@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, join } from "node:path";
@@ -107,6 +108,16 @@ const securityEvidence = {
     .update(productSecurity.decoded)
     .digest("hex"),
 };
+const checkout = fileURLToPath(new URL("../../../", import.meta.url));
+const sourceCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+  cwd: checkout,
+  encoding: "utf8",
+}).trim();
+const sourceDirty =
+  execFileSync("git", ["status", "--porcelain"], {
+    cwd: checkout,
+    encoding: "utf8",
+  }).length !== 0;
 
 test("CSP extraction tracks test-local policy changes in the authoritative Rust definition", () => {
   const marker = "oracle-local-marker; ";
@@ -225,10 +236,122 @@ const outcome = (reason, kind = "unavailable", seq = 1) => ({
   reason,
 });
 
-async function open(browser) {
+function hostileText(origin, proof) {
+  return [
+    "HOSTILE-LITERAL",
+    `</span><style id="peek-evil-style">html{opacity:.13;background-image:url("${origin}/hostile-css?proof=${proof}")}</style>`,
+    '<script id="peek-evil-script">window.peekHostileExecuted=1</script>',
+    `<img id="peek-evil-image" src="${origin}/hostile.png?proof=${proof}" onerror="window.peekHostileExecuted=1">`,
+    `<link id="peek-evil-link" rel="stylesheet" href="${origin}/hostile.css?proof=${proof}">`,
+    '<div id="peek-evil-node" style="position:fixed;inset:0;background:red">COVER-CONTROLS</div>',
+    "javascript:window.peekHostileExecuted=1",
+    "data:text/html,<script>window.peekHostileExecuted=1</script>",
+    `CSS url("${origin}/hostile-url?proof=${proof}")`,
+    "HOSTILE-END",
+  ].join("\r\n");
+}
+
+function controlPolicy(policy, origin) {
+  const additions = {
+    "script-src": ` 'unsafe-inline' 'unsafe-eval' ${origin}`,
+    "connect-src": ` ${origin}`,
+    "style-src": ` ${origin}`,
+    "img-src": ` ${origin}`,
+  };
+  return policy
+    .split(";")
+    .map((part) => {
+      const name = part.trim().split(/\s+/)[0];
+      return Object.hasOwn(additions, name) ? part + additions[name] : part;
+    })
+    .join(";");
+}
+
+function probeScript(origin, proof) {
+  return `
+  (() => {
+    const state = window.cspProbe = { active: true, done: false, trustedExternal: 1,
+      inlineScript: 0, eventHandler: 0, listener: 0, eval: 0, remoteScript: 0, violations: [] };
+    document.addEventListener('securitypolicyviolation', e => state.violations.push({directive: e.effectiveDirective, blockedURI: e.blockedURI, disposition: e.disposition}));
+    const root = document.createElement('div'); root.id = 'csp-probe-root'; root.hidden = true; document.body.append(root);
+    const target = document.createElement('div'); target.id = 'csp-style-target'; root.append(target);
+    state.styleBefore = getComputedStyle(target).color;
+    const inline = document.createElement('script'); inline.textContent = 'window.cspProbe.inlineScript++'; root.append(inline);
+    const button = document.createElement('button');
+    button.addEventListener('click', () => state.listener++);
+    button.setAttribute('onclick', 'window.cspProbe.eventHandler++'); root.append(button); button.click();
+    try { (0, eval)('window.cspProbe.eval++'); state.evalError = null; } catch (error) { state.evalError = error.name; }
+    const resource = (tag, path, configure) => new Promise(resolve => {
+      const node = document.createElement(tag);
+      node.onload = () => resolve(true); node.onerror = () => resolve(false);
+      configure(node, ${JSON.stringify(origin)} + path + '?proof=' + ${JSON.stringify(proof)}); root.append(node);
+    });
+    Promise.all([
+      resource('script', '/remote.js', (n, url) => n.src = url),
+      resource('link', '/remote.css', (n, url) => { n.rel = 'stylesheet'; n.href = url; }),
+      resource('img', '/remote.png', (n, url) => n.src = url),
+      fetch(${JSON.stringify(origin)} + '/connect?proof=' + ${JSON.stringify(proof)}, {mode: 'no-cors'}).then(() => true, () => false),
+    ]).then(async resources => {
+      state.resources = resources;
+      state.styleAfter = getComputedStyle(target).color;
+      await new Promise(resolve => setTimeout(resolve, 100));
+      state.active = false; state.done = true;
+    });
+  })();`;
+}
+
+async function open(browser, t) {
   const requests = [],
     streams = new Set(),
     allStreams = [];
+  const eventStreams = new Set();
+  const frame = structuredClone(fixture);
+  const probeRequests = [];
+  const probeDetails = [];
+  const ambientRequests = [];
+  const proof = randomUUID();
+  const probeServer = createServer((req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    // Host port discovery can visit /. Only this run's tagged requests count
+    // as browser probes; the router below rejects untagged browser traffic.
+    if (url.searchParams.get("proof") !== proof) {
+      ambientRequests.push({
+        path: req.url,
+        method: req.method,
+        agent: req.headers["user-agent"],
+      });
+      return res.writeHead(404).end();
+    }
+    probeRequests.push(url.pathname);
+    probeDetails.push({
+      path: req.url,
+      method: req.method,
+      headers: req.headers,
+    });
+    const assets = {
+      "/remote.js": ["text/javascript", "window.cspProbe.remoteScript++"],
+      "/remote.css": [
+        "text/css",
+        "#csp-style-target{color:rgb(1,2,3)!important}",
+      ],
+      "/remote.png": [
+        "image/png",
+        Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0uoAAAAASUVORK5CYII=",
+          "base64",
+        ),
+      ],
+      "/connect": ["text/plain", "CONTROL-CONNECT"],
+    };
+    const asset = assets[url.pathname];
+    res.writeHead(asset ? 200 : 404, {
+      "Content-Type": asset?.[0] ?? "text/plain",
+      "Cache-Control": "no-store",
+    });
+    res.end(asset?.[1] ?? "Unexpected probe request");
+  });
+  await new Promise((resolve) => probeServer.listen(0, "127.0.0.1", resolve));
+  const probeOrigin = `http://127.0.0.1:${probeServer.address().port}`;
   let mode = "normal",
     screens = 0;
   const server = createServer(async (req, res) => {
@@ -239,10 +362,29 @@ async function open(browser) {
       method: req.method,
       cookie: req.headers.cookie,
     });
+    if (url.pathname === "/csp-control") {
+      res.writeHead(200, {
+        "Content-Type": "text/html",
+        ...productSecurity.headers,
+        "content-security-policy": controlPolicy(csp, probeOrigin),
+      });
+      return res.end(
+        '<!doctype html><title>CSP positive control</title><body><script src="/csp-probe.js"></script>',
+      );
+    }
+    if (url.pathname === "/csp-probe.js") {
+      res.writeHead(200, {
+        "Content-Type": "text/javascript",
+        "Cache-Control": "no-store",
+      });
+      return res.end(probeScript(probeOrigin, proof));
+    }
     if (url.pathname === "/api/events") {
+      eventStreams.add(res);
+      res.on("close", () => eventStreams.delete(res));
       res.writeHead(200, { "Content-Type": "text/event-stream" });
       res.write(
-        `event: space\ndata: ${JSON.stringify(fixture)}\n\nevent: ready\ndata: ${JSON.stringify({ keys: [fixture.key] })}\n\n`,
+        `event: space\ndata: ${JSON.stringify(frame)}\n\nevent: ready\ndata: ${JSON.stringify({ keys: [frame.key] })}\n\n`,
       );
       return;
     }
@@ -304,8 +446,23 @@ async function open(browser) {
       res.writeHead(404).end();
     }
   });
+  let context;
+  let closed = false;
+  async function close() {
+    if (closed) return;
+    closed = true;
+    try {
+      await context?.close();
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+      probeServer.closeAllConnections();
+      await new Promise((resolve) => probeServer.close(resolve));
+    }
+  }
+  t.after(close);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const context = await browser.newContext({
+  context = await browser.newContext({
     viewport: { width: 1440, height: 900 },
     colorScheme: "dark",
   });
@@ -322,14 +479,40 @@ async function open(browser) {
   const origin = `http://127.0.0.1:${server.address().port}`;
   await context.route("**/*", (route) => {
     if (route.request().url().startsWith(`${origin}/`)) return route.continue();
+    if (route.request().url().startsWith(`${probeOrigin}/`)) {
+      assert.equal(
+        new URL(route.request().url()).searchParams.get("proof"),
+        proof,
+        "Untagged browser traffic to controlled origin",
+      );
+      return route.continue();
+    }
     external.push(route.request().url());
     return route.abort();
   });
-  await page.addInitScript(() => {
-    window.peekPolicy = { violations: [], clipboard: 0, opened: 0 };
-    document.addEventListener("securitypolicyviolation", (e) =>
-      window.peekPolicy.violations.push(e.violatedDirective),
-    );
+  await page.addInitScript((probeOrigin) => {
+    window.peekPolicy = {
+      violations: [],
+      expectedProbes: [],
+      clipboard: 0,
+      opened: 0,
+    };
+    document.addEventListener("securitypolicyviolation", (e) => {
+      const directive = e.effectiveDirective;
+      const controlled =
+        window.cspProbe?.active &&
+        (((e.blockedURI === "inline" || e.blockedURI === "eval") &&
+          directive.startsWith("script-src")) ||
+          (e.blockedURI.startsWith(probeOrigin) &&
+            /^(script-src|style-src|connect-src|img-src)/.test(directive)));
+      if (controlled)
+        window.peekPolicy.expectedProbes.push({
+          directive,
+          blockedURI: e.blockedURI,
+          disposition: e.disposition,
+        });
+      else window.peekPolicy.violations.push(e.violatedDirective);
+    });
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: {
@@ -346,7 +529,7 @@ async function open(browser) {
       window.peekPolicy.opened++;
       return null;
     };
-  });
+  }, probeOrigin);
   const navigation = await page.goto(`${origin}/w/${fixture.key}`);
   assert.ok(navigation);
   assert.equal(
@@ -376,15 +559,137 @@ async function open(browser) {
     errors,
     external,
     dialogs,
+    probeRequests,
+    probeDetails,
+    hostile: hostileText(probeOrigin, proof),
+    publishMessage(text) {
+      frame.frame.messages = [
+        {
+          message_id: "hostile-message",
+          thread_id: "hostile-message",
+          in_reply_to: null,
+          at_ms: 100,
+          author: "codex",
+          kind: "mention",
+          body: { text, truncated: false },
+          legs: [],
+        },
+      ];
+      for (const response of eventStreams)
+        response.write(`event: space\ndata: ${JSON.stringify(frame)}\n\n`);
+    },
+    async cspControls() {
+      const control = await context.newPage();
+      try {
+        const response = await control.goto(`${origin}/csp-control`);
+        assert.equal(
+          response.headers()["content-security-policy"],
+          controlPolicy(csp, probeOrigin),
+        );
+        await control.waitForFunction(() => window.cspProbe?.done);
+        const positive = await control.evaluate(() => ({
+          ...window.cspProbe,
+          resourcesObserved: performance
+            .getEntriesByType("resource")
+            .map((e) => ({ name: e.name, initiator: e.initiatorType })),
+        }));
+        assert.deepEqual(
+          [
+            positive.trustedExternal,
+            positive.inlineScript,
+            positive.eventHandler,
+            positive.listener,
+            positive.eval,
+            positive.remoteScript,
+          ],
+          [1, 1, 1, 1, 1, 1],
+        );
+        assert.deepEqual(positive.resources, [true, true, true, true]);
+        assert.equal(positive.styleAfter, "rgb(1, 2, 3)");
+        assert.deepEqual(positive.violations, []);
+        assert.deepEqual([...probeRequests].sort(), [
+          "/connect",
+          "/remote.css",
+          "/remote.js",
+          "/remote.png",
+        ]);
+        const received = probeRequests.length;
+        await page.evaluate(() => {
+          const script = document.createElement("script");
+          script.src = "/csp-probe.js";
+          document.body.append(script);
+        });
+        await page.waitForFunction(() => window.cspProbe?.done);
+        const negative = await page.evaluate(() => window.cspProbe);
+        assert.deepEqual([negative.trustedExternal, negative.listener], [1, 1]);
+        assert.deepEqual(
+          [
+            negative.inlineScript,
+            negative.eventHandler,
+            negative.eval,
+            negative.remoteScript,
+          ],
+          [0, 0, 0, 0],
+        );
+        assert.equal(negative.evalError, "EvalError");
+        assert.deepEqual(negative.resources, [false, false, false, false]);
+        assert.equal(negative.styleAfter, negative.styleBefore);
+        assert.equal(
+          probeRequests.length,
+          received,
+          "CSP must prevent controlled-origin network traffic; the test router permits it",
+        );
+        const expected = await page.evaluate(
+          () => window.peekPolicy.expectedProbes,
+        );
+        assert.ok(
+          expected.filter(
+            (e) =>
+              e.blockedURI === "inline" && e.directive.startsWith("script-src"),
+          ).length >= 2,
+        );
+        assert.ok(
+          expected.some(
+            (e) =>
+              e.blockedURI === "eval" && e.directive.startsWith("script-src"),
+          ),
+        );
+        for (const kind of [
+          "script-src",
+          "connect-src",
+          "style-src",
+          "img-src",
+        ])
+          assert.ok(
+            expected.some(
+              (e) =>
+                e.blockedURI.startsWith(probeOrigin) &&
+                e.directive.startsWith(kind),
+            ),
+            kind,
+          );
+        assert.deepEqual(
+          await page.evaluate(() => window.peekPolicy.violations),
+          [],
+        );
+        return {
+          positive,
+          negative,
+          expectedViolations: expected,
+          controlledOrigin: probeOrigin,
+          receivedPositiveRequests: [...probeRequests],
+          ambientRequests: [...ambientRequests],
+          positivePolicy: controlPolicy(csp, probeOrigin),
+        };
+      } finally {
+        await control.close();
+      }
+    },
     screens: () => screens,
     mode(value) {
       mode = value;
     },
-    async close() {
-      await context.close();
-      server.closeAllConnections();
-      await new Promise((resolve) => server.close(resolve));
-    },
+    close,
   };
 }
 async function until(fn, message) {
@@ -395,9 +700,89 @@ async function until(fn, message) {
   }
 }
 
+async function appearance(page) {
+  return page.evaluate(() => {
+    const html = getComputedStyle(document.documentElement);
+    const body = getComputedStyle(document.body);
+    const heading = getComputedStyle(document.querySelector("main h1"));
+    return {
+      opacity: html.opacity,
+      background: html.backgroundImage,
+      bodyColor: body.color,
+      bodyFont: body.fontSize,
+      headingColor: heading.color,
+    };
+  });
+}
+
+async function assertLiteralContent(ui, first) {
+  const before = await appearance(ui.page);
+  ui.publishMessage(ui.hostile);
+  const article = ui.page.locator('article[data-message-id="hostile-message"]');
+  await article.getByText("HOSTILE-LITERAL", { exact: false }).waitFor();
+  await article.getByRole("button", { name: "Show more", exact: true }).click();
+  const messageText = await article.textContent();
+  for (const literal of [
+    "<style",
+    "<script",
+    "<img",
+    "<link",
+    "javascript:",
+    "data:text/html",
+    "CSS url(",
+    "HOSTILE-END",
+  ])
+    assert.ok(messageText.includes(literal), literal);
+  assert.equal(
+    await article.locator("style, script, img, link, iframe").count(),
+    0,
+  );
+  first.send(
+    full(2, {
+      cols: 120,
+      rows: 20,
+      bytes: encode(`\x1b[2J\x1b[H${ui.hostile}\x1b[?25l`),
+    }),
+  );
+  await ui.rows().getByText("HOSTILE-END", { exact: true }).waitFor();
+  const terminalText = (await ui.rows().allTextContents()).join("\n");
+  for (const literal of [
+    "HOSTILE-LITERAL",
+    "<style",
+    "<script",
+    "<img",
+    "<link",
+    "javascript:",
+    "data:text/html",
+    "CSS url(",
+  ])
+    assert.ok(terminalText.includes(literal), literal);
+  assert.equal(
+    await ui.page
+      .locator(
+        "#peek-evil-style, #peek-evil-script, #peek-evil-image, #peek-evil-link, #peek-evil-node",
+      )
+      .count(),
+    0,
+  );
+  assert.equal(
+    await ui.page.evaluate(() => window.peekHostileExecuted ?? 0),
+    0,
+  );
+  assert.deepEqual(await appearance(ui.page), before);
+  assert.deepEqual(ui.probeRequests, []);
+  assert.deepEqual(ui.external, []);
+  assert.deepEqual(
+    await ui.page.evaluate(() => window.peekPolicy.violations),
+    [],
+  );
+  first.send(full(3));
+  await ui.rows().first().getByText("RED-SENTINEL", { exact: true }).waitFor();
+}
+
 test("live Peek product component, transport and CSP in real Chromium and Firefox", {
   timeout: 120000,
-}, async () => {
+}, async (t) => {
   const results = [];
   let failed = false;
   for (const [name, type, executablePath] of [
@@ -416,6 +801,10 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
         : "product CSP",
       csp: servedCsp,
       securitySource: securityEvidence,
+      securityHeaders: productSecurity.headers,
+      sourceCommit,
+      sourceDirty,
+      diagnostic: styleDiagnostic,
       version: browser.version(),
       executablePath,
       checks: [],
@@ -424,7 +813,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
     results.push(result);
     let ui;
     try {
-      ui = await open(browser);
+      ui = await open(browser, t);
       await ui.chip("codex").click();
       await ui
         .rows()
@@ -455,7 +844,16 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
           ).color,
         ]);
       assert.equal(colors[1], "rgb(12, 34, 56)");
-      assert.notEqual(colors[0], colors[1]);
+      assert.equal(colors[0], "rgb(204, 0, 0)");
+      assert.ok(
+        (await ui.drawer
+          .locator(".xterm style")
+          .evaluateAll(
+            (styles) =>
+              styles.filter((s) => s.sheet?.cssRules.length > 0).length,
+          )) >= 2,
+        "Trusted generated renderer CSS must actually be applied",
+      );
       result.checks.push(
         styleDiagnostic
           ? "diagnostic initial paint/colors with relaxed style policy; no snapshot request"
@@ -463,13 +861,17 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
       );
 
       const first = ui.live();
-      first.send(data(2, "\x1b[3;1HNEW-MARKER\x1b[5;7H\x1b[?25h"));
+      await assertLiteralContent(ui, first);
+      result.checks.push(
+        "hostile terminal and message HTML/style/script/URL payloads remain literal text without styles, DOM escape or resources",
+      );
+      first.send(data(4, "\x1b[3;1HNEW-MARKER\x1b[5;7H\x1b[?25h"));
       await ui.rows().nth(2).getByText("NEW-MARKER", { exact: true }).waitFor();
       await ui.drawer.locator(".xterm-cursor").waitFor();
       // Partial sequence must not survive a semantic full reset.
-      first.send(data(3, "\x1b]52;c;UNFINISHED"));
+      first.send(data(5, "\x1b]52;c;UNFINISHED"));
       first.send(
-        full(4, {
+        full(6, {
           cols: 30,
           rows: 8,
           bytes: encode("\x1b[HRESET-CLEAN\x1b[4;15H\x1b[?25h"),
@@ -494,7 +896,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
       await ui.page.mouse.wheel(0, 100);
       first.send(
         data(
-          5,
+          7,
           "\x1b]0;BAD-TITLE\x07\x1b]52;c;" +
             "YQ==".repeat(20000) +
             "\x07\x1b]8;;https://peek.invalid/never\x07LINK\x1b]8;;\x07\x1b[8;99;199t\x1b[6n\r\nSAFE-AFTER",
@@ -624,6 +1026,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
         ["desktop-dark", 1440, 900, "dark"],
         ["desktop-light", 1024, 700, "light"],
         ["mobile-dark", 390, 844, "dark"],
+        ["mobile-light", 390, 844, "light"],
       ]) {
         await ui.page.setViewportSize({ width, height });
         await ui.page.emulateMedia({ colorScheme: theme });
@@ -678,12 +1081,21 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
       result.checks.push(
         "session refusal on reconnect clears raw screen without snapshot fallback",
       );
+      result.cspControls = await ui.cspControls();
+      result.checks.push(
+        "positive-controlled CSP blocks inline script/event/eval and remote script/connect/style/image; expected probes are separate from zero unexpected violations",
+      );
+      result.unexpectedComponentViolations = await ui.page.evaluate(
+        () => window.peekPolicy.violations,
+      );
+      assert.deepEqual(result.unexpectedComponentViolations, []);
       result.status = "passed";
     } catch (error) {
       failed = true;
       result.status = "failed";
       result.error = String(error.stack ?? error);
       if (ui) {
+        result.probeDetails = ui.probeDetails;
         result.policy = await ui.page.evaluate(() => window.peekPolicy);
         await ui.page.screenshot({ path: join(output, `${name}-failure.png`) });
       }
