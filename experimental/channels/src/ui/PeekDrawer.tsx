@@ -26,6 +26,7 @@ import type { PeekWho } from "../store.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Icon } from "./Icons.tsx";
 import { measure } from "./measure.ts";
+import { PeekCompose } from "./PeekCompose.tsx";
 import { PeekLive } from "./PeekLive.tsx";
 import { useEscape } from "./useEscape.ts";
 
@@ -239,6 +240,11 @@ function PeekContent(props: ContentProps) {
         </p>
       )}
       <PeekLive key={attempt} target={target} onState={update} />
+      <PeekCompose
+        key={state.kind === "live" ? state.continuity : state.kind}
+        target={target}
+        continuity={state.kind === "live" ? state.continuity : null}
+      />
     </>
   );
 }

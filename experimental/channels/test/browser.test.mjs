@@ -298,6 +298,7 @@ async function open(
     onBody = null,
     onReview = () => ({ status: 200 }),
     observeLanding = false,
+    liveInput = false,
   } = {},
 ) {
   const clients = new Set();
@@ -306,6 +307,7 @@ async function open(
   const historyRequests = [];
   const contextRequests = [];
   const bodyRequests = [];
+  const inputRequests = [];
   const posts = postRoute(onPost);
   const reviews = [];
   const screens = screenRoute(onScreen);
@@ -332,6 +334,17 @@ async function open(
     }
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname === "/api/session") return posts.token(req, res);
+    if (
+      req.method === "POST" &&
+      /^\/w\/[^/]+\/participants\/[^/]+\/input$/.test(url.pathname)
+    ) {
+      inputRequests.push({
+        path: url.pathname,
+        csrf: req.headers["x-namedrop-csrf"],
+        body: JSON.parse(await readBody(req)),
+      });
+      return sendJson(res, 200, {});
+    }
     const postKey = /^\/w\/([^/]+)\/messages$/.exec(url.pathname)?.[1];
     if (req.method === "POST" && postKey !== undefined)
       return posts.post(req, res, postKey);
@@ -391,6 +404,13 @@ async function open(
         : sendJson(res, 200, context);
     }
     if (/^\/w\/[^/]+\/participants\/[^/]+\/live$/.test(url.pathname)) {
+      if (liveInput) {
+        res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+        res.write(
+          `${JSON.stringify({ v: 1, seq: 1, kind: "reset", continuity: "fixture-input", cols: 40, rows: 8, bytes: Buffer.from("READY").toString("base64") })}\n`,
+        );
+        return;
+      }
       // Legacy fixtures exercise the preserved sanitized snapshot path.
       res.writeHead(200, { "Content-Type": "application/x-ndjson" });
       return res.end(
@@ -452,7 +472,12 @@ async function open(
   t.after(async () => {
     try {
       assert.deepEqual(errors, []);
-      assert.deepEqual(await page.evaluate(() => window.cspErrors), []);
+      assert.deepEqual(
+        (await page.evaluate(() => window.cspErrors)).filter(
+          (directive) => !liveInput || directive !== "style-src-elem",
+        ),
+        [],
+      );
     } finally {
       await page.close();
       for (const client of clients) client.destroy();
@@ -476,6 +501,7 @@ async function open(
     historyRequests,
     contextRequests,
     bodyRequests,
+    inputRequests,
     posts,
     reviews,
     screens,
@@ -5383,6 +5409,61 @@ const screenText = (ui) =>
   ui.page.getByRole("region", { name: "Screen text", exact: true });
 const focusedIn = (locator) =>
   locator.evaluate((element) => element.contains(document.activeElement));
+
+test("Peek input requires Type mode, focuses the prompt, and stops without sending", async (t) => {
+  const ui = await open(t, (client) => replay(client, busyTeam()), undefined, {
+    liveInput: true,
+  });
+  await ui.live();
+  await ui.page
+    .locator(".members")
+    .getByRole("button", { name: /^C?@codex/ })
+    .click();
+  const peek = drawer(ui);
+  const type = peek.getByRole("button", { name: "Type to agent" });
+  await type.waitFor();
+  await peek.locator(".peek-live").focus();
+  await ui.page.keyboard.press("Escape");
+  assert.equal(ui.inputRequests.length, 0);
+  await ui.page
+    .locator(".members")
+    .getByRole("button", { name: /^C?@codex/ })
+    .click();
+  await type.click();
+  const prompt = peek.getByRole("textbox", { name: "Message to @codex" });
+  await prompt.waitFor();
+  assert.equal(await focusedIn(prompt), true);
+  await prompt.fill("harmless prompt");
+  await prompt.press("Enter");
+  await ui.page.waitForFunction(
+    () => document.querySelector(".peek-compose textarea")?.value === "",
+  );
+  assert.deepEqual(ui.inputRequests[0], {
+    path: `/w/${key(1)}/participants/codex/input`,
+    csrf: "csrf-1",
+    body: {
+      kind: "text",
+      text: "harmless prompt",
+      continuity: "fixture-input",
+    },
+  });
+  await prompt.press("Escape");
+  await ui.page.waitForFunction(
+    () => document.querySelector(".peek-compose textarea")?.disabled === false,
+  );
+  assert.deepEqual(ui.inputRequests[1]?.body, {
+    kind: "key",
+    key: "Escape",
+    continuity: "fixture-input",
+  });
+  assert.equal(await peek.count(), 1);
+  await peek.getByRole("button", { name: "Stop typing" }).click();
+  assert.equal(await prompt.count(), 0);
+  assert.equal(ui.inputRequests.length, 2);
+  await type.focus();
+  await ui.page.keyboard.press("Enter");
+  assert.equal(ui.inputRequests.length, 2);
+});
 
 test("DESIGN-R2 A8: an All activity row with actions keeps its grid, with 12px actions under line 2 at the alias", async (t) => {
   const team = busyTeam();
