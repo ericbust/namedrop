@@ -166,6 +166,16 @@ from Live and back, or reopening Peek, also starts a new observation. A dashboar
 session failure or replacement clears the live terminal. An ended stream says
 **Live view ended**, without asserting that the agent exited.
 
+Live opens at the bottom of the projected screen. Mouse wheel, pixel trackpad,
+keyboard scrolling, and both scrollbars move the browser view locally. Scrolling
+up pauses bottom following while output arrives. Returning to the bottom resumes
+following. Full paints and reconnects preserve your local position where possible;
+a new target or reopened Peek starts at the bottom.
+
+The projection contains the source terminal's current grid. Local scrolling
+exposes rows and columns that do not fit in Peek. It does not fetch or reconstruct
+earlier host scrollback that is absent from the ANSI stream.
+
 ## Update an experimental installation
 
 An installation that follows the `experimental` ref updates on that ref. Run the
@@ -177,7 +187,15 @@ herdr plugin action invoke update --plugin namedrop
 
 After the update, refresh or reopen Channels and reopen Peek to use the new app.
 If the dashboard session has ended, run `namedrop dashboard` for a fresh one-time
-link. Updating from exp.6 to exp.7 does not require restarting agent sessions.
+link. Updating from exp.7 to exp.8 does not require restarting agent sessions.
+
+The strict `npm run test:live-peek` browser check runs Chromium headlessly with
+visible native scrollbars. On Linux it runs official Playwright Firefox on a
+private Weston headless display, because Firefox's headless test agent hides
+scrollbars. The fixture requires an existing `weston` executable. It creates and
+removes its own display socket, HOME, and browser profile without connecting to
+your desktop. `CHROME`, `FIREFOX`, and `PLAYWRIGHT_BROWSERS_PATH` select existing
+browser installations. `LIVE_PEEK_OUTPUT` selects the evidence directory.
 
 ## Live terminal stream v1
 

@@ -13,13 +13,45 @@ export function PeekLive({
   onState(state: LiveState): void;
 }) {
   const host = useRef<HTMLDivElement>(null);
+  const viewport = useRef<HTMLElement>(null);
   useEffect(() => {
     const mounted = host.current;
-    if (!mounted) return;
+    const scrolling = viewport.current;
+    if (!mounted || !scrolling) return;
     const element = mounted;
+    const scroller = scrolling;
     const controller = new AbortController();
     let terminal: Terminal | null = null;
     const pending = new Set<() => void>();
+    let following = true;
+    let replacing = false;
+    let position = { top: 0, left: 0 };
+    function rememberPosition() {
+      if (replacing) return;
+      following =
+        scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 1;
+      position = { top: scroller.scrollTop, left: scroller.scrollLeft };
+    }
+    function restorePosition() {
+      if (controller.signal.aborted) return;
+      scroller.scrollTop = following ? scroller.scrollHeight : position.top;
+      scroller.scrollLeft = position.left;
+      position = { top: scroller.scrollTop, left: scroller.scrollLeft };
+    }
+    function localWheel(event: WheelEvent) {
+      // Keep the browser default, but bypass xterm's wheel-to-input and mouse
+      // tracking handlers even when the projected TUI enables those modes.
+      event.stopPropagation();
+    }
+    scroller.addEventListener("wheel", localWheel, {
+      capture: true,
+      passive: true,
+    });
+    scroller.addEventListener("scroll", rememberPosition);
+    const resize = new ResizeObserver(() => {
+      if (!replacing) restorePosition();
+    });
+    resize.observe(scroller);
     function dispose() {
       for (const cancel of pending) cancel();
       pending.clear();
@@ -50,6 +82,7 @@ export function PeekLive({
       for (const id of [0, 1, 2, 8, 52])
         next.parser.registerOscHandler(id, () => true);
       next.parser.registerCsiHandler({ final: "t" }, () => true);
+      next.onRender(restorePosition);
       terminal = next;
       next.open(element);
       next.textarea?.setAttribute("tabindex", "-1");
@@ -89,12 +122,15 @@ export function PeekLive({
       target,
       signal: controller.signal,
       async apply(update) {
+        replacing = update.kind === "reset";
         const current =
           update.kind === "reset"
             ? create(update.viewport.cols, update.viewport.rows)
             : terminal;
         if (!current) throw new Error("Terminal not initialized");
         await write(current, update.bytes);
+        restorePosition();
+        replacing = false;
       },
       onState(state) {
         if (controller.signal.aborted) return;
@@ -108,11 +144,15 @@ export function PeekLive({
     });
     return () => {
       controller.abort();
+      resize.disconnect();
+      scroller.removeEventListener("wheel", localWheel, true);
+      scroller.removeEventListener("scroll", rememberPosition);
       dispose();
     };
   }, [target, onState]);
   return (
     <section
+      ref={viewport}
       className="peek-text peek-live"
       aria-label={peekCopy.liveRegion}
       // biome-ignore lint/a11y/noNoninteractiveTabindex: The read-only viewport supports keyboard scrolling.
