@@ -1884,7 +1884,7 @@ button.member:not(.more):hover {
   color: var(--text);
   background: var(--bg-selected);
 }
-.peek-live {
+.peek-text.peek-live {
   overflow: auto;
   font: calc(var(--text-sm) - 0.5px) / 1.5 var(--font-mono);
 }

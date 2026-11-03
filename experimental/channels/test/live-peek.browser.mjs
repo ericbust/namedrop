@@ -7,6 +7,7 @@ import { extname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { chromium, firefox } from "playwright-core";
+import { isolatedFirefoxDisplay } from "./live-peek-scroll.browser.mjs";
 
 // Decode the deliberately small static Rust literal used by the product.
 // Unsupported syntax must stop the oracle, never select a remembered policy.
@@ -300,10 +301,12 @@ function probeScript(origin, proof) {
   })();`;
 }
 
-async function open(browser, t) {
+async function open(browser, t, initial = full()) {
   const requests = [],
     streams = new Set(),
     allStreams = [];
+  const browserRequests = [];
+  const appAmbientRequests = [];
   const eventStreams = new Set();
   const frame = structuredClone(fixture);
   const probeRequests = [];
@@ -356,6 +359,14 @@ async function open(browser, t) {
     screens = 0;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
+    if (req.headers["x-peek-fixture-proof"] !== proof) {
+      appAmbientRequests.push({
+        path: req.url,
+        method: req.method,
+        headers: req.headers,
+      });
+      return res.writeHead(404).end();
+    }
     requests.push({
       path: url.pathname,
       query: url.search,
@@ -422,7 +433,7 @@ async function open(browser, t) {
       if (mode === "unsupported")
         return res.end(`${JSON.stringify(outcome("unsupported"))}\n`);
       if (mode === "invalid") return res.end(`${JSON.stringify(full(2))}\n`);
-      stream.send(full());
+      stream.send(initial);
       if (mode === "retry") res.end();
       return;
     }
@@ -478,7 +489,18 @@ async function open(browser, t) {
   });
   const origin = `http://127.0.0.1:${server.address().port}`;
   await context.route("**/*", (route) => {
-    if (route.request().url().startsWith(`${origin}/`)) return route.continue();
+    if (route.request().url().startsWith(`${origin}/`)) {
+      browserRequests.push({
+        path: new URL(route.request().url()).pathname,
+        method: route.request().method(),
+      });
+      return route.continue({
+        headers: {
+          ...route.request().headers(),
+          "x-peek-fixture-proof": proof,
+        },
+      });
+    }
     if (route.request().url().startsWith(`${probeOrigin}/`)) {
       assert.equal(
         new URL(route.request().url()).searchParams.get("proof"),
@@ -556,6 +578,37 @@ async function open(browser, t) {
     allStreams,
     streams,
     requests,
+    browserRequests,
+    appAmbientRequests,
+    async requestControls() {
+      const beforeBrowser = browserRequests.length;
+      const beforeServer = requests.length;
+      const ambient = await fetch(origin, {
+        headers: { "user-agent": "namedrop-oracle-ambient-control" },
+      });
+      assert.equal(ambient.status, 404);
+      await ambient.text();
+      const status = await page.evaluate(async () => {
+        const response = await fetch("/request-positive-control");
+        await response.text();
+        return response.status;
+      });
+      assert.equal(status, 404);
+      assert.equal(browserRequests.length, beforeBrowser + 1);
+      assert.equal(requests.length, beforeServer + 1);
+      assert.equal(browserRequests.at(-1).path, "/request-positive-control");
+      assert.equal(requests.at(-1).path, "/request-positive-control");
+      assert.ok(
+        appAmbientRequests.some(
+          (r) => r.headers["user-agent"] === "namedrop-oracle-ambient-control",
+        ),
+      );
+      return {
+        browser: browserRequests.at(-1),
+        received: requests.at(-1),
+        ambientSeparated: true,
+      };
+    },
     errors,
     external,
     dialogs,
@@ -780,6 +833,802 @@ async function assertLiteralContent(ui, first) {
   await ui.rows().first().getByText("RED-SENTINEL", { exact: true }).waitFor();
 }
 
+function projection(rows = 60, label = "BOTTOM") {
+  return full(1, {
+    cols: 120,
+    rows,
+    bytes: encode(
+      "\x1b[2J\x1b[H" +
+        Array.from(
+          { length: rows },
+          (_, i) => `\x1b[${i + 1};1HROW-${i + 1}`,
+        ).join("") +
+        `\x1b[${rows - 1};100HRIGHT-EDGE\x1b[${rows};1H${label}\x1b[?25l`,
+    ),
+  });
+}
+
+async function scrollMetrics(ui) {
+  return ui.page.locator(".peek-live").evaluate((el) => {
+    const box = el.getBoundingClientRect();
+    const marker = [...el.querySelectorAll(".xterm-rows > div")].at(-1);
+    const rect = marker.getBoundingClientRect();
+    return {
+      top: el.scrollTop,
+      left: el.scrollLeft,
+      height: el.clientHeight,
+      total: el.scrollHeight,
+      width: el.clientWidth,
+      totalWidth: el.scrollWidth,
+      overflowX: getComputedStyle(el).overflowX,
+      bottomVisible:
+        rect.top >= box.top && rect.bottom <= box.top + el.clientHeight,
+      bottomText: marker.textContent,
+    };
+  });
+}
+
+async function settleScroll(ui) {
+  const settled = await ui.page.locator(".peek-live").evaluate(async (el) => {
+    let top = el.scrollTop,
+      left = el.scrollLeft,
+      stable = 0;
+    for (let frame = 0; frame < 120 && stable < 5; frame++) {
+      await new Promise(requestAnimationFrame);
+      stable = el.scrollTop === top && el.scrollLeft === left ? stable + 1 : 0;
+      top = el.scrollTop;
+      left = el.scrollLeft;
+    }
+    return stable >= 5;
+  });
+  assert.equal(
+    settled,
+    true,
+    "Native scroll must reach a stable position within the bounded frame budget",
+  );
+}
+
+function sparseProjection(rows = 70, latest = 35, label = "SPARSE-35") {
+  return full(1, {
+    cols: 120,
+    rows,
+    bytes: encode(
+      "\x1b[2J\x1b[H" +
+        Array.from(
+          { length: latest },
+          (_, i) => `\x1b[${i + 1};1HROW-${i + 1}`,
+        ).join("") +
+        `\x1b[${latest};1H\x1b[2K${label}\x1b[?25l`,
+    ),
+  });
+}
+
+async function usefulMetrics(ui, row, text = "") {
+  return ui.page.locator(".peek-live").evaluate(
+    (el, { row, text }) => {
+      const box = el.getBoundingClientRect();
+      const line = el.querySelectorAll(".xterm-rows > div")[row - 1];
+      const rect = line.getBoundingClientRect();
+      let marker = rect;
+      if (text) {
+        const nodes = [];
+        const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) nodes.push(walker.currentNode);
+        const source = nodes.map((node) => node.textContent).join("");
+        const at = source.indexOf(text);
+        if (at < 0) throw new Error(`Missing marker ${text}: ${source}`);
+        const range = document.createRange();
+        let offset = 0;
+        for (const node of nodes) {
+          const end = offset + node.textContent.length;
+          if (at >= offset && at < end) range.setStart(node, at - offset);
+          if (at + text.length > offset && at + text.length <= end)
+            range.setEnd(node, at + text.length - offset);
+          offset = end;
+        }
+        marker = range.getBoundingClientRect();
+      }
+      const padding = Number.parseFloat(getComputedStyle(el).paddingBottom);
+      return {
+        top: el.scrollTop,
+        height: el.clientHeight,
+        total: el.scrollHeight,
+        usefulTop: Math.max(
+          0,
+          Math.min(
+            el.scrollHeight - el.clientHeight,
+            el.scrollTop + rect.bottom - box.top + padding - el.clientHeight,
+          ),
+        ),
+        visible:
+          marker.top >= box.top && marker.bottom <= box.top + el.clientHeight,
+        markerTop: marker.top - box.top,
+        markerBottom: marker.bottom - box.top,
+      };
+    },
+    { row, text },
+  );
+}
+
+async function activeNavigationOracle(browser, t, result) {
+  const ui = await open(browser, t, projection(70, "IDLE-LATEST"));
+  let timer;
+  try {
+    await ui.page.setViewportSize({ width: 900, height: 540 });
+    await ui.chip("codex").click();
+    await ui.rows().last().getByText("IDLE-LATEST", { exact: true }).waitFor();
+    const region = ui.page.locator(".peek-live");
+    const top = async () => {
+      await region.evaluate((el) => {
+        el.scrollTop = 0;
+      });
+      await settleScroll(ui);
+      await region.focus();
+    };
+    const reachedEnd = () =>
+      ui.page.waitForFunction(
+        () => {
+          const el = document.querySelector(".peek-live");
+          const row = el.querySelectorAll(".xterm-rows > div")[69];
+          const box = el.getBoundingClientRect(),
+            rect = row.getBoundingClientRect();
+          return (
+            el.scrollHeight - el.clientHeight - el.scrollTop <= 1 &&
+            rect.top >= box.top &&
+            rect.bottom <= box.top + el.clientHeight
+          );
+        },
+        undefined,
+        { timeout: 1500 },
+      );
+    await top();
+    await ui.page.keyboard.press("Control+End");
+    await reachedEnd();
+    const idle = await usefulMetrics(ui, 70, "IDLE-LATEST");
+    let seq = 2;
+    const navigation = {};
+    const beforeServer = ui.requests.length,
+      beforeBrowser = ui.browserRequests.length;
+    for (const key of ["Control+End", "PageDown"]) {
+      await top();
+      let updates = 0;
+      const label = key === "Control+End" ? "END-FLOW" : "PAGE-FLOW";
+      timer = setInterval(
+        () =>
+          ui.live().send(data(seq++, `\x1b[70;1H\x1b[2K${label}-${++updates}`)),
+        20,
+      );
+      await ui.page.keyboard.press(key);
+      let reached = true;
+      try {
+        if (key === "Control+End") await reachedEnd();
+        else
+          await ui.page.waitForFunction(
+            () => {
+              const el = document.querySelector(".peek-live");
+              return el.scrollTop > el.clientHeight / 2;
+            },
+            undefined,
+            { timeout: 1500 },
+          );
+        // Native animation must settle while data is still arriving.
+        await settleScroll(ui);
+      } catch {
+        reached = false;
+      }
+      clearInterval(timer);
+      timer = undefined;
+      const sent = updates;
+      assert.ok(sent > 0, "Navigation must overlap actual source writes");
+      await ui
+        .rows()
+        .last()
+        .getByText(`${label}-${sent}`, { exact: true })
+        .waitFor();
+      navigation[key] = {
+        reached,
+        updates: sent,
+        metrics: await usefulMetrics(ui, 70, `${label}-${sent}`),
+      };
+    }
+    result.activeNavigation = { idle, navigation };
+    assert.deepEqual(
+      Object.fromEntries(
+        Object.entries(navigation).map(([key, value]) => [key, value.reached]),
+      ),
+      { "Control+End": true, PageDown: true },
+      "Native keyboard navigation must finish while 20ms output continues",
+    );
+
+    await top();
+    const box = await region.boundingBox();
+    await ui.page.mouse.move(box.x + 80, box.y + box.height / 2);
+    let updates = 0;
+    timer = setInterval(
+      () =>
+        ui.live().send(data(seq++, `\x1b[70;1H\x1b[2KWHEEL-FLOW-${++updates}`)),
+      20,
+    );
+    for (let step = 0; step < 12; step++) await ui.page.mouse.wheel(0, 7.5);
+    await ui.page.waitForFunction(
+      () => document.querySelector(".peek-live").scrollTop >= 70,
+    );
+    await settleScroll(ui);
+    const held = (await scrollMetrics(ui)).top;
+    const observed = updates;
+    await until(
+      () => updates >= observed + 5,
+      "live updates continue after local wheel navigation",
+    );
+    clearInterval(timer);
+    timer = undefined;
+    await ui
+      .rows()
+      .last()
+      .getByText(`WHEEL-FLOW-${updates}`, { exact: true })
+      .waitFor();
+    const wheel = await usefulMetrics(ui, 70, `WHEEL-FLOW-${updates}`);
+    assert.ok(
+      Math.abs(wheel.top - held) <= 1,
+      "Continuing output preserves the wheel-selected reading position",
+    );
+    assert.deepEqual(ui.requests.slice(beforeServer), []);
+    assert.deepEqual(ui.browserRequests.slice(beforeBrowser), []);
+    Object.assign(result.activeNavigation, {
+      wheel,
+      updates,
+      serverRequests: ui.requests.slice(beforeServer),
+      browserRequests: ui.browserRequests.slice(beforeBrowser),
+    });
+    assert.deepEqual(ui.errors, []);
+    assert.deepEqual(
+      await ui.page.evaluate(() => window.peekPolicy.violations),
+      [],
+    );
+    result.checks.push(
+      "active output every20ms: idle End control, concurrent Ctrl+End/PageDown complete, fractional wheel reading position holds; zero browser/server control requests",
+    );
+  } finally {
+    clearInterval(timer);
+    await ui.close();
+  }
+}
+
+async function sparseScrollingOracle(browser, t, result) {
+  const ui = await open(browser, t, sparseProjection());
+  try {
+    await ui.page.setViewportSize({ width: 900, height: 540 });
+    await ui.chip("codex").click();
+    const region = ui.page.locator(".peek-live");
+    const painted = async (row, text) => {
+      await ui
+        .rows()
+        .nth(row - 1)
+        .getByText(text, { exact: true })
+        .waitFor();
+      await settleScroll(ui);
+    };
+    await painted(35, "SPARSE-35");
+    const initial = await usefulMetrics(ui, 35, "SPARSE-35");
+    await ui.page.screenshot({
+      path: join(output, `${result.name}-sparse-initial.png`),
+    });
+    // Effective positive control: latest is in this projection and can be shown.
+    await region.evaluate((el, top) => {
+      el.scrollTop = top;
+    }, initial.usefulTop);
+    await settleScroll(ui);
+    const control = await usefulMetrics(ui, 35, "SPARSE-35");
+    assert.equal(control.visible, true);
+    let seq = 2;
+    const send = (bytes) => ui.live().send(data(seq++, bytes));
+    const reset = (rows, latest, label, suffix = "") => {
+      const record = sparseProjection(rows, latest, label);
+      if (suffix)
+        record.bytes = encode(
+          Buffer.from(record.bytes, "base64").toString() + suffix,
+        );
+      ui.live().send({ ...record, seq: seq++ });
+    };
+    send("\x1b[50;1HADVANCE-50");
+    await painted(50, "ADVANCE-50");
+    const advanced = await usefulMetrics(ui, 50, "ADVANCE-50");
+    result.sparse = { initial, control, advanced };
+    assert.deepEqual(
+      { initial: initial.visible, advanced: advanced.visible },
+      { initial: true, advanced: true },
+      "Sparse initial and fixed-grid advancing output must both stay visible",
+    );
+
+    const beforeInput = ui.requests.length;
+    const beforeInputBrowser = ui.browserRequests.length;
+    const bounds = await region.boundingBox();
+    await ui.page.mouse.move(bounds.x + 80, bounds.y + bounds.height / 2);
+    await ui.page.mouse.wheel(0, -240);
+    await settleScroll(ui);
+    const up = await usefulMetrics(ui, 50, "ADVANCE-50");
+    send("\x1b[55;1HHELD-55");
+    await painted(55, "HELD-55");
+    const held = await usefulMetrics(ui, 55, "HELD-55");
+    assert.ok(
+      Math.abs(held.top - up.top) <= 1,
+      "Sparse upscroll must hold under new output",
+    );
+    assert.equal(held.visible, false);
+    await region.evaluate((el, top) => {
+      el.scrollTop = top;
+    }, held.usefulTop);
+    await settleScroll(ui);
+    send("\x1b[58;1HRESUMED-58");
+    await painted(58, "RESUMED-58");
+    assert.equal(
+      (await usefulMetrics(ui, 58, "RESUMED-58")).visible,
+      true,
+      "Returning to useful latest resumes following before the physical grid end",
+    );
+
+    reset(70, 50, "RETAINED-50", "\x1b[5;1H");
+    await painted(50, "RETAINED-50");
+    const cursorAbove = await usefulMetrics(ui, 50, "RETAINED-50");
+    assert.equal(
+      cursorAbove.visible,
+      true,
+      "A cursor above retained text cannot hide the latest retained row",
+    );
+    reset(70, 35, "TRAILING-35", "\x1b[69;1H   \x1b[35;1H");
+    await painted(35, "TRAILING-35");
+    assert.equal(
+      (await usefulMetrics(ui, 35, "TRAILING-35")).visible,
+      true,
+      "Trailing spaces do not turn the blank grid tail into useful output",
+    );
+    send("\x1b[50;1H");
+    await settleScroll(ui);
+    const cursorBelow = await usefulMetrics(ui, 50);
+    assert.equal(
+      cursorBelow.visible,
+      true,
+      "The cursor row remains reachable below retained text",
+    );
+    assert.ok(Math.abs(cursorBelow.top - cursorBelow.usefulTop) <= 1);
+
+    // Active alternate-buffer content must not inherit the normal-buffer extent.
+    send("\x1b[?1049h\x1b[22;1HALTERNATE-22");
+    await painted(22, "ALTERNATE-22");
+    const alternate = await usefulMetrics(ui, 22, "ALTERNATE-22");
+    assert.equal(alternate.visible, true);
+    assert.ok(Math.abs(alternate.top - alternate.usefulTop) <= 1);
+    send("\x1b[?1049l");
+    await painted(35, "TRAILING-35");
+    assert.equal((await usefulMetrics(ui, 50)).visible, true);
+    send("\x1b[2J\x1b[H");
+    await ui.page.waitForFunction(() =>
+      [...document.querySelectorAll(".xterm-rows > div")].every(
+        (row) => row.textContent.trim() === "",
+      ),
+    );
+    await settleScroll(ui);
+    assert.equal(
+      (await usefulMetrics(ui, 1)).top,
+      0,
+      "Cleared grid with home cursor starts at the top",
+    );
+    reset(80, 0, "");
+    await ui.page.waitForFunction(() => {
+      const rows = [...document.querySelectorAll(".xterm-rows > div")];
+      return (
+        rows.length === 80 && rows.every((row) => row.textContent.trim() === "")
+      );
+    });
+    await settleScroll(ui);
+    assert.equal(
+      (await usefulMetrics(ui, 1)).top,
+      0,
+      "An empty full reset starts at the home cursor",
+    );
+    send("\x1b[40;1HAFTER-CLEAR-40");
+    await painted(40, "AFTER-CLEAR-40");
+    assert.equal((await usefulMetrics(ui, 40, "AFTER-CLEAR-40")).visible, true);
+    reset(90, 45, "TALL-GRID-45");
+    await painted(45, "TALL-GRID-45");
+    assert.equal((await usefulMetrics(ui, 45, "TALL-GRID-45")).visible, true);
+    await ui.page.setViewportSize({ width: 900, height: 420 });
+    await settleScroll(ui);
+    assert.equal((await usefulMetrics(ui, 45, "TALL-GRID-45")).visible, true);
+    reset(20, 10, "SHORT-GRID-10");
+    await painted(10, "SHORT-GRID-10");
+    assert.equal((await usefulMetrics(ui, 10, "SHORT-GRID-10")).top, 0);
+    reset(70, 35, "RESET-35");
+    await painted(35, "RESET-35");
+    assert.equal((await usefulMetrics(ui, 35, "RESET-35")).visible, true);
+    assert.deepEqual(ui.browserRequests.slice(beforeInputBrowser), []);
+    assert.deepEqual(ui.requests.slice(beforeInput), []);
+
+    const count = ui.liveCount();
+    ui.live().res.end();
+    await until(() => ui.liveCount() > count, "sparse reconnect");
+    await painted(35, "SPARSE-35");
+    assert.equal((await usefulMetrics(ui, 35, "SPARSE-35")).visible, true);
+    const box = await region.boundingBox();
+    await ui.page.mouse.move(box.x + 80, box.y + box.height / 2);
+    await ui.page.mouse.wheel(0, -200);
+    await settleScroll(ui);
+    const reconnectHeld = await usefulMetrics(ui, 35, "SPARSE-35");
+    const old = ui.liveCount();
+    ui.live().res.end();
+    await until(() => ui.liveCount() > old, "sparse held reconnect");
+    await painted(35, "SPARSE-35");
+    assert.ok(
+      Math.abs(
+        (await usefulMetrics(ui, 35, "SPARSE-35")).top - reconnectHeld.top,
+      ) <= 1,
+    );
+    ui.live().send(data(999, "INVALID-SEQUENCE"));
+    await ui.drawer
+      .getByRole("button", { name: "Try again", exact: true })
+      .click();
+    await painted(35, "SPARSE-35");
+    assert.equal(
+      (await usefulMetrics(ui, 35, "SPARSE-35")).visible,
+      true,
+      "Explicit retry starts at useful latest",
+    );
+    Object.assign(result.sparse, {
+      up,
+      held,
+      cursorAbove,
+      cursorBelow,
+      alternate,
+      reconnectHeld,
+    });
+    assert.equal(ui.screens(), 0);
+    assert.deepEqual(ui.errors, []);
+    assert.deepEqual(
+      await ui.page.evaluate(() => window.peekPolicy.violations),
+      [],
+    );
+    result.checks.push(
+      "sparse useful latest: 70/35 first paint, advance to 50, hold/resume before blank tail; retained text above cursor, trailing spaces, cursor below text, active alternate buffer, clear/empty, grid/window resize, reconnect/retry",
+    );
+  } catch (error) {
+    await ui.page.screenshot({
+      path: join(output, `${result.name}-sparse-failure.png`),
+    });
+    throw error;
+  } finally {
+    await ui.close();
+  }
+}
+
+async function scrollingOracle(browser, t, result) {
+  const ui = await open(browser, t, projection());
+  try {
+    await ui.page.setViewportSize({ width: 1024, height: 620 });
+    await ui.chip("codex").click();
+    await ui.rows().last().getByText("BOTTOM", { exact: true }).waitFor();
+    const region = ui.page.locator(".peek-live");
+    await ui.page.waitForTimeout(150);
+    const initial = await scrollMetrics(ui);
+    await ui.page.screenshot({
+      path: join(output, `${result.name}-scroll-initial.png`),
+    });
+    const bounds = await region.boundingBox();
+    await ui.page.mouse.move(bounds.x + 80, bounds.y + bounds.height / 2);
+    await ui.page.mouse.wheel(0, -240);
+    await ui.page.waitForTimeout(150);
+    const wheel = await scrollMetrics(ui);
+    // A pixel-delta input is the browser path used by a precision trackpad.
+    const cancellation = await region
+      .locator(".xterm-screen")
+      .evaluate((el) => {
+        const event = new WheelEvent("wheel", {
+          bubbles: true,
+          cancelable: true,
+          deltaY: -37.5,
+          deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+        });
+        el.dispatchEvent(event);
+        return { prevented: event.defaultPrevented };
+      });
+    await ui.page.mouse.wheel(0, -37.5);
+    await ui.page.waitForTimeout(150);
+    const trackpad = await scrollMetrics(ui);
+    result.scrolling = { initial, wheel, trackpad, cancellation };
+    await ui.page.screenshot({
+      path: join(output, `${result.name}-scroll-up.png`),
+    });
+    assert.ok(
+      initial.total > initial.height * 1.5,
+      "Real oversized projection is required",
+    );
+    assert.ok(
+      initial.totalWidth > initial.width * 1.5,
+      "Real narrow projection is required",
+    );
+    assert.ok(
+      initial.bottomVisible,
+      "First completed paint must show latest/bottom output",
+    );
+    assert.ok(
+      wheel.top < initial.top - 100,
+      "Actual browser wheel must move the local viewport up",
+    );
+    assert.ok(
+      trackpad.top < wheel.top - 10,
+      "Fractional pixel trackpad input must actually scroll",
+    );
+    assert.equal(
+      cancellation.prevented,
+      false,
+      "Pixel trackpad must reach the native outer scroller",
+    );
+    assert.equal(
+      initial.overflowX,
+      "auto",
+      "Oversized columns need an accessible horizontal scrollbar",
+    );
+    result.requestControls = await ui.requestControls();
+    const beforeInput = ui.requests.length;
+    const beforeInputBrowser = ui.browserRequests.length;
+    let seq = 2;
+    const send = (bytes) => ui.live().send(data(seq++, bytes));
+    const reset = (rows, label) =>
+      ui.live().send({ ...projection(rows, label), seq: seq++ });
+    const atBottom = () =>
+      ui.page.waitForFunction(() => {
+        const el = document.querySelector(".peek-live");
+        return el.scrollHeight - el.clientHeight - el.scrollTop <= 1;
+      });
+    const painted = async (text) => {
+      await ui.rows().last().getByText(text, { exact: true }).waitFor();
+      // Include subsequent render/scroll/ResizeObserver deliveries.
+      await ui.page.waitForTimeout(100);
+      assert.equal((await ui.rows().last().textContent()).trim(), text);
+    };
+    send("\x1b[60;1H\x1b[2KUPSCROLL-UPDATE");
+    await painted("UPSCROLL-UPDATE");
+    const held = await scrollMetrics(ui);
+    assert.ok(
+      Math.abs(held.top - trackpad.top) <= 1,
+      "New data must not drag an upscrolled reader down",
+    );
+    assert.equal(held.bottomVisible, false);
+    reset(60, "RESET-HELD");
+    await painted("RESET-HELD");
+    const resetHeld = await scrollMetrics(ui);
+    assert.ok(
+      Math.abs(resetHeld.top - held.top) <= 1,
+      "Full reset preserves the local reading position",
+    );
+    assert.equal(resetHeld.bottomVisible, false);
+
+    await ui.page.setViewportSize({ width: 1024, height: 540 });
+    await settleScroll(ui);
+    assert.ok(
+      Math.abs((await scrollMetrics(ui)).top - resetHeld.top) <= 1,
+      "Window resize retains intentional upscroll",
+    );
+    await ui.page.setViewportSize({ width: 1024, height: 620 });
+    await settleScroll(ui);
+    assert.ok(Math.abs((await scrollMetrics(ui)).top - resetHeld.top) <= 1);
+    await ui.page.mouse.wheel(0, 3000);
+    await atBottom();
+    send("\x1b[60;1H\x1b[2KFOLLOW-AGAIN");
+    await painted("FOLLOW-AGAIN");
+    assert.equal((await scrollMetrics(ui)).bottomVisible, true);
+    reset(80, "TALLER-RESET");
+    await painted("TALLER-RESET");
+    assert.equal(
+      (await scrollMetrics(ui)).bottomVisible,
+      true,
+      "Following survives a taller full reset",
+    );
+
+    // Exercise both axes over the terminal, including alternate screen + mouse tracking.
+    send("\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[80;1H\x1b[2KMOUSE-ALT");
+    await painted("MOUSE-ALT");
+    const mouseStart = await scrollMetrics(ui);
+    await ui.page.mouse.wheel(0, -160);
+    await ui.page.waitForTimeout(150);
+    const mouseUp = await scrollMetrics(ui);
+    assert.ok(
+      mouseUp.top < mouseStart.top - 80,
+      "Source mouse/alternate-screen modes cannot consume local wheel input",
+    );
+    await ui.page.mouse.wheel(2000, 0);
+    await ui.page.waitForFunction(
+      () => document.querySelector(".peek-live").scrollLeft > 100,
+    );
+    await settleScroll(ui);
+    await ui.page.mouse.wheel(2000, 0);
+    await settleScroll(ui);
+    const horizontal = await scrollMetrics(ui);
+    send("\x1b[79;100HRIGHT-EDGE\x1b[80;1H\x1b[2KEDGE-READY");
+    await painted("EDGE-READY");
+    await ui.page.mouse.wheel(0, 4000);
+    await atBottom();
+    await settleScroll(ui);
+    const edge = await ui
+      .rows()
+      .nth(78)
+      .evaluate((row) => {
+        const el = row.closest(".peek-live");
+        const box = el.getBoundingClientRect();
+        const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+          const node = walker.currentNode;
+          const at = node.textContent.indexOf("RIGHT-EDGE");
+          if (at < 0) continue;
+          const range = document.createRange();
+          range.setStart(node, at);
+          range.setEnd(node, at + "RIGHT-EDGE".length);
+          const rect = range.getBoundingClientRect();
+          return (
+            rect.left >= box.left && rect.right <= box.left + el.clientWidth
+          );
+        }
+        return false;
+      });
+    Object.assign(result.scrolling, {
+      horizontal,
+      edgeMetrics: await scrollMetrics(ui),
+      edge,
+    });
+    assert.equal(edge, true, "Far-right source output must be reachable");
+    await region.focus();
+    await ui.page.keyboard.press("PageUp");
+    await ui.page.waitForFunction(
+      (top) => document.querySelector(".peek-live").scrollTop < top - 50,
+      (await scrollMetrics(ui)).total - (await scrollMetrics(ui)).height,
+    );
+    await settleScroll(ui);
+    const keyUp = await scrollMetrics(ui);
+    send("\x1b[80;1H\x1b[2KKEY-HELD");
+    await painted("KEY-HELD");
+    assert.ok(Math.abs((await scrollMetrics(ui)).top - keyUp.top) <= 1);
+    await ui.page.keyboard.press("Control+Home");
+    await ui.page.waitForFunction(
+      () => document.querySelector(".peek-live").scrollTop === 0,
+    );
+    await settleScroll(ui);
+    // Drag the actual native vertical scrollbar thumb, not an injected scrollTop.
+    const bar = await region.boundingBox();
+    const metrics = await scrollMetrics(ui);
+    const thumb = (metrics.height * metrics.height) / metrics.total;
+    await ui.page.mouse.move(bar.x + bar.width - 3, bar.y + thumb / 2);
+    await ui.page.mouse.down();
+    await ui.page.mouse.move(
+      bar.x + bar.width - 3,
+      bar.y + metrics.height / 2,
+      { steps: 12 },
+    );
+    await ui.page.mouse.up();
+    await settleScroll(ui);
+    const scrollbar = await scrollMetrics(ui);
+    assert.ok(
+      scrollbar.top > 100,
+      "Dragging the native scrollbar must move the local viewport",
+    );
+    await region.focus();
+    await ui.page.keyboard.press("Control+End");
+    await atBottom();
+    await settleScroll(ui);
+    for (const size of [
+      { width: 1024, height: 420 },
+      { width: 1024, height: 760 },
+    ]) {
+      await ui.page.setViewportSize(size);
+      await atBottom();
+      assert.equal(
+        (await scrollMetrics(ui)).bottomVisible,
+        true,
+        "Window resize keeps bottom followers at latest",
+      );
+    }
+    // A source resize changes only the projected grid, never the source via this view.
+    reset(35, "SOURCE-RESIZE");
+    await painted("SOURCE-RESIZE");
+    assert.equal((await scrollMetrics(ui)).bottomVisible, true);
+    reset(80, "FOLLOW-RESET");
+    await painted("FOLLOW-RESET");
+    assert.equal((await scrollMetrics(ui)).bottomVisible, true);
+    assert.deepEqual(ui.browserRequests.slice(beforeInputBrowser), []);
+    assert.deepEqual(
+      ui.requests.slice(beforeInput),
+      [],
+      "Local wheel/trackpad/scrollbar/keys/resizes must emit zero host requests",
+    );
+
+    result.scrolling.localRequests = ui.requests.slice(beforeInput);
+    result.scrolling.browserRequests =
+      ui.browserRequests.slice(beforeInputBrowser);
+    result.scrolling.ambientAppRequests = ui.appAmbientRequests;
+    const count = ui.liveCount();
+    ui.live().res.end();
+    await until(() => ui.liveCount() > count, "followed reconnect");
+    await painted("BOTTOM");
+    seq = 2;
+    assert.equal(
+      (await scrollMetrics(ui)).bottomVisible,
+      true,
+      "Reconnect followers stay at bottom",
+    );
+    const reconnectBounds = await region.boundingBox();
+    await ui.page.mouse.move(
+      reconnectBounds.x + 80,
+      reconnectBounds.y + reconnectBounds.height / 2,
+    );
+    await ui.page.mouse.wheel(0, -200);
+    await ui.page.waitForTimeout(150);
+    const reconnectHeld = await scrollMetrics(ui);
+    const countHeld = ui.liveCount();
+    ui.live().res.end();
+    await until(() => ui.liveCount() > countHeld, "upscrolled reconnect");
+    await painted("BOTTOM");
+    const reconnected = await scrollMetrics(ui);
+    assert.ok(
+      Math.abs(reconnected.top - reconnectHeld.top) <= 1,
+      "Reconnect preserves intentional upscroll",
+    );
+    await ui.chip("claude").click();
+    await until(
+      () => ui.live()?.member === "claude",
+      "scroll oracle target switch",
+    );
+    await painted("BOTTOM");
+    assert.equal(
+      (await scrollMetrics(ui)).bottomVisible,
+      true,
+      "Fresh target starts latest",
+    );
+    assert.ok(
+      ui.allStreams
+        .filter((stream) => stream.member === "codex")
+        .every((stream) => stream.ended),
+    );
+    await ui.page.keyboard.press("Escape");
+    await ui.drawer.waitFor({ state: "detached" });
+    await until(
+      () => ui.streams.size === 0,
+      "scroll oracle close aborts streams",
+    );
+    await ui.chip("claude").click();
+    await painted("BOTTOM");
+    assert.equal(
+      (await scrollMetrics(ui)).bottomVisible,
+      true,
+      "Reopening starts latest",
+    );
+    assert.equal(ui.screens(), 0);
+    assert.deepEqual(ui.errors, []);
+    assert.deepEqual(ui.external, []);
+    assert.deepEqual(
+      await ui.page.evaluate(() => window.peekPolicy.violations),
+      [],
+    );
+    Object.assign(result.scrolling, {
+      held,
+      resetHeld,
+      mouseUp,
+      horizontal,
+      scrollbar,
+      reconnectHeld,
+      reconnected,
+    });
+    result.checks.push(
+      "oversized projection: initial latest; native wheel/fractional pixel/scrollbar/keyboard and horizontal reach; upscroll holds across writes/reset/reconnect; bottom resumes across resets/resizes/reconnect; fresh target/reopen latest; zero input/resize/focus/query transport",
+    );
+  } catch (error) {
+    result.scrollFailure = await scrollMetrics(ui).catch(() => null);
+    await ui.page.screenshot({
+      path: join(output, `${result.name}-scroll-failure.png`),
+    });
+    throw error;
+  } finally {
+    await ui.close();
+  }
+}
+
 test("live Peek product component, transport and CSP in real Chromium and Firefox", {
   timeout: 120000,
 }, async (t) => {
@@ -792,6 +1641,8 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
     const browser = await type.launch({
       executablePath,
       headless: true,
+      ignoreDefaultArgs: ["--hide-scrollbars"],
+      ...(name === "firefox" ? await isolatedFirefoxDisplay(t, output) : {}),
       ...(name === "chromium" ? { args: ["--no-sandbox"] } : {}),
     });
     const result = {
@@ -813,6 +1664,9 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
     results.push(result);
     let ui;
     try {
+      await activeNavigationOracle(browser, t, result);
+      await sparseScrollingOracle(browser, t, result);
+      await scrollingOracle(browser, t, result);
       ui = await open(browser, t);
       await ui.chip("codex").click();
       await ui
@@ -888,6 +1742,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
       );
 
       const beforeInput = ui.requests.length;
+      const beforeInputBrowser = ui.browserRequests.length;
       await ui.page
         .getByRole("region", { name: "Read-only live terminal" })
         .focus();
@@ -910,6 +1765,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
         )
         .waitFor();
       assert.equal(ui.screens(), 0);
+      assert.deepEqual(ui.browserRequests.slice(beforeInputBrowser), []);
       assert.deepEqual(ui.requests.slice(beforeInput), []);
       result.checks.push(
         "keyboard/scroll emits no host requests; oversized delta is refused without snapshot fallback",
@@ -971,6 +1827,13 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
         .waitFor();
       await ui.chip("claude").click();
       await until(() => ui.live()?.member === "claude", "new target stream");
+      await until(
+        () =>
+          ui.allStreams
+            .filter((s) => s.member === "codex")
+            .every((s) => s.ended),
+        "old target sockets must close after cancellation",
+      );
       assert.ok(
         ui.allStreams.filter((s) => s.member === "codex").every((s) => s.ended),
       );
@@ -1022,6 +1885,12 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
         .first()
         .getByText("RED-SENTINEL", { exact: true })
         .waitFor();
+      ui.live().send({ ...projection(60, "LATEST-OUTPUT"), seq: 2 });
+      await ui
+        .rows()
+        .last()
+        .getByText("LATEST-OUTPUT", { exact: true })
+        .waitFor();
       for (const [label, width, height, theme] of [
         ["desktop-dark", 1440, 900, "dark"],
         ["desktop-light", 1024, 700, "light"],
@@ -1041,7 +1910,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
         });
       }
       const last = ui.live();
-      last.send(outcome("replaced", "closed", 2));
+      last.send(outcome("replaced", "closed", 3));
       await ui.drawer
         .getByText(
           "This pane changed. Reopen the member to see its current screen.",
