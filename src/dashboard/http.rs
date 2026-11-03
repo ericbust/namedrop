@@ -416,6 +416,7 @@ impl Request {
 
 #[derive(Clone, Copy, Debug)]
 enum Status {
+    NoContent,
     BadRequest,
     Unauthorized,
     Forbidden,
@@ -424,12 +425,15 @@ enum Status {
     MethodNotAllowed,
     Unavailable,
     PayloadTooLarge,
+    TooManyRequests,
 }
 
 impl Status {
     fn line(self) -> &'static str {
         match self {
+            Self::NoContent => "204 No Content",
             Self::PayloadTooLarge => "413 Payload Too Large",
+            Self::TooManyRequests => "429 Too Many Requests",
             Self::BadRequest => "400 Bad Request",
             Self::Unauthorized => "401 Unauthorized",
             Self::Forbidden => "403 Forbidden",
@@ -442,10 +446,12 @@ impl Status {
 
     fn body(self) -> &'static str {
         match self {
+            Self::NoContent => "",
             Self::Unauthorized => {
                 "This dashboard needs its key. Run `namedrop dashboard` in that workspace to open it.\n"
             }
             Self::PayloadTooLarge => "Request body is too large.\n",
+            Self::TooManyRequests => "Too many input requests.\n",
             Self::BadRequest => "Bad request.\n",
             Self::Forbidden => "Forbidden.\n",
             Self::NotFound => "Not found.\n",
@@ -656,6 +662,10 @@ enum Route {
         address_id: String,
         continuity: Option<String>,
     },
+    LiveInput {
+        key: SpaceKey,
+        address_id: String,
+    },
     Events(SpaceKey),
     Messages {
         key: SpaceKey,
@@ -709,6 +719,14 @@ fn route(
         authenticate_mutation(request, session, host)?;
         if let Some(rest) = path.strip_prefix("/w/") {
             let segments: Vec<_> = rest.split('/').collect();
+            if let [key, "participants", address, "input"] = segments.as_slice() {
+                let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
+                let address_id = decode_asset_path(address).ok_or(Status::NotFound)?;
+                if address_id.is_empty() || address_id.contains('/') {
+                    return Err(Status::NotFound);
+                }
+                return Ok(Route::LiveInput { key, address_id });
+            }
             if let [key, "messages", message, "deliver"] = segments.as_slice() {
                 let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
                 let message_id = decode_asset_path(message).ok_or(Status::NotFound)?;
@@ -1209,6 +1227,14 @@ fn serve_connection(
             drop(reader);
             drop(writer);
             live.serve(stream, front, &key, &address_id, continuity.as_deref())
+        }
+        Ok(Route::LiveInput { key, address_id }) => {
+            let post = match live_peek::InputPost::read(&mut reader, &request) {
+                Ok(post) => post,
+                Err(status) => return respond_status(&mut writer, status),
+            };
+            let result = live.send_input(front, &key, &address_id, post);
+            respond_status(&mut writer, result.err().unwrap_or(Status::NoContent))
         }
         Ok(Route::Screen { key, address_id }) => {
             let _permit = match screens.try_admit() {
