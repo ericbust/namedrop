@@ -27,6 +27,8 @@ use std::{
 
 #[path = "channels_bundle.rs"]
 mod channels_bundle;
+#[path = "live_peek.rs"]
+mod live_peek;
 /// Caps an operator post and the full body Show more reads, so the page can
 /// always show at least what it could send.
 const BODY_LIMIT: usize = 64 * 1024;
