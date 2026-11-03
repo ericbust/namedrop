@@ -2,6 +2,12 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.5.0-exp.5] - 2026-11-02
+
+### Fixed
+
+- The updater's version check fetches only Git metadata and the version files it needs. It no longer downloads unrelated repository contents, including demo videos, which could exhaust its two-minute timeout on slower connections.
+
 ## [1.5.0-exp.4] - 2026-11-02
 
 ### Fixed
