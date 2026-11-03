@@ -346,15 +346,17 @@ fn input_sends_text_then_enter_and_allowlisted_keys() {
     let live = path("socket-a", "w1", "lead");
     let target = input_path("socket-a", "w1", "lead");
     let continuity = live_continuity(&server, &live);
-    assert_eq!(
-        post_input(
-            &server,
-            &target,
-            &json!({"kind":"text","text":"hello agent","continuity":continuity})
-        )
-        .status,
-        204
-    );
+    for text in ["hello agent", "--help  preserve 'quotes' and café"] {
+        assert_eq!(
+            post_input(
+                &server,
+                &target,
+                &json!({"kind":"text","text":text,"continuity":continuity})
+            )
+            .status,
+            204
+        );
+    }
     assert_eq!(
         post_input(
             &server,
@@ -374,7 +376,14 @@ fn input_sends_text_then_enter_and_allowlisted_keys() {
             .map(|call| call["args"].clone())
             .collect::<Vec<_>>(),
         vec![
-            json!(["pane", "send-text", "pane-1-lead", "--", "hello agent"]),
+            json!(["pane", "send-text", "pane-1-lead", "hello agent"]),
+            json!(["pane", "send-keys", "pane-1-lead", "enter"]),
+            json!([
+                "pane",
+                "send-text",
+                "pane-1-lead",
+                "--help  preserve 'quotes' and café"
+            ]),
             json!(["pane", "send-keys", "pane-1-lead", "enter"]),
             json!(["pane", "send-keys", "pane-1-lead", "esc"]),
         ]
