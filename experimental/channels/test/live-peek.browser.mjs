@@ -276,6 +276,11 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
         "true",
       );
       assert.equal(await ui.rows().nth(2).textContent(), "OLD-MARKER");
+      assert.deepEqual(
+        await ui.page.evaluate(() => window.peekPolicy.violations),
+        [],
+        "Real product CSP must admit the renderer without violations",
+      );
       const colors = await ui
         .rows()
         .evaluateAll((rows) => [
@@ -288,11 +293,6 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
         ]);
       assert.equal(colors[1], "rgb(12, 34, 56)");
       assert.notEqual(colors[0], colors[1]);
-      assert.deepEqual(
-        await ui.page.evaluate(() => window.peekPolicy.violations),
-        [],
-        "Real product CSP must admit the renderer without violations",
-      );
       result.checks.push(
         styleDiagnostic
           ? "diagnostic initial paint/colors with relaxed style policy; no snapshot request"
@@ -359,6 +359,11 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
         .getByText("RED-SENTINEL", { exact: true })
         .waitFor();
       const guarded = ui.live();
+      const titleBeforeEscapes = await ui.page.title();
+      const sizeBeforeEscapes = await ui.page.evaluate(() => [
+        innerWidth,
+        innerHeight,
+      ]);
       const controls =
         "\x1b]0;BAD-TITLE\x07\x1b]52;c;" +
         "A".repeat(100000) +
@@ -372,6 +377,11 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
         0,
       );
       assert.equal((await ui.page.evaluate(() => window.peekPolicy)).opened, 0);
+      assert.equal(await ui.page.title(), titleBeforeEscapes);
+      assert.deepEqual(
+        await ui.page.evaluate(() => [innerWidth, innerHeight]),
+        sizeBeforeEscapes,
+      );
       assert.equal(await ui.drawer.locator("a, img").count(), 0);
       result.checks.push(
         "split 100k control string is contained across records; no clipboard/title/link/window effects",
