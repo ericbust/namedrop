@@ -1347,6 +1347,13 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
         .waitFor();
       await ui.chip("claude").click();
       await until(() => ui.live()?.member === "claude", "new target stream");
+      await until(
+        () =>
+          ui.allStreams
+            .filter((s) => s.member === "codex")
+            .every((s) => s.ended),
+        "old target sockets must close after cancellation",
+      );
       assert.ok(
         ui.allStreams.filter((s) => s.member === "codex").every((s) => s.ended),
       );
