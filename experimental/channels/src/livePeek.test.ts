@@ -409,11 +409,23 @@ test("server-owned canonical streams conform without copying or skipping the int
               : "interrupted",
           };
     assert.deepEqual(states.at(-1), expected, stream.name);
-    assert.equal(
-      updates.length,
-      stream.records.filter(
-        (r: { kind: string }) => r.kind === "reset" || r.kind === "data",
-      ).length,
+    assert.deepEqual(
+      updates.map((update) => update.kind),
+      stream.records
+        .filter(
+          (r: { kind: string }) =>
+            r.kind === "reset" || r.kind === "history" || r.kind === "data",
+        )
+        .map((r: { kind: string }) => r.kind),
+      stream.name,
+    );
+    assert.deepEqual(
+      updates
+        .filter((update) => update.kind === "history")
+        .map((update) => update.text),
+      stream.records
+        .filter((r: { kind: string }) => r.kind === "history")
+        .map((r: { text: string }) => r.text),
       stream.name,
     );
   }
