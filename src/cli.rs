@@ -326,9 +326,10 @@ enum Command {
         #[command(subcommand)]
         command: EventCommand,
     },
-    /// Open a live dashboard of this workspace's agents in your browser.
+    /// Open Channels for this workspace in your browser.
+    #[command(name = "channels", alias = "dashboard")]
     Dashboard(DashboardArgs),
-    /// The singleton dashboard server; `namedrop dashboard` starts it.
+    /// The singleton dashboard server; `namedrop channels` starts it.
     #[command(hide = true)]
     DashboardServer {
         #[arg(long, value_name = "DIR")]
@@ -472,7 +473,7 @@ struct DashboardArgs {
     /// Print the URL without opening a browser.
     #[arg(long = "no-open")]
     no_open: bool,
-    /// Serve the dashboard UI from this directory instead of embedded assets.
+    /// Serve a custom Channels app from this directory instead of embedded assets.
     #[arg(long, value_name = "DIR")]
     ui: Option<PathBuf>,
 }
@@ -701,6 +702,26 @@ mod tests {
                 "removed command {command} was accepted"
             );
         }
+    }
+
+    #[test]
+    fn channels_and_hidden_dashboard_alias_parse_identically() {
+        let commands = ["channels", "dashboard"].map(|name| {
+            Cli::try_parse_from(["namedrop", name, "--no-open", "--ui", "custom-app"]).unwrap()
+        });
+        for command in commands {
+            assert_eq!(command.operation(), "dashboard");
+            assert_eq!(command.dashboard_open_browser(), Some(false));
+            assert_eq!(
+                command.dashboard_ui(),
+                Some(std::path::Path::new("custom-app"))
+            );
+        }
+        let help = Cli::try_parse_from(["namedrop", "--help"])
+            .unwrap_err()
+            .to_string();
+        assert!(help.contains("channels"), "{help}");
+        assert!(!help.contains("dashboard"), "{help}");
     }
 
     #[test]

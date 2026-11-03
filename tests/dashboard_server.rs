@@ -586,7 +586,7 @@ fn open_dashboard(root: &Path, workspace: &str) -> serde_json::Value {
         .args(["--json", "--plugin-state"])
         .arg(root.join("state"))
         .args(["--herdr-socket", SOCKET, "--herdr-workspace", workspace])
-        .args(["dashboard", "--no-open"])
+        .args(["channels", "--no-open"])
         .env_remove("HERDR_PANE_ID")
         .env_remove("HERDR_WORKSPACE_ID")
         .env_remove("HERDR_SOCKET_PATH")
@@ -613,7 +613,7 @@ fn live_servers(state: &Path) -> usize {
     String::from_utf8_lossy(&output.stdout).lines().count()
 }
 
-/// Stops the server `namedrop dashboard` started, which no test owns as a child.
+/// Stops the server `namedrop channels` started, which no test owns as a child.
 struct StopOnDrop(PathBuf);
 
 impl Drop for StopOnDrop {

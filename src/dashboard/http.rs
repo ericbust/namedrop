@@ -443,7 +443,7 @@ impl Status {
     fn body(self) -> &'static str {
         match self {
             Self::Unauthorized => {
-                "This dashboard needs its key. Run `namedrop dashboard` in that workspace to open it.\n"
+                "This dashboard needs its key. Run `namedrop channels` in that workspace to open it.\n"
             }
             Self::PayloadTooLarge => "Request body is too large.\n",
             Self::BadRequest => "Bad request.\n",

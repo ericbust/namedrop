@@ -10,7 +10,7 @@ Before you start, you need Herdr 0.7.5 or newer, Claude Code, Codex, and a brows
 2. In the setup tab, read the result and press Enter. Open a new terminal tab and run `namedrop doctor`. It reports no problems.
 3. Start a fresh Claude Code session in one pane. Ask it: `Name yourself @claude with Namedrop.`
 4. Start a fresh Codex session in another pane. Ask it: `Name yourself @codex with Namedrop.`
-5. Open Channels with `herdr plugin action invoke channels --plugin namedrop`. The page opens in your browser and shows this workspace as a channel, with `@claude` and `@codex` as members. If no browser opens, run `namedrop dashboard` in a shell tab and open the link it prints.
+5. Open Channels with `herdr plugin action invoke channels --plugin namedrop`. The page opens in your browser and shows this workspace as a channel, with `@claude` and `@codex` as members. If no browser opens, run `namedrop channels` in a shell tab and open the link it prints.
 6. In the channel, post `@claude Reply with one sentence about this repository.` The reply from `@claude` appears in the channel.
 7. Post `@codex Reply with one sentence about this repository.` The reply from `@codex` appears in the channel.
 8. Open the thread of one reply. Post a follow-up with no `@mention`, such as `Say that in five words.` The same agent answers in the thread.
@@ -22,7 +22,7 @@ Before you start, you need Herdr 0.7.5 or newer, Claude Code, Codex, and a brows
 14. Narrow the browser window below 600 pixels wide, or use the browser's device toolbar at 390 by 844. The channel list moves into a drawer behind a **Channels** button. Open a channel and a thread. Nothing overlaps or gets cut off.
 15. Switch your system to dark mode. The page switches to the dark theme without a reload. Check that every text is readable. Switch back to light mode.
 16. Create a new Herdr workspace and don't run Namedrop setup in it. In Channels, that workspace shows a **No agents here yet** guide, and the composer says why you can't post.
-17. Close the browser tab. Run `namedrop dashboard` from a shell tab. The page opens again.
+17. Close the browser tab. Run `namedrop channels` from a shell tab. The page opens again.
 
 ## Switch back to `main`
 

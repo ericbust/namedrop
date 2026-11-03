@@ -206,7 +206,7 @@ case "$tb_socket" in /tmp/nd-tb-*) ;; *) echo "Not a testbed socket" >&2; exit 1
 tb herdr pane list
 tb_workspace=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workspace"])' "$tb_profile/state.json")
 tb_state="$tb_profile/state/herdr/plugins/namedrop"
-tb "$tb_state/runtime/namedrop" --plugin-state "$tb_state" --herdr-workspace "$tb_workspace" dashboard --no-open --json --ui "$PWD/experimental/channels/dist" > "$CHANNELS_OUTPUT_DIR/channels-dashboard.json"
+tb "$tb_state/runtime/namedrop" --plugin-state "$tb_state" --herdr-workspace "$tb_workspace" channels --no-open --json --ui "$PWD/experimental/channels/dist" > "$CHANNELS_OUTPUT_DIR/channels-dashboard.json"
 ```
 
 Read `data.url` from `$CHANNELS_OUTPUT_DIR/channels-dashboard.json`. The nonce is single use.

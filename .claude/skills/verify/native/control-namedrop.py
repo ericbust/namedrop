@@ -341,7 +341,7 @@ def main():
             save("handoffs.json", {"inherited_exit": inherited.returncode, "preview": anonymous, "self_send": self_send})
         elif args.feature == "dashboard":
             cli("name", "@build", "--type", "terminal")
-            first = cli("dashboard", "--no-open")["data"]
+            first = cli("channels", "--no-open")["data"]
             info = json.loads((state / "dashboard/server.json").read_text())
             dashboard_pid = info["pid"]
             assert first["server"] == "started" and first["opened"] is False, first
@@ -388,7 +388,7 @@ def main():
             assert own["space"]["workspace_id"] == spaces["lead"] and own["space"]["state"] == "active", own["space"]
             assert [p["alias"] for p in own["participants"] if p["kind"]["type"] == "terminal"] == ["@build"], own
             save("dashboard-snapshot.json", own)
-            again = cli("dashboard", "--no-open")["data"]
+            again = cli("channels", "--no-open")["data"]
             assert again["server"] == "running" and again["space_key"] == first["space_key"], again
             assert urllib.parse.urlsplit(again["url"]).port == info["port"], again
             command("git", "init", "--quiet", str(base / "workspace-b"))
@@ -396,7 +396,7 @@ def main():
             panes["other"] = other["root_pane"]["pane_id"]
             wait(lambda: (base / "home" / f"ready-{panes['other']}").exists(), "second workspace prompt")
             shell_pids.append(host("pane", "process-info", "--pane", panes["other"])["process_info"]["shell_pid"])
-            second = cli("dashboard", "--no-open", pane=panes["other"], workspace=other["workspace"]["workspace_id"])["data"]
+            second = cli("channels", "--no-open", pane=panes["other"], workspace=other["workspace"]["workspace_id"])["data"]
             assert second["server"] == "running" and second["space_key"] != first["space_key"], second
             assert urllib.parse.urlsplit(second["url"]).port == info["port"], second
             other_page = urllib.parse.urlsplit(second["url"]).path
