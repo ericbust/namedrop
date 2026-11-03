@@ -85,10 +85,11 @@ export function PeekDrawer({
 }: Props) {
   const retention = retentionFor(reader);
   const pane = useRef<HTMLElement>(null);
+  const [expanded, setExpanded] = useState(false);
   useEscape(pane, onClose);
   return (
     <aside
-      className="slot peek"
+      className={`slot peek${expanded ? " is-expanded" : ""}`}
       aria-label={peekCopy.label(who.alias)}
       id={paneId}
       ref={pane}
@@ -99,6 +100,8 @@ export function PeekDrawer({
         target={target}
         who={who}
         onClose={onClose}
+        expanded={expanded}
+        onExpand={() => setExpanded((value) => !value)}
         reader={reader}
         retention={retention}
         {...rest}
@@ -107,7 +110,11 @@ export function PeekDrawer({
   );
 }
 
-type ContentProps = Omit<Props, "paneId" | "inert"> & { retention: Retention };
+type ContentProps = Omit<Props, "paneId" | "inert"> & {
+  retention: Retention;
+  expanded: boolean;
+  onExpand(): void;
+};
 function liveWords(state: LiveState): {
   stamp: string | null;
   notice: string | null;
@@ -213,6 +220,8 @@ function PeekContent(props: ContentProps) {
         who={props.who}
         toggle={props.toggle}
         onClose={props.onClose}
+        expanded={props.expanded}
+        onExpand={props.onExpand}
         stamp={stamp}
         action={
           state.kind === "unavailable" ? (
@@ -249,12 +258,16 @@ function PeekHeader({
   onClose,
   stamp,
   action,
+  expanded,
+  onExpand,
 }: {
   who: PeekWho;
   toggle: ReactNode;
   onClose(): void;
   stamp: string | null;
   action: ReactNode;
+  expanded: boolean;
+  onExpand(): void;
 }) {
   return (
     <header className="peek-head">
@@ -279,6 +292,14 @@ function PeekHeader({
         </p>
       </div>
       {action}
+      <button
+        type="button"
+        className="peek-expand"
+        aria-pressed={expanded}
+        onClick={onExpand}
+      >
+        {expanded ? "Restore" : "Expand"}
+      </button>
       <button
         type="button"
         className="icon-button"
@@ -373,6 +394,8 @@ function PeekScreen({
   retention,
   toggle,
   controls,
+  expanded,
+  onExpand,
 }: ContentProps & { controls: ReactNode }) {
   const { read, again } = usePeekRead(target, reader, retention);
   const view = peekView(read, who);
@@ -408,6 +431,8 @@ function PeekScreen({
         who={who}
         toggle={toggle}
         onClose={onClose}
+        expanded={expanded}
+        onExpand={onExpand}
         stamp={view.stamp}
         action={
           <button

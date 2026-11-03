@@ -13,19 +13,93 @@ export function PeekLive({
   onState(state: LiveState): void;
 }) {
   const host = useRef<HTMLDivElement>(null);
+  const history = useRef<HTMLPreElement>(null);
+  const historyRegion = useRef<HTMLDivElement>(null);
   const viewport = useRef<HTMLElement>(null);
   useEffect(() => {
     const mounted = host.current;
     const scrolling = viewport.current;
-    if (!mounted || !scrolling) return;
+    const historyElement = history.current;
+    const historyBlock = historyRegion.current;
+    if (!mounted || !scrolling || !historyElement || !historyBlock) return;
     const element = mounted;
     const scroller = scrolling;
+    const historyNode = historyElement;
+    const historyContainer = historyBlock;
     const controller = new AbortController();
     let terminal: Terminal | null = null;
     const pending = new Set<() => void>();
     let following = true;
     let replacing = false;
     let position = { top: 0, left: 0 };
+    let columns = 0;
+    const baseFont = Number.parseFloat(getComputedStyle(element).fontSize);
+    function readingAnchor() {
+      const top = scroller.getBoundingClientRect().top;
+      const lines = historyNode.children;
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i] as HTMLElement;
+        const rect = line.getBoundingClientRect();
+        if (rect.bottom > top) {
+          return {
+            text: line.textContent ?? "",
+            next: lines[i + 1]?.textContent ?? "",
+            offset: rect.top - top,
+          };
+        }
+      }
+      return null;
+    }
+    function snapshot(text: string) {
+      const anchor = following ? null : readingAnchor();
+      const lines = text ? text.split("\n") : [];
+      const fragment = document.createDocumentFragment();
+      for (const line of lines) {
+        const span = document.createElement("span");
+        span.textContent = line || " ";
+        fragment.append(span);
+      }
+      historyNode.replaceChildren(fragment);
+      historyContainer.hidden = lines.length === 0;
+      if (anchor) {
+        const index = lines.findIndex(
+          (line, i) =>
+            line === anchor.text && (lines[i + 1] ?? "") === anchor.next,
+        );
+        if (index >= 0) {
+          const line = historyNode.children[index] as HTMLElement;
+          position.top +=
+            line.getBoundingClientRect().top -
+            scroller.getBoundingClientRect().top -
+            anchor.offset;
+        }
+      }
+    }
+    function fit() {
+      const current = terminal;
+      if (!current || !columns) return;
+      const style = getComputedStyle(scroller);
+      const available =
+        scroller.clientWidth -
+        Number.parseFloat(style.paddingLeft) -
+        Number.parseFloat(style.paddingRight);
+      if (available <= 0) return;
+      current.options.fontSize = baseFont;
+      const width =
+        current.element?.querySelector(".xterm-screen")?.getBoundingClientRect()
+          .width ?? 0;
+      if (width <= 0) return;
+      const fitted = Math.max(
+        10,
+        Math.min(
+          baseFont,
+          Math.floor(((baseFont * available) / width) * 10) / 10,
+        ),
+      );
+      current.options.fontSize = fitted;
+      historyNode.style.fontSize = `${fitted}px`;
+      restorePosition();
+    }
     function latestTop() {
       const current = terminal;
       const screen = current?.element;
@@ -90,7 +164,7 @@ export function PeekLive({
     });
     scroller.addEventListener("scroll", rememberPosition);
     const resize = new ResizeObserver(() => {
-      if (!replacing) restorePosition();
+      if (!replacing) fit();
     });
     resize.observe(scroller);
     function dispose() {
@@ -126,6 +200,7 @@ export function PeekLive({
       next.onRender(restorePosition);
       terminal = next;
       next.open(element);
+      columns = cols;
       next.textarea?.setAttribute("tabindex", "-1");
       // xterm initializes its cursor on local focus. Preserve browser focus;
       // there is no remote focus or input transport.
@@ -134,6 +209,7 @@ export function PeekLive({
       if (focused instanceof HTMLElement && focused.isConnected)
         focused.focus({ preventScroll: true });
       else next.blur();
+      fit();
       return next;
     }
     async function write(current: Terminal, bytes: Uint8Array) {
@@ -163,13 +239,28 @@ export function PeekLive({
       target,
       signal: controller.signal,
       async apply(update) {
+        if (update.kind === "history") {
+          replacing = true;
+          snapshot(update.text);
+          restorePosition();
+          replacing = false;
+          return;
+        }
         replacing = update.kind === "reset";
-        const current =
-          update.kind === "reset"
-            ? create(update.viewport.cols, update.viewport.rows)
-            : terminal;
+        let current = terminal;
+        if (update.kind === "reset") {
+          if (!current)
+            current = create(update.viewport.cols, update.viewport.rows);
+          else {
+            current.reset();
+            current.resize(update.viewport.cols, update.viewport.rows);
+            columns = update.viewport.cols;
+            fit();
+          }
+        }
         if (!current) throw new Error("Terminal not initialized");
         await write(current, update.bytes);
+        if (update.kind === "reset") current.refresh(0, current.rows - 1);
         restorePosition();
         replacing = false;
       },
@@ -199,6 +290,11 @@ export function PeekLive({
       // biome-ignore lint/a11y/noNoninteractiveTabindex: The read-only viewport supports keyboard scrolling.
       tabIndex={0}
     >
+      <div className="peek-history" ref={historyRegion} hidden>
+        <p className="peek-region-label">Recent output</p>
+        <pre ref={history} />
+      </div>
+      <p className="peek-region-label peek-screen-label">Live screen</p>
       <div className="peek-terminal" ref={host} />
     </section>
   );

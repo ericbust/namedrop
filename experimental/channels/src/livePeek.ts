@@ -6,7 +6,8 @@ export type LiveUpdate =
       viewport: Readonly<{ cols: number; rows: number }>;
       bytes: Uint8Array;
     }>
-  | Readonly<{ kind: "data"; bytes: Uint8Array }>;
+  | Readonly<{ kind: "data"; bytes: Uint8Array }>
+  | Readonly<{ kind: "history"; text: string }>;
 
 export type LiveState =
   | Readonly<{ kind: "connecting" | "live" | "reconnecting" }>
@@ -36,6 +37,7 @@ type Wire =
       bytes: Uint8Array;
     }
   | { kind: "data"; bytes: Uint8Array }
+  | { kind: "history"; text: string }
   | { kind: "closed"; reason: "ended" | "replaced" | "missing" }
   | {
       kind: "unavailable";
@@ -51,6 +53,8 @@ type Wire =
 const LINE_LIMIT = 2 * 1024 * 1024;
 const PAINT_LIMIT = 1024 * 1024;
 const DATA_LIMIT = 64 * 1024;
+const HISTORY_LIMIT = 1024 * 1024;
+const HISTORY_LINES = 2200;
 const WATCHDOG_MS = 30_000;
 const RETRIES = [1000, 2000, 4000];
 class InvalidSource extends Error {}
@@ -122,6 +126,16 @@ function parse(line: Uint8Array, seq: number): Wire {
     case "data":
       exact(raw, ["v", "seq", "kind", "bytes"]);
       return { kind: "data", bytes: bytes(raw.bytes, DATA_LIMIT) };
+    case "history": {
+      exact(raw, ["v", "seq", "kind", "text"]);
+      if (
+        typeof raw.text !== "string" ||
+        new TextEncoder().encode(raw.text).length > HISTORY_LIMIT ||
+        raw.text.split("\n").length > HISTORY_LINES
+      )
+        throw new InvalidSource();
+      return { kind: "history", text: raw.text };
+    }
     case "closed":
       exact(raw, ["v", "seq", "kind", "reason"]);
       if (
@@ -276,6 +290,13 @@ export async function observePeek({
               if (!reset) throw new InvalidSource();
               await abortable(
                 apply({ kind: "data", bytes: record.bytes }),
+                controller.signal,
+              );
+              break;
+            case "history":
+              if (!reset) throw new InvalidSource();
+              await abortable(
+                apply({ kind: "history", text: record.text }),
                 controller.signal,
               );
               break;

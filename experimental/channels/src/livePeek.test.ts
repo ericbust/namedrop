@@ -129,6 +129,51 @@ test("live boundary consumes fragmented NDJSON, heartbeats and atomic paints in 
   assert.equal(seen[0]?.init?.redirect, "error");
 });
 
+test("history snapshots require a reset and obey exact wire and size bounds", async (t) => {
+  const history = (seq: number, text: string, extra = {}) => ({
+    v: 1,
+    seq,
+    kind: "history",
+    text,
+    ...extra,
+  });
+  await t.test("valid snapshots", async (subtest) => {
+    const valid = observation(subtest, async () =>
+      response([
+        reset(),
+        history(2, "first\nsecond"),
+        history(3, "new window"),
+        closed({ seq: 4 }),
+      ]),
+    );
+    await valid.done;
+    assert.deepEqual(
+      valid.updates.map((update) => update.kind),
+      ["reset", "history", "history"],
+    );
+    assert.deepEqual(valid.updates[1], {
+      kind: "history",
+      text: "first\nsecond",
+    });
+  });
+  for (const records of [
+    [history(1, "early")],
+    [reset(), history(2, "extra", { extra: true })],
+    [reset(), { ...history(2, "valid"), text: 12 }],
+    [reset(), history(2, "é".repeat(524289))],
+    [reset(), history(2, "line\n".repeat(2200))],
+  ]) {
+    await t.test("reject invalid snapshot", async (subtest) => {
+      const run = observation(subtest, async () => response(records));
+      await run.done;
+      assert.deepEqual(run.states.at(-1), {
+        kind: "unavailable",
+        reason: "invalid_source",
+      });
+    });
+  }
+});
+
 test("live boundary rejects malformed/version/sequence/base64/viewport/variant bytes before rendering them", async (t) => {
   const invalid = [
     reset({ v: 2 }),

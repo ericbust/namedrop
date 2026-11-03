@@ -560,6 +560,7 @@ async function open(browser, t, initial = full()) {
     "Fixture response must serve the extracted product policy",
   );
   await page.getByRole("heading", { name: "alpha", exact: true }).waitFor();
+  await page.bringToFront();
   const chip = (member) =>
     page.locator(`[data-address-id="${member}"] .member`);
   const drawer = page.getByRole("complementary", { name: /^Screen of/ });
@@ -568,6 +569,7 @@ async function open(browser, t, initial = full()) {
   const liveCount = () =>
     requests.filter((r) => r.path.endsWith("/live")).length;
   return {
+    engine: browser.browserType().name(),
     page,
     context,
     drawer,
@@ -744,6 +746,11 @@ async function open(browser, t, initial = full()) {
     },
     close,
   };
+}
+async function clickMember(ui, member) {
+  // Headed Firefox can keep an animated, visible chip perpetually "unstable"
+  // in Playwright after several contexts. Force only this setup click.
+  await ui.chip(member).click(ui.engine === "firefox" ? { force: true } : {});
 }
 async function until(fn, message) {
   const deadline = Date.now() + 5000;
@@ -955,7 +962,7 @@ async function activeNavigationOracle(browser, t, result) {
   let timer;
   try {
     await ui.page.setViewportSize({ width: 900, height: 540 });
-    await ui.chip("codex").click();
+    await clickMember(ui, "codex");
     await ui.rows().last().getByText("IDLE-LATEST", { exact: true }).waitFor();
     const region = ui.page.locator(".peek-live");
     const top = async () => {
@@ -1098,7 +1105,7 @@ async function sparseScrollingOracle(browser, t, result) {
   const ui = await open(browser, t, sparseProjection());
   try {
     await ui.page.setViewportSize({ width: 900, height: 540 });
-    await ui.chip("codex").click();
+    await clickMember(ui, "codex");
     const region = ui.page.locator(".peek-live");
     const painted = async (row, text) => {
       await ui
@@ -1304,7 +1311,7 @@ async function scrollingOracle(browser, t, result) {
   const ui = await open(browser, t, projection());
   try {
     await ui.page.setViewportSize({ width: 1024, height: 620 });
-    await ui.chip("codex").click();
+    await clickMember(ui, "codex");
     await ui.rows().last().getByText("BOTTOM", { exact: true }).waitFor();
     const region = ui.page.locator(".peek-live");
     await ui.page.waitForTimeout(150);
@@ -1629,8 +1636,164 @@ async function scrollingOracle(browser, t, result) {
   }
 }
 
+async function historyAndFitOracle(browser, t, result) {
+  const initial = full(1, {
+    cols: 58,
+    rows: 30,
+    bytes: encode("\x1b[2J\x1b[HINITIAL-LIVE\x1b[30;1HEND-LIVE"),
+  });
+  const ui = await open(browser, t, initial);
+  try {
+    await ui.page.bringToFront();
+    await clickMember(ui, "codex");
+    await until(() => ui.live(), "history oracle live stream");
+    let seq = 2;
+    const history = (start) =>
+      Array.from(
+        { length: 2100 },
+        (_, index) => `HISTORY-${String(start + index).padStart(4, "0")}`,
+      ).join("\n");
+    ui.live().send({ v: 1, seq: seq++, kind: "history", text: history(1) });
+    await ui.page.locator(".peek-history span").nth(2099).waitFor();
+    let historyStart = 1;
+    for (const size of [
+      { width: 1280, height: 800 },
+      { width: 2560, height: 1440 },
+    ]) {
+      await ui.page.bringToFront();
+      await ui.page.setViewportSize(size);
+      await ui.page.waitForTimeout(100);
+      const fit = await ui.page.locator(".peek-live").evaluate((el) => {
+        const screen = el.querySelector(".xterm-screen");
+        const style = getComputedStyle(el);
+        const available =
+          el.clientWidth -
+          parseFloat(style.paddingLeft) -
+          parseFloat(style.paddingRight);
+        return {
+          screen: screen.getBoundingClientRect().width,
+          available,
+          font: parseFloat(
+            getComputedStyle(el.querySelector(".peek-history pre")).fontSize,
+          ),
+        };
+      });
+      assert.ok(
+        fit.screen <= fit.available + 2,
+        `Terminal should fit at ${size.width}px: ${JSON.stringify(fit)}`,
+      );
+      assert.ok(fit.font >= 10, "Terminal text stays readable");
+      assert.equal(await ui.page.locator(".peek-history span").count(), 2100);
+      assert.equal(
+        await ui.page
+          .locator(".peek-region-label")
+          .allTextContents()
+          .then((labels) => labels.join(" / ")),
+        "Recent output / Live screen",
+      );
+      await ui.page
+        .locator(".peek-history span")
+        .nth(999)
+        .evaluate((line) => {
+          const scroller = line.closest(".peek-live");
+          scroller.scrollTop +=
+            line.getBoundingClientRect().top -
+            scroller.getBoundingClientRect().top;
+        });
+      await settleScroll(ui);
+      const reading = await ui.page
+        .locator(".peek-history span")
+        .nth(999)
+        .evaluate(
+          (line) =>
+            line.getBoundingClientRect().top -
+            line.closest(".peek-live").getBoundingClientRect().top,
+        );
+      historyStart += 100;
+      ui.live().send({
+        v: 1,
+        seq: seq++,
+        kind: "history",
+        text: history(historyStart),
+      });
+      ui.live().send(data(seq++, "\x1b[30;1H\x1b[2KDATA-LIVE"));
+      ui.live().send({
+        ...initial,
+        seq: seq++,
+        bytes: encode("\x1b[2J\x1b[HRESET-LIVE"),
+      });
+      await ui.page.waitForTimeout(300);
+      const held = await ui.page
+        .locator(".peek-history span")
+        .nth(899)
+        .evaluate(
+          (line) =>
+            line.getBoundingClientRect().top -
+            line.closest(".peek-live").getBoundingClientRect().top,
+        );
+      assert.ok(
+        Math.abs(held - reading) < 3,
+        `History reading anchor moved at ${size.width}px: ${held} vs ${reading}`,
+      );
+      assert.equal(
+        await ui.page.locator(".peek-history span").count(),
+        2100,
+        "Snapshot replacement must not accumulate duplicates",
+      );
+      await ui.page.screenshot({
+        path: join(output, `${result.name}-history-${size.width}-reading.png`),
+      });
+      await ui.page.locator(".peek-live").evaluate((el) => {
+        el.scrollTop = el.scrollHeight;
+      });
+      await settleScroll(ui);
+      await ui
+        .rows()
+        .first()
+        .getByText("RESET-LIVE", { exact: true })
+        .waitFor();
+      ui.live().send(data(seq++, "\x1b[30;1H\x1b[2KFOLLOW-LIVE"));
+      await ui
+        .rows()
+        .last()
+        .getByText("FOLLOW-LIVE", { exact: true })
+        .waitFor();
+      const bottom = await scrollMetrics(ui);
+      assert.ok(
+        bottom.bottomVisible,
+        "Returning to bottom follows the live screen",
+      );
+      await ui.page.screenshot({
+        path: join(
+          output,
+          `${result.name}-history-${size.width}-following.png`,
+        ),
+      });
+    }
+    const expand = ui.drawer.getByRole("button", { name: "Expand" });
+    await expand.click();
+    assert.equal(
+      await ui.drawer
+        .getByRole("button", { name: "Restore" })
+        .getAttribute("aria-pressed"),
+      "true",
+    );
+    await ui.drawer.getByRole("button", { name: "Restore" }).click();
+    assert.deepEqual(ui.errors, []);
+    assert.deepEqual(
+      await ui.page.evaluate(() => window.peekPolicy.violations),
+      [],
+    );
+    result.checks.push(
+      "2100 recent lines, bounded rotation anchor, fit and follow at 1280x800 and 2560x1440; expand/restore",
+    );
+  } finally {
+    await ui.close();
+  }
+}
+
 test("live Peek product component, transport and CSP in real Chromium and Firefox", {
-  timeout: 120000,
+  timeout: 180000,
 }, async (t) => {
   const results = [];
   let failed = false;
@@ -1667,8 +1830,9 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
       await activeNavigationOracle(browser, t, result);
       await sparseScrollingOracle(browser, t, result);
       await scrollingOracle(browser, t, result);
+      await historyAndFitOracle(browser, t, result);
       ui = await open(browser, t);
-      await ui.chip("codex").click();
+      await clickMember(ui, "codex");
       await ui
         .rows()
         .first()
@@ -1850,7 +2014,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
       );
 
       ui.mode("unsupported");
-      await ui.chip("codex").click();
+      await clickMember(ui, "codex");
       await ui.page
         .getByRole("region", { name: "Screen text", exact: true })
         .getByText("SANITIZED TEXT SNAPSHOT")
@@ -1864,7 +2028,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
         .getByRole("button", { name: "Close screen", exact: true })
         .click();
       ui.mode("retry");
-      await ui.chip("codex").click();
+      await clickMember(ui, "codex");
       await ui.drawer
         .getByText(
           "Live view isn’t available. Try again or choose Text snapshot.",
@@ -1879,7 +2043,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
         .getByRole("button", { name: "Close screen", exact: true })
         .click();
       ui.mode("normal");
-      await ui.chip("codex").click();
+      await clickMember(ui, "codex");
       await ui
         .rows()
         .first()
@@ -1932,7 +2096,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
         .getByRole("button", { name: "Close screen", exact: true })
         .click();
       ui.mode("normal");
-      await ui.chip("codex").click();
+      await clickMember(ui, "codex");
       await ui
         .rows()
         .first()
