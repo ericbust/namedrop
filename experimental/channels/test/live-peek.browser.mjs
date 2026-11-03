@@ -830,6 +830,272 @@ async function settleScroll(ui) {
   });
 }
 
+function sparseProjection(rows = 70, latest = 35, label = "SPARSE-35") {
+  return full(1, {
+    cols: 120,
+    rows,
+    bytes: encode(
+      "\x1b[2J\x1b[H" +
+        Array.from(
+          { length: latest },
+          (_, i) => `\x1b[${i + 1};1HROW-${i + 1}`,
+        ).join("") +
+        `\x1b[${latest};1H\x1b[2K${label}\x1b[?25l`,
+    ),
+  });
+}
+
+async function usefulMetrics(ui, row, text = "") {
+  return ui.page.locator(".peek-live").evaluate(
+    (el, { row, text }) => {
+      const box = el.getBoundingClientRect();
+      const line = el.querySelectorAll(".xterm-rows > div")[row - 1];
+      const rect = line.getBoundingClientRect();
+      let marker = rect;
+      if (text) {
+        const nodes = [];
+        const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) nodes.push(walker.currentNode);
+        const source = nodes.map((node) => node.textContent).join("");
+        const at = source.indexOf(text);
+        if (at < 0) throw new Error(`Missing marker ${text}: ${source}`);
+        const range = document.createRange();
+        let offset = 0;
+        for (const node of nodes) {
+          const end = offset + node.textContent.length;
+          if (at >= offset && at < end) range.setStart(node, at - offset);
+          if (at + text.length > offset && at + text.length <= end)
+            range.setEnd(node, at + text.length - offset);
+          offset = end;
+        }
+        marker = range.getBoundingClientRect();
+      }
+      const padding = Number.parseFloat(getComputedStyle(el).paddingBottom);
+      return {
+        top: el.scrollTop,
+        height: el.clientHeight,
+        total: el.scrollHeight,
+        usefulTop: Math.max(
+          0,
+          Math.min(
+            el.scrollHeight - el.clientHeight,
+            el.scrollTop + rect.bottom - box.top + padding - el.clientHeight,
+          ),
+        ),
+        visible:
+          marker.top >= box.top && marker.bottom <= box.top + el.clientHeight,
+        markerTop: marker.top - box.top,
+        markerBottom: marker.bottom - box.top,
+      };
+    },
+    { row, text },
+  );
+}
+
+async function sparseScrollingOracle(browser, t, result) {
+  const ui = await open(browser, t, sparseProjection());
+  try {
+    await ui.page.setViewportSize({ width: 900, height: 540 });
+    await ui.chip("codex").click();
+    const region = ui.page.locator(".peek-live");
+    const painted = async (row, text) => {
+      await ui
+        .rows()
+        .nth(row - 1)
+        .getByText(text, { exact: true })
+        .waitFor();
+      await settleScroll(ui);
+    };
+    await painted(35, "SPARSE-35");
+    const initial = await usefulMetrics(ui, 35, "SPARSE-35");
+    await ui.page.screenshot({
+      path: join(output, `${result.name}-sparse-initial.png`),
+    });
+    // Effective positive control: latest is in this projection and can be shown.
+    await region.evaluate((el, top) => {
+      el.scrollTop = top;
+    }, initial.usefulTop);
+    await settleScroll(ui);
+    const control = await usefulMetrics(ui, 35, "SPARSE-35");
+    assert.equal(control.visible, true);
+    let seq = 2;
+    const send = (bytes) => ui.live().send(data(seq++, bytes));
+    const reset = (rows, latest, label, suffix = "") => {
+      const record = sparseProjection(rows, latest, label);
+      if (suffix)
+        record.bytes = encode(
+          Buffer.from(record.bytes, "base64").toString() + suffix,
+        );
+      ui.live().send({ ...record, seq: seq++ });
+    };
+    send("\x1b[50;1HADVANCE-50");
+    await painted(50, "ADVANCE-50");
+    const advanced = await usefulMetrics(ui, 50, "ADVANCE-50");
+    result.sparse = { initial, control, advanced };
+    assert.deepEqual(
+      { initial: initial.visible, advanced: advanced.visible },
+      { initial: true, advanced: true },
+      "Sparse initial and fixed-grid advancing output must both stay visible",
+    );
+
+    const beforeInput = ui.requests.length;
+    const bounds = await region.boundingBox();
+    await ui.page.mouse.move(bounds.x + 80, bounds.y + bounds.height / 2);
+    await ui.page.mouse.wheel(0, -240);
+    await settleScroll(ui);
+    const up = await usefulMetrics(ui, 50, "ADVANCE-50");
+    send("\x1b[55;1HHELD-55");
+    await painted(55, "HELD-55");
+    const held = await usefulMetrics(ui, 55, "HELD-55");
+    assert.ok(
+      Math.abs(held.top - up.top) <= 1,
+      "Sparse upscroll must hold under new output",
+    );
+    assert.equal(held.visible, false);
+    await region.evaluate((el, top) => {
+      el.scrollTop = top;
+    }, held.usefulTop);
+    await settleScroll(ui);
+    send("\x1b[58;1HRESUMED-58");
+    await painted(58, "RESUMED-58");
+    assert.equal(
+      (await usefulMetrics(ui, 58, "RESUMED-58")).visible,
+      true,
+      "Returning to useful latest resumes following before the physical grid end",
+    );
+
+    reset(70, 50, "RETAINED-50", "\x1b[5;1H");
+    await painted(50, "RETAINED-50");
+    const cursorAbove = await usefulMetrics(ui, 50, "RETAINED-50");
+    assert.equal(
+      cursorAbove.visible,
+      true,
+      "A cursor above retained text cannot hide the latest retained row",
+    );
+    reset(70, 35, "TRAILING-35", "\x1b[69;1H   \x1b[35;1H");
+    await painted(35, "TRAILING-35");
+    assert.equal(
+      (await usefulMetrics(ui, 35, "TRAILING-35")).visible,
+      true,
+      "Trailing spaces do not turn the blank grid tail into useful output",
+    );
+    send("\x1b[50;1H");
+    await settleScroll(ui);
+    const cursorBelow = await usefulMetrics(ui, 50);
+    assert.equal(
+      cursorBelow.visible,
+      true,
+      "The cursor row remains reachable below retained text",
+    );
+    assert.ok(Math.abs(cursorBelow.top - cursorBelow.usefulTop) <= 1);
+
+    // Active alternate-buffer content must not inherit the normal-buffer extent.
+    send("\x1b[?1049h\x1b[22;1HALTERNATE-22");
+    await painted(22, "ALTERNATE-22");
+    const alternate = await usefulMetrics(ui, 22, "ALTERNATE-22");
+    assert.equal(alternate.visible, true);
+    assert.ok(Math.abs(alternate.top - alternate.usefulTop) <= 1);
+    send("\x1b[?1049l");
+    await painted(35, "TRAILING-35");
+    assert.equal((await usefulMetrics(ui, 50)).visible, true);
+    send("\x1b[2J\x1b[H");
+    await ui.page.waitForFunction(() =>
+      [...document.querySelectorAll(".xterm-rows > div")].every(
+        (row) => row.textContent.trim() === "",
+      ),
+    );
+    await settleScroll(ui);
+    assert.equal(
+      (await usefulMetrics(ui, 1)).top,
+      0,
+      "Cleared grid with home cursor starts at the top",
+    );
+    reset(80, 0, "");
+    await ui.page.waitForFunction(() => {
+      const rows = [...document.querySelectorAll(".xterm-rows > div")];
+      return (
+        rows.length === 80 && rows.every((row) => row.textContent.trim() === "")
+      );
+    });
+    await settleScroll(ui);
+    assert.equal(
+      (await usefulMetrics(ui, 1)).top,
+      0,
+      "An empty full reset starts at the home cursor",
+    );
+    send("\x1b[40;1HAFTER-CLEAR-40");
+    await painted(40, "AFTER-CLEAR-40");
+    assert.equal((await usefulMetrics(ui, 40, "AFTER-CLEAR-40")).visible, true);
+    reset(90, 45, "TALL-GRID-45");
+    await painted(45, "TALL-GRID-45");
+    assert.equal((await usefulMetrics(ui, 45, "TALL-GRID-45")).visible, true);
+    await ui.page.setViewportSize({ width: 900, height: 420 });
+    await settleScroll(ui);
+    assert.equal((await usefulMetrics(ui, 45, "TALL-GRID-45")).visible, true);
+    reset(20, 10, "SHORT-GRID-10");
+    await painted(10, "SHORT-GRID-10");
+    assert.equal((await usefulMetrics(ui, 10, "SHORT-GRID-10")).top, 0);
+    reset(70, 35, "RESET-35");
+    await painted(35, "RESET-35");
+    assert.equal((await usefulMetrics(ui, 35, "RESET-35")).visible, true);
+    assert.deepEqual(ui.requests.slice(beforeInput), []);
+
+    const count = ui.liveCount();
+    ui.live().res.end();
+    await until(() => ui.liveCount() > count, "sparse reconnect");
+    await painted(35, "SPARSE-35");
+    assert.equal((await usefulMetrics(ui, 35, "SPARSE-35")).visible, true);
+    const box = await region.boundingBox();
+    await ui.page.mouse.move(box.x + 80, box.y + box.height / 2);
+    await ui.page.mouse.wheel(0, -200);
+    await settleScroll(ui);
+    const reconnectHeld = await usefulMetrics(ui, 35, "SPARSE-35");
+    const old = ui.liveCount();
+    ui.live().res.end();
+    await until(() => ui.liveCount() > old, "sparse held reconnect");
+    await painted(35, "SPARSE-35");
+    assert.ok(
+      Math.abs(
+        (await usefulMetrics(ui, 35, "SPARSE-35")).top - reconnectHeld.top,
+      ) <= 1,
+    );
+    ui.live().send(data(999, "INVALID-SEQUENCE"));
+    await ui.drawer
+      .getByRole("button", { name: "Try again", exact: true })
+      .click();
+    await painted(35, "SPARSE-35");
+    assert.equal(
+      (await usefulMetrics(ui, 35, "SPARSE-35")).visible,
+      true,
+      "Explicit retry starts at useful latest",
+    );
+    Object.assign(result.sparse, {
+      up,
+      held,
+      cursorAbove,
+      cursorBelow,
+      alternate,
+      reconnectHeld,
+    });
+    assert.equal(ui.screens(), 0);
+    assert.deepEqual(ui.errors, []);
+    assert.deepEqual(
+      await ui.page.evaluate(() => window.peekPolicy.violations),
+      [],
+    );
+    result.checks.push(
+      "sparse useful latest: 70/35 first paint, advance to 50, hold/resume before blank tail; retained text above cursor, trailing spaces, cursor below text, active alternate buffer, clear/empty, grid/window resize, reconnect/retry",
+    );
+  } catch (error) {
+    await ui.page.screenshot({
+      path: join(output, `${result.name}-sparse-failure.png`),
+    });
+    throw error;
+  } finally {
+    await ui.close();
+  }
+}
+
 async function scrollingOracle(browser, t, result) {
   const ui = await open(browser, t, projection());
   try {
@@ -1188,6 +1454,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
     results.push(result);
     let ui;
     try {
+      await sparseScrollingOracle(browser, t, result);
       await scrollingOracle(browser, t, result);
       ui = await open(browser, t);
       await ui.chip("codex").click();

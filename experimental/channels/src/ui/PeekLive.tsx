@@ -26,15 +26,50 @@ export function PeekLive({
     let following = true;
     let replacing = false;
     let position = { top: 0, left: 0 };
+    function latestTop() {
+      const current = terminal;
+      const screen = current?.element;
+      if (!current || !screen) return 0;
+      const buffer = current.buffer.active;
+      let row = buffer.cursorY;
+      for (let y = current.rows - 1; y > row; y--) {
+        if (
+          buffer
+            .getLine(buffer.baseY + y)
+            ?.translateToString(true)
+            .trim()
+        ) {
+          row = y;
+          break;
+        }
+      }
+      // The projected grid can end in blank rows. Keep the lowest retained text
+      // or cursor row in view rather than following that empty physical tail.
+      const grid = screen.getBoundingClientRect();
+      const start =
+        grid.top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+      const padding = Number.parseFloat(
+        getComputedStyle(scroller).paddingBottom,
+      );
+      return Math.max(
+        0,
+        Math.min(
+          scroller.scrollHeight - scroller.clientHeight,
+          start +
+            ((row + 1) * grid.height) / current.rows +
+            padding -
+            scroller.clientHeight,
+        ),
+      );
+    }
     function rememberPosition() {
       if (replacing) return;
-      following =
-        scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 1;
+      following = scroller.scrollTop >= latestTop() - 1;
       position = { top: scroller.scrollTop, left: scroller.scrollLeft };
     }
     function restorePosition() {
       if (controller.signal.aborted) return;
-      scroller.scrollTop = following ? scroller.scrollHeight : position.top;
+      scroller.scrollTop = following ? latestTop() : position.top;
       scroller.scrollLeft = position.left;
       position = { top: scroller.scrollTop, left: scroller.scrollLeft };
     }

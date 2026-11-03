@@ -166,11 +166,12 @@ from Live and back, or reopening Peek, also starts a new observation. A dashboar
 session failure or replacement clears the live terminal. An ended stream says
 **Live view ended**, without asserting that the agent exited.
 
-Live opens at the bottom of the projected screen. Mouse wheel, pixel trackpad,
-keyboard scrolling, and both scrollbars move the browser view locally. Scrolling
-up pauses bottom following while output arrives. Returning to the bottom resumes
+Live opens at the latest text or cursor row in the projected screen, above any
+unused blank tail. Mouse wheel, pixel trackpad, keyboard scrolling, and both
+scrollbars move the browser view locally. Scrolling
+up pauses following while output arrives. Returning to the latest output resumes
 following. Full paints and reconnects preserve your local position where possible;
-a new target or reopened Peek starts at the bottom.
+a new target or reopened Peek starts at the latest output.
 
 The projection contains the source terminal's current grid. Local scrolling
 exposes rows and columns that do not fit in Peek. It does not fetch or reconstruct
