@@ -869,7 +869,7 @@ async function scrollMetrics(ui) {
 }
 
 async function settleScroll(ui) {
-  await ui.page.locator(".peek-live").evaluate(async (el) => {
+  const settled = await ui.page.locator(".peek-live").evaluate(async (el) => {
     let top = el.scrollTop,
       left = el.scrollLeft,
       stable = 0;
@@ -879,7 +879,13 @@ async function settleScroll(ui) {
       top = el.scrollTop;
       left = el.scrollLeft;
     }
+    return stable >= 5;
   });
+  assert.equal(
+    settled,
+    true,
+    "Native scroll must reach a stable position within the bounded frame budget",
+  );
 }
 
 function sparseProjection(rows = 70, latest = 35, label = "SPARSE-35") {
@@ -942,6 +948,150 @@ async function usefulMetrics(ui, row, text = "") {
     },
     { row, text },
   );
+}
+
+async function activeNavigationOracle(browser, t, result) {
+  const ui = await open(browser, t, projection(70, "IDLE-LATEST"));
+  let timer;
+  try {
+    await ui.page.setViewportSize({ width: 900, height: 540 });
+    await ui.chip("codex").click();
+    await ui.rows().last().getByText("IDLE-LATEST", { exact: true }).waitFor();
+    const region = ui.page.locator(".peek-live");
+    const top = async () => {
+      await region.evaluate((el) => {
+        el.scrollTop = 0;
+      });
+      await settleScroll(ui);
+      await region.focus();
+    };
+    const reachedEnd = () =>
+      ui.page.waitForFunction(
+        () => {
+          const el = document.querySelector(".peek-live");
+          const row = el.querySelectorAll(".xterm-rows > div")[69];
+          const box = el.getBoundingClientRect(),
+            rect = row.getBoundingClientRect();
+          return (
+            el.scrollHeight - el.clientHeight - el.scrollTop <= 1 &&
+            rect.top >= box.top &&
+            rect.bottom <= box.top + el.clientHeight
+          );
+        },
+        undefined,
+        { timeout: 1500 },
+      );
+    await top();
+    await ui.page.keyboard.press("Control+End");
+    await reachedEnd();
+    const idle = await usefulMetrics(ui, 70, "IDLE-LATEST");
+    let seq = 2;
+    const navigation = {};
+    const beforeServer = ui.requests.length,
+      beforeBrowser = ui.browserRequests.length;
+    for (const key of ["Control+End", "PageDown"]) {
+      await top();
+      let updates = 0;
+      const label = key === "Control+End" ? "END-FLOW" : "PAGE-FLOW";
+      timer = setInterval(
+        () =>
+          ui.live().send(data(seq++, `\x1b[70;1H\x1b[2K${label}-${++updates}`)),
+        20,
+      );
+      await ui.page.keyboard.press(key);
+      let reached = true;
+      try {
+        if (key === "Control+End") await reachedEnd();
+        else
+          await ui.page.waitForFunction(
+            () => {
+              const el = document.querySelector(".peek-live");
+              return el.scrollTop > el.clientHeight / 2;
+            },
+            undefined,
+            { timeout: 1500 },
+          );
+        // Native animation must settle while data is still arriving.
+        await settleScroll(ui);
+      } catch {
+        reached = false;
+      }
+      clearInterval(timer);
+      timer = undefined;
+      const sent = updates;
+      assert.ok(sent > 0, "Navigation must overlap actual source writes");
+      await ui
+        .rows()
+        .last()
+        .getByText(`${label}-${sent}`, { exact: true })
+        .waitFor();
+      navigation[key] = {
+        reached,
+        updates: sent,
+        metrics: await usefulMetrics(ui, 70, `${label}-${sent}`),
+      };
+    }
+    result.activeNavigation = { idle, navigation };
+    assert.deepEqual(
+      Object.fromEntries(
+        Object.entries(navigation).map(([key, value]) => [key, value.reached]),
+      ),
+      { "Control+End": true, PageDown: true },
+      "Native keyboard navigation must finish while 20ms output continues",
+    );
+
+    await top();
+    const box = await region.boundingBox();
+    await ui.page.mouse.move(box.x + 80, box.y + box.height / 2);
+    let updates = 0;
+    timer = setInterval(
+      () =>
+        ui.live().send(data(seq++, `\x1b[70;1H\x1b[2KWHEEL-FLOW-${++updates}`)),
+      20,
+    );
+    for (let step = 0; step < 12; step++) await ui.page.mouse.wheel(0, 7.5);
+    await ui.page.waitForFunction(
+      () => document.querySelector(".peek-live").scrollTop >= 70,
+    );
+    await settleScroll(ui);
+    const held = (await scrollMetrics(ui)).top;
+    const observed = updates;
+    await until(
+      () => updates >= observed + 5,
+      "live updates continue after local wheel navigation",
+    );
+    clearInterval(timer);
+    timer = undefined;
+    await ui
+      .rows()
+      .last()
+      .getByText(`WHEEL-FLOW-${updates}`, { exact: true })
+      .waitFor();
+    const wheel = await usefulMetrics(ui, 70, `WHEEL-FLOW-${updates}`);
+    assert.ok(
+      Math.abs(wheel.top - held) <= 1,
+      "Continuing output preserves the wheel-selected reading position",
+    );
+    assert.deepEqual(ui.requests.slice(beforeServer), []);
+    assert.deepEqual(ui.browserRequests.slice(beforeBrowser), []);
+    Object.assign(result.activeNavigation, {
+      wheel,
+      updates,
+      serverRequests: ui.requests.slice(beforeServer),
+      browserRequests: ui.browserRequests.slice(beforeBrowser),
+    });
+    assert.deepEqual(ui.errors, []);
+    assert.deepEqual(
+      await ui.page.evaluate(() => window.peekPolicy.violations),
+      [],
+    );
+    result.checks.push(
+      "active output every20ms: idle End control, concurrent Ctrl+End/PageDown complete, fractional wheel reading position holds; zero browser/server control requests",
+    );
+  } finally {
+    clearInterval(timer);
+    await ui.close();
+  }
 }
 
 async function sparseScrollingOracle(browser, t, result) {
@@ -1514,6 +1664,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
     results.push(result);
     let ui;
     try {
+      await activeNavigationOracle(browser, t, result);
       await sparseScrollingOracle(browser, t, result);
       await scrollingOracle(browser, t, result);
       ui = await open(browser, t);

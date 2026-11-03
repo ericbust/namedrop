@@ -8,6 +8,7 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 - Live Peek opens at the latest text or cursor row, above unused blank rows. Mouse wheel, trackpad, keyboard, and scrollbars move the local view, including wide and tall terminal projections.
 - Scrolling up pauses following while output arrives. Returning to the latest output resumes following across full paints, source resizes, and reconnects.
+- Keyboard scrolling stays responsive while live output arrives.
 
 Live shows the source terminal's current projected screen. It does not recover earlier host scrollback. Update Namedrop, then refresh Channels and reopen Peek. Existing agent sessions can continue.
 

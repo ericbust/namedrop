@@ -69,8 +69,14 @@ export function PeekLive({
     }
     function restorePosition() {
       if (controller.signal.aborted) return;
-      scroller.scrollTop = following ? latestTop() : position.top;
-      scroller.scrollLeft = position.left;
+      // Repeated assignments cancel Chromium's native keyboard scroll animation.
+      // A reader's position needs restoration only when replacing the grid.
+      if (following || replacing) {
+        const top = following ? latestTop() : position.top;
+        if (Math.abs(scroller.scrollTop - top) > 1) scroller.scrollTop = top;
+      }
+      if (replacing && scroller.scrollLeft !== position.left)
+        scroller.scrollLeft = position.left;
       position = { top: scroller.scrollTop, left: scroller.scrollLeft };
     }
     function localWheel(event: WheelEvent) {
