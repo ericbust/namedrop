@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { peekCopy, presenceWord } from "../copy.ts";
+import type { LiveState } from "../livePeek.ts";
 import type { PeekTarget } from "../model.ts";
 import {
   BUSY_AFTER_MS,
@@ -25,6 +26,7 @@ import type { PeekWho } from "../store.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Icon } from "./Icons.tsx";
 import { measure } from "./measure.ts";
+import { PeekLive } from "./PeekLive.tsx";
 import { useEscape } from "./useEscape.ts";
 
 type Retention = {
@@ -92,7 +94,7 @@ export function PeekDrawer({
       ref={pane}
       inert={inert}
     >
-      <PeekScreen
+      <PeekContent
         key={`${retention.id}/${peekKey(target)}`}
         target={target}
         who={who}
@@ -102,6 +104,190 @@ export function PeekDrawer({
         {...rest}
       />
     </aside>
+  );
+}
+
+type ContentProps = Omit<Props, "paneId" | "inert"> & { retention: Retention };
+function liveWords(state: LiveState): {
+  stamp: string | null;
+  notice: string | null;
+} {
+  switch (state.kind) {
+    case "connecting":
+      return { stamp: peekCopy.liveConnecting, notice: null };
+    case "reconnecting":
+      return { stamp: peekCopy.liveReconnecting, notice: null };
+    case "live":
+      return { stamp: peekCopy.live, notice: null };
+    case "session-ended":
+      return { stamp: null, notice: peekCopy.liveSession };
+    case "unavailable":
+      return { stamp: null, notice: peekCopy.liveUnavailable };
+    case "closed":
+      return {
+        stamp: null,
+        notice: {
+          ended: peekCopy.liveEnded,
+          replaced: peekCopy.liveReplaced,
+          missing: peekCopy.liveMissing,
+        }[state.reason],
+      };
+    default: {
+      const exhaustive: never = state;
+      return exhaustive;
+    }
+  }
+}
+function PeekContent(props: ContentProps) {
+  const [mode, setMode] = useState<"live" | "text">("live");
+  const [fallback, setFallback] = useState(false);
+  const [state, setState] = useState<LiveState>({ kind: "connecting" });
+  const [attempt, setAttempt] = useState(0);
+  const focusScreen = useRef(false);
+  useLayoutEffect(() => {
+    if (focusScreen.current) {
+      document.querySelector<HTMLElement>(".peek .peek-text")?.focus();
+      focusScreen.current = false;
+    }
+  });
+  const { retention, target } = props;
+  const update = useCallback(
+    (next: LiveState) => {
+      setState(next);
+      if (next.kind === "session-ended") retention.snapshots.clear();
+      if (next.kind === "closed" && next.reason !== "ended")
+        retention.snapshots.delete(peekKey(target));
+      if (next.kind === "unavailable" && next.reason === "unsupported") {
+        focusScreen.current = Boolean(
+          document.activeElement?.closest(".peek-text"),
+        );
+        setFallback(true);
+        setMode("text");
+      }
+    },
+    [retention, target],
+  );
+  const controls = (
+    <fieldset className="peek-modes" aria-label={peekCopy.view}>
+      <button
+        type="button"
+        aria-pressed={mode === "live"}
+        onClick={() => {
+          if (mode !== "live") setState({ kind: "connecting" });
+          setMode("live");
+          setFallback(false);
+        }}
+      >
+        {peekCopy.live}
+      </button>
+      <button
+        type="button"
+        aria-pressed={mode === "text"}
+        onClick={() => {
+          setMode("text");
+          setFallback(false);
+        }}
+      >
+        {peekCopy.snapshot}
+      </button>
+    </fieldset>
+  );
+  if (mode === "text")
+    return (
+      <PeekScreen
+        {...props}
+        controls={
+          <>
+            {controls}
+            {fallback && (
+              <p className="peek-fallback">{peekCopy.liveUnsupported}</p>
+            )}
+          </>
+        }
+      />
+    );
+  const { stamp, notice } = liveWords(state);
+  return (
+    <>
+      <PeekHeader
+        who={props.who}
+        toggle={props.toggle}
+        onClose={props.onClose}
+        stamp={stamp}
+        action={
+          state.kind === "unavailable" ? (
+            <button
+              type="button"
+              className="peek-refresh"
+              onClick={() => {
+                focusScreen.current = true;
+                setState({ kind: "connecting" });
+                setAttempt((n) => n + 1);
+              }}
+            >
+              {peekCopy.tryAgain}
+            </button>
+          ) : (
+            <span className="peek-head-space" />
+          )
+        }
+      />
+      {controls}
+      {notice !== null && (
+        <p className="peek-note" role="status">
+          {notice}
+        </p>
+      )}
+      <PeekLive key={attempt} target={target} onState={update} />
+    </>
+  );
+}
+
+function PeekHeader({
+  who,
+  toggle,
+  onClose,
+  stamp,
+  action,
+}: {
+  who: PeekWho;
+  toggle: ReactNode;
+  onClose(): void;
+  stamp: string | null;
+  action: ReactNode;
+}) {
+  return (
+    <header className="peek-head">
+      {toggle}
+      <Avatar
+        alias={who.alias}
+        type={who.kind}
+        small
+        presence={who.activity ?? undefined}
+      />
+      <div className="peek-who">
+        <p className="peek-title">
+          <span className="peek-alias">{who.alias}</span>
+          {who.activity !== null && (
+            <span className="peek-presence">{presenceWord[who.activity]}</span>
+          )}
+        </p>
+        <p className="peek-where" title={who.channel.suffix ?? undefined}>
+          {peekCopy.where(who.channel.label)}
+          {stamp !== null && " · "}
+          <span aria-live="polite">{stamp}</span>
+        </p>
+      </div>
+      {action}
+      <button
+        type="button"
+        className="icon-button"
+        onClick={onClose}
+        aria-label={peekCopy.close}
+      >
+        <Icon name="x" />
+      </button>
+    </header>
   );
 }
 
@@ -186,7 +372,8 @@ function PeekScreen({
   onClose,
   retention,
   toggle,
-}: Omit<Props, "paneId" | "inert"> & { retention: Retention }) {
+  controls,
+}: ContentProps & { controls: ReactNode }) {
   const { read, again } = usePeekRead(target, reader, retention);
   const view = peekView(read, who);
   const { body } = view;
@@ -217,47 +404,24 @@ function PeekScreen({
   }, [painted, openedAt]);
   return (
     <>
-      <header className="peek-head">
-        {toggle}
-        <Avatar
-          alias={who.alias}
-          type={who.kind}
-          small
-          presence={who.activity ?? undefined}
-        />
-        <div className="peek-who">
-          <p className="peek-title">
-            <span className="peek-alias">{who.alias}</span>
-            {who.activity !== null && (
-              <span className="peek-presence">
-                {presenceWord[who.activity]}
-              </span>
-            )}
-          </p>
-          <p className="peek-where" title={who.channel.suffix ?? undefined}>
-            {peekCopy.where(who.channel.label)}
-            {view.stamp !== null && " · "}
-            <span aria-live="polite">{view.stamp}</span>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="peek-refresh"
-          aria-disabled={view.refreshing || undefined}
-          onClick={again}
-        >
-          <Icon name="refresh" />
-          {peekCopy.refresh}
-        </button>
-        <button
-          type="button"
-          className="icon-button"
-          onClick={onClose}
-          aria-label={peekCopy.close}
-        >
-          <Icon name="x" />
-        </button>
-      </header>
+      <PeekHeader
+        who={who}
+        toggle={toggle}
+        onClose={onClose}
+        stamp={view.stamp}
+        action={
+          <button
+            type="button"
+            className="peek-refresh"
+            aria-disabled={view.refreshing || undefined}
+            onClick={again}
+          >
+            <Icon name="refresh" />
+            {peekCopy.refresh}
+          </button>
+        }
+      />
+      {controls}
       {view.bar !== null && (
         <Notice notice={view.bar} again={again} className="peek-bar" />
       )}
