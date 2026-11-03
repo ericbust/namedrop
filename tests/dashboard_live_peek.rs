@@ -95,7 +95,9 @@ if args[:3]==['terminal','session','observe']:
         child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)'])
     with open(os.path.join(root,'reads.jsonl'),'a') as log:
         log.write(json.dumps({'args':args,'socket':os.environ.get('HERDR_SOCKET_PATH'),'pid':os.getpid(),'child':child.pid if child else None,'stdin_null':os.read(0,1)==b'','workspace':os.environ.get('HERDR_WORKSPACE_ID'),'pane':os.environ.get('HERDR_PANE_ID')})+'\n')
-    if config.get('exit') is not None: sys.exit(config['exit'])
+    if config.get('exit') is not None:
+        os.write(1,config.get('stdout','').encode())
+        sys.exit(config['exit'])
     if config.get('gate'):
         while not os.path.exists(os.path.join(root,config['gate'])):time.sleep(.01)
     if config.get('mutate_metadata'):
@@ -431,6 +433,51 @@ fn native_full_sequence_dimensions_and_split_delta_are_normalized() {
     assert!(server.get(&p).body.contains("invalid_source"));
     configure(&f, json!({"oversize":true}));
     assert!(server.get(&p).body.contains("invalid_source"));
+}
+
+#[test]
+fn unsupported_requires_empty_stdout_even_when_partial_output_exits_two() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let p = path("socket-a", "w1", "lead");
+    for exit in [0, 1, 2] {
+        configure(&f, json!({"stdout":"{\"type\":", "exit":exit}));
+        let response = server.get(&p);
+        assert_eq!(
+            response.status, 503,
+            "partial stdout + exit {exit}: {response:?}"
+        );
+        assert!(!response.body.contains("unsupported"));
+    }
+    configure(&f, json!({"stdout":" ", "exit":2}));
+    assert_eq!(
+        server.get(&p).status,
+        503,
+        "any stdout prevents capability fallback"
+    );
+
+    configure(&f, json!({"exit":2}));
+    let empty = server.get(&p);
+    assert_eq!(empty.status, 200);
+    assert_eq!(
+        serde_json::from_str::<Value>(empty.body.trim()).unwrap(),
+        json!({"v":1,"seq":1,"kind":"unavailable","reason":"unsupported"})
+    );
+
+    configure(&f, json!({"stdout":"{broken\n", "exit":2}));
+    let malformed = server.get(&p);
+    assert_eq!(malformed.status, 200);
+    assert!(malformed.body.contains("invalid_source"));
+
+    let first = json!({"type":"terminal.frame","encoding":"ansi","full":true,"width":120,"height":40,"seq":1,"bytes":"eA=="});
+    configure(
+        &f,
+        json!({"stdout":format!("{first}\n{{\"type\":"), "exit":2}),
+    );
+    let established = server.get(&p);
+    assert_eq!(established.status, 200);
+    assert!(established.body.contains("source_lost"));
+    assert!(!established.body.contains("unsupported"));
 }
 
 #[test]

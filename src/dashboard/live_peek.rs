@@ -307,6 +307,7 @@ struct Input {
     buffer: Vec<u8>,
     scanned: usize,
     eof: bool,
+    saw_stdout: bool,
 }
 impl Input {
     fn next(&mut self, pipe: &mut ChildStdout) -> Result<Option<NativeRecord>, ()> {
@@ -339,7 +340,10 @@ impl Input {
             let budget = (ENCODED_LIMIT + 1 - self.buffer.len()).min(bytes.len());
             match pipe.read(&mut bytes[..budget]) {
                 Ok(0) => self.eof = true,
-                Ok(n) => self.buffer.extend_from_slice(&bytes[..n]),
+                Ok(n) => {
+                    self.saw_stdout = true;
+                    self.buffer.extend_from_slice(&bytes[..n]);
+                }
                 Err(e)
                     if matches!(
                         e.kind(),
@@ -568,8 +572,7 @@ impl LivePeeks {
                     // Only the exact CLI usage exit, with no output at all,
                     // proves this fixed valid invocation is unsupported.
                     observer.stop();
-                    let unsupported =
-                        observer.guard.wait()?.code() == Some(2) && normalizer.seq == 0;
+                    let unsupported = observer.guard.wait()?.code() == Some(2) && !input.saw_stdout;
                     if unsupported {
                         break Err(Event::Unavailable {
                             reason: Unavailable::Unsupported,
