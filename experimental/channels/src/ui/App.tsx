@@ -79,6 +79,7 @@ import { MemberStrip } from "./MemberStrip.tsx";
 import { type MessageActions, MessageContexts } from "./MessageActions.tsx";
 import { measure, usePhone } from "./measure.ts";
 import { NeedsYou } from "./NeedsYou.tsx";
+import { PanelResize, usePanelWidths } from "./PanelResize.tsx";
 import { type PeekAccess, PeekContext } from "./PeekContext.tsx";
 import { PeekDrawer } from "./PeekDrawer.tsx";
 import { ChannelsToggle, Sidebar } from "./Sidebar.tsx";
@@ -723,6 +724,7 @@ export function App() {
   const peeking = state.slot.kind === "peek" ? state.slot.target : null;
   const who = peeking === null ? null : peekWho(state.channels, peeking);
   const pane = thread || focused ? "thread" : who ? "peek" : null;
+  const panels = usePanelWidths(pane !== null);
   // On a phone the Channels button starts whichever header shows: the pane
   // covers the channel there.
   const toggle = phone ? (
@@ -992,6 +994,7 @@ export function App() {
     <PeekContext value={peekAccess}>
       <MessageContexts deliveries={deliveryAccess} actions={messageActions}>
         <div
+          style={panels.style}
           className={`app-shell${pane === null ? "" : ` has-slot has-${pane}`}${drawerOpen ? " drawer-open" : ""}`}
         >
           <a className="skip-link" href="#main-content" inert={drawerOpen}>
@@ -1013,6 +1016,24 @@ export function App() {
             }}
             onAnnounce={(words) => setMoveSaid({ words })}
           />
+          <PanelResize
+            side="left"
+            value={panels.widths.left}
+            maximum={panels.maximum.left}
+            controls={sidebarId}
+            onResize={(value) => panels.setWidth("left", value)}
+            onResizeStart={() => panels.startResize("left")}
+          />
+          {pane !== null && (
+            <PanelResize
+              side="right"
+              value={panels.widths.right}
+              maximum={panels.maximum.right}
+              controls={paneId}
+              onResize={(value) => panels.setWidth("right", value)}
+              onResizeStart={() => panels.startResize("right")}
+            />
+          )}
           {drawerOpen && (
             <div
               className="drawer-backdrop"

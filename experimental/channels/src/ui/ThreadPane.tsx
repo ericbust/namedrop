@@ -47,10 +47,12 @@ import {
   type ThreadGroup,
   threadAgents,
 } from "../store.ts";
+import { threadReplyRecipients } from "../thread-recipients.ts";
 import { Composer } from "./Composer.tsx";
 import { DeliveryContext } from "./DeliveryContext.ts";
 import { Icon } from "./Icons.tsx";
 import { Message, PendingMessage } from "./Message.tsx";
+import { ThreadConversationContext } from "./MessageActions.tsx";
 import { useEscape } from "./useEscape.ts";
 
 export type ThreadResponse =
@@ -152,6 +154,10 @@ export function ThreadPane({
     () => ({ kind: "thread", to: threadAgents(thread, directory) }),
     [thread, directory],
   );
+  const initialRecipients = useMemo(
+    () => threadReplyRecipients(thread, directory),
+    [thread, directory],
+  );
   const prefilled = useRef<ReplyIntent | null>(null);
   useLayoutEffect(() => {
     if (
@@ -222,62 +228,64 @@ export function ThreadPane({
         </button>
       </header>
       <div className="thread-body" ref={body}>
-        {earlierOmitted && (
-          <p className="earlier-thread">
-            Earlier conversation context omitted.
+        <ThreadConversationContext value={true}>
+          {earlierOmitted && (
+            <p className="earlier-thread">
+              Earlier conversation context omitted.
+            </p>
+          )}
+          {thread.parents.length === 0 && (
+            <p className="earlier-thread">
+              Earlier thread · the parent message is not loaded yet.
+            </p>
+          )}
+          {thread.parents.map((message) => (
+            <Message
+              key={message.id}
+              message={message}
+              located={message.id === tinted || message.id === replyingTo?.id}
+              directory={directory}
+              paused={channel.health.level === "paused"}
+              recipients={recipients(message)}
+              exit={exitFor(runs, message)}
+              chat={chatOf({
+                message,
+                thread,
+                reference: null,
+                directory,
+                replies: 0,
+                delivery: (alias) => deliveries?.of(message.id, alias) ?? idle,
+              })}
+            />
+          ))}
+          <p className="divider">
+            {count === 0 && !unloaded ? "No replies yet" : repliesCopy(count)}
+            {unloaded ? " · earlier replies not loaded" : ""}
           </p>
-        )}
-        {thread.parents.length === 0 && (
-          <p className="earlier-thread">
-            Earlier thread · the parent message is not loaded yet.
-          </p>
-        )}
-        {thread.parents.map((message) => (
-          <Message
-            key={message.id}
-            message={message}
-            located={message.id === tinted || message.id === replyingTo?.id}
-            directory={directory}
-            paused={channel.health.level === "paused"}
-            recipients={recipients(message)}
-            exit={exitFor(runs, message)}
-            chat={chatOf({
-              message,
-              thread,
-              reference: null,
-              directory,
-              replies: 0,
-              delivery: (alias) => deliveries?.of(message.id, alias) ?? idle,
-            })}
-          />
-        ))}
-        <p className="divider">
-          {count === 0 && !unloaded ? "No replies yet" : repliesCopy(count)}
-          {unloaded ? " · earlier replies not loaded" : ""}
-        </p>
-        {thread.replies.map((message) => (
-          <Message
-            key={message.id}
-            message={message}
-            located={message.id === tinted || message.id === replyingTo?.id}
-            directory={directory}
-            paused={channel.health.level === "paused"}
-            recipients={recipients(message)}
-            exit={exitFor(runs, message)}
-            chat={chatOf({
-              message,
-              thread,
-              reference: null,
-              directory,
-              replies: 0,
-              delivery: (alias) => deliveries?.of(message.id, alias) ?? idle,
-            })}
-            arrive={message.at > openedAt && !posted.has(message.id)}
-          />
-        ))}
-        {pending.map((entry) => (
-          <PendingMessage key={entry.requestId} entry={entry} />
-        ))}
+          {thread.replies.map((message) => (
+            <Message
+              key={message.id}
+              message={message}
+              located={message.id === tinted || message.id === replyingTo?.id}
+              directory={directory}
+              paused={channel.health.level === "paused"}
+              recipients={recipients(message)}
+              exit={exitFor(runs, message)}
+              chat={chatOf({
+                message,
+                thread,
+                reference: null,
+                directory,
+                replies: 0,
+                delivery: (alias) => deliveries?.of(message.id, alias) ?? idle,
+              })}
+              arrive={message.at > openedAt && !posted.has(message.id)}
+            />
+          ))}
+          {pending.map((entry) => (
+            <PendingMessage key={entry.requestId} entry={entry} />
+          ))}
+        </ThreadConversationContext>
       </div>
       {replyAbsence !== null && (
         <p className="thread-answer" role="status">
@@ -348,6 +356,12 @@ export function ThreadPane({
             placeholder={replyPlaceholder(rule.to)}
             label={replyLabel(rule.to)}
             rule={rule}
+            requireRecipient
+            initialText={
+              replyIntent === null
+                ? `${initialRecipients.map((recipient) => recipient.mentions).join(" ")}${initialRecipients.length > 0 ? " " : ""}`
+                : ""
+            }
             notice={
               replyIntent !== null && keptNotice ? (
                 <p role="status">

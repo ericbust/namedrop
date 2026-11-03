@@ -1203,7 +1203,7 @@ function replyRows() {
   ];
   return value;
 }
-test("FULL-THREAD: every row offers Reply in thread, by keyboard too, and the reply answers that message", async (t) => {
+test("THREAD-R6: timeline rows offer Reply in thread by keyboard, thread rows do not, and the reply answers the selected message", async (t) => {
   const ui = await open(t, (client) => replay(client, [replyRows()]));
   await ui.live();
   const timeline = ui.page.getByRole("region", { name: "Message history" });
@@ -1237,37 +1237,142 @@ test("FULL-THREAD: every row offers Reply in thread, by keyboard too, and the re
     true,
   );
   assert.match(await box.getAttribute("aria-label"), /^Reply to @codex/);
-  await box.fill("About the parent");
+  await box.fill("@codex About the parent");
   await ui.page.keyboard.press("Enter");
-  await pane.getByText("About the parent", { exact: true }).first().waitFor();
   await pane
-    .locator('[data-message-id="answer"]')
-    .getByRole("button", { name: "Reply in thread to @codex" })
-    .click();
-  await pane.getByRole("status").getByText("Replying to @codex").waitFor();
-  await box.fill("About the answer");
-  await ui.page.keyboard.press("Enter");
-  await pane.getByText("About the answer", { exact: true }).first().waitFor();
-  await pane.getByText(/^Replying to/).waitFor({ state: "detached" });
-  await pane
-    .locator('[data-message-id="parent"]')
-    .getByRole("button", { name: "Reply in thread to You" })
-    .click();
-  await pane
-    .getByRole("button", { name: "Reply to the latest message instead" })
-    .click();
-  assert.equal(await pane.getByText(/^Replying to/).count(), 0);
-  await box.fill("Then the latest");
-  await ui.page.keyboard.press("Enter");
-  await pane.getByText("Then the latest", { exact: true }).first().waitFor();
+    .getByText("@codex About the parent", { exact: true })
+    .first()
+    .waitFor();
+  assert.equal(
+    await pane.getByRole("button", { name: /^Reply in thread to / }).count(),
+    0,
+    "rows already in the thread do not offer another thread action",
+  );
   const sent = ui.posts.attempts
     .filter((attempt) => attempt.body !== null)
     .map(({ body }) => [body.in_reply_to, body.source]);
-  assert.deepEqual(sent, [
-    ["parent", "About the parent"],
-    ["answer", "About the answer"],
-    ["answer", "Then the latest"],
-  ]);
+  assert.deepEqual(sent, [["parent", "@codex About the parent"]]);
+});
+
+test("THREAD-R6: editable participant mentions support keyboard subsets, multiple recipients and invitations", async (t) => {
+  const value = replyRows();
+  const agent = value.frame.participants.find(
+    (member) => member.address_id === CODEX,
+  );
+  assert.ok(agent);
+  value.frame.participants.push(
+    { ...agent, address_id: "agent-reviewer", alias: "@reviewer" },
+    { ...agent, address_id: "agent-scout", alias: "@scout" },
+  );
+  value.frame.messages[0].legs.push({
+    to: "agent-reviewer",
+    stage: { stage: "queued" },
+  });
+  const whole = `${"Long parent body ".repeat(300)}END OF PARENT`;
+  value.frame.messages[0].body = {
+    text: whole.slice(0, 2000),
+    truncated: true,
+  };
+  const ui = await open(t, (client) => replay(client, [value]), undefined, {
+    onBody: () => ({ text: whole, truncated: false }),
+  });
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await ui.live();
+  await ui.page
+    .getByRole("region", { name: "Message history" })
+    .locator('[data-message-id="parent"]')
+    .getByRole("button", { name: "Reply in thread to You" })
+    .click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  await ui.page.setViewportSize({ width: 1440, height: 900 });
+  const box = pane.getByRole("combobox");
+  assert.equal(await box.inputValue(), "@codex @reviewer ");
+  assert.equal(
+    await pane.getByRole("button", { name: /^Reply in thread to / }).count(),
+    0,
+  );
+  await pane.getByRole("button", { name: "Show more", exact: true }).click();
+  await pane.getByText(/END OF PARENT/).waitFor();
+  await box.fill("Only this agent");
+  await box.press("Enter");
+  assert.equal(await box.inputValue(), "Only this agent");
+  assert.equal(ui.posts.attempts.length, 0);
+  assert.equal(
+    await pane.getByRole("button", { name: "Send", exact: true }).isDisabled(),
+    true,
+  );
+  await pane
+    .getByText("Start with @name to choose who gets this.", { exact: true })
+    .waitFor();
+  await box.fill("@rev");
+  await box.press("Tab");
+  assert.equal(await box.inputValue(), "@reviewer ");
+  await box.press("End");
+  await box.pressSequentially("Only this agent");
+  await pane
+    .getByText("Enter sends only to @reviewer", { exact: true })
+    .waitFor();
+  await box.press("Enter");
+  await pane
+    .getByText("@reviewer Only this agent", { exact: true })
+    .first()
+    .waitFor();
+  await box.fill("@cod");
+  await box.press("Enter");
+  await box.pressSequentially("@rev");
+  await box.press("Tab");
+  await box.pressSequentially("Together");
+  await box.press("Enter");
+  await pane
+    .getByText("@codex @reviewer Together", { exact: true })
+    .first()
+    .waitFor();
+  await box.fill("@sco");
+  await box.press("Tab");
+  await box.pressSequentially("Join this thread");
+  await box.press("Enter");
+  await pane
+    .getByText("@scout Join this thread", { exact: true })
+    .first()
+    .waitFor();
+  assert.deepEqual(
+    ui.posts.attempts.map(({ body }) => [body.in_reply_to, body.source]),
+    [
+      ["parent", "@reviewer Only this agent"],
+      ["answer", "@codex @reviewer Together"],
+      ["answer", "@scout Join this thread"],
+    ],
+  );
+  await eventually(
+    async () => (await box.inputValue()) === "",
+    "the invitation receipt clears the sent draft",
+  );
+  const update = structuredClone(value);
+  update.frame.messages.push(
+    message("invited-scout", "Joining the conversation", {
+      thread_id: "exchange",
+      in_reply_to: "answer",
+      author: "agent-scout",
+      kind: "reply",
+      at_ms: 400,
+    }),
+  );
+  update.frame.threads[0].message_count = 3;
+  ui.connections[0].send("space", update);
+  await pane.locator('[data-message-id="invited-scout"]').waitFor();
+  await pane.getByRole("button", { name: "Close thread" }).click();
+  await ui.page
+    .getByRole("region", { name: "Message history" })
+    .locator('[data-message-id="parent"]')
+    .getByRole("button", { name: "Reply in thread to You" })
+    .click();
+  assert.equal(await box.inputValue(), "@codex @reviewer @scout ");
+  await ui.page.screenshot({ path: "/tmp/thread-r6-desktop.png" });
+  await ui.page.setViewportSize({ width: 390, height: 800 });
+  await ui.page.screenshot({ path: "/tmp/thread-r6-narrow.png" });
 });
 
 test("FULL-THREAD: a coordination report thread names its agent, a nudge with no agent asks for a mention, and phones show the button", async (t) => {
@@ -1291,12 +1396,15 @@ test("FULL-THREAD: a coordination report thread names its agent, a nudge with no
   await pane.getByRole("status").getByText("Replying to @codex").waitFor();
   const box = pane.getByRole("combobox");
   assert.match(await box.getAttribute("aria-label"), /^Reply to @codex/);
-  await box.fill("Ship the report");
+  await box.fill("@codex Ship the report");
   await ui.page.keyboard.press("Enter");
-  await pane.getByText("Ship the report", { exact: true }).first().waitFor();
+  await pane
+    .getByText("@codex Ship the report", { exact: true })
+    .first()
+    .waitFor();
   assert.deepEqual(
     ui.posts.attempts.map(({ body }) => [body.in_reply_to, body.source]),
-    [["report", "Ship the report"]],
+    [["report", "@codex Ship the report"]],
   );
   await pane.getByRole("button", { name: "Close thread" }).click();
   await timeline
@@ -1374,7 +1482,7 @@ test("FULL-THREAD: a failed Reply in thread keeps its target, and the retry reus
   const replying = pane.getByRole("status").getByText("Replying to You");
   await replying.waitFor();
   const box = pane.getByRole("combobox");
-  await box.fill("About the parent");
+  await box.fill("@codex About the parent");
   await ui.page.keyboard.press("Enter");
   await pane.locator(".composer-error").waitFor();
   assert.equal(await replying.count(), 1, "a failed send keeps the target");
@@ -1415,7 +1523,7 @@ test("FULL-THREAD: a reply the server finds no one for asks for a mention, not t
     .locator('[data-message-id="report"]')
     .getByRole("button", { name: "Reply in thread to @codex" })
     .click();
-  await pane.getByRole("combobox").fill("Ship the report");
+  await pane.getByRole("combobox").fill("@codex Ship the report");
   await ui.page.keyboard.press("Enter");
   const alert = pane.getByRole("alert");
   await alert.waitFor();
@@ -4218,13 +4326,18 @@ test("UI-3: a thread reply carries in_reply_to and goes as typed to the thread's
     exact: true,
   });
   const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
-  assert.equal(await pane.locator(".composer-to").textContent(), "To @codex");
+  assert.equal(await reply.inputValue(), "@codex ");
+  assert.equal(await pane.locator(".composer-to").count(), 0);
   await reply.click();
   await reply.pressSequentially("thanks");
   await reply.press("Enter");
   await until(() => ui.posts.attempts.length === 1, "the reply");
   const first = JSON.parse(ui.posts.attempts[0].raw);
-  assert.equal(first.source, "thanks", "the server delivers it to @codex");
+  assert.equal(
+    first.source,
+    "@codex thanks",
+    "the server delivers it to @codex",
+  );
   assert.equal(first.in_reply_to, "answer");
   await pane.locator("article.pending").getByText("Sent").waitFor();
   assert.equal(await timeline.locator("article.pending").count(), 0);
@@ -4278,9 +4391,8 @@ test("UI-3: a thread reply to an agent in another workspace names it through its
   });
   const reply = pane.getByRole("combobox");
   await reply.waitFor();
-  assert.deepEqual(await pane.locator(".composer-to").allTextContents(), [
-    "To @lead · #alpha",
-  ]);
+  assert.equal(await reply.inputValue(), "#alpha @lead ");
+  assert.equal(await pane.locator(".composer-to").count(), 0);
   assert.equal(
     await reply.getAttribute("aria-label"),
     "Reply to @lead · #alpha",
@@ -4292,7 +4404,11 @@ test("UI-3: a thread reply to an agent in another workspace names it through its
   const [attempt] = ui.posts.attempts;
   assert.equal(attempt.key, key(1));
   const body = JSON.parse(attempt.raw);
-  assert.equal(body.source, "thanks", "the server delivers it to @lead");
+  assert.equal(
+    body.source,
+    "#alpha @lead thanks",
+    "the server delivers it to @lead",
+  );
   assert.equal(body.in_reply_to, "answer");
 });
 
@@ -4344,7 +4460,7 @@ test("UI-3: a reply in a thread with no agents stays in the box and says how to 
   await box.click();
   assert.equal(
     await status.textContent(),
-    "Enter to send · Shift+Enter for a new line",
+    "Start with @name to choose who gets this.",
   );
   assert.equal(await pane.locator(".composer-to").count(), 0, "no To label");
   await box.pressSequentially("hello");
@@ -4376,9 +4492,9 @@ test("UI-3: a reply in a thread with no agents stays in the box and says how to 
   assert.equal(posted.in_reply_to, "out");
 });
 
-test("UI-3: the recipient guard waits for a send attempt and the next keystroke clears it", async (t) => {
+test("UI-3: the thread recipient guard stays visible until an explicit recipient is chosen", async (t) => {
   const { ui, box, send, status } = await terminalThread(t);
-  const hint = "Enter to send · Shift+Enter for a new line";
+  const hint = "Start with @name to choose who gets this.";
   async function typeExpectingHint(text) {
     for (const character of text) {
       await box.pressSequentially(character);
@@ -4407,6 +4523,9 @@ test("UI-3: the recipient guard waits for a send attempt and the next keystroke 
   assert.equal(await ui.page.locator("article.pending").count(), 0);
   await typeExpectingHint("!");
   await box.fill("@shell hello");
+  await readsAs(status, "Enter sends only to @shell");
+  assert.equal(await status.locator(".composer-guard").count(), 0);
+  assert.equal(await send.isDisabled(), false);
   await box.press("Enter");
   await until(() => ui.posts.attempts.length === 1, "the addressed post");
   assert.equal(
@@ -4548,7 +4667,7 @@ test("UI-3 fix2: refused drafts in two channels and a thread each retry with the
   });
   const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
   await reply.click();
-  await reply.pressSequentially("@codex same");
+  await reply.fill("@codex same");
   await reply.press("Enter");
   await pane.locator(".composer").getByRole("alert").waitFor();
   assert.equal(new Set(requestIds(ui)).size, 3, "three drafts, three ids");
@@ -4594,7 +4713,7 @@ test("UI-3 fix3: a refused thread reply retried after a new reply arrives posts 
   });
   const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
   await reply.click();
-  await reply.pressSequentially("@codex same");
+  await reply.fill("@codex same");
   await reply.press("Enter");
   await pane.locator(".composer").getByRole("alert").waitFor();
   const update = structuredClone(value);
@@ -4986,7 +5105,7 @@ test("UI-3 fix: a thread reply refused after the pane closed marks its parent, a
   );
   await marker.click();
   await pane.waitFor();
-  assert.equal(await reply.inputValue(), "thanks");
+  assert.equal(await reply.inputValue(), "@codex thanks");
   const error = pane.locator(".composer").getByRole("alert");
   await error.waitFor();
   assert.equal(await error.textContent(), "Unknown recipient @ghost.");
@@ -4999,7 +5118,7 @@ test("UI-3 fix: a thread reply refused after the pane closed marks its parent, a
   await reply.press("Enter");
   await until(() => ui.posts.attempts.length === 2, "the retry");
   assert.equal(new Set(requestIds(ui)).size, 1, "the retry reused its id");
-  assert.equal(JSON.parse(ui.posts.attempts[1].raw).source, "thanks");
+  assert.equal(JSON.parse(ui.posts.attempts[1].raw).source, "@codex thanks");
 });
 
 test("UI-3 fix: switching channels and closing a thread keep unsent text", async (t) => {
@@ -5036,7 +5155,7 @@ test("UI-3 fix: switching channels and closing a thread keep unsent text", async
   await pane.waitFor({ state: "detached" });
   await preview.click();
   await reply.waitFor();
-  assert.equal(await reply.inputValue(), "half a reply");
+  assert.equal(await reply.inputValue(), "@codex half a reply");
   assert.equal(await alpha.inputValue(), "@codex half a post");
   await ui.row(3).click();
   await gamma.waitFor();
@@ -5044,7 +5163,7 @@ test("UI-3 fix: switching channels and closing a thread keep unsent text", async
   assert.equal(ui.posts.attempts.length, 0);
 });
 
-test("UI-3 fix: the thread box says Write a reply while the To label names the recipients", async (t) => {
+test("UI-3 fix: the thread box says Write a reply while editable mentions name the recipients", async (t) => {
   const ui = await open(t, (client) => replay(client, [askThread()]));
   await ui.live();
   const timeline = ui.page.getByRole("region", { name: "Message history" });
@@ -5054,7 +5173,8 @@ test("UI-3 fix: the thread box says Write a reply while the To label names the r
     exact: true,
   });
   const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
-  assert.equal(await pane.locator(".composer-to").textContent(), "To @codex");
+  assert.equal(await reply.inputValue(), "@codex ");
+  assert.equal(await pane.locator(".composer-to").count(), 0);
   assert.equal(await reply.getAttribute("placeholder"), "Write a reply");
   assert.equal(
     await ui.page
@@ -5908,7 +6028,7 @@ test("UI-4: names in a message header open the drawer, which replaces the thread
   assert.equal(await drawer(ui).count(), 0);
 });
 
-test("UI-4: the drawer is 480 wide at 1440 and 400 at 1024, opening a row selects it, and nothing scrolls sideways", async (t) => {
+test("UI-4: the drawer shares conversation widths at 1440 and 1024, opening a row selects it, and nothing scrolls sideways", async (t) => {
   const ui = await open(t, (client) => replay(client, busyTeam()), undefined, {
     path: "/?view=activity",
     onScreen: () => ({ body: `${"x".repeat(900)}\n${"word ".repeat(300)}` }),
@@ -5920,10 +6040,10 @@ test("UI-4: the drawer is 480 wide at 1440 and 400 at 1024, opening a row select
   assert.equal(await row.getAttribute("aria-expanded"), "true");
   assert.equal(await focusedIn(drawer(ui)), true);
   for (const [width, height, expected] of [
-    [1440, 900, 480],
-    [1024, 700, 400],
+    [1440, 900, 400],
+    [1024, 700, 360],
   ]) {
-    await ui.page.setViewportSize({ width, height });
+    await resize(ui.page, width, height);
     const layout = await ui.page.evaluate(() => ({
       drawer: Math.round(
         document.querySelector("aside.peek").getBoundingClientRect().width,
@@ -7105,7 +7225,7 @@ test("CH-fix-2 item 3: an item with no thread or no actions keeps the pane hint,
   );
 });
 
-test("CH-2: Respond targets its agent with the prefill, and plain text names every agent the reply reaches", async (t) => {
+test("CH-2: Respond targets its agent with the prefill, and removing its mention requires a new recipient", async (t) => {
   const { value, context } = actionableAttention();
   value.frame.participants.push({
     ...value.frame.participants[0],
@@ -7126,6 +7246,10 @@ test("CH-2: Respond targets its agent with the prefill, and plain text names eve
   );
   await ui.live();
   await ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("button", { name: /^Show message/ })
+    .click();
+  await ui.page
     .getByRole("button", { name: "Reply to @codex", exact: true })
     .click();
   const pane = ui.page.getByRole("complementary", {
@@ -7139,10 +7263,10 @@ test("CH-2: Respond targets its agent with the prefill, and plain text names eve
     "the Respond prefill",
   );
   await reply.fill("ok go ahead");
-  assert.equal(
-    await pane.locator(".composer-to").textContent(),
-    "To @codex, @claude",
-  );
+  assert.equal(await pane.locator(".composer-to").count(), 0);
+  await pane
+    .getByText("Start with @name to choose who gets this.", { exact: true })
+    .waitFor();
   assert.equal(
     await reply.getAttribute("aria-label"),
     "Reply to @codex, @claude",
@@ -7565,7 +7689,7 @@ test("DESIGN-R2 D2: a thread's kept-draft line lasts until that box changes, the
   await readsAs(status, kept);
   await reply.press("End");
   await ui.page.keyboard.type(" too");
-  await readsAs(status, "Enter to send · Shift+Enter for a new line");
+  await readsAs(status, "Start with @name to choose who gets this.");
   assert.equal(await reply.inputValue(), "my thread words too");
 });
 
@@ -8330,20 +8454,18 @@ test("CH-2: replies read as their own rows in time order, with a reference above
     0,
     "no references in the pane",
   );
-  assert.equal(
-    await pane.locator(".composer-to").textContent(),
-    "To @claude, @codex",
-  );
+  assert.equal(await pane.locator(".composer-to").count(), 0);
   const box = pane.getByRole("combobox", { name: "Reply to @claude, @codex" });
+  assert.equal(await box.inputValue(), "@claude @codex ");
   await box.pressSequentially("thanks both");
   assert.equal(
     await pane.locator(".composer-status").textContent(),
-    "Enter to send · Shift+Enter for a new line",
+    "Enter sends only to @claude, @codex",
   );
   await box.press("Enter");
   await until(() => ui.posts.attempts.length === 1, "the reply");
   const posted = JSON.parse(ui.posts.attempts[0].raw);
-  assert.equal(posted.source, "thanks both", "sent as typed");
+  assert.equal(posted.source, "@claude @codex thanks both", "sent as typed");
   assert.equal(posted.in_reply_to, "r3");
   await ui.page.keyboard.press("Escape");
   await pane.waitFor({ state: "detached" });
@@ -9294,6 +9416,8 @@ test("CH-fix-3 item 1: Send anyway in the thread pane delivers the post, focus m
   const pane = threadPane(ui);
   const box = pane.getByRole("combobox");
   await box.waitFor();
+  const suggestedReply = await box.inputValue();
+  assert.equal(suggestedReply, "@claude ");
   await pane.getByRole("button", { name: "Send this to @codex" }).click();
   await until(() => ui.posts.deliveries.length === 1, "the deliver POST");
   assert.equal(ui.posts.deliveries[0].path, deliverPath("p1"));
@@ -9305,7 +9429,11 @@ test("CH-fix-3 item 1: Send anyway in the thread pane delivers the post, focus m
   answered.release();
   assert.equal((await offerReads(button, "Sent to @codex")).focused, true);
   await readsAs(inTimeline, "Sent to @codex · 1 reply");
-  assert.equal(await box.inputValue(), "", "nothing is typed in the reply box");
+  assert.equal(
+    await box.inputValue(),
+    suggestedReply,
+    "delivery leaves the suggested reply untouched",
+  );
   assert.equal(ui.posts.attempts.length, 0, "no reply is posted");
 });
 
@@ -10685,7 +10813,8 @@ test("UI-R4 review H Low 2: in a thread, a pasted U+FEFF before a leading name d
     exact: true,
   });
   const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
-  assert.equal(await pane.locator(".composer-to").textContent(), "To @codex");
+  assert.equal(await reply.inputValue(), "@codex ");
+  assert.equal(await pane.locator(".composer-to").count(), 0);
   await reply.fill("﻿@claude look too");
   assert.equal(await pane.locator(".composer-to").count(), 0, "no To label");
   await reply.press("Enter");
@@ -11931,3 +12060,246 @@ test("INTEG-EXP4: the sidebar names the handoff decision count, and a handoff ca
     "3 handoffs need a decision",
   );
 });
+
+// PANELS-R6: desktop controls and responsive pane layouts.
+async function panelsRoom(t) {
+  const ui = await open(t, (client) => replay(client, [layoutChannel()]));
+  await ui.live();
+  await resize(ui.page, 1440, 900);
+  return ui;
+}
+async function openPanelsThread(ui) {
+  await ui.page
+    .getByRole("region", { name: "Message history" })
+    .getByRole("button", { name: /^1 reply from/ })
+    .click();
+  await threadPane(ui).waitFor();
+}
+const panelWidth = (separator) =>
+  separator.getAttribute("aria-valuenow").then(Number);
+async function dragPanel(page, separator, delta, finish = true) {
+  const box = await separator.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + delta, box.y + 100, {
+    steps: 8,
+  });
+  if (finish) await page.mouse.up();
+}
+test("PANELS-R6: pointer and keyboard resize independently, persist, and share thread/peek width", async (t) => {
+  const ui = await panelsRoom(t);
+  const { page } = ui;
+  const left = page.getByRole("separator", { name: "Resize Channels sidebar" });
+  const right = page.getByRole("separator", {
+    name: "Resize conversation sidebar",
+  });
+  assert.equal(await right.count(), 0);
+  await dragPanel(page, left, 60);
+  assert.equal(await panelWidth(left), 308);
+  await openPanelsThread(ui);
+  await dragPanel(page, right, -80);
+  assert.equal(await panelWidth(right), 480);
+  assert.equal(await panelWidth(left), 308);
+  assert.equal(Math.round((await threadPane(ui).boundingBox()).width), 480);
+  await right.focus();
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("Shift+ArrowLeft");
+  assert.equal(await panelWidth(right), 530);
+  assert.equal(await right.getAttribute("aria-orientation"), "vertical");
+  assert.ok(
+    await right.evaluate((el) => getComputedStyle(el).outlineStyle !== "none"),
+  );
+  await page.reload();
+  await ui.live();
+  assert.equal(await panelWidth(left), 308);
+  await openPanelsThread(ui);
+  assert.equal(await panelWidth(right), 530);
+  await threadPane(ui).getByRole("button", { name: "Close thread" }).click();
+  assert.equal(await right.count(), 0);
+  await page.locator(".members [data-peek]").first().click();
+  await page.locator(".slot.peek").waitFor();
+  assert.equal(
+    Math.round((await page.locator(".slot.peek").boundingBox()).width),
+    530,
+  );
+  assert.equal(await panelWidth(right), 530);
+  assert.equal(
+    await page.evaluate(() =>
+      document.body.classList.contains("resizing-panels"),
+    ),
+    false,
+  );
+});
+test("PANELS-R6: viewport clamping, narrow layouts, cancellation, and theme evidence", async (t) => {
+  const ui = await panelsRoom(t);
+  const { page } = ui;
+  await openPanelsThread(ui);
+  const left = page.getByRole("separator", { name: "Resize Channels sidebar" });
+  const right = page.getByRole("separator", {
+    name: "Resize conversation sidebar",
+  });
+  await right.focus();
+  await page.keyboard.press("End");
+  assert.equal(await panelWidth(right), 640);
+  await left.focus();
+  await page.keyboard.press("Home");
+  assert.equal(await panelWidth(left), 180);
+  await dragPanel(page, left, 60, false);
+  assert.equal(
+    await page.evaluate(() =>
+      document.body.classList.contains("resizing-panels"),
+    ),
+    true,
+  );
+  assert.equal(
+    await page
+      .locator(".thread-body")
+      .evaluate((el) => getComputedStyle(el).userSelect),
+    "none",
+  );
+  await left.dispatchEvent("pointercancel");
+  await page.mouse.up();
+  assert.equal(await panelWidth(left), 180);
+  assert.equal(
+    await page.evaluate(() =>
+      document.body.classList.contains("resizing-panels"),
+    ),
+    false,
+  );
+  for (const [width, height, theme] of [
+    [1440, 900, "light"],
+    [1024, 700, "dark"],
+    [768, 1024, "light"],
+    [390, 844, "dark"],
+  ]) {
+    await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
+    await resize(page, width, height);
+    assert.ok(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    );
+    if (width > 860) {
+      assert.ok((await page.locator("main").boundingBox()).width >= 320);
+      assert.equal(await left.isVisible(), true);
+    } else {
+      assert.equal(await left.isVisible(), false);
+      assert.equal(await right.isVisible(), false);
+      assert.equal(await threadPane(ui).isVisible(), true);
+    }
+    if (process.env.PANELS_SCREENSHOTS)
+      await page.screenshot({
+        path: `${process.env.PANELS_SCREENSHOTS}/panels-${width}x${height}-${theme}.png`,
+      });
+  }
+  await resize(page, 1440, 900);
+  assert.equal(await panelWidth(right), 640);
+});
+test("PANELS-R6: invalid and denied storage fall back to usable resizing", async (t) => {
+  const ui = await panelsRoom(t);
+  const { page } = ui;
+  await page.evaluate(() =>
+    localStorage.setItem(
+      "namedrop:panel-widths:v1",
+      '{"left":"bad","right":-10}',
+    ),
+  );
+  await page.reload();
+  await ui.live();
+  const left = page.getByRole("separator", { name: "Resize Channels sidebar" });
+  assert.equal(await panelWidth(left), 248);
+  await page.addInitScript(() => {
+    Storage.prototype.getItem = () => {
+      throw new Error("Storage denied");
+    };
+    Storage.prototype.setItem = () => {
+      throw new Error("Storage denied");
+    };
+  });
+  await page.reload();
+  await ui.live();
+  await dragPanel(page, left, 20);
+  assert.equal(await panelWidth(left), 268);
+});
+test("PANELS-R6: lost pointer capture, pane closure, and narrow resize clean up dragging", async (t) => {
+  const ui = await panelsRoom(t);
+  const { page } = ui;
+  await openPanelsThread(ui);
+  const right = page.getByRole("separator", {
+    name: "Resize conversation sidebar",
+  });
+  const left = page.getByRole("separator", { name: "Resize Channels sidebar" });
+  const dragging = () =>
+    page.evaluate(() => document.body.classList.contains("resizing-panels"));
+  await dragPanel(page, right, -30, false);
+  await right.evaluate((el) => el.releasePointerCapture(1));
+  await page.mouse.move(900, 200);
+  await eventually(
+    async () => !(await dragging()),
+    "lost capture ends resizing",
+  );
+  await page.mouse.up();
+  await dragPanel(page, right, -20, false);
+  await threadPane(ui)
+    .getByRole("button", { name: "Close thread" })
+    .dispatchEvent("click");
+  await eventually(
+    async () => !(await dragging()),
+    "closing pane ends resizing",
+  );
+  await page.mouse.up();
+  assert.equal(await right.count(), 0);
+  await dragPanel(page, left, 30, false);
+  await resize(page, 390, 844);
+  await eventually(
+    async () => !(await dragging()),
+    "narrow layout ends resizing",
+  );
+  await page.mouse.up();
+  assert.equal(await left.isVisible(), false);
+});
+for (const { side, saved, narrow, restored } of [
+  { side: "right", saved: 640, narrow: 1024, restored: 640 },
+  { side: "left", saved: 360, narrow: 861, restored: 360 },
+  { side: "right", saved: null, narrow: 1024, restored: 400 },
+  { side: "left", saved: null, narrow: 1024, restored: 248 },
+]) {
+  test(`PANELS-R6 cancel restores ${side} ${saved === null ? "responsive default" : "saved preference"} after viewport clamp`, async (t) => {
+    const ui = await panelsRoom(t);
+    const { page } = ui;
+    if (saved !== null) {
+      await page.evaluate(
+        ({ side, saved }) =>
+          localStorage.setItem(
+            "namedrop:panel-widths:v1",
+            JSON.stringify({ [side]: saved }),
+          ),
+        { side, saved },
+      );
+      await page.reload();
+      await ui.live();
+    }
+    await openPanelsThread(ui);
+    await resize(page, narrow, 900);
+    const separator = page.getByRole("separator", {
+      name:
+        side === "left"
+          ? "Resize Channels sidebar"
+          : "Resize conversation sidebar",
+    });
+    const before = await panelWidth(separator);
+    await dragPanel(page, separator, side === "left" ? -20 : 20, false);
+    assert.equal(await panelWidth(separator), before - 20);
+    await separator.dispatchEvent("pointercancel");
+    await page.mouse.up();
+    assert.equal(await panelWidth(separator), before);
+    await resize(page, 1440, 900);
+    assert.equal(await panelWidth(separator), restored);
+    const preference = await page.evaluate(
+      (side) =>
+        JSON.parse(localStorage.getItem("namedrop:panel-widths:v1"))[side],
+      side,
+    );
+    assert.equal(preference, saved ?? undefined);
+  });
+}

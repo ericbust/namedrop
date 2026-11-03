@@ -45,7 +45,10 @@ import { Avatar } from "./Avatar.tsx";
 import { DeliveryContext } from "./DeliveryContext.ts";
 import { Icon } from "./Icons.tsx";
 import { Markdown, MarkdownLine, markdownText } from "./Markdown.tsx";
-import { MessageActionsContext } from "./MessageActions.tsx";
+import {
+  MessageActionsContext,
+  ThreadConversationContext,
+} from "./MessageActions.tsx";
 import { PeekControl, usePeek } from "./PeekContext.tsx";
 
 const PREVIEW = 480;
@@ -585,7 +588,8 @@ function ReplyInThread({
   directory: Directory;
 }) {
   const actions = useContext(MessageActionsContext);
-  if (actions === null) return null;
+  const inThread = useContext(ThreadConversationContext);
+  if (actions === null || inThread) return null;
   const name = replyTargetName(message, directory);
   return (
     <div className="msg-actions">

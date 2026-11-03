@@ -97,6 +97,62 @@ fn leading_mentions_stay_explicit_and_plain_followup_reaches_thread_agents() {
 }
 
 #[test]
+fn thread_reply_explicit_subsets_and_new_agent_keep_exact_routes_and_durable_participants() {
+    let f = fixture();
+    let server = Server::start(&f, "not json", false);
+    let post_in_channel = |request: &str, source: &str, parent: Option<&str>| {
+        let key = namedrop::dashboard::snapshot::SpaceKey::of(&StateNamespace::for_space(
+            "socket-a", "w2",
+        ));
+        let mut body = json!({"request_id": request, "source": source});
+        if let Some(parent) = parent {
+            body["in_reply_to"] = parent.into();
+        }
+        let response = server.post(
+            &format!("/w/{}/messages", key.as_str()),
+            &body.to_string(),
+            &[],
+        );
+        (
+            response.status,
+            serde_json::from_str::<Value>(&response.body).unwrap(),
+        )
+    };
+    let (status, root) = post_in_channel("thread-r6-root", "@tester @lead inspect", None);
+    assert_eq!(status, 200, "{root}");
+    assert_eq!(recipient_aliases(&root), vec!["tester", "lead"]);
+    let parent = root["message_id"].as_str().unwrap();
+    let thread = root["thread_id"].as_str().unwrap();
+    let (status, subset) = post_in_channel("thread-r6-subset", "@tester only you", Some(parent));
+    assert_eq!(status, 200, "{subset}");
+    assert_eq!(recipient_aliases(&subset), vec!["tester"]);
+    assert_eq!(subset["thread_id"], thread);
+    let (status, invited) = post_in_channel(
+        "thread-r6-invite",
+        "@scout join us",
+        subset["message_id"].as_str(),
+    );
+    assert_eq!(status, 200, "{invited}");
+    assert_eq!(recipient_aliases(&invited), vec!["scout"]);
+    assert_eq!(invited["thread_id"], thread);
+    let durable: Vec<String> = f.db().prepare(
+        "SELECT address_id FROM thread_participants WHERE thread_id = ?1 ORDER BY participant_order"
+    ).unwrap().query_map([thread], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+    assert!(durable.iter().any(|id| id == "address-w2-tester"));
+    assert!(durable.iter().any(|id| id == "address-w2-lead"));
+    assert!(durable.iter().any(|id| id == "address-w2-scout"));
+    let (status, all) = post_in_channel(
+        "thread-r6-all",
+        "continue everyone",
+        invited["message_id"].as_str(),
+    );
+    assert_eq!(status, 200, "{all}");
+    assert_eq!(recipient_aliases(&all), vec!["tester", "lead", "scout"]);
+    assert_eq!(all["thread_id"], thread);
+    assert!(calls(&f).is_empty());
+}
+
+#[test]
 fn embedded_mentions_wake_local_members_and_reply_to_reply_keeps_channel_mode() {
     let f = Fixture::new();
     f.register_all();

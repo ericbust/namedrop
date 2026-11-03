@@ -440,7 +440,12 @@ export function keptHint(text: string): string {
 export function composerHint(rule: SendRule, text: string): string {
   const body = sentText(text);
   if (loneAt(body)) return composerCopy.nameAfter;
-  if (rule.kind === "thread") return composerCopy.hint;
+  if (rule.kind === "thread") {
+    const leading = leadingMentions(body);
+    return leading.length > 0
+      ? composerCopy.sendsOnlyTo(leading)
+      : composerCopy.hint;
+  }
   const refused = refusedLeading(body, rule.agents, rule.label);
   if (refused !== null) return refused;
   const leading = leadingMentions(body);

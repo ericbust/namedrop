@@ -6,6 +6,8 @@ export type MessageActions = Readonly<{
   fullBody(messageId: string): Promise<SafeText | null>;
   reply(message: Message, button: HTMLButtonElement): void;
 }>;
+export const ThreadConversationContext = createContext(false);
+
 export const MessageActionsContext = createContext<MessageActions | null>(null);
 
 export function MessageContexts({

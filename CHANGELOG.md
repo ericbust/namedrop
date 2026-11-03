@@ -2,6 +2,17 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.5.0-exp.6] - 2026-11-02
+
+### Added
+
+- Channels and conversation sidebars resize by dragging or keyboard, keep the channel readable, and remember their widths locally.
+- Thread replies start with editable participant mentions. Choose one or several agents, or invite another channel agent into the same thread. Removing every recipient keeps the reply unsent until someone is selected.
+
+### Fixed
+
+- Rows inside a thread no longer offer Reply in thread. Timeline rows keep the action, and Show more still expands messages inside the thread.
+
 ## [1.5.0-exp.5] - 2026-11-02
 
 ### Fixed
