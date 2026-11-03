@@ -12053,3 +12053,201 @@ test("INTEG-EXP4: the sidebar names the handoff decision count, and a handoff ca
     "3 handoffs need a decision",
   );
 });
+
+// PANELS-R6: desktop controls and responsive pane layouts.
+async function panelsRoom(t) {
+  const ui = await open(t, (client) => replay(client, [layoutChannel()]));
+  await ui.live();
+  await resize(ui.page, 1440, 900);
+  return ui;
+}
+async function openPanelsThread(ui) {
+  await ui.page
+    .getByRole("region", { name: "Message history" })
+    .getByRole("button", { name: /^1 reply from/ })
+    .click();
+  await threadPane(ui).waitFor();
+}
+const panelWidth = (separator) =>
+  separator.getAttribute("aria-valuenow").then(Number);
+async function dragPanel(page, separator, delta, finish = true) {
+  const box = await separator.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + 100);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + delta, box.y + 100, {
+    steps: 8,
+  });
+  if (finish) await page.mouse.up();
+}
+test("PANELS-R6: pointer and keyboard resize independently, persist, and share thread/peek width", async (t) => {
+  const ui = await panelsRoom(t);
+  const { page } = ui;
+  const left = page.getByRole("separator", { name: "Resize Channels sidebar" });
+  const right = page.getByRole("separator", {
+    name: "Resize conversation sidebar",
+  });
+  assert.equal(await right.count(), 0);
+  await dragPanel(page, left, 60);
+  assert.equal(await panelWidth(left), 308);
+  await openPanelsThread(ui);
+  await dragPanel(page, right, -80);
+  assert.equal(await panelWidth(right), 480);
+  assert.equal(await panelWidth(left), 308);
+  assert.equal(Math.round((await threadPane(ui).boundingBox()).width), 480);
+  await right.focus();
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("Shift+ArrowLeft");
+  assert.equal(await panelWidth(right), 530);
+  assert.equal(await right.getAttribute("aria-orientation"), "vertical");
+  assert.ok(
+    await right.evaluate((el) => getComputedStyle(el).outlineStyle !== "none"),
+  );
+  await page.reload();
+  await ui.live();
+  assert.equal(await panelWidth(left), 308);
+  await openPanelsThread(ui);
+  assert.equal(await panelWidth(right), 530);
+  await threadPane(ui).getByRole("button", { name: "Close thread" }).click();
+  assert.equal(await right.count(), 0);
+  await page.locator(".members [data-peek]").first().click();
+  await page.locator(".slot.peek").waitFor();
+  assert.equal(
+    Math.round((await page.locator(".slot.peek").boundingBox()).width),
+    530,
+  );
+  assert.equal(await panelWidth(right), 530);
+  assert.equal(
+    await page.evaluate(() =>
+      document.body.classList.contains("resizing-panels"),
+    ),
+    false,
+  );
+});
+test("PANELS-R6: viewport clamping, narrow layouts, cancellation, and theme evidence", async (t) => {
+  const ui = await panelsRoom(t);
+  const { page } = ui;
+  await openPanelsThread(ui);
+  const left = page.getByRole("separator", { name: "Resize Channels sidebar" });
+  const right = page.getByRole("separator", {
+    name: "Resize conversation sidebar",
+  });
+  await right.focus();
+  await page.keyboard.press("End");
+  assert.equal(await panelWidth(right), 640);
+  await left.focus();
+  await page.keyboard.press("Home");
+  assert.equal(await panelWidth(left), 180);
+  await dragPanel(page, left, 60, false);
+  assert.equal(
+    await page.evaluate(() =>
+      document.body.classList.contains("resizing-panels"),
+    ),
+    true,
+  );
+  assert.equal(
+    await page
+      .locator(".thread-body")
+      .evaluate((el) => getComputedStyle(el).userSelect),
+    "none",
+  );
+  await left.dispatchEvent("pointercancel");
+  await page.mouse.up();
+  assert.equal(await panelWidth(left), 180);
+  assert.equal(
+    await page.evaluate(() =>
+      document.body.classList.contains("resizing-panels"),
+    ),
+    false,
+  );
+  for (const [width, height, theme] of [
+    [1440, 900, "light"],
+    [1024, 700, "dark"],
+    [768, 1024, "light"],
+    [390, 844, "dark"],
+  ]) {
+    await page.emulateMedia({ colorScheme: theme, reducedMotion: "reduce" });
+    await resize(page, width, height);
+    assert.ok(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    );
+    if (width > 860) {
+      assert.ok((await page.locator("main").boundingBox()).width >= 320);
+      assert.equal(await left.isVisible(), true);
+    } else {
+      assert.equal(await left.isVisible(), false);
+      assert.equal(await right.isVisible(), false);
+      assert.equal(await threadPane(ui).isVisible(), true);
+    }
+    if (process.env.PANELS_SCREENSHOTS)
+      await page.screenshot({
+        path: `${process.env.PANELS_SCREENSHOTS}/panels-${width}x${height}-${theme}.png`,
+      });
+  }
+  await resize(page, 1440, 900);
+  assert.equal(await panelWidth(right), 640);
+});
+test("PANELS-R6: invalid and denied storage fall back to usable resizing", async (t) => {
+  const ui = await panelsRoom(t);
+  const { page } = ui;
+  await page.evaluate(() =>
+    localStorage.setItem(
+      "namedrop:panel-widths:v1",
+      '{"left":"bad","right":-10}',
+    ),
+  );
+  await page.reload();
+  await ui.live();
+  const left = page.getByRole("separator", { name: "Resize Channels sidebar" });
+  assert.equal(await panelWidth(left), 248);
+  await page.addInitScript(() => {
+    Storage.prototype.getItem = () => {
+      throw new Error("Storage denied");
+    };
+    Storage.prototype.setItem = () => {
+      throw new Error("Storage denied");
+    };
+  });
+  await page.reload();
+  await ui.live();
+  await dragPanel(page, left, 20);
+  assert.equal(await panelWidth(left), 268);
+});
+test("PANELS-R6: lost pointer capture, pane closure, and narrow resize clean up dragging", async (t) => {
+  const ui = await panelsRoom(t);
+  const { page } = ui;
+  await openPanelsThread(ui);
+  const right = page.getByRole("separator", {
+    name: "Resize conversation sidebar",
+  });
+  const left = page.getByRole("separator", { name: "Resize Channels sidebar" });
+  const dragging = () =>
+    page.evaluate(() => document.body.classList.contains("resizing-panels"));
+  await dragPanel(page, right, -30, false);
+  await right.evaluate((el) => el.releasePointerCapture(1));
+  await page.mouse.move(900, 200);
+  await eventually(
+    async () => !(await dragging()),
+    "lost capture ends resizing",
+  );
+  await page.mouse.up();
+  await dragPanel(page, right, -20, false);
+  await threadPane(ui)
+    .getByRole("button", { name: "Close thread" })
+    .dispatchEvent("click");
+  await eventually(
+    async () => !(await dragging()),
+    "closing pane ends resizing",
+  );
+  await page.mouse.up();
+  assert.equal(await right.count(), 0);
+  await dragPanel(page, left, 30, false);
+  await resize(page, 390, 844);
+  await eventually(
+    async () => !(await dragging()),
+    "narrow layout ends resizing",
+  );
+  await page.mouse.up();
+  assert.equal(await left.isVisible(), false);
+});
