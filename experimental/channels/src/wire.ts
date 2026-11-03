@@ -9,6 +9,7 @@ import type {
   DeliverAnswer,
   DeliverResult,
   DeliveryStage,
+  HandoffWarning,
   Health,
   MailItem,
   MailState,
@@ -21,6 +22,7 @@ import type {
   MessageKind,
   NotAddressableReason,
   Repo,
+  ReviewClear,
   Route,
   Routing,
   SafeText,
@@ -32,6 +34,7 @@ import type {
   TerminalRun,
   ThreadAction,
   ThreadChip,
+  WarningCause,
   WireEvent,
 } from "./model.ts";
 
@@ -252,7 +255,54 @@ function attention(
     messageId: optionalIdentity(item.message_id),
     threadId: optionalIdentity(item.thread_id),
     actions: threadActions(item.actions),
+    handoff:
+      kind === "coordination" && item.coordination != null
+        ? handoffWarning(item.coordination)
+        : null,
   };
+}
+const causes: readonly WarningCause[] = [
+  "blocked",
+  "cancelled",
+  "stalled",
+  "lead_retired",
+  "report",
+];
+function handoffWarning(value: unknown): HandoffWarning {
+  const item = record(value);
+  const cause = causes.find((known) => known === item.cause) ?? "report";
+  const review =
+    item.review == null
+      ? null
+      : (() => {
+          const raw = record(item.review);
+          return {
+            to: addressId(raw.to),
+            requestedAt: timestamp(raw.requested_at_ms),
+            expiresAt: timestamp(raw.expires_at_ms),
+          };
+        })();
+  return {
+    cause,
+    deliverable: safeText(item.deliverable),
+    lead: addressId(item.lead),
+    reason: optionalSafeText(item.reason ?? null),
+    report: optionalSafeText(item.report ?? null),
+    review,
+  };
+}
+function reviewClears(value: unknown): ReviewClear[] {
+  return value === undefined
+    ? []
+    : array(value).map((raw) => {
+        const item = record(raw);
+        return {
+          coordinationId: identity(item.coordination_id),
+          deliverable: safeText(item.deliverable),
+          by: addressId(item.by),
+          at: timestamp(item.at_ms),
+        };
+      });
 }
 const noActions: readonly ThreadAction[] = [];
 function threadActions(value: unknown): readonly ThreadAction[] {
@@ -623,6 +673,7 @@ function channel(value: unknown, key: SpaceKey): ChannelSnapshot {
     attention: array(frame.attention).map((item) =>
       attention(item, attentionOccurrences),
     ),
+    reviewClears: reviewClears(frame.review_clears),
     terminalRuns: terminalRuns(frame.terminal_runs),
   };
 }

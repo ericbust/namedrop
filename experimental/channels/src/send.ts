@@ -1,4 +1,5 @@
 import type {
+  AddressId,
   Alias,
   DeliverAnswer,
   DeliverFailure,
@@ -28,6 +29,14 @@ export type PostResult =
 export type ControlResult =
   | { kind: "done" }
   | { kind: "failed"; status: number };
+export type ReviewPost = {
+  requestId: string;
+  reviewer: AddressId;
+  coordinationIds: readonly string[];
+};
+export type ReviewResult =
+  | { kind: "sent"; messageId: string }
+  | { kind: "failed"; status: number; message: string };
 
 // A 2xx status is the server's answer; a body that stalls or breaks after it
 // must not hold the press. Reading has locked the body, so only aborting the
@@ -156,6 +165,28 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
           : { kind: "failed", status: response.status };
       } catch {
         return { kind: "failed", status: 0 };
+      }
+    },
+    async review(key: SpaceKey, post: ReviewPost): Promise<ReviewResult> {
+      try {
+        const response = await postWithTokenRetry(
+          `/w/${key}/coordinations/review`,
+          {
+            request_id: post.requestId,
+            reviewer: post.reviewer,
+            coordination_ids: post.coordinationIds,
+          },
+        );
+        const body = await response.text();
+        if (!response.ok)
+          return {
+            kind: "failed",
+            status: response.status,
+            message: parseRefusal(body),
+          };
+        return { kind: "sent", messageId: parseReceipt(JSON.parse(body)) };
+      } catch {
+        return { kind: "failed", status: 0, message: "" };
       }
     },
     async deliver(

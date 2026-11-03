@@ -1075,6 +1075,7 @@ export function App() {
                   directory={directory}
                   onFocus={showAttention}
                   onControl={poster.control}
+                  onReview={poster.review}
                 />
                 <Timeline
                   channel={channel}

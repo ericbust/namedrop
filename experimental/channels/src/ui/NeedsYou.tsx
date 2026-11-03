@@ -12,6 +12,12 @@ import {
   type ControlThread,
   type FocusAttention,
 } from "./AttentionActions.tsx";
+import {
+  HandoffGroup,
+  isHandoff,
+  ReviewClears,
+  type ReviewHandoffs,
+} from "./Handoffs.tsx";
 import { Icon } from "./Icons.tsx";
 
 const SHOWN = 3;
@@ -111,16 +117,21 @@ export function NeedsYou({
   directory,
   onFocus,
   onControl,
+  onReview,
 }: {
   channel: ChannelSnapshot;
   directory: Directory;
   onFocus: FocusAttention;
   onControl: ControlThread;
+  onReview: ReviewHandoffs;
 }) {
   const items = channel.health.level === "needs_you" ? channel.attention : none;
-  const now = useNow(items.length > 0);
+  const now = useNow(items.length > 0 || channel.reviewClears.length > 0);
   const announcement = useAnnouncement(channel.key, items);
   const [all, setAll] = useState(false);
+  // Handoff warnings share one collapsible row; everything else stays in view.
+  const handoffs = items.filter(isHandoff);
+  const others = items.filter((item) => !isHandoff(item));
   return (
     <>
       <p className="sr-only" aria-live="polite">
@@ -129,7 +140,7 @@ export function NeedsYou({
       {items.length > 0 && (
         <section className="attention" aria-label="Attention needed">
           <ul>
-            {(all ? items : items.slice(0, SHOWN)).map((item) => (
+            {(all ? others : others.slice(0, SHOWN)).map((item) => (
               <Item
                 key={item.rowKey}
                 item={item}
@@ -140,20 +151,32 @@ export function NeedsYou({
                 onControl={onControl}
               />
             ))}
+            {handoffs.length > 0 && (
+              <HandoffGroup
+                items={handoffs}
+                channel={channel}
+                directory={directory}
+                now={now}
+                onFocus={onFocus}
+                onControl={onControl}
+                onReview={onReview}
+              />
+            )}
           </ul>
-          {!all && items.length > SHOWN && (
+          {!all && others.length > SHOWN && (
             <div className="attention-more">
               <button
                 type="button"
                 className="text-button"
                 onClick={() => setAll(true)}
               >
-                Show {items.length - SHOWN} more
+                Show {others.length - SHOWN} more
               </button>
             </div>
           )}
         </section>
       )}
+      <ReviewClears channel={channel} now={now} />
     </>
   );
 }

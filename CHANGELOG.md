@@ -2,6 +2,18 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.5.0-exp.4] - 2026-11-02
+
+### Fixed
+
+- Review grants bind to the exact review request and committed message. Replaying a request cannot renew its grants or attach them to an unrelated operator message.
+
+### Added
+
+- Handoff warnings in Channels say in plain words what happened and what to do next: blocked, cancelled, stuck, lost its lead, or finished without a delivered report. Details shows the saved report as Markdown.
+- Ask to review sends one handoff to its lead, or to an agent you pick when the lead's pane is closed. Review all sends every open handoff to one agent. Each press grants that agent's current session one acknowledgement of each named handoff. A grant is used once, expires after 15 minutes, and ends when the dashboard session changes. The agent clears a handoff with `namedrop handoff acknowledge-granted`, and Channels shows who cleared it.
+- Handoff warnings share one collapsible row, "N handoffs need a decision", which starts closed when there are more than two. Your choice to open or close it is kept per channel, and the sidebar uses the same wording.
+
 ## [1.5.0-exp.3] - 2026-11-02
 
 ### Added

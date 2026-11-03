@@ -66,6 +66,7 @@ impl Cli {
                 | "handoff.begin"
                 | "handoff.resolve"
                 | "handoff.adopt"
+                | "handoff.acknowledge-granted"
                 | "handoff.status"
                 | "handoff.results"
                 | "handoff.preview"
@@ -419,6 +420,8 @@ enum HandoffCommand {
     Adopt,
     /// Acknowledge a resolved warning after human review; preserves the outcome and report.
     Acknowledge,
+    /// Acknowledge a warning the operator asked this agent to review; needs their review grant.
+    AcknowledgeGranted,
     Status,
     Results,
     Preview,
@@ -430,6 +433,7 @@ impl HandoffCommand {
             Self::Resolve => "handoff.resolve",
             Self::Adopt => "handoff.adopt",
             Self::Acknowledge => "handoff.acknowledge",
+            Self::AcknowledgeGranted => "handoff.acknowledge-granted",
             Self::Status => "handoff.status",
             Self::Results => "handoff.results",
             Self::Preview => "handoff.preview",

@@ -449,6 +449,39 @@ pub struct DashboardSnapshot {
     /// Command and exit code only; terminal output never leaves the store.
     pub terminal_runs: Vec<TerminalRun>,
     pub attention: Vec<AttentionCard>,
+    /// Coordination warnings agents cleared with the operator's review grant
+    /// in the last `CLEAR_WINDOW_MS`, newest first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub review_clears: Vec<ReviewClear>,
+}
+
+const REPORT_CHARS: usize = 4000;
+const CLEAR_WINDOW_MS: i64 = 30 * 60 * 1000;
+
+/// What a coordination warning is about and what the operator asked of whom.
+#[derive(Debug, Serialize)]
+pub struct CoordinationDetail {
+    pub cause: crate::store::coordination_review::WarningCause,
+    pub deliverable: SafeText,
+    pub lead: String,
+    pub reason: Option<SafeText>,
+    pub report: Option<SafeText>,
+    pub review: Option<ReviewRequest>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReviewRequest {
+    pub to: String,
+    pub requested_at_ms: u64,
+    pub expires_at_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReviewClear {
+    pub coordination_id: String,
+    pub deliverable: SafeText,
+    pub by: String,
+    pub at_ms: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -739,6 +772,8 @@ pub struct AttentionCard {
     pub opened_at_ms: i64,
     pub subject_alias: Option<String>,
     pub message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coordination: Option<CoordinationDetail>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -871,6 +906,7 @@ impl DashboardSnapshot {
             coordinations: Vec::new(),
             terminal_runs: Vec::new(),
             attention: Vec::new(),
+            review_clears: Vec::new(),
         }
     }
 }
@@ -915,6 +951,9 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
             opened_at_ms: i64::try_from(item.item.opened_at_ms).unwrap_or(i64::MAX),
             subject_alias: item.subject_alias.clone(),
             message_id: item.message_id.clone(),
+            coordination: (item.item.source_kind == crate::AttentionSourceKind::Coordination)
+                .then(|| coordination_detail(rows, &item.item.source_id, now_ms))
+                .flatten(),
         })
         .collect();
     attention.extend(rows.addresses.iter().filter_map(|address| {
@@ -943,6 +982,7 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
             opened_at_ms,
             subject_alias: Some(address.alias.clone()),
             message_id: address.blocked_message_id.clone(),
+            coordination: None,
         })
     }));
     DashboardSnapshot {
@@ -1003,7 +1043,46 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
             })
             .collect(),
         attention,
+        review_clears: rows
+            .granted_clears
+            .iter()
+            .filter(|clear| {
+                i64::try_from(clear.at_ms).is_ok_and(|at| now_ms - at < CLEAR_WINDOW_MS)
+            })
+            .map(|clear| ReviewClear {
+                coordination_id: clear.coordination_id.clone(),
+                deliverable: SafeText::from_untrusted(&clear.deliverable, SHORT_CHARS),
+                by: clear.address_id.clone(),
+                at_ms: clear.at_ms,
+            })
+            .collect(),
     }
+}
+
+fn coordination_detail(rows: &DashboardRows, id: &str, now_ms: i64) -> Option<CoordinationDetail> {
+    let warning = rows
+        .coordination_warnings
+        .iter()
+        .find(|warning| warning.coordination_id.as_str() == id)?;
+    Some(CoordinationDetail {
+        cause: warning.cause,
+        deliverable: SafeText::from_untrusted(&warning.deliverable, SHORT_CHARS),
+        lead: warning.lead_address_id.as_str().to_owned(),
+        reason: SafeText::optional(warning.reason.as_deref(), SHORT_CHARS),
+        report: SafeText::optional(warning.report.as_deref(), REPORT_CHARS),
+        review: rows
+            .review_grants
+            .iter()
+            .find(|grant| {
+                grant.coordination_id == id
+                    && i64::try_from(grant.expires_at_ms).is_ok_and(|expires| now_ms < expires)
+            })
+            .map(|grant| ReviewRequest {
+                to: grant.grantee_address_id.clone(),
+                requested_at_ms: grant.granted_at_ms,
+                expires_at_ms: grant.expires_at_ms,
+            }),
+    })
 }
 
 fn health(state: SpaceState, attention: usize, in_flight: usize, working: usize) -> SpaceHealth {

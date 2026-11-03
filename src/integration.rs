@@ -1473,6 +1473,13 @@ fn delivery_inputs(
     git_state_paths: &[String],
     review_source_message_id: Option<&MessageId>,
 ) -> Result<Vec<Value>, String> {
+    if operation.token == "handoff.acknowledge-granted" {
+        return Ok(draft
+            .review_grants
+            .iter()
+            .map(|id| json!({"coordination_id": id}))
+            .collect());
+    }
     let input = match operation.token.as_str() {
         "handoff.results" => review_source_message_id.map_or_else(
             || {
@@ -1611,6 +1618,9 @@ pub struct DeliveryControlDraft {
     pub result_set: Option<ResultSetCompletion>,
     pub permitted_operations: Vec<String>,
     pub reply_mode: crate::DeliveryReplyMode,
+    /// Coordinations the operator's review grants let this recipient
+    /// acknowledge, bound into `handoff.acknowledge-granted` one by one.
+    pub review_grants: Vec<crate::CoordinationId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1672,6 +1682,7 @@ impl DeliveryControl {
             result_set,
             permitted_operations,
             reply_mode,
+            review_grants: _,
         } = draft;
         Ok(Self {
             untrusted_channel_recap: None,

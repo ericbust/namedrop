@@ -157,6 +157,7 @@ fn channel_recap_trust_exception_survives_context_request_priority() {
             result_set: None,
             permitted_operations: vec!["reply".to_owned()],
             reply_mode: namedrop::DeliveryReplyMode::Channel,
+            review_grants: Vec::new(),
         },
         namedrop::IntegrationToolInvocation::new("/installed/namedrop", Default::default()),
     )

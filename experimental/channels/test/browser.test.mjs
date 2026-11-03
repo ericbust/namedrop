@@ -296,6 +296,7 @@ async function open(
     onControl = () => ({ status: 200 }),
     onDeliver = () => ({ status: 200 }),
     onBody = null,
+    onReview = () => ({ status: 200 }),
     observeLanding = false,
   } = {},
 ) {
@@ -306,6 +307,7 @@ async function open(
   const contextRequests = [];
   const bodyRequests = [];
   const posts = postRoute(onPost);
+  const reviews = [];
   const screens = screenRoute(onScreen);
   const server = createServer(async (req, res) => {
     if (req.url === "/api/events") {
@@ -333,6 +335,25 @@ async function open(
     const postKey = /^\/w\/([^/]+)\/messages$/.exec(url.pathname)?.[1];
     if (req.method === "POST" && postKey !== undefined)
       return posts.post(req, res, postKey);
+    if (
+      req.method === "POST" &&
+      /^\/w\/[^/]+\/coordinations\/review$/.test(url.pathname)
+    ) {
+      const review = {
+        path: url.pathname,
+        csrf: req.headers["x-namedrop-csrf"] ?? null,
+        body: JSON.parse(await readBody(req)),
+      };
+      reviews.push(review);
+      const outcome = await onReview(review);
+      return sendJson(
+        res,
+        outcome.status,
+        outcome.status === 200
+          ? { message_id: `review-${reviews.length}` }
+          : { error: outcome.error ?? "Refused." },
+      );
+    }
     if (/^\/w\/[^/]+\/threads\/[^/]+\/(continue|stop)$/.test(url.pathname))
       return posts.control(req, res, onControl, url.pathname);
     if (
@@ -449,6 +470,7 @@ async function open(
     contextRequests,
     bodyRequests,
     posts,
+    reviews,
     screens,
   };
 }
@@ -11682,4 +11704,230 @@ test("GROUP-UI: a server without repos keeps the flat list, and a channel still 
   await said(ui, "Moved alpha to position 2 of 3");
   assert.equal(await hasFocus(ui.row(1)), true);
   assert.deepEqual(await sidebarOrder(ui), [key(2), key(1), key(3)]);
+});
+
+const LEAD = "pane-address-1793208032928312296-1209682-1";
+function handoffFrame(count, { leadActivity = "idle", review = null } = {}) {
+  const value = frame(1, "alpha", "needs_you");
+  value.frame.participants[0].activity = leadActivity;
+  value.frame.participants.push({
+    ...structuredClone(value.frame.participants[0]),
+    address_id: "pane-address-claude",
+    alias: "@claude",
+    kind: { type: "agent", runtime: "claude-code" },
+    activity: "idle",
+  });
+  value.frame.attention = [
+    {
+      attention_id: "agent-status-x",
+      source_kind: "agent_status",
+      summary: {
+        text: "@codex is waiting on an approval or question.",
+        truncated: false,
+      },
+      opened_at_ms: 40,
+    },
+    ...Array.from({ length: count }, (_, n) => ({
+      attention_id: `coordination-attention:c-${n}`,
+      source_id: `c-${n}`,
+      coordination_id: `c-${n}`,
+      source_kind: "coordination",
+      summary: { text: `Recorded summary ${n}.`, truncated: false },
+      opened_at_ms: 41 + n,
+      coordination: {
+        cause: n === 0 ? "blocked" : "cancelled",
+        deliverable: { text: `Ship part ${n}`, truncated: false },
+        lead: LEAD,
+        reason: { text: "Waiting on an API key.", truncated: false },
+        report: { text: `**Report ${n}**\n\n- one item`, truncated: false },
+        review: n === 0 && review ? review : null,
+      },
+    })),
+  ];
+  return value;
+}
+
+test("NEEDS-COORD: handoff warnings fold into one row past two, other items stay in view, and the choice persists", async (t) => {
+  const ui = await open(t, (client) => replay(client, [handoffFrame(3)]));
+  const attention = ui.page.getByRole("region", { name: "Attention needed" });
+  await attention
+    .getByText("@codex is waiting on an approval or question.")
+    .waitFor();
+  const toggle = attention.getByRole("button", {
+    name: "3 handoffs need a decision",
+  });
+  assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(await attention.locator(".handoff-item").count(), 0);
+  await toggle.click();
+  assert.equal(await toggle.getAttribute("aria-expanded"), "true");
+  await attention.getByText("“Ship part 0” is blocked").waitFor();
+  assert.ok(
+    (
+      await attention
+        .locator('[data-coordination-id="c-0"] .attention-hint')
+        .textContent()
+    ).includes("@codex stopped it as blocked. Reason: Waiting on an API key."),
+  );
+  await ui.page.reload();
+  await ui.page.locator(".connection-dot.live").waitFor();
+  const again = ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("button", { name: "3 handoffs need a decision" });
+  assert.equal(
+    await again.getAttribute("aria-expanded"),
+    "true",
+    "expanded state survives a reload",
+  );
+  await again.click();
+  await ui.page.reload();
+  await ui.page.locator(".connection-dot.live").waitFor();
+  assert.equal(
+    await ui.page
+      .getByRole("region", { name: "Attention needed" })
+      .getByRole("button", { name: "3 handoffs need a decision" })
+      .getAttribute("aria-expanded"),
+    "false",
+  );
+});
+
+test("NEEDS-COORD: two handoffs start expanded and Details renders the report as Markdown", async (t) => {
+  const ui = await open(t, (client) => replay(client, [handoffFrame(2)]));
+  const attention = ui.page.getByRole("region", { name: "Attention needed" });
+  const toggle = attention.getByRole("button", {
+    name: "2 handoffs need a decision",
+  });
+  assert.equal(await toggle.getAttribute("aria-expanded"), "true");
+  const card = attention.locator('[data-coordination-id="c-0"]');
+  await card.getByRole("button", { name: "Details" }).click();
+  await card
+    .locator(".handoff-report strong", { hasText: "Report 0" })
+    .waitFor();
+  assert.equal(
+    await card.locator(".handoff-report li").textContent(),
+    "one item",
+  );
+});
+
+test("NEEDS-COORD: Ask @lead to review sends one coordination to its lead and Review all sends every one", async (t) => {
+  const ui = await open(t, (client) => replay(client, [handoffFrame(2)]));
+  const attention = ui.page.getByRole("region", { name: "Attention needed" });
+  await attention
+    .locator('[data-coordination-id="c-1"]')
+    .getByRole("button", { name: "Ask @codex to review" })
+    .click();
+  await until(() => ui.reviews.length === 1, "the per-item review");
+  const [one] = ui.reviews;
+  assert.equal(one.csrf, ui.posts.session.csrf);
+  assert.equal(one.body.reviewer, LEAD);
+  assert.deepEqual(one.body.coordination_ids, ["c-1"]);
+  assert.match(one.body.request_id, /^[0-9a-f-]{36}$/);
+  await attention.getByRole("button", { name: "Review all" }).click();
+  await until(() => ui.reviews.length === 2, "the review-all request");
+  assert.equal(
+    ui.reviews[1].body.reviewer,
+    LEAD,
+    "the lead of the most items is suggested",
+  );
+  assert.deepEqual(ui.reviews[1].body.coordination_ids, ["c-0", "c-1"]);
+  await attention
+    .getByText("Sent 2 handoffs to @codex for review · 0 of 2 cleared")
+    .waitFor();
+  await attention
+    .getByRole("combobox", { name: "Reviewer for Review all" })
+    .selectOption("pane-address-claude");
+  await attention.getByRole("button", { name: "Review all" }).click();
+  await until(
+    () => ui.reviews.length === 3,
+    "the review-all request to the picked agent",
+  );
+  assert.equal(ui.reviews[2].body.reviewer, "pane-address-claude");
+});
+
+test("NEEDS-COORD: a retired lead's handoff asks a picked agent, shows who was asked, and refusals are shown", async (t) => {
+  let client;
+  const ui = await open(
+    t,
+    (c) => {
+      client = c;
+      replay(c, [handoffFrame(1, { leadActivity: "retired" })]);
+    },
+    () => [],
+    {
+      onReview: () => ({
+        status: 409,
+        error: "The reviewer must be a live, registered agent.",
+      }),
+    },
+  );
+  const card = ui.page.locator('[data-coordination-id="c-0"]');
+  assert.equal(
+    await card.getByRole("combobox", { name: "Reviewer" }).inputValue(),
+    "pane-address-claude",
+  );
+  await card.getByRole("button", { name: "Ask to review" }).click();
+  await card
+    .getByRole("alert")
+    .getByText("The reviewer must be a live, registered agent.")
+    .waitFor();
+  assert.equal(ui.reviews[0].body.reviewer, "pane-address-claude");
+  const asked = handoffFrame(1, {
+    leadActivity: "retired",
+    review: {
+      to: "pane-address-claude",
+      requested_at_ms: Date.now(),
+      expires_at_ms: Date.now() + 900000,
+    },
+  });
+  client.send("space", asked);
+  await card
+    .getByRole("status")
+    .getByText("Sent to @claude for review · just now")
+    .waitFor();
+  const cleared = handoffFrame(0);
+  cleared.frame.review_clears = [
+    {
+      coordination_id: "c-0",
+      deliverable: { text: "Ship part 0", truncated: false },
+      by: "pane-address-claude",
+      at_ms: Date.now(),
+    },
+  ];
+  client.send("space", cleared);
+  const results = ui.page.getByRole("region", { name: "Review results" });
+  await results.getByText("“Ship part 0” · Cleared by @claude").waitFor();
+  await results.getByRole("button", { name: "Dismiss" }).click();
+  await results.waitFor({ state: "detached" });
+});
+
+test("INTEG-EXP4: the sidebar names the handoff decision count, and a handoff card's Ask to review stands in for Show message and Message", async (t) => {
+  const value = handoffFrame(2);
+  const conversation = { thread_id: "thread-c-0", message_id: "message-c-0" };
+  value.frame.attention[1].conversation = conversation;
+  value.frame.attention[1].response = { kind: "message", address_id: LEAD };
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const reason = ui.page
+    .getByRole("navigation", { name: "Needs you" })
+    .locator(".row-reason");
+  assert.equal(
+    await reason.textContent(),
+    "@codex is waiting on an approval or question. · 1 more",
+    "the two handoffs count as one banner row",
+  );
+  const card = ui.page.locator('[data-coordination-id="c-0"]');
+  assert.deepEqual(
+    await card.locator(".attention-actions button").allTextContents(),
+    ["Ask @codex to review", "Details"],
+  );
+  const handoffsOnly = handoffFrame(3);
+  handoffsOnly.frame.attention.shift();
+  const only = await open(t, (client) => replay(client, [handoffsOnly]));
+  await only.live();
+  assert.equal(
+    await only.page
+      .getByRole("navigation", { name: "Needs you" })
+      .locator(".row-reason")
+      .textContent(),
+    "3 handoffs need a decision",
+  );
 });
