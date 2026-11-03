@@ -202,12 +202,12 @@ dashboard security headers. Blank lines are heartbeats and have no sequence
 number. Each JSON record has `v: 1` and a positive, contiguous, response-local
 `seq` starting at 1.
 
-| `kind` | Other fields | Meaning |
-| --- | --- | --- |
-| `reset` | `continuity`, `cols`, `rows`, `bytes` | Replace all emulator and decoder state with the complete base64 ANSI paint at this viewport size. A later full paint produces another reset, even at the same dimensions. |
-| `data` | `bytes` | Apply ordered base64 ANSI bytes after a reset. Data may split UTF-8 or escape sequences across records. |
-| `closed` | `reason` | End with `ended`, `replaced`, or `missing`. Native diagnostic strings are not part of the contract. |
-| `unavailable` | `reason` | End with `unsupported`, `busy`, `source_lost`, `invalid_source`, `slow_viewer`, or `server_stopping`. |
+| `kind`        | Other fields                          | Meaning                                                                                                                                                                   |
+| ------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reset`       | `continuity`, `cols`, `rows`, `bytes` | Replace all emulator and decoder state with the complete base64 ANSI paint at this viewport size. A later full paint produces another reset, even at the same dimensions. |
+| `data`        | `bytes`                               | Apply ordered base64 ANSI bytes after a reset. Data may split UTF-8 or escape sequences across records.                                                                   |
+| `closed`      | `reason`                              | End with `ended`, `replaced`, or `missing`. Native diagnostic strings are not part of the contract.                                                                       |
+| `unavailable` | `reason`                              | End with `unsupported`, `busy`, `source_lost`, `invalid_source`, `slow_viewer`, or `server_stopping`.                                                                     |
 
 The viewport limits are 1 through 512 columns, 1 through 256 rows, and at most
 65,536 cells.
