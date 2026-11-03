@@ -49,7 +49,7 @@ From the repository root, use the isolated profile procedure in the
 Build the app first, then serve it from that profile.
 
 ```sh
-namedrop dashboard --no-open --json --ui /absolute/path/to/experimental/channels/dist
+namedrop channels --no-open --json --ui /absolute/path/to/experimental/channels/dist
 ```
 
 Run that command through the driver's `env -i` wrapper. Use the returned nonce URL
@@ -187,7 +187,7 @@ herdr plugin action invoke update --plugin namedrop
 ```
 
 After the update, refresh or reopen Channels and reopen Peek to use the new app.
-If the dashboard session has ended, run `namedrop dashboard` for a fresh one-time
+If the dashboard session has ended, run `namedrop channels` for a fresh one-time
 link. Updating from exp.7 to exp.8 does not require restarting agent sessions.
 
 The strict `npm run test:live-peek` browser check runs Chromium headlessly with

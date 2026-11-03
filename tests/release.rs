@@ -718,7 +718,7 @@ fn the_archive_bundles_every_declared_entrypoint_including_the_naming_popup() {
             .find(|(id, _)| id == "actions:channels")
             .unwrap()
             .1,
-        ["sh", "./scripts/run.sh", "dashboard"]
+        ["sh", "./scripts/run.sh", "channels"]
     );
     let naming = distributed["panes"]
         .as_array_of_tables()

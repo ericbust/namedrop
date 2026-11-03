@@ -369,10 +369,10 @@ Run the Herdr action **Open Namedrop Channels** in the workspace, or run its com
 
 ```sh
 herdr plugin action invoke channels --plugin namedrop
-namedrop dashboard
+namedrop channels
 ```
 
-Both open the page in your browser on macOS, and on Linux when a display is available. If no browser opens, run `namedrop dashboard` in a shell tab and open the link it prints. Herdr runs the action in its own server process, so the action can't open a browser when that process has no display. Run `namedrop dashboard --no-open` to print the link only. The link works once. Run the command again for a new link.
+Both open the page in your browser on macOS, and on Linux when a display is available. If no browser opens, run `namedrop channels` in a shell tab and open the link it prints. Herdr runs the action in its own server process, so the action can't open a browser when that process has no display. Run `namedrop channels --no-open` to print the link only. The link works once. Run the command again for a new link.
 
 ### What to try
 

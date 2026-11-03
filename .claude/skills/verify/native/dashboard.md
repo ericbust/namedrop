@@ -14,8 +14,8 @@ Users open a live, read-only browser view of one workspace's agents, messages, m
 
 ## How to get to it (user POV)
 
-- Run `namedrop dashboard` in a workspace. It opens a browser when it can, and always prints the URL. `--no-open` only prints.
-- Run the Herdr workspace action **Open Namedrop Channels**, or `herdr plugin action invoke channels --plugin namedrop`. The action runs `namedrop dashboard` in Herdr's server process, so it opens a browser only when that process has a display.
+- Run `namedrop channels` in a workspace. It opens a browser when it can, and always prints the URL. `--no-open` only prints.
+- Run the Herdr workspace action **Open Namedrop Channels**, or `herdr plugin action invoke channels --plugin namedrop`. The action runs `namedrop channels` in Herdr's server process, so it opens a browser only when that process has a display.
 - Open the printed `http://127.0.0.1:<port>/w/<key>?n=<nonce>` link. The browser lands on `/w/<key>` with the cookie set.
 
 ## Driving it with control-namedrop
@@ -25,11 +25,11 @@ Preconditions:
 - The helper owns the server, two workspaces with separate Git checkouts, and the Namedrop state. No browser is needed.
 
 - Run `.claude/skills/verify/native/control-namedrop.py --feature dashboard`.
-- It names `@build` as a terminal, then runs `dashboard --no-open` in the first workspace's pane. The response must report `server: started`, `opened: false`, the fixture workspace, and a loopback URL on the port in `<state>/dashboard/server.json`.
+- It names `@build` as a terminal, then runs `channels --no-open` in the first workspace's pane. The response must report `server: started`, `opened: false`, the fixture workspace, and a loopback URL on the port in `<state>/dashboard/server.json`.
 - It redeems the link and requires `303` to `/w/<key>` with a `Set-Cookie`. Replaying the link and requesting the page without the cookie must both return `401`. With the cookie, the page returns `200` HTML.
 - It reads the first `snapshot` frame from `/w/<key>/events`. The space must be the fixture workspace in state `active`, and the only terminal participant must be `@build`. The frame is saved as `dashboard-snapshot.json`.
-- A second `dashboard --no-open` must report `server: running` with the same port and space key.
-- It creates workspace B and runs `dashboard --no-open` from B's pane. The response must report `server: running`, the same port, and a different space key. Before activation, B's stream reports state `unknown` with B's label and no participants. After `activate` in B, the stream must deliver a frame with B's workspace ID in state `active`. It then requires `/api/spaces` to list both space keys. `dashboard.json` keeps the responses and both space states.
+- A second `channels --no-open` must report `server: running` with the same port and space key.
+- It creates workspace B and runs `channels --no-open` from B's pane. The response must report `server: running`, the same port, and a different space key. Before activation, B's stream reports state `unknown` with B's label and no participants. After `activate` in B, the stream must deliver a frame with B's workspace ID in state `active`. It then requires `/api/spaces` to list both space keys. `dashboard.json` keeps the responses and both space states.
 - The helper sets `NAMEDROP_DASHBOARD_IDLE_MS=10000` for its panes, so the server it starts idles out within the run. After the last stream closes, it waits for the server to exit, requires `dashboard: stopping: idle` in `<state>/dashboard/server.log`, and requires the session file to be gone.
 - If the server is still alive at teardown, the helper stops it by the PID recorded in `server.json`, after checking that its command line names `dashboard-server` and the fixture state. `cleanup.json` records `dashboard_pid` and `dashboard_alive`.
 - The page's rendering is a separate check. Drive the Channels app in a browser as [Channels browser app](../SKILL.md#channels-browser-app) describes. The helper does not drive `dashboard-channels`, and it does not assert link expiry.

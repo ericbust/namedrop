@@ -82,20 +82,18 @@ impl Dashboard {
     }
 
     fn command(&self, ui: Option<&Path>) -> Command {
+        self.command_named(ui, "channels", false)
+    }
+
+    fn command_named(&self, ui: Option<&Path>, name: &str, human: bool) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
         command
             .current_dir(self.root())
             .env("TMPDIR", self.root())
-            .args(["--json", "--plugin-state"])
+            .args([if human { "--human" } else { "--json" }, "--plugin-state"])
             .arg(self.state())
-            .args([
-                "--herdr-socket",
-                "assets-test",
-                "--herdr-workspace",
-                "w1",
-                "dashboard",
-                "--no-open",
-            ])
+            .args(["--herdr-socket", "assets-test", "--herdr-workspace", "w1"])
+            .args([name, "--no-open"])
             .env_remove("HERDR_PANE_ID")
             .env_remove("HERDR_WORKSPACE_ID")
             .env_remove("HERDR_SOCKET_PATH")
@@ -163,6 +161,55 @@ impl Dashboard {
             body: raw[end + 4..].to_vec(),
         }
     }
+}
+
+#[test]
+fn channels_and_legacy_alias_keep_json_and_text_output() {
+    let dashboard = Dashboard::new();
+    let first = dashboard
+        .command_named(None, "channels", false)
+        .output()
+        .unwrap();
+    let second = dashboard
+        .command_named(None, "dashboard", false)
+        .output()
+        .unwrap();
+    assert!(first.status.success(), "{first:?}");
+    assert!(second.status.success(), "{second:?}");
+    let mut first: Value = serde_json::from_slice(&first.stdout).unwrap();
+    let mut second: Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(first["operation"], "dashboard");
+    assert_eq!(second["operation"], "dashboard");
+    assert_eq!(second["data"]["server"], "running");
+    let first_url = first["data"]["url"].as_str().unwrap().to_owned();
+    let second_url = second["data"]["url"].as_str().unwrap().to_owned();
+    assert_eq!(first_url.split('?').next(), second_url.split('?').next());
+    first["data"]["url"] = Value::Null;
+    second["data"]["url"] = Value::Null;
+    first["data"]["server"] = Value::Null;
+    second["data"]["server"] = Value::Null;
+    assert_eq!(first, second);
+
+    let text = ["channels", "dashboard"].map(|name| {
+        let output = dashboard.command_named(None, name, true).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    });
+    let normalize = |output: &str| {
+        output
+            .lines()
+            .map(|line| {
+                if line.starts_with("  http://127.0.0.1:") {
+                    "  <one-time URL>"
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(normalize(&text[0]), normalize(&text[1]));
+    assert!(text[0].contains("Namedrop dashboard for workspace w1 is live:"));
 }
 
 impl Drop for Dashboard {

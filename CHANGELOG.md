@@ -2,6 +2,12 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## Unreleased
+
+### Changed
+
+- Open Channels with `namedrop channels`. The Herdr action uses this command. `namedrop dashboard` remains a hidden compatibility alias with the same flags and output.
+
 ## [1.5.0-exp.8] - 2026-11-03
 
 ### Fixed
