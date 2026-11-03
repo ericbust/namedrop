@@ -69,7 +69,7 @@ impl HistoryReader {
                                 "--lines",
                                 "2200",
                             ],
-                            Duration::from_secs(3),
+                            Duration::from_secs(20),
                             &cancelled,
                             ENCODED_LIMIT,
                         );
