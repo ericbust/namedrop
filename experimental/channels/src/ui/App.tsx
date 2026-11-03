@@ -1022,6 +1022,7 @@ export function App() {
             maximum={panels.maximum.left}
             controls={sidebarId}
             onResize={(value) => panels.setWidth("left", value)}
+            onResizeStart={() => panels.startResize("left")}
           />
           {pane !== null && (
             <PanelResize
@@ -1030,6 +1031,7 @@ export function App() {
               maximum={panels.maximum.right}
               controls={paneId}
               onResize={(value) => panels.setWidth("right", value)}
+              onResizeStart={() => panels.startResize("right")}
             />
           )}
           {drawerOpen && (

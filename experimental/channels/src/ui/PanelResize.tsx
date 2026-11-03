@@ -52,6 +52,16 @@ export function usePanelWidths(open: boolean) {
     style,
     widths,
     maximum,
+    startResize: (side: keyof PanelWidths) => {
+      const original = preferred[side];
+      return () =>
+        setPreferred((previous) => {
+          const restored = { ...previous };
+          if (original === undefined) delete restored[side];
+          else restored[side] = original;
+          return restored;
+        });
+    },
     setWidth: (side: keyof PanelWidths, value: number) =>
       setPreferred((previous) => ({
         ...previous,
@@ -66,6 +76,7 @@ type Props = {
   maximum: number;
   controls: string;
   onResize: (value: number) => void;
+  onResizeStart: () => () => void;
 };
 export function PanelResize({
   side,
@@ -73,10 +84,14 @@ export function PanelResize({
   maximum,
   controls,
   onResize,
+  onResizeStart,
 }: Props) {
-  const drag = useRef<{ pointerId: number; x: number; width: number } | null>(
-    null,
-  );
+  const drag = useRef<{
+    pointerId: number;
+    x: number;
+    width: number;
+    cancel: () => void;
+  } | null>(null);
   const [dragging, setDragging] = useState(false);
   useEffect(() => {
     if (!dragging) return;
@@ -121,6 +136,7 @@ export function PanelResize({
           pointerId: event.pointerId,
           x: event.clientX,
           width: value,
+          cancel: onResizeStart(),
         };
         setDragging(true);
       }}
@@ -138,7 +154,7 @@ export function PanelResize({
         event.currentTarget.releasePointerCapture(event.pointerId);
       }}
       onPointerCancel={() => {
-        if (drag.current) onResize(drag.current.width);
+        drag.current?.cancel();
         finish();
       }}
       onLostPointerCapture={finish}

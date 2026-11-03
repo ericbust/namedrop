@@ -12258,3 +12258,48 @@ test("PANELS-R6: lost pointer capture, pane closure, and narrow resize clean up 
   await page.mouse.up();
   assert.equal(await left.isVisible(), false);
 });
+for (const { side, saved, narrow, restored } of [
+  { side: "right", saved: 640, narrow: 1024, restored: 640 },
+  { side: "left", saved: 360, narrow: 861, restored: 360 },
+  { side: "right", saved: null, narrow: 1024, restored: 400 },
+  { side: "left", saved: null, narrow: 1024, restored: 248 },
+]) {
+  test(`PANELS-R6 cancel restores ${side} ${saved === null ? "responsive default" : "saved preference"} after viewport clamp`, async (t) => {
+    const ui = await panelsRoom(t);
+    const { page } = ui;
+    if (saved !== null) {
+      await page.evaluate(
+        ({ side, saved }) =>
+          localStorage.setItem(
+            "namedrop:panel-widths:v1",
+            JSON.stringify({ [side]: saved }),
+          ),
+        { side, saved },
+      );
+      await page.reload();
+      await ui.live();
+    }
+    await openPanelsThread(ui);
+    await resize(page, narrow, 900);
+    const separator = page.getByRole("separator", {
+      name:
+        side === "left"
+          ? "Resize Channels sidebar"
+          : "Resize conversation sidebar",
+    });
+    const before = await panelWidth(separator);
+    await dragPanel(page, separator, side === "left" ? -20 : 20, false);
+    assert.equal(await panelWidth(separator), before - 20);
+    await separator.dispatchEvent("pointercancel");
+    await page.mouse.up();
+    assert.equal(await panelWidth(separator), before);
+    await resize(page, 1440, 900);
+    assert.equal(await panelWidth(separator), restored);
+    const preference = await page.evaluate(
+      (side) =>
+        JSON.parse(localStorage.getItem("namedrop:panel-widths:v1"))[side],
+      side,
+    );
+    assert.equal(preference, saved ?? undefined);
+  });
+}
