@@ -2,6 +2,15 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.5.0-exp.7] - 2026-11-03
+
+### Added
+
+- Peek opens a live, read-only terminal projection with colors, cursor motion, and TUI redraws. Text snapshot keeps the sanitized text view and manual Refresh. Live sends no terminal input and does not resize the source terminal.
+- Live reconnects retain target continuity and stop on observed binding or terminal changes. Closing Peek, disconnecting, or stopping the dashboard cleans up its passive observer, including quiet terminals.
+
+Existing experimental installations can use Update Namedrop, then refresh or reopen Channels and Peek. This update does not require new agent sessions.
+
 ## [1.5.0-exp.6] - 2026-11-02
 
 ### Added
