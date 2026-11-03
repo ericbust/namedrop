@@ -305,6 +305,8 @@ async function open(browser, t, initial = full()) {
   const requests = [],
     streams = new Set(),
     allStreams = [];
+  const browserRequests = [];
+  const appAmbientRequests = [];
   const eventStreams = new Set();
   const frame = structuredClone(fixture);
   const probeRequests = [];
@@ -357,6 +359,14 @@ async function open(browser, t, initial = full()) {
     screens = 0;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
+    if (req.headers["x-peek-fixture-proof"] !== proof) {
+      appAmbientRequests.push({
+        path: req.url,
+        method: req.method,
+        headers: req.headers,
+      });
+      return res.writeHead(404).end();
+    }
     requests.push({
       path: url.pathname,
       query: url.search,
@@ -479,7 +489,18 @@ async function open(browser, t, initial = full()) {
   });
   const origin = `http://127.0.0.1:${server.address().port}`;
   await context.route("**/*", (route) => {
-    if (route.request().url().startsWith(`${origin}/`)) return route.continue();
+    if (route.request().url().startsWith(`${origin}/`)) {
+      browserRequests.push({
+        path: new URL(route.request().url()).pathname,
+        method: route.request().method(),
+      });
+      return route.continue({
+        headers: {
+          ...route.request().headers(),
+          "x-peek-fixture-proof": proof,
+        },
+      });
+    }
     if (route.request().url().startsWith(`${probeOrigin}/`)) {
       assert.equal(
         new URL(route.request().url()).searchParams.get("proof"),
@@ -557,6 +578,37 @@ async function open(browser, t, initial = full()) {
     allStreams,
     streams,
     requests,
+    browserRequests,
+    appAmbientRequests,
+    async requestControls() {
+      const beforeBrowser = browserRequests.length;
+      const beforeServer = requests.length;
+      const ambient = await fetch(origin, {
+        headers: { "user-agent": "namedrop-oracle-ambient-control" },
+      });
+      assert.equal(ambient.status, 404);
+      await ambient.text();
+      const status = await page.evaluate(async () => {
+        const response = await fetch("/request-positive-control");
+        await response.text();
+        return response.status;
+      });
+      assert.equal(status, 404);
+      assert.equal(browserRequests.length, beforeBrowser + 1);
+      assert.equal(requests.length, beforeServer + 1);
+      assert.equal(browserRequests.at(-1).path, "/request-positive-control");
+      assert.equal(requests.at(-1).path, "/request-positive-control");
+      assert.ok(
+        appAmbientRequests.some(
+          (r) => r.headers["user-agent"] === "namedrop-oracle-ambient-control",
+        ),
+      );
+      return {
+        browser: browserRequests.at(-1),
+        received: requests.at(-1),
+        ambientSeparated: true,
+      };
+    },
     errors,
     external,
     dialogs,
@@ -939,6 +991,7 @@ async function sparseScrollingOracle(browser, t, result) {
     );
 
     const beforeInput = ui.requests.length;
+    const beforeInputBrowser = ui.browserRequests.length;
     const bounds = await region.boundingBox();
     await ui.page.mouse.move(bounds.x + 80, bounds.y + bounds.height / 2);
     await ui.page.mouse.wheel(0, -240);
@@ -1038,6 +1091,7 @@ async function sparseScrollingOracle(browser, t, result) {
     reset(70, 35, "RESET-35");
     await painted(35, "RESET-35");
     assert.equal((await usefulMetrics(ui, 35, "RESET-35")).visible, true);
+    assert.deepEqual(ui.browserRequests.slice(beforeInputBrowser), []);
     assert.deepEqual(ui.requests.slice(beforeInput), []);
 
     const count = ui.liveCount();
@@ -1163,7 +1217,9 @@ async function scrollingOracle(browser, t, result) {
       "auto",
       "Oversized columns need an accessible horizontal scrollbar",
     );
+    result.requestControls = await ui.requestControls();
     const beforeInput = ui.requests.length;
+    const beforeInputBrowser = ui.browserRequests.length;
     let seq = 2;
     const send = (bytes) => ui.live().send(data(seq++, bytes));
     const reset = (rows, label) =>
@@ -1326,6 +1382,7 @@ async function scrollingOracle(browser, t, result) {
     reset(80, "FOLLOW-RESET");
     await painted("FOLLOW-RESET");
     assert.equal((await scrollMetrics(ui)).bottomVisible, true);
+    assert.deepEqual(ui.browserRequests.slice(beforeInputBrowser), []);
     assert.deepEqual(
       ui.requests.slice(beforeInput),
       [],
@@ -1333,6 +1390,9 @@ async function scrollingOracle(browser, t, result) {
     );
 
     result.scrolling.localRequests = ui.requests.slice(beforeInput);
+    result.scrolling.browserRequests =
+      ui.browserRequests.slice(beforeInputBrowser);
+    result.scrolling.ambientAppRequests = ui.appAmbientRequests;
     const count = ui.liveCount();
     ui.live().res.end();
     await until(() => ui.liveCount() > count, "followed reconnect");
@@ -1531,6 +1591,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
       );
 
       const beforeInput = ui.requests.length;
+      const beforeInputBrowser = ui.browserRequests.length;
       await ui.page
         .getByRole("region", { name: "Read-only live terminal" })
         .focus();
@@ -1553,6 +1614,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
         )
         .waitFor();
       assert.equal(ui.screens(), 0);
+      assert.deepEqual(ui.browserRequests.slice(beforeInputBrowser), []);
       assert.deepEqual(ui.requests.slice(beforeInput), []);
       result.checks.push(
         "keyboard/scroll emits no host requests; oversized delta is refused without snapshot fallback",
