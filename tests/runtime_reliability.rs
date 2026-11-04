@@ -18,6 +18,81 @@ use std::{
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
+
+#[test]
+fn human_cli_reply_resets_the_automatic_reply_limit() {
+    let fixture = Fixture::new();
+    fixture.initialize();
+    fixture.queue_message();
+    let namespace = fixture.namespace();
+    let thread_id = ThreadId::new("thread-1");
+    let mut store = StateStore::open(fixture.state()).unwrap();
+    store
+        .transaction(|tx| {
+            for sequence in 2..=11 {
+                tx.append_message(
+                    &namespace,
+                    &MessageDraft {
+                        thread_id: thread_id.clone(),
+                        message_id: MessageId::new(format!("message-{sequence}")),
+                        in_reply_to: Some(MessageId::new("message-1")),
+                        author_address_id: PaneAddressId::new("recipient"),
+                        author_kind: ActorKind::AgentSession,
+                        author_alias_snapshot: "recipient".into(),
+                        author_agent_session_snapshot: Some(AgentSessionId::new("session-1")),
+                        request_id: format!("agent-{sequence}"),
+                        authored_source: "@author Update.".into(),
+                        body: "Update.".into(),
+                        grammar_version: "reply/v1".into(),
+                        recipients: vec![MessageRecipientDraft {
+                            address_id: PaneAddressId::new("author"),
+                            alias_snapshot: "author".into(),
+                            agent_session_snapshot: None,
+                            delivery_id: DeliveryId::new(format!("delivery-{sequence}")),
+                        }],
+                        context_references: vec![],
+                    },
+                    &MutationAttribution::new(ActorKind::AgentSession, "session-1", now_ms()),
+                )?;
+            }
+            assert!(
+                tx.thread_control_state(&namespace, &thread_id)?
+                    .reply_limit_paused
+            );
+            Ok(())
+        })
+        .unwrap();
+
+    let input = serde_json::json!({
+        "request_id": "human-reset",
+        "author_kind": "human",
+        "in_reply_to": "message-11",
+        "source": "@author Continue with my guidance."
+    });
+    let output = fixture
+        .command()
+        .env("XDG_CONFIG_HOME", fixture.root.join("home/.config"))
+        .args(["reply", "--input-json", &input.to_string()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    store
+        .transaction(|tx| {
+            let controls = tx.thread_control_state(&namespace, &thread_id)?;
+            assert_eq!(controls.reply_allowance, 10);
+            assert!(!controls.paused);
+            assert!(!controls.stopped);
+            assert!(tx.unresolved_attention_items(&namespace)?.is_empty());
+            Ok(())
+        })
+        .unwrap();
+}
+
 const HERDR_SCRIPT: &str = "case \"$1 $2\" in\n\
     'worktree list') printf '%s\\n' '{\"result\":{\"worktrees\":[{\"path\":\"/repo\",\"open_workspace_id\":\"workspace-1\"}]}}';;\n\
     'pane list') printf '%s\\n' '{\"result\":{\"panes\":[{\"pane_id\":\"pane-recipient\",\"terminal_id\":\"terminal-1\",\"tab_id\":\"tab-1\",\"workspace_id\":\"workspace-1\",\"agent_session\":{\"value\":\"session-1\"},\"agent_status\":\"idle\"}]}}';;\n\

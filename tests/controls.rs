@@ -751,6 +751,333 @@ fn ten_agent_replies_pause_the_thread_and_continue_grants_exactly_ten_more() {
     assert_eq!(second_limit.1.len(), 1);
 }
 
+fn reply_limit_store(directory: &TestDirectory) -> StateStore {
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let namespace = StateNamespace::for_space("socket-a", "workspace-1");
+    let human = attribution(ActorKind::Human, "local-human", 1);
+    store
+        .transaction(|transaction| {
+            transaction.activate_worktree(&namespace, &human)?;
+            for (id, alias) in [
+                ("address-human", "human"),
+                ("address-agent-a", "agent-a"),
+                ("address-agent-b", "agent-b"),
+            ] {
+                transaction.create_pane_address(&namespace, &address(id, alias), &human)?;
+            }
+            transaction.bind_pane(
+                &namespace,
+                &namedrop::PaneBindingId::new("binding-agent-b"),
+                &PaneAddressId::new("address-agent-b"),
+                "pane-agent-b",
+                &human,
+            )?;
+            transaction.observe_agent_session(
+                &namespace,
+                "observation-agent-b",
+                &PaneAddressId::new("address-agent-b"),
+                &AgentSessionId::new("session-address-agent-b"),
+                "working",
+                &human,
+            )?;
+            transaction.create_thread(
+                &namespace,
+                &ThreadId::new("thread-1"),
+                "Reply limit reset",
+                &human,
+            )?;
+            transaction.append_message(&namespace, &human_reply(1), &human)?;
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+fn human_reply(sequence: u64) -> MessageDraft {
+    message(
+        sequence,
+        &ThreadId::new("thread-1"),
+        &PaneAddressId::new("address-human"),
+        ActorKind::Human,
+        &PaneAddressId::new(if sequence.is_multiple_of(2) {
+            "address-agent-b"
+        } else {
+            "address-agent-a"
+        }),
+        (sequence > 1).then(|| MessageId::new(format!("message-{}", sequence - 1))),
+    )
+}
+
+fn agent_ping_pong_reply(sequence: u64) -> MessageDraft {
+    let (author, recipient) = if sequence.is_multiple_of(2) {
+        ("address-agent-a", "address-agent-b")
+    } else {
+        ("address-agent-b", "address-agent-a")
+    };
+    message(
+        sequence,
+        &ThreadId::new("thread-1"),
+        &PaneAddressId::new(author),
+        ActorKind::AgentSession,
+        &PaneAddressId::new(recipient),
+        Some(MessageId::new(format!("message-{}", sequence - 1))),
+    )
+}
+
+fn append_agent_ping_pong(store: &mut StateStore, sequences: std::ops::RangeInclusive<u64>) {
+    store
+        .transaction(|transaction| {
+            for sequence in sequences {
+                let draft = agent_ping_pong_reply(sequence);
+                transaction.append_message(
+                    &StateNamespace::for_space("socket-a", "workspace-1"),
+                    &draft,
+                    &attribution(
+                        ActorKind::AgentSession,
+                        draft
+                            .author_agent_session_snapshot
+                            .as_ref()
+                            .unwrap()
+                            .as_str(),
+                        sequence,
+                    ),
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn human_message_midway_refills_the_reply_allowance() {
+    let directory = TestDirectory::new();
+    let mut store = reply_limit_store(&directory);
+    let namespace = StateNamespace::for_space("socket-a", "workspace-1");
+    let thread = ThreadId::new("thread-1");
+    append_agent_ping_pong(&mut store, 2..=5);
+    let before = store
+        .transaction(|transaction| transaction.thread_control_state(&namespace, &thread))
+        .unwrap();
+    assert_eq!(before.reply_allowance, 6);
+
+    let after = store
+        .transaction(|transaction| {
+            transaction.append_message(
+                &namespace,
+                &human_reply(6),
+                &attribution(ActorKind::Plugin, "human-message-relay", 6),
+            )?;
+            transaction.thread_control_state(&namespace, &thread)
+        })
+        .unwrap();
+    assert_eq!(after.reply_allowance, 10);
+    assert!(!after.paused);
+    assert!(!after.stopped);
+}
+
+#[test]
+fn human_message_continues_a_limit_pause_and_releases_a_queued_agent_delivery() {
+    let directory = TestDirectory::new();
+    let mut store = reply_limit_store(&directory);
+    let namespace = StateNamespace::for_space("socket-a", "workspace-1");
+    let thread = ThreadId::new("thread-1");
+    let human = attribution(ActorKind::Human, "local-human", 12);
+    let recipient = PaneAddressId::new("address-agent-b");
+    let lease = namedrop::LeaseDraft {
+        attempt_id: namedrop::DeliveryAttemptId::new("attempt-held-agent-reply"),
+        binding_id: namedrop::PaneBindingId::new("binding-agent-b"),
+        agent_session_id: AgentSessionId::new("session-address-agent-b"),
+        retry_of_attempt_id: None,
+        owner: "test".to_owned(),
+        acquired_at_ms: 12,
+        expires_at_ms: 112,
+    };
+    append_agent_ping_pong(&mut store, 2..=11);
+    store
+        .transaction(|transaction| {
+            let state = transaction.thread_control_state(&namespace, &thread)?;
+            assert!(state.reply_limit_paused);
+            assert_eq!(state.reply_allowance, 0);
+            let attention = transaction.unresolved_attention_items(&namespace)?;
+            assert_eq!(attention.len(), 1);
+            assert_eq!(
+                attention[0].source_kind,
+                namedrop::AttentionSourceKind::AutomaticReplyLimit
+            );
+            assert_eq!(attention[0].source_id, thread.as_str());
+            assert!(
+                transaction
+                    .lease_mailbox_head(&namespace, &recipient, &lease, &human)?
+                    .is_none()
+            );
+            Ok(())
+        })
+        .unwrap();
+
+    store
+        .transaction(|transaction| {
+            transaction.append_message(&namespace, &human_reply(12), &human)?;
+            let state = transaction.thread_control_state(&namespace, &thread)?;
+            assert_eq!(state.reply_allowance, 10);
+            assert!(!state.paused);
+            assert!(!state.reply_limit_paused);
+            assert!(
+                transaction
+                    .unresolved_attention_items(&namespace)?
+                    .is_empty()
+            );
+            assert!(
+                transaction
+                    .transition_facts(&namespace)?
+                    .iter()
+                    .any(|fact| {
+                        fact.entity_kind == namedrop::TransitionEntityKind::CollaborationThread
+                            && fact.entity_id == thread.as_str()
+                            && fact.transition_kind == namedrop::TransitionKind::Continued
+                            && fact.actor_kind == ActorKind::Human
+                    })
+            );
+            let delivered = transaction
+                .lease_mailbox_head(&namespace, &recipient, &lease, &human)?
+                .expect("the queued agent reply is deliverable after the human message");
+            assert_eq!(delivered.delivery.message_id, MessageId::new("message-2"));
+            Ok(())
+        })
+        .unwrap();
+
+    append_agent_ping_pong(&mut store, 13..=22);
+    let state = store
+        .transaction(|transaction| transaction.thread_control_state(&namespace, &thread))
+        .unwrap();
+    assert_eq!(state.reply_allowance, 0);
+    assert!(state.reply_limit_paused);
+}
+
+#[test]
+fn human_message_refills_but_preserves_a_manual_pause() {
+    let directory = TestDirectory::new();
+    let mut store = reply_limit_store(&directory);
+    let namespace = StateNamespace::for_space("socket-a", "workspace-1");
+    let thread = ThreadId::new("thread-1");
+    append_agent_ping_pong(&mut store, 2..=4);
+    let state = store
+        .transaction(|transaction| {
+            let human = attribution(ActorKind::Human, "local-human", 5);
+            let paused = transaction.pause_thread(&namespace, &thread, &human)?;
+            assert_eq!(paused.reply_allowance, 7);
+            assert!(paused.paused);
+            assert!(!paused.reply_limit_paused);
+            transaction.append_message(&namespace, &human_reply(5), &human)?;
+            transaction.thread_control_state(&namespace, &thread)
+        })
+        .unwrap();
+    assert_eq!(state.reply_allowance, 10);
+    assert!(state.paused);
+    assert!(!state.reply_limit_paused);
+    assert!(!state.stopped);
+}
+
+#[test]
+fn human_reply_cannot_reopen_or_refill_a_stopped_thread() {
+    let directory = TestDirectory::new();
+    let mut store = reply_limit_store(&directory);
+    let namespace = StateNamespace::for_space("socket-a", "workspace-1");
+    let thread = ThreadId::new("thread-1");
+    append_agent_ping_pong(&mut store, 2..=4);
+    let human = attribution(ActorKind::Human, "local-human", 5);
+    let stopped = store
+        .transaction(|transaction| transaction.stop_thread(&namespace, &thread, &human))
+        .unwrap()
+        .state;
+    assert!(stopped.stopped);
+    assert_eq!(stopped.reply_allowance, 7);
+    let rejected = store
+        .transaction(|transaction| transaction.append_message(&namespace, &human_reply(5), &human));
+    assert_eq!(rejected.unwrap_err().kind(), StoreErrorKind::InvalidInput);
+    let after = store
+        .transaction(|transaction| transaction.thread_control_state(&namespace, &thread))
+        .unwrap();
+    assert_eq!(after, stopped);
+}
+
+#[test]
+fn agent_messages_never_refill_even_with_human_mutation_attribution() {
+    let directory = TestDirectory::new();
+    let mut store = reply_limit_store(&directory);
+    let namespace = StateNamespace::for_space("socket-a", "workspace-1");
+    let thread = ThreadId::new("thread-1");
+    append_agent_ping_pong(&mut store, 2..=4);
+    store
+        .transaction(|transaction| {
+            let human = attribution(ActorKind::Human, "local-human", 5);
+            transaction.append_message(&namespace, &agent_ping_pong_reply(5), &human)?;
+            assert_eq!(
+                transaction
+                    .thread_control_state(&namespace, &thread)?
+                    .reply_allowance,
+                6
+            );
+            let mut non_reply = agent_ping_pong_reply(6);
+            non_reply.in_reply_to = None;
+            transaction.append_message(&namespace, &non_reply, &human)?;
+            assert_eq!(
+                transaction
+                    .thread_control_state(&namespace, &thread)?
+                    .reply_allowance,
+                6
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn duplicate_human_message_replay_does_not_refill_again() {
+    let directory = TestDirectory::new();
+    let mut store = reply_limit_store(&directory);
+    let namespace = StateNamespace::for_space("socket-a", "workspace-1");
+    let thread = ThreadId::new("thread-1");
+    append_agent_ping_pong(&mut store, 2..=4);
+    let draft = human_reply(5);
+    store
+        .transaction(|transaction| {
+            let receipt = transaction.append_message(
+                &namespace,
+                &draft,
+                &attribution(ActorKind::Human, "local-human", 5),
+            )?;
+            assert!(!receipt.idempotent_replay);
+            assert_eq!(
+                transaction
+                    .thread_control_state(&namespace, &thread)?
+                    .reply_allowance,
+                10
+            );
+            Ok(())
+        })
+        .unwrap();
+    append_agent_ping_pong(&mut store, 6..=6);
+    store
+        .transaction(|transaction| {
+            let before = transaction.thread_control_state(&namespace, &thread)?;
+            assert_eq!(before.reply_allowance, 9);
+            let transitions = transaction.transition_facts(&namespace)?;
+            let receipt = transaction.append_message(
+                &namespace,
+                &draft,
+                &attribution(ActorKind::Human, "local-human", 7),
+            )?;
+            assert!(receipt.idempotent_replay);
+            assert_eq!(
+                transaction.thread_control_state(&namespace, &thread)?,
+                before
+            );
+            assert_eq!(transaction.transition_facts(&namespace)?, transitions);
+            Ok(())
+        })
+        .unwrap();
+}
+
 #[test]
 fn human_controls_hold_fifo_cancel_only_permitted_work_and_never_disable_ordinary_panes() {
     let directory = TestDirectory::new();

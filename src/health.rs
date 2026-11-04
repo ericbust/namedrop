@@ -847,7 +847,7 @@ fn health_issue_for_attention(source: AttentionSourceKind) -> HealthIssue {
             "ND-THREAD-001",
             HealthSeverity::Notice,
             "A collaboration thread is waiting for approval.",
-            "Automatic replies paused at the configured human checkpoint.",
+            "Automatic replies paused at the configured human checkpoint. Your message resets the count and continues the thread.",
             HealthRepairKind::HumanDecision,
             "Continue the thread?",
         ),
