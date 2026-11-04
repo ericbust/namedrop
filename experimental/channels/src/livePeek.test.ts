@@ -117,6 +117,7 @@ test("live boundary consumes fragmented NDJSON, heartbeats and atomic paints in 
   );
   assert.deepEqual(run.updates[0], {
     kind: "reset",
+    continuity: "fixture-continuity",
     viewport: { cols: 120, rows: 40 },
     bytes: new TextEncoder().encode("\x1b[HRED"),
   });
@@ -127,6 +128,51 @@ test("live boundary consumes fragmented NDJSON, heartbeats and atomic paints in 
   assert.equal(seen[0]?.init?.credentials, "same-origin");
   assert.equal(seen[0]?.init?.cache, "no-store");
   assert.equal(seen[0]?.init?.redirect, "error");
+});
+
+test("history snapshots require a reset and obey exact wire and size bounds", async (t) => {
+  const history = (seq: number, text: string, extra = {}) => ({
+    v: 1,
+    seq,
+    kind: "history",
+    text,
+    ...extra,
+  });
+  await t.test("valid snapshots", async (subtest) => {
+    const valid = observation(subtest, async () =>
+      response([
+        reset(),
+        history(2, "first\nsecond"),
+        history(3, "new window"),
+        closed({ seq: 4 }),
+      ]),
+    );
+    await valid.done;
+    assert.deepEqual(
+      valid.updates.map((update) => update.kind),
+      ["reset", "history", "history"],
+    );
+    assert.deepEqual(valid.updates[1], {
+      kind: "history",
+      text: "first\nsecond",
+    });
+  });
+  for (const records of [
+    [history(1, "early")],
+    [reset(), history(2, "extra", { extra: true })],
+    [reset(), { ...history(2, "valid"), text: 12 }],
+    [reset(), history(2, "é".repeat(524289))],
+    [reset(), history(2, "line\n".repeat(2200))],
+  ]) {
+    await t.test("reject invalid snapshot", async (subtest) => {
+      const run = observation(subtest, async () => response(records));
+      await run.done;
+      assert.deepEqual(run.states.at(-1), {
+        kind: "unavailable",
+        reason: "invalid_source",
+      });
+    });
+  }
 });
 
 test("live boundary rejects malformed/version/sequence/base64/viewport/variant bytes before rendering them", async (t) => {
@@ -364,11 +410,23 @@ test("server-owned canonical streams conform without copying or skipping the int
               : "interrupted",
           };
     assert.deepEqual(states.at(-1), expected, stream.name);
-    assert.equal(
-      updates.length,
-      stream.records.filter(
-        (r: { kind: string }) => r.kind === "reset" || r.kind === "data",
-      ).length,
+    assert.deepEqual(
+      updates.map((update) => update.kind),
+      stream.records
+        .filter(
+          (r: { kind: string }) =>
+            r.kind === "reset" || r.kind === "history" || r.kind === "data",
+        )
+        .map((r: { kind: string }) => r.kind),
+      stream.name,
+    );
+    assert.deepEqual(
+      updates
+        .filter((update) => update.kind === "history")
+        .map((update) => update.text),
+      stream.records
+        .filter((r: { kind: string }) => r.kind === "history")
+        .map((r: { text: string }) => r.text),
       stream.name,
     );
   }
@@ -389,4 +447,74 @@ test("server-owned canonical streams conform without copying or skipping the int
     onState: (s) => states.push(s),
   });
   assert.deepEqual(states.at(-1), { kind: "closed", reason: "ended" });
+});
+
+test("retained continuity validates identity before reset exposes cached history", async (t) => {
+  const requested: string[] = [];
+  t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {
+    requested.push(String(input));
+    return response([reset(), closed({ seq: 2 })]);
+  });
+  const updates: LiveUpdate[] = [];
+  const states: LiveState[] = [];
+  await observePeek({
+    target: selected,
+    signal: new AbortController().signal,
+    retainedContinuity: "fixture-continuity",
+    async apply(update) {
+      updates.push(update);
+    },
+    onState(state) {
+      states.push(state);
+    },
+  });
+  assert.ok(requested[0]?.endsWith("?continuity=fixture-continuity"));
+  assert.equal(updates[0]?.kind, "reset");
+  const update = updates[0];
+  assert.ok(update?.kind === "reset");
+  assert.equal(update.continuity, "fixture-continuity");
+  assert.deepEqual(states.at(-1), { kind: "closed", reason: "ended" });
+});
+
+test("a changed retained identity never applies a replacement frame", async (t) => {
+  t.mock.method(globalThis, "fetch", async () =>
+    response([reset({ continuity: "replacement" })]),
+  );
+  const updates: LiveUpdate[] = [];
+  const states: LiveState[] = [];
+  await observePeek({
+    target: selected,
+    signal: new AbortController().signal,
+    retainedContinuity: "fixture-continuity",
+    async apply(update) {
+      updates.push(update);
+    },
+    onState(state) {
+      states.push(state);
+    },
+  });
+  assert.deepEqual(updates, []);
+  assert.deepEqual(states.at(-1), { kind: "closed", reason: "replaced" });
+});
+
+test("unsupported startup with retained continuity keeps the existing text fallback", async (t) => {
+  t.mock.method(globalThis, "fetch", async () =>
+    response([{ v: 1, seq: 1, kind: "unavailable", reason: "unsupported" }]),
+  );
+  const states: LiveState[] = [];
+  await observePeek({
+    target: selected,
+    signal: new AbortController().signal,
+    retainedContinuity: "fixture-continuity",
+    async apply() {
+      assert.fail("Unsupported source cannot validate retained history");
+    },
+    onState(state) {
+      states.push(state);
+    },
+  });
+  assert.deepEqual(states.at(-1), {
+    kind: "unavailable",
+    reason: "unsupported",
+  });
 });

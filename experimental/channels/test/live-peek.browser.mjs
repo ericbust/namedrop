@@ -405,6 +405,8 @@ async function open(browser, t, initial = full()) {
     }
     if (url.pathname.endsWith("/screen")) {
       screens++;
+      if (mode === "session") return res.writeHead(401).end();
+      if (mode === "missing") return res.writeHead(404).end();
       res.writeHead(200, { "Content-Type": "text/plain" });
       return res.end("SANITIZED TEXT SNAPSHOT");
     }
@@ -433,7 +435,11 @@ async function open(browser, t, initial = full()) {
       if (mode === "unsupported")
         return res.end(`${JSON.stringify(outcome("unsupported"))}\n`);
       if (mode === "invalid") return res.end(`${JSON.stringify(full(2))}\n`);
-      stream.send(initial);
+      if (mode === "delayed")
+        setTimeout(() => {
+          if (!res.destroyed) stream.send(initial);
+        }, 250);
+      else stream.send(initial);
       if (mode === "retry") res.end();
       return;
     }
@@ -560,6 +566,7 @@ async function open(browser, t, initial = full()) {
     "Fixture response must serve the extracted product policy",
   );
   await page.getByRole("heading", { name: "alpha", exact: true }).waitFor();
+  await page.bringToFront();
   const chip = (member) =>
     page.locator(`[data-address-id="${member}"] .member`);
   const drawer = page.getByRole("complementary", { name: /^Screen of/ });
@@ -568,6 +575,7 @@ async function open(browser, t, initial = full()) {
   const liveCount = () =>
     requests.filter((r) => r.path.endsWith("/live")).length;
   return {
+    engine: browser.browserType().name(),
     page,
     context,
     drawer,
@@ -745,9 +753,14 @@ async function open(browser, t, initial = full()) {
     close,
   };
 }
+async function clickMember(ui, member) {
+  // Headed Firefox can keep an animated, visible chip perpetually "unstable"
+  // in Playwright after several contexts. Force only this setup click.
+  await ui.chip(member).click(ui.engine === "firefox" ? { force: true } : {});
+}
 async function until(fn, message) {
   const deadline = Date.now() + 5000;
-  while (!fn()) {
+  while (!(await fn())) {
     if (Date.now() >= deadline) assert.fail(message);
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
@@ -955,7 +968,7 @@ async function activeNavigationOracle(browser, t, result) {
   let timer;
   try {
     await ui.page.setViewportSize({ width: 900, height: 540 });
-    await ui.chip("codex").click();
+    await clickMember(ui, "codex");
     await ui.rows().last().getByText("IDLE-LATEST", { exact: true }).waitFor();
     const region = ui.page.locator(".peek-live");
     const top = async () => {
@@ -1098,7 +1111,7 @@ async function sparseScrollingOracle(browser, t, result) {
   const ui = await open(browser, t, sparseProjection());
   try {
     await ui.page.setViewportSize({ width: 900, height: 540 });
-    await ui.chip("codex").click();
+    await clickMember(ui, "codex");
     const region = ui.page.locator(".peek-live");
     const painted = async (row, text) => {
       await ui
@@ -1304,7 +1317,7 @@ async function scrollingOracle(browser, t, result) {
   const ui = await open(browser, t, projection());
   try {
     await ui.page.setViewportSize({ width: 1024, height: 620 });
-    await ui.chip("codex").click();
+    await clickMember(ui, "codex");
     await ui.rows().last().getByText("BOTTOM", { exact: true }).waitFor();
     const region = ui.page.locator(".peek-live");
     await ui.page.waitForTimeout(150);
@@ -1629,8 +1642,590 @@ async function scrollingOracle(browser, t, result) {
   }
 }
 
+async function historyAndFitOracle(browser, t, result) {
+  const initial = full(1, {
+    cols: 58,
+    rows: 30,
+    bytes: encode("\x1b[2J\x1b[HINITIAL-LIVE\x1b[30;1HEND-LIVE"),
+  });
+  const ui = await open(browser, t, initial);
+  try {
+    await ui.page.bringToFront();
+    await clickMember(ui, "codex");
+    await until(() => ui.live(), "history oracle live stream");
+    let seq = 2;
+    const history = (start) =>
+      Array.from(
+        { length: 2100 },
+        (_, index) => `HISTORY-${String(start + index).padStart(4, "0")}`,
+      ).join("\n");
+    ui.live().send({ v: 1, seq: seq++, kind: "history", text: history(1) });
+    await ui.page.locator(".peek-history span").nth(2099).waitFor();
+    let historyStart = 1;
+    for (const size of [
+      { width: 1280, height: 800 },
+      { width: 2560, height: 1440 },
+    ]) {
+      await ui.page.bringToFront();
+      await ui.page.setViewportSize(size);
+      await ui.page.waitForTimeout(100);
+      const fit = await ui.page.locator(".peek-live").evaluate((el) => {
+        const screen = el.querySelector(".xterm-screen");
+        const style = getComputedStyle(el);
+        const available =
+          el.clientWidth -
+          parseFloat(style.paddingLeft) -
+          parseFloat(style.paddingRight);
+        return {
+          screen: screen.getBoundingClientRect().width,
+          available,
+          font: parseFloat(
+            getComputedStyle(el.querySelector(".peek-history pre")).fontSize,
+          ),
+        };
+      });
+      assert.ok(
+        fit.screen <= fit.available + 2,
+        `Terminal should fit at ${size.width}px: ${JSON.stringify(fit)}`,
+      );
+      assert.ok(fit.font >= 10, "Terminal text stays readable");
+      assert.equal(await ui.page.locator(".peek-history span").count(), 2100);
+      assert.equal(
+        await ui.page
+          .locator(".peek-region-label")
+          .allTextContents()
+          .then((labels) => labels.join(" / ")),
+        "Recent output / Live screen",
+      );
+      await ui.page
+        .locator(".peek-history span")
+        .nth(999)
+        .evaluate((line) => {
+          const scroller = line.closest(".peek-live");
+          scroller.scrollTop +=
+            line.getBoundingClientRect().top -
+            scroller.getBoundingClientRect().top;
+        });
+      await settleScroll(ui);
+      const reading = await ui.page
+        .locator(".peek-history span")
+        .nth(999)
+        .evaluate(
+          (line) =>
+            line.getBoundingClientRect().top -
+            line.closest(".peek-live").getBoundingClientRect().top,
+        );
+      historyStart += 100;
+      ui.live().send({
+        v: 1,
+        seq: seq++,
+        kind: "history",
+        text: history(historyStart),
+      });
+      ui.live().send(data(seq++, "\x1b[30;1H\x1b[2KDATA-LIVE"));
+      ui.live().send({
+        ...initial,
+        seq: seq++,
+        bytes: encode("\x1b[2J\x1b[HRESET-LIVE"),
+      });
+      await ui.page.waitForTimeout(300);
+      const held = await ui.page
+        .locator(".peek-history span")
+        .nth(899)
+        .evaluate(
+          (line) =>
+            line.getBoundingClientRect().top -
+            line.closest(".peek-live").getBoundingClientRect().top,
+        );
+      assert.ok(
+        Math.abs(held - reading) < 3,
+        `History reading anchor moved at ${size.width}px: ${held} vs ${reading}`,
+      );
+      assert.equal(
+        await ui.page.locator(".peek-history span").count(),
+        2100,
+        "Snapshot replacement must not accumulate duplicates",
+      );
+      await ui.page.screenshot({
+        path: join(output, `${result.name}-history-${size.width}-reading.png`),
+      });
+      await ui.page.locator(".peek-live").evaluate((el) => {
+        el.scrollTop = el.scrollHeight;
+      });
+      await settleScroll(ui);
+      await ui
+        .rows()
+        .first()
+        .getByText("RESET-LIVE", { exact: true })
+        .waitFor();
+      ui.live().send(data(seq++, "\x1b[30;1H\x1b[2KFOLLOW-LIVE"));
+      await ui
+        .rows()
+        .last()
+        .getByText("FOLLOW-LIVE", { exact: true })
+        .waitFor();
+      const bottom = await scrollMetrics(ui);
+      assert.ok(
+        bottom.bottomVisible,
+        "Returning to bottom follows the live screen",
+      );
+      await ui.page.screenshot({
+        path: join(
+          output,
+          `${result.name}-history-${size.width}-following.png`,
+        ),
+      });
+    }
+    const expand = ui.drawer.getByRole("button", { name: "Expand" });
+    await expand.click();
+    assert.equal(
+      await ui.drawer
+        .getByRole("button", { name: "Restore" })
+        .getAttribute("aria-pressed"),
+      "true",
+    );
+    await ui.drawer.getByRole("button", { name: "Restore" }).click();
+    assert.deepEqual(ui.errors, []);
+    assert.deepEqual(
+      await ui.page.evaluate(() => window.peekPolicy.violations),
+      [],
+    );
+    result.checks.push(
+      "2100 recent lines, bounded rotation anchor, fit and follow at 1280x800 and 2560x1440; expand/restore",
+    );
+  } finally {
+    await ui.close();
+  }
+}
+
+async function watchSnapshotInvalidationOracle(browser, t, result) {
+  const row = (index) =>
+    `Cache identity output ${String(index).padStart(4, "0")} with unique evidence`;
+  const paintGrid = (start) =>
+    Array.from(
+      { length: 20 },
+      (_, i) => `\x1b[${i + 1};1H\x1b[2K${row(start + i)}`,
+    ).join("");
+  const ui = await open(
+    browser,
+    t,
+    full(1, { cols: 96, rows: 20, bytes: encode(`\x1b[2J${paintGrid(0)}`) }),
+  );
+  try {
+    const capture = async (member) => {
+      await clickMember(ui, member);
+      await ui.page.locator(".peek-watching").waitFor();
+      ui.live().send(data(2, paintGrid(5)));
+      await until(
+        async () => (await ui.page.locator(".peek-history span").count()) === 5,
+        `${member} cache capture`,
+      );
+    };
+    await capture("codex");
+    await ui.drawer.getByRole("button", { name: "Close screen" }).click();
+    await capture("claude");
+    ui.mode("session");
+    await ui.drawer
+      .getByRole("button", { name: "Text snapshot", exact: true })
+      .click();
+    await ui.drawer.getByText("Session ended", { exact: true }).waitFor();
+    ui.mode("normal");
+    await ui.drawer.getByRole("button", { name: "Close screen" }).click();
+    await clickMember(ui, "codex");
+    await ui.page.locator(".peek-watching").waitFor();
+    assert.equal(
+      await ui.page.locator(".peek-history span").count(),
+      0,
+      "session refusal learned through snapshot mode clears every reader-scoped pane",
+    );
+    assert.equal(
+      ui.requests.filter((request) => request.path.endsWith("/live")).at(-1)
+        .query,
+      "",
+    );
+    ui.live().send(data(2, paintGrid(5)));
+    await until(
+      async () => (await ui.page.locator(".peek-history span").count()) === 5,
+      "fresh history after session replacement",
+    );
+    ui.mode("missing");
+    await ui.drawer
+      .getByRole("button", { name: "Text snapshot", exact: true })
+      .click();
+    await ui.drawer.getByText(/^Not in .+ any more$/).waitFor();
+    ui.mode("normal");
+    await ui.drawer.getByRole("button", { name: "Live", exact: true }).click();
+    await ui.page.locator(".peek-watching").waitFor();
+    assert.equal(
+      await ui.page.locator(".peek-history span").count(),
+      0,
+      "missing target learned through snapshot mode invalidates retained watch history",
+    );
+    assert.equal(
+      ui.requests.filter((request) => request.path.endsWith("/live")).at(-1)
+        .query,
+      "",
+    );
+    assert.deepEqual(ui.errors, []);
+    result.checks.push(
+      "snapshot session refusal clears all reader-scoped watch caches; snapshot missing target invalidates that pane; later live requests carry no stale continuity",
+    );
+  } finally {
+    await ui.close();
+  }
+}
+
+async function recordedWatchOracle(browser, t, result) {
+  const recordings = JSON.parse(
+    await readFile(
+      new URL(
+        "../src/fixtures/watch-history/recorded-cases.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  for (const scenario of recordings.cases) {
+    const first = scenario.updates[0].grid;
+    const paintGrid = (grid) =>
+      grid.rows.map((text, y) => `\x1b[${y + 1};1H\x1b[2K${text}`).join("");
+    const resetGrid = (grid, seq) =>
+      full(seq, {
+        cols: grid.cols,
+        rows: grid.rows.length,
+        bytes: encode(`\x1b[2J${paintGrid(grid)}`),
+      });
+    const ui = await open(browser, t, resetGrid(first, 1));
+    try {
+      await clickMember(ui, "codex");
+      await until(() => ui.live(), `${scenario.name} recorded stream`);
+      await ui.page.locator(".peek-watching").waitFor();
+      let seq = 2;
+      for (const update of scenario.updates.slice(1)) {
+        ui.live().send(
+          update.kind === "reset"
+            ? resetGrid(update.grid, seq++)
+            : data(seq++, paintGrid(update.grid)),
+        );
+      }
+      const last = scenario.updates.at(-1).grid;
+      let observedRows = [];
+      try {
+        await until(async () => {
+          observedRows = await ui.rows().allTextContents();
+          return (
+            observedRows.length === last.rows.length &&
+            observedRows.every((text, i) => text.trimEnd() === last.rows[i])
+          );
+        }, `${scenario.name} completed product xterm grid`);
+      } catch (error) {
+        const differences = observedRows.flatMap((text, i) =>
+          text.trimEnd() === last.rows[i]
+            ? []
+            : [{ row: i, observed: text, expected: last.rows[i] }],
+        );
+        throw new Error(
+          `${scenario.name} product grid differs: ${JSON.stringify(differences.slice(0, 3))}`,
+          { cause: error },
+        );
+      }
+      assert.deepEqual(
+        await ui.page.locator(".peek-history span").allTextContents(),
+        scenario.expectedDeparted,
+        `${scenario.name} uses independently selected departed rows`,
+      );
+      assert.equal(ui.screens(), 0);
+      assert.deepEqual(ui.errors, []);
+      result.checks.push(
+        `recorded grids ${scenario.name}, native ${scenario.nativeSeq.join(" to ")}, expected ${scenario.expectedDeparted.length} departed rows`,
+      );
+    } finally {
+      await ui.close();
+    }
+  }
+}
+
+async function shellSeedWatchOracle(browser, t, result) {
+  const row = (index) =>
+    `SHELL-SEED-${String(index).padStart(4, "0")} unique plain output evidence`;
+  const grid = (start) => Array.from({ length: 40 }, (_, i) => row(start + i));
+  const paintGrid = (rows) =>
+    rows.map((text, y) => `\x1b[${y + 1};1H\x1b[2K${text}`).join("");
+  const ui = await open(
+    browser,
+    t,
+    full(1, {
+      cols: 96,
+      rows: 40,
+      bytes: encode(`\x1b[2J${paintGrid(grid(20))}`),
+    }),
+  );
+  try {
+    await clickMember(ui, "codex");
+    await until(() => ui.live(), "shell seed stream");
+    await ui.page.locator(".peek-watching").waitFor();
+    ui.live().send({
+      v: 1,
+      seq: 2,
+      kind: "history",
+      text: Array.from({ length: 26 }, (_, i) => row(i)).join("\n"),
+    });
+    await until(
+      async () => (await ui.page.locator(".peek-history span").count()) === 20,
+      "seed/live sequence overlap",
+    );
+    ui.live().send(data(3, paintGrid(grid(25))));
+    await until(
+      async () => (await ui.page.locator(".peek-history span").count()) === 25,
+      "shell watched append",
+    );
+    ui.live().send({
+      v: 1,
+      seq: 4,
+      kind: "history",
+      text: Array.from({ length: 31 }, (_, i) => row(i)).join("\n"),
+    });
+    ui.live().send({
+      ...full(5),
+      cols: 96,
+      rows: 40,
+      bytes: encode(`\x1b[2J${paintGrid(grid(25))}`),
+    });
+    await ui.rows().first().getByText(row(25), { exact: true }).waitFor();
+    assert.deepEqual(
+      await ui.page.locator(".peek-history span").allTextContents(),
+      Array.from({ length: 25 }, (_, i) => row(i)),
+      "shell seed and watched contribution never duplicate",
+    );
+    assert.equal(ui.screens(), 0);
+    assert.deepEqual(ui.errors, []);
+    result.checks.push(
+      "passive shell seed/live exact overlap and later seed replacement preserve watched rows without duplicates",
+    );
+  } finally {
+    await ui.close();
+  }
+}
+
+async function watchedHistoryOracle(browser, t, result) {
+  const row = (index) =>
+    `  Watched output ${String(index).padStart(5, "0")} has unique scrolling evidence`;
+  const grid = (start) => [
+    "PINNED WATCH HEADER",
+    ...Array.from({ length: 254 }, (_, i) => row(start + i)),
+    "PINNED WATCH FOOTER",
+  ];
+  const paintGrid = (rows) =>
+    rows.map((text, y) => `\x1b[${y + 1};1H\x1b[2K${text}`).join("");
+  const initial = full(1, {
+    cols: 96,
+    rows: 256,
+    bytes: encode(`\x1b[2J${paintGrid(grid(0))}`),
+  });
+  const ui = await open(browser, t, initial);
+  try {
+    await clickMember(ui, "codex");
+    await until(() => ui.live(), "watched history stream");
+    await ui.page
+      .locator(".peek-watching")
+      .filter({ hasText: /^Watching since \d/ })
+      .waitFor();
+    assert.equal(await ui.page.locator(".peek-history span").count(), 0);
+    const since = await ui.page.locator(".peek-watching").textContent();
+    let seq = 2;
+    const sendGrid = async (start) => {
+      ui.live().send(data(seq++, paintGrid(grid(start))));
+      await until(
+        async () =>
+          (await ui.page.locator(".peek-history span").last().textContent()) ===
+          row(start - 1),
+        "completed watched frame",
+      );
+    };
+    await sendGrid(100);
+    await ui.page.locator(".peek-history span").nth(99).waitFor();
+    assert.deepEqual(
+      await ui.page.locator(".peek-history span").allTextContents(),
+      Array.from({ length: 100 }, (_, i) => row(i)),
+    );
+    assert.equal(await ui.rows().first().textContent(), "PINNED WATCH HEADER");
+    assert.equal(
+      (await ui.rows().last().textContent()).trimEnd(),
+      "PINNED WATCH FOOTER",
+    );
+    ui.live().send({
+      ...initial,
+      seq: seq++,
+      bytes: encode(`\x1b[2J${paintGrid(grid(500))}`),
+    });
+    await ui
+      .rows()
+      .nth(1)
+      .getByText(row(500).trim(), { exact: true })
+      .waitFor();
+    assert.equal(
+      await ui.page.locator(".peek-history span").count(),
+      100,
+      "reset establishes a baseline without invented rows",
+    );
+    await sendGrid(600);
+    assert.equal(await ui.page.locator(".peek-history span").count(), 200);
+    ui.live().send(data(seq++, `\x1b[2J${paintGrid(grid(700))}`));
+    await ui
+      .rows()
+      .nth(1)
+      .getByText(row(700).trim(), { exact: true })
+      .waitFor();
+    assert.equal(
+      await ui.page.locator(".peek-history span").count(),
+      200,
+      "clear and repaint cannot add rows",
+    );
+    const old = ui.live();
+    await ui.drawer.getByRole("button", { name: "Close screen" }).click();
+    await until(() => old.ended, "watch closes observation");
+    ui.mode("delayed");
+    await clickMember(ui, "codex");
+    await until(
+      () => ui.liveCount() === 2,
+      "reopen identity validation request",
+    );
+    assert.equal(
+      await ui.page.locator(".peek-history span").count(),
+      0,
+      "cached rows stay hidden before continuity validation",
+    );
+    assert.equal(await ui.page.locator(".peek-watching").isVisible(), false);
+    await ui.page
+      .locator(".peek-watching")
+      .filter({ hasText: /^Watching since/ })
+      .waitFor();
+    assert.equal(await ui.page.locator(".peek-watching").textContent(), since);
+    assert.equal(
+      await ui.page.locator(".peek-history span").count(),
+      200,
+      "validated reopen retains rows but never infers the closed interval",
+    );
+    assert.ok(
+      ui.requests
+        .filter((request) => request.path.endsWith("/live"))
+        .at(-1)
+        .query.includes("continuity=browser-continuity"),
+    );
+    seq = 2;
+    for (let start = 100; start <= 3000; start += 100) await sendGrid(start);
+    await ui.page.locator(".peek-history span").nth(3199).waitFor();
+    const anchor = ui.page.locator(".peek-history span").nth(1700);
+    const id = await anchor.getAttribute("data-row-id");
+    await anchor.evaluate((line) => {
+      const scroller = line.closest(".peek-live");
+      scroller.scrollTop +=
+        line.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+    });
+    await settleScroll(ui);
+    const anchorOffset = () =>
+      ui.page
+        .locator(`.peek-history span[data-row-id="${id}"]`)
+        .evaluate(
+          (line) =>
+            line.getBoundingClientRect().top -
+            line.closest(".peek-live").getBoundingClientRect().top,
+        );
+    const before = await anchorOffset();
+    for (let start = 3100; start <= 5200; start += 100) await sendGrid(start);
+    assert.equal(await ui.page.locator(".peek-history span").count(), 5000);
+    assert.ok(
+      Math.abs((await anchorOffset()) - before) < 3,
+      "surviving occurrence stays anchored through append and eviction",
+    );
+    let flowingStart = 5200;
+    let flowingUpdates = 0;
+    let producing = true;
+    const producer = (async () => {
+      while (producing) {
+        await sendGrid(++flowingStart);
+        flowingUpdates++;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    })();
+    let reached = true;
+    try {
+      await until(
+        () => flowingUpdates > 0,
+        "confirmed append before native return",
+      );
+      await ui.page.locator(".peek-live").focus();
+      const beforeNavigation = flowingUpdates;
+      await ui.page.keyboard.press("Control+End");
+      try {
+        await ui.page.waitForFunction(
+          () => {
+            const element = document.querySelector(".peek-live");
+            return (
+              element.scrollHeight - element.scrollTop - element.clientHeight <=
+              1
+            );
+          },
+          undefined,
+          { timeout: 1500 },
+        );
+        await settleScroll(ui);
+      } catch {
+        reached = false;
+      }
+      result.watchedNavigation = {
+        reached,
+        confirmedAppendsDuringNavigation: flowingUpdates - beforeNavigation,
+        metrics: await scrollMetrics(ui),
+      };
+      assert.ok(
+        flowingUpdates > beforeNavigation,
+        "Control+End overlaps actual confirmed watched appends",
+      );
+      assert.ok(
+        reached,
+        "Native Control+End finishes while confirmed history appends continue",
+      );
+    } finally {
+      producing = false;
+      await producer;
+    }
+    await sendGrid(flowingStart + 1);
+    assert.ok(
+      (await scrollMetrics(ui)).bottomVisible,
+      "Control+End resumes following subsequent confirmed watched rows",
+    );
+    await ui.page.screenshot({
+      path: join(output, `${result.name}-watch-following.png`),
+    });
+    ui.mode("replaced");
+    const retainedStream = ui.live();
+    await ui.drawer.getByRole("button", { name: "Close screen" }).click();
+    await until(
+      () => retainedStream.ended,
+      "retained stream closes before identity check",
+    );
+    await clickMember(ui, "codex");
+    await ui.drawer
+      .getByText(
+        "This pane changed. Reopen the member to see its current screen.",
+        { exact: true },
+      )
+      .waitFor();
+    assert.equal(await ui.page.locator(".peek-history span").count(), 0);
+    assert.equal(await ui.page.locator(".peek-watching").isVisible(), false);
+    assert.equal(ui.screens(), 0);
+    assert.deepEqual(ui.errors, []);
+    result.checks.push(
+      "watched middle-band rows, fixed header/footer, local time marker, reset/clear negatives, stable reading through 5000-line eviction, native Control+End during confirmed appends, resumed following, validated reopen and replacement invalidation; no snapshot reads",
+    );
+  } finally {
+    await ui.close();
+  }
+}
+
 test("live Peek product component, transport and CSP in real Chromium and Firefox", {
-  timeout: 120000,
+  timeout: 180000,
 }, async (t) => {
   const results = [];
   let failed = false;
@@ -1664,11 +2259,16 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
     results.push(result);
     let ui;
     try {
+      await recordedWatchOracle(browser, t, result);
+      await watchedHistoryOracle(browser, t, result);
+      await shellSeedWatchOracle(browser, t, result);
+      await watchSnapshotInvalidationOracle(browser, t, result);
       await activeNavigationOracle(browser, t, result);
       await sparseScrollingOracle(browser, t, result);
       await scrollingOracle(browser, t, result);
+      await historyAndFitOracle(browser, t, result);
       ui = await open(browser, t);
-      await ui.chip("codex").click();
+      await clickMember(ui, "codex");
       await ui
         .rows()
         .first()
@@ -1850,7 +2450,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
       );
 
       ui.mode("unsupported");
-      await ui.chip("codex").click();
+      await clickMember(ui, "codex");
       await ui.page
         .getByRole("region", { name: "Screen text", exact: true })
         .getByText("SANITIZED TEXT SNAPSHOT")
@@ -1864,7 +2464,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
         .getByRole("button", { name: "Close screen", exact: true })
         .click();
       ui.mode("retry");
-      await ui.chip("codex").click();
+      await clickMember(ui, "codex");
       await ui.drawer
         .getByText(
           "Live view isn’t available. Try again or choose Text snapshot.",
@@ -1879,7 +2479,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
         .getByRole("button", { name: "Close screen", exact: true })
         .click();
       ui.mode("normal");
-      await ui.chip("codex").click();
+      await clickMember(ui, "codex");
       await ui
         .rows()
         .first()
@@ -1932,7 +2532,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
         .getByRole("button", { name: "Close screen", exact: true })
         .click();
       ui.mode("normal");
-      await ui.chip("codex").click();
+      await clickMember(ui, "codex");
       await ui
         .rows()
         .first()

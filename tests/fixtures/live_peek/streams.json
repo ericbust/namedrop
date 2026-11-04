@@ -45,6 +45,38 @@
       ]
     },
     {
+      "name": "reset-history-data-ended",
+      "records": [
+        {
+          "bytes": "G1syShtbSEhlbGxv",
+          "cols": 120,
+          "continuity": "fixture-continuity",
+          "kind": "reset",
+          "rows": 40,
+          "seq": 1,
+          "v": 1
+        },
+        {
+          "kind": "history",
+          "seq": 2,
+          "text": "recent line one\nrecent line two\n",
+          "v": 1
+        },
+        {
+          "bytes": "G1szMW1SZWQ=",
+          "kind": "data",
+          "seq": 3,
+          "v": 1
+        },
+        {
+          "kind": "closed",
+          "reason": "ended",
+          "seq": 4,
+          "v": 1
+        }
+      ]
+    },
+    {
       "name": "replaced",
       "records": [
         {
