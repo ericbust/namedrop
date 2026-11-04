@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import claude from "./fixtures/watch-history/claude-prose.json" with {
+  type: "json",
+};
 import prose from "./fixtures/watch-history/codex-prose.json" with {
   type: "json",
 };
@@ -341,6 +344,52 @@ function proseFrame(seq: number): WatchFrame {
   assert.equal(captured.buffer, "normal");
   return { cols: captured.cols, buffer: "normal", rows: captured.rows };
 }
+
+function claudeFrame(seq: number): WatchFrame {
+  const captured = claude.frames.find((item) => item.seq === seq);
+  assert.ok(captured, `missing Claude native sequence ${seq}`);
+  assert.equal(captured.buffer, "normal");
+  return { cols: captured.cols, buffer: "normal", rows: captured.rows };
+}
+
+test("recorded Claude scroll captures the first paragraph while the trailing line grows", () => {
+  assert.deepEqual(departedRows(claudeFrame(43), claudeFrame(44)), [
+    `● ${claude.provenance.truth[0]}`,
+  ]);
+});
+
+test("recorded Claude streaming retains all 150 complete observed paragraphs including its prefix", () => {
+  let state = baseline(claudeFrame(24));
+  const anchors = new Map<string, number>();
+  for (const captured of claude.frames.slice(1)) {
+    state = watchReduce(state, {
+      kind: "frame",
+      frame: claudeFrame(captured.seq),
+    });
+    const paragraphs = watchRows(state).flatMap((row) => {
+      const text = row.text.trim().replace(/^● /, "");
+      return /^\d+\. /.test(text) ? [{ text, id: row.id }] : [];
+    });
+    assert.equal(
+      new Set(paragraphs.map((row) => row.text)).size,
+      paragraphs.length,
+      `Claude native sequence ${captured.seq} duplicated an occurrence`,
+    );
+    for (const paragraph of paragraphs) {
+      const known = anchors.get(paragraph.text);
+      if (known === undefined) anchors.set(paragraph.text, paragraph.id);
+      else assert.equal(paragraph.id, known, "retained anchors stay stable");
+    }
+  }
+  const paragraphs = [
+    ...watchRows(state).map((row) => row.text),
+    ...(state.baseline?.rows ?? []),
+  ]
+    .map((text) => text.trim().replace(/^● /, ""))
+    .filter((text) => /^\d+\. /.test(text));
+  assert.equal(claude.provenance.truth.length, 150);
+  assert.deepEqual(paragraphs, claude.provenance.truth);
+});
 
 function numberedRows(state: ReturnType<typeof emptyWatch>) {
   return watchRows(state).flatMap((row) => {
