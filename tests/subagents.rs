@@ -820,3 +820,40 @@ fn blocked_stdin_obeys_five_second_process_deadline() {
     assert!(started.elapsed() < std::time::Duration::from_secs(7));
     assert!(output.status.success() && output.stdout.is_empty() && output.stderr.is_empty());
 }
+
+#[test]
+fn claude_background_completion_on_a_new_parent_prompt_removes_the_child_immediately() {
+    let state = State::new();
+    let spawn_prompt = "1fdf9c71-b597-4525-aa68-46ce75e46774";
+    let notification_prompt = "8b104e43-9180-4b3e-a62d-0e6762444a26";
+    let child = "a0c81f2f3de5b3d69";
+    record_host_event(
+        &state,
+        host_event("UserPromptSubmit", spawn_prompt, ""),
+        100,
+    );
+    record_host_event(
+        &state,
+        host_event("SubagentStart", spawn_prompt, child),
+        110,
+    );
+    let mut parent_stop = host_event("Stop", spawn_prompt, "");
+    parent_stop["background_tasks"] = json!([{"id":child, "status":"running"}]);
+    record_host_event(&state, parent_stop, 120);
+    assert_eq!(ids(&state, 125), [child]);
+    record_host_event(
+        &state,
+        host_event("UserPromptSubmit", notification_prompt, ""),
+        130,
+    );
+    record_host_event(
+        &state,
+        host_event("SubagentStop", notification_prompt, child),
+        140,
+    );
+    assert_eq!(
+        ids(&state, 145),
+        Vec::<String>::new(),
+        "completion must clear the spawn run before the next parent Stop"
+    );
+}
