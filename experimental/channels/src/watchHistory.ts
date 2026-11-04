@@ -619,7 +619,6 @@ function observeFrame(
         : { kind: "candidate", row: { kind: "text", id: nextId++, text } };
     }
   }
-  // A join can replace active cells with archived occurrence IDs.
   const priorText = new Map(
     [...segments.flatMap((segment) => segment.cells), ...cells].map((cell) => [
       "row" in cell ? cell.row.id : cell.id,
@@ -689,7 +688,6 @@ function observeFrame(
       observed !== undefined &&
       priorText.get("row" in cell ? cell.row.id : cell.id) !== observed
     ) {
-      // Later eligible cells can publish while this coordinate stays pending.
       publishedTo = Math.min(publishedTo, position);
       continue;
     }
