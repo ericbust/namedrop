@@ -272,6 +272,54 @@ function observeOccurrence(cell: Occurrence, text: string): Occurrence {
     : { kind: "missing", id: cell.id };
 }
 
+function projectConfirmed(
+  confirmed: readonly WatchRow[],
+  cells: readonly Occurrence[],
+  nextId: number,
+) {
+  const positions = new Map<number, number>();
+  const retained = new Set(confirmed.map((row) => row.id));
+  const ordered: TextRow[] = [];
+  for (const [position, cell] of cells.entries()) {
+    if (cell.kind !== "published") continue;
+    positions.set(cell.row.id, position);
+    if (retained.has(cell.row.id)) ordered.push(cell.row);
+  }
+  const slots = [...confirmed];
+  for (let i = slots.length - 1; i >= 0; i--) {
+    const row = slots[i];
+    if (row && positions.has(row.id)) {
+      const replacement = ordered.pop();
+      if (replacement) slots[i] = replacement;
+    }
+  }
+  const rows: WatchRow[] = [];
+  let pending: Extract<WatchRow, { kind: "gap" }> | undefined;
+  for (const row of slots) {
+    if (row.kind === "gap") {
+      pending ??= row;
+      continue;
+    }
+    const previous = rows.at(-1);
+    const before = previous && positions.get(previous.id);
+    const after = positions.get(row.id);
+    if (before !== undefined && after !== undefined) {
+      if (after !== before + 1)
+        rows.push(
+          pending ?? {
+            kind: "gap",
+            id: nextId++,
+            text: "… some lines missed",
+          },
+        );
+    } else if (pending) rows.push(pending);
+    pending = undefined;
+    rows.push(row);
+  }
+  if (pending) rows.push(pending);
+  return { confirmed: rows, nextId };
+}
+
 function observeFrame(
   state: WatchHistory,
   frame: WatchFrame,
@@ -521,12 +569,7 @@ function observeFrame(
     for (let i = top + rows.length - ledger.origin; i < cells.length; i++)
       if (cells[i]?.kind === "positioned") commitTo = ledger.origin + i + 1;
   }
-  const replacements = new Map<number, TextRow>();
-  for (const cell of cells)
-    if (cell.kind === "published") replacements.set(cell.row.id, cell.row);
-  const confirmed = state.confirmed.map(
-    (row) => replacements.get(row.id) ?? row,
-  );
+  const confirmed = [...state.confirmed];
   let boundary = ledger.boundary;
   function gap() {
     if (confirmed.at(-1)?.kind !== "gap")
@@ -555,8 +598,7 @@ function observeFrame(
   }
   return {
     ...state,
-    nextId,
-    confirmed,
+    ...projectConfirmed(confirmed, cells, nextId),
     baseline: frame,
     segments,
     ledger: {

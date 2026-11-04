@@ -692,7 +692,18 @@ test("reopen maps the viewport without publishing a closed interval or replaying
       rows.length,
       `replay at ${start}`,
     );
+    if (start === 300 || start === 400) {
+      assert.deepEqual(
+        rows.map((item) => item.text),
+        [
+          ...Array.from({ length: start }, (_, i) => row(i)),
+          ...Array.from({ length: 100 }, (_, i) => row(500 + i)),
+        ],
+      );
+      assert.equal(watchRows(state)[start]?.kind, "gap");
+    }
   }
+  assert.ok(watchRows(state).every((item) => item.kind === "text"));
   const rows = watchRows(state).filter((item) => item.kind === "text");
   assert.equal(rows.length, 3000);
   assert.deepEqual(
@@ -702,6 +713,41 @@ test("reopen maps the viewport without publishing a closed interval or replaying
   assert.deepEqual(rows.slice(0, original.length), original);
   for (const known of beforeClose.filter((item) => item.kind === "text"))
     assert.equal(rows.find((item) => item.text === known.text)?.id, known.id);
+});
+
+test("joining known ranges leaves unrelated disconnected occurrences in their existing slots", () => {
+  let state = watchReduce(baseline(), { kind: "frame", frame: frame(2) });
+  for (const start of [1000, 20]) {
+    state = watchReduce(state, {
+      kind: "baseline",
+      continuity: "pane-one",
+      at: 2000,
+      frame: frame(start),
+    });
+    state = watchReduce(state, { kind: "frame", frame: frame(start + 2) });
+  }
+  const original = watchRows(state).filter((row) => row.kind === "text");
+  const unrelated = original.slice(2, 4);
+  state = watchReduce(state, { kind: "detach" });
+  state = watchReduce(state, {
+    kind: "baseline",
+    continuity: "pane-one",
+    at: 3000,
+    frame: frame(),
+  });
+  for (let start = 2; start <= 22; start += 2)
+    state = watchReduce(state, { kind: "frame", frame: frame(start) });
+  const rows = watchRows(state).filter((row) => row.kind === "text");
+  assert.deepEqual(rows.slice(2, 4), unrelated);
+  assert.deepEqual(
+    rows
+      .filter((row) => !unrelated.some((known) => known.id === row.id))
+      .map((row) => row.text),
+    Array.from({ length: 22 }, (_, i) => line(i)),
+  );
+  for (const known of original)
+    assert.equal(rows.find((row) => row.text === known.text)?.id, known.id);
+  assert.equal(watchRows(state).filter((row) => row.kind === "gap").length, 2);
 });
 
 test("disconnected candidate segments share the byte budget without replacing retained IDs", () => {
