@@ -3,6 +3,7 @@ import type { PeekTarget } from "./model.ts";
 export type LiveUpdate =
   | Readonly<{
       kind: "reset";
+      continuity: string;
       viewport: Readonly<{ cols: number; rows: number }>;
       bytes: Uint8Array;
     }>
@@ -21,6 +22,7 @@ export type LiveState =
 type Options = Readonly<{
   target: PeekTarget;
   signal: AbortSignal;
+  retainedContinuity?: string | null;
   apply(update: LiveUpdate): Promise<void>;
   onState(state: LiveState): void;
 }>;
@@ -185,11 +187,13 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 export async function observePeek({
   target,
   signal,
+  retainedContinuity = null,
   apply,
   onState,
 }: Options): Promise<void> {
   if (signal.aborted) return;
-  let continuity: string | null = null;
+  let continuity: string | null = retainedContinuity;
+  let observed = false;
   onState({ kind: "connecting" });
 
   async function attempt(): Promise<Outcome> {
@@ -275,10 +279,12 @@ export async function observePeek({
               if (continuity !== null && continuity !== record.continuity)
                 return { kind: "closed", reason: "replaced" };
               continuity = record.continuity;
+              observed = true;
               reset = true;
               await abortable(
                 apply({
                   kind: "reset",
+                  continuity: record.continuity,
                   viewport: record.viewport,
                   bytes: record.bytes,
                 }),
@@ -311,8 +317,7 @@ export async function observePeek({
                 case "unsupported":
                   return {
                     kind: "unavailable",
-                    reason:
-                      continuity === null ? "unsupported" : "invalid_source",
+                    reason: observed ? "invalid_source" : "unsupported",
                   };
                 case "busy":
                 case "invalid_source":

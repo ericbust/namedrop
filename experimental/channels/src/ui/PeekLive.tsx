@@ -3,19 +3,33 @@ import { useEffect, useRef } from "react";
 import { peekCopy } from "../copy.ts";
 import { type LiveState, observePeek } from "../livePeek.ts";
 import type { PeekTarget } from "../model.ts";
+import {
+  emptyWatch,
+  type WatchFrame,
+  type WatchHistory,
+  type WatchRow,
+  watchReduce,
+  watchRows,
+} from "../watchHistory.ts";
 import "@xterm/xterm/css/xterm.css";
 
 export function PeekLive({
   target,
   onState,
+  retainedHistory,
+  onHistory,
 }: {
   target: PeekTarget;
   onState(state: LiveState): void;
+  retainedHistory: WatchHistory;
+  onHistory(state: WatchHistory): void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const history = useRef<HTMLPreElement>(null);
   const historyRegion = useRef<HTMLDivElement>(null);
   const viewport = useRef<HTMLElement>(null);
+  const watching = useRef<HTMLParagraphElement>(null);
+  const watchState = useRef(retainedHistory);
   useEffect(() => {
     const mounted = host.current;
     const scrolling = viewport.current;
@@ -27,53 +41,87 @@ export function PeekLive({
     const historyNode = historyElement;
     const historyContainer = historyBlock;
     const controller = new AbortController();
+    let validated = false;
+    let interrupted = false;
     let terminal: Terminal | null = null;
     const pending = new Set<() => void>();
     let following = true;
     let replacing = false;
     let position = { top: 0, left: 0 };
     let columns = 0;
+    let renderedRows: readonly WatchRow[] = [];
     const baseFont = Number.parseFloat(getComputedStyle(element).fontSize);
     function readingAnchor() {
       const top = scroller.getBoundingClientRect().top;
       const lines = historyNode.children;
       for (let i = 0; i < lines.length; i++) {
-        const line = lines[i] as HTMLElement;
+        const line = lines[i];
+        if (!(line instanceof HTMLElement)) continue;
         const rect = line.getBoundingClientRect();
         if (rect.bottom > top) {
           return {
-            text: line.textContent ?? "",
-            next: lines[i + 1]?.textContent ?? "",
+            id: line.dataset.rowId,
             offset: rect.top - top,
           };
         }
       }
       return null;
     }
-    function snapshot(text: string) {
-      const anchor = following ? null : readingAnchor();
-      const lines = text ? text.split("\n") : [];
-      const fragment = document.createDocumentFragment();
-      for (const line of lines) {
-        const span = document.createElement("span");
-        span.textContent = line || " ";
-        fragment.append(span);
+    function snapshot() {
+      const lines = validated ? watchRows(watchState.current) : [];
+      const changed =
+        lines.length !== renderedRows.length ||
+        lines.some((row, i) => row !== renderedRows[i]);
+      const anchor = changed && !following ? readingAnchor() : null;
+      if (changed) {
+        replacing = true;
+        const fragment = document.createDocumentFragment();
+        for (const line of lines) {
+          const span = document.createElement("span");
+          span.dataset.rowId = String(line.id);
+          span.textContent = line.text || " ";
+          fragment.append(span);
+        }
+        historyNode.replaceChildren(fragment);
+        renderedRows = lines;
+        historyContainer.hidden = lines.length === 0;
       }
-      historyNode.replaceChildren(fragment);
-      historyContainer.hidden = lines.length === 0;
+      const marker = watching.current;
+      const since = validated ? watchState.current.startedAt : null;
+      if (marker) {
+        marker.hidden = since === null;
+        marker.textContent =
+          since === null
+            ? ""
+            : `Watching since ${new Date(since).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+      }
       if (anchor) {
-        const index = lines.findIndex(
-          (line, i) =>
-            line === anchor.text && (lines[i + 1] ?? "") === anchor.next,
+        const line = Array.from(historyNode.children).find(
+          (node) =>
+            node instanceof HTMLElement && node.dataset.rowId === anchor.id,
         );
-        if (index >= 0) {
-          const line = historyNode.children[index] as HTMLElement;
+        if (line instanceof HTMLElement) {
           position.top +=
             line.getBoundingClientRect().top -
             scroller.getBoundingClientRect().top -
             anchor.offset;
+        } else {
+          position.top = 0;
         }
       }
+      onHistory(watchState.current);
+    }
+    function sample(current: Terminal): WatchFrame {
+      const buffer = current.buffer.active;
+      return {
+        cols: current.cols,
+        buffer: buffer.type,
+        rows: Array.from(
+          { length: current.rows },
+          (_, y) =>
+            buffer.getLine(buffer.baseY + y)?.translateToString(true) ?? "",
+        ),
+      };
     }
     function fit() {
       const current = terminal;
@@ -197,6 +245,24 @@ export function PeekLive({
       for (const id of [0, 1, 2, 8, 52])
         next.parser.registerOscHandler(id, () => true);
       next.parser.registerCsiHandler({ final: "t" }, () => true);
+      next.parser.registerCsiHandler({ final: "J" }, () => {
+        interrupted = true;
+        return false;
+      });
+      next.parser.registerEscHandler({ final: "c" }, () => {
+        interrupted = true;
+        return false;
+      });
+      next.parser.registerCsiHandler({ final: "h", prefix: "?" }, (params) => {
+        if ([47, 1047, 1049].some((mode) => params.includes(mode)))
+          interrupted = true;
+        return false;
+      });
+      next.parser.registerCsiHandler({ final: "l", prefix: "?" }, (params) => {
+        if ([47, 1047, 1049].some((mode) => params.includes(mode)))
+          interrupted = true;
+        return false;
+      });
       next.onRender(restorePosition);
       terminal = next;
       next.open(element);
@@ -238,15 +304,21 @@ export function PeekLive({
     void observePeek({
       target,
       signal: controller.signal,
+      retainedContinuity: watchState.current.continuity,
       async apply(update) {
         if (update.kind === "history") {
           replacing = true;
-          snapshot(update.text);
+          watchState.current = watchReduce(watchState.current, {
+            kind: "seed",
+            text: update.text,
+          });
+          snapshot();
           restorePosition();
           replacing = false;
           return;
         }
         replacing = update.kind === "reset";
+        interrupted = false;
         let current = terminal;
         if (update.kind === "reset") {
           if (!current)
@@ -260,7 +332,23 @@ export function PeekLive({
         }
         if (!current) throw new Error("Terminal not initialized");
         await write(current, update.bytes);
-        if (update.kind === "reset") current.refresh(0, current.rows - 1);
+        if (update.kind === "reset") {
+          current.refresh(0, current.rows - 1);
+          validated = true;
+          watchState.current = watchReduce(watchState.current, {
+            kind: "baseline",
+            continuity: update.continuity,
+            at: Date.now(),
+            frame: sample(current),
+          });
+        } else {
+          watchState.current = watchReduce(watchState.current, {
+            kind: "frame",
+            frame: sample(current),
+            interrupted,
+          });
+        }
+        snapshot();
         restorePosition();
         replacing = false;
       },
@@ -269,19 +357,25 @@ export function PeekLive({
         if (
           state.kind === "session-ended" ||
           (state.kind === "closed" && state.reason !== "ended")
-        )
+        ) {
+          validated = false;
+          watchState.current = emptyWatch();
+          snapshot();
           dispose();
+        }
         onState(state);
       },
     });
     return () => {
       controller.abort();
+      watchState.current = watchReduce(watchState.current, { kind: "detach" });
+      onHistory(watchState.current);
       resize.disconnect();
       scroller.removeEventListener("wheel", localWheel, true);
       scroller.removeEventListener("scroll", rememberPosition);
       dispose();
     };
-  }, [target, onState]);
+  }, [target, onState, onHistory]);
   return (
     <section
       ref={viewport}
@@ -290,6 +384,7 @@ export function PeekLive({
       // biome-ignore lint/a11y/noNoninteractiveTabindex: The read-only viewport supports keyboard scrolling.
       tabIndex={0}
     >
+      <p className="peek-watching" ref={watching} hidden />
       <div className="peek-history" ref={historyRegion} hidden>
         <p className="peek-region-label">Recent output</p>
         <pre ref={history} />

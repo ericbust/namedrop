@@ -23,6 +23,7 @@ import {
 } from "../peek.ts";
 import type { ScreenReader } from "../screen.ts";
 import type { PeekWho } from "../store.ts";
+import { emptyWatch, type WatchHistory, watchBytes } from "../watchHistory.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Icon } from "./Icons.tsx";
 import { measure } from "./measure.ts";
@@ -32,6 +33,7 @@ import { useEscape } from "./useEscape.ts";
 type Retention = {
   id: number;
   snapshots: Map<PeekKey, PeekSnapshot>;
+  watches: Map<PeekKey, { state: WatchHistory; at: number }>;
 };
 const retained = new WeakMap<ScreenReader, Retention>();
 let nextRetentionId = 0;
@@ -41,7 +43,11 @@ const MAX_CHARACTERS = 512 * 1024;
 function retentionFor(reader: ScreenReader): Retention {
   const existing = retained.get(reader);
   if (existing) return existing;
-  const retention: Retention = { id: ++nextRetentionId, snapshots: new Map() };
+  const retention: Retention = {
+    id: ++nextRetentionId,
+    snapshots: new Map(),
+    watches: new Map(),
+  };
   retained.set(reader, retention);
   return retention;
 }
@@ -61,6 +67,21 @@ function retainSnapshot(
     if (snapshots.size <= MAX_SCREENS && characters <= MAX_CHARACTERS) break;
     snapshots.delete(oldest);
     characters -= screen.text.length;
+  }
+}
+
+function retainWatch(retention: Retention, key: PeekKey, state: WatchHistory) {
+  retention.watches.delete(key);
+  if (state.continuity === null) return;
+  retention.watches.set(key, { state, at: Date.now() });
+  let bytes = 0;
+  for (const entry of retention.watches.values())
+    bytes += watchBytes(entry.state);
+  for (const [oldest, entry] of retention.watches) {
+    if (retention.watches.size <= MAX_SCREENS && bytes <= 4 * 1024 * 1024)
+      break;
+    retention.watches.delete(oldest);
+    bytes -= watchBytes(entry.state);
   }
 }
 
@@ -161,9 +182,14 @@ function PeekContent(props: ContentProps) {
   const update = useCallback(
     (next: LiveState) => {
       setState(next);
-      if (next.kind === "session-ended") retention.snapshots.clear();
-      if (next.kind === "closed" && next.reason !== "ended")
+      if (next.kind === "session-ended") {
+        retention.snapshots.clear();
+        retention.watches.clear();
+      }
+      if (next.kind === "closed" && next.reason !== "ended") {
         retention.snapshots.delete(peekKey(target));
+        retention.watches.delete(peekKey(target));
+      }
       if (next.kind === "unavailable" && next.reason === "unsupported") {
         focusScreen.current = Boolean(
           document.activeElement?.closest(".peek-text"),
@@ -174,6 +200,15 @@ function PeekContent(props: ContentProps) {
     },
     [retention, target],
   );
+  const rememberWatch = useCallback(
+    (history: WatchHistory) => retainWatch(retention, peekKey(target), history),
+    [retention, target],
+  );
+  const cached = retention.watches.get(peekKey(target));
+  const retainedHistory =
+    cached && Date.now() - cached.at <= 5 * 60 * 1000
+      ? cached.state
+      : emptyWatch();
   const controls = (
     <fieldset className="peek-modes" aria-label={peekCopy.view}>
       <button
@@ -247,7 +282,13 @@ function PeekContent(props: ContentProps) {
           {notice}
         </p>
       )}
-      <PeekLive key={attempt} target={target} onState={update} />
+      <PeekLive
+        key={attempt}
+        target={target}
+        onState={update}
+        retainedHistory={retainedHistory}
+        onHistory={rememberWatch}
+      />
     </>
   );
 }
@@ -342,8 +383,10 @@ function usePeekRead(
         retainSnapshot(retention, key, { screen: result.screen, at });
       } else if (result.failure === "session") {
         retention.snapshots.clear();
+        retention.watches.clear();
       } else if (result.failure === "missing" || result.failure === "closed") {
         retention.snapshots.delete(key);
+        retention.watches.delete(key);
       }
       send({ type: "settled", request, result, at });
     });

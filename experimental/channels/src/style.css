@@ -1906,7 +1906,8 @@ button.member:not(.more):hover {
   overflow: auto;
   font: calc(var(--text-sm) - 0.5px) / 1.5 var(--font-mono);
 }
-.peek-region-label {
+.peek-region-label,
+.peek-watching {
   margin: 0 0 var(--space-1);
   color: var(--text-muted);
   font: 500 var(--text-xs) / 1.5 var(--font-mono);

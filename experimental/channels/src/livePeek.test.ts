@@ -117,6 +117,7 @@ test("live boundary consumes fragmented NDJSON, heartbeats and atomic paints in 
   );
   assert.deepEqual(run.updates[0], {
     kind: "reset",
+    continuity: "fixture-continuity",
     viewport: { cols: 120, rows: 40 },
     bytes: new TextEncoder().encode("\x1b[HRED"),
   });
@@ -446,4 +447,74 @@ test("server-owned canonical streams conform without copying or skipping the int
     onState: (s) => states.push(s),
   });
   assert.deepEqual(states.at(-1), { kind: "closed", reason: "ended" });
+});
+
+test("retained continuity validates identity before reset exposes cached history", async (t) => {
+  const requested: string[] = [];
+  t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL) => {
+    requested.push(String(input));
+    return response([reset(), closed({ seq: 2 })]);
+  });
+  const updates: LiveUpdate[] = [];
+  const states: LiveState[] = [];
+  await observePeek({
+    target: selected,
+    signal: new AbortController().signal,
+    retainedContinuity: "fixture-continuity",
+    async apply(update) {
+      updates.push(update);
+    },
+    onState(state) {
+      states.push(state);
+    },
+  });
+  assert.ok(requested[0]?.endsWith("?continuity=fixture-continuity"));
+  assert.equal(updates[0]?.kind, "reset");
+  const update = updates[0];
+  assert.ok(update?.kind === "reset");
+  assert.equal(update.continuity, "fixture-continuity");
+  assert.deepEqual(states.at(-1), { kind: "closed", reason: "ended" });
+});
+
+test("a changed retained identity never applies a replacement frame", async (t) => {
+  t.mock.method(globalThis, "fetch", async () =>
+    response([reset({ continuity: "replacement" })]),
+  );
+  const updates: LiveUpdate[] = [];
+  const states: LiveState[] = [];
+  await observePeek({
+    target: selected,
+    signal: new AbortController().signal,
+    retainedContinuity: "fixture-continuity",
+    async apply(update) {
+      updates.push(update);
+    },
+    onState(state) {
+      states.push(state);
+    },
+  });
+  assert.deepEqual(updates, []);
+  assert.deepEqual(states.at(-1), { kind: "closed", reason: "replaced" });
+});
+
+test("unsupported startup with retained continuity keeps the existing text fallback", async (t) => {
+  t.mock.method(globalThis, "fetch", async () =>
+    response([{ v: 1, seq: 1, kind: "unavailable", reason: "unsupported" }]),
+  );
+  const states: LiveState[] = [];
+  await observePeek({
+    target: selected,
+    signal: new AbortController().signal,
+    retainedContinuity: "fixture-continuity",
+    async apply() {
+      assert.fail("Unsupported source cannot validate retained history");
+    },
+    onState(state) {
+      states.push(state);
+    },
+  });
+  assert.deepEqual(states.at(-1), {
+    kind: "unavailable",
+    reason: "unsupported",
+  });
 });
