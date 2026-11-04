@@ -217,7 +217,7 @@ where
                 "ND-HOOK-001",
                 HealthSeverity::Blocked,
                 "Codex hook setup is incomplete or outdated.",
-                "Complete the current Codex plugin setup. If this session predates installation or refresh, restart and approve Namedrop in /hooks if prompted; otherwise verify with a round trip. Doctor alone cannot verify hooks.",
+                "Complete the current Codex plugin setup. If this session predates installation or refresh, restart and approve changed Namedrop hooks in /hooks if prompted, including SubagentStart, SubagentStop, Stop and SessionEnd; otherwise verify with a round trip. Doctor alone cannot verify hooks.",
                 HealthRepairKind::ProductAction,
                 "Follow the reported Codex plugin setup steps.",
             );

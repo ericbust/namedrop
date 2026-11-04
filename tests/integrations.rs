@@ -3136,37 +3136,41 @@ fn assert_installed_package(home_directory: &Path, runtime: AgentRuntime) {
     .unwrap();
     assert_eq!(claude_manifest["name"], "namedrop");
     assert_eq!(claude_manifest["version"], env!("CARGO_PKG_VERSION"));
-    let fallback_hook = directory.join("scripts/user-prompt-submit");
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(
-            &fs::read_to_string(directory.join("hooks/hooks.json")).unwrap()
-        )
-        .unwrap(),
-        serde_json::json!({
-            "hooks": {
-                "SessionStart": [{
-                    "hooks": [{
-                        "type": "command",
-                        "command": format!(
-                            "if [ -n \"${{PLUGIN_ROOT:-}}\" ]; then \"${{PLUGIN_ROOT}}/scripts/session-start\"; elif [ -n \"${{CLAUDE_PLUGIN_ROOT:-}}\" ]; then \"${{CLAUDE_PLUGIN_ROOT}}/scripts/session-start\"; else '{}'; fi",
-                            directory.join("scripts/session-start").display()
-                        ),
-                        "timeout": 10
-                    }]
-                }],
-                "UserPromptSubmit": [{
-                    "hooks": [{
-                        "type": "command",
-                        "command": format!(
-                            "if [ -n \"${{PLUGIN_ROOT:-}}\" ]; then \"${{PLUGIN_ROOT}}/scripts/user-prompt-submit\"; elif [ -n \"${{CLAUDE_PLUGIN_ROOT:-}}\" ]; then \"${{CLAUDE_PLUGIN_ROOT}}/scripts/user-prompt-submit\"; else '{}'; fi",
-                            fallback_hook.display()
-                        ),
-                        "timeout": 10
-                    }]
-                }]
-            }
-        })
-    );
+    let hooks: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(directory.join("hooks/hooks.json")).unwrap())
+            .unwrap();
+    for event in [
+        "SessionStart",
+        "UserPromptSubmit",
+        "SubagentStart",
+        "SubagentStop",
+        "Stop",
+        "SessionEnd",
+    ] {
+        let entries = hooks["hooks"][event].as_array().expect(event);
+        assert!(
+            entries.iter().any(
+                |entry| entry["hooks"][0]["async"] == true && entry["hooks"][0]["timeout"] == 5
+            ),
+            "{event}"
+        );
+    }
+    for (event, script) in [
+        ("SessionStart", "session-start"),
+        ("UserPromptSubmit", "user-prompt-submit"),
+    ] {
+        let command = hooks["hooks"][event][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(command.contains(&format!("/scripts/{script}")));
+        assert_eq!(hooks["hooks"][event][0]["hooks"][0]["timeout"], 10);
+        assert!(hooks["hooks"][event][0]["hooks"][0].get("async").is_none());
+    }
+    let subagent = directory.join("scripts/subagent");
+    assert!(fs::metadata(&subagent).unwrap().permissions().mode() & 0o100 != 0);
+    let subagent = fs::read_to_string(subagent).unwrap();
+    assert!(subagent.contains(&format!("hook subagent --runtime {}", runtime.as_str())));
+    assert!(subagent.contains(">/dev/null 2>&1\nexit 0"));
     let script = directory.join("scripts/user-prompt-submit");
     assert!(
         fs::metadata(&script).unwrap().permissions().mode() & 0o111 != 0,
@@ -3201,6 +3205,7 @@ fn assert_installed_package(home_directory: &Path, runtime: AgentRuntime) {
             ".claude-plugin",
             ".codex-plugin",
             ".namedrop-package.json",
+            ".namedrop-subagent-hook.json",
             "SKILL.md",
             "hooks",
             "scripts",
@@ -4001,6 +4006,40 @@ fn installed_hook_manifest_launches_from_the_codex_plugin_root() {
         r#"{"decision":"block","reason":"Collaboration message sent."}"#
     );
     assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
+fn installed_subagent_wrapper_swallows_all_output_and_failures() {
+    let directory = TestDirectory::new();
+    let executable = directory.path().join("hook-result");
+    for code in [0, 23] {
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf 'untrusted context'\nprintf 'untrusted error' >&2\nexit {code}\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+            let package = install_integration_package(
+                directory.home(),
+                runtime,
+                &executable,
+                directory.path(),
+            )
+            .unwrap();
+            let output = Command::new(package.join("scripts/subagent"))
+                .env_clear()
+                .env("HOME", directory.home())
+                .env("XDG_CONFIG_HOME", directory.home().join(".config"))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{runtime:?}: {output:?}");
+            assert!(output.stdout.is_empty(), "{runtime:?}: {output:?}");
+            assert!(output.stderr.is_empty(), "{runtime:?}: {output:?}");
+        }
+    }
 }
 
 /// An unwritable skill root is the other way installation fails, and it produces

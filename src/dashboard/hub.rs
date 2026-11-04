@@ -338,6 +338,7 @@ struct Hub<'a> {
     store: Option<StateStore>,
     data_version: Option<i64>,
     channel_notes_revision: Option<(std::time::SystemTime, u64)>,
+    subagent_revision: Option<[u8; 32]>,
     spaces: HashMap<SpaceKey, KnownSpace>,
     subscribers: HashMap<u64, Subscriber>,
     published: HashMap<SpaceKey, Published>,
@@ -368,6 +369,7 @@ pub(crate) fn run(
         store: None,
         data_version: None,
         channel_notes_revision: None,
+        subagent_revision: None,
         spaces: HashMap::new(),
         subscribers: HashMap::new(),
         published: HashMap::new(),
@@ -583,12 +585,21 @@ impl Hub<'_> {
         let metadata_changed = std::mem::take(&mut self.metadata_dirty)
             || notes_revision != self.channel_notes_revision;
         self.channel_notes_revision = notes_revision;
+        let subagent_revision = crate::subagent::revision(self.files.state());
+        let subagents_changed =
+            self.subagent_revision != Some(subagent_revision) || subagent_revision == [0xff; 32];
+        self.subagent_revision = Some(subagent_revision);
         let retention_expired = self.published.values().any(|published| {
             published
                 .expires_at_ms
                 .is_some_and(|expiry| now_ms() >= expiry)
         });
-        if !database_changed && !metadata_changed && !retention_expired && incoming.is_none() {
+        if !database_changed
+            && !metadata_changed
+            && !subagents_changed
+            && !retention_expired
+            && incoming.is_none()
+        {
             self.complete_replays();
             return true;
         }
@@ -952,6 +963,53 @@ impl Hub<'_> {
                     .filter(|expiry| *expiry > now)
                     .min();
                 let mut snapshot = snapshot::build(&rows, label.as_deref(), now);
+                for participant in &mut snapshot.participants {
+                    if !matches!(participant.kind, snapshot::ParticipantKind::Agent { .. }) {
+                        continue;
+                    }
+                    let Ok(crate::store::dashboard::LiveMember::Bound(binding)) = self
+                        .store
+                        .as_mut()?
+                        .dashboard_live_member(key, &participant.address_id)
+                    else {
+                        continue;
+                    };
+                    let Some(session) = binding.agent_session_id else {
+                        continue;
+                    };
+                    let Some(parent) = crate::subagent::ParentIdentity::new(
+                        &namespace.session_socket_id,
+                        namespace.space_id.as_str(),
+                        &binding.pane_id,
+                        session.as_str(),
+                    ) else {
+                        continue;
+                    };
+                    participant.subagents = crate::subagent::running(
+                        self.files.state(),
+                        &parent,
+                        now,
+                        binding.idle_at_ms,
+                    )
+                    .into_iter()
+                    .map(|run| {
+                        let expiry = run
+                            .started_at_ms
+                            .saturating_add(crate::subagent::MAX_RUN_AGE_MS);
+                        expires_at_ms = Some(expires_at_ms.map_or(expiry, |old| old.min(expiry)));
+                        snapshot::Subagent {
+                            id: run.id,
+                            kind: run
+                                .kind
+                                .map(|text| snapshot::SafeText::from_untrusted(&text, 80)),
+                            description: run
+                                .description
+                                .map(|text| snapshot::SafeText::from_untrusted(&text, 80)),
+                            started_at_ms: run.started_at_ms,
+                        }
+                    })
+                    .collect();
+                }
                 snapshot::channel_routing::merge(
                     self.files.state(),
                     &namespace,
@@ -1168,6 +1226,7 @@ mod tests {
             store: None,
             data_version: None,
             channel_notes_revision: None,
+            subagent_revision: None,
             spaces: HashMap::new(),
             subscribers: HashMap::new(),
             published: HashMap::new(),
@@ -1282,6 +1341,115 @@ mod tests {
                 notify: std::sync::mpsc::channel().0,
             },
         );
+    }
+
+    #[test]
+    fn file_only_subagents_publish_and_expire_without_database_changes() {
+        use crate::subagent::{self, Event, ParentIdentity};
+        use crate::{AgentSessionId, PaneBindingId};
+        let files = schema_test_files("subagent-files");
+        let namespace = StateNamespace::for_space("test-socket", "test-workspace");
+        let key = SpaceKey::of(&namespace);
+        let attribution = MutationAttribution::new(ActorKind::Plugin, "test", 1);
+        StateStore::open(files.state())
+            .unwrap()
+            .transaction(|tx| tx.activate_worktree(&namespace, &attribution))
+            .unwrap();
+        add_address(files.state(), &namespace, "reader");
+        StateStore::open(files.state())
+            .unwrap()
+            .transaction(|tx| {
+                tx.activate_worktree(&namespace, &attribution)?;
+                tx.bind_pane(
+                    &namespace,
+                    &PaneBindingId::new("binding-reader"),
+                    &PaneAddressId::new("address-reader"),
+                    "pane-reader",
+                    &attribution,
+                )?;
+                tx.observe_agent_session(
+                    &namespace,
+                    "observation-reader",
+                    &PaneAddressId::new("address-reader"),
+                    &AgentSessionId::new("parent-reader"),
+                    "working",
+                    &attribution,
+                )
+            })
+            .unwrap();
+        let mut hub = test_hub(&files);
+        let (frames, received) = sync_channel(10);
+        hub.handle(HubCommand::Subscribe {
+            id: 1,
+            subscription: Subscription::Space(key.clone()),
+            frames,
+            notify: std::sync::mpsc::channel().0,
+        });
+        let Frame::Snapshot(initial) = received.recv_timeout(Duration::from_secs(1)).unwrap()
+        else {
+            panic!("initial snapshot")
+        };
+        let initial: serde_json::Value = serde_json::from_str(&initial).unwrap();
+        assert_eq!(
+            initial["participants"][0]["subagents"],
+            serde_json::json!([])
+        );
+        let version = hub.store.as_ref().unwrap().data_version().unwrap();
+        let parent = ParentIdentity::new(
+            "test-socket",
+            "test-workspace",
+            "pane-reader",
+            "parent-reader",
+        )
+        .unwrap();
+        let started = now_ms() - subagent::MAX_RUN_AGE_MS + 1000;
+        subagent::record(
+            files.state(),
+            &parent,
+            Event::Start {
+                generation: None,
+                id: "child".into(),
+                kind: Some("Explore".into()),
+                description: Some("read <script>\u{202e} text".into()),
+            },
+            started,
+        )
+        .unwrap();
+        assert!(hub.refresh(None));
+        let Frame::Snapshot(running) = received.recv_timeout(Duration::from_secs(1)).unwrap()
+        else {
+            panic!("file change snapshot")
+        };
+        let running: serde_json::Value = serde_json::from_str(&running).unwrap();
+        assert_eq!(running["participants"][0]["subagents"][0]["id"], "child");
+        assert_eq!(
+            running["participants"][0]["subagents"][0]["description"]["text"],
+            "read <script> text"
+        );
+        assert_eq!(
+            hub.published[&key].expires_at_ms,
+            Some(started + subagent::MAX_RUN_AGE_MS)
+        );
+        let revision = subagent::revision(files.state());
+        std::thread::sleep(Duration::from_millis(1100));
+        assert!(hub.refresh(None));
+        let Frame::Snapshot(expired) = received.recv_timeout(Duration::from_secs(1)).unwrap()
+        else {
+            panic!("age expiry snapshot")
+        };
+        let expired: serde_json::Value = serde_json::from_str(&expired).unwrap();
+        assert_eq!(
+            expired["participants"][0]["subagents"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            subagent::revision(files.state()),
+            revision,
+            "age expiry is time driven"
+        );
+        assert_eq!(hub.store.as_ref().unwrap().data_version().unwrap(), version);
+        drop(hub);
+        fs::remove_dir_all(files.state()).unwrap();
     }
 
     #[test]

@@ -175,6 +175,7 @@ pub(crate) struct LiveBinding {
     pub pane_id: String,
     pub pane_type: crate::PaneType,
     pub agent_session_id: Option<AgentSessionId>,
+    pub idle_at_ms: Option<i64>,
 }
 
 pub(crate) enum LiveMember {
@@ -208,6 +209,11 @@ impl StateStore {
                     (SELECT NULLIF(o.agent_session_id, '') FROM agent_session_observations o
                      WHERE o.session_socket_id = a.session_socket_id AND o.worktree_id = a.worktree_id
                        AND o.address_id = a.address_id AND o.observed_at_ms >= b.bound_at_ms
+                     ORDER BY o.observed_at_ms DESC, o.rowid DESC LIMIT 1),
+                    (SELECT o.observed_at_ms FROM agent_session_observations o
+                     WHERE o.session_socket_id = a.session_socket_id AND o.worktree_id = a.worktree_id
+                       AND o.address_id = a.address_id AND o.observed_at_ms >= b.bound_at_ms
+                       AND o.status = 'idle'
                      ORDER BY o.observed_at_ms DESC, o.rowid DESC LIMIT 1)
                  FROM pane_addresses a LEFT JOIN pane_bindings b
                    ON b.session_socket_id = a.session_socket_id AND b.worktree_id = a.worktree_id
@@ -215,15 +221,15 @@ impl StateStore {
                  WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2 AND a.address_id = ?3",
                 params![namespace.session_socket_id, namespace.space_id.as_str(), address],
                 |row| Ok((row.get::<_,bool>(0)?,row.get::<_,String>(1)?,row.get::<_,Option<String>>(2)?,
-                    row.get::<_,Option<String>>(3)?,row.get::<_,Option<String>>(4)?)),
+                    row.get::<_,Option<String>>(3)?,row.get::<_,Option<String>>(4)?,row.get::<_,Option<i64>>(5)?)),
             ).optional()?;
             Ok(match row {
                 None => LiveMember::Missing,
-                Some((false, kind, Some(binding), Some(pane_id), session)) => LiveMember::Bound(LiveBinding {
+                Some((false, kind, Some(binding), Some(pane_id), session, idle_at_ms)) => LiveMember::Bound(LiveBinding {
                     namespace, binding_id: PaneBindingId::new(binding), pane_id,
                     pane_type: match kind.as_str() { "agent" => crate::PaneType::Agent, "terminal" => crate::PaneType::Terminal,
                         _ => return Err(StoreError::invalid_input("Unsupported live member kind.")) },
-                    agent_session_id: session.map(AgentSessionId::new),
+                    agent_session_id: session.map(AgentSessionId::new), idle_at_ms,
                 }),
                 Some(_) => LiveMember::Gone,
             })

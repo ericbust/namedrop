@@ -414,6 +414,59 @@ fn doctor_checks_current_package_files_and_preserves_the_exact_error_read_only()
 }
 
 #[test]
+fn doctor_reports_missing_stale_and_nonexecutable_subagent_hooks() {
+    use std::os::unix::fs::PermissionsExt;
+    for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+        for mutation in ["missing", "stale", "nonexecutable"] {
+            let f = Fixture::new();
+            f.register();
+            install_integration_package(
+                &f.home,
+                runtime,
+                &fs::canonicalize(std::env::current_exe().unwrap()).unwrap(),
+                &f.root,
+            )
+            .unwrap();
+            if runtime == AgentRuntime::Codex {
+                StateStore::open(&f.root)
+                    .unwrap()
+                    .transaction(|tx| {
+                        tx.open_attention_item(
+                            &StateNamespace::for_space("socket-a", "workspace-1"),
+                            &AttentionItemDraft {
+                                id: AttentionItemId::new("codex-package"),
+                                source_kind: AttentionSourceKind::IntegrationRegistration,
+                                source_id: "integration-package-codex".into(),
+                                summary: "inspect Codex integration".into(),
+                            },
+                            &MutationAttribution::new(ActorKind::Plugin, "test", 100),
+                        )
+                    })
+                    .unwrap();
+            }
+            let hook = package_directory(&f.home, runtime).join("scripts/subagent");
+            match mutation {
+                "missing" => fs::remove_file(&hook).unwrap(),
+                "stale" => fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap(),
+                _ => fs::set_permissions(&hook, fs::Permissions::from_mode(0o600)).unwrap(),
+            }
+            let database = fs::read(f.root.join("namedrop.sqlite3")).unwrap();
+            let report = diagnose_collaboration(&f.runtime());
+            let issue = report
+                .issues
+                .iter()
+                .find(|issue| {
+                    issue.code == "ND-INTEGRATION-001"
+                        && issue.explanation.contains(hook.to_str().unwrap())
+                })
+                .unwrap_or_else(|| panic!("{mutation} {runtime:?}: {report:?}"));
+            assert_eq!(issue.diagnostic["runtime"], runtime.as_str());
+            assert_eq!(fs::read(f.root.join("namedrop.sqlite3")).unwrap(), database);
+        }
+    }
+}
+
+#[test]
 fn doctor_uses_current_package_evidence_without_rewriting_stale_attention() {
     let f = Fixture::new();
     f.register();

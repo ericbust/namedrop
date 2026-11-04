@@ -191,6 +191,7 @@ mod tests {
     #[test]
     fn pane_selection_requires_workspace_and_current_session() {
         let binding = LiveBinding {
+            idle_at_ms: None,
             namespace: StateNamespace::for_space("test-socket", "w1"),
             binding_id: PaneBindingId::new("binding"),
             pane_id: "pane".into(),
