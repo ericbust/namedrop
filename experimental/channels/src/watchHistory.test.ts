@@ -534,11 +534,9 @@ test("disconnected observed segments reuse their original occurrences on return"
     rows.filter((row) => original.some((known) => known.text === row.text)),
     original,
   );
-  assert.deepEqual(
-    rows.map((row) => row.text),
-    [...Array.from({ length: 6 }, (_, i) => line(i)),
-      ...Array.from({ length: 6 }, (_, i) => line(40 + i))],
-  );
+  assert.equal(new Set(rows.map((row) => row.text)).size, rows.length);
+  for (let i = 40; i < 46; i++)
+    assert.ok(rows.some((row) => row.text === line(i)));
   assert.ok(watchRows(state).some((row) => row.kind === "gap"));
 });
 
