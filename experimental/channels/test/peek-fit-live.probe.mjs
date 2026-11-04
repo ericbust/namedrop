@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { chromium } from "playwright-core";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { chromium } from "playwright-core";
+
 const root = process.env.PEEK_FIT_LIVE_OUTPUT;
 await mkdir(root, { recursive: true });
 const launch = JSON.parse(

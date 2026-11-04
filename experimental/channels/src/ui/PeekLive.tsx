@@ -140,11 +140,17 @@ export function PeekLive({
       if (width <= 0) return;
       const fitted = Math.max(
         10,
-        Math.min(20, ((current.options.fontSize ?? baseFont) * available) / width),
+        Math.min(
+          20,
+          ((current.options.fontSize ?? baseFont) * available) / width,
+        ),
       );
       void presentation.setFontSize(fitted);
       restorePosition();
-      fittedSize = { width: scroller.clientWidth, height: scroller.clientHeight };
+      fittedSize = {
+        width: scroller.clientWidth,
+        height: scroller.clientHeight,
+      };
     }
     function latestTop() {
       const current = presentation.visible;
@@ -243,7 +249,10 @@ export function PeekLive({
       if (scroller.clientWidth !== fittedSize.width) fit();
       else {
         restorePosition();
-        fittedSize = { width: scroller.clientWidth, height: scroller.clientHeight };
+        fittedSize = {
+          width: scroller.clientWidth,
+          height: scroller.clientHeight,
+        };
       }
     });
     resize.observe(scroller);
