@@ -26,6 +26,25 @@ use std::{
 const DATABASE_FILE_NAME: &str = "namedrop.sqlite3";
 pub(crate) const SCHEMA_VERSION: u32 = 6;
 
+const RECONCILIATION_INDEX_REPAIRS: &[SchemaGap] = &[
+    SchemaGap {
+        name: "mailbox_deliveries_message",
+        ddl: "CREATE INDEX IF NOT EXISTS mailbox_deliveries_message
+              ON mailbox_deliveries(session_socket_id, worktree_id, message_id)",
+    },
+    SchemaGap {
+        name: "transition_facts_attention_acknowledgement",
+        ddl: "CREATE INDEX IF NOT EXISTS transition_facts_attention_acknowledgement
+              ON transition_facts(session_socket_id, worktree_id, entity_id)
+              WHERE entity_kind='attention_item' AND transition_kind='acknowledged'",
+    },
+    SchemaGap {
+        name: "coordination_links_assignment",
+        ddl: "CREATE INDEX IF NOT EXISTS coordination_links_assignment
+              ON coordination_links(session_socket_id, worktree_id, assignment_id, message_id)",
+    },
+];
+
 /// Personas live on the Pane Address, which survives renaming and rebinding,
 /// rather than on the role record the native naming path overwrites. Upgrading
 /// keeps a meaningful description a human wrote; an auto-registered native name
@@ -7508,8 +7527,7 @@ fn initialize_schema(
     _state_directory: &Path,
 ) -> Result<(), StoreError> {
     // Every command and hook opens the store, and most find the schema current.
-    // Only a migration takes the write lock, so an open never queues behind
-    // another process's write.
+    // Only a migration or schema repair takes the write lock.
     if schema_is_current(connection)? {
         return Ok(());
     }
@@ -7537,6 +7555,9 @@ fn initialize_schema(
             transaction.execute_batch(gap.ddl)?;
         }
     }
+    for gap in reconciliation_index_gaps(&transaction)? {
+        transaction.execute_batch(gap.ddl)?;
+    }
     if version < SCHEMA_VERSION {
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
@@ -7556,7 +7577,8 @@ fn schema_version(connection: &Connection) -> Result<u32, StoreError> {
 
 fn schema_is_current(connection: &Connection) -> Result<bool, StoreError> {
     Ok(schema_version(connection)? == SCHEMA_VERSION
-        && pre_release_schema_6_gaps(connection)?.is_empty())
+        && pre_release_schema_6_gaps(connection)?.is_empty()
+        && reconciliation_index_gaps(connection)?.is_empty())
 }
 
 /// The public `experimental` branch wrote user_version 6 before 1.4.0 added
@@ -7582,6 +7604,18 @@ fn pre_release_schema_6_gaps(connection: &Connection) -> Result<Vec<SchemaGap>, 
             name: "delivery_seats",
             ddl: bridge::DELIVERY_SEATS_SCHEMA,
         });
+    }
+    Ok(gaps)
+}
+
+fn reconciliation_index_gaps(connection: &Connection) -> rusqlite::Result<Vec<&'static SchemaGap>> {
+    let mut statement = connection
+        .prepare("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)")?;
+    let mut gaps = Vec::new();
+    for repair in RECONCILIATION_INDEX_REPAIRS {
+        if !statement.query_row([repair.name], |row| row.get::<_, bool>(0))? {
+            gaps.push(repair);
+        }
     }
     Ok(gaps)
 }
@@ -8728,6 +8762,107 @@ mod tests {
         assert!(!tables.iter().any(|table| table.contains("acp")));
     }
 
+    #[test]
+    fn schema_six_index_repairs_preserve_every_prior_schema_shape() {
+        let mut fresh = Connection::open_in_memory().unwrap();
+        initialize_schema(&mut fresh, Path::new(".")).unwrap();
+        let expected = schema_shape(&fresh);
+        assert_eq!(
+            fresh
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            6
+        );
+        assert!(reconciliation_index_gaps(&fresh).unwrap().is_empty());
+        for version in 1..=6 {
+            let mut connection = Connection::open_in_memory().unwrap();
+            connection.execute_batch(SCHEMA).unwrap();
+            for (introduced, ddl) in [
+                (2, groups::SCHEMA),
+                (3, terminal::SCHEMA),
+                (4, coordination::SCHEMA),
+                (5, PERSONA_SCHEMA),
+                (6, bridge::SCHEMA),
+                (6, bridge::DELIVERY_SEATS_SCHEMA),
+                (6, terminal::REMOTE_SCHEMA),
+            ] {
+                if version >= introduced {
+                    connection.execute_batch(ddl).unwrap();
+                }
+            }
+            connection
+                .pragma_update(None, "user_version", version)
+                .unwrap();
+            initialize_schema(&mut connection, Path::new(".")).unwrap();
+            assert_eq!(
+                connection
+                    .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                    .unwrap(),
+                6
+            );
+            assert!(reconciliation_index_gaps(&connection).unwrap().is_empty());
+            assert_eq!(
+                schema_shape(&connection),
+                expected,
+                "upgrade from {version}"
+            );
+            initialize_schema(&mut connection, Path::new(".")).unwrap();
+            assert_eq!(schema_shape(&connection), expected, "reopen from {version}");
+        }
+    }
+
+    #[test]
+    fn schema_six_repairs_each_missing_index_and_pre_release_piece() {
+        for missing_indexes in 0..8 {
+            for missing_pieces in 0..4 {
+                let mut connection = Connection::open_in_memory().unwrap();
+                initialize_schema(&mut connection, Path::new(".")).unwrap();
+                let expected = schema_shape(&connection);
+                for (bit, repair) in RECONCILIATION_INDEX_REPAIRS.iter().enumerate() {
+                    if missing_indexes & (1 << bit) != 0 {
+                        connection
+                            .execute_batch(&format!("DROP INDEX {}", repair.name))
+                            .unwrap();
+                    }
+                }
+                if missing_pieces & 1 != 0 {
+                    connection
+                        .execute_batch("DROP VIEW delivery_seats")
+                        .unwrap();
+                }
+                if missing_pieces & 2 != 0 {
+                    connection
+                        .execute_batch(
+                            "ALTER TABLE pane_addresses DROP COLUMN remote_commands_terminal_id",
+                        )
+                        .unwrap();
+                }
+                // The schema-6 reader's structural check does not require optional indexes.
+                if missing_pieces == 0 {
+                    check_read_only_schema(&connection).unwrap();
+                }
+                initialize_schema(&mut connection, Path::new(".")).unwrap();
+                assert_eq!(schema_version(&connection).unwrap(), 6);
+                assert_eq!(schema_shape(&connection), expected);
+                check_read_only_schema(&connection).unwrap();
+                initialize_schema(&mut connection, Path::new(".")).unwrap();
+                assert_eq!(schema_shape(&connection), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn current_schema_opens_while_another_connection_holds_the_write_lock() {
+        let directory = TestDirectory::new();
+        drop(StateStore::open(&directory.0).unwrap());
+        let writer = Connection::open(directory.0.join(DATABASE_FILE_NAME)).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let store = StateStore::open(&directory.0).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 6);
+        check_read_only_schema(&store.connection).unwrap();
+        writer.execute_batch("ROLLBACK").unwrap();
+    }
+
     fn schema_shape(connection: &Connection) -> String {
         let mut statement = connection
             .prepare(
@@ -8763,7 +8898,17 @@ mod tests {
         let golden = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join(format!("src/store/schema-v{SCHEMA_VERSION}.txt"));
         if std::env::var_os("NAMEDROP_WRITE_SCHEMA_GOLDEN").is_some() {
-            fs::write(&golden, &shape).unwrap();
+            let baseline = shape
+                .lines()
+                .filter(|line| {
+                    !RECONCILIATION_INDEX_REPAIRS
+                        .iter()
+                        .any(|repair| line.starts_with(&format!("index {}:", repair.name)))
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            fs::write(&golden, baseline).unwrap();
         }
         let pinned = fs::read_to_string(&golden).unwrap_or_else(|_| {
             panic!(
@@ -8773,7 +8918,13 @@ mod tests {
             )
         });
         let actual: Vec<&str> = shape.lines().collect();
-        let expected: Vec<&str> = pinned.lines().collect();
+        let mut expected: Vec<&str> = pinned.lines().collect();
+        expected.extend([
+            "index coordination_links_assignment: CREATE INDEX coordination_links_assignment ON coordination_links(session_socket_id, worktree_id, assignment_id, message_id)",
+            "index mailbox_deliveries_message: CREATE INDEX mailbox_deliveries_message ON mailbox_deliveries(session_socket_id, worktree_id, message_id)",
+            "index transition_facts_attention_acknowledgement: CREATE INDEX transition_facts_attention_acknowledgement ON transition_facts(session_socket_id, worktree_id, entity_id) WHERE entity_kind='attention_item' AND transition_kind='acknowledged'",
+        ]);
+        expected.sort_unstable();
         if let Some(line) = (0..actual.len().max(expected.len()))
             .find(|&line| actual.get(line) != expected.get(line))
         {
