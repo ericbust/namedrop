@@ -125,6 +125,12 @@ Experimental Channels build for Linux and macOS testers.
 - `namedrop dashboard --ui <dir>` serves a custom browser app from a directory under the dashboard's existing security headers. Rebuilt directories are read fresh, large assets stream with bounded memory, dotfiles stay private, and aliases of the app shell require the session cookie. Ancestors need only search permission; the UI directory needs read and search permission. The shared server keeps its UI setting through upgrades, supports handoff to older releases without claim inheritance, falls back to their embedded UI when they lack `--ui` with a logged explanation, and spawns the exact executable it probed. During a handoff, matching UI requests wait up to five seconds for a ready successor and apply its UI setting before returning a URL. Longer startups return restart guidance without a URL, initially different UI requests receive restart guidance immediately, and updates and package refreshes can proceed while the successor starts.
 
 - The dashboard's `/api/events` endpoint streams every live Herdr workspace over one authenticated connection. It sends changed workspaces as `space` events and closed workspaces as `gone` events. Dashboard frames now include a live `display_name` and a nullable `addressable_label` that identifies a workspace only when its label is unique.
+## [1.4.4] - 2026-11-04
+
+### Fixed
+
+- Namedrop commands such as naming a pane or sending a message no longer fail with `database is locked` while agents are busy. A slow check that held the database for seconds now finishes quickly. Existing databases are repaired in place without a format change, so older versions can still open them.
+
 ## [1.4.3] - 2026-11-01
 
 ### Fixed
