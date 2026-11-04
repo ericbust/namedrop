@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { chromium } from "playwright-core";
 import { createServer } from "vite";
@@ -26,9 +28,12 @@ const record = (seq, frame) => ({
 });
 
 async function withPresentation(run) {
+  const cacheDir = await mkdtemp(join(tmpdir(), "peek-presentation-"));
   const server = await createServer({
     configFile: false,
     root: new URL("../", import.meta.url).pathname,
+    cacheDir,
+    optimizeDeps: { noDiscovery: true },
     server: { host: "127.0.0.1", port: 0 },
     logLevel: "error",
   });
@@ -56,8 +61,10 @@ async function withPresentation(run) {
       );
       const text = (terminal) => {
         const buffer = terminal.buffer.active;
-        return Array.from({ length: terminal.rows }, (_, y) =>
-          buffer.getLine(buffer.baseY + y)?.translateToString(true) ?? "",
+        return Array.from(
+          { length: terminal.rows },
+          (_, y) =>
+            buffer.getLine(buffer.baseY + y)?.translateToString(true) ?? "",
         )
           .join("\n")
           .trim();
@@ -80,7 +87,8 @@ async function withPresentation(run) {
       await apply("reset", "INITIAL");
     });
     await page.waitForFunction(() =>
-      document.querySelector(".peek-buffer-visible .xterm-rows")
+      document
+        .querySelector(".peek-buffer-visible .xterm-rows")
         ?.textContent.includes("INITIAL"),
     );
     await page.evaluate(() => {
@@ -127,6 +135,7 @@ async function withPresentation(run) {
   } finally {
     await browser.close();
     await server.close();
+    await rm(cacheDir, { recursive: true, force: true });
   }
 }
 
@@ -135,15 +144,15 @@ test("blank presentation reset cancels a suspended frame and ignores its stale c
 }, async () => {
   await withPresentation(async (page) => {
     await page.evaluate(() => {
-      void window.probe.apply("data", "STALE").then(() =>
-        window.probe.settled.push("old"),
-      );
+      void window.probe
+        .apply("data", "STALE")
+        .then(() => window.probe.settled.push("old"));
     });
     await page.waitForFunction(() => window.frameGate.requested > 0);
     await page.evaluate(() => {
-      void window.probe.apply("reset", "RESET SURVIVES").then(() =>
-        window.probe.settled.push("reset"),
-      );
+      void window.probe
+        .apply("reset", "RESET SURVIVES")
+        .then(() => window.probe.settled.push("reset"));
     });
     await page.waitForTimeout(100);
     assert.equal(
@@ -171,9 +180,9 @@ test("blank presentation disposal settles a suspended publication", {
 }, async () => {
   await withPresentation(async (page) => {
     await page.evaluate(() => {
-      void window.probe.apply("data", "DISPOSED").then(() =>
-        window.probe.settled.push("disposed"),
-      );
+      void window.probe
+        .apply("data", "DISPOSED")
+        .then(() => window.probe.settled.push("disposed"));
     });
     await page.waitForFunction(() => window.frameGate.requested > 0);
     await page.evaluate(() => window.probe.presentation.dispose());
@@ -188,10 +197,9 @@ test("blank presentation disposal settles a suspended publication", {
       "disposal cancels the suspended platform frame",
     );
     await page.evaluate(() => window.frameGate.deliverStale());
-    assert.deepEqual(
-      await page.evaluate(() => window.probe.commits),
-      ["INITIAL"],
-    );
+    assert.deepEqual(await page.evaluate(() => window.probe.commits), [
+      "INITIAL",
+    ]);
   });
 });
 
@@ -200,14 +208,46 @@ test("blank presentation ingests hidden frames and refreshes the latest grid on 
 }, async () => {
   await withPresentation(async (page) => {
     await page.evaluate(() => {
-      window.frameGate.visibility("hidden");
       void (async () => {
         await window.probe.apply("data", "HIDDEN FIRST");
+        await window.probe.presentation.apply({
+          kind: "data",
+          bytes: new TextEncoder().encode("\x1b[?2026h\x1b[2J\x1b[H"),
+        });
+        window.probe.settled.push("transaction");
+      })();
+    });
+    await page.waitForFunction(() => window.frameGate.requested > 0);
+    await page.evaluate(() => window.frameGate.visibility("hidden"));
+    await page.waitForTimeout(100);
+    assert.equal(
+      await page.evaluate(() => window.probe.settled.includes("transaction")),
+      true,
+      "hiding releases an already suspended publication and accepts an open transaction",
+    );
+    assert.ok(
+      await page.evaluate(() => window.frameGate.cancelled.length > 0),
+      "hiding cancels the suspended platform frame",
+    );
+    assert.deepEqual(
+      await page.evaluate(() => window.probe.commits),
+      ["INITIAL", "HIDDEN FIRST"],
+      "hidden ingestion preserves source synchronized output boundaries",
+    );
+    await page.evaluate(() => {
+      void (async () => {
+        await window.probe.presentation.apply({
+          kind: "data",
+          bytes: new TextEncoder().encode("\x1b[?2026l"),
+        });
+        await new Promise((resolve) => setTimeout(resolve, 65));
+        window.probe.beforeClear = [...window.probe.commits];
+        await new Promise((resolve) => setTimeout(resolve, 100));
         await window.probe.apply("data", "HIDDEN LATEST");
         window.probe.settled.push("hidden");
       })();
     });
-    await page.waitForTimeout(100);
+    await page.waitForTimeout(250);
     assert.equal(
       await page.evaluate(() => window.probe.settled.includes("hidden")),
       true,
@@ -215,18 +255,38 @@ test("blank presentation ingests hidden frames and refreshes the latest grid on 
     );
     assert.deepEqual(
       await page.evaluate(() => window.probe.commits),
-      ["INITIAL", "HIDDEN FIRST", "HIDDEN LATEST"],
+      ["INITIAL", "HIDDEN FIRST", "", "HIDDEN LATEST"],
+      "a completed isolated clear commits at its deadline without blocking later hidden input",
+    );
+    assert.deepEqual(
+      await page.evaluate(() => window.probe.beforeClear),
+      ["INITIAL", "HIDDEN FIRST"],
+      "hidden clear still holds the prior content before its deadline",
     );
     await page.evaluate(() => {
-      window.frameGate.release();
       window.frameGate.visibility("visible");
+      window.frameGate.release();
+      window.probe.returned = [];
+      function sample() {
+        window.probe.returned.push(
+          [
+            ...document.querySelectorAll(".peek-buffer-visible .xterm-rows"),
+          ].map((grid) => grid.textContent.trim()),
+        );
+        if (window.probe.returned.length < 3) requestAnimationFrame(sample);
+      }
+      requestAnimationFrame(sample);
     });
-    await page.waitForFunction(() =>
-      document.querySelector(".peek-buffer-visible .xterm-rows")
-        ?.textContent.includes("HIDDEN LATEST"),
+    await page.waitForFunction(() => window.probe.returned.length === 3);
+    assert.deepEqual(
+      await page.evaluate(() => window.probe.returned),
+      [["HIDDEN LATEST"], ["HIDDEN LATEST"], ["HIDDEN LATEST"]],
+      "the return frames show only the latest completed hidden grid",
     );
     assert.equal(
-      await page.locator(".peek-buffer-visible .xterm-rows").textContent(),
+      (
+        await page.locator(".peek-buffer-visible .xterm-rows").textContent()
+      ).trim(),
       "HIDDEN LATEST",
       "public xterm refresh restores the latest hidden grid",
     );
