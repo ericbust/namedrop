@@ -593,34 +593,54 @@ pub fn running(
         if blocked {
             continue;
         }
-        // A typed stop describes only its own turn. Untyped edges retain the
-        // conservative time fallback because their causal relation is unknown.
+        // A later turn's complete background snapshot also covers older runs,
+        // but only both prompt frontiers can prove that causal order.
+        let stop_covers_generation = |turn: Option<&str>| {
+            generation.as_deref().is_some_and(|generation| {
+                turn == Some(generation) || prompt_after(turn, generation)
+            })
+        };
         let parent_stop = facts
             .iter()
             .filter(|stop| match &stop.event {
                 Event::ParentStop {
                     generation: turn, ..
-                } => generation.is_none() || turn.is_none() || turn == generation,
+                } => {
+                    generation.is_none()
+                        || turn.is_none()
+                        || stop_covers_generation(turn.as_deref())
+                }
                 _ => false,
             })
-            .max_by_key(|stop| stop.at_ms);
+            // Typed snapshots follow host prompt order, even if an older
+            // handler arrives late. Unknown frontiers retain the time fallback.
+            .max_by_key(|stop| {
+                let frontier = match &stop.event {
+                    Event::ParentStop {
+                        generation: Some(turn),
+                        ..
+                    } if generation.is_some() => prompt_at(turn),
+                    _ => None,
+                };
+                (frontier.unwrap_or(stop.at_ms), stop.at_ms)
+            });
         let background = parent_stop.is_some_and(|stop| match &stop.event {
             Event::ParentStop {
                 generation: turn,
                 background,
             } => {
                 background.contains(id)
-                    && (generation.is_some() && turn == generation || fact.at_ms <= stop.at_ms)
+                    && (stop_covers_generation(turn.as_deref()) || fact.at_ms <= stop.at_ms)
             }
             _ => false,
         });
         if let Some(stop) = parent_stop
             && !background
         {
-            let same_generation = matches!(&stop.event,
-                Event::ParentStop { generation: Some(turn), .. }
-                if generation.as_deref() == Some(turn.as_str()));
-            if same_generation || fact.at_ms <= stop.at_ms || resume <= stop.at_ms {
+            let covered_generation = matches!(&stop.event,
+                Event::ParentStop { generation: turn, .. }
+                if stop_covers_generation(turn.as_deref()));
+            if covered_generation || fact.at_ms <= stop.at_ms || resume <= stop.at_ms {
                 continue;
             }
         }

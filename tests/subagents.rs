@@ -590,19 +590,25 @@ fn later_background_snapshot_removes_an_old_run_missing_its_stop() {
 
 #[test]
 fn later_background_snapshot_keeps_an_old_run_it_still_lists() {
-    let state = State::new();
-    record_host_event(&state, host_event("UserPromptSubmit", "z-old", ""), 100);
-    record_host_event(&state, host_event("SubagentStart", "z-old", "child"), 101);
-    record_host_event(&state, host_event("Stop", "z-old", ""), 110);
-    record_host_event(&state, host_event("UserPromptSubmit", "a-new", ""), 120);
-    let mut stop = host_event("Stop", "a-new", "");
-    stop["background_tasks"] = json!([{"id":"child", "status":"running"}]);
-    record_host_event(&state, stop, 130);
-    let runs = running(&state.0, &state.parent(), 140, Some(130));
-    assert_eq!(
-        runs.iter().map(|run| run.id.as_str()).collect::<Vec<_>>(),
-        ["child"]
-    );
+    for already_background in [true, false] {
+        let state = State::new();
+        record_host_event(&state, host_event("UserPromptSubmit", "z-old", ""), 100);
+        record_host_event(&state, host_event("SubagentStart", "z-old", "child"), 101);
+        let mut stop = host_event("Stop", "z-old", "");
+        if already_background {
+            stop["background_tasks"] = json!([{"id":"child", "status":"running"}]);
+        }
+        record_host_event(&state, stop, 110);
+        record_host_event(&state, host_event("UserPromptSubmit", "a-new", ""), 120);
+        let mut stop = host_event("Stop", "a-new", "");
+        stop["background_tasks"] = json!([{"id":"child", "status":"running"}]);
+        record_host_event(&state, stop, 130);
+        let runs = running(&state.0, &state.parent(), 140, Some(130));
+        assert_eq!(
+            runs.iter().map(|run| run.id.as_str()).collect::<Vec<_>>(),
+            ["child"]
+        );
+    }
 }
 
 #[test]
