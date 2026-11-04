@@ -1248,6 +1248,8 @@ async function sparseScrollingOracle(browser, t, result) {
     await ui.page.setViewportSize({ width: 900, height: 420 });
     await settleScroll(ui);
     assert.equal((await usefulMetrics(ui, 45, "TALL-GRID-45")).visible, true);
+    await ui.page.setViewportSize({ width: 900, height: 480 });
+    await settleScroll(ui);
     reset(20, 10, "SHORT-GRID-10");
     await painted(10, "SHORT-GRID-10");
     assert.equal((await usefulMetrics(ui, 10, "SHORT-GRID-10")).top, 0);
