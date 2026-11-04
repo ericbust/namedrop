@@ -27,6 +27,7 @@ type Ledger =
         height: number;
       }>;
       origin: number;
+      retainedFrom: number | null;
       top: number;
       publishedTo: number;
       cells: readonly Occurrence[];
@@ -180,6 +181,7 @@ function withoutLayoutBlanks(
     ...ledger,
     layout: "spaced",
     origin: 0,
+    retainedFrom: ledger.retainedFrom === null ? null : 0,
     top: ledger.cells.slice(0, ledger.top - ledger.origin).filter(keep).length,
     publishedTo: ledger.cells
       .slice(0, ledger.publishedTo - ledger.origin)
@@ -188,10 +190,10 @@ function withoutLayoutBlanks(
   };
 }
 
-function uniqueAlignment(
+function alignmentOffsets(
   known: readonly (string | null)[],
-  rows: readonly string[],
-): Alignment {
+  rows: readonly (string | null)[],
+) {
   const index = new Map<string, number[]>();
   for (const [i, text] of known.entries()) {
     if (text === null || !informative(text)) continue;
@@ -201,16 +203,24 @@ function uniqueAlignment(
   }
   const candidates = new Set<number>();
   for (const [y, text] of rows.entries()) {
+    if (text === null) continue;
     for (const position of index.get(text) ?? []) candidates.add(position - y);
   }
+  return candidates;
+}
+
+function uniqueAlignment(
+  known: readonly (string | null)[],
+  rows: readonly (string | null)[],
+): Alignment {
   let accepted: number | null = null;
-  for (const top of candidates) {
+  for (const top of alignmentOffsets(known, rows)) {
     let run: string[] = [];
     let anchored = false;
     for (let y = 0; y <= rows.length; y++) {
       const previous = known[top + y];
       const text = rows[y];
-      if (text !== undefined && text === previous) {
+      if (text !== undefined && text !== null && text === previous) {
         run.push(text);
       } else {
         if (strong(run, run, run)) anchored = true;
@@ -312,12 +322,97 @@ function projectConfirmed(
             text: "… some lines missed",
           },
         );
+    } else if (previous && (before !== undefined || after !== undefined)) {
+      rows.push(
+        pending ?? {
+          kind: "gap",
+          id: nextId++,
+          text: "… some lines missed",
+        },
+      );
     } else if (pending) rows.push(pending);
     pending = undefined;
     rows.push(row);
   }
   if (pending) rows.push(pending);
   return { confirmed: rows, nextId };
+}
+
+function sameLayout(
+  active: Extract<Ledger, { kind: "located" }>,
+  archived: Extract<Ledger, { kind: "located" }>,
+) {
+  return (
+    active.screen.cols === archived.screen.cols &&
+    active.screen.buffer === archived.screen.buffer &&
+    active.screen.height === archived.screen.height &&
+    active.layout === archived.layout &&
+    active.start === archived.start &&
+    active.end === archived.end
+  );
+}
+
+function uncertainOverlap(
+  active: Extract<Ledger, { kind: "located" }>,
+  archived: Extract<Ledger, { kind: "located" }>,
+) {
+  const current = active.cells.map(occurrenceText);
+  const known = archived.cells.map(occurrenceText);
+  const uncertain = new Set<number>();
+  for (const offset of alignmentOffsets(current, known)) {
+    const start = Math.max(0, offset);
+    const end = Math.min(current.length, known.length + offset);
+    let compatible = true;
+    for (let i = start; i < end; i++) {
+      const before = known[i - offset];
+      const after = current[i];
+      if (before != null && after != null && before !== after) {
+        compatible = false;
+        break;
+      }
+    }
+    if (!compatible) continue;
+    for (let i = start; i < end; i++)
+      if (current[i] !== null && current[i] === known[i - offset])
+        uncertain.add(active.origin + i);
+  }
+  return uncertain;
+}
+
+function joinOccurrences(
+  active: Extract<Ledger, { kind: "located" }>,
+  archived: Extract<Ledger, { kind: "located" }>,
+  shift: number,
+): Extract<Ledger, { kind: "located" }> | null {
+  const origin = Math.min(active.origin, archived.origin + shift);
+  const end = Math.max(
+    active.origin + active.cells.length,
+    archived.origin + shift + archived.cells.length,
+  );
+  const cells: Occurrence[] = [];
+  for (let position = origin; position < end; position++) {
+    const current = active.cells[position - active.origin];
+    const known = archived.cells[position - shift - archived.origin];
+    if (
+      current?.kind === "published" &&
+      known?.kind === "published" &&
+      current.row.id !== known.row.id
+    )
+      return null;
+    const cell = current?.kind === "published" ? current : (known ?? current);
+    if (!cell) return null;
+    cells.push(cell);
+  }
+  return {
+    ...active,
+    origin,
+    cells,
+    publishedTo: Math.min(active.publishedTo, archived.publishedTo + shift),
+    retainedFrom:
+      active.retainedFrom === null || archived.retainedFrom === null
+        ? null
+        : Math.min(active.retainedFrom, archived.retainedFrom + shift),
+  };
 }
 
 function observeFrame(
@@ -429,71 +524,6 @@ function observeFrame(
       ledger = matched;
     }
   }
-  if (
-    observation === "data" &&
-    alignment.kind === "matched" &&
-    ledger.kind === "located" &&
-    ledger.frame === previous &&
-    scroll
-  ) {
-    const active = ledger;
-    let ambiguous = false;
-    const bridges = segments.flatMap((segment, index) => {
-      if (
-        segment.screen.cols !== frame.cols ||
-        segment.screen.buffer !== frame.buffer ||
-        segment.screen.height !== frame.rows.length ||
-        segment.layout !== active.layout ||
-        segment.start !== active.start ||
-        segment.end !== active.end
-      )
-        return [];
-      const found = locate(segment, frame);
-      if (found.kind === "ambiguous") ambiguous = true;
-      return found.kind === "matched"
-        ? [{ segment, index, offset: found.offset }]
-        : [];
-    });
-    const [bridge] = bridges;
-    if (ambiguous || bridges.length > 1) alignment = { kind: "ambiguous" };
-    else if (bridge) {
-      const shift = alignment.offset - bridge.offset;
-      const origin = Math.min(ledger.origin, bridge.segment.origin + shift);
-      const end = Math.max(
-        ledger.origin + ledger.cells.length,
-        bridge.segment.origin + shift + bridge.segment.cells.length,
-      );
-      let conflicting = false;
-      const observed = visibleRows(active, frame);
-      const frameTop = alignment.offset;
-      const cells = Array.from({ length: end - origin }, (_, i): Occurrence => {
-        const current = active.cells[origin + i - active.origin];
-        const archived =
-          bridge.segment.cells[origin + i - shift - bridge.segment.origin];
-        if (
-          current?.kind === "published" &&
-          archived?.kind === "published" &&
-          current.row.id !== archived.row.id
-        )
-          conflicting = true;
-        if (current?.kind === "published") return current;
-        if (archived) return archived;
-        if (current) return current;
-        const text = observed[origin + i - frameTop];
-        return text === undefined
-          ? { kind: "missing", id: nextId++ }
-          : {
-              kind: "candidate",
-              row: { kind: "text", id: nextId++, text },
-            };
-      });
-      if (conflicting) alignment = { kind: "ambiguous" };
-      else {
-        ledger = { ...ledger, origin, cells };
-        segments.splice(bridge.index, 1);
-      }
-    }
-  }
   if (alignment.kind === "ambiguous") {
     if (observation === "baseline") return { ...state, baseline: frame };
     const confirmed =
@@ -527,6 +557,7 @@ function observeFrame(
         height: frame.rows.length,
       },
       origin: 0,
+      retainedFrom: null,
       top: 0,
       publishedTo: 0,
       cells: previous.rows.slice(scroll.start, scroll.end).map(
@@ -547,8 +578,39 @@ function observeFrame(
       segments,
       ledger: { ...ledger, frame, top },
     };
-  const cells = [...ledger.cells];
+  const previousTop =
+    scroll &&
+    ledger.layout === "physical" &&
+    scroll.start === ledger.start &&
+    scroll.end === ledger.end
+      ? top - scroll.shift
+      : top;
+  const origin = Math.min(
+    ledger.origin,
+    Math.max(previousTop, ledger.retainedFrom ?? previousTop),
+  );
+  const prefix = Array.from(
+    { length: ledger.origin - origin },
+    (): Occurrence => ({ kind: "vacant", id: nextId++ }),
+  );
+  ledger = {
+    ...ledger,
+    origin,
+    publishedTo: prefix.length ? origin : ledger.publishedTo,
+    cells: [...prefix, ...ledger.cells],
+  };
+  let cells = [...ledger.cells];
   const rows = visibleRows(ledger, frame);
+  if (previousTop !== top) {
+    for (const [y, text] of visibleRows(ledger, previous).entries()) {
+      const i = previousTop + y - ledger.origin;
+      if (i < 0) continue;
+      const cell = cells[i];
+      cells[i] = cell
+        ? observeOccurrence(cell, text)
+        : { kind: "candidate", row: { kind: "text", id: nextId++, text } };
+    }
+  }
   for (const [y, text] of rows.entries()) {
     const position = top + y;
     const i = position - ledger.origin;
@@ -564,6 +626,27 @@ function observeFrame(
     if (cell?.kind === "candidate")
       cells[i] = { kind: "positioned", row: cell.row };
   }
+  ledger = { ...ledger, cells };
+  for (let index = 0; index < segments.length; index++) {
+    const archived = segments[index];
+    if (!archived || !sameLayout(ledger, archived)) continue;
+    const found = uniqueAlignment(
+      archived.cells.map(occurrenceText),
+      ledger.cells.map(occurrenceText),
+    );
+    if (found.kind !== "matched") continue;
+    const shift = ledger.origin - archived.origin - found.offset;
+    const joined = joinOccurrences(ledger, archived, shift);
+    if (!joined) continue;
+    ledger = joined;
+    segments.splice(index--, 1);
+  }
+  cells = [...ledger.cells];
+  const uncertain = new Set(
+    segments.flatMap((segment) =>
+      sameLayout(ledger, segment) ? [...uncertainOverlap(ledger, segment)] : [],
+    ),
+  );
   let commitTo = top;
   if (top < ledger.top) {
     for (let i = top + rows.length - ledger.origin; i < cells.length; i++)
@@ -590,7 +673,10 @@ function observeFrame(
       cell.kind === "vacant"
     )
       gap();
-    else if (cell.kind !== "published") {
+    else if (cell.kind !== "published" && uncertain.has(position)) {
+      gap();
+      cells[i] = { kind: "missing", id: cell.row.id };
+    } else if (cell.kind !== "published") {
       confirmed.push(cell.row);
       cells[i] = { kind: "published", row: cell.row };
     }
@@ -714,6 +800,9 @@ function bounded(state: WatchHistory): WatchHistory {
             {
               ...segment,
               origin: segment.origin + first,
+              retainedFrom: first
+                ? segment.origin + first
+                : segment.retainedFrom,
               cells: segment.cells.slice(first),
             },
           ];
@@ -760,6 +849,7 @@ function bounded(state: WatchHistory): WatchHistory {
     ledger = {
       ...ledger,
       origin: ledger.origin + cut,
+      retainedFrom: cut ? ledger.origin + cut : ledger.retainedFrom,
       cells: ledger.cells.slice(cut),
     };
     if (bytes > WATCH_BYTE_LIMIT)

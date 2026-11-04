@@ -246,6 +246,14 @@ test("line and encoded byte budgets evict oldest rows with stable IDs for surviv
   assert.ok(watchBytes(state) <= WATCH_BYTE_LIMIT);
   assert.ok(watchRows(state).length <= WATCH_LINE_LIMIT);
   assert.equal(state.confirmed.at(-1)?.text, line(5099));
+  for (const start of [98, 100, 102])
+    state = watchReduce(state, { kind: "frame", frame: frame(start) });
+  assert.ok(
+    !watchRows(state).some(
+      (row) => row.text === line(98) || row.text === line(99),
+    ),
+    "rewinding cannot restore deliberately evicted occurrences",
+  );
 });
 
 test("a seed arriving after watched rows needs a proven sequence relation before it can contribute", () => {
@@ -448,8 +456,27 @@ test("identical stdout rows at two proven forward positions retain separate occu
   assert.notEqual(rows[0]?.id, rows[1]?.id);
 });
 
+test("equal stdout in incompatible disconnected ranges retains separate occurrences", () => {
+  const repeated = "An identical stdout line in two unrelated known ranges";
+  const current = (start: number): WatchFrame => ({
+    ...frame(start),
+    rows: frame(start).rows.map((text) =>
+      text === line(1) || text === line(41) ? repeated : text,
+    ),
+  });
+  let state = baseline(current(0));
+  for (const start of [2, 40, 42])
+    state = watchReduce(state, { kind: "frame", frame: current(start) });
+  const rows = watchRows(state).filter((row) => row.text === repeated);
+  assert.equal(rows.length, 2);
+  assert.notEqual(rows[0]?.id, rows[1]?.id);
+});
+
 test("a uniquely located rewind recovers the previously unobserved prefix in order", () => {
-  for (const rewind of [[98, 100, 102], [90, 92, 94, 96, 98, 100, 102]]) {
+  for (const rewind of [
+    [98, 100, 102],
+    [90, 92, 94, 96, 98, 100, 102],
+  ]) {
     let state = watchReduce(baseline(frame(100)), {
       kind: "frame",
       frame: frame(102),
