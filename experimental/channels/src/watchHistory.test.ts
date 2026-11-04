@@ -696,8 +696,8 @@ test("reopen maps the viewport without publishing a closed interval or replaying
   const rows = watchRows(state).filter((item) => item.kind === "text");
   assert.equal(rows.length, 3000);
   assert.deepEqual(
-    new Set(rows.map((item) => item.text)),
-    new Set(Array.from({ length: 3000 }, (_, i) => row(i))),
+    rows.map((item) => item.text),
+    Array.from({ length: 3000 }, (_, i) => row(i)),
   );
   assert.deepEqual(rows.slice(0, original.length), original);
   for (const known of beforeClose.filter((item) => item.kind === "text"))
