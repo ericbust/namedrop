@@ -2,6 +2,7 @@ use clap::{Parser, error::ErrorKind};
 mod agent_status_ui;
 mod naming_ui;
 mod popup_input;
+mod stop_hook;
 use namedrop::{
     Clock, CommandResult, HerdrCommandExecutor, LifecycleRuntime, ProcessHerdr, ProcessIds,
     SystemClock,
@@ -137,6 +138,10 @@ fn main() -> ExitCode {
             );
         }
     };
+    if let Some(state_directory) = cli.stop_hook_state_directory() {
+        stop_hook::run(state_directory);
+        return ExitCode::SUCCESS;
+    }
     if let Some(terminal) = cli.dashboard_observer_terminal() {
         return namedrop::dashboard::run_observer_guard(terminal);
     }

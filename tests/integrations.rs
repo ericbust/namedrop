@@ -3144,6 +3144,16 @@ fn assert_installed_package(home_directory: &Path, runtime: AgentRuntime) {
         .unwrap(),
         serde_json::json!({
             "hooks": {
+                "Stop": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": format!(
+                            "if [ -n \"${{PLUGIN_ROOT:-}}\" ]; then \"${{PLUGIN_ROOT}}/scripts/stop\"; elif [ -n \"${{CLAUDE_PLUGIN_ROOT:-}}\" ]; then \"${{CLAUDE_PLUGIN_ROOT}}/scripts/stop\"; else '{}'; fi",
+                            directory.join("scripts/stop").display()
+                        ),
+                        "timeout": 1
+                    }]
+                }],
                 "SessionStart": [{
                     "hooks": [{
                         "type": "command",

@@ -29,6 +29,7 @@ const CODEX_MANIFEST_FILE: &str = ".codex-plugin/plugin.json";
 const CLAUDE_MANIFEST_FILE: &str = ".claude-plugin/plugin.json";
 const HOOKS_FILE: &str = "hooks/hooks.json";
 const HOOK_SCRIPT_FILE: &str = "scripts/user-prompt-submit";
+const STOP_SCRIPT_FILE: &str = "scripts/stop";
 const SESSION_START_SCRIPT_FILE: &str = "scripts/session-start";
 const MARKETPLACE_FILE: &str = ".agents/plugins/marketplace.json";
 const CODEX_RULES_MARKER: &str = "# Managed by Namedrop: collaboration command permissions.\n";
@@ -41,13 +42,14 @@ const PACKAGE_DIRECTORIES: [&str; 6] = [
     "hooks",
     "scripts",
 ];
-const CODEX_SNAPSHOT_FILES: [&str; 6] = [
+const CODEX_SNAPSHOT_FILES: [&str; 7] = [
     CODEX_MANIFEST_FILE,
     INSTRUCTIONS_FILE,
     DESCRIPTOR_FILE,
     HOOKS_FILE,
     HOOK_SCRIPT_FILE,
     SESSION_START_SCRIPT_FILE,
+    STOP_SCRIPT_FILE,
 ];
 
 /// Runtime configuration resolved at the CLI boundary. Library callers default
@@ -386,7 +388,7 @@ fn install_integration_package_with_config(
 
 struct PreparedPackage {
     directory: PathBuf,
-    files: [(&'static str, String, Option<u32>); 9],
+    files: [(&'static str, String, Option<u32>); 10],
     codex_policy: Option<(PathBuf, String)>,
 }
 
@@ -423,6 +425,7 @@ fn prepare_integration_package(
     let hooks = hooks_manifest(&directory)?;
     let hook = hook_script(runtime, executable, state_directory)?;
     let session_start = session_start_script(runtime, executable, state_directory)?;
+    let stop = stop_script(executable, state_directory)?;
     let codex_version = codex_cache_version(&[
         runtime.as_str(),
         &instructions,
@@ -430,6 +433,7 @@ fn prepare_integration_package(
         &hooks,
         &hook,
         &session_start,
+        &stop,
     ]);
     let files = [
         (OWNERSHIP_MARKER_FILE, ownership_marker(), None),
@@ -440,6 +444,7 @@ fn prepare_integration_package(
         (HOOKS_FILE, hooks, None),
         (HOOK_SCRIPT_FILE, hook, Some(0o700)),
         (SESSION_START_SCRIPT_FILE, session_start, Some(0o700)),
+        (STOP_SCRIPT_FILE, stop, Some(0o700)),
         (MARKETPLACE_FILE, marketplace_manifest(), None),
     ];
     verify_owned_plugin_targets(&directory, &files)?;
@@ -895,6 +900,13 @@ fn hooks_manifest(package_directory: &Path) -> Result<String, String> {
         "{}\n",
         json!({
             "hooks": {
+                "Stop": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": launch(STOP_SCRIPT_FILE)?,
+                        "timeout": 1
+                    }]
+                }],
                 "SessionStart": [{
                     "hooks": [{
                         "type": "command",
@@ -931,6 +943,22 @@ fn marketplace_manifest() -> String {
             }]
         })
     )
+}
+
+fn stop_script(executable: &Path, state_directory: &Path) -> Result<String, String> {
+    let executable = shell_single_quote(
+        executable
+            .to_str()
+            .ok_or("hook executable path is not UTF-8")?,
+    );
+    let state = shell_single_quote(
+        state_directory
+            .to_str()
+            .ok_or("hook state path is not UTF-8")?,
+    );
+    Ok(format!(
+        "#!/bin/sh\nexec >/dev/null 2>&1\nNAMEDROP_HERDR_TIMEOUT_MS=250 {executable} hook stop --state-directory {state} <&0 >/dev/null 2>&1 &\nexit 0\n"
+    ))
 }
 
 fn hook_script(

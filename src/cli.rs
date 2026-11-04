@@ -113,6 +113,15 @@ impl Cli {
         }
     }
 
+    pub fn stop_hook_state_directory(&self) -> Option<&Path> {
+        match &self.command {
+            Command::Hook {
+                command: HookCommand::Stop(args),
+            } => Some(&args.state_directory),
+            _ => None,
+        }
+    }
+
     pub fn mailbox_wake_hook_state_directory(&self) -> Option<&Path> {
         match &self.command {
             Command::Hook {
@@ -665,6 +674,7 @@ enum HookCommand {
     AgentStatusChanged,
     AgentStatusWorker,
     MailboxWake(HookArgs),
+    Stop(HookArgs),
     SessionStart(HookArgs),
     UserPromptSubmit(HookArgs),
 }
@@ -675,6 +685,7 @@ impl HookCommand {
             Self::AgentStatusChanged => "hook.agent-status-changed",
             Self::AgentStatusWorker => "hook.agent-status-worker",
             Self::MailboxWake(_) => "hook.mailbox-wake",
+            Self::Stop(_) => "hook.stop",
             Self::SessionStart(_) => "hook.session-start",
             Self::UserPromptSubmit(_) => "hook.user-prompt-submit",
         }
