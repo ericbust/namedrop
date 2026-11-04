@@ -317,12 +317,21 @@ impl Event {
             .as_str()
             .filter(|s| is_token(s))?
             .to_owned();
-        let generation = value["prompt_id"]
-            .as_str()
-            .or_else(|| value["turn_id"].as_str())
-            .filter(|value| is_token(value))
-            .map(str::to_owned);
-        let event = match value["hook_event_name"].as_str()? {
+        let hook_event = value["hook_event_name"].as_str()?;
+        // Codex subagent turn_id belongs to the child, not the parent's prompt.
+        // Without parent identity, Stop conservatively covers this child ID.
+        let generation = if host == AgentRuntime::Codex
+            && matches!(hook_event, "SubagentStart" | "SubagentStop")
+        {
+            None
+        } else {
+            value["prompt_id"]
+                .as_str()
+                .or_else(|| value["turn_id"].as_str())
+                .filter(|value| is_token(value))
+                .map(str::to_owned)
+        };
+        let event = match hook_event {
             "SubagentStop" => Self::Stop {
                 id: SubagentId::parse(value["agent_id"].as_str()?)?.0,
                 generation,
@@ -562,6 +571,16 @@ pub fn running(
         else {
             continue;
         };
+        let resume = if generation.is_none() {
+            prompts
+                .values()
+                .copied()
+                .filter(|prompt| *prompt <= fact.at_ms)
+                .max()
+                .unwrap_or(i64::MIN)
+        } else {
+            resume
+        };
         if !is_token(id)
             || stopped.contains(&(id.as_str(), None))
             || stopped.contains(&(id.as_str(), generation.as_deref()))
@@ -571,7 +590,19 @@ pub fn running(
             continue;
         }
         let blocked = facts.iter().any(|barrier| match &barrier.event {
-            Event::ParentEnd => !generation.as_deref().is_some_and(|generation| {
+            Event::ParentEnd
+            | Event::ParentEndFor { .. }
+            | Event::Reset
+            | Event::ResetFor { .. }
+                if generation.is_none() =>
+            {
+                // Unknown parent generations need a new typed prompt before
+                // Start. Resume alone cannot prove that this is new work.
+                !prompts
+                    .values()
+                    .any(|prompt| *prompt > barrier.at_ms && *prompt <= fact.at_ms)
+            }
+            Event::ParentEnd | Event::Reset => !generation.as_deref().is_some_and(|generation| {
                 prompt_at(generation).is_some_and(|prompt| prompt > barrier.at_ms)
             }),
             Event::ParentEndFor {
@@ -580,14 +611,6 @@ pub fn running(
             | Event::ResetFor {
                 generation: frontier,
             } => !prompt_after(generation.as_deref(), frontier),
-            // Without a host generation, only a newly observed typed prompt
-            // can prove recovery. A delayed unidentified barrier may hide work.
-            Event::Reset => match generation.as_deref() {
-                Some(generation) => {
-                    !prompt_at(generation).is_some_and(|prompt| prompt > barrier.at_ms)
-                }
-                None => fact.at_ms < barrier.at_ms,
-            },
             _ => false,
         });
         if blocked {

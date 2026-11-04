@@ -682,7 +682,15 @@ fn parent_stop_preserves_explicit_background_across_turns_and_idle_is_durable() 
     record(&state.0, &state.parent(), event, 200).unwrap();
     assert_eq!(ids(&state, 201), ["background"]);
     assert_eq!(running(&state.0, &state.parent(), 202, Some(201)).len(), 1);
-    record(&state.0, &state.parent(), Event::Resume, 300).unwrap();
+    record(
+        &state.0,
+        &state.parent(),
+        Event::Prompt {
+            generation: "new-parent-turn".into(),
+        },
+        300,
+    )
+    .unwrap();
     assert_eq!(ids(&state, 301), ["background"]);
     record(&state.0, &state.parent(), start("new-turn"), 302).unwrap();
     assert_eq!(ids(&state, 303), ["background", "new-turn"]);
@@ -713,6 +721,15 @@ fn reset_session_end_and_age_bound_remove_stale_runs() {
     record(&state.0, &state.parent(), start("old"), MAX_RUN_AGE_MS + 99).unwrap();
     assert!(ids(&state, MAX_RUN_AGE_MS + 100).is_empty());
     record(&state.0, &state.parent(), Event::Reset, 200).unwrap();
+    record(
+        &state.0,
+        &state.parent(),
+        Event::Prompt {
+            generation: "new-parent-turn".into(),
+        },
+        250,
+    )
+    .unwrap();
     record(&state.0, &state.parent(), start("new"), 300).unwrap();
     assert_eq!(ids(&state, 301), ["new"]);
     record(&state.0, &state.parent(), Event::ParentEnd, 400).unwrap();
