@@ -89,15 +89,26 @@ def main():
             if any(event in str(attachment.get("hookName", attachment.get("hook_name", "")))
                    for event in ("SubagentStart", "SubagentStop")):
                 hooks.append(attachment)
+        contexts = list(transcript.session_contexts)
+        for turn in transcript.turns:
+            if "authorized test of subagent presence" in turn.prompt:
+                contexts.extend(turn.contexts)
+        lifecycle_contexts = [text for text in contexts if any(
+            marker in text for marker in ("SubagentStart", "SubagentStop", "scripts/subagent")
+        )]
         (output / "hook-transcript.json").write_text(json.dumps({
             "path": str(path), "session": before.session,
             "lifecycle_hook_attachments": hooks,
+            "lifecycle_model_contexts": lifecycle_contexts,
+            "model_contexts_checked": contexts,
             "note": "Silent lifecycle hooks should produce no model-context attachment. The live count proves the hooks ran.",
         }, indent=2) + "\n")
         if browser.returncode or result.returncode:
             raise RuntimeError("live probe failed; inspect browser.log and prompt-result.txt")
         if any(hook.get("content") or hook.get("additionalContext") or hook.get("stdout") for hook in hooks):
             raise RuntimeError("lifecycle hook output reached the transcript")
+        if lifecycle_contexts:
+            raise RuntimeError("lifecycle hook context found in model messages")
         print(f"PASS {args.agent}: live count rose and returned to zero. Evidence: {output}")
     finally:
         if browser.poll() is None:
