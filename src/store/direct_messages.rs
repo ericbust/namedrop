@@ -811,6 +811,16 @@ mod tests {
                         summary: "Private request needs a response".to_owned(),
                     },
                     &f.at,
+                )?;
+                tx.open_attention_item(
+                    &f.ns,
+                    &crate::AttentionItemDraft {
+                        id: crate::AttentionItemId::new("private-automatic-attention"),
+                        source_kind: crate::AttentionSourceKind::AutomaticReplyLimit,
+                        source_id: thread_id(&f.peer).as_str().to_owned(),
+                        summary: "Private thread attention".to_owned(),
+                    },
+                    &f.at,
                 )
             })
             .unwrap();
@@ -818,7 +828,7 @@ mod tests {
         assert!(rows.attention.is_empty());
         assert!(rows.mailbox.is_empty());
         let peers = f.store.direct_message_peers().unwrap();
-        assert_eq!(peers[0].attention_count, 1);
+        assert_eq!(peers[0].attention_count, 2);
     }
 
     #[test]

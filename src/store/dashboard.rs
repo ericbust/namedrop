@@ -960,6 +960,7 @@ impl StateTransaction<'_> {
             .iter()
             .map(|address| &address.address_id)
             .collect();
+        // Resolve targets before filtering so private attention cannot become an unlinked card.
         let mut attention = self.rows(
             "WITH targets (
                  attention_item_id, source_kind, source_id, summary, opened_at_ms, resolved_at_ms,
@@ -987,28 +988,28 @@ impl StateTransaction<'_> {
                     END,
                     CASE i.source_kind
                       WHEN 'coordination' THEN COALESCE(
-                          (SELECT m.message_id FROM channel_messages m
+                          (SELECT m.message_id FROM collaboration_messages m
                            WHERE m.session_socket_id = i.session_socket_id AND m.worktree_id = i.worktree_id
                              AND m.message_id = c.report_message_id),
                           (SELECT m.message_id FROM coordination_assignments assignment
-                           JOIN channel_messages m ON m.session_socket_id = assignment.session_socket_id
+                           JOIN collaboration_messages m ON m.session_socket_id = assignment.session_socket_id
                              AND m.worktree_id = assignment.worktree_id AND m.message_id = assignment.last_reply_message_id
                            WHERE assignment.session_socket_id = i.session_socket_id AND assignment.worktree_id = i.worktree_id
                              AND assignment.coordination_id = c.coordination_id
                            ORDER BY m.created_at_ms DESC, m.rowid DESC LIMIT 1),
-                          (SELECT m.message_id FROM channel_messages m
+                          (SELECT m.message_id FROM collaboration_messages m
                            WHERE m.session_socket_id = i.session_socket_id AND m.worktree_id = i.worktree_id
                              AND m.message_id = c.wake_message_id),
                           (SELECT assignment.current_message_id FROM coordination_assignments assignment
                            WHERE assignment.session_socket_id = i.session_socket_id AND assignment.worktree_id = i.worktree_id
                              AND assignment.coordination_id = c.coordination_id ORDER BY assignment.rowid DESC LIMIT 1))
                       WHEN 'automatic_reply_limit' THEN (
-                          SELECT m.message_id FROM channel_messages m
+                          SELECT m.message_id FROM collaboration_messages m
                           WHERE m.session_socket_id = i.session_socket_id AND m.worktree_id = i.worktree_id
                             AND m.thread_id = i.source_id ORDER BY m.created_at_ms DESC, m.rowid DESC LIMIT 1)
                       WHEN 'context_grant' THEN (
                           SELECT m.message_id FROM context_grants g
-                          JOIN channel_messages m ON m.session_socket_id = g.session_socket_id
+                          JOIN collaboration_messages m ON m.session_socket_id = g.session_socket_id
                             AND m.worktree_id = g.worktree_id AND m.thread_id = g.thread_id
                           WHERE g.session_socket_id = i.session_socket_id AND g.worktree_id = i.worktree_id
                             AND g.grant_id = i.source_id ORDER BY m.created_at_ms DESC, m.rowid DESC LIMIT 1)
@@ -1023,7 +1024,7 @@ impl StateTransaction<'_> {
                                WHERE r.session_socket_id = m.session_socket_id AND r.worktree_id = m.worktree_id
                                  AND r.message_id = m.message_id AND r.address_id NOT IN (SELECT value FROM json_each(?4))
                                ORDER BY r.recipient_order LIMIT 1))
-                          FROM channel_messages m
+                          FROM collaboration_messages m
                           WHERE m.session_socket_id = i.session_socket_id AND m.worktree_id = i.worktree_id
                             AND m.thread_id = i.source_id ORDER BY m.created_at_ms DESC, m.rowid DESC LIMIT 1)
                       WHEN 'pane_binding' THEN (
