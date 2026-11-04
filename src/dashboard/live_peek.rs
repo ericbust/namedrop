@@ -1,6 +1,7 @@
 //! The private, receive-only terminal projection boundary for one HTTP viewer.
 use super::{
-    Front, SECURITY_HEADERS, Status, decode_query_value, respond_status, snapshot::SpaceKey,
+    Front, Request, SECURITY_HEADERS, Status, decode_query_value, respond_status,
+    snapshot::SpaceKey,
 };
 use crate::{
     HerdrCommandExecutor, ProcessHerdr, StateStore,
@@ -17,7 +18,10 @@ use std::{
         unix::process::CommandExt,
     },
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -28,10 +32,100 @@ const PENDING_LIMIT: usize = 2 * 1024 * 1024;
 const STARTUP: Duration = Duration::from_secs(5);
 const STALL: Duration = Duration::from_secs(2);
 const HEARTBEAT: Duration = Duration::from_secs(10);
+const INPUT_LIMIT: usize = 8 * 1024;
+const TEXT_LIMIT: usize = 4 * 1024;
+const INPUT_RATE: usize = 12;
 
 #[derive(Default)]
 pub(super) struct LivePeeks {
     active: AtomicUsize,
+    inputs: Mutex<VecDeque<Instant>>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub(super) enum InputPost {
+    #[serde(rename = "text")]
+    Text { text: String, continuity: String },
+    #[serde(rename = "key")]
+    Key { key: InputKey, continuity: String },
+}
+
+#[derive(Deserialize)]
+pub(super) enum InputKey {
+    Enter,
+    Escape,
+    #[serde(rename = "Ctrl-C")]
+    CtrlC,
+    ArrowUp,
+    ArrowDown,
+}
+
+impl InputKey {
+    fn herdr(&self) -> &'static str {
+        match self {
+            Self::Enter => "enter",
+            Self::Escape => "esc",
+            Self::CtrlC => "ctrl+c",
+            Self::ArrowUp => "up",
+            Self::ArrowDown => "down",
+        }
+    }
+}
+
+impl InputPost {
+    pub(super) fn read(reader: &mut impl Read, request: &Request) -> Result<Self, Status> {
+        if request
+            .header("content-type")
+            .map(|value| value.split(';').next().unwrap_or("").trim())
+            != Some("application/json")
+        {
+            return Err(Status::BadRequest);
+        }
+        let length = request.header("content-length").ok_or(Status::BadRequest)?;
+        if length.is_empty() || !length.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(Status::BadRequest);
+        }
+        let length = length
+            .parse::<usize>()
+            .map_err(|_| Status::PayloadTooLarge)?;
+        if length > INPUT_LIMIT {
+            return Err(Status::PayloadTooLarge);
+        }
+        let mut bytes = vec![0; length];
+        reader
+            .read_exact(&mut bytes)
+            .map_err(|_| Status::BadRequest)?;
+        let post: Self = serde_json::from_slice(&bytes).map_err(|_| Status::BadRequest)?;
+        let continuity = match &post {
+            Self::Text { text, continuity } => {
+                if text.is_empty()
+                    || text.len() > TEXT_LIMIT
+                    || text
+                        .chars()
+                        .any(|ch| ch.is_control() || (ch.is_whitespace() && ch != ' '))
+                {
+                    return Err(Status::BadRequest);
+                }
+                continuity
+            }
+            Self::Key { continuity, .. } => continuity,
+        };
+        if continuity.len() != 64
+            || !continuity
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return Err(Status::BadRequest);
+        }
+        Ok(post)
+    }
+
+    fn continuity(&self) -> &str {
+        match self {
+            Self::Text { continuity, .. } | Self::Key { continuity, .. } => continuity,
+        }
+    }
 }
 struct Permit<'a>(&'a AtomicUsize);
 impl Drop for Permit<'_> {
@@ -61,10 +155,25 @@ pub(super) fn continuity_query(query: Option<&str>) -> Result<Option<String>, St
     Ok(Some(value))
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 struct NativeIdentity {
     terminal: String,
     session: Option<String>,
+    status: Option<String>,
+}
+impl PartialEq for NativeIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.terminal == other.terminal && self.session == other.session
+    }
+}
+impl Eq for NativeIdentity {}
+impl NativeIdentity {
+    fn accepts_input(&self) -> bool {
+        !self
+            .status
+            .as_deref()
+            .is_some_and(|status| matches!(status, "offline" | "disconnected" | "unknown"))
+    }
 }
 
 #[derive(Deserialize)]
@@ -81,6 +190,7 @@ struct Pane {
     workspace_id: String,
     terminal_id: String,
     agent_session: Option<Session>,
+    agent_status: Option<String>,
 }
 #[derive(Deserialize)]
 struct Session {
@@ -135,6 +245,7 @@ fn native(binding: &LiveBinding, budget: Duration) -> Result<NativeIdentity, Sta
             .agent_session
             .map(|s| s.value)
             .filter(|s| !s.is_empty()),
+        status: pane.agent_status,
     };
     if binding
         .agent_session_id
@@ -487,6 +598,72 @@ fn pause(socket: &TcpStream, pipe: RawFd, writing: bool) -> io::Result<()> {
 }
 
 impl LivePeeks {
+    pub(super) fn send_input(
+        &self,
+        front: &Front,
+        key: &SpaceKey,
+        address: &str,
+        post: InputPost,
+    ) -> Result<(), Status> {
+        let _admitted = front.admit_mutation()?;
+        {
+            let mut recent = self.inputs.lock().map_err(|_| Status::Unavailable)?;
+            let now = Instant::now();
+            while recent
+                .front()
+                .is_some_and(|at| now.duration_since(*at) >= Duration::from_secs(1))
+            {
+                recent.pop_front();
+            }
+            if recent.len() >= INPUT_RATE {
+                return Err(Status::TooManyRequests);
+            }
+            recent.push_back(now);
+        }
+        let mut store = StateStore::open_read_only(front.files.state())
+            .map_err(|_| Status::Unavailable)?
+            .ok_or(Status::NotFound)?;
+        store
+            .set_busy_timeout(Duration::from_millis(100))
+            .map_err(|_| Status::Unavailable)?;
+        let binding = recorded(&mut store, key, address)?;
+        if binding.pane_type != crate::PaneType::Agent || binding.agent_session_id.is_none() {
+            return Err(Status::Gone);
+        }
+        let identity = native(&binding, Duration::from_millis(500))?;
+        if !identity.accepts_input() {
+            return Err(Status::Gone);
+        }
+        if identity.session.as_deref() != binding.agent_session_id.as_ref().map(|id| id.as_str()) {
+            return Err(Status::Gone);
+        }
+        if post.continuity() != continuity(front, address, &binding, &identity) {
+            return Err(Status::Gone);
+        }
+        let herdr =
+            ProcessHerdr::default().with_socket(Some(binding.namespace.session_socket_id.clone()));
+        let send = |args: &[&str]| {
+            herdr
+                .execute_bounded(args, Duration::from_secs(2), &AtomicBool::new(false), 4096)
+                .map(|_| ())
+                .map_err(|_| Status::Unavailable)
+        };
+        match post {
+            InputPost::Text { text, .. } => {
+                send(&["pane", "send-text", &binding.pane_id, &text])?;
+                let current = recorded(&mut store, key, address)?;
+                let updated = native(&binding, Duration::from_millis(500))?;
+                if current != binding || updated != identity || !updated.accepts_input() {
+                    return Err(Status::Gone);
+                }
+                send(&["pane", "send-keys", &binding.pane_id, "enter"])
+            }
+            InputPost::Key { key, .. } => {
+                send(&["pane", "send-keys", &binding.pane_id, key.herdr()])
+            }
+        }
+    }
+
     pub(super) fn serve(
         &self,
         mut socket: TcpStream,
@@ -839,7 +1016,7 @@ fn decode(text: &str) -> Result<Vec<u8>, ()> {
     }
     let mut output = Vec::with_capacity((text.len() / 4 * 3).min(PAINT_LIMIT));
     let count = text.len() / 4;
-    for (i, part) in text.as_bytes().chunks_exact(4).enumerate() {
+    for (i, part) in text.as_bytes().as_chunks::<4>().0.iter().enumerate() {
         let a = digit(part[0])?;
         let b = digit(part[1])?;
         output.push(a << 2 | b >> 4);

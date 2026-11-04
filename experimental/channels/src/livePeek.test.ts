@@ -107,8 +107,8 @@ test("live boundary consumes fragmented NDJSON, heartbeats and atomic paints in 
   await run.done;
   assert.deepEqual(run.states, [
     { kind: "connecting" },
-    { kind: "live" },
-    { kind: "live" },
+    { kind: "live", continuity: "fixture-continuity" },
+    { kind: "live", continuity: "fixture-continuity" },
     { kind: "closed", reason: "ended" },
   ]);
   assert.deepEqual(
