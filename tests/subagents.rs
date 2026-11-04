@@ -566,6 +566,81 @@ fn original_typed_background_run_survives_new_parent_prompts_and_stops() {
 }
 
 #[test]
+fn later_background_snapshot_removes_an_old_run_missing_its_stop() {
+    for started_at in [101, 135] {
+        let state = State::new();
+        record_host_event(&state, host_event("UserPromptSubmit", "z-old", ""), 100);
+        record_host_event(
+            &state,
+            host_event("SubagentStart", "z-old", "child"),
+            started_at,
+        );
+        let mut stop = host_event("Stop", "z-old", "");
+        stop["background_tasks"] = json!([{"id":"child", "status":"running"}]);
+        record_host_event(&state, stop, 110);
+        record_host_event(&state, host_event("UserPromptSubmit", "a-new", ""), 120);
+        record_host_event(&state, host_event("Stop", "a-new", ""), 130);
+        assert_eq!(
+            running(&state.0, &state.parent(), 140, Some(130)).len(),
+            0,
+            "later empty snapshot removes the old run even if its start arrived at {started_at}"
+        );
+    }
+}
+
+#[test]
+fn later_background_snapshot_keeps_an_old_run_it_still_lists() {
+    let state = State::new();
+    record_host_event(&state, host_event("UserPromptSubmit", "z-old", ""), 100);
+    record_host_event(&state, host_event("SubagentStart", "z-old", "child"), 101);
+    record_host_event(&state, host_event("Stop", "z-old", ""), 110);
+    record_host_event(&state, host_event("UserPromptSubmit", "a-new", ""), 120);
+    let mut stop = host_event("Stop", "a-new", "");
+    stop["background_tasks"] = json!([{"id":"child", "status":"running"}]);
+    record_host_event(&state, stop, 130);
+    let runs = running(&state.0, &state.parent(), 140, Some(130));
+    assert_eq!(
+        runs.iter().map(|run| run.id.as_str()).collect::<Vec<_>>(),
+        ["child"]
+    );
+}
+
+#[test]
+fn delayed_older_background_snapshot_cannot_override_a_later_empty_snapshot() {
+    let state = State::new();
+    record_host_event(&state, host_event("UserPromptSubmit", "z-old", ""), 100);
+    record_host_event(&state, host_event("SubagentStart", "z-old", "child"), 101);
+    record_host_event(&state, host_event("UserPromptSubmit", "a-new", ""), 120);
+    record_host_event(&state, host_event("Stop", "a-new", ""), 130);
+    let mut stop = host_event("Stop", "z-old", "");
+    stop["background_tasks"] = json!([{"id":"child", "status":"running"}]);
+    record_host_event(&state, stop, 150);
+    assert_eq!(running(&state.0, &state.parent(), 160, Some(130)).len(), 0);
+}
+
+#[test]
+fn background_snapshot_order_requires_both_prompt_frontiers() {
+    for observed_prompt in ["z-old", "a-new"] {
+        let state = State::new();
+        record_host_event(
+            &state,
+            host_event("UserPromptSubmit", observed_prompt, ""),
+            90,
+        );
+        record_host_event(&state, host_event("SubagentStart", "z-old", "child"), 101);
+        let mut stop = host_event("Stop", "z-old", "");
+        stop["background_tasks"] = json!([{"id":"child", "status":"running"}]);
+        record_host_event(&state, stop, 110);
+        record_host_event(&state, host_event("Stop", "a-new", ""), 130);
+        assert_eq!(
+            running(&state.0, &state.parent(), 140, Some(130)).len(),
+            1,
+            "one prompt frontier cannot prove order: {observed_prompt}"
+        );
+    }
+}
+
+#[test]
 fn malformed_fact_or_reader_overflow_hides_all_runs() {
     let state = State::new();
     record(&state.0, &state.parent(), start("one"), 100).unwrap();
