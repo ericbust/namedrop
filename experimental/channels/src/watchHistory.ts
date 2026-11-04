@@ -269,6 +269,7 @@ function observeOccurrence(cell: Occurrence, text: string): Occurrence {
       : cell;
   }
   if (cell.kind === "candidate" || cell.kind === "positioned") {
+    if (!text.trim()) return { kind: "candidate", row: { ...cell.row, text } };
     if (cell.row.text === text || cell.row.text.startsWith(text)) return cell;
     if (text.startsWith(cell.row.text))
       return { kind: "candidate", row: { ...cell.row, text } };
@@ -618,6 +619,13 @@ function observeFrame(
         : { kind: "candidate", row: { kind: "text", id: nextId++, text } };
     }
   }
+  // A join can replace active cells with archived occurrence IDs.
+  const priorText = new Map(
+    [...segments.flatMap((segment) => segment.cells), ...cells].map((cell) => [
+      "row" in cell ? cell.row.id : cell.id,
+      occurrenceText(cell),
+    ]),
+  );
   for (const [y, text] of rows.entries()) {
     const position = top + y;
     const i = position - ledger.origin;
@@ -670,9 +678,21 @@ function observeFrame(
       });
   }
   if (commitTo > ledger.publishedTo && boundary === "gap") gap();
+  let publishedTo = Math.max(ledger.publishedTo, commitTo);
   for (let position = ledger.publishedTo; position < commitTo; position++) {
     const i = position - ledger.origin;
     const cell = cells[i];
+    const observed = rows[position - top];
+    if (
+      cell &&
+      cell.kind !== "published" &&
+      observed !== undefined &&
+      priorText.get("row" in cell ? cell.row.id : cell.id) !== observed
+    ) {
+      // Later eligible cells can publish while this coordinate stays pending.
+      publishedTo = Math.min(publishedTo, position);
+      continue;
+    }
     if (
       !cell ||
       cell.kind === "conflicted" ||
@@ -700,7 +720,7 @@ function observeFrame(
       top,
       cells,
       boundary,
-      publishedTo: Math.max(ledger.publishedTo, commitTo),
+      publishedTo,
     },
   };
 }

@@ -75,6 +75,169 @@ test("recorded Codex reversal does not retain a transient line prefix before com
   assert.equal(rows[first + 1]?.text.trim(), "divisors.");
 });
 
+test("a shorter visible prefix waits while later reverse departures publish once", () => {
+  let state = watchReduce(baseline(), { kind: "frame", frame: frame(2) });
+  const original = watchRows(state);
+  const shorter = {
+    ...frame(),
+    rows: frame().rows.map((text) =>
+      text === line(6) ? text.slice(0, 25) : text,
+    ),
+  };
+  for (let repeat = 0; repeat < 2; repeat++) {
+    state = watchReduce(state, { kind: "frame", frame: shorter });
+    const rows = watchRows(state);
+    assert.ok(!rows.some((row) => row.text === line(6)));
+    assert.equal(rows.filter((row) => row.text === line(12)).length, 1);
+    assert.deepEqual(rows.slice(0, original.length), original);
+  }
+  const later = watchRows(state).find((row) => row.text === line(12));
+  state = watchReduce(state, { kind: "frame", frame: frame() });
+  for (const start of [2, 4, 6, 8])
+    state = watchReduce(state, { kind: "frame", frame: frame(start) });
+  assert.deepEqual(
+    watchRows(state).map((row) => row.text),
+    Array.from({ length: 13 }, (_, i) => line(i)),
+  );
+  assert.deepEqual(watchRows(state).at(-1), later);
+});
+
+test("mutable blanks allow restoration and replacement before departure", () => {
+  for (const replacement of [
+    line(6),
+    "Replacement output with unique content",
+  ]) {
+    let state = watchReduce(baseline(), { kind: "frame", frame: frame(2) });
+    const original = watchRows(state);
+    const changed = (start: number, text: string): WatchFrame => ({
+      ...frame(start),
+      rows: frame(start).rows.map((row) => (row === line(6) ? text : row)),
+    });
+    state = watchReduce(state, { kind: "frame", frame: changed(0, "") });
+    assert.ok(!watchRows(state).some((row) => row.text === line(6)));
+    state = watchReduce(state, {
+      kind: "frame",
+      frame: changed(0, replacement),
+    });
+    for (const start of [2, 4, 6, 8])
+      state = watchReduce(state, {
+        kind: "frame",
+        frame: changed(start, replacement),
+      });
+    assert.deepEqual(
+      watchRows(state).map((row) => row.text),
+      Array.from({ length: 13 }, (_, i) => (i === 6 ? replacement : line(i))),
+    );
+    assert.deepEqual(watchRows(state).slice(0, original.length), original);
+  }
+});
+
+test("a mutable row that truly departs blank retains the blank occurrence", () => {
+  let state = watchReduce(baseline(), { kind: "frame", frame: frame(2) });
+  for (const start of [0, 2, 4, 6, 8]) {
+    const current = frame(start);
+    state = watchReduce(state, {
+      kind: "frame",
+      frame: {
+        ...current,
+        rows: current.rows.map((text) => (text === line(6) ? "" : text)),
+      },
+    });
+  }
+  assert.deepEqual(
+    watchRows(state).map((row) => row.text),
+    Array.from({ length: 13 }, (_, i) => (i === 6 ? "" : line(i))),
+  );
+});
+
+test("an erased trailing candidate can restore or replace its text before scrolling out", () => {
+  for (const replacement of [
+    line(13),
+    "Replacement trailing output with evidence",
+  ]) {
+    let state = watchReduce(baseline(), { kind: "frame", frame: frame(2) });
+    const changed = (start: number, text: string): WatchFrame => ({
+      ...frame(start),
+      rows: frame(start).rows.map((row) => (row === line(13) ? text : row)),
+    });
+    state = watchReduce(state, { kind: "frame", frame: changed(2, "") });
+    state = watchReduce(state, {
+      kind: "frame",
+      frame: changed(2, replacement),
+    });
+    for (const start of [4, 6, 8, 10, 12, 14])
+      state = watchReduce(state, {
+        kind: "frame",
+        frame: changed(start, replacement),
+      });
+    assert.deepEqual(
+      watchRows(state).map((row) => row.text),
+      Array.from({ length: 14 }, (_, i) => (i === 13 ? replacement : line(i))),
+    );
+  }
+});
+
+test("archive selection compares the surviving occurrences rather than active coordinates", () => {
+  let state = baseline();
+  for (const start of [2, 100, 102])
+    state = watchReduce(state, { kind: "frame", frame: frame(start) });
+  const anchors = watchRows(state).filter((row) => row.kind === "text");
+  const shorter = {
+    ...frame(),
+    rows: frame().rows.map((text) =>
+      text === line(6) ? text.slice(0, 25) : text,
+    ),
+  };
+  state = watchReduce(state, { kind: "frame", frame: shorter });
+  const rows = watchRows(state).filter((row) => row.kind === "text");
+  for (const index of [2, 3, 4, 5, 7, 8, 9, 10, 11, 12])
+    assert.equal(rows.filter((row) => row.text === line(index)).length, 1);
+  assert.ok(!rows.some((row) => row.text === line(6)));
+  for (const anchor of anchors)
+    assert.deepEqual(
+      rows.find((row) => row.id === anchor.id),
+      anchor,
+    );
+});
+
+test("joining an archive compares raw visible text with the surviving occurrence evidence", () => {
+  let state = baseline();
+  for (const start of [2, 20, 22, 12])
+    state = watchReduce(state, { kind: "frame", frame: frame(start) });
+  const anchors = watchRows(state).filter((row) => row.kind === "text");
+  const current = frame(6);
+  state = watchReduce(state, {
+    kind: "frame",
+    frame: {
+      ...current,
+      rows: current.rows.map((text) =>
+        text === line(12) ? text.slice(0, 25) : text,
+      ),
+    },
+  });
+  const rows = watchRows(state).filter((row) => row.kind === "text");
+  assert.ok(!rows.some((row) => row.text === line(12)));
+  assert.equal(rows.filter((row) => row.text === line(13)).length, 1);
+  assert.equal(rows.filter((row) => row.text === line(32)).length, 1);
+  for (const anchor of anchors)
+    assert.deepEqual(
+      rows.find((row) => row.id === anchor.id),
+      anchor,
+    );
+  for (const start of [8, 10, 12, 14])
+    state = watchReduce(state, { kind: "frame", frame: frame(start) });
+  const recovered = watchRows(state).filter((row) => row.kind === "text");
+  assert.deepEqual(
+    recovered.map((row) => row.text),
+    Array.from({ length: 33 }, (_, i) => line(i)),
+  );
+  for (const anchor of rows)
+    assert.deepEqual(
+      recovered.find((row) => row.id === anchor.id),
+      anchor,
+    );
+});
+
 test("exact middle-band upward scroll captures only departed rows, preserving indent and blanks", () => {
   assert.deepEqual(departedRows(frame(), frame(2)), [line(0), line(1)]);
   const before = frame();
