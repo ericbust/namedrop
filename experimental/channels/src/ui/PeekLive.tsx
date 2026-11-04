@@ -239,7 +239,12 @@ export function PeekLive({
     scroller.addEventListener("keydown", followIntent);
     scroller.addEventListener("pointerdown", interruptReturn);
     const resize = new ResizeObserver(() => {
-      if (!replacing) fit();
+      if (replacing) return;
+      if (scroller.clientWidth !== fittedSize.width) fit();
+      else {
+        restorePosition();
+        fittedSize = { width: scroller.clientWidth, height: scroller.clientHeight };
+      }
     });
     resize.observe(scroller);
     function create(cols: number, rows: number) {

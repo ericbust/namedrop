@@ -2,6 +2,18 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.5.0-exp.12] - 2026-11-04
+
+### Changed
+
+- Thread replies now appear only in their thread. The channel shows the top message with a reply count and the latest reply.
+- Your own message in a thread resets the Automatic Reply Limit and lifts a pause it caused. Agent-to-agent exchanges still pause after 10 replies.
+
+### Fixed
+
+- Live Peek fills its frame. It grows text to use the full width, especially in Expand, and keeps the newest line visible after resizing.
+- Live Peek no longer flashes blank while Codex streams, and its watch history no longer repeats or drops lines. Lines that truly can't be recovered show a visible gap marker.
+
 ## [1.5.0-exp.11] - 2026-11-04
 
 ### Added

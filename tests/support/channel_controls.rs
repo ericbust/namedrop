@@ -106,7 +106,7 @@ fn browser_controls_continue_and_stop_release_the_reply_limit_mailbox_hold() {
 }
 
 #[test]
-fn browser_followup_receipt_reports_reply_limit_hold_until_continue() {
+fn browser_followup_refills_reply_limit_and_releases_its_hold() {
     let f = fixture();
     let parent = held_thread(&f);
     assert!(
@@ -125,17 +125,22 @@ fn browser_followup_receipt_reports_reply_limit_hold_until_continue() {
         parent["message_id"].as_str(),
     );
     assert_eq!(status, 200, "{receipt}");
-    assert_eq!(controls(&f, &parent)["reply_limit_paused"], true);
+    assert_eq!(controls(&f, &parent)["reply_limit_paused"], false);
+    assert_eq!(controls(&f, &parent)["reply_allowance"], 10);
     assert_eq!(recipient_aliases(&receipt), ["planner", "lead"]);
     for outlook in receipt["delivery_outlook"].as_array().unwrap() {
-        assert_eq!(outlook["agent_status"], "idle");
-        assert_eq!(outlook["lifecycle"], "occupied");
-        let statement = outlook["statement"].as_str().unwrap();
-        assert!(statement.contains("Continue"), "{statement}");
-        assert!(statement.contains("queued"), "{statement}");
-        assert!(!statement.contains("imminent"), "{statement}");
+        assert!(
+            !outlook["statement"].as_str().unwrap().contains("Continue"),
+            "{outlook}"
+        );
     }
-    assert_eq!(f.count("SELECT count(*) FROM delivery_attempts a JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,address_id,delivery_id) WHERE d.message_id=(SELECT message_id FROM collaboration_messages WHERE request_id='held-followup')"), 0);
+    wait_for(
+        "human followup did not release the held mailbox head",
+        || {
+            f.count("SELECT count(*) FROM delivery_attempts a JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,address_id,delivery_id) WHERE d.message_id=(SELECT message_id FROM collaboration_messages WHERE request_id='controls-reply-9')") == 1
+        },
+    );
+    assert_eq!(f.count("SELECT count(*) FROM attention_items WHERE source_kind='automatic_reply_limit' AND resolved_at_ms IS NULL"), 0);
     let (status, replay) = post(
         &server,
         "held-followup",
@@ -144,33 +149,8 @@ fn browser_followup_receipt_reports_reply_limit_hold_until_continue() {
     );
     assert_eq!(status, 200, "{replay}");
     assert_eq!(replay["idempotent_replay"], true);
-    assert_eq!(replay["delivery_outlook"], receipt["delivery_outlook"]);
-    let response = server.post(&control_path("w1", &parent, "continue"), "{}", &[]);
-    assert_eq!(response.status, 200, "{}", response.body);
-    let (status, resumed) = post(
-        &server,
-        "held-followup",
-        source,
-        parent["message_id"].as_str(),
-    );
-    assert_eq!(status, 200, "{resumed}");
-    assert_eq!(resumed["idempotent_replay"], true);
-    assert_eq!(resumed["message_id"], receipt["message_id"]);
-    for outlook in resumed["delivery_outlook"].as_array().unwrap() {
-        assert!(
-            !outlook["statement"].as_str().unwrap().contains("Continue"),
-            "{outlook}"
-        );
-    }
-    let (status, ordinary) = post(&server, "ordinary-idle", "@lead A new task.", None);
-    assert_eq!(status, 200, "{ordinary}");
-    assert!(
-        ordinary["delivery_outlook"][0]["statement"]
-            .as_str()
-            .unwrap()
-            .contains("imminent"),
-        "{ordinary}"
-    );
+    assert_eq!(replay["message_id"], receipt["message_id"]);
+    assert_eq!(controls(&f, &parent)["reply_allowance"], 10);
 }
 
 #[test]

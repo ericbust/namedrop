@@ -519,8 +519,8 @@ test("blank presentation keeps idle fitted content through width Expand and Rest
     for (const fit of widths) {
       assert.ok(fit.font >= 10, "fit keeps text readable");
       assert.ok(
-        fit.visualFont >= 9.99 && fit.visualFont <= 13.01,
-        "rendered terminal text stays between the readability floor and base size",
+        fit.visualFont >= 9.99 && fit.visualFont <= 20.01,
+        "rendered terminal text stays between the readability floor and 20 px cap",
       );
       assert.ok(
         Math.abs(fit.visualFont - fit.font) < 0.1,
@@ -594,7 +594,9 @@ test("blank presentation preserves outside focus and composer selection during s
       let focused;
       if (target === "composer") {
         await ui.drawer.getByRole("button", { name: "Type to agent" }).click();
-        focused = ui.drawer.getByRole("textbox", { name: "Message to @codex" });
+        focused = ui.drawer.getByRole("combobox", {
+          name: "Message to @codex",
+        });
         await focused.fill("Keep this unsent draft");
         await focused.evaluate((field) => field.setSelectionRange(5, 9));
       } else if (target === "history") {
