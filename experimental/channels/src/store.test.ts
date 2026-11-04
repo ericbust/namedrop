@@ -3443,57 +3443,58 @@ test("rooms: wrote keeps each author's latest message across parents and replies
     ]),
   );
 });
-test("conversations: replies are their own rows in time order, with a reference only when the row above is not the parent", () => {
-  const now = new Date(2026, 9, 28, 12, 0).getTime();
-  const reply = (id: string, at: number, author: string, parent: string) =>
-    row(id, at, {
-      author,
-      kind: "reply",
-      thread: parent === "q" ? "q" : "p",
-      inReplyTo: parent,
-    });
-  const rows = talk(
-    [
-      { ...row("p", now - 20 * MIN, { author: "human" }), channel: routed },
-      reply("a", now - 19 * MIN, "agent-2", "p"),
-      reply("b", now - 18 * MIN, "agent-1", "a"),
-      row("other", now - 17 * MIN, { author: "human", to: ["agent-1"] }),
-      reply("c", now - 16 * MIN, "agent-2", "b"),
-      reply("d", now - 15 * MIN, "agent-2", "c"),
-      reply("e", now - 14 * MIN, "agent-2", "gone"),
-      row("q", now - 12 * MIN, { author: "agent-1", to: ["agent-2"] }),
-      reply("q1", now - 11 * MIN, "agent-2", "q"),
-    ],
-    now,
-  );
-  assert.deepEqual(shown(rows), [
-    "p to",
-    "a to",
-    "b to",
-    "other to",
-    "c to ↩b",
-    "d grouped",
-    "e to ↩earlier",
-    "q to",
-    "q1 to",
-  ]);
-  const post = rows.find(
-    (item): item is MessageRow =>
-      item.kind === "message" && item.message.id === "p",
-  );
-  assert.equal(post?.replyCount, 5, "the post row still counts its replies");
-  const answer = rows.find(
-    (item): item is MessageRow =>
-      item.kind === "message" && item.message.id === "c",
-  );
-  assert.equal(
-    answer?.reference?.kind === "message" && answer.reference.parent.id,
-    "b",
-  );
-});
-test("conversations: a referenced reply starts a group, and a day divider brings the reference back", () => {
-  const today = new Date(2026, 9, 28, 0, 2).getTime();
+for (const [name, author, extra] of [
+  ["channel post", "human", { channel: routed }],
+  ["agent conversation", "agent-1", {}],
+  ["operator request", "human", {}],
+] satisfies [string, string, Record<string, unknown>][]) {
+  test(`thread-only: ${name} keeps operator and agent replies under the parent and updates its count and preview`, () => {
+    const now = new Date(2026, 9, 28, 12, 0).getTime();
+    const parent = {
+      ...row("p", now - 3 * MIN, { author, to: ["agent-2"] }),
+      ...extra,
+    };
+    const replies = [
+      row("agent-reply", now - 2 * MIN, {
+        author: "agent-2",
+        kind: "reply",
+        thread: "p",
+        inReplyTo: "p",
+      }),
+      row("operator-reply", now - MIN, {
+        author: "human",
+        kind: "reply",
+        thread: "p",
+        inReplyTo: "agent-reply",
+      }),
+    ];
+    for (let count = 0; count <= replies.length; count++) {
+      const channel = roomChannel([parent, ...replies.slice(0, count)]);
+      const rows = timelineView(channel, undefined, now).filter(
+        (item): item is MessageRow =>
+          item.kind === "message" || item.kind === "orphan",
+      );
+      assert.deepEqual(
+        rows.map((item) => item.message.id),
+        ["p"],
+      );
+      assert.equal(rows[0]?.replyCount, count);
+      assert.equal(
+        rows[0]?.latestReply?.id ?? null,
+        replies[count - 1]?.message_id ?? null,
+      );
+      assert.deepEqual(
+        threadGroups(channel)
+          .get("p")
+          ?.replies.map((reply) => reply.id),
+        replies.slice(0, count).map((reply) => reply.message_id),
+      );
+    }
+  });
+}
+test("thread-only: hidden replies do not add a new day divider", () => {
   const yesterday = new Date(2026, 9, 27, 23, 59).getTime();
+  const today = new Date(2026, 9, 28, 0, 2).getTime();
   const rows = talk(
     [
       row("p", yesterday, { author: "agent-2" }),
@@ -3503,20 +3504,29 @@ test("conversations: a referenced reply starts a group, and a day divider brings
         thread: "p",
         inReplyTo: "p",
       }),
-      row("b", today + 1000, {
-        author: "agent-2",
-        kind: "reply",
-        thread: "p",
-        inReplyTo: "p",
-      }),
     ],
     today + MIN,
   );
-  assert.deepEqual(shown(rows), ["p to", "a to ↩p", "b to ↩p"]);
-  assert.equal(
-    rows.filter((item) => item.kind === "day").length,
-    2,
-    "the day divider sits between the parent and its reply",
+  assert.deepEqual(shown(rows), ["p to preview:a"]);
+  assert.equal(rows.filter((item) => item.kind === "day").length, 1);
+});
+test("thread-only: replies without a loaded parent remain orphan rows", () => {
+  const now = new Date(2026, 9, 28, 12, 0).getTime();
+  assert.deepEqual(
+    shown(
+      talk(
+        [
+          row("orphan", now, {
+            author: "agent-2",
+            kind: "reply",
+            thread: "missing",
+            inReplyTo: "missing",
+          }),
+        ],
+        now,
+      ),
+    ),
+    ["orphan orphan to"],
   );
 });
 test("conversations: a request grouped under a channel-chat row keeps its recipients, and a channel-chat row grouped under it shows no header", () => {

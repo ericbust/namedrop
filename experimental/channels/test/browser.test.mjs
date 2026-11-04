@@ -8448,140 +8448,60 @@ test("CH-2: router_failed reads in --failed-text, explains itself, and offers Se
     );
 });
 
-test("CH-2: replies read as their own rows in time order, with a reference above a reply whose parent is not just above it", async (t) => {
+test("THREAD-ONLY: a channel thread reply stays in the pane and updates the parent count and preview", async (t) => {
   const at = Date.now() - 600_000;
-  const { ui } = await chatRoom(t, [
-    channelPost(
-      "p",
-      "can @claude check why the mac build fails on main?",
-      routed(),
-      {
-        at_ms: at,
-        legs: [{ to: "claude", stage: { stage: "working", acked_at_ms: 1 } }],
-      },
-    ),
-    answer(
-      "r1",
-      "p",
-      "p",
-      "claude",
-      "The arm64 link step fails. @codex, is the CI cache stale?\nMore detail here.",
-      {
-        at_ms: at + 60_000,
-        legs: [
-          { to: "human", stage: { stage: "delivered" } },
-          { to: "codex", stage: { stage: "working", acked_at_ms: 1 } },
-        ],
-        woke: ["codex"],
-      },
-    ),
-    message("other", "@shell ls", {
-      thread_id: "t-other",
-      at_ms: at + 90_000,
-      legs: [{ to: "shell", stage: { stage: "queued" } }],
+  const { ui, value } = await chatRoom(t, [
+    channelPost("p", "can @claude check the mac build?", routed(), {
+      at_ms: at,
+      legs: [{ to: "claude", stage: { stage: "working", acked_at_ms: 1 } }],
     }),
-    answer(
-      "r2",
-      "r1",
-      "p",
-      "codex",
-      "Yes. I cleared it, and the build passes now.",
-      {
-        at_ms: at + 120_000,
-        legs: [{ to: "human", stage: { stage: "delivered" } }],
-      },
-    ),
-    answer("r3", "gone", "p", "claude", "Following up on an older point.", {
-      at_ms: at + 150_000,
+    answer("r1", "p", "p", "claude", "The build passes now.", {
+      at_ms: at + 60_000,
     }),
   ]);
   const timeline = ui.page.getByRole("region", { name: "Message history" });
-  await timeline.locator('[data-message-id="r3"]').waitFor();
-  assert.deepEqual(
-    await timeline
-      .locator("article[data-message-id]")
-      .evaluateAll((rows) => rows.map((row) => row.dataset.messageId)),
-    ["p", "r1", "other", "r2", "r3"],
-  );
-  assert.equal(
-    await timeline.locator(".reply-preview").count(),
-    0,
-    "no reply preview",
-  );
-  assert.deepEqual(await routeOf(ui, "p").parts(), [
-    "@claude",
-    "build question",
-    "3 replies",
-  ]);
-  assert.deepEqual(await routeOf(ui, "r1").parts(), ["@codex", "pulled in"]);
-  assert.equal(
-    await timeline.locator('[data-message-id="r1"] .msg-head .to').count(),
-    0,
-  );
-  assert.equal(
-    await timeline.locator('[data-message-id="r1"] .reply-ref').count(),
-    0,
-  );
-  assert.equal(
-    await routeOf(ui, "r2").route.count(),
-    0,
-    "a reply to the operator only",
-  );
-  const reference = timeline.getByRole("button", {
-    name: "Reply to @claude: The arm64 link step fails. @codex, is the CI cache stale? Open thread",
-  });
-  assert.equal(
-    await reference.textContent(),
-    "@claude:The arm64 link step fails. @codex, is the CI cache stale?",
-  );
-  const [referenceBox, headBox] = await Promise.all([
-    reference.boundingBox(),
-    timeline.locator('[data-message-id="r2"] .msg-head').boundingBox(),
-  ]);
-  assert.ok(referenceBox.y < headBox.y, "the reference sits above the header");
-  assert.ok(
-    Math.abs(referenceBox.x - headBox.x) < 1,
-    "aligned with the text column",
-  );
-  await timeline
-    .getByRole("button", { name: "Reply to an earlier message. Open thread" })
-    .waitFor();
-  await timeline
-    .getByRole("button", { name: "3 replies. Open thread" })
-    .waitFor();
-  await reference.click();
+  const parent = timeline.locator('[data-message-id="p"]');
+  await parent.getByRole("button", { name: "Reply in thread to You" }).click();
   const pane = ui.page.getByRole("complementary", {
     name: "Thread",
     exact: true,
   });
-  await pane.locator('[data-message-id="p"] .route').waitFor();
-  assert.equal(
-    await pane.locator(".reply-ref").count(),
-    0,
-    "no references in the pane",
-  );
-  assert.equal(await pane.locator(".composer-to").count(), 0);
-  const box = pane.getByRole("combobox", { name: "Reply to @claude, @codex" });
-  assert.equal(await box.inputValue(), "@claude @codex ");
-  await box.pressSequentially("thanks both");
-  assert.equal(
-    await pane.locator(".composer-status").textContent(),
-    "Enter sends only to @claude, @codex",
-  );
+  await pane.locator('[data-message-id="r1"]').waitFor();
+  const box = pane.getByRole("combobox", { name: "Reply to @claude" });
+  await box.fill("@claude Thanks from the thread pane");
   await box.press("Enter");
-  await until(() => ui.posts.attempts.length === 1, "the reply");
-  const posted = JSON.parse(ui.posts.attempts[0].raw);
-  assert.equal(posted.source, "@claude @codex thanks both", "sent as typed");
-  assert.equal(posted.in_reply_to, "r3");
-  await ui.page.keyboard.press("Escape");
-  await pane.waitFor({ state: "detached" });
-  assert.equal(
-    await ui.page.evaluate(() =>
-      document.activeElement?.getAttribute("aria-label"),
-    ),
-    "Reply to @claude: The arm64 link step fails. @codex, is the CI cache stale? Open thread",
-    "focus returns to the reference",
+  await pane
+    .locator("article.pending")
+    .getByText("Sent", { exact: true })
+    .waitFor();
+  assert.equal(await timeline.locator("article.pending").count(), 0);
+  assert.equal(ui.posts.attempts[0].body.in_reply_to, "p");
+  const posted = ui.posts.postedRow(requestIds(ui)[0], at + 120_000);
+  posted.thread_id = "p";
+  value.frame.messages.push(posted);
+  value.frame.threads = [
+    {
+      thread_id: "p",
+      title: { text: "Mac build", truncated: false },
+      message_count: 3,
+    },
+  ];
+  ui.connections[0].send("space", value);
+  await pane.locator('[data-message-id="posted-1"]').waitFor();
+  assert.deepEqual(
+    await timeline
+      .locator("article[data-message-id]")
+      .evaluateAll((rows) => rows.map((row) => row.dataset.messageId)),
+    ["p"],
   );
+  await parent
+    .getByRole("button", { name: /^2 replies, latest from You at / })
+    .waitFor();
+  assert.match(
+    await parent.locator(".reply-preview").textContent(),
+    /Thanks from the thread pane/,
+  );
+  assert.equal(await pane.locator("article.pending").count(), 0);
 });
 
 for (const woke of [["claude"], []])
