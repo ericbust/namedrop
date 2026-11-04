@@ -2733,8 +2733,36 @@ impl StateTransaction<'_> {
                 self.charge_agent_reply(&peer, &peer_thread, attribution)?;
             }
             self.charge_agent_reply(namespace, &draft.thread_id, attribution)?;
+        } else if bridged_from.is_none() && draft.author_kind == ActorKind::Human {
+            for (peer, peer_thread) in self.paired_threads(namespace, &draft.thread_id)? {
+                self.refill_reply_allowance_here(&peer, &peer_thread, attribution)?;
+            }
+            self.refill_reply_allowance_here(namespace, &draft.thread_id, attribution)?;
         }
         self.message_receipt(namespace, &draft.message_id, false)
+    }
+
+    fn refill_reply_allowance_here(
+        &mut self,
+        namespace: &StateNamespace,
+        thread_id: &ThreadId,
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        let controls = self.thread_control_state(namespace, thread_id)?;
+        if !controls.stopped && controls.reply_limit_paused {
+            self.continue_thread_here(namespace, thread_id, attribution)?;
+        } else {
+            self.transaction.execute(
+                "UPDATE thread_controls SET reply_allowance = 10
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3",
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    thread_id.as_str()
+                ],
+            )?;
+        }
+        Ok(())
     }
 
     fn charge_agent_reply(
@@ -2780,7 +2808,7 @@ impl StateTransaction<'_> {
                     )),
                     source_kind: crate::AttentionSourceKind::AutomaticReplyLimit,
                     source_id: thread_id.as_str().to_owned(),
-                    summary: "Automatic Reply Limit reached; continue or stop this thread."
+                    summary: "Automatic Reply Limit reached; your message resets the count, or you can continue or stop this thread."
                         .to_owned(),
                 },
                 attribution,
