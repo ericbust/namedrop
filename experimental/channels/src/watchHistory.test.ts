@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import prose from "./fixtures/watch-history/codex-prose.json" with {
+  type: "json",
+};
 import recorded from "./fixtures/watch-history/recorded-cases.json" with {
   type: "json",
 };
@@ -320,3 +323,86 @@ for (const scenario of recorded.cases) {
     );
   });
 }
+
+function proseFrame(seq: number): WatchFrame {
+  const captured = prose.frames.find((item) => item.seq === seq);
+  assert.ok(captured, `missing native sequence ${seq}`);
+  assert.equal(captured.buffer, "normal");
+  return { cols: captured.cols, buffer: "normal", rows: captured.rows };
+}
+
+function numberedRows(state: ReturnType<typeof emptyWatch>) {
+  return watchRows(state).flatMap((row) => {
+    const match = /^\s*(\d+)\.\s/.exec(row.text);
+    return match ? [{ number: Number(match[1]), row }] : [];
+  });
+}
+
+test("recorded Codex viewport reversal reuses departed occurrences at every stream step", () => {
+  let state = baseline(proseFrame(618));
+  let first119: number | undefined;
+  for (let seq = 619; seq <= 623; seq++) {
+    state = watchReduce(state, { kind: "frame", frame: proseFrame(seq) });
+    const rows = numberedRows(state);
+    assert.equal(
+      rows.length,
+      new Set(rows.map((item) => item.number)).size,
+      `native sequence ${seq} duplicated a numbered occurrence`,
+    );
+    const current119 = rows.find((item) => item.number === 119)?.row.id;
+    if (first119 === undefined) first119 = current119;
+    else assert.equal(current119, first119, "revisit retains the row anchor");
+  }
+  assert.deepEqual(
+    numberedRows(state).map((item) => item.number),
+    [119, 120],
+  );
+});
+
+test("recorded streaming Codex prose retains recoverable rows through rejected and partial paints", () => {
+  let state = baseline(proseFrame(600));
+  for (let seq = 601; seq <= 679; seq++) {
+    state = watchReduce(state, { kind: "frame", frame: proseFrame(seq) });
+    const rows = numberedRows(state);
+    assert.equal(
+      rows.length,
+      new Set(rows.map((item) => item.number)).size,
+      `native sequence ${seq} duplicated a numbered occurrence`,
+    );
+  }
+  const rows = numberedRows(state);
+  const truth = prose.provenance.truth.text.split("\n");
+  for (const number of [129, 130, 131, 132]) {
+    const captured = rows.find((item) => item.number === number);
+    assert.ok(captured, `recoverable prose row ${number} was silently lost`);
+    assert.ok(truth[number - 1]?.startsWith(captured.row.text.trim()));
+    assert.ok(
+      captured.row.text.trim().length > 40,
+      "partial candidates must mature",
+    );
+  }
+  assert.ok(
+    rows.length >= 18,
+    "replay must retain observed prose rather than only gaps",
+  );
+  assert.deepEqual(
+    rows.map((item) => item.number),
+    [...rows.map((item) => item.number)].sort((a, b) => a - b),
+  );
+});
+
+test("an unrecoverable boundary in recorded Codex prose is visible before later output", () => {
+  let state = baseline(proseFrame(618));
+  state = watchReduce(state, { kind: "frame", frame: proseFrame(619) });
+  for (let seq = 668; seq <= 679; seq++)
+    state = watchReduce(state, { kind: "frame", frame: proseFrame(seq) });
+  const rows = watchRows(state);
+  const before = rows.findIndex((row) => /^\s*119\./.test(row.text));
+  const gap = rows.findIndex((row) => row.text === "… some lines missed");
+  const after = rows.findIndex((row) => /^\s*133\./.test(row.text));
+  assert.ok(before >= 0 && after > before, "retain proven rows on each side");
+  assert.ok(
+    gap > before && gap < after,
+    "unrecoverable boundary needs a visible gap",
+  );
+});
