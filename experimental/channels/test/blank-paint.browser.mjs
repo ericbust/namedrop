@@ -52,6 +52,124 @@ const visibleText = (page) =>
     .allTextContents()
     .then((rows) => rows.join("\n").trim());
 
+async function withRecordedTerminal(t, run) {
+  const browser = await chromium.launch({
+    executablePath: process.env.CHROME ?? "/usr/bin/chromium",
+    headless: true,
+    args: ["--no-sandbox"],
+  });
+  const ui = await open(
+    browser,
+    t,
+    full(1, { cols: 120, rows: 40, bytes: encode(`\x1b[2J${seed}`) }),
+  );
+  try {
+    await clickMember(ui, "codex");
+    await until(
+      async () => (await visibleText(ui.page)).includes("PROSE_COMPLETE"),
+      "recorded initial screen rendered",
+    );
+    await run(ui);
+    assert.deepEqual(ui.errors, []);
+    assert.deepEqual(
+      ui.requests.filter((request) => request.method === "POST"),
+      [],
+      "focus and draft editing never send input",
+    );
+  } finally {
+    await ui.close();
+    await browser.close();
+  }
+}
+
+test("blank presentation keeps terminal focus across every ordinary buffer swap", {
+  timeout: 30000,
+}, async (t) => {
+  await withRecordedTerminal(t, async (ui) => {
+    await ui.page.locator(".peek-buffer-visible .xterm-screen").click();
+    const focus = () =>
+      ui.page.evaluate(() => ({
+        tag: document.activeElement.tagName,
+        visible:
+          document.activeElement
+            .closest(".peek-buffer")
+            ?.getAttribute("aria-hidden") === "false",
+        textareas: document.querySelectorAll(".peek-buffer-visible textarea")
+          .length,
+      }));
+    const expected = { tag: "TEXTAREA", visible: true, textareas: 1 };
+    assert.deepEqual(
+      await focus(),
+      expected,
+      "visible terminal starts focused",
+    );
+    for (let seq = 2; seq <= 5; seq++) {
+      const marker = `ORDINARY UPDATE ${seq}`;
+      ui.live().send(data(seq, `\x1b[1;1H\x1b[2K${marker}`));
+      await until(
+        async () => (await visibleText(ui.page)).includes(marker),
+        `ordinary update ${seq} rendered`,
+      );
+      assert.deepEqual(
+        await focus(),
+        expected,
+        `terminal focus survives update ${seq}`,
+      );
+    }
+  });
+});
+
+test("blank presentation preserves outside focus and composer selection during swaps", {
+  timeout: 30000,
+}, async (t) => {
+  for (const target of ["body", "composer", "history", "button"]) {
+    await withRecordedTerminal(t, async (ui) => {
+      let focused;
+      if (target === "composer") {
+        await ui.drawer.getByRole("button", { name: "Type to agent" }).click();
+        focused = ui.drawer.getByRole("textbox", { name: "Message to @codex" });
+        await focused.fill("Keep this unsent draft");
+        await focused.evaluate((field) => field.setSelectionRange(5, 9));
+      } else if (target === "history") {
+        focused = ui.page.locator(".peek-live");
+        await focused.focus();
+      } else if (target === "button") {
+        focused = ui.drawer.getByRole("button", { name: "Close screen" });
+        await focused.focus();
+      } else {
+        await ui.page.evaluate(() => document.activeElement.blur());
+        focused = ui.page.locator("body");
+      }
+      for (let seq = 2; seq <= 4; seq++) {
+        const marker = `OUTSIDE FOCUS ${seq}`;
+        ui.live().send(data(seq, `\x1b[1;1H\x1b[2K${marker}`));
+        await until(
+          async () => (await visibleText(ui.page)).includes(marker),
+          `outside focus update ${seq} rendered`,
+        );
+        assert.equal(
+          await focused.evaluate(
+            (element) => document.activeElement === element,
+          ),
+          true,
+          `${target} keeps focus during update ${seq}`,
+        );
+        if (target === "composer") {
+          assert.deepEqual(
+            await focused.evaluate((field) => ({
+              text: field.value,
+              start: field.selectionStart,
+              end: field.selectionEnd,
+            })),
+            { text: "Keep this unsent draft", start: 5, end: 9 },
+            "draft and text selection survive terminal swaps",
+          );
+        }
+      }
+    });
+  }
+});
+
 test("recorded native 736/737 never publishes the intervening blank grid", {
   timeout: 30000,
 }, async (t) => {
