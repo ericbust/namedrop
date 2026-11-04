@@ -1279,7 +1279,11 @@ fn serve_connection(
                                     space["key"].as_str() == Some(peer.space_key.as_str())
                                 })
                             })
-                            .and_then(|space| space["label"]["text"].as_str())
+                            .and_then(|space| {
+                                space["label"]["text"]
+                                    .as_str()
+                                    .or_else(|| space["workspace_id"].as_str())
+                            })
                         {
                             peer.workspace_label =
                                 snapshot::SafeText::from_untrusted(label, 256).text;
