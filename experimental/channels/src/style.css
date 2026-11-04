@@ -1860,6 +1860,24 @@ button.member:not(.more):hover {
 .peek-head-space {
   margin-left: auto;
 }
+.peek-expand {
+  flex: none;
+  padding: 6px 9px;
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+.peek-expand:hover,
+.peek-expand[aria-pressed="true"] {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.peek.is-expanded {
+  position: absolute;
+  z-index: 3;
+  inset: 0 0 0 var(--sidebar-width);
+  border-left: 1px solid var(--line);
+}
 .peek-modes {
   display: flex;
   flex: none;
@@ -1887,6 +1905,24 @@ button.member:not(.more):hover {
 .peek-text.peek-live {
   overflow: auto;
   font: calc(var(--text-sm) - 0.5px) / 1.5 var(--font-mono);
+}
+.peek-region-label,
+.peek-watching {
+  margin: 0 0 var(--space-1);
+  color: var(--text-muted);
+  font: 500 var(--text-xs) / 1.5 var(--font-mono);
+}
+.peek-screen-label {
+  margin-top: var(--space-3);
+}
+.peek-history pre {
+  width: max-content;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+.peek-history span {
+  display: block;
+  min-height: 1.5em;
 }
 .peek-terminal {
   width: max-content;

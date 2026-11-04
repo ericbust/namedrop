@@ -3,10 +3,12 @@ import type { PeekTarget } from "./model.ts";
 export type LiveUpdate =
   | Readonly<{
       kind: "reset";
+      continuity: string;
       viewport: Readonly<{ cols: number; rows: number }>;
       bytes: Uint8Array;
     }>
-  | Readonly<{ kind: "data"; bytes: Uint8Array }>;
+  | Readonly<{ kind: "data"; bytes: Uint8Array }>
+  | Readonly<{ kind: "history"; text: string }>;
 
 export type LiveState =
   | Readonly<{ kind: "connecting" | "reconnecting" }>
@@ -21,6 +23,7 @@ export type LiveState =
 type Options = Readonly<{
   target: PeekTarget;
   signal: AbortSignal;
+  retainedContinuity?: string | null;
   apply(update: LiveUpdate): Promise<void>;
   onState(state: LiveState): void;
 }>;
@@ -37,6 +40,7 @@ type Wire =
       bytes: Uint8Array;
     }
   | { kind: "data"; bytes: Uint8Array }
+  | { kind: "history"; text: string }
   | { kind: "closed"; reason: "ended" | "replaced" | "missing" }
   | {
       kind: "unavailable";
@@ -52,6 +56,8 @@ type Wire =
 const LINE_LIMIT = 2 * 1024 * 1024;
 const PAINT_LIMIT = 1024 * 1024;
 const DATA_LIMIT = 64 * 1024;
+const HISTORY_LIMIT = 1024 * 1024;
+const HISTORY_LINES = 2200;
 const WATCHDOG_MS = 30_000;
 const RETRIES = [1000, 2000, 4000];
 class InvalidSource extends Error {}
@@ -123,6 +129,16 @@ function parse(line: Uint8Array, seq: number): Wire {
     case "data":
       exact(raw, ["v", "seq", "kind", "bytes"]);
       return { kind: "data", bytes: bytes(raw.bytes, DATA_LIMIT) };
+    case "history": {
+      exact(raw, ["v", "seq", "kind", "text"]);
+      if (
+        typeof raw.text !== "string" ||
+        new TextEncoder().encode(raw.text).length > HISTORY_LIMIT ||
+        raw.text.split("\n").length > HISTORY_LINES
+      )
+        throw new InvalidSource();
+      return { kind: "history", text: raw.text };
+    }
     case "closed":
       exact(raw, ["v", "seq", "kind", "reason"]);
       if (
@@ -172,11 +188,13 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 export async function observePeek({
   target,
   signal,
+  retainedContinuity = null,
   apply,
   onState,
 }: Options): Promise<void> {
   if (signal.aborted) return;
-  let continuity: string | null = null;
+  let continuity: string | null = retainedContinuity;
+  let observed = false;
   onState({ kind: "connecting" });
 
   async function attempt(): Promise<Outcome> {
@@ -262,10 +280,12 @@ export async function observePeek({
               if (continuity !== null && continuity !== record.continuity)
                 return { kind: "closed", reason: "replaced" };
               continuity = record.continuity;
+              observed = true;
               reset = true;
               await abortable(
                 apply({
                   kind: "reset",
+                  continuity: record.continuity,
                   viewport: record.viewport,
                   bytes: record.bytes,
                 }),
@@ -281,6 +301,13 @@ export async function observePeek({
                 controller.signal,
               );
               break;
+            case "history":
+              if (!reset) throw new InvalidSource();
+              await abortable(
+                apply({ kind: "history", text: record.text }),
+                controller.signal,
+              );
+              break;
             case "closed":
               return record;
             case "unavailable":
@@ -292,8 +319,7 @@ export async function observePeek({
                 case "unsupported":
                   return {
                     kind: "unavailable",
-                    reason:
-                      continuity === null ? "unsupported" : "invalid_source",
+                    reason: observed ? "invalid_source" : "unsupported",
                   };
                 case "busy":
                 case "invalid_source":

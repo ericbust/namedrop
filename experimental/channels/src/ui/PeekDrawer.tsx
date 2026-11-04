@@ -23,6 +23,7 @@ import {
 } from "../peek.ts";
 import type { ScreenReader } from "../screen.ts";
 import type { PeekWho } from "../store.ts";
+import { emptyWatch, type WatchHistory, watchBytes } from "../watchHistory.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Icon } from "./Icons.tsx";
 import { measure } from "./measure.ts";
@@ -33,6 +34,7 @@ import { useEscape } from "./useEscape.ts";
 type Retention = {
   id: number;
   snapshots: Map<PeekKey, PeekSnapshot>;
+  watches: Map<PeekKey, { state: WatchHistory; at: number }>;
 };
 const retained = new WeakMap<ScreenReader, Retention>();
 let nextRetentionId = 0;
@@ -42,7 +44,11 @@ const MAX_CHARACTERS = 512 * 1024;
 function retentionFor(reader: ScreenReader): Retention {
   const existing = retained.get(reader);
   if (existing) return existing;
-  const retention: Retention = { id: ++nextRetentionId, snapshots: new Map() };
+  const retention: Retention = {
+    id: ++nextRetentionId,
+    snapshots: new Map(),
+    watches: new Map(),
+  };
   retained.set(reader, retention);
   return retention;
 }
@@ -62,6 +68,21 @@ function retainSnapshot(
     if (snapshots.size <= MAX_SCREENS && characters <= MAX_CHARACTERS) break;
     snapshots.delete(oldest);
     characters -= screen.text.length;
+  }
+}
+
+function retainWatch(retention: Retention, key: PeekKey, state: WatchHistory) {
+  retention.watches.delete(key);
+  if (state.continuity === null) return;
+  retention.watches.set(key, { state, at: Date.now() });
+  let bytes = 0;
+  for (const entry of retention.watches.values())
+    bytes += watchBytes(entry.state);
+  for (const [oldest, entry] of retention.watches) {
+    if (retention.watches.size <= MAX_SCREENS && bytes <= 4 * 1024 * 1024)
+      break;
+    retention.watches.delete(oldest);
+    bytes -= watchBytes(entry.state);
   }
 }
 
@@ -86,10 +107,11 @@ export function PeekDrawer({
 }: Props) {
   const retention = retentionFor(reader);
   const pane = useRef<HTMLElement>(null);
+  const [expanded, setExpanded] = useState(false);
   useEscape(pane, onClose);
   return (
     <aside
-      className="slot peek"
+      className={`slot peek${expanded ? " is-expanded" : ""}`}
       aria-label={peekCopy.label(who.alias)}
       id={paneId}
       ref={pane}
@@ -100,6 +122,8 @@ export function PeekDrawer({
         target={target}
         who={who}
         onClose={onClose}
+        expanded={expanded}
+        onExpand={() => setExpanded((value) => !value)}
         reader={reader}
         retention={retention}
         {...rest}
@@ -108,7 +132,11 @@ export function PeekDrawer({
   );
 }
 
-type ContentProps = Omit<Props, "paneId" | "inert"> & { retention: Retention };
+type ContentProps = Omit<Props, "paneId" | "inert"> & {
+  retention: Retention;
+  expanded: boolean;
+  onExpand(): void;
+};
 function liveWords(state: LiveState): {
   stamp: string | null;
   notice: string | null;
@@ -155,9 +183,14 @@ function PeekContent(props: ContentProps) {
   const update = useCallback(
     (next: LiveState) => {
       setState(next);
-      if (next.kind === "session-ended") retention.snapshots.clear();
-      if (next.kind === "closed" && next.reason !== "ended")
+      if (next.kind === "session-ended") {
+        retention.snapshots.clear();
+        retention.watches.clear();
+      }
+      if (next.kind === "closed" && next.reason !== "ended") {
         retention.snapshots.delete(peekKey(target));
+        retention.watches.delete(peekKey(target));
+      }
       if (next.kind === "unavailable" && next.reason === "unsupported") {
         focusScreen.current = Boolean(
           document.activeElement?.closest(".peek-text"),
@@ -168,6 +201,15 @@ function PeekContent(props: ContentProps) {
     },
     [retention, target],
   );
+  const rememberWatch = useCallback(
+    (history: WatchHistory) => retainWatch(retention, peekKey(target), history),
+    [retention, target],
+  );
+  const cached = retention.watches.get(peekKey(target));
+  const retainedHistory =
+    cached && Date.now() - cached.at <= 5 * 60 * 1000
+      ? cached.state
+      : emptyWatch();
   const controls = (
     <fieldset className="peek-modes" aria-label={peekCopy.view}>
       <button
@@ -214,6 +256,8 @@ function PeekContent(props: ContentProps) {
         who={props.who}
         toggle={props.toggle}
         onClose={props.onClose}
+        expanded={props.expanded}
+        onExpand={props.onExpand}
         stamp={stamp}
         action={
           state.kind === "unavailable" ? (
@@ -239,7 +283,13 @@ function PeekContent(props: ContentProps) {
           {notice}
         </p>
       )}
-      <PeekLive key={attempt} target={target} onState={update} />
+      <PeekLive
+        key={attempt}
+        target={target}
+        onState={update}
+        retainedHistory={retainedHistory}
+        onHistory={rememberWatch}
+      />
       <PeekCompose
         key={state.kind === "live" ? state.continuity : state.kind}
         target={target}
@@ -255,12 +305,16 @@ function PeekHeader({
   onClose,
   stamp,
   action,
+  expanded,
+  onExpand,
 }: {
   who: PeekWho;
   toggle: ReactNode;
   onClose(): void;
   stamp: string | null;
   action: ReactNode;
+  expanded: boolean;
+  onExpand(): void;
 }) {
   return (
     <header className="peek-head">
@@ -285,6 +339,14 @@ function PeekHeader({
         </p>
       </div>
       {action}
+      <button
+        type="button"
+        className="peek-expand"
+        aria-pressed={expanded}
+        onClick={onExpand}
+      >
+        {expanded ? "Restore" : "Expand"}
+      </button>
       <button
         type="button"
         className="icon-button"
@@ -327,8 +389,10 @@ function usePeekRead(
         retainSnapshot(retention, key, { screen: result.screen, at });
       } else if (result.failure === "session") {
         retention.snapshots.clear();
+        retention.watches.clear();
       } else if (result.failure === "missing" || result.failure === "closed") {
         retention.snapshots.delete(key);
+        retention.watches.delete(key);
       }
       send({ type: "settled", request, result, at });
     });
@@ -379,6 +443,8 @@ function PeekScreen({
   retention,
   toggle,
   controls,
+  expanded,
+  onExpand,
 }: ContentProps & { controls: ReactNode }) {
   const { read, again } = usePeekRead(target, reader, retention);
   const view = peekView(read, who);
@@ -414,6 +480,8 @@ function PeekScreen({
         who={who}
         toggle={toggle}
         onClose={onClose}
+        expanded={expanded}
+        onExpand={onExpand}
         stamp={view.stamp}
         action={
           <button

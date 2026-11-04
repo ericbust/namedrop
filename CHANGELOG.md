@@ -2,6 +2,13 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.5.0-exp.10] - 2026-11-03
+
+### Added
+
+- Live Peek keeps text that scrolls by while you watch. “Watching since” shows when that history started, and a quick close and reopen keeps it.
+- Live Peek passively loads available shell history, fits the drawer width, and has Expand and Restore controls for more room. Type to agent stays available in either size.
+
 ## [1.5.0-exp.9] - 2026-11-03
 
 ### Fixed
