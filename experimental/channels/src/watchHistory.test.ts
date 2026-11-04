@@ -6,6 +6,9 @@ import claude from "./fixtures/watch-history/claude-prose.json" with {
 import prose from "./fixtures/watch-history/codex-prose.json" with {
   type: "json",
 };
+import transientPrefix from "./fixtures/watch-history/codex-transient-prefix.json" with {
+  type: "json",
+};
 import recorded from "./fixtures/watch-history/recorded-cases.json" with {
   type: "json",
 };
@@ -38,6 +41,39 @@ const baseline = (current = frame()) =>
     at: 1000,
     frame: current,
   });
+
+test("recorded Codex reversal does not retain a transient line prefix before completed output", () => {
+  const capturedFrame = (
+    captured: typeof transientPrefix.baseline,
+  ): WatchFrame => {
+    assert.equal(captured.buffer, "normal");
+    return { ...captured, buffer: "normal" };
+  };
+  let state = baseline(capturedFrame(transientPrefix.baseline));
+  state = watchReduce(state, { kind: "seed", text: transientPrefix.seed });
+  for (const captured of transientPrefix.frames)
+    state = watchReduce(state, {
+      kind: "frame",
+      frame: capturedFrame(captured),
+    });
+  const rows = watchRows(state);
+  assert.equal(
+    rows.filter((row) => row.text.trim() === "EXP12-LINE-002:").length,
+    0,
+    "a transient source prefix must not become retained prose",
+  );
+  assert.deepEqual(
+    rows
+      .filter((row) => /EXP12-LINE-00[12]:/.test(row.text))
+      .map((row) => row.text.trim().replace(/^• /, "")),
+    [
+      "EXP12-LINE-001: Prime numbers have exactly two positive",
+      "EXP12-LINE-002: Two is the only even prime number.",
+    ],
+  );
+  const first = rows.findIndex((row) => row.text.includes("EXP12-LINE-001:"));
+  assert.equal(rows[first + 1]?.text.trim(), "divisors.");
+});
 
 test("exact middle-band upward scroll captures only departed rows, preserving indent and blanks", () => {
   assert.deepEqual(departedRows(frame(), frame(2)), [line(0), line(1)]);
