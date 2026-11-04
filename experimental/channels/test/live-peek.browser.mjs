@@ -570,7 +570,7 @@ async function open(browser, t, initial = full()) {
   const chip = (member) =>
     page.locator(`[data-address-id="${member}"] .member`);
   const drawer = page.getByRole("complementary", { name: /^Screen of/ });
-  const rows = () => drawer.locator(".xterm-rows > div");
+  const rows = () => drawer.locator(".xterm-rows > div:visible");
   const live = () => allStreams.at(-1);
   const liveCount = () =>
     requests.filter((r) => r.path.endsWith("/live")).length;
@@ -864,7 +864,9 @@ function projection(rows = 60, label = "BOTTOM") {
 async function scrollMetrics(ui) {
   return ui.page.locator(".peek-live").evaluate((el) => {
     const box = el.getBoundingClientRect();
-    const marker = [...el.querySelectorAll(".xterm-rows > div")].at(-1);
+    const marker = [
+      ...el.querySelectorAll(".peek-buffer-visible .xterm-rows > div"),
+    ].at(-1);
     const rect = marker.getBoundingClientRect();
     return {
       top: el.scrollTop,
@@ -920,7 +922,9 @@ async function usefulMetrics(ui, row, text = "") {
   return ui.page.locator(".peek-live").evaluate(
     (el, { row, text }) => {
       const box = el.getBoundingClientRect();
-      const line = el.querySelectorAll(".xterm-rows > div")[row - 1];
+      const line = el.querySelectorAll(
+        ".peek-buffer-visible .xterm-rows > div",
+      )[row - 1];
       const rect = line.getBoundingClientRect();
       let marker = rect;
       if (text) {
@@ -982,7 +986,9 @@ async function activeNavigationOracle(browser, t, result) {
       ui.page.waitForFunction(
         () => {
           const el = document.querySelector(".peek-live");
-          const row = el.querySelectorAll(".xterm-rows > div")[69];
+          const row = el.querySelectorAll(
+            ".peek-buffer-visible .xterm-rows > div",
+          )[69];
           const box = el.getBoundingClientRect(),
             rect = row.getBoundingClientRect();
           return (
@@ -1216,9 +1222,9 @@ async function sparseScrollingOracle(browser, t, result) {
     assert.equal((await usefulMetrics(ui, 50)).visible, true);
     send("\x1b[2J\x1b[H");
     await ui.page.waitForFunction(() =>
-      [...document.querySelectorAll(".xterm-rows > div")].every(
-        (row) => row.textContent.trim() === "",
-      ),
+      [
+        ...document.querySelectorAll(".peek-buffer-visible .xterm-rows > div"),
+      ].every((row) => row.textContent.trim() === ""),
     );
     await settleScroll(ui);
     assert.equal(
@@ -1228,7 +1234,9 @@ async function sparseScrollingOracle(browser, t, result) {
     );
     reset(80, 0, "");
     await ui.page.waitForFunction(() => {
-      const rows = [...document.querySelectorAll(".xterm-rows > div")];
+      const rows = [
+        ...document.querySelectorAll(".peek-buffer-visible .xterm-rows > div"),
+      ];
       return (
         rows.length === 80 && rows.every((row) => row.textContent.trim() === "")
       );
@@ -1334,7 +1342,7 @@ async function scrollingOracle(browser, t, result) {
     const wheel = await scrollMetrics(ui);
     // A pixel-delta input is the browser path used by a precision trackpad.
     const cancellation = await region
-      .locator(".xterm-screen")
+      .locator(".xterm-screen:visible")
       .evaluate((el) => {
         const event = new WheelEvent("wheel", {
           bubbles: true,
@@ -1672,7 +1680,7 @@ async function historyAndFitOracle(browser, t, result) {
       await ui.page.setViewportSize(size);
       await ui.page.waitForTimeout(100);
       const fit = await ui.page.locator(".peek-live").evaluate((el) => {
-        const screen = el.querySelector(".xterm-screen");
+        const screen = el.querySelector(".peek-buffer-visible .xterm-screen");
         const style = getComputedStyle(el);
         const available =
           el.clientWidth -
@@ -2025,6 +2033,8 @@ async function watchedHistoryOracle(browser, t, result) {
     bytes: encode(`\x1b[2J${paintGrid(grid(0))}`),
   });
   const ui = await open(browser, t, initial);
+  const historyText = () =>
+    ui.page.locator('.peek-history span[data-watch-kind="text"]');
   try {
     await clickMember(ui, "codex");
     await until(() => ui.live(), "watched history stream");
@@ -2032,22 +2042,40 @@ async function watchedHistoryOracle(browser, t, result) {
       .locator(".peek-watching")
       .filter({ hasText: /^Watching since \d/ })
       .waitFor();
-    assert.equal(await ui.page.locator(".peek-history span").count(), 0);
+    assert.equal(await historyText().count(), 0);
     const since = await ui.page.locator(".peek-watching").textContent();
     let seq = 2;
     const sendGrid = async (start) => {
       ui.live().send(data(seq++, paintGrid(grid(start))));
-      await until(
-        async () =>
-          (await ui.page.locator(".peek-history span").last().textContent()) ===
-          row(start - 1),
-        "completed watched frame",
-      );
+      try {
+        await until(
+          async () =>
+            (await historyText()
+              .filter({ hasText: row(start - 1) })
+              .count()) === 1,
+          "completed watched frame",
+        );
+      } catch (error) {
+        result.watchFailure = {
+          expectedStart: start,
+          historyCount: await historyText().count(),
+          visibleRows: (await ui.rows().allTextContents()).slice(0, 4),
+          notices: await ui.drawer
+            .locator(".peek-bar, .peek-failure, .peek-note")
+            .allTextContents(),
+          streams: ui.liveCount(),
+          errors: ui.errors,
+        };
+        await ui.page.screenshot({
+          path: join(output, `${result.name}-watch-failure.png`),
+        });
+        throw error;
+      }
     };
     await sendGrid(100);
-    await ui.page.locator(".peek-history span").nth(99).waitFor();
+    await historyText().nth(99).waitFor();
     assert.deepEqual(
-      await ui.page.locator(".peek-history span").allTextContents(),
+      await historyText().allTextContents(),
       Array.from({ length: 100 }, (_, i) => row(i)),
     );
     assert.equal(await ui.rows().first().textContent(), "PINNED WATCH HEADER");
@@ -2066,12 +2094,22 @@ async function watchedHistoryOracle(browser, t, result) {
       .getByText(row(500).trim(), { exact: true })
       .waitFor();
     assert.equal(
-      await ui.page.locator(".peek-history span").count(),
+      await historyText().count(),
       100,
       "reset establishes a baseline without invented rows",
     );
     await sendGrid(600);
-    assert.equal(await ui.page.locator(".peek-history span").count(), 200);
+    assert.equal(await historyText().count(), 200);
+    const retainedIds = await historyText().evaluateAll((rows) =>
+      rows.map((row) => ({ text: row.textContent, id: row.dataset.rowId })),
+    );
+    const gaps = ui.page.locator('.peek-history span[data-watch-kind="gap"]');
+    assert.equal(
+      await gaps.count(),
+      1,
+      "the reset jump exposes its missing interval",
+    );
+    await gaps.getByText("… some lines missed", { exact: true }).waitFor();
     ui.live().send(data(seq++, `\x1b[2J${paintGrid(grid(700))}`));
     await ui
       .rows()
@@ -2079,7 +2117,7 @@ async function watchedHistoryOracle(browser, t, result) {
       .getByText(row(700).trim(), { exact: true })
       .waitFor();
     assert.equal(
-      await ui.page.locator(".peek-history span").count(),
+      await historyText().count(),
       200,
       "clear and repaint cannot add rows",
     );
@@ -2093,7 +2131,7 @@ async function watchedHistoryOracle(browser, t, result) {
       "reopen identity validation request",
     );
     assert.equal(
-      await ui.page.locator(".peek-history span").count(),
+      await historyText().count(),
       0,
       "cached rows stay hidden before continuity validation",
     );
@@ -2104,7 +2142,7 @@ async function watchedHistoryOracle(browser, t, result) {
       .waitFor();
     assert.equal(await ui.page.locator(".peek-watching").textContent(), since);
     assert.equal(
-      await ui.page.locator(".peek-history span").count(),
+      await historyText().count(),
       200,
       "validated reopen retains rows but never infers the closed interval",
     );
@@ -2116,8 +2154,24 @@ async function watchedHistoryOracle(browser, t, result) {
     );
     seq = 2;
     for (let start = 100; start <= 3000; start += 100) await sendGrid(start);
-    await ui.page.locator(".peek-history span").nth(3199).waitFor();
-    const anchor = ui.page.locator(".peek-history span").nth(1700);
+    await historyText().nth(2999).waitFor();
+    const replayed = await historyText().allTextContents();
+    assert.equal(replayed.length, 3000, "revisits do not add duplicate output");
+    assert.equal(new Set(replayed).size, 3000);
+    assert.deepEqual(
+      replayed,
+      Array.from({ length: 3000 }, (_, i) => row(i)),
+      "a proven bridge restores the original output order",
+    );
+    for (const retained of retainedIds)
+      assert.equal(
+        await historyText()
+          .filter({ hasText: retained.text })
+          .getAttribute("data-row-id"),
+        retained.id,
+        "revisited occurrences retain their original reading anchors",
+      );
+    const anchor = historyText().nth(1700);
     const id = await anchor.getAttribute("data-row-id");
     await anchor.evaluate((line) => {
       const scroller = line.closest(".peek-live");
@@ -2135,7 +2189,7 @@ async function watchedHistoryOracle(browser, t, result) {
         );
     const before = await anchorOffset();
     for (let start = 3100; start <= 5200; start += 100) await sendGrid(start);
-    assert.equal(await ui.page.locator(".peek-history span").count(), 5000);
+    assert.equal(await historyText().count(), 5000);
     assert.ok(
       Math.abs((await anchorOffset()) - before) < 3,
       "surviving occurrence stays anchored through append and eviction",
@@ -2214,7 +2268,7 @@ async function watchedHistoryOracle(browser, t, result) {
         { exact: true },
       )
       .waitFor();
-    assert.equal(await ui.page.locator(".peek-history span").count(), 0);
+    assert.equal(await historyText().count(), 0);
     assert.equal(await ui.page.locator(".peek-watching").isVisible(), false);
     assert.equal(ui.screens(), 0);
     assert.deepEqual(ui.errors, []);
@@ -2225,6 +2279,151 @@ async function watchedHistoryOracle(browser, t, result) {
     await ui.close();
   }
 }
+
+test("live Peek native return follows history appended during keyboard scrolling", {
+  timeout: 30000,
+}, async (t) => {
+  const browser = await chromium.launch({
+    executablePath: process.env.CHROME ?? "/usr/bin/chromium",
+    headless: true,
+    args: ["--no-sandbox"],
+  });
+  const row = (index) => `NAVIGATION ROW ${String(index).padStart(5, "0")}`;
+  const grid = (start) =>
+    [
+      "PINNED NAVIGATION HEADER",
+      ...Array.from({ length: 254 }, (_, i) => row(start + i)),
+      "PINNED NAVIGATION FOOTER",
+    ]
+      .map((text, y) => `\x1b[${y + 1};1H\x1b[2K${text}`)
+      .join("");
+  const ui = await open(
+    browser,
+    t,
+    full(1, {
+      cols: 96,
+      rows: 256,
+      bytes: encode(grid(2100)),
+    }),
+  );
+  const history = ui.page.locator('.peek-history span[data-watch-kind="text"]');
+  let producing = true;
+  let producer;
+  try {
+    await clickMember(ui, "codex");
+    await until(() => ui.live(), "navigation stream");
+    await ui
+      .rows()
+      .last()
+      .getByText("PINNED NAVIGATION FOOTER", { exact: true })
+      .waitFor();
+    let seq = 2;
+    ui.live().send({
+      v: 1,
+      seq: seq++,
+      kind: "history",
+      text: Array.from({ length: 2100 }, (_, i) => row(i)).join("\n"),
+    });
+    await history.nth(2099).waitFor();
+    let start = 2100;
+    const send = async (next) => {
+      ui.live().send(data(seq++, grid(next)));
+      await until(
+        async () => (await history.last().textContent()) === row(next - 1),
+        "confirmed navigation append",
+      );
+    };
+    for (start = 2200; start <= 5000; start += 100) await send(start);
+    start = 5000;
+    assert.equal(await history.count(), 5000);
+    await history.nth(1700).evaluate((line) => {
+      const scroller = line.closest(".peek-live");
+      scroller.scrollTop +=
+        line.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+    });
+    await settleScroll(ui);
+    await ui.page.evaluate(() => {
+      const scroller = document.querySelector(".peek-live");
+      const initialTop = scroller.scrollTop;
+      window.nativeNavigation = new Promise((resolve) => {
+        scroller.addEventListener("scroll", function moved() {
+          if (scroller.scrollTop <= initialTop) return;
+          scroller.removeEventListener("scroll", moved);
+          resolve({
+            top: scroller.scrollTop,
+            remaining:
+              scroller.scrollHeight -
+              scroller.clientHeight -
+              scroller.scrollTop,
+          });
+        });
+      });
+    });
+    await ui.page.locator(".peek-live").focus();
+    await ui.page.keyboard.press("Control+End");
+    const intermediate = await ui.page.evaluate(() => window.nativeNavigation);
+    assert.ok(
+      intermediate.remaining > 100,
+      "native End starts before the next history append",
+    );
+    let appended = 0;
+    producer = (async () => {
+      while (producing) {
+        await send(++start);
+        appended++;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    })();
+    let reached = true;
+    try {
+      await ui.page.waitForFunction(
+        () => {
+          const scroller = document.querySelector(".peek-live");
+          return (
+            scroller.scrollHeight -
+              scroller.scrollTop -
+              scroller.clientHeight <=
+            1
+          );
+        },
+        undefined,
+        { timeout: 1500 },
+      );
+      await settleScroll(ui);
+    } catch {
+      reached = false;
+    }
+    assert.ok(
+      appended > 0,
+      "native navigation overlaps confirmed history appends",
+    );
+    assert.equal(
+      reached,
+      true,
+      `native End finishes during confirmed appends: ${JSON.stringify(await scrollMetrics(ui))}`,
+    );
+    const afterReturn = appended;
+    await until(
+      () => appended > afterReturn,
+      "confirmed append after native return",
+    );
+    assert.equal(
+      (await scrollMetrics(ui)).bottomVisible,
+      true,
+      "native return resumes following later confirmed output",
+    );
+    assert.deepEqual(ui.errors, []);
+    assert.deepEqual(
+      ui.requests.filter((request) => request.method === "POST"),
+      [],
+    );
+  } finally {
+    producing = false;
+    await producer;
+    await ui.close();
+    await browser.close();
+  }
+});
 
 async function resizePendingScrollOracle(browser, t, result) {
   const ui = await open(
@@ -2242,7 +2441,7 @@ async function resizePendingScrollOracle(browser, t, result) {
       .evaluate((el) => ({
         top: el.scrollTop,
         height: el.clientHeight,
-        rowBottom: [...el.querySelectorAll(".xterm-rows > div")]
+        rowBottom: [...el.querySelectorAll(".peek-buffer-visible .xterm-rows > div")]
           .at(-1)
           .getBoundingClientRect().bottom,
         frameBottom: el.getBoundingClientRect().bottom,
@@ -2363,9 +2562,9 @@ async function frameFitOracle(browser, t, result, cols = 58, rows = 70) {
                 const rect = el.getBoundingClientRect();
                 const style = getComputedStyle(el);
                 const grid = el
-                  .querySelector(".xterm-screen")
+                  .querySelector(".peek-buffer-visible .xterm-screen")
                   .getBoundingClientRect();
-                const row = [...el.querySelectorAll(".xterm-rows > div")]
+                const row = [...el.querySelectorAll(".peek-buffer-visible .xterm-rows > div")]
                   .at(-1)
                   .getBoundingClientRect();
                 const footer = document
@@ -2375,7 +2574,7 @@ async function frameFitOracle(browser, t, result, cols = 58, rows = 70) {
                   .querySelector(".peek")
                   .getBoundingClientRect();
                 const font = parseFloat(
-                  getComputedStyle(el.querySelector(".xterm-rows")).fontSize,
+                  getComputedStyle(el.querySelector(".peek-buffer-visible .xterm-rows")).fontSize,
                 );
                 const available =
                   el.clientWidth -
@@ -2454,7 +2653,7 @@ async function frameFitOracle(browser, t, result, cols = 58, rows = 70) {
   }
 }
 
-test("live Peek product component, transport, geometry and CSP", {
+test("live Peek product component, transport and CSP in real Chromium and Firefox", {
   timeout: 180000,
 }, async (t) => {
   const results = [];
@@ -2468,8 +2667,9 @@ test("live Peek product component, transport, geometry and CSP", {
         ]),
   ].filter(
     ([name]) =>
-      !process.env.PEEK_FIT_ENGINES ||
-      process.env.PEEK_FIT_ENGINES.split(",").includes(name),
+      (!process.env.LIVE_PEEK_BROWSER || process.env.LIVE_PEEK_BROWSER === name) &&
+      (!process.env.PEEK_FIT_ENGINES ||
+      process.env.PEEK_FIT_ENGINES.split(",").includes(name)),
   )) {
     const browser = await type.launch({
       executablePath,
@@ -2575,7 +2775,7 @@ test("live Peek product component, transport, geometry and CSP", {
       );
       first.send(data(4, "\x1b[3;1HNEW-MARKER\x1b[5;7H\x1b[?25h"));
       await ui.rows().nth(2).getByText("NEW-MARKER", { exact: true }).waitFor();
-      await ui.drawer.locator(".xterm-cursor").waitFor();
+      await ui.drawer.locator(".xterm-cursor:visible").waitFor();
       // Partial sequence must not survive a semantic full reset.
       first.send(data(5, "\x1b]52;c;UNFINISHED"));
       first.send(
@@ -2831,10 +3031,20 @@ test("live Peek product component, transport, geometry and CSP", {
     join(output, "results.json"),
     `${JSON.stringify(results, null, 2)}\n`,
   );
-  assert.equal(failed, false, `Both browsers must pass. Evidence: ${output}`);
+  assert.ok(
+    results.length > 0,
+    "LIVE_PEEK_BROWSER must select chromium or firefox",
+  );
+  assert.equal(
+    failed,
+    false,
+    `Selected browsers must pass. Evidence: ${output}`,
+  );
   console.log(
     styleDiagnostic
       ? "LIVE_PEEK_STYLE_DIAGNOSTIC_PASS"
       : "LIVE_PEEK_BROWSERS_PASS",
   );
 });
+
+export { clickMember, data, full, open, until };

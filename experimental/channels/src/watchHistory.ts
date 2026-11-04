@@ -1,4 +1,43 @@
-export type WatchRow = Readonly<{ id: number; text: string }>;
+type TextRow = Readonly<{ kind: "text"; id: number; text: string }>;
+export type WatchRow =
+  | TextRow
+  | Readonly<{ kind: "gap"; id: number; text: "… some lines missed" }>;
+type Occurrence =
+  | Readonly<{ kind: "candidate"; row: TextRow }>
+  | Readonly<{ kind: "positioned"; row: TextRow }>
+  | Readonly<{
+      kind: "conflicted";
+      id: number;
+      alternatives: readonly string[];
+    }>
+  | Readonly<{ kind: "missing"; id: number }>
+  | Readonly<{ kind: "vacant"; id: number }>
+  | Readonly<{ kind: "published"; row: TextRow }>;
+type Ledger =
+  | Readonly<{ kind: "unlocated"; boundary: "continuous" | "gap" }>
+  | Readonly<{
+      kind: "located";
+      frame: WatchFrame | null;
+      start: number;
+      end: number;
+      layout: "physical" | "spaced";
+      screen: Readonly<{
+        cols: number;
+        buffer: WatchFrame["buffer"];
+        height: number;
+      }>;
+      origin: number;
+      retainedFrom: number | null;
+      top: number;
+      publishedTo: number;
+      cells: readonly Occurrence[];
+      boundary: "continuous" | "gap";
+    }>;
+type Scroll = Readonly<{ start: number; end: number; shift: number }>;
+type Alignment =
+  | Readonly<{ kind: "matched"; offset: number }>
+  | Readonly<{ kind: "unmatched" }>
+  | Readonly<{ kind: "ambiguous" }>;
 export type WatchFrame = Readonly<{
   cols: number;
   buffer: "normal" | "alternate";
@@ -8,9 +47,11 @@ export type WatchHistory = Readonly<{
   continuity: string | null;
   startedAt: number | null;
   nextId: number;
-  seed: readonly WatchRow[];
+  seed: readonly TextRow[];
   confirmed: readonly WatchRow[];
   baseline: WatchFrame | null;
+  ledger: Ledger;
+  segments: readonly Extract<Ledger, { kind: "located" }>[];
 }>;
 export type WatchEvent =
   | Readonly<{
@@ -35,6 +76,8 @@ export function emptyWatch(): WatchHistory {
     seed: [],
     confirmed: [],
     baseline: null,
+    ledger: { kind: "unlocated", boundary: "continuous" },
+    segments: [],
   };
 }
 
@@ -62,36 +105,32 @@ function strong(
   return characters >= 80 && unique;
 }
 
-/** Only an exact, uniquely explained upward middle-band shift can add rows. */
-export function departedRows(
-  old: WatchFrame,
-  next: WatchFrame,
-): readonly string[] {
+function scrollBetween(old: WatchFrame, next: WatchFrame): Scroll | null {
   if (
     old.cols !== next.cols ||
     old.buffer !== next.buffer ||
     old.rows.length !== next.rows.length
   )
-    return [];
+    return null;
   const before = old.rows;
   const after = next.rows;
   const count = before.length;
   let first = 0;
   while (first < count && before[first] === after[first]) first++;
-  if (first === count) return [];
+  if (first === count) return null;
   let last = count - 1;
   while (last > first && before[last] === after[last]) last--;
-  let accepted: {
-    start: number;
-    shift: number;
-    rows: readonly string[];
-  } | null = null;
+  let accepted: Scroll | null = null;
   for (let shift = 1; shift <= Math.floor(count / 2); shift++) {
     const mismatches = [0];
-    for (let y = 0; y + shift < count; y++)
-      mismatches.push(
-        (mismatches[y] ?? 0) + (before[y + shift] === after[y] ? 0 : 1),
-      );
+    for (let y = 0; y + shift < count; y++) {
+      const previous = before[y + shift];
+      const current = after[y];
+      const compatible =
+        previous === current ||
+        (previous?.trim() && current?.startsWith(previous));
+      mismatches.push((mismatches[y] ?? 0) + (compatible ? 0 : 1));
+    }
     for (let start = 0; start <= first; start++) {
       for (
         let end = Math.max(last + 1, start + 2 * shift);
@@ -100,16 +139,570 @@ export function departedRows(
       ) {
         const overlapEnd = end - shift;
         if (mismatches[overlapEnd] !== mismatches[start]) continue;
-        if (!strong(before.slice(start + shift, end), before, after)) continue;
+        const exact = before
+          .slice(start + shift, end)
+          .filter((text, y) => text === after[start + y]);
+        if (!strong(exact, before, after)) continue;
         const rows = before.slice(start, start + shift);
         if (!rows.some((row) => row.trim())) continue;
         if (accepted && (accepted.start !== start || accepted.shift !== shift))
-          return [];
-        accepted = { start, shift, rows };
+          return null;
+        accepted = { start, end, shift };
       }
     }
   }
-  return accepted?.rows ?? [];
+  return accepted;
+}
+
+export function departedRows(
+  old: WatchFrame,
+  next: WatchFrame,
+): readonly string[] {
+  const scroll = scrollBetween(old, next);
+  return scroll
+    ? old.rows.slice(scroll.start, scroll.start + scroll.shift)
+    : [];
+}
+
+function occurrenceText(cell: Occurrence) {
+  return cell.kind === "conflicted" ||
+    cell.kind === "missing" ||
+    cell.kind === "vacant"
+    ? null
+    : cell.row.text;
+}
+
+function visibleRows(
+  ledger: Extract<Ledger, { kind: "located" }>,
+  frame: WatchFrame,
+) {
+  const rows = frame.rows.slice(ledger.start, ledger.end);
+  return ledger.layout === "spaced" ? rows.filter((text) => text.trim()) : rows;
+}
+
+function withoutLayoutBlanks(
+  ledger: Extract<Ledger, { kind: "located" }>,
+): Extract<Ledger, { kind: "located" }> {
+  const keep = (cell: Occurrence) => occurrenceText(cell)?.trim() !== "";
+  return {
+    ...ledger,
+    layout: "spaced",
+    origin: 0,
+    retainedFrom: ledger.retainedFrom === null ? null : 0,
+    top: ledger.cells.slice(0, ledger.top - ledger.origin).filter(keep).length,
+    publishedTo: ledger.cells
+      .slice(0, ledger.publishedTo - ledger.origin)
+      .filter(keep).length,
+    cells: ledger.cells.filter(keep),
+  };
+}
+
+function alignmentOffsets(
+  known: readonly (string | null)[],
+  rows: readonly (string | null)[],
+) {
+  const index = new Map<string, number[]>();
+  for (const [i, text] of known.entries()) {
+    if (text === null || !informative(text)) continue;
+    const positions = index.get(text) ?? [];
+    positions.push(i);
+    index.set(text, positions);
+  }
+  const candidates = new Set<number>();
+  for (const [y, text] of rows.entries()) {
+    if (text === null) continue;
+    for (const position of index.get(text) ?? []) candidates.add(position - y);
+  }
+  return candidates;
+}
+
+function uniqueAlignment(
+  known: readonly (string | null)[],
+  rows: readonly (string | null)[],
+): Alignment {
+  let accepted: number | null = null;
+  for (const top of alignmentOffsets(known, rows)) {
+    let run: string[] = [];
+    let anchored = false;
+    for (let y = 0; y <= rows.length; y++) {
+      const previous = known[top + y];
+      const text = rows[y];
+      if (text !== undefined && text !== null && text === previous) {
+        run.push(text);
+      } else {
+        if (strong(run, run, run)) anchored = true;
+        run = [];
+      }
+    }
+    if (!anchored) continue;
+    if (accepted !== null && accepted !== top) return { kind: "ambiguous" };
+    accepted = top;
+  }
+  return accepted === null
+    ? { kind: "unmatched" }
+    : { kind: "matched", offset: accepted };
+}
+
+function locate(
+  ledger: Extract<Ledger, { kind: "located" }>,
+  frame: WatchFrame,
+) {
+  const alignment = uniqueAlignment(
+    ledger.cells.map(occurrenceText),
+    visibleRows(ledger, frame),
+  );
+  return alignment.kind === "matched"
+    ? ({
+        kind: "matched",
+        offset: ledger.origin + alignment.offset,
+      } satisfies Alignment)
+    : alignment;
+}
+
+function observeOccurrence(cell: Occurrence, text: string): Occurrence {
+  if (cell.kind === "missing") return cell;
+  if (cell.kind === "vacant")
+    return { kind: "candidate", row: { kind: "text", id: cell.id, text } };
+  if (cell.kind === "published") {
+    return text.startsWith(cell.row.text) && text !== cell.row.text
+      ? { kind: "published", row: { ...cell.row, text } }
+      : cell;
+  }
+  if (cell.kind === "candidate" || cell.kind === "positioned") {
+    if (cell.row.text === text || cell.row.text.startsWith(text)) return cell;
+    if (text.startsWith(cell.row.text))
+      return { kind: "candidate", row: { ...cell.row, text } };
+    return {
+      kind: "conflicted",
+      id: cell.row.id,
+      alternatives: [cell.row.text, text],
+    };
+  }
+  const compatible = cell.alternatives.filter(
+    (candidate) => candidate === text || text.startsWith(candidate),
+  );
+  if (compatible.length === 1)
+    return { kind: "candidate", row: { kind: "text", id: cell.id, text } };
+  const alternatives = [...new Set([...cell.alternatives, text])];
+  return alternatives.length <= 8
+    ? { ...cell, alternatives }
+    : { kind: "missing", id: cell.id };
+}
+
+function projectConfirmed(
+  confirmed: readonly WatchRow[],
+  cells: readonly Occurrence[],
+  nextId: number,
+) {
+  const positions = new Map<number, number>();
+  const retained = new Set(confirmed.map((row) => row.id));
+  const ordered: TextRow[] = [];
+  for (const [position, cell] of cells.entries()) {
+    if (cell.kind !== "published") continue;
+    positions.set(cell.row.id, position);
+    if (retained.has(cell.row.id)) ordered.push(cell.row);
+  }
+  const slots = [...confirmed];
+  for (let i = slots.length - 1; i >= 0; i--) {
+    const row = slots[i];
+    if (row && positions.has(row.id)) {
+      const replacement = ordered.pop();
+      if (replacement) slots[i] = replacement;
+    }
+  }
+  const rows: WatchRow[] = [];
+  let pending: Extract<WatchRow, { kind: "gap" }> | undefined;
+  for (const row of slots) {
+    if (row.kind === "gap") {
+      pending ??= row;
+      continue;
+    }
+    const previous = rows.at(-1);
+    const before = previous && positions.get(previous.id);
+    const after = positions.get(row.id);
+    if (before !== undefined && after !== undefined) {
+      if (after !== before + 1)
+        rows.push(
+          pending ?? {
+            kind: "gap",
+            id: nextId++,
+            text: "… some lines missed",
+          },
+        );
+    } else if (previous && (before !== undefined || after !== undefined)) {
+      rows.push(
+        pending ?? {
+          kind: "gap",
+          id: nextId++,
+          text: "… some lines missed",
+        },
+      );
+    } else if (pending) rows.push(pending);
+    pending = undefined;
+    rows.push(row);
+  }
+  if (pending) rows.push(pending);
+  return { confirmed: rows, nextId };
+}
+
+function sameLayout(
+  active: Extract<Ledger, { kind: "located" }>,
+  archived: Extract<Ledger, { kind: "located" }>,
+) {
+  return (
+    active.screen.cols === archived.screen.cols &&
+    active.screen.buffer === archived.screen.buffer &&
+    active.screen.height === archived.screen.height &&
+    active.layout === archived.layout &&
+    active.start === archived.start &&
+    active.end === archived.end
+  );
+}
+
+function uncertainOverlap(
+  active: Extract<Ledger, { kind: "located" }>,
+  archived: Extract<Ledger, { kind: "located" }>,
+) {
+  const current = active.cells.map(occurrenceText);
+  const known = archived.cells.map(occurrenceText);
+  const uncertain = new Set<number>();
+  for (const offset of alignmentOffsets(current, known)) {
+    const start = Math.max(0, offset);
+    const end = Math.min(current.length, known.length + offset);
+    let compatible = true;
+    for (let i = start; i < end; i++) {
+      const before = known[i - offset];
+      const after = current[i];
+      if (before != null && after != null && before !== after) {
+        compatible = false;
+        break;
+      }
+    }
+    if (!compatible) continue;
+    for (let i = start; i < end; i++)
+      if (current[i] !== null && current[i] === known[i - offset])
+        uncertain.add(active.origin + i);
+  }
+  return uncertain;
+}
+
+function joinOccurrences(
+  active: Extract<Ledger, { kind: "located" }>,
+  archived: Extract<Ledger, { kind: "located" }>,
+  shift: number,
+): Extract<Ledger, { kind: "located" }> | null {
+  const origin = Math.min(active.origin, archived.origin + shift);
+  const end = Math.max(
+    active.origin + active.cells.length,
+    archived.origin + shift + archived.cells.length,
+  );
+  const cells: Occurrence[] = [];
+  for (let position = origin; position < end; position++) {
+    const current = active.cells[position - active.origin];
+    const known = archived.cells[position - shift - archived.origin];
+    if (
+      current?.kind === "published" &&
+      known?.kind === "published" &&
+      current.row.id !== known.row.id
+    )
+      return null;
+    const cell = current?.kind === "published" ? current : (known ?? current);
+    if (!cell) return null;
+    cells.push(cell);
+  }
+  return {
+    ...active,
+    origin,
+    cells,
+    publishedTo: Math.min(active.publishedTo, archived.publishedTo + shift),
+    retainedFrom:
+      active.retainedFrom === null || archived.retainedFrom === null
+        ? null
+        : Math.min(active.retainedFrom, archived.retainedFrom + shift),
+  };
+}
+
+function observeFrame(
+  state: WatchHistory,
+  frame: WatchFrame,
+  observation: "baseline" | "data" | "interrupted",
+): WatchHistory {
+  const previous = state.baseline;
+  if (observation === "interrupted" || !previous)
+    return {
+      ...state,
+      baseline: frame,
+      ledger: { ...state.ledger, boundary: "gap" },
+    };
+  const screen =
+    state.ledger.kind === "located"
+      ? state.ledger.screen
+      : {
+          cols: previous.cols,
+          buffer: previous.buffer,
+          height: previous.rows.length,
+        };
+  if (
+    screen.cols !== frame.cols ||
+    screen.buffer !== frame.buffer ||
+    screen.height !== frame.rows.length
+  )
+    return {
+      ...state,
+      baseline: frame,
+      ledger: { kind: "unlocated", boundary: "gap" },
+      segments:
+        state.ledger.kind === "located"
+          ? [...state.segments, { ...state.ledger, frame: null }]
+          : state.segments,
+    };
+  let nextId = state.nextId;
+  let ledger = state.ledger;
+  const segments = [...state.segments];
+  const scroll = scrollBetween(previous, frame);
+  const backward = scrollBetween(frame, previous);
+  let alignment: Alignment = { kind: "unmatched" };
+  if (ledger.kind === "located" && ledger.frame === previous) {
+    const movement = scroll ?? backward;
+    if (
+      movement &&
+      ledger.layout === "physical" &&
+      movement.start >= ledger.start &&
+      movement.end === ledger.end
+    ) {
+      ledger = {
+        ...ledger,
+        start: movement.start,
+        top: ledger.top + movement.start - ledger.start,
+      };
+      alignment = {
+        kind: "matched",
+        offset: ledger.top + (scroll ? movement.shift : -movement.shift),
+      };
+    }
+  }
+  if (alignment.kind === "unmatched") {
+    if (ledger.kind === "located" && scroll && scroll.start > ledger.start)
+      ledger = {
+        ...ledger,
+        start: scroll.start,
+        top: ledger.top + scroll.start - ledger.start,
+      };
+    let matched: Extract<Ledger, { kind: "located" }> | null = null;
+    let matchedIndex = -1;
+    const candidates =
+      ledger.kind === "located" ? [...segments, ledger] : segments;
+    for (const [index, candidate] of candidates.entries()) {
+      if (
+        candidate.screen.cols !== frame.cols ||
+        candidate.screen.buffer !== frame.buffer ||
+        candidate.screen.height !== frame.rows.length
+      )
+        continue;
+      let located = candidate;
+      let found = locate(located, frame);
+      if (found.kind === "unmatched" && candidate.layout === "physical") {
+        const spaced = withoutLayoutBlanks(candidate);
+        const spacedAlignment = locate(spaced, frame);
+        if (spacedAlignment.kind !== "unmatched") {
+          located = spaced;
+          found = spacedAlignment;
+        }
+      }
+      if (
+        found.kind === "ambiguous" ||
+        (found.kind === "matched" && matched !== null)
+      ) {
+        alignment = { kind: "ambiguous" };
+        break;
+      }
+      if (found.kind === "matched") {
+        matched = located;
+        matchedIndex = index;
+        alignment = found;
+      }
+    }
+    if (alignment.kind === "matched" && matched) {
+      if (matchedIndex < segments.length) {
+        segments.splice(matchedIndex, 1);
+        if (ledger.kind === "located")
+          segments.push({ ...ledger, frame: null });
+      }
+      ledger = matched;
+    }
+  }
+  if (alignment.kind === "ambiguous") {
+    if (observation === "baseline") return { ...state, baseline: frame };
+    const confirmed =
+      state.confirmed.at(-1)?.kind === "gap"
+        ? state.confirmed
+        : [
+            ...state.confirmed,
+            {
+              kind: "gap",
+              id: nextId++,
+              text: "… some lines missed",
+            } satisfies WatchRow,
+          ];
+    return { ...state, confirmed, nextId, baseline: frame };
+  }
+  let top = alignment.kind === "matched" ? alignment.offset : null;
+  if (top === null) {
+    if (observation === "baseline" || !scroll)
+      return { ...state, baseline: frame };
+    const boundary = ledger.kind === "unlocated" ? ledger.boundary : "gap";
+    if (ledger.kind === "located") segments.push({ ...ledger, frame: null });
+    ledger = {
+      kind: "located",
+      frame: previous,
+      start: scroll.start,
+      end: scroll.end,
+      layout: "physical",
+      screen: {
+        cols: frame.cols,
+        buffer: frame.buffer,
+        height: frame.rows.length,
+      },
+      origin: 0,
+      retainedFrom: null,
+      top: 0,
+      publishedTo: 0,
+      cells: previous.rows.slice(scroll.start, scroll.end).map(
+        (text): Occurrence => ({
+          kind: "candidate",
+          row: { kind: "text", id: nextId++, text },
+        }),
+      ),
+      boundary,
+    };
+    top = scroll.shift;
+  }
+  if (ledger.kind !== "located") return { ...state, baseline: frame };
+  if (observation === "baseline")
+    return {
+      ...state,
+      baseline: frame,
+      segments,
+      ledger: { ...ledger, frame, top },
+    };
+  const previousTop =
+    scroll &&
+    ledger.layout === "physical" &&
+    scroll.start === ledger.start &&
+    scroll.end === ledger.end
+      ? top - scroll.shift
+      : top;
+  const origin = Math.min(
+    ledger.origin,
+    Math.max(previousTop, ledger.retainedFrom ?? previousTop),
+  );
+  const prefix = Array.from(
+    { length: ledger.origin - origin },
+    (): Occurrence => ({ kind: "vacant", id: nextId++ }),
+  );
+  ledger = {
+    ...ledger,
+    origin,
+    publishedTo: prefix.length ? origin : ledger.publishedTo,
+    cells: [...prefix, ...ledger.cells],
+  };
+  let cells = [...ledger.cells];
+  const rows = visibleRows(ledger, frame);
+  if (previousTop !== top) {
+    for (const [y, text] of visibleRows(ledger, previous).entries()) {
+      const i = previousTop + y - ledger.origin;
+      if (i < 0) continue;
+      const cell = cells[i];
+      cells[i] = cell
+        ? observeOccurrence(cell, text)
+        : { kind: "candidate", row: { kind: "text", id: nextId++, text } };
+    }
+  }
+  for (const [y, text] of rows.entries()) {
+    const position = top + y;
+    const i = position - ledger.origin;
+    const cell = cells[i];
+    if (i < 0) continue;
+    cells[i] = cell
+      ? observeOccurrence(cell, text)
+      : { kind: "candidate", row: { kind: "text", id: nextId++, text } };
+  }
+  for (let y = 0; y + 1 < rows.length; y++) {
+    const i = top + y - ledger.origin;
+    const cell = cells[i];
+    if (cell?.kind === "candidate")
+      cells[i] = { kind: "positioned", row: cell.row };
+  }
+  ledger = { ...ledger, cells };
+  for (let index = 0; index < segments.length; index++) {
+    const archived = segments[index];
+    if (!archived || !sameLayout(ledger, archived)) continue;
+    const found = uniqueAlignment(
+      archived.cells.map(occurrenceText),
+      ledger.cells.map(occurrenceText),
+    );
+    if (found.kind !== "matched") continue;
+    const shift = ledger.origin - archived.origin - found.offset;
+    const joined = joinOccurrences(ledger, archived, shift);
+    if (!joined) continue;
+    ledger = joined;
+    segments.splice(index--, 1);
+  }
+  cells = [...ledger.cells];
+  const uncertain = new Set(
+    segments.flatMap((segment) =>
+      sameLayout(ledger, segment) ? [...uncertainOverlap(ledger, segment)] : [],
+    ),
+  );
+  let commitTo = top;
+  if (top < ledger.top) {
+    for (let i = top + rows.length - ledger.origin; i < cells.length; i++)
+      if (cells[i]?.kind === "positioned") commitTo = ledger.origin + i + 1;
+  }
+  const confirmed = [...state.confirmed];
+  let boundary = ledger.boundary;
+  function gap() {
+    if (confirmed.at(-1)?.kind !== "gap")
+      confirmed.push({
+        kind: "gap",
+        id: nextId++,
+        text: "… some lines missed",
+      });
+  }
+  if (commitTo > ledger.publishedTo && boundary === "gap") gap();
+  for (let position = ledger.publishedTo; position < commitTo; position++) {
+    const i = position - ledger.origin;
+    const cell = cells[i];
+    if (
+      !cell ||
+      cell.kind === "conflicted" ||
+      cell.kind === "missing" ||
+      cell.kind === "vacant"
+    )
+      gap();
+    else if (cell.kind !== "published" && uncertain.has(position)) {
+      gap();
+      cells[i] = { kind: "missing", id: cell.row.id };
+    } else if (cell.kind !== "published") {
+      confirmed.push(cell.row);
+      cells[i] = { kind: "published", row: cell.row };
+    }
+    boundary = "continuous";
+  }
+  return {
+    ...state,
+    ...projectConfirmed(confirmed, cells, nextId),
+    baseline: frame,
+    segments,
+    ledger: {
+      ...ledger,
+      frame,
+      top,
+      cells,
+      boundary,
+      publishedTo: Math.max(ledger.publishedTo, commitTo),
+    },
+  };
 }
 
 function seedColumns(text: string) {
@@ -121,35 +714,108 @@ function seedColumns(text: string) {
   return columns;
 }
 
-function overlap(left: readonly string[], right: readonly string[]) {
-  for (let size = Math.min(left.length, right.length); size >= 4; size--) {
-    const tail = left.slice(-size);
-    if (
-      tail.every((text, index) => text === right[index]) &&
-      strong(tail, left, right)
-    )
-      return size;
-  }
-  return 0;
-}
-
 export function watchRows(state: WatchHistory): readonly WatchRow[] {
   return [...state.seed, ...state.confirmed];
+}
+
+function occurrenceBytes(cell: Occurrence) {
+  const texts =
+    cell.kind === "missing" || cell.kind === "vacant"
+      ? []
+      : cell.kind === "conflicted"
+        ? cell.alternatives
+        : [cell.row.text];
+  return texts.reduce(
+    (bytes, text) => bytes + encoder.encode(text).length + 1,
+    0,
+  );
 }
 
 export function watchBytes(state: WatchHistory) {
   let bytes = 0;
   for (const row of watchRows(state))
     bytes += encoder.encode(row.text).length + 1;
+  const segments =
+    state.ledger.kind === "located"
+      ? [...state.segments, state.ledger]
+      : state.segments;
+  for (const segment of segments) {
+    for (const cell of segment.cells)
+      if (cell.kind !== "published") bytes += occurrenceBytes(cell);
+  }
   for (const text of state.baseline?.rows ?? [])
     bytes += encoder.encode(text).length + 1;
   return bytes;
 }
 
+function compactSegment(
+  segment: Extract<Ledger, { kind: "located" }>,
+): Extract<Ledger, { kind: "located" }> {
+  let run: string[] = [];
+  let proofTo = 0;
+  const lastPublished = segment.cells.findLastIndex(
+    (cell) => cell.kind === "published",
+  );
+  for (const [i, cell] of segment.cells.entries()) {
+    if (i < lastPublished) continue;
+    const text = occurrenceText(cell);
+    if (text === null) run = [];
+    else run.push(text);
+    if (strong(run, run, run)) {
+      proofTo = i + 1;
+      break;
+    }
+  }
+  if (!proofTo) return segment;
+  return {
+    ...segment,
+    cells: segment.cells.map((cell, i) =>
+      i < proofTo ||
+      cell.kind === "published" ||
+      cell.kind === "missing" ||
+      cell.kind === "vacant"
+        ? cell
+        : cell.kind === "conflicted"
+          ? { kind: "missing", id: cell.id }
+          : { kind: "vacant", id: cell.row.id },
+    ),
+  };
+}
+
 function bounded(state: WatchHistory): WatchHistory {
   const seed = [...state.seed];
   const confirmed = [...state.confirmed];
+  let ledger = state.ledger;
+  let segments = [...state.segments];
+  const retained = new Set(confirmed.map((row) => row.id));
   let bytes = watchBytes(state);
+  if (bytes > WATCH_BYTE_LIMIT) {
+    segments = segments.map(compactSegment);
+    bytes = watchBytes({ ...state, segments });
+  }
+  function trimSegments() {
+    segments = segments.flatMap((segment) => {
+      const first = segment.cells.findIndex(
+        (cell) => cell.kind === "published" && retained.has(cell.row.id),
+      );
+      const cut = first < 0 ? segment.cells.length : first;
+      for (const cell of segment.cells.slice(0, cut))
+        if (cell.kind !== "published") bytes -= occurrenceBytes(cell);
+      return first < 0
+        ? []
+        : [
+            {
+              ...segment,
+              origin: segment.origin + first,
+              retainedFrom: first
+                ? segment.origin + first
+                : segment.retainedFrom,
+              cells: segment.cells.slice(first),
+            },
+          ];
+    });
+  }
+  trimSegments();
   while (
     seed.length + confirmed.length > WATCH_LINE_LIMIT ||
     bytes > WATCH_BYTE_LIMIT
@@ -157,57 +823,135 @@ function bounded(state: WatchHistory): WatchHistory {
     const row = seed.length ? seed.shift() : confirmed.shift();
     if (!row) break;
     bytes -= encoder.encode(row.text).length + 1;
+    retained.delete(row.id);
+    const archived = segments.find((segment) =>
+      segment.cells.some(
+        (cell) => cell.kind === "published" && cell.row.id === row.id,
+      ),
+    );
+    if (archived) {
+      const ids = new Set(
+        archived.cells.flatMap((cell) =>
+          cell.kind === "published" ? [cell.row.id] : [],
+        ),
+      );
+      for (let i = confirmed.length - 1; i >= 0; i--) {
+        const candidate = confirmed[i];
+        if (candidate && ids.has(candidate.id)) {
+          bytes -= encoder.encode(candidate.text).length + 1;
+          retained.delete(candidate.id);
+          confirmed.splice(i, 1);
+        }
+      }
+    }
+    trimSegments();
   }
-  return { ...state, seed, confirmed };
+  if (ledger.kind === "located") {
+    let cut = 0;
+    while (ledger.origin + cut < ledger.publishedTo) {
+      const cell = ledger.cells[cut];
+      if (cell && cell.kind === "published" && retained.has(cell.row.id)) break;
+      cut++;
+    }
+    ledger = {
+      ...ledger,
+      origin: ledger.origin + cut,
+      retainedFrom: cut ? ledger.origin + cut : ledger.retainedFrom,
+      cells: ledger.cells.slice(cut),
+    };
+    if (bytes > WATCH_BYTE_LIMIT)
+      ledger = { kind: "unlocated", boundary: "gap" };
+  }
+  return { ...state, seed, confirmed, ledger, segments };
+}
+
+function seedBoundary(state: WatchHistory, source: readonly string[]) {
+  let known = state.confirmed.map((row) =>
+    row.kind === "text" ? row.text : null,
+  );
+  if (state.ledger.kind === "located") {
+    const ids = new Set(
+      state.ledger.cells.flatMap((cell) =>
+        cell.kind === "conflicted" ||
+        cell.kind === "missing" ||
+        cell.kind === "vacant"
+          ? []
+          : [cell.row.id],
+      ),
+    );
+    if (state.confirmed.every((row) => ids.has(row.id)))
+      known = state.ledger.cells.map(occurrenceText);
+  } else if (!state.confirmed.length) {
+    known = [...(state.baseline?.rows ?? [])];
+  }
+  if (known.some((text) => text === null)) return null;
+  const visible = known.flatMap((text) => (text === null ? [] : [text]));
+  const alignment = uniqueAlignment(source, visible);
+  if (alignment.kind !== "matched") return null;
+  const offset = alignment.offset;
+  if (state.ledger.kind === "located" || state.confirmed.length) return offset;
+  let run: string[] = [];
+  for (let i = 0; i <= visible.length; i++) {
+    const text = visible[i];
+    if (text !== undefined && source[i + offset] === text) run.push(text);
+    else {
+      if (strong(run, run, run)) return offset + i - run.length;
+      run = [];
+    }
+  }
+  return null;
 }
 
 function alignSeed(state: WatchHistory): WatchHistory {
-  const seed = state.seed.map((row) => row.text);
-  const confirmed = state.confirmed.map((row) => row.text);
-  const captured = overlap(seed, confirmed);
-  if (captured) return { ...state, seed: state.seed.slice(0, -captured) };
-  if (state.confirmed.length || !state.baseline) return state;
-  const visible = overlap(seed, state.baseline.rows);
-  return visible ? { ...state, seed: state.seed.slice(0, -visible) } : state;
+  const boundary = seedBoundary(
+    state,
+    state.seed.map((row) => row.text),
+  );
+  return boundary === null
+    ? state
+    : { ...state, seed: state.seed.slice(0, Math.max(0, boundary)) };
 }
 
 export function watchReduce(
   state: WatchHistory,
   event: WatchEvent,
 ): WatchHistory {
+  if (event.kind === "frame" || event.kind === "baseline") {
+    const rows = event.frame.rows.map((text) => text.trimEnd());
+    event = { ...event, frame: { ...event.frame, rows } };
+  }
   switch (event.kind) {
     case "detach":
-      return { ...state, baseline: null };
+      return {
+        ...state,
+        baseline: null,
+        ledger: { ...state.ledger, boundary: "gap" },
+      };
     case "baseline": {
       const same = state.continuity === event.continuity;
       const previous = same ? state : emptyWatch();
+      const resumed = {
+        ...previous,
+        continuity: event.continuity,
+        startedAt: previous.startedAt ?? event.at,
+        baseline: event.frame,
+      };
       return bounded(
-        alignSeed({
-          ...previous,
-          continuity: event.continuity,
-          startedAt: previous.startedAt ?? event.at,
-          baseline: event.frame,
-        }),
+        alignSeed(
+          same ? observeFrame(resumed, event.frame, "baseline") : resumed,
+        ),
       );
     }
-    case "frame": {
-      const departed =
-        state.baseline && !event.interrupted
-          ? departedRows(state.baseline, event.frame)
-          : [];
-      let nextId = state.nextId;
+    case "frame":
       return bounded(
-        alignSeed({
-          ...state,
-          confirmed: [
-            ...state.confirmed,
-            ...departed.map((text) => ({ id: nextId++, text })),
-          ],
-          nextId,
-          baseline: event.frame,
-        }),
+        alignSeed(
+          observeFrame(
+            state,
+            event.frame,
+            event.interrupted ? "interrupted" : "data",
+          ),
+        ),
       );
-    }
     case "seed": {
       const source = event.text ? event.text.split("\n") : [];
       const cols = state.baseline?.cols;
@@ -216,30 +960,29 @@ export function watchReduce(
           ? -1
           : source.findIndex((line) => seedColumns(line) > cols);
       const text = wrapped < 0 ? source : source.slice(0, wrapped);
+      const boundary = seedBoundary(state, text);
+      const incoming =
+        boundary === null ? text : text.slice(0, Math.max(0, boundary));
       const previous = state.seed.map((row) => row.text);
       const unchanged =
-        previous.length === text.length &&
-        previous.every((row, i) => row === text[i]);
-      if (
-        state.confirmed.length &&
-        !unchanged &&
-        !overlap(
-          text,
-          state.confirmed.map((row) => row.text),
-        )
-      )
+        previous.length === incoming.length &&
+        previous.every((row, i) => row === incoming[i]);
+      if (state.confirmed.length && !unchanged && boundary === null)
         return state;
-      const shared =
-        previous.length === text.length &&
-        previous.every((row, i) => row === text[i])
-          ? previous.length
-          : overlap(previous, text);
+      const alignment = uniqueAlignment(previous, incoming);
+      const shared = unchanged
+        ? 0
+        : alignment.kind === "matched"
+          ? alignment.offset
+          : null;
       let nextId = state.nextId;
-      const retained = shared ? state.seed.slice(-shared) : [];
-      const seed = [
-        ...retained,
-        ...text.slice(shared).map((line) => ({ id: nextId++, text: line })),
-      ];
+      const seed = incoming.map((text, i): TextRow => {
+        const previousRow =
+          shared === null ? undefined : state.seed[i + shared];
+        return previousRow?.kind === "text" && previousRow.text === text
+          ? previousRow
+          : { kind: "text", id: nextId++, text };
+      });
       return bounded(alignSeed({ ...state, seed, nextId }));
     }
     default: {
