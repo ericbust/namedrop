@@ -2226,55 +2226,123 @@ async function watchedHistoryOracle(browser, t, result) {
   }
 }
 
-async function frameFitOracle(browser, t, result) {
-  const ui = await open(browser, t, full(1, {
-    cols: 58, rows: 70,
-    bytes: encode("\x1b[2J\x1b[HSTART\x1b[70;1HLAST-ROW-PROMPT>"),
-  }));
+async function frameFitOracle(browser, t, result, cols = 58, rows = 70) {
+  const ui = await open(
+    browser,
+    t,
+    full(1, {
+      cols,
+      rows,
+      bytes: encode(`\x1b[2J\x1b[HSTART\x1b[${rows};1HLAST-ROW-PROMPT>`),
+    }),
+  );
   const failures = [];
-  result.fit = [];
+  result.fit ??= [];
   try {
     await clickMember(ui, "codex");
     await until(() => ui.live(), "fit stream opened");
     await ui.rows().filter({ hasText: "LAST-ROW-PROMPT>" }).waitFor();
-    for (const [width, height] of [[1280,800],[1440,900],[1728,1117],[1920,1080],[2560,1440]]) {
+    ui.live().send({
+      v: 1,
+      seq: 2,
+      kind: "history",
+      text: Array.from({ length: 200 }, (_, i) => `HISTORY-${i}`).join("\n"),
+    });
+    await ui.page.locator(".peek-history span").nth(199).waitFor();
+    for (const [width, height] of [
+      [1280, 800],
+      [1440, 900],
+      [1728, 1117],
+      [1920, 1080],
+      [2560, 1440],
+    ]) {
       await ui.page.setViewportSize({ width, height });
       for (const expanded of [false, true]) {
-        if ((await ui.drawer.getByRole("button", {name: "Restore", exact: true}).count()) !== Number(expanded))
-          await ui.drawer.getByRole("button", {name: expanded ? "Expand" : "Restore", exact: true}).click();
+        if (
+          (await ui.drawer
+            .getByRole("button", { name: "Restore", exact: true })
+            .count()) !== Number(expanded)
+        )
+          await ui.drawer
+            .getByRole("button", {
+              name: expanded ? "Expand" : "Restore",
+              exact: true,
+            })
+            .click();
         for (const compose of [false, true]) {
-          if (compose) await ui.drawer.getByRole("button", {name: "Type to agent", exact: true}).click();
+          if (compose)
+            await ui.drawer
+              .getByRole("button", { name: "Type to agent", exact: true })
+              .click();
           await ui.page.waitForTimeout(120);
-          const metrics = await ui.page.locator(".peek-live").evaluate((el) => {
-            const rect = el.getBoundingClientRect();
-            const style = getComputedStyle(el);
-            const grid = el.querySelector(".xterm-screen").getBoundingClientRect();
-            const row = [...el.querySelectorAll(".xterm-rows > div")].at(-1).getBoundingClientRect();
-            const footer = document.querySelector(".peek-compose").getBoundingClientRect();
-            const drawer = document.querySelector(".peek").getBoundingClientRect();
-            const font = parseFloat(getComputedStyle(el.querySelector(".xterm-rows")).fontSize);
-            const available = el.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-            return { frameBottom: rect.bottom, footerTop: footer.top, footerBottom: footer.bottom,
-              drawerBottom: drawer.bottom, windowBottom: innerHeight, rowTop: row.top, rowBottom: row.bottom,
-              frameTop: rect.top, gridWidth: grid.width, available, font, cell: grid.width / 58,
-              drawerScroll: document.querySelector(".peek").scrollTop };
-          });
-          const label = `${result.name}-${width}x${height}-${expanded ? "expanded" : "normal"}-${compose ? "compose" : "closed"}`;
+          const metrics = await ui.page
+            .locator(".peek-live")
+            .evaluate((el, columns) => {
+              const rect = el.getBoundingClientRect();
+              const style = getComputedStyle(el);
+              const grid = el
+                .querySelector(".xterm-screen")
+                .getBoundingClientRect();
+              const row = [...el.querySelectorAll(".xterm-rows > div")]
+                .at(-1)
+                .getBoundingClientRect();
+              const footer = document
+                .querySelector(".peek-compose")
+                .getBoundingClientRect();
+              const drawer = document
+                .querySelector(".peek")
+                .getBoundingClientRect();
+              const font = parseFloat(
+                getComputedStyle(el.querySelector(".xterm-rows")).fontSize,
+              );
+              const available =
+                el.clientWidth -
+                parseFloat(style.paddingLeft) -
+                parseFloat(style.paddingRight);
+              return {
+                frameBottom: rect.bottom,
+                footerTop: footer.top,
+                footerBottom: footer.bottom,
+                drawerBottom: drawer.bottom,
+                windowBottom: innerHeight,
+                rowTop: row.top,
+                rowBottom: row.bottom,
+                frameTop: rect.top,
+                gridWidth: grid.width,
+                available,
+                font,
+                cell: grid.width / columns,
+                drawerScroll: document.querySelector(".peek").scrollTop,
+              };
+            }, cols);
+          const label = `${result.name}-${cols}cols-${rows}rows-${width}x${height}-${expanded ? "expanded" : "normal"}-${compose ? "compose" : "closed"}`;
           const checks = {
-            "frame reaches footer": Math.abs(metrics.frameBottom - metrics.footerTop) <= 1,
-            "footer reaches window bottom": Math.abs(metrics.footerBottom - metrics.windowBottom) <= 1,
-            "last row fully visible": metrics.rowTop >= metrics.frameTop && metrics.rowBottom <= metrics.frameBottom + 1,
-            "width fills within one cell or font cap": metrics.font >= 19.9 || metrics.available - metrics.gridWidth <= metrics.cell + 1,
+            "frame reaches footer":
+              Math.abs(metrics.frameBottom - metrics.footerTop) <= 1,
+            "footer reaches window bottom":
+              Math.abs(metrics.footerBottom - metrics.windowBottom) <= 1,
+            "last row fully visible":
+              metrics.rowTop >= metrics.frameTop &&
+              metrics.rowBottom <= metrics.frameBottom + 1,
+            "width fills within one cell or font cap":
+              metrics.font <= 10.01 ||
+              metrics.font >= 19.99 ||
+              metrics.available - metrics.gridWidth <= metrics.cell + 1,
             "drawer stays unscrolled": metrics.drawerScroll === 0,
           };
-          result.fit.push({label, ...metrics, checks});
-          for (const [check, passed] of Object.entries(checks)) if (!passed) failures.push(`${label}: ${check}`);
-          await ui.page.screenshot({path: join(output, `${label}.png`)});
-          if (compose) await ui.drawer.getByRole("button", {name: "Stop typing", exact: true}).click();
+          result.fit.push({ label, ...metrics, checks });
+          for (const [check, passed] of Object.entries(checks))
+            if (!passed) failures.push(`${label}: ${check}`);
+          await ui.page.screenshot({ path: join(output, `${label}.png`) });
+          if (compose)
+            await ui.drawer
+              .getByRole("button", { name: "Stop typing", exact: true })
+              .click();
         }
       }
     }
-    assert.deepEqual(failures, [], "Live frame geometry");
+    result.fitFailures ??= [];
+    result.fitFailures.push(...failures);
     assert.deepEqual(ui.errors, []);
   } finally {
     await ui.close();
@@ -2290,8 +2358,14 @@ test("live Peek product component, transport, geometry and CSP", {
     ["chromium", chromium, process.env.CHROME ?? "/usr/bin/chromium"],
     ...(process.env.PEEK_FIT_ONLY === "1"
       ? [["webkit", webkit, process.env.WEBKIT ?? webkit.executablePath()]]
-      : [["firefox", firefox, process.env.FIREFOX ?? firefox.executablePath()]]),
-  ].filter(([name]) => !process.env.PEEK_FIT_ENGINES || process.env.PEEK_FIT_ENGINES.split(",").includes(name))) {
+      : [
+          ["firefox", firefox, process.env.FIREFOX ?? firefox.executablePath()],
+        ]),
+  ].filter(
+    ([name]) =>
+      !process.env.PEEK_FIT_ENGINES ||
+      process.env.PEEK_FIT_ENGINES.split(",").includes(name),
+  )) {
     const browser = await type.launch({
       executablePath,
       headless: true,
@@ -2319,10 +2393,19 @@ test("live Peek product component, transport, geometry and CSP", {
     let ui;
     try {
       if (process.env.PEEK_FIT_ONLY === "1") {
-        await frameFitOracle(browser, t, result);
+        for (const [cols, rows] of [
+          [58, 70],
+          [120, 70],
+          [200, 70],
+          [58, 12],
+        ])
+          await frameFitOracle(browser, t, result, cols, rows);
+        assert.deepEqual(result.fitFailures, [], "Live frame geometry");
         result.status = "passed";
         continue;
       }
+      await frameFitOracle(browser, t, result);
+      assert.deepEqual(result.fitFailures, [], "Live frame geometry");
       await recordedWatchOracle(browser, t, result);
       await watchedHistoryOracle(browser, t, result);
       await shellSeedWatchOracle(browser, t, result);
