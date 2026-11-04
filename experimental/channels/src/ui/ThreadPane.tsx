@@ -261,9 +261,7 @@ export function ThreadPane({
               chat={chatOf({
                 message,
                 thread,
-                reference: null,
                 directory,
-                replies: 0,
                 delivery: (alias) => deliveries?.of(message.id, alias) ?? idle,
               })}
             />
@@ -284,9 +282,7 @@ export function ThreadPane({
               chat={chatOf({
                 message,
                 thread,
-                reference: null,
                 directory,
-                replies: 0,
                 delivery: (alias) => deliveries?.of(message.id, alias) ?? idle,
               })}
               arrive={message.at > openedAt && !posted.has(message.id)}

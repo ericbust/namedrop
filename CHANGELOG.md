@@ -2,6 +2,18 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.5.0-exp.12] - 2026-11-04
+
+### Changed
+
+- Thread replies now appear only in their thread. The channel shows the top message with a reply count and the latest reply.
+- Your own message in a thread resets the Automatic Reply Limit and lifts a pause it caused. Agent-to-agent exchanges still pause after 10 replies.
+
+### Fixed
+
+- Live Peek fills its frame. It grows text to use the full width, especially in Expand, and keeps the newest line visible after resizing.
+- Live Peek no longer flashes blank while Codex streams, and its watch history no longer repeats or drops lines. Lines that truly can't be recovered show a visible gap marker.
+
 ## [1.5.0-exp.11] - 2026-11-04
 
 ### Added
@@ -125,6 +137,12 @@ Experimental Channels build for Linux and macOS testers.
 - `namedrop dashboard --ui <dir>` serves a custom browser app from a directory under the dashboard's existing security headers. Rebuilt directories are read fresh, large assets stream with bounded memory, dotfiles stay private, and aliases of the app shell require the session cookie. Ancestors need only search permission; the UI directory needs read and search permission. The shared server keeps its UI setting through upgrades, supports handoff to older releases without claim inheritance, falls back to their embedded UI when they lack `--ui` with a logged explanation, and spawns the exact executable it probed. During a handoff, matching UI requests wait up to five seconds for a ready successor and apply its UI setting before returning a URL. Longer startups return restart guidance without a URL, initially different UI requests receive restart guidance immediately, and updates and package refreshes can proceed while the successor starts.
 
 - The dashboard's `/api/events` endpoint streams every live Herdr workspace over one authenticated connection. It sends changed workspaces as `space` events and closed workspaces as `gone` events. Dashboard frames now include a live `display_name` and a nullable `addressable_label` that identifies a workspace only when its label is unique.
+## [1.4.4] - 2026-11-04
+
+### Fixed
+
+- Namedrop commands such as naming a pane or sending a message no longer fail with `database is locked` while agents are busy. A slow check that held the database for seconds now finishes quickly. Existing databases are repaired in place without a format change, so older versions can still open them.
+
 ## [1.4.3] - 2026-11-01
 
 ### Fixed

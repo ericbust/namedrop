@@ -1174,9 +1174,6 @@ button.member:not(.more):hover {
   grid-row: 1;
   min-width: 0;
 }
-.reply-ref ~ .msg-content {
-  grid-row: 2;
-}
 .msg-head {
   display: flex;
   flex-wrap: wrap;
@@ -1297,9 +1294,6 @@ button.member:not(.more):hover {
   position: relative;
   height: 0;
 }
-.reply-ref ~ .msg-actions {
-  grid-row: 2;
-}
 .msg-reply {
   position: absolute;
   top: -4px;
@@ -1334,8 +1328,7 @@ button.member:not(.more):hover {
   color: var(--text-muted);
 }
 @media (hover: none), (max-width: 600px) {
-  .msg-actions,
-  .reply-ref ~ .msg-actions {
+  .msg-actions {
     grid-row: auto;
     justify-self: end;
     position: static;
@@ -1537,33 +1530,6 @@ button.member:not(.more):hover {
   margin-right: var(--space-2);
   font-weight: 400;
   color: var(--text-muted);
-}
-.reply-ref {
-  grid-column: 2;
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  min-width: 0;
-  max-width: var(--measure);
-  padding-block: var(--space-2);
-  margin-block: calc(-1 * var(--space-2)) -6px;
-  font-size: var(--text-xs);
-  line-height: 16px;
-  color: var(--text-muted);
-  text-align: left;
-}
-.reply-ref:hover {
-  color: var(--text);
-}
-.reply-ref-author {
-  flex: none;
-  font-weight: 600;
-}
-.reply-ref-text {
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
 }
 .report {
   max-width: var(--measure);
@@ -1925,8 +1891,22 @@ button.member:not(.more):hover {
   min-height: 1.5em;
 }
 .peek-terminal {
+  position: relative;
   width: max-content;
   min-width: 100%;
+  overflow: clip;
+}
+.peek-buffer {
+  position: fixed;
+  top: 0;
+  left: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.peek-buffer-visible {
+  position: relative;
+  visibility: visible;
+  pointer-events: auto;
 }
 .peek-live .xterm .xterm-viewport {
   overflow: hidden;

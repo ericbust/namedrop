@@ -160,9 +160,7 @@ export function Timeline({
           : chatOf({
               message: row.message,
               thread: row.thread,
-              reference: row.reference,
               directory,
-              replies: row.replyCount,
               delivery: (alias) =>
                 deliveries?.of(row.message.id, alias) ?? idle,
             }),

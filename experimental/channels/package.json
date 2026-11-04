@@ -12,7 +12,9 @@
     "test:live-peek": "npm run build && node --test test/live-peek.browser.mjs",
     "build": "vite build",
     "bundle": "npm run build && node bundle.mjs",
-    "bundle:check": "npm run build && node bundle.mjs --check"
+    "bundle:check": "npm run build && node bundle.mjs --check",
+    "test:peek-fit": "npm run build && PEEK_FIT_ONLY=1 node --test test/live-peek.browser.mjs",
+    "test:blank-paint": "npm run build && node --test --test-name-pattern=\"recorded native 736/737|blank presentation\" test/blank-paint.browser.mjs"
   },
   "dependencies": {
     "@xterm/xterm": "6.0.0",

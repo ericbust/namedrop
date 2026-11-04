@@ -204,42 +204,6 @@ function flat(blocks: readonly Block[], links: boolean): ReactNode[] {
   ]);
 }
 
-function inlineText(nodes: readonly Inline[]): string {
-  return nodes
-    .map((node) =>
-      node.kind === "text" || node.kind === "code"
-        ? prose(node.text)
-        : inlineText(node.children),
-    )
-    .join("");
-}
-function blockText(block: Block): string {
-  switch (block.kind) {
-    case "paragraph":
-    case "heading":
-      return inlineText(block.inlines);
-    case "code":
-      return codeText(block).slice(0, -1);
-    case "list":
-      return block.items.map((item) => blocksText(item.blocks)).join("\n");
-    case "quote":
-      return blocksText(block.blocks);
-    case "table":
-      return [block.head, ...block.rows]
-        .map((row) =>
-          row.cells.map((cell) => inlineText(cell.inlines)).join(" | "),
-        )
-        .join("\n");
-  }
-}
-function blocksText(blocks: readonly Block[]): string {
-  return blocks.map(blockText).join("\n");
-}
-// The words a reader sees, for an accessible name or a title.
-export function markdownText(source: string): string {
-  return blocksText(parseMarkdown(source));
-}
-
 // Hook rows sit inside a paragraph and reply previews inside a button, where
 // block elements cannot go and a link cannot nest, so they keep inline styles only.
 export function MarkdownLine({

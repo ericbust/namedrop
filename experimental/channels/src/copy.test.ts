@@ -16,7 +16,6 @@ import {
   presenceWord,
   receiptCopy,
   recipientsLabel,
-  referenceCopy,
   relativeAge,
   repliesCopy,
   replyLabel,
@@ -796,7 +795,7 @@ test("participant names: remote agents carry their home, envoys and unknown ids 
   });
 });
 
-test("channel chat words: the route line, its offers and tooltips, reply counts and the reference line", () => {
+test("channel chat words: the route line, its offers and tooltips, and reply counts", () => {
   assert.deepEqual(routeCopy.state, {
     checking: "Checking who this is for…",
     failed: "Couldn't check who this is for",
@@ -816,25 +815,6 @@ test("channel chat words: the route line, its offers and tooltips, reply counts 
   );
   assert.equal(repliesCopy(1), "1 reply");
   assert.equal(repliesCopy(3), "3 replies");
-  assert.equal(routeCopy.openReplies(3), "3 replies. Open thread");
-  assert.equal(
-    referenceCopy.label("@claude", "The arm64 link step fails."),
-    "Reply to @claude: The arm64 link step fails. Open thread",
-  );
-  assert.equal(
-    referenceCopy.label("@claude", `${"a".repeat(78)} ${"b".repeat(9)}`),
-    `Reply to @claude: ${"a".repeat(78)}… Open thread`,
-    "a long first line is clipped in the accessible name",
-  );
-  assert.equal(
-    referenceCopy.label("You", "can you look"),
-    "Reply to You: can you look. Open thread",
-  );
-  assert.equal(referenceCopy.earlier, "Reply to an earlier message");
-  assert.equal(
-    referenceCopy.earlierLabel,
-    "Reply to an earlier message. Open thread",
-  );
 });
 
 test("handoff copy names the deliverable, the lead and the recorded reason for every cause", () => {

@@ -937,6 +937,46 @@ fn a_conversation_across_workspaces_pauses_at_the_local_reply_limit() {
 }
 
 #[test]
+fn a_human_reply_to_local_recipients_refills_every_paired_thread() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    assert_eq!(
+        ping_pong(
+            &fixture,
+            ("w1", "pane-1-lead"),
+            ("w2", "pane-2-tester"),
+            "#ws2 @tester Ping."
+        ),
+        10
+    );
+    assert_eq!(
+        fixture
+            .count("SELECT count(*) FROM thread_controls WHERE paused = 1 AND reply_allowance = 0"),
+        2
+    );
+    let last = fixture.herdr.last_envelope("pane-1-lead");
+    execute_message_operation(
+        "reply",
+        json!({
+            "request_id": "human-local-reset",
+            "source": "@planner Follow this guidance.",
+            "author_kind": "human",
+            "in_reply_to": last["control"]["message_id"]
+        }),
+        &fixture.runtime("w1", "pane-1-lead"),
+    )
+    .unwrap();
+    assert_eq!(
+        fixture.count("SELECT count(*) FROM thread_controls WHERE paused = 0 AND stopped = 0 AND reply_allowance = 10"),
+        2
+    );
+    assert_eq!(
+        fixture.count("SELECT count(*) FROM attention_items WHERE source_kind = 'automatic_reply_limit' AND resolved_at_ms IS NULL"),
+        0
+    );
+}
+
+#[test]
 fn a_send_drains_the_workspace_it_forwarded_into() {
     let fixture = Fixture::new();
     fixture.register_all();
