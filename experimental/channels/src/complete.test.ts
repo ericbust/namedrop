@@ -11,8 +11,10 @@ import {
   leadingMentions,
   mentionedAgents,
   postSource,
+  skillRecipients,
 } from "./complete.ts";
 import type { AddressId, ChannelSnapshot, Member, SpaceKey } from "./model.ts";
+import { parseSkills, type SkillCatalog } from "./skills.ts";
 import { parseEvent } from "./wire.ts";
 
 function participant(
@@ -104,6 +106,8 @@ function names(completion: Completion | null): string[] {
         return "#all";
       case "member":
         return candidate.member.alias;
+      case "skill":
+        return `${candidate.runtime}:${candidate.skill.name}`;
       default: {
         const exhaustive: never = candidate;
         return exhaustive;
@@ -868,5 +872,198 @@ test("complete: disabled copy follows the server reason despite sanitized or ide
       "unusable-label",
       "no-label",
     ],
+  );
+});
+
+const codex = [...alpha.members.values()].find(
+  (member) => member.alias === "@codex",
+);
+const claude = [...alpha.members.values()].find(
+  (member) => member.alias === "@claude",
+);
+const coder = [...beta.members.values()].find(
+  (member) => member.alias === "@coder",
+);
+assert.ok(codex && claude && coder);
+const codexTarget = { key: alphaKey, member: codex.id };
+const claudeTarget = { key: alphaKey, member: claude.id };
+const coderTarget = { key: betaKey, member: coder.id };
+const skillCatalogs: readonly SkillCatalog[] = [
+  {
+    ...codexTarget,
+    runtime: "codex",
+    skills: [
+      { name: "review", description: "Review a change", source: "personal" },
+      { name: "codex-only", description: "Codex skill", source: "project" },
+      { name: "tools:check", description: "Plugin check", source: "plugin" },
+    ],
+  },
+  {
+    ...claudeTarget,
+    runtime: "claude",
+    skills: [
+      { name: "review", description: "Claude review", source: "personal" },
+      { name: "claude-only", description: "Claude skill", source: "project" },
+    ],
+  },
+  {
+    ...coderTarget,
+    runtime: "codex",
+    skills: [
+      { name: "beta-only", description: "Other cwd", source: "project" },
+    ],
+  },
+];
+const skillContext: CompletionContext = {
+  ...context,
+  skillRecipients: [codexTarget],
+};
+
+test("skills: both sigils trigger only at word starts and reject paths and URLs", () => {
+  for (const text of ["$", "/", "do $rev", "do\n/rev", "do\t$rev"])
+    assert.equal(
+      complete(text, text.length, skillContext, skillCatalogs)?.token.kind,
+      "skill",
+      text,
+    );
+  for (const text of [
+    "foo/rev",
+    "foo$rev",
+    "https://review",
+    "/tmp/file",
+    "$/tmp",
+    "C:\\review",
+    "/tmp\\file",
+    "\\$rev",
+  ])
+    assert.equal(
+      complete(text, text.length, skillContext, skillCatalogs),
+      null,
+      text,
+    );
+  assert.equal(complete("/rev ", 5, skillContext, skillCatalogs), null);
+});
+
+test("skills: catalogs belong to actual recipients, including cwd differences within one runtime", () => {
+  const listed = (text: string, ctx = skillContext) =>
+    names(complete(text, text.length, ctx, skillCatalogs));
+  assert.deepEqual(listed("/"), [
+    "codex:codex-only",
+    "codex:review",
+    "codex:tools:check",
+  ]);
+  assert.deepEqual(listed("@claude /"), [
+    "claude:claude-only",
+    "claude:review",
+  ]);
+  assert.deepEqual(listed("#beta @coder /"), ["codex:beta-only"]);
+  assert.deepEqual(listed("#alpha #beta @coder /"), ["codex:beta-only"]);
+  assert.deepEqual(listed("#Beta: @coder $"), ["codex:beta-only"]);
+  assert.deepEqual(listed("#beta @coder #alpha @claude /"), [
+    "codex:beta-only",
+    "claude:claude-only",
+    "claude:review",
+  ]);
+  assert.deepEqual(
+    listed("body @claude /"),
+    listed("/"),
+    "body mentions do not override the thread",
+  );
+  assert.deepEqual(listed("/", context), [], "no recipients means no catalog");
+  for (const text of [
+    "@missing /",
+    "@shell /",
+    "@ghost /",
+    "#all @codex /",
+    "#nowhere @codex /",
+    "#beta /",
+    "@Codex /",
+    "@codex; /",
+  ])
+    assert.deepEqual(listed(text), [], text);
+});
+
+test("skills: mixed runtime options retain both names, badges and native insertion", () => {
+  const text = "@codex @claude /rev tail";
+  const completion = complete(
+    text,
+    text.indexOf(" tail"),
+    skillContext,
+    skillCatalogs,
+  );
+  assert.ok(completion);
+  assert.deepEqual(names(completion), ["codex:review", "claude:review"]);
+  for (const candidate of completion.candidates) {
+    assert.equal(candidate.kind, "skill");
+    if (candidate.kind !== "skill") continue;
+    assert.equal(candidate.badge, true);
+    const sigil = candidate.runtime === "claude" ? "/" : "$";
+    assert.deepEqual(accept(text, completion, candidate), {
+      text: `@codex @claude ${sigil}review tail`,
+      caret: `@codex @claude ${sigil}review `.length,
+    });
+  }
+  const plugin = complete("$tools:", 7, skillContext, skillCatalogs);
+  assert.ok(plugin?.candidates[0]);
+  assert.equal(
+    accept("$tools:", plugin, plugin.candidates[0])?.text,
+    "$tools:check ",
+  );
+});
+
+test("skills: unknown runtimes stay empty and duplicate runtime/name options collapse", () => {
+  const catalogs: SkillCatalog[] = [
+    {
+      ...codexTarget,
+      runtime: null,
+      skills: [{ name: "unknown", description: "Unknown", source: "personal" }],
+    },
+  ];
+  assert.deepEqual(names(complete("/", 1, skillContext, catalogs)), []);
+  const catalog = skillCatalogs[0];
+  assert.ok(catalog);
+  const result = complete("/", 1, skillContext, [catalog, catalog]);
+  assert.equal(result?.candidates.length, 3);
+  assert.equal(
+    result?.candidates.some(
+      (candidate) => candidate.kind === "skill" && candidate.badge,
+    ),
+    false,
+  );
+  assert.deepEqual(skillRecipients("#beta @coder /", skillContext), [
+    coderTarget,
+  ]);
+});
+
+test("skills: HTTP catalog parsing bounds untrusted text and rejects malformed entries", () => {
+  assert.equal(parseSkills({ runtime: "future", skills: [] }), null);
+  assert.equal(parseSkills({ runtime: "codex", skills: "oops" }), null);
+  assert.equal(parseSkills(null), null);
+  assert.deepEqual(
+    parseSkills({
+      runtime: "claude",
+      skills: [
+        {
+          name: "plugin:skill",
+          description: "<script>\nPlain text",
+          source: "plugin",
+        },
+        { name: "../path", description: "unsafe", source: "personal" },
+        { name: "bad", description: 3, source: "project" },
+        { name: "future", description: "Future", source: "future" },
+        { name: "long", description: "x".repeat(1000), source: "project" },
+      ],
+    }),
+    {
+      runtime: "claude",
+      skills: [
+        {
+          name: "plugin:skill",
+          description: "<script> Plain text",
+          source: "plugin",
+        },
+        { name: "long", description: "x".repeat(240), source: "project" },
+      ],
+    },
   );
 });

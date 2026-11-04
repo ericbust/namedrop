@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { homesOf, threadGroups } from "./store.ts";
-import { threadReplyRecipients } from "./thread-recipients.ts";
+import {
+  threadReplyRecipients,
+  threadSkillRecipients,
+} from "./thread-recipients.ts";
 import { parseEvent } from "./wire.ts";
 
 test("thread defaults use addressable local and scoped mentions, omitting unknown and retired agents", () => {
@@ -81,5 +84,25 @@ test("thread defaults use addressable local and scoped mentions, omitting unknow
       { names: ["@local"], mentions: "@local" },
       { names: ["@lead · #beta"], mentions: "#beta @lead" },
     ],
+  );
+  const remoteAgent = [...remote.members.values()][0];
+  const localAgent = [...here.members.values()].find(
+    (member) => member.alias === "@local",
+  );
+  assert.ok(remoteAgent && localAgent);
+  assert.deepEqual(
+    threadSkillRecipients(
+      thread,
+      {
+        members: here.members,
+        homes: homesOf([here, remote], undefined),
+      },
+      here.key,
+    ),
+    [
+      { key: remote.key, member: remoteAgent.id },
+      { key: here.key, member: localAgent.id },
+    ],
+    "skill catalogs use the actual remote address and channel, never the envoy or display label",
   );
 });

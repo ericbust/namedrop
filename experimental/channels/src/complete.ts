@@ -7,6 +7,13 @@ import type {
   SendRule,
   SpaceKey,
 } from "./model.ts";
+import {
+  type Skill,
+  type SkillCatalog,
+  type SkillRuntime,
+  type SkillTarget,
+  skillTargetKey,
+} from "./skills.ts";
 import { channelSuffix } from "./store.ts";
 
 export type DisabledReason =
@@ -25,9 +32,10 @@ export type CompletionContext = {
   current: SpaceKey;
   channels: readonly ChannelOption[];
   membersOf(key: SpaceKey): readonly Member[];
+  skillRecipients?: readonly SkillTarget[];
 };
 export type Token = {
-  kind: "channel" | "member";
+  kind: "channel" | "member" | "skill";
   start: number;
   end: number;
   query: string;
@@ -35,7 +43,8 @@ export type Token = {
 export type Candidate =
   | { kind: "channel"; channel: ChannelOption }
   | { kind: "all" }
-  | { kind: "member"; member: Member };
+  | { kind: "member"; member: Member }
+  | { kind: "skill"; runtime: SkillRuntime; skill: Skill; badge: boolean };
 export type Completion = {
   token: Token;
   target: SpaceKey;
@@ -109,9 +118,12 @@ function tokenAt(text: string, caret: number): Token | null {
   let end = caret;
   while (end < text.length && !WHITESPACE.test(text.charAt(end))) end++;
   const sigil = text.charAt(start);
-  if (sigil !== "#" && sigil !== "@") return null;
+  if (sigil !== "#" && sigil !== "@" && sigil !== "/" && sigil !== "$")
+    return null;
+  const skill = sigil === "/" || sigil === "$";
+  if (skill && /[/\\]/.test(text.slice(start + 1, end))) return null;
   return {
-    kind: sigil === "#" ? "channel" : "member",
+    kind: skill ? "skill" : sigil === "#" ? "channel" : "member",
     start,
     end,
     query: text.slice(start + 1, end),
@@ -175,9 +187,19 @@ export function complete(
   text: string,
   caret: number,
   context: CompletionContext,
+  catalogs: readonly SkillCatalog[] = [],
 ): Completion | null {
   const token = tokenAt(text, caret);
   if (token === null) return null;
+  if (token.kind === "skill") {
+    const targets = new Set(skillRecipients(text, context).map(skillTargetKey));
+    return completeSkills(
+      text,
+      caret,
+      catalogs.filter((catalog) => targets.has(skillTargetKey(catalog))),
+      context.current,
+    );
+  }
   if (token.kind === "channel") {
     const candidates: Candidate[] = ranked(
       context.channels,
@@ -216,6 +238,8 @@ export function insertion(candidate: Candidate): string | null {
       return ALL;
     case "member":
       return `@${bareAlias(candidate.member)}`;
+    case "skill":
+      return `${candidate.runtime === "claude" ? "/" : "$"}${candidate.skill.name}`;
     default: {
       const exhaustive: never = candidate;
       return exhaustive;
@@ -454,4 +478,97 @@ export function composerHint(rule: SendRule, text: string): string {
   return mentioned.length > 0
     ? composerCopy.checks(mentioned.map((member) => member.alias))
     : composerCopy.toRoom;
+}
+
+// Leading recipients override the thread. Unresolved names and #all cannot
+// identify a pane catalog, so they never borrow the current channel's skills.
+export function skillRecipients(
+  text: string,
+  context: CompletionContext,
+): readonly SkillTarget[] {
+  let at = spaceAfter(text, 0);
+  let keys: readonly SpaceKey[] = [context.current];
+  let explicit = false;
+  let names = false;
+  let labelsActive = false;
+  const targets = new Map<string, SkillTarget>();
+  while (at < text.length) {
+    const word = recipient(wordAt(text, at));
+    if (LABEL.test(word)) {
+      explicit = true;
+      const label = foldLabel(word.slice(1));
+      if (label === "all") return [];
+      const resolved = context.channels.flatMap((channel) =>
+        channel.token !== null && foldLabel(channel.token.slice(1)) === label
+          ? [channel.key]
+          : [],
+      );
+      keys = labelsActive ? [...keys, ...resolved] : resolved;
+      labelsActive = true;
+    } else if (word.startsWith("@") && ALIAS.test(word.slice(1))) {
+      names = true;
+      labelsActive = false;
+      for (const key of keys) {
+        for (const member of context.membersOf(key)) {
+          if (
+            member.alias === word &&
+            member.kind.type === "agent" &&
+            member.activity !== "retired"
+          ) {
+            const target = { key, member: member.id };
+            targets.set(skillTargetKey(target), target);
+          }
+        }
+      }
+    } else {
+      if (word.startsWith("@")) return [];
+      break;
+    }
+    at = spaceAfter(text, at + wordAt(text, at).length);
+  }
+  return explicit || names
+    ? [...targets.values()]
+    : (context.skillRecipients ?? []);
+}
+
+export function skillToken(text: string, caret: number): boolean {
+  return tokenAt(text, caret)?.kind === "skill";
+}
+
+export function completeSkills(
+  text: string,
+  caret: number,
+  catalogs: readonly SkillCatalog[],
+  target: SpaceKey,
+): Completion | null {
+  const token = tokenAt(text, caret);
+  if (token?.kind !== "skill") return null;
+  const runtimes = new Set(
+    catalogs.flatMap((catalog) =>
+      catalog.runtime === null ? [] : [catalog.runtime],
+    ),
+  );
+  const candidates = new Map<string, Extract<Candidate, { kind: "skill" }>>();
+  for (const catalog of catalogs) {
+    if (catalog.runtime === null) continue;
+    for (const skill of catalog.skills) {
+      const key = `${catalog.runtime}:${skill.name}`;
+      if (!candidates.has(key))
+        candidates.set(key, {
+          kind: "skill",
+          runtime: catalog.runtime,
+          skill,
+          badge: runtimes.size > 1,
+        });
+    }
+  }
+  return {
+    token,
+    target,
+    candidates: ranked(
+      [...candidates.values()],
+      (candidate) => [candidate.skill.name],
+      token.query,
+    ),
+  };
 }

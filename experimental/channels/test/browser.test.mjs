@@ -299,6 +299,7 @@ async function open(
     onReview = () => ({ status: 200 }),
     observeLanding = false,
     liveInput = false,
+    onSkills = () => ({ runtime: null, skills: [] }),
   } = {},
 ) {
   const clients = new Set();
@@ -308,6 +309,7 @@ async function open(
   const contextRequests = [];
   const bodyRequests = [];
   const inputRequests = [];
+  const skillRequests = [];
   const posts = postRoute(onPost);
   const reviews = [];
   const screens = screenRoute(onScreen);
@@ -344,6 +346,15 @@ async function open(
         body: JSON.parse(await readBody(req)),
       });
       return sendJson(res, 200, {});
+    }
+    const skills = /^\/w\/([^/]+)\/participants\/([^/]+)\/skills$/.exec(
+      url.pathname,
+    );
+    if (req.method === "GET" && skills !== null) {
+      const target = { key: skills[1], member: decodeURIComponent(skills[2]) };
+      skillRequests.push(target);
+      const catalog = await onSkills(target);
+      return sendJson(res, 200, catalog);
     }
     const postKey = /^\/w\/([^/]+)\/messages$/.exec(url.pathname)?.[1];
     if (req.method === "POST" && postKey !== undefined)
@@ -502,6 +513,7 @@ async function open(
     contextRequests,
     bodyRequests,
     inputRequests,
+    skillRequests,
     posts,
     reviews,
     screens,
@@ -5430,7 +5442,7 @@ test("Peek input requires Type mode, focuses the prompt, and stops without sendi
     .getByRole("button", { name: /^C?@codex/ })
     .click();
   await type.click();
-  const prompt = peek.getByRole("textbox", { name: "Message to @codex" });
+  const prompt = peek.getByRole("combobox", { name: "Message to @codex" });
   await prompt.waitFor();
   assert.equal(await focusedIn(prompt), true);
   await prompt.fill("harmless prompt");
@@ -12397,3 +12409,255 @@ for (const { side, saved, narrow, restored } of [
     assert.equal(preference, saved ?? undefined);
   });
 }
+
+function skillTeam() {
+  return [
+    crew(1, "alpha", [
+      ["codex", "@codex", "idle"],
+      [
+        "claude",
+        "@claude",
+        "idle",
+        { kind: { type: "agent", runtime: "claude" } },
+      ],
+    ]),
+    crew(2, "beta", [["other", "@other", "idle"]]),
+  ];
+}
+function fixtureSkills({ member }) {
+  const runtime = member === "claude" ? "claude" : "codex";
+  return {
+    runtime,
+    skills: [
+      {
+        name: `${member}-only`,
+        description: `<b>${member} description</b>`,
+        source: "project",
+      },
+      {
+        name: "tools:review",
+        description: "Review this change",
+        source: "plugin",
+      },
+    ],
+  };
+}
+
+test("skills: composer scopes leading recipients, shows mixed badges, accepts without sending and renders descriptions as text", async (t) => {
+  const ui = await open(t, (client) => replay(client, skillTeam()), undefined, {
+    onSkills: fixtureSkills,
+  });
+  await ui.live();
+  await ui.row(1).click();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const list = ui.page.getByRole("listbox", { name: "Skills" });
+  await box.fill("/");
+  assert.equal(await list.count(), 0);
+  assert.equal(ui.skillRequests.length, 0);
+  await box.fill("@claude $");
+  await list.waitFor();
+  assert.deepEqual(await list.locator(".opt-name").allTextContents(), [
+    "/claude-only",
+    "/tools:review",
+  ]);
+  assert.equal(await list.locator("b").count(), 0);
+  assert.match(await list.textContent(), /<b>claude description<\/b>/);
+  assert.equal(
+    await list.locator(".opt-skill-meta").first().textContent(),
+    "project",
+  );
+  assert.equal(await box.getAttribute("aria-expanded"), "true");
+  assert.equal(
+    await box.getAttribute("aria-activedescendant"),
+    await list.getByRole("option").first().getAttribute("id"),
+  );
+  await box.press("ArrowDown");
+  await box.press("Enter");
+  assert.equal(await box.inputValue(), "@claude /tools:review ");
+  assert.equal(ui.posts.attempts.length, 0);
+  await box.fill("@codex @claude /tools:");
+  await list.waitFor();
+  assert.deepEqual(await list.locator(".opt-name").allTextContents(), [
+    "$tools:review",
+    "/tools:review",
+  ]);
+  assert.deepEqual(await list.locator(".opt-skill-meta").allTextContents(), [
+    "Codexplugin",
+    "Claudeplugin",
+  ]);
+  await box.press("Escape");
+  assert.equal(await list.count(), 0);
+  await box.fill("#beta @other /");
+  await list.waitFor();
+  assert.deepEqual(await list.locator(".opt-name").allTextContents(), [
+    "$other-only",
+    "$tools:review",
+  ]);
+  await box.press("Tab");
+  assert.equal(await box.inputValue(), "#beta @other $other-only ");
+  assert.equal(ui.posts.attempts.length, 0);
+  assert.ok(
+    ui.skillRequests.some(
+      ({ key: targetKey, member }) =>
+        targetKey === key(2) && member === "other",
+    ),
+  );
+  await box.fill("@codex /tmp/path");
+  assert.equal(await list.count(), 0);
+});
+
+test("skills: an obsolete participant response cannot replace the current catalog", async (t) => {
+  let release;
+  const delayed = new Promise((resolve) => {
+    release = resolve;
+  });
+  t.after(() => release());
+  const ui = await open(t, (client) => replay(client, skillTeam()), undefined, {
+    onSkills: async (target) => {
+      if (target.member === "claude") await delayed;
+      return fixtureSkills(target);
+    },
+  });
+  await ui.live();
+  await ui.row(1).click();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  await box.fill("@claude /");
+  await ui.page.waitForTimeout(30);
+  await box.fill("#beta @other /");
+  const list = ui.page.getByRole("listbox", { name: "Skills" });
+  await list.waitFor();
+  assert.deepEqual(await list.locator(".opt-name").allTextContents(), [
+    "$other-only",
+    "$tools:review",
+  ]);
+  release();
+  await ui.page.waitForTimeout(50);
+  assert.deepEqual(await list.locator(".opt-name").allTextContents(), [
+    "$other-only",
+    "$tools:review",
+  ]);
+});
+
+test("skills: Peek uses its pane catalog, Escape dismisses locally, and Enter or Tab selects without sending", async (t) => {
+  const ui = await open(t, (client) => replay(client, skillTeam()), undefined, {
+    liveInput: true,
+    onSkills: fixtureSkills,
+  });
+  await ui.live();
+  await ui.row(1).click();
+  await ui.page
+    .locator(".members")
+    .getByRole("button", { name: /^C?@claude/ })
+    .click();
+  const peek = drawer(ui);
+  await peek.getByRole("button", { name: "Type to agent" }).click();
+  const prompt = peek.getByRole("combobox", { name: "Message to @claude" });
+  const list = peek.getByRole("listbox", { name: "Skills" });
+  await prompt.fill("$");
+  await list.waitFor();
+  assert.deepEqual(await list.locator(".opt-name").allTextContents(), [
+    "/claude-only",
+    "/tools:review",
+  ]);
+  await prompt.press("Escape");
+  assert.equal(await list.count(), 0);
+  assert.equal(ui.inputRequests.length, 0);
+  assert.equal(await peek.count(), 1);
+  await prompt.fill("$tools:");
+  await list.waitFor();
+  await prompt.press("Enter");
+  assert.equal(await prompt.inputValue(), "/tools:review ");
+  assert.equal(ui.inputRequests.length, 0);
+  await prompt.fill("$claude");
+  await list.waitFor();
+  await prompt.press("Tab");
+  assert.equal(await prompt.inputValue(), "/claude-only ");
+  assert.equal(ui.inputRequests.length, 0);
+  await prompt.press("Enter");
+  await ui.page.waitForFunction(
+    () => document.querySelector(".peek-compose textarea")?.value === "",
+  );
+  assert.deepEqual(ui.inputRequests[0]?.body, {
+    kind: "text",
+    text: "/claude-only ",
+    continuity: "fixture-input",
+  });
+  assert.ok(
+    ui.skillRequests.every(
+      ({ key: targetKey, member }) =>
+        targetKey === key(1) && member === "claude",
+    ),
+  );
+});
+
+test("skills: thread defaults resolve actual recipients and leading mentions override them", async (t) => {
+  const values = skillTeam();
+  values[0].frame.messages = [
+    message("skill-thread", "Check the branch", {
+      legs: [{ to: "codex", stage: { stage: "delivered" } }],
+    }),
+  ];
+  values[0].frame.threads = [
+    {
+      thread_id: "skill-thread",
+      title: { text: "Check the branch", truncated: false },
+      message_count: 1,
+    },
+  ];
+  const ui = await open(t, (client) => replay(client, values), undefined, {
+    onSkills: fixtureSkills,
+  });
+  await ui.live();
+  await ui.row(1).click();
+  await ui.page
+    .getByRole("region", { name: "Message history" })
+    .getByRole("button", { name: "Reply in thread to You" })
+    .click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const box = pane.getByRole("combobox");
+  await box.fill("/");
+  const list = pane.getByRole("listbox", { name: "Skills" });
+  await list.waitFor();
+  assert.deepEqual(await list.locator(".opt-name").allTextContents(), [
+    "$codex-only",
+    "$tools:review",
+  ]);
+  await box.fill("@claude /");
+  await list.waitFor();
+  assert.deepEqual(await list.locator(".opt-name").allTextContents(), [
+    "/claude-only",
+    "/tools:review",
+  ]);
+  await box.press("Escape");
+  assert.equal(await list.count(), 0);
+  assert.equal(await pane.count(), 1);
+});
+
+test("skills: an open catalog refreshes after the client cache expires", async (t) => {
+  let reads = 0;
+  const ui = await open(t, (client) => replay(client, skillTeam()), undefined, {
+    onSkills: () => ({
+      runtime: "codex",
+      skills: [
+        {
+          name: ++reads === 1 ? "before" : "after",
+          description: "Current catalog",
+          source: "project",
+        },
+      ],
+    }),
+  });
+  await ui.live();
+  await ui.row(1).click();
+  await ui.page.clock.install();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  await box.fill("@codex /");
+  const list = ui.page.getByRole("listbox", { name: "Skills" });
+  await list.getByText("$before", { exact: true }).waitFor();
+  await ui.page.clock.fastForward(10_001);
+  await list.getByText("$after", { exact: true }).waitFor();
+  assert.equal(reads, 2);
+});
