@@ -2,6 +2,12 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.5.0-exp.11] - 2026-11-04
+
+### Added
+
+- Typing `/` or `$` in the Channels message box or Peek's Type to agent box suggests the addressed agent's skills. Claude and Codex have separate lists, and choosing a skill inserts it the way that agent expects.
+
 ## [1.5.0-exp.10] - 2026-11-03
 
 ### Added
