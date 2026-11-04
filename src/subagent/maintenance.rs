@@ -57,6 +57,55 @@ enum LifecycleGroup {
     UnresolvedStop(String),
 }
 
+struct CapturedFile {
+    path: PathBuf,
+    metadata: std::fs::Metadata,
+}
+
+impl CapturedFile {
+    fn unchanged(&self) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(&self.path).is_ok_and(|current| {
+            current.is_file()
+                && current.dev() == self.metadata.dev()
+                && current.ino() == self.metadata.ino()
+                && current.mtime() == self.metadata.mtime()
+                && current.mtime_nsec() == self.metadata.mtime_nsec()
+                && current.ctime() == self.metadata.ctime()
+                && current.ctime_nsec() == self.metadata.ctime_nsec()
+                && current.len() == self.metadata.len()
+        })
+    }
+
+    fn expire(&self, directory: &Path, now_ms: i64, grace_ms: i64) {
+        use std::os::unix::fs::MetadataExt;
+        if !self.unchanged() {
+            return;
+        }
+        let receipt = if fact_path(&self.path) {
+            read_json::<Fact>(&self.path, FACT_CAP).map(|fact| fact.at_ms)
+        } else if self.path == directory.join("identity") {
+            read_json::<ParentMetadata>(&self.path, FACT_CAP).map(|parent| parent.last_activity_ms)
+        } else if self.path == directory.join("lifecycle") {
+            read_json::<LifecycleCheckpoint>(&self.path, CHECKPOINT_CAP)
+                .and_then(|checkpoint| checkpoint.entries.iter().map(|entry| entry.at_ms).max())
+        } else if self.path.parent() == Some(directory.join("tombstones").as_path()) {
+            read_json::<i64>(&self.path, 32)
+        } else {
+            None
+        };
+        let at_ms = receipt.unwrap_or_else(|| {
+            self.metadata
+                .mtime()
+                .saturating_mul(1_000)
+                .saturating_add(self.metadata.mtime_nsec() / 1_000_000)
+        });
+        if now_ms.saturating_sub(at_ms) >= grace_ms && self.unchanged() {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 fn checkpoint(
     parent: &ParentIdentity,
     facts: &[Fact],
@@ -241,7 +290,7 @@ pub fn maintain(
         if !entry.file_type()?.is_dir() {
             continue;
         }
-        maintain_parent(state, &entry.path(), now_ms, &presence)?;
+        maintain_parent(state, &entry.path(), now_ms, &presence, || {})?;
     }
     Ok(())
 }
@@ -251,6 +300,7 @@ fn maintain_parent(
     directory: &Path,
     now_ms: i64,
     presence: &impl Fn(&ParentIdentity) -> ParentPresence,
+    after_capture: impl FnOnce(),
 ) -> std::io::Result<()> {
     let mut captured: Vec<_> = std::fs::read_dir(directory)?.collect::<Result<_, _>>()?;
     let inactive = directory.join("inactive");
@@ -260,10 +310,49 @@ fn maintain_parent(
         }
         captured.extend(std::fs::read_dir(&inactive)?.collect::<Result<Vec<_>, _>>()?);
     }
+    let tombstones = directory.join("tombstones");
+    if std::fs::symlink_metadata(&tombstones).is_ok() && !real_directory(&tombstones) {
+        return Ok(());
+    }
+    let markers: Vec<_> = if real_directory(&tombstones) {
+        std::fs::read_dir(&tombstones)?.collect::<Result<_, _>>()?
+    } else {
+        Vec::new()
+    };
+    let snapshot: Vec<_> = captured
+        .iter()
+        .chain(&markers)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).ok()?;
+            metadata
+                .is_file()
+                .then_some(CapturedFile { path, metadata })
+        })
+        .collect();
+    after_capture();
+    for file in &snapshot {
+        if file
+            .path
+            .extension()
+            .is_some_and(|extension| extension == "tmp")
+        {
+            file.expire(directory, now_ms, RETENTION_MS);
+        }
+    }
+    let expire_orphans = || {
+        for file in &snapshot {
+            file.expire(directory, now_ms, RETENTION_MS);
+        }
+        let _ = std::fs::remove_dir(&tombstones);
+        let _ = std::fs::remove_dir(&inactive);
+        let _ = std::fs::remove_dir(directory);
+    };
     let mut source = Vec::new();
     for entry in &captured {
         if fact_path(&entry.path()) {
             let Some(fact) = read_json::<Fact>(&entry.path(), FACT_CAP) else {
+                expire_orphans();
                 return Ok(());
             };
             source.push((entry.path(), fact));
@@ -272,11 +361,13 @@ fn maintain_parent(
     let metadata_path = directory.join("identity");
     let mut metadata = if std::fs::symlink_metadata(&metadata_path).is_ok() {
         let Some(metadata) = read_json::<ParentMetadata>(&metadata_path, FACT_CAP) else {
+            expire_orphans();
             return Ok(());
         };
         metadata
     } else {
         let Some((_, fact)) = source.first() else {
+            expire_orphans();
             return Ok(());
         };
         ParentMetadata {
@@ -291,15 +382,18 @@ fn maintain_parent(
             .iter()
             .any(|(_, fact)| fact.parent != metadata.parent)
     {
+        expire_orphans();
         return Ok(());
     }
     let old_checkpoint = if std::fs::symlink_metadata(directory.join("lifecycle")).is_ok() {
         let Some(checkpoint) =
             read_json::<LifecycleCheckpoint>(&directory.join("lifecycle"), CHECKPOINT_CAP)
         else {
+            expire_orphans();
             return Ok(());
         };
         if checkpoint.parent != metadata.parent {
+            expire_orphans();
             return Ok(());
         }
         Some(checkpoint)
@@ -368,21 +462,21 @@ fn maintain_parent(
         metadata.missing_since_ms = Some(metadata.last_activity_ms.min(now_ms));
     }
     publish_bytes(directory, "identity", &serde_json::to_vec(&metadata)?, true)?;
-    let tombstones = directory.join("tombstones");
-    if std::fs::symlink_metadata(&tombstones).is_ok() && !real_directory(&tombstones) {
-        return Ok(());
-    }
-    let markers: Vec<_> = if real_directory(&tombstones) {
-        std::fs::read_dir(&tombstones)?.collect::<Result<_, _>>()?
-    } else {
-        Vec::new()
-    };
     let stale = now_ms.saturating_sub(metadata.last_activity_ms) >= RETENTION_MS;
     let retired = (status != ParentPresence::Unknown || ended.is_some())
         && metadata
             .missing_since_ms
             .is_some_and(|at| now_ms.saturating_sub(at) >= PARENT_GRACE_MS);
     if stale || retired {
+        for file in &snapshot {
+            if file
+                .path
+                .extension()
+                .is_some_and(|extension| extension == "tmp")
+            {
+                file.expire(directory, now_ms, FINISHED_GRACE_MS);
+            }
+        }
         for (path, _) in &source {
             let _ = std::fs::remove_file(path);
         }
@@ -551,6 +645,183 @@ mod tests {
             id: id.to_owned(),
             generation: generation.map(str::to_owned),
         }
+    }
+
+    fn modified_at(path: &Path, at_ms: i64) {
+        fs::File::open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::from_millis(at_ms as u64),
+            ))
+            .unwrap();
+    }
+
+    #[test]
+    fn orphan_temporary_files_expire_at_retention_boundary_idempotently() {
+        let state = State::new();
+        let directory = state.parent().directory(&state.0);
+        create_directory(&directory).unwrap();
+        let temporary = directory.join(".interrupted.tmp");
+        fs::write(&temporary, "partial").unwrap();
+        modified_at(&temporary, 1_000);
+        state.clean(1_000 + RETENTION_MS - 1, ParentPresence::Unknown);
+        assert!(temporary.exists());
+        state.clean(1_000 + RETENTION_MS, ParentPresence::Unknown);
+        assert!(!directory.exists());
+        state.clean(1_000 + RETENTION_MS, ParentPresence::Unknown);
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn malformed_parent_files_expire_at_retention_boundary() {
+        for corrupt in ["parent-broken.json", "identity", "lifecycle"] {
+            let state = State::new();
+            state.record(Event::Resume, 1_000);
+            state.clean(1_000, ParentPresence::Present);
+            let directory = state.parent().directory(&state.0);
+            fs::write(directory.join(corrupt), "partial").unwrap();
+            for entry in fs::read_dir(&directory).unwrap() {
+                modified_at(&entry.unwrap().path(), 1_000);
+            }
+            state.clean(1_000 + RETENTION_MS - 1, ParentPresence::Unknown);
+            assert!(directory.join(corrupt).exists(), "{corrupt}");
+            state.clean(1_000 + RETENTION_MS, ParentPresence::Unknown);
+            assert!(!directory.exists(), "{corrupt}");
+            state.clean(1_000 + RETENTION_MS, ParentPresence::Unknown);
+        }
+    }
+
+    #[test]
+    fn malformed_identity_does_not_expire_recent_receipts_with_old_mtimes() {
+        let state = State::new();
+        let now = 1_000 + RETENTION_MS;
+        state.record(start("recent", None), now);
+        let directory = state.parent().directory(&state.0);
+        fs::write(directory.join("identity"), "partial").unwrap();
+        for entry in fs::read_dir(&directory).unwrap() {
+            modified_at(&entry.unwrap().path(), 1_000);
+        }
+        state.clean(now, ParentPresence::Unknown);
+        assert_eq!(state.runs(now), ["recent"]);
+        state.clean(now, ParentPresence::Unknown);
+        assert_eq!(state.runs(now), ["recent"]);
+    }
+
+    #[test]
+    fn live_parent_activity_does_not_pin_stale_temporary_files() {
+        let state = State::new();
+        let now = 1_000 + RETENTION_MS;
+        state.record(start("recent", None), now);
+        let temporary = state.parent().directory(&state.0).join(".interrupted.tmp");
+        fs::write(&temporary, "partial").unwrap();
+        modified_at(&temporary, 1_000);
+        state.clean(now - 1, ParentPresence::Present);
+        assert!(temporary.exists());
+        state.clean(now, ParentPresence::Present);
+        assert!(!temporary.exists());
+        assert_eq!(state.runs(now), ["recent"]);
+    }
+
+    #[test]
+    fn retired_parent_reaps_old_temporary_files_and_preserves_fresh_writes() {
+        let state = State::new();
+        state.record(Event::Resume, 1_000);
+        state.clean(1_000, ParentPresence::Absent);
+        let directory = state.parent().directory(&state.0);
+        let now = 1_000 + PARENT_GRACE_MS;
+        let old = directory.join(".interrupted.tmp");
+        let young = directory.join(".writing.tmp");
+        fs::write(&old, "partial").unwrap();
+        fs::write(&young, "writing").unwrap();
+        modified_at(&old, now - FINISHED_GRACE_MS);
+        modified_at(&young, now - FINISHED_GRACE_MS + 1);
+        state.clean(now, ParentPresence::Absent);
+        assert!(!old.exists());
+        assert_eq!(fs::read_to_string(&young).unwrap(), "writing");
+        state.clean(now, ParentPresence::Absent);
+        assert!(young.exists());
+        state.clean(
+            now - FINISHED_GRACE_MS + 1 + RETENTION_MS,
+            ParentPresence::Unknown,
+        );
+        assert!(!directory.exists());
+
+        let state = State::new();
+        state.record(Event::Resume, 1_000);
+        state.clean(1_000, ParentPresence::Absent);
+        let directory = state.parent().directory(&state.0);
+        let old = directory.join(".interrupted.tmp");
+        fs::write(&old, "partial").unwrap();
+        modified_at(&old, now - FINISHED_GRACE_MS);
+        state.clean(now, ParentPresence::Absent);
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn orphan_cleanup_preserves_files_published_replaced_or_changed_after_capture() {
+        let state = State::new();
+        let directory = state.parent().directory(&state.0);
+        create_directory(&directory).unwrap();
+        let replaced = directory.join(".replaced.tmp");
+        let changed = directory.join(".changed.tmp");
+        for path in [&replaced, &changed, &directory.join("identity")] {
+            fs::write(path, "stale").unwrap();
+            modified_at(path, 1_000);
+        }
+        let original = fs::File::open(&replaced).unwrap();
+        let now = 1_000 + RETENTION_MS;
+        maintain_parent(
+            &state.0,
+            &directory,
+            now,
+            &|_| ParentPresence::Unknown,
+            || {
+                publish_bytes(&directory, ".replaced.tmp", b"fresh", true).unwrap();
+                modified_at(&replaced, 1_000);
+                fs::write(&changed, "fresh contents").unwrap();
+                state.record(start("concurrent", None), now);
+            },
+        )
+        .unwrap();
+        drop(original);
+        assert_eq!(fs::read_to_string(&replaced).unwrap(), "fresh");
+        assert_eq!(fs::read_to_string(&changed).unwrap(), "fresh contents");
+        assert_eq!(state.runs(now), ["concurrent"]);
+        assert!(!directory.join("identity").exists());
+        state.clean(now, ParentPresence::Present);
+        assert_eq!(state.runs(now), ["concurrent"]);
+    }
+
+    #[test]
+    fn orphan_cleanup_only_visits_regular_files_and_known_subdirectories() {
+        use std::os::unix::fs::symlink;
+        let state = State::new();
+        let directory = state.parent().directory(&state.0);
+        create_directory(&directory).unwrap();
+        let outside = state.0.join("outside");
+        fs::write(&outside, "keep").unwrap();
+        modified_at(&outside, 1_000);
+        symlink(&outside, directory.join(".linked.tmp")).unwrap();
+        let nested = directory.join("unowned");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("keep"), "keep").unwrap();
+        modified_at(&nested.join("keep"), 1_000);
+        for subdirectory in ["inactive", "tombstones"] {
+            let subdirectory = directory.join(subdirectory);
+            fs::create_dir(&subdirectory).unwrap();
+            fs::write(subdirectory.join("broken.start.json"), "partial").unwrap();
+            modified_at(&subdirectory.join("broken.start.json"), 1_000);
+        }
+        state.clean(1_000 + RETENTION_MS, ParentPresence::Unknown);
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "keep");
+        assert!(
+            fs::symlink_metadata(directory.join(".linked.tmp"))
+                .unwrap()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(nested.join("keep")).unwrap(), "keep");
+        assert!(!directory.join("inactive").exists());
+        assert!(!directory.join("tombstones").exists());
     }
 
     #[test]
@@ -767,7 +1038,7 @@ mod tests {
         state.clean(RETENTION_MS + 1, ParentPresence::Present);
         assert!(!is_tombstoned(&dir, "old", None));
         fs::write(dir.join("identity"), "corrupt").unwrap();
-        state.clean(2 * RETENTION_MS, ParentPresence::Absent);
+        state.clean(RETENTION_MS + PARENT_GRACE_MS, ParentPresence::Absent);
         assert!(
             dir.join(format!("{}.start.json", child_key("new", None)))
                 .exists()
