@@ -3090,6 +3090,7 @@ test("slot: a thread and a peek exclude each other, a view change closes either,
     alias: "@codex",
     kind: "agent",
     activity: null,
+    subagents: [],
     channel: { label: "#beta", suffix: null },
   });
   assert.deepEqual(reduce(peeking, { type: "gone", key: beta }).slot, closed);
@@ -3573,4 +3574,37 @@ test("conversations: request threads still collapse under their parent with the 
     ),
     ["ask to preview:out", "cmd to preview:cmd-reply"],
   );
+});
+
+test("PeekWho follows subagents in fresh frames and drops them when the member disappears", () => {
+  const frame = snapshot();
+  const withAgents = {
+    ...frame,
+    frame: {
+      ...frame.frame,
+      participants: [
+        {
+          ...participant(),
+          subagents: [
+            { id: "one", kind: null, description: null, started_at_ms: 42 },
+          ],
+        },
+      ],
+    },
+  };
+  let state = apply(initialState(), withAgents);
+  const channel = [...state.channels.values()][0];
+  const member = channel?.members.values().next().value;
+  assert.ok(channel && member);
+  const target = peekTarget(channel.key, member);
+  assert.ok(target);
+  assert.equal(peekWho(state.channels, target)?.subagents.length, 1);
+  state = apply(state, frame);
+  assert.deepEqual(peekWho(state.channels, target)?.subagents, []);
+  state = apply(state, withAgents);
+  state = apply(state, {
+    ...frame,
+    frame: { ...frame.frame, participants: [] },
+  });
+  assert.deepEqual(peekWho(state.channels, target)?.subagents, []);
 });

@@ -1284,6 +1284,7 @@ export type PeekWho = Readonly<{
   alias: string;
   kind: PeekableKind;
   activity: Activity | null;
+  subagents: Member["subagents"];
   channel: { label: string; suffix: string | null };
 }>;
 export function peekWho(
@@ -1298,6 +1299,7 @@ export function peekWho(
     alias: member?.alias ?? target.alias,
     kind: kind === undefined || kind === "human" ? target.kind : kind,
     activity: member?.activity ?? null,
+    subagents: member?.subagents ?? [],
     channel: {
       label: channelMention(channel),
       suffix: channelSuffix(channel, channels.values()),

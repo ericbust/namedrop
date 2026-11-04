@@ -509,3 +509,56 @@ test("repo: a malformed repo refuses the frame like any other malformed field", 
   ])
     assert.equal(spaceWithRepo(repo), "refused", JSON.stringify(repo));
 });
+
+test("participant subagents accept additive metadata and tolerate legacy or malformed rows", () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL("./fixtures/real-frames.jsonl", import.meta.url),
+      "utf8",
+    )
+      .trim()
+      .split("\n")[0] ?? "null",
+  );
+  const read = (subagents: unknown) => {
+    fixture.frame.participants[0].subagents = subagents;
+    const event = parseEvent("space", JSON.stringify(fixture));
+    assert.ok(event?.type === "space");
+    return [...event.channel.members.values()][0]?.subagents;
+  };
+  for (const value of [undefined, null, {}, "bad", 42])
+    assert.deepEqual(read(value), []);
+  const good = {
+    id: "one",
+    kind: { text: "Explore", truncated: false },
+    description: { text: "<script>unsafe()</script>", truncated: false },
+    started_at_ms: 42,
+  };
+  assert.deepEqual(read([good]), [
+    {
+      id: "one",
+      kind: good.kind,
+      description: good.description,
+      startedAt: 42,
+    },
+  ]);
+  assert.deepEqual(
+    read([
+      null,
+      {},
+      { ...good, id: "" },
+      { ...good, started_at_ms: -1 },
+      { ...good, started_at_ms: 1.5 },
+      { ...good, started_at_ms: Number.MAX_SAFE_INTEGER + 1 },
+    ]),
+    [],
+  );
+  assert.deepEqual(read([{ ...good, kind: 4, description: { text: "bad" } }]), [
+    { id: "one", kind: null, description: null, startedAt: 42 },
+  ]);
+  assert.equal(read([good, good])?.length, 1);
+  const bounded = read([
+    { ...good, description: { text: "x".repeat(1000), truncated: false } },
+  ])?.[0]?.description;
+  assert.equal(bounded?.text.length, 240);
+  assert.equal(bounded?.truncated, true);
+});

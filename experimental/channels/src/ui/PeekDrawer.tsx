@@ -333,6 +333,15 @@ function PeekHeader({
           )}
         </p>
         <p className="peek-where" title={who.channel.suffix ?? undefined}>
+          {who.subagents.length > 0 && (
+            <>
+              <span className="peek-subagents">
+                {who.subagents.length}{" "}
+                {who.subagents.length === 1 ? "subagent" : "subagents"}
+              </span>
+              {" · "}
+            </>
+          )}
           {peekCopy.where(who.channel.label)}
           {stamp !== null && " · "}
           <span aria-live="polite">{stamp}</span>

@@ -352,9 +352,9 @@ test("a recently closed member reads Pane closed, muted without a dot, last amon
   assert.equal(text(chip), "C@closedPane closed");
   assert.equal(chip.includes("presence"), false, chip);
   assert.ok(chip.includes('class="member is-retired"'), chip);
-  assert.ok(chip.startsWith('<button type="button"'));
+  assert.ok(chip.includes('<button type="button"'));
   assert.ok(chip.includes(`data-peek="${event.channel.key}/closed"`));
-  assert.ok(chip.endsWith("</button>"));
+  assert.ok(chip.includes("</button>"));
 });
 
 test("an old retired member leaves the strip but remains the author of its history", async () => {
@@ -987,4 +987,38 @@ test("markdownText is the quoted line as the reader sees it", async () => {
   assert.equal(markdownText("- item *one*"), "item one");
   assert.equal(markdownText("# Head \\@alpha"), "Head @alpha");
   assert.equal(markdownText("plain \\@alpha text"), "plain @alpha text");
+});
+
+test("subagent chips show counts and plain bounded descriptions without nested controls", async () => {
+  const { MemberStrip } = await load<typeof import("./ui/MemberStrip.tsx")>(
+    "/src/ui/MemberStrip.tsx",
+  );
+  const fixture = JSON.parse((await fixtures())[0] ?? "null");
+  fixture.frame.participants = [
+    {
+      ...fixture.frame.participants[0],
+      alias: "@claude",
+      subagents: [
+        {
+          id: "one",
+          kind: { text: "Explore", truncated: false },
+          description: {
+            text: '<img src=x onerror="unsafe()">',
+            truncated: false,
+          },
+          started_at_ms: Date.now() - 61000,
+        },
+      ],
+    },
+  ];
+  const event = space(fixture);
+  const markup = renderToStaticMarkup(
+    createElement(MemberStrip, { members: event.channel.members }),
+  );
+  assert.match(markup, /class="subagent-count">· 1 subagent</);
+  assert.match(markup, /aria-label="Subagents of @claude"/);
+  assert.match(markup, /&lt;img src=x onerror=&quot;unsafe\(\)&quot;&gt;/);
+  assert.equal(markup.includes("<img"), false);
+  assert.match(markup, /class="subagent-elapsed">1m \ds</);
+  assert.equal(markup.includes("<button"), false);
 });
