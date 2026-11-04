@@ -184,16 +184,19 @@ export class PeekPresentation {
     if (this.hold?.timer) clearTimeout(this.hold.timer);
     this.hold = null;
     const [previous, next] = buffers;
+    const focused = document.activeElement;
+    const transferFocus = previous.host.contains(focused);
     this.show(previous, false);
     this.show(next, true);
     this.buffers = [next, previous];
-    if (!next.initialized) {
+    if (!next.initialized || transferFocus) {
       next.initialized = true;
-      const focused = document.activeElement;
       next.terminal.focus();
-      if (focused instanceof HTMLElement && focused.isConnected)
-        focused.focus({ preventScroll: true });
-      else next.terminal.blur();
+      if (!transferFocus) {
+        next.terminal.blur();
+        if (focused instanceof HTMLElement && focused.isConnected)
+          focused.focus({ preventScroll: true });
+      }
     }
     this.commit({
       terminal: next.terminal,
