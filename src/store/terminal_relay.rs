@@ -79,6 +79,7 @@ impl StateTransaction<'_> {
             params![ns[0], ns[1], ending.agent_session_id.as_str()],
             |row| row.get(0),
         )?;
+        let previous_end = previous_end.max(ending.previous_end_ms.map(to_i64).transpose()?);
         let ended_at = to_i64(ending.ended_at_ms)?;
         if previous_end.is_some_and(|previous| previous >= ended_at) {
             return Ok(Vec::new());
@@ -424,6 +425,7 @@ mod tests {
                     &TerminalRelayEnd {
                         agent_session_id: AgentSessionId::new("session"),
                         ended_at_ms: time,
+                        previous_end_ms: None,
                         text: text.to_owned(),
                     },
                     &at(time),
@@ -591,6 +593,7 @@ mod tests {
                     &TerminalRelayEnd {
                         agent_session_id: AgentSessionId::new("other-session"),
                         ended_at_ms: 20,
+                        previous_end_ms: None,
                         text: "Other answer".to_owned(),
                     },
                     &at(20),

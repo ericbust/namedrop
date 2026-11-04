@@ -957,7 +957,7 @@ fn stop_script(executable: &Path, state_directory: &Path) -> Result<String, Stri
             .ok_or("hook state path is not UTF-8")?,
     );
     Ok(format!(
-        "#!/bin/sh\nexec >/dev/null 2>&1\nNAMEDROP_HERDR_TIMEOUT_MS=250 {executable} hook stop --state-directory {state} <&0 >/dev/null 2>&1 &\nexit 0\n"
+        "#!/bin/sh\nexec >/dev/null 2>&1\nNAMEDROP_HERDR_TIMEOUT_MS=250 {executable} hook stop --state-directory {state} <&0 >/dev/null 2>&1\nexit 0\n"
     ))
 }
 

@@ -130,6 +130,7 @@ fn cross_space_operator_terminal_relay_returns_to_the_human_and_routes_the_next_
         let ending = TerminalRelayEnd {
             agent_session_id: AgentSessionId::new(xws::session("pane-2-tester")),
             ended_at_ms: 50,
+            previous_end_ms: None,
             text: "Which option?".to_owned(),
         };
         let at = MutationAttribution::new(ActorKind::Plugin, "test-relay", 50);
@@ -240,6 +241,7 @@ fn cross_space_operator_terminal_relay_is_suppressed_after_a_real_reply() {
                 &TerminalRelayEnd {
                     agent_session_id: AgentSessionId::new(xws::session("pane-2-tester")),
                     ended_at_ms: 50,
+                    previous_end_ms: None,
                     text: "Which option?".to_owned(),
                 },
                 &MutationAttribution::new(ActorKind::Plugin, "test-relay", 50),
@@ -265,6 +267,7 @@ fn cross_space_agent_envoys_do_not_arm_terminal_relay() {
                     &TerminalRelayEnd {
                         agent_session_id: AgentSessionId::new(xws::session("pane-2-tester")),
                         ended_at_ms: 50,
+                        previous_end_ms: None,
                         text: "Which option?".to_owned(),
                     },
                     &MutationAttribution::new(ActorKind::Plugin, "test-relay", 50),

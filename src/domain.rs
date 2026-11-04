@@ -493,6 +493,7 @@ pub const TERMINAL_RELAY_MAX_CHARS: usize = 16_000;
 pub struct TerminalRelayEnd {
     pub agent_session_id: AgentSessionId,
     pub ended_at_ms: u64,
+    pub previous_end_ms: Option<u64>,
     pub text: String,
 }
 
