@@ -2138,14 +2138,62 @@ async function watchedHistoryOracle(browser, t, result) {
       Math.abs((await anchorOffset()) - before) < 3,
       "surviving occurrence stays anchored through append and eviction",
     );
-    await ui.page.locator(".peek-live").evaluate((el) => {
-      el.scrollTop = el.scrollHeight;
-    });
-    await settleScroll(ui);
-    await sendGrid(5300);
+    let flowingStart = 5200;
+    let flowingUpdates = 0;
+    let producing = true;
+    const producer = (async () => {
+      while (producing) {
+        await sendGrid(++flowingStart);
+        flowingUpdates++;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    })();
+    let reached = true;
+    try {
+      await until(
+        () => flowingUpdates > 0,
+        "confirmed append before native return",
+      );
+      await ui.page.locator(".peek-live").focus();
+      const beforeNavigation = flowingUpdates;
+      await ui.page.keyboard.press("Control+End");
+      try {
+        await ui.page.waitForFunction(
+          () => {
+            const element = document.querySelector(".peek-live");
+            return (
+              element.scrollHeight - element.scrollTop - element.clientHeight <=
+              1
+            );
+          },
+          undefined,
+          { timeout: 1500 },
+        );
+        await settleScroll(ui);
+      } catch {
+        reached = false;
+      }
+      result.watchedNavigation = {
+        reached,
+        confirmedAppendsDuringNavigation: flowingUpdates - beforeNavigation,
+        metrics: await scrollMetrics(ui),
+      };
+      assert.ok(
+        flowingUpdates > beforeNavigation,
+        "Control+End overlaps actual confirmed watched appends",
+      );
+      assert.ok(
+        reached,
+        "Native Control+End finishes while confirmed history appends continue",
+      );
+    } finally {
+      producing = false;
+      await producer;
+    }
+    await sendGrid(flowingStart + 1);
     assert.ok(
       (await scrollMetrics(ui)).bottomVisible,
-      "returning to the live screen resumes following",
+      "Control+End resumes following subsequent confirmed watched rows",
     );
     await ui.page.screenshot({
       path: join(output, `${result.name}-watch-following.png`),
@@ -2169,7 +2217,7 @@ async function watchedHistoryOracle(browser, t, result) {
     assert.equal(ui.screens(), 0);
     assert.deepEqual(ui.errors, []);
     result.checks.push(
-      "watched middle-band rows, fixed header/footer, local time marker, reset/clear negatives, stable reading through 5000-line eviction, resumed following, validated reopen and replacement invalidation; no snapshot reads",
+      "watched middle-band rows, fixed header/footer, local time marker, reset/clear negatives, stable reading through 5000-line eviction, native Control+End during confirmed appends, resumed following, validated reopen and replacement invalidation; no snapshot reads",
     );
   } finally {
     await ui.close();

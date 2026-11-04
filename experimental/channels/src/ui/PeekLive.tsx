@@ -201,6 +201,10 @@ export function PeekLive({
         scroller.scrollLeft = position.left;
       position = { top: scroller.scrollTop, left: scroller.scrollLeft };
     }
+    function followIntent(event: KeyboardEvent) {
+      if (event.key === "End" && (event.ctrlKey || event.metaKey))
+        following = true;
+    }
     function localWheel(event: WheelEvent) {
       // Keep the browser default, but bypass xterm's wheel-to-input and mouse
       // tracking handlers even when the projected TUI enables those modes.
@@ -211,6 +215,7 @@ export function PeekLive({
       passive: true,
     });
     scroller.addEventListener("scroll", rememberPosition);
+    scroller.addEventListener("keydown", followIntent);
     const resize = new ResizeObserver(() => {
       if (!replacing) fit();
     });
@@ -373,6 +378,7 @@ export function PeekLive({
       resize.disconnect();
       scroller.removeEventListener("wheel", localWheel, true);
       scroller.removeEventListener("scroll", rememberPosition);
+      scroller.removeEventListener("keydown", followIntent);
       dispose();
     };
   }, [target, onState, onHistory]);
