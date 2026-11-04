@@ -118,6 +118,10 @@ if args[:3]==['terminal','session','observe']:
     if config.get('closed',True): print(json.dumps({'type':'terminal.closed','reason':'PRIVATE-NATIVE-REASON'}),flush=True)
     sys.exit(0)
 if args[:2]==['pane','read']:print('SANITIZED SNAPSHOT');sys.exit(0)
+if args[:2] in [['pane','send-text'],['pane','send-keys']]:
+    with open(os.path.join(root,'reads.jsonl'),'a') as log:
+        log.write(json.dumps({'args':args,'socket':os.environ.get('HERDR_SOCKET_PATH')})+'\n')
+    sys.exit(0)
 responses=json.load(open(os.path.join(root,'responses.json')))
 key=' '.join(args)
 if key in responses:print(responses[key])
@@ -187,6 +191,26 @@ else:sys.exit(1)
 
     fn get(&self, path: &str) -> Response {
         self.request(path, &[("Cookie", &self.cookie)])
+    }
+
+    fn post(&self, path: &str, body: &str, headers: &[(&str, &str)]) -> Response {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        write!(stream, "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", self.port, body.len()).unwrap();
+        for (name, value) in headers {
+            write!(stream, "{name}: {value}\r\n").unwrap();
+        }
+        write!(stream, "\r\n{body}").unwrap();
+        read_response(stream)
+    }
+
+    fn csrf(&self) -> String {
+        serde_json::from_str::<Value>(&self.get("/api/session").body).unwrap()["csrf_token"]
+            .as_str()
+            .unwrap()
+            .to_owned()
     }
 }
 
@@ -269,6 +293,178 @@ fn stopped(pid: u64) -> bool {
         // SAFETY: signal 0 only tests existence of the fixture PID.
         (unsafe { libc::kill(i32::try_from(pid).unwrap(), 0) }) < 0
     }
+}
+
+fn input_path(socket: &str, workspace: &str, alias: &str) -> String {
+    path(socket, workspace, alias).replace("/live", "/input")
+}
+
+fn live_continuity(server: &Server, target: &str) -> String {
+    let response = server.get(target);
+    assert_eq!(response.status, 200);
+    serde_json::from_str::<Value>(response.body.lines().next().unwrap()).unwrap()["continuity"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn post_input(server: &Server, target: &str, body: &Value) -> Response {
+    let csrf = server.csrf();
+    server.post(
+        target,
+        &body.to_string(),
+        &[("Cookie", &server.cookie), ("X-Namedrop-Csrf", &csrf)],
+    )
+}
+
+#[test]
+fn input_requires_session_and_csrf_before_any_send() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let live = path("socket-a", "w1", "lead");
+    let target = input_path("socket-a", "w1", "lead");
+    let body =
+        json!({"kind":"key","key":"Enter","continuity":live_continuity(&server,&live)}).to_string();
+    assert_eq!(server.post(&target, &body, &[]).status, 401);
+    assert_eq!(
+        server
+            .post(&target, &body, &[("Cookie", &server.cookie)])
+            .status,
+        403
+    );
+    assert!(
+        !invocations(&f)
+            .iter()
+            .any(|call| call["args"][1] == "send-keys")
+    );
+}
+
+#[test]
+fn input_sends_text_then_enter_and_allowlisted_keys() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let live = path("socket-a", "w1", "lead");
+    let target = input_path("socket-a", "w1", "lead");
+    let continuity = live_continuity(&server, &live);
+    for text in ["hello agent", "--help  preserve 'quotes' and café"] {
+        assert_eq!(
+            post_input(
+                &server,
+                &target,
+                &json!({"kind":"text","text":text,"continuity":continuity})
+            )
+            .status,
+            204
+        );
+    }
+    assert_eq!(
+        post_input(
+            &server,
+            &target,
+            &json!({"kind":"key","key":"Escape","continuity":continuity})
+        )
+        .status,
+        204
+    );
+    let sends: Vec<_> = invocations(&f)
+        .into_iter()
+        .filter(|call| call["args"][1] == "send-text" || call["args"][1] == "send-keys")
+        .collect();
+    assert_eq!(
+        sends
+            .iter()
+            .map(|call| call["args"].clone())
+            .collect::<Vec<_>>(),
+        vec![
+            json!(["pane", "send-text", "pane-1-lead", "hello agent"]),
+            json!(["pane", "send-keys", "pane-1-lead", "enter"]),
+            json!([
+                "pane",
+                "send-text",
+                "pane-1-lead",
+                "--help  preserve 'quotes' and café"
+            ]),
+            json!(["pane", "send-keys", "pane-1-lead", "enter"]),
+            json!(["pane", "send-keys", "pane-1-lead", "esc"]),
+        ]
+    );
+    assert!(sends.iter().all(|call| call["socket"] == "socket-a"));
+}
+
+#[test]
+fn input_refuses_wrong_binding_changed_session_and_offline_pane() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let live = path("socket-a", "w1", "lead");
+    let target = input_path("socket-a", "w1", "lead");
+    let continuity = live_continuity(&server, &live);
+    let body = json!({"kind":"key","key":"Enter","continuity":continuity});
+    assert_eq!(
+        post_input(&server, &input_path("socket-a", "w1", "planner"), &body).status,
+        410
+    );
+    f.db()
+        .execute(
+            "UPDATE pane_bindings SET pane_id = 'other-pane' WHERE pane_id = 'pane-1-lead'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(post_input(&server, &target, &body).status, 410);
+    f.db()
+        .execute(
+            "UPDATE pane_bindings SET pane_id = 'pane-1-lead' WHERE pane_id = 'other-pane'",
+            [],
+        )
+        .unwrap();
+    f.db().execute("UPDATE agent_session_observations SET agent_session_id = 'different' WHERE address_id = ?1", [xws::address_id("w1", "lead")]).unwrap();
+    assert_eq!(post_input(&server, &target, &body).status, 410);
+    f.db().execute("UPDATE agent_session_observations SET agent_session_id = 'session-pane-1-lead' WHERE address_id = ?1", [xws::address_id("w1", "lead")]).unwrap();
+    let rp = f.root.join("responses.json");
+    let mut responses: Value = serde_json::from_str(&fs::read_to_string(&rp).unwrap()).unwrap();
+    let mut panes: Value =
+        serde_json::from_str(responses["pane list --workspace w1"].as_str().unwrap()).unwrap();
+    panes["result"]["panes"][0]["agent_session"] = json!({"value":"changed-native-session"});
+    responses["pane list --workspace w1"] = json!(panes.to_string());
+    fs::write(&rp, responses.to_string()).unwrap();
+    assert_eq!(post_input(&server, &target, &body).status, 410);
+    panes["result"]["panes"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("agent_session");
+    responses["pane list --workspace w1"] = json!(panes.to_string());
+    fs::write(&rp, responses.to_string()).unwrap();
+    assert_eq!(post_input(&server, &target, &body).status, 410);
+    panes["result"]["panes"][0]["agent_session"] = json!({"value":"session-pane-1-lead"});
+    panes["result"]["panes"][0]["agent_status"] = json!("offline");
+    responses["pane list --workspace w1"] = json!(panes.to_string());
+    fs::write(&rp, responses.to_string()).unwrap();
+    assert_eq!(post_input(&server, &target, &body).status, 410);
+    assert!(
+        !invocations(&f)
+            .iter()
+            .any(|call| call["args"][1] == "send-keys")
+    );
+}
+
+#[test]
+fn input_rejects_oversize_control_text_and_unknown_keys() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let continuity = live_continuity(&server, &path("socket-a", "w1", "lead"));
+    let target = input_path("socket-a", "w1", "lead");
+    for body in [
+        json!({"kind":"key","key":"F1","continuity":continuity}),
+        json!({"kind":"text","text":"hello\nworld","continuity":continuity}),
+    ] {
+        assert_eq!(post_input(&server, &target, &body).status, 400);
+    }
+    let big = json!({"kind":"text","text":"x".repeat(8192),"continuity":continuity});
+    assert_eq!(post_input(&server, &target, &big).status, 413);
+    assert!(
+        !invocations(&f)
+            .iter()
+            .any(|call| call["args"][1] == "send-text" || call["args"][1] == "send-keys")
+    );
 }
 
 #[test]

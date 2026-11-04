@@ -9,7 +9,8 @@ export type LiveUpdate =
   | Readonly<{ kind: "data"; bytes: Uint8Array }>;
 
 export type LiveState =
-  | Readonly<{ kind: "connecting" | "live" | "reconnecting" }>
+  | Readonly<{ kind: "connecting" | "reconnecting" }>
+  | Readonly<{ kind: "live"; continuity: string }>
   | Readonly<{ kind: "closed"; reason: "ended" | "replaced" | "missing" }>
   | Readonly<{ kind: "session-ended" }>
   | Readonly<{
@@ -270,7 +271,8 @@ export async function observePeek({
                 }),
                 controller.signal,
               );
-              if (!signal.aborted) onState({ kind: "live" });
+              if (!signal.aborted)
+                onState({ kind: "live", continuity: record.continuity });
               break;
             case "data":
               if (!reset) throw new InvalidSource();
