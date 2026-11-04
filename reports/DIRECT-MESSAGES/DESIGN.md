@@ -23,3 +23,19 @@ An explicit trusted DM mode identifies the message as coming from the operator a
 ## Design checkpoint
 
 Inspection confirmed that `collaboration_messages.grammar_version` is unrestricted text, `create_thread` accepts an explicit ID, and recipient rows preserve address identity. This design changes code and wire types while retaining database schema 6. Implementation can proceed.
+
+## Shared API contract
+
+Authenticated `GET /api/direct-messages` returns `{ "peers": [...] }`. Each peer has `space_key`, `address_id`, `alias`, `workspace_label`, `pane_label`, `runtime`, `presence`, `closed`, `thread_id`, `last_activity_ms`, `last_message_id`, `last_agent_message_id`, and `attention_count`. `pane_label` is nullable `SafeText`. `presence` is `idle`, `working`, or `gone`. Thread and activity fields are nullable until the first message. The other labels and identities are strings. Attention is a nonnegative integer.
+
+Authenticated `GET /w/{space_key}/direct-messages/{address_id}/messages` returns `{ "thread_id": null, "messages": [], "earlier_omitted": false }` for an untouched conversation. Existing conversations return their ID and ordinary redacted message wire objects in time order. History supports the existing `before` cursor and a bounded `limit`. This route also serves closed conversations.
+
+Authenticated `POST` to that messages URL accepts only `{ "request_id": "...", "source": "..." }`, applies existing mutation authentication and CSRF, and returns the existing send receipt. The address in the URL fixes the sole recipient. Opening a conversation does not create a thread.
+
+The browser polls the separate directory and selected history every two seconds, with cancellation on selection changes. DMs have their own state, selection, drafts, outbox, and unread cursors. They never enter the channel store. Directory discovery retains stored conversations even when their workspace is no longer live. Peek and completion reuse the peer's space and address.
+
+## Design comparison
+
+Three independent sketches converged on the root marker and immutable peer recipient. The cross-review selected the dedicated directory and history API. It retained historical workspace discovery from the global-projection alternative. A separate authenticated poll keeps updates independent of channel events without adding a global SSE event type. Per-space DM bodies and revisions were rejected because closed history must survive workspace removal. A session-wide ban on unrelated public sends was rejected because legitimate concurrent channel work remains independent. The DM reply itself enforces the private participant pair.
+
+Model the Domain shaped the typed conversation membership. Separate Before Serializing Shared State shaped isolated Rust and Channels worktrees. Prove It Works requires store, browser, and real-agent evidence before completion.
