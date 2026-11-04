@@ -19,6 +19,7 @@ use std::{
 };
 
 const TICK: Duration = Duration::from_millis(250);
+const SUBAGENT_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
 const HERDR_TIMEOUT: Duration = Duration::from_secs(1);
 const UNAVAILABLE_LIMIT: u8 = 3;
 const RECOVERY_BACKOFF: Duration = Duration::from_secs(2);
@@ -331,6 +332,69 @@ struct KnownSpace {
     activated: bool,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum NativeSubagentSession {
+    Active(String),
+    Ended,
+    Unknown,
+}
+type SubagentPaneSessions = HashMap<String, NativeSubagentSession>;
+type NativeSubagentPanes = HashMap<(String, String), Option<SubagentPaneSessions>>;
+
+fn native_subagent_panes(input: &str) -> Option<SubagentPaneSessions> {
+    let value: serde_json::Value = serde_json::from_str(input).ok()?;
+    value["result"]["panes"]
+        .as_array()?
+        .iter()
+        .map(|pane| {
+            Some((
+                pane["pane_id"].as_str()?.to_owned(),
+                match pane.get("agent_session") {
+                    Some(serde_json::Value::Null) => NativeSubagentSession::Ended,
+                    Some(session) => session["value"]
+                        .as_str()
+                        .filter(|session| !session.is_empty())
+                        .map(|session| NativeSubagentSession::Active(session.to_owned()))
+                        .unwrap_or(NativeSubagentSession::Unknown),
+                    None => NativeSubagentSession::Unknown,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn subagent_presence(
+    parent: &crate::subagent::ParentIdentity,
+    bindings: &[crate::store::dashboard::SubagentParentBinding],
+    native: &NativeSubagentPanes,
+) -> crate::subagent::ParentPresence {
+    use crate::subagent::ParentPresence;
+    let matching: Vec<_> = bindings
+        .iter()
+        .filter(|binding| {
+            binding.socket == parent.socket
+                && binding.workspace == parent.workspace
+                && binding.pane == parent.pane
+        })
+        .collect();
+    if matching.is_empty() {
+        return ParentPresence::Absent;
+    }
+    let Some(Some(panes)) = native.get(&(parent.socket.clone(), parent.workspace.clone())) else {
+        return ParentPresence::Unknown;
+    };
+    let Some(native_session) = panes.get(&parent.pane) else {
+        return ParentPresence::Absent;
+    };
+    match native_session {
+        NativeSubagentSession::Active(session) if session == &parent.session => {
+            ParentPresence::Present
+        }
+        NativeSubagentSession::Active(_) | NativeSubagentSession::Ended => ParentPresence::Absent,
+        NativeSubagentSession::Unknown => ParentPresence::Unknown,
+    }
+}
+
 struct Hub<'a> {
     files: &'a ServerFiles,
     instance: &'a str,
@@ -339,6 +403,8 @@ struct Hub<'a> {
     data_version: Option<i64>,
     channel_notes_revision: Option<(std::time::SystemTime, u64)>,
     subagent_revision: Option<[u8; 32]>,
+    next_subagent_maintenance: Instant,
+    subagent_maintenance: Option<JoinHandle<()>>,
     spaces: HashMap<SpaceKey, KnownSpace>,
     subscribers: HashMap<u64, Subscriber>,
     published: HashMap<SpaceKey, Published>,
@@ -370,6 +436,8 @@ pub(crate) fn run(
         data_version: None,
         channel_notes_revision: None,
         subagent_revision: None,
+        next_subagent_maintenance: Instant::now() + SUBAGENT_MAINTENANCE_INTERVAL,
+        subagent_maintenance: None,
         spaces: HashMap::new(),
         subscribers: HashMap::new(),
         published: HashMap::new(),
@@ -553,6 +621,55 @@ impl Hub<'_> {
         None
     }
 
+    fn maintain_subagents(&mut self) {
+        if Instant::now() < self.next_subagent_maintenance {
+            return;
+        }
+        if self
+            .subagent_maintenance
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            return;
+        }
+        if let Some(worker) = self.subagent_maintenance.take() {
+            let _ = worker.join();
+        }
+        self.next_subagent_maintenance = Instant::now() + SUBAGENT_MAINTENANCE_INTERVAL;
+        let Some(store) = self.store.as_mut() else {
+            return;
+        };
+        let Ok(bindings) = store.dashboard_subagent_parents() else {
+            return;
+        };
+        let state = self.files.state().to_owned();
+        self.subagent_maintenance = thread::Builder::new()
+            .name("subagent-maintenance".to_owned())
+            .spawn(move || {
+                let mut native = HashMap::new();
+                let cancel = AtomicBool::new(false);
+                for binding in &bindings {
+                    let key = (binding.socket.clone(), binding.workspace.clone());
+                    native.entry(key).or_insert_with(|| {
+                        ProcessHerdr::default()
+                            .with_socket(Some(binding.socket.clone()))
+                            .execute_bounded(
+                                &["pane", "list", "--workspace", &binding.workspace],
+                                HERDR_TIMEOUT,
+                                &cancel,
+                                8 * 1024 * 1024,
+                            )
+                            .ok()
+                            .and_then(|output| native_subagent_panes(&output.stdout))
+                    });
+                }
+                let _ = crate::subagent::maintain(&state, now_ms(), |parent| {
+                    subagent_presence(parent, &bindings, &native)
+                });
+            })
+            .ok();
+    }
+
     fn refresh(&mut self, incoming: Option<&Subscription>) -> bool {
         if self.store.is_none() && !self.open_store() {
             return false;
@@ -581,6 +698,7 @@ impl Hub<'_> {
         self.unpublished_spaces
             .retain(|key| self.live_spaces.contains_key(key));
         self.metadata_dirty |= previous != self.live_spaces;
+        self.maintain_subagents();
         let notes_revision = snapshot::channel_routing::revision(self.files.state());
         let metadata_changed = std::mem::take(&mut self.metadata_dirty)
             || notes_revision != self.channel_notes_revision;
@@ -1227,6 +1345,8 @@ mod tests {
             data_version: None,
             channel_notes_revision: None,
             subagent_revision: None,
+            next_subagent_maintenance: Instant::now() + SUBAGENT_MAINTENANCE_INTERVAL,
+            subagent_maintenance: None,
             spaces: HashMap::new(),
             subscribers: HashMap::new(),
             published: HashMap::new(),
@@ -2015,5 +2135,152 @@ mod tests {
             "ready repeated after successful retry"
         );
         let _ = fs::remove_dir_all(&state);
+    }
+    #[test]
+    fn subagent_liveness_requires_successful_native_discovery_and_session_evidence() {
+        use crate::{
+            store::dashboard::SubagentParentBinding,
+            subagent::{ParentIdentity, ParentPresence},
+        };
+        let parent = ParentIdentity::new("socket", "space", "pane", "session").unwrap();
+        let bindings = vec![SubagentParentBinding {
+            socket: "socket".into(),
+            workspace: "space".into(),
+            pane: "pane".into(),
+        }];
+        let mut native = NativeSubagentPanes::new();
+        assert_eq!(
+            subagent_presence(&parent, &bindings, &native),
+            ParentPresence::Unknown
+        );
+        native.insert(("socket".into(), "space".into()), None);
+        assert_eq!(
+            subagent_presence(&parent, &bindings, &native),
+            ParentPresence::Unknown
+        );
+        native.insert(
+            ("socket".into(), "space".into()),
+            Some(HashMap::from([(
+                "pane".into(),
+                NativeSubagentSession::Unknown,
+            )])),
+        );
+        assert_eq!(
+            subagent_presence(&parent, &bindings, &native),
+            ParentPresence::Unknown
+        );
+        assert_eq!(
+            subagent_presence(&parent, &bindings, &native),
+            ParentPresence::Unknown
+        );
+        native.insert(
+            ("socket".into(), "space".into()),
+            native_subagent_panes(
+                r#"{"result":{"panes":[{"pane_id":"pane","agent_session":null}]}}"#,
+            ),
+        );
+        assert_eq!(
+            subagent_presence(&parent, &bindings, &native),
+            ParentPresence::Absent
+        );
+        native.insert(
+            ("socket".into(), "space".into()),
+            native_subagent_panes(
+                r#"{"result":{"panes":[{"pane_id":"pane","agent_session":{"value":"session"}}]}}"#,
+            ),
+        );
+        assert_eq!(
+            subagent_presence(&parent, &bindings, &native),
+            ParentPresence::Present
+        );
+        native.insert(("socket".into(), "space".into()), native_subagent_panes(r#"{"result":{"panes":[{"pane_id":"pane","agent_session":{"value":"new-session"}}]}}"#));
+        assert_eq!(
+            subagent_presence(&parent, &bindings, &native),
+            ParentPresence::Absent
+        );
+        native.insert(("socket".into(), "space".into()), Some(HashMap::new()));
+        assert_eq!(
+            subagent_presence(&parent, &bindings, &native),
+            ParentPresence::Absent
+        );
+        assert!(native_subagent_panes(r#"{"result":{"panes":[{}]}}"#).is_none());
+    }
+
+    #[test]
+    fn subagent_maintenance_timer_runs_without_database_or_subscription_changes() {
+        use crate::subagent::{self, Event, PARENT_GRACE_MS, ParentIdentity};
+        let files = schema_test_files("subagent-maintenance-timer");
+        let parent =
+            ParentIdentity::new("test-socket", "test-workspace", "test-pane", "test-session")
+                .unwrap();
+        subagent::record(
+            files.state(),
+            &parent,
+            Event::ParentEnd,
+            now_ms() - PARENT_GRACE_MS - 100,
+        )
+        .unwrap();
+        let mut hub = test_hub(&files);
+        assert!(hub.refresh(None));
+        let version = hub.store.as_ref().unwrap().data_version().unwrap();
+        hub.next_subagent_maintenance = Instant::now();
+        assert!(hub.refresh(None));
+        hub.subagent_maintenance
+            .take()
+            .expect("scheduled without subscribers")
+            .join()
+            .unwrap();
+        assert_eq!(hub.store.as_ref().unwrap().data_version().unwrap(), version);
+        assert_eq!(
+            fs::read_dir(files.state().join("subagents/v1"))
+                .unwrap()
+                .count(),
+            0
+        );
+        drop(hub);
+        let _ = fs::remove_dir_all(files.state());
+    }
+
+    #[test]
+    fn subagent_parent_snapshot_includes_unsubscribed_bindings() {
+        use crate::PaneBindingId;
+        let files = schema_test_files("subagent-parent-snapshot");
+        let at = |time| MutationAttribution::new(ActorKind::Plugin, "test", time);
+        for name in ["one", "two"] {
+            let namespace = StateNamespace::for_space("test-socket", name);
+            StateStore::open(files.state())
+                .unwrap()
+                .transaction(|tx| tx.activate_worktree(&namespace, &at(1)))
+                .unwrap();
+            add_address(files.state(), &namespace, "reader");
+            StateStore::open(files.state())
+                .unwrap()
+                .transaction(|tx| {
+                    tx.bind_pane(
+                        &namespace,
+                        &PaneBindingId::new("binding"),
+                        &PaneAddressId::new("address-reader"),
+                        "pane",
+                        &at(10),
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let mut store = StateStore::open(files.state()).unwrap();
+        let parents = store.dashboard_subagent_parents().unwrap();
+        assert_eq!(parents.len(), 2);
+        assert!(
+            parents
+                .iter()
+                .any(|parent| parent.workspace == "one" && parent.pane == "pane")
+        );
+        assert!(
+            parents
+                .iter()
+                .any(|parent| parent.workspace == "two" && parent.pane == "pane")
+        );
+        drop(store);
+        let _ = fs::remove_dir_all(files.state());
     }
 }

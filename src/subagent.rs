@@ -1,5 +1,8 @@
 //! Host subagent events and independent file facts consumed by Channels.
 use crate::{AgentRuntime, AgentSessionId};
+mod maintenance;
+use maintenance::{CHECKPOINT_CAP, LifecycleCheckpoint};
+pub use maintenance::{FINISHED_GRACE_MS, PARENT_GRACE_MS, ParentPresence, RETENTION_MS, maintain};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -273,7 +276,7 @@ impl ParentIdentity {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Event {
     Start {
         id: String,
@@ -389,7 +392,7 @@ impl Event {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct Fact {
     parent: ParentIdentity,
     at_ms: i64,
@@ -410,105 +413,278 @@ pub fn record(
     event: Event,
     at_ms: i64,
 ) -> std::io::Result<()> {
-    use std::{
-        io::Write,
-        os::unix::fs::{DirBuilderExt, OpenOptionsExt},
-        sync::atomic::{AtomicU64, Ordering},
-    };
-    static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
+    publish(state, parent, event, at_ms, |_| {})
+}
+
+fn publish(
+    state: &Path,
+    parent: &ParentIdentity,
+    event: Event,
+    at_ms: i64,
+    mut observe: impl FnMut(PublicationStage),
+) -> std::io::Result<()> {
+    create_directory(&state.join("subagents"))?;
+    create_directory(&state.join("subagents/v1"))?;
     let directory = parent.directory(state);
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&directory)?;
     let name = match &event {
-        Event::Start { id, generation, .. } => format!(
-            "{}.start.json",
-            hash_id(&format!(
-                "{id}\0{}",
-                generation.as_deref().unwrap_or_default()
-            ))
-        ),
-        Event::Stop { id, generation } => format!(
-            "{}.stop.json",
-            hash_id(&format!(
-                "{id}\0{}",
-                generation.as_deref().unwrap_or_default()
-            ))
-        ),
-        _ => format!(
-            "parent-{at_ms}-{}-{}.json",
-            std::process::id(),
-            NEXT_FILE.fetch_add(1, Ordering::Relaxed)
-        ),
+        Event::Start { id, generation, .. } => {
+            format!("{}.start.json", child_key(id, generation.as_deref()))
+        }
+        Event::Stop { id, generation } => {
+            format!("{}.stop.json", child_key(id, generation.as_deref()))
+        }
+        _ => format!("parent-{at_ms}-{}.json", unique_suffix()),
     };
-    let temporary = directory.join(format!(
-        ".{}-{}.tmp",
+    let bytes = serde_json::to_vec(&Fact {
+        parent: parent.clone(),
+        at_ms,
+        event: event.clone(),
+    })?;
+    for _ in 0..3 {
+        create_directory(&directory)?;
+        if let Event::Start { id, generation, .. } = &event
+            && (is_tombstoned(&directory, id, generation.as_deref())
+                || std::fs::symlink_metadata(directory.join("inactive").join(format!(
+                    "{}.start.json",
+                    child_key(id, generation.as_deref())
+                )))
+                .is_ok())
+        {
+            return Ok(());
+        }
+        match publish_bytes_observed(&directory, &name, &bytes, false, &mut observe) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            result => return result,
+        }
+    }
+    Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+}
+
+fn unique_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}-{}",
         std::process::id(),
         NEXT_FILE.fetch_add(1, Ordering::Relaxed)
-    ));
+    )
+}
+
+fn create_directory(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    if let Some(parent) = path.parent() {
+        if !parent.is_dir() {
+            create_directory(parent)?;
+        }
+        if std::fs::symlink_metadata(parent)?.file_type().is_symlink() {
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+        }
+    }
+    match std::fs::DirBuilder::new().mode(0o700).create(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && real_directory(path) => {
+            Ok(())
+        }
+        result => result,
+    }
+}
+
+fn real_directory(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_dir())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PublicationStage {
+    BeforeOpen,
+    BeforeLink,
+    AfterLink,
+}
+
+fn publish_bytes(directory: &Path, name: &str, bytes: &[u8], replace: bool) -> std::io::Result<()> {
+    publish_bytes_observed(directory, name, bytes, replace, &mut |_| {})
+}
+
+fn publish_bytes_observed(
+    directory: &Path,
+    name: &str,
+    bytes: &[u8],
+    replace: bool,
+    observe: &mut impl FnMut(PublicationStage),
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let temporary = directory.join(format!(".{}.tmp", unique_suffix()));
     let result = (|| {
-        let bytes = serde_json::to_vec(&Fact {
-            parent: parent.clone(),
-            at_ms,
-            event,
-        })?;
+        observe(PublicationStage::BeforeOpen);
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(&temporary)?;
-        file.write_all(&bytes)?;
-        match std::fs::hard_link(&temporary, directory.join(name)) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-            Err(error) => Err(error),
-        }
+        file.write_all(bytes)?;
+        observe(PublicationStage::BeforeLink);
+        let result = if replace {
+            std::fs::rename(&temporary, directory.join(name))
+        } else {
+            match std::fs::hard_link(&temporary, directory.join(name)) {
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+                result => result,
+            }
+        };
+        observe(PublicationStage::AfterLink);
+        result
     })();
-    let _ = std::fs::remove_file(&temporary);
+    let _ = std::fs::remove_file(temporary);
     result
+}
+
+fn child_key(id: &str, generation: Option<&str>) -> String {
+    hash_id(&format!("{id}\0{}", generation.unwrap_or_default()))
+}
+
+fn is_tombstoned(directory: &Path, id: &str, generation: Option<&str>) -> bool {
+    let tombstones = directory.join("tombstones");
+    // Any existing marker fails closed, including one corrupted by interruption.
+    [child_key(id, generation), child_key(id, None)]
+        .iter()
+        .any(|key| std::fs::symlink_metadata(tombstones.join(key)).is_ok())
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path, cap: u64) -> Option<T> {
+    if !std::fs::symlink_metadata(path).ok()?.file_type().is_file() {
+        return None;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let mut bytes = Vec::new();
+    file.take(cap + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() <= cap as usize)
+        .then(|| serde_json::from_slice(&bytes).ok())
+        .flatten()
+}
+
+fn fact_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            (name.starts_with("parent-") && name.ends_with(".json"))
+                || name.ends_with(".start.json")
+                || name.ends_with(".stop.json")
+        })
 }
 
 fn hash_id(id: &str) -> String {
     crate::lower_hex(&Sha256::digest(id.as_bytes()))
 }
 
+#[derive(Default)]
+struct FactSnapshot {
+    facts: Vec<Fact>,
+    compacted: bool,
+}
+
+#[cfg(test)]
 fn facts(directory: &Path) -> Vec<Fact> {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return Vec::new();
-    };
-    let entries: Vec<_> = entries.take(FACTS_PER_PARENT + 1).collect();
-    if entries.len() > FACTS_PER_PARENT {
-        return Vec::new();
+    read_facts(directory, |_| {}).facts
+}
+
+fn read_facts(directory: &Path, mut before_read: impl FnMut(&Path)) -> FactSnapshot {
+    if !real_directory(directory)
+        || !directory.parent().is_some_and(real_directory)
+        || !directory
+            .parent()
+            .and_then(Path::parent)
+            .is_some_and(real_directory)
+    {
+        return FactSnapshot::default();
     }
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return FactSnapshot::default();
+    };
     let mut output = Vec::new();
     for entry in entries {
-        let Ok(entry) = entry else { return Vec::new() };
-        if !entry.path().extension().is_some_and(|ext| ext == "json") {
+        let Ok(entry) = entry else {
+            return FactSnapshot::default();
+        };
+        if !fact_path(&entry.path()) {
             continue;
         }
-        let parsed = (|| {
-            if !entry.file_type().ok()?.is_file() {
-                return None;
+        before_read(&entry.path());
+        let Some(fact) = read_json::<Fact>(&entry.path(), FACT_CAP) else {
+            if std::fs::symlink_metadata(entry.path())
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            {
+                continue;
             }
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                .open(entry.path())
-                .ok()?;
-            let mut bytes = Vec::new();
-            file.take(FACT_CAP + 1).read_to_end(&mut bytes).ok()?;
-            if bytes.len() > FACT_CAP as usize {
-                return None;
-            }
-            serde_json::from_slice(&bytes).ok()
-        })();
-        let Some(fact) = parsed else {
-            return Vec::new();
+            return FactSnapshot::default();
         };
         output.push(fact);
     }
-    output
+    let inactive = directory.join("inactive");
+    if std::fs::symlink_metadata(&inactive).is_ok() {
+        if !real_directory(&inactive) {
+            return FactSnapshot::default();
+        }
+        let Ok(entries) = std::fs::read_dir(&inactive) else {
+            return FactSnapshot::default();
+        };
+        let mut archived = Vec::new();
+        let mut keys = std::collections::HashSet::new();
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return FactSnapshot::default();
+            };
+            if !fact_path(&entry.path()) {
+                continue;
+            }
+            let Some(fact) = read_json::<Fact>(&entry.path(), FACT_CAP) else {
+                if std::fs::symlink_metadata(entry.path())
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                {
+                    continue;
+                }
+                return FactSnapshot::default();
+            };
+            if !matches!(fact.event, Event::Start { .. }) {
+                return FactSnapshot::default();
+            }
+            if let Event::Start { id, generation, .. } = &fact.event {
+                keys.insert(child_key(id, generation.as_deref()));
+            }
+            archived.push(fact);
+        }
+        output.retain(|fact| !matches!(&fact.event, Event::Start { id, generation, .. } if keys.contains(&child_key(id, generation.as_deref()))));
+        output.extend(archived);
+    }
+    // Read the checkpoint after ingress: cleanup publishes it before unlinking
+    // captured facts, so every reader sees at least one copy of each barrier.
+    let mut compacted = false;
+    if std::fs::symlink_metadata(directory.join("lifecycle")).is_ok() {
+        let Some(checkpoint) =
+            read_json::<LifecycleCheckpoint>(&directory.join("lifecycle"), CHECKPOINT_CAP)
+        else {
+            return FactSnapshot::default();
+        };
+        compacted = checkpoint.proof_floor_ms.is_some();
+        if let Some(floor) = checkpoint.proof_floor_ms {
+            let retained: std::collections::HashSet<_> = checkpoint
+                .entries
+                .iter()
+                .filter_map(|entry| match &entry.event {
+                    Event::Prompt { generation } => Some(generation.clone()),
+                    _ => None,
+                })
+                .collect();
+            output.retain(|fact| !matches!(&fact.event, Event::Prompt { generation } if fact.at_ms < floor && !retained.contains(generation)));
+        }
+        output.extend(checkpoint.facts());
+    }
+    FactSnapshot {
+        facts: output,
+        compacted,
+    }
 }
 
 /// `idle_at_ms` is an authoritative native status observation, never derived
@@ -519,9 +695,57 @@ pub fn running(
     now_ms: i64,
     idle_at_ms: Option<i64>,
 ) -> Vec<Running> {
-    use std::collections::{HashMap, HashSet};
     let directory = parent.directory(state);
-    let facts: Vec<_> = facts(&directory)
+    let snapshot = read_facts(&directory, |_| {});
+    running_snapshot(state, parent, now_ms, idle_at_ms, &directory, snapshot)
+}
+
+fn running_snapshot(
+    state: &Path,
+    parent: &ParentIdentity,
+    now_ms: i64,
+    idle_at_ms: Option<i64>,
+    directory: &Path,
+    snapshot: FactSnapshot,
+) -> Vec<Running> {
+    let mut runs: Vec<_> = evaluate_runs(state, parent, now_ms, idle_at_ms, directory, snapshot)
+        .into_iter()
+        .filter_map(|outcome| match outcome {
+            RunOutcome::Running(run) => Some(run),
+            _ => None,
+        })
+        .collect();
+    runs.sort_by(|a, b| (a.started_at_ms, &a.id).cmp(&(b.started_at_ms, &b.id)));
+    let mut seen = std::collections::HashSet::new();
+    runs.reverse();
+    runs.retain(|run| seen.insert(run.id.clone()));
+    runs.reverse();
+    if runs.len() > FACTS_PER_PARENT {
+        Vec::new()
+    } else {
+        runs
+    }
+}
+
+enum RunOutcome {
+    Running(Running),
+    Finished { key: String, at_ms: i64 },
+    Inactive { key: String, at_ms: i64 },
+    PendingProof,
+}
+
+fn evaluate_runs(
+    state: &Path,
+    parent: &ParentIdentity,
+    now_ms: i64,
+    idle_at_ms: Option<i64>,
+    directory: &Path,
+    snapshot: FactSnapshot,
+) -> Vec<RunOutcome> {
+    use std::collections::HashMap;
+    let compacted = snapshot.compacted;
+    let facts: Vec<_> = snapshot
+        .facts
         .into_iter()
         .filter(|fact| &fact.parent == parent)
         .collect();
@@ -552,14 +776,14 @@ pub fn running(
         .map(|f| f.at_ms)
         .max()
         .unwrap_or(i64::MIN);
-    let stopped: HashSet<_> = facts
+    let stopped: HashMap<_, _> = facts
         .iter()
         .filter_map(|f| match &f.event {
-            Event::Stop { id, generation } => Some((id.as_str(), generation.as_deref())),
+            Event::Stop { id, generation } => Some(((id.as_str(), generation.as_deref()), f.at_ms)),
             _ => None,
         })
         .collect();
-    let mut runs = Vec::new();
+    let mut outcomes = Vec::new();
     for fact in &facts {
         let Event::Start {
             id,
@@ -580,39 +804,94 @@ pub fn running(
         } else {
             resume
         };
+        let inactive = |at_ms| RunOutcome::Inactive {
+            key: child_key(id, generation.as_deref()),
+            at_ms,
+        };
+        let finished = |at_ms| RunOutcome::Finished {
+            key: child_key(id, generation.as_deref()),
+            at_ms,
+        };
         if !is_token(id)
-            || stopped.contains(&(id.as_str(), None))
-            || stopped.contains(&(id.as_str(), generation.as_deref()))
             || fact.at_ms > now_ms
-            || now_ms.saturating_sub(fact.at_ms) >= MAX_RUN_AGE_MS
+            || is_tombstoned(directory, id, generation.as_deref())
         {
+            outcomes.push(RunOutcome::PendingProof);
             continue;
         }
-        let blocked = facts.iter().any(|barrier| match &barrier.event {
-            Event::ParentEnd
-            | Event::ParentEndFor { .. }
-            | Event::Reset
-            | Event::ResetFor { .. }
-                if generation.is_none() =>
-            {
-                // Unknown parent generations need a new typed prompt before
-                // Start. Resume alone cannot prove that this is new work.
-                !prompts
-                    .values()
-                    .any(|prompt| *prompt > barrier.at_ms && *prompt <= fact.at_ms)
-            }
-            Event::ParentEnd | Event::Reset => !generation.as_deref().is_some_and(|generation| {
-                prompt_at(generation).is_some_and(|prompt| prompt > barrier.at_ms)
-            }),
-            Event::ParentEndFor {
-                generation: frontier,
-            }
-            | Event::ResetFor {
-                generation: frontier,
-            } => !prompt_after(generation.as_deref(), frontier),
-            _ => false,
-        });
-        if blocked {
+        if let Some(at_ms) = stopped
+            .get(&(id.as_str(), None))
+            .or_else(|| stopped.get(&(id.as_str(), generation.as_deref())))
+        {
+            outcomes.push(finished(*at_ms));
+            continue;
+        }
+        if now_ms.saturating_sub(fact.at_ms) >= MAX_RUN_AGE_MS {
+            outcomes.push(finished(fact.at_ms.saturating_add(MAX_RUN_AGE_MS)));
+            continue;
+        }
+        if compacted
+            && generation
+                .as_deref()
+                .is_some_and(|turn| prompt_at(turn).is_none())
+        {
+            outcomes.push(RunOutcome::PendingProof);
+            continue;
+        }
+        let blockers: Vec<_> = facts
+            .iter()
+            .filter(|barrier| match &barrier.event {
+                Event::ParentEnd
+                | Event::ParentEndFor { .. }
+                | Event::Reset
+                | Event::ResetFor { .. }
+                    if generation.is_none() =>
+                {
+                    // Unknown parent generations need a new typed prompt before
+                    // Start. Resume alone cannot prove that this is new work.
+                    !prompts
+                        .values()
+                        .any(|prompt| *prompt > barrier.at_ms && *prompt <= fact.at_ms)
+                }
+                Event::ParentEnd | Event::Reset => {
+                    !generation.as_deref().is_some_and(|generation| {
+                        prompt_at(generation).is_some_and(|prompt| prompt > barrier.at_ms)
+                    })
+                }
+                Event::ParentEndFor {
+                    generation: frontier,
+                }
+                | Event::ResetFor {
+                    generation: frontier,
+                } => !prompt_after(generation.as_deref(), frontier),
+                _ => false,
+            })
+            .collect();
+        if !blockers.is_empty() {
+            let completion = blockers
+                .iter()
+                .filter_map(|barrier| {
+                    let proven = match (&generation, &barrier.event) {
+                        (None, _) => fact.at_ms <= barrier.at_ms,
+                        (Some(turn), Event::ParentEnd | Event::Reset) => prompt_at(turn).is_some(),
+                        (
+                            Some(turn),
+                            Event::ParentEndFor {
+                                generation: frontier,
+                            }
+                            | Event::ResetFor {
+                                generation: frontier,
+                            },
+                        ) => {
+                            turn == frontier
+                                || (prompt_at(turn).is_some() && prompt_at(frontier).is_some())
+                        }
+                        _ => false,
+                    };
+                    proven.then_some(barrier.at_ms)
+                })
+                .min();
+            outcomes.push(completion.map_or(RunOutcome::PendingProof, inactive));
             continue;
         }
         // A later turn's complete background snapshot also covers older runs,
@@ -663,6 +942,11 @@ pub fn running(
                 Event::ParentStop { generation: turn, .. }
                 if stop_covers_generation(turn.as_deref()));
             if covered_generation || fact.at_ms <= stop.at_ms || resume <= stop.at_ms {
+                outcomes.push(if covered_generation || fact.at_ms <= stop.at_ms {
+                    inactive(stop.at_ms)
+                } else {
+                    RunOutcome::PendingProof
+                });
                 continue;
             }
         }
@@ -676,9 +960,10 @@ pub fn running(
                 },
                 now_ms,
             );
+            outcomes.push(finished(now_ms));
             continue;
         }
-        runs.push(Running {
+        outcomes.push(RunOutcome::Running(Running {
             id: id.clone(),
             kind: kind
                 .as_deref()
@@ -689,21 +974,20 @@ pub fn running(
                 .and_then(SubagentText::parse)
                 .map(|text| text.0),
             started_at_ms: fact.at_ms,
-        });
+        }));
     }
-    runs.sort_by(|a, b| (a.started_at_ms, &a.id).cmp(&(b.started_at_ms, &b.id)));
-    let mut seen = std::collections::HashSet::new();
-    runs.reverse();
-    runs.retain(|run| seen.insert(run.id.clone()));
-    runs.reverse();
-    runs
+    outcomes
 }
 
 /// A digest over names and file metadata catches file-only changes without
 /// requiring a database write or filesystem watcher.
 pub fn revision(state: &Path) -> [u8; 32] {
     let mut entries = Vec::new();
-    if let Ok(directories) = std::fs::read_dir(state.join("subagents/v1")) {
+    let root = state.join("subagents/v1");
+    if !real_directory(&state.join("subagents")) || !real_directory(&root) {
+        return [0; 32];
+    }
+    if let Ok(directories) = std::fs::read_dir(&root) {
         for (count, directory) in directories.enumerate().take(4097) {
             if count == 4096 {
                 return [0xff; 32];
@@ -713,12 +997,23 @@ pub fn revision(state: &Path) -> [u8; 32] {
                 continue;
             }
             if let Ok(files) = std::fs::read_dir(directory.path()) {
-                for entry in files.take(FACTS_PER_PARENT + 1).filter_map(Result::ok) {
-                    if entries.len() == 32768 {
+                let mut count = 0;
+                for entry in files.filter_map(Result::ok) {
+                    let path = entry.path();
+                    if !fact_path(&path)
+                        && !matches!(
+                            entry.file_name().to_str(),
+                            Some("identity" | "lifecycle" | "inactive" | "tombstones")
+                        )
+                    {
+                        continue;
+                    }
+                    if count == FACTS_PER_PARENT || entries.len() == 32768 {
                         return [0xff; 32];
                     }
-                    if let Ok(meta) = entry.metadata() {
-                        entries.push((entry.path(), meta.len(), meta.modified().ok()));
+                    count += 1;
+                    if let Ok(meta) = std::fs::symlink_metadata(&path) {
+                        entries.push((path, meta.len(), meta.modified().ok()));
                     }
                 }
             }

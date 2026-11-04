@@ -194,7 +194,33 @@ const LATEST_ATTEMPT: &str = "a.rowid = (
        AND latest.worktree_id = d.worktree_id AND latest.delivery_id = d.delivery_id
      ORDER BY latest.created_at_ms DESC, latest.rowid DESC LIMIT 1)";
 
+pub(crate) struct SubagentParentBinding {
+    pub socket: String,
+    pub workspace: String,
+    pub pane: String,
+}
+
 impl StateStore {
+    pub(crate) fn dashboard_subagent_parents(
+        &mut self,
+    ) -> Result<Vec<SubagentParentBinding>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT b.session_socket_id, b.worktree_id, b.pane_id
+             FROM pane_bindings b JOIN pane_addresses a
+               ON a.session_socket_id = b.session_socket_id AND a.worktree_id = b.worktree_id
+              AND a.address_id = b.address_id
+             WHERE b.active = 1 AND a.retired = 0 AND a.pane_type = 'agent'",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(SubagentParentBinding {
+                socket: row.get(0)?,
+                workspace: row.get(1)?,
+                pane: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     pub(crate) fn dashboard_live_member(
         &mut self,
         key: &crate::dashboard::snapshot::SpaceKey,

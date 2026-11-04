@@ -657,7 +657,7 @@ fn background_snapshot_order_requires_both_prompt_frontiers() {
 }
 
 #[test]
-fn malformed_fact_or_reader_overflow_hides_all_runs() {
+fn malformed_facts_and_child_overflow_hide_runs_but_nonfacts_do_not() {
     let state = State::new();
     record(&state.0, &state.parent(), start("one"), 100).unwrap();
     let directory = fs::read_dir(state.0.join("subagents/v1"))
@@ -672,6 +672,16 @@ fn malformed_fact_or_reader_overflow_hides_all_runs() {
     fs::remove_file(broken).unwrap();
     for id in 0..4096 {
         fs::write(directory.join(format!("{id}.tmp")), []).unwrap();
+    }
+    assert_eq!(ids(&state, 101), ["one"]);
+    for id in 0..4096 {
+        record(
+            &state.0,
+            &state.parent(),
+            start(&format!("child-{id}")),
+            100,
+        )
+        .unwrap();
     }
     assert!(ids(&state, 101).is_empty());
 }
