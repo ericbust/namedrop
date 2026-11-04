@@ -522,6 +522,26 @@ test("seed and watched occurrences reconcile through the full observed ledger wi
   assert.deepEqual(state.seed.slice(5), previous);
 });
 
+test("disconnected observed segments reuse their original occurrences on return", () => {
+  let state = baseline();
+  let original: ReturnType<typeof watchRows> = [];
+  for (const start of [2, 4, 6, 40, 42, 44, 46, 0, 2, 4, 6]) {
+    state = watchReduce(state, { kind: "frame", frame: frame(start) });
+    if (start === 6 && !original.length) original = watchRows(state);
+  }
+  const rows = watchRows(state).filter((row) => row.kind === "text");
+  assert.deepEqual(
+    rows.filter((row) => original.some((known) => known.text === row.text)),
+    original,
+  );
+  assert.deepEqual(
+    rows.map((row) => row.text),
+    [...Array.from({ length: 6 }, (_, i) => line(i)),
+      ...Array.from({ length: 6 }, (_, i) => line(40 + i))],
+  );
+  assert.ok(watchRows(state).some((row) => row.kind === "gap"));
+});
+
 test("multiple established sequence alignments show a gap and withhold a guessed occurrence", () => {
   const repeatedFrame = (start: number): WatchFrame => ({
     ...frame(start),
@@ -543,6 +563,13 @@ test("multiple established sequence alignments show a gap and withhold a guessed
   for (let start = 2; start <= 42; start += 2)
     state = watchReduce(state, { kind: "frame", frame: repeatedFrame(start) });
   const rows = watchRows(state).filter((row) => row.kind === "text");
+  assert.deepEqual(rows.map((row) => row.text),
+    Array.from({ length: 42 }, (_, i) => repeatedFrame(i).rows[1]));
+  assert.equal(watchRows(state).filter((row) => row.kind === "gap").length, 0);
+  for (let i = 5; i < 17; i++) {
+    assert.equal(rows[i]?.text, rows[i + 20]?.text);
+    assert.notEqual(rows[i]?.id, rows[i + 20]?.id);
+  }
   state = watchReduce(state, { kind: "frame", frame: repeatedFrame(5) });
   state = watchReduce(state, { kind: "frame", frame: repeatedFrame(7) });
   assert.deepEqual(
