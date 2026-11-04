@@ -2041,7 +2041,7 @@ async function watchedHistoryOracle(browser, t, result) {
       ui.live().send(data(seq++, paintGrid(grid(start))));
       await until(
         async () =>
-          (await historyText().last().textContent()) === row(start - 1),
+          (await ui.rows().nth(1).textContent()).trim() === row(start).trim(),
         "completed watched frame",
       );
     };
@@ -2073,6 +2073,9 @@ async function watchedHistoryOracle(browser, t, result) {
     );
     await sendGrid(600);
     assert.equal(await historyText().count(), 200);
+    const retainedIds = await historyText().evaluateAll((rows) =>
+      rows.map((row) => ({ text: row.textContent, id: row.dataset.rowId })),
+    );
     const gaps = ui.page.locator('.peek-history span[data-watch-kind="gap"]');
     assert.equal(
       await gaps.count(),
@@ -2124,7 +2127,23 @@ async function watchedHistoryOracle(browser, t, result) {
     );
     seq = 2;
     for (let start = 100; start <= 3000; start += 100) await sendGrid(start);
-    await historyText().nth(3199).waitFor();
+    await historyText().nth(2999).waitFor();
+    const replayed = await historyText().allTextContents();
+    assert.equal(replayed.length, 3000, "revisits do not add duplicate output");
+    assert.equal(new Set(replayed).size, 3000);
+    assert.deepEqual(
+      replayed,
+      Array.from({ length: 3000 }, (_, i) => row(i)),
+      "a proven bridge restores the original output order",
+    );
+    for (const retained of retainedIds)
+      assert.equal(
+        await historyText()
+          .filter({ hasText: retained.text })
+          .getAttribute("data-row-id"),
+        retained.id,
+        "revisited occurrences retain their original reading anchors",
+      );
     const anchor = historyText().nth(1700);
     const id = await anchor.getAttribute("data-row-id");
     await anchor.evaluate((line) => {
