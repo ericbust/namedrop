@@ -133,8 +133,6 @@ export function PeekLive({
         Number.parseFloat(style.paddingLeft) -
         Number.parseFloat(style.paddingRight);
       if (available <= 0) return;
-      for (const terminal of presentation.terminals)
-        terminal.options.fontSize = baseFont;
       const width =
         current.element?.querySelector(".xterm-screen")?.getBoundingClientRect()
           .width ?? 0;
@@ -143,12 +141,12 @@ export function PeekLive({
         10,
         Math.min(
           baseFont,
-          Math.floor(((baseFont * available) / width) * 10) / 10,
+          Math.floor(
+            (((current.options.fontSize ?? baseFont) * available) / width) * 10,
+          ) / 10,
         ),
       );
-      for (const terminal of presentation.terminals)
-        terminal.options.fontSize = fitted;
-      historyNode.style.fontSize = `${fitted}px`;
+      void presentation.setFontSize(fitted);
       restorePosition();
     }
     function latestTop() {
@@ -271,6 +269,7 @@ export function PeekLive({
       return next;
     }
     presentation = new PeekPresentation(element, create, (paint) => {
+      historyNode.style.fontSize = `${paint.terminal.options.fontSize}px`;
       if (paint.history) {
         if (paint.baseline !== null) {
           validated = true;

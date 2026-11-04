@@ -9,6 +9,7 @@ type Buffer = {
   initialized: boolean;
 };
 type Hold = { deadline: number; timer: ReturnType<typeof setTimeout> | null };
+type Publication = { kind: "paint"; history: boolean } | { kind: "layout" };
 
 export class PeekPresentation {
   private buffers: [Buffer, Buffer] | null = null;
@@ -21,11 +22,17 @@ export class PeekPresentation {
   private hold: Hold | null = null;
   private skippedBlank = false;
   private cancelFrame: (() => void) | null = null;
+  private cancelRender: (() => void) | null = null;
+  private fontSize: number | null = null;
   private readonly visibilityChanged = () => {
-    if (document.visibilityState === "hidden") this.cancelFrame?.();
-    else
+    if (document.visibilityState === "hidden") {
+      this.cancelFrame?.();
+      this.cancelRender?.();
+    } else {
       for (const buffer of this.buffers ?? [])
         buffer.terminal.refresh(0, buffer.terminal.rows - 1);
+      if (this.fontSize !== null) void this.setFontSize(this.fontSize);
+    }
   };
 
   constructor(
@@ -45,13 +52,27 @@ export class PeekPresentation {
     return this.buffers?.[0].terminal ?? null;
   }
 
-  get terminals() {
-    return this.buffers?.map((buffer) => buffer.terminal) ?? [];
+  setFontSize(fontSize: number) {
+    this.fontSize = fontSize;
+    const generation = this.generation;
+    return this.enqueue(async () => {
+      if (
+        !this.active(generation) ||
+        !this.buffers ||
+        this.paints.length > 0 ||
+        this.hold ||
+        document.visibilityState === "hidden" ||
+        this.buffers[0].terminal.options.fontSize === this.fontSize
+      )
+        return;
+      await this.publish(generation, { kind: "layout" });
+    });
   }
 
   invalidate() {
     this.generation++;
     this.cancelFrame?.();
+    this.cancelRender?.();
     if (this.hold?.timer) clearTimeout(this.hold.timer);
     this.hold = null;
   }
@@ -94,15 +115,18 @@ export class PeekPresentation {
                 staged.terminal.modes.synchronizedOutputMode
               )
                 return;
-              await this.publish(generation, false);
+              await this.publish(generation, { kind: "paint", history: false });
             }).catch(() => {});
           }, 120);
         } else if (Date.now() >= this.hold.deadline) {
-          await this.publish(generation, false);
+          await this.publish(generation, { kind: "paint", history: false });
         }
         return;
       }
-      await this.publish(generation, !blank || !this.skippedBlank);
+      await this.publish(generation, {
+        kind: "paint",
+        history: !blank || !this.skippedBlank,
+      });
     });
   }
 
@@ -184,9 +208,35 @@ export class PeekPresentation {
     }
   }
 
-  private async publish(generation: number, history: boolean) {
+  private async renderFont(terminal: Terminal, fontSize: number) {
+    await new Promise<void>((resolve) => {
+      const finish = () => {
+        if (this.cancelRender !== finish) return;
+        subscription.dispose();
+        this.cancelRender = null;
+        resolve();
+      };
+      const subscription = terminal.onRender((event) => {
+        if (event.start === 0 && event.end === terminal.rows - 1) finish();
+      });
+      this.cancelRender = finish;
+      terminal.options.fontSize = fontSize;
+      terminal.refresh(0, terminal.rows - 1);
+    });
+  }
+
+  private async publish(generation: number, publication: Publication) {
     const buffers = this.buffers;
     if (!buffers) return;
+    const [previous, next] = buffers;
+    if (
+      document.visibilityState !== "hidden" &&
+      this.fontSize !== null &&
+      next.terminal.options.fontSize !== this.fontSize
+    ) {
+      await this.renderFont(next.terminal, this.fontSize);
+      if (!this.active(generation)) return;
+    }
     if (document.visibilityState !== "hidden") {
       await new Promise<void>((resolve) => {
         const frame = requestAnimationFrame(() => {
@@ -203,9 +253,10 @@ export class PeekPresentation {
       });
     }
     if (!this.active(generation)) return;
-    if (this.hold?.timer) clearTimeout(this.hold.timer);
-    this.hold = null;
-    const [previous, next] = buffers;
+    if (publication.kind === "paint") {
+      if (this.hold?.timer) clearTimeout(this.hold.timer);
+      this.hold = null;
+    }
     const focused = document.activeElement;
     const transferFocus = previous.host.contains(focused);
     this.show(previous, false);
@@ -222,11 +273,13 @@ export class PeekPresentation {
     }
     this.commit({
       terminal: next.terminal,
-      baseline: this.baseline,
-      interrupted: next.interrupted || this.skippedBlank,
-      history,
+      baseline: publication.kind === "paint" ? this.baseline : null,
+      interrupted:
+        publication.kind === "paint" && (next.interrupted || this.skippedBlank),
+      history: publication.kind === "paint" && publication.history,
     });
-    if (history) {
+    if (publication.kind === "layout") return;
+    if (publication.history) {
       this.baseline = null;
       this.skippedBlank = false;
     }

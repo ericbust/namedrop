@@ -1928,9 +1928,10 @@ button.member:not(.more):hover {
   position: relative;
   width: max-content;
   min-width: 100%;
+  overflow: clip;
 }
 .peek-buffer {
-  position: absolute;
+  position: fixed;
   top: 0;
   left: 0;
   visibility: hidden;

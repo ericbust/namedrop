@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { chromium } from "playwright-core";
-import { createServer } from "vite";
 import { clickMember, data, full, open, until } from "./live-peek.browser.mjs";
+import { withPresentation } from "./peek-presentation.mjs";
 
 const fixture = JSON.parse(
   await readFile(
@@ -26,118 +24,6 @@ const record = (seq, frame) => ({
   seq,
   bytes: frame.paint.bytes,
 });
-
-async function withPresentation(run) {
-  const cacheDir = await mkdtemp(join(tmpdir(), "peek-presentation-"));
-  const server = await createServer({
-    configFile: false,
-    root: new URL("../", import.meta.url).pathname,
-    cacheDir,
-    optimizeDeps: { noDiscovery: true },
-    server: { host: "127.0.0.1", port: 0 },
-    logLevel: "error",
-  });
-  const browser = await chromium.launch({
-    executablePath: process.env.CHROME ?? "/usr/bin/chromium",
-    headless: true,
-    args: ["--no-sandbox"],
-  });
-  try {
-    await server.listen();
-    const page = await browser.newPage();
-    const errors = [];
-    page.on("pageerror", (error) => errors.push(error.message));
-    await page.route("**/probe.html", (route) =>
-      route.fulfill({
-        contentType: "text/html",
-        body: '<link rel="stylesheet" href="/node_modules/@xterm/xterm/css/xterm.css"><link rel="stylesheet" href="/src/style.css"><div class="peek-terminal"></div>',
-      }),
-    );
-    await page.goto(`${server.resolvedUrls.local[0]}probe.html`);
-    await page.evaluate(async () => {
-      const { PeekPresentation } = await import("/src/peekPresentation.ts");
-      const { Terminal } = await import(
-        "/node_modules/@xterm/xterm/lib/xterm.mjs"
-      );
-      const text = (terminal) => {
-        const buffer = terminal.buffer.active;
-        return Array.from(
-          { length: terminal.rows },
-          (_, y) =>
-            buffer.getLine(buffer.baseY + y)?.translateToString(true) ?? "",
-        )
-          .join("\n")
-          .trim();
-      };
-      const commits = [];
-      const presentation = new PeekPresentation(
-        document.querySelector(".peek-terminal"),
-        (cols, rows) => new Terminal({ cols, rows }),
-        ({ terminal }) => commits.push(text(terminal)),
-      );
-      const apply = (kind, content) =>
-        presentation.apply({
-          kind,
-          bytes: new TextEncoder().encode(`\x1b[2J\x1b[H${content}`),
-          ...(kind === "reset"
-            ? { viewport: { cols: 40, rows: 10 }, continuity: "probe" }
-            : {}),
-        });
-      window.probe = { presentation, apply, commits, settled: [] };
-      await apply("reset", "INITIAL");
-    });
-    await page.waitForFunction(() =>
-      document
-        .querySelector(".peek-buffer-visible .xterm-rows")
-        ?.textContent.includes("INITIAL"),
-    );
-    await page.evaluate(() => {
-      const request = window.requestAnimationFrame.bind(window);
-      const cancel = window.cancelAnimationFrame.bind(window);
-      const callbacks = new Map();
-      const captured = [];
-      let next = 1000000;
-      let withheld = true;
-      window.frameGate = {
-        requested: 0,
-        cancelled: [],
-        visibility(state) {
-          Object.defineProperty(document, "visibilityState", {
-            configurable: true,
-            get: () => state,
-          });
-          document.dispatchEvent(new Event("visibilitychange"));
-        },
-        release() {
-          withheld = false;
-          for (const callback of callbacks.values()) request(callback);
-          callbacks.clear();
-        },
-        deliverStale() {
-          for (const callback of captured) callback(performance.now());
-        },
-      };
-      window.requestAnimationFrame = (callback) => {
-        if (!withheld) return request(callback);
-        const id = next++;
-        callbacks.set(id, callback);
-        captured.push(callback);
-        window.frameGate.requested++;
-        return id;
-      };
-      window.cancelAnimationFrame = (id) => {
-        if (callbacks.delete(id)) window.frameGate.cancelled.push(id);
-        else cancel(id);
-      };
-    });
-    await run(page);
-    assert.deepEqual(errors, []);
-  } finally {
-    await browser.close();
-    await server.close();
-    await rm(cacheDir, { recursive: true, force: true });
-  }
-}
 
 test("blank presentation reset cancels a suspended frame and ignores its stale callback", {
   timeout: 15000,
@@ -201,6 +87,112 @@ test("blank presentation disposal settles a suspended publication", {
       "INITIAL",
     ]);
   });
+});
+
+test("blank presentation settles suspended font rendering on reset disposal and hiding", {
+  timeout: 30000,
+}, async () => {
+  for (const action of ["reset", "dispose", "hidden"]) {
+    await withPresentation(async (page) => {
+      await page.evaluate(() => {
+        void window.probe.presentation
+          .setFontSize(18)
+          .then(() => window.probe.settled.push("font"));
+      });
+      await page.waitForFunction(() => window.frameGate.requested > 0);
+      await page.evaluate((action) => {
+        if (action === "reset") {
+          void window.probe
+            .apply("reset", "RESET AFTER FONT")
+            .then(() => window.probe.settled.push("reset"));
+        } else if (action === "dispose") window.probe.presentation.dispose();
+        else window.frameGate.visibility("hidden");
+      }, action);
+      await page.waitForTimeout(100);
+      assert.equal(
+        await page.evaluate(() => window.probe.settled.includes("font")),
+        true,
+        `${action} settles font rendering without an animation frame`,
+      );
+      if (action === "hidden") {
+        await page.evaluate(async () => {
+          await window.probe.apply("data", "HIDDEN AFTER FONT");
+          window.probe.settled.push("hidden");
+        });
+        assert.equal(
+          await page.evaluate(() => window.probe.settled.includes("hidden")),
+          true,
+          "hidden source ingestion progresses after cancelling a font render wait",
+        );
+      } else if (action === "reset") {
+        await page.evaluate(() => window.frameGate.release());
+        await page.waitForFunction(() =>
+          window.probe.settled.includes("reset"),
+        );
+        assert.equal(
+          await page.evaluate(() => window.probe.commits.at(-1)),
+          "RESET AFTER FONT",
+        );
+      }
+    });
+  }
+});
+
+test("blank presentation defers font-only swaps across a held clear and source transaction", {
+  timeout: 20000,
+}, async () => {
+  for (const kind of ["clear", "transaction"]) {
+    await withPresentation(async (page) => {
+      await page.evaluate(async (kind) => {
+        window.frameGate.release();
+        window.probe.originalFont =
+          window.probe.presentation.visible.options.fontSize;
+        await window.probe.presentation.apply({
+          kind: "data",
+          bytes: new TextEncoder().encode(
+            `${kind === "transaction" ? "\x1b[?2026h" : ""}\x1b[2J\x1b[H`,
+          ),
+        });
+        await window.probe.presentation.setFontSize(18);
+      }, kind);
+      assert.deepEqual(
+        await page.evaluate(() => window.probe.commits),
+        ["INITIAL"],
+        `${kind} keeps the previous completed drawing while font work is pending`,
+      );
+      assert.equal(
+        await page.evaluate(
+          () =>
+            window.probe.presentation.visible.options.fontSize ===
+            window.probe.originalFont,
+        ),
+        true,
+        "deferred font work leaves the visible renderer untouched",
+      );
+      if (kind === "transaction") {
+        await page.evaluate(async () => {
+          await window.probe.presentation.apply({
+            kind: "data",
+            bytes: new TextEncoder().encode("TRANSACTION COMPLETE\x1b[?2026l"),
+          });
+        });
+      } else {
+        await page.waitForFunction(() => window.probe.commits.at(-1) === "");
+      }
+      assert.deepEqual(
+        await page.evaluate(() => window.probe.commits),
+        ["INITIAL", kind === "transaction" ? "TRANSACTION COMPLETE" : ""],
+        "only the completed source boundary publishes, without an intermediate font-only frame",
+      );
+      assert.equal(
+        await page.evaluate(
+          () => window.probe.presentation.visible.options.fontSize,
+        ),
+        18,
+        "the completed source publication includes the deferred font size",
+      );
+    });
+  }
 });
 
 test("blank presentation ingests hidden frames and refreshes the latest grid on return", {
@@ -355,6 +347,47 @@ test("blank presentation keeps idle fitted content through width Expand and Rest
   timeout: 30000,
 }, async (t) => {
   await withRecordedTerminal(t, async (ui) => {
+    const copyMarker = async () => {
+      const marker = ui.page
+        .locator(".peek-buffer-visible .xterm-rows > div")
+        .nth(8);
+      await marker.scrollIntoViewIfNeeded();
+      const markerBox = await marker.boundingBox();
+      await ui.page.mouse.dblclick(
+        markerBox.x + (markerBox.width * 9) / 120,
+        markerBox.y + markerBox.height / 2,
+      );
+      return ui.page.evaluate(() => {
+        const clipboardData = new DataTransfer();
+        document.activeElement.dispatchEvent(
+          new ClipboardEvent("copy", { clipboardData, bubbles: true }),
+        );
+        return clipboardData.getData("text/plain").trim();
+      });
+    };
+    assert.equal(
+      await copyMarker(),
+      "PROSE_COMPLETE",
+      "initial fitted terminal selection copies the displayed word",
+    );
+    const extent = await ui.page.locator(".peek-live").evaluate((element) => {
+      const terminal = element
+        .querySelector(".peek-terminal")
+        .getBoundingClientRect();
+      const scroller = element.getBoundingClientRect();
+      const padding = parseFloat(getComputedStyle(element).paddingBottom);
+      return {
+        actual: element.scrollHeight,
+        expected: Math.max(
+          element.clientHeight,
+          terminal.bottom - scroller.top + element.scrollTop + padding,
+        ),
+      };
+    });
+    assert.ok(
+      Math.abs(extent.actual - extent.expected) <= 2,
+      `the fitted projection owns its scroll extent: ${JSON.stringify(extent)}`,
+    );
     ui.live().send({
       v: 1,
       kind: "history",
@@ -367,6 +400,27 @@ test("blank presentation keeps idle fitted content through width Expand and Rest
     const history = await ui.page
       .locator(".peek-history span")
       .allTextContents();
+    const intersections = await ui.page.evaluate(async () => {
+      document.querySelector(".peek-live").scrollTop = 0;
+      const stage = document.querySelector(
+        ".peek-buffer:not(.peek-buffer-visible)",
+      );
+      const visible = document.querySelector(".peek-buffer-visible");
+      const observe = (element) =>
+        new Promise((resolve) => {
+          const observer = new IntersectionObserver(([entry]) => {
+            observer.disconnect();
+            resolve(entry.isIntersecting);
+          });
+          observer.observe(element);
+        });
+      return { stage: await observe(stage), visible: await observe(visible) };
+    });
+    assert.deepEqual(
+      intersections,
+      { stage: true, visible: false },
+      "staging stays drawable while the reader views history offscreen",
+    );
     await ui.page.evaluate(() => {
       window.fitSamples = [];
       window.fitSampling = true;
@@ -486,6 +540,11 @@ test("blank presentation keeps idle fitted content through width Expand and Rest
       ui.liveCount(),
       1,
       "fitting retains the same idle live stream",
+    );
+    assert.equal(
+      await copyMarker(),
+      "PROSE_COMPLETE",
+      "selection follows the fitted terminal geometry",
     );
   });
 });
@@ -806,6 +865,7 @@ test("blank presentation never exposes split synchronized transactions or 64KiB 
   await withTerminal(t, "COMPLETE BEFORE", async (ui) => {
     await startSampler(ui.page);
     ui.live().send(data(2, "\x1b[?2026h\x1b[2J\x1b[H"));
+    await ui.page.setViewportSize({ width: 320, height: 900 });
     await ui.page.waitForTimeout(160);
     assert.equal(
       await visibleText(ui.page),
@@ -813,6 +873,7 @@ test("blank presentation never exposes split synchronized transactions or 64KiB 
       "open transaction cannot publish its clear",
     );
     ui.live().send(data(3, "PARTIAL CONTENT"));
+    await ui.page.setViewportSize({ width: 1440, height: 900 });
     await ui.page.waitForTimeout(40);
     assert.equal(
       await visibleText(ui.page),
