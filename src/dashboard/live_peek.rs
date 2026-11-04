@@ -57,6 +57,7 @@ impl HistoryReader {
             .spawn(move || {
                 let mut last = None;
                 while !cancelled.load(Ordering::Acquire) {
+                    // ANSI reads are passive and do not scroll the source application.
                     let result = ProcessHerdr::default()
                         .with_socket(Some(socket.clone()))
                         .execute_bounded(
@@ -68,6 +69,8 @@ impl HistoryReader {
                                 "recent-unwrapped",
                                 "--lines",
                                 "2200",
+                                "--format",
+                                "ansi",
                             ],
                             Duration::from_secs(20),
                             &cancelled,

@@ -379,7 +379,9 @@ fn recent_history_is_bounded_sanitized_and_sent_after_reset() {
             "--source",
             "recent-unwrapped",
             "--lines",
-            "2200"
+            "2200",
+            "--format",
+            "ansi"
         ])
     );
     assert_eq!(calls[0]["socket"], "socket-a");
