@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -110,7 +111,7 @@ def main():
         browser.wait(timeout=300)
         run.capture()
         if browser.returncode or result.returncode:
-            raise RuntimeError("live probe failed; inspect browser.log and prompt-result.txt")
+            raise RuntimeError(f"live probe failed with browser exit {browser.returncode} and prompt exit {result.returncode}; inspect browser.log and prompt-result.txt")
         transcript = run.transcript(args.agent)
         path = Path(transcript.path)
         records = records_in(path)
@@ -138,6 +139,10 @@ def main():
         )]
         if len(child_paths) != len(child_ids):
             raise RuntimeError("every observed child needs its own transcript")
+        transcript_output = output / "transcripts"
+        transcript_output.mkdir(exist_ok=True)
+        for original in [path, *child_paths]:
+            shutil.copyfile(original, transcript_output / original.name)
         for child in child_paths:
             evidence_records.extend(records_in(child))
         contexts = contexts_in(evidence_records)
@@ -146,6 +151,7 @@ def main():
             "path": str(path), "session": before.session,
             "lifecycle_hook_attachments": hooks,
             "child_transcripts": [str(child) for child in child_paths],
+            "transcript_copies": [str(transcript_output / original.name) for original in [path, *child_paths]],
             "unexpected_model_contexts": unexpected_contexts,
             "model_contexts_checked": contexts,
             "note": "Silent lifecycle hooks should produce no model-context attachment. The live count proves the hooks ran.",
