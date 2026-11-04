@@ -796,7 +796,7 @@ fn human_reply(sequence: u64) -> MessageDraft {
         &ThreadId::new("thread-1"),
         &PaneAddressId::new("address-human"),
         ActorKind::Human,
-        &PaneAddressId::new(if sequence % 2 == 0 {
+        &PaneAddressId::new(if sequence.is_multiple_of(2) {
             "address-agent-b"
         } else {
             "address-agent-a"
@@ -806,7 +806,7 @@ fn human_reply(sequence: u64) -> MessageDraft {
 }
 
 fn agent_ping_pong_reply(sequence: u64) -> MessageDraft {
-    let (author, recipient) = if sequence % 2 == 0 {
+    let (author, recipient) = if sequence.is_multiple_of(2) {
         ("address-agent-a", "address-agent-b")
     } else {
         ("address-agent-b", "address-agent-a")
