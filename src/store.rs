@@ -78,6 +78,7 @@ pub(crate) use coordination_ownership::CoordinationRole;
 mod groups;
 mod handoff;
 mod terminal;
+mod terminal_relay;
 
 pub struct StateStore {
     connection: Connection,
@@ -2951,6 +2952,11 @@ impl StateTransaction<'_> {
             )?;
         }
         self.insert_message_recipients(namespace, draft, thread_order, attribution)?;
+        if draft.author_kind == ActorKind::Human
+            && self.is_operator_address(namespace, &draft.author_address_id)?
+        {
+            self.resolve_terminal_relay_attention(namespace, &draft.thread_id, attribution)?;
+        }
         self.append_transition(
             namespace,
             TransitionEntityKind::CollaborationMessage,
@@ -5956,6 +5962,9 @@ impl StateTransaction<'_> {
             transition,
             attribution,
         )?;
+        if next == DeliveryState::Submitted {
+            self.arm_terminal_relay(namespace, attempt_id, &source_message_id, attribution)?;
+        }
         if matches!(next, DeliveryState::Held | DeliveryState::Failed) {
             self.open_delivery_attempt_attention(
                 namespace,
@@ -7409,6 +7418,8 @@ fn parse_transition_entity_kind(value: String) -> rusqlite::Result<TransitionEnt
         "coordination_review_grant" => Ok(TransitionEntityKind::CoordinationReviewGrant),
         "coordination_review_request" => Ok(TransitionEntityKind::CoordinationReviewRequest),
         "coordination_review_message" => Ok(TransitionEntityKind::CoordinationReviewMessage),
+        "terminal_relay_session" => Ok(TransitionEntityKind::TerminalRelaySession),
+        "terminal_relay_attempt" => Ok(TransitionEntityKind::TerminalRelayAttempt),
         _ => Err(invalid_text("transition entity kind", value)),
     }
 }
@@ -7471,6 +7482,7 @@ fn parse_attention_source_kind(value: String) -> rusqlite::Result<crate::Attenti
         "pane_binding" => Ok(crate::AttentionSourceKind::PaneBinding),
         "integration_registration" => Ok(crate::AttentionSourceKind::IntegrationRegistration),
         "agent_disposition" => Ok(crate::AttentionSourceKind::AgentDisposition),
+        "terminal_relay" => Ok(crate::AttentionSourceKind::TerminalRelay),
         "context_grant" => Ok(crate::AttentionSourceKind::ContextGrant),
         "coordination" => Ok(crate::AttentionSourceKind::Coordination),
         _ => Err(invalid_text("attention source kind", value)),

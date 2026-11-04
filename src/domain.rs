@@ -487,6 +487,15 @@ pub struct MessageDraft {
     pub context_references: Vec<ContextReferenceDraft>,
 }
 
+pub const TERMINAL_RELAY_MAX_CHARS: usize = 16_000;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalRelayEnd {
+    pub agent_session_id: AgentSessionId,
+    pub ended_at_ms: u64,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MessageReceipt {
     pub message_id: MessageId,
@@ -778,6 +787,8 @@ pub enum TransitionEntityKind {
     CoordinationReviewRequest,
     /// A committed review message, as the JSON pair `[request_id, message_id]`.
     CoordinationReviewMessage,
+    TerminalRelaySession,
+    TerminalRelayAttempt,
 }
 
 impl TransitionEntityKind {
@@ -796,6 +807,8 @@ impl TransitionEntityKind {
             Self::CoordinationReviewGrant => "coordination_review_grant",
             Self::CoordinationReviewRequest => "coordination_review_request",
             Self::CoordinationReviewMessage => "coordination_review_message",
+            Self::TerminalRelaySession => "terminal_relay_session",
+            Self::TerminalRelayAttempt => "terminal_relay_attempt",
         }
     }
 }
@@ -901,6 +914,7 @@ pub enum AttentionSourceKind {
     PaneBinding,
     IntegrationRegistration,
     AgentDisposition,
+    TerminalRelay,
     ContextGrant,
     Coordination,
 }
@@ -913,6 +927,7 @@ impl AttentionSourceKind {
             Self::PaneBinding => "pane_binding",
             Self::IntegrationRegistration => "integration_registration",
             Self::AgentDisposition => "agent_disposition",
+            Self::TerminalRelay => "terminal_relay",
             Self::ContextGrant => "context_grant",
             Self::Coordination => "coordination",
         }

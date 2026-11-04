@@ -835,6 +835,14 @@ fn health_issue_for_attention(source: AttentionSourceKind) -> HealthIssue {
             HealthRepairKind::HumanDecision,
             "Review the delivery?",
         ),
+        AttentionSourceKind::TerminalRelay => issue(
+            "ND-DELIVERY-004",
+            HealthSeverity::Notice,
+            "An agent answered in its terminal.",
+            "Its answer was saved in the conversation and may need your reply.",
+            HealthRepairKind::HumanDecision,
+            "Review the answer?",
+        ),
         AttentionSourceKind::AgentDisposition => issue(
             "ND-DELIVERY-003",
             HealthSeverity::Blocked,
