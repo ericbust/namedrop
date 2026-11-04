@@ -960,7 +960,6 @@ impl StateTransaction<'_> {
             .iter()
             .map(|address| &address.address_id)
             .collect();
-        // Resolve targets before filtering so private attention cannot become an unlinked card.
         let mut attention = self.rows(
             "WITH targets (
                  attention_item_id, source_kind, source_id, summary, opened_at_ms, resolved_at_ms,

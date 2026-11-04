@@ -597,6 +597,27 @@ where
             MutationAttribution::new(ActorKind::Human, "local-human", runtime.clock.now_unix_ms());
         let mut store = StateStore::open(runtime.state_directory)?;
         let routed = store.transaction(|tx| {
+            if let Some(receipt) =
+                tx.replay_direct_message(&namespace, peer, request_id, source, &at)?
+            {
+                return Ok(receipt);
+            }
+            let binding = tx
+                .active_pane_bindings(&namespace)?
+                .into_iter()
+                .find(|binding| &binding.address_id == peer);
+            let available = binding.is_some_and(|binding| {
+                discover_worktree_for_workspace(runtime.herdr, workspace).is_ok_and(|live| {
+                    live.panes
+                        .iter()
+                        .any(|pane| pane.pane_id == binding.pane_id)
+                })
+            });
+            if !available {
+                return Err(crate::StoreError::invalid_input(
+                    "this direct message conversation is closed",
+                ));
+            }
             tx.send_direct_message(&namespace, peer, request_id, source, runtime.ids, &at)
         })?;
         Ok(receipt_json(routed, Vec::new()))

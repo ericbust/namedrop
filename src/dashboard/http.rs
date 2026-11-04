@@ -1239,6 +1239,9 @@ fn serve_connection(
                                 peer.closed = true;
                                 peer.presence = "gone".to_owned();
                             }
+                        } else {
+                            peer.closed = true;
+                            peer.presence = "gone".to_owned();
                         }
                         if let Some(label) = spaces
                             .as_ref()

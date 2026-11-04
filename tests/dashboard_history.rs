@@ -15,6 +15,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpStream,
+    os::unix::fs::PermissionsExt,
     path::Path,
     process::{Child, Command, Stdio},
     thread,
@@ -34,7 +35,14 @@ impl Server {
         Self::start_binary(state, Path::new(env!("CARGO_BIN_EXE_namedrop")))
     }
     fn start_binary(state: &Path, binary: &Path) -> Self {
-        let child = Command::new(binary)
+        Self::start_configured(state, binary, None)
+    }
+    fn start_configured(state: &Path, binary: &Path, herdr: Option<&Path>) -> Self {
+        let mut command = Command::new(binary);
+        if let Some(herdr) = herdr {
+            command.env("HERDR_BIN_PATH", herdr);
+        }
+        let child = command
             .arg("--plugin-state")
             .arg(state)
             .arg("dashboard-server")
@@ -709,7 +717,43 @@ fn direct_message_http_routes_keep_private_history_out_of_channel_reads() {
     let state = directory.path().join("state");
     let ns = setup(&state, "direct-http");
     let key = SpaceKey::of(&ns);
-    let server = Server::start(&state);
+    let herdr = directory.path().join("fake-herdr");
+    let live_panes = directory.path().join("live-panes.json");
+    fs::write(
+        &herdr,
+        r#"#!/usr/bin/env python3
+import pathlib, sys
+root = pathlib.Path(__file__).parent
+if sys.argv[1:3] == ["worktree", "list"]:
+    print('{"error":{"code":"not_git_worktree"}}', file=sys.stderr)
+    sys.exit(1)
+if sys.argv[1:3] == ["pane", "list"]:
+    if (root / "discovery-fails").exists():
+        sys.exit(1)
+    print((root / "live-panes.json").read_text())
+elif sys.argv[1:3] == ["workspace", "list"]:
+    print('{"result":{"workspaces":[]}}')
+else:
+    print('{}')
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(
+        &live_panes,
+        serde_json::json!({"result":{"panes":[{
+            "pane_id":"pane-b", "terminal_id":"terminal-b", "tab_id":"tab-b",
+            "workspace_id":"direct-http", "agent":"codex", "agent_status":"idle",
+            "agent_session":{"value":"session-b"}
+        }]}})
+        .to_string(),
+    )
+    .unwrap();
+    let server = Server::start_configured(
+        &state,
+        Path::new(env!("CARGO_BIN_EXE_namedrop")),
+        Some(&herdr),
+    );
     let path = format!("/w/{}/direct-messages/address-b/messages", key.as_str());
     assert_eq!(server.get("/api/direct-messages", false).0, 401);
     assert_eq!(server.get(&path, false).0, 401);
@@ -803,8 +847,47 @@ fn direct_message_http_routes_keep_private_history_out_of_channel_reads() {
         .unwrap();
     assert_eq!(peer["last_message_id"], sent["message_id"]);
     assert_eq!(peer["space_key"], key.as_str());
+    assert_eq!(peer["closed"], false);
+    fs::write(&live_panes, r#"{"result":{"panes":[]}}"#).unwrap();
+    let (_, peers) = server.get("/api/direct-messages", true);
+    let peer = peers["peers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|peer| peer["address_id"] == "address-b")
+        .unwrap();
+    assert_eq!(peer["closed"], true);
+    assert_eq!(peer["presence"], "gone");
+    assert_eq!(
+        post(
+            serde_json::json!({"request_id":"after-close","source":"Do not store"}),
+            Some(csrf)
+        )
+        .0,
+        400
+    );
+    fs::write(directory.path().join("discovery-fails"), b"").unwrap();
+    let (_, peers) = server.get("/api/direct-messages", true);
+    let peer = peers["peers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|peer| peer["address_id"] == "address-b")
+        .unwrap();
+    assert_eq!(peer["closed"], true);
+    assert_eq!(peer["presence"], "gone");
+    assert_eq!(
+        post(
+            serde_json::json!({"request_id":"discovery-unavailable","source":"Do not store"}),
+            Some(csrf)
+        )
+        .0,
+        400
+    );
     let (status, replay) = post(body, Some(csrf));
     assert_eq!(status, 200);
     assert_eq!(replay["message_id"], sent["message_id"]);
     assert_eq!(replay["idempotent_replay"], true);
+    let (_, history) = server.get(&path, true);
+    assert_eq!(history["messages"].as_array().unwrap().len(), 1);
 }

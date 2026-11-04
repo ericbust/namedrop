@@ -8,7 +8,7 @@ import {
   mergeDirectHistory,
 } from "../direct-messages.ts";
 import type { Draft, DraftKey, Outgoing } from "../model.ts";
-import { createPoster } from "../send.ts";
+import type { createPoster } from "../send.ts";
 import { draftKey, sameComposer } from "../store.ts";
 import { parseDirectHistory, parseDirectPeers } from "../wire.ts";
 
@@ -26,7 +26,37 @@ function savedReads(): Map<string, string> {
     return new Map();
   }
 }
-export function useDirectMessages(selected: string | null) {
+function useDirectPoll(
+  request: ((signal: AbortSignal) => Promise<void>) | null,
+) {
+  const retry = useRef(() => {});
+  useEffect(() => {
+    if (request === null) return;
+    let controller: AbortController;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = () => {
+      controller?.abort();
+      clearTimeout(timer);
+      controller = new AbortController();
+      const { signal } = controller;
+      void request(signal).finally(() => {
+        if (!signal.aborted) timer = setTimeout(poll, 2000);
+      });
+    };
+    retry.current = poll;
+    poll();
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+      retry.current = () => {};
+    };
+  }, [request]);
+  return useCallback(() => retry.current(), []);
+}
+export function useDirectMessages(
+  selected: string | null,
+  poster: ReturnType<typeof createPoster>,
+) {
   const [peers, setPeers] = useState<readonly DirectPeer[]>([]);
   const [directoryError, setDirectoryError] = useState(false);
   const [histories, setHistories] = useState<
@@ -38,9 +68,11 @@ export function useDirectMessages(selected: string | null) {
     new Map(),
   );
   const [reads, setReads] = useState(savedReads);
-  const [revision, refresh] = useState(0);
-  const [older, setOlder] = useState(false);
-  const [poster] = useState(createPoster);
+  const [olderRequest, setOlderRequest] = useState<{
+    key: string;
+    controller: AbortController;
+  } | null>(null);
+  const older = olderRequest !== null && olderRequest.key === selected;
   const sending = useRef(new Set<string>());
   const draftsRef = useRef(drafts);
   draftsRef.current = drafts;
@@ -48,52 +80,42 @@ export function useDirectMessages(selected: string | null) {
     peers.find((peer) => directKey(peer) === selected) ?? null;
   const peerRef = useRef(selectedPeer);
   peerRef.current = selectedPeer;
-  useEffect(() => poster.prepare(), [poster]);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: A retry restarts the independent directory poll.
-  useEffect(() => {
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
+  const refreshDirectory = useDirectPoll(
+    useCallback(async (signal: AbortSignal) => {
       try {
         const response = await fetch("/api/direct-messages", {
           credentials: "same-origin",
-          signal: controller.signal,
+          signal,
         });
         if (!response.ok) throw new Error("Directory unavailable");
         const next = parseDirectPeers(await response.json());
-        if (!controller.signal.aborted) {
+        if (!signal.aborted) {
           setPeers(next);
           setDirectoryError(false);
         }
       } catch {
-        if (!controller.signal.aborted) setDirectoryError(true);
+        if (!signal.aborted) setDirectoryError(true);
       }
-      if (!controller.signal.aborted)
-        timer = setTimeout(() => void poll(), 2000);
-    };
-    void poll();
-    return () => {
-      controller.abort();
-      clearTimeout(timer);
-    };
-  }, [revision]);
+    }, []),
+  );
   const spaceKey = selectedPeer?.spaceKey;
   const addressId = selectedPeer?.addressId;
-  // biome-ignore lint/correctness/useExhaustiveDependencies: A retry refreshes the selected private history.
-  useEffect(() => {
-    if (spaceKey === undefined || addressId === undefined || selected === null)
-      return;
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
+  const pollHistory = useCallback(
+    async (signal: AbortSignal) => {
+      if (
+        spaceKey === undefined ||
+        addressId === undefined ||
+        selected === null
+      )
+        return;
       try {
         const response = await fetch(
           `${directPath({ spaceKey, addressId })}?limit=100`,
-          { credentials: "same-origin", signal: controller.signal },
+          { credentials: "same-origin", signal },
         );
         if (!response.ok) throw new Error("Conversation unavailable");
         const page = parseDirectHistory(await response.json());
-        if (!controller.signal.aborted) {
+        if (!signal.aborted) {
           setHistories((all) =>
             new Map(all).set(
               selected,
@@ -118,18 +140,14 @@ export function useDirectMessages(selected: string | null) {
           );
         }
       } catch {
-        if (!controller.signal.aborted)
-          setErrors((all) => new Set(all).add(selected));
+        if (!signal.aborted) setErrors((all) => new Set(all).add(selected));
       }
-      if (!controller.signal.aborted)
-        timer = setTimeout(() => void poll(), 2000);
-    };
-    void poll();
-    return () => {
-      controller.abort();
-      clearTimeout(timer);
-    };
-  }, [selected, spaceKey, addressId, revision]);
+    },
+    [selected, spaceKey, addressId],
+  );
+  const refreshHistory = useDirectPoll(
+    selectedPeer === null ? null : pollHistory,
+  );
   const history = selected === null ? undefined : histories.get(selected);
   const lastAgent = selectedPeer?.lastAgentMessageId;
   useEffect(() => {
@@ -154,9 +172,7 @@ export function useDirectMessages(selected: string | null) {
                 READ_KEY,
                 JSON.stringify(Object.fromEntries(next)),
               );
-            } catch {
-              /* Storage may be unavailable. */
-            }
+            } catch {}
             return next;
           }),
         1500,
@@ -248,26 +264,25 @@ export function useDirectMessages(selected: string | null) {
                   })
                 : all;
             });
-            refresh((value) => value + 1);
+            refreshDirectory();
+            refreshHistory();
           }
         });
     },
-    [poster],
+    [poster, refreshDirectory, refreshHistory],
   );
-  const olderRequest = useRef<AbortController | null>(null);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: Navigation cancels pagination even while its peer remains in the directory.
   useEffect(() => {
-    setOlder(false);
-    return () => olderRequest.current?.abort();
-  }, [selected]);
+    if (olderRequest !== null && olderRequest.key !== selected)
+      olderRequest.controller.abort();
+    return () => olderRequest?.controller.abort();
+  }, [selected, olderRequest]);
   const loadOlder = async () => {
     const peer = peerRef.current;
     const before = history?.messages[0]?.id;
     if (!peer || !before || older) return;
     const key = directKey(peer);
     const controller = new AbortController();
-    olderRequest.current = controller;
-    setOlder(true);
+    setOlderRequest({ key, controller });
     try {
       const params = new URLSearchParams({ before, limit: "100" });
       const response = await fetch(`${directPath(peer)}?${params}`, {
@@ -277,13 +292,20 @@ export function useDirectMessages(selected: string | null) {
       if (!response.ok) throw new Error("Conversation unavailable");
       const page = parseDirectHistory(await response.json());
       if (!controller.signal.aborted)
-        setHistories((all) =>
-          new Map(all).set(key, mergeDirectHistory(all.get(key), page)),
-        );
+        setHistories((all) => {
+          const current = all.get(key);
+          if (current?.messages[0]?.id !== before) return all;
+          return new Map(all).set(
+            key,
+            mergeDirectHistory(current, page, "prepend"),
+          );
+        });
     } catch {
       if (!controller.signal.aborted) setErrors((all) => new Set(all).add(key));
     } finally {
-      if (!controller.signal.aborted) setOlder(false);
+      setOlderRequest((current) =>
+        current?.controller === controller ? null : current,
+      );
     }
   };
   return {
@@ -307,7 +329,10 @@ export function useDirectMessages(selected: string | null) {
     edit,
     send,
     loadOlder,
-    retry: () => refresh((value) => value + 1),
+    retry: () => {
+      refreshDirectory();
+      refreshHistory();
+    },
     pending: [...outbox.values()].filter(
       (entry) =>
         selectedPeer !== null &&

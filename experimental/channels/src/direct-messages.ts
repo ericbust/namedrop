@@ -77,18 +77,27 @@ export function directPeers(
 export function mergeDirectHistory(
   before: DirectHistory | undefined,
   after: DirectHistory,
+  direction: "latest" | "prepend" = "latest",
 ): DirectHistory {
   if (!before || before.threadId !== after.threadId) return after;
   const messages = new Map(
     before.messages.map((message) => [message.id, message]),
   );
+  if (
+    direction === "latest" &&
+    !after.messages.some((message) => messages.has(message.id))
+  )
+    return after;
   for (const message of after.messages) messages.set(message.id, message);
   return {
     threadId: after.threadId,
     messages: [...messages.values()].sort(
       (a, b) => a.at - b.at || a.id.localeCompare(b.id),
     ),
-    earlierOmitted: before.earlierOmitted && after.earlierOmitted,
+    earlierOmitted:
+      direction === "prepend"
+        ? after.earlierOmitted
+        : before.earlierOmitted && after.earlierOmitted,
   };
 }
 export function directSelection(): string | null {

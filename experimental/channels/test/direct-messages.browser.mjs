@@ -53,6 +53,9 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
   const conversations = new Map(peers.map((peer) => [peer.address_id, []]));
   conversations.set("closed", [
     message("old-private", "Retained closed history", "closed"),
+    ...Array.from({ length: 60 }, (_, index) =>
+      message(`closed-${index}`, `Earlier private message ${index}`, "closed"),
+    ),
   ]);
   const posts = [];
   const reads = [];
@@ -62,6 +65,7 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
   let directoryReads = 0;
   let tokenReads = 0;
   let delayBeta = false;
+  let delayOlder = false;
   let sendFailures = 1;
   const fixture = JSON.parse(
     (
@@ -146,11 +150,20 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
         target.last_agent_message_id = reply.message_id;
         return json(res, { message_id: id, thread_id: "private-thread" });
       }
+      const all = conversations.get(address);
+      const before = url.searchParams.get("before");
+      const end =
+        before === null
+          ? all.length
+          : all.findIndex((item) => item.message_id === before);
+      const start = Math.max(0, end - 100);
       const body = {
-        thread_id: conversations.get(address).length ? "private-thread" : null,
-        messages: conversations.get(address),
-        earlier_omitted: false,
+        thread_id: all.length ? "private-thread" : null,
+        messages: all.slice(start, end),
+        earlier_omitted: start > 0,
       };
+      if (before !== null && delayOlder)
+        return setTimeout(() => json(res, body), 4000);
       if (address === "b" && delayBeta)
         return setTimeout(() => json(res, body), 1000);
       return json(res, body);
@@ -344,6 +357,45 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
   assert.ok(
     screenReads.some((path) => path.includes(`/w/${key(1)}/participants/a/`)),
   );
+  const at = Date.now();
+  const gapMessage = (id) => ({
+    ...message(`gap-${id}`, `Gap message ${id}`),
+    at_ms: at + id,
+  });
+  conversations
+    .get("a")
+    .push(...Array.from({ length: 201 }, (_, index) => gapMessage(index + 1)));
+  await page.getByText("Gap message 201", { exact: true }).waitFor();
+  assert.equal(
+    await page.getByText("Private reply for a", { exact: true }).count(),
+    0,
+  );
+  const loadEarlier = page.getByRole("button", {
+    name: "Load earlier messages",
+    exact: true,
+  });
+  delayOlder = true;
+  await loadEarlier.click();
+  await page.waitForTimeout(100);
+  conversations
+    .get("a")
+    .push(
+      ...Array.from({ length: 200 }, (_, index) => gapMessage(index + 202)),
+    );
+  await page.getByText("Gap message 401", { exact: true }).waitFor();
+  await page.waitForTimeout(4200);
+  assert.equal(
+    await page.getByText("Gap message 2", { exact: true }).count(),
+    0,
+    "an older page for a replaced cursor cannot create a gap",
+  );
+  delayOlder = false;
+  await loadEarlier.click();
+  await page.getByText("Gap message 202", { exact: true }).waitFor();
+  assert.equal(
+    await page.getByText("Gap message 302", { exact: true }).count(),
+    1,
+  );
   await mkdir("/tmp/direct-messages-channels", { recursive: true });
   await page.screenshot({
     path: "/tmp/direct-messages-channels/desktop-light.png",
@@ -355,6 +407,28 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
   await page.getByRole("button", { name: /Closed/ }).click();
   await page.locator(`[data-dm-key="${key(3)}/closed"]`).click();
   await page.getByText("Retained closed history", { exact: true }).waitFor();
+  const timeline = page.getByRole("region", {
+    name: "Direct conversation with @claude · #archived",
+  });
+  await timeline.focus();
+  assert.equal(
+    await timeline.evaluate((node) => node === document.activeElement),
+    true,
+  );
+  await timeline.evaluate((node) => {
+    node.scrollTop = 0;
+  });
+  await timeline.press("PageDown");
+  await page.waitForFunction(
+    () => document.querySelector(".dm-timeline").scrollTop > 100,
+  );
+  await timeline.evaluate((node) => {
+    node.scrollTop = 0;
+  });
+  await timeline.press("ArrowDown");
+  await page.waitForFunction(
+    () => document.querySelector(".dm-timeline").scrollTop > 0,
+  );
   assert.equal(await composer.isDisabled(), true);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({

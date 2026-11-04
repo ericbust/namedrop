@@ -116,7 +116,7 @@ export function DirectConversation({
             className="timeline dm-timeline"
             ref={scroller}
             aria-label={`Direct conversation with ${directLabel(peer)}`}
-            // biome-ignore lint/a11y/noNoninteractiveTabindex: The conversation scrolls with the keyboard.
+            // biome-ignore lint/a11y/noNoninteractiveTabindex: This named scroll region supports PageDown, verified in direct-messages.browser.mjs.
             tabIndex={0}
             onScroll={(event) => {
               const node = event.currentTarget;

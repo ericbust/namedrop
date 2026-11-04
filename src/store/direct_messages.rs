@@ -6,7 +6,6 @@ pub(crate) fn thread_id(peer: &PaneAddressId) -> ThreadId {
     ThreadId::new(format!("direct-message:{}", peer.as_str()))
 }
 
-// Root provenance, rather than a name prefix, determines private placement.
 pub(crate) fn private_thread_sql(alias: &str) -> String {
     format!(
         "EXISTS (SELECT 1 FROM collaboration_messages dm_root
@@ -396,18 +395,16 @@ impl StateTransaction<'_> {
         }))
     }
 
-    pub(crate) fn send_direct_message(
+    pub(crate) fn replay_direct_message(
         &mut self,
         ns: &StateNamespace,
         peer: &PaneAddressId,
         request_id: &str,
         source: &str,
-        ids: &impl crate::IdGenerator,
         at: &MutationAttribution,
-    ) -> Result<RoutedMessageReceipt, StoreError> {
+    ) -> Result<Option<RoutedMessageReceipt>, StoreError> {
         let operator = self.ensure_operator_author(ns, at)?;
         let thread = thread_id(peer);
-        // Replay remains valid after closure and never rebinds an old request to another peer.
         let existing = self
             .transaction
             .query_row(
@@ -442,8 +439,26 @@ impl StateTransaction<'_> {
                     parent.as_ref(),
                     ActorKind::Human,
                 )?
+                .map(Some)
                 .ok_or_else(|| StoreError::internal("direct message replay disappeared"));
         }
+        Ok(None)
+    }
+
+    pub(crate) fn send_direct_message(
+        &mut self,
+        ns: &StateNamespace,
+        peer: &PaneAddressId,
+        request_id: &str,
+        source: &str,
+        ids: &impl crate::IdGenerator,
+        at: &MutationAttribution,
+    ) -> Result<RoutedMessageReceipt, StoreError> {
+        if let Some(receipt) = self.replay_direct_message(ns, peer, request_id, source, at)? {
+            return Ok(receipt);
+        }
+        let operator = self.ensure_operator_author(ns, at)?;
+        let thread = thread_id(peer);
         let peer_snapshot = self.routing_address_by_id(ns, peer)?;
         if peer_snapshot.pane_binding_id.is_none()
             || self.pane_type(ns, peer)? != crate::PaneType::Agent

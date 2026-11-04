@@ -168,8 +168,9 @@ function deliveryWords(change: Change | null): string | null {
   );
 }
 export function App() {
+  const [poster] = useState(createPoster);
   const [selectedDm, setSelectedDm] = useState(directSelection);
-  const dm = useDirectMessages(selectedDm);
+  const dm = useDirectMessages(selectedDm, poster);
   const [dmPeek, setDmPeek] = useState<PeekTarget | null>(null);
   useEffect(() => {
     if (dmPeek && selectedDm !== `${dmPeek.channel}/${dmPeek.member}`)
@@ -233,7 +234,6 @@ export function App() {
     )
       focusEvidence({ type: "close" });
   }, [evidence, state.selection.key]);
-  const [poster] = useState(createPoster);
   const [reader] = useState(createScreenReader);
   const inFlightPosts = useRef(new Map<string, ComposerId>());
   const posted = useRef(new Set<string>());

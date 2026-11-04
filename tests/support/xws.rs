@@ -62,6 +62,7 @@ pub struct FakeHerdr {
     pub statuses: Mutex<BTreeMap<String, String>>,
     pub sessions: Mutex<BTreeMap<String, String>>,
     pub unreadable: Mutex<BTreeSet<String>>,
+    pub missing_panes: Mutex<BTreeSet<String>>,
     pub failing_prompts: Mutex<BTreeSet<String>>,
     /// Shell panes as (workspace, pane, physical terminal).
     pub terminals: Mutex<Vec<(String, String, String)>>,
@@ -87,6 +88,7 @@ impl FakeHerdr {
             statuses: Mutex::new(BTreeMap::new()),
             sessions: Mutex::new(BTreeMap::new()),
             unreadable: Mutex::new(BTreeSet::new()),
+            missing_panes: Mutex::new(BTreeSet::new()),
             failing_prompts: Mutex::new(BTreeSet::new()),
             terminals: Mutex::new(Vec::new()),
             runs: Mutex::new(Vec::new()),
@@ -183,6 +185,8 @@ impl HerdrCommandExecutor for FakeHerdr {
                         })
                     })
                     .collect();
+                let missing = self.missing_panes.lock().unwrap();
+                panes.retain(|pane| !missing.contains(pane["pane_id"].as_str().unwrap()));
                 panes.extend(
                     self.terminals
                         .lock()

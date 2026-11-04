@@ -3090,6 +3090,39 @@ fn direct_message_round_trip_binds_operator_identity_and_ignores_body_mentions()
 }
 
 #[test]
+fn direct_messages_reject_missing_live_peers_before_commit_and_replay_after_closure() {
+    use namedrop::send_operator_direct_message;
+    let f = Fixture::new();
+    f.register_all();
+    let peer = f.db().query_row("SELECT address_id FROM alias_claims WHERE worktree_id='w1' AND alias='planner' AND claim_state='active'",[],|row|row.get::<_,String>(0)).unwrap();
+    let peer = PaneAddressId::new(peer);
+    let mut runtime = f.runtime("w1", "unused");
+    runtime.current_pane_id = None;
+    let sent =
+        send_operator_direct_message("dm-before-close", "Private hello", &peer, &runtime).unwrap();
+    let before = f.message_rows();
+    f.herdr
+        .missing_panes
+        .lock()
+        .unwrap()
+        .insert("pane-1-planner".to_owned());
+    let error = send_operator_direct_message("dm-after-close", "Do not commit", &peer, &runtime)
+        .unwrap_err();
+    assert!(error.to_string().contains("conversation is closed"));
+    assert_eq!(f.message_rows(), before);
+    f.herdr.unreadable.lock().unwrap().insert("w1".to_owned());
+    let error = send_operator_direct_message("dm-unavailable", "Do not commit", &peer, &runtime)
+        .unwrap_err();
+    assert!(error.to_string().contains("conversation is closed"));
+    assert_eq!(f.message_rows(), before);
+    let replay =
+        send_operator_direct_message("dm-before-close", "Private hello", &peer, &runtime).unwrap();
+    assert_eq!(replay["message_id"], sent["message_id"]);
+    assert_eq!(replay["idempotent_replay"], true);
+    assert_eq!(f.message_rows(), before);
+}
+
+#[test]
 fn same_named_agents_receive_separate_direct_messages_in_their_home_workspace() {
     use namedrop::send_operator_direct_message;
     let f = Fixture::new();

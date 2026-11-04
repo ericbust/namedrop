@@ -116,13 +116,51 @@ test("DM history keeps earlier pages and updates receipts without duplicating me
     messages: [message("old", 1)],
     earlier_omitted: false,
   });
-  const merged = mergeDirectHistory(newest, older);
+  const merged = mergeDirectHistory(newest, older, "prepend");
   assert.deepEqual(
     merged.messages.map((message) => message.id),
     ["old", "new"],
   );
   assert.equal(merged.earlierOmitted, false);
   assert.deepEqual(mergeDirectHistory(merged, newest), merged);
+});
+test("a disjoint newest DM window resets the cache and keeps older history reachable", () => {
+  const page = (start: number, end: number, earlierOmitted: boolean) =>
+    parseDirectHistory({
+      thread_id: "dm",
+      messages: Array.from({ length: end - start + 1 }, (_, offset) => {
+        const id = start + offset;
+        return {
+          message_id: `message-${id}`,
+          thread_id: "dm",
+          in_reply_to: null,
+          at_ms: id,
+          author: "human",
+          kind: "mention",
+          body: { text: String(id), truncated: false },
+          legs: [],
+        };
+      }),
+      earlier_omitted: earlierOmitted,
+    });
+  const cached = page(1, 1, false);
+  const latest = page(102, 201, true);
+  const refreshed = mergeDirectHistory(cached, latest);
+  assert.deepEqual(refreshed, latest);
+  assert.equal(refreshed.earlierOmitted, true);
+  const prepended = mergeDirectHistory(
+    refreshed,
+    page(2, 101, true),
+    "prepend",
+  );
+  assert.equal(prepended.messages.length, 200);
+  assert.equal(prepended.messages[0]?.id, "message-2");
+  assert.equal(prepended.messages.at(-1)?.id, "message-201");
+  assert.equal(prepended.earlierOmitted, true);
+  const complete = mergeDirectHistory(prepended, cached, "prepend");
+  assert.equal(complete.messages.length, 201);
+  assert.equal(complete.earlierOmitted, false);
+  assert.deepEqual(mergeDirectHistory(complete, latest), complete);
 });
 test("DM sender uses existing session and CSRF refresh with only the private endpoint body", async () => {
   const a = peer();
