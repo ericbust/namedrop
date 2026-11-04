@@ -18,7 +18,6 @@ const browser = await chromium.launch({
 const context = await browser.newContext({
   viewport: { width: 1440, height: 900 },
   colorScheme: "light",
-  recordVideo: { dir: join(output, "video"), size: { width: 1440, height: 900 } },
 });
 const page = await context.newPage();
 const errors = [];
@@ -88,6 +87,5 @@ try {
   await writeFile(join(output, "failure-frames.json"), JSON.stringify(await page.evaluate(() => window.subagentFrames).catch(() => []), null, 2));
   throw error;
 } finally {
-  await context.close();
   await browser.close();
 }
