@@ -441,6 +441,49 @@ mod tests {
     }
 
     #[test]
+    fn terminal_relay_stays_visible_but_out_of_model_context() {
+        let (mut store, ns) = fixture("channel/v1", true);
+        relay(&mut store, &ns, 20, "Decision: TERMINAL_PRIVATE_SENTINEL?");
+        store
+            .transaction(|tx| {
+                let recap = tx.channel_recap(&ns, &MessageId::new("unrelated"))?;
+                assert!(
+                    !recap.contains("TERMINAL_PRIVATE_SENTINEL"),
+                    "recap leaked: {recap}"
+                );
+                tx.ensure_thread_participant(
+                    &ns,
+                    &ThreadId::new("thread"),
+                    &PaneAddressId::new("peer"),
+                    true,
+                    &at(30),
+                )?;
+                let context = tx.thread_context_snapshot(
+                    &ns,
+                    &ThreadId::new("thread"),
+                    &PaneAddressId::new("peer"),
+                )?;
+                assert!(
+                    !context
+                        .payload
+                        .to_string()
+                        .contains("TERMINAL_PRIVATE_SENTINEL"),
+                    "snapshot leaked: {}",
+                    context.payload
+                );
+                let rows = tx.dashboard_rows(&ns)?;
+                assert!(
+                    rows.messages
+                        .iter()
+                        .any(|message| message.grammar_version == GRAMMAR
+                            && message.body.contains("TERMINAL_PRIVATE_SENTINEL"))
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn explicit_no_reply_still_relays() {
         let (mut store, ns) = fixture("mention/v1", true);
         store

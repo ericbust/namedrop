@@ -2582,6 +2582,7 @@ impl StateTransaction<'_> {
         let mut statement = self.transaction.prepare(
             "SELECT m.author_alias_snapshot, m.body FROM collaboration_messages m
              WHERE m.session_socket_id = ?1 AND m.worktree_id = ?2 AND m.message_id <> ?3
+               AND m.grammar_version <> 'terminal-relay/v1'
                AND EXISTS(SELECT 1 FROM collaboration_messages root
                    WHERE root.session_socket_id = m.session_socket_id AND root.worktree_id = m.worktree_id
                      AND root.thread_id = m.thread_id AND root.in_reply_to IS NULL AND root.grammar_version = 'channel/v1')
@@ -3813,6 +3814,7 @@ impl StateTransaction<'_> {
             let mut statement = self.transaction.prepare(
                 "SELECT body FROM collaboration_messages
                  WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3
+                   AND grammar_version <> 'terminal-relay/v1'
                  ORDER BY thread_order DESC LIMIT 20",
             )?;
             statement

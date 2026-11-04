@@ -33,7 +33,6 @@ pub fn run(state: &Path) {
         return;
     };
     let text = input.final_text();
-    // A hook without an explicit socket must not discover a different server.
     let Ok(socket) = env::var("HERDR_SOCKET_PATH") else {
         return;
     };

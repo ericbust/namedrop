@@ -314,7 +314,22 @@ fn input_caps_post_roster_and_channel_recap_including_unicode_and_controls() {
         grammar_version: "mention/v1".to_owned(),
         body: "PRIVATE_NON_CHANNEL_BODY".to_owned(),
     });
+    rows.messages.push(MessageRow {
+        channel_to: None,
+        channel_state: None,
+        channel_mentioned: None,
+        woke: Vec::new(),
+        message_id: "terminal-relay:attempt".to_owned(),
+        thread_id: "channel-thread".to_owned(),
+        in_reply_to: Some("0".to_owned()),
+        created_at_ms: 12,
+        author_address_id: "claude".to_owned(),
+        author_is_human: false,
+        grammar_version: "terminal-relay/v1".to_owned(),
+        body: "TERMINAL_PRIVATE_SENTINEL".to_owned(),
+    });
     let input = test_input(&rows, &"😀".repeat(100));
+    assert!(!input.payload.contains("TERMINAL_PRIVATE_SENTINEL"));
     assert!(!input.aliases.is_empty());
     assert!(input.payload.len() + input.schema.len() + INSTRUCTIONS.len() <= MAX_INPUT_BYTES);
     let payload: Value = serde_json::from_str(&input.payload).unwrap();
