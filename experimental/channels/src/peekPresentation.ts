@@ -20,6 +20,13 @@ export class PeekPresentation {
   private baseline: string | null = null;
   private hold: Hold | null = null;
   private skippedBlank = false;
+  private cancelFrame: (() => void) | null = null;
+  private readonly visibilityChanged = () => {
+    if (document.visibilityState === "hidden") this.cancelFrame?.();
+    else
+      for (const buffer of this.buffers ?? [])
+        buffer.terminal.refresh(0, buffer.terminal.rows - 1);
+  };
 
   constructor(
     private readonly host: HTMLElement,
@@ -30,7 +37,9 @@ export class PeekPresentation {
       interrupted: boolean;
       history: boolean;
     }) => void,
-  ) {}
+  ) {
+    document.addEventListener("visibilitychange", this.visibilityChanged);
+  }
 
   get visible() {
     return this.buffers?.[0].terminal ?? null;
@@ -42,6 +51,7 @@ export class PeekPresentation {
 
   invalidate() {
     this.generation++;
+    this.cancelFrame?.();
     if (this.hold?.timer) clearTimeout(this.hold.timer);
     this.hold = null;
   }
@@ -177,9 +187,21 @@ export class PeekPresentation {
   private async publish(generation: number, history: boolean) {
     const buffers = this.buffers;
     if (!buffers) return;
-    await new Promise<void>((resolve) =>
-      requestAnimationFrame(() => resolve()),
-    );
+    if (document.visibilityState !== "hidden") {
+      await new Promise<void>((resolve) => {
+        const frame = requestAnimationFrame(() => {
+          if (this.cancelFrame !== cancel) return;
+          this.cancelFrame = null;
+          resolve();
+        });
+        const cancel = () => {
+          cancelAnimationFrame(frame);
+          this.cancelFrame = null;
+          resolve();
+        };
+        this.cancelFrame = cancel;
+      });
+    }
     if (!this.active(generation)) return;
     if (this.hold?.timer) clearTimeout(this.hold.timer);
     this.hold = null;
@@ -217,6 +239,7 @@ export class PeekPresentation {
   dispose() {
     this.invalidate();
     this.disposed = true;
+    document.removeEventListener("visibilitychange", this.visibilityChanged);
     for (const cancel of this.pending) cancel();
     this.pending.clear();
     for (const buffer of this.buffers ?? []) buffer.terminal.dispose();
