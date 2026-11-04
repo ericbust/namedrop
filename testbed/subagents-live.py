@@ -36,8 +36,12 @@ def normalized_context(text):
     )
 
 
-def unexpected_contexts_in(records, expected):
-    return [text for text in contexts_in(records) if normalized_context(text) not in expected]
+def unexpected_contexts_in(records, expected, *, codex_child_version=None):
+    native = set()
+    if codex_child_version == "0.164.0":
+        fixture = Path(__file__).parent / "fixtures/codex-0.164.0-child-context.json"
+        native = set(json.loads(fixture.read_text())["contexts"])
+    return [text for text in contexts_in(records) if normalized_context(text) not in expected and text not in native]
 
 
 def records_in(path):
@@ -68,6 +72,7 @@ def main():
     before_transcript = run.transcript(args.agent)
     before_records = records_in(Path(before_transcript.path))
     expected_contexts = {normalized_context(text) for text in contexts_in(before_records)}
+    codex_version = profile.tool_version("codex") if args.agent == "codex" else None
     shell = profile.state["panes"]["shell"]
     opened = profile.namedrop("--herdr-pane", shell, "channels", "--no-open", "--json")
     if opened.returncode:
@@ -143,12 +148,17 @@ def main():
         transcript_output.mkdir(exist_ok=True)
         for original in [path, *child_paths]:
             shutil.copyfile(original, transcript_output / original.name)
-        for child in child_paths:
-            evidence_records.extend(records_in(child))
         contexts = contexts_in(evidence_records)
         unexpected_contexts = unexpected_contexts_in(evidence_records, expected_contexts)
+        for child in child_paths:
+            child_records = records_in(child)
+            contexts.extend(contexts_in(child_records))
+            unexpected_contexts.extend(unexpected_contexts_in(
+                child_records, expected_contexts, codex_child_version=codex_version,
+            ))
         (output / "hook-transcript.json").write_text(json.dumps({
             "path": str(path), "session": before.session,
+            "codex_version": codex_version,
             "lifecycle_hook_attachments": hooks,
             "child_transcripts": [str(child) for child in child_paths],
             "transcript_copies": [str(transcript_output / original.name) for original in [path, *child_paths]],
