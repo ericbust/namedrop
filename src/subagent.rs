@@ -293,8 +293,17 @@ pub enum Event {
         generation: Option<String>,
     },
     ParentEnd,
+    ParentEndFor {
+        generation: String,
+    },
     Reset,
+    ResetFor {
+        generation: String,
+    },
     Resume,
+    Prompt {
+        generation: String,
+    },
 }
 
 impl Event {
@@ -347,7 +356,10 @@ impl Event {
                     .take(256)
                     .collect(),
             },
-            "SessionEnd" => Self::ParentEnd,
+            "SessionEnd" => match generation {
+                Some(generation) => Self::ParentEndFor { generation },
+                None => Self::ParentEnd,
+            },
             "SessionStart"
                 if value["source"]
                     .as_str()
@@ -355,8 +367,14 @@ impl Event {
             {
                 Self::Resume
             }
-            "SessionStart" => Self::Reset,
-            "UserPromptSubmit" => Self::Resume,
+            "SessionStart" => match generation {
+                Some(generation) => Self::ResetFor { generation },
+                None => Self::Reset,
+            },
+            "UserPromptSubmit" => match generation {
+                Some(generation) => Self::Prompt { generation },
+                None => Self::Resume,
+            },
             _ => return None,
         };
         Some((session, event))
@@ -493,31 +511,36 @@ pub fn running(
     now_ms: i64,
     idle_at_ms: Option<i64>,
 ) -> Vec<Running> {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     let directory = parent.directory(state);
     let facts: Vec<_> = facts(&directory)
         .into_iter()
         .filter(|fact| &fact.parent == parent)
         .collect();
-    let ended = facts
-        .iter()
-        .any(|fact| matches!(fact.event, Event::ParentEnd));
-    if ended {
-        return Vec::new();
+    // Only UserPromptSubmit proves a new host generation. SessionStart resume
+    // and compact can replay an ended session without any new work.
+    let mut prompts = HashMap::new();
+    for fact in &facts {
+        if let Event::Prompt { generation } = &fact.event {
+            prompts
+                .entry(generation.as_str())
+                .and_modify(|at: &mut i64| *at = (*at).min(fact.at_ms))
+                .or_insert(fact.at_ms);
+        }
     }
-    let reset = facts
-        .iter()
-        .filter(|f| matches!(f.event, Event::Reset))
-        .map(|f| f.at_ms)
-        .max()
-        .unwrap_or(i64::MIN);
-    let latest_stop = facts
-        .iter()
-        .filter(|f| matches!(f.event, Event::ParentStop { .. }))
-        .max_by_key(|f| f.at_ms);
+    let prompt_at = |generation: &str| prompts.get(generation).copied();
+    let prompt_after = |generation: Option<&str>, barrier: &str| {
+        generation.is_some_and(|generation| {
+            generation != barrier
+                && match (prompt_at(generation), prompt_at(barrier)) {
+                    (Some(prompt), Some(frontier)) => prompt > frontier,
+                    _ => false,
+                }
+        })
+    };
     let resume = facts
         .iter()
-        .filter(|f| matches!(f.event, Event::Resume))
+        .filter(|f| matches!(f.event, Event::Resume | Event::Prompt { .. }))
         .map(|f| f.at_ms)
         .max()
         .unwrap_or(i64::MIN);
@@ -542,29 +565,64 @@ pub fn running(
         if !is_token(id)
             || stopped.contains(&(id.as_str(), None))
             || stopped.contains(&(id.as_str(), generation.as_deref()))
-            || fact.at_ms < reset
             || fact.at_ms > now_ms
             || now_ms.saturating_sub(fact.at_ms) >= MAX_RUN_AGE_MS
         {
             continue;
         }
-        let background = latest_stop.is_some_and(|stop| match &stop.event {
-            Event::ParentStop { background, .. } => background.contains(id),
+        let blocked = facts.iter().any(|barrier| match &barrier.event {
+            Event::ParentEnd => !generation.as_deref().is_some_and(|generation| {
+                prompt_at(generation).is_some_and(|prompt| prompt > barrier.at_ms)
+            }),
+            Event::ParentEndFor {
+                generation: frontier,
+            }
+            | Event::ResetFor {
+                generation: frontier,
+            } => !prompt_after(generation.as_deref(), frontier),
+            // Without a host generation, only a newly observed typed prompt
+            // can prove recovery. A delayed unidentified barrier may hide work.
+            Event::Reset => match generation.as_deref() {
+                Some(generation) => {
+                    !prompt_at(generation).is_some_and(|prompt| prompt > barrier.at_ms)
+                }
+                None => fact.at_ms < barrier.at_ms,
+            },
             _ => false,
         });
-        let turn_stopped = generation.is_some()
-            && facts.iter().any(|fact| {
-                matches!(&fact.event, Event::ParentStop { generation: turn, background }
-                if turn == generation && !background.contains(id))
-            });
-        if !background && turn_stopped {
+        if blocked {
             continue;
         }
-        if let Some(stop) = latest_stop
+        // A typed stop describes only its own turn. Untyped edges retain the
+        // conservative time fallback because their causal relation is unknown.
+        let parent_stop = facts
+            .iter()
+            .filter(|stop| match &stop.event {
+                Event::ParentStop {
+                    generation: turn, ..
+                } => generation.is_none() || turn.is_none() || turn == generation,
+                _ => false,
+            })
+            .max_by_key(|stop| stop.at_ms);
+        let background = parent_stop.is_some_and(|stop| match &stop.event {
+            Event::ParentStop {
+                generation: turn,
+                background,
+            } => {
+                background.contains(id)
+                    && (generation.is_some() && turn == generation || fact.at_ms <= stop.at_ms)
+            }
+            _ => false,
+        });
+        if let Some(stop) = parent_stop
             && !background
-            && (fact.at_ms <= stop.at_ms || resume <= stop.at_ms)
         {
-            continue;
+            let same_generation = matches!(&stop.event,
+                Event::ParentStop { generation: Some(turn), .. }
+                if generation.as_deref() == Some(turn.as_str()));
+            if same_generation || fact.at_ms <= stop.at_ms || resume <= stop.at_ms {
+                continue;
+            }
         }
         if !background && idle_at_ms.is_some_and(|idle| fact.at_ms <= idle) {
             let _ = record(
