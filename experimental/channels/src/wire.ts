@@ -223,6 +223,7 @@ function attention(
     case "context_grant":
     case "coordination":
     case "agent_status":
+    case "terminal_relay":
       source = kind;
       break;
     default:
@@ -402,6 +403,8 @@ function messageKind(value: unknown): MessageKind {
       return "mention";
     case "reply":
       return "reply";
+    case "terminal_relay":
+      return "terminal_relay";
     case "handoff":
       return "handoff";
     case "result_set":

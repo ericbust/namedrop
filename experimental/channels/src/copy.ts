@@ -136,6 +136,11 @@ const unanswered: AttentionRow = {
   namedHint: "It ended its turn without replying.",
 };
 const attentionTable: Record<Attention["source"], AttentionRow> = {
+  terminal_relay: {
+    title: "Terminal reply needs you",
+    named: (alias) => `${alias}'s terminal reply needs you`,
+    hint: "Read the terminal reply, then answer in the thread.",
+  },
   agent_status: { ...needsYou, hint: "Answer it in its pane in Herdr." },
   agent_disposition: unanswered,
   delivery_attempt: unanswered,

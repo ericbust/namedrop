@@ -26,6 +26,16 @@ const channelRow = {
   legs: [],
 };
 
+test("terminal relay history preserves its provenance kind and untrusted text", () => {
+  const text =
+    "<script>alert(1)</script> **Choose** [one](https://example.com)?";
+  const [message] = parseHistory([
+    { ...channelRow, kind: "terminal_relay", body: { text, truncated: true } },
+  ]);
+  assert.equal(message?.kind, "terminal_relay");
+  assert.deepEqual(message?.body, { text, truncated: true });
+});
+
 test("channel history preserves optional routing and wake metadata", () => {
   const channel = {
     state: "routed",
