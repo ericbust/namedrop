@@ -448,6 +448,86 @@ test("identical stdout rows at two proven forward positions retain separate occu
   assert.notEqual(rows[0]?.id, rows[1]?.id);
 });
 
+test("a uniquely located rewind recovers the previously unobserved prefix in order", () => {
+  for (const rewind of [[98, 100, 102], [90, 92, 94, 96, 98, 100, 102]]) {
+    let state = watchReduce(baseline(frame(100)), {
+      kind: "frame",
+      frame: frame(102),
+    });
+    const original = watchRows(state);
+    for (const start of [...rewind, 104])
+      state = watchReduce(state, { kind: "frame", frame: frame(start) });
+    const first = rewind[0];
+    assert.ok(first !== undefined);
+    const rows = watchRows(state);
+    assert.ok(rows.length >= 104 - first);
+    assert.deepEqual(
+      rows.map((row) => row.text),
+      Array.from({ length: rows.length }, (_, i) => line(first + i)),
+    );
+    for (const row of original)
+      assert.equal(rows.find((item) => item.text === row.text)?.id, row.id);
+  }
+});
+
+test("reverse departure with a partial archived overlap never republishes known occurrences", () => {
+  let state = baseline();
+  let archived: ReturnType<typeof watchRows> = [];
+  for (const start of [117, 120, 137, 141, 128, 111]) {
+    state = watchReduce(state, { kind: "frame", frame: frame(start) });
+    if (start === 141) archived = watchRows(state);
+  }
+  const rows = watchRows(state).filter((row) => row.kind === "text");
+  assert.equal(new Set(rows.map((row) => row.text)).size, rows.length);
+  for (const row of archived.filter((row) => row.kind === "text"))
+    assert.equal(rows.find((item) => item.text === row.text)?.id, row.id);
+  assert.ok(watchRows(state).some((row) => row.kind === "gap"));
+});
+
+test("seeded viewport walks retain unique occurrences and order within known ranges", () => {
+  for (const seed of [1, 7, 19, 42, 117, 211, 997, 65537]) {
+    let random = seed;
+    const next = () => {
+      random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
+      return random;
+    };
+    let state = baseline();
+    let start = 0;
+    const path: number[] = [];
+    for (let step = 0; step < 100; step++) {
+      start =
+        step % 5 === 0
+          ? next() % 150
+          : Math.max(0, Math.min(150, start + (next() % 13) - 6));
+      path.push(start);
+      state = watchReduce(state, { kind: "frame", frame: frame(start) });
+      const seen = new Set<string>();
+      let previous: number | null = null;
+      for (const row of watchRows(state)) {
+        if (row.kind === "gap") {
+          previous = null;
+          continue;
+        }
+        const context = `seed ${seed}, viewport walk ${JSON.stringify(path)}`;
+        assert.ok(!seen.has(row.text), `duplicate ${row.text}, ${context}`);
+        seen.add(row.text);
+        const match = /Unique content row (\d+)/.exec(row.text);
+        assert.ok(match);
+        const position = Number(match[1]);
+        assert.ok(
+          previous === null || position === previous + 1,
+          `unordered known range ${previous} -> ${position}, ${context}`,
+        );
+        previous = position;
+      }
+    }
+    assert.ok(
+      watchRows(state).filter((row) => row.kind === "text").length >= 20,
+      `seed ${seed} must retain observed output`,
+    );
+  }
+});
+
 function capturedParagraph(
   state: ReturnType<typeof emptyWatch>,
   number: number,
