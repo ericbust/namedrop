@@ -731,7 +731,7 @@ test("disconnected candidate segments share the byte budget without replacing re
         .filter((row) => row.kind === "text")
         .map((row) => [row.text, row.id]),
     );
-    for (const offset of [start, start + 2]) {
+    for (const offset of [start + 1, start + 3, start, start + 2]) {
       state = watchReduce(state, { kind: "frame", frame: wideFrame(offset) });
       assert.ok(watchBytes(state) <= WATCH_BYTE_LIMIT);
     }
