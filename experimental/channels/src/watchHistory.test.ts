@@ -561,8 +561,10 @@ test("multiple established sequence alignments show a gap and withhold a guessed
   for (let start = 2; start <= 42; start += 2)
     state = watchReduce(state, { kind: "frame", frame: repeatedFrame(start) });
   const rows = watchRows(state).filter((row) => row.kind === "text");
-  assert.deepEqual(rows.map((row) => row.text),
-    Array.from({ length: 42 }, (_, i) => repeatedFrame(i).rows[1]));
+  assert.deepEqual(
+    rows.map((row) => row.text),
+    Array.from({ length: 42 }, (_, i) => repeatedFrame(i).rows[1]),
+  );
   assert.equal(watchRows(state).filter((row) => row.kind === "gap").length, 0);
   for (let i = 5; i < 17; i++) {
     assert.equal(rows[i]?.text, rows[i + 20]?.text);
@@ -620,4 +622,31 @@ test("an interrupted sample keeps known occurrence references for a later unique
   });
   state = watchReduce(state, { kind: "frame", frame: frame(2) });
   assert.deepEqual(watchRows(state), rows);
+});
+
+test("disconnected candidate segments share the byte budget without replacing retained IDs", () => {
+  const wideFrame = (start: number): WatchFrame => {
+    const current = frame(start);
+    return {
+      ...current,
+      cols: 4000,
+      rows: current.rows.map((text) => text.padEnd(3000, "x")),
+    };
+  };
+  let state = baseline(wideFrame(0));
+  state = watchReduce(state, { kind: "frame", frame: wideFrame(2) });
+  const original = watchRows(state);
+  for (let i = 1; i <= 50; i++) {
+    state = watchReduce(state, { kind: "frame", frame: wideFrame(i * 100) });
+    state = watchReduce(state, {
+      kind: "frame",
+      frame: wideFrame(i * 100 + 2),
+    });
+    assert.ok(watchBytes(state) <= WATCH_BYTE_LIMIT);
+  }
+  assert.deepEqual(watchRows(state).slice(0, original.length), original);
+  assert.equal(
+    new Set(watchRows(state).map((row) => row.id)).size,
+    watchRows(state).length,
+  );
 });

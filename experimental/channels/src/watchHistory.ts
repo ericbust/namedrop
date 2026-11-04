@@ -16,6 +16,7 @@ type Ledger =
   | Readonly<{ kind: "unlocated"; boundary: "continuous" | "gap" }>
   | Readonly<{
       kind: "located";
+      frame: WatchFrame | null;
       start: number;
       end: number;
       layout: "physical" | "spaced";
@@ -48,6 +49,7 @@ export type WatchHistory = Readonly<{
   confirmed: readonly WatchRow[];
   baseline: WatchFrame | null;
   ledger: Ledger;
+  segments: readonly Extract<Ledger, { kind: "located" }>[];
 }>;
 export type WatchEvent =
   | Readonly<{
@@ -73,6 +75,7 @@ export function emptyWatch(): WatchHistory {
     confirmed: [],
     baseline: null,
     ledger: { kind: "unlocated", boundary: "continuous" },
+    segments: [],
   };
 }
 
@@ -264,36 +267,6 @@ function observeOccurrence(cell: Occurrence, text: string): Occurrence {
     : { kind: "missing", id: cell.id };
 }
 
-function withPublishedHistory(
-  state: WatchHistory,
-  ledger: Extract<Ledger, { kind: "located" }>,
-): Extract<Ledger, { kind: "located" }> {
-  const id = (cell: Occurrence) =>
-    cell.kind === "conflicted" || cell.kind === "missing"
-      ? cell.id
-      : cell.row.id;
-  const known = new Set(ledger.cells.map(id));
-  if (state.confirmed.every((row) => known.has(row.id))) return ledger;
-  const cells: Occurrence[] = [
-    ...state.confirmed.map(
-      (row): Occurrence =>
-        row.kind === "gap"
-          ? { kind: "missing", id: row.id }
-          : { kind: "published", row },
-    ),
-    ...ledger.cells.slice(ledger.publishedTo - ledger.origin),
-  ];
-  const head = ledger.cells[ledger.top - ledger.origin];
-  const top = head ? cells.findIndex((cell) => id(cell) === id(head)) : -1;
-  return {
-    ...ledger,
-    cells,
-    origin: 0,
-    publishedTo: state.confirmed.length,
-    top: top < 0 ? state.confirmed.length : top,
-  };
-}
-
 function observeFrame(
   state: WatchHistory,
   frame: WatchFrame,
@@ -323,32 +296,84 @@ function observeFrame(
       ...state,
       baseline: frame,
       ledger: { kind: "unlocated", boundary: "gap" },
+      segments:
+        state.ledger.kind === "located"
+          ? [...state.segments, { ...state.ledger, frame: null }]
+          : state.segments,
     };
   let nextId = state.nextId;
-  let ledger =
-    state.ledger.kind === "located"
-      ? withPublishedHistory(state, state.ledger)
-      : state.ledger;
+  let ledger = state.ledger;
+  const segments = [...state.segments];
   const scroll = scrollBetween(previous, frame);
-  if (ledger.kind === "located" && scroll && scroll.start > ledger.start) {
-    ledger = {
-      ...ledger,
-      start: scroll.start,
-      top: ledger.top + scroll.start - ledger.start,
-    };
+  const backward = scrollBetween(frame, previous);
+  let alignment: Alignment = { kind: "unmatched" };
+  if (ledger.kind === "located" && ledger.frame === previous) {
+    const movement = scroll ?? backward;
+    if (
+      movement &&
+      ledger.layout === "physical" &&
+      movement.start >= ledger.start &&
+      movement.end === ledger.end
+    ) {
+      ledger = {
+        ...ledger,
+        start: movement.start,
+        top: ledger.top + movement.start - ledger.start,
+      };
+      alignment = {
+        kind: "matched",
+        offset: ledger.top + (scroll ? movement.shift : -movement.shift),
+      };
+    }
   }
-  let alignment: Alignment =
-    ledger.kind === "located" ? locate(ledger, frame) : { kind: "unmatched" };
-  if (
-    alignment.kind === "unmatched" &&
-    ledger.kind === "located" &&
-    ledger.layout === "physical"
-  ) {
-    const spaced = withoutLayoutBlanks(ledger);
-    const aligned = locate(spaced, frame);
-    if (aligned.kind !== "unmatched") {
-      ledger = spaced;
-      alignment = aligned;
+  if (alignment.kind === "unmatched") {
+    if (ledger.kind === "located" && scroll && scroll.start > ledger.start)
+      ledger = {
+        ...ledger,
+        start: scroll.start,
+        top: ledger.top + scroll.start - ledger.start,
+      };
+    let matched: Extract<Ledger, { kind: "located" }> | null = null;
+    let matchedIndex = -1;
+    const candidates =
+      ledger.kind === "located" ? [...segments, ledger] : segments;
+    for (const [index, candidate] of candidates.entries()) {
+      if (
+        candidate.screen.cols !== frame.cols ||
+        candidate.screen.buffer !== frame.buffer ||
+        candidate.screen.height !== frame.rows.length
+      )
+        continue;
+      let located = candidate;
+      let found = locate(located, frame);
+      if (found.kind === "unmatched" && candidate.layout === "physical") {
+        const spaced = withoutLayoutBlanks(candidate);
+        const spacedAlignment = locate(spaced, frame);
+        if (spacedAlignment.kind !== "unmatched") {
+          located = spaced;
+          found = spacedAlignment;
+        }
+      }
+      if (
+        found.kind === "ambiguous" ||
+        (found.kind === "matched" && matched !== null)
+      ) {
+        alignment = { kind: "ambiguous" };
+        break;
+      }
+      if (found.kind === "matched") {
+        matched = located;
+        matchedIndex = index;
+        alignment = found;
+      }
+    }
+    if (alignment.kind === "matched" && matched) {
+      if (matchedIndex < segments.length) {
+        segments.splice(matchedIndex, 1);
+        if (ledger.kind === "located")
+          segments.push({ ...ledger, frame: null });
+      }
+      ledger = matched;
     }
   }
   if (alignment.kind === "ambiguous") {
@@ -369,8 +394,10 @@ function observeFrame(
   if (top === null) {
     if (!scroll) return { ...state, baseline: frame };
     const boundary = ledger.kind === "unlocated" ? ledger.boundary : "gap";
+    if (ledger.kind === "located") segments.push({ ...ledger, frame: null });
     ledger = {
       kind: "located",
+      frame: previous,
       start: scroll.start,
       end: scroll.end,
       layout: "physical",
@@ -446,8 +473,10 @@ function observeFrame(
     nextId,
     confirmed,
     baseline: frame,
+    segments,
     ledger: {
       ...ledger,
+      frame,
       top,
       cells,
       boundary,
@@ -486,8 +515,12 @@ export function watchBytes(state: WatchHistory) {
   let bytes = 0;
   for (const row of watchRows(state))
     bytes += encoder.encode(row.text).length + 1;
-  if (state.ledger.kind === "located") {
-    for (const cell of state.ledger.cells)
+  const segments =
+    state.ledger.kind === "located"
+      ? [...state.segments, state.ledger]
+      : state.segments;
+  for (const segment of segments) {
+    for (const cell of segment.cells)
       if (cell.kind !== "published") bytes += occurrenceBytes(cell);
   }
   for (const text of state.baseline?.rows ?? [])
@@ -499,7 +532,13 @@ function bounded(state: WatchHistory): WatchHistory {
   const seed = [...state.seed];
   const confirmed = [...state.confirmed];
   let ledger = state.ledger;
+  let segments = [...state.segments];
   let bytes = watchBytes(state);
+  while (segments.length && bytes > WATCH_BYTE_LIMIT) {
+    const segment = segments.shift();
+    for (const cell of segment?.cells ?? [])
+      if (cell.kind !== "published") bytes -= occurrenceBytes(cell);
+  }
   while (
     seed.length + confirmed.length > WATCH_LINE_LIMIT ||
     bytes > WATCH_BYTE_LIMIT
@@ -524,7 +563,22 @@ function bounded(state: WatchHistory): WatchHistory {
     if (bytes > WATCH_BYTE_LIMIT)
       ledger = { kind: "unlocated", boundary: "gap" };
   }
-  return { ...state, seed, confirmed, ledger };
+  const retained = new Set(confirmed.map((row) => row.id));
+  segments = segments.flatMap((segment) => {
+    const first = segment.cells.findIndex(
+      (cell) => cell.kind === "published" && retained.has(cell.row.id),
+    );
+    return first < 0
+      ? []
+      : [
+          {
+            ...segment,
+            origin: segment.origin + first,
+            cells: segment.cells.slice(first),
+          },
+        ];
+  });
+  return { ...state, seed, confirmed, ledger, segments };
 }
 
 function seedBoundary(state: WatchHistory, source: readonly string[]) {
