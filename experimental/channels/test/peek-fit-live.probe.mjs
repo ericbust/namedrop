@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { chromium } from "playwright-core";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -76,6 +77,19 @@ try {
           const name = `${alias.slice(1)}-${width}x${height}-${expanded ? "expanded" : "normal"}-${compose ? "compose" : "closed"}`;
           observations.push({ name, ...geometry });
           await page.screenshot({ path: join(root, `${name}.png`) });
+          assert.ok(
+            Math.abs(geometry.frameBottom - geometry.footerTop) <= 1,
+            `${name}: frame reaches footer`,
+          );
+          assert.ok(
+            Math.abs(geometry.footerBottom - height) <= 1,
+            `${name}: footer reaches window bottom`,
+          );
+          assert.ok(
+            geometry.lastTop >= geometry.frameTop &&
+              geometry.lastBottom <= geometry.frameBottom + 1,
+            `${name}: newest populated row stays visible`,
+          );
           if (compose)
             await page
               .getByRole("button", { name: "Stop typing", exact: true })
