@@ -4,7 +4,7 @@
   "provenance": {
     "binary": "/home/ebusta/.local/share/mise/installs/codex/0.164.0/bin/codex",
     "binary_sha256": "b93f6811d3f653f0fb83be4050d857fb9abbb111dfa2ce160563327daff7f306",
-    "transcript_evidence": "/home/ebusta/.local/state/pstack/orchestrate/namedrop-ui/reports/SUBAGENTS/live/codex/hook-transcript.json",
+    "transcript_evidence": "/home/ebusta/.local/state/pstack/orchestrate/namedrop-ui/reports/SUBAGENTS/native-context/source-live/hook-transcript.json",
     "transcript_evidence_sha256": "ab49b4886efa63f026147e7f46d980f93a3f2bc319d90ef497d17611beba7dc7",
     "verification_report": "/home/ebusta/.local/state/pstack/orchestrate/namedrop-ui/reports/SUBAGENTS/native-context/provenance.json"
   },
