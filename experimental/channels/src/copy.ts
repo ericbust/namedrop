@@ -561,26 +561,7 @@ export const routeCopy = {
     unreachable:
       "Namedrop couldn't reach its router, so it didn't pick who gets this post. The post is saved.",
   } satisfies Record<RouteTip["kind"], unknown>,
-  openReplies: (count: number) => `${repliesCopy(count)}. Open thread`,
 };
-const REFERENCE_LIMIT = 80;
-export const referenceCopy = {
-  earlier: "Reply to an earlier message",
-  label: (author: string, line: string) => {
-    const points = Array.from(line);
-    const clipped =
-      points.length > REFERENCE_LIMIT
-        ? `${points
-            .slice(0, REFERENCE_LIMIT - 1)
-            .join("")
-            .trimEnd()}…`
-        : line;
-    const stop = /[.!?…]$/.test(clipped) ? "" : ".";
-    return `Reply to ${author}: ${clipped}${stop} Open thread`;
-  },
-  earlierLabel: "Reply to an earlier message. Open thread",
-};
-
 export const emptyChannelCopy = {
   title: "No messages yet",
   body: "Post here to talk with the agents in this workspace. Mention @name to bring one in.",

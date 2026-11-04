@@ -971,9 +971,6 @@ export type Wrote = ReadonlyMap<AddressId | "human", number>;
 // When each member first wrote or was sent a message in a thread: the time it
 // joined the conversation.
 export type Joined = ReadonlyMap<AddressId, number>;
-// A thread that reads as a conversation, every message its own row. Its first
-// loaded parent decides: a channel post makes a channel room, a first message
-// an agent wrote makes an agents room, and anything else is a request thread.
 export type Room =
   | { kind: "channel"; post: Message; wrote: Wrote; joined: Joined }
   | { kind: "agents"; root: Message; wrote: Wrote };
@@ -1061,11 +1058,6 @@ export function threadGroups(
     group.room = roomOf(group, channel.members);
   return groups;
 }
-// The line above a conversation reply whose row above is not the message it answers.
-export type ReplyReference =
-  | { kind: "message"; parent: Message }
-  | { kind: "earlier" };
-const earlier: ReplyReference = { kind: "earlier" };
 export type MessageRow = {
   kind: "message" | "orphan";
   message: Message;
@@ -1075,7 +1067,6 @@ export type MessageRow = {
   recipients: readonly AddressId[];
   latestReply: Message | null;
   replyCount: number;
-  reference: ReplyReference | null;
 };
 export type TimelineRow =
   | MessageRow
@@ -1125,26 +1116,15 @@ export function timelineView(
       if (!thread) continue;
       const { room } = thread;
       const reply = message.inReplyTo !== null || message.kind === "reply";
-      if (reply && room === null && thread.parents.length > 0) continue;
+      if (reply && thread.parents.length > 0) continue;
       if (message.at < dayStart || message.at >= dayEnd) {
         ({ start: dayStart, end: dayEnd } = dayBounds(message.at));
         rows.push({ kind: "day", label: dayLabel(dayStart, now), before: id });
         previous = null;
       }
       const to = recipients(message);
-      let reference: ReplyReference | null = null;
-      if (
-        room !== null &&
-        message.inReplyTo !== null &&
-        previous?.id !== message.inReplyTo
-      ) {
-        const parent = channel.messages.get(message.inReplyTo);
-        reference =
-          parent === undefined ? earlier : { kind: "message", parent };
-      }
       const grouped =
-        (!reply || room !== null) &&
-        reference === null &&
+        !reply &&
         previous !== null &&
         previous.author === message.author &&
         message.at - previous.at >= 0 &&
@@ -1153,7 +1133,7 @@ export function timelineView(
         !isSystem(previous);
       const channelChat = room?.kind === "channel";
       rows.push({
-        kind: reply && room === null ? "orphan" : "message",
+        kind: reply ? "orphan" : "message",
         message,
         thread,
         grouped,
@@ -1164,17 +1144,15 @@ export function timelineView(
               (previous?.kind !== message.kind ||
                 !sameList(previousNamed, to))),
         recipients: to,
-        latestReply:
-          reply || room !== null ? null : (thread.replies.at(-1) ?? null),
+        latestReply: reply ? null : (thread.replies.at(-1) ?? null),
         replyCount: reply
           ? 0
           : Math.max(
               thread.replies.length,
               thread.knownCount - Math.max(1, thread.parents.length),
             ),
-        reference,
       });
-      previous = reply && room === null ? null : message;
+      previous = reply ? null : message;
       previousNamed = channelChat ? noRecipients : to;
     }
   }
