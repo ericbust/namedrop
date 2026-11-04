@@ -137,13 +137,7 @@ export function PeekLive({
         current.element?.querySelector(".xterm-screen")?.getBoundingClientRect()
           .width ?? 0;
       if (width <= 0) return;
-      const fitted = Math.max(
-        10,
-        Math.min(
-          baseFont,
-          Math.floor(((baseFont * available) / width) * 10) / 10,
-        ),
-      );
+      const fitted = Math.max(10, Math.min(20, (baseFont * available) / width));
       current.options.fontSize = fitted;
       historyNode.style.fontSize = `${fitted}px`;
       restorePosition();
