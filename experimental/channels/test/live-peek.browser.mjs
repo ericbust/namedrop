@@ -2402,6 +2402,16 @@ test("live Peek native return follows history appended during keyboard scrolling
       true,
       `native End finishes during confirmed appends: ${JSON.stringify(await scrollMetrics(ui))}`,
     );
+    const afterReturn = appended;
+    await until(
+      () => appended > afterReturn,
+      "confirmed append after native return",
+    );
+    assert.equal(
+      (await scrollMetrics(ui)).bottomVisible,
+      true,
+      "native return resumes following later confirmed output",
+    );
     assert.deepEqual(ui.errors, []);
     assert.deepEqual(
       ui.requests.filter((request) => request.method === "POST"),

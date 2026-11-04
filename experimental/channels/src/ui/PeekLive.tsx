@@ -44,7 +44,7 @@ export function PeekLive({
     const controller = new AbortController();
     let validated = false;
     let presentation: PeekPresentation;
-    let following = true;
+    let navigation: "following" | "reading" | "returning" = "following";
     let replacing = false;
     let position = { top: 0, left: 0 };
     let columns = 0;
@@ -71,7 +71,8 @@ export function PeekLive({
       const changed =
         lines.length !== renderedRows.length ||
         lines.some((row, i) => row !== renderedRows[i]);
-      const anchor = changed && !following ? readingAnchor() : null;
+      const anchor =
+        changed && navigation === "reading" ? readingAnchor() : null;
       if (changed) {
         replacing = true;
         const fragment = document.createDocumentFragment();
@@ -188,15 +189,17 @@ export function PeekLive({
     }
     function rememberPosition() {
       if (replacing) return;
-      following = scroller.scrollTop >= latestTop() - 1;
+      const latest = scroller.scrollTop >= latestTop() - 1;
+      if (navigation !== "returning" || latest)
+        navigation = latest ? "following" : "reading";
       position = { top: scroller.scrollTop, left: scroller.scrollLeft };
     }
     function restorePosition() {
       if (controller.signal.aborted) return;
       // Repeated assignments cancel Chromium's native keyboard scroll animation.
       // A reader's position needs restoration only when replacing the grid.
-      if (following || replacing) {
-        const top = following ? latestTop() : position.top;
+      if (navigation !== "reading" || replacing) {
+        const top = navigation !== "reading" ? latestTop() : position.top;
         if (Math.abs(scroller.scrollTop - top) > 1) scroller.scrollTop = top;
       }
       if (replacing && scroller.scrollLeft !== position.left)
@@ -205,9 +208,25 @@ export function PeekLive({
     }
     function followIntent(event: KeyboardEvent) {
       if (event.key === "End" && (event.ctrlKey || event.metaKey))
-        following = true;
+        navigation = "returning";
+      else if (
+        [
+          "ArrowUp",
+          "ArrowDown",
+          "PageUp",
+          "PageDown",
+          "Home",
+          "End",
+          " ",
+        ].includes(event.key)
+      )
+        interruptReturn();
+    }
+    function interruptReturn() {
+      if (navigation === "returning") navigation = "reading";
     }
     function localWheel(event: WheelEvent) {
+      interruptReturn();
       // Keep the browser default, but bypass xterm's wheel-to-input and mouse
       // tracking handlers even when the projected TUI enables those modes.
       event.stopPropagation();
@@ -218,6 +237,7 @@ export function PeekLive({
     });
     scroller.addEventListener("scroll", rememberPosition);
     scroller.addEventListener("keydown", followIntent);
+    scroller.addEventListener("pointerdown", interruptReturn);
     const resize = new ResizeObserver(() => {
       if (!replacing) fit();
     });
@@ -315,6 +335,7 @@ export function PeekLive({
       scroller.removeEventListener("wheel", localWheel, true);
       scroller.removeEventListener("scroll", rememberPosition);
       scroller.removeEventListener("keydown", followIntent);
+      scroller.removeEventListener("pointerdown", interruptReturn);
       presentation.dispose();
     };
   }, [target, onState, onHistory]);
