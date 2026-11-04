@@ -1148,6 +1148,7 @@ export function App() {
           >
             {selectedDm !== null ? (
               <DirectConversation
+                key={selectedDm}
                 dm={dm}
                 completion={
                   dm.selectedPeer === null

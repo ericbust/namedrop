@@ -84,6 +84,7 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
   let tokenReads = 0;
   let delayBeta = false;
   let delayOlder = false;
+  let delayAlphaBody = false;
   let sendFailures = 1;
   const fixture = JSON.parse(
     (
@@ -153,10 +154,17 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
           ?.some((item) => item.message_id === id)
       )
         return json(res, {}, 404);
-      return json(res, {
+      const address = decodeURIComponent(scoped[2]);
+      const body = {
         message_id: id,
-        body: { text: longBodies.get(id), truncated: false },
-      });
+        body: {
+          text: longBodies.get(`${address}/${id}`) ?? longBodies.get(id),
+          truncated: false,
+        },
+      };
+      if (delayAlphaBody && address === "a" && id === "shared-message")
+        return setTimeout(() => json(res, body), 1000);
+      return json(res, body);
     }
     const direct = /^\/w\/([^/]+)\/direct-messages\/([^/]+)\/messages$/.exec(
       url.pathname,
@@ -358,6 +366,52 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
     ],
   );
   assert.ok(bodyReads.every((read) => read.csrf));
+  const alphaBody = `${"Alpha scoped text. ".repeat(140)}Alpha scoped ending`;
+  const betaBody = `${"Beta scoped text. ".repeat(140)}Beta scoped ending`;
+  longBodies.set("a/shared-message", alphaBody);
+  longBodies.set("b/shared-message", betaBody);
+  conversations.get("a").push(message("shared-message", alphaBody, "a"));
+  conversations.get("b").push(message("shared-message", betaBody, "b"));
+  const sharedRow = page.locator('[data-message-id="shared-message"]');
+  await b.click();
+  await sharedRow.getByText(/Beta scoped text/).waitFor();
+  await a.click();
+  await sharedRow.getByText(/Alpha scoped text/).waitFor();
+  await sharedRow
+    .getByRole("button", { name: "Show more", exact: true })
+    .click();
+  await sharedRow.getByText(/Alpha scoped ending/).waitFor();
+  await b.click();
+  await page
+    .getByRole("region", {
+      name: "Direct conversation with @claude · #beta",
+      exact: true,
+    })
+    .waitFor();
+  assert.equal(await sharedRow.getByText(/Alpha scoped ending/).count(), 0);
+  await sharedRow.getByText(/Beta scoped text/).waitFor();
+  delayAlphaBody = true;
+  await a.click();
+  await sharedRow
+    .getByRole("button", { name: "Show more", exact: true })
+    .click();
+  await page.waitForFunction(() =>
+    document.querySelector(
+      '[data-message-id="shared-message"] [aria-busy="true"]',
+    ),
+  );
+  await b.click();
+  await sharedRow.getByText(/Beta scoped text/).waitFor();
+  await page.waitForTimeout(1200);
+  assert.equal(await sharedRow.getByText(/Alpha scoped ending/).count(), 0);
+  assert.equal(
+    await sharedRow
+      .getByRole("button", { name: "Show more", exact: true })
+      .count(),
+    1,
+  );
+  delayAlphaBody = false;
+  await a.click();
   const incoming = message("beta-unread", "Private incoming beta", "b");
   conversations.get("b").push(incoming);
   peers[1].thread_id = "private-thread";
