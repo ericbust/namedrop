@@ -351,6 +351,145 @@ async function withRecordedTerminal(t, run) {
   }
 }
 
+test("blank presentation keeps idle fitted content through width Expand and Restore changes", {
+  timeout: 30000,
+}, async (t) => {
+  await withRecordedTerminal(t, async (ui) => {
+    ui.live().send({
+      v: 1,
+      kind: "history",
+      seq: 2,
+      text: Array.from({ length: 260 }, (_, i) => `IDLE HISTORY ${i}`).join(
+        "\n",
+      ),
+    });
+    await ui.page.locator(".peek-history span").nth(259).waitFor();
+    const history = await ui.page
+      .locator(".peek-history span")
+      .allTextContents();
+    await ui.page.evaluate(() => {
+      window.fitSamples = [];
+      window.fitSampling = true;
+      function sample() {
+        if (!window.fitSampling) return;
+        const scroller = document.querySelector(".peek-live");
+        const box = scroller.getBoundingClientRect();
+        const grids = [
+          ...document.querySelectorAll(".peek-buffer-visible .xterm-rows"),
+        ];
+        window.fitSamples.push(
+          grids.map((grid) => {
+            const rect = grid.getBoundingClientRect();
+            return {
+              text: grid.textContent.trim(),
+              intersecting: rect.bottom > box.top && rect.top < box.bottom,
+              width: rect.width,
+            };
+          }),
+        );
+        requestAnimationFrame(() => setTimeout(sample, 0));
+      }
+      requestAnimationFrame(() => setTimeout(sample, 0));
+    });
+    const widths = [];
+    for (const width of [960, 1700, 1280]) {
+      await ui.page.setViewportSize({ width, height: 1000 });
+      for (const button of ["Expand", "Restore"]) {
+        await ui.drawer
+          .getByRole("button", { name: button, exact: true })
+          .click();
+        await ui.page.waitForTimeout(100);
+        await ui.page.locator(".peek-live").focus();
+        await ui.page.keyboard.press("Control+End");
+        await ui.page.waitForTimeout(150);
+        widths.push(
+          await ui.page.locator(".peek-live").evaluate((el) => {
+            const style = getComputedStyle(el);
+            return {
+              available:
+                el.clientWidth -
+                parseFloat(style.paddingLeft) -
+                parseFloat(style.paddingRight),
+              screen: el
+                .querySelector(".peek-buffer-visible .xterm-screen")
+                .getBoundingClientRect().width,
+              font: parseFloat(
+                getComputedStyle(el.querySelector(".peek-history pre"))
+                  .fontSize,
+              ),
+              visualFont:
+                parseFloat(
+                  getComputedStyle(
+                    el.querySelector(".peek-buffer-visible .xterm-rows"),
+                  ).fontSize,
+                ) *
+                parseFloat(
+                  getComputedStyle(el.querySelector(".peek-terminal")).zoom,
+                ),
+            };
+          }),
+        );
+        await ui.page
+          .locator(".peek-history span")
+          .nth(200)
+          .evaluate((line) => {
+            line.closest(".peek-live").scrollTop = line.offsetTop;
+          });
+        await ui.page.waitForTimeout(100);
+      }
+    }
+    const observations = await ui.page.evaluate(() => {
+      window.fitSampling = false;
+      return window.fitSamples;
+    });
+    assert.ok(
+      observations.length > 20,
+      "real browser frames observed while fitting idle content",
+    );
+    assert.ok(
+      observations.some((grids) => grids.some((grid) => grid.intersecting)),
+      "the idle terminal is actually displayed during fit actions",
+    );
+    assert.deepEqual(
+      observations.filter((grids) =>
+        grids.some((grid) => grid.intersecting && !grid.text),
+      ),
+      [],
+      "idle width and Expand/Restore changes never display an empty source grid",
+    );
+    assert.ok(
+      Math.max(...widths.map((fit) => fit.screen)) >
+        Math.min(...widths.map((fit) => fit.screen)) + 100,
+      "Expand changes the actual projected terminal width",
+    );
+    for (const fit of widths) {
+      assert.ok(fit.font >= 10, "fit keeps text readable");
+      assert.ok(
+        fit.visualFont >= 9.99 && fit.visualFont <= 13.01,
+        "rendered terminal text stays between the readability floor and base size",
+      );
+      assert.ok(
+        Math.abs(fit.visualFont - fit.font) < 0.1,
+        "history and projected terminal text use matching visual sizes",
+      );
+      assert.ok(
+        fit.screen <= fit.available + 2 || fit.font === 10,
+        `fit uses available width or the readability floor: ${JSON.stringify(fit)}`,
+      );
+    }
+    assert.deepEqual(
+      await ui.page.locator(".peek-history span").allTextContents(),
+      history,
+      "idle fitting never changes retained history",
+    );
+    assert.equal(
+      ui.liveCount(),
+      1,
+      "fitting retains the same idle live stream",
+    );
+  });
+});
+
 test("blank presentation keeps terminal focus across every ordinary buffer swap", {
   timeout: 30000,
 }, async (t) => {
