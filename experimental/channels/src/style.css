@@ -1925,8 +1925,21 @@ button.member:not(.more):hover {
   min-height: 1.5em;
 }
 .peek-terminal {
+  position: relative;
   width: max-content;
   min-width: 100%;
+}
+.peek-buffer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.peek-buffer-visible {
+  position: relative;
+  visibility: visible;
+  pointer-events: auto;
 }
 .peek-live .xterm .xterm-viewport {
   overflow: hidden;

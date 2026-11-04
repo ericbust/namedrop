@@ -570,7 +570,7 @@ async function open(browser, t, initial = full()) {
   const chip = (member) =>
     page.locator(`[data-address-id="${member}"] .member`);
   const drawer = page.getByRole("complementary", { name: /^Screen of/ });
-  const rows = () => drawer.locator(".xterm-rows > div");
+  const rows = () => drawer.locator(".xterm-rows > div:visible");
   const live = () => allStreams.at(-1);
   const liveCount = () =>
     requests.filter((r) => r.path.endsWith("/live")).length;
@@ -2025,6 +2025,8 @@ async function watchedHistoryOracle(browser, t, result) {
     bytes: encode(`\x1b[2J${paintGrid(grid(0))}`),
   });
   const ui = await open(browser, t, initial);
+  const historyText = () =>
+    ui.page.locator('.peek-history span[data-watch-kind="text"]');
   try {
     await clickMember(ui, "codex");
     await until(() => ui.live(), "watched history stream");
@@ -2032,22 +2034,21 @@ async function watchedHistoryOracle(browser, t, result) {
       .locator(".peek-watching")
       .filter({ hasText: /^Watching since \d/ })
       .waitFor();
-    assert.equal(await ui.page.locator(".peek-history span").count(), 0);
+    assert.equal(await historyText().count(), 0);
     const since = await ui.page.locator(".peek-watching").textContent();
     let seq = 2;
     const sendGrid = async (start) => {
       ui.live().send(data(seq++, paintGrid(grid(start))));
       await until(
         async () =>
-          (await ui.page.locator(".peek-history span").last().textContent()) ===
-          row(start - 1),
+          (await historyText().last().textContent()) === row(start - 1),
         "completed watched frame",
       );
     };
     await sendGrid(100);
-    await ui.page.locator(".peek-history span").nth(99).waitFor();
+    await historyText().nth(99).waitFor();
     assert.deepEqual(
-      await ui.page.locator(".peek-history span").allTextContents(),
+      await historyText().allTextContents(),
       Array.from({ length: 100 }, (_, i) => row(i)),
     );
     assert.equal(await ui.rows().first().textContent(), "PINNED WATCH HEADER");
@@ -2066,12 +2067,19 @@ async function watchedHistoryOracle(browser, t, result) {
       .getByText(row(500).trim(), { exact: true })
       .waitFor();
     assert.equal(
-      await ui.page.locator(".peek-history span").count(),
+      await historyText().count(),
       100,
       "reset establishes a baseline without invented rows",
     );
     await sendGrid(600);
-    assert.equal(await ui.page.locator(".peek-history span").count(), 200);
+    assert.equal(await historyText().count(), 200);
+    const gaps = ui.page.locator('.peek-history span[data-watch-kind="gap"]');
+    assert.equal(
+      await gaps.count(),
+      1,
+      "the reset jump exposes its missing interval",
+    );
+    await gaps.getByText("… some lines missed", { exact: true }).waitFor();
     ui.live().send(data(seq++, `\x1b[2J${paintGrid(grid(700))}`));
     await ui
       .rows()
@@ -2079,7 +2087,7 @@ async function watchedHistoryOracle(browser, t, result) {
       .getByText(row(700).trim(), { exact: true })
       .waitFor();
     assert.equal(
-      await ui.page.locator(".peek-history span").count(),
+      await historyText().count(),
       200,
       "clear and repaint cannot add rows",
     );
@@ -2093,7 +2101,7 @@ async function watchedHistoryOracle(browser, t, result) {
       "reopen identity validation request",
     );
     assert.equal(
-      await ui.page.locator(".peek-history span").count(),
+      await historyText().count(),
       0,
       "cached rows stay hidden before continuity validation",
     );
@@ -2104,7 +2112,7 @@ async function watchedHistoryOracle(browser, t, result) {
       .waitFor();
     assert.equal(await ui.page.locator(".peek-watching").textContent(), since);
     assert.equal(
-      await ui.page.locator(".peek-history span").count(),
+      await historyText().count(),
       200,
       "validated reopen retains rows but never infers the closed interval",
     );
@@ -2116,8 +2124,8 @@ async function watchedHistoryOracle(browser, t, result) {
     );
     seq = 2;
     for (let start = 100; start <= 3000; start += 100) await sendGrid(start);
-    await ui.page.locator(".peek-history span").nth(3199).waitFor();
-    const anchor = ui.page.locator(".peek-history span").nth(1700);
+    await historyText().nth(3199).waitFor();
+    const anchor = historyText().nth(1700);
     const id = await anchor.getAttribute("data-row-id");
     await anchor.evaluate((line) => {
       const scroller = line.closest(".peek-live");
@@ -2135,7 +2143,7 @@ async function watchedHistoryOracle(browser, t, result) {
         );
     const before = await anchorOffset();
     for (let start = 3100; start <= 5200; start += 100) await sendGrid(start);
-    assert.equal(await ui.page.locator(".peek-history span").count(), 5000);
+    assert.equal(await historyText().count(), 5000);
     assert.ok(
       Math.abs((await anchorOffset()) - before) < 3,
       "surviving occurrence stays anchored through append and eviction",
@@ -2214,7 +2222,7 @@ async function watchedHistoryOracle(browser, t, result) {
         { exact: true },
       )
       .waitFor();
-    assert.equal(await ui.page.locator(".peek-history span").count(), 0);
+    assert.equal(await historyText().count(), 0);
     assert.equal(await ui.page.locator(".peek-watching").isVisible(), false);
     assert.equal(ui.screens(), 0);
     assert.deepEqual(ui.errors, []);
@@ -2234,7 +2242,10 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
   for (const [name, type, executablePath] of [
     ["chromium", chromium, process.env.CHROME ?? "/usr/bin/chromium"],
     ["firefox", firefox, process.env.FIREFOX ?? firefox.executablePath()],
-  ]) {
+  ].filter(
+    ([name]) =>
+      !process.env.LIVE_PEEK_BROWSER || process.env.LIVE_PEEK_BROWSER === name,
+  )) {
     const browser = await type.launch({
       executablePath,
       headless: true,
@@ -2323,7 +2334,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
       );
       first.send(data(4, "\x1b[3;1HNEW-MARKER\x1b[5;7H\x1b[?25h"));
       await ui.rows().nth(2).getByText("NEW-MARKER", { exact: true }).waitFor();
-      await ui.drawer.locator(".xterm-cursor").waitFor();
+      await ui.drawer.locator(".xterm-cursor:visible").waitFor();
       // Partial sequence must not survive a semantic full reset.
       first.send(data(5, "\x1b]52;c;UNFINISHED"));
       first.send(
@@ -2579,7 +2590,15 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
     join(output, "results.json"),
     `${JSON.stringify(results, null, 2)}\n`,
   );
-  assert.equal(failed, false, `Both browsers must pass. Evidence: ${output}`);
+  assert.ok(
+    results.length > 0,
+    "LIVE_PEEK_BROWSER must select chromium or firefox",
+  );
+  assert.equal(
+    failed,
+    false,
+    `Selected browsers must pass. Evidence: ${output}`,
+  );
   console.log(
     styleDiagnostic
       ? "LIVE_PEEK_STYLE_DIAGNOSTIC_PASS"
@@ -2587,4 +2606,4 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
   );
 });
 
-export { open, full, data, clickMember, until };
+export { clickMember, data, full, open, until };

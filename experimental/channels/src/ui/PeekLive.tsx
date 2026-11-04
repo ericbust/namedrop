@@ -3,6 +3,7 @@ import { useEffect, useRef } from "react";
 import { peekCopy } from "../copy.ts";
 import { type LiveState, observePeek } from "../livePeek.ts";
 import type { PeekTarget } from "../model.ts";
+import { PeekPresentation } from "../peekPresentation.ts";
 import {
   emptyWatch,
   type WatchFrame,
@@ -42,9 +43,7 @@ export function PeekLive({
     const historyContainer = historyBlock;
     const controller = new AbortController();
     let validated = false;
-    let interrupted = false;
-    let terminal: Terminal | null = null;
-    const pending = new Set<() => void>();
+    let presentation: PeekPresentation;
     let following = true;
     let replacing = false;
     let position = { top: 0, left: 0 };
@@ -79,6 +78,7 @@ export function PeekLive({
         for (const line of lines) {
           const span = document.createElement("span");
           span.dataset.rowId = String(line.id);
+          span.dataset.watchKind = line.kind;
           span.textContent = line.text || " ";
           fragment.append(span);
         }
@@ -124,7 +124,7 @@ export function PeekLive({
       };
     }
     function fit() {
-      const current = terminal;
+      const current = presentation.visible;
       if (!current || !columns) return;
       const style = getComputedStyle(scroller);
       const available =
@@ -132,7 +132,8 @@ export function PeekLive({
         Number.parseFloat(style.paddingLeft) -
         Number.parseFloat(style.paddingRight);
       if (available <= 0) return;
-      current.options.fontSize = baseFont;
+      for (const terminal of presentation.terminals)
+        terminal.options.fontSize = baseFont;
       const width =
         current.element?.querySelector(".xterm-screen")?.getBoundingClientRect()
           .width ?? 0;
@@ -144,12 +145,13 @@ export function PeekLive({
           Math.floor(((baseFont * available) / width) * 10) / 10,
         ),
       );
-      current.options.fontSize = fitted;
+      for (const terminal of presentation.terminals)
+        terminal.options.fontSize = fitted;
       historyNode.style.fontSize = `${fitted}px`;
       restorePosition();
     }
     function latestTop() {
-      const current = terminal;
+      const current = presentation.visible;
       const screen = current?.element;
       if (!current || !screen) return 0;
       const buffer = current.buffer.active;
@@ -220,15 +222,7 @@ export function PeekLive({
       if (!replacing) fit();
     });
     resize.observe(scroller);
-    function dispose() {
-      for (const cancel of pending) cancel();
-      pending.clear();
-      terminal?.dispose();
-      terminal = null;
-      element?.replaceChildren();
-    }
     function create(cols: number, rows: number) {
-      dispose();
       const style = getComputedStyle(element);
       const next = new Terminal({
         cols,
@@ -250,62 +244,35 @@ export function PeekLive({
       for (const id of [0, 1, 2, 8, 52])
         next.parser.registerOscHandler(id, () => true);
       next.parser.registerCsiHandler({ final: "t" }, () => true);
-      next.parser.registerCsiHandler({ final: "J" }, () => {
-        interrupted = true;
-        return false;
+      next.onRender(() => {
+        if (presentation.visible === next) restorePosition();
       });
-      next.parser.registerEscHandler({ final: "c" }, () => {
-        interrupted = true;
-        return false;
-      });
-      next.parser.registerCsiHandler({ final: "h", prefix: "?" }, (params) => {
-        if ([47, 1047, 1049].some((mode) => params.includes(mode)))
-          interrupted = true;
-        return false;
-      });
-      next.parser.registerCsiHandler({ final: "l", prefix: "?" }, (params) => {
-        if ([47, 1047, 1049].some((mode) => params.includes(mode)))
-          interrupted = true;
-        return false;
-      });
-      next.onRender(restorePosition);
-      terminal = next;
-      next.open(element);
       columns = cols;
-      next.textarea?.setAttribute("tabindex", "-1");
-      // xterm initializes its cursor on local focus. Preserve browser focus;
-      // there is no remote focus or input transport.
-      const focused = document.activeElement;
-      next.focus();
-      if (focused instanceof HTMLElement && focused.isConnected)
-        focused.focus({ preventScroll: true });
-      else next.blur();
-      fit();
       return next;
     }
-    async function write(current: Terminal, bytes: Uint8Array) {
-      for (let start = 0; start < bytes.length; start += 64 * 1024) {
-        if (controller.signal.aborted || terminal !== current)
-          throw new Error("Disposed terminal");
-        await new Promise<void>((resolve, reject) => {
-          const cancel = () => {
-            pending.delete(cancel);
-            reject(new Error("Disposed terminal"));
-          };
-          pending.add(cancel);
-          try {
-            current.write(bytes.subarray(start, start + 64 * 1024), () => {
-              pending.delete(cancel);
-              if (controller.signal.aborted || terminal !== current)
-                reject(new Error("Disposed terminal"));
-              else resolve();
-            });
-          } catch {
-            cancel();
-          }
-        });
+    presentation = new PeekPresentation(element, create, (paint) => {
+      if (paint.history) {
+        if (paint.baseline !== null) {
+          validated = true;
+          watchState.current = watchReduce(watchState.current, {
+            kind: "baseline",
+            continuity: paint.baseline,
+            at: Date.now(),
+            frame: sample(paint.terminal),
+          });
+        } else {
+          watchState.current = watchReduce(watchState.current, {
+            kind: "frame",
+            frame: sample(paint.terminal),
+            interrupted: paint.interrupted,
+          });
+        }
+        snapshot();
       }
-    }
+      if (paint.baseline !== null) fit();
+      restorePosition();
+      replacing = false;
+    });
     void observePeek({
       target,
       signal: controller.signal,
@@ -323,42 +290,11 @@ export function PeekLive({
           return;
         }
         replacing = update.kind === "reset";
-        interrupted = false;
-        let current = terminal;
-        if (update.kind === "reset") {
-          if (!current)
-            current = create(update.viewport.cols, update.viewport.rows);
-          else {
-            current.reset();
-            current.resize(update.viewport.cols, update.viewport.rows);
-            columns = update.viewport.cols;
-            fit();
-          }
-        }
-        if (!current) throw new Error("Terminal not initialized");
-        await write(current, update.bytes);
-        if (update.kind === "reset") {
-          current.refresh(0, current.rows - 1);
-          validated = true;
-          watchState.current = watchReduce(watchState.current, {
-            kind: "baseline",
-            continuity: update.continuity,
-            at: Date.now(),
-            frame: sample(current),
-          });
-        } else {
-          watchState.current = watchReduce(watchState.current, {
-            kind: "frame",
-            frame: sample(current),
-            interrupted,
-          });
-        }
-        snapshot();
-        restorePosition();
-        replacing = false;
+        await presentation.apply(update);
       },
       onState(state) {
         if (controller.signal.aborted) return;
+        if (state.kind === "reconnecting") presentation.invalidate();
         if (
           state.kind === "session-ended" ||
           (state.kind === "closed" && state.reason !== "ended")
@@ -366,7 +302,7 @@ export function PeekLive({
           validated = false;
           watchState.current = emptyWatch();
           snapshot();
-          dispose();
+          presentation.dispose();
         }
         onState(state);
       },
@@ -379,7 +315,7 @@ export function PeekLive({
       scroller.removeEventListener("wheel", localWheel, true);
       scroller.removeEventListener("scroll", rememberPosition);
       scroller.removeEventListener("keydown", followIntent);
-      dispose();
+      presentation.dispose();
     };
   }, [target, onState, onHistory]);
   return (
