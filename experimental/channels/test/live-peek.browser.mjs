@@ -6,7 +6,7 @@ import { createServer } from "node:http";
 import { extname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { chromium, firefox } from "playwright-core";
+import { chromium, firefox, webkit } from "playwright-core";
 import { isolatedFirefoxDisplay } from "./live-peek-scroll.browser.mjs";
 
 // Decode the deliberately small static Rust literal used by the product.
@@ -2226,15 +2226,251 @@ async function watchedHistoryOracle(browser, t, result) {
   }
 }
 
-test("live Peek product component, transport and CSP in real Chromium and Firefox", {
+async function resizePendingScrollOracle(browser, t, result) {
+  const ui = await open(
+    browser,
+    t,
+    full(1, {
+      cols: 58,
+      rows: 70,
+      bytes: encode("\x1b[2J\x1b[HSTART\x1b[70;1HLAST-ROW-PROMPT>"),
+    }),
+  );
+  const metrics = () =>
+    ui.page
+      .locator(".peek-live")
+      .evaluate((el) => ({
+        top: el.scrollTop,
+        height: el.clientHeight,
+        rowBottom: [...el.querySelectorAll(".xterm-rows > div")]
+          .at(-1)
+          .getBoundingClientRect().bottom,
+        frameBottom: el.getBoundingClientRect().bottom,
+      }));
+  try {
+    await clickMember(ui, "codex");
+    await until(() => ui.live(), "race stream opened");
+    await ui.rows().filter({ hasText: "LAST-ROW-PROMPT>" }).waitFor();
+    ui.live().send({
+      v: 1,
+      seq: 2,
+      kind: "history",
+      text: Array.from({ length: 200 }, (_, i) => `HISTORY-${i}`).join("\n"),
+    });
+    await ui.page.locator(".peek-history span").nth(199).waitFor();
+    await settleScroll(ui);
+    result.beforeResize = await metrics();
+    result.resize = await ui.page.locator(".peek-live").evaluate((el) => {
+      const height = el.clientHeight;
+      el.style.maxHeight = `${height - 100}px`;
+      const changedHeight = el.clientHeight;
+      el.dispatchEvent(new Event("scroll"));
+      return { height, changedHeight };
+    });
+    await ui.page.evaluate(
+      () =>
+        new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        ),
+    );
+    result.afterResize = await metrics();
+    assert.equal(result.resize.changedHeight, result.resize.height - 100);
+    assert.ok(
+      result.afterResize.rowBottom <= result.afterResize.frameBottom + 1,
+      `Pending scroll before ResizeObserver must preserve follow: ${JSON.stringify(result)}`,
+    );
+    await ui.page.locator(".peek-live").hover();
+    await ui.page.mouse.wheel(0, -160);
+    await settleScroll(ui);
+    result.afterWheel = await metrics();
+    assert.ok(
+      result.afterWheel.top < result.afterResize.top - 50,
+      "Ordinary wheel pauses follow after fitting",
+    );
+    await ui.page.locator(".peek-live").evaluate((el) => {
+      el.style.maxHeight = `${el.clientHeight - 50}px`;
+      void el.clientHeight;
+      el.dispatchEvent(new Event("scroll"));
+    });
+    await ui.page.evaluate(
+      () =>
+        new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        ),
+    );
+    result.readerAfterResize = await metrics();
+    assert.ok(
+      Math.abs(result.readerAfterResize.top - result.afterWheel.top) <= 1,
+      "Reader stays paused during a resize",
+    );
+  } finally {
+    await ui.close();
+  }
+}
+
+async function frameFitOracle(browser, t, result, cols = 58, rows = 70) {
+  const ui = await open(
+    browser,
+    t,
+    full(1, {
+      cols,
+      rows,
+      bytes: encode(`\x1b[2J\x1b[HSTART\x1b[${rows};1HLAST-ROW-PROMPT>`),
+    }),
+  );
+  const failures = [];
+  result.fit ??= [];
+  try {
+    await clickMember(ui, "codex");
+    await until(() => ui.live(), "fit stream opened");
+    await ui.rows().filter({ hasText: "LAST-ROW-PROMPT>" }).waitFor();
+    ui.live().send({
+      v: 1,
+      seq: 2,
+      kind: "history",
+      text: Array.from({ length: 200 }, (_, i) => `HISTORY-${i}`).join("\n"),
+    });
+    await ui.page.locator(".peek-history span").nth(199).waitFor();
+    for (const [width, height] of [
+      [1280, 800],
+      [1440, 900],
+      [1728, 1117],
+      [1920, 1080],
+      [2560, 1440],
+    ]) {
+      await ui.page.setViewportSize({ width, height });
+      for (const expanded of [false, true]) {
+        if (
+          (await ui.drawer
+            .getByRole("button", { name: "Restore", exact: true })
+            .count()) !== Number(expanded)
+        )
+          await ui.drawer
+            .getByRole("button", {
+              name: expanded ? "Expand" : "Restore",
+              exact: true,
+            })
+            .click();
+        for (const compose of [false, true]) {
+          if (compose)
+            await ui.drawer
+              .getByRole("button", { name: "Type to agent", exact: true })
+              .click();
+          const metrics = await ui.page
+            .locator(".peek-live")
+            .evaluate(async (el, columns) => {
+              const measure = () => {
+                const rect = el.getBoundingClientRect();
+                const style = getComputedStyle(el);
+                const grid = el
+                  .querySelector(".xterm-screen")
+                  .getBoundingClientRect();
+                const row = [...el.querySelectorAll(".xterm-rows > div")]
+                  .at(-1)
+                  .getBoundingClientRect();
+                const footer = document
+                  .querySelector(".peek-compose")
+                  .getBoundingClientRect();
+                const drawer = document
+                  .querySelector(".peek")
+                  .getBoundingClientRect();
+                const font = parseFloat(
+                  getComputedStyle(el.querySelector(".xterm-rows")).fontSize,
+                );
+                const available =
+                  el.clientWidth -
+                  parseFloat(style.paddingLeft) -
+                  parseFloat(style.paddingRight);
+                return {
+                  frameBottom: rect.bottom,
+                  footerTop: footer.top,
+                  footerBottom: footer.bottom,
+                  drawerBottom: drawer.bottom,
+                  windowBottom: innerHeight,
+                  rowTop: row.top,
+                  rowBottom: row.bottom,
+                  frameTop: rect.top,
+                  gridWidth: grid.width,
+                  available,
+                  font,
+                  cell: grid.width / columns,
+                  drawerScroll: document.querySelector(".peek").scrollTop,
+                };
+              };
+              const frames = [];
+              for (let frame = 0; frame < 6; frame++) {
+                await new Promise((resolve) =>
+                  requestAnimationFrame(() => setTimeout(resolve, 0)),
+                );
+                frames.push(measure());
+              }
+              return { ...frames[0], frames };
+            }, cols);
+          const label = `${result.name}-${cols}cols-${rows}rows-${width}x${height}-${expanded ? "expanded" : "normal"}-${compose ? "compose" : "closed"}`;
+          const checks = {
+            "frame reaches footer":
+              Math.abs(metrics.frameBottom - metrics.footerTop) <= 1,
+            "footer reaches window bottom":
+              Math.abs(metrics.footerBottom - metrics.windowBottom) <= 1,
+            "last row fully visible":
+              metrics.rowTop >= metrics.frameTop &&
+              metrics.rowBottom <= metrics.frameBottom + 1,
+            "width fills within one cell or upper font cap":
+              metrics.font >= 19.99 ||
+              metrics.available - metrics.gridWidth <= metrics.cell + 1,
+            "width fits unless at lower font cap":
+              metrics.font <= 10.01 ||
+              metrics.gridWidth - metrics.available <= 1,
+            "font stays within readable limits":
+              metrics.font >= 10 && metrics.font <= 20,
+            "geometry stable from first animation frame": metrics.frames.every(
+              (frame) =>
+                [
+                  "frameBottom",
+                  "footerTop",
+                  "rowBottom",
+                  "gridWidth",
+                  "font",
+                ].every((key) => Math.abs(frame[key] - metrics[key]) <= 1),
+            ),
+            "drawer stays unscrolled": metrics.drawerScroll === 0,
+          };
+          result.fit.push({ label, ...metrics, checks });
+          for (const [check, passed] of Object.entries(checks))
+            if (!passed) failures.push(`${label}: ${check}`);
+          await ui.page.screenshot({ path: join(output, `${label}.png`) });
+          if (compose)
+            await ui.drawer
+              .getByRole("button", { name: "Stop typing", exact: true })
+              .click();
+        }
+      }
+    }
+    result.fitFailures ??= [];
+    result.fitFailures.push(...failures);
+    assert.deepEqual(ui.errors, []);
+  } finally {
+    await ui.close();
+  }
+}
+
+test("live Peek product component, transport, geometry and CSP", {
   timeout: 180000,
 }, async (t) => {
   const results = [];
   let failed = false;
   for (const [name, type, executablePath] of [
     ["chromium", chromium, process.env.CHROME ?? "/usr/bin/chromium"],
-    ["firefox", firefox, process.env.FIREFOX ?? firefox.executablePath()],
-  ]) {
+    ...(process.env.PEEK_FIT_ONLY === "1"
+      ? [["webkit", webkit, process.env.WEBKIT ?? webkit.executablePath()]]
+      : [
+          ["firefox", firefox, process.env.FIREFOX ?? firefox.executablePath()],
+        ]),
+  ].filter(
+    ([name]) =>
+      !process.env.PEEK_FIT_ENGINES ||
+      process.env.PEEK_FIT_ENGINES.split(",").includes(name),
+  )) {
     const browser = await type.launch({
       executablePath,
       headless: true,
@@ -2261,6 +2497,22 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
     results.push(result);
     let ui;
     try {
+      if (process.env.PEEK_FIT_ONLY === "1") {
+        await resizePendingScrollOracle(browser, t, result);
+        for (const [cols, rows] of [
+          [58, 70],
+          [120, 70],
+          [200, 70],
+          [58, 12],
+        ])
+          await frameFitOracle(browser, t, result, cols, rows);
+        assert.deepEqual(result.fitFailures, [], "Live frame geometry");
+        result.status = "passed";
+        continue;
+      }
+      await resizePendingScrollOracle(browser, t, result);
+      await frameFitOracle(browser, t, result);
+      assert.deepEqual(result.fitFailures, [], "Live frame geometry");
       await recordedWatchOracle(browser, t, result);
       await watchedHistoryOracle(browser, t, result);
       await shellSeedWatchOracle(browser, t, result);

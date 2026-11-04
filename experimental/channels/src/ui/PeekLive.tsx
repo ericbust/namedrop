@@ -49,6 +49,7 @@ export function PeekLive({
     let replacing = false;
     let position = { top: 0, left: 0 };
     let columns = 0;
+    let fittedSize = { width: 0, height: 0 };
     let renderedRows: readonly WatchRow[] = [];
     const baseFont = Number.parseFloat(getComputedStyle(element).fontSize);
     function readingAnchor() {
@@ -137,16 +138,11 @@ export function PeekLive({
         current.element?.querySelector(".xterm-screen")?.getBoundingClientRect()
           .width ?? 0;
       if (width <= 0) return;
-      const fitted = Math.max(
-        10,
-        Math.min(
-          baseFont,
-          Math.floor(((baseFont * available) / width) * 10) / 10,
-        ),
-      );
+      const fitted = Math.max(10, Math.min(20, (baseFont * available) / width));
       current.options.fontSize = fitted;
       historyNode.style.fontSize = `${fitted}px`;
       restorePosition();
+      fittedSize = { width: scroller.clientWidth, height: scroller.clientHeight };
     }
     function latestTop() {
       const current = terminal;
@@ -185,7 +181,12 @@ export function PeekLive({
       );
     }
     function rememberPosition() {
-      if (replacing) return;
+      if (
+        replacing ||
+        scroller.clientWidth !== fittedSize.width ||
+        scroller.clientHeight !== fittedSize.height
+      )
+        return;
       following = scroller.scrollTop >= latestTop() - 1;
       position = { top: scroller.scrollTop, left: scroller.scrollLeft };
     }
