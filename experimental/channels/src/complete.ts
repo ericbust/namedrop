@@ -480,34 +480,28 @@ export function composerHint(rule: SendRule, text: string): string {
     : composerCopy.toRoom;
 }
 
-// Leading recipients override the thread. Unresolved names and #all cannot
-// identify a pane catalog, so they never borrow the current channel's skills.
 export function skillRecipients(
   text: string,
   context: CompletionContext,
 ): readonly SkillTarget[] {
-  let at = spaceAfter(text, 0);
-  let keys: readonly SpaceKey[] = [context.current];
-  let explicit = false;
+  const { labels, end } = leadingLabels(text);
+  if (labels.includes("all")) return [];
+  const keys =
+    labels.length === 0
+      ? [context.current]
+      : context.channels.flatMap((channel) =>
+          channel.token !== null &&
+          labels.includes(foldLabel(channel.token.slice(1)))
+            ? [channel.key]
+            : [],
+        );
+  let at = end;
   let names = false;
-  let labelsActive = false;
   const targets = new Map<string, SkillTarget>();
   while (at < text.length) {
     const word = recipient(wordAt(text, at));
-    if (LABEL.test(word)) {
-      explicit = true;
-      const label = foldLabel(word.slice(1));
-      if (label === "all") return [];
-      const resolved = context.channels.flatMap((channel) =>
-        channel.token !== null && foldLabel(channel.token.slice(1)) === label
-          ? [channel.key]
-          : [],
-      );
-      keys = labelsActive ? [...keys, ...resolved] : resolved;
-      labelsActive = true;
-    } else if (word.startsWith("@") && ALIAS.test(word.slice(1))) {
+    if (word.startsWith("@") && ALIAS.test(word.slice(1))) {
       names = true;
-      labelsActive = false;
       for (const key of keys) {
         for (const member of context.membersOf(key)) {
           if (
@@ -521,14 +515,12 @@ export function skillRecipients(
         }
       }
     } else {
-      if (word.startsWith("@")) return [];
+      if (!names && word.startsWith("@")) return [];
       break;
     }
     at = spaceAfter(text, at + wordAt(text, at).length);
   }
-  return explicit || names
-    ? [...targets.values()]
-    : (context.skillRecipients ?? []);
+  return names ? [...targets.values()] : (context.skillRecipients ?? []);
 }
 
 export function skillToken(text: string, caret: number): boolean {

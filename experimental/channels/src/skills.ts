@@ -16,7 +16,6 @@ export function skillTargetKey(target: SkillTarget): string {
   return `${target.key}/${target.member}`;
 }
 
-// The catalog is file content crossing the HTTP boundary, including its names.
 export function parseSkills(
   value: unknown,
 ): Pick<SkillCatalog, "runtime" | "skills"> | null {

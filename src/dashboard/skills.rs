@@ -396,7 +396,7 @@ fn discover(context: &DiscoveryContext) -> Vec<Skill> {
     scan.skills.into_values().collect()
 }
 
-fn plugin_tree(scan: &mut Scan, root: &Path, name: &str, manifest: &Path, commands: bool) {
+fn plugin_tree(scan: &mut Scan, root: &Path, name: &str, manifest: &Path, runtime: SkillRuntime) {
     if scan.entries >= MAX_ENTRIES || scan.skills.len() >= MAX_SKILLS {
         return;
     }
@@ -409,6 +409,9 @@ fn plugin_tree(scan: &mut Scan, root: &Path, name: &str, manifest: &Path, comman
         } else {
             path
         }],
+        Some(Value::Array(paths)) if paths.is_empty() && runtime == SkillRuntime::Codex => {
+            vec!["skills"]
+        }
         Some(Value::Array(paths)) => paths
             .iter()
             .filter_map(Value::as_str)
@@ -423,10 +426,19 @@ fn plugin_tree(scan: &mut Scan, root: &Path, name: &str, manifest: &Path, comman
             .collect(),
         _ => vec!["skills"],
     };
+    let canonical_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     for path in paths {
-        scan.tree(&root.join(path), SkillSource::Plugin, Some(name), 0);
+        let path = root.join(path);
+        let path = if runtime == SkillRuntime::Codex
+            && fs::canonicalize(&path).is_ok_and(|path| path == canonical_root)
+        {
+            root.join("skills")
+        } else {
+            path
+        };
+        scan.tree(&path, SkillSource::Plugin, Some(name), 0);
     }
-    if commands {
+    if runtime == SkillRuntime::Claude {
         let path = root.join("commands");
         scan.commands(&path, &path, SkillSource::Plugin, Some(name), 0);
     }
@@ -477,7 +489,7 @@ fn claude_plugins(context: &DiscoveryContext, projects: &[PathBuf], scan: &mut S
                     root,
                     name,
                     &root.join(".claude-plugin/plugin.json"),
-                    true,
+                    SkillRuntime::Claude,
                 );
             }
         }
@@ -523,7 +535,7 @@ fn codex_plugins(context: &DiscoveryContext, scan: &mut Scan) {
                 &version,
                 name,
                 &version.join(".codex-plugin/plugin.json"),
-                false,
+                SkillRuntime::Codex,
             );
         }
     }
@@ -708,6 +720,63 @@ mod tests {
         let skills = discover(&f.context(SkillRuntime::Codex));
         assert_eq!(names(&skills), ["demo:newest"]);
         assert_eq!(skills[0].source, SkillSource::Plugin);
+    }
+
+    #[test]
+    fn codex_manifest_root_variants_use_default_skills_directory() {
+        let f = Fixture::new();
+        let plugin = "codex-home/plugins/cache/market/demo/1.0.0";
+        let root = f.0.join(plugin);
+        f.write(
+            "codex-home/config.toml",
+            "[plugins.\"demo@market\"]\nenabled = true\n",
+        );
+        f.skill(plugin, "root");
+        f.skill(&format!("{plugin}/skills/nested"), "nested");
+        f.skill(&format!("{plugin}/other"), "other");
+        for paths in [
+            serde_json::json!(""),
+            serde_json::json!([]),
+            serde_json::json!("./"),
+            serde_json::json!("."),
+            serde_json::json!(root),
+            serde_json::json!("./other/.."),
+            serde_json::json!(["./"]),
+            serde_json::json!(["."]),
+            serde_json::json!([root]),
+            serde_json::json!(["./other/.."]),
+        ] {
+            f.write(
+                &format!("{plugin}/.codex-plugin/plugin.json"),
+                &serde_json::json!({"skills": paths}).to_string(),
+            );
+            let skills = discover(&f.context(SkillRuntime::Codex));
+            assert_eq!(names(&skills), ["demo:nested"], "{paths}");
+        }
+        for paths in [serde_json::json!("./other"), serde_json::json!(["./other"])] {
+            f.write(
+                &format!("{plugin}/.codex-plugin/plugin.json"),
+                &serde_json::json!({"skills": paths}).to_string(),
+            );
+            assert_eq!(
+                names(&discover(&f.context(SkillRuntime::Codex))),
+                ["demo:other"],
+                "{paths}"
+            );
+        }
+        for paths in [
+            serde_json::json!("./other/SKILL.md"),
+            serde_json::json!(["./other/SKILL.md"]),
+        ] {
+            f.write(
+                &format!("{plugin}/.codex-plugin/plugin.json"),
+                &serde_json::json!({"skills": paths}).to_string(),
+            );
+            assert!(
+                discover(&f.context(SkillRuntime::Codex)).is_empty(),
+                "{paths}"
+            );
+        }
     }
 
     #[test]

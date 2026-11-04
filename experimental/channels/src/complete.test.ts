@@ -959,11 +959,22 @@ test("skills: catalogs belong to actual recipients, including cwd differences wi
   assert.deepEqual(listed("#beta @coder /"), ["codex:beta-only"]);
   assert.deepEqual(listed("#alpha #beta @coder /"), ["codex:beta-only"]);
   assert.deepEqual(listed("#Beta: @coder $"), ["codex:beta-only"]);
-  assert.deepEqual(listed("#beta @coder #alpha @claude /"), [
+  assert.deepEqual(listed("#alpha #beta @coder @claude /"), [
     "codex:beta-only",
     "claude:claude-only",
     "claude:review",
   ]);
+  assert.deepEqual(listed("#beta @coder #alpha @claude /"), [
+    "codex:beta-only",
+  ]);
+  for (const text of [
+    "@codex #beta @coder /",
+    "@codex #beta @other /",
+    "@codex #all /",
+  ])
+    assert.deepEqual(listed(text), listed("@codex /"), text);
+  assert.deepEqual(listed("#beta /"), listed("/"));
+  assert.deepEqual(listed("#beta /", context), []);
   assert.deepEqual(
     listed("body @claude /"),
     listed("/"),
@@ -976,7 +987,6 @@ test("skills: catalogs belong to actual recipients, including cwd differences wi
     "@ghost /",
     "#all @codex /",
     "#nowhere @codex /",
-    "#beta /",
     "@Codex /",
     "@codex; /",
   ])
