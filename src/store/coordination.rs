@@ -308,7 +308,7 @@ impl StateTransaction<'_> {
         ns: &StateNamespace,
         id: &CoordinationId,
     ) -> Result<bool, StoreError> {
-        Ok(self.transaction.query_row(
+        Ok(self.transaction.prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM coordinations c
              WHERE c.session_socket_id=?1 AND c.worktree_id=?2 AND c.coordination_id=?3
                AND ((c.outcome IN ('blocked','cancelled') AND c.report IS NOT NULL
@@ -326,11 +326,13 @@ impl StateTransaction<'_> {
                    JOIN delivery_seats s USING(session_socket_id,worktree_id,delivery_id)
                    WHERE d.session_socket_id=c.session_socket_id AND d.worktree_id=c.worktree_id
                      AND s.progress NOT IN ('settled','failed','cancelled')
-                     AND (d.message_id=c.report_message_id OR d.message_id=c.wake_message_id
-                       OR d.message_id IN (SELECT l.message_id FROM coordination_links l
-                         JOIN coordination_assignments a USING(session_socket_id,worktree_id,assignment_id)
-                         WHERE a.session_socket_id=c.session_socket_id AND a.worktree_id=c.worktree_id
-                           AND a.coordination_id=c.coordination_id))))",
+                     AND d.message_id IN (SELECT c.report_message_id UNION ALL SELECT c.wake_message_id
+                       UNION ALL SELECT l.message_id FROM coordination_links l
+                         WHERE l.session_socket_id=c.session_socket_id AND l.worktree_id=c.worktree_id
+                           AND l.assignment_id IN (SELECT a.assignment_id FROM coordination_assignments a
+                             WHERE a.session_socket_id=c.session_socket_id AND a.worktree_id=c.worktree_id
+                               AND a.coordination_id=c.coordination_id))))",
+        )?.query_row(
             params![ns.session_socket_id, ns.space_id.as_str(), id.as_str()],
             |row| row.get(0),
         )?)
@@ -341,17 +343,21 @@ impl StateTransaction<'_> {
         ns: &StateNamespace,
         id: &CoordinationId,
     ) -> Result<bool, StoreError> {
-        Ok(self.transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM attention_items a JOIN transition_facts f
+        Ok(self
+            .transaction
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM attention_items a JOIN transition_facts f
                ON f.session_socket_id=a.session_socket_id AND f.worktree_id=a.worktree_id
                  AND f.entity_id=a.attention_item_id
              WHERE a.session_socket_id=?1 AND a.worktree_id=?2
                AND a.source_kind='coordination' AND a.source_id=?3
                AND f.entity_kind='attention_item' AND f.transition_kind='acknowledged'
                AND f.actor_kind='human')",
-            params![ns.session_socket_id, ns.space_id.as_str(), id.as_str()],
-            |row| row.get(0),
-        )?)
+            )?
+            .query_row(
+                params![ns.session_socket_id, ns.space_id.as_str(), id.as_str()],
+                |row| row.get(0),
+            )?)
     }
 
     pub fn acknowledge_coordination_attention(
@@ -1244,3 +1250,6 @@ impl StateTransaction<'_> {
         self.coordination_report(ns, &input.coordination_id, owner)
     }
 }
+
+#[cfg(test)]
+mod tests;
