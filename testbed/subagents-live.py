@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -13,6 +14,33 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import livetest
 import testbed
+
+
+def contexts_in(records):
+    contexts = []
+    for record in records:
+        attachment = record.get("attachment") or {}
+        if attachment.get("type") == "hook_additional_context":
+            contexts.extend(text for text in attachment.get("content", []) if isinstance(text, str))
+        payload = record.get("payload") or {}
+        if record.get("type") == "response_item" and payload.get("type") == "message" and payload.get("role") == "developer":
+            contexts.append("\n".join(part.get("text", "") for part in payload.get("content", []) if isinstance(part, dict)))
+    return contexts
+
+
+def normalized_context(text):
+    return re.sub(
+        r"available now|busy; work queues until its session settles|no registered Agent Session; work queues until one registers",
+        "<readiness>", text,
+    )
+
+
+def unexpected_contexts_in(records, expected):
+    return [text for text in contexts_in(records) if normalized_context(text) not in expected]
+
+
+def records_in(path):
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
 def main():
@@ -36,6 +64,9 @@ def main():
     before = run.panes()[args.agent]
     if before.session is None:
         raise RuntimeError("warm up the agent with testbed/testbed test --keep first")
+    before_transcript = run.transcript(args.agent)
+    before_records = records_in(Path(before_transcript.path))
+    expected_contexts = {normalized_context(text) for text in contexts_in(before_records)}
     shell = profile.state["panes"]["shell"]
     opened = profile.namedrop("--herdr-pane", shell, "channels", "--no-open", "--json")
     if opened.returncode:
@@ -78,9 +109,11 @@ def main():
         (output / "prompt-result.txt").write_text(result.stdout)
         browser.wait(timeout=300)
         run.capture()
+        if browser.returncode or result.returncode:
+            raise RuntimeError("live probe failed; inspect browser.log and prompt-result.txt")
         transcript = run.transcript(args.agent)
         path = Path(transcript.path)
-        records = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        records = records_in(path)
         hooks = []
         for record in records:
             attachment = record.get("attachment")
@@ -89,26 +122,38 @@ def main():
             if any(event in str(attachment.get("hookName", attachment.get("hook_name", "")))
                    for event in ("SubagentStart", "SubagentStop")):
                 hooks.append(attachment)
-        contexts = list(transcript.session_contexts)
-        for turn in transcript.turns:
-            if "authorized test of subagent presence" in turn.prompt:
-                contexts.extend(turn.contexts)
-        lifecycle_contexts = [text for text in contexts if any(
-            marker in text for marker in ("SubagentStart", "SubagentStop", "scripts/subagent")
+        evidence_records = records[len(before_records):]
+        browser_result = json.loads((output / "browser-result.json").read_text())
+        child_ids = set()
+        for event in browser_result["frames"]:
+            for member in event["value"]["frame"]["participants"]:
+                if member["alias"].lstrip("@") == args.agent:
+                    child_ids.update(child["id"] for child in member.get("subagents", []))
+        if len(child_ids) < 2:
+            raise RuntimeError("fewer than two host child identities were observed")
+        child_root = profile.dir / ("home/.claude/projects" if args.agent == "claude" else "codex/sessions")
+        child_paths = [child for child in child_root.rglob("*.jsonl") if any(
+            child.name == f"agent-{identity}.jsonl" or child.name.endswith(f"-{identity}.jsonl")
+            for identity in child_ids
         )]
+        if len(child_paths) != len(child_ids):
+            raise RuntimeError("every observed child needs its own transcript")
+        for child in child_paths:
+            evidence_records.extend(records_in(child))
+        contexts = contexts_in(evidence_records)
+        unexpected_contexts = unexpected_contexts_in(evidence_records, expected_contexts)
         (output / "hook-transcript.json").write_text(json.dumps({
             "path": str(path), "session": before.session,
             "lifecycle_hook_attachments": hooks,
-            "lifecycle_model_contexts": lifecycle_contexts,
+            "child_transcripts": [str(child) for child in child_paths],
+            "unexpected_model_contexts": unexpected_contexts,
             "model_contexts_checked": contexts,
             "note": "Silent lifecycle hooks should produce no model-context attachment. The live count proves the hooks ran.",
         }, indent=2) + "\n")
-        if browser.returncode or result.returncode:
-            raise RuntimeError("live probe failed; inspect browser.log and prompt-result.txt")
         if any(hook.get("content") or hook.get("additionalContext") or hook.get("stdout") for hook in hooks):
             raise RuntimeError("lifecycle hook output reached the transcript")
-        if lifecycle_contexts:
-            raise RuntimeError("lifecycle hook context found in model messages")
+        if unexpected_contexts:
+            raise RuntimeError("unexpected model context after subagent hooks; inspect hook-transcript.json")
         print(f"PASS {args.agent}: live count rose and returned to zero. Evidence: {output}")
     finally:
         if browser.poll() is None:

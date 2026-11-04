@@ -40,6 +40,7 @@ try {
   await page.goto(url);
   const member = page.getByRole("list", { name: "Members", exact: true }).getByRole("button").filter({ hasText: `@${alias}` });
   await member.waitFor({ timeout: 30_000 });
+  const memberId = await member.locator("xpath=ancestor::li[1]").getAttribute("data-address-id");
   assert.equal(await member.locator(".subagent-count").count(), 0);
   await page.screenshot({ path: join(output, "before.png"), fullPage: true });
   await writeFile(join(output, "browser-ready"), "ready\n");
@@ -68,6 +69,13 @@ try {
   await page.screenshot({ path: join(output, "running-narrow-dark.png"), fullPage: true });
   await count.waitFor({ state: "detached", timeout: 240_000 });
   await peek.waitFor({ state: "detached", timeout: 10_000 });
+  await member.waitFor({ state: "visible", timeout: 10_000 });
+  assert.equal(await member.locator("xpath=ancestor::li[1]").getAttribute("data-address-id"), memberId);
+  assert.equal(await page.locator(".peek-head .peek-alias").innerText(), `@${alias}`);
+  const finalFrames = await page.evaluate(() => window.subagentFrames);
+  const finalMember = finalFrames.at(-1)?.value.frame.participants.find((item) => item.address_id === memberId);
+  assert.ok(finalMember, "the same member remains in the final frame");
+  assert.deepEqual(finalMember.subagents, [], "the server reports an explicit empty running set");
   await page.screenshot({ path: join(output, "after-zero.png"), fullPage: true });
   assert.deepEqual(errors, []);
   await writeFile(join(output, "browser-result.json"), JSON.stringify({
