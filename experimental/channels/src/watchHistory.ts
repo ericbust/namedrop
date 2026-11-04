@@ -123,10 +123,14 @@ function scrollBetween(old: WatchFrame, next: WatchFrame): Scroll | null {
   let accepted: Scroll | null = null;
   for (let shift = 1; shift <= Math.floor(count / 2); shift++) {
     const mismatches = [0];
-    for (let y = 0; y + shift < count; y++)
-      mismatches.push(
-        (mismatches[y] ?? 0) + (before[y + shift] === after[y] ? 0 : 1),
-      );
+    for (let y = 0; y + shift < count; y++) {
+      const previous = before[y + shift];
+      const current = after[y];
+      const compatible =
+        previous === current ||
+        (previous?.trim() && current?.startsWith(previous));
+      mismatches.push((mismatches[y] ?? 0) + (compatible ? 0 : 1));
+    }
     for (let start = 0; start <= first; start++) {
       for (
         let end = Math.max(last + 1, start + 2 * shift);
@@ -135,7 +139,10 @@ function scrollBetween(old: WatchFrame, next: WatchFrame): Scroll | null {
       ) {
         const overlapEnd = end - shift;
         if (mismatches[overlapEnd] !== mismatches[start]) continue;
-        if (!strong(before.slice(start + shift, end), before, after)) continue;
+        const exact = before
+          .slice(start + shift, end)
+          .filter((text, y) => text === after[start + y]);
+        if (!strong(exact, before, after)) continue;
         const rows = before.slice(start, start + shift);
         if (!rows.some((row) => row.trim())) continue;
         if (accepted && (accepted.start !== start || accepted.shift !== shift))

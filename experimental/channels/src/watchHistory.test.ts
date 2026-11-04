@@ -358,6 +358,19 @@ test("recorded Claude scroll captures the first paragraph while the trailing lin
   ]);
 });
 
+test("growing overlap rows cannot replace the required exact scroll anchors", () => {
+  const next = frame(2);
+  assert.deepEqual(
+    departedRows(frame(), {
+      ...next,
+      rows: next.rows.map((text, y) =>
+        y >= 1 && y <= 7 ? `${text} streamed suffix` : text,
+      ),
+    }),
+    [],
+  );
+});
+
 test("recorded Claude streaming retains all 150 complete observed paragraphs including its prefix", () => {
   let state = baseline(claudeFrame(24));
   const anchors = new Map<string, number>();
