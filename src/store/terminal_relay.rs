@@ -8,6 +8,7 @@ struct RelayAttempt {
     alias: String,
     message_id: String,
     thread_id: String,
+    source_author: String,
     started_at_ms: u64,
 }
 
@@ -41,14 +42,16 @@ impl StateTransaction<'_> {
         message: &MessageId,
         attribution: &MutationAttribution,
     ) -> Result<(), StoreError> {
-        let operator_source = self.transaction.query_row(
-            "SELECT author_kind='human' AND author_address_id='operator:local'
+        let (human, author) = self.transaction.query_row(
+            "SELECT author_kind='human', author_address_id
              FROM collaboration_messages WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3",
             params![namespace.session_socket_id, namespace.space_id.as_str(), message.as_str()],
-            |row| row.get::<_, bool>(0),
+            |row| Ok((row.get::<_, bool>(0)?, row.get::<_, String>(1)?)),
         )?;
-        if operator_source
-            && self.is_operator_address(namespace, &PaneAddressId::new("operator:local"))?
+        if human
+            && self
+                .operator_projection_addresses(namespace)?
+                .contains(&author)
         {
             self.append_transition(
                 namespace,
@@ -83,7 +86,7 @@ impl StateTransaction<'_> {
         let attempts = {
             let mut statement = self.transaction.prepare(
                 "SELECT a.attempt_id, a.address_id, r.alias_snapshot, m.message_id,
-                        m.thread_id, arm.occurred_at_ms
+                        m.thread_id, arm.occurred_at_ms, m.author_address_id
                  FROM delivery_attempts a
                  JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, delivery_id, address_id)
                  JOIN collaboration_messages m USING (session_socket_id, worktree_id, message_id)
@@ -96,7 +99,7 @@ impl StateTransaction<'_> {
                  WHERE a.session_socket_id=?1 AND a.worktree_id=?2 AND a.agent_session_id=?3
                    AND arm.occurred_at_ms > ?4 AND arm.occurred_at_ms <= ?5
                    AND s.state IN ('submitted','acknowledged','settled')
-                   AND m.author_kind='human' AND m.author_address_id='operator:local'
+                   AND m.author_kind='human'
                    AND NOT EXISTS (SELECT 1 FROM delivery_attempts newer
                        WHERE newer.session_socket_id=a.session_socket_id AND newer.worktree_id=a.worktree_id
                          AND newer.delivery_id=a.delivery_id AND newer.rowid>a.rowid)
@@ -119,6 +122,7 @@ impl StateTransaction<'_> {
                             message_id: row.get(3)?,
                             thread_id: row.get(4)?,
                             started_at_ms: from_i64(row.get(5)?)?,
+                            source_author: row.get(6)?,
                         })
                     },
                 )?
@@ -136,10 +140,12 @@ impl StateTransaction<'_> {
             ending.ended_at_ms,
         );
         let mut messages = Vec::new();
-        if !text.is_empty()
-            && self.is_operator_address(namespace, &PaneAddressId::new("operator:local"))?
-        {
+        let operators = self.operator_projection_addresses(namespace)?;
+        if !text.is_empty() {
             for attempt in attempts {
+                if !operators.contains(&attempt.source_author) {
+                    continue;
+                }
                 let message_id = MessageId::new(format!("terminal-relay:{}", attempt.attempt_id));
                 let exists = self.transaction.query_row(
                     "SELECT EXISTS(SELECT 1 FROM collaboration_messages
@@ -199,22 +205,33 @@ impl StateTransaction<'_> {
                         &at,
                     )?;
                 }
-                self.open_attention_item(
+                let mut conversations = vec![(namespace.clone(), message_id.clone())];
+                if let Some(copy) = self.mirror_terminal_relay(
                     namespace,
-                    &AttentionItemDraft {
-                        id: crate::AttentionItemId::new(format!(
-                            "terminal-relay:{}",
-                            attempt.attempt_id
-                        )),
-                        source_kind: crate::AttentionSourceKind::TerminalRelay,
-                        source_id: message_id.as_str().to_owned(),
-                        summary: format!(
-                            "@{} answered in their terminal and may need your reply.",
-                            attempt.alias
-                        ),
-                    },
+                    &MessageId::new(&attempt.message_id),
+                    &message_id,
                     &at,
-                )?;
+                )? {
+                    conversations.push(copy);
+                }
+                for (conversation, relay) in conversations {
+                    self.open_attention_item(
+                        &conversation,
+                        &AttentionItemDraft {
+                            id: crate::AttentionItemId::new(format!(
+                                "terminal-relay:{}",
+                                attempt.attempt_id
+                            )),
+                            source_kind: crate::AttentionSourceKind::TerminalRelay,
+                            source_id: relay.as_str().to_owned(),
+                            summary: format!(
+                                "@{} answered in their terminal and may need your reply.",
+                                attempt.alias
+                            ),
+                        },
+                        &at,
+                    )?;
+                }
                 messages.push(message_id);
             }
         }
@@ -234,32 +251,36 @@ impl StateTransaction<'_> {
         thread: &ThreadId,
         attribution: &MutationAttribution,
     ) -> Result<(), StoreError> {
-        let ids = {
-            let mut statement = self.transaction.prepare(
-                "SELECT i.source_id FROM attention_items i JOIN collaboration_messages m
-                 ON m.session_socket_id=i.session_socket_id AND m.worktree_id=i.worktree_id
-                   AND m.message_id=i.source_id
-                 WHERE i.session_socket_id=?1 AND i.worktree_id=?2 AND i.source_kind='terminal_relay'
-                   AND i.resolved_at_ms IS NULL AND m.thread_id=?3",
-            )?;
-            statement
-                .query_map(
-                    params![
-                        namespace.session_socket_id,
-                        namespace.space_id.as_str(),
-                        thread.as_str()
-                    ],
-                    |row| row.get::<_, String>(0),
-                )?
-                .collect::<Result<Vec<_>, _>>()?
-        };
-        for id in ids {
-            self.resolve_attention_source(
-                namespace,
-                crate::AttentionSourceKind::TerminalRelay,
-                &id,
-                attribution,
-            )?;
+        let mut conversations = self.paired_threads(namespace, thread)?;
+        conversations.push((namespace.clone(), thread.clone()));
+        for (namespace, thread) in conversations {
+            let ids = {
+                let mut statement = self.transaction.prepare(
+                    "SELECT i.source_id FROM attention_items i JOIN collaboration_messages m
+                     ON m.session_socket_id=i.session_socket_id AND m.worktree_id=i.worktree_id
+                       AND m.message_id=i.source_id
+                     WHERE i.session_socket_id=?1 AND i.worktree_id=?2 AND i.source_kind='terminal_relay'
+                       AND i.resolved_at_ms IS NULL AND m.thread_id=?3",
+                )?;
+                statement
+                    .query_map(
+                        params![
+                            namespace.session_socket_id,
+                            namespace.space_id.as_str(),
+                            thread.as_str()
+                        ],
+                        |row| row.get::<_, String>(0),
+                    )?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            for id in ids {
+                self.resolve_attention_source(
+                    &namespace,
+                    crate::AttentionSourceKind::TerminalRelay,
+                    &id,
+                    attribution,
+                )?;
+            }
         }
         Ok(())
     }
