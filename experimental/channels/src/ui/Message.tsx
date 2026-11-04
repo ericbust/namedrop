@@ -14,8 +14,6 @@ import {
   participantCopy,
   pendingCopy,
   receiptCopy,
-  referenceCopy,
-  repliesCopy,
   replyInThreadCopy,
   routeCopy,
   SHOWN_RECIPIENTS,
@@ -39,12 +37,12 @@ import {
   type RoutePart,
   sameChat,
 } from "../route.ts";
-import { participant, type ReplyReference, replyTargetName } from "../store.ts";
+import { participant, replyTargetName } from "../store.ts";
 import { terminalResult } from "../wire.ts";
 import { Avatar } from "./Avatar.tsx";
 import { DeliveryContext } from "./DeliveryContext.ts";
 import { Icon } from "./Icons.tsx";
-import { Markdown, MarkdownLine, markdownText } from "./Markdown.tsx";
+import { Markdown, MarkdownLine } from "./Markdown.tsx";
 import {
   MessageActionsContext,
   ThreadConversationContext,
@@ -281,47 +279,6 @@ function variantFor(
 }
 
 type ThreadOpener = (threadId: string, button: HTMLButtonElement) => void;
-function Reference({
-  reference,
-  message,
-  directory,
-  onThread,
-}: {
-  reference: ReplyReference;
-  message: MessageRow;
-  directory: Directory;
-  onThread: ThreadOpener;
-}) {
-  let label = referenceCopy.earlierLabel;
-  let content: ReactNode = referenceCopy.earlier;
-  if (reference.kind === "message") {
-    const author = who(directory, reference.parent.author);
-    const [line = ""] = reference.parent.body.text.split("\n", 1);
-    label = referenceCopy.label(author.name, markdownText(line));
-    content = (
-      <>
-        <span className="reply-ref-author">
-          <Name person={author} />:
-        </span>
-        <span className="reply-ref-text">
-          <MarkdownLine source={line} />
-        </span>
-      </>
-    );
-  }
-  return (
-    <button
-      type="button"
-      className="reply-ref"
-      data-thread-id={message.threadId}
-      aria-label={label}
-      onClick={(event) => onThread(message.threadId, event.currentTarget)}
-    >
-      <Icon name="reply" className="icon-12" />
-      {content}
-    </button>
-  );
-}
 // A delivery part that leaves while it has focus hands focus to its message
 // row, so the next Tab continues from there. React runs a ref's cleanup before
 // it takes the element off the page.
@@ -348,17 +305,11 @@ function Route({
   message,
   directory,
   paused,
-  onThread,
-  paneId,
-  expanded,
 }: {
   line: RouteLine;
   message: MessageRow;
   directory: Directory;
   paused: boolean;
-  onThread: ThreadOpener | undefined;
-  paneId: string | undefined;
-  expanded: boolean;
 }) {
   const deliveries = useContext(DeliveryContext);
   const element = useRef<HTMLDivElement>(null);
@@ -472,28 +423,6 @@ function Route({
           </li>
         );
       }
-      case "replies":
-        return (
-          <li>
-            {onThread === undefined ? (
-              repliesCopy(part.count)
-            ) : (
-              <button
-                type="button"
-                className="route-link"
-                data-thread-id={message.threadId}
-                aria-controls={paneId}
-                aria-expanded={expanded}
-                aria-label={routeCopy.openReplies(part.count)}
-                onClick={(event) =>
-                  onThread(message.threadId, event.currentTarget)
-                }
-              >
-                {repliesCopy(part.count)}
-              </button>
-            )}
-          </li>
-        );
       default: {
         const exhaustive: never = part;
         return exhaustive;
@@ -514,9 +443,7 @@ function Route({
             : routeCopy.tip.unreachable
       }
     >
-      {line.icon !== null && (
-        <Icon name={line.icon} className="icon-12 route-icon" />
-      )}
+      <Icon name={line.icon} className="icon-12 route-icon" />
       <ul className="route-parts" aria-label={routeCopy.label}>
         {line.parts.map((item) => (
           <Fragment key={partKey(item)}>{part(item)}</Fragment>
@@ -551,7 +478,25 @@ function SystemRow({
   paused,
   arrive,
   located,
-}: Pick<MessageProps, "message" | "directory" | "arrive" | "located"> & {
+  latestReply,
+  replyCount = 0,
+  replyExit,
+  onThread,
+  paneId,
+  threadExpanded = false,
+}: Pick<
+  MessageProps,
+  | "message"
+  | "directory"
+  | "arrive"
+  | "located"
+  | "latestReply"
+  | "replyCount"
+  | "replyExit"
+  | "onThread"
+  | "paneId"
+  | "threadExpanded"
+> & {
   paused: boolean;
 }) {
   const failed = message.legs.some((leg) => leg.stage.stage === "failed");
@@ -574,6 +519,18 @@ function SystemRow({
         </p>
         {failed && (
           <Receipts message={message} directory={directory} paused={paused} />
+        )}
+        {onThread && replyCount > 0 && (
+          <ReplyPreview
+            message={message}
+            directory={directory}
+            reply={latestReply ?? null}
+            count={replyCount}
+            exit={replyExit}
+            onThread={onThread}
+            paneId={paneId}
+            expanded={threadExpanded}
+          />
         )}
       </div>
       <ReplyInThread message={message} directory={directory} />
@@ -727,6 +684,12 @@ export const Message = memo(
           paused={paused}
           arrive={arrive}
           located={located}
+          latestReply={latestReply}
+          replyCount={replyCount}
+          replyExit={replyExit}
+          onThread={onThread}
+          paneId={paneId}
+          threadExpanded={threadExpanded}
         />
       );
     const author = who(directory, message.author);
@@ -742,14 +705,6 @@ export const Message = memo(
         data-message-id={message.id}
         data-kind={message.kind}
       >
-        {chat?.reference && onThread && (
-          <Reference
-            reference={chat.reference}
-            message={message}
-            directory={directory}
-            onThread={onThread}
-          />
-        )}
         {grouped ? (
           <time className="msg-gutter" dateTime={time?.iso} title={time?.full}>
             {time?.short}
@@ -836,9 +791,6 @@ export const Message = memo(
                   message={message}
                   directory={directory}
                   paused={paused}
-                  onThread={onThread}
-                  paneId={paneId}
-                  expanded={threadExpanded}
                 />
               )
             : receipts &&
@@ -849,18 +801,7 @@ export const Message = memo(
                   paused={paused}
                 />
               )}
-          {chat?.kind === "agents" && chat.route && (
-            <Route
-              line={chat.route}
-              message={message}
-              directory={directory}
-              paused={paused}
-              onThread={onThread}
-              paneId={paneId}
-              expanded={threadExpanded}
-            />
-          )}
-          {chat == null && onThread && replyCount > 0 && (
+          {onThread && replyCount > 0 && (
             <ReplyPreview
               message={message}
               directory={directory}

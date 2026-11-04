@@ -3358,13 +3358,7 @@ function shown(rows: readonly TimelineRow[]) {
   return rows.flatMap((item) =>
     item.kind === "message" || item.kind === "orphan"
       ? [
-          `${item.kind === "orphan" ? "orphan " : ""}${item.message.id}${item.grouped ? " grouped" : ""}${item.showRecipients ? " to" : ""}${
-            item.reference === null
-              ? ""
-              : item.reference.kind === "earlier"
-                ? " ↩earlier"
-                : ` ↩${item.reference.parent.id}`
-          }${item.latestReply ? ` preview:${item.latestReply.id}` : ""}`,
+          `${item.kind === "orphan" ? "orphan " : ""}${item.message.id}${item.grouped ? " grouped" : ""}${item.showRecipients ? " to" : ""}${item.latestReply ? ` preview:${item.latestReply.id}` : ""}`,
         ]
       : [],
   );

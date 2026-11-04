@@ -9,7 +9,6 @@ import type {
 } from "./model.ts";
 import {
   participant,
-  type ReplyReference,
   type Room,
   recipients,
   type ThreadGroup,
@@ -29,13 +28,12 @@ export type RoutePart =
       kind: "delivery";
       alias: Alias;
       state: Exclude<Delivery, { kind: "idle" }>;
-    }
-  | { kind: "replies"; count: number };
+    };
 export type RouteTip =
   | { kind: "router"; name: string }
   | { kind: "unreachable" };
 export type RouteLine = {
-  icon: "clock" | "arrow" | "inbox" | "alert" | null;
+  icon: "clock" | "arrow" | "inbox" | "alert";
   tone: "muted" | "failed";
   tip: RouteTip | null;
   parts: readonly RoutePart[];
@@ -43,7 +41,6 @@ export type RouteLine = {
 // Everything channel chat adds around a message's body.
 export type Chat = {
   kind: Room["kind"];
-  reference: ReplyReference | null;
   route: RouteLine | null;
 };
 
@@ -76,10 +73,6 @@ function line(
 ): RouteLine {
   return { icon, tone: "muted", tip, parts };
 }
-function repliesOnly(tail: readonly RoutePart[]): RouteLine | null {
-  return tail.length === 0 ? null : line(null, tail);
-}
-
 function liveAgentNamed(
   directory: Directory,
   alias: string,
@@ -99,12 +92,11 @@ const unknown = { state: "unknown" } as const;
 const queued: DeliveryStage = { stage: "queued" };
 
 // The line under a channel-chat message: who got it and why, its receipts,
-// the mentioned agents it did not reach, and the post's reply count.
+// and the mentioned agents it did not reach.
 export function routeLine(
   message: Message,
   room: Extract<Room, { kind: "channel" }>,
   directory: Directory,
-  replies: number,
   delivery: (alias: Alias) => Delivery,
 ): RouteLine | null {
   const legs = recipients(message).filter(
@@ -115,8 +107,6 @@ export function routeLine(
     return member === undefined || legs.includes(member.id) ? [] : [member.id];
   });
   const reached = [...legs, ...listed];
-  const tail: readonly RoutePart[] =
-    replies > 0 ? [{ kind: "replies", count: replies }] : [];
   const names: RoutePart = { kind: "names", ids: reached };
   const receipts = (): RoutePart[] =>
     answered(room, reached, message.at, directory)
@@ -179,9 +169,7 @@ export function routeLine(
       ...pressed,
     ];
     if (reached.length === 0)
-      return unsent.length === 0
-        ? repliesOnly(tail)
-        : line("inbox", [...unsent, ...tail]);
+      return unsent.length === 0 ? null : line("inbox", unsent);
     return line(
       "arrow",
       [
@@ -189,7 +177,6 @@ export function routeLine(
         ...(reason === null ? [] : [{ kind: "reason", text: reason } as const]),
         ...receipts(),
         ...unsent,
-        ...tail,
       ],
       router === null ? null : { kind: "router", name: router },
     );
@@ -197,7 +184,7 @@ export function routeLine(
   const routing = message.routing ?? unknown;
   switch (routing.state) {
     case "routing":
-      return line("clock", [{ kind: "state", state: "checking" }, ...tail]);
+      return line("clock", [{ kind: "state", state: "checking" }]);
     case "routed":
       return sent(routing.reason, routing.router);
     case "unrouted":
@@ -215,18 +202,16 @@ export function routeLine(
             ? []
             : [{ kind: "send", aliases: idle, form: "to" } as const]),
           ...pressed,
-          ...tail,
         ],
       };
     }
     case "unknown":
       return reached.length === 0
-        ? repliesOnly(tail)
+        ? null
         : line("arrow", [
             names,
             ...(pulledIn ? [{ kind: "pulled-in" } as const] : []),
             ...receipts(),
-            ...tail,
           ]);
     default: {
       const exhaustive: never = routing;
@@ -238,27 +223,22 @@ export function routeLine(
 export function chatOf({
   message,
   thread,
-  reference,
   directory,
-  replies,
   delivery,
 }: {
   message: Message;
   thread: ThreadGroup;
-  reference: ReplyReference | null;
   directory: Directory;
-  replies: number;
   delivery: (alias: Alias) => Delivery;
 }): Chat | null {
   const { room } = thread;
   if (room === null) return null;
   return {
     kind: room.kind,
-    reference,
     route:
       room.kind === "channel"
-        ? routeLine(message, room, directory, replies, delivery)
-        : repliesOnly(replies > 0 ? [{ kind: "replies", count: replies }] : []),
+        ? routeLine(message, room, directory, delivery)
+        : null,
   };
 }
 
@@ -266,15 +246,7 @@ export function chatOf({
 export function sameChat(a: Chat | null, b: Chat | null): boolean {
   if (a === null || b === null) return a === b;
   return (
-    a.kind === b.kind &&
-    (a.reference === b.reference ||
-      (a.reference !== null &&
-        b.reference !== null &&
-        a.reference.kind === b.reference.kind &&
-        (a.reference.kind === "earlier" ||
-          (b.reference.kind === "message" &&
-            a.reference.parent === b.reference.parent)))) &&
-    JSON.stringify(a.route) === JSON.stringify(b.route)
+    a.kind === b.kind && JSON.stringify(a.route) === JSON.stringify(b.route)
   );
 }
 
@@ -284,8 +256,6 @@ export function chatPeople(
 ): readonly (AddressId | "human")[] {
   if (chat === null) return [];
   const people: (AddressId | "human")[] = [];
-  if (chat.reference?.kind === "message")
-    people.push(chat.reference.parent.author);
   for (const part of chat.route?.parts ?? [])
     if (part.kind === "names") people.push(...part.ids);
     else if (part.kind === "receipt") people.push(part.id);

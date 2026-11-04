@@ -8169,8 +8169,8 @@ async function chatRoom(t, messages, options) {
   await ui.live();
   return { ui, value };
 }
-function routeOf(ui, id) {
-  const route = ui.page.locator(`main [data-message-id="${id}"] .route`);
+function routeOf(ui, id, scope = ui.page.locator("main")) {
+  const route = scope.locator(`[data-message-id="${id}"] .route`);
   return {
     route,
     parts: () => route.locator(".route-parts > li").allTextContents(),
@@ -8467,6 +8467,9 @@ test("THREAD-ONLY: a channel thread reply stays in the pane and updates the pare
     exact: true,
   });
   await pane.locator('[data-message-id="r1"]').waitFor();
+  await parent
+    .getByRole("button", { name: /^1 reply from @claude at / })
+    .waitFor();
   const box = pane.getByRole("combobox", { name: "Reply to @claude" });
   await box.fill("@claude Thanks from the thread pane");
   await box.press("Enter");
@@ -8550,28 +8553,33 @@ for (const woke of [["claude"], []])
       }),
     ]);
     const timeline = ui.page.getByRole("region", { name: "Message history" });
-    await timeline.locator('[data-message-id="report"]').waitFor();
-    assert.deepEqual(await routeOf(ui, "ask").parts(), ["@codex", "pulled in"]);
+    await timeline.locator('[data-message-id="p"]').waitFor();
     assert.deepEqual(
-      await routeOf(ui, "answer").parts(),
+      await timeline
+        .locator("article[data-message-id]")
+        .evaluateAll((rows) => rows.map((row) => row.dataset.messageId)),
+      ["p", "room"],
+    );
+    await timeline
+      .getByRole("button", { name: /^3 replies, latest from @claude at / })
+      .click();
+    const pane = threadPane(ui);
+    await pane.locator('[data-message-id="report"]').waitFor();
+    assert.deepEqual(await routeOf(ui, "ask", pane).parts(), [
+      "@codex",
+      "pulled in",
+    ]);
+    assert.deepEqual(
+      await routeOf(ui, "answer", pane).parts(),
       ["@claude"],
       "the asker hears back as a plain recipient",
     );
-    await timeline
-      .locator('[data-message-id="answer"]')
-      .getByRole("button", {
-        name: "Reply to @claude: Asking now: @codex what is 6 times 7? Open thread",
-      })
-      .waitFor();
     assert.equal(
-      await routeOf(ui, "report").route.count(),
+      await routeOf(ui, "report", pane).route.count(),
       0,
       "the report back to the room has no route line",
     );
-    assert.equal(
-      await timeline.getByText("pulled in", { exact: true }).count(),
-      1,
-    );
+    assert.equal(await pane.getByText("pulled in", { exact: true }).count(), 1);
   });
 
 const threadPane = (ui) =>
@@ -8864,7 +8872,7 @@ const deliverySurfaces = {
     });
     await ui.page
       .locator("main")
-      .getByRole("button", { name: "1 reply. Open thread" })
+      .getByRole("button", { name: /^1 reply from @claude at / })
       .click();
     await threadPane(ui).getByRole("combobox").waitFor();
     return { ui, scope: threadPane(ui), id: "p1", inPane: true };
@@ -9437,7 +9445,7 @@ test("CH-fix-3 item 1: Send anyway in the thread pane delivers the post, focus m
   });
   await ui.page
     .locator("main")
-    .getByRole("button", { name: "1 reply. Open thread" })
+    .getByRole("button", { name: /^1 reply from @claude at / })
     .click();
   const pane = threadPane(ui);
   const box = pane.getByRole("combobox");
@@ -9448,13 +9456,13 @@ test("CH-fix-3 item 1: Send anyway in the thread pane delivers the post, focus m
   await until(() => ui.posts.deliveries.length === 1, "the deliver POST");
   assert.equal(ui.posts.deliveries[0].path, deliverPath("p1"));
   const inTimeline = routeOf(ui, "p1").route;
-  await readsAs(inTimeline, "Sending to @codex… · 1 reply");
+  await readsAs(inTimeline, "Sending to @codex…");
   await readsAs(pane.locator(".route"), "Sending to @codex…");
   const button = await pressedOffer(pane, "p1", "@codex");
   assert.equal((await offerState(button)).focused, true);
   answered.release();
   assert.equal((await offerReads(button, "Sent to @codex")).focused, true);
-  await readsAs(inTimeline, "Sent to @codex · 1 reply");
+  await readsAs(inTimeline, "Sent to @codex");
   assert.equal(
     await box.inputValue(),
     suggestedReply,
@@ -9547,7 +9555,7 @@ test("thread reply: a name with no message after it stays in the box and says wh
   const { ui } = await chatRoom(t, [post, reply]);
   await ui.page
     .locator("main")
-    .getByRole("button", { name: "1 reply. Open thread" })
+    .getByRole("button", { name: /^1 reply from @claude at / })
     .click();
   const pane = threadPane(ui);
   const box = pane.getByRole("combobox");
@@ -9864,7 +9872,7 @@ test("UI-R4 H4: this channel's own #label before a closed name reads that the pa
   assert.deepEqual(read, hints);
 });
 
-test("CH-2: an agent conversation shows every message flat, with header recipients and receipts", async (t) => {
+test("THREAD-ONLY: an agent conversation keeps replies in its thread with header recipients and receipts", async (t) => {
   const at = Date.now() - 600_000;
   const { ui } = await chatRoom(t, [
     message("ask", "please reply with the single word pong.", {
@@ -9880,40 +9888,39 @@ test("CH-2: an agent conversation shows every message flat, with header recipien
     }),
   ]);
   const timeline = ui.page.getByRole("region", { name: "Message history" });
-  await timeline.locator('[data-message-id="pong"]').waitFor();
-  assert.equal(
+  const parent = timeline.locator('[data-message-id="ask"]');
+  await parent.waitFor();
+  assert.deepEqual(
     await timeline
-      .locator('[data-message-id="pong"] .msg-head .to')
-      .textContent(),
-    " to @claude",
+      .locator("article[data-message-id]")
+      .evaluateAll((rows) => rows.map((row) => row.dataset.messageId)),
+    ["ask"],
   );
   assert.equal(
-    await timeline.locator('[data-message-id="pong"] .receipt').textContent(),
-    "Delivered",
-  );
-  assert.equal(
-    await timeline.locator('[data-message-id="ask"] .receipt').count(),
+    await parent.locator(".receipt").count(),
     0,
     "@codex answered, so the ask's receipts hide",
   );
+  assert.equal(await parent.locator(".route").count(), 0);
+  assert.equal(await parent.locator(".reply-preview").count(), 1);
+  await parent
+    .getByRole("button", { name: /^1 reply from @codex at / })
+    .click();
+  const pane = threadPane(ui);
+  await pane.locator('[data-message-id="pong"]').waitFor();
   assert.equal(
-    await timeline.locator('[data-message-id="pong"] .route').count(),
+    await pane.locator('[data-message-id="pong"] .msg-head .to').textContent(),
+    " to @claude",
+  );
+  assert.equal(
+    await pane.locator('[data-message-id="pong"] .receipt').textContent(),
+    "Delivered",
+  );
+  assert.equal(
+    await pane.locator('[data-message-id="pong"] .route').count(),
     0,
-    "a reply in an agent conversation has no route line",
   );
-  assert.equal(
-    await timeline.locator('[data-message-id="ask"] .route').textContent(),
-    "1 reply",
-    "the first message links its replies the way a channel post does",
-  );
-  assert.equal(
-    await timeline.locator(".reply-preview").count(),
-    0,
-    "no reply preview box",
-  );
-  await timeline.getByRole("button", { name: "1 reply. Open thread" }).click();
-  await ui.page
-    .getByRole("complementary", { name: "Thread", exact: true })
+  await pane
     .getByRole("combobox", { name: "Reply to @claude, @codex" })
     .waitFor();
 });
@@ -12581,3 +12588,34 @@ test("skills: an open catalog refreshes after the client cache expires", async (
   await list.getByText("$after", { exact: true }).waitFor();
   assert.equal(reads, 2);
 });
+
+for (const kind of ["nudge", "hook"])
+  test(`THREAD-ONLY: a ${kind} root exposes its replies through a count and preview`, async (t) => {
+    const at = Date.now() - 120_000;
+    const { ui } = await chatRoom(t, [
+      message("root", "Please continue", { kind, at_ms: at }),
+      answer(
+        "system-answer",
+        "root",
+        "root",
+        "codex",
+        "Continuing with the fix",
+        { at_ms: at + 60_000 },
+      ),
+    ]);
+    const timeline = ui.page.getByRole("region", { name: "Message history" });
+    const root = timeline.locator('[data-message-id="root"]');
+    await root.waitFor();
+    assert.equal(
+      await timeline.locator('[data-message-id="system-answer"]').count(),
+      0,
+    );
+    await root
+      .getByRole("button", { name: /^1 reply from @codex at / })
+      .click();
+    await threadPane(ui).locator('[data-message-id="system-answer"]').waitFor();
+    assert.match(
+      await root.locator(".reply-preview").textContent(),
+      /Continuing with the fix/,
+    );
+  });

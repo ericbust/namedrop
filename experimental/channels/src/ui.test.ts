@@ -975,16 +975,3 @@ test("no preview cut renders an empty strong, em, link, cell or row group", asyn
     }
   }
 });
-
-test("markdownText is the quoted line as the reader sees it", async () => {
-  const { markdownText } = await load<typeof import("./ui/Markdown.tsx")>(
-    "/src/ui/Markdown.tsx",
-  );
-  assert.equal(
-    markdownText("**Done** with _step_ `\\@gamma` [docs](https://a.test/d)"),
-    "Done with step @gamma docs",
-  );
-  assert.equal(markdownText("- item *one*"), "item one");
-  assert.equal(markdownText("# Head \\@alpha"), "Head @alpha");
-  assert.equal(markdownText("plain \\@alpha text"), "plain @alpha text");
-});
