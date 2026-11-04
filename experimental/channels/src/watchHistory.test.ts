@@ -624,6 +624,86 @@ test("an interrupted sample keeps known occurrence references for a later unique
   assert.deepEqual(watchRows(state), rows);
 });
 
+test("reopen maps the viewport without publishing a closed interval or replaying known rows", () => {
+  const row = (index: number) =>
+    `  Watched output ${String(index).padStart(5, "0")} has unique scrolling evidence`;
+  const grid = (start: number): WatchFrame => ({
+    cols: 96,
+    buffer: "normal",
+    rows: [
+      "PINNED WATCH HEADER",
+      ...Array.from({ length: 254 }, (_, i) => row(start + i)),
+      "PINNED WATCH FOOTER",
+    ],
+  });
+  let state = watchReduce(baseline(grid(0)), {
+    kind: "frame",
+    frame: grid(100),
+  });
+  const original = watchRows(state);
+  assert.equal(original.length, 100);
+  state = watchReduce(state, {
+    kind: "baseline",
+    continuity: "pane-one",
+    at: 2000,
+    frame: grid(500),
+  });
+  assert.deepEqual(watchRows(state), original);
+  state = watchReduce(state, { kind: "frame", frame: grid(600) });
+  assert.equal(
+    watchRows(state).filter((item) => item.kind === "text").length,
+    200,
+  );
+  assert.equal(
+    watchRows(state).filter((item) => item.kind === "gap").length,
+    1,
+  );
+  const beforeClose = watchRows(state);
+  state = watchReduce(state, {
+    kind: "frame",
+    frame: grid(700),
+    interrupted: true,
+  });
+  assert.deepEqual(watchRows(state), beforeClose);
+  state = watchReduce(state, { kind: "detach" });
+  state = watchReduce(state, {
+    kind: "baseline",
+    continuity: "pane-one",
+    at: 3000,
+    frame: grid(0),
+  });
+  assert.equal(
+    watchRows(state).filter((item) => item.kind === "text").length,
+    200,
+    "reopen cannot publish stale pending rows",
+  );
+  assert.deepEqual(watchRows(state), beforeClose);
+  state = watchReduce(state, { kind: "frame", frame: grid(100) });
+  assert.deepEqual(
+    watchRows(state),
+    beforeClose,
+    "known replay cannot append occurrences",
+  );
+  for (let start = 200; start <= 3000; start += 100) {
+    state = watchReduce(state, { kind: "frame", frame: grid(start) });
+    const rows = watchRows(state).filter((item) => item.kind === "text");
+    assert.equal(
+      new Set(rows.map((item) => item.text)).size,
+      rows.length,
+      `replay at ${start}`,
+    );
+  }
+  const rows = watchRows(state).filter((item) => item.kind === "text");
+  assert.equal(rows.length, 3000);
+  assert.deepEqual(
+    new Set(rows.map((item) => item.text)),
+    new Set(Array.from({ length: 3000 }, (_, i) => row(i))),
+  );
+  assert.deepEqual(rows.slice(0, original.length), original);
+  for (const known of beforeClose.filter((item) => item.kind === "text"))
+    assert.equal(rows.find((item) => item.text === known.text)?.id, known.id);
+});
+
 test("disconnected candidate segments share the byte budget without replacing retained IDs", () => {
   const wideFrame = (start: number): WatchFrame => {
     const current = frame(start);
@@ -645,6 +725,40 @@ test("disconnected candidate segments share the byte budget without replacing re
     assert.ok(watchBytes(state) <= WATCH_BYTE_LIMIT);
   }
   assert.deepEqual(watchRows(state).slice(0, original.length), original);
+  const returnTo = (start: number) => {
+    const known = new Map(
+      watchRows(state)
+        .filter((row) => row.kind === "text")
+        .map((row) => [row.text, row.id]),
+    );
+    for (const offset of [start, start + 2]) {
+      state = watchReduce(state, { kind: "frame", frame: wideFrame(offset) });
+      assert.ok(watchBytes(state) <= WATCH_BYTE_LIMIT);
+    }
+    const rows = watchRows(state).filter((row) => row.kind === "text");
+    assert.equal(
+      new Set(rows.map((row) => row.text)).size,
+      rows.length,
+      "return cannot repeat retained occurrences",
+    );
+    for (const row of rows)
+      if (known.has(row.text)) assert.equal(row.id, known.get(row.text));
+  };
+  returnTo(0);
+  assert.deepEqual(watchRows(state).slice(0, original.length), original);
+  for (let i = 51; i <= 150; i++) {
+    state = watchReduce(state, { kind: "frame", frame: wideFrame(i * 100) });
+    state = watchReduce(state, {
+      kind: "frame",
+      frame: wideFrame(i * 100 + 2),
+    });
+    assert.ok(watchBytes(state) <= WATCH_BYTE_LIMIT);
+  }
+  const retained = watchRows(state).find((row) => row.kind === "text");
+  assert.ok(retained);
+  const match = /Unique content row (\d+)/.exec(retained.text);
+  assert.ok(match);
+  returnTo(Number(match[1]));
   assert.equal(
     new Set(watchRows(state).map((row) => row.id)).size,
     watchRows(state).length,
