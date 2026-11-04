@@ -443,6 +443,91 @@ fn host_turn_identity_allows_same_agent_on_a_new_turn_and_keeps_old_tombstone() 
     );
 }
 
+
+fn record_host_event(state: &State, payload: Value, at: i64) {
+    let (_, event) = Event::parse(
+        AgentRuntime::ClaudeCode,
+        &payload.to_string(),
+        &FakeFiles::default(),
+    ).unwrap();
+    record(&state.0, &state.parent(), event, at).unwrap();
+}
+
+fn host_event(edge: &str, generation: &str, id: &str) -> Value {
+    json!({"session_id":"parent-session", "hook_event_name":edge,
+        "prompt_id":generation, "agent_id":id, "agent_type":"Explore"})
+}
+
+#[test]
+fn ended_session_requires_a_new_proven_prompt_before_showing_new_work() {
+    let state = State::new();
+    record_host_event(&state, host_event("UserPromptSubmit", "turn-1", ""), 100);
+    record_host_event(&state, host_event("SubagentStart", "turn-1", "old"), 110);
+    record_host_event(&state, host_event("SessionEnd", "turn-1", ""), 120);
+    let resumed = json!({"session_id":"parent-session", "hook_event_name":"SessionStart", "source":"resume", "prompt_id":"turn-2"});
+    record_host_event(&state, resumed, 130);
+    record_host_event(&state, host_event("SubagentStart", "turn-2", "new"), 140);
+    assert!(ids(&state, 145).is_empty(), "SessionStart alone cannot prove a new prompt");
+    record_host_event(&state, host_event("UserPromptSubmit", "turn-2", ""), 150);
+    record_host_event(&state, host_event("SubagentStart", "turn-1", "delayed-old"), 160);
+    assert_eq!(ids(&state, 170), ["new"]);
+}
+
+#[test]
+fn delayed_parent_stop_does_not_hide_a_newer_typed_turn() {
+    let state = State::new();
+    record_host_event(&state, host_event("UserPromptSubmit", "turn-1", ""), 100);
+    record_host_event(&state, host_event("SubagentStart", "turn-1", "old"), 110);
+    record_host_event(&state, host_event("UserPromptSubmit", "turn-2", ""), 120);
+    record_host_event(&state, host_event("SubagentStart", "turn-2", "new"), 130);
+    record_host_event(&state, host_event("Stop", "turn-1", ""), 140);
+    record_host_event(&state, host_event("SubagentStart", "turn-1", "late-old"), 150);
+    assert_eq!(ids(&state, 160), ["new"]);
+}
+
+#[test]
+fn background_exemption_belongs_to_the_child_run_generation() {
+    let state = State::new();
+    record_host_event(&state, host_event("SubagentStart", "turn-1", "child"), 100);
+    let mut stop = host_event("Stop", "turn-1", "");
+    stop["background_tasks"] = json!([{"id":"child", "status":"running"}]);
+    record_host_event(&state, stop, 110);
+    record_host_event(&state, host_event("SubagentStop", "turn-1", "child"), 120);
+    record_host_event(&state, host_event("UserPromptSubmit", "turn-2", ""), 130);
+    record_host_event(&state, host_event("SubagentStart", "turn-2", "child"), 140);
+    assert_eq!(ids(&state, 145), ["child"]);
+    assert!(running(&state.0, &state.parent(), 160, Some(150)).is_empty());
+    assert!(ids(&state, 170).is_empty(), "native idle cleanup stays durable");
+}
+
+#[test]
+fn delayed_typed_end_and_reset_do_not_hide_new_proven_prompt() {
+    for edge in ["SessionEnd", "SessionStart"] {
+        let state = State::new();
+        record_host_event(&state, host_event("UserPromptSubmit", "turn-1", ""), 100);
+        record_host_event(&state, host_event("SubagentStart", "turn-1", "old"), 110);
+        record_host_event(&state, host_event("UserPromptSubmit", "turn-2", ""), 120);
+        record_host_event(&state, host_event("SubagentStart", "turn-2", "new"), 130);
+        record_host_event(&state, host_event(edge, "turn-1", ""), 140);
+        record_host_event(&state, host_event("SubagentStart", "turn-1", "late-old"), 150);
+        assert_eq!(ids(&state, 160), ["new"], "{edge}");
+    }
+}
+
+#[test]
+fn original_typed_background_run_survives_new_parent_prompts_and_stops() {
+    let state = State::new();
+    record_host_event(&state, host_event("SubagentStart", "turn-1", "background"), 100);
+    let mut stop = host_event("Stop", "turn-1", "");
+    stop["background_tasks"] = json!([{"id":"background", "status":"running"}]);
+    record_host_event(&state, stop, 110);
+    record_host_event(&state, host_event("UserPromptSubmit", "turn-2", ""), 120);
+    record_host_event(&state, host_event("SubagentStart", "turn-2", "foreground"), 130);
+    record_host_event(&state, host_event("Stop", "turn-2", ""), 140);
+    let runs = running(&state.0, &state.parent(), 160, Some(150));
+    assert_eq!(runs.iter().map(|run| run.id.as_str()).collect::<Vec<_>>(), ["background"]);
+}
+
 #[test]
 fn malformed_fact_or_reader_overflow_hides_all_runs() {
     let state = State::new();
