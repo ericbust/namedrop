@@ -2280,6 +2280,141 @@ async function watchedHistoryOracle(browser, t, result) {
   }
 }
 
+test("live Peek native return follows history appended during keyboard scrolling", {
+  timeout: 30000,
+}, async (t) => {
+  const browser = await chromium.launch({
+    executablePath: process.env.CHROME ?? "/usr/bin/chromium",
+    headless: true,
+    args: ["--no-sandbox"],
+  });
+  const row = (index) => `NAVIGATION ROW ${String(index).padStart(5, "0")}`;
+  const grid = (start) =>
+    [
+      "PINNED NAVIGATION HEADER",
+      ...Array.from({ length: 254 }, (_, i) => row(start + i)),
+      "PINNED NAVIGATION FOOTER",
+    ]
+      .map((text, y) => `\x1b[${y + 1};1H\x1b[2K${text}`)
+      .join("");
+  const ui = await open(
+    browser,
+    t,
+    full(1, {
+      cols: 96,
+      rows: 256,
+      bytes: encode(grid(2100)),
+    }),
+  );
+  const history = ui.page.locator('.peek-history span[data-watch-kind="text"]');
+  let producing = true;
+  let producer;
+  try {
+    await clickMember(ui, "codex");
+    await until(() => ui.live(), "navigation stream");
+    await ui
+      .rows()
+      .last()
+      .getByText("PINNED NAVIGATION FOOTER", { exact: true })
+      .waitFor();
+    let seq = 2;
+    ui.live().send({
+      v: 1,
+      seq: seq++,
+      kind: "history",
+      text: Array.from({ length: 2100 }, (_, i) => row(i)).join("\n"),
+    });
+    await history.nth(2099).waitFor();
+    let start = 2100;
+    const send = async (next) => {
+      ui.live().send(data(seq++, grid(next)));
+      await until(
+        async () => (await history.last().textContent()) === row(next - 1),
+        "confirmed navigation append",
+      );
+    };
+    for (start = 2200; start <= 5000; start += 100) await send(start);
+    start = 5000;
+    assert.equal(await history.count(), 5000);
+    await history.nth(1700).evaluate((line) => {
+      const scroller = line.closest(".peek-live");
+      scroller.scrollTop +=
+        line.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+    });
+    await settleScroll(ui);
+    await ui.page.evaluate(() => {
+      const scroller = document.querySelector(".peek-live");
+      const initialTop = scroller.scrollTop;
+      window.nativeNavigation = new Promise((resolve) => {
+        scroller.addEventListener("scroll", function moved() {
+          if (scroller.scrollTop <= initialTop) return;
+          scroller.removeEventListener("scroll", moved);
+          resolve({
+            top: scroller.scrollTop,
+            remaining:
+              scroller.scrollHeight -
+              scroller.clientHeight -
+              scroller.scrollTop,
+          });
+        });
+      });
+    });
+    await ui.page.locator(".peek-live").focus();
+    await ui.page.keyboard.press("Control+End");
+    const intermediate = await ui.page.evaluate(() => window.nativeNavigation);
+    assert.ok(
+      intermediate.remaining > 100,
+      "native End starts before the next history append",
+    );
+    let appended = 0;
+    producer = (async () => {
+      while (producing) {
+        await send(++start);
+        appended++;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    })();
+    let reached = true;
+    try {
+      await ui.page.waitForFunction(
+        () => {
+          const scroller = document.querySelector(".peek-live");
+          return (
+            scroller.scrollHeight -
+              scroller.scrollTop -
+              scroller.clientHeight <=
+            1
+          );
+        },
+        undefined,
+        { timeout: 1500 },
+      );
+      await settleScroll(ui);
+    } catch {
+      reached = false;
+    }
+    assert.ok(
+      appended > 0,
+      "native navigation overlaps confirmed history appends",
+    );
+    assert.equal(
+      reached,
+      true,
+      `native End finishes during confirmed appends: ${JSON.stringify(await scrollMetrics(ui))}`,
+    );
+    assert.deepEqual(ui.errors, []);
+    assert.deepEqual(
+      ui.requests.filter((request) => request.method === "POST"),
+      [],
+    );
+  } finally {
+    producing = false;
+    await producer;
+    await ui.close();
+    await browser.close();
+  }
+});
+
 test("live Peek product component, transport and CSP in real Chromium and Firefox", {
   timeout: 180000,
 }, async (t) => {
