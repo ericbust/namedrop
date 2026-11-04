@@ -32,10 +32,10 @@ const RECONCILIATION_INDEX_REPAIRS: &[SchemaGap] = &[
               ON mailbox_deliveries(session_socket_id, worktree_id, message_id)",
     },
     SchemaGap {
-        name: "transition_facts_human_acknowledgement",
-        ddl: "CREATE INDEX IF NOT EXISTS transition_facts_human_acknowledgement
+        name: "transition_facts_attention_acknowledgement",
+        ddl: "CREATE INDEX IF NOT EXISTS transition_facts_attention_acknowledgement
               ON transition_facts(session_socket_id, worktree_id, entity_id)
-              WHERE entity_kind='attention_item' AND transition_kind='acknowledged' AND actor_kind='human'",
+              WHERE entity_kind='attention_item' AND transition_kind='acknowledged'",
     },
     SchemaGap {
         name: "coordination_links_assignment",
@@ -8046,7 +8046,7 @@ mod tests {
         expected.extend([
             "index coordination_links_assignment: CREATE INDEX coordination_links_assignment ON coordination_links(session_socket_id, worktree_id, assignment_id, message_id)",
             "index mailbox_deliveries_message: CREATE INDEX mailbox_deliveries_message ON mailbox_deliveries(session_socket_id, worktree_id, message_id)",
-            "index transition_facts_human_acknowledgement: CREATE INDEX transition_facts_human_acknowledgement ON transition_facts(session_socket_id, worktree_id, entity_id) WHERE entity_kind='attention_item' AND transition_kind='acknowledged' AND actor_kind='human'",
+            "index transition_facts_attention_acknowledgement: CREATE INDEX transition_facts_attention_acknowledgement ON transition_facts(session_socket_id, worktree_id, entity_id) WHERE entity_kind='attention_item' AND transition_kind='acknowledged'",
         ]);
         expected.sort_unstable();
         if let Some(line) = (0..actual.len().max(expected.len()))
