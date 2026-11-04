@@ -2714,3 +2714,32 @@ body.resizing-panels * {
   cursor: col-resize;
   user-select: none;
 }
+
+.option-skill {
+  height: auto;
+  min-height: 52px;
+  padding-block: var(--space-1);
+}
+.opt-skill-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+}
+.opt-description {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+.opt-skill-meta {
+  display: flex;
+  flex: none;
+  align-items: flex-end;
+  flex-direction: column;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+.peek-compose form {
+  position: relative;
+}

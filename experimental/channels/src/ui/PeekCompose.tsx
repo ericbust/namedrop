@@ -1,6 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { accept, completeSkills, skillToken } from "../complete.ts";
 import type { PeekTarget } from "../model.ts";
 import { type PeekInput, sendPeekInput } from "../peekInput.ts";
+import { CompletionList, optionId } from "./CompletionList.tsx";
+import { useSkills } from "./useSkills.ts";
 
 type State =
   | { kind: "off" }
@@ -25,9 +28,52 @@ export function PeekCompose({
 }) {
   const [state, setState] = useState<State>({ kind: "off" });
   const field = useRef<HTMLTextAreaElement>(null);
+  const list = useRef<HTMLDivElement>(null);
+  const listId = useId();
+  const [caret, setCaret] = useState(0);
+  const [focused, setFocused] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+  const [highlight, setHighlight] = useState({ token: "", index: 0 });
+  const placedCaret = useRef<number | null>(null);
   const pending = useRef<AbortController | null>(null);
   useEffect(() => () => pending.current?.abort(), []);
   const active = continuity !== null && state.kind !== "off";
+  const text = state.kind === "off" ? "" : state.text;
+  const catalogs = useSkills(
+    active &&
+      state.kind !== "sending" &&
+      target.kind === "agent" &&
+      skillToken(text, caret)
+      ? [{ key: target.channel, member: target.member }]
+      : [],
+  );
+  const completion = completeSkills(text, caret, catalogs, target.channel);
+  const candidates = completion?.candidates ?? [];
+  const open = active && focused && !dismissed && candidates.length > 0;
+  const token =
+    completion === null
+      ? ""
+      : `${completion.token.start}:${completion.token.query}`;
+  const selected = !open
+    ? -1
+    : highlight.token === token
+      ? Math.min(highlight.index, candidates.length - 1)
+      : 0;
+  useLayoutEffect(() => {
+    if (placedCaret.current === null) return;
+    field.current?.setSelectionRange(placedCaret.current, placedCaret.current);
+    placedCaret.current = null;
+  });
+  function choose(index: number) {
+    const candidate = candidates[index];
+    if (completion === null || candidate === undefined) return;
+    const next = accept(text, completion, candidate);
+    if (next === null) return;
+    placedCaret.current = next.caret;
+    setCaret(next.caret);
+    setDismissed(false);
+    setState({ kind: "ready", text: next.text });
+  }
   async function send(
     input: { kind: "text"; text: string } | { kind: "key"; key: KeyInput },
   ) {
@@ -106,21 +152,74 @@ export function PeekCompose({
               }
             }}
           >
+            {open && completion !== null && (
+              <CompletionList
+                completion={completion}
+                active={selected}
+                listId={listId}
+                list={list}
+                onChoose={choose}
+              />
+            )}
             <textarea
               ref={field}
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded={open}
+              aria-controls={open ? listId : undefined}
+              aria-activedescendant={
+                selected < 0 ? undefined : optionId(listId, selected)
+              }
               aria-label={`Message to ${target.alias}`}
               placeholder="Type a prompt, then press Enter"
               maxLength={4096}
               rows={2}
               value={state.text}
               disabled={state.kind === "sending"}
-              onChange={(event) =>
+              onChange={(event) => {
+                setCaret(event.target.selectionStart);
+                setDismissed(false);
                 setState({
                   kind: "ready",
                   text: event.target.value.replace(/[\r\n]/g, " "),
-                })
-              }
+                });
+              }}
+              onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
+              onFocus={(event) => {
+                setFocused(true);
+                setCaret(event.currentTarget.selectionStart);
+              }}
+              onBlur={() => setFocused(false)}
               onKeyDown={(event) => {
+                if (event.nativeEvent.isComposing) return;
+                if (open) {
+                  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                    event.preventDefault();
+                    setHighlight({
+                      token,
+                      index:
+                        (selected +
+                          (event.key === "ArrowDown" ? 1 : -1) +
+                          candidates.length) %
+                        candidates.length,
+                    });
+                    return;
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setDismissed(true);
+                    return;
+                  }
+                  if (
+                    (event.key === "Enter" || event.key === "Tab") &&
+                    !event.shiftKey
+                  ) {
+                    event.preventDefault();
+                    choose(selected);
+                    return;
+                  }
+                }
                 if (event.key === "Enter" && !event.nativeEvent.isComposing) {
                   event.preventDefault();
                   event.currentTarget.form?.requestSubmit();

@@ -1,6 +1,6 @@
 [package]
 name = "namedrop"
-version = "1.5.0-exp.10"
+version = "1.5.0-exp.11"
 edition = "2024"
 rust-version = "1.97"
 description = "Name and @mention AI agents and terminal panes to collaborate inside Herdr"
@@ -28,3 +28,5 @@ sha2 = "0.11"
 toml_edit = "0.25"
 libc = "0.2"
 unicode-width = { version = "0.2.2", default-features = false }
+serde_yaml_ng = "0.10.0"
+semver = "1.0.28"

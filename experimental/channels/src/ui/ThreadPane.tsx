@@ -47,7 +47,10 @@ import {
   type ThreadGroup,
   threadAgents,
 } from "../store.ts";
-import { threadReplyRecipients } from "../thread-recipients.ts";
+import {
+  threadReplyRecipients,
+  threadSkillRecipients,
+} from "../thread-recipients.ts";
 import { Composer } from "./Composer.tsx";
 import { DeliveryContext } from "./DeliveryContext.ts";
 import { Icon } from "./Icons.tsx";
@@ -154,6 +157,13 @@ export function ThreadPane({
     () => ({ kind: "thread", to: threadAgents(thread, directory) }),
     [thread, directory],
   );
+  const scopedCompletion = useMemo<CompletionContext | null>(() => {
+    if (completion === null) return null;
+    return {
+      ...completion,
+      skillRecipients: threadSkillRecipients(thread, directory, channel.key),
+    };
+  }, [completion, thread, directory, channel.key]);
   const initialRecipients = useMemo(
     () => threadReplyRecipients(thread, directory),
     [thread, directory],
@@ -345,11 +355,11 @@ export function ThreadPane({
         </p>
       )}
       {(response === null || response.kind === "reply") &&
-        completion &&
+        scopedCompletion &&
         latest &&
         (activeReply === null || to !== null) && (
           <Composer
-            context={completion}
+            context={scopedCompletion}
             composer={composer}
             drafts={drafts}
             outbox={outbox}

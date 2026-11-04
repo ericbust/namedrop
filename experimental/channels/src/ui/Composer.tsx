@@ -11,7 +11,6 @@ import {
 } from "react";
 import {
   accept,
-  type Candidate,
   type CompletionContext,
   complete,
   composerHint,
@@ -20,14 +19,10 @@ import {
   leadingMentions,
   postSource,
   sentText,
+  skillRecipients,
+  skillToken,
 } from "../complete.ts";
-import {
-  composerCopy,
-  disabledChannelCopy,
-  presenceWord,
-  recipientsLabel,
-  sendErrorCopy,
-} from "../copy.ts";
+import { composerCopy, recipientsLabel, sendErrorCopy } from "../copy.ts";
 import type {
   ComposerId,
   Draft,
@@ -36,96 +31,10 @@ import type {
   SendRule,
 } from "../model.ts";
 import { draftKey, inFlight } from "../store.ts";
-import { Avatar } from "./Avatar.tsx";
+import { CompletionList, optionId } from "./CompletionList.tsx";
 import { Icon } from "./Icons.tsx";
 import { measure } from "./measure.ts";
-
-const optionId = (list: string, index: number) => `${list}-${index}`;
-
-function Option({
-  candidate,
-  id,
-  active,
-  onChoose,
-}: {
-  candidate: Candidate;
-  id: string;
-  active: boolean;
-  onChoose: () => void;
-}) {
-  const disabled = insertion(candidate) === null;
-  let content: ReactNode;
-  let title: string | undefined;
-  switch (candidate.kind) {
-    case "channel": {
-      const { channel } = candidate;
-      title =
-        channel.disabledReason === null
-          ? undefined
-          : disabledChannelCopy[channel.disabledReason];
-      content = (
-        <>
-          <Icon name="hash" className="opt-icon" />
-          <span className="opt-name">
-            {channel.name}
-            {channel.suffix !== null && (
-              <span className="row-suffix"> · {channel.suffix}</span>
-            )}
-          </span>
-          {channel.token !== null && (
-            <span className="opt-meta">{channel.token}</span>
-          )}
-        </>
-      );
-      break;
-    }
-    case "all":
-      content = (
-        <>
-          <Icon name="hash" className="opt-icon" />
-          <span className="opt-name">#all</span>
-          <span className="opt-meta">· {composerCopy.everyWorkspace}</span>
-        </>
-      );
-      break;
-    case "member": {
-      const { member } = candidate;
-      content = (
-        <>
-          <Avatar
-            alias={member.alias}
-            type={member.kind.type}
-            small
-            presence={member.activity}
-          />
-          <span className="opt-name">{member.alias}</span>
-          <span className="opt-presence">{presenceWord[member.activity]}</span>
-        </>
-      );
-      break;
-    }
-    default: {
-      const exhaustive: never = candidate;
-      return exhaustive;
-    }
-  }
-  return (
-    // biome-ignore lint/a11y/useKeyWithClickEvents: keys reach options through the combobox's aria-activedescendant.
-    <div
-      role="option"
-      id={id}
-      className="option"
-      aria-selected={active}
-      aria-disabled={disabled || undefined}
-      title={title}
-      tabIndex={-1}
-      onMouseDown={(event) => event.preventDefault()}
-      onClick={onChoose}
-    >
-      {content}
-    </div>
-  );
-}
+import { useSkills } from "./useSkills.ts";
 
 export function Composer({
   context,
@@ -184,9 +93,12 @@ export function Composer({
   const needsRecipient = requireRecipient && leading.length === 0;
   const source = needsRecipient ? null : postSource(text, rule);
 
+  const skillTargets =
+    skillToken(text, caret) && !sending ? skillRecipients(text, context) : [];
+  const catalogs = useSkills(skillTargets);
   const completion = useMemo(
-    () => (sending ? null : complete(text, caret, context)),
-    [sending, text, caret, context],
+    () => (sending ? null : complete(text, caret, context, catalogs)),
+    [sending, text, caret, context, catalogs],
   );
   const candidates = completion?.candidates ?? [];
   const open = focused && !dismissed && candidates.length > 0;
@@ -228,20 +140,6 @@ export function Composer({
     element.style.height = "auto";
     element.style.height = `${element.scrollHeight}px`;
   });
-  useLayoutEffect(() => {
-    const element = list.current;
-    const option =
-      active < 0 ? null : document.getElementById(optionId(listId, active));
-    if (!element || !option) return;
-    if (option.offsetTop < element.scrollTop)
-      element.scrollTop = option.offsetTop;
-    else if (
-      option.offsetTop + option.offsetHeight >
-      element.scrollTop + element.clientHeight
-    )
-      element.scrollTop =
-        option.offsetTop + option.offsetHeight - element.clientHeight;
-  }, [active, listId]);
   useLayoutEffect(() => {
     const start = typedAt.current;
     typedAt.current = null;
@@ -310,32 +208,14 @@ export function Composer({
   return (
     <div className="composer">
       <div className="composer-box">
-        {open && (
-          <div
-            ref={list}
-            id={listId}
-            role="listbox"
-            className="completions"
-            aria-label={
-              completion?.token.kind === "member" ? "Members" : "Channels"
-            }
-          >
-            {candidates.map((candidate, index) => (
-              <Option
-                key={
-                  candidate.kind === "channel"
-                    ? candidate.channel.key
-                    : candidate.kind === "member"
-                      ? candidate.member.id
-                      : "#all"
-                }
-                candidate={candidate}
-                id={optionId(listId, index)}
-                active={index === active}
-                onChoose={() => choose(index)}
-              />
-            ))}
-          </div>
+        {open && completion !== null && (
+          <CompletionList
+            completion={completion}
+            active={active}
+            listId={listId}
+            list={list}
+            onChoose={choose}
+          />
         )}
         {rule.kind === "thread" &&
           !requireRecipient &&
