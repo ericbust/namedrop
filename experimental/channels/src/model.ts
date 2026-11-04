@@ -288,7 +288,8 @@ export type SendRule =
       agents: ReadonlyMap<AddressId, Member>;
       label: string | null;
     }
-  | { kind: "thread"; to: readonly string[] };
+  | { kind: "thread"; to: readonly string[] }
+  | { kind: "direct"; alias: string };
 export type WireEvent =
   | { type: "space"; channel: ChannelSnapshot }
   | { type: "gone"; key: SpaceKey }

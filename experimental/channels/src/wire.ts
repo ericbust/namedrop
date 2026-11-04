@@ -1,3 +1,4 @@
+import type { DirectHistory, DirectPeer } from "./direct-messages.ts";
 import type {
   Activity,
   AddressId,
@@ -756,4 +757,49 @@ export function parseRefusal(body: string): string {
     if (typeof error === "string") return error.trim();
   } catch {}
   return body.trim();
+}
+
+export function parseDirectPeers(raw: unknown): readonly DirectPeer[] {
+  const peers = array(record(raw).peers).map((raw): DirectPeer => {
+    const item = record(raw);
+    const presence = item.presence;
+    if (presence !== "idle" && presence !== "working" && presence !== "gone")
+      throw new Error("Invalid direct message presence");
+    if (typeof item.closed !== "boolean")
+      throw new Error("Expected closed flag");
+    return {
+      spaceKey: spaceKey(item.space_key),
+      addressId: addressId(item.address_id),
+      alias: `@${identity(item.alias).replace(/^@+/, "")}`,
+      workspaceLabel: text(item.workspace_label),
+      paneLabel: optionalSafeText(item.pane_label),
+      runtime: text(item.runtime),
+      presence,
+      closed: item.closed,
+      threadId: nullableText(item.thread_id),
+      lastActivityMs:
+        item.last_activity_ms === null
+          ? null
+          : timestamp(item.last_activity_ms),
+      lastMessageId: nullableText(item.last_message_id),
+      lastAgentMessageId: nullableText(item.last_agent_message_id),
+      attentionCount: integer(item.attention_count),
+    };
+  });
+  if (
+    new Set(peers.map((peer) => `${peer.spaceKey}/${peer.addressId}`)).size !==
+    peers.length
+  )
+    throw new Error("Duplicate direct message peer");
+  return peers;
+}
+export function parseDirectHistory(raw: unknown): DirectHistory {
+  const item = record(raw);
+  if (typeof item.earlier_omitted !== "boolean")
+    throw new Error("Expected history flag");
+  return {
+    threadId: nullableText(item.thread_id),
+    messages: [...messages(item.messages).values()],
+    earlierOmitted: item.earlier_omitted,
+  };
 }
