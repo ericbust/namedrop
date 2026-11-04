@@ -29,6 +29,8 @@ use std::{
 mod channels_bundle;
 #[path = "live_peek.rs"]
 mod live_peek;
+#[path = "skills_api.rs"]
+mod skills_api;
 /// Caps an operator post and the full body Show more reads, so the page can
 /// always show at least what it could send.
 const BODY_LIMIT: usize = 64 * 1024;
@@ -75,6 +77,7 @@ pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>, stop: Arc<At
     let history_store = Arc::new(Mutex::new(HistoryStore::Unopened));
     let screens = Arc::new(ScreenReads::default());
     let live = Arc::new(live_peek::LivePeeks::default());
+    let skills = Arc::new(super::skills::SkillCatalog::default());
     for mut stream in listener.incoming().flatten() {
         if stop.load(Ordering::Acquire) {
             break;
@@ -97,9 +100,18 @@ pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>, stop: Arc<At
         let history_store = history_store.clone();
         let screens = screens.clone();
         let live = live.clone();
+        let skills = skills.clone();
         thread::spawn(move || {
             let _permit = permit;
-            let _ = serve_connection(stream, &front, &next_id, &history_store, &screens, &live);
+            let _ = serve_connection(
+                stream,
+                &front,
+                &next_id,
+                &history_store,
+                &screens,
+                &live,
+                &skills,
+            );
         });
     }
 }
@@ -319,7 +331,7 @@ fn newest_screen_text(text: &str) -> String {
     format!("{MARKER}{suffix}")
 }
 
-fn strip_terminal_sequences(raw: &str) -> String {
+pub(super) fn strip_terminal_sequences(raw: &str) -> String {
     enum State {
         Ground,
         Escape,
@@ -653,6 +665,10 @@ enum Route {
         thread_id: String,
         action: super::thread_controls::Action,
     },
+    Skills {
+        key: SpaceKey,
+        address_id: String,
+    },
     Screen {
         key: SpaceKey,
         address_id: String,
@@ -709,7 +725,7 @@ fn route(
     if request.method == "POST"
         && matches!(
             path.split('/').collect::<Vec<_>>().as_slice(),
-            ["", "w", _, "participants", _, "live"]
+            ["", "w", _, "participants", _, "live" | "skills"]
         )
     {
         return Err(Status::MethodNotAllowed);
@@ -790,7 +806,12 @@ fn route(
         if segments.get(1) == Some(&"participants") {
             authenticate_session(request, port, session)?;
             authenticate_provenance(request, host)?;
-            let [key, "participants", address, kind @ ("screen" | "live")] = segments.as_slice()
+            let [
+                key,
+                "participants",
+                address,
+                kind @ ("screen" | "live" | "skills"),
+            ] = segments.as_slice()
             else {
                 return Err(Status::NotFound);
             };
@@ -799,7 +820,9 @@ fn route(
             if address_id.is_empty() || address_id.contains('/') {
                 return Err(Status::NotFound);
             }
-            return if *kind == "live" {
+            return if *kind == "skills" {
+                Ok(Route::Skills { key, address_id })
+            } else if *kind == "live" {
                 if request
                     .header("content-length")
                     .is_some_and(|length| length != "0")
@@ -1069,6 +1092,7 @@ fn serve_connection(
     history_store: &Mutex<HistoryStore>,
     screens: &ScreenReads,
     live: &live_peek::LivePeeks,
+    skills: &super::skills::SkillCatalog,
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut writer = stream.try_clone()?;
@@ -1235,6 +1259,24 @@ fn serve_connection(
             };
             let result = live.send_input(front, &key, &address_id, post);
             respond_status(&mut writer, result.err().unwrap_or(Status::NoContent))
+        }
+        Ok(Route::Skills { key, address_id }) => {
+            match skills_api::read(
+                history_store,
+                front.files.state(),
+                &key,
+                &address_id,
+                skills,
+            ) {
+                Ok(reply) => respond(
+                    &mut writer,
+                    "200 OK",
+                    "application/json",
+                    "",
+                    serde_json::to_string(&reply).unwrap().as_bytes(),
+                ),
+                Err(status) => respond_status(&mut writer, status),
+            }
         }
         Ok(Route::Screen { key, address_id }) => {
             let _permit = match screens.try_admit() {
@@ -2111,5 +2153,50 @@ mod screen_regression_tests {
             pending && retained,
             "timed out follower changed the leader's flight"
         );
+    }
+}
+
+#[cfg(test)]
+mod skill_route_tests {
+    use super::*;
+
+    #[test]
+    fn skills_require_session_provenance_and_safe_member_path() {
+        let state =
+            std::env::temp_dir().join(format!("namedrop-skill-route-{}", std::process::id()));
+        let files = ServerFiles::at(&state).unwrap();
+        let token = files.token().unwrap();
+        let session = files.session().unwrap();
+        let mut request = Request {
+            method: "GET".into(),
+            path: "/w/0123456789abcdef0123/participants/member/skills".into(),
+            query: None,
+            headers: vec![("host".into(), "127.0.0.1:1234".into())],
+        };
+        let routes = |request: &Request| route(request, 1234, &token, &session, false);
+        assert!(matches!(routes(&request), Err(Status::Unauthorized)));
+        request.headers.push((
+            "cookie".into(),
+            format!("{}={}", cookie_name(1234), session.as_str()),
+        ));
+        request
+            .headers
+            .push(("origin".into(), "https://other.invalid".into()));
+        assert!(matches!(routes(&request), Err(Status::Forbidden)));
+        request.headers.pop();
+        request
+            .headers
+            .push(("sec-fetch-site".into(), "same-origin".into()));
+        assert!(
+            matches!(routes(&request), Ok(Route::Skills { address_id, .. }) if address_id == "member")
+        );
+        request.path = "/w/0123456789abcdef0123/participants/bad%2Fmember/skills".into();
+        assert!(matches!(routes(&request), Err(Status::NotFound)));
+        request.path = "/w/invalid-key/participants/member/skills".into();
+        assert!(matches!(routes(&request), Err(Status::NotFound)));
+        request.path = "/w/0123456789abcdef0123/participants/member/skills".into();
+        request.method = "POST".into();
+        assert!(matches!(routes(&request), Err(Status::MethodNotAllowed)));
+        std::fs::remove_dir_all(state).unwrap();
     }
 }

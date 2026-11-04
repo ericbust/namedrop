@@ -6,6 +6,7 @@ mod http;
 mod hub;
 mod observer_guard;
 mod server_files;
+mod skills;
 pub mod snapshot;
 mod thread_controls;
 
