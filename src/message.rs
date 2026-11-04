@@ -559,6 +559,54 @@ where
         .map(|(receipt, ())| receipt)
 }
 
+pub fn send_operator_direct_message<E, C, I>(
+    request_id: &str,
+    source: &str,
+    peer: &crate::PaneAddressId,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Result<Value, OperatorSendError>
+where
+    E: crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
+    send_operator_direct_message_observing_commit(request_id, source, peer, runtime, |_| ())
+        .map(|(receipt, ())| receipt)
+}
+
+pub(crate) fn send_operator_direct_message_observing_commit<E, C, I, R>(
+    request_id: &str,
+    source: &str,
+    peer: &crate::PaneAddressId,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+    observe_commit: impl FnOnce(&Value) -> R,
+) -> Result<(Value, R), OperatorSendError>
+where
+    E: crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
+    let persist = || -> Result<Value, SendError> {
+        required_nonempty(request_id.to_owned(), "request_id").map_err(SendError::Input)?;
+        required_nonempty(source.to_owned(), "source").map_err(SendError::Input)?;
+        let workspace = runtime.workspace_id.ok_or_else(|| {
+            SendError::Input("a direct message requires its peer's workspace".to_owned())
+        })?;
+        let namespace = StateNamespace::for_space(runtime.session_socket_id, workspace);
+        let at =
+            MutationAttribution::new(ActorKind::Human, "local-human", runtime.clock.now_unix_ms());
+        let mut store = StateStore::open(runtime.state_directory)?;
+        let routed = store.transaction(|tx| {
+            tx.send_direct_message(&namespace, peer, request_id, source, runtime.ids, &at)
+        })?;
+        Ok(receipt_json(routed, Vec::new()))
+    };
+    let mut receipt = persist().map_err(OperatorSendError::from)?;
+    let observed = observe_commit(&receipt);
+    receipt["drain"] = crate::drain_receipt(runtime);
+    Ok((receipt, observed))
+}
+
 pub(crate) fn send_operator_message_observing_commit<E, C, I, R>(
     request_id: &str,
     source: &str,
@@ -1099,7 +1147,7 @@ where
     let PreparedMessageOperation {
         request_id,
         authored_source,
-        parsed,
+        mut parsed,
         author_kind,
         in_reply_to,
         disposition_attempt_id,
@@ -1157,6 +1205,19 @@ where
         if let Some(caller) = caller {
             caller.check(transaction, &namespace)?;
         }
+        if matches!(author_source, Author::Operator)
+            && let Some(target) = &in_reply_to
+        {
+            let route = transaction.message_route(&namespace, target)?;
+            if transaction
+                .direct_message(&namespace, &route.thread_id)?
+                .is_some()
+            {
+                return Err(crate::StoreError::invalid_input(
+                    "channel endpoints cannot target a direct message",
+                ));
+            }
+        }
         let (author, _) = sending_author(transaction, &namespace, author_source, &replay, runtime)?;
         let replayed =
             replay.receipt(transaction, &namespace, &author, author_source, &discovered)?;
@@ -1180,7 +1241,35 @@ where
     }
     let grammar_version = preparation.grammar(in_reply_to.as_ref());
     let plain_channel = preparation == MessagePreparation::OperatorPlain;
-    let routing = if plain_channel {
+    let direct_reply = store.transaction(|tx| {
+        let Some(target) = &in_reply_to else {
+            return Ok(None);
+        };
+        let route = tx.message_route(&namespace, target)?;
+        let dm = tx.direct_message(&namespace, &route.thread_id)?;
+        if dm.is_some() && (context.is_some() || request_context || tracking.present()) {
+            return Err(crate::StoreError::invalid_input(
+                "direct message replies cannot expand participants or publish coordination",
+            ));
+        }
+        dm.map(|dm| dm.counterpart(&author.address_id)).transpose()
+    })?;
+    if direct_reply.is_some() {
+        let start = skip_whitespace(&authored_source, 0);
+        let end = token_end(&authored_source, start);
+        if authored_source[start..end]
+            .strip_suffix([',', ':'])
+            .unwrap_or(&authored_source[start..end])
+            != "@operator"
+        {
+            return Err(SendError::Input(
+                "a direct message reply must use its bound @operator recipient".to_owned(),
+            ));
+        }
+        parsed.body = authored_source[skip_whitespace(&authored_source, end)..].to_owned();
+        parsed.context_mentions.clear();
+    }
+    let routing = if plain_channel || direct_reply.is_some() {
         crate::spaces::RoutePlan {
             sender_label: WorkspaceLabel::from_herdr(namespace.space_id.as_str()),
             legs: Vec::new(),
@@ -1287,7 +1376,9 @@ where
                 thread_id
             }
         };
-        let mut recipients = if plain_channel {
+        let mut recipients = if let Some(peer) = &direct_reply {
+            vec![transaction.routing_address_by_id(&namespace, peer)?]
+        } else if plain_channel {
             Vec::new()
         } else {
             routing.resolve(transaction, &namespace, &author.address_id, runtime.clock.now_unix_ms())?
@@ -1328,7 +1419,7 @@ where
             transaction.pane_type(&namespace,&r.address_id).is_ok_and(|kind|kind==crate::PaneType::Terminal)) {
             return Err(crate::StoreError::invalid_input("terminal recipients accept new shell command requests without agent context attachments"));
         }
-        let references = if channel_reply || preparation == MessagePreparation::OperatorPlain {
+        let references = if direct_reply.is_some() || channel_reply || preparation == MessagePreparation::OperatorPlain {
             Vec::new()
         } else {
             resolve_aliases(transaction, &namespace, &reference_aliases)?

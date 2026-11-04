@@ -61,9 +61,17 @@ UPDATE pane_addresses SET persona = (
 );
 "#;
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MessageAppendMode {
+    Normal,
+    PendingChannel,
+    DirectMessage,
+}
+
 mod bridge;
 pub(crate) mod channel_routing;
 mod deferred_commands;
+pub(crate) mod direct_messages;
 pub(crate) use bridge::{EnvoyOrigin, ForwardedCopy};
 pub(crate) use groups::addressed_recipients;
 mod coordination;
@@ -2638,6 +2646,7 @@ impl StateTransaction<'_> {
         }
 
         let mut ancestors = Vec::new();
+        let mut thread_modes = std::collections::HashMap::new();
         let mut visited = HashSet::new();
         let mut current_id = message_id.clone();
         loop {
@@ -2686,11 +2695,23 @@ impl StateTransaction<'_> {
                 "recipient_order",
                 false,
             )?;
-            let channel_thread = self.channel_thread(namespace, &message.thread_id)?;
+            let (channel_thread, direct_message) =
+                match thread_modes.get(&message.thread_id).copied() {
+                    Some(modes) => modes,
+                    None => {
+                        let channel = self.channel_thread(namespace, &message.thread_id)?;
+                        let private = !channel
+                            && self
+                                .direct_message(namespace, &message.thread_id)?
+                                .is_some();
+                        thread_modes.insert(message.thread_id.clone(), (channel, private));
+                        (channel, private)
+                    }
+                };
             let parent_id = message.in_reply_to.clone().filter(|_| {
                 channel_thread && message.author_kind == ActorKind::AgentSession.as_str()
             });
-            ancestors.push((message, recipients, channel_thread));
+            ancestors.push((message, recipients, channel_thread, direct_message));
             match parent_id {
                 Some(parent_id) => current_id = parent_id,
                 None => break,
@@ -2698,7 +2719,7 @@ impl StateTransaction<'_> {
         }
 
         let mut parent_route: Option<MessageRoute> = None;
-        for (message, recipients, channel_thread) in ancestors.into_iter().rev() {
+        for (message, recipients, channel_thread, direct_message) in ancestors.into_iter().rev() {
             let RouteMessage {
                 message_id,
                 thread_id,
@@ -2735,7 +2756,11 @@ impl StateTransaction<'_> {
                 })
                 .map(|recipient| recipient.address_id.clone())
                 .collect();
-            let mut reply_mode = crate::DeliveryReplyMode::for_message_grammar(&grammar_version);
+            let mut reply_mode = if direct_message {
+                crate::DeliveryReplyMode::DirectMessage
+            } else {
+                crate::DeliveryReplyMode::for_message_grammar(&grammar_version)
+            };
             if reply_mode == crate::DeliveryReplyMode::AgentThread && channel_thread {
                 reply_mode = crate::DeliveryReplyMode::Channel;
             }
@@ -2770,7 +2795,13 @@ impl StateTransaction<'_> {
         attribution: &MutationAttribution,
         bridged_from: Option<&bridge::BridgeOrigin<'_>>,
     ) -> Result<MessageReceipt, StoreError> {
-        self.append_message_mode(namespace, draft, attribution, bridged_from, false)
+        self.append_message_mode(
+            namespace,
+            draft,
+            attribution,
+            bridged_from,
+            MessageAppendMode::Normal,
+        )
     }
 
     fn append_message_mode(
@@ -2779,8 +2810,17 @@ impl StateTransaction<'_> {
         draft: &MessageDraft,
         attribution: &MutationAttribution,
         bridged_from: Option<&bridge::BridgeOrigin<'_>>,
-        pending_channel: bool,
+        mode: MessageAppendMode,
     ) -> Result<MessageReceipt, StoreError> {
+        let pending_channel = mode == MessageAppendMode::PendingChannel;
+        if draft.grammar_version == direct_messages::GRAMMAR
+            && draft.in_reply_to.is_none()
+            && mode != MessageAppendMode::DirectMessage
+        {
+            return Err(StoreError::invalid_input(
+                "direct message roots require the private send operation",
+            ));
+        }
         let fingerprint = serde_json::to_string(&serde_json::json!({
             "in_reply_to": draft.in_reply_to.as_ref().map(MessageId::as_str),
             "author_address_id": draft.author_address_id.as_str(),
@@ -2832,6 +2872,7 @@ impl StateTransaction<'_> {
                 "a collaboration message needs at least one recipient".to_owned(),
             ));
         }
+        let direct_message = self.validate_direct_message(namespace, draft)?;
         let author_disabled = self.transaction.query_row(
             "SELECT collaboration_disabled
              FROM pane_addresses
@@ -2850,7 +2891,8 @@ impl StateTransaction<'_> {
             ));
         }
         // A copy's reply was already counted against the author's own thread.
-        let is_agent_reply = bridged_from.is_none()
+        let is_agent_reply = !direct_message
+            && bridged_from.is_none()
             && draft.author_kind == ActorKind::AgentSession
             && draft.in_reply_to.is_some()
             && !matches!(
@@ -4811,7 +4853,8 @@ impl StateTransaction<'_> {
         let head_delivery_id = self
             .transaction
             .query_row(
-                "SELECT d.delivery_id
+                &format!(
+                    "SELECT d.delivery_id
                  FROM mailbox_deliveries d
                  JOIN collaboration_messages m USING (
                      session_socket_id, worktree_id, message_id
@@ -4821,7 +4864,7 @@ impl StateTransaction<'_> {
                  )
                  WHERE d.session_socket_id = ?1 AND d.worktree_id = ?2
                    AND d.address_id = ?3 AND d.state = 'queued'
-                   AND c.paused = 0 AND c.stopped = 0
+                   AND (c.paused = 0 OR (c.reply_allowance = 0 AND {private})) AND c.stopped = 0
                    AND NOT EXISTS (
                        SELECT 1
                        FROM mailbox_deliveries earlier
@@ -4833,6 +4876,8 @@ impl StateTransaction<'_> {
                    )
                  ORDER BY d.mailbox_order
                  LIMIT 1",
+                    private = direct_messages::private_thread_sql("m")
+                ),
                 params![
                     namespace.session_socket_id,
                     namespace.space_id.as_str(),
@@ -4981,9 +5026,10 @@ impl StateTransaction<'_> {
             return Ok(None);
         }
         let controls_allow_delivery = self.transaction.query_row(
-            "SELECT w.activated = 1 AND w.paused = 0 AND w.deactivated = 0
+            &format!(
+                "SELECT w.activated = 1 AND w.paused = 0 AND w.deactivated = 0
                     AND p.collaboration_disabled = 0
-                    AND c.paused = 0 AND c.stopped = 0
+                    AND (c.paused = 0 OR (c.reply_allowance = 0 AND {private})) AND c.stopped = 0
              FROM mailbox_deliveries d
              JOIN collaboration_messages m USING (
                  session_socket_id, worktree_id, message_id
@@ -4998,6 +5044,8 @@ impl StateTransaction<'_> {
              JOIN worktrees w USING (session_socket_id, worktree_id)
              WHERE d.session_socket_id = ?1 AND d.worktree_id = ?2
                AND d.delivery_id = ?3 AND d.address_id = ?4",
+                private = direct_messages::private_thread_sql("m")
+            ),
             params![
                 namespace.session_socket_id,
                 namespace.space_id.as_str(),
@@ -5231,7 +5279,12 @@ impl StateTransaction<'_> {
         let stale_nudge = nudge
             && !self.coordination_wake_current(namespace, &MessageId::new(message_id.clone()))?;
         let tracked_join = result_set.is_some() && !assignments.is_empty();
-        let reply_mode = if !tracked_join
+        let reply_mode = if self
+            .direct_message(namespace, &ThreadId::new(&thread_id))?
+            .is_some()
+        {
+            crate::DeliveryReplyMode::DirectMessage
+        } else if !tracked_join
             && crate::DeliveryReplyMode::for_message_grammar(&grammar_version)
                 == crate::DeliveryReplyMode::AgentThread
             && self.channel_thread(namespace, &ThreadId::new(&thread_id))?

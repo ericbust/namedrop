@@ -655,6 +655,17 @@ enum Route {
     Page,
     Session,
     Send(SpaceKey),
+    DirectMessages,
+    DirectHistory {
+        key: SpaceKey,
+        address_id: String,
+        before: Option<String>,
+        limit: i64,
+    },
+    DirectSend {
+        key: SpaceKey,
+        address_id: String,
+    },
     CoordinationReview(SpaceKey),
     Deliver {
         key: SpaceKey,
@@ -729,6 +740,35 @@ fn route(
         )
     {
         return Err(Status::MethodNotAllowed);
+    }
+    if path == "/api/direct-messages" && request.method == "GET" {
+        authenticate_session(request, port, session)?;
+        authenticate_provenance(request, host)?;
+        return Ok(Route::DirectMessages);
+    }
+    if let Some(rest) = path.strip_prefix("/w/") {
+        let segments: Vec<_> = rest.split('/').collect();
+        if let [key, "direct-messages", address, "messages"] = segments.as_slice() {
+            authenticate_session(request, port, session)?;
+            authenticate_provenance(request, host)?;
+            let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
+            let address_id = decode_asset_path(address).ok_or(Status::NotFound)?;
+            if address_id.is_empty() || address_id.contains('/') {
+                return Err(Status::NotFound);
+            }
+            return if request.method == "POST" {
+                authenticate_mutation(request, session, host)?;
+                Ok(Route::DirectSend { key, address_id })
+            } else {
+                let (before, limit) = history_query(request)?;
+                Ok(Route::DirectHistory {
+                    key,
+                    address_id,
+                    before,
+                    limit,
+                })
+            };
+        }
     }
     if request.method == "POST" {
         authenticate_session(request, port, session)?;
@@ -1129,6 +1169,159 @@ fn serve_connection(
                 .to_string()
                 .as_bytes(),
         ),
+        Ok(Route::DirectMessages) => {
+            let result = (|| {
+                let mut guard = history_store.lock().map_err(|_| Status::Unavailable)?;
+                match guard.store(front.files.state()) {
+                    Ok(store) => store
+                        .direct_message_peers()
+                        .map_err(|_| Status::Unavailable),
+                    Err(Status::NotFound) => Ok(Vec::new()),
+                    Err(status) => Err(status),
+                }
+            })();
+            match result {
+                Ok(mut peers) => {
+                    let (reply, answer) = mpsc::channel();
+                    let spaces = front
+                        .hub
+                        .send(HubCommand::Spaces { reply })
+                        .ok()
+                        .and_then(|()| answer.recv_timeout(Duration::from_secs(5)).ok())
+                        .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok());
+                    let mut live_spaces = HashMap::new();
+                    for peer in &mut peers {
+                        let live = if peer.closed {
+                            None
+                        } else {
+                            live_spaces
+                                .entry(peer.space_key.clone())
+                                .or_insert_with(|| {
+                                    let herdr = ProcessHerdr::default().with_socket(Some(
+                                        peer.namespace.session_socket_id.clone(),
+                                    ));
+                                    crate::discover_worktree_for_workspace(
+                                        &herdr,
+                                        peer.namespace.space_id.as_str(),
+                                    )
+                                    .ok()
+                                })
+                                .as_ref()
+                        };
+                        if let Some(live) = live {
+                            if let Some(label) = &live.label {
+                                peer.workspace_label =
+                                    snapshot::SafeText::from_untrusted(label, 256).text;
+                            }
+                            if let Some(pane) = live
+                                .panes
+                                .iter()
+                                .find(|pane| Some(&pane.pane_id) == peer.pane_id.as_ref())
+                            {
+                                peer.pane_label = pane
+                                    .pane_label
+                                    .as_deref()
+                                    .map(|label| snapshot::SafeText::from_untrusted(label, 256));
+                                if let Some(runtime) = crate::integration::pane_agent_runtime(pane)
+                                {
+                                    peer.runtime = runtime.as_str().to_owned();
+                                }
+                                peer.presence = if matches!(
+                                    pane.agent_status.as_deref(),
+                                    Some("idle" | "done")
+                                ) {
+                                    "idle"
+                                } else {
+                                    "working"
+                                }
+                                .to_owned();
+                            } else {
+                                peer.closed = true;
+                                peer.presence = "gone".to_owned();
+                            }
+                        }
+                        if let Some(label) = spaces
+                            .as_ref()
+                            .and_then(|v| v.as_array())
+                            .and_then(|spaces| {
+                                spaces.iter().find(|space| {
+                                    space["key"].as_str() == Some(peer.space_key.as_str())
+                                })
+                            })
+                            .and_then(|space| space["label"]["text"].as_str())
+                        {
+                            peer.workspace_label =
+                                snapshot::SafeText::from_untrusted(label, 256).text;
+                        }
+                    }
+                    peers.sort_by(|a, b| {
+                        b.last_activity_ms
+                            .cmp(&a.last_activity_ms)
+                            .then_with(|| a.workspace_label.cmp(&b.workspace_label))
+                            .then_with(|| a.address_id.cmp(&b.address_id))
+                    });
+                    let body = serde_json::to_vec(&serde_json::json!({"peers":peers}))
+                        .map_err(io::Error::other)?;
+                    respond(&mut writer, "200 OK", "application/json", "", &body)
+                }
+                Err(status) => respond_status(&mut writer, status),
+            }
+        }
+        Ok(Route::DirectHistory {
+            key,
+            address_id,
+            before,
+            limit,
+        }) => {
+            let result = (|| {
+                let mut guard = history_store.lock().map_err(|_| Status::Unavailable)?;
+                let store = guard.store(front.files.state())?;
+                let ns = store
+                    .dashboard_spaces()
+                    .map_err(|_| Status::Unavailable)?
+                    .into_iter()
+                    .find(|space| SpaceKey::of(&space.namespace) == key)
+                    .map(|space| space.namespace)
+                    .ok_or(Status::NotFound)?;
+                store
+                    .direct_message_history(
+                        &ns,
+                        &crate::PaneAddressId::new(address_id),
+                        before.as_deref(),
+                        limit,
+                    )
+                    .map_err(|_| Status::Unavailable)?
+                    .ok_or(Status::NotFound)
+            })();
+            match result {
+                Ok(rows) => {
+                    let messages: Vec<_> = rows
+                        .history
+                        .messages
+                        .iter()
+                        .map(|row| snapshot::message(row, &rows.history.legs))
+                        .collect();
+                    let body=serde_json::to_vec(&serde_json::json!({"thread_id":rows.thread_id,"messages":messages,"earlier_omitted":rows.earlier_omitted})).map_err(io::Error::other)?;
+                    respond(&mut writer, "200 OK", "application/json", "", &body)
+                }
+                Err(status) => respond_status(&mut writer, status),
+            }
+        }
+        Ok(Route::DirectSend { key, address_id }) => {
+            let post: DirectMessagePost = match read_json_body(&mut reader, &request) {
+                Ok(post) => post,
+                Err(status) => return respond_status(&mut writer, status),
+            };
+            if post.request_id.trim().is_empty()
+                || post.request_id.len() > 128
+                || post.request_id.chars().any(char::is_control)
+                || post.source.trim().is_empty()
+                || post.source.len() > BODY_LIMIT
+            {
+                return respond_status(&mut writer, Status::BadRequest);
+            }
+            send_direct_post(&mut writer, front, key, &address_id, post)
+        }
         Ok(Route::Send(key)) => {
             let post = match OperatorPost::read(&mut reader, &request) {
                 Ok(post) => post,
@@ -1458,6 +1651,94 @@ fn serve_connection(
             }
         }
         Ok(Route::AllEvents) => stream_events(stream, writer, front, next_id, Subscription::All),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectMessagePost {
+    request_id: String,
+    source: String,
+}
+
+fn send_direct_post(
+    writer: &mut TcpStream,
+    front: &Front,
+    key: SpaceKey,
+    address: &str,
+    post: DirectMessagePost,
+) -> io::Result<()> {
+    let mut admitted = Some(match front.admit_mutation() {
+        Ok(guard) => guard,
+        Err(status) => return respond_status(writer, status),
+    });
+    let namespace = StateStore::open_read_only(front.files.state())
+        .and_then(|store| store.map(|mut store| store.dashboard_spaces()).transpose());
+    let namespace = match namespace {
+        Ok(Some(spaces)) => spaces
+            .into_iter()
+            .find(|space| SpaceKey::of(&space.namespace) == key)
+            .map(|space| space.namespace),
+        Ok(None) => None,
+        Err(_) => return respond_status(writer, Status::Unavailable),
+    };
+    let Some(namespace) = namespace else {
+        return respond_status(writer, Status::NotFound);
+    };
+    let herdr = ProcessHerdr::default().with_socket(Some(namespace.session_socket_id.clone()));
+    let ids = crate::ProcessIds::default();
+    let runtime = crate::LifecycleRuntime {
+        state_directory: front.files.state(),
+        home_directory: None,
+        agent_config: crate::AgentConfigDirectories::default(),
+        cwd: Path::new("/"),
+        workspace_id: Some(namespace.space_id.as_str()),
+        current_pane_id: None,
+        session_socket_id: &namespace.session_socket_id,
+        herdr: &herdr,
+        clock: &crate::SystemClock,
+        ids: &ids,
+    };
+    writer.set_write_timeout(Some(Duration::from_secs(1)))?;
+    let sent = crate::message::send_operator_direct_message_observing_commit(
+        &post.request_id,
+        &post.source,
+        &crate::PaneAddressId::new(address),
+        &runtime,
+        |receipt| {
+            front.channel_wake.notify();
+            let response = respond(
+                writer,
+                "200 OK",
+                "application/json",
+                "",
+                receipt.to_string().as_bytes(),
+            );
+            drop(admitted.take());
+            response
+        },
+    );
+    match sent {
+        Ok((receipt, response)) => {
+            if let Err(error) = wake_mailboxes_after_send(front.files.state(), &namespace, &receipt)
+            {
+                eprintln!("Message saved; could not wake delivery: {error}");
+            }
+            response
+        }
+        Err(error) => respond(
+            writer,
+            match error.kind() {
+                crate::OperatorSendErrorKind::InvalidInput => "400 Bad Request",
+                crate::OperatorSendErrorKind::Unavailable => "503 Service Unavailable",
+                crate::OperatorSendErrorKind::Internal => "500 Internal Server Error",
+            },
+            "application/json",
+            "",
+            serde_json::json!({"error":error.public_message()})
+                .to_string()
+                .as_bytes(),
+        ),
     }
 }
 

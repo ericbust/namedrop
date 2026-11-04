@@ -702,3 +702,109 @@ fn targeted_context_is_thread_and_namespace_scoped_and_uses_the_safe_projection(
         404
     );
 }
+
+#[test]
+fn direct_message_http_routes_keep_private_history_out_of_channel_reads() {
+    let directory = TestDirectory::new();
+    let state = directory.path().join("state");
+    let ns = setup(&state, "direct-http");
+    let key = SpaceKey::of(&ns);
+    let server = Server::start(&state);
+    let path = format!("/w/{}/direct-messages/address-b/messages", key.as_str());
+    assert_eq!(server.get("/api/direct-messages", false).0, 401);
+    assert_eq!(server.get(&path, false).0, 401);
+    let (status, empty) = server.get(&path, true);
+    assert_eq!(status, 200);
+    assert_eq!(
+        empty,
+        serde_json::json!({"thread_id":null,"messages":[],"earlier_omitted":false})
+    );
+    let (_, session) = server.get("/api/session", true);
+    let csrf = session["csrf_token"].as_str().unwrap();
+    let post = |body: Value, token: Option<&str>| {
+        let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let source = body.to_string();
+        let mut request = format!(
+            "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: namedrop_dashboard_{}={}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+            server.port,
+            server.port,
+            server.session,
+            source.len()
+        );
+        if let Some(token) = token {
+            request.push_str(&format!("X-Namedrop-CSRF: {token}\r\n"));
+        }
+        request.push_str("\r\n");
+        request.push_str(&source);
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).unwrap();
+        let (headers, body) = raw.split_once("\r\n\r\n").unwrap();
+        (
+            headers
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .parse::<u16>()
+                .unwrap(),
+            serde_json::from_str::<Value>(body).unwrap_or(Value::Null),
+        )
+    };
+    let body =
+        serde_json::json!({"request_id":"dm-http","source":"Private question mentioning @a"});
+    assert_eq!(post(body.clone(), None).0, 403);
+    assert_eq!(
+        post(
+            serde_json::json!({"request_id":"bad","source":"Question","to":["address-a"]}),
+            Some(csrf)
+        )
+        .0,
+        400
+    );
+    let (status, sent) = post(body.clone(), Some(csrf));
+    assert_eq!(status, 200, "{sent}");
+    assert_eq!(sent["recipients"].as_array().unwrap().len(), 1);
+    assert_eq!(sent["recipients"][0]["address_id"], "address-b");
+    let (_, history) = server.get(&path, true);
+    assert_eq!(history["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(history["messages"][0]["body"]["text"], body["source"]);
+    let message = sent["message_id"].as_str().unwrap();
+    assert_eq!(
+        server.get(&format!("/w/{}/messages", key.as_str()), true).1,
+        serde_json::json!([])
+    );
+    assert_eq!(
+        server
+            .get(
+                &format!("/w/{}/messages/{message}/context", key.as_str()),
+                true
+            )
+            .0,
+        404
+    );
+    let raw = server.raw_with_headers(
+        &format!("/w/{}/messages/{message}/body", key.as_str()),
+        true,
+        &format!("X-Namedrop-CSRF: {csrf}\r\n"),
+    );
+    assert!(raw.starts_with("HTTP/1.1 404"), "{raw}");
+    let frame = server.snapshot(&key);
+    assert!(frame["messages"].as_array().unwrap().is_empty());
+    assert!(frame["threads"].as_array().unwrap().is_empty());
+    let (_, peers) = server.get("/api/direct-messages", true);
+    let peer = peers["peers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|peer| peer["address_id"] == "address-b")
+        .unwrap();
+    assert_eq!(peer["last_message_id"], sent["message_id"]);
+    assert_eq!(peer["space_key"], key.as_str());
+    let (status, replay) = post(body, Some(csrf));
+    assert_eq!(status, 200);
+    assert_eq!(replay["message_id"], sent["message_id"]);
+    assert_eq!(replay["idempotent_replay"], true);
+}

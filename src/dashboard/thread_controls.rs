@@ -41,6 +41,13 @@ pub(super) fn commit(
     let now = crate::Clock::now_unix_ms(&crate::SystemClock);
     let attribution = MutationAttribution::new(ActorKind::Human, "local-human", now);
     let mut store = StateStore::open(state).map_err(store_error)?;
+    if store
+        .transaction(|tx| tx.direct_message(&namespace, &thread))
+        .map_err(store_error)?
+        .is_some()
+    {
+        return Err(ControlError::NotFound);
+    }
     let (control, stopped) = store
         .transaction(|tx| {
             let current = tx.thread_control_state(&namespace, &thread)?;
