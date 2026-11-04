@@ -2954,6 +2954,7 @@ impl StateTransaction<'_> {
         }
         self.insert_message_recipients(namespace, draft, thread_order, attribution)?;
         if draft.author_kind == ActorKind::Human
+            && draft.in_reply_to.is_some()
             && self.is_operator_address(namespace, &draft.author_address_id)?
         {
             self.resolve_terminal_relay_attention(namespace, &draft.thread_id, attribution)?;

@@ -79,7 +79,11 @@ impl StateTransaction<'_> {
             params![ns[0], ns[1], ending.agent_session_id.as_str()],
             |row| row.get(0),
         )?;
-        let previous_end = previous_end.max(ending.previous_end_ms.map(to_i64).transpose()?);
+        let previous_end = ending
+            .previous_end_ms
+            .map(to_i64)
+            .transpose()?
+            .or(previous_end);
         let ended_at = to_i64(ending.ended_at_ms)?;
         if previous_end.is_some_and(|previous| previous >= ended_at) {
             return Ok(Vec::new());
@@ -504,6 +508,31 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn native_stop_intervals_survive_workers_finishing_out_of_order() {
+        let (mut store, ns) = fixture("mention/v1", true);
+        for (previous, end, text, expected) in [
+            (20, 40, "Later unrelated answer", 0),
+            (0, 20, "Original question?", 1),
+        ] {
+            let messages = store
+                .transaction(|tx| {
+                    tx.relay_terminal_ending(
+                        &ns,
+                        &TerminalRelayEnd {
+                            agent_session_id: AgentSessionId::new("session"),
+                            ended_at_ms: end,
+                            previous_end_ms: Some(previous),
+                            text: text.to_owned(),
+                        },
+                        &at(end),
+                    )
+                })
+                .unwrap();
+            assert_eq!(messages.len(), expected);
+        }
     }
 
     #[test]

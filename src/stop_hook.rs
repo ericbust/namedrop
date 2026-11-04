@@ -121,7 +121,7 @@ pub fn run_worker(state: &Path) {
     let ending = TerminalRelayEnd {
         agent_session_id: AgentSessionId::new(captured.input.session_id),
         ended_at_ms: captured.ended_at_ms,
-        previous_end_ms: captured.previous_end_ms,
+        previous_end_ms: Some(captured.previous_end_ms.unwrap_or(0)),
         text,
     };
     let attribution = MutationAttribution::new(ActorKind::Plugin, "namedrop", captured.ended_at_ms);
@@ -255,10 +255,68 @@ fn read_input(input: impl Read) -> Option<StopInput> {
         .read_to_end(&mut bytes)
         .ok()?;
     if bytes.len() as u64 > MAX_INPUT_BYTES {
-        return None;
+        return stop_identity_prefix(&bytes);
     }
     let input: StopInput = serde_json::from_slice(&bytes).ok()?;
     (input.hook_event_name == "Stop" && !input.session_id.trim().is_empty()).then_some(input)
+}
+
+fn stop_identity_prefix(bytes: &[u8]) -> Option<StopInput> {
+    fn whitespace(bytes: &[u8], offset: &mut usize) {
+        while bytes.get(*offset).is_some_and(u8::is_ascii_whitespace) {
+            *offset += 1;
+        }
+    }
+    fn value(bytes: &[u8], offset: &mut usize) -> Option<Value> {
+        let mut values =
+            serde_json::Deserializer::from_slice(bytes.get(*offset..)?).into_iter::<Value>();
+        let result = values.next()?.ok()?;
+        *offset += values.byte_offset();
+        Some(result)
+    }
+    let mut offset = 0;
+    whitespace(bytes, &mut offset);
+    if bytes.get(offset) != Some(&b'{') {
+        return None;
+    }
+    offset += 1;
+    let mut fields = serde_json::Map::new();
+    fields.insert(
+        "last_assistant_message".to_owned(),
+        Value::String(String::new()),
+    );
+    loop {
+        whitespace(bytes, &mut offset);
+        let Value::String(key) = value(bytes, &mut offset)? else {
+            return None;
+        };
+        whitespace(bytes, &mut offset);
+        if bytes.get(offset) != Some(&b':') {
+            return None;
+        }
+        offset += 1;
+        let item = value(bytes, &mut offset)?;
+        if matches!(
+            key.as_str(),
+            "hook_event_name" | "session_id" | "prompt_id" | "turn_id"
+        ) {
+            fields.insert(key, item);
+        }
+        if let Ok(input) = serde_json::from_value::<StopInput>(Value::Object(fields.clone())) {
+            let identity = match (&input.prompt_id, &input.turn_id) {
+                (Some(id), None) | (None, Some(id)) => !id.trim().is_empty(),
+                _ => false,
+            };
+            if identity && input.hook_event_name == "Stop" && !input.session_id.trim().is_empty() {
+                return Some(input);
+            }
+        }
+        whitespace(bytes, &mut offset);
+        if bytes.get(offset) != Some(&b',') {
+            return None;
+        }
+        offset += 1;
+    }
 }
 
 impl StopInput {
@@ -361,6 +419,25 @@ mod tests {
         ] {
             let input = read_input(fixture.as_bytes()).unwrap();
             assert_eq!(input.final_text(None), expected);
+        }
+    }
+
+    #[test]
+    fn oversized_recorded_host_payloads_keep_identity_and_discard_text() {
+        for fixture in [
+            include_str!("../tests/fixtures/terminal-relay/claude-2.1.316-stop.json"),
+            include_str!("../tests/fixtures/terminal-relay/codex-0.164.0-stop.json"),
+        ] {
+            let original = read_input(fixture.as_bytes()).unwrap();
+            let oversized = fixture.replace(
+                &serde_json::to_string(original.last_assistant_message.as_ref().unwrap()).unwrap(),
+                &serde_json::to_string(&"x".repeat(MAX_INPUT_BYTES as usize + 100)).unwrap(),
+            );
+            let bounded = read_input(oversized.as_bytes()).unwrap();
+            assert_eq!(bounded.session_id, original.session_id);
+            assert_eq!(bounded.prompt_id, original.prompt_id);
+            assert_eq!(bounded.turn_id, original.turn_id);
+            assert_eq!(bounded.final_text(None), "");
         }
     }
 

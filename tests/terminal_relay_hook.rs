@@ -289,8 +289,11 @@ impl Fixture {
         let previous_boundary = self.boundary();
         let worker_pid_file = self.0.join("worker-pid");
         let _ = fs::remove_file(&worker_pid_file);
-        let mut payload = json!({"hook_event_name":"Stop", "session_id":"session", "last_assistant_message":text});
-        payload[identity_key] = json!(identity);
+        let payload = format!(
+            "{{\"hook_event_name\":\"Stop\",\"session_id\":\"session\",\"{identity_key}\":{},\"last_assistant_message\":{}}}",
+            serde_json::to_string(identity).unwrap(),
+            serde_json::to_string(text).unwrap(),
+        );
         let mut child = self
             .command(env!("CARGO_BIN_EXE_namedrop"))
             .env("HERDR_SOCKET_PATH", "test-socket")
@@ -307,8 +310,13 @@ impl Fixture {
             .stdin
             .take()
             .unwrap()
-            .write_all(payload.to_string().as_bytes())
-            .unwrap();
+            .write_all(payload.as_bytes())
+            .unwrap_or_else(|error| {
+                assert!(
+                    payload.len() > 1024 * 1024 && error.kind() == std::io::ErrorKind::BrokenPipe,
+                    "{error}"
+                );
+            });
         let output = child.wait_with_output().unwrap();
         assert!(output.status.success());
         assert!(output.stdout.is_empty());
@@ -347,6 +355,25 @@ impl Fixture {
         connection.prepare("SELECT message_id, body FROM collaboration_messages WHERE grammar_version='terminal-relay/v1' ORDER BY thread_order").unwrap()
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
             .collect::<Result<_, _>>().unwrap()
+    }
+}
+
+#[test]
+fn an_oversized_stop_cannot_relay_an_unrelated_later_answer() {
+    for identity_key in ["prompt_id", "turn_id"] {
+        let fixture = Fixture::new();
+        fixture.initialize_relay();
+        fixture.stop(
+            identity_key,
+            "oversized-turn",
+            &"x".repeat(1024 * 1024 + 100),
+        );
+        fixture.stop(identity_key, "unrelated-turn", "Unrelated answer");
+        assert!(
+            fixture.relays().is_empty(),
+            "oversized Stop lost its boundary: {:?}",
+            fixture.relays()
+        );
     }
 }
 
