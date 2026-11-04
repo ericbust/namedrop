@@ -864,7 +864,9 @@ function projection(rows = 60, label = "BOTTOM") {
 async function scrollMetrics(ui) {
   return ui.page.locator(".peek-live").evaluate((el) => {
     const box = el.getBoundingClientRect();
-    const marker = [...el.querySelectorAll(".xterm-rows > div")].at(-1);
+    const marker = [
+      ...el.querySelectorAll(".peek-buffer-visible .xterm-rows > div"),
+    ].at(-1);
     const rect = marker.getBoundingClientRect();
     return {
       top: el.scrollTop,
@@ -920,7 +922,9 @@ async function usefulMetrics(ui, row, text = "") {
   return ui.page.locator(".peek-live").evaluate(
     (el, { row, text }) => {
       const box = el.getBoundingClientRect();
-      const line = el.querySelectorAll(".xterm-rows > div")[row - 1];
+      const line = el.querySelectorAll(
+        ".peek-buffer-visible .xterm-rows > div",
+      )[row - 1];
       const rect = line.getBoundingClientRect();
       let marker = rect;
       if (text) {
@@ -982,7 +986,9 @@ async function activeNavigationOracle(browser, t, result) {
       ui.page.waitForFunction(
         () => {
           const el = document.querySelector(".peek-live");
-          const row = el.querySelectorAll(".xterm-rows > div")[69];
+          const row = el.querySelectorAll(
+            ".peek-buffer-visible .xterm-rows > div",
+          )[69];
           const box = el.getBoundingClientRect(),
             rect = row.getBoundingClientRect();
           return (
@@ -1216,9 +1222,9 @@ async function sparseScrollingOracle(browser, t, result) {
     assert.equal((await usefulMetrics(ui, 50)).visible, true);
     send("\x1b[2J\x1b[H");
     await ui.page.waitForFunction(() =>
-      [...document.querySelectorAll(".xterm-rows > div")].every(
-        (row) => row.textContent.trim() === "",
-      ),
+      [
+        ...document.querySelectorAll(".peek-buffer-visible .xterm-rows > div"),
+      ].every((row) => row.textContent.trim() === ""),
     );
     await settleScroll(ui);
     assert.equal(
@@ -1228,7 +1234,9 @@ async function sparseScrollingOracle(browser, t, result) {
     );
     reset(80, 0, "");
     await ui.page.waitForFunction(() => {
-      const rows = [...document.querySelectorAll(".xterm-rows > div")];
+      const rows = [
+        ...document.querySelectorAll(".peek-buffer-visible .xterm-rows > div"),
+      ];
       return (
         rows.length === 80 && rows.every((row) => row.textContent.trim() === "")
       );
@@ -1334,7 +1342,7 @@ async function scrollingOracle(browser, t, result) {
     const wheel = await scrollMetrics(ui);
     // A pixel-delta input is the browser path used by a precision trackpad.
     const cancellation = await region
-      .locator(".xterm-screen")
+      .locator(".xterm-screen:visible")
       .evaluate((el) => {
         const event = new WheelEvent("wheel", {
           bubbles: true,
@@ -1672,7 +1680,7 @@ async function historyAndFitOracle(browser, t, result) {
       await ui.page.setViewportSize(size);
       await ui.page.waitForTimeout(100);
       const fit = await ui.page.locator(".peek-live").evaluate((el) => {
-        const screen = el.querySelector(".xterm-screen");
+        const screen = el.querySelector(".peek-buffer-visible .xterm-screen");
         const style = getComputedStyle(el);
         const available =
           el.clientWidth -
@@ -2039,11 +2047,30 @@ async function watchedHistoryOracle(browser, t, result) {
     let seq = 2;
     const sendGrid = async (start) => {
       ui.live().send(data(seq++, paintGrid(grid(start))));
-      await until(
-        async () =>
-          (await ui.rows().nth(1).textContent()).trim() === row(start).trim(),
-        "completed watched frame",
-      );
+      try {
+        await until(
+          async () =>
+            (await historyText()
+              .filter({ hasText: row(start - 1) })
+              .count()) === 1,
+          "completed watched frame",
+        );
+      } catch (error) {
+        result.watchFailure = {
+          expectedStart: start,
+          historyCount: await historyText().count(),
+          visibleRows: (await ui.rows().allTextContents()).slice(0, 4),
+          notices: await ui.drawer
+            .locator(".peek-bar, .peek-failure, .peek-note")
+            .allTextContents(),
+          streams: ui.liveCount(),
+          errors: ui.errors,
+        };
+        await ui.page.screenshot({
+          path: join(output, `${result.name}-watch-failure.png`),
+        });
+        throw error;
+      }
     };
     await sendGrid(100);
     await historyText().nth(99).waitFor();
