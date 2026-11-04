@@ -152,7 +152,7 @@ test("reset and detach preserve history and time while forbidding inference acro
   state = watchReduce(state, { kind: "frame", frame: frame(72) });
   assert.deepEqual(
     state.confirmed.map((row) => row.text),
-    [line(0), line(1), line(70), line(71)],
+    [line(0), line(1), "… some lines missed", line(70), line(71)],
   );
   state = watchReduce(state, {
     kind: "baseline",
@@ -164,7 +164,7 @@ test("reset and detach preserve history and time while forbidding inference acro
   assert.equal(state.startedAt, 3000);
 });
 
-test("identical text at different confirmed occurrences keeps distinct row IDs", () => {
+test("a same-continuity rebaseline reuses uniquely anchored occurrences", () => {
   let state = watchReduce(baseline(), { kind: "frame", frame: frame(2) });
   state = watchReduce(state, {
     kind: "baseline",
@@ -173,11 +173,14 @@ test("identical text at different confirmed occurrences keeps distinct row IDs",
     frame: frame(),
   });
   state = watchReduce(state, { kind: "frame", frame: frame(2) });
+  const rows = watchRows(state);
   assert.deepEqual(
-    state.confirmed.map((row) => row.text),
-    [line(0), line(1), line(0), line(1)],
+    rows.slice(0, 2).map((row) => row.text),
+    [line(0), line(1)],
   );
-  assert.equal(new Set(state.confirmed.map((row) => row.id)).size, 4);
+  assert.equal(new Set(rows.map((row) => row.id)).size, rows.length);
+  assert.equal(rows.filter((row) => row.text === line(0)).length, 1);
+  assert.equal(rows.filter((row) => row.text === line(1)).length, 1);
 });
 
 test("seed replacement keeps occurrence anchors and strong visible overlap appears once", () => {
@@ -405,4 +408,191 @@ test("an unrecoverable boundary in recorded Codex prose is visible before later 
     gap > before && gap < after,
     "unrecoverable boundary needs a visible gap",
   );
+});
+
+test("detach and reconnect preserve occurrence identity when the same viewport is uniquely anchored", () => {
+  let state = watchReduce(baseline(), { kind: "frame", frame: frame(2) });
+  const rows = watchRows(state);
+  state = watchReduce(state, { kind: "detach" });
+  state = watchReduce(state, {
+    kind: "baseline",
+    continuity: "pane-one",
+    at: 2000,
+    frame: frame(),
+  });
+  state = watchReduce(state, { kind: "frame", frame: frame(2) });
+  const resumed = watchRows(state);
+  assert.deepEqual(resumed.slice(0, rows.length), rows);
+  assert.equal(new Set(resumed.map((row) => row.id)).size, resumed.length);
+  for (const row of rows)
+    assert.equal(resumed.filter((item) => item.text === row.text).length, 1);
+});
+
+test("identical stdout rows at two proven forward positions retain separate occurrences", () => {
+  const repeated =
+    "A genuine repeated stdout message with the same exact wording";
+  const repeatedFrame = (start: number) => {
+    const current = frame(start);
+    return {
+      ...current,
+      rows: current.rows.map((text) =>
+        text === line(1) || text === line(14) ? repeated : text,
+      ),
+    };
+  };
+  let state = baseline(repeatedFrame(0));
+  for (let start = 2; start <= 18; start += 2)
+    state = watchReduce(state, { kind: "frame", frame: repeatedFrame(start) });
+  const rows = watchRows(state).filter((row) => row.text === repeated);
+  assert.equal(rows.length, 2);
+  assert.notEqual(rows[0]?.id, rows[1]?.id);
+});
+
+function capturedParagraph(
+  state: ReturnType<typeof emptyWatch>,
+  number: number,
+) {
+  const lines = watchRows(state).map((row) =>
+    row.text.trim().replace(/^• /, ""),
+  );
+  const start = lines.findIndex((text) => text.startsWith(`${number}. `));
+  assert.ok(start >= 0, `missing paragraph ${number}`);
+  let end = start + 1;
+  while (
+    end < lines.length &&
+    !/^\d+\.\s/.test(lines[end] ?? "") &&
+    lines[end] !== "… some lines missed"
+  )
+    end++;
+  return lines.slice(start, end).filter(Boolean).join(" ");
+}
+
+test("recorded prose preserves complete paragraphs and every continuation occurrence", () => {
+  let state = baseline(proseFrame(600));
+  for (let seq = 601; seq <= 679; seq++)
+    state = watchReduce(state, { kind: "frame", frame: proseFrame(seq) });
+  const truth = prose.provenance.truth.text.split("\n");
+  for (let number = 123; number <= 133; number++)
+    assert.equal(capturedParagraph(state, number), truth[number - 1]);
+});
+
+test("recorded final paragraph spacing and backward navigation retain the complete observed tail", () => {
+  let state = baseline(proseFrame(718));
+  for (let seq = 719; seq <= 743; seq++) {
+    const captured = proseFrame(seq);
+    state = watchReduce(state, {
+      kind: "frame",
+      frame: {
+        ...captured,
+        rows: captured.rows.map((text) => text.padEnd(captured.cols)),
+      },
+    });
+  }
+  const truth = prose.provenance.truth.text.split("\n");
+  for (let number = 146; number < 150; number++)
+    assert.equal(capturedParagraph(state, number), truth[number - 1]);
+  assert.ok(
+    capturedParagraph(state, 150).startsWith(truth[149] ?? "missing truth"),
+  );
+  const numbers = numberedRows(state).map((item) => item.number);
+  assert.equal(new Set(numbers).size, numbers.length);
+});
+
+test("a newly fixed header cannot overwrite early established prose occurrences", () => {
+  let state = baseline(proseFrame(38));
+  for (let seq = 39; seq <= 90; seq++)
+    state = watchReduce(state, { kind: "frame", frame: proseFrame(seq) });
+  const truth = prose.provenance.truth.text.split("\n");
+  for (const number of [2, 3])
+    assert.equal(capturedParagraph(state, number), truth[number - 1]);
+});
+
+test("seed and watched occurrences reconcile through the full observed ledger with stable prefix IDs", () => {
+  let state = baseline(frame(10));
+  const seed = (start: number, count: number) =>
+    Array.from({ length: count }, (_, i) => line(start + i)).join("\n");
+  state = watchReduce(state, { kind: "seed", text: seed(0, 16) });
+  const previous = state.seed;
+  state = watchReduce(state, { kind: "frame", frame: frame(12) });
+  state = watchReduce(state, { kind: "seed", text: seed(-5, 24) });
+  assert.deepEqual(
+    watchRows(state).map((row) => row.text),
+    Array.from({ length: 17 }, (_, i) => line(i - 5)),
+  );
+  assert.deepEqual(state.seed.slice(5), previous);
+});
+
+test("multiple established sequence alignments show a gap and withhold a guessed occurrence", () => {
+  const repeatedFrame = (start: number): WatchFrame => ({
+    ...frame(start),
+    rows: [
+      "Fixed header",
+      ...Array.from({ length: 12 }, (_, i) => {
+        const position = start + i;
+        if (
+          (position >= 5 && position < 17) ||
+          (position >= 25 && position < 37)
+        )
+          return `Repeated block row ${(position - 5) % 20} with informative evidence`;
+        return line(position);
+      }),
+      "Fixed footer",
+    ],
+  });
+  let state = baseline(repeatedFrame(0));
+  for (let start = 2; start <= 42; start += 2)
+    state = watchReduce(state, { kind: "frame", frame: repeatedFrame(start) });
+  const rows = watchRows(state).filter((row) => row.kind === "text");
+  state = watchReduce(state, { kind: "frame", frame: repeatedFrame(5) });
+  state = watchReduce(state, { kind: "frame", frame: repeatedFrame(7) });
+  assert.deepEqual(
+    watchRows(state).filter((row) => row.kind === "text"),
+    rows,
+  );
+  assert.equal(watchRows(state).at(-1)?.kind, "gap");
+});
+
+test("unresolved redraw alternatives stay bounded and become a visible gap at departure", () => {
+  let state = watchReduce(baseline(), { kind: "frame", frame: frame(2) });
+  for (let i = 0; i < 100; i++) {
+    const current = frame(2);
+    state = watchReduce(state, {
+      kind: "frame",
+      frame: {
+        ...current,
+        rows: current.rows.map((text, y) =>
+          y === 8
+            ? `Unresolved animation state ${i} with different wording`
+            : text,
+        ),
+      },
+    });
+  }
+  if (state.ledger.kind !== "located")
+    assert.fail("expected located occurrences");
+  assert.ok(
+    state.ledger.cells.every(
+      (cell) => cell.kind !== "conflicted" || cell.alternatives.length <= 8,
+    ),
+  );
+  for (let start = 4; start <= 12; start += 2)
+    state = watchReduce(state, { kind: "frame", frame: frame(start) });
+  assert.ok(watchRows(state).some((row) => row.kind === "gap"));
+  assert.ok(
+    !watchRows(state).some((row) =>
+      row.text.startsWith("Unresolved animation"),
+    ),
+  );
+});
+
+test("an interrupted sample keeps known occurrence references for a later uniquely anchored revisit", () => {
+  let state = watchReduce(baseline(), { kind: "frame", frame: frame(2) });
+  const rows = watchRows(state);
+  state = watchReduce(state, {
+    kind: "frame",
+    frame: frame(),
+    interrupted: true,
+  });
+  state = watchReduce(state, { kind: "frame", frame: frame(2) });
+  assert.deepEqual(watchRows(state), rows);
 });
