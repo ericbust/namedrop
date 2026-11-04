@@ -410,7 +410,7 @@ fn concurrent_siblings_and_stop_before_start_keep_exact_running_set() {
 }
 
 #[test]
-fn host_turn_identity_allows_same_agent_on_a_new_turn_and_keeps_old_tombstone() {
+fn parsed_completion_keeps_delayed_and_reused_child_ids_stopped() {
     let state = State::new();
     for (edge, turn, at) in [
         ("SubagentStop", "turn-1", 100),
@@ -427,9 +427,10 @@ fn host_turn_identity_allows_same_agent_on_a_new_turn_and_keeps_old_tombstone() 
         record(&state.0, &state.parent(), event, at).unwrap();
     }
     let runs = running(&state.0, &state.parent(), 103, None);
-    assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].started_at_ms, 102);
-    let malformed = json!({"session_id":"parent-session", "agent_id":"resumed", "hook_event_name":"SubagentStop", "agent_type":[7], "agent_transcript_path":{}, "background_tasks":17});
+    assert!(runs.is_empty(), "parent prompts cannot identify child runs");
+    record_host_event(&state, host_event("SubagentStart", "turn-2", "fresh"), 103);
+    assert_eq!(ids(&state, 103), ["fresh"]);
+    let malformed = json!({"session_id":"parent-session", "agent_id":"fresh", "hook_event_name":"SubagentStop", "agent_type":[7], "agent_transcript_path":{}, "background_tasks":17});
     let (_, event) = Event::parse(
         AgentRuntime::ClaudeCode,
         &malformed.to_string(),
@@ -511,7 +512,16 @@ fn background_exemption_belongs_to_the_child_run_generation() {
     let mut stop = host_event("Stop", "turn-1", "");
     stop["background_tasks"] = json!([{"id":"child", "status":"running"}]);
     record_host_event(&state, stop, 110);
-    record_host_event(&state, host_event("SubagentStop", "turn-1", "child"), 120);
+    record(
+        &state.0,
+        &state.parent(),
+        Event::Stop {
+            id: "child".into(),
+            generation: Some("turn-1".into()),
+        },
+        120,
+    )
+    .unwrap();
     record_host_event(&state, host_event("UserPromptSubmit", "turn-2", ""), 130);
     record_host_event(&state, host_event("SubagentStart", "turn-2", "child"), 140);
     assert_eq!(ids(&state, 145), ["child"]);

@@ -319,10 +319,7 @@ impl Event {
             .to_owned();
         let hook_event = value["hook_event_name"].as_str()?;
         // Codex subagent turn_id belongs to the child, not the parent's prompt.
-        // Without parent identity, Stop conservatively covers this child ID.
-        let generation = if host == AgentRuntime::Codex
-            && matches!(hook_event, "SubagentStart" | "SubagentStop")
-        {
+        let generation = if host == AgentRuntime::Codex && hook_event == "SubagentStart" {
             None
         } else {
             value["prompt_id"]
@@ -334,7 +331,9 @@ impl Event {
         let event = match hook_event {
             "SubagentStop" => Self::Stop {
                 id: SubagentId::parse(value["agent_id"].as_str()?)?.0,
-                generation,
+                // Completion can arrive on a later parent prompt or child turn.
+                // Without a stable run identity, Stop covers this child ID.
+                generation: None,
             },
             "SubagentStart" => {
                 let sighting = SubagentSighting::parse(host, input, files)?;
