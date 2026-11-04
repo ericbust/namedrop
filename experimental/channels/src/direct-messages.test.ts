@@ -193,3 +193,47 @@ test("DM sender uses existing session and CSRF refresh with only the private end
     });
   }
 });
+
+test("private full bodies keep peer scope, CSRF retry and validated responses", async () => {
+  const target = peer(rawPeer("a".repeat(20), "pane:1"));
+  const paths: string[] = [];
+  let sessions = 0;
+  let bodies = 0;
+  const poster = createPoster(async (input, init) => {
+    const path = String(input);
+    paths.push(path);
+    if (path === "/api/session")
+      return Response.json({ csrf_token: `token-${++sessions}` });
+    assert.equal(init?.credentials, "same-origin");
+    assert.notEqual(init?.method, "POST");
+    assert.equal(
+      new Headers(init?.headers).get("X-Namedrop-Csrf"),
+      `token-${sessions}`,
+    );
+    if (++bodies === 1) return new Response("Expired", { status: 403 });
+    return Response.json({
+      message_id: bodies === 2 ? "long-reply" : "wrong-message",
+      body: { text: "Full private reply ending", truncated: false },
+    });
+  });
+  assert.deepEqual(
+    await poster.fullBody(target.spaceKey, "long-reply", target.addressId),
+    {
+      text: "Full private reply ending",
+      truncated: false,
+    },
+  );
+  assert.equal(
+    await poster.fullBody(target.spaceKey, "another", target.addressId),
+    null,
+  );
+  assert.equal(sessions, 2);
+  assert.deepEqual(
+    paths.filter((path) => path.endsWith("/body")),
+    [
+      `/w/${target.spaceKey}/direct-messages/pane%3A1/messages/long-reply/body`,
+      `/w/${target.spaceKey}/direct-messages/pane%3A1/messages/long-reply/body`,
+      `/w/${target.spaceKey}/direct-messages/pane%3A1/messages/another/body`,
+    ],
+  );
+});

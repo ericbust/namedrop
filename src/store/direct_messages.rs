@@ -194,6 +194,41 @@ impl StateStore {
         self.transaction(|tx| tx.direct_message_peers())
     }
 
+    pub(crate) fn direct_message_body(
+        &mut self,
+        ns: &StateNamespace,
+        peer: &PaneAddressId,
+        message_id: &str,
+        max_chars: usize,
+    ) -> Result<Option<dashboard::BodyPrefix>, StoreError> {
+        self.transaction(|tx| {
+            let thread = thread_id(peer);
+            if tx.direct_message(ns, &thread)?.is_none() {
+                return Ok(None);
+            }
+            Ok(tx
+                .transaction
+                .query_row(
+                    "SELECT substr(body, 1, ?5), length(body) > ?5 FROM collaboration_messages
+                 WHERE session_socket_id=?1 AND worktree_id=?2 AND thread_id=?3 AND message_id=?4",
+                    params![
+                        ns.session_socket_id,
+                        ns.space_id.as_str(),
+                        thread.as_str(),
+                        message_id,
+                        i64::try_from(max_chars).unwrap_or(i64::MAX)
+                    ],
+                    |row| {
+                        Ok(dashboard::BodyPrefix {
+                            text: row.get(0)?,
+                            cut: row.get(1)?,
+                        })
+                    },
+                )
+                .optional()?)
+        })
+    }
+
     pub(crate) fn direct_message_history(
         &mut self,
         ns: &StateNamespace,
@@ -673,6 +708,54 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        let body = f
+            .store
+            .direct_message_body(&f.ns, &f.peer, reply.message_id.as_str(), 7)
+            .unwrap()
+            .unwrap();
+        assert_eq!(body.text, "Private");
+        assert!(body.cut);
+        let full = f
+            .store
+            .direct_message_body(&f.ns, &f.peer, root.receipt.message_id.as_str(), 500)
+            .unwrap()
+            .unwrap();
+        assert_eq!(full.text, "Private question @outsider");
+        assert!(!full.cut);
+        f.store
+            .transaction(|tx| {
+                let outsider = PaneAddressId::new("outsider");
+                add_peer(tx, &f.ns, &outsider, "other", &f.at)?;
+                tx.send_direct_message(
+                    &f.ns,
+                    &outsider,
+                    "another-dm",
+                    "Another private conversation",
+                    &crate::ProcessIds::default(),
+                    &f.at,
+                )
+            })
+            .unwrap();
+        for (ns, peer, message) in [
+            (f.ns.clone(), f.peer.clone(), "public-message"),
+            (
+                f.ns.clone(),
+                PaneAddressId::new("outsider"),
+                reply.message_id.as_str(),
+            ),
+            (
+                StateNamespace::for_space("dm-test-socket", "other"),
+                f.peer.clone(),
+                reply.message_id.as_str(),
+            ),
+        ] {
+            assert!(
+                f.store
+                    .direct_message_body(&ns, &peer, message, 500)
+                    .unwrap()
+                    .is_none()
+            );
+        }
         let history = f
             .store
             .direct_message_history(&f.ns, &f.peer, None, 100)

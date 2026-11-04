@@ -12,6 +12,7 @@ import { Composer } from "./Composer.tsx";
 import { DirectRuntime } from "./DirectSidebar.tsx";
 import { Message, PendingMessage } from "./Message.tsx";
 import {
+  type MessageActions,
   MessageContexts,
   ThreadConversationContext,
 } from "./MessageActions.tsx";
@@ -58,6 +59,17 @@ export function DirectConversation({
             directRecipient: { key: peer.spaceKey, member: peer.addressId },
           },
     [peer, completion],
+  );
+  const actions = useMemo<MessageActions | null>(
+    () =>
+      peer === null
+        ? null
+        : {
+            fullBody: (messageId) =>
+              dm.fullBody(peer.spaceKey, messageId, peer.addressId),
+            reply: null,
+          },
+    [peer, dm.fullBody],
   );
   const selected = peer === null ? null : directKey(peer);
   const previous = useRef(selected);
@@ -110,7 +122,7 @@ export function DirectConversation({
           </PeekControl>
         )}
       </header>
-      <MessageContexts deliveries={null} actions={null}>
+      <MessageContexts deliveries={null} actions={actions}>
         <ThreadConversationContext value={true}>
           <section
             className="timeline dm-timeline"

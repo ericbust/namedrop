@@ -797,8 +797,12 @@ else:
             serde_json::from_str::<Value>(body).unwrap_or(Value::Null),
         )
     };
-    let body =
-        serde_json::json!({"request_id":"dm-http","source":"Private question mentioning @a"});
+    let secret = format!("sk-proj-{}UNIQUE_SECRET_TAIL", "a".repeat(164));
+    let operator_body = format!(
+        "{} mentioning @a {secret} Private operator ending",
+        "q".repeat(1980)
+    );
+    let body = serde_json::json!({"request_id":"dm-http","source":operator_body});
     assert_eq!(post(body.clone(), None).0, 403);
     assert_eq!(
         post(
@@ -814,7 +818,8 @@ else:
     assert_eq!(sent["recipients"][0]["address_id"], "address-b");
     let (_, history) = server.get(&path, true);
     assert_eq!(history["messages"].as_array().unwrap().len(), 1);
-    assert_eq!(history["messages"][0]["body"]["text"], body["source"]);
+    assert_eq!(history["messages"][0]["body"]["truncated"], true);
+    assert!(!history.to_string().contains("sk-proj-"));
     let message = sent["message_id"].as_str().unwrap();
     assert_eq!(
         server.get(&format!("/w/{}/messages", key.as_str()), true).1,
@@ -835,9 +840,129 @@ else:
         &format!("X-Namedrop-CSRF: {csrf}\r\n"),
     );
     assert!(raw.starts_with("HTTP/1.1 404"), "{raw}");
+    let private_body = format!("{path}/{message}/body");
+    assert_eq!(server.get(&private_body, false).0, 401);
+    assert_eq!(server.get(&private_body, true).0, 403);
+    let headers = format!("X-Namedrop-CSRF: {csrf}\r\n");
+    for provenance in [
+        "Origin: http://foreign.invalid\r\n",
+        "Sec-Fetch-Site: same-site\r\n",
+        "Sec-Fetch-Site: cross-site\r\n",
+    ] {
+        assert!(
+            server
+                .raw_with_headers(&private_body, true, &format!("{headers}{provenance}"))
+                .starts_with("HTTP/1.1 403")
+        );
+    }
+    let read_body = |route: &str| {
+        let raw = server.raw_with_headers(route, true, &headers);
+        let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+        (
+            head.split_whitespace()
+                .nth(1)
+                .unwrap()
+                .parse::<u16>()
+                .unwrap(),
+            serde_json::from_str::<Value>(body).unwrap_or(Value::Null),
+        )
+    };
+    let (status, full) = read_body(&private_body);
+    assert_eq!(status, 200);
+    assert_eq!(full["message_id"], message);
+    assert_eq!(full["body"]["truncated"], false);
+    assert!(
+        full["body"]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("Private operator ending")
+    );
+    assert!(!full.to_string().contains("sk-proj-"));
+    assert!(!full.to_string().contains("UNIQUE_SECRET_TAIL"));
     let frame = server.snapshot(&key);
     assert!(frame["messages"].as_array().unwrap().is_empty());
     assert!(frame["threads"].as_array().unwrap().is_empty());
+    let reply_body = format!(
+        "{} {secret} {} Agent ending",
+        "r".repeat(65_530),
+        "s".repeat(5000)
+    );
+    StateStore::open(&state)
+        .unwrap()
+        .transaction(|tx| {
+            tx.append_message(
+                &ns,
+                &MessageDraft {
+                    thread_id: ThreadId::new(sent["thread_id"].as_str().unwrap()),
+                    message_id: MessageId::new("private-agent-reply"),
+                    in_reply_to: Some(MessageId::new(message)),
+                    author_address_id: PaneAddressId::new("address-b"),
+                    author_kind: ActorKind::AgentSession,
+                    author_alias_snapshot: "b".into(),
+                    author_agent_session_snapshot: None,
+                    request_id: "private-agent-reply".into(),
+                    authored_source: format!("@operator {reply_body}"),
+                    body: reply_body,
+                    grammar_version: "mention/v1".into(),
+                    recipients: vec![MessageRecipientDraft {
+                        address_id: PaneAddressId::new("operator:local"),
+                        alias_snapshot: "operator".into(),
+                        agent_session_snapshot: None,
+                        delivery_id: DeliveryId::new("private-reply-delivery"),
+                    }],
+                    context_references: Vec::new(),
+                },
+                &at(u64::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                )
+                .unwrap()),
+            )
+        })
+        .unwrap();
+    let agent_body = format!("{path}/private-agent-reply/body");
+    let (status, full) = read_body(&agent_body);
+    assert_eq!(status, 200);
+    assert_eq!(full["body"]["truncated"], true);
+    assert!(full["body"]["text"].as_str().unwrap().len() <= 65_536);
+    assert!(!full.to_string().contains("sk-proj-"));
+    assert!(!full.to_string().contains("UNIQUE_SECRET_TAIL"));
+    assert!(
+        !full["body"]["text"].as_str().unwrap().contains("sk-"),
+        "even a partial secret prefix must be redacted before the cap"
+    );
+    assert!(full["body"]["text"].as_str().unwrap().ends_with("[REDA"));
+    let other_ns = setup(&state, "another-workspace");
+    append(&state, &ns, 0, 1, "Public body");
+    for route in [
+        format!(
+            "/w/{}/direct-messages/address-a/messages/{message}/body",
+            key.as_str()
+        ),
+        format!(
+            "/w/{}/direct-messages/address-b/messages/{message}/body",
+            SpaceKey::of(&other_ns).as_str()
+        ),
+        format!("{path}/message-0/body"),
+        format!("{path}/missing/body"),
+        format!("/w/{}/messages/private-agent-reply/body", key.as_str()),
+    ] {
+        assert_eq!(read_body(&route).0, 404, "{route}");
+    }
+    let (status, public_body) = read_body(&format!("/w/{}/messages/message-0/body", key.as_str()));
+    assert_eq!(status, 200);
+    assert_eq!(public_body["body"]["text"], "Public body");
+    assert_eq!(
+        server
+            .get(
+                &format!("/w/{}/messages/private-agent-reply/context", key.as_str()),
+                true
+            )
+            .0,
+        404
+    );
     let (_, peers) = server.get("/api/direct-messages", true);
     let peer = peers["peers"]
         .as_array()
@@ -845,7 +970,7 @@ else:
         .iter()
         .find(|peer| peer["address_id"] == "address-b")
         .unwrap();
-    assert_eq!(peer["last_message_id"], sent["message_id"]);
+    assert_eq!(peer["last_message_id"], "private-agent-reply");
     assert_eq!(peer["space_key"], key.as_str());
     assert_eq!(peer["closed"], false);
     fs::write(&live_panes, r#"{"result":{"panes":[]}}"#).unwrap();
@@ -884,10 +1009,20 @@ else:
         .0,
         400
     );
+    assert_eq!(
+        read_body(&private_body).0,
+        200,
+        "closed operator history remains expandable"
+    );
+    assert_eq!(
+        read_body(&agent_body).0,
+        200,
+        "closed agent history remains expandable"
+    );
     let (status, replay) = post(body, Some(csrf));
     assert_eq!(status, 200);
     assert_eq!(replay["message_id"], sent["message_id"]);
     assert_eq!(replay["idempotent_replay"], true);
     let (_, history) = server.get(&path, true);
-    assert_eq!(history["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(history["messages"].as_array().unwrap().len(), 2);
 }

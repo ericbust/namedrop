@@ -57,6 +57,24 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
       message(`closed-${index}`, `Earlier private message ${index}`, "closed"),
     ),
   ]);
+  const longBodies = new Map([
+    [
+      "long-operator",
+      `${"Operator private text. ".repeat(140)}Operator private ending`,
+    ],
+    [
+      "long-agent",
+      `${"Agent private text. ".repeat(140)}[redacted] Agent private ending`,
+    ],
+    [
+      "long-closed",
+      `${"Closed private text. ".repeat(140)}Closed private ending`,
+    ],
+  ]);
+  conversations
+    .get("closed")
+    .push(message("long-closed", longBodies.get("long-closed"), "closed"));
+  const bodyReads = [];
   const posts = [];
   const reads = [];
   const screenReads = [];
@@ -118,6 +136,28 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
       directoryReads++;
       return json(res, { peers });
     }
+    if (url.pathname.endsWith("/body")) {
+      bodyReads.push({
+        path: url.pathname,
+        csrf: req.headers["x-namedrop-csrf"],
+      });
+      const scoped =
+        /^\/w\/([^/]+)\/direct-messages\/([^/]+)\/messages\/([^/]+)\/body$/.exec(
+          url.pathname,
+        );
+      if (!scoped || !req.headers["x-namedrop-csrf"]) return json(res, {}, 403);
+      const id = decodeURIComponent(scoped[3]);
+      if (
+        !conversations
+          .get(decodeURIComponent(scoped[2]))
+          ?.some((item) => item.message_id === id)
+      )
+        return json(res, {}, 404);
+      return json(res, {
+        message_id: id,
+        body: { text: longBodies.get(id), truncated: false },
+      });
+    }
     const direct = /^\/w\/([^/]+)\/direct-messages\/([^/]+)\/messages$/.exec(
       url.pathname,
     );
@@ -159,7 +199,13 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
       const start = Math.max(0, end - 100);
       const body = {
         thread_id: all.length ? "private-thread" : null,
-        messages: all.slice(start, end),
+        messages: all.slice(start, end).map((item) => ({
+          ...item,
+          body: {
+            text: item.body.text.slice(0, 2000),
+            truncated: item.body.text.length > 2000,
+          },
+        })),
         earlier_omitted: start > 0,
       };
       if (before !== null && delayOlder)
@@ -280,6 +326,38 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
     assert.equal(post.space, key(1));
     assert.deepEqual(Object.keys(post.body).sort(), ["request_id", "source"]);
   }
+  conversations
+    .get("a")
+    .push(
+      message("long-operator", longBodies.get("long-operator")),
+      message("long-agent", longBodies.get("long-agent"), "a"),
+    );
+  for (const [id, ending] of [
+    ["long-operator", "Operator private ending"],
+    ["long-agent", "Agent private ending"],
+  ]) {
+    const row = page.locator(`[data-message-id="${id}"]`);
+    await row.getByRole("button", { name: "Show more", exact: true }).click();
+    await row.getByText(new RegExp(ending)).waitFor();
+    assert.equal(
+      await row
+        .getByRole("button", { name: "Reply in thread", exact: false })
+        .count(),
+      0,
+    );
+    assert.equal(
+      await row.locator("button.route-link, [data-offer]").count(),
+      0,
+    );
+  }
+  assert.deepEqual(
+    bodyReads.map((read) => read.path),
+    [
+      `/w/${key(1)}/direct-messages/a/messages/long-operator/body`,
+      `/w/${key(1)}/direct-messages/a/messages/long-agent/body`,
+    ],
+  );
+  assert.ok(bodyReads.every((read) => read.csrf));
   const incoming = message("beta-unread", "Private incoming beta", "b");
   conversations.get("b").push(incoming);
   peers[1].thread_id = "private-thread";
@@ -428,6 +506,19 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
   await timeline.press("ArrowDown");
   await page.waitForFunction(
     () => document.querySelector(".dm-timeline").scrollTop > 0,
+  );
+  const closedLong = page.locator('[data-message-id="long-closed"]');
+  await closedLong
+    .getByRole("button", { name: "Show more", exact: true })
+    .click();
+  await closedLong.getByText(/Closed private ending/).waitFor();
+  assert.equal(
+    bodyReads.at(-1).path,
+    `/w/${key(3)}/direct-messages/closed/messages/long-closed/body`,
+  );
+  assert.equal(
+    await page.locator(".msg-reply, button.route-link, [data-offer]").count(),
+    0,
   );
   assert.equal(await composer.isDisabled(), true);
   await page.setViewportSize({ width: 390, height: 844 });

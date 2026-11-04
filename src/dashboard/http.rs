@@ -706,6 +706,7 @@ enum Route {
     MessageBody {
         key: SpaceKey,
         message_id: String,
+        direct_peer: Option<crate::PaneAddressId>,
     },
     AllEvents,
     Spaces,
@@ -748,6 +749,29 @@ fn route(
     }
     if let Some(rest) = path.strip_prefix("/w/") {
         let segments: Vec<_> = rest.split('/').collect();
+        if let [key, "direct-messages", address, "messages", message, "body"] = segments.as_slice()
+        {
+            authenticate_session(request, port, session)?;
+            authenticate_mutation(request, session, host)?;
+            if request.method != "GET" {
+                return Err(Status::MethodNotAllowed);
+            }
+            let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
+            let address_id = decode_asset_path(address).ok_or(Status::NotFound)?;
+            let message_id = decode_asset_path(message).ok_or(Status::NotFound)?;
+            if address_id.is_empty()
+                || address_id.contains('/')
+                || message_id.is_empty()
+                || message_id.contains('/')
+            {
+                return Err(Status::NotFound);
+            }
+            return Ok(Route::MessageBody {
+                key,
+                message_id,
+                direct_peer: Some(crate::PaneAddressId::new(address_id)),
+            });
+        }
         if let [key, "direct-messages", address, "messages"] = segments.as_slice() {
             authenticate_session(request, port, session)?;
             authenticate_provenance(request, host)?;
@@ -838,7 +862,11 @@ fn route(
                 return Err(Status::NotFound);
             }
             return Ok(if *kind == "body" {
-                Route::MessageBody { key, message_id }
+                Route::MessageBody {
+                    key,
+                    message_id,
+                    direct_peer: None,
+                }
             } else {
                 Route::MessageContext { key, message_id }
             });
@@ -1623,7 +1651,11 @@ fn serve_connection(
                 Err(status) => respond_status(&mut writer, status),
             }
         }
-        Ok(Route::MessageBody { key, message_id }) => {
+        Ok(Route::MessageBody {
+            key,
+            message_id,
+            direct_peer,
+        }) => {
             let result = (|| {
                 let mut guard = history_store.lock().map_err(|_| Status::Unavailable)?;
                 let store = guard.store(front.files.state())?;
@@ -1634,10 +1666,21 @@ fn serve_connection(
                     .find(|space| SpaceKey::of(&space.namespace) == key)
                     .map(|space| space.namespace)
                     .ok_or(Status::NotFound)?;
-                store
-                    .dashboard_message_body(&namespace, &message_id, BODY_LIMIT + BODY_READ_MARGIN)
-                    .map_err(|_| Status::Unavailable)?
-                    .ok_or(Status::NotFound)
+                match direct_peer {
+                    Some(peer) => store.direct_message_body(
+                        &namespace,
+                        &peer,
+                        &message_id,
+                        BODY_LIMIT + BODY_READ_MARGIN,
+                    ),
+                    None => store.dashboard_message_body(
+                        &namespace,
+                        &message_id,
+                        BODY_LIMIT + BODY_READ_MARGIN,
+                    ),
+                }
+                .map_err(|_| Status::Unavailable)?
+                .ok_or(Status::NotFound)
             })();
             match result {
                 Ok(body) => {

@@ -309,6 +309,7 @@ export function useDirectMessages(
     }
   };
   return {
+    fullBody: poster.fullBody,
     peers,
     selectedPeer,
     directoryError,

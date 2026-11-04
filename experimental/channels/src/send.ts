@@ -108,8 +108,16 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
     prepare(): void {
       void token();
     },
-    async fullBody(key: SpaceKey, messageId: string): Promise<SafeText | null> {
-      const path = `/w/${key}/messages/${encodeURIComponent(messageId)}/body`;
+    async fullBody(
+      key: SpaceKey,
+      messageId: string,
+      directTo?: AddressId,
+    ): Promise<SafeText | null> {
+      const conversation =
+        directTo === undefined
+          ? `/w/${key}`
+          : `/w/${key}/direct-messages/${encodeURIComponent(directTo)}`;
+      const path = `${conversation}/messages/${encodeURIComponent(messageId)}/body`;
       try {
         const used = token();
         let response = await read(path, await used);
