@@ -29,7 +29,7 @@ fn plain_post_routes_verbatim_and_replay_does_not_call_router_again() {
         .db()
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     let call = &calls(&f)[0];
     assert!(
         call["env"]
