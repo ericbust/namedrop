@@ -23,6 +23,9 @@ mod lifecycle;
 #[doc(hidden)]
 pub mod linux_sandbox;
 mod message;
+#[doc(hidden)]
+pub mod reminder;
+pub use reminder::execute_reminder_operation;
 mod persona;
 mod ports;
 mod runtime;
