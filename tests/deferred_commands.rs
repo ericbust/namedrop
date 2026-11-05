@@ -1296,3 +1296,85 @@ fn assert_reminder_clock_discovery_failure(error: &str) {
         0
     );
 }
+
+#[test]
+fn reminder_common_command_recovers_clock_without_socket_hint() {
+    let f = Fixture::new();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(f.directory.path().join("reminder-clock.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let reminder = f.reminder("no-socket-recovery", "1h");
+    StateStore::open(f.directory.path())
+        .unwrap()
+        .transaction(|tx| {
+            tx.complete_reconciliation(&StateNamespace::for_space(&f.socket, "workspace-1"))
+        })
+        .unwrap();
+    lock.unlock().unwrap();
+    let clock = f.clock();
+    wait_for(|| namedrop::reminder::clock_running(f.directory.path()));
+    drop(clock);
+    assert!(!namedrop::reminder::clock_running(f.directory.path()));
+    let connection =
+        rusqlite::Connection::open(f.directory.path().join("namedrop.sqlite3")).unwrap();
+    let id = reminder["reminder_id"].as_str().unwrap();
+    let due = SystemClock.now_unix_ms() - 1;
+    connection.execute("UPDATE reminders SET due_at_ms=?2,state_json=json_set(state_json,'$.due_at_ms',?2) WHERE reminder_id=?1", rusqlite::params![id,due as i64]).unwrap();
+    response(
+        f.command()
+            .arg("--plugin-state")
+            .arg(f.directory.path())
+            .args(["describe", "reminder.set"])
+            .env_remove("HERDR_SOCKET_PATH")
+            .output()
+            .unwrap(),
+    );
+    let count_fires = || {
+        connection
+            .query_row("SELECT count(*) FROM reminder_fires", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while count_fires() == 0 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        count_fires(),
+        1,
+        "state-scoped describe without socket hint must recover the clock and fire once"
+    );
+    wait_for(|| {
+        connection
+            .query_row(
+                "SELECT count(*) FROM delivery_attempt_state WHERE state='acknowledged'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 1
+    });
+    response(
+        f.command()
+            .arg("--plugin-state")
+            .arg(f.directory.path())
+            .args(["describe", "reminder.set"])
+            .output()
+            .unwrap(),
+    );
+    wait_for(|| !namedrop::reminder::clock_running(f.directory.path()));
+    assert_eq!(count_fires(), 1);
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM delivery_attempts", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
