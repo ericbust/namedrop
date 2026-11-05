@@ -553,7 +553,7 @@ test("blank presentation keeps terminal focus across every ordinary buffer swap"
   timeout: 30000,
 }, async (t) => {
   await withRecordedTerminal(t, async (ui) => {
-    await ui.page.locator(".peek-buffer-visible .xterm-screen").click();
+    await ui.page.locator(".peek-terminal").click();
     const focus = () =>
       ui.page.evaluate(() => ({
         tag: document.activeElement.tagName,

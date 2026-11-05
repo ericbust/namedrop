@@ -301,11 +301,21 @@ function probeScript(origin, proof) {
   })();`;
 }
 
+function isDirectoryPoll(method, url) {
+  return (
+    method === "GET" &&
+    url.pathname === "/api/direct-messages" &&
+    url.search === ""
+  );
+}
+
 async function open(browser, t, initial = full()) {
   const requests = [],
     streams = new Set(),
     allStreams = [];
   const browserRequests = [];
+  const directoryRequests = [];
+  const browserDirectoryRequests = [];
   const appAmbientRequests = [];
   const eventStreams = new Set();
   const frame = structuredClone(fixture);
@@ -367,12 +377,17 @@ async function open(browser, t, initial = full()) {
       });
       return res.writeHead(404).end();
     }
-    requests.push({
+    const directory = isDirectoryPoll(req.method, url);
+    (directory ? directoryRequests : requests).push({
       path: url.pathname,
       query: url.search,
       method: req.method,
       cookie: req.headers.cookie,
     });
+    if (directory) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ peers: [] }));
+    }
     if (url.pathname === "/csp-control") {
       res.writeHead(200, {
         "Content-Type": "text/html",
@@ -496,10 +511,12 @@ async function open(browser, t, initial = full()) {
   const origin = `http://127.0.0.1:${server.address().port}`;
   await context.route("**/*", (route) => {
     if (route.request().url().startsWith(`${origin}/`)) {
-      browserRequests.push({
-        path: new URL(route.request().url()).pathname,
-        method: route.request().method(),
-      });
+      const url = new URL(route.request().url());
+      const method = route.request().method();
+      const observed = isDirectoryPoll(method, url)
+        ? browserDirectoryRequests
+        : browserRequests;
+      observed.push({ path: url.pathname, query: url.search, method });
       return route.continue({
         headers: {
           ...route.request().headers(),
@@ -587,6 +604,8 @@ async function open(browser, t, initial = full()) {
     streams,
     requests,
     browserRequests,
+    directoryRequests,
+    browserDirectoryRequests,
     appAmbientRequests,
     async requestControls() {
       const beforeBrowser = browserRequests.length;
@@ -611,10 +630,52 @@ async function open(browser, t, initial = full()) {
           (r) => r.headers["user-agent"] === "namedrop-oracle-ambient-control",
         ),
       );
-      return {
+      const control = {
         browser: browserRequests.at(-1),
         received: requests.at(-1),
         ambientSeparated: true,
+      };
+      const pollsBefore = directoryRequests.length;
+      const browserPollsBefore = browserDirectoryRequests.length;
+      const directory = await page.evaluate(async () => {
+        const response = await fetch("/api/direct-messages");
+        return { status: response.status, body: await response.json() };
+      });
+      assert.deepEqual(directory, { status: 200, body: { peers: [] } });
+      assert.ok(directoryRequests.length > pollsBefore);
+      assert.ok(browserDirectoryRequests.length > browserPollsBefore);
+      for (const [path, method] of [
+        ["/api/direct-messages", "POST"],
+        ["/api/direct-messages?control=1", "GET"],
+      ]) {
+        const status = await page.evaluate(
+          async ([path, method]) => {
+            const response = await fetch(path, { method });
+            await response.text();
+            return response.status;
+          },
+          [path, method],
+        );
+        assert.equal(status, 404);
+      }
+      const unexpected = [
+        { path: "/request-positive-control", query: "", method: "GET" },
+        { path: "/api/direct-messages", query: "", method: "POST" },
+        { path: "/api/direct-messages", query: "?control=1", method: "GET" },
+      ];
+      assert.deepEqual(browserRequests.slice(beforeBrowser), unexpected);
+      assert.deepEqual(
+        requests.slice(beforeServer).map(({ path, query, method }) => ({
+          path,
+          query,
+          method,
+        })),
+        unexpected,
+      );
+      return {
+        ...control,
+        directoryPollSeparated: true,
+        unexpectedDirectoryRequests: unexpected.slice(1),
       };
     },
     errors,
