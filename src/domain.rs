@@ -487,6 +487,16 @@ pub struct MessageDraft {
     pub context_references: Vec<ContextReferenceDraft>,
 }
 
+pub const TERMINAL_RELAY_MAX_CHARS: usize = 16_000;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TerminalRelayEnd {
+    pub agent_session_id: AgentSessionId,
+    pub ended_at_ms: u64,
+    pub previous_end_ms: Option<u64>,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MessageReceipt {
     pub message_id: MessageId,
@@ -500,6 +510,7 @@ pub struct MessageReceipt {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryReplyMode {
+    DirectMessage,
     AgentThread,
     Channel,
     ReturnToSource,
@@ -509,6 +520,7 @@ pub enum DeliveryReplyMode {
 impl DeliveryReplyMode {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::DirectMessage => "direct_message",
             Self::AgentThread => "agent_thread",
             Self::Channel => "channel",
             Self::ReturnToSource => "return_to_source",
@@ -518,6 +530,7 @@ impl DeliveryReplyMode {
 
     pub(crate) fn for_message_grammar(grammar_version: &str) -> Self {
         match grammar_version {
+            "direct-message/v1" => Self::DirectMessage,
             "channel/v1" => Self::Channel,
             "mention-hook/v1" => Self::ReturnToSource,
             "coordination-report/v1"
@@ -778,6 +791,8 @@ pub enum TransitionEntityKind {
     CoordinationReviewRequest,
     /// A committed review message, as the JSON pair `[request_id, message_id]`.
     CoordinationReviewMessage,
+    TerminalRelaySession,
+    TerminalRelayAttempt,
 }
 
 impl TransitionEntityKind {
@@ -796,6 +811,8 @@ impl TransitionEntityKind {
             Self::CoordinationReviewGrant => "coordination_review_grant",
             Self::CoordinationReviewRequest => "coordination_review_request",
             Self::CoordinationReviewMessage => "coordination_review_message",
+            Self::TerminalRelaySession => "terminal_relay_session",
+            Self::TerminalRelayAttempt => "terminal_relay_attempt",
         }
     }
 }
@@ -901,6 +918,7 @@ pub enum AttentionSourceKind {
     PaneBinding,
     IntegrationRegistration,
     AgentDisposition,
+    TerminalRelay,
     ContextGrant,
     Coordination,
 }
@@ -913,6 +931,7 @@ impl AttentionSourceKind {
             Self::PaneBinding => "pane_binding",
             Self::IntegrationRegistration => "integration_registration",
             Self::AgentDisposition => "agent_disposition",
+            Self::TerminalRelay => "terminal_relay",
             Self::ContextGrant => "context_grant",
             Self::Coordination => "coordination",
         }

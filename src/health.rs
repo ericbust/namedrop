@@ -217,7 +217,7 @@ where
                 "ND-HOOK-001",
                 HealthSeverity::Blocked,
                 "Codex hook setup is incomplete or outdated.",
-                "Complete the current Codex plugin setup. If this session predates installation or refresh, restart and approve Namedrop in /hooks if prompted; otherwise verify with a round trip. Doctor alone cannot verify hooks.",
+                "Complete the current Codex plugin setup. If this session predates installation or refresh, restart and approve changed Namedrop hooks in /hooks if prompted, including SubagentStart, SubagentStop, Stop and SessionEnd; otherwise verify with a round trip. Doctor alone cannot verify hooks.",
                 HealthRepairKind::ProductAction,
                 "Follow the reported Codex plugin setup steps.",
             );
@@ -834,6 +834,14 @@ fn health_issue_for_attention(source: AttentionSourceKind) -> HealthIssue {
             "Later messages remain safe while you decide what should happen next.",
             HealthRepairKind::HumanDecision,
             "Review the delivery?",
+        ),
+        AttentionSourceKind::TerminalRelay => issue(
+            "ND-DELIVERY-004",
+            HealthSeverity::Notice,
+            "An agent answered in its terminal.",
+            "Its answer was saved in the conversation and may need your reply.",
+            HealthRepairKind::HumanDecision,
+            "Review the answer?",
         ),
         AttentionSourceKind::AgentDisposition => issue(
             "ND-DELIVERY-003",

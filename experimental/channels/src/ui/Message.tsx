@@ -108,7 +108,10 @@ function previewLimit(text: string, length = PREVIEW): number {
     ? limit - 1
     : limit;
 }
-type Variant = "text" | "command" | "output";
+type Variant = "text" | "plain" | "command" | "output";
+function terminalProvenance(name: string): string {
+  return `From ${name}'s terminal (not sent through Namedrop)`;
+}
 function Body({
   text: shortText,
   truncated: shortTruncated,
@@ -159,6 +162,8 @@ function Body({
               {text.slice(0, limit)}
               {more}
             </span>
+          ) : variant === "plain" ? (
+            text.slice(0, limit) + (more ?? "")
           ) : (
             <Markdown source={text} limit={limit} tail={more} />
           )}
@@ -269,6 +274,7 @@ function variantFor(
   directory: Directory,
   recipients: readonly AddressId[],
 ): Variant {
+  if (message.kind === "terminal_relay") return "plain";
   if (who(directory, message.author).avatar === "terminal") return "output";
   const [only] = recipients;
   return recipients.length === 1 &&
@@ -546,7 +552,8 @@ function ReplyInThread({
 }) {
   const actions = useContext(MessageActionsContext);
   const inThread = useContext(ThreadConversationContext);
-  if (actions === null || inThread) return null;
+  const reply = actions?.reply;
+  if (!reply || inThread) return null;
   const name = replyTargetName(message, directory);
   return (
     <div className="msg-actions">
@@ -555,7 +562,7 @@ function ReplyInThread({
         className="msg-reply"
         aria-label={`${replyInThreadCopy.label} to ${name}`}
         title={replyInThreadCopy.label}
-        onClick={(event) => actions.reply(message, event.currentTarget)}
+        onClick={(event) => reply(message, event.currentTarget)}
       >
         <Icon name="reply" className="icon-12" />
         <span>{replyInThreadCopy.label}</span>
@@ -590,7 +597,9 @@ function ReplyPreview({
     const name = author.name;
     const type = author.avatar;
     const time = clock(reply.at);
-    const result = type === "terminal" ? terminalResult(reply.body) : null;
+    const relay = reply.kind === "terminal_relay";
+    const result =
+      !relay && type === "terminal" ? terminalResult(reply.body) : null;
     const text = result
       ? (result.stdout || result.stderr).split("\n", 2).join("\n")
       : reply.body.text;
@@ -610,11 +619,16 @@ function ReplyPreview({
               </time>
             )}
           </span>
+          {relay && (
+            <span className="terminal-provenance">
+              {terminalProvenance(name)}
+            </span>
+          )}
           {result && text === "" ? (
             <span className="rp-body no-output">No output</span>
           ) : (
             <span className={`rp-body${type === "terminal" ? " mono" : ""}`}>
-              {result ? (
+              {result || relay ? (
                 text.slice(0, previewLimit(text, 400))
               ) : (
                 <MarkdownLine source={text} limit={previewLimit(text, 400)} />
@@ -757,6 +771,11 @@ export const Message = memo(
                 </time>
               )}
             </header>
+          )}
+          {message.kind === "terminal_relay" && (
+            <p className="terminal-provenance">
+              {terminalProvenance(author.name)}
+            </p>
           )}
           {message.kind === "result_set" ? (
             <div className="report">

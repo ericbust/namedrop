@@ -4,6 +4,14 @@
 use super::*;
 use crate::{AgentSessionId, PaneBindingId};
 
+fn public_sql(sql: &str) -> String {
+    let messages = format!(
+        "(SELECT rowid, * FROM collaboration_messages public_message WHERE NOT {})",
+        super::direct_messages::private_thread_sql("public_message")
+    );
+    sql.replace("channel_messages", &messages)
+}
+
 pub const MESSAGE_WINDOW: i64 = 150;
 pub const TERMINAL_RUN_WINDOW: i64 = 20;
 pub const COORDINATION_WINDOW: i64 = 20;
@@ -175,6 +183,7 @@ pub(crate) struct LiveBinding {
     pub pane_id: String,
     pub pane_type: crate::PaneType,
     pub agent_session_id: Option<AgentSessionId>,
+    pub idle_at_ms: Option<i64>,
 }
 
 pub(crate) enum LiveMember {
@@ -183,7 +192,7 @@ pub(crate) enum LiveMember {
     Bound(LiveBinding),
 }
 
-const WINDOW_MESSAGE_IDS: &str = "SELECT message_id FROM collaboration_messages
+const WINDOW_MESSAGE_IDS: &str = "SELECT message_id FROM channel_messages
      WHERE session_socket_id = ?1 AND worktree_id = ?2
      ORDER BY created_at_ms DESC, rowid DESC LIMIT ?3";
 
@@ -193,7 +202,33 @@ const LATEST_ATTEMPT: &str = "a.rowid = (
        AND latest.worktree_id = d.worktree_id AND latest.delivery_id = d.delivery_id
      ORDER BY latest.created_at_ms DESC, latest.rowid DESC LIMIT 1)";
 
+pub(crate) struct SubagentParentBinding {
+    pub socket: String,
+    pub workspace: String,
+    pub pane: String,
+}
+
 impl StateStore {
+    pub(crate) fn dashboard_subagent_parents(
+        &mut self,
+    ) -> Result<Vec<SubagentParentBinding>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT b.session_socket_id, b.worktree_id, b.pane_id
+             FROM pane_bindings b JOIN pane_addresses a
+               ON a.session_socket_id = b.session_socket_id AND a.worktree_id = b.worktree_id
+              AND a.address_id = b.address_id
+             WHERE b.active = 1 AND a.retired = 0 AND a.pane_type = 'agent'",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(SubagentParentBinding {
+                socket: row.get(0)?,
+                workspace: row.get(1)?,
+                pane: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     pub(crate) fn dashboard_live_member(
         &mut self,
         key: &crate::dashboard::snapshot::SpaceKey,
@@ -208,6 +243,11 @@ impl StateStore {
                     (SELECT NULLIF(o.agent_session_id, '') FROM agent_session_observations o
                      WHERE o.session_socket_id = a.session_socket_id AND o.worktree_id = a.worktree_id
                        AND o.address_id = a.address_id AND o.observed_at_ms >= b.bound_at_ms
+                     ORDER BY o.observed_at_ms DESC, o.rowid DESC LIMIT 1),
+                    (SELECT o.observed_at_ms FROM agent_session_observations o
+                     WHERE o.session_socket_id = a.session_socket_id AND o.worktree_id = a.worktree_id
+                       AND o.address_id = a.address_id AND o.observed_at_ms >= b.bound_at_ms
+                       AND o.status = 'idle'
                      ORDER BY o.observed_at_ms DESC, o.rowid DESC LIMIT 1)
                  FROM pane_addresses a LEFT JOIN pane_bindings b
                    ON b.session_socket_id = a.session_socket_id AND b.worktree_id = a.worktree_id
@@ -215,15 +255,15 @@ impl StateStore {
                  WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2 AND a.address_id = ?3",
                 params![namespace.session_socket_id, namespace.space_id.as_str(), address],
                 |row| Ok((row.get::<_,bool>(0)?,row.get::<_,String>(1)?,row.get::<_,Option<String>>(2)?,
-                    row.get::<_,Option<String>>(3)?,row.get::<_,Option<String>>(4)?)),
+                    row.get::<_,Option<String>>(3)?,row.get::<_,Option<String>>(4)?,row.get::<_,Option<i64>>(5)?)),
             ).optional()?;
             Ok(match row {
                 None => LiveMember::Missing,
-                Some((false, kind, Some(binding), Some(pane_id), session)) => LiveMember::Bound(LiveBinding {
+                Some((false, kind, Some(binding), Some(pane_id), session, idle_at_ms)) => LiveMember::Bound(LiveBinding {
                     namespace, binding_id: PaneBindingId::new(binding), pane_id,
                     pane_type: match kind.as_str() { "agent" => crate::PaneType::Agent, "terminal" => crate::PaneType::Terminal,
                         _ => return Err(StoreError::invalid_input("Unsupported live member kind.")) },
-                    agent_session_id: session.map(AgentSessionId::new),
+                    agent_session_id: session.map(AgentSessionId::new), idle_at_ms,
                 }),
                 Some(_) => LiveMember::Gone,
             })
@@ -296,8 +336,10 @@ impl StateStore {
             Ok(transaction
                 .transaction
                 .query_row(
-                    "SELECT substr(body, 1, ?4), length(body) > ?4 FROM collaboration_messages
+                    &public_sql(
+                        "SELECT substr(body, 1, ?4), length(body) > ?4 FROM channel_messages
                      WHERE session_socket_id = ?1 AND worktree_id = ?2 AND message_id = ?3",
+                    ),
                     params![
                         ns[0],
                         ns[1],
@@ -343,10 +385,10 @@ impl StateTransaction<'_> {
         let ns = namespace_params(namespace);
         let cursor = match before {
             Some(id) => {
-                let mut statement = self.transaction.prepare(
-                    "SELECT created_at_ms, rowid FROM collaboration_messages
+                let mut statement = self.transaction.prepare(&public_sql(
+                    "SELECT created_at_ms, rowid FROM channel_messages
                      WHERE session_socket_id = ?1 AND worktree_id = ?2 AND message_id = ?3",
-                )?;
+                ))?;
                 match statement
                     .query_row(params![ns[0], ns[1], id], |row| {
                         Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
@@ -367,7 +409,7 @@ impl StateTransaction<'_> {
         let sql = format!(
             "SELECT message_id, thread_id, in_reply_to, created_at_ms, author_address_id,
                     author_kind, grammar_version, body
-             FROM collaboration_messages
+             FROM channel_messages
              WHERE session_socket_id = ?1 AND worktree_id = ?2 {predicate}
              ORDER BY created_at_ms DESC, rowid DESC LIMIT {}",
             if cursor.is_some() { "?5" } else { "?3" }
@@ -407,7 +449,7 @@ impl StateTransaction<'_> {
         Ok(Some(HistoryRows { messages, legs }))
     }
 
-    fn dashboard_message_legs(
+    pub(super) fn dashboard_message_legs(
         &self,
         namespace: &StateNamespace,
         messages: &[MessageRow],
@@ -475,15 +517,17 @@ impl StateTransaction<'_> {
         let ns = namespace_params(namespace);
         let thread_id = conversation.thread_id;
         let message_count: i64 = self.transaction.query_row(
-            "SELECT COUNT(*) FROM collaboration_messages
+            &public_sql(
+                "SELECT COUNT(*) FROM channel_messages
              WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3",
+            ),
             params![ns[0], ns[1], thread_id],
             |row| row.get(0),
         )?;
         let mut messages = self.rows(
             "WITH scoped AS MATERIALIZED (
                  SELECT rowid AS message_order, message_id, created_at_ms
-                 FROM collaboration_messages
+                 FROM channel_messages
                  WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3
              ), selected AS (
                  SELECT message_id FROM (SELECT message_id FROM scoped ORDER BY created_at_ms DESC, message_order DESC LIMIT 100)
@@ -492,7 +536,7 @@ impl StateTransaction<'_> {
              )
              SELECT m.message_id, m.thread_id, m.in_reply_to, m.created_at_ms, m.author_address_id,
                     m.author_kind, m.grammar_version, m.body
-             FROM collaboration_messages m
+             FROM channel_messages m
              WHERE m.session_socket_id = ?1 AND m.worktree_id = ?2 AND m.thread_id = ?3
                AND m.message_id IN (SELECT message_id FROM selected)
              ORDER BY m.created_at_ms, m.rowid",
@@ -524,8 +568,10 @@ impl StateTransaction<'_> {
         Ok(self
             .transaction
             .query_row(
-                "SELECT thread_id, message_id FROM collaboration_messages
+                &public_sql(
+                    "SELECT thread_id, message_id FROM channel_messages
              WHERE session_socket_id = ?1 AND worktree_id = ?2 AND message_id = ?3",
+                ),
                 params![ns[0], ns[1], message_id],
                 |row| {
                     Ok(ConversationRow {
@@ -554,10 +600,10 @@ impl StateTransaction<'_> {
         .to_string();
         let ns = namespace_params(namespace);
         let sources = self.rows(
-            "SELECT m.message_id, m.authored_source FROM collaboration_messages m
+            "SELECT m.message_id, m.authored_source FROM channel_messages m
              WHERE m.session_socket_id = ?1 AND m.worktree_id = ?2
                AND m.message_id IN (SELECT value FROM json_each(?3))
-               AND (EXISTS (SELECT 1 FROM transition_facts f WHERE f.session_socket_id=m.session_socket_id AND f.worktree_id=m.worktree_id AND f.entity_kind='collaboration_message' AND f.entity_id=m.message_id AND f.actor_kind='human' AND f.actor_id='channel-router/v1' AND f.transition_kind IN ('queued','dispatching','settled','empty','failed')) OR EXISTS (SELECT 1 FROM collaboration_messages root
+               AND (EXISTS (SELECT 1 FROM transition_facts f WHERE f.session_socket_id=m.session_socket_id AND f.worktree_id=m.worktree_id AND f.entity_kind='collaboration_message' AND f.entity_id=m.message_id AND f.actor_kind='human' AND f.actor_id='channel-router/v1' AND f.transition_kind IN ('queued','dispatching','settled','empty','failed')) OR EXISTS (SELECT 1 FROM channel_messages root
                    WHERE root.session_socket_id = m.session_socket_id AND root.worktree_id = m.worktree_id
                      AND root.thread_id = m.thread_id AND root.in_reply_to IS NULL
                      AND root.grammar_version = 'channel/v1'))",
@@ -638,7 +684,7 @@ impl StateTransaction<'_> {
         let mut messages = self.rows(
             "SELECT message_id, thread_id, in_reply_to, created_at_ms, author_address_id,
                     author_kind, grammar_version, body
-             FROM collaboration_messages
+             FROM channel_messages
              WHERE session_socket_id = ?1 AND worktree_id = ?2
              ORDER BY created_at_ms DESC, rowid DESC LIMIT ?3",
             windowed,
@@ -699,7 +745,7 @@ impl StateTransaction<'_> {
                          WHERE x.session_socket_id = d.session_socket_id
                            AND x.worktree_id = d.worktree_id AND x.delivery_id = d.delivery_id)
                  FROM mailbox_deliveries d
-                 JOIN collaboration_messages m USING (session_socket_id, worktree_id, message_id)
+                 JOIN channel_messages m USING (session_socket_id, worktree_id, message_id)
                  LEFT JOIN delivery_attempts a ON {LATEST_ATTEMPT}
                  LEFT JOIN delivery_acknowledgements ack USING (session_socket_id, worktree_id, attempt_id)
                  WHERE d.session_socket_id = ?1 AND d.worktree_id = ?2
@@ -727,13 +773,13 @@ impl StateTransaction<'_> {
         let threads = self.rows(
             &format!(
                 "SELECT t.thread_id, t.title,
-                        (SELECT COUNT(*) FROM collaboration_messages c
+                        (SELECT COUNT(*) FROM channel_messages c
                          WHERE c.session_socket_id = t.session_socket_id
                            AND c.worktree_id = t.worktree_id AND c.thread_id = t.thread_id)
                  FROM collaboration_threads t
                  WHERE t.session_socket_id = ?1 AND t.worktree_id = ?2
                    AND t.thread_id IN (
-                       SELECT thread_id FROM collaboration_messages
+                       SELECT thread_id FROM channel_messages
                        WHERE session_socket_id = ?1 AND worktree_id = ?2
                          AND message_id IN ({WINDOW_MESSAGE_IDS}))"
             ),
@@ -892,7 +938,7 @@ impl StateTransaction<'_> {
                      AND e.worktree_id = a.worktree_id AND e.address_id = a.address_id)
              ORDER BY a.address_id)
              SELECT a.*, m.thread_id FROM address_rows a
-             LEFT JOIN collaboration_messages m ON m.session_socket_id = ?1 AND m.worktree_id = ?2
+             LEFT JOIN channel_messages m ON m.session_socket_id = ?1 AND m.worktree_id = ?2
                AND m.message_id = a.blocked_message_id
              ORDER BY a.address_id",
             ns,
@@ -912,8 +958,8 @@ impl StateTransaction<'_> {
                     bound: row.get(6)?,
                     occupied: row.get(7)?,
                     agent_status: row.get(8)?,
-                    blocked_since_ms: row.get(9)?,
-                    blocked_message_id: row.get(10)?,
+                    blocked_since_ms: if row.get::<_,Option<String>>(10)?.is_some() && row.get::<_,Option<String>>(12)?.is_none() { None } else { row.get(9)? },
+                    blocked_message_id: if row.get::<_,Option<String>>(12)?.is_some() { row.get(10)? } else { None },
                     blocked_conversation: match row.get::<_, Option<String>>(12)? {
                         Some(thread_id) => Some(ConversationRow { thread_id, message_id: row.get(10)? }),
                         None => None,
@@ -1035,7 +1081,8 @@ impl StateTransaction<'_> {
               AND d.delivery_id = a.delivery_id AND d.address_id = a.address_id
              LEFT JOIN coordinations c ON i.source_kind = 'coordination'
                AND c.session_socket_id = i.session_socket_id AND c.worktree_id = i.worktree_id AND c.coordination_id = i.source_id
-             WHERE i.session_socket_id = ?1 AND i.worktree_id = ?2 AND i.resolved_at_ms IS NULL)
+             WHERE i.session_socket_id = ?1 AND i.worktree_id = ?2 AND i.resolved_at_ms IS NULL
+               AND i.source_kind <> 'terminal_relay')
              SELECT targets.*, m.thread_id, m.message_id,
                EXISTS (SELECT 1 FROM coordination_links links
                        WHERE links.session_socket_id = m.session_socket_id
@@ -1053,12 +1100,13 @@ impl StateTransaction<'_> {
                OR COALESCE(controls.paused OR controls.stopped, 0),
                COALESCE(responder.pane_type = 'terminal', 0)
              FROM targets
-             LEFT JOIN collaboration_messages m ON m.session_socket_id = ?1 AND m.worktree_id = ?2
+             LEFT JOIN channel_messages m ON m.session_socket_id = ?1 AND m.worktree_id = ?2
                AND m.message_id = targets.target_message_id
              LEFT JOIN thread_controls controls ON controls.session_socket_id = m.session_socket_id
                AND controls.worktree_id = m.worktree_id AND controls.thread_id = m.thread_id
              LEFT JOIN pane_addresses responder ON responder.session_socket_id = ?1 AND responder.worktree_id = ?2
-               AND responder.address_id = targets.response_address_id",
+               AND responder.address_id = targets.response_address_id
+             WHERE targets.target_message_id IS NULL OR m.message_id IS NOT NULL",
             params![ns[0], ns[1], serde_json::json!(address_ids).to_string(), serde_json::json!(operators).to_string()],
             |row| {
                 let item = crate::AttentionItemRecord {
@@ -1083,7 +1131,8 @@ impl StateTransaction<'_> {
                         .as_str_or_null()?
                         .and_then(alias_for_address),
                     crate::AttentionSourceKind::AutomaticReplyLimit
-                    | crate::AttentionSourceKind::Coordination => None,
+                    | crate::AttentionSourceKind::Coordination
+                    | crate::AttentionSourceKind::TerminalRelay => None,
                 };
                 Ok(AttentionRow {
                     conversation: match row.get::<_, Option<String>>(12)? {
@@ -1099,9 +1148,66 @@ impl StateTransaction<'_> {
                 })
             },
         )?;
+        let relays = self.rows(
+            "SELECT i.attention_item_id, i.source_id, i.summary, i.opened_at_ms,
+                    m.thread_id, m.author_address_id, m.author_alias_snapshot, m.body
+             FROM attention_items i JOIN channel_messages m
+               ON m.session_socket_id=i.session_socket_id AND m.worktree_id=i.worktree_id
+                 AND m.message_id=i.source_id
+             WHERE i.session_socket_id=?1 AND i.worktree_id=?2
+               AND i.source_kind='terminal_relay' AND i.resolved_at_ms IS NULL",
+            namespace_params(namespace),
+            |row| {
+                let message_id: String = row.get(1)?;
+                let address: String = row.get(5)?;
+                let body: String = row.get(7)?;
+                let idle = addresses.iter().any(|candidate| {
+                    candidate.address_id == address
+                        && candidate.agent_status.as_deref().is_some_and(|status| {
+                            matches!(status, "idle" | "blocked" | "blocked_on_user" | "waiting")
+                        })
+                });
+                Ok((
+                    AttentionRow {
+                        conversation: Some(ConversationRow {
+                            thread_id: row.get(4)?,
+                            message_id: message_id.clone(),
+                        }),
+                        response_address_id: Some(address),
+                        reply_requires_message: false,
+                        response_is_terminal: false,
+                        item: crate::AttentionItemRecord {
+                            id: crate::AttentionItemId::new(row.get::<_, String>(0)?),
+                            source_kind: crate::AttentionSourceKind::TerminalRelay,
+                            source_id: message_id.clone(),
+                            summary: row.get(2)?,
+                            opened_at_ms: from_i64(row.get(3)?)?,
+                            resolved_at_ms: None,
+                        },
+                        subject_alias: Some(row.get(6)?),
+                        message_id: Some(message_id),
+                    },
+                    idle || body.trim_end().ends_with('?'),
+                ))
+            },
+        )?;
+        let priority: std::collections::HashSet<_> = relays
+            .iter()
+            .filter(|(_, high)| *high)
+            .map(|(item, _)| item.item.id.clone())
+            .collect();
+        attention.extend(relays.into_iter().map(|(item, _)| item));
         attention.sort_unstable_by(|left, right| {
-            (left.item.opened_at_ms, left.item.id.as_str())
-                .cmp(&(right.item.opened_at_ms, right.item.id.as_str()))
+            (
+                !priority.contains(&left.item.id),
+                left.item.opened_at_ms,
+                left.item.id.as_str(),
+            )
+                .cmp(&(
+                    !priority.contains(&right.item.id),
+                    right.item.opened_at_ms,
+                    right.item.id.as_str(),
+                ))
         });
         let mut rows = DashboardRows {
             namespace: namespace.clone(),
@@ -1219,7 +1325,7 @@ impl StateTransaction<'_> {
         params: impl rusqlite::Params,
         map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     ) -> Result<Vec<T>, StoreError> {
-        let mut statement = self.transaction.prepare(sql)?;
+        let mut statement = self.transaction.prepare(&public_sql(sql))?;
         let rows = statement
             .query_map(params, map)?
             .collect::<Result<Vec<_>, _>>()?;

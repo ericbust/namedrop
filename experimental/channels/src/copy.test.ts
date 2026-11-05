@@ -49,6 +49,7 @@ function recipient(kind: MemberKind): Participant {
       recentlyClosed: false,
       role: null,
       paneLabel: null,
+      subagents: [],
     },
     home: null,
   };
@@ -390,6 +391,7 @@ function agent(alias: string, pane: string | null = null): Member {
     recentlyClosed: false,
     role: null,
     paneLabel: pane === null ? null : { text: pane, truncated: false },
+    subagents: [],
   };
 }
 test("with a pane response, the hint names the responder's pane with its label as the tooltip, except where the source's own hint wins", () => {

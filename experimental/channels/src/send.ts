@@ -22,6 +22,7 @@ export type Post = {
   key: SpaceKey;
   source: string;
   inReplyTo: string | null;
+  directTo?: AddressId;
 };
 export type PostResult =
   | { kind: "sent"; messageId: string }
@@ -107,8 +108,16 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
     prepare(): void {
       void token();
     },
-    async fullBody(key: SpaceKey, messageId: string): Promise<SafeText | null> {
-      const path = `/w/${key}/messages/${encodeURIComponent(messageId)}/body`;
+    async fullBody(
+      key: SpaceKey,
+      messageId: string,
+      directTo?: AddressId,
+    ): Promise<SafeText | null> {
+      const conversation =
+        directTo === undefined
+          ? `/w/${key}`
+          : `/w/${key}/direct-messages/${encodeURIComponent(directTo)}`;
+      const path = `${conversation}/messages/${encodeURIComponent(messageId)}/body`;
       try {
         const used = token();
         let response = await read(path, await used);
@@ -125,10 +134,16 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
     },
     async post(post: Post): Promise<PostResult> {
       try {
-        const response = await postWithTokenRetry(`/w/${post.key}/messages`, {
+        const path =
+          post.directTo === undefined
+            ? `/w/${post.key}/messages`
+            : `/w/${post.key}/direct-messages/${encodeURIComponent(post.directTo)}/messages`;
+        const response = await postWithTokenRetry(path, {
           request_id: post.requestId,
           source: post.source,
-          ...(post.inReplyTo === null ? {} : { in_reply_to: post.inReplyTo }),
+          ...(post.directTo !== undefined || post.inReplyTo === null
+            ? {}
+            : { in_reply_to: post.inReplyTo }),
         });
         if (!response.ok)
           return {

@@ -49,6 +49,14 @@ pub struct RuntimeOptions {
 }
 
 impl Cli {
+    pub fn subagent_hook(&self) -> Option<(&Path, crate::AgentRuntime)> {
+        match &self.command {
+            Command::Hook {
+                command: HookCommand::Subagent(args),
+            } => Some((&args.hook.state_directory, args.runtime.into())),
+            _ => None,
+        }
+    }
     pub fn human_output(&self, terminal: bool) -> bool {
         self.human || (!self.json && terminal && !self.machine_operation())
     }
@@ -108,6 +116,24 @@ impl Cli {
         match &self.command {
             Command::Hook {
                 command: HookCommand::UserPromptSubmit(args),
+            } => Some(&args.state_directory),
+            _ => None,
+        }
+    }
+
+    pub fn stop_hook_state_directory(&self) -> Option<&Path> {
+        match &self.command {
+            Command::Hook {
+                command: HookCommand::Stop(args),
+            } => Some(&args.state_directory),
+            _ => None,
+        }
+    }
+
+    pub fn stop_worker_state_directory(&self) -> Option<&Path> {
+        match &self.command {
+            Command::Hook {
+                command: HookCommand::StopWorker(args),
             } => Some(&args.state_directory),
             _ => None,
         }
@@ -665,8 +691,12 @@ enum HookCommand {
     AgentStatusChanged,
     AgentStatusWorker,
     MailboxWake(HookArgs),
+    Stop(HookArgs),
+    #[command(hide = true)]
+    StopWorker(HookArgs),
     SessionStart(HookArgs),
     UserPromptSubmit(HookArgs),
+    Subagent(SubagentHookArgs),
 }
 
 impl HookCommand {
@@ -675,8 +705,11 @@ impl HookCommand {
             Self::AgentStatusChanged => "hook.agent-status-changed",
             Self::AgentStatusWorker => "hook.agent-status-worker",
             Self::MailboxWake(_) => "hook.mailbox-wake",
+            Self::Stop(_) => "hook.stop",
+            Self::StopWorker(_) => "hook.stop-worker",
             Self::SessionStart(_) => "hook.session-start",
             Self::UserPromptSubmit(_) => "hook.user-prompt-submit",
+            Self::Subagent(_) => "hook.subagent",
         }
     }
 }
@@ -686,6 +719,29 @@ struct HookArgs {
     /// Plugin-owned state directory for this installed hook.
     #[arg(long, value_name = "PATH")]
     state_directory: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct SubagentHookArgs {
+    #[command(flatten)]
+    hook: HookArgs,
+    #[arg(long, value_enum)]
+    runtime: HookRuntime,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum HookRuntime {
+    ClaudeCode,
+    Codex,
+}
+
+impl From<HookRuntime> for crate::AgentRuntime {
+    fn from(value: HookRuntime) -> Self {
+        match value {
+            HookRuntime::ClaudeCode => Self::ClaudeCode,
+            HookRuntime::Codex => Self::Codex,
+        }
+    }
 }
 
 #[cfg(test)]

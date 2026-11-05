@@ -1,3 +1,4 @@
+import type { DirectHistory, DirectPeer } from "./direct-messages.ts";
 import type {
   Activity,
   AddressId,
@@ -30,6 +31,7 @@ import type {
   ScreenFailure,
   SpaceKey,
   SpaceState,
+  Subagent,
   TerminalResult,
   TerminalRun,
   ThreadAction,
@@ -115,6 +117,38 @@ function safeText(value: unknown): SafeText {
 }
 function optionalSafeText(value: unknown): SafeText | null {
   return value === null ? null : safeText(value);
+}
+function subagentText(value: unknown): SafeText | null {
+  if (value === null || value === undefined) return null;
+  try {
+    const parsed = safeText(value);
+    return {
+      text: parsed.text.slice(0, 240),
+      truncated: parsed.truncated || parsed.text.length > 240,
+    };
+  } catch {
+    return null;
+  }
+}
+function subagents(value: unknown): readonly Subagent[] {
+  if (!Array.isArray(value)) return [];
+  const agents = new Map<string, Subagent>();
+  for (const raw of value) {
+    try {
+      const item = record(raw);
+      const id = identity(item.id);
+      const startedAt = integer(item.started_at_ms);
+      agents.set(id, {
+        id,
+        kind: subagentText(item.kind),
+        description: subagentText(item.description),
+        startedAt,
+      });
+    } catch {
+      // Optional metadata must not discard the participant or channel.
+    }
+  }
+  return [...agents.values()];
 }
 function health(value: unknown): Health {
   const item = record(value);
@@ -223,6 +257,7 @@ function attention(
     case "context_grant":
     case "coordination":
     case "agent_status":
+    case "terminal_relay":
       source = kind;
       break;
     default:
@@ -402,6 +437,8 @@ function messageKind(value: unknown): MessageKind {
       return "mention";
     case "reply":
       return "reply";
+    case "terminal_relay":
+      return "terminal_relay";
     case "handoff":
       return "handoff";
     case "result_set":
@@ -643,6 +680,7 @@ function channel(value: unknown, key: SpaceKey): ChannelSnapshot {
       recentlyClosed: item.recently_closed === true,
       role: optionalSafeText(item.role),
       paneLabel: optionalSafeText(item.pane_label),
+      subagents: subagents(item.subagents),
     });
   }
   const rows = messages(frame.messages);
@@ -756,4 +794,49 @@ export function parseRefusal(body: string): string {
     if (typeof error === "string") return error.trim();
   } catch {}
   return body.trim();
+}
+
+export function parseDirectPeers(raw: unknown): readonly DirectPeer[] {
+  const peers = array(record(raw).peers).map((raw): DirectPeer => {
+    const item = record(raw);
+    const presence = item.presence;
+    if (presence !== "idle" && presence !== "working" && presence !== "gone")
+      throw new Error("Invalid direct message presence");
+    if (typeof item.closed !== "boolean")
+      throw new Error("Expected closed flag");
+    return {
+      spaceKey: spaceKey(item.space_key),
+      addressId: addressId(item.address_id),
+      alias: `@${identity(item.alias).replace(/^@+/, "")}`,
+      workspaceLabel: text(item.workspace_label),
+      paneLabel: optionalSafeText(item.pane_label),
+      runtime: text(item.runtime),
+      presence,
+      closed: item.closed,
+      threadId: nullableText(item.thread_id),
+      lastActivityMs:
+        item.last_activity_ms === null
+          ? null
+          : timestamp(item.last_activity_ms),
+      lastMessageId: nullableText(item.last_message_id),
+      lastAgentMessageId: nullableText(item.last_agent_message_id),
+      attentionCount: integer(item.attention_count),
+    };
+  });
+  if (
+    new Set(peers.map((peer) => `${peer.spaceKey}/${peer.addressId}`)).size !==
+    peers.length
+  )
+    throw new Error("Duplicate direct message peer");
+  return peers;
+}
+export function parseDirectHistory(raw: unknown): DirectHistory {
+  const item = record(raw);
+  if (typeof item.earlier_omitted !== "boolean")
+    throw new Error("Expected history flag");
+  return {
+    threadId: nullableText(item.thread_id),
+    messages: [...messages(item.messages).values()],
+    earlierOmitted: item.earlier_omitted,
+  };
 }

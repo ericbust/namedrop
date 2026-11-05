@@ -571,10 +571,15 @@ where
             let permission_removal =
                 crate::install::remove_claude_permissions(runtime.state_directory);
             let sandbox_removal = crate::install::codex_sandbox::remove(runtime.state_directory);
+            let subagent_removal = crate::install::remove_subagent_hooks(
+                runtime.state_directory,
+                runtime.home_directory,
+            );
             Ok(json!({
                 "space_id": discovered.workspace_id,
                 "worktree_id": discovered.worktree_attached.then_some(discovered.worktree_id),
                 "codex_sandbox": {"removed_entries": sandbox_removal.as_ref().ok(), "error": sandbox_removal.err()},
+                "subagent_hooks": {"removed_entries": subagent_removal.as_ref().ok(), "error": subagent_removal.err()},
                 "claude_permissions": {"removed": permission_removal.as_ref().is_ok_and(|count| *count > 0), "removed_entries": permission_removal.as_ref().ok(), "error": permission_removal.err()},
                 "deactivated": true,
                 "state_preserved": true

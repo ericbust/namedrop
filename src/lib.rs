@@ -31,6 +31,7 @@ mod runtime;
 mod shortcuts;
 mod spaces;
 mod store;
+pub mod subagent;
 #[doc(hidden)]
 pub use shortcuts::install_shortcuts;
 mod terminal;
@@ -86,7 +87,8 @@ pub use lifecycle::{
 pub use message::{
     BodyMention, OperatorSendError, OperatorSendErrorKind, ParsedMessage, RecipientOutlook,
     RecipientRun, carries_leading_mentions, execute_message_operation, parse_mentions,
-    parse_prompt_mentions, recipient_outlooks, send_operator_message, validate_message_input,
+    parse_prompt_mentions, recipient_outlooks, send_operator_direct_message, send_operator_message,
+    validate_message_input,
 };
 pub use ports::{Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator, PromptFailureKind};
 pub use runtime::{ProcessHerdr, ProcessIds, SystemClock};

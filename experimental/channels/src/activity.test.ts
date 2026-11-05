@@ -87,6 +87,37 @@ function apply(state: State, ...frames: unknown[]): State {
 function load(...frames: unknown[]): ReadonlyMap<SpaceKey, Channel> {
   return apply(initialState(), ...frames).channels;
 }
+
+test("an idle agent's terminal relay appears in All activity Needs you with its reply target", () => {
+  const conversation = { thread_id: "request", message_id: "relay" };
+  const channels = load(
+    space("a", "alpha", [lane("agent-a", "@codex", "idle")], {
+      health: { level: "needs_you", items: 1 },
+      attention: [
+        {
+          source_kind: "terminal_relay",
+          summary: { text: "Which option?", truncated: false },
+          opened_at_ms: 100,
+          subject_alias: "@codex",
+          conversation,
+          response: { kind: "reply", address_id: "agent-a", ...conversation },
+        },
+      ],
+    }),
+  );
+  const [group] = activityOf(channels).groups;
+  assert.equal(group?.kind, "needs_you");
+  const [row] = group?.rows ?? [];
+  assert.equal(row?.line.kind, "attention");
+  if (row?.line.kind !== "attention") assert.fail("missing relay attention");
+  assert.equal(row.line.attention.source, "terminal_relay");
+  assert.deepEqual(row.line.attention.response, {
+    kind: "reply",
+    addressId: "agent-a",
+    threadId: "request",
+    messageId: "relay",
+  });
+});
 function rows(list: ActivityList) {
   return list.groups.map((group) => [
     group.kind,

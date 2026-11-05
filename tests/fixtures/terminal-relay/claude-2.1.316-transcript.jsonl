@@ -1,0 +1,2 @@
+{"type": "assistant", "sessionId": "test-session", "message": {"role": "assistant", "content": [{"type": "text", "text": "Hi! I'm @claude in this Namedrop testbed. What can I help you with?"}]}}
+{"type": "assistant", "sessionId": "test-session", "message": {"role": "assistant", "content": [{"type": "text", "text": "Would you prefer tea or coffee?"}]}}

@@ -2,6 +2,7 @@ use clap::{Parser, error::ErrorKind};
 mod agent_status_ui;
 mod naming_ui;
 mod popup_input;
+mod stop_hook;
 use namedrop::{
     Clock, CommandResult, HerdrCommandExecutor, LifecycleRuntime, ProcessHerdr, ProcessIds,
     SystemClock,
@@ -127,6 +128,11 @@ fn main() -> ExitCode {
             };
         }
         Err(error) => {
+            if arguments.first().is_some_and(|arg| arg == "hook")
+                && arguments.get(1).is_some_and(|arg| arg == "subagent")
+            {
+                return ExitCode::SUCCESS;
+            }
             let args: Vec<_> = env::args_os().skip(1).collect();
             let human = !args.iter().any(|arg| arg == "--json")
                 && (args.iter().any(|arg| arg == "--human") || io::stdout().is_terminal());
@@ -137,6 +143,17 @@ fn main() -> ExitCode {
             );
         }
     };
+    if let Some((state, host)) = cli.subagent_hook() {
+        return run_subagent_hook(state, host);
+    }
+    if let Some(state_directory) = cli.stop_hook_state_directory() {
+        stop_hook::run(state_directory);
+        return ExitCode::SUCCESS;
+    }
+    if let Some(state_directory) = cli.stop_worker_state_directory() {
+        stop_hook::run_worker(state_directory);
+        return ExitCode::SUCCESS;
+    }
     if let Some(terminal) = cli.dashboard_observer_terminal() {
         return namedrop::dashboard::run_observer_guard(terminal);
     }
@@ -398,6 +415,49 @@ fn main() -> ExitCode {
         eprintln!("Command queued; could not start shell watcher: {error}");
     }
     finish(operation, result)
+}
+
+fn run_subagent_hook(state: &Path, host: namedrop::AgentRuntime) -> ExitCode {
+    if thread::Builder::new()
+        .spawn(|| {
+            thread::sleep(Duration::from_secs(5));
+            std::process::exit(0);
+        })
+        .is_err()
+    {
+        return ExitCode::SUCCESS;
+    }
+    let mut input = String::new();
+    let cap = namedrop::subagent::SUBAGENT_STDIN_CAP;
+    if io::stdin()
+        .take(cap as u64 + 1)
+        .read_to_string(&mut input)
+        .is_err()
+        || input.len() > cap
+    {
+        return ExitCode::SUCCESS;
+    }
+    let Some((session, event)) =
+        namedrop::subagent::Event::parse(host, &input, &namedrop::subagent::DiskFiles)
+    else {
+        return ExitCode::SUCCESS;
+    };
+    let identity = env::var("HERDR_SOCKET_PATH")
+        .ok()
+        .zip(env::var("HERDR_WORKSPACE_ID").ok())
+        .zip(env::var("HERDR_PANE_ID").ok())
+        .and_then(|((socket, workspace), pane)| {
+            namedrop::subagent::ParentIdentity::new(&socket, &workspace, &pane, &session)
+        });
+    if let Some(parent) = identity {
+        let _ = namedrop::subagent::record(
+            state,
+            &parent,
+            event,
+            SystemClock.now_unix_ms().min(i64::MAX as u64) as i64,
+        );
+    }
+    ExitCode::SUCCESS
 }
 
 fn wake_mailboxes(options: &RuntimeOptions) -> Result<(), String> {

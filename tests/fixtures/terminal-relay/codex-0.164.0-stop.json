@@ -1,0 +1,11 @@
+{
+  "session_id": "codex-session-id",
+  "turn_id": "codex-turn-id",
+  "transcript_path": "/testbed/codex/transcript_path",
+  "cwd": "/testbed/codex/cwd",
+  "hook_event_name": "Stop",
+  "model": "gpt-6-sol",
+  "permission_mode": "default",
+  "stop_hook_active": false,
+  "last_assistant_message": "Hi! What can I help with?"
+}

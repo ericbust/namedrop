@@ -17,6 +17,12 @@ export type MemberKind =
   | { type: "human" | "terminal" | "unknown" }
   | { type: "agent"; runtime: string | null };
 export type SafeText = { text: string; truncated: boolean };
+export type Subagent = Readonly<{
+  id: string;
+  kind: SafeText | null;
+  description: SafeText | null;
+  startedAt: number;
+}>;
 export type Member = {
   id: AddressId;
   alias: string;
@@ -25,6 +31,7 @@ export type Member = {
   recentlyClosed: boolean;
   role: SafeText | null;
   paneLabel: SafeText | null;
+  subagents: readonly Subagent[];
 };
 export type Conversation = { threadId: string; messageId: string };
 export type AttentionResponse =
@@ -80,6 +87,7 @@ export type Attention = {
     | "context_grant"
     | "coordination"
     | "agent_status"
+    | "terminal_relay"
     | "unknown";
   summary: SafeText;
   subjectSummary: SafeText | null;
@@ -105,6 +113,7 @@ export type TerminalResult = {
 export type MessageKind =
   | "mention"
   | "reply"
+  | "terminal_relay"
   | "handoff"
   | "result_set"
   | "nudge"
@@ -288,7 +297,8 @@ export type SendRule =
       agents: ReadonlyMap<AddressId, Member>;
       label: string | null;
     }
-  | { kind: "thread"; to: readonly string[] };
+  | { kind: "thread"; to: readonly string[] }
+  | { kind: "direct"; alias: string };
 export type WireEvent =
   | { type: "space"; channel: ChannelSnapshot }
   | { type: "gone"; key: SpaceKey }

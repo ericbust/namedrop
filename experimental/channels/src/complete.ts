@@ -33,6 +33,7 @@ export type CompletionContext = {
   channels: readonly ChannelOption[];
   membersOf(key: SpaceKey): readonly Member[];
   skillRecipients?: readonly SkillTarget[];
+  directRecipient?: SkillTarget;
 };
 export type Token = {
   kind: "channel" | "member" | "skill";
@@ -442,6 +443,7 @@ function loneAt(sent: string): boolean {
 // The text Enter sends, or null when it must stay in the box.
 export function postSource(text: string, rule: SendRule): string | null {
   const body = sentText(text);
+  if (rule.kind === "direct") return body === "" ? null : body;
   if (loneAt(body)) return null;
   const { leading, rest } = serverMentions(body);
   if (leading.length > 0) return rest.trim() === "" ? null : body;
@@ -462,6 +464,8 @@ export function keptHint(text: string): string {
 
 // Where Enter sends the text, in the words of the hint under the box.
 export function composerHint(rule: SendRule, text: string): string {
+  if (rule.kind === "direct")
+    return `Only ${rule.alias} receives this direct message.`;
   const body = sentText(text);
   if (loneAt(body)) return composerCopy.nameAfter;
   if (rule.kind === "thread") {
@@ -484,6 +488,7 @@ export function skillRecipients(
   text: string,
   context: CompletionContext,
 ): readonly SkillTarget[] {
+  if (context.directRecipient) return [context.directRecipient];
   const { labels, end } = leadingLabels(text);
   if (labels.includes("all")) return [];
   const keys =
