@@ -171,6 +171,54 @@ impl Fixture {
             Ok(message)
         })
     }
+    fn operator_original(&self, private: bool) -> MessageId {
+        self.tx(|tx| {
+            let thread = if private {
+                crate::store::direct_messages::thread_id(&owner().address)
+            } else {
+                ThreadId::new("original-thread")
+            };
+            tx.ensure_operator_author(&ns(), &by(1))?;
+            tx.create_thread(&ns(), &thread, "remind me", &by(1))?;
+            let id = MessageId::new("question");
+            tx.append_message_mode(
+                &ns(),
+                &MessageDraft {
+                    thread_id: thread,
+                    message_id: id.clone(),
+                    in_reply_to: None,
+                    author_address_id: PaneAddressId::new("operator:local"),
+                    author_kind: ActorKind::Human,
+                    author_alias_snapshot: "operator".into(),
+                    author_agent_session_snapshot: None,
+                    request_id: "question".into(),
+                    authored_source: "@owner remind me".into(),
+                    body: "remind me".into(),
+                    grammar_version: if private {
+                        "direct-message/v1"
+                    } else {
+                        "channel/v1"
+                    }
+                    .into(),
+                    recipients: vec![crate::MessageRecipientDraft {
+                        address_id: owner().address,
+                        alias_snapshot: "owner".into(),
+                        agent_session_snapshot: Some(owner().session),
+                        delivery_id: DeliveryId::new("original-delivery"),
+                    }],
+                    context_references: vec![],
+                },
+                &by(1),
+                None,
+                if private {
+                    MessageAppendMode::DirectMessage
+                } else {
+                    MessageAppendMode::Normal
+                },
+            )?;
+            Ok(id)
+        })
+    }
     fn settle_original(&self) {
         self.lease("original-attempt", 2);
         self.tx(|tx| {
@@ -1567,6 +1615,162 @@ fn reminder_startup_retry_does_not_redrain_successful_busy_namespaces() {
                 tx.reminder(&ns(), "busy")?.state,
                 ReminderState::AwaitingDelivery { .. }
             ));
+            Ok(())
+        });
+    }
+}
+
+#[test]
+fn reminder_operator_wakes_keep_dm_and_channel_reply_routes() {
+    for private in [false, true] {
+        let f = Fixture::new();
+        let original = f.operator_original(private);
+        f.settle_original();
+        f.set("r", Some(original.clone()), crate::reminder::Repeat::Once);
+        f.fire("r");
+        let wake = f.lease("wake", 60_001);
+        let input = f.tx(|tx| {
+            let envelope = tx.delivery_envelope(
+                &ns(),
+                &wake.attempt_id,
+                crate::IntegrationToolInvocation::new("/test/namedrop", Default::default()),
+            )?;
+            assert_eq!(
+                envelope.control.reply_mode,
+                if private {
+                    crate::DeliveryReplyMode::DirectMessage
+                } else {
+                    crate::DeliveryReplyMode::Channel
+                }
+            );
+            assert!(
+                envelope
+                    .control
+                    .permitted_operations
+                    .iter()
+                    .any(|op| op == "reminder.set")
+            );
+            assert_ne!(envelope.control.message_id, original);
+            let mut input = envelope
+                .control
+                .tool
+                .operations
+                .iter()
+                .find(|op| op.token == "reply")
+                .unwrap()
+                .input
+                .clone();
+            assert_eq!(input["in_reply_to"], json!(original));
+            assert_eq!(
+                input["source"],
+                json!(format!("@operator {}", crate::REPLY_BODY_PLACEHOLDER))
+            );
+            input["source"] = json!("@operator the current time");
+            tx.transition_delivery_attempt(
+                &ns(),
+                &wake.attempt_id,
+                DeliveryState::Submitted,
+                &by(60_002),
+            )?;
+            if private {
+                let thread = crate::store::direct_messages::thread_id(&owner().address);
+                tx.transaction.execute(
+                    "UPDATE thread_controls SET reply_allowance=0 WHERE thread_id=?1",
+                    [thread.as_str()],
+                )?;
+            }
+            Ok(input)
+        });
+        if private {
+            assert!(
+                StateStore::open(&f.state)
+                    .unwrap()
+                    .direct_message_peers()
+                    .unwrap()
+                    .iter()
+                    .all(|p| p.last_agent_message_id.is_none())
+            );
+        }
+        let ids = ProcessIds::default();
+        let runtime = crate::LifecycleRuntime {
+            state_directory: &f.state,
+            home_directory: None,
+            agent_config: Default::default(),
+            cwd: Path::new("/test-repo"),
+            workspace_id: Some("test-space"),
+            current_pane_id: Some("pane"),
+            session_socket_id: "test-socket",
+            herdr: &f,
+            clock: &crate::SystemClock,
+            ids: &ids,
+        };
+        crate::execute_message_operation("reply", input, &runtime).unwrap();
+        if private {
+            assert!(
+                StateStore::open(&f.state)
+                    .unwrap()
+                    .direct_message_peers()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.last_agent_message_id.is_some())
+            );
+        }
+        f.tx(|tx| {
+            assert!(tx.delivery_disposition_exists(&ns(), &wake.attempt_id)?);
+            if private {
+                assert!(tx.dashboard_rows(&ns())?.messages.is_empty());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[test]
+fn reminder_terminal_only_answers_relay_once_in_the_original_conversation() {
+    for private in [false, true] {
+        let f = Fixture::new();
+        let original = f.operator_original(private);
+        f.settle_original();
+        f.set("r", Some(original.clone()), crate::reminder::Repeat::Once);
+        f.fire("r");
+        let wake = f.lease("wake", 60_000);
+        f.tx(|tx| {
+            tx.transition_delivery_attempt(
+                &ns(),
+                &wake.attempt_id,
+                DeliveryState::Submitted,
+                &by(60_000),
+            )?;
+            let ending = crate::TerminalRelayEnd {
+                agent_session_id: owner().session,
+                ended_at_ms: 60_010,
+                previous_end_ms: Some(5),
+                text: "the current time".into(),
+            };
+            let relayed = tx.relay_terminal_ending(&ns(), &ending, &by(60_010))?;
+            assert_eq!(relayed.len(), 1);
+            let (parent, body): (String, String) = tx.transaction.query_row(
+                "SELECT in_reply_to,body FROM collaboration_messages WHERE message_id=?1",
+                [relayed[0].as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            assert_eq!(parent, original.as_str());
+            assert_eq!(body, "the current time");
+            assert!(
+                tx.relay_terminal_ending(&ns(), &ending, &by(60_010))?
+                    .is_empty()
+            );
+            let later = crate::TerminalRelayEnd {
+                ended_at_ms: 60_020,
+                ..ending
+            };
+            assert!(
+                tx.relay_terminal_ending(&ns(), &later, &by(60_020))?
+                    .is_empty()
+            );
+            if private {
+                assert!(tx.dashboard_rows(&ns())?.messages.is_empty());
+            }
             Ok(())
         });
     }

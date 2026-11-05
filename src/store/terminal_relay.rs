@@ -8,7 +8,6 @@ struct RelayAttempt {
     alias: String,
     message_id: String,
     thread_id: String,
-    source_author: String,
     started_at_ms: u64,
 }
 
@@ -42,17 +41,7 @@ impl StateTransaction<'_> {
         message: &MessageId,
         attribution: &MutationAttribution,
     ) -> Result<(), StoreError> {
-        let (human, author) = self.transaction.query_row(
-            "SELECT author_kind='human', author_address_id
-             FROM collaboration_messages WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3",
-            params![namespace.session_socket_id, namespace.space_id.as_str(), message.as_str()],
-            |row| Ok((row.get::<_, bool>(0)?, row.get::<_, String>(1)?)),
-        )?;
-        if human
-            && self
-                .operator_projection_addresses(namespace)?
-                .contains(&author)
-        {
+        if self.terminal_relay_source(namespace, message)?.is_some() {
             self.append_transition(
                 namespace,
                 TransitionEntityKind::TerminalRelayAttempt,
@@ -62,6 +51,29 @@ impl StateTransaction<'_> {
             )?;
         }
         Ok(())
+    }
+
+    fn terminal_relay_source(
+        &self,
+        namespace: &StateNamespace,
+        message: &MessageId,
+    ) -> Result<Option<MessageId>, StoreError> {
+        let source = match self.reminder_reply_target(namespace, message)? {
+            Some(Some(original)) => original,
+            Some(None) => return Ok(None),
+            None => message.clone(),
+        };
+        let (human, author) = self.transaction.query_row(
+            "SELECT author_kind='human', author_address_id
+             FROM collaboration_messages WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3",
+            params![namespace.session_socket_id, namespace.space_id.as_str(), source.as_str()],
+            |row| Ok((row.get::<_, bool>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        Ok((human
+            && self
+                .operator_projection_addresses(namespace)?
+                .contains(&author))
+        .then_some(source))
     }
 
     pub fn relay_terminal_ending(
@@ -91,7 +103,7 @@ impl StateTransaction<'_> {
         let attempts = {
             let mut statement = self.transaction.prepare(
                 "SELECT a.attempt_id, a.address_id, r.alias_snapshot, m.message_id,
-                        m.thread_id, arm.occurred_at_ms, m.author_address_id
+                        m.thread_id, arm.occurred_at_ms
                  FROM delivery_attempts a
                  JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, delivery_id, address_id)
                  JOIN collaboration_messages m USING (session_socket_id, worktree_id, message_id)
@@ -104,7 +116,6 @@ impl StateTransaction<'_> {
                  WHERE a.session_socket_id=?1 AND a.worktree_id=?2 AND a.agent_session_id=?3
                    AND arm.occurred_at_ms > ?4 AND arm.occurred_at_ms <= ?5
                    AND s.state IN ('submitted','acknowledged','settled')
-                   AND m.author_kind='human'
                    AND NOT EXISTS (SELECT 1 FROM delivery_attempts newer
                        WHERE newer.session_socket_id=a.session_socket_id AND newer.worktree_id=a.worktree_id
                          AND newer.delivery_id=a.delivery_id AND newer.rowid>a.rowid)
@@ -127,7 +138,6 @@ impl StateTransaction<'_> {
                             message_id: row.get(3)?,
                             thread_id: row.get(4)?,
                             started_at_ms: from_i64(row.get(5)?)?,
-                            source_author: row.get(6)?,
                         })
                     },
                 )?
@@ -145,12 +155,13 @@ impl StateTransaction<'_> {
             ending.ended_at_ms,
         );
         let mut messages = Vec::new();
-        let operators = self.operator_projection_addresses(namespace)?;
         if !text.is_empty() {
             for attempt in attempts {
-                if !operators.contains(&attempt.source_author) {
+                let Some(source) =
+                    self.terminal_relay_source(namespace, &MessageId::new(&attempt.message_id))?
+                else {
                     continue;
-                }
+                };
                 let message_id = MessageId::new(format!("terminal-relay:{}", attempt.attempt_id));
                 let exists = self.transaction.query_row(
                     "SELECT EXISTS(SELECT 1 FROM collaboration_messages
@@ -165,7 +176,7 @@ impl StateTransaction<'_> {
                     "SELECT EXISTS(SELECT 1 FROM collaboration_messages reply
                        WHERE reply.session_socket_id=?1 AND reply.worktree_id=?2 AND reply.thread_id=?3
                          AND reply.author_address_id=?4 AND reply.author_kind='agent_session'
-                         AND reply.grammar_version <> 'terminal-relay/v1'
+                         AND reply.grammar_version NOT IN ('terminal-relay/v1','reminder/v1')
                          AND reply.created_at_ms >= ?5 AND reply.created_at_ms <= ?6)
                      OR EXISTS(SELECT 1 FROM delivery_dispositions
                        WHERE session_socket_id=?1 AND worktree_id=?2 AND attempt_id=?7 AND disposition_kind='reply')",
@@ -184,7 +195,7 @@ impl StateTransaction<'_> {
                         request_id, authored_source, body, grammar_version, created_at_ms)
                      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'agent_session',?9,?3,?10,?10,?11,?12)",
                     params![ns[0], ns[1], message_id.as_str(), attempt.thread_id, to_i64(order)?,
-                        attempt.message_id, attempt.address_id, attempt.alias,
+                        source.as_str(), attempt.address_id, attempt.alias,
                         ending.agent_session_id.as_str(), text, GRAMMAR, ended_at],
                 )?;
                 self.append_transition(
@@ -211,12 +222,9 @@ impl StateTransaction<'_> {
                     )?;
                 }
                 let mut conversations = vec![(namespace.clone(), message_id.clone())];
-                if let Some(copy) = self.mirror_terminal_relay(
-                    namespace,
-                    &MessageId::new(&attempt.message_id),
-                    &message_id,
-                    &at,
-                )? {
+                if let Some(copy) =
+                    self.mirror_terminal_relay(namespace, &source, &message_id, &at)?
+                {
                     conversations.push(copy);
                 }
                 for (conversation, relay) in conversations {

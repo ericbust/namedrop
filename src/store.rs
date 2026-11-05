@@ -66,6 +66,7 @@ enum MessageAppendMode {
     Normal,
     PendingChannel,
     DirectMessage,
+    Reminder,
 }
 
 mod bridge;
@@ -2882,7 +2883,8 @@ impl StateTransaction<'_> {
                 "a collaboration message needs at least one recipient".to_owned(),
             ));
         }
-        let direct_message = self.validate_direct_message(namespace, draft)?;
+        let direct_message =
+            self.validate_direct_message(namespace, draft, mode == MessageAppendMode::Reminder)?;
         let author_disabled = self.transaction.query_row(
             "SELECT collaboration_disabled
              FROM pane_addresses
@@ -5462,6 +5464,14 @@ impl StateTransaction<'_> {
             for operation in &mut control.tool.operations {
                 if operation.token == "reply" {
                     operation.input["in_reply_to"] = serde_json::json!(target);
+                    let alias = if matches!(
+                        reply_mode,
+                        crate::DeliveryReplyMode::DirectMessage | crate::DeliveryReplyMode::Channel
+                    ) {
+                        "operator"
+                    } else {
+                        &alias
+                    };
                     operation.input["source"] =
                         serde_json::json!(format!("@{} {}", alias, crate::REPLY_BODY_PLACEHOLDER));
                 }

@@ -289,7 +289,7 @@ impl StateTransaction<'_> {
         let message = MessageId::new(format!("reminder-message:{key}"));
         let delivery = DeliveryId::new(format!("reminder-delivery:{key}"));
         let body = format!("Reminder for @{}: {}", address.alias, reminder.spec.body);
-        self.append_message(
+        self.append_message_mode(
             ns,
             &MessageDraft {
                 thread_id: thread,
@@ -312,6 +312,8 @@ impl StateTransaction<'_> {
                 context_references: vec![],
             },
             &by,
+            None,
+            MessageAppendMode::Reminder,
         )?;
         self.transaction.execute("INSERT INTO reminder_fires(session_socket_id,worktree_id,reminder_id,scheduled_at_ms,ordinal,message_id,delivery_id) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![ns.session_socket_id,ns.space_id.as_str(),id,to_i64(due_at_ms)?,ordinal,message.as_str(),delivery.as_str()])?;
         self.reminder_state(
