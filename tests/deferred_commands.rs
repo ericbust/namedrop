@@ -121,7 +121,9 @@ args = sys.argv[1:]
 with (root / 'herdr-calls').open('a') as f: f.write(json.dumps(args) + '\n')
 if args[:2] == ['--socket', str(root / 'herdr.sock')]: args = args[2:]
 if args[:2] == ['worktree','list'] and (root / 'discovery-error').exists():
-    print((root / 'discovery-error').read_text(), file=sys.stderr)
+    error = (root / 'discovery-error').read_text()
+    print(error, file=sys.stderr)
+    (root / 'observed-discovery-error').write_text(error)
     sys.exit(1)
 if args[:2] == ['worktree','list']: print(json.dumps({'result':{'worktrees':[{'path':'/repo','open_workspace_id':'workspace-1'}]}}))
 elif args[:2] == ['workspace','list']: print(json.dumps({'result':{'workspaces':[{'workspace_id':'workspace-1'}]}}))
@@ -1218,26 +1220,26 @@ fn assert_reminder_clock_discovery_failure(error: &str) {
             == 3
     });
     connection.execute_batch("UPDATE mailbox_deliveries SET state='held' WHERE delivery_id IN (SELECT f.delivery_id FROM reminder_fires f JOIN reminders r USING(session_socket_id,worktree_id,reminder_id) WHERE r.request_id='held'); UPDATE mailbox_deliveries SET state='submitted' WHERE delivery_id IN (SELECT f.delivery_id FROM reminder_fires f JOIN reminders r USING(session_socket_id,worktree_id,reminder_id) WHERE r.request_id='submitted');").unwrap();
-    let calls_before = fs::read_to_string(f.directory.path().join("herdr-calls"))
-        .unwrap()
-        .lines()
-        .count();
-    fs::write(f.directory.path().join("discovery-error"), json!({"error":{"code":error,"message":"workspace_not_found text alone is not authoritative"}}).to_string()).unwrap();
+    let error_payload = json!({"error":{"code":error,"message":"workspace_not_found text alone is not authoritative"}}).to_string();
+    let error_path = f.directory.path().join("discovery-error");
+    let temporary_error_path = error_path.with_extension("tmp");
+    fs::write(&temporary_error_path, &error_payload).unwrap();
+    fs::rename(temporary_error_path, error_path).unwrap();
     fs::write(f.directory.path().join("reminder-clock.wake"), []).unwrap();
     wait_for(|| {
-        connection
-            .query_row(
-                "SELECT count(*) FROM reminders WHERE state='failed'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap()
-            == 4
-            || fs::read_to_string(f.directory.path().join("herdr-calls"))
+        if error == "workspace_not_found" {
+            connection
+                .query_row(
+                    "SELECT count(*) FROM reminders WHERE state='failed'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
                 .unwrap()
-                .lines()
-                .count()
-                >= calls_before + 2
+                == 4
+        } else {
+            fs::read_to_string(f.directory.path().join("observed-discovery-error"))
+                .is_ok_and(|observed| observed == error_payload)
+        }
     });
     drop(clock);
     let mut statement = connection
