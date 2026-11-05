@@ -96,7 +96,7 @@ impl StateTransaction<'_> {
         ns: &StateNamespace,
         id: String,
         owner: ReminderOwner,
-        spec: ReminderSpec,
+        mut spec: ReminderSpec,
         request: &str,
         fingerprint: &str,
     ) -> Result<Reminder, StoreError> {
@@ -113,7 +113,19 @@ impl StateTransaction<'_> {
                     "in_reply_to must be a message delivered to this exact Agent Session",
                 ));
             }
-            self.message_route(ns, message)?;
+            spec.in_reply_to = self
+                .reminder_reply_target(ns, message)?
+                .unwrap_or_else(|| Some(message.clone()));
+            if let Some(target) = &spec.in_reply_to {
+                let route = self.message_route(ns, target)?;
+                if route.from_namedrop
+                    || route.reply_mode == crate::DeliveryReplyMode::ReportToHuman
+                {
+                    return Err(StoreError::invalid_input(
+                        "in_reply_to system-only message does not support reminder replies",
+                    ));
+                }
+            }
         }
         let state = ReminderState::Scheduled {
             due_at_ms: spec.first_due_at_ms,
@@ -397,6 +409,29 @@ impl StateTransaction<'_> {
         Ok(Some(
             json!({"reminder_id":id,"state":"cancelled","transport_may_have_started":transport_may_have_started}),
         ))
+    }
+
+    pub(crate) fn fail_reminder_workspace(&self, ns: &StateNamespace) -> Result<(), StoreError> {
+        let mut statement = self.transaction.prepare("SELECT reminder_id FROM reminders WHERE session_socket_id=?1 AND worktree_id=?2 AND state IN ('scheduled','awaiting_delivery')")?;
+        let ids = statement
+            .query_map(params![ns.session_socket_id, ns.space_id.as_str()], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for id in ids {
+            let reminder = self.reminder(ns, &id)?;
+            if let ReminderState::AwaitingDelivery { delivery_id, .. } = reminder.state {
+                self.transaction.execute("UPDATE mailbox_deliveries SET state='failed' WHERE session_socket_id=?1 AND worktree_id=?2 AND delivery_id=?3 AND state='queued'",params![ns.session_socket_id,ns.space_id.as_str(),delivery_id.as_str()])?;
+            }
+            self.reminder_state(
+                ns,
+                &id,
+                &ReminderState::Failed {
+                    reason: "owner workspace is gone".into(),
+                },
+            )?;
+        }
+        Ok(())
     }
 
     pub(crate) fn maintain_reminder_owners(

@@ -191,14 +191,13 @@ fn main() -> ExitCode {
             }
         }
     }
-    if let Some(state) = selected_state.as_deref()
-        && let Some(socket) = cli
+    if let Some(state) = selected_state.as_deref() {
+        let socket = cli
             .runtime
             .herdr_socket
             .clone()
-            .or_else(|| env::var("HERDR_SOCKET_PATH").ok())
-    {
-        let _ = namedrop::reminder::ensure_clock(state, &socket);
+            .or_else(|| env::var("HERDR_SOCKET_PATH").ok());
+        let _ = namedrop::reminder::ensure_clock(state, socket.as_deref());
     }
     let human = cli.human_output(io::stdout().is_terminal());
     let input_file = cli.input_is_file();

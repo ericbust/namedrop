@@ -424,13 +424,13 @@ fn assert_fresh_reminder_reply(grammar: &str, nested: bool) {
             &ns(),
             &wake.attempt_id,
             DeliveryState::Submitted,
-            &by(60_002),
+            &by(60_005),
         )?;
         tx.ensure_delivery_attempt_acknowledged(
             &ns(),
             &wake.attempt_id,
             &owner().session,
-            &by(60_002),
+            &by(60_005),
         )?;
         Ok(reply)
     });

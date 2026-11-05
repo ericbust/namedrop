@@ -255,7 +255,9 @@ fn timestamp_ms(value: &str) -> Result<u64, String> {
         "Z" | "z" => 0,
         zone if zone.len() == 6
             && matches!(zone.as_bytes()[0], b'+' | b'-')
-            && zone.as_bytes()[3] == b':' =>
+            && zone.as_bytes()[3] == b':'
+            && zone.as_bytes()[1..3].iter().all(u8::is_ascii_digit)
+            && zone.as_bytes()[4..6].iter().all(u8::is_ascii_digit) =>
         {
             let h = zone[1..3].parse::<i64>().map_err(|_| invalid())?;
             let m = zone[4..6].parse::<i64>().map_err(|_| invalid())?;

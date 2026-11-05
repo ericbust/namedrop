@@ -18,10 +18,10 @@ fn selected_executable(state: &Path) -> Result<std::path::PathBuf, String> {
     }
 }
 
-fn pending(state: &Path) -> Result<(u64, Option<u64>, bool), String> {
+fn pending(state: &Path) -> Result<(u64, Option<u64>, bool, Option<String>), String> {
     let database = state.join("namedrop.sqlite3");
     if !database.is_file() {
-        return Ok((0, None, false));
+        return Ok((0, None, false, None));
     }
     let connection = Connection::open_with_flags(
         database,
@@ -31,9 +31,9 @@ fn pending(state: &Path) -> Result<(u64, Option<u64>, bool), String> {
     connection
         .busy_timeout(Duration::from_millis(50))
         .map_err(|e| e.to_string())?;
-    match connection.query_row("SELECT count(*),min(due_at_ms),coalesce(max(state='awaiting_delivery'),0) FROM reminders INDEXED BY reminders_pending WHERE state IN ('scheduled','awaiting_delivery')",[],|r|Ok((u64::from(r.get::<_,u32>(0)?),r.get::<_,Option<i64>>(1)?.map(|n|n as u64),r.get::<_,bool>(2)?))) {
+    match connection.query_row("SELECT count(*),min(due_at_ms),coalesce(max(state='awaiting_delivery'),0),min(session_socket_id) FROM reminders INDEXED BY reminders_pending WHERE state IN ('scheduled','awaiting_delivery')",[],|r|Ok((u64::from(r.get::<_,u32>(0)?),r.get::<_,Option<i64>>(1)?.map(|n|n as u64),r.get::<_,bool>(2)?,r.get::<_,Option<String>>(3)?))) {
         Ok(pending)=>Ok(pending),
-        Err(rusqlite::Error::SqliteFailure(_,Some(message))) if message.contains("no such table") || message.contains("no such index")=>Ok((0,None,false)),
+        Err(rusqlite::Error::SqliteFailure(_,Some(message))) if message.contains("no such table") || message.contains("no such index")=>Ok((0,None,false,None)),
         Err(error)=>Err(error.to_string()),
     }
 }
@@ -53,10 +53,19 @@ pub fn clock_running(state: &Path) -> bool {
     file.try_lock().is_err()
 }
 
-pub fn ensure_clock(state: &Path, socket: &str) -> Result<(), String> {
-    if pending(state).is_ok_and(|pending| pending.0 == 0) || clock_running(state) {
+pub fn ensure_clock(state: &Path, socket: Option<&str>) -> Result<(), String> {
+    let pending = pending(state);
+    if pending.as_ref().is_ok_and(|pending| pending.0 == 0) || clock_running(state) {
         return Ok(());
     }
+    let persisted_socket = match pending {
+        Ok(pending) => pending.3,
+        Err(error) if socket.is_none() => return Err(error),
+        Err(_) => None,
+    };
+    let socket = socket
+        .or(persisted_socket.as_deref())
+        .ok_or("pending reminders have no Herdr socket")?;
     let executable = selected_executable(state)?;
     let mut command = Command::new(executable);
     command
@@ -79,7 +88,7 @@ pub fn ensure_clock(state: &Path, socket: &str) -> Result<(), String> {
 
 pub(super) fn signal_clock(state: &Path, socket: &str) -> Result<(), String> {
     fs::write(state.join("reminder-clock.wake"), []).map_err(|e| e.to_string())?;
-    ensure_clock(state, socket)
+    ensure_clock(state, Some(socket))
 }
 
 pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
@@ -97,7 +106,7 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
     }
     loop {
         let _ = fs::remove_file(state.join("reminder-clock.wake"));
-        let (count, _, _) = match pending(state) {
+        let (count, _, _, _) = match pending(state) {
             Ok(pending) => pending,
             Err(error) if transient(&error) => {
                 thread::sleep(Duration::from_millis(250));
@@ -107,7 +116,7 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
         };
         if count == 0 {
             lock.unlock().map_err(|e| e.to_string())?;
-            return ensure_clock(state, socket);
+            return ensure_clock(state, Some(socket));
         }
         {
             let _gate = crate::runtime_command_guard(state)?;
@@ -133,7 +142,7 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
                 continue;
             }
         }
-        let (remaining, next, awaiting) = match pending(state) {
+        let (remaining, next, awaiting, _) = match pending(state) {
             Ok(pending) => pending,
             Err(error) if transient(&error) => {
                 thread::sleep(Duration::from_millis(250));
@@ -172,6 +181,15 @@ fn cycle(state: &Path) -> Result<(), String> {
         let herdr = ProcessHerdr::default().with_socket(Some(socket.to_owned()));
         let live = match crate::discover_worktree_for_workspace(&herdr, ns.space_id.as_str()) {
             Ok(live) => live,
+            Err(error)
+                if crate::lifecycle::herdr_error_code(&error).as_deref()
+                    == Some("workspace_not_found") =>
+            {
+                store
+                    .transaction(|tx| tx.fail_reminder_workspace(&ns))
+                    .map_err(|e| e.to_string())?;
+                continue;
+            }
             Err(_) => continue,
         };
         let now = SystemClock.now_unix_ms();
@@ -211,12 +229,14 @@ mod tests {
         fs::create_dir(&root).unwrap();
         assert_eq!(pending_count(&root), 0);
         assert!(!clock_running(&root));
+        ensure_clock(&root, None).unwrap();
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
         let store = StateStore::open(&root).unwrap();
         drop(store);
         let connection = Connection::open(root.join("namedrop.sqlite3")).unwrap();
         connection.execute_batch("BEGIN IMMEDIATE").unwrap();
         assert_eq!(pending_count(&root), 0);
+        ensure_clock(&root, None).unwrap();
         assert!(!root.join("reminder-clock.lock").exists());
         connection.execute_batch("ROLLBACK").unwrap();
         drop(connection);

@@ -1955,7 +1955,7 @@ pub fn pane_workspace(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> Resul
         })
 }
 
-fn herdr_error_code(error: &str) -> Option<String> {
+pub(crate) fn herdr_error_code(error: &str) -> Option<String> {
     serde_json::from_str::<Value>(error).ok().and_then(|value| {
         value
             .pointer("/error/code")

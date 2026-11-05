@@ -4901,6 +4901,9 @@ impl StateTransaction<'_> {
                 .map(|token| (*token).to_owned())
                 .collect::<Vec<_>>()
         };
+        if reminder_target == Some(None) {
+            permitted_operations.push("reminder.set".to_owned());
+        }
         if reply_mode == crate::DeliveryReplyMode::AgentThread || attached_context.is_some() {
             permitted_operations.extend(
                 crate::CONTEXT_DELIVERY_OPERATIONS
@@ -8019,7 +8022,6 @@ mod tests {
                         )
                         .unwrap();
                 }
-                // The schema-6 reader's structural check does not require optional indexes.
                 if missing_pieces == 0 {
                     assert!(check_read_only_schema(&connection).is_err());
                 }

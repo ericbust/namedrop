@@ -748,7 +748,7 @@ fn recover_committed<E: crate::HerdrCommandExecutor, C: Clock, I: IdGenerator>(
             if recovered.is_some() {
                 let _ = crate::reminder::ensure_clock(
                     runtime.state_directory,
-                    runtime.session_socket_id,
+                    Some(runtime.session_socket_id),
                 );
             }
             Ok(recovered.map(|r| json!(r)))
