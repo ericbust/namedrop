@@ -18,10 +18,19 @@ fn selected_executable(state: &Path) -> Result<std::path::PathBuf, String> {
     }
 }
 
-fn pending(state: &Path) -> Result<(u64, Option<u64>, bool, Option<String>), String> {
+#[derive(Default)]
+struct Pending {
+    count: u64,
+    next_due_at_ms: Option<u64>,
+    socket: Option<String>,
+    due: Vec<crate::StateNamespace>,
+    catch_up: Vec<crate::StateNamespace>,
+}
+
+fn pending(state: &Path, now: u64, startup: bool) -> Result<Pending, String> {
     let database = state.join("namedrop.sqlite3");
     if !database.is_file() {
-        return Ok((0, None, false, None));
+        return Ok(Pending::default());
     }
     let connection = Connection::open_with_flags(
         database,
@@ -31,15 +40,55 @@ fn pending(state: &Path) -> Result<(u64, Option<u64>, bool, Option<String>), Str
     connection
         .busy_timeout(Duration::from_millis(50))
         .map_err(|e| e.to_string())?;
-    match connection.query_row("SELECT count(*),min(due_at_ms),coalesce(max(state='awaiting_delivery'),0),min(session_socket_id) FROM reminders INDEXED BY reminders_pending WHERE state IN ('scheduled','awaiting_delivery')",[],|r|Ok((u64::from(r.get::<_,u32>(0)?),r.get::<_,Option<i64>>(1)?.map(|n|n as u64),r.get::<_,bool>(2)?,r.get::<_,Option<String>>(3)?))) {
-        Ok(pending)=>Ok(pending),
-        Err(rusqlite::Error::SqliteFailure(_,Some(message))) if message.contains("no such table") || message.contains("no such index")=>Ok((0,None,false,None)),
-        Err(error)=>Err(error.to_string()),
+    let summary = connection.query_row(
+        "SELECT count(*),min(CASE WHEN state='scheduled' THEN due_at_ms END),min(session_socket_id) FROM reminders INDEXED BY reminders_pending WHERE state IN ('scheduled','awaiting_delivery')",
+        [], |r| Ok(Pending { count:u64::from(r.get::<_,u32>(0)?), next_due_at_ms:r.get::<_,Option<i64>>(1)?.map(|n|n as u64), socket:r.get(2)?, ..Pending::default() })
+    );
+    let mut plan = match summary {
+        Ok(plan) => plan,
+        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+            if message.contains("no such table") || message.contains("no such index") =>
+        {
+            return Ok(Pending::default());
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    if plan.next_due_at_ms.is_some_and(|at| at <= now) {
+        let mut statement = connection.prepare("SELECT DISTINCT session_socket_id,worktree_id FROM reminders WHERE state='scheduled' AND due_at_ms<=?1").map_err(|e|e.to_string())?;
+        plan.due = statement
+            .query_map([now as i64], |r| {
+                Ok(crate::StateNamespace::for_space(
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
     }
+    if startup {
+        let mut statement = connection.prepare("SELECT DISTINCT session_socket_id,worktree_id FROM reminders WHERE state='awaiting_delivery'").map_err(|e|e.to_string())?;
+        plan.catch_up = statement
+            .query_map([], |r| {
+                Ok(crate::StateNamespace::for_space(
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(plan)
+}
+
+fn wait_ms(plan: &Pending, now: u64) -> u64 {
+    plan.next_due_at_ms
+        .map_or(30_000, |at| at.saturating_sub(now).clamp(100, 30_000))
 }
 
 pub fn pending_count(state: &Path) -> u64 {
-    pending(state).map_or(0, |p| p.0)
+    pending(state, 0, false).map_or(0, |p| p.count)
 }
 
 pub fn clock_running(state: &Path) -> bool {
@@ -54,12 +103,12 @@ pub fn clock_running(state: &Path) -> bool {
 }
 
 pub fn ensure_clock(state: &Path, socket: Option<&str>) -> Result<(), String> {
-    let pending = pending(state);
-    if pending.as_ref().is_ok_and(|pending| pending.0 == 0) || clock_running(state) {
+    let pending = pending(state, 0, false);
+    if pending.as_ref().is_ok_and(|pending| pending.count == 0) || clock_running(state) {
         return Ok(());
     }
     let persisted_socket = match pending {
-        Ok(pending) => pending.3,
+        Ok(pending) => pending.socket,
         Err(error) if socket.is_none() => return Err(error),
         Err(_) => None,
     };
@@ -104,27 +153,31 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
     if lock.try_lock().is_err() {
         return Ok(());
     }
+    let mut startup = true;
     loop {
         let _ = fs::remove_file(state.join("reminder-clock.wake"));
-        let (count, _, _, _) = match pending(state) {
-            Ok(pending) => pending,
+        let plan = match pending(state, SystemClock.now_unix_ms(), startup) {
+            Ok(plan) => plan,
             Err(error) if transient(&error) => {
                 thread::sleep(Duration::from_millis(250));
                 continue;
             }
             Err(error) => return Err(error),
         };
-        if count == 0 {
+        if plan.count == 0 {
             lock.unlock().map_err(|e| e.to_string())?;
             return ensure_clock(state, Some(socket));
         }
-        {
-            let _gate = crate::runtime_command_guard(state)?;
+        let selected = selected_executable(state)?;
+        let changed = fs::canonicalize(&selected).ok()
+            != std::env::current_exe().and_then(fs::canonicalize).ok();
+        if changed || !plan.due.is_empty() || !plan.catch_up.is_empty() {
+            let gate = crate::runtime_command_guard(state)?;
             let selected = selected_executable(state)?;
             if fs::canonicalize(&selected).ok()
                 != std::env::current_exe().and_then(fs::canonicalize).ok()
             {
-                drop(_gate);
+                drop(gate);
                 lock.unlock().map_err(|e| e.to_string())?;
                 let error = Command::new(selected)
                     .arg("reminder-clock")
@@ -133,30 +186,36 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
                     .exec();
                 return Err(error.to_string());
             }
-            if let Err(error) = cycle(state) {
-                if !transient(&error) {
-                    return Err(error);
+            match cycle_with(
+                state,
+                &SystemClock,
+                &ProcessIds::default(),
+                |ns| ProcessHerdr::default().with_socket(Some(ns.session_socket_id.clone())),
+                startup,
+            ) {
+                Ok(caught_up) => startup = startup && !caught_up,
+                Err(error) if transient(&error) => {
+                    drop(gate);
+                    thread::sleep(Duration::from_millis(250));
+                    continue;
                 }
-                drop(_gate);
-                thread::sleep(Duration::from_millis(250));
-                continue;
+                Err(error) => return Err(error),
             }
+        } else {
+            startup = false;
         }
-        let (remaining, next, awaiting, _) = match pending(state) {
-            Ok(pending) => pending,
+        let plan = match pending(state, SystemClock.now_unix_ms(), false) {
+            Ok(plan) => plan,
             Err(error) if transient(&error) => {
                 thread::sleep(Duration::from_millis(250));
                 continue;
             }
             Err(error) => return Err(error),
         };
-        if remaining == 0 {
+        if plan.count == 0 {
             continue;
         }
-        let wait_ms = next.map_or(1000, |at| {
-            at.saturating_sub(SystemClock.now_unix_ms())
-                .clamp(100, if awaiting { 1000 } else { 60_000 })
-        });
+        let wait_ms = wait_ms(&plan, SystemClock.now_unix_ms());
         let mut waited = 0;
         while waited < wait_ms && !state.join("reminder-clock.wake").exists() {
             let step = (wait_ms - waited).min(100);
@@ -170,53 +229,51 @@ fn transient(error: &str) -> bool {
     error.contains("busy") || error.contains("locked")
 }
 
-fn cycle(state: &Path) -> Result<(), String> {
-    cycle_with(state, &SystemClock, &ProcessIds::default(), |ns| {
-        ProcessHerdr::default().with_socket(Some(ns.session_socket_id.clone()))
-    })
-}
-
 pub(crate) fn cycle_with<E, C, I>(
     state: &Path,
     clock: &C,
     ids: &I,
     mut herdr_for: impl FnMut(&crate::StateNamespace) -> E,
-) -> Result<(), String>
+    startup: bool,
+) -> Result<bool, String>
 where
     E: crate::HerdrCommandExecutor,
     C: Clock,
     I: crate::IdGenerator,
 {
-    let mut store = StateStore::open(state).map_err(|e| e.to_string())?;
-    let namespaces = store
-        .transaction(|tx| tx.reminder_namespaces())
-        .map_err(|e| e.to_string())?;
-    for ns in namespaces {
-        let socket = &ns.session_socket_id;
+    let plan = pending(state, clock.now_unix_ms(), startup)?;
+    let mut drains = plan.catch_up;
+    for ns in plan.due {
         let herdr = herdr_for(&ns);
-        let live = match crate::discover_worktree_for_workspace(&herdr, ns.space_id.as_str()) {
+        let live = match crate::lifecycle::discover_reminder_workspace(state, &ns, &herdr) {
             Ok(live) => live,
             Err(error)
                 if crate::lifecycle::herdr_error_code(&error).as_deref()
                     == Some("workspace_not_found") =>
             {
-                store
-                    .transaction(|tx| tx.fail_reminder_workspace(&ns))
-                    .map_err(|e| e.to_string())?;
+                drains.retain(|candidate| candidate != &ns);
                 continue;
             }
             Err(_) => continue,
         };
         let now = clock.now_unix_ms();
-        store
+        let enqueued = StateStore::open(state)
+            .map_err(|e| e.to_string())?
             .transaction(|tx| {
-                tx.maintain_reminder_owners(&ns, &live)?;
+                let mut enqueued = false;
                 for reminder in tx.due_reminders(&ns, now)? {
-                    tx.enqueue_reminder(&ns, &reminder.reminder_id, &live, now)?;
+                    enqueued |= tx.enqueue_reminder(&ns, &reminder.reminder_id, &live, now)?;
                 }
-                Ok(())
+                Ok(enqueued)
             })
             .map_err(|e| e.to_string())?;
+        if enqueued && !drains.contains(&ns) {
+            drains.push(ns);
+        }
+    }
+    let mut caught_up = true;
+    for ns in drains {
+        let herdr = herdr_for(&ns);
         let runtime = LifecycleRuntime {
             state_directory: state,
             home_directory: None,
@@ -224,7 +281,7 @@ where
             cwd: state,
             workspace_id: Some(ns.space_id.as_str()),
             current_pane_id: None,
-            session_socket_id: socket,
+            session_socket_id: &ns.session_socket_id,
             herdr: &herdr,
             clock,
             ids,
@@ -232,15 +289,28 @@ where
         let result = crate::drain_mailboxes(&runtime);
         #[cfg(test)]
         crate::work_counters::drain_result(&result);
-        let _ = result;
+        if result.is_err() {
+            caught_up = false;
+        }
     }
-    Ok(())
+    Ok(caught_up)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::IdGenerator;
+    #[test]
+    fn reminder_idle_wait_is_bounded_by_deadline_and_rescan() {
+        let mut plan = Pending::default();
+        assert_eq!(wait_ms(&plan, 0), 30_000);
+        plan.next_due_at_ms = Some(10_000);
+        assert_eq!(wait_ms(&plan, 500), 9_500);
+        assert_eq!(wait_ms(&plan, 20_000), 100);
+        plan.next_due_at_ms = Some(100_000);
+        assert_eq!(wait_ms(&plan, 0), 30_000);
+    }
+
     #[test]
     fn reminder_pending_probe_and_doctor_lock_probe_do_not_create_state() {
         let root = std::env::temp_dir().join(ProcessIds::default().next_id("test-reminder-probe"));

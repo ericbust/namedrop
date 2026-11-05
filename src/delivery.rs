@@ -4,7 +4,7 @@ use crate::{
     HerdrCommandExecutor, IdGenerator, InflightDeliveryAttempt, IntegrationToolInvocation,
     LeaseDraft, LifecycleRuntime, MutationAttribution, PromptFailureKind, StateNamespace,
     StateStore, StateTransaction, StoreError, collaboration_executable, discover_worktree,
-    discover_worktree_for_workspace, tool_environment,
+    tool_environment,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -86,6 +86,7 @@ pub fn spaces_to_wake(
             store
                 .transaction(|transaction| {
                     let mut spaces = transaction.spaces_awaiting_dispatch(session_socket_id)?;
+                    spaces.extend(transaction.reminder_spaces(session_socket_id)?);
                     spaces.extend(transaction.coordination_homes_seated_in(
                         session_socket_id,
                         &crate::SpaceId::new(here),
@@ -315,7 +316,13 @@ where
     let namespace = first_discovery.namespace(runtime.session_socket_id);
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
     let reconciliation_completed = store
-        .transaction(|transaction| transaction.reconciliation_completed(&namespace))
+        .transaction(|transaction| {
+            let completed = transaction.reconciliation_completed(&namespace)?;
+            if !completed {
+                transaction.maintain_reminder_owners(&namespace, &first_discovery)?;
+            }
+            Ok(completed)
+        })
         .map_err(|error| error.to_string())?;
     if !reconciliation_completed {
         return Ok(DrainReport::default());
@@ -351,13 +358,15 @@ where
     }
     let reconciled = store
         .transaction(|transaction| {
-            reconcile_delivery_state(
+            let report = reconcile_delivery_state(
                 transaction,
                 &namespace,
                 &first_discovery.panes,
                 false,
                 &MutationAttribution::new(ActorKind::Plugin, "namedrop-dispatch", now),
-            )
+            )?;
+            transaction.maintain_reminder_owners(&namespace, &first_discovery)?;
+            Ok(report)
         })
         .map_err(|error| error.to_string())?;
     let cutoff = now.saturating_sub(QUEUED_HOLD_AFTER_MS);
@@ -617,7 +626,8 @@ where
                             &leased.attempt_id,
                             DeliveryState::Failed,
                             &attribution,
-                        )
+                        )?;
+                        transaction.maintain_reminder_owners(&namespace, &second_discovery)
                     })
                     .map_err(|error| error.to_string())?;
                 report.failed.push(leased.attempt_id);
@@ -663,7 +673,11 @@ where
     E: HerdrCommandExecutor,
 {
     match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id),
+        Some(workspace_id) => crate::lifecycle::discover_reminder_workspace(
+            runtime.state_directory,
+            &StateNamespace::for_space(runtime.session_socket_id, workspace_id),
+            runtime.herdr,
+        ),
         None => discover_worktree(runtime.herdr, runtime.cwd),
     }
 }

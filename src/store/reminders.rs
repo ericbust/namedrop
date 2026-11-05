@@ -249,13 +249,13 @@ impl StateTransaction<'_> {
         id: &str,
         live: &crate::DiscoveredWorktree,
         now: u64,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         let reminder = self.reminder(ns, id)?;
         let ReminderState::Scheduled { due_at_ms, ordinal } = reminder.state else {
-            return Ok(());
+            return Ok(false);
         };
         if due_at_ms > now {
-            return Ok(());
+            return Ok(false);
         }
         let owner = &reminder.owner;
         if !self.reminder_owner_current(ns, owner)?
@@ -266,13 +266,14 @@ impl StateTransaction<'_> {
                 .and_then(|p| p.agent_session_id.as_ref())
                 != Some(&owner.session)
         {
-            return self.reminder_state(
+            self.reminder_state(
                 ns,
                 id,
                 &ReminderState::Failed {
                     reason: "owner pane, binding, or exact Agent Session is gone".into(),
                 },
-            );
+            )?;
+            return Ok(false);
         }
         let address = self.routing_address_by_id(ns, &owner.address)?;
         let by = MutationAttribution::new(ActorKind::Plugin, "namedrop-reminder", now);
@@ -320,7 +321,8 @@ impl StateTransaction<'_> {
                 delivery_id: delivery,
                 ordinal,
             },
-        )
+        )?;
+        Ok(true)
     }
 
     pub(crate) fn reminder_delivery_allowed(
@@ -483,15 +485,12 @@ impl StateTransaction<'_> {
         Ok(())
     }
 
-    pub(crate) fn reminder_namespaces(&self) -> Result<Vec<StateNamespace>, StoreError> {
-        let mut s=self.transaction.prepare("SELECT DISTINCT session_socket_id,worktree_id FROM reminders WHERE state IN ('scheduled','awaiting_delivery')")?;
-        Ok(s.query_map([], |r| {
-            Ok(StateNamespace::for_space(
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?)
+    pub(crate) fn reminder_spaces(&self, socket: &str) -> Result<Vec<crate::SpaceId>, StoreError> {
+        let mut s=self.transaction.prepare("SELECT DISTINCT worktree_id FROM reminders WHERE session_socket_id=?1 AND state='awaiting_delivery'")?;
+        Ok(
+            s.query_map([socket], |r| r.get::<_, String>(0).map(crate::SpaceId::new))?
+                .collect::<Result<Vec<_>, _>>()?,
+        )
     }
 }
 

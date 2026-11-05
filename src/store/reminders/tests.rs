@@ -12,6 +12,8 @@ struct Fixture {
     busy: Cell<bool>,
     discoveries: Cell<u64>,
     prompts: Cell<u64>,
+    discovery_error: Cell<Option<&'static str>>,
+    prompt_failure: Cell<Option<crate::PromptFailureKind>>,
 }
 fn ns() -> StateNamespace {
     StateNamespace::for_space("test-socket", "test-space")
@@ -36,6 +38,8 @@ impl Fixture {
             busy: Cell::new(false),
             discoveries: Cell::new(0),
             prompts: Cell::new(0),
+            discovery_error: Cell::new(None),
+            prompt_failure: Cell::new(None),
         };
         f.tx(|tx| {
             tx.activate_worktree(&ns(), &by(0))?;
@@ -186,6 +190,11 @@ impl Drop for Fixture {
     }
 }
 impl HerdrCommandExecutor for Fixture {
+    fn classify_prompt_failure(&self, _error: &str) -> crate::PromptFailureKind {
+        self.prompt_failure
+            .get()
+            .unwrap_or(crate::PromptFailureKind::AmbiguousInvocation)
+    }
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         let value = match args {
             ["workspace", "list"] => {
@@ -193,6 +202,9 @@ impl HerdrCommandExecutor for Fixture {
             }
             ["worktree", "list", ..] => {
                 self.discoveries.set(self.discoveries.get() + 1);
+                if let Some(code) = self.discovery_error.get() {
+                    return Err(json!({"error":{"code":code,"message":"workspace_not_found text alone is not authoritative"}}).to_string());
+                }
                 json!({"result":{"worktrees":[{"path":"/test-repo","open_workspace_id":"test-space"}]}})
             }
             ["pane", "list", ..] => {
@@ -201,6 +213,9 @@ impl HerdrCommandExecutor for Fixture {
             ["pane", "report-metadata", ..] | ["notification", "show", ..] => json!({}),
             ["agent", "prompt", "pane", _] => {
                 self.prompts.set(self.prompts.get() + 1);
+                if self.prompt_failure.get().is_some() {
+                    return Err("fake prompt failure".into());
+                }
                 self.now.set(900_000);
                 json!({})
             }
@@ -1066,7 +1081,7 @@ fn reminder_busy_clock_work_measurement() {
     let ids = ProcessIds::default();
     let startup_scope = crate::work_counters::Scope::start();
     let startup_result =
-        crate::reminder::clock::cycle_with(&f.state, &f, &ids, |_| MeasurementHerdr(&f));
+        crate::reminder::cycle_with(&f.state, &f, &ids, |_| MeasurementHerdr(&f), true);
     let startup = startup_scope.finish();
     startup_result.unwrap();
     let startup_discoveries = f.discoveries.replace(0);
@@ -1074,7 +1089,7 @@ fn reminder_busy_clock_work_measurement() {
     let mut errors = 0;
     for second in 1..=300 {
         f.now.set(60_000 + second * 1000);
-        if crate::reminder::clock::cycle_with(&f.state, &f, &ids, |_| MeasurementHerdr(&f)).is_err()
+        if crate::reminder::cycle_with(&f.state, &f, &ids, |_| MeasurementHerdr(&f), false).is_err()
         {
             errors += 1;
         }
@@ -1153,4 +1168,261 @@ fn reminder_busy_clock_work_measurement() {
         );
         Ok(())
     });
+}
+
+#[test]
+fn reminder_idle_cycle_is_read_only_under_an_external_writer() {
+    let f = Fixture::new();
+    f.busy.set(true);
+    f.set("r", None, crate::reminder::Repeat::Once);
+    f.fire("r");
+    let connection = Connection::open(f.state.join("namedrop.sqlite3")).unwrap();
+    connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+    f.discoveries.set(0);
+    let scope = crate::work_counters::Scope::start();
+    let result = crate::reminder::cycle_with(
+        &f.state,
+        &f,
+        &ProcessIds::default(),
+        |_| MeasurementHerdr(&f),
+        false,
+    );
+    let counts = scope.finish();
+    connection.execute_batch("ROLLBACK").unwrap();
+    assert!(result.unwrap());
+    assert_eq!(counts.writes, 0);
+    assert_eq!(counts.drains, 0);
+    assert_eq!(f.discoveries.get(), 0);
+}
+
+#[test]
+fn reminder_future_only_startup_has_no_discovery_write_or_drain() {
+    let f = Fixture::new();
+    f.set("future", None, crate::reminder::Repeat::Once);
+    f.now.set(0);
+    let scope = crate::work_counters::Scope::start();
+    let result = crate::reminder::cycle_with(
+        &f.state,
+        &f,
+        &ProcessIds::default(),
+        |_| MeasurementHerdr(&f),
+        true,
+    );
+    let counts = scope.finish();
+    assert!(result.unwrap());
+    assert_eq!(counts.writes, 0);
+    assert_eq!(counts.drains, 0);
+    assert_eq!(f.discoveries.get(), 0);
+}
+
+#[test]
+fn reminder_due_cycle_ignores_future_namespaces_and_deduplicates_catchup() {
+    let f = Fixture::new();
+    f.busy.set(true);
+    f.set("future", None, crate::reminder::Repeat::Once);
+    f.set("queued", None, crate::reminder::Repeat::Once);
+    f.set("due", None, crate::reminder::Repeat::Once);
+    f.fire("queued");
+    f.tx(|tx| {
+        tx.activate_worktree(&StateNamespace::for_space("test-socket", "future-space"), &by(0))?;
+        tx.transaction.execute("UPDATE reminders SET worktree_id='future-space',due_at_ms=900000,state_json=json_set(state_json,'$.due_at_ms',900000) WHERE reminder_id='future'", [])?;
+        Ok(())
+    });
+    f.discoveries.set(0);
+    let scope = crate::work_counters::Scope::start();
+    let mut visited = Vec::new();
+    let result = crate::reminder::cycle_with(
+        &f.state,
+        &f,
+        &ProcessIds::default(),
+        |namespace| {
+            visited.push(namespace.clone());
+            MeasurementHerdr(&f)
+        },
+        true,
+    );
+    let counts = scope.finish();
+    assert!(result.unwrap());
+    assert_eq!(counts.drains, 1);
+    assert_eq!(visited, vec![ns(), ns()]);
+    assert_eq!(f.discoveries.get(), 2);
+    f.tx(|tx| {
+        assert!(matches!(
+            tx.reminder(&ns(), "due")?.state,
+            ReminderState::AwaitingDelivery { .. }
+        ));
+        Ok(())
+    });
+}
+
+#[test]
+fn reminder_cancelled_after_plan_does_not_drain() {
+    let f = Fixture::new();
+    f.set("due", None, crate::reminder::Repeat::Once);
+    let scope = crate::work_counters::Scope::start();
+    let result = crate::reminder::cycle_with(
+        &f.state,
+        &f,
+        &ProcessIds::default(),
+        |_| {
+            f.tx(|tx| tx.cancel_reminder(&ns(), &owner(), "due", 60_000));
+            MeasurementHerdr(&f)
+        },
+        false,
+    );
+    let counts = scope.finish();
+    assert!(result.unwrap());
+    assert_eq!(counts.drains, 0);
+    assert_eq!(f.prompts.get(), 0);
+    f.tx(|tx| {
+        assert_eq!(tx.reminder(&ns(), "due")?.state, ReminderState::Cancelled);
+        Ok(())
+    });
+}
+
+#[test]
+fn reminder_terminal_mailbox_cleanup_remains_hook_visible() {
+    let f = Fixture::new();
+    f.set("queued", None, crate::reminder::Repeat::Once);
+    f.fire("queued");
+    f.tx(|tx| {
+        tx.transaction
+            .execute("UPDATE mailbox_deliveries SET state='cancelled'", [])?;
+        Ok(())
+    });
+    assert_eq!(
+        crate::spaces_to_wake(&f.state, "test-socket", "elsewhere"),
+        vec!["elsewhere", "test-space"]
+    );
+    assert_eq!(
+        crate::spaces_to_wake(&f.state, "other-socket", "elsewhere"),
+        vec!["elsewhere"]
+    );
+    let runtime = crate::LifecycleRuntime {
+        state_directory: &f.state,
+        home_directory: None,
+        agent_config: Default::default(),
+        cwd: Path::new("/test-repo"),
+        workspace_id: Some("test-space"),
+        current_pane_id: None,
+        session_socket_id: "test-socket",
+        herdr: &f,
+        clock: &f,
+        ids: &ProcessIds::default(),
+    };
+    crate::drain_mailboxes(&runtime).unwrap();
+    f.tx(|tx| {
+        assert_eq!(
+            tx.reminder(&ns(), "queued")?.state,
+            ReminderState::Failed {
+                reason: "reminder delivery cancelled".into()
+            }
+        );
+        Ok(())
+    });
+    assert_eq!(f.prompts.get(), 0);
+}
+
+#[test]
+fn reminder_startup_catchup_keeps_transient_failure_eligible() {
+    let f = Fixture::new();
+    f.busy.set(true);
+    f.set("r", None, crate::reminder::Repeat::Once);
+    f.fire("r");
+    f.discovery_error.set(Some("transport_unavailable"));
+    let caught_up = crate::reminder::cycle_with(
+        &f.state,
+        &f,
+        &ProcessIds::default(),
+        |_| MeasurementHerdr(&f),
+        true,
+    )
+    .unwrap();
+    assert!(!caught_up);
+    f.tx(|tx| {
+        assert!(matches!(
+            tx.reminder(&ns(), "r")?.state,
+            ReminderState::AwaitingDelivery { .. }
+        ));
+        Ok(())
+    });
+    f.discovery_error.set(None);
+    let scope = crate::work_counters::Scope::start();
+    let result = crate::reminder::cycle_with(
+        &f.state,
+        &f,
+        &ProcessIds::default(),
+        |_| MeasurementHerdr(&f),
+        true,
+    );
+    let counts = scope.finish();
+    assert!(result.unwrap());
+    assert_eq!(counts.drains, 1);
+    assert_eq!(counts.drain_errors, 0);
+    assert_eq!(f.prompts.get(), 0);
+}
+
+#[test]
+fn reminder_enqueue_reports_only_a_new_durable_fire() {
+    let f = Fixture::new();
+    f.set("r", None, crate::reminder::Repeat::Once);
+    let live = f.live();
+    f.tx(|tx| {
+        assert!(!tx.enqueue_reminder(&ns(), "r", &live, 59_999)?);
+        assert!(tx.enqueue_reminder(&ns(), "r", &live, 60_000)?);
+        assert!(!tx.enqueue_reminder(&ns(), "r", &live, 60_000)?);
+        Ok(())
+    });
+}
+
+#[test]
+fn reminder_dispatch_failure_finalizes_in_the_same_drain_but_ambiguity_waits() {
+    for kind in [
+        crate::PromptFailureKind::DefinitiveNonRetryable,
+        crate::PromptFailureKind::AmbiguousInvocation,
+    ] {
+        let f = Fixture::new();
+        f.set(
+            "r",
+            None,
+            crate::reminder::Repeat::Count {
+                interval_ms: 60_000,
+                total: 2,
+            },
+        );
+        f.fire("r");
+        f.prompt_failure.set(Some(kind));
+        let runtime = crate::LifecycleRuntime {
+            state_directory: &f.state,
+            home_directory: None,
+            agent_config: Default::default(),
+            cwd: Path::new("/test-repo"),
+            workspace_id: Some("test-space"),
+            current_pane_id: None,
+            session_socket_id: "test-socket",
+            herdr: &f,
+            clock: &f,
+            ids: &ProcessIds::default(),
+        };
+        let report = crate::drain_mailboxes(&runtime).unwrap();
+        assert_eq!(f.prompts.get(), 1);
+        f.tx(|tx| {
+            if kind == crate::PromptFailureKind::DefinitiveNonRetryable {
+                assert_eq!(report.failed.len(), 1);
+                assert_eq!(
+                    tx.reminder(&ns(), "r")?.state,
+                    ReminderState::Failed {
+                        reason: "reminder delivery failed".into()
+                    }
+                );
+            } else {
+                assert_eq!(report.held.len(), 1);
+                assert!(matches!(
+                    tx.reminder(&ns(), "r")?.state,
+                    ReminderState::AwaitingDelivery { .. }
+                ));
+            }
+            Ok(())
+        });
+    }
 }

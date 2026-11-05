@@ -387,7 +387,9 @@ pub(crate) fn execute_with_caller<
     Ok(result)
 }
 
-pub(crate) mod clock;
+mod clock;
+#[cfg(test)]
+pub(crate) use clock::cycle_with;
 use clock::signal_clock;
 pub use clock::{clock_running, ensure_clock, pending_count, run_clock};
 
