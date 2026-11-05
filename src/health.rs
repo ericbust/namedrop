@@ -64,6 +64,8 @@ pub struct HealthReport {
     #[serde(default)]
     pub available_terminals: u64,
     pub waiting_messages: u64,
+    #[serde(default)]
+    pub pending_reminders: u64,
     pub issues: Vec<HealthIssue>,
     pub hook_verification: String,
 }
@@ -109,6 +111,7 @@ where
                 available_agents: 0,
                 available_terminals: 0,
                 waiting_messages,
+                pending_reminders: 0,
                 hook_verification: "unverified".to_owned(),
                 issues: vec![worktree_issue],
             };
@@ -134,6 +137,7 @@ where
             available_agents: 0,
             available_terminals: 0,
             waiting_messages: 0,
+            pending_reminders: 0,
             hook_verification: "unverified".to_owned(),
             issues: vec![inactive],
         };
@@ -566,6 +570,17 @@ where
         issues.insert(0, attention);
     }
 
+    let pending_reminders = crate::reminder::pending_count(runtime.state_directory);
+    if pending_reminders > 0 && !crate::reminder::clock_running(runtime.state_directory) {
+        issues.push(issue(
+            "ND-REMINDER-001",
+            HealthSeverity::Blocked,
+            "Pending reminders have no running clock.",
+            "Run any Namedrop command to restart the clock.",
+            HealthRepairKind::ProductAction,
+            "Restart the reminder clock.",
+        ));
+    }
     HealthReport {
         status: if issues
             .iter()
@@ -578,6 +593,7 @@ where
         available_agents,
         available_terminals,
         waiting_messages,
+        pending_reminders,
         issues,
         hook_verification: "unverified".to_owned(),
     }
@@ -813,6 +829,7 @@ fn unavailable_report(error: &str) -> HealthReport {
         available_agents: 0,
         available_terminals: 0,
         waiting_messages: 0,
+        pending_reminders: 0,
         hook_verification: "unverified".to_owned(),
         issues: vec![issue(
             "ND-INSPECT-001",
@@ -1035,8 +1052,8 @@ pub fn render_health_report_to_text(report: &HealthReport) -> String {
         String::new()
     };
     let passed = format!(
-        "Namedrop checks passed; runtime hooks remain unverified.\n{} {agents} available.{terminals} {} messages await progress.",
-        report.available_agents, report.waiting_messages,
+        "Namedrop checks passed; runtime hooks remain unverified.\n{} {agents} available.{terminals} {} messages await progress. {} reminders pending.",
+        report.available_agents, report.waiting_messages, report.pending_reminders,
     );
     if report.issues.is_empty() {
         return passed;
@@ -1113,6 +1130,7 @@ mod tests {
             available_agents: 0,
             available_terminals: 0,
             waiting_messages: 0,
+            pending_reminders: 0,
             hook_verification: "unverified".to_owned(),
             issues: vec![issue(
                 "ND-SETUP-002",

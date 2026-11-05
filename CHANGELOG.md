@@ -2,6 +2,14 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.5.0-exp.14] - 2026-11-05
+
+### Added
+
+- Agents can remind themselves. Ask an agent to do something later ("check the build in 10 minutes and tell me") or on a schedule, and it wakes up when it is time and answers where you asked: in the DM, the thread, or back to the agent that asked. Works for Claude and Codex and survives restarts. Pending reminders appear in Channels with a Cancel button.
+
+Start a new agent session after updating so it learns the reminder commands. The database upgrades in place to schema 7.
+
 ## [1.5.0-exp.13] - 2026-11-04
 
 ### Added

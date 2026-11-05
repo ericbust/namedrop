@@ -118,7 +118,16 @@ export type MessageKind =
   | "result_set"
   | "nudge"
   | "hook"
+  | "reminder"
   | "unknown";
+export type PendingReminder = {
+  id: string;
+  owner: AddressId;
+  body: SafeText;
+  dueAt: number | null;
+  repeatsLeft: number;
+  repeatUntil: number | null;
+};
 export type DeliveryStage =
   | {
       stage:

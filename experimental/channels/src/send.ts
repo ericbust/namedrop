@@ -9,11 +9,13 @@ import type {
   SpaceKey,
   ThreadAction,
 } from "./model.ts";
+import { type ReminderConversation, reminderPath } from "./reminders.ts";
 import {
   parseDeliverAnswer,
   parseFullBody,
   parseReceipt,
   parseRefusal,
+  parseReminders,
   parseSessionToken,
 } from "./wire.ts";
 
@@ -105,6 +107,32 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
     });
   }
   return {
+    async reminders(target: ReminderConversation, signal: AbortSignal) {
+      const response = await fetcher(reminderPath(target), {
+        credentials: "same-origin",
+        signal,
+      });
+      if (!response.ok) throw new Error("Could not load reminders");
+      return parseReminders(await response.json());
+    },
+    async cancelReminder(
+      target: ReminderConversation,
+      id: string,
+      signal: AbortSignal,
+    ): Promise<ControlResult> {
+      try {
+        const response = await postWithTokenRetry(
+          `${reminderPath(target)}/${encodeURIComponent(id)}/cancel`,
+          {},
+          signal,
+        );
+        return response.ok
+          ? { kind: "done" }
+          : { kind: "failed", status: response.status };
+      } catch {
+        return { kind: "failed", status: 0 };
+      }
+    },
     prepare(): void {
       void token();
     },

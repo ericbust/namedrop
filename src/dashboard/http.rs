@@ -648,6 +648,11 @@ fn content_type(path: &str) -> &'static str {
 }
 
 enum Route {
+    Reminders {
+        key: SpaceKey,
+        conversation: super::reminders::Conversation,
+        cancel: Option<String>,
+    },
     Redeem {
         location: String,
         nonce: String,
@@ -749,6 +754,32 @@ fn route(
     }
     if let Some(rest) = path.strip_prefix("/w/") {
         let segments: Vec<_> = rest.split('/').collect();
+        if matches!(segments.get(1), Some(&"threads" | &"direct-messages"))
+            && segments.get(3) == Some(&"reminders")
+        {
+            authenticate_session(request, port, session)?;
+            authenticate_provenance(request, host)?;
+            let cancel = match (request.method.as_str(), segments.as_slice()) {
+                ("GET", [_, _, _, "reminders"]) => None,
+                ("POST", [_, _, _, "reminders", reminder, "cancel"]) => {
+                    authenticate_mutation(request, session, host)?;
+                    Some(decode_route_id(reminder)?)
+                }
+                _ => return Err(Status::MethodNotAllowed),
+            };
+            let key = SpaceKey::parse(segments[0]).ok_or(Status::NotFound)?;
+            let id = decode_route_id(segments[2])?;
+            let conversation = if segments[1] == "direct-messages" {
+                super::reminders::Conversation::Direct(id)
+            } else {
+                super::reminders::Conversation::Thread(id)
+            };
+            return Ok(Route::Reminders {
+                key,
+                conversation,
+                cancel,
+            });
+        }
         if let [key, "direct-messages", address, "messages", message, "body"] = segments.as_slice()
         {
             authenticate_session(request, port, session)?;
@@ -985,6 +1016,12 @@ fn route(
         (_, Some((key, "events"))) => Route::Events(key),
         _ => Route::Page,
     })
+}
+
+fn decode_route_id(segment: &str) -> Result<String, Status> {
+    decode_asset_path(segment)
+        .filter(|id| !id.is_empty() && !id.contains('/'))
+        .ok_or(Status::NotFound)
 }
 
 fn csrf_token(session: &Token) -> String {
@@ -1424,6 +1461,43 @@ fn serve_connection(
                         "",
                         serde_json::json!({"error": message}).to_string().as_bytes(),
                     )
+                }
+            }
+        }
+        Ok(Route::Reminders {
+            key,
+            conversation,
+            cancel,
+        }) => {
+            let result = if let Some(reminder) = cancel {
+                let _admitted = match front.admit_mutation() {
+                    Ok(guard) => guard,
+                    Err(status) => return respond_status(&mut writer, status),
+                };
+                super::reminders::cancel(
+                    front.files.state(),
+                    &key,
+                    &conversation,
+                    &reminder,
+                    crate::Clock::now_unix_ms(&crate::SystemClock),
+                )
+            } else {
+                super::reminders::list(front.files.state(), &key, &conversation)
+                    .map(|reminders| serde_json::json!({ "reminders": reminders }))
+            };
+            match result {
+                Ok(value) => respond(
+                    &mut writer,
+                    "200 OK",
+                    "application/json",
+                    "",
+                    value.to_string().as_bytes(),
+                ),
+                Err(super::reminders::Error::NotFound) => {
+                    respond_status(&mut writer, Status::NotFound)
+                }
+                Err(super::reminders::Error::Unavailable) => {
+                    respond_status(&mut writer, Status::Unavailable)
                 }
             }
         }
@@ -2528,6 +2602,69 @@ mod skill_route_tests {
         request.path = "/w/0123456789abcdef0123/participants/member/skills".into();
         request.method = "POST".into();
         assert!(matches!(routes(&request), Err(Status::MethodNotAllowed)));
+        std::fs::remove_dir_all(state).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod reminder_route_tests {
+    use super::*;
+
+    #[test]
+    fn reminders_require_session_provenance_and_csrf_for_cancel() {
+        let state = std::env::temp_dir().join(crate::IdGenerator::next_id(
+            &crate::ProcessIds::default(),
+            "reminder-route",
+        ));
+        let files = ServerFiles::at(&state).unwrap();
+        let token = files.token().unwrap();
+        let session = files.session().unwrap();
+        for scope in ["threads/thread", "direct-messages/agent"] {
+            let path = format!("/w/0123456789abcdef0123/{scope}/reminders");
+            let mut request = Request {
+                method: "GET".into(),
+                path: path.clone(),
+                query: None,
+                headers: vec![("host".into(), "127.0.0.1:1234".into())],
+            };
+            let routes = |request: &Request| route(request, 1234, &token, &session, false);
+            assert!(matches!(routes(&request), Err(Status::Unauthorized)));
+            request.headers.push((
+                "cookie".into(),
+                format!("{}={}", cookie_name(1234), session.as_str()),
+            ));
+            request
+                .headers
+                .push(("origin".into(), "https://other.invalid".into()));
+            assert!(matches!(routes(&request), Err(Status::Forbidden)));
+            request.headers.pop();
+            request
+                .headers
+                .push(("sec-fetch-site".into(), "same-origin".into()));
+            assert!(matches!(
+                routes(&request),
+                Ok(Route::Reminders { cancel: None, .. })
+            ));
+            request.method = "POST".into();
+            request.path = format!("{path}/reminder/cancel");
+            assert!(matches!(routes(&request), Err(Status::Forbidden)));
+            request
+                .headers
+                .push(("x-namedrop-csrf".into(), csrf_token(&session)));
+            assert!(
+                matches!(routes(&request), Ok(Route::Reminders { cancel: Some(id), .. }) if id == "reminder")
+            );
+            request
+                .headers
+                .push(("origin".into(), "https://other.invalid".into()));
+            assert!(matches!(routes(&request), Err(Status::Forbidden)));
+            request.headers.pop();
+            request.path = format!("{path}/bad%2Fid/cancel");
+            assert!(matches!(routes(&request), Err(Status::NotFound)));
+            request.path = format!("{path}/reminder/cancel");
+            request.method = "GET".into();
+            assert!(matches!(routes(&request), Err(Status::MethodNotAllowed)));
+        }
         std::fs::remove_dir_all(state).unwrap();
     }
 }

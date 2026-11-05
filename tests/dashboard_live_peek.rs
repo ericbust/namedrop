@@ -882,29 +882,48 @@ fn missing_session_is_allowed_but_later_identity_changes_end_view() {
 
 #[test]
 fn logical_rebind_discards_live_target_and_retains_retry_continuity() {
-    let f = Fixture::new();
-    let server = Server::start(&f);
-    let p = path("socket-a", "w1", "lead");
-    configure(&f, json!({"quiet":true}));
-    let mut live = server.live(&p);
-    let reset = live.record().unwrap();
-    f.db()
-        .execute(
+    for holding_write_lock in [false, true] {
+        let f = Fixture::new();
+        let server = Server::start(&f);
+        let p = path("socket-a", "w1", "lead");
+        configure(&f, json!({"quiet":true}));
+        let mut live = server.live(&p);
+        let reset = live.record().unwrap();
+        let db = f.db();
+        if holding_write_lock {
+            db.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        }
+        db.execute(
             "UPDATE pane_bindings SET binding_id = 'new-binding' WHERE address_id = ?1",
             [xws::address_id("w1", "lead")],
         )
         .unwrap();
-    assert_eq!(live.record().unwrap()["reason"], "replaced");
-    assert_eq!(
-        server
-            .get(&format!(
-                "{p}?continuity={}",
-                reset["continuity"].as_str().unwrap()
-            ))
-            .status,
-        410
-    );
-    assert_eq!(invocations(&f).len(), 1);
+        let event = live.record().unwrap();
+        if holding_write_lock {
+            assert_eq!(event["kind"], "unavailable");
+            assert_eq!(event["reason"], "busy");
+            db.execute_batch("COMMIT").unwrap();
+        } else {
+            // The writer can outlast the reader's bounded lock wait on a busy host.
+            assert!(
+                matches!(
+                    (event["kind"].as_str(), event["reason"].as_str()),
+                    (Some("closed"), Some("replaced")) | (Some("unavailable"), Some("busy"))
+                ),
+                "unexpected rebind event: {event}"
+            );
+        }
+        assert_eq!(
+            server
+                .get(&format!(
+                    "{p}?continuity={}",
+                    reset["continuity"].as_str().unwrap()
+                ))
+                .status,
+            410
+        );
+        assert_eq!(invocations(&f).len(), 1);
+    }
 }
 
 #[test]

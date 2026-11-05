@@ -32,6 +32,17 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let arguments: Vec<_> = env::args_os().skip(1).collect();
+    if arguments.first().is_some_and(|arg| arg == "reminder-clock") {
+        return match arguments.as_slice() {
+            [_, state, socket] => {
+                match namedrop::reminder::run_clock(Path::new(state), &socket.to_string_lossy()) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(_) => ExitCode::from(65),
+                }
+            }
+            _ => ExitCode::from(64),
+        };
+    }
     if arguments
         .first()
         .is_some_and(|arg| arg == "--deferred-worker" || arg == "--deferred-execute")
@@ -144,13 +155,16 @@ fn main() -> ExitCode {
         }
     };
     if let Some((state, host)) = cli.subagent_hook() {
+        let _ = namedrop::reminder::ensure_clock(state, None);
         return run_subagent_hook(state, host);
     }
     if let Some(state_directory) = cli.stop_hook_state_directory() {
+        let _ = namedrop::reminder::ensure_clock(state_directory, None);
         stop_hook::run(state_directory);
         return ExitCode::SUCCESS;
     }
     if let Some(state_directory) = cli.stop_worker_state_directory() {
+        let _ = namedrop::reminder::ensure_clock(state_directory, None);
         stop_hook::run_worker(state_directory);
         return ExitCode::SUCCESS;
     }
@@ -204,6 +218,14 @@ fn main() -> ExitCode {
                 return ExitCode::from(69);
             }
         }
+    }
+    if let Some(state) = selected_state.as_deref() {
+        let socket = cli
+            .runtime
+            .herdr_socket
+            .clone()
+            .or_else(|| env::var("HERDR_SOCKET_PATH").ok());
+        let _ = namedrop::reminder::ensure_clock(state, socket.as_deref());
     }
     if cli.is_dashboard_server() {
         let Some(state) = selected_state else {
@@ -394,6 +416,8 @@ fn main() -> ExitCode {
             | "handoff.preview"
     ) {
         run_operation(operation, input, OperationKind::Handoff, &cli.runtime)
+    } else if operation.starts_with("reminder.") {
+        run_operation(operation, input, OperationKind::Reminder, &cli.runtime)
     } else if matches!(operation, "group.list" | "group.set" | "group.remove") {
         run_operation(operation, input, OperationKind::Group, &cli.runtime)
     } else if is_control_operation(operation) {
@@ -758,6 +782,7 @@ mod session_event_tests {
 
 #[derive(Clone, Copy)]
 enum OperationKind {
+    Reminder,
     Handoff,
     Group,
     Context,
@@ -775,6 +800,9 @@ fn run_operation(
 ) -> Result<serde_json::Value, String> {
     with_runtime_options(options, |runtime| {
         let result = match kind {
+            OperationKind::Reminder => {
+                namedrop::execute_reminder_operation(operation, input, runtime)
+            }
             OperationKind::Handoff => execute_handoff_operation(operation, input, runtime),
             OperationKind::Group => execute_group_operation(operation, input, runtime),
             OperationKind::Context => execute_context_operation(operation, input, runtime),

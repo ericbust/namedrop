@@ -73,6 +73,7 @@ impl StateTransaction<'_> {
         &self,
         ns: &StateNamespace,
         draft: &MessageDraft,
+        reminder_wake: bool,
     ) -> Result<bool, StoreError> {
         let existing = self.direct_message(ns, &draft.thread_id)?;
         let creating = draft.grammar_version == GRAMMAR && draft.in_reply_to.is_none();
@@ -129,8 +130,17 @@ impl StateTransaction<'_> {
             }
             return Ok(false);
         };
+        let counterpart = if reminder_wake
+            && draft.grammar_version == "reminder/v1"
+            && draft.author_address_id == dm.peer
+            && draft.author_alias_snapshot == "namedrop"
+        {
+            dm.peer.clone()
+        } else {
+            dm.counterpart(&draft.author_address_id)?
+        };
         if draft.recipients.len() != 1
-            || draft.recipients[0].address_id != dm.counterpart(&draft.author_address_id)?
+            || draft.recipients[0].address_id != counterpart
             || !draft.context_references.is_empty()
             || (draft.author_address_id.as_str() == "operator:local"
                 && draft.author_kind != ActorKind::Human)
@@ -314,7 +324,7 @@ impl StateTransaction<'_> {
             peer.last_message_id = Some(latest.0);
             peer.last_activity_ms = Some(latest.1);
             peer.last_agent_message_id = self.transaction.query_row("SELECT message_id FROM collaboration_messages
-                WHERE session_socket_id=?1 AND worktree_id=?2 AND thread_id=?3 AND author_kind='agent_session'
+                WHERE session_socket_id=?1 AND worktree_id=?2 AND thread_id=?3 AND author_kind='agent_session' AND grammar_version <> 'reminder/v1'
                 ORDER BY created_at_ms DESC,rowid DESC LIMIT 1",params![peer.namespace.session_socket_id,
                 peer.namespace.space_id.as_str(),thread.as_str()],|row|row.get(0)).optional()?;
             peer.attention_count=self.transaction.query_row("SELECT COUNT(*) FROM attention_items i

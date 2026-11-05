@@ -56,6 +56,7 @@ import { DeliveryContext } from "./DeliveryContext.ts";
 import { Icon } from "./Icons.tsx";
 import { Message, PendingMessage } from "./Message.tsx";
 import { ThreadConversationContext } from "./MessageActions.tsx";
+import { Reminders } from "./Reminders.tsx";
 import { useEscape } from "./useEscape.ts";
 
 export type ThreadResponse =
@@ -208,7 +209,7 @@ export function ThreadPane({
       body.current.scrollTop = body.current.scrollHeight;
   }, [pending]);
   useEscape(pane, onClose);
-  const count = thread.replies.length;
+  const count = thread.replies.filter((row) => row.kind !== "reminder").length;
   const unloaded =
     thread.knownCount > thread.parents.length + thread.replies.length;
   return (
@@ -228,6 +229,10 @@ export function ThreadPane({
             ? channel.displayName
             : `#${channel.addressableLabel}`}
         </span>
+        <Reminders
+          target={{ kind: "thread", key: channel.key, thread: thread.id }}
+          directory={directory}
+        />
         <button
           type="button"
           className="icon-button"

@@ -24,7 +24,7 @@ use std::{
 };
 
 const DATABASE_FILE_NAME: &str = "namedrop.sqlite3";
-pub(crate) const SCHEMA_VERSION: u32 = 6;
+pub(crate) const SCHEMA_VERSION: u32 = 7;
 
 const RECONCILIATION_INDEX_REPAIRS: &[SchemaGap] = &[
     SchemaGap {
@@ -66,12 +66,14 @@ enum MessageAppendMode {
     Normal,
     PendingChannel,
     DirectMessage,
+    Reminder,
 }
 
 mod bridge;
 pub(crate) mod channel_routing;
 mod deferred_commands;
 pub(crate) mod direct_messages;
+mod reminders;
 pub(crate) use bridge::{EnvoyOrigin, ForwardedCopy};
 pub(crate) use groups::addressed_recipients;
 mod coordination;
@@ -257,6 +259,10 @@ impl StateStore {
             TransactionBehavior::Immediate
         };
         let transaction = self.connection.transaction_with_behavior(behavior)?;
+        #[cfg(test)]
+        if !self.read_only {
+            crate::work_counters::write_begin();
+        }
         let mut state_transaction = StateTransaction { transaction };
         let value = operation(&mut state_transaction)?;
         state_transaction.transaction.commit()?;
@@ -2773,7 +2779,10 @@ impl StateTransaction<'_> {
                 reply_mode,
                 matches!(
                     grammar_version.as_str(),
-                    "coordination-nudge/v1" | "coordination-report/v1" | "result-set/v1"
+                    "coordination-nudge/v1"
+                        | "coordination-report/v1"
+                        | "result-set/v1"
+                        | "reminder/v1"
                 ),
                 asked_addresses,
             ));
@@ -2874,7 +2883,8 @@ impl StateTransaction<'_> {
                 "a collaboration message needs at least one recipient".to_owned(),
             ));
         }
-        let direct_message = self.validate_direct_message(namespace, draft)?;
+        let direct_message =
+            self.validate_direct_message(namespace, draft, mode == MessageAppendMode::Reminder)?;
         let author_disabled = self.transaction.query_row(
             "SELECT collaboration_disabled
              FROM pane_addresses
@@ -2899,14 +2909,14 @@ impl StateTransaction<'_> {
             && draft.in_reply_to.is_some()
             && !matches!(
                 draft.grammar_version.as_str(),
-                "result-set/v1" | "terminal-result/v1"
+                "result-set/v1" | "terminal-result/v1" | "reminder/v1"
             );
         let controls = self.thread_control_state(namespace, &draft.thread_id)?;
         if draft.in_reply_to.is_some()
             && controls.stopped
             && !matches!(
                 draft.grammar_version.as_str(),
-                "result-set/v1" | "terminal-result/v1"
+                "result-set/v1" | "terminal-result/v1" | "reminder/v1"
             )
         {
             return Err(StoreError::invalid_input(
@@ -4935,6 +4945,15 @@ impl StateTransaction<'_> {
         )? {
             return Ok(None);
         }
+        if !self.reminder_delivery_allowed(
+            namespace,
+            &head_message,
+            address_id,
+            &agent_session_id,
+            &crate::PaneBindingId::new(binding_id.clone()),
+        )? {
+            return Ok(None);
+        }
         let retry_of_attempt_id = self
             .transaction
             .query_row(
@@ -5056,6 +5075,15 @@ impl StateTransaction<'_> {
             &delivery.message_id,
             address_id,
             &lease.agent_session_id,
+        )? {
+            return Ok(None);
+        }
+        if !self.reminder_delivery_allowed(
+            namespace,
+            &delivery.message_id,
+            address_id,
+            &lease.agent_session_id,
+            &lease.binding_id,
         )? {
             return Ok(None);
         }
@@ -5316,7 +5344,14 @@ impl StateTransaction<'_> {
         let stale_nudge = nudge
             && !self.coordination_wake_current(namespace, &MessageId::new(message_id.clone()))?;
         let tracked_join = result_set.is_some() && !assignments.is_empty();
-        let reply_mode = if self
+        let reminder_target =
+            self.reminder_reply_target(namespace, &MessageId::new(message_id.clone()))?;
+        let reply_mode = if let Some(target) = &reminder_target {
+            match target {
+                Some(target) => self.message_route(namespace, target)?.reply_mode,
+                None => crate::DeliveryReplyMode::ReportToHuman,
+            }
+        } else if self
             .direct_message(namespace, &ThreadId::new(&thread_id))?
             .is_some()
         {
@@ -5352,6 +5387,9 @@ impl StateTransaction<'_> {
                 .map(|token| (*token).to_owned())
                 .collect::<Vec<_>>()
         };
+        if reminder_target == Some(None) {
+            permitted_operations.push("reminder.set".to_owned());
+        }
         if matches!(
             reply_mode,
             crate::DeliveryReplyMode::AgentThread | crate::DeliveryReplyMode::Channel
@@ -5419,6 +5457,24 @@ impl StateTransaction<'_> {
             let recap = self.channel_recap(namespace, &control.message_id)?;
             if !recap.is_empty() {
                 control.untrusted_channel_recap = Some(recap);
+            }
+        }
+        if let Some(Some(target)) = reminder_target {
+            let (alias,): (String,) = self.transaction.query_row("SELECT author_alias_snapshot FROM collaboration_messages WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3",params![namespace.session_socket_id,namespace.space_id.as_str(),target.as_str()],|r|Ok((r.get(0)?,)))?;
+            for operation in &mut control.tool.operations {
+                if operation.token == "reply" {
+                    operation.input["in_reply_to"] = serde_json::json!(target);
+                    let alias = if matches!(
+                        reply_mode,
+                        crate::DeliveryReplyMode::DirectMessage | crate::DeliveryReplyMode::Channel
+                    ) {
+                        "operator"
+                    } else {
+                        &alias
+                    };
+                    operation.input["source"] =
+                        serde_json::json!(format!("@{} {}", alias, crate::REPLY_BODY_PLACEHOLDER));
+                }
             }
         }
         control.coordination_id = assignments.first().map(|a| a.coordination_id.clone());
@@ -5983,6 +6039,9 @@ impl StateTransaction<'_> {
                     "acknowledged state requires an immutable Delivery Acknowledgement",
                 ));
             }
+        }
+        if matches!(next, DeliveryState::Submitted | DeliveryState::Acknowledged) {
+            self.reminder_delivery_succeeded(namespace, &delivery_id, attribution.occurred_at_ms)?;
         }
         let active = matches!(
             next,
@@ -7641,12 +7700,13 @@ fn initialize_schema(
         (6, bridge::SCHEMA),
         (6, bridge::DELIVERY_SEATS_SCHEMA),
         (6, terminal::REMOTE_SCHEMA),
+        (7, reminders::SCHEMA),
     ] {
         if version < introduced_in {
             transaction.execute_batch(schema)?;
         }
     }
-    if version == SCHEMA_VERSION {
+    if version >= 6 {
         for gap in pre_release_schema_6_gaps(&transaction)? {
             transaction.execute_batch(gap.ddl)?;
         }
@@ -8867,7 +8927,7 @@ mod tests {
             fresh
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
-            6
+            SCHEMA_VERSION
         );
         assert!(reconciliation_index_gaps(&fresh).unwrap().is_empty());
         for version in 1..=6 {
@@ -8881,6 +8941,7 @@ mod tests {
                 (6, bridge::SCHEMA),
                 (6, bridge::DELIVERY_SEATS_SCHEMA),
                 (6, terminal::REMOTE_SCHEMA),
+                (7, reminders::SCHEMA),
             ] {
                 if version >= introduced {
                     connection.execute_batch(ddl).unwrap();
@@ -8894,7 +8955,7 @@ mod tests {
                 connection
                     .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                     .unwrap(),
-                6
+                SCHEMA_VERSION
             );
             assert!(reconciliation_index_gaps(&connection).unwrap().is_empty());
             assert_eq!(
@@ -8911,9 +8972,23 @@ mod tests {
     fn schema_six_repairs_each_missing_index_and_pre_release_piece() {
         for missing_indexes in 0..8 {
             for missing_pieces in 0..4 {
+                let mut fresh = Connection::open_in_memory().unwrap();
+                initialize_schema(&mut fresh, Path::new(".")).unwrap();
+                let expected = schema_shape(&fresh);
                 let mut connection = Connection::open_in_memory().unwrap();
-                initialize_schema(&mut connection, Path::new(".")).unwrap();
-                let expected = schema_shape(&connection);
+                let lines: Vec<_> = include_str!("store/schema-v6.txt").lines().collect();
+                for line in lines
+                    .iter()
+                    .filter(|l| l.starts_with("table "))
+                    .chain(lines.iter().filter(|l| !l.starts_with("table ")))
+                {
+                    let (_, sql) = line.split_once(": ").unwrap();
+                    connection.execute_batch(&format!("{sql};")).unwrap();
+                }
+                connection.pragma_update(None, "user_version", 6).unwrap();
+                for repair in RECONCILIATION_INDEX_REPAIRS {
+                    connection.execute_batch(repair.ddl).unwrap();
+                }
                 for (bit, repair) in RECONCILIATION_INDEX_REPAIRS.iter().enumerate() {
                     if missing_indexes & (1 << bit) != 0 {
                         connection
@@ -8933,12 +9008,11 @@ mod tests {
                         )
                         .unwrap();
                 }
-                // The schema-6 reader's structural check does not require optional indexes.
                 if missing_pieces == 0 {
-                    check_read_only_schema(&connection).unwrap();
+                    assert!(check_read_only_schema(&connection).is_err());
                 }
                 initialize_schema(&mut connection, Path::new(".")).unwrap();
-                assert_eq!(schema_version(&connection).unwrap(), 6);
+                assert_eq!(schema_version(&connection).unwrap(), SCHEMA_VERSION);
                 assert_eq!(schema_shape(&connection), expected);
                 check_read_only_schema(&connection).unwrap();
                 initialize_schema(&mut connection, Path::new(".")).unwrap();
@@ -8954,7 +9028,7 @@ mod tests {
         let writer = Connection::open(directory.0.join(DATABASE_FILE_NAME)).unwrap();
         writer.execute_batch("BEGIN IMMEDIATE").unwrap();
         let store = StateStore::open(&directory.0).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 6);
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
         check_read_only_schema(&store.connection).unwrap();
         writer.execute_batch("ROLLBACK").unwrap();
     }

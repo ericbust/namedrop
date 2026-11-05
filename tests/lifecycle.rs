@@ -1928,7 +1928,7 @@ fn lifecycle_operations_activate_create_bind_and_list_through_one_contract() {
         true
     );
     let rules = fs::read_to_string(directory.home().join(".codex/rules/namedrop.rules")).unwrap();
-    assert_eq!(rules.matches("prefix_rule(").count(), 19);
+    assert_eq!(rules.matches("prefix_rule(").count(), 22);
     let executable = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
     for argv in [vec!["address", "list"], vec!["complete", "--no-reply"]] {
         let mut pattern = vec![

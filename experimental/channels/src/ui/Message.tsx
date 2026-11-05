@@ -514,16 +514,24 @@ function SystemRow({
       data-message-id={message.id}
       data-kind={message.kind}
     >
-      <Icon name={message.kind === "hook" ? "plug" : "bell"} />
+      {message.kind === "reminder" ? (
+        <span className="reminder-clock" aria-hidden="true">
+          ⏰
+        </span>
+      ) : (
+        <Icon name={message.kind === "hook" ? "plug" : "bell"} />
+      )}
       <div className="msg-content">
         <p>
-          <strong>{message.kind === "hook" ? "Hook" : "Nudge"}</strong>
+          {message.kind !== "reminder" && (
+            <strong>{message.kind === "hook" ? "Hook" : "Nudge"}</strong>
+          )}
           <span className="body" title={text === raw ? undefined : raw}>
             <MarkdownLine source={text} limit={previewLimit(text)} links />
             {text.length > PREVIEW || truncated ? "…" : null}
           </span>
         </p>
-        {failed && (
+        {failed && message.kind !== "reminder" && (
           <Receipts message={message} directory={directory} paused={paused} />
         )}
         {onThread && replyCount > 0 && (
@@ -539,7 +547,9 @@ function SystemRow({
           />
         )}
       </div>
-      <ReplyInThread message={message} directory={directory} />
+      {message.kind !== "reminder" && (
+        <ReplyInThread message={message} directory={directory} />
+      )}
     </article>
   );
 }
@@ -690,7 +700,11 @@ export const Message = memo(
     arrive = false,
     located = false,
   }: MessageProps) {
-    if (message.kind === "nudge" || message.kind === "hook")
+    if (
+      message.kind === "nudge" ||
+      message.kind === "hook" ||
+      message.kind === "reminder"
+    )
       return (
         <SystemRow
           message={message}

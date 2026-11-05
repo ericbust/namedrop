@@ -365,8 +365,11 @@ function requestHistory(state: State, key: SpaceKey): State {
 }
 function hasActivity(a: Channel, b: Channel): boolean {
   return (
-    [...b.latestMessages.keys()].some(
-      (id) => !a.latestMessages.has(id) && !a.messages.has(id),
+    [...b.latestMessages.values()].some(
+      (row) =>
+        row.kind !== "reminder" &&
+        !a.latestMessages.has(row.id) &&
+        !a.messages.has(row.id),
     ) ||
     a.attention !== b.attention ||
     a.members.size !== b.members.size ||
@@ -992,8 +995,11 @@ function agentAuthor(
 function wroteIn(group: Pick<ThreadGroup, "parents" | "replies">): Wrote {
   const wrote = new Map<AddressId | "human", number>();
   for (const messages of [group.parents, group.replies])
-    for (const { author, at } of messages)
+    for (const message of messages) {
+      if (message.kind === "reminder") continue;
+      const { author, at } = message;
       wrote.set(author, Math.max(at, wrote.get(author) ?? at));
+    }
   return wrote;
 }
 function joinedIn(group: Pick<ThreadGroup, "parents" | "replies">): Joined {
@@ -1090,7 +1096,11 @@ function sameList<T>(a: readonly T[], b: readonly T[]): boolean {
   return a === b || (a.length === b.length && a.every((x, i) => x === b[i]));
 }
 function isSystem(message: Message): boolean {
-  return message.kind === "nudge" || message.kind === "hook";
+  return (
+    message.kind === "nudge" ||
+    message.kind === "hook" ||
+    message.kind === "reminder"
+  );
 }
 export function timelineView(
   channel: Pick<Channel, "messages" | "runs" | "threads" | "members">,
@@ -1132,6 +1142,8 @@ export function timelineView(
         !isSystem(message) &&
         !isSystem(previous);
       const channelChat = room?.kind === "channel";
+      const replies = thread.replies.filter((row) => row.kind !== "reminder");
+      const reminderCount = thread.replies.length - replies.length;
       rows.push({
         kind: reply ? "orphan" : "message",
         message,
@@ -1144,12 +1156,14 @@ export function timelineView(
               (previous?.kind !== message.kind ||
                 !sameList(previousNamed, to))),
         recipients: to,
-        latestReply: reply ? null : (thread.replies.at(-1) ?? null),
+        latestReply: reply ? null : (replies.at(-1) ?? null),
         replyCount: reply
           ? 0
           : Math.max(
-              thread.replies.length,
-              thread.knownCount - Math.max(1, thread.parents.length),
+              replies.length,
+              thread.knownCount -
+                Math.max(1, thread.parents.length) -
+                reminderCount,
             ),
       });
       previous = reply ? null : message;
@@ -1234,6 +1248,7 @@ export function replyTargetName(
 ): string {
   if (message.kind === "nudge") return "Nudge";
   if (message.kind === "hook") return "Hook";
+  if (message.kind === "reminder") return "Reminder";
   return participantCopy(participant(directory, message.author)).name;
 }
 

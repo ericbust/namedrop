@@ -1009,3 +1009,31 @@ test("subagent chips show counts and plain bounded descriptions without nested c
   assert.match(markup, /class="subagent-elapsed">1m \ds</);
   assert.equal(markup.includes("<button"), false);
 });
+
+test("a reminder renders quietly without receipts or a reply action", async () => {
+  const { Message } = await load<typeof import("./ui/Message.tsx")>(
+    "/src/ui/Message.tsx",
+  );
+  const fixture = JSON.parse((await fixtures())[3] ?? "null");
+  fixture.frame.messages = [
+    {
+      ...fixture.frame.messages[0],
+      kind: "reminder",
+      body: { text: "Reminder for @codex: Check the build", truncated: false },
+    },
+  ];
+  const { channel } = space(fixture);
+  const message = [...channel.messages.values()][0];
+  assert.ok(message);
+  const markup = renderToStaticMarkup(
+    createElement(Message, {
+      message,
+      directory: { members: channel.members, homes: new Map() },
+      recipients: [],
+    }),
+  );
+  assert.match(markup, /class="system/);
+  assert.match(markup, /⏰/);
+  assert.match(markup, /Reminder for @codex: Check the build/);
+  assert.doesNotMatch(markup, /class="(?:receipt|msg-head|msg-actions)/);
+});

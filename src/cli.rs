@@ -71,6 +71,9 @@ impl Cli {
                 | "send"
                 | "reply"
                 | "delivery.inbox"
+                | "reminder.set"
+                | "reminder.list"
+                | "reminder.cancel"
                 | "handoff.begin"
                 | "handoff.resolve"
                 | "handoff.adopt"
@@ -288,6 +291,11 @@ enum Command {
         #[command(subcommand)]
         command: HandoffCommand,
     },
+    /// Schedule a wake for this exact Agent Session.
+    Reminder {
+        #[command(subcommand)]
+        command: ReminderCommand,
+    },
     /// Manage saved groups of agent mentions.
     Group {
         #[command(subcommand)]
@@ -391,6 +399,7 @@ impl Command {
             Self::TerminalExecute { .. } => "terminal.execute",
             Self::Handoff { command } => command.operation(),
             Self::Group { command } => command.operation(),
+            Self::Reminder { command } => command.operation(),
             Self::Name(_) => "name",
             Self::Activate => "activate",
             Self::Deactivate => "deactivate",
@@ -810,5 +819,21 @@ mod tests {
         assert!(reset.is_reset_tour());
         assert!(Cli::try_parse_from(["namedrop", "ui", "install-shortcuts"]).is_ok());
         assert!(Cli::try_parse_from(["namedrop", "ui", "install-status-shortcut"]).is_ok());
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum ReminderCommand {
+    Set,
+    List,
+    Cancel,
+}
+impl ReminderCommand {
+    fn operation(&self) -> &'static str {
+        match self {
+            Self::Set => "reminder.set",
+            Self::List => "reminder.list",
+            Self::Cancel => "reminder.cancel",
+        }
     }
 }
