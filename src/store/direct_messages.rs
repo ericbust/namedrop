@@ -877,6 +877,143 @@ mod tests {
     }
 
     #[test]
+    fn terminal_ending_stays_in_direct_message_with_private_attention_and_unread_metadata() {
+        let mut f = Fixture::new();
+        let root = f.send("dm-terminal-request", "Which option should we use?");
+        let session = crate::AgentSessionId::new("session-peer");
+        let attempt = crate::DeliveryAttemptId::new("dm-terminal-attempt");
+        let ending = crate::TerminalRelayEnd {
+            agent_session_id: session.clone(),
+            ended_at_ms: 20,
+            previous_end_ms: None,
+            text: "Do you prefer option A or option B?".to_owned(),
+        };
+        let relay = f
+            .store
+            .transaction(|tx| {
+                tx.observe_agent_session(&f.ns, "observed-peer", &f.peer, &session, "idle", &f.at)?;
+                let leased = tx.lease_mailbox_head(
+                    &f.ns,
+                    &f.peer,
+                    &crate::LeaseDraft {
+                        attempt_id: attempt.clone(),
+                        binding_id: PaneBindingId::new("binding-peer"),
+                        agent_session_id: session.clone(),
+                        retry_of_attempt_id: None,
+                        owner: "test".to_owned(),
+                        acquired_at_ms: 2,
+                        expires_at_ms: 1000,
+                    },
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 2),
+                )?;
+                assert!(leased.is_some());
+                tx.transition_delivery_attempt(
+                    &f.ns,
+                    &attempt,
+                    crate::DeliveryState::Submitted,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 3),
+                )?;
+                let relayed = tx.relay_terminal_ending(
+                    &f.ns,
+                    &ending,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 20),
+                )?;
+                assert_eq!(relayed.len(), 1);
+                assert_eq!(
+                    tx.delivery_attempt_state(&f.ns, &attempt)?,
+                    crate::DeliveryState::Settled
+                );
+                Ok(relayed[0].clone())
+            })
+            .unwrap();
+        let history = f
+            .store
+            .direct_message_history(&f.ns, &f.peer, None, 100)
+            .unwrap()
+            .unwrap();
+        assert_eq!(history.history.messages.len(), 2);
+        let message = &history.history.messages[1];
+        assert_eq!(message.message_id, relay.as_str());
+        assert_eq!(message.thread_id, root.receipt.thread_id.as_str());
+        assert_eq!(
+            message.in_reply_to.as_deref(),
+            Some(root.receipt.message_id.as_str())
+        );
+        assert_eq!(message.author_address_id, f.peer.as_str());
+        assert_eq!(message.grammar_version, "terminal-relay/v1");
+        assert_eq!(message.body, ending.text);
+        assert!(
+            history
+                .history
+                .legs
+                .iter()
+                .all(|leg| leg.message_id != relay.as_str())
+        );
+        let peers = f.store.direct_message_peers().unwrap();
+        assert_eq!(peers.len(), 1);
+        let peer = &peers[0];
+        assert_eq!(
+            peer.thread_id.as_deref(),
+            Some(root.receipt.thread_id.as_str())
+        );
+        assert_eq!(peer.last_message_id.as_deref(), Some(relay.as_str()));
+        assert_eq!(peer.last_agent_message_id.as_deref(), Some(relay.as_str()));
+        assert_eq!(
+            peer.attention_count, 1,
+            "DM terminal reply must need the operator"
+        );
+        let rows = f.store.dashboard_rows(&f.ns).unwrap();
+        assert!(
+            rows.messages.is_empty(),
+            "DM reply leaked into channel timeline"
+        );
+        assert!(
+            rows.threads.is_empty(),
+            "DM reply leaked into channel threads"
+        );
+        assert!(
+            rows.attention.is_empty(),
+            "DM attention leaked into All activity"
+        );
+        assert!(rows.mailbox.is_empty());
+        for (label, absent) in [
+            (
+                "body",
+                f.store
+                    .dashboard_message_body(&f.ns, relay.as_str(), 500)
+                    .unwrap()
+                    .is_none(),
+            ),
+            (
+                "thread",
+                f.store
+                    .dashboard_thread_context(&f.ns, relay.as_str())
+                    .unwrap()
+                    .is_none(),
+            ),
+            (
+                "history",
+                f.store
+                    .dashboard_history(&f.ns, Some(relay.as_str()), 100)
+                    .unwrap()
+                    .is_none(),
+            ),
+        ] {
+            assert!(absent, "private terminal reply appeared in public {label}");
+        }
+        f.store
+            .transaction(|tx| {
+                assert!(tx.relay_terminal_ending(&f.ns, &ending, &f.at)?.is_empty());
+                Ok(())
+            })
+            .unwrap();
+        f.at = MutationAttribution::new(ActorKind::Human, "test", 30);
+        f.send("dm-follow-up", "Option A");
+        let peers = f.store.direct_message_peers().unwrap();
+        assert_eq!(peers[0].attention_count, 0);
+    }
+
+    #[test]
     fn direct_message_delivery_attention_belongs_to_the_private_peer() {
         let mut f = Fixture::new();
         f.send("dm-attention", "Private request");
