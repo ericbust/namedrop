@@ -17,6 +17,12 @@ export type MemberKind =
   | { type: "human" | "terminal" | "unknown" }
   | { type: "agent"; runtime: string | null };
 export type SafeText = { text: string; truncated: boolean };
+export type Subagent = Readonly<{
+  id: string;
+  kind: SafeText | null;
+  description: SafeText | null;
+  startedAt: number;
+}>;
 export type Member = {
   id: AddressId;
   alias: string;
@@ -25,6 +31,7 @@ export type Member = {
   recentlyClosed: boolean;
   role: SafeText | null;
   paneLabel: SafeText | null;
+  subagents: readonly Subagent[];
 };
 export type Conversation = { threadId: string; messageId: string };
 export type AttentionResponse =

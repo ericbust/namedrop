@@ -30,6 +30,7 @@ import type {
   ScreenFailure,
   SpaceKey,
   SpaceState,
+  Subagent,
   TerminalResult,
   TerminalRun,
   ThreadAction,
@@ -115,6 +116,38 @@ function safeText(value: unknown): SafeText {
 }
 function optionalSafeText(value: unknown): SafeText | null {
   return value === null ? null : safeText(value);
+}
+function subagentText(value: unknown): SafeText | null {
+  if (value === null || value === undefined) return null;
+  try {
+    const parsed = safeText(value);
+    return {
+      text: parsed.text.slice(0, 240),
+      truncated: parsed.truncated || parsed.text.length > 240,
+    };
+  } catch {
+    return null;
+  }
+}
+function subagents(value: unknown): readonly Subagent[] {
+  if (!Array.isArray(value)) return [];
+  const agents = new Map<string, Subagent>();
+  for (const raw of value) {
+    try {
+      const item = record(raw);
+      const id = identity(item.id);
+      const startedAt = integer(item.started_at_ms);
+      agents.set(id, {
+        id,
+        kind: subagentText(item.kind),
+        description: subagentText(item.description),
+        startedAt,
+      });
+    } catch {
+      // Optional metadata must not discard the participant or channel.
+    }
+  }
+  return [...agents.values()];
 }
 function health(value: unknown): Health {
   const item = record(value);
@@ -643,6 +676,7 @@ function channel(value: unknown, key: SpaceKey): ChannelSnapshot {
       recentlyClosed: item.recently_closed === true,
       role: optionalSafeText(item.role),
       paneLabel: optionalSafeText(item.pane_label),
+      subagents: subagents(item.subagents),
     });
   }
   const rows = messages(frame.messages);

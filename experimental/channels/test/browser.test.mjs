@@ -6252,7 +6252,7 @@ async function openPeekHarness(t) {
             open(member = "codex", channel = "alpha", reader = 0) {
               root.render(createElement(PeekDrawer, {
                 target: { channel, member, alias: "@" + member, kind: "agent" },
-                who: { alias: "@" + member, kind: "agent", activity: "working", channel: {label: "#" + channel, suffix: null} },
+                who: { alias: "@" + member, kind: "agent", activity: "working", subagents: [], channel: {label: "#" + channel, suffix: null} },
                 reader: readers[reader], startedAt: performance.now(), paneId: "peek", onClose: close,
               }));
             },
@@ -12619,3 +12619,174 @@ for (const kind of ["nudge", "hook"])
       /Continuing with the fix/,
     );
   });
+test("subagents: live counts, hover and keyboard details, safe descriptions and Peek header", async (t) => {
+  const frames = busyTeam();
+  const parent = frames[0].frame.participants.find(
+    (member) => member.address_id === "codex",
+  );
+  assert.ok(parent);
+  parent.subagents = [];
+  const ui = await open(t, (client) => replay(client, frames), undefined, {
+    onScreen: () => ({ body: "Subagent parent screen" }),
+  });
+  await ui.live();
+  const chip = ui.page.locator('.members [data-address-id="codex"] button');
+  assert.equal(await chip.locator(".subagent-count").count(), 0);
+  const running = [
+    {
+      id: "explore",
+      kind: { text: "Explore", truncated: false },
+      description: {
+        text: '<img src=x onerror="window.subagentXss=true">',
+        truncated: false,
+      },
+      started_at_ms: Date.now() - 65000,
+    },
+    {
+      id: "build",
+      kind: { text: "Builder", truncated: false },
+      description: { text: "x".repeat(1000), truncated: false },
+      started_at_ms: Date.now() - 2000,
+    },
+  ];
+  parent.subagents = running;
+  ui.connections.at(-1).send("space", frames[0]);
+  await chip.getByText("· 2 subagents", { exact: true }).waitFor();
+  await chip.hover();
+  const details = ui.page.getByRole("tooltip");
+  await details.waitFor();
+  assert.equal(
+    await details
+      .getByRole("list", { name: "Subagents of @codex" })
+      .getByRole("listitem")
+      .count(),
+    2,
+  );
+  assert.equal(
+    await details.locator(".subagent-description").first().textContent(),
+    running[0].description.text,
+  );
+  assert.equal(await details.locator("img, script").count(), 0);
+  assert.equal(
+    await details.locator(".subagent-description").nth(1).textContent(),
+    `${"x".repeat(240)}…`,
+  );
+  assert.match(
+    await details.locator(".subagent-elapsed").first().textContent(),
+    /^1m \ds$/,
+  );
+  assert.equal(await ui.page.evaluate(() => window.subagentXss), undefined);
+  if (process.env.SUBAGENTS_SCREENSHOTS)
+    await ui.page.screenshot({
+      animations: "disabled",
+      path: `${process.env.SUBAGENTS_SCREENSHOTS}/subagents-desktop-hover.png`,
+    });
+  await ui.page.keyboard.press("Escape");
+  await details.waitFor({ state: "hidden" });
+  await ui.page.mouse.move(0, 0);
+  await chip.focus();
+  await details.waitFor();
+  assert.equal(
+    await chip.getAttribute("aria-describedby"),
+    await details.getAttribute("id"),
+  );
+  await ui.page.keyboard.press("Enter");
+  await screenText(ui).getByText("Subagent parent screen").waitFor();
+  assert.equal(
+    await drawer(ui).locator(".peek-subagents").textContent(),
+    "2 subagents",
+  );
+  if (process.env.SUBAGENTS_SCREENSHOTS)
+    await ui.page.screenshot({
+      animations: "disabled",
+      path: `${process.env.SUBAGENTS_SCREENSHOTS}/subagents-desktop-peek.png`,
+    });
+  assert.ok(
+    (await drawer(ui).locator(".peek-alias").boundingBox())?.width > 20,
+  );
+  parent.subagents = [running[0]];
+  ui.connections.at(-1).send("space", frames[0]);
+  await drawer(ui).getByText("1 subagent", { exact: true }).waitFor();
+  parent.subagents = [];
+  ui.connections.at(-1).send("space", frames[0]);
+  await ui.page.waitForFunction(
+    () =>
+      document.querySelectorAll(".subagent-count, .peek-subagents").length ===
+      0,
+  );
+  await ui.page.keyboard.press("Escape");
+  await drawer(ui).waitFor({ state: "detached" });
+  assert.equal(
+    await chip.evaluate((element) => element === document.activeElement),
+    true,
+  );
+  parent.subagents = running;
+  ui.connections.at(-1).send("space", frames[0]);
+  await chip.getByText("· 2 subagents", { exact: true }).waitFor();
+  await ui.page.setViewportSize({ width: 390, height: 844 });
+  await chip.focus();
+  await chip.hover();
+  await details.waitFor();
+  const box = await details.boundingBox();
+  assert.ok(box && box.x >= 0 && box.x + box.width <= 390, JSON.stringify(box));
+  assert.equal(
+    await ui.page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+    true,
+  );
+  if (process.env.SUBAGENTS_SCREENSHOTS)
+    await ui.page.screenshot({
+      animations: "disabled",
+      path: `${process.env.SUBAGENTS_SCREENSHOTS}/subagents-narrow-hover.png`,
+    });
+  await chip.click();
+  await drawer(ui).getByText("2 subagents", { exact: true }).waitFor();
+  assert.equal(
+    await ui.page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+    true,
+  );
+  await ui.page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  );
+  assert.ok(
+    (await drawer(ui).locator(".peek-alias").boundingBox())?.width > 20,
+  );
+  if (process.env.SUBAGENTS_SCREENSHOTS)
+    await ui.page.screenshot({
+      animations: "disabled",
+      path: `${process.env.SUBAGENTS_SCREENSHOTS}/subagents-narrow-peek.png`,
+    });
+});
+
+test("subagents: live Peek header follows running and stopped subagents", async (t) => {
+  const frames = busyTeam();
+  const parent = frames[0].frame.participants.find(
+    (member) => member.address_id === "codex",
+  );
+  assert.ok(parent);
+  parent.subagents = [
+    { id: "one", kind: null, description: null, started_at_ms: Date.now() },
+  ];
+  const ui = await open(t, (client) => replay(client, frames), undefined, {
+    liveInput: true,
+  });
+  await ui.live();
+  await ui.page.locator('.members [data-address-id="codex"] button').click();
+  await drawer(ui).getByRole("button", { name: "Type to agent" }).waitFor();
+  await drawer(ui).getByText("1 subagent", { exact: true }).waitFor();
+  parent.subagents = [];
+  ui.connections.at(-1).send("space", frames[0]);
+  await ui.page.waitForFunction(
+    () => document.querySelectorAll(".peek-subagents").length === 0,
+  );
+  assert.equal(
+    await drawer(ui).getByRole("button", { name: "Type to agent" }).count(),
+    1,
+  );
+});

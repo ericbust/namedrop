@@ -15,6 +15,7 @@ const who: PeekWho = {
   alias: "@codex",
   kind: "agent",
   activity: "working",
+  subagents: [],
   channel: { label: "#alpha", suffix: null },
 };
 const early = new Date(2026, 9, 29, 22, 42).getTime();

@@ -31,6 +31,7 @@ mod runtime;
 mod shortcuts;
 mod spaces;
 mod store;
+pub mod subagent;
 #[doc(hidden)]
 pub use shortcuts::install_shortcuts;
 mod terminal;

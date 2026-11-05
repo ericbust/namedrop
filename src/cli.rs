@@ -49,6 +49,14 @@ pub struct RuntimeOptions {
 }
 
 impl Cli {
+    pub fn subagent_hook(&self) -> Option<(&Path, crate::AgentRuntime)> {
+        match &self.command {
+            Command::Hook {
+                command: HookCommand::Subagent(args),
+            } => Some((&args.hook.state_directory, args.runtime.into())),
+            _ => None,
+        }
+    }
     pub fn human_output(&self, terminal: bool) -> bool {
         self.human || (!self.json && terminal && !self.machine_operation())
     }
@@ -667,6 +675,7 @@ enum HookCommand {
     MailboxWake(HookArgs),
     SessionStart(HookArgs),
     UserPromptSubmit(HookArgs),
+    Subagent(SubagentHookArgs),
 }
 
 impl HookCommand {
@@ -677,6 +686,7 @@ impl HookCommand {
             Self::MailboxWake(_) => "hook.mailbox-wake",
             Self::SessionStart(_) => "hook.session-start",
             Self::UserPromptSubmit(_) => "hook.user-prompt-submit",
+            Self::Subagent(_) => "hook.subagent",
         }
     }
 }
@@ -686,6 +696,29 @@ struct HookArgs {
     /// Plugin-owned state directory for this installed hook.
     #[arg(long, value_name = "PATH")]
     state_directory: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct SubagentHookArgs {
+    #[command(flatten)]
+    hook: HookArgs,
+    #[arg(long, value_enum)]
+    runtime: HookRuntime,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum HookRuntime {
+    ClaudeCode,
+    Codex,
+}
+
+impl From<HookRuntime> for crate::AgentRuntime {
+    fn from(value: HookRuntime) -> Self {
+        match value {
+            HookRuntime::ClaudeCode => Self::ClaudeCode,
+            HookRuntime::Codex => Self::Codex,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -15,6 +15,7 @@ export function PeekControl({
   className,
   title,
   expanded,
+  describedBy,
   fallback,
   children,
 }: {
@@ -22,6 +23,7 @@ export function PeekControl({
   className?: string;
   title?: string;
   expanded?: boolean;
+  describedBy?: string;
   fallback: "span" | "none";
   children: ReactNode;
 }) {
@@ -41,6 +43,7 @@ export function PeekControl({
       title={title}
       data-peek={peekKey(target)}
       aria-expanded={expanded}
+      aria-describedby={describedBy}
       onClick={(event) =>
         access.open(target, event.currentTarget, event.timeStamp)
       }

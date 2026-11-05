@@ -14,6 +14,7 @@ const target = (member: string): PeekTarget => {
     recentlyClosed: false,
     role: null,
     paneLabel: null,
+    subagents: [],
   });
   assert.ok(made);
   return made;

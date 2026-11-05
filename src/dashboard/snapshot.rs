@@ -571,6 +571,15 @@ pub struct Participant {
     pub mailbox: Vec<MailboxItem>,
     /// Aliases whose answer this participant is waiting for.
     pub waiting_on: Vec<String>,
+    pub subagents: Vec<Subagent>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Subagent {
+    pub id: String,
+    pub kind: Option<SafeText>,
+    pub description: Option<SafeText>,
+    pub started_at_ms: i64,
 }
 
 #[derive(Debug, Eq, PartialEq, Serialize)]
@@ -1265,6 +1274,7 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow], now_ms: i64) -> V
             recently_closed: false,
             mailbox: Vec::new(),
             waiting_on,
+            subagents: Vec::new(),
         });
     }
     for address in addresses {
@@ -1320,6 +1330,7 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow], now_ms: i64) -> V
                 })
                 .collect(),
             waiting_on,
+            subagents: Vec::new(),
         });
     }
     lanes
