@@ -24,6 +24,29 @@ struct Fixture {
     _listener: UnixListener,
 }
 
+struct ScriptHerdr<'a>(&'a Path);
+impl HerdrCommandExecutor for ScriptHerdr<'_> {
+    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+        let output = Command::new(self.0)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", self.0.parent().unwrap().join("home"))
+            .env(
+                "XDG_CONFIG_HOME",
+                self.0.parent().unwrap().join("xdg-config"),
+            )
+            .args(args)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+        }
+        Ok(HerdrCommandOutput {
+            stdout: String::from_utf8(output.stdout).map_err(|error| error.to_string())?,
+        })
+    }
+}
+
 struct NativeHerdr;
 impl HerdrCommandExecutor for NativeHerdr {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
@@ -194,6 +217,19 @@ else: print('{}')
                 .output()
                 .unwrap(),
         );
+    }
+
+    fn wake_mailboxes(&self) {
+        let output = self
+            .command()
+            .env("HERDR_SOCKET_PATH", &self.socket)
+            .env("HERDR_WORKSPACE_ID", "workspace-1")
+            .args(["hook", "mailbox-wake", "--state-directory"])
+            .arg(self.directory.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        assert!(output.stdout.is_empty());
     }
 
     fn clock(&self) -> Worker {
@@ -1109,6 +1145,7 @@ fn reminder_queued_owner_maintenance_is_not_delayed_by_a_future_schedule() {
         panes("replacement").to_string(),
     )
     .unwrap();
+    f.wake_mailboxes();
     wait_for(|| {
         connection
             .query_row(
@@ -1225,7 +1262,14 @@ fn assert_reminder_clock_discovery_failure(error: &str) {
     let temporary_error_path = error_path.with_extension("tmp");
     fs::write(&temporary_error_path, &error_payload).unwrap();
     fs::rename(temporary_error_path, error_path).unwrap();
-    fs::write(f.directory.path().join("reminder-clock.wake"), []).unwrap();
+    let failure = namedrop::execute_lifecycle_operation(
+        "event.agent-status-changed",
+        json!({"type":"pane_agent_status_changed","pane_id":"pane-author","workspace_id":"workspace-1","agent_status":"working"}),
+        &LifecycleRuntime {
+            state_directory:f.directory.path(),home_directory:Some(f.directory.home()),agent_config:Default::default(),cwd:Path::new("/repo"),workspace_id:Some("workspace-1"),current_pane_id:None,session_socket_id:&f.socket,herdr:&ScriptHerdr(&f.herdr),clock:&SystemClock,ids:&ProcessIds::default(),
+        },
+    ).unwrap_err();
+    assert_eq!(failure, error_payload);
     wait_for(|| {
         if error == "workspace_not_found" {
             connection
