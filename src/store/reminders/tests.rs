@@ -9,6 +9,9 @@ struct Fixture {
     state: PathBuf,
     live_session: Cell<&'static str>,
     now: Cell<u64>,
+    busy: Cell<bool>,
+    discoveries: Cell<u64>,
+    prompts: Cell<u64>,
 }
 fn ns() -> StateNamespace {
     StateNamespace::for_space("test-socket", "test-space")
@@ -30,6 +33,9 @@ impl Fixture {
             state: std::env::temp_dir().join(ProcessIds::default().next_id("test-reminders")),
             live_session: Cell::new("session"),
             now: Cell::new(60_000),
+            busy: Cell::new(false),
+            discoveries: Cell::new(0),
+            prompts: Cell::new(0),
         };
         f.tx(|tx| {
             tx.activate_worktree(&ns(), &by(0))?;
@@ -186,13 +192,15 @@ impl HerdrCommandExecutor for Fixture {
                 json!({"result":{"workspaces":[{"workspace_id":"test-space"}]}})
             }
             ["worktree", "list", ..] => {
+                self.discoveries.set(self.discoveries.get() + 1);
                 json!({"result":{"worktrees":[{"path":"/test-repo","open_workspace_id":"test-space"}]}})
             }
             ["pane", "list", ..] => {
-                json!({"result":{"panes":[{"pane_id":"pane","terminal_id":"terminal","tab_id":"tab","workspace_id":"test-space","agent_session":{"value":self.live_session.get()},"agent_status":"idle"}]}})
+                json!({"result":{"panes":[{"pane_id":"pane","terminal_id":"terminal","tab_id":"tab","workspace_id":"test-space","agent_session":{"value":self.live_session.get()},"agent_status":if self.busy.get() { "working" } else { "idle" }}]}})
             }
             ["pane", "report-metadata", ..] | ["notification", "show", ..] => json!({}),
             ["agent", "prompt", "pane", _] => {
+                self.prompts.set(self.prompts.get() + 1);
                 self.now.set(900_000);
                 json!({})
             }
@@ -1020,6 +1028,129 @@ fn reminder_refuses_unsupported_system_only_origin() {
         );
         let error = result.expect_err("system-only origin must not grant a bound reply");
         assert!(error.to_string().contains("system"), "{error}");
+        Ok(())
+    });
+}
+
+struct MeasurementHerdr<'a>(&'a Fixture);
+impl HerdrCommandExecutor for MeasurementHerdr<'_> {
+    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+        self.0.execute(args)
+    }
+}
+
+#[test]
+fn reminder_busy_clock_work_measurement() {
+    let f = Fixture::new();
+    f.busy.set(true);
+    f.tx(|tx| {
+        tx.observe_agent_session(
+            &ns(),
+            "busy",
+            &owner().address,
+            &owner().session,
+            "working",
+            &by(1),
+        )
+    });
+    f.set(
+        "r",
+        None,
+        crate::reminder::Repeat::Count {
+            interval_ms: 60_000,
+            total: 2,
+        },
+    );
+    f.fire("r");
+    f.discoveries.set(0);
+    let ids = ProcessIds::default();
+    let startup_scope = crate::work_counters::Scope::start();
+    let startup_result =
+        crate::reminder::clock::cycle_with(&f.state, &f, &ids, |_| MeasurementHerdr(&f));
+    let startup = startup_scope.finish();
+    startup_result.unwrap();
+    let startup_discoveries = f.discoveries.replace(0);
+    let scope = crate::work_counters::Scope::start();
+    let mut errors = 0;
+    for second in 1..=300 {
+        f.now.set(60_000 + second * 1000);
+        if crate::reminder::clock::cycle_with(&f.state, &f, &ids, |_| MeasurementHerdr(&f)).is_err()
+        {
+            errors += 1;
+        }
+    }
+    let recurring = scope.finish();
+    let discoveries = f.discoveries.get();
+    assert_eq!(errors, 0);
+    assert_eq!(startup.drain_errors, 0);
+    assert_eq!(recurring.drain_errors, 0);
+    assert_eq!(f.now.get(), 360_000);
+    assert!(f.busy.get());
+    assert_eq!(f.prompts.get(), 0);
+    let connection = Connection::open(f.state.join("namedrop.sqlite3")).unwrap();
+    for table in [
+        "reminder_fires",
+        "mailbox_deliveries",
+        "collaboration_messages",
+    ] {
+        assert_eq!(
+            connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM delivery_attempts", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT state FROM mailbox_deliveries", [], |r| r
+                .get::<_, String>(0))
+            .unwrap(),
+        "queued"
+    );
+    f.tx(|tx| {
+        assert!(matches!(
+            tx.reminder(&ns(), "r")?.state,
+            ReminderState::AwaitingDelivery { .. }
+        ));
+        Ok(())
+    });
+    println!(
+        "IDLE_MEASUREMENT {}",
+        json!({"duration_simulated_seconds":300,"startup":startup,"startup_discoveries":startup_discoveries,"recurring":recurring,"recurring_discoveries":discoveries,"errors":errors,"fires":1,"mailboxes":1,"attempts_while_busy":0,"state":"awaiting_delivery"})
+    );
+    f.busy.set(false);
+    let home = f.state.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let runtime = crate::LifecycleRuntime {
+        state_directory: &f.state,
+        home_directory: Some(&home),
+        agent_config: Default::default(),
+        cwd: Path::new("/test-repo"),
+        workspace_id: Some("test-space"),
+        current_pane_id: Some("pane"),
+        session_socket_id: "test-socket",
+        herdr: &f,
+        clock: &f,
+        ids: &ids,
+    };
+    crate::execute_lifecycle_operation("event.agent-status-changed", json!({"type":"pane_agent_status_changed","pane_id":"pane","workspace_id":"test-space","agent_status":"idle"}), &runtime).unwrap();
+    assert_eq!(f.prompts.get(), 1);
+    f.tx(|tx| {
+        assert_eq!(
+            tx.reminder(&ns(), "r")?.state,
+            ReminderState::Scheduled {
+                due_at_ms: 960_000,
+                ordinal: 2
+            }
+        );
         Ok(())
     });
 }

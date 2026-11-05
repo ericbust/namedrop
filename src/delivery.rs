@@ -309,6 +309,8 @@ where
     C: Clock,
     I: IdGenerator,
 {
+    #[cfg(test)]
+    crate::work_counters::drain();
     let first_discovery = discover(runtime)?;
     let namespace = first_discovery.namespace(runtime.session_socket_id);
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;

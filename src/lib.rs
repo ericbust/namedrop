@@ -244,3 +244,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod work_counters;

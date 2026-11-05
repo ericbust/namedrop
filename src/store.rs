@@ -239,6 +239,10 @@ impl StateStore {
             TransactionBehavior::Immediate
         };
         let transaction = self.connection.transaction_with_behavior(behavior)?;
+        #[cfg(test)]
+        if !self.read_only {
+            crate::work_counters::write_begin();
+        }
         let mut state_transaction = StateTransaction { transaction };
         let value = operation(&mut state_transaction)?;
         state_transaction.transaction.commit()?;

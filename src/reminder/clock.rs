@@ -171,14 +171,29 @@ fn transient(error: &str) -> bool {
 }
 
 fn cycle(state: &Path) -> Result<(), String> {
-    let ids = ProcessIds::default();
+    cycle_with(state, &SystemClock, &ProcessIds::default(), |ns| {
+        ProcessHerdr::default().with_socket(Some(ns.session_socket_id.clone()))
+    })
+}
+
+pub(crate) fn cycle_with<E, C, I>(
+    state: &Path,
+    clock: &C,
+    ids: &I,
+    mut herdr_for: impl FnMut(&crate::StateNamespace) -> E,
+) -> Result<(), String>
+where
+    E: crate::HerdrCommandExecutor,
+    C: Clock,
+    I: crate::IdGenerator,
+{
     let mut store = StateStore::open(state).map_err(|e| e.to_string())?;
     let namespaces = store
         .transaction(|tx| tx.reminder_namespaces())
         .map_err(|e| e.to_string())?;
     for ns in namespaces {
         let socket = &ns.session_socket_id;
-        let herdr = ProcessHerdr::default().with_socket(Some(socket.to_owned()));
+        let herdr = herdr_for(&ns);
         let live = match crate::discover_worktree_for_workspace(&herdr, ns.space_id.as_str()) {
             Ok(live) => live,
             Err(error)
@@ -192,7 +207,7 @@ fn cycle(state: &Path) -> Result<(), String> {
             }
             Err(_) => continue,
         };
-        let now = SystemClock.now_unix_ms();
+        let now = clock.now_unix_ms();
         store
             .transaction(|tx| {
                 tx.maintain_reminder_owners(&ns, &live)?;
@@ -211,10 +226,13 @@ fn cycle(state: &Path) -> Result<(), String> {
             current_pane_id: None,
             session_socket_id: socket,
             herdr: &herdr,
-            clock: &SystemClock,
-            ids: &ids,
+            clock,
+            ids,
         };
-        let _ = crate::drain_mailboxes(&runtime);
+        let result = crate::drain_mailboxes(&runtime);
+        #[cfg(test)]
+        crate::work_counters::drain_result(&result);
+        let _ = result;
     }
     Ok(())
 }
