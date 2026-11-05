@@ -176,6 +176,50 @@ impl StateTransaction<'_> {
         Ok(())
     }
 
+    pub(crate) fn conversation_reminders(
+        &self,
+        ns: &StateNamespace,
+        thread: &ThreadId,
+    ) -> Result<Vec<Reminder>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT r.reminder_id FROM reminders r
+             JOIN collaboration_messages m ON m.session_socket_id=r.session_socket_id
+               AND m.worktree_id=r.worktree_id AND m.message_id=json_extract(r.spec_json,'$.in_reply_to')
+             WHERE r.session_socket_id=?1 AND r.worktree_id=?2 AND m.thread_id=?3
+               AND r.state IN ('scheduled','awaiting_delivery')
+             ORDER BY r.due_at_ms,r.reminder_id",
+        )?;
+        let ids = statement
+            .query_map(
+                params![ns.session_socket_id, ns.space_id.as_str(), thread.as_str()],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids.iter().map(|id| self.reminder(ns, id)).collect()
+    }
+
+    pub(crate) fn cancel_conversation_reminder(
+        &mut self,
+        ns: &StateNamespace,
+        thread: &ThreadId,
+        id: &str,
+        now: u64,
+    ) -> Result<Option<Value>, StoreError> {
+        let scoped: bool = self.transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reminders r
+             JOIN collaboration_messages m ON m.session_socket_id=r.session_socket_id
+               AND m.worktree_id=r.worktree_id AND m.message_id=json_extract(r.spec_json,'$.in_reply_to')
+             WHERE r.session_socket_id=?1 AND r.worktree_id=?2 AND m.thread_id=?3 AND r.reminder_id=?4)",
+            params![ns.session_socket_id, ns.space_id.as_str(), thread.as_str(), id],
+            |row| row.get(0),
+        )?;
+        if !scoped {
+            return Ok(None);
+        }
+        let reminder = self.reminder(ns, id)?;
+        self.cancel_reminder(ns, &reminder.owner, id, now).map(Some)
+    }
+
     pub(crate) fn cancel_reminder(
         &mut self,
         ns: &StateNamespace,

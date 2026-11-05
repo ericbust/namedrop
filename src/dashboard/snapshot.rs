@@ -658,6 +658,7 @@ pub enum MessageKind {
     Nudge,
     Hook,
     TerminalRelay,
+    Reminder,
 }
 
 impl MessageKind {
@@ -669,6 +670,7 @@ impl MessageKind {
             "mention-hook/v1" => Self::Hook,
             "terminal-result/v1" => Self::Reply,
             "terminal-relay/v1" => Self::TerminalRelay,
+            "reminder/v1" => Self::Reminder,
             _ if is_reply => Self::Reply,
             _ => Self::Mention,
         }

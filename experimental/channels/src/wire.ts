@@ -22,6 +22,7 @@ import type {
   MessageContext,
   MessageKind,
   NotAddressableReason,
+  PendingReminder,
   Repo,
   ReviewClear,
   Route,
@@ -447,6 +448,8 @@ function messageKind(value: unknown): MessageKind {
       return "nudge";
     case "hook":
       return "hook";
+    case "reminder":
+      return "reminder";
     default:
       return "unknown";
   }
@@ -743,6 +746,23 @@ export function parseFullBody(raw: unknown, messageId: string): SafeText {
 }
 export function parseSessionToken(raw: unknown): string {
   return identity(record(raw).csrf_token);
+}
+export function parseReminders(raw: unknown): readonly PendingReminder[] {
+  const rows = array(record(raw).reminders).map((raw): PendingReminder => {
+    const item = record(raw);
+    return {
+      id: identity(item.reminder_id),
+      owner: addressId(item.owner),
+      body: safeText(item.body),
+      dueAt: item.due_at_ms === null ? null : timestamp(item.due_at_ms),
+      repeatsLeft: integer(item.repeats_left),
+      repeatUntil:
+        item.repeat_until_ms === null ? null : timestamp(item.repeat_until_ms),
+    };
+  });
+  if (new Set(rows.map((row) => row.id)).size !== rows.length)
+    throw new Error("Duplicate reminder");
+  return rows;
 }
 function field(answer: unknown, name: string): unknown {
   return typeof answer === "object" && answer !== null && !Array.isArray(answer)

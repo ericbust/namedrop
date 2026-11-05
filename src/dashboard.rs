@@ -5,6 +5,7 @@ mod coordination_review;
 mod http;
 mod hub;
 mod observer_guard;
+mod reminders;
 mod server_files;
 mod skills;
 pub mod snapshot;

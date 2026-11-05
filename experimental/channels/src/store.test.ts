@@ -24,6 +24,7 @@ import {
   peekWho,
   reduce,
   participant as resolve,
+  roomOf,
   routeEvent,
   runsByMessage,
   sortedChannels,
@@ -3611,4 +3612,39 @@ test("PeekWho follows subagents in fresh frames and drops them when the member d
     frame: { ...frame.frame, participants: [] },
   });
   assert.deepEqual(peekWho(state.channels, target)?.subagents, []);
+});
+
+test("reminder rows do not become the latest reply or count as their owner's response", () => {
+  const value = snapshot();
+  value.frame.messages = [
+    row("request", 1000, {
+      author: "agent-1",
+      to: ["agent-2"],
+      thread: "conversation",
+    }),
+    row("answer", 2000, {
+      author: "agent-2",
+      kind: "reply",
+      thread: "conversation",
+      inReplyTo: "request",
+    }),
+    row("wake", 3000, {
+      author: "agent-1",
+      kind: "reminder",
+      thread: "conversation",
+      inReplyTo: "request",
+    }),
+  ];
+  const channel = activeChannel(apply(initialState(), value));
+  const group = threadGroups(channel).get("conversation");
+  assert.ok(group);
+  const room = roomOf(group, channel.members);
+  assert.ok(room);
+  assert.equal(room.wrote.get(group.parents[0]?.author ?? "human"), 1000);
+  const request = timelineView(channel).find(
+    (item) => item.kind === "message" && item.message.id === "request",
+  );
+  assert.ok(request?.kind === "message");
+  assert.equal(request.latestReply?.id, "answer");
+  assert.equal(request.replyCount, 1);
 });

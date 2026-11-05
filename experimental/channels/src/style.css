@@ -1631,6 +1631,90 @@ button.member:not(.more):hover {
   display: inline;
   line-height: inherit;
 }
+.reminder-clock {
+  justify-self: center;
+}
+.system[data-kind="reminder"] .body {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.conversation-reminders {
+  position: relative;
+  flex-shrink: 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+.conversation-reminders > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 32px;
+  cursor: pointer;
+  list-style: none;
+}
+.conversation-reminders > summary::-webkit-details-marker {
+  display: none;
+}
+.conversation-reminders > summary:hover {
+  color: var(--text);
+}
+.reminder-details {
+  position: absolute;
+  z-index: 10;
+  right: 0;
+  top: 100%;
+  width: min(360px, 75vw);
+  max-height: min(400px, 60vh);
+  overflow: auto;
+  padding: var(--space-3);
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+}
+.reminder-details h3 {
+  margin: 0 0 var(--space-2);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+.reminder-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.reminder-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+}
+.reminder-copy {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.reminder-copy strong {
+  color: var(--text);
+}
+.reminder-body {
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.thread-head {
+  position: relative;
+}
+.thread-head .conversation-reminders {
+  position: static;
+}
+.thread-head .reminder-details {
+  right: var(--space-3);
+  width: min(360px, calc(100% - var(--space-6)));
+}
 .system p > strong {
   font-weight: 600;
   margin-right: 6px;

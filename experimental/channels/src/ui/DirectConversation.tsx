@@ -17,6 +17,7 @@ import {
   ThreadConversationContext,
 } from "./MessageActions.tsx";
 import { PeekControl } from "./PeekContext.tsx";
+import { Reminders } from "./Reminders.tsx";
 import type { DirectMessages } from "./useDirectMessages.ts";
 
 export function DirectConversation({
@@ -112,6 +113,16 @@ export function DirectConversation({
             {peer.presence}
           </span>
         </div>
+        {peer.threadId !== null && (
+          <Reminders
+            target={{
+              kind: "direct",
+              key: peer.spaceKey,
+              peer: peer.addressId,
+            }}
+            directory={directory}
+          />
+        )}
         {!peer.closed && (
           <PeekControl
             target={peekTarget(peer.spaceKey, member)}
@@ -178,7 +189,9 @@ export function DirectConversation({
                 directory={directory}
                 recipients={message.legs.map((leg) => leg.to)}
                 grouped={
-                  index > 0 && messages[index - 1]?.author === message.author
+                  index > 0 &&
+                  messages[index - 1]?.author === message.author &&
+                  messages[index - 1]?.kind !== "reminder"
                 }
                 showRecipients={false}
               />

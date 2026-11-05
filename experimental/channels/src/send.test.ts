@@ -436,3 +436,34 @@ test("fullBody: reads one message with the session token, refreshes a stale toke
     "reading a body never posts",
   );
 });
+
+test("reminder Cancel sends the scoped id with CSRF and retries an expired token", async () => {
+  let token = 0;
+  const server = fakeServer(({ url, init }) => {
+    if (url === "/api/session")
+      return json(200, { csrf_token: `token-${++token}` });
+    return new Headers(init?.headers).get("X-Namedrop-Csrf") === "token-1"
+      ? json(403, {})
+      : json(200, { state: "cancelled" });
+  });
+  const poster = createPoster(server.fetcher);
+  const result = await poster.cancelReminder(
+    { kind: "thread", key, thread: "thread:one" },
+    "reminder:one",
+    press,
+  );
+  assert.deepEqual(result, { kind: "done" });
+  assert.deepEqual(
+    posts(server.seen).map(({ url, csrf }) => ({ url, csrf })),
+    [
+      {
+        url: `/w/${key}/threads/thread%3Aone/reminders/reminder%3Aone/cancel`,
+        csrf: "token-1",
+      },
+      {
+        url: `/w/${key}/threads/thread%3Aone/reminders/reminder%3Aone/cancel`,
+        csrf: "token-2",
+      },
+    ],
+  );
+});
