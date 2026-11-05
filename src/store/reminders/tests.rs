@@ -326,75 +326,138 @@ fn reminder_fire_is_atomic_and_survives_restart_without_duplicate() {
 #[test]
 fn reminder_fresh_reply_preserves_original_thread_after_disposition() {
     for grammar in ["collab/v1", "mention-hook/v1"] {
-        let f = Fixture::new();
-        let original = f.original(grammar);
-        f.settle_original();
-        f.set("r", Some(original.clone()), crate::reminder::Repeat::Once);
-        f.fire("r");
-        let wake = f.lease("fresh-attempt", 60_001);
-        let reply = f.tx(|tx| {
+        assert_fresh_reminder_reply(grammar, false);
+    }
+}
+
+#[test]
+fn reminder_nested_ordinary_reply_preserves_original_origin() {
+    assert_fresh_reminder_reply("collab/v1", true);
+}
+
+#[test]
+fn reminder_nested_typed_mention_preserves_original_origin() {
+    assert_fresh_reminder_reply("mention-hook/v1", true);
+}
+
+fn assert_fresh_reminder_reply(grammar: &str, nested: bool) {
+    let f = Fixture::new();
+    let original = f.original(grammar);
+    f.settle_original();
+    f.set("r", Some(original.clone()), crate::reminder::Repeat::Once);
+    f.fire("r");
+    if nested {
+        let first = f.lease("first-wake", 60_001);
+        let message = f.tx(|tx| {
             let envelope = tx.delivery_envelope(
                 &ns(),
-                &wake.attempt_id,
+                &first.attempt_id,
                 crate::IntegrationToolInvocation::new("/test/namedrop", Default::default()),
             )?;
-            assert_ne!(envelope.control.message_id, original);
-            assert_eq!(envelope.control.thread_id, ThreadId::new("original-thread"));
-            assert_eq!(
-                envelope.control.reply_mode,
-                crate::DeliveryReplyMode::for_message_grammar(grammar)
-            );
-            assert_eq!(
-                tx.thread_control_state(&ns(), &envelope.control.thread_id)?
-                    .reply_allowance,
-                10
-            );
-            let mut reply = envelope
+            let set = envelope
                 .control
                 .tool
                 .operations
                 .iter()
-                .find(|o| o.token == "reply")
-                .unwrap()
-                .input
-                .clone();
-            assert_eq!(reply["in_reply_to"], json!(original));
-            assert_eq!(reply["attempt_id"], "fresh-attempt");
-            reply["source"] = json!("@author checked the job");
+                .find(|op| op.token == "reminder.set")
+                .unwrap();
+            assert_eq!(set.input["in_reply_to"], json!(envelope.control.message_id));
             tx.transition_delivery_attempt(
                 &ns(),
-                &wake.attempt_id,
+                &first.attempt_id,
                 DeliveryState::Submitted,
                 &by(60_002),
             )?;
             tx.ensure_delivery_attempt_acknowledged(
                 &ns(),
-                &wake.attempt_id,
+                &first.attempt_id,
                 &owner().session,
                 &by(60_002),
             )?;
-            Ok(reply)
+            tx.record_no_reply_disposition(
+                &ns(),
+                &first.attempt_id,
+                "first-wake-disposition",
+                &owner().session,
+                &by(60_003),
+            )?;
+            Ok(serde_json::from_value(set.input["in_reply_to"].clone()).unwrap())
         });
-        let runtime = crate::LifecycleRuntime {
-            state_directory: &f.state,
-            home_directory: None,
-            agent_config: Default::default(),
-            cwd: Path::new("/test-repo"),
-            workspace_id: Some("test-space"),
-            current_pane_id: Some("pane"),
-            session_socket_id: "test-socket",
-            herdr: &f,
-            clock: &crate::SystemClock,
-            ids: &ProcessIds::default(),
-        };
-        let answer = crate::execute_message_operation("reply", reply, &runtime).unwrap();
-        assert_eq!(answer["thread_id"], "original-thread");
-        f.tx(|tx|{
-            assert_eq!(tx.thread_control_state(&ns(),&ThreadId::new("original-thread"))?.reply_allowance,9);
-            let count:i64=tx.transaction.query_row("SELECT count(*) FROM delivery_dispositions WHERE attempt_id='original-attempt' AND disposition_id='original-disposition'",[],|r|r.get(0))?;
-            assert_eq!(count,1);assert!(tx.delivery_disposition_exists(&ns(),&wake.attempt_id)?);Ok(())
-        });
+        f.set("nested", Some(message), crate::reminder::Repeat::Once);
+        f.fire("nested");
     }
+    let wake = f.lease("fresh-attempt", 60_004);
+    let reply = f.tx(|tx| {
+        let envelope = tx.delivery_envelope(
+            &ns(),
+            &wake.attempt_id,
+            crate::IntegrationToolInvocation::new("/test/namedrop", Default::default()),
+        )?;
+        assert_ne!(envelope.control.message_id, original);
+        assert_eq!(envelope.control.thread_id, ThreadId::new("original-thread"));
+        assert_eq!(
+            envelope.control.reply_mode,
+            crate::DeliveryReplyMode::for_message_grammar(grammar)
+        );
+        assert_eq!(
+            tx.thread_control_state(&ns(), &envelope.control.thread_id)?
+                .reply_allowance,
+            10
+        );
+        let mut reply = envelope
+            .control
+            .tool
+            .operations
+            .iter()
+            .find(|o| o.token == "reply")
+            .unwrap()
+            .input
+            .clone();
+        assert_eq!(reply["in_reply_to"], json!(original));
+        assert_eq!(reply["attempt_id"], "fresh-attempt");
+        assert_eq!(
+            reply["source"],
+            json!(format!("@author {}", crate::REPLY_BODY_PLACEHOLDER))
+        );
+        reply["source"] = json!("@author checked the job");
+        tx.transition_delivery_attempt(
+            &ns(),
+            &wake.attempt_id,
+            DeliveryState::Submitted,
+            &by(60_002),
+        )?;
+        tx.ensure_delivery_attempt_acknowledged(
+            &ns(),
+            &wake.attempt_id,
+            &owner().session,
+            &by(60_002),
+        )?;
+        Ok(reply)
+    });
+    let runtime = crate::LifecycleRuntime {
+        state_directory: &f.state,
+        home_directory: None,
+        agent_config: Default::default(),
+        cwd: Path::new("/test-repo"),
+        workspace_id: Some("test-space"),
+        current_pane_id: Some("pane"),
+        session_socket_id: "test-socket",
+        herdr: &f,
+        clock: &crate::SystemClock,
+        ids: &ProcessIds::default(),
+    };
+    let answer = crate::execute_message_operation("reply", reply, &runtime).unwrap();
+    assert_eq!(answer["thread_id"], "original-thread");
+    f.tx(|tx|{
+        assert_eq!(tx.thread_control_state(&ns(),&ThreadId::new("original-thread"))?.reply_allowance,9);
+        let count:i64=tx.transaction.query_row("SELECT count(*) FROM delivery_dispositions WHERE attempt_id='original-attempt' AND disposition_id='original-disposition'",[],|r|r.get(0))?;
+        assert_eq!(count,1);
+        if nested {
+            let count: i64 = tx.transaction.query_row("SELECT count(*) FROM delivery_dispositions WHERE attempt_id='first-wake' AND disposition_id='first-wake-disposition'", [], |r| r.get(0))?;
+            assert_eq!(count, 1);
+        }
+        assert!(tx.delivery_disposition_exists(&ns(),&wake.attempt_id)?);Ok(())
+    });
 }
 
 #[test]
@@ -808,6 +871,155 @@ fn reminder_fixed_delay_starts_after_a_slow_successful_prompt() {
                 ordinal: 2
             }
         );
+        Ok(())
+    });
+}
+
+#[test]
+fn reminder_nested_pane_wake_stays_report_to_human() {
+    let f = Fixture::new();
+    f.set("first", None, crate::reminder::Repeat::Once);
+    f.fire("first");
+    let first = f.lease("first-wake", 60_001);
+    let target = f.tx(|tx| {
+        let envelope = tx.delivery_envelope(
+            &ns(),
+            &first.attempt_id,
+            crate::IntegrationToolInvocation::new("/test/namedrop", Default::default()),
+        )?;
+        let set = envelope
+            .control
+            .tool
+            .operations
+            .iter()
+            .find(|op| op.token == "reminder.set")
+            .expect("pane reminder wake must offer reminder.set");
+        assert_eq!(set.input["in_reply_to"], json!(envelope.control.message_id));
+        Ok(serde_json::from_value(set.input["in_reply_to"].clone()).unwrap())
+    });
+    f.set("nested", Some(target), crate::reminder::Repeat::Once);
+    f.tx(|tx| {
+        tx.transition_delivery_attempt(
+            &ns(),
+            &first.attempt_id,
+            DeliveryState::Submitted,
+            &by(60_002),
+        )?;
+        tx.ensure_delivery_attempt_acknowledged(
+            &ns(),
+            &first.attempt_id,
+            &owner().session,
+            &by(60_002),
+        )?;
+        tx.record_no_reply_disposition(
+            &ns(),
+            &first.attempt_id,
+            "pane-done",
+            &owner().session,
+            &by(60_003),
+        )
+    });
+    f.fire("nested");
+    let nested = f.lease("nested-wake", 60_004);
+    f.tx(|tx| {
+        let envelope = tx.delivery_envelope(
+            &ns(),
+            &nested.attempt_id,
+            crate::IntegrationToolInvocation::new("/test/namedrop", Default::default()),
+        )?;
+        assert_eq!(
+            envelope.control.reply_mode,
+            crate::DeliveryReplyMode::ReportToHuman
+        );
+        assert!(
+            envelope
+                .control
+                .tool
+                .operations
+                .iter()
+                .any(|op| op.token == "complete.no-reply")
+        );
+        assert!(
+            !envelope
+                .control
+                .tool
+                .operations
+                .iter()
+                .any(|op| op.token == "reply")
+        );
+        assert!(tx.delivery_disposition_exists(&ns(), &first.attempt_id)?);
+        Ok(())
+    });
+}
+
+#[test]
+fn reminder_nested_origin_authenticates_received_wake_before_normalizing() {
+    let f = Fixture::new();
+    let original = f.original("collab/v1");
+    f.settle_original();
+    f.set("first", Some(original), crate::reminder::Repeat::Once);
+    f.fire("first");
+    let message = MessageId::new("reminder-message:first:60000");
+    f.tx(|tx| {
+        let error = tx
+            .set_reminder(
+                &ns(),
+                "unreceived".into(),
+                owner(),
+                f.spec(Some(message.clone()), crate::reminder::Repeat::Once),
+                "unreceived",
+                "unreceived",
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("delivered to this exact Agent Session"),
+            "{error}"
+        );
+        Ok(())
+    });
+    f.lease("first-wake", 60_001);
+    f.tx(|tx| {
+        let error = tx
+            .set_reminder(
+                &ns(),
+                "other-session".into(),
+                ReminderOwner {
+                    session: AgentSessionId::new("other"),
+                    ..owner()
+                },
+                f.spec(Some(message), crate::reminder::Repeat::Once),
+                "other-session",
+                "other-session",
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("delivered to this exact Agent Session"),
+            "{error}"
+        );
+        Ok(())
+    });
+}
+
+#[test]
+fn reminder_refuses_unsupported_system_only_origin() {
+    let f = Fixture::new();
+    let original = f.original("coordination-report/v1");
+    f.lease("system-origin", 2);
+    f.tx(|tx| {
+        let result = tx.set_reminder(
+            &ns(),
+            "unsupported".into(),
+            owner(),
+            f.spec(Some(original), crate::reminder::Repeat::Once),
+            "unsupported",
+            "unsupported",
+        );
+        let error = result.expect_err("system-only origin must not grant a bound reply");
+        assert!(error.to_string().contains("system"), "{error}");
         Ok(())
     });
 }

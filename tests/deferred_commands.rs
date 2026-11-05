@@ -120,6 +120,9 @@ root = Path(__file__).parent
 args = sys.argv[1:]
 with (root / 'herdr-calls').open('a') as f: f.write(json.dumps(args) + '\n')
 if args[:2] == ['--socket', str(root / 'herdr.sock')]: args = args[2:]
+if args[:2] == ['worktree','list'] and (root / 'discovery-error').exists():
+    print((root / 'discovery-error').read_text(), file=sys.stderr)
+    sys.exit(1)
 if args[:2] == ['worktree','list']: print(json.dumps({'result':{'worktrees':[{'path':'/repo','open_workspace_id':'workspace-1'}]}}))
 elif args[:2] == ['workspace','list']: print(json.dumps({'result':{'workspaces':[{'workspace_id':'workspace-1'}]}}))
 elif args[:2] == ['pane','list']: print((root / 'panes.json').read_text())
@@ -1158,4 +1161,138 @@ fn reminder_empty_exit_set_races_and_common_command_recovery() {
     wait_for(|| namedrop::reminder::clock_running(f.directory.path()));
     f.cancel_reminder(&pending["reminder_id"]);
     wait_for(|| !namedrop::reminder::clock_running(f.directory.path()));
+}
+
+#[test]
+fn reminder_clock_fails_deleted_workspace_and_preserves_ambiguous_transport() {
+    assert_reminder_clock_discovery_failure("workspace_not_found");
+}
+
+#[test]
+fn reminder_clock_keeps_transient_discovery_pending() {
+    assert_reminder_clock_discovery_failure("transport_unavailable");
+}
+
+fn assert_reminder_clock_discovery_failure(error: &str) {
+    let f = Fixture::new();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(f.directory.path().join("reminder-clock.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    f.reminder("scheduled", "1h");
+    let queued = f.reminder("queued", "1m");
+    f.reminder("held", "1m");
+    f.reminder("submitted", "1m");
+    let connection =
+        rusqlite::Connection::open(f.directory.path().join("namedrop.sqlite3")).unwrap();
+    let id = queued["reminder_id"].as_str().unwrap();
+    let due = SystemClock.now_unix_ms() - 1;
+    connection.execute("UPDATE reminders SET due_at_ms=?1,state_json=json_set(state_json,'$.due_at_ms',?1) WHERE request_id!='scheduled'",[due as i64]).unwrap();
+    let mut busy = panes("session-author");
+    busy["result"]["panes"][0]["agent_status"] = json!("working");
+    fs::write(f.directory.path().join("panes.json"), busy.to_string()).unwrap();
+    lock.unlock().unwrap();
+    let clock = f.clock();
+    wait_for(|| {
+        connection
+            .query_row(
+                "SELECT state FROM reminders WHERE reminder_id=?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+            == "awaiting_delivery"
+    });
+    wait_for(|| {
+        connection
+            .query_row(
+                "SELECT count(*) FROM reminders WHERE state='awaiting_delivery'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 3
+    });
+    connection.execute_batch("UPDATE mailbox_deliveries SET state='held' WHERE delivery_id IN (SELECT f.delivery_id FROM reminder_fires f JOIN reminders r USING(session_socket_id,worktree_id,reminder_id) WHERE r.request_id='held'); UPDATE mailbox_deliveries SET state='submitted' WHERE delivery_id IN (SELECT f.delivery_id FROM reminder_fires f JOIN reminders r USING(session_socket_id,worktree_id,reminder_id) WHERE r.request_id='submitted');").unwrap();
+    let calls_before = fs::read_to_string(f.directory.path().join("herdr-calls"))
+        .unwrap()
+        .lines()
+        .count();
+    fs::write(f.directory.path().join("discovery-error"), json!({"error":{"code":error,"message":"workspace_not_found text alone is not authoritative"}}).to_string()).unwrap();
+    fs::write(f.directory.path().join("reminder-clock.wake"), []).unwrap();
+    wait_for(|| {
+        connection
+            .query_row(
+                "SELECT count(*) FROM reminders WHERE state='failed'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 4
+            || fs::read_to_string(f.directory.path().join("herdr-calls"))
+                .unwrap()
+                .lines()
+                .count()
+                >= calls_before + 2
+    });
+    drop(clock);
+    let mut statement = connection
+        .prepare("SELECT state,state_json FROM reminders ORDER BY request_id")
+        .unwrap();
+    let states = statement
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    if error == "workspace_not_found" {
+        assert!(
+            states.iter().all(|(state, _)| state == "failed"),
+            "deleted workspace left pending reminders: {states:?}"
+        );
+        assert!(
+            states
+                .iter()
+                .all(|(_, state)| state.contains("workspace") && state.contains("gone")),
+            "missing failure explanation: {states:?}"
+        );
+    } else {
+        assert_eq!(
+            states
+                .iter()
+                .map(|(state, _)| state.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "awaiting_delivery",
+                "awaiting_delivery",
+                "scheduled",
+                "awaiting_delivery"
+            ]
+        );
+    }
+    assert_eq!(
+        connection
+            .query_row("SELECT d.state FROM mailbox_deliveries d JOIN reminder_fires f USING(session_socket_id,worktree_id,delivery_id) JOIN reminders r USING(session_socket_id,worktree_id,reminder_id) WHERE r.request_id='queued'", [], |r| r
+                .get::<_, String>(0))
+            .unwrap(),
+        if error == "workspace_not_found" {
+            "failed"
+        } else {
+            "queued"
+        }
+    );
+    for state in ["held", "submitted"] {
+        let actual: String = connection.query_row("SELECT d.state FROM mailbox_deliveries d JOIN reminder_fires f USING(session_socket_id,worktree_id,delivery_id) JOIN reminders r USING(session_socket_id,worktree_id,reminder_id) WHERE r.request_id=?1", [state], |r| r.get(0)).unwrap();
+        assert_eq!(actual, state);
+    }
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM delivery_attempts", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
 }

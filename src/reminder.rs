@@ -394,9 +394,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reminder_rfc3339_rejects_signed_offset_components() {
+        for offset in [
+            "+-1:00", "+00:-1", "++1:00", "+00:+1", "--1:00", "-00:-1", "-+1:00", "-00:+1",
+        ] {
+            let value = format!("2099-01-01T00:00:00{offset}");
+            assert!(
+                timestamp_ms(&value).is_err(),
+                "accepted malformed RFC3339 offset {value}"
+            );
+        }
+    }
+
+    #[test]
     fn reminder_schedule_limits_and_rfc3339_offsets() {
         let now = timestamp_ms("2026-11-05T12:00:00Z").unwrap();
         assert_eq!(timestamp_ms("2026-11-05T07:00:00-05:00").unwrap(), now);
+        assert_eq!(timestamp_ms("2026-11-05T17:30:00+05:30").unwrap(), now);
         assert_eq!(
             timestamp_ms("2026-11-05T12:00:00.123456Z").unwrap(),
             now + 123
