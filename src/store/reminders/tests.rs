@@ -1294,8 +1294,12 @@ fn reminder_terminal_mailbox_cleanup_remains_hook_visible() {
     f.set("queued", None, crate::reminder::Repeat::Once);
     f.fire("queued");
     f.tx(|tx| {
-        tx.transaction
-            .execute("UPDATE mailbox_deliveries SET state='cancelled'", [])?;
+        let ReminderState::AwaitingDelivery { delivery_id, .. } =
+            tx.reminder(&ns(), "queued")?.state
+        else {
+            panic!("queued reminder must await delivery");
+        };
+        assert!(tx.cancel_unsent_delivery(&ns(), &delivery_id, &by(60_001))?);
         Ok(())
     });
     assert_eq!(
