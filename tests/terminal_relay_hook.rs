@@ -10,8 +10,11 @@ use namedrop::{
 use serde_json::{Value, json};
 use std::{
     fs,
-    io::Write,
-    os::unix::fs::PermissionsExt,
+    io::{Read, Write},
+    os::{
+        fd::AsRawFd,
+        unix::{fs::PermissionsExt, net::UnixStream, process::CommandExt},
+    },
     path::PathBuf,
     process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
@@ -289,13 +292,27 @@ impl Fixture {
         let previous_boundary = self.boundary();
         let worker_pid_file = self.0.join("worker-pid");
         let _ = fs::remove_file(&worker_pid_file);
+        let (mut worker_done, worker_lifetime) = UnixStream::pair().unwrap();
+        let worker_fd = worker_lifetime.as_raw_fd();
         let payload = format!(
             "{{\"hook_event_name\":\"Stop\",\"session_id\":\"session\",\"{identity_key}\":{},\"last_assistant_message\":{}}}",
             serde_json::to_string(identity).unwrap(),
             serde_json::to_string(text).unwrap(),
         );
-        let mut child = self
-            .command(env!("CARGO_BIN_EXE_namedrop"))
+        let mut command = self.command(env!("CARGO_BIN_EXE_namedrop"));
+        // Inherit this descriptor through Stop and its detached worker; EOF waits for both.
+        unsafe {
+            command.pre_exec(move || {
+                let flags = libc::fcntl(worker_fd, libc::F_GETFD);
+                if flags == -1
+                    || libc::fcntl(worker_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command
             .env("HERDR_SOCKET_PATH", "test-socket")
             .env("STOP_TEST_WORKER_PID", &worker_pid_file)
             .env("HERDR_BIN_PATH", self.0.join("herdr"))
@@ -306,6 +323,7 @@ impl Fixture {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
+        drop(worker_lifetime);
         child
             .stdin
             .take()
@@ -321,32 +339,39 @@ impl Fixture {
         assert!(output.status.success());
         assert!(output.stdout.is_empty());
         assert!(output.stderr.is_empty());
+        let mut completion = libc::pollfd {
+            fd: worker_done.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(
+            unsafe { libc::poll(&mut completion, 1, 5000) },
+            1,
+            "Stop completion wait failed or timed out"
+        );
+        assert_ne!(
+            completion.revents & (libc::POLLIN | libc::POLLHUP),
+            0,
+            "unexpected Stop completion events: {}",
+            completion.revents
+        );
+        assert_eq!(
+            worker_done
+                .read(&mut [0])
+                .expect("Stop completion read failed"),
+            0,
+            "unexpected Stop completion bytes"
+        );
         if self.boundary() == previous_boundary {
             assert!(
                 !worker_pid_file.exists(),
                 "duplicate Stop launched a worker"
             );
-            return;
-        }
-        for _ in 0..200 {
-            if worker_pid_file.exists() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(5));
-        }
-        let pid = fs::read_to_string(worker_pid_file).expect("captured Stop launched its worker");
-        {
-            for _ in 0..200 {
-                let stat = fs::read_to_string(format!("/proc/{pid}/stat"));
-                if stat
-                    .as_ref()
-                    .map_or(true, |value| value.split_whitespace().nth(2) == Some("Z"))
-                {
-                    return;
-                }
-                thread::sleep(Duration::from_millis(5));
-            }
-            panic!("Stop worker did not exit");
+        } else {
+            assert!(
+                worker_pid_file.exists(),
+                "captured Stop launched its worker"
+            );
         }
     }
 
