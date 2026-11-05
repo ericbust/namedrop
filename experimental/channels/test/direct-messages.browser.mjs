@@ -291,6 +291,12 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
     /@claude · #alpha · Pane a · idle/,
   );
   assert.match(await b.getAttribute("aria-label"), /@claude · #beta/);
+  await a.click();
+  await page.getByRole("button", { name: "Peek", exact: true }).click();
+  await page.locator(".peek").waitFor();
+  assert.equal(await page.locator(".peek-subagents").count(), 0);
+  await page.getByRole("button", { name: "Close screen", exact: true }).click();
+  await page.goBack();
   for (const client of clients) {
     for (const frame of frames)
       client.write(`event: space\ndata: ${JSON.stringify(frame)}\n\n`);
@@ -481,6 +487,36 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
   );
   await page.getByRole("button", { name: "Peek", exact: true }).click();
   await page.waitForFunction(() => document.querySelector(".peek"));
+  const alpha = frames[0];
+  const participant = {
+    ...alpha.frame.participants[0],
+    address_id: "a",
+    alias: "@claude",
+    activity: "working",
+    subagents: [
+      { id: "one", kind: null, description: null, started_at_ms: 42 },
+      { id: "two", kind: null, description: null, started_at_ms: 43 },
+    ],
+  };
+  for (const participants of [
+    [participant],
+    [{ ...participant, subagents: [] }],
+    [participant],
+    [],
+  ]) {
+    alpha.frame.participants = participants;
+    for (const client of clients)
+      client.write(`event: space\ndata: ${JSON.stringify(alpha)}\n\n`);
+    if (participants[0]?.subagents.length)
+      await page
+        .locator(".peek-subagents")
+        .getByText("2 subagents", { exact: true })
+        .waitFor();
+    else
+      await page.waitForFunction(
+        () => !document.querySelector(".peek-subagents"),
+      );
+  }
   await page
     .getByRole("button", { name: "Text snapshot", exact: true })
     .click();

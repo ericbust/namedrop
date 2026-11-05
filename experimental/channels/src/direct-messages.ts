@@ -50,6 +50,7 @@ export function directMember(peer: DirectPeer): Member {
     recentlyClosed: peer.closed,
     role: null,
     paneLabel: peer.paneLabel,
+    subagents: [],
   };
 }
 export function directLabel(peer: DirectPeer): string {

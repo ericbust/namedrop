@@ -69,6 +69,9 @@ test("directory filters aliases, workspace, pane and runtime and orders by priva
   assert.deepEqual(directPeers([a, b], "claude beta builder"), [b]);
   assert.deepEqual(directPeers([a], "codex"), []);
 });
+test("DM directory members have no subagent facts without a channel snapshot", () => {
+  assert.deepEqual(directMember(peer()).subagents, []);
+});
 test("DM body mentions and channel names never change the fixed recipient or skill target", () => {
   const a = peer();
   const rule = { kind: "direct", alias: a.alias } satisfies Parameters<

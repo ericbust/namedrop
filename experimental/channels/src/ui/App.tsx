@@ -770,6 +770,7 @@ export function App() {
             alias: dmPeer.alias,
             kind: peeking.kind,
             activity: dmPeer.presence === "gone" ? "offline" : dmPeer.presence,
+            subagents: peekWho(state.channels, peeking)?.subagents ?? [],
             channel: {
               label: `#${dmPeer.workspaceLabel.replace(/^#/, "")}`,
               suffix: null,
