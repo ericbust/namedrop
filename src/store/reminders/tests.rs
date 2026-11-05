@@ -41,11 +41,15 @@ impl Fixture {
             discovery_error: Cell::new(None),
             prompt_failure: Cell::new(None),
         };
-        f.tx(|tx| {
-            tx.activate_worktree(&ns(), &by(0))?;
+        f.initialize(&ns());
+        f
+    }
+    fn initialize(&self, namespace: &StateNamespace) {
+        self.tx(|tx| {
+            tx.activate_worktree(namespace, &by(0))?;
             for name in ["owner", "author"] {
                 tx.create_pane_address(
-                    &ns(),
+                    namespace,
                     &crate::PaneAddressDraft {
                         id: PaneAddressId::new(name),
                         role_id: crate::PaneRoleId::new(name),
@@ -57,14 +61,14 @@ impl Fixture {
                 )?;
             }
             tx.bind_pane(
-                &ns(),
+                namespace,
                 &PaneBindingId::new("binding"),
                 &owner().address,
                 "pane",
                 &by(0),
             )?;
             tx.observe_agent_session(
-                &ns(),
+                namespace,
                 "observation",
                 &owner().address,
                 &owner().session,
@@ -72,7 +76,7 @@ impl Fixture {
                 &by(0),
             )?;
             tx.issue_integration_challenge(
-                &ns(),
+                namespace,
                 "registration",
                 &owner().address,
                 AgentRuntime::Codex,
@@ -80,7 +84,7 @@ impl Fixture {
                 &by(0),
             )?;
             tx.complete_integration_registration(
-                &ns(),
+                namespace,
                 &owner().address,
                 &owner().session,
                 AgentRuntime::Codex,
@@ -89,10 +93,9 @@ impl Fixture {
                 crate::complete_capability_profile(),
                 &by(0),
             )?;
-            tx.complete_reconciliation(&ns())?;
+            tx.complete_reconciliation(namespace)?;
             Ok(())
         });
-        f
     }
     fn tx<T>(&self, f: impl FnOnce(&mut StateTransaction<'_>) -> Result<T, StoreError>) -> T {
         StateStore::open(&self.state)
@@ -1079,9 +1082,10 @@ fn reminder_busy_clock_work_measurement() {
     f.fire("r");
     f.discoveries.set(0);
     let ids = ProcessIds::default();
+    let mut catch_up = crate::reminder::CatchUp::default();
     let startup_scope = crate::work_counters::Scope::start();
     let startup_result =
-        crate::reminder::cycle_with(&f.state, &f, &ids, |_| MeasurementHerdr(&f), true);
+        crate::reminder::cycle_with(&f.state, &f, &ids, |_| MeasurementHerdr(&f), &mut catch_up);
     let startup = startup_scope.finish();
     startup_result.unwrap();
     let startup_discoveries = f.discoveries.replace(0);
@@ -1089,7 +1093,8 @@ fn reminder_busy_clock_work_measurement() {
     let mut errors = 0;
     for second in 1..=300 {
         f.now.set(60_000 + second * 1000);
-        if crate::reminder::cycle_with(&f.state, &f, &ids, |_| MeasurementHerdr(&f), false).is_err()
+        if crate::reminder::cycle_with(&f.state, &f, &ids, |_| MeasurementHerdr(&f), &mut catch_up)
+            .is_err()
         {
             errors += 1;
         }
@@ -1185,7 +1190,7 @@ fn reminder_idle_cycle_is_read_only_under_an_external_writer() {
         &f,
         &ProcessIds::default(),
         |_| MeasurementHerdr(&f),
-        false,
+        &mut crate::reminder::CatchUp::completed(),
     );
     let counts = scope.finish();
     connection.execute_batch("ROLLBACK").unwrap();
@@ -1206,7 +1211,7 @@ fn reminder_future_only_startup_has_no_discovery_write_or_drain() {
         &f,
         &ProcessIds::default(),
         |_| MeasurementHerdr(&f),
-        true,
+        &mut crate::reminder::CatchUp::default(),
     );
     let counts = scope.finish();
     assert!(result.unwrap());
@@ -1239,7 +1244,7 @@ fn reminder_due_cycle_ignores_future_namespaces_and_deduplicates_catchup() {
             visited.push(namespace.clone());
             MeasurementHerdr(&f)
         },
-        true,
+        &mut crate::reminder::CatchUp::default(),
     );
     let counts = scope.finish();
     assert!(result.unwrap());
@@ -1268,7 +1273,7 @@ fn reminder_cancelled_after_plan_does_not_drain() {
             f.tx(|tx| tx.cancel_reminder(&ns(), &owner(), "due", 60_000));
             MeasurementHerdr(&f)
         },
-        false,
+        &mut crate::reminder::CatchUp::completed(),
     );
     let counts = scope.finish();
     assert!(result.unwrap());
@@ -1330,12 +1335,13 @@ fn reminder_startup_catchup_keeps_transient_failure_eligible() {
     f.set("r", None, crate::reminder::Repeat::Once);
     f.fire("r");
     f.discovery_error.set(Some("transport_unavailable"));
+    let mut catch_up = crate::reminder::CatchUp::default();
     let caught_up = crate::reminder::cycle_with(
         &f.state,
         &f,
         &ProcessIds::default(),
         |_| MeasurementHerdr(&f),
-        true,
+        &mut catch_up,
     )
     .unwrap();
     assert!(!caught_up);
@@ -1353,7 +1359,7 @@ fn reminder_startup_catchup_keeps_transient_failure_eligible() {
         &f,
         &ProcessIds::default(),
         |_| MeasurementHerdr(&f),
-        true,
+        &mut catch_up,
     );
     let counts = scope.finish();
     assert!(result.unwrap());
@@ -1422,6 +1428,138 @@ fn reminder_dispatch_failure_finalizes_in_the_same_drain_but_ambiguity_waits() {
                     ReminderState::AwaitingDelivery { .. }
                 ));
             }
+            Ok(())
+        });
+    }
+}
+
+struct ScopedHerdr<'a> {
+    fixture: &'a Fixture,
+    namespace: StateNamespace,
+    error: Option<&'static str>,
+}
+impl HerdrCommandExecutor for ScopedHerdr<'_> {
+    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+        if args.starts_with(&["worktree", "list"])
+            && let Some(code) = self.error
+        {
+            return Err(json!({"error":{"code":code}}).to_string());
+        }
+        self.fixture.execute(args).map(|output| HerdrCommandOutput {
+            stdout: output
+                .stdout
+                .replace("test-space", self.namespace.space_id.as_str()),
+        })
+    }
+}
+
+#[test]
+fn reminder_startup_retry_does_not_redrain_successful_busy_namespaces() {
+    for error in ["transport_unavailable", "workspace_not_found"] {
+        let f = Fixture::new();
+        f.busy.set(true);
+        f.set("busy", None, crate::reminder::Repeat::Once);
+        f.fire("busy");
+        let unavailable = StateNamespace::for_space("test-socket", "unavailable");
+        f.initialize(&unavailable);
+        let herdr = ScopedHerdr {
+            fixture: &f,
+            namespace: unavailable.clone(),
+            error: None,
+        };
+        let live = crate::discover_worktree_for_workspace(&herdr, "unavailable").unwrap();
+        f.tx(|tx| {
+            tx.set_reminder(
+                &unavailable,
+                "retry".into(),
+                owner(),
+                f.spec(None, crate::reminder::Repeat::Once),
+                "retry",
+                "retry",
+            )?;
+            tx.enqueue_reminder(&unavailable, "retry", &live, 60_000)
+        });
+        let mut catch_up = crate::reminder::CatchUp::default();
+        let mut visited = Vec::new();
+        let first = crate::reminder::cycle_with(
+            &f.state,
+            &f,
+            &ProcessIds::default(),
+            |namespace| {
+                visited.push(namespace.clone());
+                ScopedHerdr {
+                    fixture: &f,
+                    namespace: namespace.clone(),
+                    error: (namespace == &unavailable).then_some(error),
+                }
+            },
+            &mut catch_up,
+        )
+        .unwrap();
+        assert_eq!(first, error == "workspace_not_found");
+        assert_eq!(visited.len(), 2);
+        assert!(visited.contains(&ns()));
+        assert!(visited.contains(&unavailable));
+        visited.clear();
+        let scope = crate::work_counters::Scope::start();
+        let second = crate::reminder::cycle_with(
+            &f.state,
+            &f,
+            &ProcessIds::default(),
+            |namespace| {
+                visited.push(namespace.clone());
+                ScopedHerdr {
+                    fixture: &f,
+                    namespace: namespace.clone(),
+                    error: (namespace == &unavailable).then_some(error),
+                }
+            },
+            &mut catch_up,
+        );
+        let counts = scope.finish();
+        assert_eq!(second.unwrap(), error == "workspace_not_found");
+        assert_eq!(counts.writes, 0);
+        if error == "workspace_not_found" {
+            assert!(visited.is_empty());
+            assert_eq!(counts.drains, 0);
+            f.tx(|tx| {
+                assert_eq!(
+                    tx.reminder(&unavailable, "retry")?.state,
+                    ReminderState::Failed {
+                        reason: "owner workspace is gone".into()
+                    }
+                );
+                Ok(())
+            });
+        } else {
+            assert_eq!(visited, vec![unavailable.clone()]);
+            assert_eq!(counts.drains, 1);
+            assert_eq!(counts.drain_errors, 1);
+            visited.clear();
+            let recovered = crate::reminder::cycle_with(
+                &f.state,
+                &f,
+                &ProcessIds::default(),
+                |namespace| {
+                    visited.push(namespace.clone());
+                    ScopedHerdr {
+                        fixture: &f,
+                        namespace: namespace.clone(),
+                        error: None,
+                    }
+                },
+                &mut catch_up,
+            )
+            .unwrap();
+            assert!(recovered);
+            assert_eq!(visited, vec![unavailable]);
+        }
+        assert_eq!(f.prompts.get(), 0);
+        f.tx(|tx| {
+            assert!(matches!(
+                tx.reminder(&ns(), "busy")?.state,
+                ReminderState::AwaitingDelivery { .. }
+            ));
             Ok(())
         });
     }

@@ -388,9 +388,9 @@ pub(crate) fn execute_with_caller<
 }
 
 mod clock;
-#[cfg(test)]
-pub(crate) use clock::cycle_with;
 use clock::signal_clock;
+#[cfg(test)]
+pub(crate) use clock::{CatchUp, cycle_with};
 pub use clock::{clock_running, ensure_clock, pending_count, run_clock};
 
 #[cfg(test)]

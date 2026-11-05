@@ -19,6 +19,16 @@ fn selected_executable(state: &Path) -> Result<std::path::PathBuf, String> {
 }
 
 #[derive(Default)]
+pub(crate) struct CatchUp(Option<Vec<crate::StateNamespace>>);
+
+impl CatchUp {
+    #[cfg(test)]
+    pub(crate) fn completed() -> Self {
+        Self(Some(Vec::new()))
+    }
+}
+
+#[derive(Default)]
 struct Pending {
     count: u64,
     next_due_at_ms: Option<u64>,
@@ -153,10 +163,10 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
     if lock.try_lock().is_err() {
         return Ok(());
     }
-    let mut startup = true;
+    let mut catch_up = CatchUp::default();
     loop {
         let _ = fs::remove_file(state.join("reminder-clock.wake"));
-        let plan = match pending(state, SystemClock.now_unix_ms(), startup) {
+        let plan = match pending(state, SystemClock.now_unix_ms(), catch_up.0.is_none()) {
             Ok(plan) => plan,
             Err(error) if transient(&error) => {
                 thread::sleep(Duration::from_millis(250));
@@ -171,7 +181,14 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
         let selected = selected_executable(state)?;
         let changed = fs::canonicalize(&selected).ok()
             != std::env::current_exe().and_then(fs::canonicalize).ok();
-        if changed || !plan.due.is_empty() || !plan.catch_up.is_empty() {
+        if changed
+            || !plan.due.is_empty()
+            || !plan.catch_up.is_empty()
+            || catch_up
+                .0
+                .as_ref()
+                .is_some_and(|namespaces| !namespaces.is_empty())
+        {
             let gate = crate::runtime_command_guard(state)?;
             let selected = selected_executable(state)?;
             if fs::canonicalize(&selected).ok()
@@ -191,9 +208,9 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
                 &SystemClock,
                 &ProcessIds::default(),
                 |ns| ProcessHerdr::default().with_socket(Some(ns.session_socket_id.clone())),
-                startup,
+                &mut catch_up,
             ) {
-                Ok(caught_up) => startup = startup && !caught_up,
+                Ok(_) => {}
                 Err(error) if transient(&error) => {
                     drop(gate);
                     thread::sleep(Duration::from_millis(250));
@@ -202,7 +219,7 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
                 Err(error) => return Err(error),
             }
         } else {
-            startup = false;
+            catch_up.0 = Some(Vec::new());
         }
         let plan = match pending(state, SystemClock.now_unix_ms(), false) {
             Ok(plan) => plan,
@@ -234,15 +251,17 @@ pub(crate) fn cycle_with<E, C, I>(
     clock: &C,
     ids: &I,
     mut herdr_for: impl FnMut(&crate::StateNamespace) -> E,
-    startup: bool,
+    catch_up: &mut CatchUp,
 ) -> Result<bool, String>
 where
     E: crate::HerdrCommandExecutor,
     C: Clock,
     I: crate::IdGenerator,
 {
-    let plan = pending(state, clock.now_unix_ms(), startup)?;
-    let mut drains = plan.catch_up;
+    let initializing = catch_up.0.is_none();
+    let plan = pending(state, clock.now_unix_ms(), initializing)?;
+    let remaining = catch_up.0.get_or_insert(plan.catch_up);
+    let mut drains = remaining.clone();
     for ns in plan.due {
         let herdr = herdr_for(&ns);
         let live = match crate::lifecycle::discover_reminder_workspace(state, &ns, &herdr) {
@@ -252,6 +271,7 @@ where
                     == Some("workspace_not_found") =>
             {
                 drains.retain(|candidate| candidate != &ns);
+                remaining.retain(|candidate| candidate != &ns);
                 continue;
             }
             Err(_) => continue,
@@ -271,7 +291,6 @@ where
             drains.push(ns);
         }
     }
-    let mut caught_up = true;
     for ns in drains {
         let herdr = herdr_for(&ns);
         let runtime = LifecycleRuntime {
@@ -289,11 +308,15 @@ where
         let result = crate::drain_mailboxes(&runtime);
         #[cfg(test)]
         crate::work_counters::drain_result(&result);
-        if result.is_err() {
-            caught_up = false;
+        if result.as_ref().err().is_none_or(|error| {
+            crate::lifecycle::herdr_error_code(error).as_deref() == Some("workspace_not_found")
+        }) {
+            remaining.retain(|candidate| candidate != &ns);
+        } else if initializing && !remaining.contains(&ns) {
+            remaining.push(ns);
         }
     }
-    Ok(caught_up)
+    Ok(remaining.is_empty())
 }
 
 #[cfg(test)]
