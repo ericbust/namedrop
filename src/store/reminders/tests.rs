@@ -1104,6 +1104,9 @@ fn reminder_busy_clock_work_measurement() {
     assert_eq!(errors, 0);
     assert_eq!(startup.drain_errors, 0);
     assert_eq!(recurring.drain_errors, 0);
+    assert_eq!(recurring.writes, 0);
+    assert_eq!(recurring.drains, 0);
+    assert_eq!(discoveries, 0);
     assert_eq!(f.now.get(), 360_000);
     assert!(f.busy.get());
     assert_eq!(f.prompts.get(), 0);
