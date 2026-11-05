@@ -336,6 +336,8 @@ async function open(
     }
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname === "/api/session") return posts.token(req, res);
+    if (url.pathname === "/api/direct-messages")
+      return sendJson(res, 200, { peers: [] });
     if (
       req.method === "POST" &&
       /^\/w\/[^/]+\/participants\/[^/]+\/input$/.test(url.pathname)
@@ -10645,7 +10647,7 @@ test("UI-R4 L2: the drawer is a modal dialog named Channels, and the list inside
     await dialog
       .getByRole("navigation")
       .evaluateAll((navs) => navs.map((nav) => nav.getAttribute("aria-label"))),
-    ["Needs you", "Channel list"],
+    ["Needs you", "Channel list", "Direct messages"],
     "no landmark in the dialog repeats its name",
   );
   await ui.page.keyboard.press("Escape");

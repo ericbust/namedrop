@@ -212,7 +212,13 @@ impl StateTransaction<'_> {
                 "pending channel posts require the local operator and no recipients",
             ));
         }
-        let receipt = self.append_message_mode(namespace, draft, actor, None, true)?;
+        let receipt = self.append_message_mode(
+            namespace,
+            draft,
+            actor,
+            None,
+            MessageAppendMode::PendingChannel,
+        )?;
         if !receipt.idempotent_replay {
             self.append_transition(
                 namespace,

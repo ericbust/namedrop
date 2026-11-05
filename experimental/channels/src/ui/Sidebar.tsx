@@ -1,6 +1,7 @@
 import {
   type DragEvent,
   type KeyboardEvent,
+  type ReactNode,
   type RefObject,
   useEffect,
   useId,
@@ -49,9 +50,9 @@ function reason(channel: Channel): string {
 function needsYouOf(channels: Channel[]): Channel[] {
   return channels.filter((channel) => channel.health.level === "needs_you");
 }
-const TABBABLE = "a[href], button:not([disabled])";
+const TABBABLE = "a[href], button:not([disabled]), input:not([disabled])";
 const CURRENT_ROW =
-  '.channels-navigation [aria-current="page"], .activity-entry[aria-current="page"]';
+  '.channels-navigation [aria-current="page"], .activity-entry[aria-current="page"], .dm-navigation [aria-current="page"]';
 function focusCurrentRow(sidebar: HTMLElement | null) {
   (
     sidebar?.querySelector<HTMLElement>(CURRENT_ROW) ??
@@ -71,6 +72,8 @@ type Props = {
   onSelect: (key: SpaceKey) => void;
   onActivity: () => void;
   onAnnounce: (words: string) => void;
+  directMessages?: ReactNode;
+  directSelected?: boolean;
 };
 // Reading the global inside each call keeps a blocked or absent localStorage
 // inside loadLayout's and saveLayout's guards.
@@ -91,6 +94,8 @@ export function Sidebar({
   onSelect,
   onActivity,
   onAnnounce,
+  directMessages,
+  directSelected = false,
 }: Props) {
   const sidebar = useRef<HTMLElement>(null);
   const baseId = useId();
@@ -371,7 +376,9 @@ export function Sidebar({
           className={`row${unread ? " unread" : ""}`}
           data-channel-key={channel.key}
           aria-current={
-            state.selection.key === channel.key ? "page" : undefined
+            !directSelected && state.selection.key === channel.key
+              ? "page"
+              : undefined
           }
           tabIndex={tabStop === `channel:${channel.key}` ? 0 : -1}
           onClick={() => onSelect(channel.key)}
@@ -443,7 +450,9 @@ export function Sidebar({
           className="row activity-entry"
           href={routePath({ kind: "activity" })}
           aria-current={
-            state.selection.kind === "activity" ? "page" : undefined
+            !directSelected && state.selection.kind === "activity"
+              ? "page"
+              : undefined
           }
           onClick={(event) => {
             if (
@@ -589,6 +598,7 @@ export function Sidebar({
             </ul>
           )}
         </nav>
+        {directMessages}
       </div>
       <footer className="sidebar-footer">
         {drawer === null && (

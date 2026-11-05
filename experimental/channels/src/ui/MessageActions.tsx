@@ -4,7 +4,7 @@ import { type DeliveryAccess, DeliveryContext } from "./DeliveryContext.ts";
 
 export type MessageActions = Readonly<{
   fullBody(messageId: string): Promise<SafeText | null>;
-  reply(message: Message, button: HTMLButtonElement): void;
+  reply: ((message: Message, button: HTMLButtonElement) => void) | null;
 }>;
 export const ThreadConversationContext = createContext(false);
 

@@ -28,6 +28,11 @@ import {
   routeCopy,
 } from "../copy.ts";
 import { type Change, createDeliveries, deliveryOf } from "../delivery.ts";
+import {
+  type DirectPeer,
+  directKey,
+  directSelection,
+} from "../direct-messages.ts";
 import type {
   ComposerId,
   Directory,
@@ -74,6 +79,8 @@ import type { FocusAttention } from "./AttentionActions.tsx";
 import { ChannelHeader } from "./ChannelHeader.tsx";
 import { Composer } from "./Composer.tsx";
 import type { DeliveryAccess } from "./DeliveryContext.ts";
+import { DirectConversation } from "./DirectConversation.tsx";
+import { DirectSidebar } from "./DirectSidebar.tsx";
 import { Icon } from "./Icons.tsx";
 import { MemberStrip } from "./MemberStrip.tsx";
 import { type MessageActions, MessageContexts } from "./MessageActions.tsx";
@@ -85,6 +92,7 @@ import { PeekDrawer } from "./PeekDrawer.tsx";
 import { ChannelsToggle, Sidebar } from "./Sidebar.tsx";
 import { ThreadPane, type ThreadResponse } from "./ThreadPane.tsx";
 import { type Located, Timeline } from "./Timeline.tsx";
+import { useDirectMessages } from "./useDirectMessages.ts";
 
 const noGroups: ReadonlyMap<string, ThreadGroup> = new Map();
 const noRows: readonly TimelineRow[] = [];
@@ -93,7 +101,10 @@ const noMembers: Directory["members"] = new Map();
 const POSTED_LIMIT = 200;
 const MAIN_SCROLLER = "main .timeline, main .activity-list";
 function go(route: Route) {
-  if (!sameRoute(routeOf(location), route))
+  if (
+    new URLSearchParams(location.search).has("dm") ||
+    !sameRoute(routeOf(location), route)
+  )
     history.pushState(null, "", routePath(route));
 }
 function measuredReduce(state: State, event: Event): State {
@@ -157,6 +168,14 @@ function deliveryWords(change: Change | null): string | null {
   );
 }
 export function App() {
+  const [poster] = useState(createPoster);
+  const [selectedDm, setSelectedDm] = useState(directSelection);
+  const dm = useDirectMessages(selectedDm, poster);
+  const [dmPeek, setDmPeek] = useState<PeekTarget | null>(null);
+  useEffect(() => {
+    if (dmPeek && selectedDm !== `${dmPeek.channel}/${dmPeek.member}`)
+      setDmPeek(null);
+  }, [selectedDm, dmPeek]);
   const [state, dispatch] = useReducer(measuredReduce, undefined, () =>
     bootState({ visible: !document.hidden, route: routeOf(location) }),
   );
@@ -215,7 +234,6 @@ export function App() {
     )
       focusEvidence({ type: "close" });
   }, [evidence, state.selection.key]);
-  const [poster] = useState(createPoster);
   const [reader] = useState(createScreenReader);
   const inFlightPosts = useRef(new Map<string, ComposerId>());
   const posted = useRef(new Set<string>());
@@ -425,7 +443,10 @@ export function App() {
     };
   }, [state.channels.size]);
   useEffect(() => {
-    const back = () => dispatch(routeEvent(routeOf(location)));
+    const back = () => {
+      setSelectedDm(directSelection());
+      dispatch(routeEvent(routeOf(location)));
+    };
     addEventListener("popstate", back);
     return () => removeEventListener("popstate", back);
   }, []);
@@ -455,10 +476,10 @@ export function App() {
   }, []);
   useEffect(() => {
     const key = state.selection.key;
-    if (key === null || !state.visible) return;
+    if (key === null || !state.visible || selectedDm !== null) return;
     const dwell = setTimeout(() => dispatch({ type: "read", key }), 1500);
     return () => clearTimeout(dwell);
-  }, [state.selection.key, state.visible]);
+  }, [state.selection.key, state.visible, selectedDm]);
   let needsYou = 0;
   for (const channel of state.channels.values())
     if (channel.health.level === "needs_you") needsYou++;
@@ -528,16 +549,19 @@ export function App() {
     [],
   );
   const select = useCallback((key: SpaceKey) => {
+    setSelectedDm(null);
     focusEvidence({ type: "close" });
     go({ kind: "channel", key });
     dispatch({ type: "select", key });
   }, []);
   const showActivity = useCallback(() => {
+    setSelectedDm(null);
     focusEvidence({ type: "close" });
     go({ kind: "activity" });
     dispatch({ type: "activity" });
   }, []);
   const jump = useCallback((key: SpaceKey) => {
+    setSelectedDm(null);
     focusEvidence({ type: "close" });
     go({ kind: "channel", key });
     dispatch({ type: "jump", key });
@@ -636,6 +660,7 @@ export function App() {
   const terminalRuns = channel?.terminalRuns;
   const runs = useMemo(() => runsByMessage(terminalRuns ?? []), [terminalRuns]);
   const focused =
+    selectedDm === null &&
     evidence.kind !== "closed" &&
     evidence.kind !== "in-channel" &&
     evidence.request.key === channel?.key
@@ -643,12 +668,14 @@ export function App() {
       : null;
   const thread = useMemo(
     () =>
-      focused?.kind === "ready" && channel !== undefined
-        ? evidenceThread(focused.context, channel.messages, channel.members)
-        : state.slot.kind === "thread"
-          ? groups.get(state.slot.id)
-          : undefined,
-    [focused, channel, state.slot, groups],
+      selectedDm !== null
+        ? undefined
+        : focused?.kind === "ready" && channel !== undefined
+          ? evidenceThread(focused.context, channel.messages, channel.members)
+          : state.slot.kind === "thread"
+            ? groups.get(state.slot.id)
+            : undefined,
+    [focused, channel, state.slot, groups, selectedDm],
   );
   const evidenceResponse =
     (evidence.kind === "ready" || evidence.kind === "in-channel") &&
@@ -721,8 +748,34 @@ export function App() {
     box.focus();
     if (want.at !== null) box.setSelectionRange(want.at, want.at);
   });
-  const peeking = state.slot.kind === "peek" ? state.slot.target : null;
-  const who = peeking === null ? null : peekWho(state.channels, peeking);
+  const peeking =
+    selectedDm !== null
+      ? dmPeek
+      : state.slot.kind === "peek"
+        ? state.slot.target
+        : null;
+  const dmPeer =
+    selectedDm === null || peeking === null
+      ? undefined
+      : dm.peers.find(
+          (peer) =>
+            peer.spaceKey === peeking.channel &&
+            peer.addressId === peeking.member,
+        );
+  const who: ReturnType<typeof peekWho> =
+    peeking === null
+      ? null
+      : dmPeer
+        ? {
+            alias: dmPeer.alias,
+            kind: peeking.kind,
+            activity: dmPeer.presence === "gone" ? "offline" : dmPeer.presence,
+            channel: {
+              label: `#${dmPeer.workspaceLabel.replace(/^#/, "")}`,
+              suffix: null,
+            },
+          }
+        : peekWho(state.channels, peeking);
   const pane = thread || focused ? "thread" : who ? "peek" : null;
   const panels = usePanelWidths(pane !== null);
   // On a phone the Channels button starts whichever header shows: the pane
@@ -882,12 +935,16 @@ export function App() {
       opening.current = { element, key: peekKey(target), startedAt };
       focusPane.current = true;
       requestFocus();
-      dispatch({ type: "peek", target });
+      if (selectedDm !== null) setDmPeek(target);
+      else dispatch({ type: "peek", target });
     },
-    [],
+    [selectedDm],
   );
   const closePeek = useCallback(() => {
-    flushSync(() => dispatch({ type: "peek", target: null }));
+    flushSync(() => {
+      setDmPeek(null);
+      dispatch({ type: "peek", target: null });
+    });
     const saved = opening.current;
     const control =
       saved === null
@@ -899,7 +956,7 @@ export function App() {
             );
     (control ?? document.querySelector<HTMLElement>(MAIN_SCROLLER))?.focus();
   }, []);
-  const scope = channel?.key ?? null;
+  const scope = dm.selectedPeer?.spaceKey ?? channel?.key ?? null;
   const peekAccess = useMemo<PeekAccess>(
     () => ({ scope, open: openPeek }),
     [scope, openPeek],
@@ -1015,6 +1072,23 @@ export function App() {
               if (drawerOpen) closeDrawer();
             }}
             onAnnounce={(words) => setMoveSaid({ words })}
+            directSelected={selectedDm !== null}
+            directMessages={
+              <DirectSidebar
+                dm={dm}
+                selected={selectedDm}
+                onSelect={(peer: DirectPeer) => {
+                  const key = directKey(peer);
+                  const url = new URL(location.href);
+                  url.searchParams.set("dm", key);
+                  history.pushState(null, "", url);
+                  setSelectedDm(key);
+                  focusEvidence({ type: "close" });
+                  dispatch({ type: "thread", threadId: null });
+                  if (drawerOpen) closeDrawer();
+                }}
+              />
+            }
           />
           <PanelResize
             side="left"
@@ -1072,7 +1146,25 @@ export function App() {
               });
             }}
           >
-            {state.selection.kind === "activity" && state.channels.size > 0 ? (
+            {selectedDm !== null ? (
+              <DirectConversation
+                key={selectedDm}
+                dm={dm}
+                completion={
+                  dm.selectedPeer === null
+                    ? null
+                    : {
+                        current: dm.selectedPeer.spaceKey,
+                        channels: channelOptions(state.channels.values()),
+                        membersOf: (key) => [
+                          ...(state.channels.get(key)?.members.values() ?? []),
+                        ],
+                      }
+                }
+                toggle={mainToggle}
+              />
+            ) : state.selection.kind === "activity" &&
+              state.channels.size > 0 ? (
               <ActivityView
                 toggle={mainToggle}
                 list={activity}

@@ -3126,3 +3126,198 @@ fn tracked_attention_offers_a_new_message_without_operator_tracking_authority() 
         assert!(reply["message_id"].is_string());
     }
 }
+
+#[test]
+fn direct_message_round_trip_binds_operator_identity_and_ignores_body_mentions() {
+    use namedrop::send_operator_direct_message;
+    let f = Fixture::new();
+    f.register_all();
+    f.rename("w1", "lead", "operator");
+    let peer = f.db().query_row("SELECT address_id FROM alias_claims WHERE worktree_id='w1' AND alias='planner' AND claim_state='active'",[],|row|row.get::<_,String>(0)).unwrap();
+    let peer = PaneAddressId::new(peer);
+    let mut runtime = f.runtime("w1", "unused");
+    runtime.current_pane_id = None;
+    let sent = send_operator_direct_message(
+        "dm-send",
+        "Private question for @operator and #ws2 @tester",
+        &peer,
+        &runtime,
+    )
+    .unwrap();
+    let envelope = f.herdr.last_envelope("pane-1-planner");
+    assert_eq!(envelope["control"]["reply_mode"], "direct_message");
+    assert_eq!(
+        envelope["control"]["sender"]["address_id"],
+        "operator:local"
+    );
+    assert!(
+        envelope["trusted_instruction"]
+            .as_str()
+            .unwrap()
+            .contains("private direct message")
+    );
+    assert_eq!(
+        envelope["control"]["recipients"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        envelope["control"]["context_references"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    let prompts = f.herdr.prompts.lock().unwrap().len();
+    let replied = f.reply_to(
+        "w1",
+        "pane-1-planner",
+        &envelope,
+        "@operator @unknown Private reply mentioning @operator and #ws2 @tester",
+    );
+    assert_eq!(replied["thread_id"], sent["thread_id"]);
+    assert_eq!(replied["recipients"].as_array().unwrap().len(), 1);
+    assert_eq!(replied["recipients"][0]["address_id"], "operator:local");
+    let reply_body: String = f
+        .db()
+        .query_row(
+            "SELECT body FROM collaboration_messages WHERE message_id=?1",
+            [replied["message_id"].as_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        reply_body,
+        "@unknown Private reply mentioning @operator and #ws2 @tester"
+    );
+    assert_eq!(f.herdr.prompts.lock().unwrap().len(), prompts);
+    let replay = send_operator_direct_message(
+        "dm-send",
+        "Private question for @operator and #ws2 @tester",
+        &peer,
+        &runtime,
+    )
+    .unwrap();
+    assert_eq!(replay["message_id"], sent["message_id"]);
+    assert_eq!(replay["idempotent_replay"], true);
+    let mut store = StateStore::open(&f.state).unwrap();
+    let ns = StateNamespace::for_space("socket-a", "w1");
+    let rows = store.dashboard_rows(&ns).unwrap();
+    assert!(rows.messages.is_empty());
+    assert!(rows.mailbox.is_empty());
+    assert!(rows.threads.is_empty());
+    assert!(rows.attention.is_empty());
+    let allowance: i64 = f
+        .db()
+        .query_row(
+            "SELECT reply_allowance FROM thread_controls WHERE worktree_id='w1' AND thread_id=?1",
+            [sent["thread_id"].as_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(allowance, 10);
+    f.rename("w1", "planner", "renamed");
+    f.db().execute("UPDATE thread_controls SET paused=1,reply_allowance=0 WHERE worktree_id='w1' AND thread_id=?1",[sent["thread_id"].as_str().unwrap()]).unwrap();
+    let next = send_operator_direct_message(
+        "dm-zero-allowance",
+        "Operator question at zero allowance",
+        &peer,
+        &runtime,
+    )
+    .unwrap();
+    let next_envelope = f.herdr.last_envelope("pane-1-planner");
+    assert_eq!(next_envelope["control"]["message_id"], next["message_id"]);
+    assert_eq!(next["thread_id"], sent["thread_id"]);
+    assert_eq!(next["recipients"][0]["alias"], "renamed");
+    let next_reply = f.reply_to(
+        "w1",
+        "pane-1-planner",
+        &next_envelope,
+        "@operator Direct answer at zero allowance",
+    );
+    assert_eq!(next_reply["thread_id"], sent["thread_id"]);
+    assert!(
+        send_operator_message(
+            "public-reply-to-private",
+            "@renamed Public attempt",
+            Some(&namedrop::MessageId::new(
+                sent["message_id"].as_str().unwrap()
+            )),
+            &runtime
+        )
+        .is_err()
+    );
+    let public = send_operator_message(
+        "unrelated-public-send",
+        "@renamed Unrelated public work",
+        None,
+        &runtime,
+    )
+    .unwrap();
+    assert_ne!(public["thread_id"], sent["thread_id"]);
+}
+
+#[test]
+fn direct_messages_reject_missing_live_peers_before_commit_and_replay_after_closure() {
+    use namedrop::send_operator_direct_message;
+    let f = Fixture::new();
+    f.register_all();
+    let peer = f.db().query_row("SELECT address_id FROM alias_claims WHERE worktree_id='w1' AND alias='planner' AND claim_state='active'",[],|row|row.get::<_,String>(0)).unwrap();
+    let peer = PaneAddressId::new(peer);
+    let mut runtime = f.runtime("w1", "unused");
+    runtime.current_pane_id = None;
+    let sent =
+        send_operator_direct_message("dm-before-close", "Private hello", &peer, &runtime).unwrap();
+    let before = f.message_rows();
+    f.herdr
+        .missing_panes
+        .lock()
+        .unwrap()
+        .insert("pane-1-planner".to_owned());
+    let error = send_operator_direct_message("dm-after-close", "Do not commit", &peer, &runtime)
+        .unwrap_err();
+    assert!(error.to_string().contains("conversation is closed"));
+    assert_eq!(f.message_rows(), before);
+    f.herdr.unreadable.lock().unwrap().insert("w1".to_owned());
+    let error = send_operator_direct_message("dm-unavailable", "Do not commit", &peer, &runtime)
+        .unwrap_err();
+    assert!(error.to_string().contains("conversation is closed"));
+    assert_eq!(f.message_rows(), before);
+    let replay =
+        send_operator_direct_message("dm-before-close", "Private hello", &peer, &runtime).unwrap();
+    assert_eq!(replay["message_id"], sent["message_id"]);
+    assert_eq!(replay["idempotent_replay"], true);
+    assert_eq!(f.message_rows(), before);
+}
+
+#[test]
+fn same_named_agents_receive_separate_direct_messages_in_their_home_workspace() {
+    use namedrop::send_operator_direct_message;
+    let f = Fixture::new();
+    f.register_all();
+    let mut sent = Vec::new();
+    for (space, pane) in [("w1", "pane-1-lead"), ("w2", "pane-2-lead")] {
+        let peer = f.db().query_row("SELECT address_id FROM alias_claims WHERE worktree_id=?1 AND alias='lead' AND claim_state='active'",[space],|row|row.get::<_,String>(0)).unwrap();
+        let mut runtime = f.runtime(space, "unused");
+        runtime.current_pane_id = None;
+        let message = send_operator_direct_message(
+            "dm-collision",
+            "Private hello @tester",
+            &PaneAddressId::new(peer),
+            &runtime,
+        )
+        .unwrap();
+        let envelope = f.herdr.last_envelope(pane);
+        assert_eq!(envelope["control"]["message_id"], message["message_id"]);
+        let reply = f.reply_to(space, pane, &envelope, "@operator Private answer");
+        assert_eq!(reply["thread_id"], message["thread_id"]);
+        sent.push(message);
+    }
+    assert_ne!(sent[0]["message_id"], sent[1]["message_id"]);
+    let copies: i64 = f
+        .db()
+        .query_row("SELECT COUNT(*) FROM bridged_messages", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(copies, 0);
+}

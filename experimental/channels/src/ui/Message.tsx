@@ -552,7 +552,8 @@ function ReplyInThread({
 }) {
   const actions = useContext(MessageActionsContext);
   const inThread = useContext(ThreadConversationContext);
-  if (actions === null || inThread) return null;
+  const reply = actions?.reply;
+  if (!reply || inThread) return null;
   const name = replyTargetName(message, directory);
   return (
     <div className="msg-actions">
@@ -561,7 +562,7 @@ function ReplyInThread({
         className="msg-reply"
         aria-label={`${replyInThreadCopy.label} to ${name}`}
         title={replyInThreadCopy.label}
-        onClick={(event) => actions.reply(message, event.currentTarget)}
+        onClick={(event) => reply(message, event.currentTarget)}
       >
         <Icon name="reply" className="icon-12" />
         <span>{replyInThreadCopy.label}</span>

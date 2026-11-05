@@ -1294,7 +1294,11 @@ impl Hub<'_> {
             .map(|row| {
                 let key = SpaceKey::of(&row.namespace);
                 let repo = self.repo(&key, &repos);
-                SpaceSummary::of(row, labels.get(key.as_str()).map(String::as_str), repo)
+                let label = match self.live_spaces.get(&key) {
+                    Some(space) => space.label.as_deref(),
+                    None => labels.get(key.as_str()).map(String::as_str),
+                };
+                SpaceSummary::of(row, label, repo)
             })
             .collect();
         serde_json::to_string(&spaces).unwrap_or_else(|_| "[]".to_owned())
@@ -1363,6 +1367,44 @@ mod tests {
             schema_busy_since: None,
             last_error: None,
         }
+    }
+
+    #[test]
+    fn space_index_uses_the_live_channel_label_before_the_saved_fallback() {
+        let state =
+            std::env::temp_dir().join(format!("namedrop-hub-direct-label-{}", std::process::id()));
+        let namespace = StateNamespace::for_space("socket-a", "w1");
+        StateStore::open(&state)
+            .unwrap()
+            .transaction(|tx| {
+                tx.activate_worktree(
+                    &namespace,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 1),
+                )
+            })
+            .unwrap();
+        let files = ServerFiles::at(&state).unwrap();
+        let key = SpaceKey::of(&namespace);
+        files.record_label(key.as_str(), "repo").unwrap();
+        let mut hub = test_hub(&files);
+        hub.live_spaces.insert(
+            key.clone(),
+            LiveSpace {
+                namespace,
+                label: Some("dm-second-workspace".to_owned()),
+                repo: None,
+            },
+        );
+        let index: serde_json::Value = serde_json::from_str(&hub.spaces_json()).unwrap();
+        assert_eq!(index[0]["label"]["text"], "dm-second-workspace");
+        hub.live_spaces.get_mut(&key).unwrap().label = None;
+        let index: serde_json::Value = serde_json::from_str(&hub.spaces_json()).unwrap();
+        assert!(index[0]["label"].is_null());
+        hub.live_spaces.clear();
+        let index: serde_json::Value = serde_json::from_str(&hub.spaces_json()).unwrap();
+        assert_eq!(index[0]["label"]["text"], "repo");
+        drop(hub);
+        fs::remove_dir_all(state).unwrap();
     }
 
     #[test]
