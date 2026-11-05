@@ -2,6 +2,14 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.5.0-exp.13] - 2026-11-04
+
+### Added
+
+- Direct messages. A "Direct messages" section in the sidebar lists every Namedrop agent in every workspace, with the workspace's channel next to each name so same-named agents are easy to tell apart. DMs stay out of channels, threads, and All activity.
+- You can see when an agent runs subagents. Its member chip and Peek header show how many are running.
+- If an agent answers a Channels message only in its own terminal, that answer now appears in the thread or DM, marked "From @name's terminal", and the conversation is flagged as needing you. Typed Mentions in panes work as before.
+
 ## [1.5.0-exp.12] - 2026-11-04
 
 ### Changed
