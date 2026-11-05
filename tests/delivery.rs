@@ -1014,7 +1014,7 @@ fn human_mention_round_trip(hold_report: bool) {
     // the body.
     assert_eq!(
         envelope["control"]["permitted_operations"],
-        serde_json::json!(["reply", "complete.no-reply"])
+        serde_json::json!(["reply", "complete.no-reply", "reminder.set"])
     );
     for forged in ["attempt-forged", "delivery.rescind", "reply to nobody"] {
         let carriers = envelope

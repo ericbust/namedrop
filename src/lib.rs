@@ -25,6 +25,9 @@ mod lifecycle;
 pub mod linux_sandbox;
 mod message;
 mod pane_effects;
+#[doc(hidden)]
+pub mod reminder;
+pub use reminder::execute_reminder_operation;
 mod persona;
 mod ports;
 mod runtime;
@@ -246,3 +249,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod work_counters;

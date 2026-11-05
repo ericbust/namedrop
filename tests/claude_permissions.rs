@@ -152,6 +152,9 @@ print(json.dumps({'result':result}))
             "handoff begin",
             "handoff resolve",
             "handoff adopt",
+            "reminder set",
+            "reminder list",
+            "reminder cancel",
             "address list",
             "handoff acknowledge-granted",
         ]
@@ -282,7 +285,7 @@ fn reactivation_is_idempotent_and_deactivation_keeps_identical_user_rules() {
     f.activate();
     assert_eq!(
         f.read()["permissions"]["allow"].as_array().unwrap().len(),
-        20
+        23
     );
     let before = fs::read(f.settings()).unwrap();
     let modified = fs::metadata(f.settings()).unwrap().modified().unwrap();
@@ -314,12 +317,12 @@ fn runtime_path_change_removes_old_managed_rules_only() {
     install_integration_package(&f.home, AgentRuntime::ClaudeCode, &first, &f.root).unwrap();
     assert_eq!(
         f.read()["permissions"]["allow"].as_array().unwrap().len(),
-        20
+        23
     );
     let next = f.root.join("next runtime/namedrop");
     install_integration_package(&f.home, AgentRuntime::ClaudeCode, &next, &f.root).unwrap();
     let allow = f.read()["permissions"]["allow"].as_array().unwrap().clone();
-    assert_eq!(allow.len(), 20);
+    assert_eq!(allow.len(), 23);
     assert_eq!(allow[0], "Read");
     assert!(
         !allow
@@ -408,7 +411,7 @@ fn config_directory_override_is_isolated_from_the_default_profile() {
     f.activate();
     assert_eq!(
         f.read()["permissions"]["allow"].as_array().unwrap().len(),
-        20
+        23
     );
     f.deactivate();
     assert_eq!(f.read()["permissions"]["allow"], json!(["Read"]));
@@ -514,7 +517,7 @@ fn deactivating_one_of_two_worktrees_keeps_shared_permissions() {
     assert_eq!(fs::read(f.settings()).unwrap(), before);
     let second = f.run_for("workspace-2", "deactivate", json!({}));
     assert_eq!(second["claude_permissions"]["removed"], true);
-    assert_eq!(second["claude_permissions"]["removed_entries"], 19);
+    assert_eq!(second["claude_permissions"]["removed_entries"], 22);
     assert_eq!(f.read()["permissions"]["allow"], json!([]));
 }
 
@@ -1042,8 +1045,8 @@ fn reactivation_removes_an_owned_environment_bootstrap_rule() {
         !allow.contains(&unsafe_rule),
         "reactivation retained the owned environment bootstrap: {allow:?}"
     );
-    assert_eq!(&allow[..19], f.expected());
-    assert_eq!(allow[19], "Read");
+    assert_eq!(&allow[..22], f.expected());
+    assert_eq!(allow[22], "Read");
     let owned: Value = serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
     assert!(!owned["entries"].as_array().unwrap().contains(&unsafe_rule));
     f.deactivate();
