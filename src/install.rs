@@ -1303,6 +1303,9 @@ mod permission_tests {
             "Bash('/opt/namedrop' --plugin-state '/opt/state' handoff begin *)",
             "Bash('/opt/namedrop' --plugin-state '/opt/state' handoff resolve *)",
             "Bash('/opt/namedrop' --plugin-state '/opt/state' handoff adopt *)",
+            "Bash('/opt/namedrop' --plugin-state '/opt/state' reminder set *)",
+            "Bash('/opt/namedrop' --plugin-state '/opt/state' reminder list *)",
+            "Bash('/opt/namedrop' --plugin-state '/opt/state' reminder cancel *)",
             "Bash('/opt/namedrop' --plugin-state '/opt/state' address list *)",
         ];
         assert_eq!(actual, expected);

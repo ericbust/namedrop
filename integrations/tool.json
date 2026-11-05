@@ -90,7 +90,10 @@
               "group.list",
               "handoff.begin",
               "handoff.resolve",
-              "handoff.adopt"
+              "handoff.adopt",
+              "reminder.set",
+              "reminder.list",
+              "reminder.cancel"
             ]
           }
         }
@@ -1269,6 +1272,109 @@
           "input": {
             "request_id": "adopt-coordination-example",
             "coordination_id": "coordination-example"
+          }
+        }
+      ]
+    },
+    {
+      "token": "reminder.set",
+      "description": "Schedule a wake for this exact Agent Session. Provide in or RFC 3339 at, at least 60 seconds ahead. Optional every requires count (total occurrences including the first, at most 100) or inclusive until. Repeats wait for successful delivery and restart their interval then. Wake rows are free; answers use the ordinary reply allowance and paused threads wait. Use in_reply_to to answer the original author later. Reuse request_id on retries.",
+      "argv": [
+        "reminder",
+        "set"
+      ],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "in": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1
+          },
+          "every": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "until": {
+            "type": "string"
+          },
+          "in_reply_to": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "body"
+        ]
+      },
+      "examples": [
+        {
+          "description": "Schedule a wake for this exact Agent Session.",
+          "input": {
+            "in": "1m",
+            "body": "Check the job and reply with its result",
+            "in_reply_to": "message-id",
+            "request_id": "reminder-request-id"
+          }
+        }
+      ]
+    },
+    {
+      "token": "reminder.list",
+      "description": "List pending reminders belonging to this exact Agent Session.",
+      "argv": [
+        "reminder",
+        "list"
+      ],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "examples": [
+        {
+          "description": "List pending reminders belonging to this exact Agent Session.",
+          "input": {}
+        }
+      ]
+    },
+    {
+      "token": "reminder.cancel",
+      "description": "Cancel a reminder belonging to this exact Agent Session. Prevents future fires and cancels queued work when possible. A transport already started cannot be recalled.",
+      "argv": [
+        "reminder",
+        "cancel"
+      ],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "reminder_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "reminder_id"
+        ]
+      },
+      "examples": [
+        {
+          "description": "Cancel a reminder belonging to this exact Agent Session.",
+          "input": {
+            "reminder_id": "reminder-id"
           }
         }
       ]

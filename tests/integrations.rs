@@ -26,7 +26,7 @@ use std::{
     },
 };
 
-const COMPLETE_PROFILE: [&str; 17] = [
+const COMPLETE_PROFILE: [&str; 20] = [
     "describe",
     "register",
     "ack",
@@ -44,6 +44,9 @@ const COMPLETE_PROFILE: [&str; 17] = [
     "handoff.begin",
     "handoff.resolve",
     "handoff.adopt",
+    "reminder.set",
+    "reminder.list",
+    "reminder.cancel",
 ];
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -1252,7 +1255,7 @@ fn generated_skill_command_forms_are_covered_by_managed_settings() {
         serde_json::from_value(settings["permissions"]["allow"].clone()).unwrap();
     assert_eq!(
         permissions.len(),
-        18,
+        21,
         "registration uses the same fixed prefix as the other operations"
     );
     for rule in &permissions {
@@ -1503,7 +1506,7 @@ fn packaged_skill_profiles_stay_compact_and_defer_delivery_discovery() {
         // session. The permissions section adds the persistent Claude settings
         // contract; keep the remaining profile within the existing budget.
         assert!(
-            instructions.len() < 7_800,
+            instructions.len() < 8_000,
             "{} packaged profile is {} bytes",
             runtime.as_str(),
             instructions.len()
@@ -2028,6 +2031,7 @@ fn delivery_envelope_keeps_trusted_control_separate_from_verbatim_untrusted_body
         serde_json::json!([
             "reply",
             "complete.no-reply",
+            "reminder.set",
             "context.inspect",
             "context.read"
         ])
@@ -2762,12 +2766,18 @@ fn older_complete_profiles_stay_registered_and_registerable() {
             &runtime,
         )
     };
-    let current = [&PROFILE_16[..], &["handoff.adopt"]].concat();
+    let prior = [&PROFILE_16[..], &["handoff.adopt"]].concat();
+    let current = [
+        &prior[..],
+        &["reminder.set", "reminder.list", "reminder.cancel"],
+    ]
+    .concat();
 
     register(&current).unwrap();
     assert_eq!(complete_capability_profile(), current);
 
     for (observation, profile) in [
+        ("observation-17", &prior[..]),
         ("observation-16", &PROFILE_16[..]),
         ("observation-14", &PROFILE_14[..]),
     ] {
@@ -2820,7 +2830,7 @@ fn older_complete_profiles_stay_registered_and_registerable() {
         .copied()
         .filter(|token| !matches!(*token, "handoff.begin" | "handoff.resolve"))
         .collect::<Vec<_>>();
-    assert_eq!(partial.len(), 15);
+    assert_eq!(partial.len(), 18);
     restart("session-4", 45);
     assert_eq!(
         register(&partial).unwrap_err(),
@@ -3060,7 +3070,7 @@ fn activation_installs_both_shared_packages_before_challenging_either_runtime() 
             .unwrap();
     assert_eq!(
         settings["permissions"]["allow"].as_array().unwrap().len(),
-        18
+        21
     );
 
     execute_lifecycle_operation(
@@ -3189,7 +3199,7 @@ fn a_previous_version_package_is_replaced_without_touching_unrelated_files() {
     assert_eq!(settings["unrelated"], true);
     assert_eq!(
         settings["permissions"]["allow"].as_array().unwrap().len(),
-        18
+        21
     );
     assert_eq!(installed_names(&skill_root), ["namedrop", "other-skill"]);
 }

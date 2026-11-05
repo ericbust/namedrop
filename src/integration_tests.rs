@@ -35,7 +35,7 @@ fn claude_delivery_guidance_matches_managed_rules_for_every_automatic_operation(
     let settings: Value =
         serde_json::from_slice(&fs::read(home.join(".claude/settings.json")).unwrap()).unwrap();
     let rules = settings["permissions"]["allow"].as_array().unwrap();
-    assert_eq!(operations.len(), 18);
+    assert_eq!(operations.len(), 21);
     for operation in operations {
         let prefix = format!("{}: ", operation.token);
         let command = guidance

@@ -31,6 +31,17 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let arguments: Vec<_> = env::args_os().skip(1).collect();
+    if arguments.first().is_some_and(|arg| arg == "reminder-clock") {
+        return match arguments.as_slice() {
+            [_, state, socket] => {
+                match namedrop::reminder::run_clock(Path::new(state), &socket.to_string_lossy()) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(_) => ExitCode::from(65),
+                }
+            }
+            _ => ExitCode::from(64),
+        };
+    }
     if arguments
         .first()
         .is_some_and(|arg| arg == "--deferred-worker" || arg == "--deferred-execute")
@@ -179,6 +190,15 @@ fn main() -> ExitCode {
                 return ExitCode::from(69);
             }
         }
+    }
+    if let Some(state) = selected_state.as_deref()
+        && let Some(socket) = cli
+            .runtime
+            .herdr_socket
+            .clone()
+            .or_else(|| env::var("HERDR_SOCKET_PATH").ok())
+    {
+        let _ = namedrop::reminder::ensure_clock(state, &socket);
     }
     let human = cli.human_output(io::stdout().is_terminal());
     let input_file = cli.input_is_file();
@@ -348,6 +368,8 @@ fn main() -> ExitCode {
             | "handoff.preview"
     ) {
         run_operation(operation, input, OperationKind::Handoff, &cli.runtime)
+    } else if operation.starts_with("reminder.") {
+        run_operation(operation, input, OperationKind::Reminder, &cli.runtime)
     } else if matches!(operation, "group.list" | "group.set" | "group.remove") {
         run_operation(operation, input, OperationKind::Group, &cli.runtime)
     } else if is_control_operation(operation) {
@@ -590,6 +612,7 @@ mod session_event_tests {
 
 #[derive(Clone, Copy)]
 enum OperationKind {
+    Reminder,
     Handoff,
     Group,
     Context,
@@ -607,6 +630,9 @@ fn run_operation(
 ) -> Result<serde_json::Value, String> {
     with_runtime_options(options, |runtime| {
         let result = match kind {
+            OperationKind::Reminder => {
+                namedrop::execute_reminder_operation(operation, input, runtime)
+            }
             OperationKind::Handoff => execute_handoff_operation(operation, input, runtime),
             OperationKind::Group => execute_group_operation(operation, input, runtime),
             OperationKind::Context => execute_context_operation(operation, input, runtime),

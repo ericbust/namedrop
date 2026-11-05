@@ -139,9 +139,70 @@ else: print('{}')
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
+            .env("HOME", self.directory.home())
+            .env("XDG_CONFIG_HOME", self.directory.path().join("xdg-config"))
             .env("HERDR_BIN_PATH", &self.herdr)
             .current_dir(self.directory.path());
         command
+    }
+
+    fn reminder(&self, request: &str, delay: &str) -> Value {
+        response(
+            self.command()
+                .arg("--plugin-state")
+                .arg(self.directory.path())
+                .args([
+                    "reminder",
+                    "set",
+                    "--herdr-socket",
+                    &self.socket,
+                    "--herdr-workspace",
+                    "workspace-1",
+                    "--herdr-pane",
+                    "pane-author",
+                    "--input-json",
+                ])
+                .arg(json!({"in":delay,"body":"test wake","request_id":request}).to_string())
+                .output()
+                .unwrap(),
+        )["data"]
+            .clone()
+    }
+
+    fn cancel_reminder(&self, id: &Value) {
+        response(
+            self.command()
+                .arg("--plugin-state")
+                .arg(self.directory.path())
+                .args([
+                    "reminder",
+                    "cancel",
+                    "--herdr-socket",
+                    &self.socket,
+                    "--herdr-workspace",
+                    "workspace-1",
+                    "--herdr-pane",
+                    "pane-author",
+                    "--input-json",
+                ])
+                .arg(json!({"reminder_id":id}).to_string())
+                .output()
+                .unwrap(),
+        );
+    }
+
+    fn clock(&self) -> Worker {
+        Worker(
+            self.command()
+                .arg("reminder-clock")
+                .arg(self.directory.path())
+                .arg(&self.socket)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        )
     }
 
     fn sandbox_command(&self, operation: &[&str], input: Value) -> Output {
@@ -806,4 +867,295 @@ fn invalid_pending_markers_never_execute_and_other_commands_drain() {
             assert!(fs::symlink_metadata(marker).is_err());
         }
     }
+}
+
+#[test]
+fn deferred_reminder_receipt_loss_preserves_one_absolute_deadline() {
+    let f = Fixture::new();
+    let clock_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(f.directory.path().join("reminder-clock.lock"))
+        .unwrap();
+    clock_lock.lock().unwrap();
+    let input = json!({"in":"1m","body":"check later"});
+    let queued = response(f.sandbox_command(&["reminder", "set"], input.clone()));
+    let receipt = PathBuf::from(queued["data"]["receipt"].as_str().unwrap());
+    let key = queued["data"]["operation_id"].as_str().unwrap();
+    let worker = f.worker();
+    wait_for(|| receipt.exists());
+    let first = response(f.sandbox_command(&["reminder", "set"], input.clone()));
+    assert!(first["data"]["reminder_id"].is_string(), "{first}");
+    let first_due = first["data"]["spec"]["first_due_at_ms"].clone();
+    drop(worker);
+    fs::remove_file(&receipt).unwrap();
+    fs::write(f.spool().join("pending").join(format!("{key}.json")), "{}").unwrap();
+    let worker = f.worker();
+    wait_for(|| receipt.exists());
+    let replay = response(f.sandbox_command(&["reminder", "set"], input));
+    assert_eq!(replay["data"]["reminder_id"], first["data"]["reminder_id"]);
+    assert_eq!(replay["data"]["spec"]["first_due_at_ms"], first_due);
+    let listed = response(f.sandbox_command(&["reminder", "list"], json!({})));
+    if listed["data"]["state"] == "pending" {
+        let list_receipt = PathBuf::from(listed["data"]["receipt"].as_str().unwrap());
+        wait_for(|| list_receipt.exists());
+    }
+    let cancelled = response(f.sandbox_command(
+        &["reminder", "cancel"],
+        json!({"reminder_id":first["data"]["reminder_id"]}),
+    ));
+    if cancelled["data"]["state"] == "pending" {
+        let path = PathBuf::from(cancelled["data"]["receipt"].as_str().unwrap());
+        wait_for(|| path.exists());
+    }
+    drop(worker);
+    let connection =
+        rusqlite::Connection::open(f.directory.path().join("namedrop.sqlite3")).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM reminders", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT state FROM reminders", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "cancelled"
+    );
+}
+
+#[test]
+fn reminder_clock_singleton_wakes_early_and_releases_runtime_gate_while_asleep() {
+    let f = Fixture::new();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(f.directory.path().join("reminder-clock.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let first = response(
+        f.command()
+            .arg("--plugin-state")
+            .arg(f.directory.path())
+            .args([
+                "reminder",
+                "set",
+                "--herdr-socket",
+                &f.socket,
+                "--herdr-workspace",
+                "workspace-1",
+                "--herdr-pane",
+                "pane-author",
+                "--input-json",
+            ])
+            .arg(json!({"in":"1h","body":"later","request_id":"clock-first"}).to_string())
+            .output()
+            .unwrap(),
+    );
+    assert!(first["data"]["reminder_id"].is_string());
+    StateStore::open(f.directory.path())
+        .unwrap()
+        .transaction(|tx| {
+            tx.complete_reconciliation(&StateNamespace::for_space(&f.socket, "workspace-1"))
+        })
+        .unwrap();
+    lock.unlock().unwrap();
+    fs::create_dir_all(f.directory.path().join("runtime")).unwrap();
+    let gate = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(f.directory.path().join("runtime/commands.lock"))
+        .unwrap();
+    let mut clock = Worker(
+        f.command()
+            .arg("reminder-clock")
+            .arg(f.directory.path())
+            .arg(&f.socket)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    wait_for(|| namedrop::reminder::clock_running(f.directory.path()));
+    let other = f
+        .command()
+        .arg("reminder-clock")
+        .arg(f.directory.path())
+        .arg(&f.socket)
+        .output()
+        .unwrap();
+    assert!(other.status.success());
+    assert!(other.stdout.is_empty());
+    assert!(other.stderr.is_empty());
+    wait_for(|| gate.try_lock().is_ok());
+    gate.unlock().unwrap();
+    let second = response(
+        f.command()
+            .arg("--plugin-state")
+            .arg(f.directory.path())
+            .args([
+                "reminder",
+                "set",
+                "--herdr-socket",
+                &f.socket,
+                "--herdr-workspace",
+                "workspace-1",
+                "--herdr-pane",
+                "pane-author",
+                "--input-json",
+            ])
+            .arg(json!({"in":"1m","body":"earlier","request_id":"clock-second"}).to_string())
+            .output()
+            .unwrap(),
+    );
+    let second_id = second["data"]["reminder_id"].as_str().unwrap();
+    let connection =
+        rusqlite::Connection::open(f.directory.path().join("namedrop.sqlite3")).unwrap();
+    let due = SystemClock.now_unix_ms() - 1;
+    connection.execute("UPDATE reminders SET due_at_ms=?2,state_json=json_set(state_json,'$.due_at_ms',?2) WHERE reminder_id=?1",rusqlite::params![second_id,due as i64]).unwrap();
+    fs::write(f.directory.path().join("reminder-clock.wake"), []).unwrap();
+    wait_for(|| {
+        connection
+            .query_row(
+                "SELECT count(*) FROM reminder_fires WHERE reminder_id=?1",
+                [second_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 1
+    });
+    wait_for(|| {
+        connection.query_row("SELECT count(*) FROM delivery_attempts a JOIN delivery_attempt_state s USING(session_socket_id,worktree_id,attempt_id,address_id) JOIN reminder_fires f USING(session_socket_id,worktree_id,delivery_id) WHERE f.reminder_id=?1 AND s.state='acknowledged'",[second_id],|r|r.get::<_,i64>(0)).unwrap()==1
+    });
+    let id = second_id.to_owned();
+    clock.0.kill().unwrap();
+    clock.0.wait().unwrap();
+    drop(clock);
+    let clock = Worker(
+        f.command()
+            .arg("reminder-clock")
+            .arg(f.directory.path())
+            .arg(&f.socket)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    wait_for(|| namedrop::reminder::clock_running(f.directory.path()));
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM reminder_fires WHERE reminder_id=?1",
+                [id],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(connection.query_row("SELECT count(*) FROM delivery_attempts a JOIN reminder_fires f USING(session_socket_id,worktree_id,delivery_id) WHERE f.reminder_id=?1",[second_id],|r|r.get::<_,i64>(0)).unwrap(),1);
+    drop(clock);
+}
+
+#[test]
+fn reminder_queued_owner_maintenance_is_not_delayed_by_a_future_schedule() {
+    let f = Fixture::new();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(f.directory.path().join("reminder-clock.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    f.reminder("future", "1h");
+    let earlier = f.reminder("queued", "1m");
+    let connection =
+        rusqlite::Connection::open(f.directory.path().join("namedrop.sqlite3")).unwrap();
+    let id = earlier["reminder_id"].as_str().unwrap();
+    let due = SystemClock.now_unix_ms() - 1;
+    connection.execute("UPDATE reminders SET due_at_ms=?2,state_json=json_set(state_json,'$.due_at_ms',?2) WHERE reminder_id=?1",rusqlite::params![id,due as i64]).unwrap();
+    let mut busy = panes("session-author");
+    busy["result"]["panes"][0]["agent_status"] = json!("working");
+    fs::write(f.directory.path().join("panes.json"), busy.to_string()).unwrap();
+    lock.unlock().unwrap();
+    let clock = f.clock();
+    wait_for(|| {
+        connection
+            .query_row(
+                "SELECT state FROM reminders WHERE reminder_id=?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+            == "awaiting_delivery"
+    });
+    fs::write(
+        f.directory.path().join("panes.json"),
+        panes("replacement").to_string(),
+    )
+    .unwrap();
+    wait_for(|| {
+        connection
+            .query_row(
+                "SELECT state FROM reminders WHERE reminder_id=?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+            == "failed"
+    });
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM delivery_attempts", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    drop(clock);
+}
+
+#[test]
+fn reminder_empty_exit_set_races_and_common_command_recovery() {
+    let f = Fixture::new();
+    for i in 0..4 {
+        let clock = f.clock();
+        let reminder = f.reminder(&format!("exit-race-{i}"), "1h");
+        wait_for(|| namedrop::reminder::clock_running(f.directory.path()));
+        assert_eq!(namedrop::reminder::pending_count(f.directory.path()), 1);
+        f.cancel_reminder(&reminder["reminder_id"]);
+        wait_for(|| !namedrop::reminder::clock_running(f.directory.path()));
+        drop(clock);
+    }
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(f.directory.path().join("reminder-clock.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let pending = f.reminder("recover-after-kill", "1h");
+    lock.unlock().unwrap();
+    assert!(!namedrop::reminder::clock_running(f.directory.path()));
+    let output = f
+        .command()
+        .arg("--plugin-state")
+        .arg(f.directory.path())
+        .args(["describe", "reminder.list", "--herdr-socket", &f.socket])
+        .output()
+        .unwrap();
+    response(output);
+    wait_for(|| namedrop::reminder::clock_running(f.directory.path()));
+    f.cancel_reminder(&pending["reminder_id"]);
+    wait_for(|| !namedrop::reminder::clock_running(f.directory.path()));
 }
