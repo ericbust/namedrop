@@ -326,8 +326,11 @@ impl StateTransaction<'_> {
                     AND m.message_id=d.message_id
                 LEFT JOIN context_grants g ON g.session_socket_id=i.session_socket_id AND g.worktree_id=i.worktree_id
                     AND g.grant_id=i.source_id AND i.source_kind='context_grant'
+                LEFT JOIN collaboration_messages relay ON relay.session_socket_id=i.session_socket_id
+                    AND relay.worktree_id=i.worktree_id AND relay.message_id=i.source_id AND i.source_kind='terminal_relay'
                 WHERE i.session_socket_id=?1 AND i.worktree_id=?2 AND i.resolved_at_ms IS NULL
-                    AND (m.thread_id=?3 OR g.thread_id=?3 OR (i.source_kind='automatic_reply_limit' AND i.source_id=?3))",
+                    AND (m.thread_id=?3 OR g.thread_id=?3 OR relay.thread_id=?3
+                         OR (i.source_kind='automatic_reply_limit' AND i.source_id=?3))",
                 params![peer.namespace.session_socket_id,peer.namespace.space_id.as_str(),thread.as_str()],|row|row.get(0))?;
         }
 

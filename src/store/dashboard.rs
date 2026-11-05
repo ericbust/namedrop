@@ -1151,7 +1151,7 @@ impl StateTransaction<'_> {
         let relays = self.rows(
             "SELECT i.attention_item_id, i.source_id, i.summary, i.opened_at_ms,
                     m.thread_id, m.author_address_id, m.author_alias_snapshot, m.body
-             FROM attention_items i JOIN collaboration_messages m
+             FROM attention_items i JOIN channel_messages m
                ON m.session_socket_id=i.session_socket_id AND m.worktree_id=i.worktree_id
                  AND m.message_id=i.source_id
              WHERE i.session_socket_id=?1 AND i.worktree_id=?2
