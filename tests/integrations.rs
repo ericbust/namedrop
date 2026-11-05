@@ -3166,6 +3166,10 @@ fn assert_installed_package(home_directory: &Path, runtime: AgentRuntime) {
         assert_eq!(hooks["hooks"][event][0]["hooks"][0]["timeout"], 10);
         assert!(hooks["hooks"][event][0]["hooks"][0].get("async").is_none());
     }
+    let stop = &hooks["hooks"]["Stop"][0]["hooks"][0];
+    assert!(stop["command"].as_str().unwrap().contains("/scripts/stop"));
+    assert_eq!(stop["timeout"], 1);
+    assert!(stop.get("async").is_none());
     let subagent = directory.join("scripts/subagent");
     assert!(fs::metadata(&subagent).unwrap().permissions().mode() & 0o100 != 0);
     let subagent = fs::read_to_string(subagent).unwrap();

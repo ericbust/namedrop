@@ -1067,7 +1067,8 @@ impl StateTransaction<'_> {
               AND d.delivery_id = a.delivery_id AND d.address_id = a.address_id
              LEFT JOIN coordinations c ON i.source_kind = 'coordination'
                AND c.session_socket_id = i.session_socket_id AND c.worktree_id = i.worktree_id AND c.coordination_id = i.source_id
-             WHERE i.session_socket_id = ?1 AND i.worktree_id = ?2 AND i.resolved_at_ms IS NULL)
+             WHERE i.session_socket_id = ?1 AND i.worktree_id = ?2 AND i.resolved_at_ms IS NULL
+               AND i.source_kind <> 'terminal_relay')
              SELECT targets.*, m.thread_id, m.message_id,
                EXISTS (SELECT 1 FROM coordination_links links
                        WHERE links.session_socket_id = m.session_socket_id
@@ -1115,7 +1116,8 @@ impl StateTransaction<'_> {
                         .as_str_or_null()?
                         .and_then(alias_for_address),
                     crate::AttentionSourceKind::AutomaticReplyLimit
-                    | crate::AttentionSourceKind::Coordination => None,
+                    | crate::AttentionSourceKind::Coordination
+                    | crate::AttentionSourceKind::TerminalRelay => None,
                 };
                 Ok(AttentionRow {
                     conversation: match row.get::<_, Option<String>>(12)? {
@@ -1131,9 +1133,66 @@ impl StateTransaction<'_> {
                 })
             },
         )?;
+        let relays = self.rows(
+            "SELECT i.attention_item_id, i.source_id, i.summary, i.opened_at_ms,
+                    m.thread_id, m.author_address_id, m.author_alias_snapshot, m.body
+             FROM attention_items i JOIN collaboration_messages m
+               ON m.session_socket_id=i.session_socket_id AND m.worktree_id=i.worktree_id
+                 AND m.message_id=i.source_id
+             WHERE i.session_socket_id=?1 AND i.worktree_id=?2
+               AND i.source_kind='terminal_relay' AND i.resolved_at_ms IS NULL",
+            namespace_params(namespace),
+            |row| {
+                let message_id: String = row.get(1)?;
+                let address: String = row.get(5)?;
+                let body: String = row.get(7)?;
+                let idle = addresses.iter().any(|candidate| {
+                    candidate.address_id == address
+                        && candidate.agent_status.as_deref().is_some_and(|status| {
+                            matches!(status, "idle" | "blocked" | "blocked_on_user" | "waiting")
+                        })
+                });
+                Ok((
+                    AttentionRow {
+                        conversation: Some(ConversationRow {
+                            thread_id: row.get(4)?,
+                            message_id: message_id.clone(),
+                        }),
+                        response_address_id: Some(address),
+                        reply_requires_message: false,
+                        response_is_terminal: false,
+                        item: crate::AttentionItemRecord {
+                            id: crate::AttentionItemId::new(row.get::<_, String>(0)?),
+                            source_kind: crate::AttentionSourceKind::TerminalRelay,
+                            source_id: message_id.clone(),
+                            summary: row.get(2)?,
+                            opened_at_ms: from_i64(row.get(3)?)?,
+                            resolved_at_ms: None,
+                        },
+                        subject_alias: Some(row.get(6)?),
+                        message_id: Some(message_id),
+                    },
+                    idle || body.trim_end().ends_with('?'),
+                ))
+            },
+        )?;
+        let priority: std::collections::HashSet<_> = relays
+            .iter()
+            .filter(|(_, high)| *high)
+            .map(|(item, _)| item.item.id.clone())
+            .collect();
+        attention.extend(relays.into_iter().map(|(item, _)| item));
         attention.sort_unstable_by(|left, right| {
-            (left.item.opened_at_ms, left.item.id.as_str())
-                .cmp(&(right.item.opened_at_ms, right.item.id.as_str()))
+            (
+                !priority.contains(&left.item.id),
+                left.item.opened_at_ms,
+                left.item.id.as_str(),
+            )
+                .cmp(&(
+                    !priority.contains(&right.item.id),
+                    right.item.opened_at_ms,
+                    right.item.id.as_str(),
+                ))
         });
         let mut rows = DashboardRows {
             namespace: namespace.clone(),

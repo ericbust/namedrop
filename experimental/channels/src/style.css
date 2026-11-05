@@ -1328,6 +1328,13 @@ button.member:not(.more):hover {
   font-size: var(--text-xs);
   color: var(--text-muted);
 }
+.terminal-provenance {
+  display: block;
+  margin: 2px 0;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
 .no-output {
   line-height: var(--leading-body);
   color: var(--text-muted);

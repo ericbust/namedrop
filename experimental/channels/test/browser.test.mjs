@@ -1182,6 +1182,101 @@ test("UI-2: code, safe links, report cards, long bodies and unknown variants ren
 });
 
 const CODEX = "pane-address-1793208032928312296-1209682-1";
+test("terminal relay is plain, bounded, visibly attributed, and replyable from Needs you", async (t) => {
+  const value = frame(1, "alpha", "needs_you");
+  value.frame.participants = people();
+  const text = `<img src=x onerror=alert(1)> **Choose** [one](https://example.com)\n${"Option details. ".repeat(90)}Which option?`;
+  const parent = message("request", "@codex choose an option");
+  const relay = message("relay", text, {
+    thread_id: "request",
+    in_reply_to: "request",
+    author: "codex",
+    kind: "terminal_relay",
+  });
+  value.frame.messages = [parent, relay];
+  value.frame.attention = [
+    {
+      source_kind: "terminal_relay",
+      summary: { text: "Which option?", truncated: false },
+      opened_at_ms: 100,
+      subject_alias: "@codex",
+      message_id: "relay",
+      thread_id: "request",
+      conversation: { thread_id: "request", message_id: "relay" },
+      response: {
+        kind: "reply",
+        address_id: "codex",
+        thread_id: "request",
+        message_id: "relay",
+      },
+    },
+  ];
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [parent, relay],
+  );
+  await ui.live();
+  await ui.page
+    .locator(".attention-title")
+    .getByText("@codex's terminal reply needs you", { exact: true })
+    .waitFor();
+  const preview = ui.page.locator(".reply-preview");
+  await preview
+    .getByText("From @codex's terminal (not sent through Namedrop)", {
+      exact: true,
+    })
+    .waitFor();
+  assert.match(
+    await preview.locator(".rp-body").textContent(),
+    /\*\*Choose\*\*/,
+  );
+  assert.equal(await preview.locator("img, a, strong").count(), 0);
+  await preview.click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const row = pane.locator('[data-message-id="relay"]');
+  await row
+    .getByText("From @codex's terminal (not sent through Namedrop)", {
+      exact: true,
+    })
+    .waitFor();
+  assert.equal((await row.locator(".body").textContent()).length, 481);
+  assert.equal(
+    await row.locator(".body img, .body a, .body strong").count(),
+    0,
+  );
+  await row.getByRole("button", { name: "Show more", exact: true }).click();
+  assert.equal(await row.locator(".body").textContent(), text);
+  await row.getByRole("button", { name: "Show less", exact: true }).click();
+  await row.getByRole("button", { name: "Show more", exact: true }).waitFor();
+  const box = pane.getByRole("combobox");
+  const posted = ui.page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      response.url().includes("/messages"),
+  );
+  await box.fill("@codex Use option one");
+  await box.press("Enter");
+  await posted;
+  await pane
+    .locator(".body")
+    .getByText("@codex Use option one", { exact: true })
+    .waitFor();
+  assert.equal(ui.posts.attempts.at(-1).body.in_reply_to, "relay");
+  await ui.page.getByRole("link", { name: /^All activity/ }).click();
+  await ui.page
+    .getByRole("heading", { name: "All activity", level: 1 })
+    .waitFor();
+  assert.deepEqual(
+    await ui.page.locator(".activity-group .nav-label").allTextContents(),
+    ["Needs you1"],
+  );
+  assert.match(await ui.page.locator(".activity-row").textContent(), /@codex/);
+});
+
 test("FULL-THREAD: Show more reads the whole message once, with the session token, and says when it can't", async (t) => {
   const value = frame(1, "alpha");
   const whole = `${"Long body ".repeat(1000)}END OF BODY`;

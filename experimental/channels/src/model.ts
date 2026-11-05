@@ -87,6 +87,7 @@ export type Attention = {
     | "context_grant"
     | "coordination"
     | "agent_status"
+    | "terminal_relay"
     | "unknown";
   summary: SafeText;
   subjectSummary: SafeText | null;
@@ -112,6 +113,7 @@ export type TerminalResult = {
 export type MessageKind =
   | "mention"
   | "reply"
+  | "terminal_relay"
   | "handoff"
   | "result_set"
   | "nudge"

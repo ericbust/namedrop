@@ -114,6 +114,173 @@ fn operator_attention_normalizes_an_exact_remote_operator_envoy() {
 }
 
 #[test]
+fn cross_space_operator_terminal_relay_returns_to_the_human_and_routes_the_next_reply() {
+    use namedrop::{AgentSessionId, MessageId, TerminalRelayEnd};
+    for complete_no_reply in [false, true] {
+        let f = Fixture::new();
+        f.register_all();
+        let mut runtime = f.runtime("w1", "unused");
+        runtime.current_pane_id = None;
+        let sent = send_operator_message("remote-question", "#ws2 @tester inspect", None, &runtime)
+            .unwrap();
+        let envelope = f.herdr.last_envelope("pane-2-tester");
+        let remote = StateNamespace::for_space("socket-a", "w2");
+        let home = StateNamespace::for_space("socket-a", "w1");
+        let mut store = StateStore::open(&f.state).unwrap();
+        let ending = TerminalRelayEnd {
+            agent_session_id: AgentSessionId::new(xws::session("pane-2-tester")),
+            ended_at_ms: 50,
+            previous_end_ms: None,
+            text: "Which option?".to_owned(),
+        };
+        let at = MutationAttribution::new(ActorKind::Plugin, "test-relay", 50);
+        let deliveries_before: i64 = f
+            .db()
+            .query_row("SELECT COUNT(*) FROM mailbox_deliveries", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let prompts_before = f.herdr.prompts.lock().unwrap().len();
+        if complete_no_reply {
+            namedrop::execute_integration_operation(
+                "complete",
+                json!({"attempt_id":envelope["control"]["attempt_id"]}),
+                &f.runtime("w2", "pane-2-tester"),
+            )
+            .unwrap();
+        }
+        let relayed = store
+            .transaction(|tx| tx.relay_terminal_ending(&remote, &ending, &at))
+            .unwrap();
+        assert_eq!(relayed.len(), 1, "operator envoys must arm terminal relay");
+        assert!(
+            store
+                .transaction(|tx| tx.relay_terminal_ending(&remote, &ending, &at))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            f.db()
+                .query_row("SELECT COUNT(*) FROM mailbox_deliveries", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            deliveries_before
+        );
+        assert_eq!(f.herdr.prompts.lock().unwrap().len(), prompts_before);
+        assert_eq!(f.db().query_row("SELECT COUNT(*) FROM message_recipients r JOIN collaboration_messages m USING (session_socket_id,worktree_id,message_id) WHERE m.grammar_version='terminal-relay/v1'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        let frame =
+            namedrop::dashboard::snapshot::build(&store.dashboard_rows(&home).unwrap(), None, 50);
+        let wire = serde_json::to_value(&frame).unwrap();
+        let message = wire["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["kind"] == "terminal_relay")
+            .expect("relay in original human conversation");
+        assert_eq!(message["thread_id"], sent["thread_id"]);
+        assert_eq!(message["body"]["text"], "Which option?");
+        assert!(message["legs"].as_array().unwrap().is_empty());
+        let attention = wire["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["source_kind"] == "terminal_relay")
+            .unwrap();
+        assert_eq!(attention["response"]["kind"], "reply");
+        assert_eq!(
+            attention["response"]["address_id"],
+            "envoy:w2:address-w2-tester"
+        );
+        assert_eq!(attention["response"]["message_id"], message["message_id"]);
+        assert_eq!(wire["health"]["level"], "needs_you");
+        f.advance(20);
+        send_operator_message(
+            "remote-answer",
+            "@tester First option",
+            Some(&MessageId::new(message["message_id"].as_str().unwrap())),
+            &runtime,
+        )
+        .unwrap();
+        let followup = f.herdr.last_envelope("pane-2-tester");
+        assert_ne!(
+            followup["control"]["attempt_id"],
+            envelope["control"]["attempt_id"]
+        );
+        assert_eq!(Fixture::untrusted_body(&followup), "First option");
+        for ns in [&home, &remote] {
+            assert!(
+                !store
+                    .dashboard_rows(ns)
+                    .unwrap()
+                    .attention
+                    .iter()
+                    .any(|item| item.item.source_kind
+                        == namedrop::AttentionSourceKind::TerminalRelay
+                        && item.item.resolved_at_ms.is_none())
+            );
+        }
+    }
+}
+
+#[test]
+fn cross_space_operator_terminal_relay_is_suppressed_after_a_real_reply() {
+    use namedrop::{AgentSessionId, TerminalRelayEnd};
+    let f = Fixture::new();
+    f.register_all();
+    let mut runtime = f.runtime("w1", "unused");
+    runtime.current_pane_id = None;
+    send_operator_message("remote-question", "#ws2 @tester inspect", None, &runtime).unwrap();
+    let envelope = f.herdr.last_envelope("pane-2-tester");
+    f.advance(5);
+    f.reply_to("w2", "pane-2-tester", &envelope, "@operator Done.");
+    let mut store = StateStore::open(&f.state).unwrap();
+    let relayed = store
+        .transaction(|tx| {
+            tx.relay_terminal_ending(
+                &StateNamespace::for_space("socket-a", "w2"),
+                &TerminalRelayEnd {
+                    agent_session_id: AgentSessionId::new(xws::session("pane-2-tester")),
+                    ended_at_ms: 50,
+                    previous_end_ms: None,
+                    text: "Which option?".to_owned(),
+                },
+                &MutationAttribution::new(ActorKind::Plugin, "test-relay", 50),
+            )
+        })
+        .unwrap();
+    assert!(relayed.is_empty());
+    assert_eq!(f.db().query_row("SELECT COUNT(*) FROM collaboration_messages WHERE grammar_version='terminal-relay/v1'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[test]
+fn cross_space_agent_envoys_do_not_arm_terminal_relay() {
+    use namedrop::{AgentSessionId, TerminalRelayEnd};
+    for author_kind in ["human", "agent_session"] {
+        let f = Fixture::new();
+        f.register_all();
+        execute_message_operation("send", json!({"request_id":"agent-question", "source":"#ws2 @tester inspect", "author_kind":author_kind}), &f.runtime("w1", "pane-1-lead")).unwrap();
+        let mut store = StateStore::open(&f.state).unwrap();
+        let relayed = store
+            .transaction(|tx| {
+                tx.relay_terminal_ending(
+                    &StateNamespace::for_space("socket-a", "w2"),
+                    &TerminalRelayEnd {
+                        agent_session_id: AgentSessionId::new(xws::session("pane-2-tester")),
+                        ended_at_ms: 50,
+                        previous_end_ms: None,
+                        text: "Which option?".to_owned(),
+                    },
+                    &MutationAttribution::new(ActorKind::Plugin, "test-relay", 50),
+                )
+            })
+            .unwrap();
+        assert!(relayed.is_empty());
+        assert_eq!(f.db().query_row("SELECT COUNT(*) FROM transition_facts WHERE entity_kind='terminal_relay_attempt'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(f.db().query_row("SELECT COUNT(*) FROM collaboration_messages WHERE grammar_version='terminal-relay/v1'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    }
+}
+
+#[test]
 fn paneless_operator_round_trip_uses_the_ledger_without_an_operator_pane() {
     let f = Fixture::new();
     f.register_all();

@@ -29,6 +29,7 @@ const CODEX_MANIFEST_FILE: &str = ".codex-plugin/plugin.json";
 const CLAUDE_MANIFEST_FILE: &str = ".claude-plugin/plugin.json";
 const HOOKS_FILE: &str = "hooks/hooks.json";
 const HOOK_SCRIPT_FILE: &str = "scripts/user-prompt-submit";
+const STOP_SCRIPT_FILE: &str = "scripts/stop";
 const SESSION_START_SCRIPT_FILE: &str = "scripts/session-start";
 const SUBAGENT_SCRIPT_FILE: &str = "scripts/subagent";
 const SUBAGENT_OWNERSHIP_FILE: &str = ".namedrop-subagent-hook.json";
@@ -38,6 +39,7 @@ enum HookScript {
     Prompt,
     Session,
     Subagent,
+    Stop,
 }
 impl HookScript {
     fn file(self) -> &'static str {
@@ -45,6 +47,7 @@ impl HookScript {
             Self::Prompt => HOOK_SCRIPT_FILE,
             Self::Session => SESSION_START_SCRIPT_FILE,
             Self::Subagent => SUBAGENT_SCRIPT_FILE,
+            Self::Stop => STOP_SCRIPT_FILE,
         }
     }
     fn render(
@@ -57,19 +60,22 @@ impl HookScript {
             Self::Prompt => hook_script(runtime, executable, state),
             Self::Session => session_start_script(runtime, executable, state),
             Self::Subagent => subagent_script(runtime, executable, state),
+            Self::Stop => stop_script(executable, state),
         }
     }
 }
-const HOOK_SCRIPTS: [HookScript; 3] = [
+const HOOK_SCRIPTS: [HookScript; 4] = [
     HookScript::Prompt,
     HookScript::Session,
     HookScript::Subagent,
+    HookScript::Stop,
 ];
-const HOOK_EVENTS: [(&str, HookScript, bool); 8] = [
+const HOOK_EVENTS: [(&str, HookScript, bool); 9] = [
     ("SessionStart", HookScript::Session, false),
     ("UserPromptSubmit", HookScript::Prompt, false),
     ("SubagentStart", HookScript::Subagent, true),
     ("SubagentStop", HookScript::Subagent, true),
+    ("Stop", HookScript::Stop, false),
     ("Stop", HookScript::Subagent, true),
     ("SessionEnd", HookScript::Subagent, true),
     ("SessionStart", HookScript::Subagent, true),
@@ -960,7 +966,7 @@ fn hooks_manifest(package_directory: &Path) -> Result<String, String> {
     };
     let mut hooks = serde_json::Map::new();
     for (event, script, silent) in HOOK_EVENTS {
-        let mut command = json!({ "type": "command", "command": launch(script.file())?, "timeout": if silent { 5 } else { 10 } });
+        let mut command = json!({ "type": "command", "command": launch(script.file())?, "timeout": if matches!(script, HookScript::Stop) { 1 } else if silent { 5 } else { 10 } });
         if silent {
             command["async"] = json!(true);
         }
@@ -1092,6 +1098,22 @@ pub(crate) fn remove_subagent_hooks(state: &Path, home: Option<&Path>) -> Result
         }
     }
     Ok(removed)
+}
+
+fn stop_script(executable: &Path, state_directory: &Path) -> Result<String, String> {
+    let executable = shell_single_quote(
+        executable
+            .to_str()
+            .ok_or("hook executable path is not UTF-8")?,
+    );
+    let state = shell_single_quote(
+        state_directory
+            .to_str()
+            .ok_or("hook state path is not UTF-8")?,
+    );
+    Ok(format!(
+        "#!/bin/sh\nexec >/dev/null 2>&1\nNAMEDROP_HERDR_TIMEOUT_MS=250 {executable} hook stop --state-directory {state} <&0 >/dev/null 2>&1\nexit 0\n"
+    ))
 }
 
 fn hook_script(

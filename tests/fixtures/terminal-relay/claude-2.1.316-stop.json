@@ -1,0 +1,16 @@
+{
+  "session_id": "claude-session-id",
+  "transcript_path": "/testbed/claude/transcript_path",
+  "cwd": "/testbed/claude/cwd",
+  "scratchpad_dir": "/testbed/claude/scratchpad_dir",
+  "prompt_id": "claude-prompt-id",
+  "permission_mode": "auto",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "Hi! I'm @claude in this Namedrop testbed. What can I help you with?",
+  "background_tasks": [],
+  "session_crons": []
+}

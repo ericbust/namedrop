@@ -657,6 +657,7 @@ pub enum MessageKind {
     ResultSet,
     Nudge,
     Hook,
+    TerminalRelay,
 }
 
 impl MessageKind {
@@ -667,6 +668,7 @@ impl MessageKind {
             "coordination-nudge/v1" => Self::Nudge,
             "mention-hook/v1" => Self::Hook,
             "terminal-result/v1" => Self::Reply,
+            "terminal-relay/v1" => Self::TerminalRelay,
             _ if is_reply => Self::Reply,
             _ => Self::Mention,
         }
@@ -837,6 +839,7 @@ fn attention_response(item: &rows::AttentionRow) -> AttentionResponse {
     match item.item.source_kind {
         AttentionSourceKind::DeliveryAttempt
         | AttentionSourceKind::AgentDisposition
+        | AttentionSourceKind::TerminalRelay
         | AttentionSourceKind::Coordination
         | AttentionSourceKind::AutomaticReplyLimit => {
             if let Some(conversation) = &item.conversation {
@@ -1137,7 +1140,14 @@ pub(crate) fn message(row: &rows::MessageRow, legs: &[rows::LegRow]) -> MessageR
             row.author_address_id.clone()
         },
         kind: MessageKind::of(&row.grammar_version, row.in_reply_to.is_some()),
-        body: SafeText::from_untrusted(&row.body, BODY_CHARS),
+        body: SafeText::from_untrusted(
+            &row.body,
+            if row.grammar_version == "terminal-relay/v1" {
+                crate::TERMINAL_RELAY_MAX_CHARS
+            } else {
+                BODY_CHARS
+            },
+        ),
         legs: legs
             .iter()
             .filter(|leg| leg.message_id == row.message_id)
