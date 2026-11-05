@@ -74,6 +74,8 @@ def migrate(binary, state, home, schema=7):
     env.update(HOME=str(home), XDG_CONFIG_HOME=str(home / '.config'),
                XDG_STATE_HOME=str(home / '.local/state'), XDG_CACHE_HOME=str(home / '.cache'))
     with (runtime / 'commands.lock').open('a') as gate:
+        assert fcntl.fcntl(gate, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDWR, \
+            'The fixture must inherit the same read/write command gate as runtime.lock'
         fcntl.flock(gate, fcntl.LOCK_EX)
         env['NAMEDROP_MIGRATION_GATE_FD'] = str(gate.fileno())
         result = subprocess.run([str(binary), '--migrate-runtime-state', str(state)],
