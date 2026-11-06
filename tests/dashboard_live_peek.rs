@@ -840,15 +840,28 @@ fn cached_tty_rechecks_startup_resize_without_rediscovery_or_retained_descriptor
 fn failed_tty_discovery_throttles_startup_but_rechecks_metadata_rows() {
     let f = Fixture::new();
     let server = Server::start(&f);
+    let shim = f.root.join("herdr");
+    let script = fs::read_to_string(&shim).unwrap().replace(
+        "if args[:2]==['pane','process-info']:\n",
+        "if args[:2]==['pane','process-info']:\n    if not os.path.exists(os.path.join(root,'geometry-reads.jsonl')):time.sleep(.1)\n",
+    );
+    fs::write(shim, script).unwrap();
     set_rows(&f, json!(40));
     set_process_info(&f, json!({"tty":"??"}));
     configure(
         &f,
-        json!({"mutate_metadata":metadata_with_rows(&f, json!(80)),"quiet":true}),
+        json!({"mutate_metadata":metadata_with_rows(&f, json!(80)),"delay_rows":{"40":0.8},"quiet":true}),
     );
     let mut live = server.live(&path("socket-a", "w1", "lead"));
     let reset = live.record().unwrap();
     assert_eq!(reset["rows"], 80);
+    let startup_calls = geometry_invocations(&f);
+    eprintln!("Startup geometry calls: {startup_calls:?}");
+    if startup_calls.len() == 2 {
+        let interval = startup_calls[1]["time"].as_f64().unwrap()
+            - startup_calls[0]["time"].as_f64().unwrap();
+        assert!(interval >= 0.95, "Python log interval was {interval:.3}s");
+    }
     assert_eq!(geometry_invocations(&f).len(), 1);
     assert_eq!(invocations(&f).len(), 2);
     let source = SourcePty::new(200, 70);
@@ -860,7 +873,9 @@ fn failed_tty_discovery_throttles_startup_but_rechecks_metadata_rows() {
     assert_eq!(resized["continuity"], reset["continuity"]);
     let calls = geometry_invocations(&f);
     assert_eq!(calls.len(), 2);
-    assert!(calls[1]["time"].as_f64().unwrap() - calls[0]["time"].as_f64().unwrap() >= 0.95);
+    let interval = calls[1]["time"].as_f64().unwrap() - calls[0]["time"].as_f64().unwrap();
+    eprintln!("Python log interval was {interval:.3}s");
+    assert!(interval >= 0.95, "Python log interval was {interval:.3}s");
 }
 
 #[test]
