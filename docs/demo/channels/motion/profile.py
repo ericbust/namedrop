@@ -8,7 +8,7 @@ root=Path(__file__).resolve().parents[4]
 sys.path.insert(0,str(root/'testbed/lib'))
 import testbed
 
-PRODUCT='b9ea2d0d022fe1fd5ea17762f3a90ec01d110303'
+PRODUCT='f5494d6f15f42b5c8c073bbcdbb01f0649dd0350'
 PRODUCT_FILES=['src','experimental/channels/src','Cargo.toml','Cargo.lock','herdr-plugin.toml']
 
 name,operation,*extra=sys.argv[1:]

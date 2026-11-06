@@ -13,12 +13,12 @@ root=Path(__file__).resolve().parent
 assets=root.parent.parent/'assets'
 mp4=assets/'namedrop-channels.mp4';webp=assets/'namedrop-channels.webp'
 provenance=json.loads((root/'motion/capture.json').read_text())
-assert provenance['productRevision']=='b9ea2d0d022fe1fd5ea17762f3a90ec01d110303','expected exp.18 product'
+assert provenance['productRevision']=='f5494d6f15f42b5c8c073bbcdbb01f0649dd0350','expected exp.19 product'
 if args.recording:
  recording=json.loads(args.recording.read_text())
  assert recording['productRevision']==provenance['productRevision'],'wrong product revision'
  assert recording['sourceRevision']==provenance['sourceRevision'],'wrong source build'
- assert recording['version']=='1.5.0-exp.18','wrong runtime version'
+ assert recording['version']=='1.5.0-exp.19','wrong runtime version'
  assert recording['viewport']=={'width':1280,'height':720} and recording['deviceScaleFactor']==2,'capture must be 1280x720 at 2x'
  events={event['name']:event for event in recording['events']}
  assert events['reminder-fired']['t']-events['reminder-sent']['t']>=55,'reminder must really wait one minute'
