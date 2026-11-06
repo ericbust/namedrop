@@ -16,8 +16,12 @@ pub(crate) use server_files::current_operator_session;
 /// Internal child entry point. A private stdin pipe ties an observer to its
 /// dashboard's lifetime, including a quiet terminal after dashboard SIGKILL.
 #[doc(hidden)]
-pub fn run_observer_guard(terminal: &str, rows: Option<u16>) -> std::process::ExitCode {
-    observer_guard::run(terminal, rows)
+pub fn run_observer_guard(
+    terminal: &str,
+    rows: Option<u16>,
+    cols: Option<u16>,
+) -> std::process::ExitCode {
+    observer_guard::run(terminal, rows, cols)
 }
 
 use crate::{Clock, HerdrCommandExecutor, IdGenerator, LifecycleRuntime, StateNamespace};

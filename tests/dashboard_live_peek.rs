@@ -10,7 +10,10 @@ use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
-    os::unix::fs::PermissionsExt,
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::{fs::PermissionsExt, process::CommandExt},
+    },
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -61,6 +64,114 @@ fn set_rows(f: &Fixture, rows: Value) {
     let temporary = f.root.join("responses-next.json");
     fs::write(&temporary, metadata_with_rows(f, rows).to_string()).unwrap();
     fs::rename(temporary, f.root.join("responses.json")).unwrap();
+}
+
+fn set_process_info(f: &Fixture, info: Value) {
+    let mut responses: Value =
+        serde_json::from_slice(&fs::read(f.root.join("responses.json")).unwrap()).unwrap();
+    responses["pane process-info --pane pane-1-lead"] =
+        json!(json!({"result":{"process_info":info}}).to_string());
+    let temporary = f.root.join("responses-next.json");
+    fs::write(&temporary, responses.to_string()).unwrap();
+    fs::rename(temporary, f.root.join("responses.json")).unwrap();
+}
+
+struct SourcePty {
+    master: fs::File,
+    slave: fs::File,
+    path: String,
+}
+impl SourcePty {
+    fn new(cols: u16, rows: u16) -> Self {
+        let (mut master, mut slave) = (-1, -1);
+        let size = libc::winsize {
+            ws_col: cols,
+            ws_row: rows,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // SAFETY: openpty initializes both descriptors using the supplied size.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    &size,
+                )
+            },
+            0
+        );
+        // SAFETY: openpty returned two owned descriptors above.
+        let master = unsafe { fs::File::from_raw_fd(master) };
+        let slave = unsafe { fs::File::from_raw_fd(slave) };
+        let mut name = [0; 512];
+        // SAFETY: ttyname_r writes at most the supplied name buffer length.
+        assert_eq!(
+            unsafe { libc::ttyname_r(slave.as_raw_fd(), name.as_mut_ptr(), name.len()) },
+            0
+        );
+        // SAFETY: ttyname_r succeeded and NUL terminated the buffer.
+        let path = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let mut attributes = std::mem::MaybeUninit::<libc::termios>::uninit();
+        // SAFETY: tcgetattr initializes attributes for this disposable PTY.
+        assert_eq!(
+            unsafe { libc::tcgetattr(slave.as_raw_fd(), attributes.as_mut_ptr()) },
+            0
+        );
+        // SAFETY: tcgetattr succeeded above.
+        let mut attributes = unsafe { attributes.assume_init() };
+        // SAFETY: these operations change only this test-owned PTY.
+        unsafe {
+            libc::cfmakeraw(&mut attributes);
+            assert_eq!(
+                libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &attributes),
+                0
+            );
+        }
+        // SAFETY: nonblocking reads make a consumed-input regression fail instead of hanging.
+        unsafe {
+            let flags = libc::fcntl(slave.as_raw_fd(), libc::F_GETFL);
+            assert!(flags >= 0);
+            assert_eq!(
+                libc::fcntl(slave.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK),
+                0
+            );
+        }
+        Self {
+            master,
+            slave,
+            path,
+        }
+    }
+    fn resize(&self, cols: u16, rows: u16) {
+        let size = libc::winsize {
+            ws_col: cols,
+            ws_row: rows,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // SAFETY: only this disposable source is resized by the test, never by the dashboard.
+        assert_eq!(
+            unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+            0
+        );
+    }
+    fn size(&self) -> (u16, u16) {
+        let mut size = std::mem::MaybeUninit::<libc::winsize>::uninit();
+        // SAFETY: ioctl initializes size for the owned descriptor.
+        assert_eq!(
+            unsafe { libc::ioctl(self.slave.as_raw_fd(), libc::TIOCGWINSZ, size.as_mut_ptr()) },
+            0
+        );
+        // SAFETY: TIOCGWINSZ succeeded above.
+        let size = unsafe { size.assume_init() };
+        (size.ws_col, size.ws_row)
+    }
 }
 
 fn configure_history(f: &Fixture, text: &str) {
@@ -128,10 +239,14 @@ if args[:3]==['terminal','session','observe']:
         child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)'])
     with open(os.path.join(root,'reads.jsonl'),'a') as log:
         log.write(json.dumps({'args':args,'socket':os.environ.get('HERDR_SOCKET_PATH'),'pid':os.getpid(),'child':child.pid if child else None,'stdin_null':os.read(0,1)==b'','workspace':os.environ.get('HERDR_WORKSPACE_ID'),'pane':os.environ.get('HERDR_PANE_ID')})+'\n')
+    if config.get('reject_geometry') and ('--rows' in args or '--cols' in args):
+        time.sleep(config.get('reject_delay',0))
+        os.write(1,config.get('reject_stdout','').encode());sys.exit(2)
     if config.get('exit') is not None:
         os.write(1,config.get('stdout','').encode())
         sys.exit(config['exit'])
     rows=int(args[args.index('--rows')+1]) if '--rows' in args else 40
+    cols=int(args[args.index('--cols')+1]) if '--cols' in args else 120
     if config.get('gate_rows') and rows in config['gate_rows']:
         while True:time.sleep(.01)
     if config.get('gate'):
@@ -145,7 +260,8 @@ if args[:3]==['terminal','session','observe']:
         os.write(1,b'x'*(2*1024*1024+1));time.sleep(120)
     payload=b'\x1b[2J\x1b[HSAFE-INITIAL'
     if config.get('source_rows') and rows>=60:payload+=b'\x1b[60;1HBOTTOM-PROMPT'
-    frames=config.get('frames',[{'type':'terminal.frame','encoding':'ansi','full':True,'width':120,'height':rows,'seq':1,'bytes':base64.b64encode(payload).decode()}])
+    if config.get('source_cols') and cols>=200 and rows>=70:payload+=b'\x1b[70;190HRIGHT-EDGE'
+    frames=config.get('frames',[{'type':'terminal.frame','encoding':'ansi','full':True,'width':cols,'height':rows,'seq':1,'bytes':base64.b64encode(payload).decode()}])
     for frame in frames: print(json.dumps(frame),flush=True)
     if config.get('flood'):
         seq=len(frames)
@@ -362,6 +478,346 @@ fn post_input(server: &Server, target: &str, body: &Value) -> Response {
         &body.to_string(),
         &[("Cookie", &server.cookie), ("X-Namedrop-Csrf", &csrf)],
     )
+}
+
+#[test]
+fn source_tty_preserves_wide_bottom_marker_without_consuming_source_input() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let mut source = SourcePty::new(200, 80);
+    set_rows(&f, json!(40));
+    set_process_info(
+        &f,
+        json!({"tty":source.path, "shell_pid":"ignored-when-tty-is-present"}),
+    );
+    configure(&f, json!({"source_cols":true}));
+    source
+        .master
+        .write_all(b"source-input-still-pending")
+        .unwrap();
+    let response = server.get(&path("socket-a", "w1", "lead"));
+    assert_eq!(response.status, 200);
+    let reset: Value = serde_json::from_str(response.body.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        (reset["cols"].as_u64(), reset["rows"].as_u64()),
+        (Some(200), Some(80))
+    );
+    assert_eq!(
+        reset["bytes"],
+        "G1syShtbSFNBRkUtSU5JVElBTBtbNzA7MTkwSFJJR0hULUVER0U="
+    );
+    assert_eq!(source.size(), (200, 80));
+    let mut pending = [0; 26];
+    source.slave.read_exact(&mut pending).unwrap();
+    assert_eq!(&pending, b"source-input-still-pending");
+    let call = invocations(&f).remove(0);
+    assert_eq!(
+        call["args"],
+        json!([
+            "terminal",
+            "session",
+            "observe",
+            "t-pane-1-lead",
+            "--rows",
+            "80",
+            "--cols",
+            "200"
+        ])
+    );
+    assert_eq!(call["stdin_null"], true);
+}
+
+#[test]
+fn source_column_changes_keep_continuity_sequence_history_and_input() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let source = SourcePty::new(200, 80);
+    set_process_info(&f, json!({"tty":source.path}));
+    configure(&f, json!({"quiet":true,"child":true,"source_cols":true}));
+    configure_history(&f, "history before columns change");
+    let mut live = server.live(&path("socket-a", "w1", "lead"));
+    let reset = live.record().unwrap();
+    let continuity = reset["continuity"].clone();
+    assert_eq!(reset["cols"], 200);
+    assert_eq!(live.record().unwrap()["kind"], "history");
+    let mut seq = 2;
+    for cols in [240, 100, 200] {
+        source.resize(cols, 80);
+        let event = live.record().unwrap();
+        assert_eq!(event["kind"], "reset");
+        assert_eq!(event["cols"], cols);
+        assert_eq!(event["rows"], 80);
+        assert_eq!(event["continuity"], continuity);
+        seq += 1;
+        assert_eq!(event["seq"], seq);
+        assert_eq!(
+            post_input(
+                &server,
+                &input_path("socket-a", "w1", "lead"),
+                &json!({"kind":"key","key":"Enter","continuity":continuity})
+            )
+            .status,
+            204
+        );
+    }
+    configure_history(&f, "history after columns change");
+    let history = live.record().unwrap();
+    assert_eq!(history["kind"], "history");
+    assert_eq!(history["text"], "history after columns change");
+    assert_eq!(history["seq"], seq + 1);
+    drop(live);
+    let calls: Vec<_> = invocations(&f)
+        .into_iter()
+        .filter(|call| call["args"][0] == "terminal")
+        .collect();
+    assert_eq!(calls.len(), 4);
+    for call in calls {
+        wait_for(|| stopped(call["pid"].as_u64().unwrap()));
+        wait_for(|| stopped(call["child"].as_u64().unwrap()));
+    }
+}
+
+#[test]
+fn unavailable_geometry_keeps_known_columns_until_authoritative_resize() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let source = SourcePty::new(200, 80);
+    set_rows(&f, json!(80));
+    set_process_info(&f, json!({"tty":source.path}));
+    configure(&f, json!({"quiet":true,"source_cols":true}));
+    configure_history(&f, "geometry available");
+    let mut live = server.live(&path("socket-a", "w1", "lead"));
+    let reset = live.record().unwrap();
+    assert_eq!(reset["cols"], 200);
+    assert_eq!(live.record().unwrap()["kind"], "history");
+    for (index, info) in [json!({}), json!({"tty":"/dev/namedrop-test-missing-tty"})]
+        .into_iter()
+        .enumerate()
+    {
+        set_process_info(&f, info);
+        let text = format!("geometry temporarily unavailable {index}");
+        configure_history(&f, &text);
+        let event = live.record().unwrap();
+        assert_eq!(
+            event["kind"], "history",
+            "optional geometry loss reset the known source grid"
+        );
+        assert_eq!(event["text"], text);
+        assert_eq!(invocations(&f).len(), 1);
+    }
+    source.resize(240, 80);
+    set_process_info(&f, json!({"tty":source.path}));
+    let resized = live.record().unwrap();
+    assert_eq!(resized["kind"], "reset");
+    assert_eq!(resized["cols"], 240);
+    assert_eq!(resized["continuity"], reset["continuity"]);
+    assert_eq!(resized["seq"], 5);
+    assert_eq!(invocations(&f).len(), 2);
+}
+
+#[test]
+fn partial_geometry_revalidates_retained_columns_against_new_rows() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let source = SourcePty::new(512, 128);
+    set_process_info(&f, json!({"tty":source.path}));
+    configure(&f, json!({"quiet":true}));
+    let mut live = server.live(&path("socket-a", "w1", "lead"));
+    let reset = live.record().unwrap();
+    assert_eq!(reset["cols"], 512);
+    assert_eq!(reset["rows"], 128);
+    set_rows(&f, json!(256));
+    set_process_info(&f, json!({}));
+    let event = live.record().unwrap();
+    assert_eq!(event["kind"], "unavailable");
+    assert_eq!(event["reason"], "source_lost");
+    assert_eq!(invocations(&f).len(), 1);
+    assert_eq!(
+        post_input(
+            &server,
+            &input_path("socket-a", "w1", "lead"),
+            &json!({"kind":"key","key":"Enter","continuity":reset["continuity"]})
+        )
+        .status,
+        204
+    );
+}
+
+#[test]
+fn invalid_source_geometry_refuses_live_without_revoking_input() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let source = SourcePty::new(200, 80);
+    let p = path("socket-a", "w1", "lead");
+    let continuity = live_continuity(&server, &p);
+    set_process_info(&f, json!({"tty":source.path}));
+    for (cols, rows) in [(0, 80), (513, 80), (200, 0), (200, 257), (512, 256)] {
+        source.resize(cols, rows);
+        assert_eq!(server.get(&p).status, 503);
+    }
+    for info in [
+        json!({"tty":3}),
+        json!({"tty":"/tmp/untrusted"}),
+        json!({"tty":"/dev/pts/../0"}),
+        json!({"shell_pid":"bad"}),
+        json!({"shell_pid":0}),
+    ] {
+        set_process_info(&f, info);
+        assert_eq!(server.get(&p).status, 503);
+    }
+    assert_eq!(
+        post_input(
+            &server,
+            &input_path("socket-a", "w1", "lead"),
+            &json!({"kind":"key","key":"Enter","continuity":continuity})
+        )
+        .status,
+        204
+    );
+}
+
+#[test]
+fn unavailable_tty_keeps_legacy_rows_and_absent_metadata_keeps_defaults() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    set_process_info(&f, json!({"tty":"/dev/namedrop-test-missing-tty"}));
+    let p = path("socket-a", "w1", "lead");
+    let response = server.get(&p);
+    let reset: Value = serde_json::from_str(response.body.lines().next().unwrap()).unwrap();
+    assert_eq!(reset["cols"], 120);
+    assert_eq!(reset["rows"], 40);
+    assert_eq!(
+        invocations(&f)[0]["args"],
+        json!(["terminal", "session", "observe", "t-pane-1-lead"])
+    );
+    set_rows(&f, json!(80));
+    let response = server.get(&p);
+    let reset: Value = serde_json::from_str(response.body.lines().next().unwrap()).unwrap();
+    assert_eq!(reset["cols"], 120);
+    assert_eq!(reset["rows"], 80);
+}
+
+#[test]
+fn shell_pid_discovers_controlling_tty_with_bounded_ps() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let source = SourcePty::new(200, 70);
+    let mut command = Command::new("/usr/bin/python3");
+    command
+        .args(["-c", "import time;time.sleep(120)"])
+        .stdin(source.slave.try_clone().unwrap())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: the child creates its own session and claims only the disposable test PTY.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut shell = command.spawn().unwrap();
+    set_process_info(&f, json!({"shell_pid":shell.id()}));
+    let started = Instant::now();
+    let response = server.get(&path("socket-a", "w1", "lead"));
+    let _ = shell.kill();
+    let _ = shell.wait();
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(response.status, 200);
+    let reset: Value = serde_json::from_str(response.body.lines().next().unwrap()).unwrap();
+    assert_eq!(reset["cols"], 200);
+    assert_eq!(reset["rows"], 70);
+    assert_eq!(source.size(), (200, 70));
+}
+
+#[test]
+fn legacy_observer_retries_without_geometry_once_at_startup_and_resize() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    set_rows(&f, json!(80));
+    configure(
+        &f,
+        json!({"reject_geometry":true,"quiet":true,"child":true}),
+    );
+    configure_history(&f, "legacy observer history");
+    let mut live = server.live(&path("socket-a", "w1", "lead"));
+    let reset = live.record().unwrap();
+    assert_eq!(reset["rows"], 40);
+    assert_eq!(reset["seq"], 1);
+    assert_eq!(live.record().unwrap()["kind"], "history");
+    set_rows(&f, json!(60));
+    let resized = live.record().unwrap();
+    assert_eq!(resized["kind"], "reset");
+    assert_eq!(resized["seq"], 3);
+    assert_eq!(resized["continuity"], reset["continuity"]);
+    assert_eq!(resized["rows"], 40);
+    assert_eq!(
+        post_input(
+            &server,
+            &input_path("socket-a", "w1", "lead"),
+            &json!({"kind":"key","key":"Enter","continuity":reset["continuity"]})
+        )
+        .status,
+        204
+    );
+    drop(live);
+    let calls: Vec<_> = invocations(&f)
+        .into_iter()
+        .filter(|call| call["args"][0] == "terminal")
+        .collect();
+    assert_eq!(calls.len(), 4);
+    assert_eq!(calls[0]["args"].as_array().unwrap().len(), 6);
+    assert_eq!(calls[1]["args"].as_array().unwrap().len(), 4);
+    assert_eq!(calls[2]["args"].as_array().unwrap().len(), 6);
+    assert_eq!(calls[3]["args"].as_array().unwrap().len(), 4);
+    for call in calls {
+        wait_for(|| stopped(call["pid"].as_u64().unwrap()));
+        wait_for(|| stopped(call["child"].as_u64().unwrap()));
+    }
+}
+
+#[test]
+fn geometry_usage_retry_requires_no_stdout_and_second_failure_is_unsupported() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    set_rows(&f, json!(80));
+    let p = path("socket-a", "w1", "lead");
+    for stdout in [" ", "{\"type\":", "{bad\n"] {
+        configure(&f, json!({"reject_geometry":true,"reject_stdout":stdout}));
+        let before = invocations(&f).len();
+        let response = server.get(&p);
+        assert_eq!(invocations(&f).len(), before + 1);
+        assert!(!response.body.contains("unsupported"));
+    }
+    configure(&f, json!({"reject_geometry":true,"exit":2}));
+    let before = invocations(&f).len();
+    assert!(server.get(&p).body.contains("unsupported"));
+    assert_eq!(invocations(&f).len(), before + 2);
+    configure(&f, json!({"exit":1}));
+    let before = invocations(&f).len();
+    assert_eq!(server.get(&p).status, 503);
+    assert_eq!(invocations(&f).len(), before + 1);
+}
+
+#[test]
+fn flagless_retry_keeps_original_deadline_and_cleans_children() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    set_rows(&f, json!(80));
+    configure(
+        &f,
+        json!({"reject_geometry":true,"reject_delay":2,"gate":"never","child":true}),
+    );
+    let started = Instant::now();
+    assert_eq!(server.get(&path("socket-a", "w1", "lead")).status, 503);
+    assert!(started.elapsed() < Duration::from_secs(6));
+    let calls = invocations(&f);
+    assert_eq!(calls.len(), 2);
+    for call in calls {
+        wait_for(|| stopped(call["pid"].as_u64().unwrap()));
+        wait_for(|| stopped(call["child"].as_u64().unwrap()));
+    }
 }
 
 #[test]

@@ -12,12 +12,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
+    fs::OpenOptions,
     io::{self, Read, Write},
     net::TcpStream,
     os::{
         fd::{AsRawFd, RawFd},
-        unix::process::CommandExt,
+        unix::{fs::OpenOptionsExt, process::CommandExt},
     },
+    path::{Component, Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
         Arc, Mutex,
@@ -288,18 +290,138 @@ struct NativePane {
     identity: NativeIdentity,
     source_rows: Option<serde_json::Value>,
 }
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SourceViewport {
+    cols: Option<u16>,
+    rows: Option<u16>,
+}
+impl SourceViewport {
+    fn validated(cols: Option<u64>, rows: Option<u64>) -> Result<Self, Status> {
+        if cols.is_some_and(|cols| !(1..=512).contains(&cols))
+            || rows.is_some_and(|rows| !(1..=256).contains(&rows))
+            || cols
+                .zip(rows)
+                .is_some_and(|(cols, rows)| cols * rows > 65536)
+        {
+            return Err(Status::Unavailable);
+        }
+        Ok(Self {
+            cols: cols.map(|cols| cols as u16),
+            rows: rows.map(|rows| rows as u16),
+        })
+    }
+
+    fn has_flags(self) -> bool {
+        self.cols.is_some() || self.rows.is_some()
+    }
+}
+
+fn tty_path(value: &str) -> Result<PathBuf, Status> {
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        return Err(Status::Unavailable);
+    }
+    let path = Path::new(value);
+    let path = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        Path::new("/dev").join(path)
+    };
+    let relative = path.strip_prefix("/dev").map_err(|_| Status::Unavailable)?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        || value.split('/').any(|part| matches!(part, "." | ".."))
+    {
+        return Err(Status::Unavailable);
+    }
+    Ok(path)
+}
+
+fn tty_viewport(path: &Path) -> Result<Option<SourceViewport>, Status> {
+    let Ok(tty) = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(path)
+    else {
+        return Ok(None);
+    };
+    let fd = tty.as_raw_fd();
+    // SAFETY: isatty and TIOCGWINSZ borrow this open descriptor without reading or changing the PTY.
+    if unsafe { libc::isatty(fd) } != 1 {
+        return Ok(None);
+    }
+    let mut size = std::mem::MaybeUninit::<libc::winsize>::uninit();
+    // SAFETY: ioctl initializes the valid winsize allocation on success.
+    if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, size.as_mut_ptr()) } != 0 {
+        return Ok(None);
+    }
+    // SAFETY: TIOCGWINSZ succeeded above.
+    let size = unsafe { size.assume_init() };
+    SourceViewport::validated(Some(u64::from(size.ws_col)), Some(u64::from(size.ws_row))).map(Some)
+}
+
+fn shell_tty(pid: u64, budget: Duration) -> Result<Option<PathBuf>, Status> {
+    if pid == 0 || pid > i32::MAX as u64 {
+        return Err(Status::Unavailable);
+    }
+    let result = ProcessHerdr::for_binary("/bin/ps").execute_bounded(
+        &["-p", &pid.to_string(), "-o", "tty="],
+        budget.min(Duration::from_millis(150)),
+        &AtomicBool::new(false),
+        1024,
+    );
+    let Ok(result) = result else {
+        return Ok(None);
+    };
+    let name = result.stdout.trim();
+    if matches!(name, "" | "?" | "??" | "-") {
+        return Ok(None);
+    }
+    tty_path(name).map(Some)
+}
+
 impl NativePane {
-    fn rows(&self) -> Result<Option<u16>, Status> {
-        self.source_rows
+    fn viewport(&self, binding: &LiveBinding, budget: Duration) -> Result<SourceViewport, Status> {
+        let started = Instant::now();
+        let result = ProcessHerdr::default()
+            .with_socket(Some(binding.namespace.session_socket_id.clone()))
+            .execute_bounded(
+                &["pane", "process-info", "--pane", &binding.pane_id],
+                budget.min(Duration::from_millis(150)),
+                &AtomicBool::new(false),
+                ENCODED_LIMIT,
+            );
+        if let Ok(result) = result
+            && let Ok(reply) = serde_json::from_str::<serde_json::Value>(&result.stdout)
+            && let Some(info) = reply.pointer("/result/process_info")
+        {
+            let path = if let Some(value) = info.get("tty").filter(|value| !value.is_null()) {
+                Some(tty_path(value.as_str().ok_or(Status::Unavailable)?)?)
+            } else if let Some(value) = info.get("shell_pid").filter(|value| !value.is_null()) {
+                shell_tty(
+                    value.as_u64().ok_or(Status::Unavailable)?,
+                    budget.saturating_sub(started.elapsed()),
+                )?
+            } else {
+                None
+            };
+            if let Some(path) = path
+                && let Some(viewport) = tty_viewport(&path)?
+            {
+                return Ok(viewport);
+            }
+        }
+        let rows = self
+            .source_rows
             .as_ref()
-            .map(|value| {
-                value
-                    .as_u64()
-                    .filter(|rows| (1..=256).contains(rows))
-                    .map(|rows| rows as u16)
-                    .ok_or(Status::Unavailable)
-            })
-            .transpose()
+            .map(|value| value.as_u64().ok_or(Status::Unavailable))
+            .transpose()?;
+        SourceViewport::validated(None, rows)
     }
 }
 
@@ -434,14 +556,17 @@ impl Observer {
     fn open(
         binding: &LiveBinding,
         identity: &NativeIdentity,
-        rows: Option<u16>,
+        viewport: SourceViewport,
     ) -> io::Result<Self> {
         let mut command = Command::new(std::env::current_exe()?);
         command
             .arg("dashboard-observer-guard")
             .arg(&identity.terminal);
-        if let Some(rows) = rows {
+        if let Some(rows) = viewport.rows {
             command.arg("--rows").arg(rows.to_string());
+        }
+        if let Some(cols) = viewport.cols {
+            command.arg("--cols").arg(cols.to_string());
         }
         let mut guard = command
             .env("HERDR_SOCKET_PATH", &binding.namespace.session_socket_id)
@@ -487,18 +612,21 @@ struct Observation {
     observer: Observer,
     input: Input,
     normalizer: Normalizer,
-    rows: Option<u16>,
+    viewport: SourceViewport,
+    flagless: bool,
     deadline: Option<Instant>,
 }
 impl Observation {
     fn open(binding: &LiveBinding, pane: &NativePane, deadline: Instant) -> Result<Self, Status> {
-        let rows = pane.rows()?;
+        let viewport =
+            pane.viewport(binding, deadline.saturating_duration_since(Instant::now()))?;
         Ok(Self {
-            observer: Observer::open(binding, &pane.identity, rows)
+            observer: Observer::open(binding, &pane.identity, viewport)
                 .map_err(|_| Status::Unavailable)?,
             input: Input::default(),
             normalizer: Normalizer::default(),
-            rows,
+            viewport,
+            flagless: false,
             deadline: Some(deadline),
         })
     }
@@ -512,12 +640,45 @@ impl Observation {
         if pane.identity != *identity {
             return Err(Status::Gone);
         }
-        if pane.rows()? == self.rows {
+        let deadline = self.deadline.unwrap_or_else(|| Instant::now() + STARTUP);
+        let viewport =
+            pane.viewport(binding, deadline.saturating_duration_since(Instant::now()))?;
+        let viewport = SourceViewport::validated(
+            viewport.cols.or(self.viewport.cols).map(u64::from),
+            viewport.rows.or(self.viewport.rows).map(u64::from),
+        )?;
+        if viewport == self.viewport {
             return Ok(false);
         }
-        let deadline = self.deadline.unwrap_or_else(|| Instant::now() + STARTUP);
         self.observer.stop();
-        *self = Self::open(binding, &pane, deadline)?;
+        self.observer =
+            Observer::open(binding, &pane.identity, viewport).map_err(|_| Status::Unavailable)?;
+        self.input = Input::default();
+        self.normalizer = Normalizer::default();
+        self.viewport = viewport;
+        self.flagless = false;
+        self.deadline = Some(deadline);
+        Ok(true)
+    }
+
+    fn retry_flagless(
+        &mut self,
+        binding: &LiveBinding,
+        identity: &NativeIdentity,
+    ) -> io::Result<bool> {
+        if !self.input.eof || self.input.saw_stdout || self.flagless || !self.viewport.has_flags() {
+            return Ok(false);
+        }
+        // The guard owns stdout until exit, so EOF makes this wait finite.
+        // Closing liveness first could mask usage exit 2.
+        if self.observer.guard.wait()?.code() != Some(2) {
+            return Ok(false);
+        }
+        self.observer.stop();
+        self.observer = Observer::open(binding, identity, SourceViewport::default())?;
+        self.input = Input::default();
+        self.normalizer = Normalizer::default();
+        self.flagless = true;
         Ok(true)
     }
 
@@ -936,6 +1097,9 @@ impl LivePeeks {
                         });
                     }
                     Ok(None) if observation.input.eof => {
+                        if observation.retry_flagless(&binding, &identity)? {
+                            continue;
+                        }
                         // Only the exact CLI usage exit, with no output at all,
                         // proves this fixed valid invocation is unsupported.
                         observation.observer.stop();
@@ -1097,9 +1261,15 @@ impl LivePeeks {
                         Err(()) => Some(Event::Unavailable {
                             reason: Unavailable::InvalidSource,
                         }),
-                        Ok(None) if observation.input.eof => Some(Event::Unavailable {
-                            reason: Unavailable::SourceLost,
-                        }),
+                        Ok(None) if observation.input.eof => {
+                            if observation.retry_flagless(&binding, &identity)? {
+                                None
+                            } else {
+                                Some(Event::Unavailable {
+                                    reason: Unavailable::SourceLost,
+                                })
+                            }
+                        }
                         Ok(None) => None,
                     };
                     if let Some(event) = event {
@@ -1266,6 +1436,30 @@ fn decode(text: &str) -> Result<Vec<u8>, ()> {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn tty_names_accept_linux_and_macos_devices_and_refuse_parent_paths() {
+        for (name, expected) in [
+            ("pts/12", "/dev/pts/12"),
+            ("/dev/pts/12", "/dev/pts/12"),
+            ("ttys012", "/dev/ttys012"),
+            ("/dev/ttys012", "/dev/ttys012"),
+        ] {
+            assert_eq!(tty_path(name).unwrap(), Path::new(expected));
+        }
+        for name in [
+            "",
+            "/dev",
+            "/tmp/tty",
+            "../tty",
+            "pts/../12",
+            "/dev/./pts/12",
+            "ttys012\n",
+            "/dev/pts/12 extra",
+        ] {
+            assert!(tty_path(name).is_err(), "accepted {name:?}");
+        }
+    }
 
     #[test]
     fn normalization_checks_full_sequence_grid_and_decoded_limits() {

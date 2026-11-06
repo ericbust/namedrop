@@ -5,13 +5,13 @@ use std::{
     process::{Command, ExitCode, Stdio},
 };
 
-pub(super) fn run(terminal: &str, rows: Option<u16>) -> ExitCode {
-    let result = run_inner(terminal, rows);
+pub(super) fn run(terminal: &str, rows: Option<u16>, cols: Option<u16>) -> ExitCode {
+    let result = run_inner(terminal, rows, cols);
     // Child diagnostics and terminal bytes must not enter dashboard logs.
     ExitCode::from(result.unwrap_or(1))
 }
 
-fn run_inner(terminal: &str, rows: Option<u16>) -> io::Result<u8> {
+fn run_inner(terminal: &str, rows: Option<u16>, cols: Option<u16>) -> io::Result<u8> {
     if terminal.is_empty()
         || terminal.len() > 512
         || terminal.starts_with('-')
@@ -34,6 +34,9 @@ fn run_inner(terminal: &str, rows: Option<u16>) -> io::Result<u8> {
     command.args(["terminal", "session", "observe", terminal]);
     if let Some(rows) = rows {
         command.arg("--rows").arg(rows.to_string());
+    }
+    if let Some(cols) = cols {
+        command.arg("--cols").arg(cols.to_string());
     }
     let mut child = command
         .env("HERDR_SOCKET_PATH", socket)

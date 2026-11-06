@@ -37,6 +37,13 @@ impl Default for ProcessHerdr {
 }
 
 impl ProcessHerdr {
+    pub(crate) fn for_binary(binary: &str) -> Self {
+        Self {
+            binary: binary.to_owned(),
+            ..Self::default()
+        }
+    }
+
     pub fn with_socket(mut self, socket: Option<String>) -> Self {
         self.socket = socket;
         self
