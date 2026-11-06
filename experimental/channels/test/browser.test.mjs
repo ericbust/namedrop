@@ -1345,6 +1345,23 @@ function replyRows() {
   ];
   return value;
 }
+test("THREAD-TO: a sole agent receives plain replies with an explicit wire recipient", async (t) => {
+  const ui = await open(t, (client) => replay(client, [replyRows()]));
+  await ui.live();
+  await ui.page
+    .getByRole("region", { name: "Message history" })
+    .locator('[data-message-id="parent"]')
+    .getByRole("button", { name: "Reply in thread to You" })
+    .click();
+  const pane = threadPane(ui);
+  const box = pane.getByRole("combobox");
+  await box.fill("Thanks for checking");
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the plain thread reply");
+  assert.equal(ui.posts.attempts[0].body.source, "@codex Thanks for checking");
+  assert.equal(ui.posts.attempts[0].body.in_reply_to, "parent");
+});
+
 test("THREAD-R6: timeline rows offer Reply in thread by keyboard, thread rows do not, and the reply answers the selected message", async (t) => {
   const ui = await open(t, (client) => replay(client, [replyRows()]));
   await ui.live();
