@@ -153,6 +153,11 @@ locally to see a wider grid. Opening
 or resizing Peek sends no terminal input, source resize, focus, or takeover command.
 The browser uses pinned xterm 6.0.0 without a terminal input bridge.
 
+Unusable geometry hints fall back to source row metadata, then observer defaults.
+Positive sizes clamp to 512 columns, 256 rows, and 65,536 cells. A watch caches its
+discovered TTY path, reads dimensions without retaining an open descriptor, and
+retries failed path discovery at most once per second.
+
 Live displays terminal content rather than the Text snapshot route's redacted
 text. Select **Text snapshot** for that sanitized plain-text alternative. Text
 reads `GET /w/<key>/participants/<address>/screen` on selection and on **Refresh**
