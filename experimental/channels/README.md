@@ -145,9 +145,11 @@ under its own address. Escape closes the drawer and returns focus to the control
 that opened it.
 
 Live shows a passive terminal projection with colors, cursor motion, and TUI
-redraws. Its rows follow the source pane, including source resizes. Older hosts
-without source row metadata retain the observer's default height. Its columns
-use the observer's projected viewport. Scroll the projection locally to see a wider grid. Opening
+redraws. Its grid follows the source terminal, including source resizes, when its
+PTY dimensions are available. Reading those dimensions does not change the source.
+If only source row metadata is available, Live follows those rows. Older Herdr
+builds that reject size flags use their default projection. Scroll the projection
+locally to see a wider grid. Opening
 or resizing Peek sends no terminal input, source resize, focus, or takeover command.
 The browser uses pinned xterm 6.0.0 without a terminal input bridge.
 
@@ -205,6 +207,10 @@ directory and `PEEK_SOURCE_OUTPUT` to a screenshot directory. The test compares 
 native prompt with Live Peek in Chromium and WebKit at scales 1 and 2, then grows
 and shrinks the source terminal. It controls only that test profile's terminal.
 `PEEK_SOURCE_TEXT` overrides the expected Codex prompt text.
+Set `PEEK_SOURCE_ALIAS=shell` to test the shell pane. A prepared marker at column
+190 can be checked with `PEEK_SOURCE_COLUMNS=200`, `PEEK_SOURCE_TEXT=COL190S`, and
+`PEEK_SOURCE_COLUMN_MARKER=COL190S`. The regression also grows and shrinks the source
+width while preserving the marker's column.
 
 ## Live terminal stream v1
 

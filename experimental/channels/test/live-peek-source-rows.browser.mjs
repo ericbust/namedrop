@@ -19,7 +19,7 @@ assert.ok(
 );
 assert.ok(output, "Set PEEK_SOURCE_OUTPUT to the screenshot directory");
 const python = `
-import json,os,signal,subprocess,sys
+import json,os,signal,subprocess,sys,fcntl,termios,struct
 from pathlib import Path
 sys.path.insert(0,str(Path(sys.argv[1])/'testbed/lib'))
 directory=Path(sys.argv[2]).resolve()
@@ -36,7 +36,11 @@ if operation=='dashboard':
  print(p.namedrop('channels','--no-open','--json','--ui',str(Path(sys.argv[1])/'experimental/channels/dist')).stdout)
 elif operation=='source':
  info=p.herdr('pane','get',pane)['pane']
- print(json.dumps({'rows':info['scroll']['viewport_rows'],'text':p.run(['herdr','pane','read',pane,'--source','visible']).stdout}))
+ process=p.herdr('pane','process-info','--pane',pane)['process_info']
+ tty=subprocess.check_output(['/bin/ps','-p',str(process['shell_pid']),'-o','tty='],env=p.env,text=True).strip()
+ fd=os.open('/dev/'+tty,os.O_RDONLY|os.O_NOCTTY|os.O_NONBLOCK)
+ kernel_rows,kernel_cols,_,_=struct.unpack('HHHH',fcntl.ioctl(fd,termios.TIOCGWINSZ,b'\\0'*8));os.close(fd)
+ print(json.dumps({'rows':info['scroll']['viewport_rows'],'cols':kernel_cols,'kernel_rows':kernel_rows,'text':p.run(['herdr','pane','read',pane,'--source','visible']).stdout}))
 elif operation=='control':
  info=p.herdr('pane','get',pane)['pane']
  child=subprocess.Popen(['herdr','terminal','session','control',info['terminal_id'],'--takeover','--rows',sys.argv[5],'--cols',sys.argv[6]],env=p.env,stdin=subprocess.PIPE,stdout=subprocess.PIPE)
@@ -133,16 +137,21 @@ for (const [engine, type] of [
   ["webkit", webkit],
 ]) {
   for (const scale of [1, 2]) {
-    test(`${engine} scale ${scale}: Live Peek retains the source bottom row and follows source resizing`, {
+    test(`${alias} ${columns}cols ${engine} scale ${scale}: Live Peek preserves source text and geometry through resizing`, {
       timeout: 60000,
     }, async (t) => {
       await mkdir(output, { recursive: true });
       let stop = await control(t, 80, columns);
       const source = native("source");
       assert.equal(source.rows, 80, "The test source has 80 rows");
+      assert.equal(
+        source.cols,
+        columns,
+        "The kernel source has the requested columns",
+      );
       assert.ok(
         source.text.includes(needle),
-        "The native source contains the expected prompt",
+        "The native source contains the expected text",
       );
       const browser = await type.launch({
         headless: true,
@@ -266,6 +275,23 @@ for (const [engine, type] of [
           await page.screenshot({
             path: join(output, `${engine}-${scale}-columns-resized.png`),
           });
+          await stop();
+          stop = await control(t, source.rows, columns);
+          await page.waitForFunction(
+            (expected) =>
+              [
+                ...document.querySelectorAll(
+                  ".peek-buffer-visible .xterm-rows > div",
+                ),
+              ].some((row) => row.textContent.length === expected),
+            columns,
+          );
+          assert.equal(
+            (await rows.allTextContents())
+              .find((line) => line.includes(columnMarker))
+              ?.indexOf(columnMarker),
+            189,
+          );
         }
       } finally {
         if (stop) await stop();
