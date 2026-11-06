@@ -58,18 +58,8 @@ The screens come from an isolated profile under `~/namedrop-demo`, so no persona
 
 ## Re-capture and render Channels
 
-The Channels highlight records the complete app on the exp.17 build, with real
-Claude Code and Codex panes beside it. Each beat opens on the whole app, then one
-slow push-in holds on the instruction, reply, reminder, Needs you card or live Peek.
-The movie is under 60 seconds and uses timestamped 2x app frames and synchronized ANSI captures.
-The animated WebP is the opening channel beat.
+The Channels highlight is one continuous take of the real Channels page on the 1.5.0-exp.18 build, recorded at a 1280×720 viewport at 2x. It starts from an empty channel named **Release planning**. Five scenes follow, each with one caption: ask an agent in a channel, follow up in the thread without @, ask for a reminder in a DM, see Needs you, and type to an agent in Live Peek. Each scene makes at most one slow push-in, then holds on a spotlit focal element. The movie is 30 to 40 seconds long. The animated WebP is the first scene.
 
-Follow [Record Channels with a moving camera](channels/motion/README.md) to capture
-and render a take. It documents the isolated testbed, disabled spellcheck, source
-manifest, safe Esc cancellation, shot plan, motion metrics and asset checks. `motion/capture.json`
-records this take's build and source hashes. The old cropped still scene remains
-available for reference; it is not the source of the current published movie.
+Follow [Record and render the Channels highlight](channels/motion/README.md) to stage a take in the testbed, record it, plan the cut, render it, and check it. `channels/motion/capture.json` records the published take's build and source hashes. `channels/motion/legibility.py` measures the focal text at README width and writes the contact sheet. Look at the sheet and one frame per shot before you publish.
 
-Inspect one finished MP4 frame per beat at 900 px width. Check that every instruction,
-reply and terminal row comes from the real recording. Keep capture timestamps,
-quoted messages, omissions, file sizes and durations with the report.
+The cropped still scene in `channels/` is an earlier version. It is not the source of the published movie.

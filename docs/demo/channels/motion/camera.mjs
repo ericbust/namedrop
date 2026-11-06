@@ -1,5 +1,5 @@
 export const W = 1920, H = 1080;
-export const PICTURE = { top: 135, height: 925 };
+export const PICTURE = { top: 110, height: 970 };
 const CENTER_Y = PICTURE.top + PICTURE.height / 2;
 
 export const ease = x => x * x * (3 - 2 * x);
@@ -20,6 +20,11 @@ function bracket(keys, t) {
 export function sourceAt(shot, t) {
   const [a, b, p] = bracket(shot.source, t);
   return a + (b - a) * p;
+}
+
+export function spotAt(shot, t) {
+  const [a, b, p] = bracket(shot.spot, t);
+  return a + (b - a) * ease(p);
 }
 
 const origin = ([cx, cy, zoom]) => [W / 2 - cx * zoom, CENTER_Y - cy * zoom, zoom];

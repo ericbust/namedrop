@@ -1,92 +1,107 @@
-# Record Channels with a moving camera
+# Record and render the Channels highlight
 
-The published highlight uses the exp.17 product at `8ea5c1a`.
-`capture.json` identifies the integrated build, real capture times and source hashes.
-Every app frame is a 2x screenshot of the running page. Both terminal panels use
-synchronized `herdr pane read --ansi` captures. No app text is redrawn.
+The README movie is one continuous real take of the Channels page, cut into five short scenes. Each scene has one caption and one focal element at a time. The app is recorded at a 1280×720 CSS viewport with `deviceScaleFactor: 2`, so each source frame is 2560×1440 and the UI text is large in the movie.
 
-The raw take stays outside Git because it is about 1.3 GB. Keep its `recording/`
-directory with `recording.json`, `frames/` and `panes/`. The manifest records source
-time, input and reply events, camera rectangles, the runtime version and Git source.
-The edit follows that real sequence and compresses waiting. Terminal home paths are shortened to `~`, including wrapped paths.
+Only crops, scaling, cuts, dissolves and overlays are added. The overlays are the caption band, a spotlight that dims app pixels outside the focal ring, the ring itself, the **1 minute later** label and the end card. No app text is drawn or changed.
 
-## Capture a new take
+`capture.json` records the published take: product and source revisions, event times, and a hash of the source frame behind each focal hold.
 
-Use `testbed/testbed` to build an owned `test-` profile from the product revision.
-Keep HOME and XDG_CONFIG_HOME isolated. Finish startup before recording, and put the
-demo repository inside the profile HOME so Peek uses short paths. Name the workspace
-**Release planning**. Register and warm both real agents until they are idle. Add
-real planning notes through the channel composer so close-ups include recent context.
-Keep Claude in manual permission mode. Clear irrelevant terminal history before the take.
+| File | Purpose |
+|---|---|
+| `stage.py` | Builds a clean take in a `test-` profile: a new empty workspace named **Release planning**, both agents started in `~/release-planning`, warmed up and idle, and Claude in manual permission mode |
+| `record.mjs` | Opens Channels in Chromium, records timestamped 2x frames, and runs queued step files. `mark()` stores each event with the measured focal element |
+| `queue.mjs` | Queues one step file for the recorder |
+| `steps/*.js` | The six capture steps, typed and sent through the real UI |
+| `profile.py` | The only bridge to the profile: build check, link, agent status, screen text, and Esc on a real blocked prompt |
+| `plan.py` | The storyboard as data. Finds each focal ring in the source frame, plans the camera, spotlight and captions, and fails on a broken rule |
+| `ink.py` | Finds text ink in a frame and measures the cap height of its lines |
+| `scene.html`, `scene.mjs`, `camera.mjs` | The renderer that `docs/demo/render.mjs` steps frame by frame |
+| `legibility.py` | Measures the focal text in the finished movie at README width, and writes the contact sheet and key frames |
 
-From the repository root, start the recorder:
+## Before you start
 
-```sh
-TESTBED_HOME=/path/to/testbed CHROME=/path/to/chromium node docs/demo/channels/motion/record.mjs test-channels-exp17 /path/to/take
-```
-
-The helper rejects a non-test profile, a mismatched product tree or version, and
-agents without a registered idle session. Chromium spellcheck is disabled through
-browser flags. Set `HEADLESS=0` to watch the browser. Only enqueue your own trusted
-JavaScript action files. The supplied steps type and send through the real UI:
+You need the Namedrop testbed, Chromium, Node.js, ffmpeg, and Python 3 with Pillow and NumPy. Keep the take, renders and Python environment outside `/tmp`. A take is about 1 GB.
 
 ```sh
-for step in docs/demo/channels/motion/steps/*.js; do
-  node docs/demo/channels/motion/queue.mjs /path/to/take "$step"
-done
+python3 -m venv ~/.cache/channels-video/venv
+~/.cache/channels-video/venv/bin/pip install pillow numpy
 ```
 
-The recorder captures timestamped 2880 by 1800 frames and both real panes. It uses
-a lower capture cadence during the actual two-minute reminder wait. Each action
-writes a result beside its queued JSON. The permission step captures Needs you,
-then sends Esc through a helper that requires a real blocked agent. It never
-approves a permission. Verify the actual prompt and confirm no requested file exists.
-Type to agent writes input first, then its Enter control submits it.
+## Capture a take
 
-Inspect the take before rendering. Check aliases, registered status, reminder
-Cancel and display text, and a Peek stream that stays live through its reply.
-A DM-triggered permission showed stale status during this take, so the recorded
-Needs-you beat was re-captured from the active workspace channel. The rejected
-interval and evidence remain in the capture report. Esc also left an honest
-unanswered-request notice in the captured app. Report these findings rather than
-editing them out of source frames or claiming the product behavior is fixed.
+1. Build a `test-` profile from the product revision. The testbed links logins read-only and isolates `HOME` and `XDG_CONFIG_HOME`. Run the commands from the repository root.
 
-## Render the take
+   ```sh
+   export TESTBED_HOME=~/.cache/channels-video/testbed
+   testbed/testbed test --link . --profile test-channels --codex no-daemon --keep
+   ```
 
-`plan.py` holds the shot list. Each beat opens on the wide view of the app and both
-panes, makes one eased push-in of about 1.3 seconds, then holds. Close-ups crop the
-full app width at zoom 1.333 and keep its top or bottom. Beats change with a short
-dissolve, and the two-minute reminder wait is a dissolve in time. The planner maps
-output time to source time and fails when a move, hold, caption or total length is
-outside its limits. `camera.mjs` evaluates the plan for both the scene and the
-metrics. Generate the plan, then serve copied scene files beside the raw recording:
+2. Stage a clean workspace. Run this again before every take, because a take leaves messages in the channel.
 
-```sh
-python3 docs/demo/channels/motion/plan.py /path/to/take --shotlist /path/to/report/shotlist.md
-cp docs/demo/channels/motion/scene.html docs/demo/channels/motion/scene.mjs docs/demo/channels/motion/camera.mjs /path/to/take/
-python3 -m http.server 8772 --bind 127.0.0.1 --directory /path/to/take
-```
+   ```sh
+   python3 docs/demo/channels/motion/stage.py test-channels
+   ```
 
-From another shell in the repository root:
+   Claude Code starts in auto mode, which runs the Needs-you command without asking. `stage.py` presses Shift-Tab until the pane shows `manual mode on`.
 
-```sh
-SCENE_URL=http://127.0.0.1:8772/scene.html CHROME=/path/to/chromium RENDER_SCALE=1.3333333333333333 node docs/demo/render.mjs /path/to/master.mp4 24
-ffmpeg -y -i /path/to/master.mp4 -c:v libx264 -preset slow -b:v 1800k -pix_fmt yuv420p -pass 1 -passlogfile /path/to/take/h264-pass -an -f null /dev/null
-ffmpeg -y -i /path/to/master.mp4 -c:v libx264 -preset slow -b:v 1800k -pix_fmt yuv420p -pass 2 -passlogfile /path/to/take/h264-pass -an -movflags +faststart docs/assets/namedrop-channels.mp4
-ffmpeg -y -i docs/assets/namedrop-channels.mp4 -t 14.3 -vf 'fps=12,scale=1400:-1:flags=lanczos' -c:v libwebp_anim -quality 65 -compression_level 6 -loop 0 docs/assets/namedrop-channels.webp
-python3 docs/demo/channels/check.py /path/to/metadata.json --recording /path/to/take/recording/recording.json
-node docs/demo/channels/motion/metrics.mjs new=/path/to/take/timeline.json,docs/assets/namedrop-channels.mp4
-```
+3. Start the recorder in one shell. It refuses a profile that is not `test-`, a product that differs from the revision in `profile.py`, and agents that are not registered and idle.
 
-`metrics.mjs` reports camera moves per minute, peak zoom and pan speed, pan travel
-while zoomed in, the shortest hold and caption, and a frame-difference check on the
-movie. Pass an earlier timeline and movie as another column to compare cuts.
+   ```sh
+   CHROME=/usr/bin/chromium node docs/demo/channels/motion/record.mjs test-channels ~/.cache/channels-video/take
+   ```
 
-The poster is the opening channel beat, which loops on a beat boundary. Keep the MP4 under 15 MB and the poster
-under 8 MB. Inspect exported frames at 900 px, especially the completed instructions,
-agent work, pending reminder, fired answer, Needs you and live Peek reply. Keep the
-capture report with timestamps, exact real messages, frame paths and omissions.
+4. In another shell, queue the steps one at a time, and read each result before you queue the next:
 
-`rehearse.mjs` retains the earlier 28-second throwaway recorder. Its `throwaway`
-marker excludes it from the final-media gate. The current planner does not map its
-older event names.
+   ```sh
+   for step in docs/demo/channels/motion/steps/*.js; do
+     node docs/demo/channels/motion/queue.mjs ~/.cache/channels-video/take "$step"
+     until [ -f ~/.cache/channels-video/take/actions/$(basename "$step" .js).json.result ]; do sleep 1; done
+     head -c 600 ~/.cache/channels-video/take/actions/$(basename "$step" .js).json.result; echo
+   done
+   ```
+
+   The recorder skips a file name it has already run. To repeat a step, queue a copy under a new name. The last step stops the recorder.
+
+Three steps need care:
+
+- `5-needs.js` checks that Claude is really blocked before it records Needs you, then sends Esc to Claude's pane. It never approves the prompt. Afterwards, check that `release-notes.txt` does not exist in `~/release-planning`.
+- `6-peek.js` sends the Type-to-agent text. Codex sometimes keeps that text as an unsent draft. The step then presses the Peek **Enter** control and records a `peek-extra-enter` event.
+- Live Peek follows the bottom of the screen. Do not clear the Codex pane before the take. After a clear, the answer prints near the top of an empty screen and falls outside the expanded Peek view.
+
+## Render the movie
+
+1. Plan the cut. The planner prints the zoom, hold and focal cap height of every shot:
+
+   ```sh
+   ~/.cache/channels-video/venv/bin/python docs/demo/channels/motion/plan.py ~/.cache/channels-video/take --shotlist ~/.cache/channels-video/shotlist.md
+   ```
+
+   It fails when a push-in or hold is too short, a hold does not play at real speed, focal text is under 9.5 px tall at 900 px width, or the cut is not 30 to 40 seconds long. To change the cut, edit `SCENES` in `plan.py`. A `search` rectangle limits where a ring looks for ink. Use one for elements the recorder cannot measure, such as the reminder popover or the rows of the Peek terminal.
+
+2. Serve the take with the scene files:
+
+   ```sh
+   cp docs/demo/channels/motion/scene.html docs/demo/channels/motion/scene.mjs docs/demo/channels/motion/camera.mjs ~/.cache/channels-video/take/
+   python3 -m http.server 8772 --bind 127.0.0.1 --directory ~/.cache/channels-video/take
+   ```
+
+   Open `http://127.0.0.1:8772/scene.html?t=12` to preview from 12 seconds.
+
+3. From another shell in the repository root, render and encode:
+
+   ```sh
+   SCENE_URL=http://127.0.0.1:8772/scene.html CHROME=/usr/bin/chromium RENDER_SCALE=1.3333333333333333 node docs/demo/render.mjs ~/.cache/channels-video/master.mp4 30
+   ffmpeg -y -i ~/.cache/channels-video/master.mp4 -c:v libx264 -preset slow -crf 16 -pix_fmt yuv420p -an -movflags +faststart docs/assets/namedrop-channels.mp4
+   ffmpeg -y -i docs/assets/namedrop-channels.mp4 -t 7.9 -vf 'fps=15,scale=1400:-1:flags=lanczos' -c:v libwebp_anim -quality 85 -compression_level 6 -loop 0 docs/assets/namedrop-channels.webp
+   ```
+
+   The WebP is the first scene. It ends where the second scene's dissolve starts, so the loop restarts on a clean boundary.
+
+4. Check the result:
+
+   ```sh
+   ~/.cache/channels-video/venv/bin/python docs/demo/channels/motion/legibility.py ~/.cache/channels-video/take/timeline.json docs/assets/namedrop-channels.mp4 ~/.cache/channels-video/report
+   python3 docs/demo/channels/check.py ~/.cache/channels-video/report/metadata.json --recording ~/.cache/channels-video/take/recording/recording.json
+   ```
+
+   `legibility.py` fails when a focal text line is under 9.5 px tall at 900 px width. It writes `legibility.md`, a crop of each ring, one 2560 px and one 900 px frame per shot, and `sheet.png` with a frame every two seconds. Look at the sheet and the frames before you publish. `check.py` checks the codec, size, length, fast start, WebP and the take's provenance. Update `capture.json` for the new take first.

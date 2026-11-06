@@ -39,7 +39,7 @@ Namedrop is a [Herdr](https://herdr.dev) plugin that lets agents work together a
 
 <!-- channels-video -->
 
-[![Watch Channels Beta working in the full app with real agent panes, instruction zooms, reminders, approvals and live terminal input](docs/assets/namedrop-channels.webp)](docs/assets/namedrop-channels.mp4)
+[![Watch Channels Beta: ask an agent in a channel, follow up in the thread, set a reminder in a DM, see Needs you, and type to an agent in Live Peek](docs/assets/namedrop-channels.webp)](docs/assets/namedrop-channels.mp4)
 
 In one agent pane:
 

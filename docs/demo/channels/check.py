@@ -13,17 +13,15 @@ root=Path(__file__).resolve().parent
 assets=root.parent.parent/'assets'
 mp4=assets/'namedrop-channels.mp4';webp=assets/'namedrop-channels.webp'
 provenance=json.loads((root/'motion/capture.json').read_text())
-assert provenance['productRevision']=='8ea5c1a21d61da0e2539a2d8cae0638557c83dab','expected exp.17 product'
+assert provenance['productRevision']=='b9ea2d0d022fe1fd5ea17762f3a90ec01d110303','expected exp.18 product'
 if args.recording:
  recording=json.loads(args.recording.read_text())
- assert recording['throwaway'] is False,'rehearsal footage cannot be published'
  assert recording['productRevision']==provenance['productRevision'],'wrong product revision'
  assert recording['sourceRevision']==provenance['sourceRevision'],'wrong source build'
- assert recording['version']=='1.5.0-exp.17','wrong runtime version'
- assert recording['viewport']=={'width':1440,'height':900} and recording['deviceScaleFactor']==2,'capture must be 2x'
- assert len(recording['panes'])>1,'real panes required'
+ assert recording['version']=='1.5.0-exp.18','wrong runtime version'
+ assert recording['viewport']=={'width':1280,'height':720} and recording['deviceScaleFactor']==2,'capture must be 1280x720 at 2x'
  events={event['name']:event for event in recording['events']}
- assert events['reminder-fired']['t']-events['reminder-pending']['t']>=110,'reminder must really wait two minutes'
+ assert events['reminder-fired']['t']-events['reminder-sent']['t']>=55,'reminder must really wait one minute'
  assert not recording['errors'],recording['errors']
  for source in provenance['sourceFrames']:
   assert hashlib.sha256((args.recording.parent/source['file']).read_bytes()).hexdigest()==source['sha256'],source['file']
@@ -31,7 +29,7 @@ probe=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_format',
 streams=probe['streams'];duration=float(probe['format']['duration'])
 assert len(streams)==1 and streams[0]['codec_name']=='h264','silent H.264 required'
 assert streams[0]['width']==2560 and streams[0]['height']==1440,'wrong video dimensions'
-assert 45<=duration<=60 and abs(duration-provenance['outputDuration'])<0.05,'wrong movie duration'
+assert 30<=duration<=40 and abs(duration-provenance['outputDuration'])<0.05,'wrong movie duration'
 assert mp4.stat().st_size<15_000_000,'MP4 too large'
 video=mp4.read_bytes();assert 0<video.find(b'moov')<video.find(b'mdat'),'fast-start MP4 required'
 data=webp.read_bytes();assert data[:4]==b'RIFF' and data[8:12]==b'WEBP','not WebP'

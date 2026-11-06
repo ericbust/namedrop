@@ -1,131 +1,214 @@
 {
-  "productRevision": "8ea5c1a21d61da0e2539a2d8cae0638557c83dab",
-  "sourceRevision": "686abd48a06e272f7178efd29feed625bf31b96a",
-  "version": "1.5.0-exp.17",
+  "productRevision": "b9ea2d0d022fe1fd5ea17762f3a90ec01d110303",
+  "sourceRevision": "30b29e177cca9d742459863d0df33e76fcef4597",
+  "version": "1.5.0-exp.18",
   "viewport": {
-    "width": 1440,
-    "height": 900
+    "width": 1280,
+    "height": 720
   },
   "deviceScaleFactor": 2,
-  "startedAtEpochMs": 1793994112863,
-  "duration": 487.682294749,
-  "sourceFrameCount": 3803,
-  "panePairCount": 792,
-  "outputDuration": 58.708,
-  "sourceFrames": [
+  "startedAtEpochMs": 1794000930129,
+  "duration": 166.90706918700002,
+  "sourceFrameCount": 1753,
+  "outputDuration": 38.3,
+  "events": [
     {
-      "event": "wide",
-      "sourceTime": 0.09599601700000494,
-      "file": "frames/000000.jpg",
-      "sha256": "940c746ac61a6fd42f9f0a1baf48c836d3d26545dc59d919980c7f79a5d11252"
+      "name": "ask-wide",
+      "t": 0.00013820399999985966,
+      "at": "2026-11-06T21:35:30.129Z"
     },
     {
-      "event": "ask-instruction",
-      "sourceTime": 9.724431630000007,
-      "file": "frames/000104.jpg",
-      "sha256": "5eff58a56718249ab4ad6ed694501e6db946cd8b1e44b5bca38f8f660490a6ad"
+      "name": "ask-typed",
+      "t": 3.7079759989999994,
+      "at": "2026-11-06T21:35:33.837Z"
     },
     {
-      "event": "ask-working",
-      "sourceTime": 12.616465198000006,
-      "file": "frames/000132.jpg",
-      "sha256": "3e4dba277ed4330c3efe6de7d83bdfefbef819228ef48e10a0f0069fcd47c71a"
+      "name": "ask-sent",
+      "t": 5.736310893000001,
+      "at": "2026-11-06T21:35:35.866Z"
     },
     {
-      "event": "ask-reply",
-      "sourceTime": 18.920519532000007,
-      "file": "frames/000187.jpg",
-      "sha256": "fc7d5628fb3a323ef331fc7387ade2206e6dbf8130e496caf5e97d0c83b63588"
+      "name": "ask-reply",
+      "t": 14.464728138999998,
+      "at": "2026-11-06T21:35:44.594Z"
     },
     {
-      "event": "followup-instruction",
-      "sourceTime": 23.595541339999997,
-      "file": "frames/000231.jpg",
-      "sha256": "8f0cce4b1cdea376c2f411db7ca2e4b3a14c1b59f6614a1bda6d5eb9345d3d76"
+      "name": "followup-open",
+      "t": 19.380512237999998,
+      "at": "2026-11-06T21:35:49.510Z"
     },
     {
-      "event": "followup-reply",
-      "sourceTime": 33.390441395,
-      "file": "frames/000328.jpg",
-      "sha256": "169a9d2ea05b0024ced4a1a1f7900e94ea7b90f121cc329c347a10422fe37cda"
+      "name": "followup-typed",
+      "t": 20.387591798,
+      "at": "2026-11-06T21:35:50.517Z"
     },
     {
-      "event": "reminder-instruction",
-      "sourceTime": 80.01547111900001,
-      "file": "frames/000857.jpg",
-      "sha256": "b1c4f15fa658be7d9b973fe1c75f0b42ee76e0e42d431cad8bd0182215f1f0c1"
+      "name": "followup-sent",
+      "t": 22.232363841999998,
+      "at": "2026-11-06T21:35:52.362Z"
     },
     {
-      "event": "reminder-pending",
-      "sourceTime": 89.932725891,
-      "file": "frames/000953.jpg",
-      "sha256": "4f271d89bb6b317a280412672f528224fc12da0a315b10f00365d475d1649265"
+      "name": "followup-reply",
+      "t": 30.393798818,
+      "at": "2026-11-06T21:36:00.523Z"
     },
     {
-      "event": "reminder-confirmed",
-      "sourceTime": 102.987494445,
-      "file": "frames/001001.jpg",
-      "sha256": "0bbf206d71f37d460e48aaad28c0bb0a1cd2dbf389d7dd0e0e117fc3dcbbff6f"
+      "name": "dm-open",
+      "t": 35.80700616200001,
+      "at": "2026-11-06T21:36:05.936Z"
     },
     {
-      "event": "reminder-fired",
-      "sourceTime": 208.454212897,
-      "file": "frames/001212.jpg",
-      "sha256": "99b4bba07a534e67b1703d2c4036946798fed821e60b87dcece56ca8774f33b7"
+      "name": "reminder-typed",
+      "t": 37.714959199000006,
+      "at": "2026-11-06T21:36:07.844Z"
     },
     {
-      "event": "reminder-reply",
-      "sourceTime": 214.633330283,
-      "file": "frames/001256.jpg",
-      "sha256": "2a3b670a5596f8932eaf96443b136e3ab493273468f0be0f424b988c0e6e3319"
+      "name": "reminder-sent",
+      "t": 39.52941225,
+      "at": "2026-11-06T21:36:09.659Z"
     },
     {
-      "event": "needs-blocked",
-      "sourceTime": 369.27237242599995,
-      "file": "frames/002647.jpg",
-      "sha256": "e73dbef49c725b759b0db4aed005df7884555a5550edd231ebf96442a909f891"
+      "name": "reminder-pending",
+      "t": 46.574292902,
+      "at": "2026-11-06T21:36:16.703Z"
     },
     {
-      "event": "needs-open",
-      "sourceTime": 369.37419033400005,
-      "file": "frames/002648.jpg",
-      "sha256": "c66158bc9a0a67bd7ed57df8ee95df820e2a8a966778aa2984d062eb8c4d6e6c"
+      "name": "reminder-pending-end",
+      "t": 50.586837743000004,
+      "at": "2026-11-06T21:36:20.716Z"
     },
     {
-      "event": "needs-cancelled",
-      "sourceTime": 470.3051550800001,
-      "file": "frames/003638.jpg",
-      "sha256": "f0c9713012027734ea187d2173b562c16e31272095d16a37d481879d9f3aa938"
+      "name": "reminder-fired",
+      "t": 106.175277934,
+      "at": "2026-11-06T21:37:16.304Z"
     },
     {
-      "event": "peek-instruction",
-      "sourceTime": 478.415843798,
-      "file": "frames/003717.jpg",
-      "sha256": "5b404f70c829b46ac73675eb61aafa59b9ad62b1bede3da24a5b3960cfd09148"
+      "name": "reminder-answer",
+      "t": 114.13125381100001,
+      "at": "2026-11-06T21:37:24.260Z"
     },
     {
-      "event": "peek-working",
-      "sourceTime": 481.08368278499995,
-      "file": "frames/003743.jpg",
-      "sha256": "01af3503d17860cc60d40ddc83f0098688825cae2be494b3918a169f41dfd68c"
+      "name": "needs-typed",
+      "t": 120.86243174699999,
+      "at": "2026-11-06T21:37:30.992Z"
     },
     {
-      "event": "peek-reply",
-      "sourceTime": 483.968400971,
-      "file": "frames/003770.jpg",
-      "sha256": "f48f2a8c6991d1d9809488f43e179b63f93f76ad139d7ea02178f9242a7b777b"
+      "name": "needs-sent",
+      "t": 122.392587861,
+      "at": "2026-11-06T21:37:32.522Z"
     },
     {
-      "event": "end",
-      "sourceTime": 487.378785757,
-      "file": "frames/003802.jpg",
-      "sha256": "f48f2a8c6991d1d9809488f43e179b63f93f76ad139d7ea02178f9242a7b777b"
+      "name": "needs-blocked",
+      "t": 133.38412234600003,
+      "at": "2026-11-06T21:37:43.513Z"
+    },
+    {
+      "name": "needs-esc",
+      "t": 138.22189618900003,
+      "at": "2026-11-06T21:37:48.351Z"
+    },
+    {
+      "name": "needs-cancelled",
+      "t": 138.527406398,
+      "at": "2026-11-06T21:37:48.657Z"
+    },
+    {
+      "name": "peek-open",
+      "t": 143.92032150300003,
+      "at": "2026-11-06T21:37:54.050Z"
+    },
+    {
+      "name": "peek-typed",
+      "t": 145.63136198200002,
+      "at": "2026-11-06T21:37:55.761Z"
+    },
+    {
+      "name": "peek-sent",
+      "t": 147.517737047,
+      "at": "2026-11-06T21:37:57.647Z"
+    },
+    {
+      "name": "peek-extra-enter",
+      "t": 159.396954566,
+      "at": "2026-11-06T21:38:09.526Z"
+    },
+    {
+      "name": "peek-reply",
+      "t": 163.157366504,
+      "at": "2026-11-06T21:38:13.287Z"
     }
   ],
-  "notes": [
-    "Full app and real pane captures. No interface text is redrawn.",
-    "Permission prompts cancelled, never approved.",
-    "A DM status discrepancy was preserved in the report; Needs-you was recaptured from the active channel.",
-    "The terminal HOME paths are shortened during restaging."
-  ]
+  "sourceFrames": [
+    {
+      "shot": "ask",
+      "outputTime": 3.15,
+      "sourceTime": 4.246,
+      "file": "frames/000061.jpg",
+      "sha256": "8291018b59c2cf0c926be14bcf0ed3264037d86541cf2f222f7aa25687c161a9"
+    },
+    {
+      "shot": "reply",
+      "outputTime": 6.425,
+      "sourceTime": 15.367,
+      "file": "frames/000213.jpg",
+      "sha256": "42a291ef19e797b80584e157c92db6f5101e092b74df681b744282ffca3b0fbf"
+    },
+    {
+      "shot": "follow-up",
+      "outputTime": 9.625,
+      "sourceTime": 20.975,
+      "file": "frames/000292.jpg",
+      "sha256": "098e7529500315f16e97ccdd48646f8ae9f6a99b9991e8a6ba458758ece126da"
+    },
+    {
+      "shot": "thread reply",
+      "outputTime": 12.775,
+      "sourceTime": 31.394,
+      "file": "frames/000444.jpg",
+      "sha256": "8a7327aa53cae96d99c83df399d80f84a3b07acdeedc340ee90cfe4b4543aa8c"
+    },
+    {
+      "shot": "reminder ask",
+      "outputTime": 17.05,
+      "sourceTime": 38.374,
+      "file": "frames/000546.jpg",
+      "sha256": "cb598209810c2527c574630093ae289ac2ca8bf098c279ac691f4bf7f774ea4c"
+    },
+    {
+      "shot": "pending",
+      "outputTime": 20.125,
+      "sourceTime": 47.707,
+      "file": "frames/000683.jpg",
+      "sha256": "0485252a9a6b76dfeb39f2467153534025a311c66c6740e9c8609a5c02bc094d"
+    },
+    {
+      "shot": "reminder fires",
+      "outputTime": 23.225,
+      "sourceTime": 115.458,
+      "file": "frames/001030.jpg",
+      "sha256": "0629d7f6e13b00bbc0818921ec25974f69cbd1757b6143eeb1cfd2e95ba663c7"
+    },
+    {
+      "shot": "needs you",
+      "outputTime": 26.425,
+      "sourceTime": 133.876,
+      "file": "frames/001301.jpg",
+      "sha256": "7387daeaf8839c871a8d4461388faf70d69e391e027e5f05ff502de9d1304ee6"
+    },
+    {
+      "shot": "peek input",
+      "outputTime": 30.75,
+      "sourceTime": 146.389,
+      "file": "frames/001480.jpg",
+      "sha256": "18ee4c35fe69779e34678b89e6f11a202876b35ffd4ea7ddb0b68a12621ad194"
+    },
+    {
+      "shot": "peek reply",
+      "outputTime": 33.975,
+      "sourceTime": 163.929,
+      "file": "frames/001715.jpg",
+      "sha256": "813df2c23f5a5b6c1e5e5905c6ab1464d1000b52372711a311f20c4037dd3bc1"
+    }
+  ],
+  "notes": "Take 3 of round 5. Every app frame is a 2x screenshot of the running page; the spotlight, ring, captions, label and end card are overlays. Codex kept the Live Peek input as a draft, so the take pressed the Peek Enter control once (event peek-extra-enter)."
 }

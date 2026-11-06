@@ -1,9 +1,0 @@
-async ({page,context,mark,out,record,profile}) => {
-await page.waitForFunction(()=>[...document.querySelectorAll('.members .member')].some(n=>n.textContent.includes('@claude')&&n.textContent.includes('Idle')),{},{timeout:90000});await mark('needs-cancelled');
-await page.getByRole('list',{name:'Members',exact:true}).getByRole('button').filter({hasText:'@codex'}).click();const drawer=page.getByRole('complementary',{name:'Screen of @codex',exact:true});await drawer.waitFor();await page.waitForTimeout(1200);await mark('peek-open',await drawer.boundingBox());
-await page.getByRole('button',{name:'Type to agent',exact:true}).click();const box=page.getByRole('combobox',{name:'Message to @codex',exact:true});await mark('peek-type',await box.boundingBox());await box.pressSequentially('Give three release checks, one short line each. Do not use tools.',{delay:100});await mark('peek-instruction',await box.boundingBox());await page.waitForTimeout(2200);
-await drawer.getByRole('button',{name:'Send',exact:true}).click();await page.getByRole('button',{name:'Send Enter',exact:true}).click();await mark('peek-posted');
-await page.waitForFunction(()=>[...document.querySelectorAll('.members .member')].some(n=>n.textContent.includes('@codex')&&n.textContent.includes('Working')),{},{timeout:60000});await mark('peek-working',{x:1045,y:420,width:380,height:290});await page.screenshot({path:out+'/peek-working.png'});
-await page.waitForFunction(()=>[...document.querySelectorAll('.members .member')].some(n=>n.textContent.includes('@codex')&&n.textContent.includes('Idle')),{},{timeout:90000});await page.waitForTimeout(1200);const text=await drawer.innerText();if(text.includes('This pane changed'))throw new Error('Peek stream interrupted');await mark('peek-reply',{x:1045,y:420,width:380,height:290});await page.screenshot({path:out+'/peek-reply.png'});await page.waitForTimeout(3200);await mark('end');await record.stop();return text;
-
-}
