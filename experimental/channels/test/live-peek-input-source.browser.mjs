@@ -56,7 +56,7 @@ for (const [engine, type] of [
   ["webkit", webkit],
 ]) {
   for (const alias of ["codex", "claude"]) {
-    const attempts = alias === "codex" ? 10 : 1;
+    const attempts = 10;
     test(`${engine} ${alias}: ${attempts} automatic submissions keep the same Live Peek`, {
       timeout: 180000,
     }, async (t) => {
