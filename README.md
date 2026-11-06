@@ -183,6 +183,8 @@ In the dashboard channel, a top-level post can use plain text. Without a known l
 
 Replies to these channel posts stay in their thread, with the latest reply previewed under the channel message. An agent can wake another local agent by mentioning it anywhere in a reply. Escaped mentions, unknown names, terminals, and self-mentions stay text. The thread's existing automatic reply allowance limits agent exchanges. In a thread with one eligible agent, your plain follow-up goes to that agent without a model call. With several agents, choose recipients with `@name` before sending. Embedded mentions of new participants go through the router. Terminals always need an explicit leading mention. Leading mentions keep their existing addressing rules.
 
+Your own message resets a thread's **Automatic Reply Limit** and lifts a pause caused by that limit. Agent-to-agent exchanges pause after 10 replies until you continue the conversation.
+
 ### Mention agents in other workspaces
 
 Names are unique per Herdr workspace, so two workspaces can each have an `@lead`. Put the workspace label before the mention to reach another workspace:
@@ -307,8 +309,6 @@ In a Codex or Claude Code pane, press **Prefix**, then **Shift-S**. The panel sh
 **R** refreshes, **↑** and **↓** scroll, and **Esc** closes. Agent states and outstanding requests appear at once. **Preparing summary…** placeholders fill in as descriptions arrive.
 
 Each description comes from a separate background request through the host of the pane you opened the panel from: Haiku for Claude Code, Luna for Codex. The request uses your existing sign-in and usage allowance, and it doesn't prompt or interrupt the active session. Outstanding requests come from Namedrop's delivery records. The model writes only the descriptions. If a summary fails, the panel shows the reason and the pane's recent output. See [panel behavior and limits](docs/operations.md#agent-status-panel).
-
-Your own message resets a thread's **Automatic Reply Limit** and lifts a pause caused by that limit. Agent-to-agent exchanges pause after 10 replies until you continue the conversation.
 
 ## Tour
 
