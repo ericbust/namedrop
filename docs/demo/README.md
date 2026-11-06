@@ -59,14 +59,14 @@ The screens come from an isolated profile under `~/namedrop-demo`, so no persona
 ## Re-capture and render Channels
 
 The Channels highlight records the complete app on the exp.17 build, with real
-Claude Code and Codex panes beside it. A moving camera follows instructions,
-agent work, thread replies, the real reminder, Needs you and live terminal input.
-The 59.5-second movie uses timestamped 2x app frames and synchronized ANSI captures.
-The animated WebP is a shorter excerpt.
+Claude Code and Codex panes beside it. Each beat opens on the whole app, then one
+slow push-in holds on the instruction, reply, reminder, Needs you card or live Peek.
+The movie is under 60 seconds and uses timestamped 2x app frames and synchronized ANSI captures.
+The animated WebP is the opening channel beat.
 
 Follow [Record Channels with a moving camera](channels/motion/README.md) to capture
 and render a take. It documents the isolated testbed, disabled spellcheck, source
-manifest, safe Esc cancellation, camera plan and asset checks. `motion/capture.json`
+manifest, safe Esc cancellation, shot plan, motion metrics and asset checks. `motion/capture.json`
 records this take's build and source hashes. The old cropped still scene remains
 available for reference; it is not the source of the current published movie.
 

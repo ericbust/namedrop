@@ -1,4 +1,4 @@
-const W = 1920, H = 1080;
+import { W, H, PICTURE, ease, clamp, shotIndexAt, sourceAt, viewAt, captionsAt } from './camera.mjs';
 const canvas = document.querySelector('canvas');
 canvas.width = Math.round(W * devicePixelRatio);
 canvas.height = Math.round(H * devicePixelRatio);
@@ -7,9 +7,6 @@ ctx.scale(devicePixelRatio, devicePixelRatio);
 const params = new URLSearchParams(location.search);
 const recordingBase = params.get('recording') || 'recording';
 const images = new Map(), panes = new Map();
-const ease = x => x * x * (3 - 2 * x);
-const clamp = x => Math.max(0, Math.min(1, x));
-const interpolate = (a, b, p) => a.map((value, i) => value + (b[i] - value) * ease(p));
 let recording, timeline;
 
 async function frame(file) {
@@ -60,7 +57,7 @@ async function paneText(file) {
   return panes.get(file);
 }
 
-function pane(rows, name, color, y) {
+function pane(ctx, rows, name, color, y) {
   const x = 1470, width = 450, height = 435;
   ctx.fillStyle = '#111217';
   ctx.fillRect(x, y, width, height);
@@ -84,9 +81,9 @@ function pane(rows, name, color, y) {
   ctx.restore();
 }
 
-function endCard(progress) {
+function endCard(alpha) {
   ctx.save();
-  ctx.globalAlpha = ease(clamp(progress / 0.18));
+  ctx.globalAlpha = alpha;
   ctx.fillStyle = '#090a0e';
   ctx.fillRect(0, 0, W, H);
   ctx.textAlign = 'center';
@@ -105,6 +102,12 @@ function endCard(progress) {
   ctx.restore();
 }
 
+const offscreen = document.createElement('canvas');
+offscreen.width = canvas.width;
+offscreen.height = canvas.height;
+const offscreenCtx = offscreen.getContext('2d');
+offscreenCtx.scale(devicePixelRatio, devicePixelRatio);
+
 window.sceneReady = (async () => {
   [recording, timeline] = await Promise.all([
     fetch(recordingBase + '/recording.json').then(response => response.json()),
@@ -112,57 +115,60 @@ window.sceneReady = (async () => {
   ]);
   if (!recording.frames.length) throw new Error('Recording has no source frames');
   if (!recording.throwaway && !recording.panes?.length) throw new Error('Final recording requires real pane captures');
-  window.DURATION = timeline.at(-1).end;
+  window.DURATION = timeline.duration;
   await frame(recording.frames[0].file);
 })();
 
-window.renderAt = async t => {
-  await window.sceneReady;
-  const section = timeline.find(item => t >= item.start && t < item.end) || timeline.at(-1);
-  const p = clamp((t - section.start) / (section.end - section.start));
-  const sourceTime = section.source[0] + p * (section.source[1] - section.source[0]);
+async function drawShot(target, shot, t) {
+  const sourceTime = sourceAt(shot, t);
   const sourcePane = recording.panes?.length ? nearest(recording.panes, sourceTime) : {};
   const [image, codex, claude] = await Promise.all([
     frame(nearest(recording.frames, sourceTime).file),
     paneText(sourcePane.codex), paneText(sourcePane.claude),
   ]);
-  const [cx, cy, zoom, anchorY] = interpolate(section.from, section.to, p);
-  const originX = W / 2 - cx * zoom, originY = anchorY - cy * zoom;
-  ctx.fillStyle = '#090a0e';
-  ctx.fillRect(0, 0, W, H);
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(0, 135, W, H - 155);
-  ctx.clip();
-  ctx.translate(originX, originY);
-  ctx.scale(zoom, zoom);
-  ctx.drawImage(image, 0, 0, recording.viewport.width, recording.viewport.height);
-  pane(codex, 'Codex', '#80ddd5', 0);
-  pane(claude, 'Claude', '#dfa78f', 465);
-  ctx.restore();
+  const view = viewAt(shot, t);
+  target.fillStyle = '#090a0e';
+  target.fillRect(0, 0, W, H);
+  target.save();
+  target.beginPath();
+  target.rect(0, PICTURE.top, W, PICTURE.height);
+  target.clip();
+  target.translate(view.x, view.y);
+  target.scale(view.zoom, view.zoom);
+  target.drawImage(image, 0, 0, recording.viewport.width, recording.viewport.height);
+  pane(target, codex, 'Codex', '#80ddd5', 0);
+  pane(target, claude, 'Claude', '#dfa78f', 465);
+  target.restore();
+}
 
-  ctx.fillStyle = '#f2f3f6';
+window.renderAt = async t => {
+  await window.sceneReady;
+  const index = shotIndexAt(timeline, t);
+  const shot = timeline.shots[index], previous = timeline.shots[index - 1];
+  const blend = previous && shot.fade ? ease(clamp((t - shot.start) / shot.fade)) : 1;
+  if (shot.endCard) {
+    await drawShot(ctx, previous, previous.end);
+    endCard(blend);
+    return;
+  }
+  if (blend < 1) {
+    await drawShot(ctx, previous, previous.end);
+    await drawShot(offscreenCtx, shot, t);
+    ctx.save();
+    ctx.globalAlpha = blend;
+    ctx.drawImage(offscreen, 0, 0, W, H);
+    ctx.restore();
+  } else {
+    await drawShot(ctx, shot, t);
+  }
   ctx.textAlign = 'center';
   ctx.font = '600 40px Inter, Arial, sans-serif';
-  ctx.fillText(section.caption, W / 2, 79);
-  const overviewAlpha = ease(clamp((zoom - 1) / 0.3));
-  if (overviewAlpha > 0) {
-    ctx.save();
-    ctx.globalAlpha = overviewAlpha * 0.94;
-    const width = 340, height = width * 900 / 1440, x = W - width - 28, y = 153;
-    ctx.fillStyle = '#191b24';
-    ctx.fillRect(x - 5, y - 5, width + 10, height + 10);
-    ctx.drawImage(image, x, y, width, height);
-    const left = Math.max(0, -originX / zoom), top = Math.max(0, (135 - originY) / zoom);
-    const right = Math.min(1440, (W - originX) / zoom), bottom = Math.min(900, (H - 20 - originY) / zoom);
-    if (right > left && bottom > top) {
-      ctx.strokeStyle = '#80ddd5';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(x + left / 1440 * width, y + top / 900 * height, (right - left) / 1440 * width, (bottom - top) / 900 * height);
-    }
-    ctx.restore();
+  for (const caption of captionsAt(timeline, t)) {
+    ctx.globalAlpha = caption.alpha;
+    ctx.fillStyle = '#f2f3f6';
+    ctx.fillText(caption.text, W / 2, 79);
   }
-  if (section.endCard) endCard(p);
+  ctx.globalAlpha = 1;
 };
 
 await window.sceneReady;
