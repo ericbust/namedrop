@@ -553,13 +553,13 @@ impl Hub<'_> {
     }
 
     fn verdict_at(&mut self, now: Instant) -> Option<Verdict> {
-        if self.unsupported_schema {
+        let tailnet = super::tailscale::read(self.files.state());
+        let tailnet_owned = !matches!(&tailnet, Ok(None));
+        if self.unsupported_schema && !tailnet_owned {
             return Some(Verdict::Exit(
                 "this release does not support the state schema",
             ));
         }
-        let tailnet = super::tailscale::read(self.files.state());
-        let tailnet_owned = !matches!(&tailnet, Ok(None));
         let runtime = self.files.state().join("runtime");
         let wants_handoff = if fs::symlink_metadata(runtime.join("migration.json")).is_ok() {
             Some("an update is migrating state")
@@ -1751,6 +1751,18 @@ mod tests {
                 Some(Verdict::Handoff("an update is migrating state"))
             ));
             fs::remove_file(runtime.join("migration.json")).unwrap();
+            hub.unsupported_schema = true;
+            assert!(
+                hub.verdict_at(now).is_none(),
+                "{state} ownership must reserve the port even when the state schema is unsupported"
+            );
+            fs::write(runtime.join("namedrop"), "compatible release").unwrap();
+            assert!(matches!(
+                hub.verdict_at(now),
+                Some(Verdict::Handoff("a newer release is current"))
+            ));
+            fs::remove_file(runtime.join("namedrop")).unwrap();
+            hub.unsupported_schema = false;
         }
         fs::write(&ownership, "malformed").unwrap();
         assert!(hub.verdict_at(now).is_none());
