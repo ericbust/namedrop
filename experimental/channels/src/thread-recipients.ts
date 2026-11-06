@@ -1,26 +1,29 @@
 import { attentionReplyTo } from "./attention.ts";
-import type { AddressId, Directory, ReplyTo, SpaceKey } from "./model.ts";
+import type { Directory, SendRule, SpaceKey } from "./model.ts";
 import { type SkillTarget, skillTargetKey } from "./skills.ts";
-import { participant, recipients, type ThreadGroup } from "./store.ts";
+import {
+  participant,
+  recipients,
+  type ThreadGroup,
+  threadAgents,
+} from "./store.ts";
 
-// Keep local names before scoped names: a #workspace token scopes subsequent @mentions.
-export function threadReplyRecipients(
+export function threadSendRule(
   thread: ThreadGroup,
   directory: Directory,
-): readonly ReplyTo[] {
-  const seen = new Set<AddressId>();
-  const local: ReplyTo[] = [];
-  const remote: ReplyTo[] = [];
-  for (const message of [...thread.parents, ...thread.replies]) {
-    for (const id of [message.author, ...recipients(message)]) {
-      if (id === "human" || seen.has(id)) continue;
-      seen.add(id);
-      const to = attentionReplyTo({ addressId: id }, directory);
-      if (to === null) continue;
-      (to.mentions.startsWith("#") ? remote : local).push(to);
+): Extract<SendRule, { kind: "thread" }> {
+  const to = threadAgents(thread, directory);
+  let implicitRecipient: string | null = null;
+  if (to.length === 1) {
+    for (const message of [...thread.parents, ...thread.replies]) {
+      for (const id of [message.author, ...recipients(message)]) {
+        if (id === "human") continue;
+        const recipient = attentionReplyTo({ addressId: id }, directory);
+        if (recipient !== null) implicitRecipient = recipient.mentions;
+      }
     }
   }
-  return [...local, ...remote];
+  return { kind: "thread", to, implicitRecipient };
 }
 
 export function threadSkillRecipients(

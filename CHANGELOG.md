@@ -2,6 +2,12 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.5.0-exp.15] - 2026-11-06
+
+### Fixed
+
+- Thread replies go to the only agent without typing `@`. With several agents, Channels asks you to pick who receives the reply.
+
 ## [1.5.0-exp.14] - 2026-11-05
 
 ### Added

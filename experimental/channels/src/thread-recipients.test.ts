@@ -1,14 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { homesOf, threadGroups } from "./store.ts";
-import {
-  threadReplyRecipients,
-  threadSkillRecipients,
-} from "./thread-recipients.ts";
+import { homesOf, type ThreadGroup, threadGroups } from "./store.ts";
+import { threadSendRule, threadSkillRecipients } from "./thread-recipients.ts";
 import { parseEvent } from "./wire.ts";
 
-test("thread defaults use addressable local and scoped mentions, omitting unknown and retired agents", () => {
+test("thread rules default to a sole addressable agent and retain unresolved participants", () => {
   const wire = JSON.parse(
     readFileSync(
       new URL("./fixtures/real-frames.jsonl", import.meta.url),
@@ -34,7 +31,11 @@ test("thread defaults use addressable local and scoped mentions, omitting unknow
     ...wire,
     frame: {
       ...wire.frame,
-      participants: [agent("local", "@local"), agent("old", "@old", "retired")],
+      participants: [
+        agent("local", "@local"),
+        agent("old", "@old", "retired"),
+        { ...agent("shell", "@shell"), kind: { type: "terminal" } },
+      ],
       messages: [
         {
           message_id: "root",
@@ -47,6 +48,7 @@ test("thread defaults use addressable local and scoped mentions, omitting unknow
           legs: [
             "envoy:remote:lead",
             "old",
+            "shell",
             "envoy:unknown:agent",
             "local",
             "envoy:remote:lead",
@@ -76,14 +78,55 @@ test("thread defaults use addressable local and scoped mentions, omitting unknow
   }).get("root");
   assert.ok(thread);
   assert.deepEqual(
-    threadReplyRecipients(thread, {
+    threadSendRule(thread, {
       members: here.members,
       homes: homesOf([here, remote], undefined),
     }),
-    [
-      { names: ["@local"], mentions: "@local" },
-      { names: ["@lead · #beta"], mentions: "#beta @lead" },
-    ],
+    {
+      kind: "thread",
+      to: ["@lead · #beta", "an agent in another workspace", "@local"],
+      implicitRecipient: null,
+    },
+  );
+  const directory = {
+    members: here.members,
+    homes: homesOf([here, remote], undefined),
+  };
+  const only = (ids: string[]): ThreadGroup => ({
+    ...thread,
+    parents: thread.parents.map((row) => ({
+      ...row,
+      author: "human",
+      legs: row.legs.filter((leg) => ids.includes(leg.to)),
+    })),
+    replies: [],
+  });
+  assert.equal(
+    threadSendRule(only(["local"]), directory).implicitRecipient,
+    "@local",
+  );
+  assert.equal(
+    threadSendRule(only(["local", "shell"]), directory).implicitRecipient,
+    "@local",
+  );
+  assert.deepEqual(threadSendRule(only(["shell", "old"]), directory), {
+    kind: "thread",
+    to: [],
+    implicitRecipient: null,
+  });
+  assert.equal(
+    threadSendRule(only(["envoy:remote:lead"]), directory).implicitRecipient,
+    "#beta @lead",
+  );
+  assert.equal(threadSendRule(only([]), directory).implicitRecipient, null);
+  assert.equal(
+    threadSendRule(only(["envoy:unknown:agent"]), directory).implicitRecipient,
+    null,
+  );
+  assert.equal(
+    threadSendRule(only(["local", "envoy:unknown:agent"]), directory)
+      .implicitRecipient,
+    null,
   );
   const remoteAgent = [...remote.members.values()][0];
   const localAgent = [...here.members.values()].find(

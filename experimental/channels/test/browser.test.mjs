@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname } from "node:path";
 import { after, before, test } from "node:test";
@@ -1345,6 +1345,115 @@ function replyRows() {
   ];
   return value;
 }
+test("THREAD-TO: a sole agent receives plain replies with an explicit wire recipient", async (t) => {
+  const ui = await open(t, (client) => replay(client, [replyRows()]));
+  await ui.live();
+  await ui.page
+    .getByRole("region", { name: "Message history" })
+    .locator('[data-message-id="parent"]')
+    .getByRole("button", { name: "Reply in thread to You" })
+    .click();
+  const pane = threadPane(ui);
+  const box = pane.getByRole("combobox");
+  assert.equal(await box.inputValue(), "");
+  assert.equal(await pane.locator(".composer-to").textContent(), "To @codex");
+  await box.fill("Thanks for checking");
+  await threadToScreenshots(ui, "sole-agent");
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the plain thread reply");
+  assert.equal(ui.posts.attempts[0].body.source, "@codex Thanks for checking");
+  assert.equal(ui.posts.attempts[0].body.in_reply_to, "parent");
+  await eventually(
+    async () => (await box.inputValue()) === "",
+    "the reply clears",
+  );
+  await box.fill("A second plain reply");
+  await pane.getByRole("button", { name: "Send", exact: true }).click();
+  await until(() => ui.posts.attempts.length === 2, "the second plain reply");
+  assert.equal(ui.posts.attempts[1].body.source, "@codex A second plain reply");
+});
+
+async function threadToScreenshots(ui, name) {
+  const directory = process.env.THREAD_TO_SCREENSHOTS;
+  if (!directory) return;
+  await mkdir(directory, { recursive: true });
+  await ui.page.setViewportSize({ width: 1440, height: 900 });
+  for (const colorScheme of ["light", "dark"]) {
+    await ui.page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
+    await ui.page.screenshot({
+      path: `${directory}/${name}-${colorScheme}.png`,
+    });
+  }
+}
+
+test("THREAD-TO: adding an agent keeps the draft and asks who receives it", async (t) => {
+  const value = replyRows();
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  await ui.page
+    .getByRole("region", { name: "Message history" })
+    .locator('[data-message-id="parent"]')
+    .getByRole("button", { name: "Reply in thread to You" })
+    .click();
+  const pane = threadPane(ui);
+  const box = pane.getByRole("combobox");
+  const send = pane.getByRole("button", { name: "Send", exact: true });
+  const status = pane.locator(".composer-status");
+  assert.equal(
+    await status.textContent(),
+    "Enter to send · Shift+Enter for a new line",
+  );
+  await box.fill("Keep this draft");
+  assert.equal(await send.isEnabled(), true);
+  const update = structuredClone(value);
+  const agent = update.frame.participants.find(
+    (member) => member.address_id === CODEX,
+  );
+  assert.ok(agent);
+  update.frame.participants.push({
+    ...agent,
+    address_id: "reviewer",
+    alias: "@reviewer",
+  });
+  update.frame.messages.push(
+    message("joined", "I can help", {
+      thread_id: "exchange",
+      in_reply_to: "answer",
+      author: "reviewer",
+      kind: "reply",
+      at_ms: 400,
+    }),
+  );
+  update.frame.threads[0].message_count++;
+  ui.connections[0].send("space", update);
+  await pane.locator('[data-message-id="joined"]').waitFor();
+  assert.equal(await box.inputValue(), "Keep this draft");
+  assert.equal(await send.isDisabled(), true);
+  assert.equal(await pane.locator(".composer-to").count(), 0);
+  await readsAs(status, "Pick who gets this: @codex or @reviewer");
+  await box.press("Enter");
+  assert.equal(ui.posts.attempts.length, 0);
+  assert.equal(await box.inputValue(), "Keep this draft");
+  await box.blur();
+  await readsAs(status, "Pick who gets this: @codex or @reviewer");
+  assert.equal(await status.getByRole("alert").count(), 0);
+  await threadToScreenshots(ui, "pick-agent");
+  await box.fill("");
+  await box.blur();
+  assert.equal(await status.textContent(), "");
+  await box.focus();
+  await readsAs(status, "Enter to send · Shift+Enter for a new line");
+  await box.press("Enter");
+  await readsAs(status, "Pick who gets this: @codex or @reviewer");
+  await box.fill("@reviewer Please help");
+  await box.press("Enter");
+  await until(
+    () => ui.posts.attempts.length === 1,
+    "the selected recipient reply",
+  );
+  assert.equal(ui.posts.attempts[0].body.source, "@reviewer Please help");
+});
+
 test("THREAD-R6: timeline rows offer Reply in thread by keyboard, thread rows do not, and the reply answers the selected message", async (t) => {
   const ui = await open(t, (client) => replay(client, [replyRows()]));
   await ui.live();
@@ -1431,7 +1540,7 @@ test("THREAD-R6: editable participant mentions support keyboard subsets, multipl
   });
   await ui.page.setViewportSize({ width: 1440, height: 900 });
   const box = pane.getByRole("combobox");
-  assert.equal(await box.inputValue(), "@codex @reviewer ");
+  assert.equal(await box.inputValue(), "");
   assert.equal(
     await pane.getByRole("button", { name: /^Reply in thread to / }).count(),
     0,
@@ -1447,7 +1556,7 @@ test("THREAD-R6: editable participant mentions support keyboard subsets, multipl
     true,
   );
   await pane
-    .getByText("Start with @name to choose who gets this.", { exact: true })
+    .getByText("Pick who gets this: @codex or @reviewer", { exact: true })
     .waitFor();
   await box.fill("@rev");
   await box.press("Tab");
@@ -1511,7 +1620,7 @@ test("THREAD-R6: editable participant mentions support keyboard subsets, multipl
     .locator('[data-message-id="parent"]')
     .getByRole("button", { name: "Reply in thread to You" })
     .click();
-  assert.equal(await box.inputValue(), "@codex @reviewer @scout ");
+  assert.equal(await box.inputValue(), "");
   await ui.page.screenshot({ path: "/tmp/thread-r6-desktop.png" });
   await ui.page.setViewportSize({ width: 390, height: 800 });
   await ui.page.screenshot({ path: "/tmp/thread-r6-narrow.png" });
@@ -4435,7 +4544,7 @@ test("UI-3: pressing Enter twice writes one post", async (t) => {
   assert.equal(await timeline.locator("[data-message-id]").count(), 2);
 });
 
-test("UI-3: a thread reply carries in_reply_to and goes as typed to the thread's agents", async (t) => {
+test("UI-3: a thread reply carries in_reply_to and prefixes the sole agent", async (t) => {
   const now = Date.now();
   const value = team(1, "alpha");
   value.frame.messages = [
@@ -4468,8 +4577,8 @@ test("UI-3: a thread reply carries in_reply_to and goes as typed to the thread's
     exact: true,
   });
   const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
-  assert.equal(await reply.inputValue(), "@codex ");
-  assert.equal(await pane.locator(".composer-to").count(), 0);
+  assert.equal(await reply.inputValue(), "");
+  assert.equal(await pane.locator(".composer-to").count(), 1);
   await reply.click();
   await reply.pressSequentially("thanks");
   await reply.press("Enter");
@@ -4533,8 +4642,8 @@ test("UI-3: a thread reply to an agent in another workspace names it through its
   });
   const reply = pane.getByRole("combobox");
   await reply.waitFor();
-  assert.equal(await reply.inputValue(), "#alpha @lead ");
-  assert.equal(await pane.locator(".composer-to").count(), 0);
+  assert.equal(await reply.inputValue(), "");
+  assert.equal(await pane.locator(".composer-to").count(), 1);
   assert.equal(
     await reply.getAttribute("aria-label"),
     "Reply to @lead · #alpha",
@@ -5247,7 +5356,7 @@ test("UI-3 fix: a thread reply refused after the pane closed marks its parent, a
   );
   await marker.click();
   await pane.waitFor();
-  assert.equal(await reply.inputValue(), "@codex thanks");
+  assert.equal(await reply.inputValue(), "thanks");
   const error = pane.locator(".composer").getByRole("alert");
   await error.waitFor();
   assert.equal(await error.textContent(), "Unknown recipient @ghost.");
@@ -5297,7 +5406,7 @@ test("UI-3 fix: switching channels and closing a thread keep unsent text", async
   await pane.waitFor({ state: "detached" });
   await preview.click();
   await reply.waitFor();
-  assert.equal(await reply.inputValue(), "@codex half a reply");
+  assert.equal(await reply.inputValue(), "half a reply");
   assert.equal(await alpha.inputValue(), "@codex half a post");
   await ui.row(3).click();
   await gamma.waitFor();
@@ -5305,7 +5414,7 @@ test("UI-3 fix: switching channels and closing a thread keep unsent text", async
   assert.equal(ui.posts.attempts.length, 0);
 });
 
-test("UI-3 fix: the thread box says Write a reply while editable mentions name the recipients", async (t) => {
+test("UI-3 fix: the thread box says Write a reply while the To chip names its recipient", async (t) => {
   const ui = await open(t, (client) => replay(client, [askThread()]));
   await ui.live();
   const timeline = ui.page.getByRole("region", { name: "Message history" });
@@ -5315,8 +5424,8 @@ test("UI-3 fix: the thread box says Write a reply while editable mentions name t
     exact: true,
   });
   const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
-  assert.equal(await reply.inputValue(), "@codex ");
-  assert.equal(await pane.locator(".composer-to").count(), 0);
+  assert.equal(await reply.inputValue(), "");
+  assert.equal(await pane.locator(".composer-to").count(), 1);
   assert.equal(await reply.getAttribute("placeholder"), "Write a reply");
   assert.equal(
     await ui.page
@@ -7468,7 +7577,7 @@ test("CH-2: Respond targets its agent with the prefill, and removing its mention
   await reply.fill("ok go ahead");
   assert.equal(await pane.locator(".composer-to").count(), 0);
   await pane
-    .getByText("Start with @name to choose who gets this.", { exact: true })
+    .getByText("Pick who gets this: @codex or @claude", { exact: true })
     .waitFor();
   assert.equal(
     await reply.getAttribute("aria-label"),
@@ -7892,7 +8001,12 @@ test("DESIGN-R2 D2: a thread's kept-draft line lasts until that box changes, the
   await readsAs(status, kept);
   await reply.press("End");
   await ui.page.keyboard.type(" too");
-  await readsAs(status, "Start with @name to choose who gets this.");
+  await readsAs(status, "Enter to send · Shift+Enter for a new line");
+  assert.equal(await pane.locator(".composer-to").textContent(), "To @codex");
+  assert.equal(
+    await pane.getByRole("button", { name: "Send", exact: true }).isEnabled(),
+    true,
+  );
   assert.equal(await reply.inputValue(), "my thread words too");
 });
 
@@ -9547,8 +9661,8 @@ test("CH-fix-3 item 1: Send anyway in the thread pane delivers the post, focus m
   const pane = threadPane(ui);
   const box = pane.getByRole("combobox");
   await box.waitFor();
-  const suggestedReply = await box.inputValue();
-  assert.equal(suggestedReply, "@claude ");
+  const initialReply = await box.inputValue();
+  assert.equal(initialReply, "");
   await pane.getByRole("button", { name: "Send this to @codex" }).click();
   await until(() => ui.posts.deliveries.length === 1, "the deliver POST");
   assert.equal(ui.posts.deliveries[0].path, deliverPath("p1"));
@@ -9562,8 +9676,8 @@ test("CH-fix-3 item 1: Send anyway in the thread pane delivers the post, focus m
   await readsAs(inTimeline, "Sent to @codex");
   assert.equal(
     await box.inputValue(),
-    suggestedReply,
-    "delivery leaves the suggested reply untouched",
+    initialReply,
+    "delivery leaves the reply box untouched",
   );
   assert.equal(ui.posts.attempts.length, 0, "no reply is posted");
 });
@@ -10943,8 +11057,8 @@ test("UI-R4 review H Low 2: in a thread, a pasted U+FEFF before a leading name d
     exact: true,
   });
   const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
-  assert.equal(await reply.inputValue(), "@codex ");
-  assert.equal(await pane.locator(".composer-to").count(), 0);
+  assert.equal(await reply.inputValue(), "");
+  assert.equal(await pane.locator(".composer-to").count(), 1);
   await reply.fill("﻿@claude look too");
   assert.equal(await pane.locator(".composer-to").count(), 0, "no To label");
   await reply.press("Enter");

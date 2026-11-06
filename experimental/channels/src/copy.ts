@@ -459,6 +459,8 @@ export const composerCopy = {
   send: "Send",
   everyWorkspace: "every workspace",
   needsRecipient: "Start with @name to choose who gets this.",
+  pickRecipient: (names: readonly string[]) =>
+    `Pick who gets this: ${names.join(" or ")}`,
   needsMessage: (names: readonly string[]) =>
     `Add a message after ${shortList(names)}.`,
   postNotSent: "A post wasn't sent",
