@@ -558,6 +558,8 @@ impl Hub<'_> {
                 "this release does not support the state schema",
             ));
         }
+        let tailnet = super::tailscale::read(self.files.state());
+        let tailnet_owned = !matches!(&tailnet, Ok(None));
         let runtime = self.files.state().join("runtime");
         let wants_handoff = if fs::symlink_metadata(runtime.join("migration.json")).is_ok() {
             Some("an update is migrating state")
@@ -599,7 +601,10 @@ impl Hub<'_> {
             None
         };
         if let Some(reason) = wants_handoff {
-            return Some(if self.subscribers.is_empty() {
+            if tailnet.is_err() {
+                return None;
+            }
+            return Some(if self.subscribers.is_empty() && !tailnet_owned {
                 Verdict::Exit(reason)
             } else {
                 Verdict::Handoff(reason)
@@ -615,6 +620,7 @@ impl Hub<'_> {
         if self
             .idle_since
             .is_some_and(|since| now.duration_since(since) >= self.idle)
+            && !tailnet_owned
         {
             return Some(Verdict::Idle);
         }
@@ -1701,6 +1707,66 @@ mod tests {
                 Some(Verdict::Handoff("the state schema changed"))
             ));
         }
+        let _ = fs::remove_dir_all(files.state());
+    }
+
+    #[test]
+    fn tailnet_ownership_keeps_backend_alive_and_hands_off_without_tabs() {
+        let files = schema_test_files("tailnet-lifetime");
+        let mut hub = schema_test_hub(&files);
+        let now = Instant::now();
+        hub.idle_since = Some(now - hub.idle);
+        let ownership = files.state().join("dashboard/tailscale.json");
+        let runtime = files.state().join("runtime");
+        fs::create_dir_all(&runtime).unwrap();
+        for state in ["installing", "enabled", "removing"] {
+            fs::write(
+                &ownership,
+                serde_json::json!({
+                    "version": 1,
+                    "state": state,
+                    "handler": {
+                        "dns_name": "device.tailnet.ts.net",
+                        "https_port": 443,
+                        "owner_login": "owner@example.com",
+                        "backend_port": 1234
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            assert!(
+                hub.verdict_at(now).is_none(),
+                "{state} ownership must keep the authenticated backend alive"
+            );
+            fs::write(runtime.join("namedrop"), "new release").unwrap();
+            assert!(matches!(
+                hub.verdict_at(now),
+                Some(Verdict::Handoff("a newer release is current"))
+            ));
+            fs::remove_file(runtime.join("namedrop")).unwrap();
+            fs::write(runtime.join("migration.json"), "{}").unwrap();
+            assert!(matches!(
+                hub.verdict_at(now),
+                Some(Verdict::Handoff("an update is migrating state"))
+            ));
+            fs::remove_file(runtime.join("migration.json")).unwrap();
+        }
+        fs::write(&ownership, "malformed").unwrap();
+        assert!(hub.verdict_at(now).is_none());
+        fs::write(runtime.join("namedrop"), "new release").unwrap();
+        assert!(hub.verdict_at(now).is_none());
+        fs::remove_file(runtime.join("namedrop")).unwrap();
+        fs::write(runtime.join("migration.json"), "{}").unwrap();
+        assert!(hub.verdict_at(now).is_none());
+        fs::remove_file(runtime.join("migration.json")).unwrap();
+        fs::remove_file(&ownership).unwrap();
+        fs::create_dir(&ownership).unwrap();
+        fs::write(runtime.join("namedrop"), "new release").unwrap();
+        assert!(hub.verdict_at(now).is_none());
+        fs::remove_file(runtime.join("namedrop")).unwrap();
+        fs::remove_dir(&ownership).unwrap();
+        assert!(matches!(hub.verdict_at(now), Some(Verdict::Idle)));
         let _ = fs::remove_dir_all(files.state());
     }
 

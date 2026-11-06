@@ -128,7 +128,9 @@ async function main() {
     TAILSCALE_PROOF_FAKE: "1",
     TAILSCALE_PROOF_STATE: fakeFile,
     TAILSCALE_PROOF_LOG: commandLog,
+    NAMEDROP_DASHBOARD_IDLE_MS: "2000",
   };
+  const alias = `tailscale-proof-${randomUUID().slice(0, 8)}`;
   const checks = [];
   const check = (name) => {
     checks.push(name);
@@ -186,6 +188,12 @@ async function main() {
   };
   const herdr = async (args) => {
     const result = await run(join(profile, "bin/herdr"), args);
+    if (
+      !result.stdout.trim() &&
+      args[0] === "pane" &&
+      ["run", "report-agent", "report-agent-session", "close"].includes(args[1])
+    )
+      return;
     const value = JSON.parse(result.stdout);
     assert.notEqual(value.ok, false, result.stdout);
     return value.result;
@@ -278,6 +286,17 @@ async function main() {
       "Doctor reports the tailnet URL",
     );
     check("Doctor reports the configured HTTPS origin");
+    await delay(3000);
+    assert.equal(
+      (
+        await request(backend, "/api/session", {
+          Host: `127.0.0.1:${backend}`,
+        })
+      ).status,
+      401,
+      "owned Serve backend must stay alive past idle without browser tabs",
+    );
+    check("owned Serve backend stays alive without tabs past the idle timeout");
 
     fixturePane = (
       await herdr([
@@ -297,7 +316,7 @@ async function main() {
       fixturePane,
       `${quote(process.execPath)} ${quote(script)} --fixture-terminal ${quote(receiptFile)}`,
     ]);
-    const session = `tailscale-proof-${randomUUID()}`;
+    const session = randomUUID();
     await herdr([
       "pane",
       "report-agent",
@@ -311,10 +330,26 @@ async function main() {
       "--agent-session-id",
       session,
     ]);
-    await namedrop(
-      ["name", "@tailscale-proof", "--type", "agent"],
+    await herdr([
+      "pane",
+      "report-agent-session",
       fixturePane,
+      "--source",
+      "herdr:codex",
+      "--agent",
+      "codex",
+      "--agent-session-id",
+      session,
+    ]);
+    assert.equal(
+      (
+        await herdr(["pane", "list", "--workspace", saved.workspace])
+      ).panes.find((pane) => pane.pane_id === fixturePane)?.agent_session
+        ?.value,
+      session,
+      "the fixture must have a native Herdr session identity",
     );
+    await namedrop(["name", `@${alias}`, "--type", "agent"], fixturePane);
     const fixture = await python(
       env,
       [state, marker.socket, saved.workspace, fixturePane, session],
@@ -459,7 +494,7 @@ print(json.dumps({'address':address,'binding':binding}))
     const member = page
       .getByRole("list", { name: "Members", exact: true })
       .getByRole("button")
-      .filter({ hasText: "@tailscale-proof" });
+      .filter({ hasText: `@${alias}` });
     await member.waitFor();
     const cookies = await context.cookies(link.origin);
     const cookie = cookies.find((item) =>
@@ -572,7 +607,7 @@ print(json.dumps({'address':address,'binding':binding}))
       "HTTPS proxy strips spoofed identity and rejects missing or foreign identity even with a loopback Host",
     );
 
-    const postText = `@tailscale-proof Tailnet public post ${randomUUID()}`;
+    const postText = `@${alias} Tailnet public post ${randomUUID()}`;
     const channelComposer = page.getByRole("combobox", { name: /^Message #/ });
     await channelComposer.fill(postText);
     await channelComposer.press("Escape");
@@ -689,17 +724,40 @@ print(json.dumps({'state':db.execute('SELECT state FROM reminders WHERE reminder
     );
     await page
       .getByRole("combobox", {
-        name: "Message to @tailscale-proof",
+        name: `Message to @${alias}`,
         exact: true,
       })
       .fill(inputText);
     await page
       .getByRole("combobox", {
-        name: "Message to @tailscale-proof",
+        name: `Message to @${alias}`,
         exact: true,
       })
       .press("Enter");
-    assert.equal((await inputResponse).status(), 200);
+    const inputReply = await inputResponse;
+    if (inputReply.status() !== 204) {
+      await writeFile(
+        join(output, "input-diagnostic.json"),
+        JSON.stringify(
+          {
+            native: await herdr([
+              "pane",
+              "list",
+              "--workspace",
+              saved.workspace,
+            ]),
+            fixture,
+            session,
+            responseStatus: inputReply.status(),
+            frames: liveRecords.slice(-8),
+            post: inputReply.request().postData(),
+          },
+          null,
+          2,
+        ),
+      );
+    }
+    assert.equal(inputReply.status(), 204);
     await eventually(
       async () =>
         (await readFile(receiptFile, "utf8").catch(() => "")).includes(
@@ -721,7 +779,7 @@ print(json.dumps({'state':db.execute('SELECT state FROM reminders WHERE reminder
     await page.locator(`[data-dm-key="${key}/${fixture.address}"]`).click();
     const directText = `Tailnet private post ${randomUUID()}`;
     const directComposer = page.getByRole("combobox", {
-      name: "Message @tailscale-proof privately",
+      name: `Message @${alias} privately`,
       exact: true,
     });
     await directComposer.fill(directText);
@@ -780,7 +838,7 @@ print(json.dumps({'state':db.execute('SELECT state FROM reminders WHERE reminder
       false,
       JSON.stringify({
         request_id: randomUUID(),
-        source: "@tailscale-proof must not post",
+        source: `@${alias} must not post`,
       }),
     );
     assert.equal(wrongMutation.status, 403);
