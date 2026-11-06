@@ -2,6 +2,12 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.5.0-exp.19] - 2026-11-06
+
+### Fixed
+
+- Type to agent submits prompts in Codex automatically instead of sometimes leaving an unsent draft.
+
 ## [1.5.0-exp.18] - 2026-11-06
 
 ### Fixed

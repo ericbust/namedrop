@@ -1049,13 +1049,12 @@ impl LivePeeks {
         };
         match post {
             InputPost::Text { text, .. } => {
-                send(&["pane", "send-text", &binding.pane_id, &text])?;
                 let current = recorded(&mut store, key, address)?;
                 let updated = native(&binding, Duration::from_millis(500))?.identity;
                 if current != binding || updated != identity || !updated.accepts_input() {
                     return Err(Status::Gone);
                 }
-                send(&["pane", "send-keys", &binding.pane_id, "enter"])
+                send(&["pane", "run", &binding.pane_id, &text])
             }
             InputPost::Key { key, .. } => {
                 send(&["pane", "send-keys", &binding.pane_id, key.herdr()])
