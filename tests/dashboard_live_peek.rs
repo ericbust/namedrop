@@ -311,19 +311,25 @@ if args[:2]==['pane','read']:
             json.dump(config['history_mutate_metadata'],open(os.path.join(root,'responses.json'),'w'))
         os.write(1,json.load(open(os.path.join(root,'history.json'))).encode());sys.exit(0)
     print('SANITIZED SNAPSHOT');sys.exit(0)
-if args[:2] in [['pane','send-text'],['pane','send-keys']]:
+if args[:2] in [['pane','run'],['pane','send-text'],['pane','send-keys']]:
     with open(os.path.join(root,'reads.jsonl'),'a') as log:
         log.write(json.dumps({'args':args,'socket':os.environ.get('HERDR_SOCKET_PATH')})+'\n')
-    config=json.load(open(os.path.join(root,'observer.json')))
-    if args[:2]==['pane','send-text'] and config.get('send_text_gate'):
-        while not os.path.exists(os.path.join(root,config['send_text_gate'])):time.sleep(.01)
     sys.exit(0)
 if args[:2]==['pane','process-info']:
     with open(os.path.join(root,'geometry-reads.jsonl'),'a') as log:
         log.write(json.dumps({'args':args})+'\n')
 responses=json.load(open(os.path.join(root,'responses.json')))
 key=' '.join(args)
-if key in responses:print(responses[key])
+if key in responses:
+    config=json.load(open(os.path.join(root,'observer.json')))
+    if key=='pane list --workspace w1' and config.get('native_identity_gate'):
+        gate=os.path.join(root,config['native_identity_gate'])
+        try:
+            with open(gate+'.captured','x'):pass
+        except FileExistsError:pass
+        else:
+            while not os.path.exists(gate):time.sleep(.01)
+    print(responses[key])
 elif args[:2]==['worktree','list']:sys.stderr.write('{"error":{"code":"not_git_worktree"}}');sys.exit(1)
 else:sys.exit(1)
 "#).unwrap();
@@ -1305,21 +1311,31 @@ fn input_requires_session_and_csrf_before_any_send() {
             .status,
         403
     );
-    assert!(
-        !invocations(&f)
-            .iter()
-            .any(|call| call["args"][1] == "send-keys")
-    );
+    assert!(!invocations(&f).iter().any(|call| matches!(
+        call["args"][1].as_str(),
+        Some("run" | "send-text" | "send-keys")
+    )));
 }
 
 #[test]
-fn input_sends_text_then_enter_and_allowlisted_keys() {
+fn input_submits_text_once_and_sends_allowlisted_keys() {
     let f = Fixture::new();
     let server = Server::start(&f);
     let live = path("socket-a", "w1", "lead");
     let target = input_path("socket-a", "w1", "lead");
     let continuity = live_continuity(&server, &live);
-    for text in ["hello agent", "--help  preserve 'quotes' and café"] {
+    for (text, status) in [
+        ("hello agent", "idle"),
+        ("--help  preserve 'quotes' and café", "working"),
+        ("--help", "blocked"),
+    ] {
+        let file = f.root.join("responses.json");
+        let mut responses: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        let mut panes: Value =
+            serde_json::from_str(responses["pane list --workspace w1"].as_str().unwrap()).unwrap();
+        panes["result"]["panes"][0]["agent_status"] = json!(status);
+        responses["pane list --workspace w1"] = json!(panes.to_string());
+        fs::write(file, responses.to_string()).unwrap();
         assert_eq!(
             post_input(
                 &server,
@@ -1341,7 +1357,12 @@ fn input_sends_text_then_enter_and_allowlisted_keys() {
     );
     let sends: Vec<_> = invocations(&f)
         .into_iter()
-        .filter(|call| call["args"][1] == "send-text" || call["args"][1] == "send-keys")
+        .filter(|call| {
+            matches!(
+                call["args"][1].as_str(),
+                Some("run" | "send-text" | "send-keys")
+            )
+        })
         .collect();
     assert_eq!(
         sends
@@ -1349,15 +1370,14 @@ fn input_sends_text_then_enter_and_allowlisted_keys() {
             .map(|call| call["args"].clone())
             .collect::<Vec<_>>(),
         vec![
-            json!(["pane", "send-text", "pane-1-lead", "hello agent"]),
-            json!(["pane", "send-keys", "pane-1-lead", "enter"]),
+            json!(["pane", "run", "pane-1-lead", "hello agent"]),
             json!([
                 "pane",
-                "send-text",
+                "run",
                 "pane-1-lead",
                 "--help  preserve 'quotes' and café"
             ]),
-            json!(["pane", "send-keys", "pane-1-lead", "enter"]),
+            json!(["pane", "run", "pane-1-lead", "--help"]),
             json!(["pane", "send-keys", "pane-1-lead", "esc"]),
         ]
     );
@@ -1366,11 +1386,11 @@ fn input_sends_text_then_enter_and_allowlisted_keys() {
 
 #[test]
 fn input_revalidation_allows_fresh_idle_but_refuses_replacement() {
-    for change in ["idle", "binding", "session", "terminal"] {
+    for change in ["binding", "session", "terminal", "idle"] {
         let f = Fixture::new();
         let server = Server::start(&f);
         let continuity = live_continuity(&server, &path("socket-a", "w1", "lead"));
-        configure(&f, json!({"send_text_gate":"finish-send"}));
+        configure(&f, json!({"native_identity_gate":"finish-identity"}));
         let response = thread::scope(|scope| {
             let request = scope.spawn(|| {
                 post_input(
@@ -1379,11 +1399,7 @@ fn input_revalidation_allows_fresh_idle_but_refuses_replacement() {
                     &json!({"kind":"text","text":"continue","continuity":continuity}),
                 )
             });
-            wait_for(|| {
-                invocations(&f)
-                    .iter()
-                    .any(|call| call["args"][1] == "send-text")
-            });
+            wait_for(|| f.root.join("finish-identity.captured").exists());
             match change {
                 "idle" => record_fresh_idle(&f),
                 "binding" => {
@@ -1406,7 +1422,7 @@ fn input_revalidation_allows_fresh_idle_but_refuses_replacement() {
                 }
                 _ => unreachable!(),
             }
-            fs::write(f.root.join("finish-send"), "").unwrap();
+            fs::write(f.root.join("finish-identity"), "").unwrap();
             request.join().unwrap()
         });
         assert_eq!(
@@ -1414,10 +1430,25 @@ fn input_revalidation_allows_fresh_idle_but_refuses_replacement() {
             if change == "idle" { 204 } else { 410 },
             "{change}"
         );
-        let enter_sent = invocations(&f)
-            .iter()
-            .any(|call| call["args"][1] == "send-keys");
-        assert_eq!(enter_sent, change == "idle", "{change}");
+        let sends: Vec<_> = invocations(&f)
+            .into_iter()
+            .filter(|call| {
+                matches!(
+                    call["args"][1].as_str(),
+                    Some("run" | "send-text" | "send-keys")
+                )
+            })
+            .map(|call| call["args"].clone())
+            .collect();
+        assert_eq!(
+            sends,
+            if change == "idle" {
+                vec![json!(["pane", "run", "pane-1-lead", "continue"])]
+            } else {
+                vec![]
+            },
+            "{change}"
+        );
     }
 }
 
@@ -1469,11 +1500,10 @@ fn input_refuses_wrong_binding_changed_session_and_offline_pane() {
     responses["pane list --workspace w1"] = json!(panes.to_string());
     fs::write(&rp, responses.to_string()).unwrap();
     assert_eq!(post_input(&server, &target, &body).status, 410);
-    assert!(
-        !invocations(&f)
-            .iter()
-            .any(|call| call["args"][1] == "send-keys")
-    );
+    assert!(!invocations(&f).iter().any(|call| matches!(
+        call["args"][1].as_str(),
+        Some("run" | "send-text" | "send-keys")
+    )));
 }
 
 #[test]
@@ -1490,11 +1520,10 @@ fn input_rejects_oversize_control_text_and_unknown_keys() {
     }
     let big = json!({"kind":"text","text":"x".repeat(8192),"continuity":continuity});
     assert_eq!(post_input(&server, &target, &big).status, 413);
-    assert!(
-        !invocations(&f)
-            .iter()
-            .any(|call| call["args"][1] == "send-text" || call["args"][1] == "send-keys")
-    );
+    assert!(!invocations(&f).iter().any(|call| matches!(
+        call["args"][1].as_str(),
+        Some("run" | "send-text" | "send-keys")
+    )));
 }
 
 #[test]
