@@ -2,6 +2,14 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.5.0-exp.17] - 2026-11-06
+
+### Fixed
+
+- Live Peek keeps streaming after you send a prompt with Type to agent and the agent replies.
+- Agent status agrees across channel members, direct messages, and Peek. Pending permissions and questions show Needs you everywhere.
+- One-time reminders no longer show a repeat count. Reminder times are shorter, with the full date and time available on hover.
+
 ## [1.5.0-exp.16] - 2026-11-06
 
 ### Fixed
