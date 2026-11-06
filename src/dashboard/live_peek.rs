@@ -1438,6 +1438,39 @@ mod tests {
     use serde_json::{Value, json};
 
     #[test]
+    fn geometry_hints_clamp_positive_axes_and_ignore_zero() {
+        for (cols, rows, expected) in [
+            (
+                Some(600),
+                Some(300),
+                SourceViewport {
+                    cols: Some(512),
+                    rows: Some(128),
+                },
+            ),
+            (
+                Some(200),
+                Some(300),
+                SourceViewport {
+                    cols: Some(200),
+                    rows: Some(256),
+                },
+            ),
+            (Some(0), Some(0), SourceViewport::default()),
+            (
+                None,
+                Some(u64::MAX),
+                SourceViewport {
+                    cols: None,
+                    rows: Some(256),
+                },
+            ),
+        ] {
+            assert_eq!(SourceViewport::validated(cols, rows).unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn tty_names_accept_linux_and_macos_devices_and_refuse_parent_paths() {
         for (name, expected) in [
             ("pts/12", "/dev/pts/12"),

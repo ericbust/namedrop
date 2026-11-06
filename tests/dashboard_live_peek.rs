@@ -198,6 +198,14 @@ fn invocations(f: &Fixture) -> Vec<Value> {
         .collect()
 }
 
+fn geometry_invocations(f: &Fixture) -> Vec<Value> {
+    fs::read_to_string(f.root.join("geometry-reads.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
 fn path(socket: &str, workspace: &str, alias: &str) -> String {
     format!(
         "/w/{}/participants/{}/live",
@@ -285,6 +293,9 @@ if args[:2] in [['pane','send-text'],['pane','send-keys']]:
     with open(os.path.join(root,'reads.jsonl'),'a') as log:
         log.write(json.dumps({'args':args,'socket':os.environ.get('HERDR_SOCKET_PATH')})+'\n')
     sys.exit(0)
+if args[:2]==['pane','process-info']:
+    with open(os.path.join(root,'geometry-reads.jsonl'),'a') as log:
+        log.write(json.dumps({'args':args,'time':time.monotonic()})+'\n')
 responses=json.load(open(os.path.join(root,'responses.json')))
 key=' '.join(args)
 if key in responses:print(responses[key])
@@ -571,6 +582,7 @@ fn source_column_changes_keep_continuity_sequence_history_and_input() {
         .filter(|call| call["args"][0] == "terminal")
         .collect();
     assert_eq!(calls.len(), 4);
+    assert_eq!(geometry_invocations(&f).len(), 1);
     for call in calls {
         wait_for(|| stopped(call["pid"].as_u64().unwrap()));
         wait_for(|| stopped(call["child"].as_u64().unwrap()));
@@ -619,19 +631,22 @@ fn unavailable_geometry_keeps_known_columns_until_authoritative_resize() {
 fn partial_geometry_revalidates_retained_columns_against_new_rows() {
     let f = Fixture::new();
     let server = Server::start(&f);
-    let source = SourcePty::new(512, 128);
+    let source = SourcePty::new(512, 100);
     set_process_info(&f, json!({"tty":source.path}));
     configure(&f, json!({"quiet":true}));
     let mut live = server.live(&path("socket-a", "w1", "lead"));
     let reset = live.record().unwrap();
     assert_eq!(reset["cols"], 512);
-    assert_eq!(reset["rows"], 128);
+    assert_eq!(reset["rows"], 100);
+    source.resize(0, 0);
     set_rows(&f, json!(256));
     set_process_info(&f, json!({}));
     let event = live.record().unwrap();
-    assert_eq!(event["kind"], "unavailable");
-    assert_eq!(event["reason"], "source_lost");
-    assert_eq!(invocations(&f).len(), 1);
+    assert_eq!(event["kind"], "reset");
+    assert_eq!(event["cols"], 512);
+    assert_eq!(event["rows"], 128);
+    assert_eq!(event["continuity"], reset["continuity"]);
+    assert_eq!(invocations(&f).len(), 2);
     assert_eq!(
         post_input(
             &server,
@@ -644,26 +659,66 @@ fn partial_geometry_revalidates_retained_columns_against_new_rows() {
 }
 
 #[test]
-fn invalid_source_geometry_refuses_live_without_revoking_input() {
+fn invalid_source_geometry_falls_back_or_clamps_without_revoking_input() {
     let f = Fixture::new();
     let server = Server::start(&f);
     let source = SourcePty::new(200, 80);
     let p = path("socket-a", "w1", "lead");
     let continuity = live_continuity(&server, &p);
     set_process_info(&f, json!({"tty":source.path}));
-    for (cols, rows) in [(0, 80), (513, 80), (200, 0), (200, 257), (512, 256)] {
+    set_rows(&f, json!(60));
+    for (cols, rows, expected) in [
+        (0, 0, (120, 60)),
+        (0, 80, (120, 60)),
+        (513, 80, (512, 80)),
+        (200, 0, (120, 60)),
+        (200, 257, (200, 256)),
+        (512, 256, (512, 128)),
+        (600, 300, (512, 128)),
+    ] {
         source.resize(cols, rows);
-        assert_eq!(server.get(&p).status, 503);
+        let response = server.get(&p);
+        assert_eq!(response.status, 200, "source {cols}x{rows}");
+        let reset: Value = serde_json::from_str(response.body.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            (reset["cols"].as_u64(), reset["rows"].as_u64()),
+            (Some(expected.0), Some(expected.1))
+        );
+        assert_eq!(reset["continuity"], continuity);
     }
     for info in [
         json!({"tty":3}),
+        json!({"tty":"??"}),
+        json!({"tty":"console"}),
+        json!({"tty":" "}),
+        json!({"tty":"pts/1 extra"}),
         json!({"tty":"/tmp/untrusted"}),
         json!({"tty":"/dev/pts/../0"}),
         json!({"shell_pid":"bad"}),
         json!({"shell_pid":0}),
+        json!({"shell_pid":u64::MAX}),
     ] {
         set_process_info(&f, info);
-        assert_eq!(server.get(&p).status, 503);
+        let response = server.get(&p);
+        assert_eq!(response.status, 200);
+        let reset: Value = serde_json::from_str(response.body.lines().next().unwrap()).unwrap();
+        assert_eq!(reset["rows"], 60);
+        assert_eq!(reset["continuity"], continuity);
+    }
+    for rows in [
+        json!("bad"),
+        json!(null),
+        json!(-1),
+        json!(0),
+        json!({}),
+        json!([]),
+    ] {
+        set_rows(&f, rows);
+        let response = server.get(&p);
+        assert_eq!(response.status, 200);
+        let reset: Value = serde_json::from_str(response.body.lines().next().unwrap()).unwrap();
+        assert_eq!(reset["rows"], 40);
+        assert_eq!(reset["continuity"], continuity);
     }
     assert_eq!(
         post_input(
@@ -729,6 +784,68 @@ fn shell_pid_discovers_controlling_tty_with_bounded_ps() {
     assert_eq!(reset["cols"], 200);
     assert_eq!(reset["rows"], 70);
     assert_eq!(source.size(), (200, 70));
+    assert_eq!(geometry_invocations(&f).len(), 1);
+}
+
+#[test]
+fn cached_tty_rechecks_startup_resize_without_rediscovery_or_retained_descriptor() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let source = SourcePty::new(200, 80);
+    set_process_info(&f, json!({"tty":source.path}));
+    configure(&f, json!({"delay_rows":{"80":0.3},"quiet":true}));
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            wait_for(|| !invocations(&f).is_empty());
+            source.resize(240, 80);
+        });
+        let mut live = server.live(&path("socket-a", "w1", "lead"));
+        let reset = live.record().unwrap();
+        assert_eq!(reset["cols"], 240);
+        assert_eq!(geometry_invocations(&f).len(), 1);
+        assert_eq!(invocations(&f).len(), 2);
+        #[cfg(target_os = "linux")]
+        for descriptor in fs::read_dir(format!("/proc/{}/fd", server.child.id())).unwrap() {
+            let target = fs::read_link(descriptor.unwrap().path()).unwrap();
+            assert_ne!(target, std::path::Path::new(&source.path));
+        }
+    });
+}
+
+#[test]
+fn failed_tty_discovery_throttles_startup_but_rechecks_metadata_rows() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    set_rows(&f, json!(40));
+    set_process_info(&f, json!({"tty":"??"}));
+    configure(
+        &f,
+        json!({"mutate_metadata":metadata_with_rows(&f, json!(80))}),
+    );
+    let response = server.get(&path("socket-a", "w1", "lead"));
+    assert_eq!(response.status, 200);
+    let reset: Value = serde_json::from_str(response.body.lines().next().unwrap()).unwrap();
+    assert_eq!(reset["rows"], 80);
+    assert_eq!(geometry_invocations(&f).len(), 1);
+    assert_eq!(invocations(&f).len(), 2);
+}
+
+#[test]
+fn legacy_retry_preserves_successful_tty_discovery_across_resizes() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let source = SourcePty::new(200, 80);
+    set_process_info(&f, json!({"tty":source.path}));
+    configure(&f, json!({"reject_geometry":true,"quiet":true}));
+    let mut live = server.live(&path("socket-a", "w1", "lead"));
+    let reset = live.record().unwrap();
+    assert_eq!(reset["cols"], 120);
+    source.resize(240, 80);
+    let resized = live.record().unwrap();
+    assert_eq!(resized["kind"], "reset");
+    assert_eq!(resized["continuity"], reset["continuity"]);
+    assert_eq!(invocations(&f).len(), 4);
+    assert_eq!(geometry_invocations(&f).len(), 1);
 }
 
 #[test]
@@ -938,24 +1055,28 @@ fn initial_row_retry_keeps_original_startup_deadline() {
 }
 
 #[test]
-fn invalid_source_rows_fail_live_without_revoking_input_continuity() {
+fn invalid_source_rows_fall_back_or_clamp_without_revoking_input_continuity() {
     let f = Fixture::new();
     let server = Server::start(&f);
     let p = path("socket-a", "w1", "lead");
     let continuity = live_continuity(&server, &p);
     let before = invocations(&f).len();
-    for rows in [
-        json!(0),
-        json!(-1),
-        json!(257),
-        json!("60"),
-        json!(60.5),
-        Value::Null,
+    for (rows, expected) in [
+        (json!(0), 40),
+        (json!(-1), 40),
+        (json!(257), 256),
+        (json!("60"), 40),
+        (json!(60.5), 40),
+        (Value::Null, 40),
     ] {
         set_rows(&f, rows);
-        assert_eq!(server.get(&p).status, 503);
+        let response = server.get(&p);
+        assert_eq!(response.status, 200);
+        let reset: Value = serde_json::from_str(response.body.lines().next().unwrap()).unwrap();
+        assert_eq!(reset["rows"], expected);
+        assert_eq!(reset["continuity"], continuity);
     }
-    assert_eq!(invocations(&f).len(), before);
+    assert_eq!(invocations(&f).len(), before + 6);
     assert_eq!(
         post_input(
             &server,
