@@ -183,13 +183,15 @@ pub(crate) struct LiveBinding {
     pub pane_id: String,
     pub pane_type: crate::PaneType,
     pub agent_session_id: Option<AgentSessionId>,
-    pub idle_at_ms: Option<i64>,
 }
 
 pub(crate) enum LiveMember {
     Missing,
     Gone,
-    Bound(LiveBinding),
+    Bound {
+        binding: LiveBinding,
+        idle_at_ms: Option<i64>,
+    },
 }
 
 const WINDOW_MESSAGE_IDS: &str = "SELECT message_id FROM channel_messages
@@ -259,12 +261,12 @@ impl StateStore {
             ).optional()?;
             Ok(match row {
                 None => LiveMember::Missing,
-                Some((false, kind, Some(binding), Some(pane_id), session, idle_at_ms)) => LiveMember::Bound(LiveBinding {
+                Some((false, kind, Some(binding), Some(pane_id), session, idle_at_ms)) => LiveMember::Bound { binding: LiveBinding {
                     namespace, binding_id: PaneBindingId::new(binding), pane_id,
                     pane_type: match kind.as_str() { "agent" => crate::PaneType::Agent, "terminal" => crate::PaneType::Terminal,
                         _ => return Err(StoreError::invalid_input("Unsupported live member kind.")) },
-                    agent_session_id: session.map(AgentSessionId::new), idle_at_ms,
-                }),
+                    agent_session_id: session.map(AgentSessionId::new),
+                }, idle_at_ms },
                 Some(_) => LiveMember::Gone,
             })
         })

@@ -720,18 +720,61 @@ enum Route {
     Health,
 }
 
+fn admit_host(
+    request: &Request,
+    port: u16,
+    tailnet: Option<&super::tailscale::OwnedHandler>,
+) -> Result<String, Status> {
+    let host = request.header("host").ok_or(Status::Forbidden)?;
+    // Exact loopback Host defeats DNS rebinding onto this port.
+    if host == format!("127.0.0.1:{port}") || host == format!("localhost:{port}") {
+        // Serve preserves the client's Host but always adds proxy headers. Never let
+        // a remote caller disguise a proxied request as direct loopback traffic.
+        if request.headers.iter().any(|(name, _)| {
+            name.starts_with("x-forwarded-")
+                || name.starts_with("tailscale-")
+                || name == "forwarded"
+        }) {
+            return Err(Status::Forbidden);
+        }
+        return Ok(format!("http://{host}"));
+    }
+    let handler = tailnet.ok_or(Status::Forbidden)?;
+    // Serve removes client identity headers and adds the authenticated login:
+    // https://tailscale.com/docs/features/tailscale-serve#identity-headers
+    // Trust is limited to our loopback listener; local OS processes are already trusted.
+    if host != handler.authority()
+        || handler.backend_port != port
+        || request.header("tailscale-user-login") != Some(handler.owner_login.as_str())
+    {
+        return Err(Status::Forbidden);
+    }
+    let origin = handler.origin();
+    if request
+        .header("origin")
+        .is_some_and(|supplied| supplied != origin)
+    {
+        return Err(Status::Forbidden);
+    }
+    Ok(origin)
+}
+
+fn tailnet_still_enabled(front: &Front, expected: Option<&super::tailscale::OwnedHandler>) -> bool {
+    expected.is_none_or(|expected| {
+        matches!(super::tailscale::read(front.files.state()),
+            Ok(Some(super::tailscale::Ownership::Enabled(current))) if current == *expected)
+    })
+}
+
 fn route(
     request: &Request,
     port: u16,
     token: &Token,
     session: &Token,
     directory: bool,
+    tailnet: Option<&super::tailscale::OwnedHandler>,
 ) -> Result<Route, Status> {
-    let host = request.header("host").ok_or(Status::Forbidden)?;
-    // Exact loopback Host defeats DNS rebinding onto this port.
-    if host != format!("127.0.0.1:{port}") && host != format!("localhost:{port}") {
-        return Err(Status::Forbidden);
-    }
+    let origin = admit_host(request, port, tailnet)?;
     if request.header("sec-fetch-site") == Some("cross-site") {
         return Err(Status::Forbidden);
     }
@@ -749,7 +792,7 @@ fn route(
     }
     if path == "/api/direct-messages" && request.method == "GET" {
         authenticate_session(request, port, session)?;
-        authenticate_provenance(request, host)?;
+        authenticate_provenance(request, &origin)?;
         return Ok(Route::DirectMessages);
     }
     if let Some(rest) = path.strip_prefix("/w/") {
@@ -758,11 +801,11 @@ fn route(
             && segments.get(3) == Some(&"reminders")
         {
             authenticate_session(request, port, session)?;
-            authenticate_provenance(request, host)?;
+            authenticate_provenance(request, &origin)?;
             let cancel = match (request.method.as_str(), segments.as_slice()) {
                 ("GET", [_, _, _, "reminders"]) => None,
                 ("POST", [_, _, _, "reminders", reminder, "cancel"]) => {
-                    authenticate_mutation(request, session, host)?;
+                    authenticate_mutation(request, session, &origin)?;
                     Some(decode_route_id(reminder)?)
                 }
                 _ => return Err(Status::MethodNotAllowed),
@@ -783,7 +826,7 @@ fn route(
         if let [key, "direct-messages", address, "messages", message, "body"] = segments.as_slice()
         {
             authenticate_session(request, port, session)?;
-            authenticate_mutation(request, session, host)?;
+            authenticate_mutation(request, session, &origin)?;
             if request.method != "GET" {
                 return Err(Status::MethodNotAllowed);
             }
@@ -805,14 +848,14 @@ fn route(
         }
         if let [key, "direct-messages", address, "messages"] = segments.as_slice() {
             authenticate_session(request, port, session)?;
-            authenticate_provenance(request, host)?;
+            authenticate_provenance(request, &origin)?;
             let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
             let address_id = decode_asset_path(address).ok_or(Status::NotFound)?;
             if address_id.is_empty() || address_id.contains('/') {
                 return Err(Status::NotFound);
             }
             return if request.method == "POST" {
-                authenticate_mutation(request, session, host)?;
+                authenticate_mutation(request, session, &origin)?;
                 Ok(Route::DirectSend { key, address_id })
             } else {
                 let (before, limit) = history_query(request)?;
@@ -827,7 +870,7 @@ fn route(
     }
     if request.method == "POST" {
         authenticate_session(request, port, session)?;
-        authenticate_mutation(request, session, host)?;
+        authenticate_mutation(request, session, &origin)?;
         if let Some(rest) = path.strip_prefix("/w/") {
             let segments: Vec<_> = rest.split('/').collect();
             if let [key, "participants", address, "input"] = segments.as_slice() {
@@ -879,13 +922,13 @@ fn route(
         let segments: Vec<_> = rest.split('/').collect();
         if segments.get(1) == Some(&"messages") && segments.len() > 2 {
             authenticate_session(request, port, session)?;
-            authenticate_provenance(request, host)?;
+            authenticate_provenance(request, &origin)?;
             let [key, "messages", message, kind @ ("context" | "body")] = segments.as_slice()
             else {
                 return Err(Status::NotFound);
             };
             if *kind == "body" {
-                authenticate_mutation(request, session, host)?;
+                authenticate_mutation(request, session, &origin)?;
             }
             let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
             let message_id = decode_asset_path(message).ok_or(Status::NotFound)?;
@@ -904,7 +947,7 @@ fn route(
         }
         if segments.get(1) == Some(&"participants") {
             authenticate_session(request, port, session)?;
-            authenticate_provenance(request, host)?;
+            authenticate_provenance(request, &origin)?;
             let [
                 key,
                 "participants",
@@ -1042,7 +1085,7 @@ fn authenticate_session(request: &Request, port: u16, session: &Token) -> Result
     }
 }
 
-fn authenticate_mutation(request: &Request, session: &Token, host: &str) -> Result<(), Status> {
+fn authenticate_mutation(request: &Request, session: &Token, origin: &str) -> Result<(), Status> {
     let expected = csrf_token(session);
     let candidate = request.header("x-namedrop-csrf").ok_or(Status::Forbidden)?;
     if expected.len() != candidate.len()
@@ -1054,13 +1097,13 @@ fn authenticate_mutation(request: &Request, session: &Token, host: &str) -> Resu
     {
         return Err(Status::Forbidden);
     }
-    authenticate_provenance(request, host)
+    authenticate_provenance(request, origin)
 }
 
-fn authenticate_provenance(request: &Request, host: &str) -> Result<(), Status> {
+fn authenticate_provenance(request: &Request, expected_origin: &str) -> Result<(), Status> {
     if request
         .header("origin")
-        .is_some_and(|origin| origin != format!("http://{host}"))
+        .is_some_and(|origin| origin != expected_origin)
     {
         return Err(Status::Forbidden);
     }
@@ -1206,12 +1249,20 @@ fn serve_connection(
         Ok(request) => request,
         Err(status) => return respond_status(&mut writer, status),
     };
+    let ownership = super::tailscale::read(front.files.state()).ok().flatten();
+    let tailnet = match &ownership {
+        Some(super::tailscale::Ownership::Enabled(handler)) => Some(handler),
+        _ => None,
+    };
+    let tailnet_request =
+        tailnet.filter(|handler| request.header("host") == Some(handler.authority().as_str()));
     match route(
         &request,
         front.port,
         &front.token,
         &front.session,
         matches!(front.assets, Assets::Directory(_)),
+        tailnet,
     ) {
         Err(status) => respond_status(&mut writer, status),
         Ok(Route::Redeem { nonce, .. }) if !front.files.consume_entry(&nonce) => {
@@ -1219,9 +1270,14 @@ fn serve_connection(
         }
         Ok(Route::Redeem { location, .. }) => {
             let headers = format!(
-                "Location: {location}\r\nSet-Cookie: {}={}; HttpOnly; SameSite=Strict; Path=/\r\n",
+                "Location: {location}\r\nSet-Cookie: {}={}; HttpOnly; SameSite=Strict; Path=/{}\r\n",
                 cookie_name(front.port),
-                front.session.as_str()
+                front.session.as_str(),
+                if tailnet_request.is_some() {
+                    "; Secure"
+                } else {
+                    ""
+                }
             );
             respond(&mut writer, "303 See Other", "text/plain", &headers, b"")
         }
@@ -1552,7 +1608,14 @@ fn serve_connection(
             }
             drop(reader);
             drop(writer);
-            live.serve(stream, front, &key, &address_id, continuity.as_deref())
+            live.serve(
+                stream,
+                front,
+                &key,
+                &address_id,
+                continuity.as_deref(),
+                tailnet_request,
+            )
         }
         Ok(Route::LiveInput { key, address_id }) => {
             let post = match live_peek::InputPost::read(&mut reader, &request) {
@@ -1649,9 +1712,14 @@ fn serve_connection(
                 body.as_bytes(),
             )
         }
-        Ok(Route::Events(key)) => {
-            stream_events(stream, writer, front, next_id, Subscription::Space(key))
-        }
+        Ok(Route::Events(key)) => stream_events(
+            stream,
+            writer,
+            front,
+            next_id,
+            Subscription::Space(key),
+            tailnet_request,
+        ),
         Ok(Route::Messages { key, before, limit }) => {
             let result = (|| {
                 let mut guard = history_store.lock().map_err(|_| Status::Unavailable)?;
@@ -1774,7 +1842,14 @@ fn serve_connection(
                 Err(status) => respond_status(&mut writer, status),
             }
         }
-        Ok(Route::AllEvents) => stream_events(stream, writer, front, next_id, Subscription::All),
+        Ok(Route::AllEvents) => stream_events(
+            stream,
+            writer,
+            front,
+            next_id,
+            Subscription::All,
+            tailnet_request,
+        ),
     }
 }
 
@@ -2162,6 +2237,7 @@ fn stream_events(
     front: &Front,
     next_id: &AtomicU64,
     subscription: Subscription,
+    tailnet: Option<&super::tailscale::OwnedHandler>,
 ) -> io::Result<()> {
     write!(
         writer,
@@ -2184,6 +2260,9 @@ fn stream_events(
     }
     let mut last_write = Instant::now();
     let result = loop {
+        if !tailnet_still_enabled(front, tailnet) {
+            break Ok(());
+        }
         let written = match inbox.recv_timeout(Duration::from_secs(1)) {
             Ok(Frame::Snapshot(json)) => write!(writer, "event: snapshot\ndata: {json}\n\n"),
             Ok(Frame::Spaces(events)) => events.iter().try_for_each(|event| match event {
@@ -2578,7 +2657,7 @@ mod skill_route_tests {
             query: None,
             headers: vec![("host".into(), "127.0.0.1:1234".into())],
         };
-        let routes = |request: &Request| route(request, 1234, &token, &session, false);
+        let routes = |request: &Request| route(request, 1234, &token, &session, false, None);
         assert!(matches!(routes(&request), Err(Status::Unauthorized)));
         request.headers.push((
             "cookie".into(),
@@ -2627,7 +2706,7 @@ mod reminder_route_tests {
                 query: None,
                 headers: vec![("host".into(), "127.0.0.1:1234".into())],
             };
-            let routes = |request: &Request| route(request, 1234, &token, &session, false);
+            let routes = |request: &Request| route(request, 1234, &token, &session, false, None);
             assert!(matches!(routes(&request), Err(Status::Unauthorized)));
             request.headers.push((
                 "cookie".into(),
@@ -2664,6 +2743,274 @@ mod reminder_route_tests {
             request.path = format!("{path}/reminder/cancel");
             request.method = "GET".into();
             assert!(matches!(routes(&request), Err(Status::MethodNotAllowed)));
+        }
+        std::fs::remove_dir_all(state).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tailnet_route_tests {
+    use super::super::tailscale::OwnedHandler;
+    use super::*;
+
+    fn handler(port: u16) -> OwnedHandler {
+        OwnedHandler {
+            dns_name: "device.tail123.ts.net".into(),
+            https_port: port,
+            owner_login: "owner@example.com".into(),
+            backend_port: 1234,
+        }
+    }
+
+    fn request(host: &str, login: Option<&str>, origin: Option<&str>) -> Request {
+        let mut headers = vec![("host".into(), host.into())];
+        if let Some(login) = login {
+            headers.push(("tailscale-user-login".into(), login.into()));
+        }
+        if let Some(origin) = origin {
+            headers.push(("origin".into(), origin.into()));
+        }
+        Request {
+            method: "GET".into(),
+            path: "/api/session".into(),
+            query: None,
+            headers,
+        }
+    }
+
+    #[test]
+    fn exact_tailnet_authority_identity_and_optional_https_origin_matrix() {
+        for https_port in [443, 8443] {
+            let handler = handler(https_port);
+            let authority = handler.authority();
+            let origin = handler.origin();
+            for host in [
+                authority.clone(),
+                "untrusted.example".into(),
+                format!("{authority}.evil"),
+                format!("{authority}."),
+                format!("{authority}:443"),
+            ] {
+                for login in [
+                    None,
+                    Some("owner@example.com"),
+                    Some("other@example.com"),
+                    Some(""),
+                ] {
+                    for supplied in [
+                        None,
+                        Some(origin.as_str()),
+                        Some("https://evil.example"),
+                        Some("http://device.tail123.ts.net"),
+                        Some("null"),
+                    ] {
+                        let request = request(&host, login, supplied);
+                        let accepted = admit_host(&request, 1234, Some(&handler)).is_ok();
+                        assert_eq!(
+                            accepted,
+                            host == authority
+                                && login == Some("owner@example.com")
+                                && supplied.is_none_or(|value| value == origin),
+                            "host={host} login={login:?} origin={supplied:?}"
+                        );
+                        assert!(admit_host(&request, 1234, None).is_err());
+                    }
+                }
+            }
+            assert!(
+                admit_host(
+                    &request(&authority, Some("owner@example.com"), None),
+                    9999,
+                    Some(&handler)
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_cannot_disguise_itself_as_local_even_when_tailnet_is_off() {
+        let handler = handler(443);
+        for host in ["127.0.0.1:1234", "localhost:1234"] {
+            let plain = request(host, None, None);
+            assert!(admit_host(&plain, 1234, None).is_ok());
+            assert!(admit_host(&plain, 1234, Some(&handler)).is_ok());
+            for marker in [
+                "x-forwarded-host",
+                "x-forwarded-for",
+                "x-forwarded-proto",
+                "tailscale-user-login",
+                "tailscale-funnel-request",
+                "forwarded",
+            ] {
+                for value in ["", "other@example.com", "owner@example.com"] {
+                    let mut proxied = request(host, None, None);
+                    proxied.headers.push((marker.into(), value.into()));
+                    assert!(admit_host(&proxied, 1234, None).is_err(), "{marker}");
+                    assert!(
+                        admit_host(&proxied, 1234, Some(&handler)).is_err(),
+                        "{marker}"
+                    );
+                }
+            }
+        }
+        for host in [
+            "localhost",
+            "127.0.0.1",
+            "127.0.0.2:1234",
+            "localhost:4321",
+            "[::1]:1234",
+        ] {
+            assert!(admit_host(&request(host, None, None), 1234, Some(&handler)).is_err());
+        }
+    }
+
+    #[test]
+    fn every_tailnet_route_checks_identity_before_assets_health_redemption_or_session() {
+        let state = std::env::temp_dir().join(format!(
+            "namedrop-tailnet-routes-{}",
+            super::super::server_files::random_hex(12).unwrap()
+        ));
+        let files = ServerFiles::at(&state).unwrap();
+        let token = files.token().unwrap();
+        let session = files.session().unwrap();
+        let handler = handler(443);
+        let paths = [
+            "/",
+            "/favicon.ico",
+            "/healthz",
+            "/api/session",
+            "/api/events",
+            "/api/spaces",
+            "/api/direct-messages",
+            "/w/0123456789abcdef0123",
+            "/w/0123456789abcdef0123/events",
+            "/w/0123456789abcdef0123/participants/agent/live",
+            "/w/0123456789abcdef0123/participants/agent/skills",
+            "/w/0123456789abcdef0123/threads/thread/reminders",
+        ];
+        for path in paths {
+            let mut request = request(
+                &handler.authority(),
+                Some("owner@example.com"),
+                Some(&handler.origin()),
+            );
+            request.path = path.into();
+            request.headers.push((
+                "cookie".into(),
+                format!("{}={}", cookie_name(1234), session.as_str()),
+            ));
+            request.query = (path == "/healthz").then(|| format!("t={}", token.as_str()));
+            assert!(
+                route(&request, 1234, &token, &session, false, Some(&handler)).is_ok(),
+                "{path}"
+            );
+            assert!(
+                matches!(
+                    route(&request, 1234, &token, &session, false, None),
+                    Err(Status::Forbidden)
+                ),
+                "{path}"
+            );
+            request
+                .headers
+                .iter_mut()
+                .find(|(name, _)| name == "tailscale-user-login")
+                .unwrap()
+                .1 = "wrong@example.com".into();
+            assert!(
+                matches!(
+                    route(&request, 1234, &token, &session, false, Some(&handler)),
+                    Err(Status::Forbidden)
+                ),
+                "{path}"
+            );
+        }
+        let mut request = request(
+            &handler.authority(),
+            Some("owner@example.com"),
+            Some(&handler.origin()),
+        );
+        request.path = "/".into();
+        request.query = Some("n=one-time-entry".into());
+        assert!(matches!(
+            route(&request, 1234, &token, &session, false, Some(&handler)),
+            Ok(Route::Redeem { .. })
+        ));
+        request
+            .headers
+            .push(("sec-fetch-site".into(), "cross-site".into()));
+        assert!(matches!(
+            route(&request, 1234, &token, &session, false, Some(&handler)),
+            Err(Status::Forbidden)
+        ));
+        std::fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn csrf_session_and_fetch_metadata_still_gate_https_mutations() {
+        let state = std::env::temp_dir().join(format!(
+            "namedrop-tailnet-csrf-{}",
+            super::super::server_files::random_hex(12).unwrap()
+        ));
+        let files = ServerFiles::at(&state).unwrap();
+        let token = files.token().unwrap();
+        let session = files.session().unwrap();
+        let handler = handler(8443);
+        for (host, login, origin, policy) in [
+            (
+                handler.authority(),
+                Some("owner@example.com"),
+                handler.origin(),
+                Some(&handler),
+            ),
+            (
+                "127.0.0.1:1234".into(),
+                None,
+                "http://127.0.0.1:1234".into(),
+                None,
+            ),
+        ] {
+            let mut request = request(&host, login, Some(&origin));
+            request.method = "POST".into();
+            request.path = "/w/0123456789abcdef0123/messages".into();
+            assert!(matches!(
+                route(&request, 1234, &token, &session, false, policy),
+                Err(Status::Unauthorized)
+            ));
+            request.headers.push((
+                "cookie".into(),
+                format!("{}={}", cookie_name(1234), session.as_str()),
+            ));
+            assert!(matches!(
+                route(&request, 1234, &token, &session, false, policy),
+                Err(Status::Forbidden)
+            ));
+            request
+                .headers
+                .push(("x-namedrop-csrf".into(), csrf_token(&session)));
+            assert!(matches!(
+                route(&request, 1234, &token, &session, false, policy),
+                Ok(Route::Send(_))
+            ));
+            request
+                .headers
+                .push(("sec-fetch-site".into(), "same-site".into()));
+            assert!(matches!(
+                route(&request, 1234, &token, &session, false, policy),
+                Err(Status::Forbidden)
+            ));
+            request.headers.pop();
+            request
+                .headers
+                .iter_mut()
+                .find(|(name, _)| name == "origin")
+                .unwrap()
+                .1 = "https://evil.example".into();
+            assert!(matches!(
+                route(&request, 1234, &token, &session, false, policy),
+                Err(Status::Forbidden)
+            ));
         }
         std::fs::remove_dir_all(state).unwrap();
     }

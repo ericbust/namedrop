@@ -9,6 +9,7 @@ mod reminders;
 mod server_files;
 mod skills;
 pub mod snapshot;
+pub(crate) mod tailscale;
 mod thread_controls;
 
 pub(crate) use server_files::current_operator_session;
@@ -50,7 +51,15 @@ pub fn open(
     runtime: &LifecycleRuntime<'_, impl HerdrCommandExecutor, impl Clock, impl IdGenerator>,
     open_browser: bool,
     ui_directory: Option<&Path>,
+    tailscale: Option<bool>,
 ) -> Result<Value, String> {
+    if tailscale == Some(false) {
+        return disable_tailscale(runtime.state_directory);
+    }
+    let files = ServerFiles::at(runtime.state_directory)?;
+    let _tailscale_operation = tailscale
+        .map(|_| tailscale::operation_lock(&files))
+        .transpose()?;
     let ui = UiSource::from_directory(ui_directory)?;
     let workspace_id = match runtime.workspace_id {
         Some(id) => id.to_owned(),
@@ -60,7 +69,6 @@ pub fn open(
         runtime.session_socket_id,
         &workspace_id,
     ));
-    let files = ServerFiles::at(runtime.state_directory)?;
     if let Some(workspace) = herdr_workspace(runtime.herdr, &workspace_id) {
         if let Some(label) = workspace.label.filter(|label| !label.trim().is_empty())
             && let Err(error) = files.record_label(key.as_str(), &label)
@@ -72,12 +80,12 @@ pub fn open(
         }
     }
     let (server, info) = ensure(&files, &files.token()?, &ui)?;
-    let url = format!(
-        "http://127.0.0.1:{}/w/{}?n={}",
-        info.port,
-        key.as_str(),
-        files.mint_entry()?
-    );
+    let origin = if tailscale == Some(true) {
+        tailscale::enable(&files, info.port)?.origin()
+    } else {
+        format!("http://127.0.0.1:{}", info.port)
+    };
+    let url = format!("{origin}/w/{}?n={}", key.as_str(), files.mint_entry()?);
     let opened = open_browser && launch_browser(&url);
     Ok(json!({
         "url": url,
@@ -85,7 +93,16 @@ pub fn open(
         "workspace_id": workspace_id,
         "server": server,
         "opened": opened,
+        "tailscale": tailscale == Some(true),
     }))
+}
+
+/// Disable tailnet access without workspace discovery or starting a server.
+pub fn disable_tailscale(state: &Path) -> Result<Value, String> {
+    let files = ServerFiles::at(state)?;
+    let _operation = tailscale::operation_lock(&files)?;
+    tailscale::disable(&files)?;
+    Ok(json!({"tailscale": "off"}))
 }
 
 /// Idempotent: converges on the one live server whether it was already
@@ -95,6 +112,10 @@ fn ensure(
     token: &Token,
     ui: &UiSource,
 ) -> Result<(&'static str, ServerInfo), String> {
+    let ownership = tailscale::read(files.state())?;
+    let pinned_port = ownership
+        .as_ref()
+        .map(|record| record.handler().backend_port);
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut spawned = false;
     let mut waiting_for_matching_handoff = false;
@@ -124,6 +145,9 @@ fn ensure(
             if let Some(info) = files.info()
                 && let Some(phase) = answers(&info, token)
             {
+                if pinned_port.is_some_and(|port| port != info.port) {
+                    return Err("Channels server port differs from its owned Tailscale target; turn Tailscale off before restarting it".to_owned());
+                }
                 if &info.ui != ui {
                     if phase == ServerPhase::Restarting {
                         return Err(format!(
@@ -283,7 +307,14 @@ fn run_server(
     let assets = http::Assets::new(&ui);
     // Before server.json, so whoever sees this server can already enter it.
     let session = files.session()?;
-    let listener = bind(files.info().map(|info| info.port))?;
+    let ownership = tailscale::read(state)?;
+    let pinned = ownership
+        .as_ref()
+        .map(|record| record.handler().backend_port);
+    let listener = bind(
+        pinned.or_else(|| files.info().map(|info| info.port)),
+        pinned.is_some(),
+    )?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let instance = server_files::random_hex(16)?;
     let mut channel_service = channel_service::ChannelService::start(state)?;
@@ -352,13 +383,18 @@ fn run_server(
 
 /// Reuses the last port so open tabs and bookmarks survive a restart. A
 /// predecessor may still hold it for a moment during a handoff.
-fn bind(preferred: Option<u16>) -> Result<TcpListener, String> {
+fn bind(preferred: Option<u16>, pinned: bool) -> Result<TcpListener, String> {
     if let Some(port) = preferred {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
                 Ok(listener) => return Ok(listener),
                 Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+                Err(error) if pinned => {
+                    return Err(format!(
+                        "could not bind the owned Tailscale backend port {port}: {error}; free the port or run `namedrop channels --tailscale off`"
+                    ));
+                }
                 Err(_) => break,
             }
         }
@@ -371,4 +407,25 @@ fn idle() -> Duration {
         .ok()
         .and_then(|value| value.parse().ok())
         .map_or(DEFAULT_IDLE, Duration::from_millis)
+}
+
+#[cfg(test)]
+mod tailscale_port_tests {
+    use super::*;
+
+    #[test]
+    fn owned_backend_port_never_falls_back_to_another_listener() {
+        let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = occupied.local_addr().unwrap().port();
+        let error = bind(Some(port), true).unwrap_err();
+        assert!(
+            error.contains(&format!("Tailscale backend port {port}")),
+            "{error}"
+        );
+        let local = bind(Some(port), false).unwrap();
+        assert_ne!(local.local_addr().unwrap().port(), port);
+        drop(occupied);
+        let restored = bind(Some(port), true).unwrap();
+        assert_eq!(restored.local_addr().unwrap().port(), port);
+    }
 }

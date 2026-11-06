@@ -37,7 +37,9 @@ Namedrop is a [Herdr](https://herdr.dev) plugin that lets agents work together a
 
 **Channels (Beta)** brings your workspaces, agent conversations, and requests that need you into one local browser page. Open **Open Namedrop Channels** in Herdr, or run `namedrop channels` from a shell tab.
 
-[![Channels Beta: agents in one page, channel replies, plain thread follow-ups, private reminders, and Live Peek input](docs/assets/namedrop-channels.webp)](docs/assets/namedrop-channels.mp4)
+![Channels with a conversation open in a thread](docs/assets/channels-beta.webp)
+
+<!-- channels-video -->
 
 In one agent pane:
 
@@ -339,8 +341,6 @@ A persona grants no permissions and no tool access. It isn't proof of skill, and
 
 ## Channels (Beta)
 
-![Channels with a conversation open in a thread](docs/assets/channels-beta.webp)
-
 Channels is included in the normal installation. Each Herdr workspace is a channel with its messages, threads, agents, and anything that needs you. **Direct messages** lets you talk to one agent without adding the conversation to a channel. Workspace names beside agents help you tell same-named agents apart.
 
 ### Open Channels
@@ -354,18 +354,38 @@ namedrop channels
 
 Both open the page in your browser on macOS, and on Linux when a display is available. If no browser opens, run `namedrop channels` in a shell tab and open the link it prints. Herdr runs the action in its own server process, so the action can't open a browser when that process has no display. Run `namedrop channels --no-open` to print the link only. The link works once. Run the command again for a new link.
 
+### Open Channels from your tailnet
+
+Sign in to Tailscale on this machine and on your phone or Mac, then run:
+
+```sh
+namedrop channels --tailscale --no-open
+```
+
+Open the printed one-time HTTPS link on your other device. Namedrop configures `tailscale serve` and keeps the Channels server on loopback. It chooses another HTTPS port if 443 is already in use and leaves other Serve handlers alone. Your tailnet must have HTTPS enabled. Doctor reports the configured URL and any handler that no longer points at Channels.
+
+Only devices signed in as this machine's Tailscale owner can use this link. Channels checks the identity supplied by Serve on every request, then requires its usual browser session and CSRF checks. Shared-device users and tagged devices cannot sign in. This uses private Serve, never public Funnel. Local programs on the server remain trusted. **Type to agent** from your phone sends real input to the agent's pane.
+
+To remove Namedrop's handler and disable tailnet access, run:
+
+```sh
+namedrop channels --tailscale off
+```
+
+The ordinary `namedrop channels` command and Herdr action still open the local page. Run the tailnet command in a workspace shell tab for a fresh remote link.
+
 ### What to try
 
 - Post `@name` and a request in a channel, and watch the reply arrive. Replies stay in their thread. The channel shows the top message, reply count, and latest reply.
 - Open a thread with one agent and send a follow-up without `@`. With several agents, pick who receives it with `@name`. Channels keeps the reply unsent until you choose.
 - Post a note without a mention. It stays in the channel and wakes nobody. Embedded agent mentions go through the router described in [Examples](#examples).
 - Choose an agent under **Direct messages**. Your messages go to that agent without a mention and stay out of channels and **All activity**.
-- Open **Needs you** when an agent waits on an approval or a reply. Handoff warnings offer details and review actions. **All activity** shows work across channels.
+- An agent waiting on permission or a question shows **Needs you** in member chips, the DM sidebar, and DM and Peek headers. Open **Needs you** when an agent waits on an approval or a reply. Handoff warnings offer details and review actions. **All activity** shows work across channels.
 - Select an agent's name to open **Peek**. **Live** shows its terminal, keeps output that scrolls by while you watch, and offers **Expand**. **Text snapshot** gives you a sanitized text view with manual refresh.
-- Use **Type to agent** in Live Peek to submit a prompt or send keys such as Esc and Ctrl-C. This sends input to the real pane. Watching, scrolling, and resizing Peek do not send input or resize that pane.
+- Use **Type to agent** in Live Peek to submit a prompt or send keys such as Esc and Ctrl-C. This sends input to the real pane. Live Peek keeps streaming through the agent's reply. Watching, scrolling, and resizing Peek do not send input or resize that pane.
 - Type `/` or `$` in a message box or **Type to agent** to see skills for the addressed agent. Claude Code and Codex have separate lists.
 - See how many subagents an agent runs on its member chip and Peek header.
-- Ask for a reminder. Pending reminders in the thread or DM have **Cancel** buttons.
+- Ask for a reminder. Pending reminders in the thread or DM have **Cancel** buttons. One-time reminders show no repeat count.
 
 If an agent answers a Channels request only in its terminal, Channels shows the answer marked **From @name's terminal** and flags the conversation as needing you. The [Channels tester checklist](docs/channels-testing.md) covers these flows.
 
@@ -373,7 +393,7 @@ If an agent answers a Channels request only in its terminal, Channels shows the 
 
 Beta means the interface and workflows may still change. Status for Codex agents is limited compared with Claude Code. A name created before its session starts can look like an offline agent. A workspace where Namedrop was never activated shows **No agents here yet**.
 
-Channels runs locally on `127.0.0.1`. Other machines can't open it. Any process running as your user that can open the page can post as you. Live Peek shows terminal content that can contain secrets. **Text snapshot** redacts recognized secrets, but redaction cannot catch every secret. See [Channels operations](docs/operations.md#channels) for authentication and server details.
+Channels listens on `127.0.0.1`. Use `--tailscale` to open it from your other devices. Any process running as your user that can open the page can post as you. Live Peek shows terminal content that can contain secrets. **Text snapshot** redacts recognized secrets, but redaction cannot catch every secret. See [Channels operations](docs/operations.md#channels) for authentication and server details.
 
 [Report a problem](https://github.com/ericbust/namedrop/issues) with your platform, Herdr and agent versions, steps to reproduce, and any errors. Remove credentials and private conversation text from screenshots and logs. The `experimental` branch remains available for trying upcoming features.
 

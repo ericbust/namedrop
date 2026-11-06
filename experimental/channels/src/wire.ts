@@ -824,6 +824,7 @@ export function parseDirectPeers(raw: unknown): readonly DirectPeer[] {
       throw new Error("Invalid direct message presence");
     if (typeof item.closed !== "boolean")
       throw new Error("Expected closed flag");
+    const attentionCount = integer(item.attention_count);
     return {
       spaceKey: spaceKey(item.space_key),
       addressId: addressId(item.address_id),
@@ -831,7 +832,12 @@ export function parseDirectPeers(raw: unknown): readonly DirectPeer[] {
       workspaceLabel: text(item.workspace_label),
       paneLabel: optionalSafeText(item.pane_label),
       runtime: text(item.runtime),
-      presence,
+      activity:
+        item.closed || presence === "gone"
+          ? "offline"
+          : attentionCount > 0
+            ? "blocked"
+            : presence,
       closed: item.closed,
       threadId: nullableText(item.thread_id),
       lastActivityMs:
@@ -840,7 +846,7 @@ export function parseDirectPeers(raw: unknown): readonly DirectPeer[] {
           : timestamp(item.last_activity_ms),
       lastMessageId: nullableText(item.last_message_id),
       lastAgentMessageId: nullableText(item.last_agent_message_id),
-      attentionCount: integer(item.attention_count),
+      attentionCount,
     };
   });
   if (

@@ -77,6 +77,51 @@ where
     C: Clock,
     I: IdGenerator,
 {
+    let mut report = diagnose_space(runtime);
+    if let Some(diagnostic) = crate::dashboard::tailscale::diagnose(runtime.state_directory) {
+        let explanation = match (&diagnostic.url, &diagnostic.problem) {
+            (Some(url), Some(problem)) => format!("{url}: {problem}"),
+            (Some(url), None) => url.clone(),
+            (None, Some(problem)) => problem.clone(),
+            (None, None) => unreachable!(),
+        };
+        let problem = diagnostic.problem.is_some();
+        let mut check = issue(
+            "ND-TAILSCALE-001",
+            if problem {
+                HealthSeverity::Notice
+            } else {
+                HealthSeverity::Info
+            },
+            if problem {
+                "Channels Tailscale access needs attention."
+            } else {
+                "Channels is configured for your tailnet."
+            },
+            &explanation,
+            HealthRepairKind::HumanDecision,
+            if problem {
+                "Run `namedrop channels --tailscale off`, then `namedrop channels --tailscale` to configure access again."
+            } else {
+                "Run `namedrop channels --tailscale --no-open` for a one-time sign-in link."
+            },
+        );
+        check.diagnostic =
+            serde_json::json!({"url": diagnostic.url, "problem": diagnostic.problem});
+        report.issues.push(check);
+        if problem && report.status == HealthStatus::Healthy {
+            report.status = HealthStatus::NeedsAttention;
+        }
+    }
+    report
+}
+
+fn diagnose_space<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> HealthReport
+where
+    E: HerdrCommandExecutor,
+    C: Clock,
+    I: IdGenerator,
+{
     let HealthSnapshot {
         setup,
         waiting_messages,

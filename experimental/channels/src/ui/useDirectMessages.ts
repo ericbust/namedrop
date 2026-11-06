@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type DirectHistory,
   type DirectPeer,
+  deriveDirectPeers,
   directComposer,
   directKey,
   directPath,
   mergeDirectHistory,
 } from "../direct-messages.ts";
-import type { Draft, DraftKey, Outgoing } from "../model.ts";
+import type { Channel, Draft, DraftKey, Outgoing, SpaceKey } from "../model.ts";
 import type { createPoster } from "../send.ts";
 import { draftKey, sameComposer } from "../store.ts";
 import { parseDirectHistory, parseDirectPeers } from "../wire.ts";
@@ -56,8 +57,13 @@ function useDirectPoll(
 export function useDirectMessages(
   selected: string | null,
   poster: ReturnType<typeof createPoster>,
+  channels: ReadonlyMap<SpaceKey, Channel>,
 ) {
-  const [peers, setPeers] = useState<readonly DirectPeer[]>([]);
+  const [directoryPeers, setPeers] = useState<readonly DirectPeer[]>([]);
+  const peers = useMemo(
+    () => deriveDirectPeers(directoryPeers, channels),
+    [directoryPeers, channels],
+  );
   const [directoryError, setDirectoryError] = useState(false);
   const [histories, setHistories] = useState<
     ReadonlyMap<string, DirectHistory>

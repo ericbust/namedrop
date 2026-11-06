@@ -50,6 +50,12 @@ pub fn render_command_result_to_text(result: &CommandResult) -> String {
                 field("Tab label", &data["tab_label"], 0, &mut lines);
             }
         }
+        "dashboard" if data["tailscale"] == "off" => {
+            lines.push(
+                "Channels Tailscale access is off. The owned Serve handler has been removed."
+                    .into(),
+            );
+        }
         "dashboard" => {
             lines.push(format!(
                 "Namedrop dashboard for workspace {} is live:",
@@ -59,6 +65,8 @@ pub fn render_command_result_to_text(result: &CommandResult) -> String {
             lines.push(
                 if data["opened"] == true {
                     "Opened in your browser. It stops on its own 10 minutes after the last tab closes."
+                } else if data["tailscale"] == true {
+                    "Open that URL on a device signed in to your Tailscale account within 10 minutes; it works once. The server stops 10 minutes after the last tab closes."
                 } else {
                     "Open that URL in a browser on this machine within 10 minutes; it works once. The server stops on its own 10 minutes after the last tab closes."
                 }

@@ -553,7 +553,9 @@ impl Hub<'_> {
     }
 
     fn verdict_at(&mut self, now: Instant) -> Option<Verdict> {
-        if self.unsupported_schema {
+        let tailnet = super::tailscale::read(self.files.state());
+        let tailnet_owned = !matches!(&tailnet, Ok(None));
+        if self.unsupported_schema && !tailnet_owned {
             return Some(Verdict::Exit(
                 "this release does not support the state schema",
             ));
@@ -599,7 +601,10 @@ impl Hub<'_> {
             None
         };
         if let Some(reason) = wants_handoff {
-            return Some(if self.subscribers.is_empty() {
+            if tailnet.is_err() {
+                return None;
+            }
+            return Some(if self.subscribers.is_empty() && !tailnet_owned {
                 Verdict::Exit(reason)
             } else {
                 Verdict::Handoff(reason)
@@ -615,6 +620,7 @@ impl Hub<'_> {
         if self
             .idle_since
             .is_some_and(|since| now.duration_since(since) >= self.idle)
+            && !tailnet_owned
         {
             return Some(Verdict::Idle);
         }
@@ -1085,7 +1091,10 @@ impl Hub<'_> {
                     if !matches!(participant.kind, snapshot::ParticipantKind::Agent { .. }) {
                         continue;
                     }
-                    let Ok(crate::store::dashboard::LiveMember::Bound(binding)) = self
+                    let Ok(crate::store::dashboard::LiveMember::Bound {
+                        binding,
+                        idle_at_ms: parent_idle_at_ms,
+                    }) = self
                         .store
                         .as_mut()?
                         .dashboard_live_member(key, &participant.address_id)
@@ -1107,7 +1116,7 @@ impl Hub<'_> {
                         self.files.state(),
                         &parent,
                         now,
-                        binding.idle_at_ms,
+                        parent_idle_at_ms,
                     )
                     .into_iter()
                     .map(|run| {
@@ -1701,6 +1710,78 @@ mod tests {
                 Some(Verdict::Handoff("the state schema changed"))
             ));
         }
+        let _ = fs::remove_dir_all(files.state());
+    }
+
+    #[test]
+    fn tailnet_ownership_keeps_backend_alive_and_hands_off_without_tabs() {
+        let files = schema_test_files("tailnet-lifetime");
+        let mut hub = schema_test_hub(&files);
+        let now = Instant::now();
+        hub.idle_since = Some(now - hub.idle);
+        let ownership = files.state().join("dashboard/tailscale.json");
+        let runtime = files.state().join("runtime");
+        fs::create_dir_all(&runtime).unwrap();
+        for state in ["installing", "enabled", "removing"] {
+            fs::write(
+                &ownership,
+                serde_json::json!({
+                    "version": 1,
+                    "state": state,
+                    "handler": {
+                        "dns_name": "device.tailnet.ts.net",
+                        "https_port": 443,
+                        "owner_login": "owner@example.com",
+                        "backend_port": 1234
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+            assert!(
+                hub.verdict_at(now).is_none(),
+                "{state} ownership must keep the authenticated backend alive"
+            );
+            fs::write(runtime.join("namedrop"), "new release").unwrap();
+            assert!(matches!(
+                hub.verdict_at(now),
+                Some(Verdict::Handoff("a newer release is current"))
+            ));
+            fs::remove_file(runtime.join("namedrop")).unwrap();
+            fs::write(runtime.join("migration.json"), "{}").unwrap();
+            assert!(matches!(
+                hub.verdict_at(now),
+                Some(Verdict::Handoff("an update is migrating state"))
+            ));
+            fs::remove_file(runtime.join("migration.json")).unwrap();
+            hub.unsupported_schema = true;
+            assert!(
+                hub.verdict_at(now).is_none(),
+                "{state} ownership must reserve the port even when the state schema is unsupported"
+            );
+            fs::write(runtime.join("namedrop"), "compatible release").unwrap();
+            assert!(matches!(
+                hub.verdict_at(now),
+                Some(Verdict::Handoff("a newer release is current"))
+            ));
+            fs::remove_file(runtime.join("namedrop")).unwrap();
+            hub.unsupported_schema = false;
+        }
+        fs::write(&ownership, "malformed").unwrap();
+        assert!(hub.verdict_at(now).is_none());
+        fs::write(runtime.join("namedrop"), "new release").unwrap();
+        assert!(hub.verdict_at(now).is_none());
+        fs::remove_file(runtime.join("namedrop")).unwrap();
+        fs::write(runtime.join("migration.json"), "{}").unwrap();
+        assert!(hub.verdict_at(now).is_none());
+        fs::remove_file(runtime.join("migration.json")).unwrap();
+        fs::remove_file(&ownership).unwrap();
+        fs::create_dir(&ownership).unwrap();
+        fs::write(runtime.join("namedrop"), "new release").unwrap();
+        assert!(hub.verdict_at(now).is_none());
+        fs::remove_file(runtime.join("namedrop")).unwrap();
+        fs::remove_dir(&ownership).unwrap();
+        assert!(matches!(hub.verdict_at(now), Some(Verdict::Idle)));
         let _ = fs::remove_dir_all(files.state());
     }
 

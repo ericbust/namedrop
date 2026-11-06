@@ -290,27 +290,27 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
   const b = page.locator(`[data-dm-key="${key(2)}/b"]`);
   assert.equal(
     await a.locator(".row-reason").textContent(),
-    "idle",
+    "Idle",
     "a pane label matching the alias does not repeat in the status line",
   );
   assert.equal(await a.locator(".row-name").textContent(), "@claude · #alpha");
-  assert.equal(await b.locator(".row-reason").textContent(), "idle");
+  assert.equal(await b.locator(".row-reason").textContent(), "Idle");
   assert.equal(
     await a.getAttribute("aria-label"),
-    "@claude · #alpha · @claude · idle",
+    "@claude · #alpha · @claude · Idle",
   );
   assert.equal(
     await b.getAttribute("aria-label"),
-    "@claude · #beta · Pane b · idle",
+    "@claude · #beta · Pane b · Idle",
   );
   assert.equal(
     await b.getAttribute("title"),
-    "@claude · #beta · Pane b · idle",
+    "@claude · #beta · Pane b · Idle",
   );
   await a.click();
   assert.equal(
     await page.locator(".dm-heading > span").textContent(),
-    "#alpha · @claude · idle",
+    "#alpha · @claude · Idle",
   );
   await page.getByRole("button", { name: "Peek", exact: true }).click();
   await page.locator(".peek").waitFor();
@@ -339,7 +339,7 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
   await b.click();
   assert.equal(
     await page.locator(".dm-heading > span").textContent(),
-    "#beta · Pane b · idle",
+    "#beta · Pane b · Idle",
   );
   await composer.fill("beta draft");
   await a.click();

@@ -434,15 +434,12 @@ impl TtyDiscovery {
             }
             self.path = None;
         }
-        let now = Instant::now();
-        if now >= self.next_probe && !budget.is_zero() {
-            self.next_probe = now + Duration::from_secs(1);
-            if let Some(path) = source_tty(binding, budget)
-                && let Some(viewport) = tty_viewport(&path)
-            {
-                self.path = Some(path);
-                return viewport;
-            }
+        if self.begin_probe(Instant::now(), budget)
+            && let Some(path) = source_tty(binding, budget)
+            && let Some(viewport) = tty_viewport(&path)
+        {
+            self.path = Some(path);
+            return viewport;
         }
         SourceViewport::bounded(
             None,
@@ -450,6 +447,14 @@ impl TtyDiscovery {
                 .as_ref()
                 .and_then(serde_json::Value::as_u64),
         )
+    }
+
+    fn begin_probe(&mut self, now: Instant, budget: Duration) -> bool {
+        if now < self.next_probe || budget.is_zero() {
+            return false;
+        }
+        self.next_probe = now + Duration::from_secs(1);
+        true
     }
 }
 
@@ -482,7 +487,7 @@ fn recorded(store: &mut StateStore, key: &SpaceKey, address: &str) -> Result<Liv
     {
         LiveMember::Missing => Err(Status::NotFound),
         LiveMember::Gone => Err(Status::Gone),
-        LiveMember::Bound(binding) => Ok(binding),
+        LiveMember::Bound { binding, .. } => Ok(binding),
     }
 }
 
@@ -1065,6 +1070,7 @@ impl LivePeeks {
         key: &SpaceKey,
         address: &str,
         expected: Option<&str>,
+        tailnet: Option<&super::super::tailscale::OwnedHandler>,
     ) -> io::Result<()> {
         let started = Instant::now();
         socket.set_write_timeout(Some(Duration::from_secs(1)))?;
@@ -1110,7 +1116,8 @@ impl LivePeeks {
         // Validate the entire first full paint before committing HTTP headers.
         let first = loop {
             let first = loop {
-                if started.elapsed() >= STARTUP
+                if !super::tailnet_still_enabled(front, tailnet)
+                    || started.elapsed() >= STARTUP
                     || front.restarting.load(Ordering::Acquire)
                     || front.files.restarting()
                 {
@@ -1203,6 +1210,9 @@ impl LivePeeks {
         let mut native_checked = Instant::now();
         let mut last_heartbeat = Instant::now();
         loop {
+            if !super::tailnet_still_enabled(front, tailnet) {
+                return Ok(());
+            }
             if disconnected(&socket) {
                 return Ok(());
             }
@@ -1479,6 +1489,21 @@ fn decode(text: &str) -> Result<Vec<u8>, ()> {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn tty_discovery_reserves_one_second_between_probe_starts() {
+        let mut discovery = TtyDiscovery::new();
+        let now = discovery.next_probe;
+        let budget = Duration::from_millis(150);
+        assert!(!discovery.begin_probe(now, Duration::ZERO));
+        assert!(discovery.begin_probe(now, budget));
+        assert!(!discovery.begin_probe(now, budget));
+        assert!(!discovery.begin_probe(now + Duration::from_millis(999), budget));
+        assert!(!discovery.begin_probe(now + Duration::from_secs(1), Duration::ZERO));
+        assert!(discovery.begin_probe(now + Duration::from_secs(1), budget));
+        assert!(!discovery.begin_probe(now + Duration::from_millis(1999), budget));
+        assert!(discovery.begin_probe(now + Duration::from_secs(2), budget));
+    }
 
     #[test]
     fn geometry_hints_clamp_positive_axes_and_ignore_zero() {

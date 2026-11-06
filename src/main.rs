@@ -219,6 +219,17 @@ fn main() -> ExitCode {
             }
         }
     }
+    if cli.dashboard_tailscale() == Some(false) {
+        let result = selected_state
+            .as_deref()
+            .ok_or_else(|| "HERDR_PLUGIN_STATE_DIR or --plugin-state is required".to_owned())
+            .and_then(namedrop::dashboard::disable_tailscale);
+        return finish(
+            "dashboard",
+            result,
+            cli.human_output(io::stdout().is_terminal()),
+        );
+    }
     if let Some(state) = selected_state.as_deref() {
         let socket = cli
             .runtime
@@ -295,7 +306,12 @@ fn main() -> ExitCode {
         return finish(
             "dashboard",
             with_runtime_options(&cli.runtime, |runtime| {
-                namedrop::dashboard::open(runtime, open_browser, cli.dashboard_ui())
+                namedrop::dashboard::open(
+                    runtime,
+                    open_browser,
+                    cli.dashboard_ui(),
+                    cli.dashboard_tailscale(),
+                )
             }),
         );
     }
