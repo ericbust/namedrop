@@ -495,11 +495,15 @@ test("complete: a channel post sends as typed, a thread reply needs agents or it
   assert.equal(postSource("@codex hi", channel), "@codex hi");
   assert.equal(postSource("@codex, hi", channel), "@codex, hi");
   assert.equal(postSource("  \n ", channel), null);
-  const agents = { kind: "thread", to: ["@lead · #alpha"] } as const;
-  assert.equal(postSource(" thanks ", agents), "thanks", "never prefixed");
-  assert.equal(postSource("#alpha hi", agents), "#alpha hi");
+  const agents = {
+    kind: "thread",
+    to: ["@lead · #alpha"],
+    implicitRecipient: "#alpha @lead",
+  } as const;
+  assert.equal(postSource(" thanks ", agents), "#alpha @lead thanks");
+  assert.equal(postSource("#alpha hi", agents), "#alpha @lead #alpha hi");
   assert.equal(postSource("@codex hi", agents), "@codex hi");
-  const nobody = { kind: "thread", to: [] } as const;
+  const nobody = { kind: "thread", to: [], implicitRecipient: null } as const;
   assert.equal(postSource("ls -la", nobody), null);
   assert.equal(postSource("hi @shell", nobody), null);
   assert.equal(postSource("@shell ls -la", nobody), "@shell ls -la");
@@ -551,7 +555,10 @@ test("complete: the hint says where Enter sends the text", () => {
   );
   for (const to of [[], ["@codex"]])
     assert.equal(
-      composerHint({ kind: "thread", to }, "@codex hi"),
+      composerHint(
+        { kind: "thread", to, implicitRecipient: null },
+        "@codex hi",
+      ),
       "Enter sends only to @codex",
     );
 });
@@ -658,7 +665,10 @@ test("complete: a leading name whose pane is closed says so, before its capitals
     "a new pane took the name, so the name reaches it",
   );
   assert.equal(
-    composerHint({ kind: "thread", to: [] }, "@ghost hi"),
+    composerHint(
+      { kind: "thread", to: [], implicitRecipient: null },
+      "@ghost hi",
+    ),
     "Enter sends only to @ghost",
   );
 });
@@ -713,8 +723,8 @@ test("H2: a lone @ reads Type a name after @ and Enter keeps it in the box, sinc
   } as const;
   const rules = [
     channel,
-    { kind: "thread", to: ["@codex"] },
-    { kind: "thread", to: [] },
+    { kind: "thread", to: ["@codex"], implicitRecipient: "@codex" },
+    { kind: "thread", to: [], implicitRecipient: null },
   ] as const;
   // Each sends "@" or "\u0085@", which the server reads as a leading mention with no name.
   for (const rule of rules)
@@ -1075,5 +1085,65 @@ test("skills: HTTP catalog parsing bounds untrusted text and rejects malformed e
         { name: "long", description: "x".repeat(240), source: "project" },
       ],
     },
+  );
+});
+
+test("complete: thread replies use exactly one scoped default or require a leading recipient", () => {
+  const single = {
+    kind: "thread",
+    to: ["@codex"],
+    implicitRecipient: "@codex",
+  } as const;
+  const remote = {
+    ...single,
+    to: ["@lead · #beta"],
+    implicitRecipient: "#beta @lead",
+  };
+  const multi = {
+    ...single,
+    to: ["@codex", "@claude"],
+    implicitRecipient: null,
+  };
+  const zero = { ...multi, to: [] };
+  assert.equal(postSource(" Plain reply ", single), "@codex Plain reply");
+  assert.equal(postSource("Plain reply", remote), "#beta @lead Plain reply");
+  assert.equal(
+    postSource("#other plain reply", single),
+    "@codex #other plain reply",
+  );
+  assert.equal(
+    postSource("#other plain reply", remote),
+    "#beta @lead #other plain reply",
+  );
+  for (const rule of [single, remote, multi, zero]) {
+    assert.equal(postSource("@other reply", rule), "@other reply");
+    assert.equal(
+      postSource("#other @agent reply", rule),
+      "#other @agent reply",
+    );
+    for (const text of ["", "  ", "@", "#beta", "#beta @", "#beta @agent"])
+      assert.equal(postSource(text, rule), null, JSON.stringify(text));
+  }
+  for (const rule of [multi, zero]) {
+    assert.equal(postSource("Plain reply", rule), null);
+    assert.equal(postSource("Ask @codex about this", rule), null);
+  }
+  assert.equal(
+    composerHint(multi, "Plain reply"),
+    "Pick who gets this: @codex or @claude",
+  );
+  assert.equal(
+    composerHint(multi, ""),
+    "Enter to send · Shift+Enter for a new line",
+  );
+  assert.equal(composerHint(multi, "@"), "Type a name after @");
+  assert.equal(composerHint(multi, "#beta @"), "Type a name after @");
+  assert.equal(
+    composerHint(multi, "@other reply"),
+    "Enter sends only to @other",
+  );
+  assert.equal(
+    composerHint(single, "Plain reply"),
+    "Enter to send · Shift+Enter for a new line",
   );
 });

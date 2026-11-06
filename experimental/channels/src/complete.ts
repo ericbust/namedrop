@@ -444,18 +444,30 @@ function loneAt(sent: string): boolean {
 export function postSource(text: string, rule: SendRule): string | null {
   const body = sentText(text);
   if (rule.kind === "direct") return body === "" ? null : body;
-  if (loneAt(body)) return null;
+  if (
+    loneAt(body) ||
+    (rule.kind === "thread" && loneAt(body.slice(leadingLabels(body).end)))
+  )
+    return null;
   const { leading, rest } = serverMentions(body);
   if (leading.length > 0) return rest.trim() === "" ? null : body;
-  return body === "" || (rule.kind === "thread" && rule.to.length === 0)
-    ? null
-    : body;
+  if (body === "") return null;
+  if (rule.kind === "thread") {
+    if (
+      rule.implicitRecipient === null ||
+      leadingLabels(body).end === body.length
+    )
+      return null;
+    return `${rule.implicitRecipient} ${body}`;
+  }
+  return body;
 }
 
 // Why Enter kept the text in the box, for the line under it.
 export function keptHint(text: string): string {
   const body = sentText(text);
-  if (loneAt(body)) return composerCopy.nameAfter;
+  if (loneAt(body.slice(leadingLabels(body).end)))
+    return composerCopy.nameAfter;
   const leading = leadingMentions(body);
   return leading.length > 0
     ? composerCopy.needsMessage(leading)
@@ -467,11 +479,16 @@ export function composerHint(rule: SendRule, text: string): string {
   if (rule.kind === "direct")
     return `Only ${rule.alias} receives this direct message.`;
   const body = sentText(text);
-  if (loneAt(body)) return composerCopy.nameAfter;
+  if (
+    loneAt(body) ||
+    (rule.kind === "thread" && loneAt(body.slice(leadingLabels(body).end)))
+  )
+    return composerCopy.nameAfter;
   if (rule.kind === "thread") {
     const leading = leadingMentions(body);
-    return leading.length > 0
-      ? composerCopy.sendsOnlyTo(leading)
+    if (leading.length > 0) return composerCopy.sendsOnlyTo(leading);
+    return rule.implicitRecipient === null && rule.to.length > 1 && body !== ""
+      ? composerCopy.pickRecipient(rule.to)
       : composerCopy.hint;
   }
   const refused = refusedLeading(body, rule.agents, rule.label);

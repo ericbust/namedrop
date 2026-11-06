@@ -34,7 +34,6 @@ import type {
   DraftKey,
   Message as MessageRow,
   Outgoing,
-  SendRule,
 } from "../model.ts";
 import { chatOf } from "../route.ts";
 import {
@@ -45,12 +44,8 @@ import {
   replyTargetName,
   sameComposer,
   type ThreadGroup,
-  threadAgents,
 } from "../store.ts";
-import {
-  threadReplyRecipients,
-  threadSkillRecipients,
-} from "../thread-recipients.ts";
+import { threadSendRule, threadSkillRecipients } from "../thread-recipients.ts";
 import { Composer } from "./Composer.tsx";
 import { DeliveryContext } from "./DeliveryContext.ts";
 import { Icon } from "./Icons.tsx";
@@ -154,8 +149,8 @@ export function ThreadPane({
   );
   const replyAbsence =
     activeReply === null ? null : absence(activeReply, directory);
-  const rule = useMemo<Extract<SendRule, { kind: "thread" }>>(
-    () => ({ kind: "thread", to: threadAgents(thread, directory) }),
+  const rule = useMemo(
+    () => threadSendRule(thread, directory),
     [thread, directory],
   );
   const scopedCompletion = useMemo<CompletionContext | null>(() => {
@@ -165,10 +160,6 @@ export function ThreadPane({
       skillRecipients: threadSkillRecipients(thread, directory, channel.key),
     };
   }, [completion, thread, directory, channel.key]);
-  const initialRecipients = useMemo(
-    () => threadReplyRecipients(thread, directory),
-    [thread, directory],
-  );
   const prefilled = useRef<ReplyIntent | null>(null);
   useLayoutEffect(() => {
     if (
@@ -367,12 +358,6 @@ export function ThreadPane({
             placeholder={replyPlaceholder(rule.to)}
             label={replyLabel(rule.to)}
             rule={rule}
-            requireRecipient
-            initialText={
-              replyIntent === null
-                ? `${initialRecipients.map((recipient) => recipient.mentions).join(" ")}${initialRecipients.length > 0 ? " " : ""}`
-                : ""
-            }
             notice={
               replyIntent !== null && keptNotice ? (
                 <p role="status">
