@@ -24,12 +24,12 @@ const message = (id, thread, kind, body, author = "agent") => ({
   body: { text: body, truncated: false },
   legs: [],
 });
-const reminder = (id) => ({
+const reminder = (id, repeatsLeft = 2) => ({
   reminder_id: id,
   owner: "agent",
   body: { text: "Check the build", truncated: false },
-  due_at_ms: Date.now() + 60000,
-  repeats_left: 2,
+  due_at_ms: Date.UTC(2026, 10, 6, 17, 36, 12),
+  repeats_left: repeatsLeft,
   repeat_until_ms: null,
 });
 
@@ -112,7 +112,7 @@ test("quiet reminder rows and scoped Cancel work in thread members and DM header
   ];
   const lists = new Map([
     ["threads/public-thread", [reminder("public-pending")]],
-    ["direct-messages/agent", [reminder("private-pending")]],
+    ["direct-messages/agent", [reminder("private-pending", 0)]],
   ]);
   const cancellations = [];
   let failCancel = true;
@@ -215,6 +215,8 @@ test("quiet reminder rows and scoped Cancel work in thread members and DM header
   });
   const page = await browser.newPage({
     viewport: { width: 1440, height: 900 },
+    locale: "en-US",
+    timezoneId: "America/New_York",
   });
   page.setDefaultTimeout(8000);
   const errors = [];
@@ -288,6 +290,11 @@ test("quiet reminder rows and scoped Cancel work in thread members and DM header
     ),
     false,
   );
+  const pendingRow = page.locator(".dm-header .reminder-item");
+  assert.doesNotMatch(await pendingRow.textContent(), /repeats? left| · /);
+  const dueTime = pendingRow.locator("time");
+  assert.equal(await dueTime.textContent(), "Next 12:36 PM");
+  assert.equal(await dueTime.getAttribute("title"), "11/6/2026, 12:36:12 PM");
   await page
     .getByRole("button", {
       name: "Cancel reminder Check the build",
