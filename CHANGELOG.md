@@ -4,10 +4,14 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 ## [1.5.0-exp.17] - 2026-11-06
 
+### Added
+
+- Open Channels from your phone or Mac with `namedrop channels --tailscale`. Private HTTPS access uses Tailscale Serve and accepts only this machine's Tailscale owner. Existing Serve handlers stay in place. Run `namedrop channels --tailscale off` to remove Namedrop's handler.
+
 ### Fixed
 
 - Live Peek keeps streaming after you send a prompt with Type to agent and the agent replies.
-- Agent status agrees across channel members, direct messages, and Peek. Pending permissions and questions show Needs you everywhere.
+- Agent status agrees across channel members, direct messages, and Peek. Pending permissions and questions show Needs you everywhere. DM sidebar rows show the agent name once.
 - One-time reminders no longer show a repeat count. Reminder times are shorter, with the full date and time available on hover.
 
 ## [1.5.0-exp.16] - 2026-11-06

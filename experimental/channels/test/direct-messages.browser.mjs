@@ -41,7 +41,9 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
   timeout: 60000,
 }, async (t) => {
   const peers = [
-    peer(1, "a", "alpha"),
+    peer(1, "a", "alpha", {
+      pane_label: { text: "@claude", truncated: false },
+    }),
     peer(2, "b", "beta"),
     peer(2, "c", "beta", { alias: "codex", runtime: "codex" }),
     peer(3, "closed", "archived", {
@@ -286,12 +288,30 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
   );
   const a = page.locator(`[data-dm-key="${key(1)}/a"]`);
   const b = page.locator(`[data-dm-key="${key(2)}/b"]`);
-  assert.match(
-    await a.getAttribute("aria-label"),
-    /@claude · #alpha · Pane a · Idle/,
+  assert.equal(
+    await a.locator(".row-reason").textContent(),
+    "Idle",
+    "a pane label matching the alias does not repeat in the status line",
   );
-  assert.match(await b.getAttribute("aria-label"), /@claude · #beta/);
+  assert.equal(await a.locator(".row-name").textContent(), "@claude · #alpha");
+  assert.equal(await b.locator(".row-reason").textContent(), "Idle");
+  assert.equal(
+    await a.getAttribute("aria-label"),
+    "@claude · #alpha · @claude · Idle",
+  );
+  assert.equal(
+    await b.getAttribute("aria-label"),
+    "@claude · #beta · Pane b · Idle",
+  );
+  assert.equal(
+    await b.getAttribute("title"),
+    "@claude · #beta · Pane b · Idle",
+  );
   await a.click();
+  assert.equal(
+    await page.locator(".dm-heading > span").textContent(),
+    "#alpha · @claude · Idle",
+  );
   await page.getByRole("button", { name: "Peek", exact: true }).click();
   await page.locator(".peek").waitFor();
   assert.equal(await page.locator(".peek-subagents").count(), 0);
@@ -317,6 +337,10 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
   });
   await composer.fill("alpha draft");
   await b.click();
+  assert.equal(
+    await page.locator(".dm-heading > span").textContent(),
+    "#beta · Pane b · idle",
+  );
   await composer.fill("beta draft");
   await a.click();
   assert.equal(await composer.inputValue(), "alpha draft");

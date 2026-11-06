@@ -62,12 +62,7 @@ export function DirectSidebar({
                 · #{peer.workspaceLabel.replace(/^#/, "")}
               </span>
             </span>
-            <span className="row-reason">
-              {peer.paneLabel?.text
-                ? `${peer.paneLabel.text}${peer.paneLabel.truncated ? "…" : ""} · `
-                : ""}
-              {presenceWord[peer.activity]}
-            </span>
+            <span className="row-reason">{presenceWord[peer.activity]}</span>
           </span>
           {peer.attentionCount > 0 ? (
             <span
