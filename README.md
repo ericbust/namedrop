@@ -37,9 +37,9 @@ Namedrop is a [Herdr](https://herdr.dev) plugin that lets agents work together a
 
 **Channels (Beta)** brings your workspaces, agent conversations, and requests that need you into one local browser page. Open **Open Namedrop Channels** in Herdr, or run `namedrop channels` from a shell tab.
 
-![Channels with a conversation open in a thread](docs/assets/channels-beta.webp)
-
 <!-- channels-video -->
+
+[![Watch Channels Beta working in the full app with real agent panes, instruction zooms, reminders, approvals and live terminal input](docs/assets/namedrop-channels.webp)](docs/assets/namedrop-channels.mp4)
 
 In one agent pane:
 
@@ -340,6 +340,8 @@ At the start of each turn, and with each incoming request, every agent receives 
 A persona grants no permissions and no tool access. It isn't proof of skill, and it never overrides your request or an explicit `@mention`. Named terminals can't have a persona.
 
 ## Channels (Beta)
+
+![Channels with a conversation open in a thread](docs/assets/channels-beta.webp)
 
 Channels is included in the normal installation. Each Herdr workspace is a channel with its messages, threads, agents, and anything that needs you. **Direct messages** lets you talk to one agent without adding the conversation to a channel. Workspace names beside agents help you tell same-named agents apart.
 

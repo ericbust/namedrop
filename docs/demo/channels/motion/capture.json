@@ -1,0 +1,131 @@
+{
+  "productRevision": "8ea5c1a21d61da0e2539a2d8cae0638557c83dab",
+  "sourceRevision": "686abd48a06e272f7178efd29feed625bf31b96a",
+  "version": "1.5.0-exp.17",
+  "viewport": {
+    "width": 1440,
+    "height": 900
+  },
+  "deviceScaleFactor": 2,
+  "startedAtEpochMs": 1793994112863,
+  "duration": 487.682294749,
+  "sourceFrameCount": 3803,
+  "panePairCount": 792,
+  "outputDuration": 59.5,
+  "sourceFrames": [
+    {
+      "event": "wide",
+      "sourceTime": 0.09599601700000494,
+      "file": "frames/000000.jpg",
+      "sha256": "940c746ac61a6fd42f9f0a1baf48c836d3d26545dc59d919980c7f79a5d11252"
+    },
+    {
+      "event": "ask-instruction",
+      "sourceTime": 9.724431630000007,
+      "file": "frames/000104.jpg",
+      "sha256": "5eff58a56718249ab4ad6ed694501e6db946cd8b1e44b5bca38f8f660490a6ad"
+    },
+    {
+      "event": "ask-working",
+      "sourceTime": 12.616465198000006,
+      "file": "frames/000132.jpg",
+      "sha256": "3e4dba277ed4330c3efe6de7d83bdfefbef819228ef48e10a0f0069fcd47c71a"
+    },
+    {
+      "event": "ask-reply",
+      "sourceTime": 18.920519532000007,
+      "file": "frames/000187.jpg",
+      "sha256": "fc7d5628fb3a323ef331fc7387ade2206e6dbf8130e496caf5e97d0c83b63588"
+    },
+    {
+      "event": "followup-instruction",
+      "sourceTime": 23.595541339999997,
+      "file": "frames/000231.jpg",
+      "sha256": "8f0cce4b1cdea376c2f411db7ca2e4b3a14c1b59f6614a1bda6d5eb9345d3d76"
+    },
+    {
+      "event": "followup-reply",
+      "sourceTime": 33.390441395,
+      "file": "frames/000328.jpg",
+      "sha256": "169a9d2ea05b0024ced4a1a1f7900e94ea7b90f121cc329c347a10422fe37cda"
+    },
+    {
+      "event": "reminder-instruction",
+      "sourceTime": 80.01547111900001,
+      "file": "frames/000857.jpg",
+      "sha256": "b1c4f15fa658be7d9b973fe1c75f0b42ee76e0e42d431cad8bd0182215f1f0c1"
+    },
+    {
+      "event": "reminder-pending",
+      "sourceTime": 89.932725891,
+      "file": "frames/000953.jpg",
+      "sha256": "4f271d89bb6b317a280412672f528224fc12da0a315b10f00365d475d1649265"
+    },
+    {
+      "event": "reminder-confirmed",
+      "sourceTime": 102.987494445,
+      "file": "frames/001001.jpg",
+      "sha256": "0bbf206d71f37d460e48aaad28c0bb0a1cd2dbf389d7dd0e0e117fc3dcbbff6f"
+    },
+    {
+      "event": "reminder-fired",
+      "sourceTime": 208.454212897,
+      "file": "frames/001212.jpg",
+      "sha256": "99b4bba07a534e67b1703d2c4036946798fed821e60b87dcece56ca8774f33b7"
+    },
+    {
+      "event": "reminder-reply",
+      "sourceTime": 214.633330283,
+      "file": "frames/001256.jpg",
+      "sha256": "2a3b670a5596f8932eaf96443b136e3ab493273468f0be0f424b988c0e6e3319"
+    },
+    {
+      "event": "needs-blocked",
+      "sourceTime": 369.27237242599995,
+      "file": "frames/002647.jpg",
+      "sha256": "e73dbef49c725b759b0db4aed005df7884555a5550edd231ebf96442a909f891"
+    },
+    {
+      "event": "needs-open",
+      "sourceTime": 369.37419033400005,
+      "file": "frames/002648.jpg",
+      "sha256": "c66158bc9a0a67bd7ed57df8ee95df820e2a8a966778aa2984d062eb8c4d6e6c"
+    },
+    {
+      "event": "needs-cancelled",
+      "sourceTime": 470.3051550800001,
+      "file": "frames/003638.jpg",
+      "sha256": "f0c9713012027734ea187d2173b562c16e31272095d16a37d481879d9f3aa938"
+    },
+    {
+      "event": "peek-instruction",
+      "sourceTime": 478.415843798,
+      "file": "frames/003717.jpg",
+      "sha256": "5b404f70c829b46ac73675eb61aafa59b9ad62b1bede3da24a5b3960cfd09148"
+    },
+    {
+      "event": "peek-working",
+      "sourceTime": 481.08368278499995,
+      "file": "frames/003743.jpg",
+      "sha256": "01af3503d17860cc60d40ddc83f0098688825cae2be494b3918a169f41dfd68c"
+    },
+    {
+      "event": "peek-reply",
+      "sourceTime": 483.968400971,
+      "file": "frames/003770.jpg",
+      "sha256": "f48f2a8c6991d1d9809488f43e179b63f93f76ad139d7ea02178f9242a7b777b"
+    },
+    {
+      "event": "end",
+      "sourceTime": 487.378785757,
+      "file": "frames/003802.jpg",
+      "sha256": "f48f2a8c6991d1d9809488f43e179b63f93f76ad139d7ea02178f9242a7b777b"
+    }
+  ],
+  "notes": [
+    "Full app and real pane captures. No interface text is redrawn.",
+    "Permission prompts cancelled, never approved.",
+    "A DM status discrepancy was preserved in the report; Needs-you was recaptured from the active channel.",
+    "The terminal HOME paths are shortened during restaging."
+  ]
+}

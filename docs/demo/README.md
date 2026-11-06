@@ -58,62 +58,18 @@ The screens come from an isolated profile under `~/namedrop-demo`, so no persona
 
 ## Re-capture and render Channels
 
-The 40-second Channels highlight uses real Claude Code and Codex sessions in one
-isolated `test-channels-video` profile. Its source screenshots are in
-`channels/captures/`. `channels/prep.py` crops those screenshots into larger windows
-for README playback. It does not paint text or alter the page. `channels/terminals.json`
-contains cropped rows from real `herdr pane read --ansi` captures.
+The Channels highlight records the complete app on the exp.17 build, with real
+Claude Code and Codex panes beside it. A moving camera follows instructions,
+agent work, thread replies, the real reminder, Needs you and live terminal input.
+The 59.5-second movie uses timestamped 2x app frames and synchronized ANSI captures.
+The animated WebP is a shorter excerpt.
 
-From the repository root, check the embedded app and start an isolated profile:
+Follow [Record Channels with a moving camera](channels/motion/README.md) to capture
+and render a take. It documents the isolated testbed, disabled spellcheck, source
+manifest, safe Esc cancellation, camera plan and asset checks. `motion/capture.json`
+records this take's build and source hashes. The old cropped still scene remains
+available for reference; it is not the source of the current published movie.
 
-```sh
-(cd experimental/channels && npm ci && npm run bundle:check)
-TESTBED_HOME="$PWD/../testbed" testbed/testbed up --link "$PWD" --profile test-channels-video
-```
-
-Use the profile's generated `env.sh` and the testbed wrapper in the
-[Channels browser driver](../../.claude/skills/verify/SKILL.md#channels-browser-app).
-Keep HOME and XDG_CONFIG_HOME isolated. Use only the testbed socket. Rename the
-workspace to **Release planning**, finish the recognized onboarding screens, and
-warm both agents with a harmless prompt. Open the embedded Channels app through
-the profile's `namedrop channels --no-open --json`. Keep its nonce URL private.
-
-Run `CHROME=/path/to/chromium node docs/demo/channels/capture.mjs "$CHANNELS_URL" /path/to/captures`
-from the repository root. Drive the real page in that browser and type capture names
-in the terminal. It saves 1440 by 900 screenshots at 2x. Record the channel request,
-its reply, a one-agent thread follow-up with **To @codex**, a Claude DM reminder with
-**Cancel** visible, the reminder's reply after two minutes, and **Type to agent** in
-Live Peek. **Send** writes the text into the agent pane. The **Enter** key control
-submits it. Cancel or deny every tool approval used for a Needs-you capture.
-
-Replace the corresponding source PNGs, check the crop boxes in `channels/prep.py`,
-and save a timestamp and quoted real message for each capture. Check the sidebar
-aliases, status chips, and Peek frame before rendering. The current cut omits
-Needs you because its DM sidebar said "working" while the member chip said
-"Needs you". The captured Peek reply required reopening the drawer after input
-reported a changed pane. These are capture findings for follow-up, not simulated
-success states.
-
-From `docs/demo`, render with the shared deterministic renderer:
-
-```sh
-python3 channels/prep.py
-python3 -m http.server 8767 --bind 127.0.0.1 &
-SCENE_URL=http://127.0.0.1:8767/channels/scene.html CHROME=/path/to/chromium RENDER_SCALE=1.3333333333333333 node render.mjs /path/to/channels-master.mp4 24
-ffmpeg -y -i /path/to/channels-master.mp4 -c:v libx264 -preset slow -crf 22 -pix_fmt yuv420p -movflags +faststart ../assets/namedrop-channels.mp4
-ffmpeg -y -i ../assets/namedrop-channels.mp4 -vf 'fps=12,scale=1400:-1:flags=lanczos' -c:v libwebp_anim -quality 75 -compression_level 6 -loop 0 ../assets/namedrop-channels.webp
-```
-
-Keep builds and renders outside `/tmp`. Inspect one exported frame per beat at
-900 px width, and confirm both asset durations and sizes before updating the README.
-
-Run `python3 channels/check.py /path/to/metadata.json` to verify capture hashes,
-H.264 with no audio, fast-start MP4 layout, both widths, the 40-second duration,
-and the asset size limits. It reads animated WebP frame durations directly.
-
-Run `CHROME=/path/to/chromium node channels/check-scene.mjs /path/to/preview-frames`
-to render each beat and check that seeking back reproduces the overview.
-
-The [continuous recording pipeline](channels/motion/README.md) is the round-two
-rehearsal. It records the whole app and eases a camera over the live recording.
-The final capture waits for the coordinator's exp.17 SHA.
+Inspect one finished MP4 frame per beat at 900 px width. Check that every instruction,
+reply and terminal row comes from the real recording. Keep capture timestamps,
+quoted messages, omissions, file sizes and durations with the report.

@@ -46,8 +46,11 @@ async function paneText(file) {
     if (recording.profileHome) {
       const home = recording.profileHome.replace(/\/$/, '');
       const parent = home.slice(0, home.lastIndexOf('/'));
-      text = text.replaceAll(home, '~');
-      if (parent) text = text.replaceAll(parent, '~');
+      const userHome = home.split('/').slice(0, 3).join('/');
+      for (const path of [home, parent, userHome]) {
+        const wrapped = [...path].map(char => '\\^$.*+?()[]{}|'.includes(char) ? '\\' + char : char).join('\\s*');
+        text = text.replace(new RegExp(wrapped, 'g'), '~');
+      }
     }
     const rows = text.split('\n');
     while (rows.length && !rows.at(-1).trim()) rows.pop();

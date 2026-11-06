@@ -1,59 +1,83 @@
-# Continuous Channels recording
+# Record Channels with a moving camera
 
-This is the round-two camera pipeline. The existing published assets remain the
-first cut until the exp.17 capture is approved. The rehearsal records the real
-whole app and moves a camera over that recording. It never redraws interface text.
+The published 59.5-second highlight uses the exp.17 product at `8ea5c1a`.
+`capture.json` identifies the integrated build, real capture times and source hashes.
+Every app frame is a 2x screenshot of the running page. Both terminal panels use
+synchronized `herdr pane read --ansi` captures. No app text is redrawn.
 
-`rehearse.mjs` records an isolated **Release rehearsal** channel at 1440 by 900
-with `deviceScaleFactor: 2`. It captures timestamped 2880 by 1800 JPEG frames while
-Playwright types and sends real messages. `recording.json` keeps each frame's
-source time and marks typing, posting, reply arrival, and thread opening. Its wall-clock
-start aligns these frames with the epoch timestamps from pane captures.
-`capture.sh` separately records real pane output using the same isolated profile.
+The raw take stays outside Git because it is about 1.3 GB. Keep its `recording/`
+directory with `recording.json`, `frames/` and `panes/`. The manifest records source
+time, input and reply events, camera rectangles, the runtime version and Git source.
+The camera follows that real sequence, compresses waiting, and shows a live overview
+while zoomed in. Terminal home paths are shortened to `~`, including wrapped paths.
 
-`scene.mjs` maps output time to source time, then draws the corresponding whole-app
-frame. Camera keyframes use source CSS coordinates, a scale, and the vertical
-position of the point of interest in the output frame. Smoothstep eases
-between positions. During a close zoom, a small live overview shows the entire app
-and outlines the current field of view. Waiting can be compressed independently
-of typing and camera motion. The shared `render.mjs` produces deterministic output
-frames and ffmpeg encodes them.
+## Capture a new take
 
-## Rehearse the pipeline
+Use `testbed/testbed` to build an owned `test-` profile from the product revision.
+Keep HOME and XDG_CONFIG_HOME isolated. Finish startup before recording, and put the
+demo repository inside the profile HOME so Peek uses short paths. Name the workspace
+**Release planning**. Register and warm both real agents until they are idle. Add
+real planning notes through the channel composer so close-ups include recent context.
+Keep Claude in manual permission mode. Clear irrelevant terminal history before the take.
 
-Use only an isolated testbed profile and its loopback URL. Start with an empty
-**Release rehearsal** channel and a warmed, real Claude session. Keep the URL out
-of source control. From the repository root:
+From the repository root, start the recorder:
 
 ```sh
-CHROME=/path/to/chromium node docs/demo/channels/motion/rehearse.mjs "$CHANNELS_URL" /path/to/rehearsal/recording bcae742 --rehearsal
-python3 docs/demo/channels/motion/plan.py /path/to/rehearsal
-cp docs/demo/channels/motion/scene.html docs/demo/channels/motion/scene.mjs /path/to/rehearsal/
-python3 -m http.server 8770 --bind 127.0.0.1 --directory /path/to/rehearsal
+TESTBED_HOME=/path/to/testbed CHROME=/path/to/chromium node docs/demo/channels/motion/record.mjs test-channels-exp17 /path/to/take
 ```
 
-In another shell, render the 28-second proof:
+The helper rejects a non-test profile, a mismatched product tree or version, and
+agents without a registered idle session. Chromium spellcheck is disabled through
+browser flags. Set `HEADLESS=0` to watch the browser. Only enqueue your own trusted
+JavaScript action files. The supplied steps type and send through the real UI:
 
 ```sh
-SCENE_URL=http://127.0.0.1:8770/scene.html CHROME=/path/to/chromium RENDER_SCALE=1.3333333333333333 node docs/demo/render.mjs /path/to/rehearsal/pipeline.mp4 24
+for step in docs/demo/channels/motion/steps/*.js; do
+  node docs/demo/channels/motion/queue.mjs /path/to/take "$step"
+done
 ```
 
-The rehearsal has an explicit old-build caption. Its known old-build statuses are
-not final footage. The shipped source revision must be recorded accurately in the
-manifest. Keep captures and builds outside `/tmp`.
+The recorder captures timestamped 2880 by 1800 frames and both real panes. It uses
+a lower capture cadence during the actual two-minute reminder wait. Each action
+writes a result beside its queued JSON. The permission step captures Needs you,
+then sends Esc through a helper that requires a real blocked agent. It never
+approves a permission. Verify the actual prompt and confirm no requested file exists.
+Type to agent writes input first, then its Enter control submits it.
 
-## Final capture gate
+Inspect the take before rendering. Check aliases, registered status, reminder
+Cancel and display text, and a Peek stream that stays live through its reply.
+A DM-triggered permission showed stale status during this take, so the recorded
+Needs-you beat was re-captured from the active workspace channel. The rejected
+interval and evidence remain in the capture report. Esc also left an honest
+unanswered-request notice in the captured app. Report these findings rather than
+editing them out of source frames or claiming the product behavior is fixed.
 
-Wait for the coordinator's exp.17 SHA. Install that exact commit into a fresh
-`test-` profile, verify its source revision and embedded bundle, and warm both real
-agents. Use a short directory inside the profile HOME so terminal paths use `~`.
-Confirm Live Peek survives Type to agent, all status labels agree, and the pending
-reminder no longer says "0 repeats left" before filming.
+## Render the take
 
-Record the channel ask, plain thread follow-up, DM reminder, Needs you, and Live
-Peek as one continuous workspace. Extend the source-event plan to 45–60 seconds.
-Hold completed instructions long enough to read, ease out on send, pan toward the
-working pane or reply, and return to the wide view. Label compressed reminder
-waiting as **2 minutes later**. Cancel every captured permission prompt. Keep the
-final MP4 below about 15 MB and the 1400 px WebP below about 8 MB. The poster may be
-a shorter excerpt.
+Camera segments map output time to real source time. Rectangles use source CSS
+coordinates. Smoothstep moves between camera positions. Generate the plan, then
+serve copied scene files beside the raw recording:
+
+```sh
+python3 docs/demo/channels/motion/plan.py /path/to/take
+cp docs/demo/channels/motion/scene.html docs/demo/channels/motion/scene.mjs /path/to/take/
+python3 -m http.server 8772 --bind 127.0.0.1 --directory /path/to/take
+```
+
+From another shell in the repository root:
+
+```sh
+SCENE_URL=http://127.0.0.1:8772/scene.html CHROME=/path/to/chromium RENDER_SCALE=1.3333333333333333 node docs/demo/render.mjs /path/to/master.mp4 24
+ffmpeg -y -i /path/to/master.mp4 -c:v libx264 -preset slow -b:v 1800k -pix_fmt yuv420p -pass 1 -passlogfile /path/to/take/h264-pass -an -f null /dev/null
+ffmpeg -y -i /path/to/master.mp4 -c:v libx264 -preset slow -b:v 1800k -pix_fmt yuv420p -pass 2 -passlogfile /path/to/take/h264-pass -an -movflags +faststart docs/assets/namedrop-channels.mp4
+ffmpeg -y -i docs/assets/namedrop-channels.mp4 -t 12 -vf 'fps=8,scale=1400:-1:flags=lanczos' -c:v libwebp_anim -quality 65 -compression_level 6 -loop 0 docs/assets/namedrop-channels.webp
+python3 docs/demo/channels/check.py /path/to/metadata.json --recording /path/to/take/recording/recording.json
+```
+
+The poster is a shorter animated excerpt. Keep the MP4 under 15 MB and the poster
+under 8 MB. Inspect exported frames at 900 px, especially the completed instructions,
+agent work, pending reminder, fired answer, Needs you and live Peek reply. Keep the
+capture report with timestamps, exact real messages, frame paths and omissions.
+
+`rehearse.mjs` retains the earlier 28-second throwaway pipeline for camera experiments.
+Its old-build caption and `throwaway` marker exclude it from the final-media gate.
