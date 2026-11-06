@@ -124,7 +124,7 @@ for (const [engine, type] of [
           after.idle?.observed_at_ms <= before.idle.observed_at_ms)
       );
       await page.waitForTimeout(1500);
-      const text = await page.locator(".peek").innerText();
+      const text = (await page.locator(".peek").textContent()) ?? "";
       await page.screenshot({ path: join(output, `${label}-after.png`) });
       await writeFile(
         join(output, `${label}.json`),
