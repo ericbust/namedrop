@@ -81,6 +81,8 @@ export function Composer({
   const sending = inFlight(outbox, composer);
   const leading = leadingMentions(sentText(text));
   const source = postSource(text, rule);
+  const missingRecipient =
+    rule.kind === "thread" && rule.to.length === 0 && leading.length === 0;
   const pickRecipient =
     rule.kind === "thread" &&
     rule.to.length > 1 &&
@@ -268,8 +270,12 @@ export function Composer({
               ? composerCopy.pickRecipient(rule.to)
               : composerHint(rule, text)}
           </p>
-        ) : guarded && source === null && sentText(text) !== "" ? (
-          <p className="composer-guard">{keptHint(text)}</p>
+        ) : (guarded || (focused && missingRecipient)) &&
+          source === null &&
+          (missingRecipient || sentText(text) !== "") ? (
+          <p className="composer-guard">
+            {missingRecipient ? composerCopy.needsRecipient : keptHint(text)}
+          </p>
         ) : focused ? (
           <p>{composerHint(rule, text)}</p>
         ) : null}

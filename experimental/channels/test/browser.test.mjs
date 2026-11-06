@@ -5356,7 +5356,7 @@ test("UI-3 fix: a thread reply refused after the pane closed marks its parent, a
   );
   await marker.click();
   await pane.waitFor();
-  assert.equal(await reply.inputValue(), "@codex thanks");
+  assert.equal(await reply.inputValue(), "thanks");
   const error = pane.locator(".composer").getByRole("alert");
   await error.waitFor();
   assert.equal(await error.textContent(), "Unknown recipient @ghost.");
@@ -8001,7 +8001,12 @@ test("DESIGN-R2 D2: a thread's kept-draft line lasts until that box changes, the
   await readsAs(status, kept);
   await reply.press("End");
   await ui.page.keyboard.type(" too");
-  await readsAs(status, "Start with @name to choose who gets this.");
+  await readsAs(status, "Enter to send · Shift+Enter for a new line");
+  assert.equal(await pane.locator(".composer-to").textContent(), "To @codex");
+  assert.equal(
+    await pane.getByRole("button", { name: "Send", exact: true }).isEnabled(),
+    true,
+  );
   assert.equal(await reply.inputValue(), "my thread words too");
 });
 
@@ -9656,8 +9661,8 @@ test("CH-fix-3 item 1: Send anyway in the thread pane delivers the post, focus m
   const pane = threadPane(ui);
   const box = pane.getByRole("combobox");
   await box.waitFor();
-  const suggestedReply = await box.inputValue();
-  assert.equal(suggestedReply, "@claude ");
+  const initialReply = await box.inputValue();
+  assert.equal(initialReply, "");
   await pane.getByRole("button", { name: "Send this to @codex" }).click();
   await until(() => ui.posts.deliveries.length === 1, "the deliver POST");
   assert.equal(ui.posts.deliveries[0].path, deliverPath("p1"));
@@ -9671,8 +9676,8 @@ test("CH-fix-3 item 1: Send anyway in the thread pane delivers the post, focus m
   await readsAs(inTimeline, "Sent to @codex");
   assert.equal(
     await box.inputValue(),
-    suggestedReply,
-    "delivery leaves the suggested reply untouched",
+    initialReply,
+    "delivery leaves the reply box untouched",
   );
   assert.equal(ui.posts.attempts.length, 0, "no reply is posted");
 });
