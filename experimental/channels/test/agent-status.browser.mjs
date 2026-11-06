@@ -157,7 +157,9 @@ test("one agent has the same status in channel members, DMs and both Peek header
   assert.equal(await dm.locator(".row-reason").textContent(), "Idle");
   assert.match(await page.locator(".dm-heading").textContent(), /Idle/);
   await page.getByRole("button", { name: "Close screen", exact: true }).click();
-  await page.locator(`.channels-navigation [data-channel-key="${key}"]`).click();
+  await page
+    .locator(`.channels-navigation [data-channel-key="${key}"]`)
+    .click();
   assert.equal(await chip.locator(".status").textContent(), "Idle");
   assert.equal(await dm.locator(".row-reason").textContent(), "Idle");
   await page.screenshot({
