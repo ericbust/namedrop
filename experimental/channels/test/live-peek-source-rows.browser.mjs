@@ -10,6 +10,9 @@ const checkout = fileURLToPath(new URL("../../../", import.meta.url));
 const profile = process.env.PEEK_SOURCE_PROFILE;
 const output = process.env.PEEK_SOURCE_OUTPUT;
 const needle = process.env.PEEK_SOURCE_TEXT ?? "Ask Codex to do anything";
+const alias = process.env.PEEK_SOURCE_ALIAS ?? "codex";
+const columns = Number(process.env.PEEK_SOURCE_COLUMNS ?? 160);
+const columnMarker = process.env.PEEK_SOURCE_COLUMN_MARKER;
 assert.ok(
   profile,
   "Set PEEK_SOURCE_PROFILE to an isolated test-* profile directory",
@@ -27,7 +30,7 @@ p=testbed.Profile(directory.name);p.owned()
 assert str(p.socket).startswith('/tmp/nd-tb-')
 assert Path(p.env['HOME']).is_relative_to(directory)
 assert Path(p.env['XDG_CONFIG_HOME']).is_relative_to(directory)
-pane=p.state['panes']['codex']
+pane=p.state['panes'][sys.argv[4]]
 operation=sys.argv[3]
 if operation=='dashboard':
  print(p.namedrop('channels','--no-open','--json','--ui',str(Path(sys.argv[1])/'experimental/channels/dist')).stdout)
@@ -36,7 +39,7 @@ elif operation=='source':
  print(json.dumps({'rows':info['scroll']['viewport_rows'],'text':p.run(['herdr','pane','read',pane,'--source','visible']).stdout}))
 elif operation=='control':
  info=p.herdr('pane','get',pane)['pane']
- child=subprocess.Popen(['herdr','terminal','session','control',info['terminal_id'],'--takeover','--rows',sys.argv[4],'--cols',sys.argv[5]],env=p.env,stdin=subprocess.PIPE,stdout=subprocess.PIPE)
+ child=subprocess.Popen(['herdr','terminal','session','control',info['terminal_id'],'--takeover','--rows',sys.argv[5],'--cols',sys.argv[6]],env=p.env,stdin=subprocess.PIPE,stdout=subprocess.PIPE)
  def stop(*_):
   child.terminate()
   try: child.wait(timeout=2)
@@ -52,16 +55,29 @@ elif operation=='control':
 
 function native(operation) {
   return JSON.parse(
-    execFileSync("python3", ["-c", python, checkout, profile, operation], {
-      encoding: "utf8",
-    }),
+    execFileSync(
+      "python3",
+      ["-c", python, checkout, profile, operation, alias],
+      {
+        encoding: "utf8",
+      },
+    ),
   );
 }
 
 async function control(t, rows, cols) {
   const child = spawn(
     "python3",
-    ["-c", python, checkout, profile, "control", String(rows), String(cols)],
+    [
+      "-c",
+      python,
+      checkout,
+      profile,
+      "control",
+      alias,
+      String(rows),
+      String(cols),
+    ],
     { stdio: ["ignore", "pipe", "inherit"], detached: true },
   );
   let closed = false;
@@ -121,7 +137,7 @@ for (const [engine, type] of [
       timeout: 60000,
     }, async (t) => {
       await mkdir(output, { recursive: true });
-      let stop = await control(t, 80, 160);
+      let stop = await control(t, 80, columns);
       const source = native("source");
       assert.equal(source.rows, 80, "The test source has 80 rows");
       assert.ok(
@@ -148,7 +164,7 @@ for (const [engine, type] of [
         await page.goto(native("dashboard").data.url);
         await page
           .locator(".member")
-          .filter({ hasText: "@codex" })
+          .filter({ hasText: `@${alias}` })
           .first()
           .click();
         const rows = page.locator(".peek-buffer-visible .xterm-rows > div");
@@ -179,13 +195,22 @@ for (const [engine, type] of [
             await page.screenshot({ path: join(output, `${label}.png`) });
             if (
               text.length !== source.rows ||
-              !text.join("\n").includes(needle)
+              !text.join("\n").includes(needle) ||
+              (columnMarker &&
+                text
+                  .find((line) => line.includes(columnMarker))
+                  ?.indexOf(columnMarker) !== 189)
             ) {
               failures.push({
                 label,
                 sourceRows: source.rows,
                 projectedRows: text.length,
                 promptVisible: text.join("\n").includes(needle),
+                markerColumn: columnMarker
+                  ? (text
+                      .find((line) => line.includes(columnMarker))
+                      ?.indexOf(columnMarker) ?? -1) + 1
+                  : undefined,
               });
             }
           }
@@ -200,7 +225,7 @@ for (const [engine, type] of [
           "The projection includes the source bottom rows and prompt",
         );
         await stop();
-        stop = await control(t, source.rows + 20, 160);
+        stop = await control(t, source.rows + 20, columns);
         await page.waitForFunction(
           (expected) =>
             document.querySelectorAll(".peek-buffer-visible .xterm-rows > div")
@@ -212,7 +237,7 @@ for (const [engine, type] of [
         });
         assert.ok((await rows.allTextContents()).join("\n").includes(needle));
         await stop();
-        stop = await control(t, source.rows, 160);
+        stop = await control(t, source.rows, columns);
         await page.waitForFunction(
           (expected) =>
             document.querySelectorAll(".peek-buffer-visible .xterm-rows > div")
@@ -220,6 +245,28 @@ for (const [engine, type] of [
           source.rows,
         );
         assert.ok((await rows.allTextContents()).join("\n").includes(needle));
+        if (columnMarker) {
+          await stop();
+          stop = await control(t, source.rows, columns + 20);
+          await page.waitForFunction(
+            (expected) =>
+              [
+                ...document.querySelectorAll(
+                  ".peek-buffer-visible .xterm-rows > div",
+                ),
+              ].some((row) => row.textContent.length === expected),
+            columns + 20,
+          );
+          assert.equal(
+            (await rows.allTextContents())
+              .find((line) => line.includes(columnMarker))
+              ?.indexOf(columnMarker),
+            189,
+          );
+          await page.screenshot({
+            path: join(output, `${engine}-${scale}-columns-resized.png`),
+          });
+        }
       } finally {
         if (stop) await stop();
       }
