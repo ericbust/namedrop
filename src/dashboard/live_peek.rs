@@ -296,19 +296,17 @@ struct SourceViewport {
     rows: Option<u16>,
 }
 impl SourceViewport {
-    fn validated(cols: Option<u64>, rows: Option<u64>) -> Result<Self, Status> {
-        if cols.is_some_and(|cols| !(1..=512).contains(&cols))
-            || rows.is_some_and(|rows| !(1..=256).contains(&rows))
-            || cols
-                .zip(rows)
-                .is_some_and(|(cols, rows)| cols * rows > 65536)
-        {
-            return Err(Status::Unavailable);
+    fn bounded(cols: Option<u64>, rows: Option<u64>) -> Self {
+        let cols = cols
+            .filter(|cols| *cols > 0)
+            .map(|cols| cols.min(512) as u16);
+        let mut rows = rows
+            .filter(|rows| *rows > 0)
+            .map(|rows| rows.min(256) as u16);
+        if let (Some(cols), Some(height)) = (cols, &mut rows) {
+            *height = u32::from(*height).min(65536 / u32::from(cols)) as u16;
         }
-        Ok(Self {
-            cols: cols.map(|cols| cols as u16),
-            rows: rows.map(|rows| rows as u16),
-        })
+        Self { cols, rows }
     }
 
     fn has_flags(self) -> bool {
@@ -316,13 +314,13 @@ impl SourceViewport {
     }
 }
 
-fn tty_path(value: &str) -> Result<PathBuf, Status> {
-    if value.is_empty()
+fn tty_path(value: &str) -> Option<PathBuf> {
+    if matches!(value, "" | "?" | "??" | "-" | "console" | "/dev/console")
         || value
             .chars()
             .any(|ch| ch.is_control() || ch.is_whitespace())
     {
-        return Err(Status::Unavailable);
+        return None;
     }
     let path = Path::new(value);
     let path = if path.is_absolute() {
@@ -330,44 +328,50 @@ fn tty_path(value: &str) -> Result<PathBuf, Status> {
     } else {
         Path::new("/dev").join(path)
     };
-    let relative = path.strip_prefix("/dev").map_err(|_| Status::Unavailable)?;
+    let relative = path.strip_prefix("/dev").ok()?;
     if relative.as_os_str().is_empty()
         || relative
             .components()
             .any(|component| !matches!(component, Component::Normal(_)))
         || value.split('/').any(|part| matches!(part, "." | ".."))
     {
-        return Err(Status::Unavailable);
+        return None;
     }
-    Ok(path)
+    Some(path)
 }
 
-fn tty_viewport(path: &Path) -> Result<Option<SourceViewport>, Status> {
+fn tty_viewport(path: &Path) -> Option<SourceViewport> {
     let Ok(tty) = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
         .open(path)
     else {
-        return Ok(None);
+        return None;
     };
     let fd = tty.as_raw_fd();
     // SAFETY: isatty and TIOCGWINSZ borrow this open descriptor without reading or changing the PTY.
     if unsafe { libc::isatty(fd) } != 1 {
-        return Ok(None);
+        return None;
     }
     let mut size = std::mem::MaybeUninit::<libc::winsize>::uninit();
     // SAFETY: ioctl initializes the valid winsize allocation on success.
     if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, size.as_mut_ptr()) } != 0 {
-        return Ok(None);
+        return None;
     }
     // SAFETY: TIOCGWINSZ succeeded above.
     let size = unsafe { size.assume_init() };
-    SourceViewport::validated(Some(u64::from(size.ws_col)), Some(u64::from(size.ws_row))).map(Some)
+    if size.ws_col == 0 || size.ws_row == 0 {
+        return None;
+    }
+    Some(SourceViewport::bounded(
+        Some(u64::from(size.ws_col)),
+        Some(u64::from(size.ws_row)),
+    ))
 }
 
-fn shell_tty(pid: u64, budget: Duration) -> Result<Option<PathBuf>, Status> {
-    if pid == 0 || pid > i32::MAX as u64 {
-        return Err(Status::Unavailable);
+fn shell_tty(pid: u64, budget: Duration) -> Option<PathBuf> {
+    if pid == 0 || pid > i32::MAX as u64 || budget.is_zero() {
+        return None;
     }
     let result = ProcessHerdr::for_binary("/bin/ps").execute_bounded(
         &["-p", &pid.to_string(), "-o", "tty="],
@@ -376,52 +380,76 @@ fn shell_tty(pid: u64, budget: Duration) -> Result<Option<PathBuf>, Status> {
         1024,
     );
     let Ok(result) = result else {
-        return Ok(None);
+        return None;
     };
-    let name = result.stdout.trim();
-    if matches!(name, "" | "?" | "??" | "-") {
-        return Ok(None);
-    }
-    tty_path(name).map(Some)
+    tty_path(result.stdout.trim())
 }
 
-impl NativePane {
-    fn viewport(&self, binding: &LiveBinding, budget: Duration) -> Result<SourceViewport, Status> {
-        let started = Instant::now();
-        let result = ProcessHerdr::default()
-            .with_socket(Some(binding.namespace.session_socket_id.clone()))
-            .execute_bounded(
-                &["pane", "process-info", "--pane", &binding.pane_id],
-                budget.min(Duration::from_millis(150)),
-                &AtomicBool::new(false),
-                ENCODED_LIMIT,
-            );
-        if let Ok(result) = result
-            && let Ok(reply) = serde_json::from_str::<serde_json::Value>(&result.stdout)
-            && let Some(info) = reply.pointer("/result/process_info")
-        {
-            let path = if let Some(value) = info.get("tty").filter(|value| !value.is_null()) {
-                Some(tty_path(value.as_str().ok_or(Status::Unavailable)?)?)
-            } else if let Some(value) = info.get("shell_pid").filter(|value| !value.is_null()) {
-                shell_tty(
-                    value.as_u64().ok_or(Status::Unavailable)?,
-                    budget.saturating_sub(started.elapsed()),
-                )?
-            } else {
-                None
-            };
-            if let Some(path) = path
-                && let Some(viewport) = tty_viewport(&path)?
+fn source_tty(binding: &LiveBinding, budget: Duration) -> Option<PathBuf> {
+    if budget.is_zero() {
+        return None;
+    }
+    let started = Instant::now();
+    let result = ProcessHerdr::default()
+        .with_socket(Some(binding.namespace.session_socket_id.clone()))
+        .execute_bounded(
+            &["pane", "process-info", "--pane", &binding.pane_id],
+            budget.min(Duration::from_millis(150)),
+            &AtomicBool::new(false),
+            ENCODED_LIMIT,
+        );
+    let result = result.ok()?;
+    let reply = serde_json::from_str::<serde_json::Value>(&result.stdout).ok()?;
+    let info = reply.pointer("/result/process_info")?;
+    if let Some(value) = info.get("tty").filter(|value| !value.is_null()) {
+        tty_path(value.as_str()?)
+    } else if let Some(value) = info.get("shell_pid").filter(|value| !value.is_null()) {
+        shell_tty(value.as_u64()?, budget.saturating_sub(started.elapsed()))
+    } else {
+        None
+    }
+}
+
+struct TtyDiscovery {
+    path: Option<PathBuf>,
+    next_probe: Instant,
+}
+impl TtyDiscovery {
+    fn new() -> Self {
+        Self {
+            path: None,
+            next_probe: Instant::now(),
+        }
+    }
+
+    fn viewport(
+        &mut self,
+        pane: &NativePane,
+        binding: &LiveBinding,
+        budget: Duration,
+    ) -> SourceViewport {
+        if let Some(path) = &self.path {
+            if let Some(viewport) = tty_viewport(path) {
+                return viewport;
+            }
+            self.path = None;
+        }
+        let now = Instant::now();
+        if now >= self.next_probe && !budget.is_zero() {
+            self.next_probe = now + Duration::from_secs(1);
+            if let Some(path) = source_tty(binding, budget)
+                && let Some(viewport) = tty_viewport(&path)
             {
-                return Ok(viewport);
+                self.path = Some(path);
+                return viewport;
             }
         }
-        let rows = self
-            .source_rows
-            .as_ref()
-            .map(|value| value.as_u64().ok_or(Status::Unavailable))
-            .transpose()?;
-        SourceViewport::validated(None, rows)
+        SourceViewport::bounded(
+            None,
+            pane.source_rows
+                .as_ref()
+                .and_then(serde_json::Value::as_u64),
+        )
     }
 }
 
@@ -613,19 +641,28 @@ struct Observation {
     input: Input,
     normalizer: Normalizer,
     viewport: SourceViewport,
+    tty: TtyDiscovery,
     flagless: bool,
     deadline: Option<Instant>,
 }
 impl Observation {
     fn open(binding: &LiveBinding, pane: &NativePane, deadline: Instant) -> Result<Self, Status> {
-        let viewport =
-            pane.viewport(binding, deadline.saturating_duration_since(Instant::now()))?;
+        let mut tty = TtyDiscovery::new();
+        let viewport = tty.viewport(
+            pane,
+            binding,
+            deadline.saturating_duration_since(Instant::now()),
+        );
+        if Instant::now() >= deadline {
+            return Err(Status::Unavailable);
+        }
         Ok(Self {
             observer: Observer::open(binding, &pane.identity, viewport)
                 .map_err(|_| Status::Unavailable)?,
             input: Input::default(),
             normalizer: Normalizer::default(),
             viewport,
+            tty,
             flagless: false,
             deadline: Some(deadline),
         })
@@ -641,14 +678,20 @@ impl Observation {
             return Err(Status::Gone);
         }
         let deadline = self.deadline.unwrap_or_else(|| Instant::now() + STARTUP);
-        let viewport =
-            pane.viewport(binding, deadline.saturating_duration_since(Instant::now()))?;
-        let viewport = SourceViewport::validated(
+        let viewport = self.tty.viewport(
+            &pane,
+            binding,
+            deadline.saturating_duration_since(Instant::now()),
+        );
+        let viewport = SourceViewport::bounded(
             viewport.cols.or(self.viewport.cols).map(u64::from),
             viewport.rows.or(self.viewport.rows).map(u64::from),
-        )?;
+        );
         if viewport == self.viewport {
             return Ok(false);
+        }
+        if Instant::now() >= deadline {
+            return Err(Status::Unavailable);
         }
         self.observer.stop();
         self.observer =
@@ -1441,6 +1484,14 @@ mod tests {
     fn geometry_hints_clamp_positive_axes_and_ignore_zero() {
         for (cols, rows, expected) in [
             (
+                Some(1),
+                Some(256),
+                SourceViewport {
+                    cols: Some(1),
+                    rows: Some(256),
+                },
+            ),
+            (
                 Some(600),
                 Some(300),
                 SourceViewport {
@@ -1466,7 +1517,7 @@ mod tests {
                 },
             ),
         ] {
-            assert_eq!(SourceViewport::validated(cols, rows).unwrap(), expected);
+            assert_eq!(SourceViewport::bounded(cols, rows), expected);
         }
     }
 
@@ -1482,6 +1533,11 @@ mod tests {
         }
         for name in [
             "",
+            "?",
+            "??",
+            "-",
+            "console",
+            "/dev/console",
             "/dev",
             "/tmp/tty",
             "../tty",
@@ -1490,7 +1546,7 @@ mod tests {
             "ttys012\n",
             "/dev/pts/12 extra",
         ] {
-            assert!(tty_path(name).is_err(), "accepted {name:?}");
+            assert!(tty_path(name).is_none(), "accepted {name:?}");
         }
     }
 

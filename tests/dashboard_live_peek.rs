@@ -693,6 +693,7 @@ fn invalid_source_geometry_falls_back_or_clamps_without_revoking_input() {
         json!({"tty":" "}),
         json!({"tty":"pts/1 extra"}),
         json!({"tty":"/tmp/untrusted"}),
+        json!({"tty":"/dev/null"}),
         json!({"tty":"/dev/pts/../0"}),
         json!({"shell_pid":"bad"}),
         json!({"shell_pid":0}),
@@ -806,8 +807,9 @@ fn cached_tty_rechecks_startup_resize_without_rediscovery_or_retained_descriptor
         assert_eq!(invocations(&f).len(), 2);
         #[cfg(target_os = "linux")]
         for descriptor in fs::read_dir(format!("/proc/{}/fd", server.child.id())).unwrap() {
-            let target = fs::read_link(descriptor.unwrap().path()).unwrap();
-            assert_ne!(target, std::path::Path::new(&source.path));
+            if let Ok(target) = fs::read_link(descriptor.unwrap().path()) {
+                assert_ne!(target, std::path::Path::new(&source.path));
+            }
         }
     });
 }
@@ -820,14 +822,23 @@ fn failed_tty_discovery_throttles_startup_but_rechecks_metadata_rows() {
     set_process_info(&f, json!({"tty":"??"}));
     configure(
         &f,
-        json!({"mutate_metadata":metadata_with_rows(&f, json!(80))}),
+        json!({"mutate_metadata":metadata_with_rows(&f, json!(80)),"quiet":true}),
     );
-    let response = server.get(&path("socket-a", "w1", "lead"));
-    assert_eq!(response.status, 200);
-    let reset: Value = serde_json::from_str(response.body.lines().next().unwrap()).unwrap();
+    let mut live = server.live(&path("socket-a", "w1", "lead"));
+    let reset = live.record().unwrap();
     assert_eq!(reset["rows"], 80);
     assert_eq!(geometry_invocations(&f).len(), 1);
     assert_eq!(invocations(&f).len(), 2);
+    let source = SourcePty::new(200, 70);
+    set_process_info(&f, json!({"tty":source.path}));
+    let resized = live.record().unwrap();
+    assert_eq!(resized["kind"], "reset");
+    assert_eq!(resized["cols"], 200);
+    assert_eq!(resized["rows"], 70);
+    assert_eq!(resized["continuity"], reset["continuity"]);
+    let calls = geometry_invocations(&f);
+    assert_eq!(calls.len(), 2);
+    assert!(calls[1]["time"].as_f64().unwrap() - calls[0]["time"].as_f64().unwrap() >= 0.95);
 }
 
 #[test]
