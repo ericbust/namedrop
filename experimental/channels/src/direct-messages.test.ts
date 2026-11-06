@@ -72,6 +72,14 @@ test("directory filters aliases, workspace, pane and runtime and orders by priva
 test("DM directory members have no subagent facts without a channel snapshot", () => {
   assert.deepEqual(directMember(peer()).subagents, []);
 });
+test("pending attention takes precedence over working in a DM member", () => {
+  const waiting = peer({
+    ...rawPeer(),
+    presence: "working",
+    attention_count: 1,
+  });
+  assert.equal(directMember(waiting).activity, "blocked");
+});
 test("DM body mentions and channel names never change the fixed recipient or skill target", () => {
   const a = peer();
   const rule = { kind: "direct", alias: a.alias } satisfies Parameters<
