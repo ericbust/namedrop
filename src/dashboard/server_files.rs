@@ -386,7 +386,7 @@ impl ServerFiles {
         self.write_atomic("repos.json", &bytes)
     }
 
-    fn write_atomic(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
+    pub(super) fn write_atomic(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
         let target = self.dir.join(name);
         let temporary = self.dir.join(format!(".{name}.{}.tmp", std::process::id()));
         let mut file = OpenOptions::new()
@@ -585,7 +585,7 @@ fn fresh(path: &Path) -> bool {
         })
 }
 
-fn private_file(path: &Path) -> Result<File, String> {
+pub(super) fn private_file(path: &Path) -> Result<File, String> {
     OpenOptions::new()
         .create(true)
         .truncate(false)
