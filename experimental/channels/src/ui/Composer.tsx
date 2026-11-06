@@ -44,8 +44,6 @@ export function Composer({
   placeholder,
   label,
   rule,
-  requireRecipient = false,
-  initialText = "",
   notice = null,
   closed = null,
   onEdit,
@@ -58,8 +56,6 @@ export function Composer({
   placeholder: string;
   label: string;
   rule: SendRule;
-  requireRecipient?: boolean;
-  initialText?: string;
   notice?: ReactNode;
   // Why nothing can be sent from here, such as a workspace with no agents.
   closed?: string | null;
@@ -74,24 +70,22 @@ export function Composer({
   const [width, setWidth] = useState(0);
   const box = useRef<HTMLTextAreaElement>(null);
   const list = useRef<HTMLDivElement>(null);
-  const placedCaret = useRef<number | null>(
-    !drafts.has(draftKey(composer)) && initialText.length > 0
-      ? initialText.length
-      : null,
-  );
+  const placedCaret = useRef<number | null>(null);
   const fitted = useRef<string | null>(null);
   const typedAt = useRef<number | null>(null);
   const listId = useId();
 
-  // Recipient suggestions become a saved draft only when the operator edits them.
-  const [initialDraft, setInitialDraft] = useState(initialText);
   const draft = drafts.get(draftKey(composer));
-  const text = draft?.text ?? initialDraft;
+  const text = draft?.text ?? "";
   const failure = draft?.failure ?? null;
   const sending = inFlight(outbox, composer);
   const leading = leadingMentions(sentText(text));
-  const needsRecipient = requireRecipient && leading.length === 0;
-  const source = needsRecipient ? null : postSource(text, rule);
+  const source = postSource(text, rule);
+  const pickRecipient =
+    rule.kind === "thread" &&
+    rule.to.length > 1 &&
+    leading.length === 0 &&
+    (guarded || sentText(text) !== "");
 
   const skillTargets =
     skillToken(text, caret) && !sending ? skillRecipients(text, context) : [];
@@ -149,7 +143,6 @@ export function Composer({
   });
 
   function edit(next: string, at: number) {
-    setInitialDraft("");
     onEdit(next);
     setCaret(at);
     setDismissed(false);
@@ -218,8 +211,7 @@ export function Composer({
           />
         )}
         {rule.kind === "thread" &&
-          !requireRecipient &&
-          rule.to.length > 0 &&
+          rule.implicitRecipient !== null &&
           leading.length === 0 && (
             <span className="composer-to">{recipientsLabel(rule.to)}</span>
           )}
@@ -270,9 +262,13 @@ export function Composer({
           <p>{composerCopy.sending}</p>
         ) : notice !== null ? (
           notice
-        ) : (guarded || (focused && needsRecipient)) &&
-          source === null &&
-          (needsRecipient || sentText(text) !== "") ? (
+        ) : pickRecipient ? (
+          <p>
+            {sentText(text) === "" && rule.kind === "thread"
+              ? composerCopy.pickRecipient(rule.to)
+              : composerHint(rule, text)}
+          </p>
+        ) : guarded && source === null && sentText(text) !== "" ? (
           <p className="composer-guard">{keptHint(text)}</p>
         ) : focused ? (
           <p>{composerHint(rule, text)}</p>
