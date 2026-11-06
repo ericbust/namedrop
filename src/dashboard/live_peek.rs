@@ -434,15 +434,12 @@ impl TtyDiscovery {
             }
             self.path = None;
         }
-        let now = Instant::now();
-        if now >= self.next_probe && !budget.is_zero() {
-            self.next_probe = now + Duration::from_secs(1);
-            if let Some(path) = source_tty(binding, budget)
-                && let Some(viewport) = tty_viewport(&path)
-            {
-                self.path = Some(path);
-                return viewport;
-            }
+        if self.begin_probe(Instant::now(), budget)
+            && let Some(path) = source_tty(binding, budget)
+            && let Some(viewport) = tty_viewport(&path)
+        {
+            self.path = Some(path);
+            return viewport;
         }
         SourceViewport::bounded(
             None,
@@ -450,6 +447,14 @@ impl TtyDiscovery {
                 .as_ref()
                 .and_then(serde_json::Value::as_u64),
         )
+    }
+
+    fn begin_probe(&mut self, now: Instant, budget: Duration) -> bool {
+        if now < self.next_probe || budget.is_zero() {
+            return false;
+        }
+        self.next_probe = now + Duration::from_secs(1);
+        true
     }
 }
 
@@ -1479,6 +1484,21 @@ fn decode(text: &str) -> Result<Vec<u8>, ()> {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn tty_discovery_reserves_one_second_between_probe_starts() {
+        let mut discovery = TtyDiscovery::new();
+        let now = discovery.next_probe;
+        let budget = Duration::from_millis(150);
+        assert!(!discovery.begin_probe(now, Duration::ZERO));
+        assert!(discovery.begin_probe(now, budget));
+        assert!(!discovery.begin_probe(now, budget));
+        assert!(!discovery.begin_probe(now + Duration::from_millis(999), budget));
+        assert!(!discovery.begin_probe(now + Duration::from_secs(1), Duration::ZERO));
+        assert!(discovery.begin_probe(now + Duration::from_secs(1), budget));
+        assert!(!discovery.begin_probe(now + Duration::from_millis(1999), budget));
+        assert!(discovery.begin_probe(now + Duration::from_secs(2), budget));
+    }
 
     #[test]
     fn geometry_hints_clamp_positive_axes_and_ignore_zero() {

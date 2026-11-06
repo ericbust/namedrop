@@ -162,15 +162,18 @@ impl SourcePty {
         );
     }
     fn size(&self) -> (u16, u16) {
+        self.try_size().unwrap()
+    }
+    fn try_size(&self) -> std::io::Result<(u16, u16)> {
         let mut size = std::mem::MaybeUninit::<libc::winsize>::uninit();
         // SAFETY: ioctl initializes size for the owned descriptor.
-        assert_eq!(
-            unsafe { libc::ioctl(self.slave.as_raw_fd(), libc::TIOCGWINSZ, size.as_mut_ptr()) },
-            0
-        );
+        if unsafe { libc::ioctl(self.slave.as_raw_fd(), libc::TIOCGWINSZ, size.as_mut_ptr()) } != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
         // SAFETY: TIOCGWINSZ succeeded above.
         let size = unsafe { size.assume_init() };
-        (size.ws_col, size.ws_row)
+        Ok((size.ws_col, size.ws_row))
     }
 }
 
@@ -317,7 +320,7 @@ if args[:2] in [['pane','send-text'],['pane','send-keys']]:
     sys.exit(0)
 if args[:2]==['pane','process-info']:
     with open(os.path.join(root,'geometry-reads.jsonl'),'a') as log:
-        log.write(json.dumps({'args':args,'time':time.monotonic()})+'\n')
+        log.write(json.dumps({'args':args})+'\n')
 responses=json.load(open(os.path.join(root,'responses.json')))
 key=' '.join(args)
 if key in responses:print(responses[key])
@@ -776,6 +779,26 @@ fn unavailable_tty_keeps_legacy_rows_and_absent_metadata_keeps_defaults() {
 }
 
 #[test]
+fn hung_up_source_tty_uses_metadata_rows() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let SourcePty {
+        master,
+        slave: _slave,
+        path: tty,
+    } = SourcePty::new(200, 70);
+    drop(master);
+    set_rows(&f, json!(60));
+    set_process_info(&f, json!({"tty":tty}));
+    let response = server.get(&path("socket-a", "w1", "lead"));
+    assert_eq!(response.status, 200);
+    let reset: Value = serde_json::from_str(response.body.lines().next().unwrap()).unwrap();
+    assert_eq!(reset["cols"], 120);
+    assert_eq!(reset["rows"], 60);
+    assert_eq!(geometry_invocations(&f).len(), 1);
+}
+
+#[test]
 fn shell_pid_discovers_controlling_tty_with_bounded_ps() {
     let f = Fixture::new();
     let server = Server::start(&f);
@@ -799,6 +822,7 @@ fn shell_pid_discovers_controlling_tty_with_bounded_ps() {
     set_process_info(&f, json!({"shell_pid":shell.id()}));
     let started = Instant::now();
     let response = server.get(&path("socket-a", "w1", "lead"));
+    let source_size = source.try_size();
     let _ = shell.kill();
     let _ = shell.wait();
     assert!(started.elapsed() < Duration::from_secs(2));
@@ -806,7 +830,7 @@ fn shell_pid_discovers_controlling_tty_with_bounded_ps() {
     let reset: Value = serde_json::from_str(response.body.lines().next().unwrap()).unwrap();
     assert_eq!(reset["cols"], 200);
     assert_eq!(reset["rows"], 70);
-    assert_eq!(source.size(), (200, 70));
+    assert_eq!(source_size.unwrap(), (200, 70));
     assert_eq!(geometry_invocations(&f).len(), 1);
 }
 
@@ -840,28 +864,15 @@ fn cached_tty_rechecks_startup_resize_without_rediscovery_or_retained_descriptor
 fn failed_tty_discovery_throttles_startup_but_rechecks_metadata_rows() {
     let f = Fixture::new();
     let server = Server::start(&f);
-    let shim = f.root.join("herdr");
-    let script = fs::read_to_string(&shim).unwrap().replace(
-        "if args[:2]==['pane','process-info']:\n",
-        "if args[:2]==['pane','process-info']:\n    if not os.path.exists(os.path.join(root,'geometry-reads.jsonl')):time.sleep(.1)\n",
-    );
-    fs::write(shim, script).unwrap();
     set_rows(&f, json!(40));
     set_process_info(&f, json!({"tty":"??"}));
     configure(
         &f,
-        json!({"mutate_metadata":metadata_with_rows(&f, json!(80)),"delay_rows":{"40":0.8},"quiet":true}),
+        json!({"mutate_metadata":metadata_with_rows(&f, json!(80)),"quiet":true}),
     );
     let mut live = server.live(&path("socket-a", "w1", "lead"));
     let reset = live.record().unwrap();
     assert_eq!(reset["rows"], 80);
-    let startup_calls = geometry_invocations(&f);
-    eprintln!("Startup geometry calls: {startup_calls:?}");
-    if startup_calls.len() == 2 {
-        let interval = startup_calls[1]["time"].as_f64().unwrap()
-            - startup_calls[0]["time"].as_f64().unwrap();
-        assert!(interval >= 0.95, "Python log interval was {interval:.3}s");
-    }
     assert_eq!(geometry_invocations(&f).len(), 1);
     assert_eq!(invocations(&f).len(), 2);
     let source = SourcePty::new(200, 70);
@@ -873,9 +884,6 @@ fn failed_tty_discovery_throttles_startup_but_rechecks_metadata_rows() {
     assert_eq!(resized["continuity"], reset["continuity"]);
     let calls = geometry_invocations(&f);
     assert_eq!(calls.len(), 2);
-    let interval = calls[1]["time"].as_f64().unwrap() - calls[0]["time"].as_f64().unwrap();
-    eprintln!("Python log interval was {interval:.3}s");
-    assert!(interval >= 0.95, "Python log interval was {interval:.3}s");
 }
 
 #[test]
