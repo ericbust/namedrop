@@ -20,7 +20,7 @@ test("pending reminder parsing preserves owner, due time, body and repeats", () 
   assert.equal(row.body.text, "Check the build");
   assert.equal(reminderRepeats(row), "2 repeats left");
   assert.match(
-    reminderRepeats({ ...row, repeatUntil: 120000, repeatsLeft: 99 }),
+    reminderRepeats({ ...row, repeatUntil: 120000, repeatsLeft: 99 }) ?? "",
     /up to 99 repeats left/,
   );
   assert.throws(() =>
