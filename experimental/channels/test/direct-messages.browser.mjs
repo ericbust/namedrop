@@ -339,7 +339,7 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
   await b.click();
   assert.equal(
     await page.locator(".dm-heading > span").textContent(),
-    "#beta · Pane b · idle",
+    "#beta · Pane b · Idle",
   );
   await composer.fill("beta draft");
   await a.click();
