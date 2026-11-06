@@ -374,6 +374,26 @@ namedrop channels
 
 Both open the page in your browser on macOS, and on Linux when a display is available. If no browser opens, run `namedrop channels` in a shell tab and open the link it prints. Herdr runs the action in its own server process, so the action can't open a browser when that process has no display. Run `namedrop channels --no-open` to print the link only. The link works once. Run the command again for a new link.
 
+### Open Channels from your tailnet
+
+Sign in to Tailscale on this machine and on your phone or Mac, then run:
+
+```sh
+namedrop channels --tailscale --no-open
+```
+
+Open the printed one-time HTTPS link on your other device. Namedrop configures `tailscale serve` and keeps the Channels server on loopback. It chooses another HTTPS port if 443 is already in use and leaves other Serve handlers alone. Your tailnet must have HTTPS enabled. Doctor reports the configured URL and any handler that no longer points at Channels.
+
+Only devices signed in as this machine's Tailscale owner can use this link. Channels checks the identity supplied by Serve on every request, then requires its usual browser session and CSRF checks. Shared-device users and tagged devices cannot sign in. This uses private Serve, never public Funnel. Local programs on the server remain trusted. **Type to agent** from your phone sends real input to the agent's pane.
+
+To remove Namedrop's handler and disable tailnet access, run:
+
+```sh
+namedrop channels --tailscale off
+```
+
+The ordinary `namedrop channels` command and Herdr action still open the local page. Run the tailnet command in a workspace shell tab for a fresh remote link.
+
 ### What to try
 
 - Post `@name` and a request in a channel, and watch the reply arrive in the channel.
@@ -390,7 +410,7 @@ The [Channels tester checklist](docs/channels-testing.md) lists these checks in 
 - Status for Codex agents is limited compared with Claude Code agents.
 - The page can't yet tell an agent that you named before its session started from an agent that is offline.
 - A workspace where Namedrop was never turned on shows a **No agents here yet** guide. To start, name an agent there with `namedrop name @alias`.
-- The page is a local browser page on `127.0.0.1`. Other machines can't open it. Any process that runs as your user and can open the page can post as you. See [Channels](docs/operations.md#channels) for the server details.
+- The server listens on `127.0.0.1`. Use `--tailscale` to open it from your other devices. Any process that runs as your user and can open the page can post as you. See [Channels](docs/operations.md#channels) for the server details.
 
 ## Update Namedrop
 

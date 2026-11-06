@@ -1070,6 +1070,7 @@ impl LivePeeks {
         key: &SpaceKey,
         address: &str,
         expected: Option<&str>,
+        tailnet: Option<&super::super::tailscale::OwnedHandler>,
     ) -> io::Result<()> {
         let started = Instant::now();
         socket.set_write_timeout(Some(Duration::from_secs(1)))?;
@@ -1115,7 +1116,8 @@ impl LivePeeks {
         // Validate the entire first full paint before committing HTTP headers.
         let first = loop {
             let first = loop {
-                if started.elapsed() >= STARTUP
+                if !super::tailnet_still_enabled(front, tailnet)
+                    || started.elapsed() >= STARTUP
                     || front.restarting.load(Ordering::Acquire)
                     || front.files.restarting()
                 {
@@ -1208,6 +1210,9 @@ impl LivePeeks {
         let mut native_checked = Instant::now();
         let mut last_heartbeat = Instant::now();
         loop {
+            if !super::tailnet_still_enabled(front, tailnet) {
+                return Ok(());
+            }
             if disconnected(&socket) {
                 return Ok(());
             }
