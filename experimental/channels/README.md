@@ -145,8 +145,9 @@ under its own address. Escape closes the drawer and returns focus to the control
 that opened it.
 
 Live shows a passive terminal projection with colors, cursor motion, and TUI
-redraws. Its grid is the observer's projected viewport, which can differ from the
-source PTY dimensions. Scroll the projection locally to see a wider grid. Opening
+redraws. Its rows follow the source pane, including source resizes. Older hosts
+without source row metadata retain the observer's default height. Its columns
+use the observer's projected viewport. Scroll the projection locally to see a wider grid. Opening
 or resizing Peek sends no terminal input, source resize, focus, or takeover command.
 The browser uses pinned xterm 6.0.0 without a terminal input bridge.
 
@@ -197,6 +198,13 @@ scrollbars. The fixture requires an existing `weston` executable. It creates and
 removes its own display socket, HOME, and browser profile without connecting to
 your desktop. `CHROME`, `FIREFOX`, and `PLAYWRIGHT_BROWSERS_PATH` select existing
 browser installations. `LIVE_PEEK_OUTPUT` selects the evidence directory.
+
+`npm run test:source-rows` drives an existing isolated testbed profile with an idle
+Codex pane, which it sizes to 80 rows. Set `PEEK_SOURCE_PROFILE` to its `test-*` profile
+directory and `PEEK_SOURCE_OUTPUT` to a screenshot directory. The test compares the
+native prompt with Live Peek in Chromium and WebKit at scales 1 and 2, then grows
+and shrinks the source terminal. It controls only that test profile's terminal.
+`PEEK_SOURCE_TEXT` overrides the expected Codex prompt text.
 
 ## Live terminal stream v1
 

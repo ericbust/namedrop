@@ -38,7 +38,11 @@ elif operation=='control':
  info=p.herdr('pane','get',pane)['pane']
  child=subprocess.Popen(['herdr','terminal','session','control',info['terminal_id'],'--takeover','--rows',sys.argv[4],'--cols',sys.argv[5]],env=p.env,stdin=subprocess.PIPE,stdout=subprocess.PIPE)
  def stop(*_):
-  child.terminate();child.wait(timeout=5);sys.exit(0)
+  child.terminate()
+  try: child.wait(timeout=2)
+  except subprocess.TimeoutExpired:
+   child.kill();child.wait(timeout=2)
+  sys.exit(0)
  signal.signal(signal.SIGTERM,stop)
  for line in child.stdout:
   frame=json.loads(line)
@@ -54,28 +58,58 @@ function native(operation) {
   );
 }
 
-async function control(rows, cols) {
+async function control(t, rows, cols) {
   const child = spawn(
     "python3",
     ["-c", python, checkout, profile, "control", String(rows), String(cols)],
-    { stdio: ["ignore", "pipe", "inherit"] },
+    { stdio: ["ignore", "pipe", "inherit"], detached: true },
   );
-  await new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("exit", (code) =>
-      reject(new Error(`Controller exited ${code}`)),
-    );
-    child.stdout.once("data", resolve);
-  });
-  child.stdout.resume();
   let closed = false;
-  return async () => {
-    if (closed || child.exitCode !== null || child.signalCode !== null) return;
+  const stop = async () => {
+    if (closed || !child.pid) return;
     closed = true;
-    const exited = new Promise((resolve) => child.once("exit", resolve));
-    child.kill();
-    await exited;
+    const exited =
+      child.exitCode !== null || child.signalCode !== null
+        ? Promise.resolve()
+        : new Promise((resolve) => child.once("exit", resolve));
+    const signal = (name) => {
+      try {
+        process.kill(-child.pid, name);
+      } catch (error) {
+        if (error.code !== "ESRCH") throw error;
+      }
+    };
+    signal("SIGTERM");
+    const kill = setTimeout(() => signal("SIGKILL"), 5000);
+    try {
+      await exited;
+    } finally {
+      signal("SIGKILL");
+      clearTimeout(kill);
+    }
   };
+  t.after(stop);
+  let timer;
+  try {
+    await new Promise((resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new Error("Controller startup timed out")),
+        5000,
+      );
+      child.once("error", reject);
+      child.once("exit", (code) =>
+        reject(new Error(`Controller exited ${code}`)),
+      );
+      child.stdout.once("data", resolve);
+    });
+    child.stdout.resume();
+    return stop;
+  } catch (error) {
+    await stop();
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 for (const [engine, type] of [
@@ -85,13 +119,11 @@ for (const [engine, type] of [
   for (const scale of [1, 2]) {
     test(`${engine} scale ${scale}: Live Peek retains the source bottom row and follows source resizing`, {
       timeout: 60000,
-    }, async () => {
+    }, async (t) => {
       await mkdir(output, { recursive: true });
+      let stop = await control(t, 80, 160);
       const source = native("source");
-      assert.ok(
-        source.rows > 40,
-        "Use an idle test Codex pane taller than 40 rows",
-      );
+      assert.equal(source.rows, 80, "The test source has 80 rows");
       assert.ok(
         source.text.includes(needle),
         "The native source contains the expected prompt",
@@ -105,12 +137,12 @@ for (const [engine, type] of [
             }
           : {}),
       });
+      t.after(() => browser.close());
       const context = await browser.newContext({
         deviceScaleFactor: scale,
         viewport: { width: 1440, height: 900 },
       });
       const page = await context.newPage();
-      let stop;
       const failures = [];
       try {
         await page.goto(native("dashboard").data.url);
@@ -167,7 +199,8 @@ for (const [engine, type] of [
           [],
           "The projection includes the source bottom rows and prompt",
         );
-        stop = await control(source.rows + 20, 160);
+        await stop();
+        stop = await control(t, source.rows + 20, 160);
         await page.waitForFunction(
           (expected) =>
             document.querySelectorAll(".peek-buffer-visible .xterm-rows > div")
@@ -179,17 +212,16 @@ for (const [engine, type] of [
         });
         assert.ok((await rows.allTextContents()).join("\n").includes(needle));
         await stop();
-        stop = await control(source.rows, 160);
+        stop = await control(t, source.rows, 160);
         await page.waitForFunction(
           (expected) =>
             document.querySelectorAll(".peek-buffer-visible .xterm-rows > div")
               .length === expected,
           source.rows,
         );
+        assert.ok((await rows.allTextContents()).join("\n").includes(needle));
       } finally {
         if (stop) await stop();
-        await context.close();
-        await browser.close();
       }
     });
   }

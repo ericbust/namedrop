@@ -953,7 +953,6 @@ impl LivePeeks {
                 }
                 pause(&socket, observation.observer.stdout.as_raw_fd(), false)?;
             };
-            // Recheck identity and size before exposing a first paint.
             let rechecked = recorded(&mut store, key, address).and_then(|current| {
                 if current != binding {
                     return Err(Status::Gone);
