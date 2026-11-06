@@ -3,10 +3,14 @@ import { chromium } from 'playwright-core';
 import { spawn } from 'node:child_process';
 const [out = 'namedrop-demo.mp4', fps = '30'] = process.argv.slice(2);
 const url = (process.env.SCENE_URL || 'http://127.0.0.1:8765/scene.html') + '?capture&still';
-const browser = await chromium.launch({ channel: 'chrome', args: ['--use-angle=metal', '--enable-gpu'] });
-const page = await browser.newPage({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 2 });
+const browser = await chromium.launch({
+  ...(process.env.CHROME ? { executablePath: process.env.CHROME } : { channel: 'chrome' }),
+  args: process.platform === 'darwin' ? ['--use-angle=metal', '--enable-gpu'] : ['--no-sandbox'],
+});
+const page = await browser.newPage({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: Number(process.env.RENDER_SCALE || 2) });
 page.on('pageerror', (e) => { console.error(e.stack); process.exit(1); });
 await page.goto(url);
+await page.waitForFunction(() => window.sceneReady && window.renderAt);
 await page.evaluate(() => window.sceneReady);
 const duration = await page.evaluate(() => window.DURATION);
 const ffmpeg = spawn('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'image2pipe', '-framerate', fps, '-i', '-',
@@ -20,6 +24,6 @@ for (let i = 0; i < frames; i++) {
   if (i % 60 === 0) process.stderr.write(`\r${i}/${frames}`);
 }
 ffmpeg.stdin.end();
-await new Promise((r) => ffmpeg.on('close', r));
+await new Promise((resolve, reject) => ffmpeg.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`))));
 await browser.close();
 process.stderr.write(`\rwrote ${out} (${frames} frames)\n`);

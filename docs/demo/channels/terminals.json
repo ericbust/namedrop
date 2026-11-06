@@ -1,4 +1,5 @@
 {
   "codex": "\u203a For release planning, give a checklist of exactly three\n  short lines. Do not use tools.\n\n\n\u2022 Confirm release scope.\n  Run release tests.\n  Prepare rollback plan.\n\n  Worked for 1s \u2022 12:34",
-  "claude": "\u25cf I've confirmed to the operator that I'll check the release checklist in 2 minutes. A one-time reminder is set to have\n  me look at it and report back to them.\n\n\u273b Cooked for 9s \u00b7 done 12:31 PM"
+  "claude": "\u25cf I've confirmed to the operator that I'll check the release checklist in 2 minutes. A one-time reminder is set to have\n  me look at it and report back to them.\n\n\u273b Cooked for 9s \u00b7 done 12:31 PM",
+  "working": "\u2022 Working (5s \u2022 esc to interrupt)"
 }

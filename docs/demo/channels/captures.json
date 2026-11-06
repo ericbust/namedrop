@@ -8,8 +8,8 @@
   "captures": [
     {
       "file": "01-overview.png",
-      "capturedAt": "2026-11-06T17:38:06.765102+00:00",
-      "sha256": "0c1278dd23bc1ed259c18555b668d2a6aac3ede1f97d1032f42be0cd4d95ecd2",
+      "capturedAt": "2026-11-06T17:45:23.129002+00:00",
+      "sha256": "749a7030669e87730a4a9b54f51406826c4f1b6b17de55834e048b3ec2e894bf",
       "message": "Confirm scope; test; plan rollback."
     },
     {
@@ -53,6 +53,12 @@
       "capturedAt": "2026-11-06T17:40:41.651868+00:00",
       "sha256": "79500fa5632fd06e25929571e581ee95617703237c8c0faa0ae92a08390d9a34",
       "message": "Confirm tests pass. Review release notes. Verify deployment and rollback steps."
+    },
+    {
+      "file": "02-ask.png",
+      "message": "@codex Give me a three-item release checklist. Keep it to one short sentence.",
+      "capturedAt": "2026-11-06T17:30:59.682961+00:00",
+      "sha256": "1987c17f2db24493395e7947f29ea46f54c67000a18e725baff64b422e3eb4e3"
     }
   ]
 }
