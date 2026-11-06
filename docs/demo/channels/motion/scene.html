@@ -1,11 +1,21 @@
 <!doctype html>
 <html lang="en">
+<head>
 <meta charset="utf-8">
 <title>Channels (Beta)</title>
+<link rel="stylesheet" href="../../stage.css">
 <style>
-html, body { margin: 0; width: 1920px; height: 1080px; background: #090a0e; overflow: hidden; }
-canvas { display: block; width: 1920px; height: 1080px; }
+  .card { width: 470px; }
+  .card .msg { font-size: 23px; }
+  .app .body canvas { display: block; width: 1280px; height: 720px; }
 </style>
-<canvas aria-label="Channels product highlight"></canvas>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="css"></div>
+<div id="hud"></div>
+<script src="/take/panes.js"></script>
+<script type="importmap">{ "imports": { "three": "../../node_modules/three/build/three.module.js", "three/addons/": "../../node_modules/three/examples/jsm/" } }</script>
 <script type="module" src="scene.mjs"></script>
+</body>
 </html>

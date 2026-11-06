@@ -7,6 +7,7 @@ It tells two stories. First a lead hands work to `@reviewer` and `@tester` and m
 | File | Purpose |
 |---|---|
 | `frames.js` | The captured screens used by the scene, as ANSI rows |
+| `stage3d.js`, `stage.css` | The stage both README movies share: background, windows, name plates, cards, beams and captions |
 | `scene.html`, `scene.js` | The scene: CSS3D windows for the terminals, message cards and name plates, a WebGL layer for the background and handoff beams, and a deterministic timeline |
 | `render.mjs` | Steps the timeline frame by frame in headless Chrome and pipes the frames to ffmpeg |
 | `stills.mjs` | Renders the Agent status still and the social preview at 2x |
@@ -58,8 +59,8 @@ The screens come from an isolated profile under `~/namedrop-demo`, so no persona
 
 ## Re-capture and render Channels
 
-The Channels highlight is one continuous take of the real Channels page on the 1.5.0-exp.18 build, recorded at a 1280×720 viewport at 2x. It starts from an empty channel named **Release planning**. Five scenes follow, each with one caption: ask an agent in a channel, follow up in the thread without @, ask for a reminder in a DM, see Needs you, and type to an agent in Live Peek. Each scene makes at most one slow push-in, then holds on a spotlit focal element. The movie is 30 to 40 seconds long. The animated WebP is the first scene.
+The Channels highlight is one continuous take of the real Channels page on the 1.5.0-exp.18 build, recorded at a 1280×720 viewport at 2x. It starts from an empty channel named **Release planning**. Five scenes follow, each with one caption: ask an agent in a channel, follow up in the thread without @, ask for a reminder in a DM, see Needs you, and type to an agent in Live Peek. It plays on the same stage as the Namedrop demo above: the whole Channels window stays on screen with the real Codex and Claude Code windows beside it, and cards quote each real message as it travels between them. The camera does not move. A gentle spotlight and a ring mark the focal element, and a callout beside it repeats its real text in large type. The movie is 30 to 40 seconds long. The animated WebP is the first scene.
 
-Follow [Record and render the Channels highlight](channels/motion/README.md) to stage a take in the testbed, record it, plan the cut, render it, and check it. `channels/motion/capture.json` records the published take's build and source hashes. `channels/motion/legibility.py` measures the focal text at README width and writes the contact sheet. Look at the sheet and one frame per shot before you publish.
+Follow [Record and render the Channels highlight](channels/motion/README.md) to stage a take in the testbed, record it, plan the cut, render it, and check it. `channels/motion/capture.json` records the published take's build and source hashes. `channels/motion/legibility.py` measures the focal text in the app and in the callout at README width, and writes the contact sheet. Look at the sheet and one frame per shot before you publish.
 
 The cropped still scene in `channels/` is an earlier version. It is not the source of the published movie.

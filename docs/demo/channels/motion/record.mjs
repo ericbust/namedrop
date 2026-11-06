@@ -13,6 +13,7 @@ const helper = resolve(dirname(fileURLToPath(import.meta.url)), 'profile.py');
 const queue = root + '/actions';
 await mkdir(queue, { recursive: true });
 await mkdir(root + '/recording/frames', { recursive: true });
+await mkdir(root + '/recording/panes', { recursive: true });
 
 const VIEWPORT = { width: 1280, height: 720 }, SCALE = 2;
 const profile = JSON.parse((await exec('python3', [helper, profileName, 'info'])).stdout);
@@ -39,7 +40,7 @@ console.log('READY');
 const recording = {
   viewport: VIEWPORT, deviceScaleFactor: SCALE, version: profile.version,
   productRevision: profile.productRevision, sourceRevision: profile.source.commit,
-  profileHome: profile.profileHome, events: [], frames: [], errors,
+  profileHome: profile.profileHome, events: [], frames: [], panes: [], errors,
 };
 let active = false, finished = false, start = 0, rate = 15;
 const time = () => (performance.now() - start) / 1000;
@@ -104,6 +105,21 @@ const frameJob = (async () => {
   }
 })();
 
+// Both agents' real screens, with colour, twice a second.
+const paneJob = (async () => {
+  while (!finished) {
+    if (!active) { await new Promise(r => setTimeout(r, 100)); continue; }
+    const t = time(), index = String(recording.panes.length).padStart(6, '0'), row = { t };
+    await Promise.all(['claude', 'codex'].map(async alias => {
+      const file = 'panes/' + index + '-' + alias + '.ansi';
+      await writeFile(root + '/recording/' + file, await record.helper('ansi', alias));
+      row[alias] = file;
+    }));
+    recording.panes.push(row);
+    await new Promise(r => setTimeout(r, Math.max(0, 500 - (time() - t) * 1000)));
+  }
+})();
+
 const seen = new Set();
 try {
   while (!finished) {
@@ -124,8 +140,8 @@ try {
   }
 } finally {
   finished = true;
-  await frameJob;
+  await Promise.all([frameJob, paneJob]);
   if (start) await save();
   await browser.close();
-  console.log('SAVED', recording.frames.length, 'frames');
+  console.log('SAVED', recording.frames.length, 'frames,', recording.panes.length, 'pane pairs');
 }

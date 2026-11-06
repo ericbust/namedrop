@@ -1,214 +1,215 @@
 {
   "productRevision": "b9ea2d0d022fe1fd5ea17762f3a90ec01d110303",
-  "sourceRevision": "30b29e177cca9d742459863d0df33e76fcef4597",
+  "sourceRevision": "4767149aeddc857ea3efce72f44724e33a99fd9d",
   "version": "1.5.0-exp.18",
   "viewport": {
     "width": 1280,
     "height": 720
   },
   "deviceScaleFactor": 2,
-  "startedAtEpochMs": 1794000930129,
-  "duration": 166.90706918700002,
-  "sourceFrameCount": 1753,
-  "outputDuration": 38.3,
+  "startedAtEpochMs": 1794002793648,
+  "duration": 164.027555576,
+  "sourceFrameCount": 1761,
+  "panePairCount": 328,
+  "outputDuration": 39.6,
   "events": [
     {
       "name": "ask-wide",
-      "t": 0.00013820399999985966,
-      "at": "2026-11-06T21:35:30.129Z"
+      "t": 0.0001260939999999664,
+      "at": "2026-11-06T22:06:33.648Z"
     },
     {
       "name": "ask-typed",
-      "t": 3.7079759989999994,
-      "at": "2026-11-06T21:35:33.837Z"
+      "t": 3.868508247,
+      "at": "2026-11-06T22:06:37.516Z"
     },
     {
       "name": "ask-sent",
-      "t": 5.736310893000001,
-      "at": "2026-11-06T21:35:35.866Z"
+      "t": 5.800915955,
+      "at": "2026-11-06T22:06:39.449Z"
     },
     {
       "name": "ask-reply",
-      "t": 14.464728138999998,
-      "at": "2026-11-06T21:35:44.594Z"
+      "t": 17.088163867,
+      "at": "2026-11-06T22:06:50.736Z"
     },
     {
       "name": "followup-open",
-      "t": 19.380512237999998,
-      "at": "2026-11-06T21:35:49.510Z"
+      "t": 22.322159792999997,
+      "at": "2026-11-06T22:06:55.970Z"
     },
     {
       "name": "followup-typed",
-      "t": 20.387591798,
-      "at": "2026-11-06T21:35:50.517Z"
+      "t": 23.307965036000002,
+      "at": "2026-11-06T22:06:56.956Z"
     },
     {
       "name": "followup-sent",
-      "t": 22.232363841999998,
-      "at": "2026-11-06T21:35:52.362Z"
+      "t": 25.149746816,
+      "at": "2026-11-06T22:06:58.798Z"
     },
     {
       "name": "followup-reply",
-      "t": 30.393798818,
-      "at": "2026-11-06T21:36:00.523Z"
+      "t": 33.11618084,
+      "at": "2026-11-06T22:07:06.764Z"
     },
     {
       "name": "dm-open",
-      "t": 35.80700616200001,
-      "at": "2026-11-06T21:36:05.936Z"
+      "t": 38.702264999,
+      "at": "2026-11-06T22:07:12.350Z"
     },
     {
       "name": "reminder-typed",
-      "t": 37.714959199000006,
-      "at": "2026-11-06T21:36:07.844Z"
+      "t": 40.65739948900001,
+      "at": "2026-11-06T22:07:14.305Z"
     },
     {
       "name": "reminder-sent",
-      "t": 39.52941225,
-      "at": "2026-11-06T21:36:09.659Z"
+      "t": 42.483939608,
+      "at": "2026-11-06T22:07:16.132Z"
     },
     {
       "name": "reminder-pending",
-      "t": 46.574292902,
-      "at": "2026-11-06T21:36:16.703Z"
+      "t": 49.436728191,
+      "at": "2026-11-06T22:07:23.085Z"
     },
     {
       "name": "reminder-pending-end",
-      "t": 50.586837743000004,
-      "at": "2026-11-06T21:36:20.716Z"
+      "t": 53.465028569000005,
+      "at": "2026-11-06T22:07:27.113Z"
     },
     {
       "name": "reminder-fired",
-      "t": 106.175277934,
-      "at": "2026-11-06T21:37:16.304Z"
+      "t": 109.07719868999999,
+      "at": "2026-11-06T22:08:22.725Z"
     },
     {
       "name": "reminder-answer",
-      "t": 114.13125381100001,
-      "at": "2026-11-06T21:37:24.260Z"
+      "t": 115.061161528,
+      "at": "2026-11-06T22:08:28.709Z"
     },
     {
       "name": "needs-typed",
-      "t": 120.86243174699999,
-      "at": "2026-11-06T21:37:30.992Z"
+      "t": 121.07709103399999,
+      "at": "2026-11-06T22:08:34.725Z"
     },
     {
       "name": "needs-sent",
-      "t": 122.392587861,
-      "at": "2026-11-06T21:37:32.522Z"
+      "t": 122.61442222,
+      "at": "2026-11-06T22:08:36.262Z"
     },
     {
       "name": "needs-blocked",
-      "t": 133.38412234600003,
-      "at": "2026-11-06T21:37:43.513Z"
+      "t": 128.540293233,
+      "at": "2026-11-06T22:08:42.188Z"
     },
     {
       "name": "needs-esc",
-      "t": 138.22189618900003,
-      "at": "2026-11-06T21:37:48.351Z"
+      "t": 133.360998492,
+      "at": "2026-11-06T22:08:47.009Z"
     },
     {
       "name": "needs-cancelled",
-      "t": 138.527406398,
-      "at": "2026-11-06T21:37:48.657Z"
+      "t": 134.174998926,
+      "at": "2026-11-06T22:08:47.823Z"
     },
     {
       "name": "peek-open",
-      "t": 143.92032150300003,
-      "at": "2026-11-06T21:37:54.050Z"
+      "t": 139.91094265499999,
+      "at": "2026-11-06T22:08:53.559Z"
     },
     {
       "name": "peek-typed",
-      "t": 145.63136198200002,
-      "at": "2026-11-06T21:37:55.761Z"
+      "t": 141.585497839,
+      "at": "2026-11-06T22:08:55.233Z"
     },
     {
       "name": "peek-sent",
-      "t": 147.517737047,
-      "at": "2026-11-06T21:37:57.647Z"
+      "t": 143.43839387999998,
+      "at": "2026-11-06T22:08:57.086Z"
     },
     {
       "name": "peek-extra-enter",
-      "t": 159.396954566,
-      "at": "2026-11-06T21:38:09.526Z"
+      "t": 155.30869427599998,
+      "at": "2026-11-06T22:09:08.957Z"
     },
     {
       "name": "peek-reply",
-      "t": 163.157366504,
-      "at": "2026-11-06T21:38:13.287Z"
+      "t": 160.26071597299998,
+      "at": "2026-11-06T22:09:13.909Z"
     }
   ],
   "sourceFrames": [
     {
       "shot": "ask",
-      "outputTime": 3.15,
-      "sourceTime": 4.246,
-      "file": "frames/000061.jpg",
-      "sha256": "8291018b59c2cf0c926be14bcf0ed3264037d86541cf2f222f7aa25687c161a9"
+      "outputTime": 2.9,
+      "sourceTime": 4.736,
+      "file": "frames/000069.jpg",
+      "sha256": "3273a1d490cfac5f0470d3297041f61f05bb7713bfbe459798a6437cb34369b9"
     },
     {
       "shot": "reply",
-      "outputTime": 6.425,
-      "sourceTime": 15.367,
-      "file": "frames/000213.jpg",
-      "sha256": "42a291ef19e797b80584e157c92db6f5101e092b74df681b744282ffca3b0fbf"
+      "outputTime": 6.6,
+      "sourceTime": 18.299,
+      "file": "frames/000271.jpg",
+      "sha256": "a21a7744ae0ded4210d702dd8efabcc15f4516aa386a4357fcd377e47f08f052"
     },
     {
       "shot": "follow-up",
-      "outputTime": 9.625,
-      "sourceTime": 20.975,
-      "file": "frames/000292.jpg",
-      "sha256": "098e7529500315f16e97ccdd48646f8ae9f6a99b9991e8a6ba458758ece126da"
+      "outputTime": 10.3,
+      "sourceTime": 24.219,
+      "file": "frames/000358.jpg",
+      "sha256": "3455d3aef32958c71d898e24539605fbdfd242c314178d930e369034f1905274"
     },
     {
       "shot": "thread reply",
-      "outputTime": 12.775,
-      "sourceTime": 31.394,
-      "file": "frames/000444.jpg",
-      "sha256": "8a7327aa53cae96d99c83df399d80f84a3b07acdeedc340ee90cfe4b4543aa8c"
+      "outputTime": 14.0,
+      "sourceTime": 34.319,
+      "file": "frames/000507.jpg",
+      "sha256": "f8cf0f859983dabe5eba4eaa5daf6c5a52a255f19b49cae31110dcf71b255ae3"
     },
     {
       "shot": "reminder ask",
-      "outputTime": 17.05,
-      "sourceTime": 38.374,
-      "file": "frames/000546.jpg",
-      "sha256": "cb598209810c2527c574630093ae289ac2ca8bf098c279ac691f4bf7f774ea4c"
+      "outputTime": 18.2,
+      "sourceTime": 41.515,
+      "file": "frames/000614.jpg",
+      "sha256": "d8b0185554220f368be531a3d17c073fa6b940bb9eb6d82fa00828c83f17a5c8"
     },
     {
       "shot": "pending",
-      "outputTime": 20.125,
-      "sourceTime": 47.707,
-      "file": "frames/000683.jpg",
-      "sha256": "0485252a9a6b76dfeb39f2467153534025a311c66c6740e9c8609a5c02bc094d"
+      "outputTime": 21.5,
+      "sourceTime": 50.75,
+      "file": "frames/000751.jpg",
+      "sha256": "2e4626087dcf74daf0ea9294667de82608eb68b544a9127eb4d0502520f4c156"
     },
     {
       "shot": "reminder fires",
-      "outputTime": 23.225,
-      "sourceTime": 115.458,
-      "file": "frames/001030.jpg",
-      "sha256": "0629d7f6e13b00bbc0818921ec25974f69cbd1757b6143eeb1cfd2e95ba663c7"
+      "outputTime": 24.625,
+      "sourceTime": 116.412,
+      "file": "frames/001068.jpg",
+      "sha256": "d1f005b20a04bf2b49ae9128f0358c5d94128c298912b69b035f29fdd9627fac"
     },
     {
       "shot": "needs you",
-      "outputTime": 26.425,
-      "sourceTime": 133.876,
-      "file": "frames/001301.jpg",
-      "sha256": "7387daeaf8839c871a8d4461388faf70d69e391e027e5f05ff502de9d1304ee6"
+      "outputTime": 28.05,
+      "sourceTime": 128.813,
+      "file": "frames/001252.jpg",
+      "sha256": "d6d2d039bc75a37273433dbfeb039a539feb49d2b798aad4ec1c9c1940bbb412"
     },
     {
       "shot": "peek input",
-      "outputTime": 30.75,
-      "sourceTime": 146.389,
-      "file": "frames/001480.jpg",
-      "sha256": "18ee4c35fe69779e34678b89e6f11a202876b35ffd4ea7ddb0b68a12621ad194"
+      "outputTime": 32.3,
+      "sourceTime": 142.481,
+      "file": "frames/001451.jpg",
+      "sha256": "70d2c2831d9141278a605cc0bd75217e09bd7fea057df91e3bd735f2d05219eb"
     },
     {
       "shot": "peek reply",
-      "outputTime": 33.975,
-      "sourceTime": 163.929,
-      "file": "frames/001715.jpg",
-      "sha256": "813df2c23f5a5b6c1e5e5905c6ab1464d1000b52372711a311f20c4037dd3bc1"
+      "outputTime": 35.8,
+      "sourceTime": 161.329,
+      "file": "frames/001723.jpg",
+      "sha256": "5ee2cf024968b2551852b175ba1de61ca756e286d1c8fafa6cfe59e17cb05902"
     }
   ],
-  "notes": "Take 3 of round 5. Every app frame is a 2x screenshot of the running page; the spotlight, ring, captions, label and end card are overlays. Codex kept the Live Peek input as a draft, so the take pressed the Peek Enter control once (event peek-extra-enter)."
+  "notes": "Round 6, take 4. Every app frame is a 2x screenshot of the running page, and the agent windows are herdr pane reads with colour taken twice a second. The spotlight, ring, callouts, cards, beams, captions, label and end card are overlays. Codex kept the Live Peek input as a draft, so the take pressed the Peek Enter control once (event peek-extra-enter)."
 }

@@ -1,35 +1,50 @@
-"""Plan the Channels highlight from a take: shots, focal rings, camera, spotlight and captions.
+"""Plan the Channels highlight from a take, on the stage of the Namedrop demo.
 
-Every focal ring is the tight box of real ink inside an element the recorder measured, found
-in the source frame itself. The planner fails when a move, hold, zoom, caption, total length
-or focal text size breaks the storyboard rules."""
+The Channels window stays whole and still on the stage, with the real Codex and Claude Code
+windows beside it. In each shot a spotlight ring marks the focal element, found as the tight
+box of real ink in the source frame, and a callout repeats its key text in large type. Cards
+quote real messages as they travel between Channels and an agent. Every callout and card must
+be text the page or an agent's screen really showed. The planner fails when a hold, a quote,
+the focal text size or the total length breaks the storyboard rules."""
 import argparse
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
+import re
+import shutil
+import subprocess
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFont
 
 from ink import ink_mask, line_caps
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('directory', type=Path, help='take directory with recording/recording.json')
 parser.add_argument('--shotlist', type=Path, help='also write a Markdown shot list here')
+parser.add_argument('--font', type=Path, help='TrueType font for the callouts (default: Liberation Sans Bold)')
 args = parser.parse_args()
 recording = json.loads((args.directory / 'recording/recording.json').read_text())
 events = {event['name']: event for event in recording['events']}
 VIEW_W, VIEW_H = recording['viewport']['width'], recording['viewport']['height']
 DPR = recording['deviceScaleFactor']
 
-# Output is 1920×1080 logical px, rendered at 4/3 to 2560×1440. A caption band sits on top.
-W, H, BAND = 1920, 1080, 110
-SCALE = (H - BAND) / VIEW_H
+# The stage is 1920×1080 logical px, rendered at 4/3 to 2560×1440. World x runs right and
+# y up from the centre; a window at z = 0 maps one world unit to one logical pixel.
+W, H, BAR = 1920, 1080, 38
+APP_SCALE = 1.04
+APP_LEFT, APP_TOP = 36, 176
+COLUMN = (1404, 1886)                       # the agent windows' column, in screen x
+AGENT_TOPS = {'codex': 238, 'claude': 676}  # window top edges, in screen y; plates sit above
+AGENT_ROWS = 21
 README_WIDTH = 900
-MAX_ZOOM, PUSH, MIN_HOLD, FADE = 2.0, 1.2, 2.5, 0.45
+MIN_HOLD, FADE, SPOT_IN = 2.5, 0.45, 0.6
 MIN_CAP_README = 9.5
+CALLOUT_MAIN, CALLOUT_WHO, CALLOUT_PAD, CALLOUT_GAP = 34, 21, 22, 16
+INSTRUCTION_HOLD, REPLY_HOLD = 0.9, 0.7
 DURATION = (30, 40)
-END_SECONDS, END_FADE = 2.8, 0.6
+END_SECONDS = 2.4
+APP = {'x': APP_LEFT, 'y': APP_TOP + BAR * APP_SCALE, 'scale': APP_SCALE}
 
 
 def at(point):
@@ -37,14 +52,14 @@ def at(point):
     return events[name]['t'] + offset
 
 
-def frame_at(t):
-    return min(recording['frames'], key=lambda frame: abs(frame['t'] - t))
+def nearest(items, t):
+    return min(items, key=lambda item: abs(item['t'] - t))
 
 
 def ink_box(rect, t, pad):
     """The padded bounding box, in CSS px, of the ink inside rect, and the smallest cap height
     of its text lines in CSS px, both read from the source frame."""
-    image = Image.open(args.directory / 'recording' / frame_at(t)['file']).convert('L')
+    image = Image.open(args.directory / 'recording' / nearest(recording['frames'], t)['file']).convert('L')
     x0, y0 = max(0, int(rect['x'] * DPR)), max(0, int(rect['y'] * DPR))
     x1 = min(image.width, int((rect['x'] + rect['width']) * DPR))
     y1 = min(image.height, int((rect['y'] + rect['height']) * DPR))
@@ -58,15 +73,92 @@ def ink_box(rect, t, pad):
     return box, min(caps) / DPR
 
 
+SGR = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)')
+
+
+def plain(line):
+    return SGR.sub('', line)
+
+
+def flatten(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from flatten(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from flatten(item)
+
+
+def normalize(text):
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+# What the take really showed: the page text and agent screens the steps returned, and the
+# text of every measured focal element.
+SHOWN = normalize(' '.join(
+    [text for path in sorted((args.directory / 'actions').glob('*.result'))
+     for text in flatten(json.loads(path.read_text()).get('value'))] +
+    [event['focus']['read']['text'] for event in recording['events'] if 'focus' in event]))
+
+# ---------- the agents' real screens ----------
+HOME = recording['profileHome'].rstrip('/')
+PRIVATE = HOME.rsplit('/profiles/', 1)[0]
+
+
+def shorten_home(line):
+    """The profile's home as ~, as docs/demo/prep.py does, including a path Codex cut short."""
+    line = line.replace(HOME, '~')
+    return re.sub('(?:' + '|'.join(re.escape(HOME[:n]) for n in range(len(HOME) - 1, 8, -1)) + ')…', '~…', line)
+
+
+def screen_rows(file):
+    """The rows a window shows: what follows the last delivered request, without its JSON
+    envelope or the testbed's private paths, blank runs squeezed, the newest rows kept."""
+    rows = [shorten_home(line.rstrip('\r')) for line in (args.directory / 'recording' / file).read_text().split('\n')]
+    marks = [i for i, row in enumerate(rows) if 'untrusted_body' in plain(row)]
+    if marks:
+        rows = rows[marks[-1] + 1:]
+    kept = []
+    for row in rows:
+        text = plain(row)
+        if PRIVATE in text or re.search(r'[{}]"|"[{}:,]|"\]', text):
+            continue
+        if not text.strip() and (not kept or not plain(kept[-1]).strip()):
+            continue
+        kept.append(row)
+    while kept and not plain(kept[-1]).strip():
+        kept.pop()
+    return kept[-AGENT_ROWS:]
+
+
+FRAMES = {}
+
+
+def pane_key(alias, t):
+    """The key of the agent's screen at source time t; identical screens share one key."""
+    capture = nearest(recording['panes'], t)
+    rows = screen_rows(capture[alias])
+    for key, frame in FRAMES.items():
+        if key.startswith(alias + '-') and frame['rows'] == rows:
+            return key
+    key = f'{alias}-{capture[alias].split("/")[-1].split("-")[0]}'
+    FRAMES[key] = {'rows': rows, 'cols': max([len(plain(row)) for row in rows] or [1]), 'sourceTime': capture['t']}
+    return key
+
+
 @dataclass
 class Shot:
     name: str
     focus: str                # event whose measured element holds the focal text
     ink: object               # source time of the frame the ring is found in
     segments: list            # (output seconds, source from, source to); the last one is the hold
-    push: float = 0.0         # seconds on the wide view before an eased push-in; 0 is a cut
+    callout: tuple            # (who, text): real on-screen text repeated beside the ring
+    shown: object             # source time from which the callout text is on screen
+    agent: str                # the agent this shot is about
+    cards: tuple = ()         # ('to' | 'from', source time, real message text)
     search: dict = None       # search rectangle in CSS px instead of the event's element
-    max_zoom: float = MAX_ZOOM
     label: str = ''
     pad: float = 12
     plan: dict = field(default_factory=dict)
@@ -74,60 +166,95 @@ class Shot:
 
 SCENES = [
     ('Ask an agent in a channel', [
-        Shot('ask', 'ask-typed', ('ask-typed', 0.2), [(4.5, ('ask-wide', 1.4), ('ask-typed', 1.75))], push=0.6),
-        Shot('reply', 'ask-reply', ('ask-reply', 0.5), [(0.8, ('ask-sent', 0.2), ('ask-reply', -0.2)),
-                                                        (2.6, ('ask-reply', -0.2), ('ask-reply', 2.4))]),
+        Shot('ask', 'ask-typed', ('ask-typed', 0.2),
+             [(1.6, ('ask-wide', 1.4), 'ask-typed'), (2.6, 'ask-typed', ('ask-typed', 1.75))],
+             ('', '@codex Suggest a name for the 1.5 release. One word.'), 'ask-typed', 'codex'),
+        Shot('reply', 'ask-reply', ('ask-reply', 0.5),
+             [(1.0, ('ask-sent', 0.2), ('ask-reply', -0.2)), (2.8, ('ask-reply', -0.2), ('ask-reply', 2.6))],
+             ('@codex', 'Horizon'), 'ask-reply', 'codex',
+             cards=(('to', ('ask-sent', 0.2), 'Suggest a name for the 1.5 release. One word.'),
+                    ('from', 'ask-reply', 'Horizon'))),
     ]),
     ('Follow up in the thread. No @ needed.', [
-        Shot('follow-up', 'followup-typed', ('followup-typed', 0.2), [(3.0, ('followup-open', -0.1), ('followup-sent', -0.05))]),
-        Shot('thread reply', 'followup-reply', ('followup-reply', 0.5), [(0.7, ('followup-sent', 0.2), ('followup-reply', -0.2)),
-                                                                        (2.6, ('followup-reply', -0.2), ('followup-reply', 2.4))]),
+        Shot('follow-up', 'followup-typed', ('followup-typed', 0.2),
+             [(1.0, ('followup-open', -0.1), 'followup-typed'), (2.6, 'followup-typed', ('followup-sent', -0.05))],
+             ('To @codex', 'Two more, please.'), 'followup-typed', 'codex'),
+        Shot('thread reply', 'followup-reply', ('followup-reply', 0.5),
+             [(1.0, ('followup-sent', 0.2), ('followup-reply', -0.2)), (2.8, ('followup-reply', -0.2), ('followup-reply', 2.6))],
+             ('@codex', 'Orbit, Summit'), 'followup-reply', 'codex',
+             cards=(('to', ('followup-sent', 0.2), 'Two more, please.'), ('from', 'followup-reply', 'Orbit, Summit'))),
     ]),
     ('Ask for a reminder in a DM', [
-        Shot('reminder ask', 'reminder-typed', ('reminder-typed', 0.2), [(4.1, 'dm-open', ('reminder-typed', 1.75))], push=0.4),
-        Shot('pending', 'reminder-pending', ('reminder-pending', 0.5), [(0.6, ('reminder-sent', 0.2), ('reminder-pending', -0.1)),
-                                                                       (2.6, ('reminder-pending', -0.1), ('reminder-pending', 2.5))],
+        Shot('reminder ask', 'reminder-typed', ('reminder-typed', 0.2),
+             [(1.5, 'dm-open', 'reminder-typed'), (2.6, 'reminder-typed', ('reminder-typed', 1.75))],
+             ('', 'In 1 minute, remind me here: Tag the release.'), 'reminder-typed', 'claude'),
+        Shot('pending', 'reminder-pending', ('reminder-pending', 0.5),
+             [(0.6, ('reminder-sent', 0.2), ('reminder-pending', -0.1)), (2.8, ('reminder-pending', -0.1), ('reminder-pending', 2.7))],
+             ('Pending reminders', 'Tag the release.'), 'reminder-pending', 'claude',
+             cards=(('to', ('reminder-sent', 0.2), 'In 1 minute, remind me here: Tag the release.'),),
              search={'x': 840, 'y': 40, 'width': 400, 'height': 140}),
-        Shot('reminder fires', 'reminder-answer', ('reminder-answer', 0.5), [(3.0, ('reminder-answer', -0.2), ('reminder-answer', 2.5))],
-             label='1 minute later'),
+        Shot('reminder fires', 'reminder-answer', ('reminder-answer', 0.5),
+             [(3.0, ('reminder-answer', -0.2), ('reminder-answer', 2.5))],
+             ('@claude', 'Reminder: Tag the release.'), 'reminder-answer', 'claude',
+             cards=(('from', 'reminder-answer', 'Reminder: Tag the release.'),), label='1 minute later'),
     ]),
     ('See when an agent needs you', [
-        Shot('needs you', 'needs-blocked', 'needs-blocked', search={'x': 8, 'y': 108, 'width': 231, 'height': 80}, segments=[(0.7, ('needs-sent', 0.3), ('needs-blocked', -0.7)),
-                                                             (2.7, ('needs-blocked', -0.7), ('needs-blocked', 2.0))]),
+        Shot('needs you', 'needs-blocked', 'needs-blocked',
+             [(0.7, ('needs-sent', 0.3), ('needs-blocked', -1.2)), (2.9, ('needs-blocked', -1.2), ('needs-blocked', 1.7))],
+             ('Needs you', '@claude is waiting on an approval or question.'), ('needs-blocked', -1.05), 'claude',
+             cards=(('to', ('needs-sent', 0.3), 'Use Bash to run: touch release-notes.txt'),),
+             search={'x': 8, 'y': 108, 'width': 231, 'height': 80}),
     ]),
     ('Watch an agent live and type to it', [
-        Shot('peek input', 'peek-typed', ('peek-typed', 0.2), [(4.1, 'peek-open', ('peek-typed', 1.8))], push=0.4,
+        Shot('peek input', 'peek-typed', ('peek-typed', 0.2),
+             [(1.5, 'peek-open', 'peek-typed'), (2.6, 'peek-typed', ('peek-typed', 1.8))],
+             ('', 'Name one release risk in five words.'), 'peek-typed', 'codex',
              search={'x': 267, 'y': 585, 'width': 453, 'height': 70}),
-        Shot('peek reply', 'peek-reply', ('peek-reply', 0.5), [(0.9, ('peek-sent', 0.2), ('peek-reply', -0.3)),
-                                                              (2.6, ('peek-reply', -0.3), ('peek-reply', 2.3))],
-             search={'x': 266, 'y': 104, 'width': 998, 'height': 160}, max_zoom=1.5),
+        Shot('peek reply', 'peek-reply', ('peek-reply', 0.5),
+             [(0.8, ('peek-sent', 0.2), ('peek-reply', -0.3)), (2.8, ('peek-reply', -0.3), ('peek-reply', 2.5))],
+             ('@codex', 'Late regressions delay production rollout.'), 'peek-reply', 'codex',
+             cards=(('to', ('peek-sent', 0.2), 'Name one release risk in five words.'),),
+             search={'x': 266, 'y': 104, 'width': 998, 'height': 160}),
     ]),
 ]
 
-
-def framing(ring, max_zoom):
-    """Camera [cx, cy, zoom] in CSS px that fits the ring, clamped to stay inside the app."""
-    fit = min(W / (SCALE * (ring['width'] + 80)), (H - BAND) / (SCALE * (ring['height'] + 60)))
-    zoom = max(1.0, min(max_zoom, fit))
-    half_w, half_h = W / (2 * SCALE * zoom), (H - BAND) / (2 * SCALE * zoom)
-    cx, cy = ring['x'] + ring['width'] / 2, ring['y'] + ring['height'] / 2
-    cx = VIEW_W / 2 if half_w >= VIEW_W / 2 else min(max(cx, half_w), VIEW_W - half_w)
-    cy = VIEW_H / 2 if half_h >= VIEW_H / 2 else min(max(cy, half_h), VIEW_H - half_h)
-    return [cx, cy, zoom], fit
+font_path = args.font or Path(subprocess.run(['fc-match', '-f', '%{file}', 'Liberation Sans:bold'],
+                                             check=True, capture_output=True, text=True).stdout)
+shutil.copyfile(font_path, args.directory / 'callout-font.ttf')
+fonts = {size: ImageFont.truetype(str(font_path), size) for size in (CALLOUT_MAIN, CALLOUT_WHO)}
 
 
-WIDE = [VIEW_W / 2, VIEW_H / 2, 1.0]
-errors, shots, captions, rows = [], [], [], []
+def callout_box(ring, who, text):
+    """The callout in app CSS px: below the ring when it fits, otherwise above."""
+    width = max(fonts[CALLOUT_MAIN].getlength(text), fonts[CALLOUT_WHO].getlength(who) if who else 0) + 2 * CALLOUT_PAD
+    height = 2 * 14 + CALLOUT_MAIN * 1.2 + (CALLOUT_WHO * 1.35 if who else 0)
+    below, above = ring['y'] + ring['height'] + CALLOUT_GAP, ring['y'] - CALLOUT_GAP - height
+    y = below if below + height <= VIEW_H - 8 else above
+    x = min(max(ring['x'] + ring['width'] / 2 - width / 2, 8), VIEW_W - 8 - width)
+    return {'x': round(x, 1), 'y': round(y, 1), 'width': round(width, 1), 'height': round(height, 1)}
+
+
+def output_time(source, s):
+    """The first output time at which the shot shows source time s."""
+    for (t0, s0), (t1, s1) in zip(source, source[1:]):
+        if s0 <= s <= s1:
+            return t0 + (t1 - t0) * ((s - s0) / (s1 - s0) if s1 > s0 else 0)
+    return None
+
+
+main_cap = fonts[CALLOUT_MAIN].getbbox('H')
+CALLOUT_CAP = main_cap[3] - main_cap[1]
+errors, shots, captions, rows, cards = [], [], [], [], []
+schedules = {'codex': [], 'claude': []}
+active = []
 clock = 0.0
 for caption, scene_shots in SCENES:
     scene_start = clock
+    active.append([round(scene_start, 3), scene_shots[0].agent])
     for index, shot in enumerate(scene_shots):
         start, fade = clock, (FADE if shots else 0.0)
         element = events[shot.focus]['focus']
         ring, cap = ink_box(shot.search or element['ring'], at(shot.ink), shot.pad)
-        view, fit = framing(ring, shot.max_zoom)
-        if fit < 1.0:
-            errors.append(f'{shot.name}: the ring is too large to frame at zoom 1')
         source, t = [], start
         for seconds, source_from, source_to in shot.segments:
             s0, s1 = at(source_from), at(source_to)
@@ -139,41 +266,57 @@ for caption, scene_shots in SCENES:
             source.append([t, s1])
         end = t
         hold_seconds, hold_from, hold_to = shot.segments[-1]
-        if shot.push:
-            arrive = start + shot.push + PUSH
-            camera = [[start, WIDE], [start + shot.push, WIDE], [arrive, view], [end, view]]
-            spot = [[start + shot.push + PUSH * 0.4, 0], [arrive, 1], [end, 1]]
-            hold = end - arrive
-        else:
-            arrive = start + fade
-            camera = [[start, view], [end, view]]
-            spot = [[start, 1], [end, 1]]
-            hold = min(end - arrive, hold_seconds)
+        hold = min(end - start - fade, hold_seconds)
         speed = (at(hold_to) - at(hold_from)) / hold_seconds
+        who, text = shot.callout
+        quotes = [who, text] + [quote for _, _, quote in shot.cards]
+        for part in quotes:
+            if part and normalize(part) not in SHOWN:
+                errors.append(f'{shot.name}: "{part}" is not text the take showed')
+        shown = output_time(source, at(shot.shown))
+        if shown is None:
+            errors.append(f'{shot.name}: the callout text is never on screen in this shot')
+            shown = end
+        callout_from = max(shown, start + fade)
         if hold < MIN_HOLD - 1e-6:
-            errors.append(f'{shot.name}: focal hold {hold:.2f}s is shorter than {MIN_HOLD}s')
-        if not 0.85 <= speed <= 1.15:
+            errors.append(f'{shot.name}: hold {hold:.2f}s is shorter than {MIN_HOLD}s')
+        if end - callout_from < MIN_HOLD - 0.3:
+            errors.append(f'{shot.name}: the callout shows for only {end - callout_from:.2f}s')
+        # A still screen may play slower than real time; a moving one may not play faster.
+        if not 0.6 <= speed <= 1.15:
             errors.append(f'{shot.name}: the hold plays at {speed:.2f}x')
-        readme_cap = cap * SCALE * view[2] * README_WIDTH / W
-        if readme_cap < MIN_CAP_README:
-            errors.append(f'{shot.name}: focal cap height {readme_cap:.1f}px at {README_WIDTH}px is under {MIN_CAP_README}')
-        shot.plan = {'zoom': view[2], 'hold': hold, 'capCss': cap, 'domCapCss': element['read'].get('capPx'),
-                     'readmeCap': readme_cap, 'text': element['read']['text']}
+        in_app = cap * APP_SCALE * README_WIDTH / W
+        in_callout = CALLOUT_CAP * APP_SCALE * README_WIDTH / W
+        if max(in_app, in_callout) < MIN_CAP_README:
+            errors.append(f'{shot.name}: focal text is {in_app:.1f}px in the app and {in_callout:.1f}px in the callout at {README_WIDTH}px')
+        for kind, when, quote in shot.cards:
+            t0 = output_time(source, at(when))
+            if t0 is None:
+                errors.append(f'{shot.name}: card "{quote}" is not inside the shot')
+                continue
+            cards.append({'kind': kind, 'agent': shot.agent, 't0': round(t0, 3), 'text': quote,
+                          'hold': INSTRUCTION_HOLD if kind == 'to' else REPLY_HOLD})
+        for alias in schedules:
+            for at_output, at_source in ((start, source[0][1]), (end - hold, at(hold_from))):
+                key = pane_key(alias, at_source)
+                if not schedules[alias] or schedules[alias][-1][1] != key:
+                    schedules[alias].append([round(at_output, 3), key])
+        # The spotlight eases in once; later shots arrive lit, so the dim never pulses between shots.
+        spot = [[0.4, 0], [0.4 + SPOT_IN, 1], [round(end, 3), 1]] if not shots else [[round(start, 3), 1], [round(end, 3), 1]]
+        shot.plan = {'hold': hold, 'speed': speed, 'inApp': in_app, 'inCallout': in_callout,
+                     'callout': (who + ': ' if who else '') + text, 'calloutSeconds': end - callout_from}
         shots.append({'name': shot.name, 'start': round(start, 3), 'end': round(end, 3), 'fade': fade,
                       'source': [[round(a, 3), round(b, 3)] for a, b in source],
-                      'camera': [[round(a, 3), [round(c[0], 2), round(c[1], 2), round(c[2] * SCALE, 4)]] for a, c in camera],
-                      'spot': [[round(a, 3), b] for a, b in spot],
+                      'spot': spot,
                       'ring': {k: round(v, 2) for k, v in ring.items()},
-                      'hold': [round(arrive, 3), round(end, 3)],
-                      'capCss': cap, 'zoom': round(view[2], 4),
+                      'callout': {'who': who, 'text': text, 'from': round(callout_from, 3),
+                                  'box': callout_box(ring, who, text)},
+                      'hold': [round(end - hold, 3), round(end, 3)], 'capCss': cap,
                       **({'label': shot.label} if shot.label else {})})
         rows.append((caption if index == 0 else '', shot, start, end, fade))
         clock = end
     captions.append({'start': round(scene_start, 3), 'end': round(clock, 3), 'text': caption})
 
-last = shots[-1]
-shots.append({'name': 'end card', 'start': round(clock, 3), 'end': round(clock + END_SECONDS, 3), 'fade': END_FADE,
-              'endCard': True, 'source': last['source'][-1:] * 2, 'camera': last['camera'][-1:] * 2, 'spot': [[0, 0]]})
 duration = round(clock + END_SECONDS, 3)
 if not DURATION[0] <= duration <= DURATION[1]:
     errors.append(f'{duration}s is outside {DURATION[0]}-{DURATION[1]}s')
@@ -183,29 +326,38 @@ for caption in captions:
 if errors:
     parser.error('\n'.join(errors))
 
-timeline = {'duration': duration, 'band': BAND, 'scale': SCALE, 'viewport': recording['viewport'],
+(args.directory / 'panes.js').write_text('window.FRAMES = ' + json.dumps(
+    {key: {'rows': frame['rows'], 'cols': frame['cols']} for key, frame in FRAMES.items()}) + ';\n')
+timeline = {'duration': duration, 'end': round(clock, 3), 'viewport': recording['viewport'],
+            'app': {**APP, 'left': APP_LEFT, 'top': APP_TOP, 'bar': BAR},
+            'agents': {alias: {'top': AGENT_TOPS[alias], 'column': COLUMN, 'rows': AGENT_ROWS, 'schedule': schedules[alias]}
+                       for alias in schedules},
+            'active': active, 'cards': cards,
+            'callout': {'font': 'callout-font.ttf', 'main': CALLOUT_MAIN, 'who': CALLOUT_WHO, 'pad': CALLOUT_PAD},
             'shots': shots, 'captions': captions}
 (args.directory / 'timeline.json').write_text(json.dumps(timeline, indent=1) + '\n')
-pushes = sum(1 for _, shot, *_ in rows if shot.push)
-print(f'{len(recording["frames"])} real source frames. {len(shots)} shots, {pushes} push-ins, '
-      f'{len(captions)} captions, {duration:g} seconds planned.')
+print(f'{len(recording["frames"])} real source frames, {len(FRAMES)} real agent screens. {len(shots)} shots, '
+      f'{len(cards)} cards, no camera moves, {len(captions)} captions, {duration:g} seconds planned.')
 for _, shot, *_ in rows:
-    print(f'  {shot.name:<15} zoom {shot.plan["zoom"]:.2f}  hold {shot.plan["hold"]:.1f}s  '
-          f'cap {shot.plan["capCss"]:.1f} CSS px (DOM {shot.plan["domCapCss"] or 0:.1f}) -> {shot.plan["readmeCap"]:.1f} px at {README_WIDTH}')
+    print(f'  {shot.name:<15} hold {shot.plan["hold"]:.1f}s at {shot.plan["speed"]:.2f}x  callout {shot.plan["calloutSeconds"]:.1f}s  '
+          f'cap at {README_WIDTH}: app {shot.plan["inApp"]:.1f}px, callout {shot.plan["inCallout"]:.1f}px')
 
 if args.shotlist:
     lines = ['# Channels highlight shot list', '',
-             'Generated by `docs/demo/channels/motion/plan.py --shotlist`. Times are output seconds. Source is seconds '
-             'into the raw take. Speed is source seconds per output second. Zoom 1 shows the whole app. The cap '
-             'height is that of the smallest focal text line, measured in the source frame, as it appears in a 900 px wide README.', '',
-             '| Caption | Shot | Start | End | Entry | Zoom | Hold | Source | Speed | Cap at 900 px | Focal text |',
-             '|---|---|---:|---:|---|---:|---:|---|---|---:|---|']
+             'Generated by `docs/demo/channels/motion/plan.py --shotlist`. The whole Channels window is on screen in '
+             'every shot and the camera does not move. Times are output seconds. Source is seconds into the raw take. '
+             'Speed is source seconds per output second. Cap heights are at 900 px README width: the smallest focal '
+             'text in the app, measured in the source frame, and the callout text.', '',
+             '| Caption | Shot | Start | End | Entry | Hold | Source | Speed | App cap | Callout cap | Callout (real text) |',
+             '|---|---|---:|---:|---|---:|---|---|---:|---:|---|']
     for caption, shot, start, end, fade in rows:
         speeds = ', '.join(f'{(at(b) - at(a)) / s:.1f}x' for s, a, b in shot.segments)
-        entry = (f'{shot.push:g}s wide, {PUSH:g}s push-in' if shot.push else 'cut') + (f', {fade:g}s dissolve' if fade else '')
-        lines.append(f'| {caption} | {shot.name} | {start:.1f} | {end:.1f} | {entry} | {shot.plan["zoom"]:.2f} '
-                     f'| {shot.plan["hold"]:.1f}s | {at(shot.segments[0][1]):.1f} to {at(shot.segments[-1][2]):.1f} '
-                     f'| {speeds} | {shot.plan["readmeCap"]:.1f} px | {shot.plan["text"][:70]} |')
-    lines.append(f'| | end card | {clock:.1f} | {duration:.1f} | {END_FADE:g}s fade | | | | | | |')
+        entry = f'{fade:g}s dissolve' if fade else 'first shot'
+        lines.append(f'| {caption} | {shot.name} | {start:.1f} | {end:.1f} | {entry} | {shot.plan["hold"]:.1f}s '
+                     f'| {at(shot.segments[0][1]):.1f} to {at(shot.segments[-1][2]):.1f} | {speeds} '
+                     f'| {shot.plan["inApp"]:.1f} px | {shot.plan["inCallout"]:.1f} px | {shot.plan["callout"]} |')
+    lines += [f'| | end card | {clock:.1f} | {duration:.1f} | | | | | | | |', '',
+              '| Card | Agent | Output time | Real message |', '|---|---|---:|---|',
+              *[f'| {"you to agent" if c["kind"] == "to" else "agent to you"} | @{c["agent"]} | {c["t0"]:.1f} | {c["text"]} |' for c in cards]]
     args.shotlist.parent.mkdir(parents=True, exist_ok=True)
     args.shotlist.write_text('\n'.join(lines) + '\n')

@@ -34,6 +34,8 @@ elif operation=='status':
  print(p.herdr('pane','get',agent_pane(extra[0]))['pane'].get('agent_status'))
 elif operation=='screen':
  print(p.run(['herdr','pane','read',agent_pane(extra[0]),'--source','visible']).stdout,end='')
+elif operation=='ansi':
+ print(p.run(['herdr','pane','read',agent_pane(extra[0]),'--source','visible','--ansi']).stdout,end='')
 elif operation=='cancel':
  pane=agent_pane(extra[0])
  if p.herdr('pane','get',pane)['pane'].get('agent_status')!='blocked':
