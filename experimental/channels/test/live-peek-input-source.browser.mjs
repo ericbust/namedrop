@@ -56,11 +56,11 @@ for (const [engine, type] of [
   ["webkit", webkit],
 ]) {
   for (const alias of ["codex", "claude"]) {
-    test(`${engine} ${alias}: Type to agent keeps the same Live Peek through the reply`, {
-      timeout: 60000,
+    const attempts = alias === "codex" ? 10 : 1;
+    test(`${engine} ${alias}: ${attempts} automatic submissions keep the same Live Peek`, {
+      timeout: 180000,
     }, async (t) => {
       await mkdir(output, { recursive: true });
-      const label = `${engine}-${alias}`;
       const browser = await type.launch({
         headless: true,
         ...(engine === "chromium"
@@ -91,65 +91,69 @@ for (const [engine, type] of [
         .click();
       const rows = page.locator(".peek-buffer-visible .xterm-rows > div");
       await rows.first().waitFor();
-      const before = native("source", alias);
-      assert.ok(before.idle, "The real agent has completed its seed turn");
-      await page.screenshot({ path: join(output, `${label}-before.png`) });
-      const marker = `PEEKREPLY${Date.now()}${alias.toUpperCase()}`;
       await page
         .getByRole("button", { name: "Type to agent", exact: true })
         .click();
       const field = page.getByRole("combobox", {
         name: `Message to @${alias}`,
       });
-      await field.fill(`Reply exactly ${marker}. Do not use tools.`);
-      await field.press("Enter");
-      if (alias === "codex") {
-        await page.waitForTimeout(200);
-        await page
-          .getByRole("button", { name: "Send Enter", exact: true })
-          .click();
-      }
-      let after;
-      const deadline = Date.now() + 30000;
-      do {
-        await page.waitForTimeout(300);
-        after = native("source", alias);
-      } while (
-        Date.now() < deadline &&
-        (!after.text
-          .split("\n")
-          .some(
-            (line) => line.includes(marker) && !line.includes("Reply exactly"),
-          ) ||
-          after.idle?.observed_at_ms <= before.idle.observed_at_ms)
-      );
-      await page.waitForTimeout(1500);
-      const text = (await page.locator(".peek").textContent()) ?? "";
-      await page.screenshot({ path: join(output, `${label}-after.png`) });
-      await writeFile(
-        join(output, `${label}.json`),
-        JSON.stringify({ marker, posts, before, after, text }, null, 2),
-      );
-      assert.ok(
-        after.text
-          .split("\n")
-          .some(
+      for (let attempt = 1; attempt <= attempts; attempt++) {
+        const label = `${engine}-${alias}-${attempt}`;
+        const before = native("source", alias);
+        assert.ok(before.idle, "The real agent has completed its seed turn");
+        await page.screenshot({ path: join(output, `${label}-before.png`) });
+        const marker = `AUTO${Date.now()}${attempt}${attempt === 5 ? "Ω" : ""}`;
+        await field.fill(`Reply exactly ${marker}. Do not use tools.`);
+        await field.press("Enter");
+        let after;
+        const deadline = Date.now() + 30000;
+        do {
+          await page.waitForTimeout(300);
+          after = native("source", alias);
+        } while (
+          Date.now() < deadline &&
+          (!after.text
+            .split("\n")
+            .some(
+              (line) =>
+                line.includes(marker) && !line.includes("Reply exactly"),
+            ) ||
+            after.idle?.observed_at_ms <= before.idle.observed_at_ms)
+        );
+        await page.waitForTimeout(1500);
+        const text = (await page.locator(".peek").textContent()) ?? "";
+        await page.screenshot({ path: join(output, `${label}-after.png`) });
+        await writeFile(
+          join(output, `${label}.json`),
+          JSON.stringify({ marker, posts, before, after, text }, null, 2),
+        );
+        assert.ok(
+          after.text
+            .split("\n")
+            .some(
+              (line) =>
+                line.includes(marker) && !line.includes("Reply exactly"),
+            ),
+          "The real agent replied to the browser input",
+        );
+        assert.ok(after.idle.observed_at_ms > before.idle.observed_at_ms);
+        assert.deepEqual(after.binding, before.binding);
+        assert.equal(after.terminal, before.terminal);
+        assert.deepEqual(after.session, before.session);
+        assert.equal(
+          posts.length,
+          attempt,
+          "Exactly one automatic text submission per prompt",
+        );
+        assert.ok(posts.every((status) => status === 204));
+        assert.equal(text.includes("This pane changed"), false);
+        assert.ok(
+          (await rows.allTextContents()).some(
             (line) => line.includes(marker) && !line.includes("Reply exactly"),
           ),
-        "The real agent replied to the browser input",
-      );
-      assert.ok(after.idle.observed_at_ms > before.idle.observed_at_ms);
-      assert.deepEqual(after.binding, before.binding);
-      assert.equal(after.terminal, before.terminal);
-      assert.deepEqual(after.session, before.session);
-      assert.ok(posts.length > 0 && posts.every((status) => status === 204));
-      assert.equal(text.includes("This pane changed"), false);
-      assert.ok(
-        (await rows.allTextContents()).some(
-          (line) => line.includes(marker) && !line.includes("Reply exactly"),
-        ),
-        "The reply is visible in the same Live Peek without reopening",
-      );
+          "The reply is visible in the same Live Peek without reopening",
+        );
+      }
     });
   }
 }
