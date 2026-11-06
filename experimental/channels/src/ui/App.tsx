@@ -170,7 +170,6 @@ function deliveryWords(change: Change | null): string | null {
 export function App() {
   const [poster] = useState(createPoster);
   const [selectedDm, setSelectedDm] = useState(directSelection);
-  const dm = useDirectMessages(selectedDm, poster);
   const [dmPeek, setDmPeek] = useState<PeekTarget | null>(null);
   useEffect(() => {
     if (dmPeek && selectedDm !== `${dmPeek.channel}/${dmPeek.member}`)
@@ -179,6 +178,7 @@ export function App() {
   const [state, dispatch] = useReducer(measuredReduce, undefined, () =>
     bootState({ visible: !document.hidden, route: routeOf(location) }),
   );
+  const dm = useDirectMessages(selectedDm, poster, state.channels);
   const [frameVersion, frameArrived] = useReducer(
     (version: number) => version + 1,
     0,
@@ -769,7 +769,7 @@ export function App() {
         ? {
             alias: dmPeer.alias,
             kind: peeking.kind,
-            activity: dmPeer.presence === "gone" ? "offline" : dmPeer.presence,
+            activity: dmPeer.activity,
             subagents: peekWho(state.channels, peeking)?.subagents ?? [],
             channel: {
               label: `#${dmPeer.workspaceLabel.replace(/^#/, "")}`,

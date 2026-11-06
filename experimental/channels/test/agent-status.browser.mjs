@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { mkdir, readFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 import { createServer as createViteServer } from "vite";
 
@@ -126,12 +126,19 @@ test("one agent has the same status in channel members, DMs and both Peek header
   });
   assert.equal(await chip.locator(".status").textContent(), "Needs you");
   assert.equal(await dm.locator(".row-reason").textContent(), "Needs you");
-  await page.getByText("@claude needs permission", { exact: true }).waitFor();
+  await page
+    .locator(".attention-title", { hasText: "@claude needs permission" })
+    .waitFor();
+  await page.screenshot({
+    path: "/tmp/namedrop-agent-status/status-needs-you.png",
+  });
   await chip.click();
   assert.equal(await page.locator(".peek-presence").textContent(), "Needs you");
   frame.attention = pending("question");
   publish();
-  await page.getByText("@claude needs question", { exact: true }).waitFor();
+  await page
+    .locator(".attention-title", { hasText: "@claude needs question" })
+    .waitFor();
   assert.equal(await chip.locator(".status").textContent(), "Needs you");
   assert.equal(await dm.locator(".row-reason").textContent(), "Needs you");
   assert.equal(await page.locator(".peek-presence").textContent(), "Needs you");
@@ -150,7 +157,7 @@ test("one agent has the same status in channel members, DMs and both Peek header
   assert.equal(await dm.locator(".row-reason").textContent(), "Idle");
   assert.match(await page.locator(".dm-heading").textContent(), /Idle/);
   await page.getByRole("button", { name: "Close screen", exact: true }).click();
-  await page.locator(`.channels-navigation [href="/w/${key}"]`).click();
+  await page.locator(`.channels-navigation [data-channel-key="${key}"]`).click();
   assert.equal(await chip.locator(".status").textContent(), "Idle");
   assert.equal(await dm.locator(".row-reason").textContent(), "Idle");
   await page.screenshot({

@@ -288,7 +288,7 @@ test("private DMs keep duplicate names, replies, drafts and unread separate from
   const b = page.locator(`[data-dm-key="${key(2)}/b"]`);
   assert.match(
     await a.getAttribute("aria-label"),
-    /@claude · #alpha · Pane a · idle/,
+    /@claude · #alpha · Pane a · Idle/,
   );
   assert.match(await b.getAttribute("aria-label"), /@claude · #beta/);
   await a.click();

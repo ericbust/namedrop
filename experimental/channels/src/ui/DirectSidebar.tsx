@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { runtimeName } from "../copy.ts";
+import { presenceWord, runtimeName } from "../copy.ts";
 import {
   type DirectPeer,
   directKey,
@@ -48,8 +48,8 @@ export function DirectSidebar({
           type="button"
           className={`row dm-row${unread ? " unread" : ""}`}
           data-dm-key={key}
-          title={`${label}${peer.paneLabel?.text ? ` · ${peer.paneLabel.text}` : ""} · ${peer.presence}`}
-          aria-label={`${label}${peer.paneLabel?.text ? ` · ${peer.paneLabel.text}` : ""} · ${peer.presence}`}
+          title={`${label}${peer.paneLabel?.text ? ` · ${peer.paneLabel.text}` : ""} · ${presenceWord[peer.activity]}`}
+          aria-label={`${label}${peer.paneLabel?.text ? ` · ${peer.paneLabel.text}` : ""} · ${presenceWord[peer.activity]}`}
           aria-current={selected === key ? "page" : undefined}
           onClick={() => onSelect(peer)}
         >
@@ -66,7 +66,7 @@ export function DirectSidebar({
               {peer.paneLabel?.text
                 ? `${peer.paneLabel.text}${peer.paneLabel.truncated ? "…" : ""} · `
                 : ""}
-              {peer.presence}
+              {presenceWord[peer.activity]}
             </span>
           </span>
           {peer.attentionCount > 0 ? (
