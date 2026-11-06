@@ -182,6 +182,22 @@ fn configure_history(f: &Fixture, text: &str) {
     .unwrap();
 }
 
+fn record_fresh_idle(f: &Fixture) {
+    assert_eq!(
+        f.db()
+            .execute(
+                "INSERT INTO agent_session_observations
+                 SELECT session_socket_id, worktree_id, observation_id || '-fresh-idle',
+                        address_id, agent_session_id, 'idle', observed_at_ms + 1
+                 FROM agent_session_observations WHERE address_id = ?1
+                 ORDER BY observed_at_ms DESC, rowid DESC LIMIT 1",
+                [xws::address_id("w1", "lead")],
+            )
+            .unwrap(),
+        1
+    );
+}
+
 fn history_invocations(f: &Fixture) -> Vec<Value> {
     fs::read_to_string(f.root.join("history-reads.jsonl"))
         .unwrap_or_default()
@@ -271,6 +287,9 @@ if args[:3]==['terminal','session','observe']:
     if config.get('source_cols') and cols>=200 and rows>=70:payload+=b'\x1b[70;190HRIGHT-EDGE'
     frames=config.get('frames',[{'type':'terminal.frame','encoding':'ansi','full':True,'width':cols,'height':rows,'seq':1,'bytes':base64.b64encode(payload).decode()}])
     for frame in frames: print(json.dumps(frame),flush=True)
+    if config.get('reply_gate'):
+        while not os.path.exists(os.path.join(root,config['reply_gate'])):time.sleep(.01)
+        print(json.dumps({'type':'terminal.frame','encoding':'ansi','full':False,'width':cols,'height':rows,'seq':len(frames)+1,'bytes':base64.b64encode(b'AGENT-REPLY').decode()}),flush=True)
     if config.get('flood'):
         seq=len(frames)
         payload=base64.b64encode(b'\x1b[H'+b'X'*60000).decode()
@@ -292,6 +311,9 @@ if args[:2]==['pane','read']:
 if args[:2] in [['pane','send-text'],['pane','send-keys']]:
     with open(os.path.join(root,'reads.jsonl'),'a') as log:
         log.write(json.dumps({'args':args,'socket':os.environ.get('HERDR_SOCKET_PATH')})+'\n')
+    config=json.load(open(os.path.join(root,'observer.json')))
+    if args[:2]==['pane','send-text'] and config.get('send_text_gate'):
+        while not os.path.exists(os.path.join(root,config['send_text_gate'])):time.sleep(.01)
     sys.exit(0)
 if args[:2]==['pane','process-info']:
     with open(os.path.join(root,'geometry-reads.jsonl'),'a') as log:
@@ -1046,6 +1068,81 @@ fn first_paint_rechecks_rows_and_retries_before_http_headers() {
 }
 
 #[test]
+fn fresh_idle_before_first_paint_preserves_live_continuity() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    configure(&f, json!({"gate":"first-paint"}));
+    let response = thread::scope(|scope| {
+        let request = scope.spawn(|| server.get(&path("socket-a", "w1", "lead")));
+        wait_for(|| invocations(&f).len() == 1);
+        record_fresh_idle(&f);
+        fs::write(f.root.join("first-paint"), "").unwrap();
+        request.join().unwrap()
+    });
+    assert_eq!(response.status, 200);
+    let reset: Value = serde_json::from_str(response.body.lines().next().unwrap()).unwrap();
+    assert_eq!(reset["kind"], "reset");
+    assert_eq!(
+        reset["continuity"],
+        live_continuity(&server, &path("socket-a", "w1", "lead"))
+    );
+}
+
+#[test]
+fn fresh_idle_during_stream_preserves_reply_history_and_input() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    configure(&f, json!({"quiet":true,"reply_gate":"agent-reply"}));
+    configure_history(&f, "earlier history\n");
+    let mut live = server.live(&path("socket-a", "w1", "lead"));
+    let reset = live.record().unwrap();
+    let continuity = reset["continuity"].clone();
+    assert_eq!(live.record().unwrap()["text"], "earlier history");
+    record_fresh_idle(&f);
+    configure_history(&f, "earlier history\nAGENT-REPLY\n");
+    fs::write(f.root.join("agent-reply"), "").unwrap();
+    let mut reply = false;
+    let mut history = false;
+    let mut seq = 2;
+    while !reply || !history {
+        let event = live.record().unwrap();
+        seq += 1;
+        assert_eq!(event["seq"], seq);
+        match event["kind"].as_str() {
+            Some("data") => {
+                assert_eq!(event["bytes"], "QUdFTlQtUkVQTFk=");
+                reply = true;
+            }
+            Some("history") => {
+                assert_eq!(event["text"], "earlier history\nAGENT-REPLY");
+                history = true;
+            }
+            _ => panic!("idle refresh interrupted live output: {event}"),
+        }
+    }
+    assert_eq!(
+        post_input(
+            &server,
+            &input_path("socket-a", "w1", "lead"),
+            &json!({"kind":"text","text":"continue","continuity":continuity})
+        )
+        .status,
+        204
+    );
+    assert_eq!(
+        server
+            .live(&format!(
+                "{}?continuity={}",
+                path("socket-a", "w1", "lead"),
+                continuity.as_str().unwrap()
+            ))
+            .record()
+            .unwrap()["continuity"],
+        continuity
+    );
+}
+
+#[test]
 fn initial_row_retry_keeps_original_startup_deadline() {
     let f = Fixture::new();
     let server = Server::start(&f);
@@ -1262,6 +1359,63 @@ fn input_sends_text_then_enter_and_allowlisted_keys() {
         ]
     );
     assert!(sends.iter().all(|call| call["socket"] == "socket-a"));
+}
+
+#[test]
+fn input_revalidation_allows_fresh_idle_but_refuses_replacement() {
+    for change in ["idle", "binding", "session", "terminal"] {
+        let f = Fixture::new();
+        let server = Server::start(&f);
+        let continuity = live_continuity(&server, &path("socket-a", "w1", "lead"));
+        configure(&f, json!({"send_text_gate":"finish-send"}));
+        let response = thread::scope(|scope| {
+            let request = scope.spawn(|| {
+                post_input(
+                    &server,
+                    &input_path("socket-a", "w1", "lead"),
+                    &json!({"kind":"text","text":"continue","continuity":continuity}),
+                )
+            });
+            wait_for(|| {
+                invocations(&f)
+                    .iter()
+                    .any(|call| call["args"][1] == "send-text")
+            });
+            match change {
+                "idle" => record_fresh_idle(&f),
+                "binding" => {
+                    f.db().execute("UPDATE pane_bindings SET binding_id = 'replacement' WHERE address_id = ?1", [xws::address_id("w1", "lead")]).unwrap();
+                }
+                "session" => {
+                    f.db().execute("UPDATE agent_session_observations SET agent_session_id = 'replacement' WHERE address_id = ?1", [xws::address_id("w1", "lead")]).unwrap();
+                }
+                "terminal" => {
+                    let file = f.root.join("responses.json");
+                    let mut responses: Value =
+                        serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+                    let mut panes: Value = serde_json::from_str(
+                        responses["pane list --workspace w1"].as_str().unwrap(),
+                    )
+                    .unwrap();
+                    panes["result"]["panes"][0]["terminal_id"] = json!("replacement");
+                    responses["pane list --workspace w1"] = json!(panes.to_string());
+                    fs::write(file, responses.to_string()).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            fs::write(f.root.join("finish-send"), "").unwrap();
+            request.join().unwrap()
+        });
+        assert_eq!(
+            response.status,
+            if change == "idle" { 204 } else { 410 },
+            "{change}"
+        );
+        let enter_sent = invocations(&f)
+            .iter()
+            .any(|call| call["args"][1] == "send-keys");
+        assert_eq!(enter_sent, change == "idle", "{change}");
+    }
 }
 
 #[test]
