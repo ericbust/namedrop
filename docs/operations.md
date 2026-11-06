@@ -145,7 +145,35 @@ Channels is the browser page that `namedrop channels` serves. It shows each Herd
 
 The URL has the form `http://127.0.0.1:<port>/w/<key>`, where the key is a hash of the Herdr socket and workspace id. The URL stays the same across server restarts, so you can bookmark it. The printed link carries a one-shot `?n=<nonce>` that expires after 10 minutes. The first visit exchanges it for a session cookie and redirects to the clean URL, so the link in your terminal and browser history opens nothing later. Redemption removes only the nonce parameter. Other query parameters, such as `view=activity`, and the browser fragment survive the redirect. Run `namedrop channels` again for a fresh link. `http://127.0.0.1:<port>/` lists the activated workspaces by label.
 
-The first `namedrop channels` call starts one background server for your state directory. Later calls from any workspace reuse it and report `"server": "running"`. The server listens on 127.0.0.1 only. It rejects requests whose `Host` is not that address or `localhost`, and pages without the session cookie return 401. The server keeps two secrets with mode 0600. `<state>/dashboard/token` is shared only by the CLI and the server, and never reaches a browser. `<state>/dashboard/session` is the browser cookie. It survives an upgrade handoff, so open tabs reconnect, and rotates when the server stops for idleness, so a tab left open never presents a live cookie to whatever binds the port next. Delete either file to rotate it. Every page sends a strict Content-Security-Policy, and the page inserts collaborator text as text, never as markup.
+The first `namedrop channels` call starts one background server for your state directory. Later calls from any workspace reuse it and report `"server": "running"`. The server listens on 127.0.0.1 only. By default, it rejects requests whose `Host` is not that address or `localhost`, and pages without the session cookie return 401. The tailnet option below permits one recorded HTTPS host with an owner identity check. The server keeps two secrets with mode 0600. `<state>/dashboard/token` is shared only by the CLI and the server, and never reaches a browser. `<state>/dashboard/session` is the browser cookie. It survives an upgrade handoff, so open tabs reconnect, and rotates when the server stops for idleness, so a tab left open never presents a live cookie to whatever binds the port next. Delete either file to rotate it. Every page sends a strict Content-Security-Policy, and the page inserts collaborator text as text, never as markup.
+
+### Open Channels from your tailnet
+
+On the Channels machine, sign in to Tailscale as your own user and enable HTTPS for your tailnet. In a workspace shell tab, run:
+
+```sh
+namedrop channels --tailscale --no-open
+```
+
+Open the printed one-time `https://<machine>.<tailnet>.ts.net[:port]/w/<key>?n=<nonce>` link on your phone or Mac, signed in to Tailscale as the same user. The link exchanges its nonce for an HttpOnly, SameSite=Strict, Secure session cookie. Later requests still need that session. Posting and pane input still need the session's CSRF token. Event streams, Live Peek, posting, threads, DMs, and reminder Cancel use the same HTTPS origin.
+
+Namedrop runs `tailscale status --json` to find the machine's MagicDNS name and owner's login, then inspects `tailscale serve status --json`. It creates a background HTTPS proxy to the Channels loopback port. If 443 is occupied, it selects another unused HTTPS port. It records its handler in `<state>/dashboard/tailscale.json` and never adopts an unrecorded handler, even if it points at Channels. It refuses to change unfamiliar configuration or a Funnel-enabled owned port. It never runs Funnel or resets the Serve configuration.
+
+The listener stays on `127.0.0.1`. For the recorded tailnet Host, every request must carry the owner's exact `Tailscale-User-Login`. A supplied Origin must match the recorded HTTPS origin. Requests carrying proxy headers cannot use a loopback Host to bypass this check. [Tailscale Serve removes caller-supplied identity headers and inserts the requester's identity](https://tailscale.com/docs/features/tailscale-serve#identity-headers). This includes shared-device users, whose different login Channels rejects. Tagged devices have no user header and cannot sign in. The one-time link alone cannot grant another tailnet user access. Local processes on the server remain trusted because they can connect directly to loopback and supply headers themselves.
+
+**Type to agent** from your phone sends real input to the agent's pane. The ordinary `namedrop channels` command and Herdr action still open the local page. Run the tailnet command again for a fresh remote link.
+
+While Namedrop owns a Serve handler, Channels requires its recorded backend port on restart. If another process occupies it, startup fails instead of moving the server and leaving the proxy pointed at a different service. Doctor reports the tailnet URL and flags a missing, changed, or stale proxy target. Concurrent external Serve edits are not transactional with Namedrop's CLI operations. Resolve reported conflicts before retrying.
+
+To revoke tailnet access and remove only Namedrop's unchanged handler, run:
+
+```sh
+namedrop channels --tailscale off
+```
+
+Namedrop disables admission before attempting removal and closes existing tailnet event and Live Peek streams when they next check access. If someone changed its handler, it leaves that configuration alone and reports the conflict. Local access remains available.
+
+### Custom Channels app
 
 Pass `--ui <dir>` to serve a custom browser app in place of the embedded Channels app, for example `namedrop channels --no-open --ui ./dist`. The directory must exist, permit both reading and searching, and have a valid UTF-8 path. Ancestors need only search permission. Invalid permissions fail immediately with the directory path. Its `index.html` serves both the workspace URL and `/`, with the same session cookie and security headers as the embedded Channels app. Other files in the directory are public assets served by path, so keep private files elsewhere. Any path component starting with `.` returns 404. Hard links are served like regular files; aliases of `index.html` require the session cookie. Pages and APIs require the session cookie. Missing files return 404 with no embedded fallback, and each request opens the current directory and file, including after the directory is deleted and rebuilt or renamed and replaced. A replacement symlink at the configured path or any ancestor, and all descendant symlinks, return 404. File responses stream in bounded chunks and close stalled writes after one second. Inline scripts remain blocked by the Content-Security-Policy.
 
