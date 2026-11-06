@@ -113,3 +113,7 @@ and the asset size limits. It reads animated WebP frame durations directly.
 
 Run `CHROME=/path/to/chromium node channels/check-scene.mjs /path/to/preview-frames`
 to render each beat and check that seeking back reproduces the overview.
+
+The [continuous recording pipeline](channels/motion/README.md) is the round-two
+rehearsal. It records the whole app and eases a camera over the live recording.
+The final capture waits for the coordinator's exp.17 SHA.
