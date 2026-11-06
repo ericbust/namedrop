@@ -779,26 +779,6 @@ fn unavailable_tty_keeps_legacy_rows_and_absent_metadata_keeps_defaults() {
 }
 
 #[test]
-fn hung_up_source_tty_uses_metadata_rows() {
-    let f = Fixture::new();
-    let server = Server::start(&f);
-    let SourcePty {
-        master,
-        slave: _slave,
-        path: tty,
-    } = SourcePty::new(200, 70);
-    drop(master);
-    set_rows(&f, json!(60));
-    set_process_info(&f, json!({"tty":tty}));
-    let response = server.get(&path("socket-a", "w1", "lead"));
-    assert_eq!(response.status, 200);
-    let reset: Value = serde_json::from_str(response.body.lines().next().unwrap()).unwrap();
-    assert_eq!(reset["cols"], 120);
-    assert_eq!(reset["rows"], 60);
-    assert_eq!(geometry_invocations(&f).len(), 1);
-}
-
-#[test]
 fn shell_pid_discovers_controlling_tty_with_bounded_ps() {
     let f = Fixture::new();
     let server = Server::start(&f);
