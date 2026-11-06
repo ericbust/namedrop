@@ -1027,6 +1027,118 @@ mod tests {
     }
 
     #[test]
+    fn acknowledged_direct_message_permission_status_is_public_without_private_context() {
+        use crate::dashboard::snapshot::{
+            Activity, AttentionResponse, AttentionSourceKind, SpaceHealth, build,
+        };
+
+        let mut f = Fixture::new();
+        let private_body = "Private request requiring Bash permission";
+        let root = f.send("dm-permission", private_body);
+        let session = crate::AgentSessionId::new("session-peer");
+        let attempt = crate::DeliveryAttemptId::new("dm-permission-attempt");
+        f.store
+            .transaction(|tx| {
+                tx.observe_agent_session(&f.ns, "initial-peer", &f.peer, &session, "idle", &f.at)?;
+                let leased = tx.lease_mailbox_head(
+                    &f.ns,
+                    &f.peer,
+                    &crate::LeaseDraft {
+                        attempt_id: attempt.clone(),
+                        binding_id: PaneBindingId::new("binding-peer"),
+                        agent_session_id: session.clone(),
+                        retry_of_attempt_id: None,
+                        owner: "test".to_owned(),
+                        acquired_at_ms: 2,
+                        expires_at_ms: 1000,
+                    },
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 2),
+                )?;
+                assert!(leased.is_some());
+                tx.transition_delivery_attempt(
+                    &f.ns,
+                    &attempt,
+                    crate::DeliveryState::Submitted,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 3),
+                )?;
+                tx.ensure_delivery_attempt_acknowledged(
+                    &f.ns,
+                    &attempt,
+                    &session,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 4),
+                )?;
+                assert_eq!(
+                    tx.delivery_attempt_state(&f.ns, &attempt)?,
+                    crate::DeliveryState::Acknowledged
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        for (status, at_ms, activity, health) in [
+            (
+                "blocked",
+                10,
+                Activity::Blocked,
+                SpaceHealth::NeedsYou { items: 1 },
+            ),
+            ("idle", 20, Activity::Idle, SpaceHealth::Calm),
+        ] {
+            f.store
+                .transaction(|tx| {
+                    tx.observe_agent_session(
+                        &f.ns,
+                        &format!("peer-{status}"),
+                        &f.peer,
+                        &session,
+                        status,
+                        &MutationAttribution::new(ActorKind::Plugin, "test", at_ms),
+                    )
+                })
+                .unwrap();
+            let rows = f.store.dashboard_rows(&f.ns).unwrap();
+            assert!(rows.messages.is_empty());
+            assert!(rows.threads.is_empty());
+            assert!(rows.mailbox.is_empty());
+            let snapshot = build(&rows, None, at_ms as i64);
+            let wire = serde_json::to_string(&snapshot).unwrap();
+            for private in [
+                private_body,
+                root.receipt.message_id.as_str(),
+                root.receipt.thread_id.as_str(),
+            ] {
+                assert!(
+                    !wire.contains(private),
+                    "private DM context leaked: {private}"
+                );
+            }
+            let member = snapshot
+                .participants
+                .iter()
+                .find(|member| member.address_id == f.peer.as_str())
+                .unwrap();
+            assert!(member.mailbox.is_empty());
+            assert_eq!(member.activity, activity, "DM peer observed as {status}");
+            assert_eq!(snapshot.health, health);
+            if status == "blocked" {
+                assert_eq!(snapshot.attention.len(), 1);
+                let attention = &snapshot.attention[0];
+                assert_eq!(attention.source_kind, AttentionSourceKind::AgentStatus);
+                assert_eq!(attention.opened_at_ms, 10);
+                assert!(matches!(
+                    &attention.response,
+                    AttentionResponse::Pane { address_id } if address_id == f.peer.as_str()
+                ));
+                assert!(attention.message_id.is_none());
+                assert!(attention.thread_id.is_none());
+                assert!(attention.conversation.is_none());
+            } else {
+                assert!(snapshot.attention.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn direct_message_delivery_attention_belongs_to_the_private_peer() {
         let mut f = Fixture::new();
         f.send("dm-attention", "Private request");

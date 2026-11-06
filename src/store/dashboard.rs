@@ -960,7 +960,7 @@ impl StateTransaction<'_> {
                     bound: row.get(6)?,
                     occupied: row.get(7)?,
                     agent_status: row.get(8)?,
-                    blocked_since_ms: if row.get::<_,Option<String>>(10)?.is_some() && row.get::<_,Option<String>>(12)?.is_none() { None } else { row.get(9)? },
+                    blocked_since_ms: row.get(9)?,
                     blocked_message_id: if row.get::<_,Option<String>>(12)?.is_some() { row.get(10)? } else { None },
                     blocked_conversation: match row.get::<_, Option<String>>(12)? {
                         Some(thread_id) => Some(ConversationRow { thread_id, message_id: row.get(10)? }),
