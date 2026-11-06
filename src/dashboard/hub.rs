@@ -1085,7 +1085,10 @@ impl Hub<'_> {
                     if !matches!(participant.kind, snapshot::ParticipantKind::Agent { .. }) {
                         continue;
                     }
-                    let Ok(crate::store::dashboard::LiveMember::Bound(binding)) = self
+                    let Ok(crate::store::dashboard::LiveMember::Bound {
+                        binding,
+                        idle_at_ms: parent_idle_at_ms,
+                    }) = self
                         .store
                         .as_mut()?
                         .dashboard_live_member(key, &participant.address_id)
@@ -1107,7 +1110,7 @@ impl Hub<'_> {
                         self.files.state(),
                         &parent,
                         now,
-                        binding.idle_at_ms,
+                        parent_idle_at_ms,
                     )
                     .into_iter()
                     .map(|run| {

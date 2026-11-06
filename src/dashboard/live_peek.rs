@@ -482,7 +482,7 @@ fn recorded(store: &mut StateStore, key: &SpaceKey, address: &str) -> Result<Liv
     {
         LiveMember::Missing => Err(Status::NotFound),
         LiveMember::Gone => Err(Status::Gone),
-        LiveMember::Bound(binding) => Ok(binding),
+        LiveMember::Bound { binding, .. } => Ok(binding),
     }
 }
 
