@@ -2,6 +2,13 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.5.0-exp.16] - 2026-11-06
+
+### Fixed
+
+- Live Peek shows the whole terminal in tall and wide panes. It previously showed only the top 40 rows and first 120 columns, which could hide the agent's prompt on a Mac.
+- Live Peek keeps working with older Herdr builds.
+
 ## [1.5.0-exp.15] - 2026-11-06
 
 ### Fixed
