@@ -260,9 +260,9 @@ impl Cli {
         matches!(self.command, Command::DashboardServer { .. })
     }
 
-    pub fn dashboard_observer_terminal(&self) -> Option<&str> {
+    pub fn dashboard_observer(&self) -> Option<(&str, Option<u16>)> {
         match &self.command {
-            Command::DashboardObserverGuard { terminal } => Some(terminal),
+            Command::DashboardObserverGuard { terminal, rows } => Some((terminal, *rows)),
             _ => None,
         }
     }
@@ -372,7 +372,11 @@ enum Command {
         inherit_claim: bool,
     },
     #[command(hide = true)]
-    DashboardObserverGuard { terminal: String },
+    DashboardObserverGuard {
+        terminal: String,
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..=256))]
+        rows: Option<u16>,
+    },
     /// Runtime hooks installed for supported agents.
     #[command(hide = true)]
     Hook {

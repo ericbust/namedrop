@@ -168,8 +168,8 @@ fn main() -> ExitCode {
         stop_hook::run_worker(state_directory);
         return ExitCode::SUCCESS;
     }
-    if let Some(terminal) = cli.dashboard_observer_terminal() {
-        return namedrop::dashboard::run_observer_guard(terminal);
+    if let Some((terminal, rows)) = cli.dashboard_observer() {
+        return namedrop::dashboard::run_observer_guard(terminal, rows);
     }
     let selected_state = cli
         .runtime

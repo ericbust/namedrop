@@ -47,6 +47,22 @@ fn configure(f: &Fixture, response: Value) {
     fs::rename(temporary, f.root.join("observer.json")).unwrap();
 }
 
+fn metadata_with_rows(f: &Fixture, rows: Value) -> Value {
+    let mut responses: Value =
+        serde_json::from_slice(&fs::read(f.root.join("responses.json")).unwrap()).unwrap();
+    let mut panes: Value =
+        serde_json::from_str(responses["pane list --workspace w1"].as_str().unwrap()).unwrap();
+    panes["result"]["panes"][0]["scroll"] = json!({"viewport_rows": rows});
+    responses["pane list --workspace w1"] = json!(panes.to_string());
+    responses
+}
+
+fn set_rows(f: &Fixture, rows: Value) {
+    let temporary = f.root.join("responses-next.json");
+    fs::write(&temporary, metadata_with_rows(f, rows).to_string()).unwrap();
+    fs::rename(temporary, f.root.join("responses.json")).unwrap();
+}
+
 fn configure_history(f: &Fixture, text: &str) {
     fs::write(
         f.root.join("history.json"),
@@ -115,15 +131,21 @@ if args[:3]==['terminal','session','observe']:
     if config.get('exit') is not None:
         os.write(1,config.get('stdout','').encode())
         sys.exit(config['exit'])
+    rows=int(args[args.index('--rows')+1]) if '--rows' in args else 40
+    if config.get('gate_rows') and rows in config['gate_rows']:
+        while True:time.sleep(.01)
     if config.get('gate'):
         while not os.path.exists(os.path.join(root,config['gate'])):time.sleep(.01)
+    time.sleep(config.get('delay_rows',{}).get(str(rows),0))
     if config.get('mutate_metadata'):
         json.dump(config['mutate_metadata'],open(os.path.join(root,'responses.json'),'w'))
     if config.get('raw') is not None:
         os.write(1,config['raw'].encode());sys.exit(0)
     if config.get('oversize'):
         os.write(1,b'x'*(2*1024*1024+1));time.sleep(120)
-    frames=config.get('frames',[{'type':'terminal.frame','encoding':'ansi','full':True,'width':120,'height':40,'seq':1,'bytes':base64.b64encode(b'\x1b[2J\x1b[HSAFE-INITIAL').decode()}])
+    payload=b'\x1b[2J\x1b[HSAFE-INITIAL'
+    if config.get('source_rows') and rows>=60:payload+=b'\x1b[60;1HBOTTOM-PROMPT'
+    frames=config.get('frames',[{'type':'terminal.frame','encoding':'ansi','full':True,'width':120,'height':rows,'seq':1,'bytes':base64.b64encode(payload).decode()}])
     for frame in frames: print(json.dumps(frame),flush=True)
     if config.get('flood'):
         seq=len(frames)
@@ -340,6 +362,244 @@ fn post_input(server: &Server, target: &str, body: &Value) -> Response {
         &body.to_string(),
         &[("Cookie", &server.cookie), ("X-Namedrop-Csrf", &csrf)],
     )
+}
+
+#[test]
+fn source_rows_include_bottom_prompt_and_keep_observation_passive() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    set_rows(&f, json!(60));
+    configure(&f, json!({"source_rows":true}));
+    let response = server.get(&path("socket-a", "w1", "lead"));
+    assert_eq!(response.status, 200);
+    let reset: Value = serde_json::from_str(response.body.lines().next().unwrap()).unwrap();
+    assert_eq!(reset["rows"], 60);
+    assert_eq!(reset["cols"], 120);
+    assert_eq!(
+        reset["bytes"],
+        "G1syShtbSFNBRkUtSU5JVElBTBtbNjA7MUhCT1RUT00tUFJPTVBU"
+    );
+    let call = invocations(&f).remove(0);
+    assert_eq!(
+        call["args"],
+        json!([
+            "terminal",
+            "session",
+            "observe",
+            "t-pane-1-lead",
+            "--rows",
+            "60"
+        ])
+    );
+    assert_eq!(call["stdin_null"], true);
+    assert!(call["pane"].is_null() && call["workspace"].is_null());
+}
+
+#[test]
+fn same_identity_row_changes_preserve_stream_continuity_input_and_history() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    set_rows(&f, json!(40));
+    configure(&f, json!({"quiet":true,"source_rows":true,"child":true}));
+    configure_history(&f, "earlier history\n");
+    let mut live = server.live(&path("socket-a", "w1", "lead"));
+    let reset = live.record().unwrap();
+    let continuity = reset["continuity"].clone();
+    let initial_history = live.record().unwrap();
+    assert_eq!(initial_history["kind"], "history");
+    assert_eq!(initial_history["seq"], 2);
+    let mut seq = 2;
+    for rows in [60, 20] {
+        set_rows(&f, json!(rows));
+        let event = live.record().unwrap();
+        assert_eq!(event["kind"], "reset");
+        assert_eq!(event["rows"], rows);
+        assert_eq!(event["continuity"], continuity);
+        seq += 1;
+        assert_eq!(event["seq"], seq);
+        assert_eq!(
+            post_input(
+                &server,
+                &input_path("socket-a", "w1", "lead"),
+                &json!({"kind":"key","key":"Enter","continuity":continuity})
+            )
+            .status,
+            204
+        );
+    }
+    configure_history(&f, "history survives both resizes\n");
+    let event = live.record().unwrap();
+    assert_eq!(event["kind"], "history");
+    assert_eq!(event["seq"], seq + 1);
+    assert_eq!(event["text"], "history survives both resizes");
+    let calls: Vec<_> = invocations(&f)
+        .into_iter()
+        .filter(|call| call["args"][0] == "terminal")
+        .collect();
+    assert_eq!(calls.len(), 3);
+    for call in &calls[..2] {
+        wait_for(|| stopped(call["pid"].as_u64().unwrap()));
+        wait_for(|| stopped(call["child"].as_u64().unwrap()));
+    }
+    drop(live);
+    wait_for(|| stopped(calls[2]["pid"].as_u64().unwrap()));
+    wait_for(|| stopped(calls[2]["child"].as_u64().unwrap()));
+}
+
+#[test]
+fn first_paint_rechecks_rows_and_retries_before_http_headers() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    set_rows(&f, json!(40));
+    let changed = metadata_with_rows(&f, json!(60));
+    configure(&f, json!({"source_rows":true,"mutate_metadata":changed}));
+    let response = server.get(&path("socket-a", "w1", "lead"));
+    assert_eq!(response.status, 200);
+    let reset: Value = serde_json::from_str(response.body.lines().next().unwrap()).unwrap();
+    assert_eq!(reset["rows"], 60);
+    assert_eq!(reset["seq"], 1);
+    assert_eq!(invocations(&f).len(), 2);
+}
+
+#[test]
+fn initial_row_retry_keeps_original_startup_deadline() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    set_rows(&f, json!(40));
+    let changed = metadata_with_rows(&f, json!(60));
+    configure(
+        &f,
+        json!({"mutate_metadata":changed,"gate_rows":[60],"delay_rows":{"40":2},"child":true}),
+    );
+    let started = Instant::now();
+    assert_eq!(server.get(&path("socket-a", "w1", "lead")).status, 503);
+    assert!(started.elapsed() < Duration::from_secs(7));
+    assert_eq!(invocations(&f).len(), 2);
+    for call in invocations(&f) {
+        wait_for(|| stopped(call["pid"].as_u64().unwrap()));
+        wait_for(|| stopped(call["child"].as_u64().unwrap()));
+    }
+}
+
+#[test]
+fn invalid_source_rows_fail_live_without_revoking_input_continuity() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let p = path("socket-a", "w1", "lead");
+    let continuity = live_continuity(&server, &p);
+    let before = invocations(&f).len();
+    for rows in [
+        json!(0),
+        json!(-1),
+        json!(257),
+        json!("60"),
+        json!(60.5),
+        Value::Null,
+    ] {
+        set_rows(&f, rows);
+        assert_eq!(server.get(&p).status, 503);
+    }
+    assert_eq!(invocations(&f).len(), before);
+    assert_eq!(
+        post_input(
+            &server,
+            &input_path("socket-a", "w1", "lead"),
+            &json!({"kind":"key","key":"Enter","continuity":continuity})
+        )
+        .status,
+        204
+    );
+}
+
+#[test]
+fn malformed_reobservation_ends_stream_and_reaps_both_observer_groups() {
+    for config in [
+        json!({"raw":"{broken\n","child":true}),
+        json!({"frames":[{"type":"terminal.frame","encoding":"ansi","full":false,"width":120,"height":60,"seq":1,"bytes":"eA=="}],"child":true}),
+    ] {
+        let f = Fixture::new();
+        let server = Server::start(&f);
+        set_rows(&f, json!(40));
+        configure(&f, json!({"quiet":true,"child":true}));
+        let mut live = server.live(&path("socket-a", "w1", "lead"));
+        assert_eq!(live.record().unwrap()["kind"], "reset");
+        configure(&f, config);
+        set_rows(&f, json!(60));
+        let event = live.record().unwrap();
+        assert_eq!(
+            event,
+            json!({"v":1,"seq":2,"kind":"unavailable","reason":"invalid_source"})
+        );
+        assert_eq!(invocations(&f).len(), 2);
+        for call in invocations(&f) {
+            wait_for(|| stopped(call["pid"].as_u64().unwrap()));
+            wait_for(|| stopped(call["child"].as_u64().unwrap()));
+        }
+    }
+}
+
+#[test]
+fn identity_replacement_during_reobservation_closes_original_continuity() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    set_rows(&f, json!(40));
+    configure(&f, json!({"quiet":true,"gate_rows":[60],"child":true}));
+    let p = path("socket-a", "w1", "lead");
+    let mut live = server.live(&p);
+    let reset = live.record().unwrap();
+    set_rows(&f, json!(60));
+    wait_for(|| invocations(&f).len() == 2);
+    let mut responses = metadata_with_rows(&f, json!(60));
+    let mut panes: Value =
+        serde_json::from_str(responses["pane list --workspace w1"].as_str().unwrap()).unwrap();
+    panes["result"]["panes"][0]["terminal_id"] = json!("replacement");
+    responses["pane list --workspace w1"] = json!(panes.to_string());
+    fs::write(f.root.join("responses.json"), responses.to_string()).unwrap();
+    assert_eq!(
+        live.record().unwrap(),
+        json!({"v":1,"seq":2,"kind":"closed","reason":"replaced"})
+    );
+    assert_eq!(
+        server
+            .get(&format!(
+                "{p}?continuity={}",
+                reset["continuity"].as_str().unwrap()
+            ))
+            .status,
+        410
+    );
+    assert_eq!(invocations(&f).len(), 2);
+    for call in invocations(&f) {
+        wait_for(|| stopped(call["pid"].as_u64().unwrap()));
+        wait_for(|| stopped(call["child"].as_u64().unwrap()));
+    }
+}
+
+#[test]
+fn quiet_reobservations_share_one_first_paint_deadline() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    set_rows(&f, json!(40));
+    configure(
+        &f,
+        json!({"quiet":true,"gate_rows":[60,30,20],"child":true}),
+    );
+    let mut live = server.live(&path("socket-a", "w1", "lead"));
+    let reset = live.record().unwrap();
+    let started = Instant::now();
+    for (index, rows) in [60, 30, 20].into_iter().enumerate() {
+        set_rows(&f, json!(rows));
+        wait_for(|| invocations(&f).len() >= index + 2);
+    }
+    let event = live.record().unwrap();
+    assert_eq!(event["kind"], "unavailable");
+    assert_eq!(event["reason"], "source_lost");
+    assert_eq!(event["seq"], reset["seq"].as_u64().unwrap() + 1);
+    assert!(started.elapsed() < Duration::from_secs(8));
+    for call in invocations(&f) {
+        wait_for(|| stopped(call["pid"].as_u64().unwrap()));
+        wait_for(|| stopped(call["child"].as_u64().unwrap()));
+    }
 }
 
 #[test]
