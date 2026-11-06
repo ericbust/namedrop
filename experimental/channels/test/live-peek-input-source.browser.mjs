@@ -29,7 +29,7 @@ assert Path(p.env['XDG_CONFIG_HOME']).is_relative_to(directory)
 operation,alias=sys.argv[3:5]
 pane=p.state['panes'][alias]
 if operation=='dashboard':
- print(p.namedrop('channels','--no-open','--json').stdout)
+ print(p.namedrop('channels','--no-open','--json','--ui',str(Path(sys.argv[1])/'experimental/channels/dist')).stdout)
 elif operation=='source':
  db=sqlite3.connect('file:'+str(directory/'state/herdr/plugins/namedrop/namedrop.sqlite3')+'?mode=ro',uri=True)
  db.row_factory=sqlite3.Row
