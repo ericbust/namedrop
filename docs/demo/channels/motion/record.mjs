@@ -23,13 +23,18 @@ for (const alias of ['claude', 'codex']) {
   if (!address?.registered || !['idle', 'done'].includes(address.agent_status)) throw new Error(alias + ' must be registered and idle');
 }
 const opened = JSON.parse((await exec('python3', [helper, profileName, 'open'])).stdout);
-const browser = await chromium.launch({
+// Chromium ignores --disable-spell-checking here, so the take's own browser profile turns
+// spellcheck off; otherwise typed names such as @claude get a red underline.
+const browserProfile = root + '/browser-profile';
+await mkdir(browserProfile + '/Default', { recursive: true });
+await writeFile(browserProfile + '/Default/Preferences', JSON.stringify({ browser: { enable_spellchecking: false }, spellcheck: { dictionaries: [], use_spelling_service: false } }));
+const context = await chromium.launchPersistentContext(browserProfile, {
   ...(process.env.CHROME ? { executablePath: process.env.CHROME } : { channel: 'chrome' }),
   headless: process.env.HEADLESS !== '0',
-  args: ['--no-sandbox', '--disable-spell-checking', '--disable-features=Spellcheck,SpellcheckService'],
+  args: ['--no-sandbox'],
+  viewport: VIEWPORT, deviceScaleFactor: SCALE, colorScheme: 'light',
 });
-const context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: SCALE, colorScheme: 'light' });
-const page = await context.newPage();
+const page = context.pages()[0] || await context.newPage();
 page.setDefaultTimeout(15000);
 const errors = [];
 page.on('pageerror', e => errors.push(e.message));
@@ -142,6 +147,6 @@ try {
   finished = true;
   await Promise.all([frameJob, paneJob]);
   if (start) await save();
-  await browser.close();
+  await context.close();
   console.log('SAVED', recording.frames.length, 'frames,', recording.panes.length, 'pane pairs');
 }

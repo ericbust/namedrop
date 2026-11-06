@@ -62,11 +62,12 @@ python3 -m venv ~/.cache/channels-video/venv
 
    The recorder skips a file name it has already run. To repeat a step, queue a copy under a new name. The last step stops the recorder.
 
-Three steps need care:
+Two steps need care:
 
-- `5-needs.js` checks that Claude is really blocked before it records Needs you, then sends Esc to Claude's pane. It never approves the prompt. Afterwards, check that `release-notes.txt` does not exist in `~/release-planning`.
-- `6-peek.js` sends the Type-to-agent text. Codex sometimes keeps that text as an unsent draft. The step then presses the Peek **Enter** control and records a `peek-extra-enter` event.
-- Live Peek follows the bottom of the screen. Do not clear the Codex pane before the take. After a clear, the answer prints near the top of an empty screen and falls outside the expanded Peek view.
+- `3-collab.js` asks @claude to ask @codex, then waits until both agents have worked and gone quiet. It fails if either agent stops on a prompt. It then opens the thread that holds the whole exchange.
+- `6-needs.js` checks that Claude is really blocked before it records Needs you, then sends Esc to Claude's pane. It never approves the prompt. Afterwards, check that `release-notes.txt` does not exist in `~/release-planning`.
+
+The recorder turns spellcheck off through its own browser profile under the take directory. Chromium ignores `--disable-spell-checking` here, and it would underline typed names such as `@claude`.
 
 ## Render the movie
 

@@ -3,7 +3,7 @@
 The Channels window stays whole and still on the stage, with the real Codex and Claude Code
 windows beside it. In each shot a spotlight ring marks the focal element, found as the tight
 box of real ink in the source frame, and a callout repeats its key text in large type. Cards
-quote real messages as they travel between Channels and an agent. Every callout and card must
+quote real messages as they travel between Channels and the agents, and between agents. Every callout and card must
 be text the page or an agent's screen really showed. The planner fails when a hold, a quote,
 the focal text size or the total length breaks the storyboard rules."""
 import argparse
@@ -41,9 +41,8 @@ README_WIDTH = 900
 MIN_HOLD, FADE, SPOT_IN = 2.5, 0.45, 0.6
 MIN_CAP_README = 9.5
 CALLOUT_MAIN, CALLOUT_WHO, CALLOUT_PAD, CALLOUT_GAP = 34, 21, 22, 16
-INSTRUCTION_HOLD, REPLY_HOLD = 0.9, 0.7
 DURATION = (30, 40)
-END_SECONDS = 2.4
+END_SECONDS = 2.2
 APP = {'x': APP_LEFT, 'y': APP_TOP + BAR * APP_SCALE, 'scale': APP_SCALE}
 
 
@@ -156,8 +155,8 @@ class Shot:
     segments: list            # (output seconds, source from, source to); the last one is the hold
     callout: tuple            # (who, text): real on-screen text repeated beside the ring
     shown: object             # source time from which the callout text is on screen
-    agent: str                # the agent this shot is about
-    cards: tuple = ()         # ('to' | 'from', source time, real message text)
+    agent: str                # the agent this shot is about: its colour marks the callout
+    cards: tuple = ()         # (sender, recipient, source time or seconds into the shot, real message text)
     search: dict = None       # search rectangle in CSS px instead of the event's element
     label: str = ''
     pad: float = 12
@@ -165,56 +164,58 @@ class Shot:
 
 
 SCENES = [
-    ('Ask an agent in a channel', [
+    ('Ask an agent in a channel', 'codex', [
         Shot('ask', 'ask-typed', ('ask-typed', 0.2),
              [(1.6, ('ask-wide', 1.4), 'ask-typed'), (2.6, 'ask-typed', ('ask-typed', 1.75))],
              ('', '@codex Suggest a name for the 1.5 release. One word.'), 'ask-typed', 'codex'),
         Shot('reply', 'ask-reply', ('ask-reply', 0.5),
-             [(1.0, ('ask-sent', 0.2), ('ask-reply', -0.2)), (2.8, ('ask-reply', -0.2), ('ask-reply', 2.6))],
+             [(0.8, ('ask-sent', 0.2), ('ask-reply', -0.2)), (2.8, ('ask-reply', -0.2), ('ask-reply', 2.6))],
              ('@codex', 'Horizon'), 'ask-reply', 'codex',
-             cards=(('to', ('ask-sent', 0.2), 'Suggest a name for the 1.5 release. One word.'),
-                    ('from', 'ask-reply', 'Horizon'))),
+             cards=(('you', 'codex', ('ask-sent', 0.2), 'Suggest a name for the 1.5 release. One word.'),
+                    ('codex', 'you', 'ask-reply', 'Horizon'))),
     ]),
-    ('Follow up in the thread. No @ needed.', [
+    ('Follow up in the thread. No @ needed.', 'codex', [
         Shot('follow-up', 'followup-typed', ('followup-typed', 0.2),
              [(1.0, ('followup-open', -0.1), 'followup-typed'), (2.6, 'followup-typed', ('followup-sent', -0.05))],
              ('To @codex', 'Two more, please.'), 'followup-typed', 'codex'),
         Shot('thread reply', 'followup-reply', ('followup-reply', 0.5),
-             [(1.0, ('followup-sent', 0.2), ('followup-reply', -0.2)), (2.8, ('followup-reply', -0.2), ('followup-reply', 2.6))],
-             ('@codex', 'Orbit, Summit'), 'followup-reply', 'codex',
-             cards=(('to', ('followup-sent', 0.2), 'Two more, please.'), ('from', 'followup-reply', 'Orbit, Summit'))),
+             [(0.8, ('followup-sent', 0.2), ('followup-reply', -0.2)), (2.8, ('followup-reply', -0.2), ('followup-reply', 2.6))],
+             ('@codex', 'Beacon, Summit'), 'followup-reply', 'codex',
+             cards=(('you', 'codex', ('followup-sent', 0.2), 'Two more, please.'),
+                    ('codex', 'you', 'followup-reply', 'Beacon, Summit'))),
     ]),
-    ('Ask for a reminder in a DM', [
+    ('Agents work together in the open', 'both', [
+        Shot('collab ask', 'collab-typed', ('collab-typed', 0.2),
+             [(1.6, ('collab-open', 0.4), 'collab-typed'), (2.6, 'collab-typed', ('collab-typed', 1.75))],
+             ('', '@claude Ask @codex for one release risk, in five words.'), 'collab-typed', 'claude'),
+        # The thread opens once both agents are done; the cards replay its two messages in order.
+        Shot('agents talk', 'collab-thread', ('collab-done', 3.0),
+             [(1.0, ('collab-sent', 0.2), ('collab-done', 2.3)), (3.0, ('collab-done', 2.3), ('collab-done', 5.3))],
+             ('@codex to @claude', 'Critical dependencies miss integration deadlines.'), ('collab-done', 2.3), 'codex',
+             cards=(('you', 'claude', ('collab-sent', 0.2), 'Ask @codex for one release risk, in five words.'),
+                    ('claude', 'codex', 1.3, 'Please name one release risk, in five words.'),
+                    ('codex', 'claude', 2.6, 'Critical dependencies miss integration deadlines.'))),
+    ]),
+    ('Ask for a reminder in a DM', 'claude', [
         Shot('reminder ask', 'reminder-typed', ('reminder-typed', 0.2),
              [(1.5, 'dm-open', 'reminder-typed'), (2.6, 'reminder-typed', ('reminder-typed', 1.75))],
              ('', 'In 1 minute, remind me here: Tag the release.'), 'reminder-typed', 'claude'),
         Shot('pending', 'reminder-pending', ('reminder-pending', 0.5),
              [(0.6, ('reminder-sent', 0.2), ('reminder-pending', -0.1)), (2.8, ('reminder-pending', -0.1), ('reminder-pending', 2.7))],
-             ('Pending reminders', 'Tag the release.'), 'reminder-pending', 'claude',
-             cards=(('to', ('reminder-sent', 0.2), 'In 1 minute, remind me here: Tag the release.'),),
+             ('Pending reminders', 'Remind the operator in this direct message: Tag the release.'), 'reminder-pending', 'claude',
+             cards=(('you', 'claude', ('reminder-sent', 0.2), 'In 1 minute, remind me here: Tag the release.'),),
              search={'x': 840, 'y': 40, 'width': 400, 'height': 140}),
         Shot('reminder fires', 'reminder-answer', ('reminder-answer', 0.5),
              [(3.0, ('reminder-answer', -0.2), ('reminder-answer', 2.5))],
              ('@claude', 'Reminder: Tag the release.'), 'reminder-answer', 'claude',
-             cards=(('from', 'reminder-answer', 'Reminder: Tag the release.'),), label='1 minute later'),
+             cards=(('claude', 'you', 'reminder-answer', 'Reminder: Tag the release.'),), label='1 minute later'),
     ]),
-    ('See when an agent needs you', [
+    ('See when an agent needs you', 'claude', [
         Shot('needs you', 'needs-blocked', 'needs-blocked',
-             [(0.7, ('needs-sent', 0.3), ('needs-blocked', -1.2)), (2.9, ('needs-blocked', -1.2), ('needs-blocked', 1.7))],
-             ('Needs you', '@claude is waiting on an approval or question.'), ('needs-blocked', -1.05), 'claude',
-             cards=(('to', ('needs-sent', 0.3), 'Use Bash to run: touch release-notes.txt'),),
+             [(0.7, ('needs-sent', 0.3), ('needs-blocked', -0.8)), (2.9, ('needs-blocked', -0.8), ('needs-blocked', 2.1))],
+             ('Needs you', '@claude is waiting on an approval or question.'), ('needs-blocked', -0.65), 'claude',
+             cards=(('you', 'claude', ('needs-sent', 0.3), 'Use Bash to run: touch release-notes.txt'),),
              search={'x': 8, 'y': 108, 'width': 231, 'height': 80}),
-    ]),
-    ('Watch an agent live and type to it', [
-        Shot('peek input', 'peek-typed', ('peek-typed', 0.2),
-             [(1.5, 'peek-open', 'peek-typed'), (2.6, 'peek-typed', ('peek-typed', 1.8))],
-             ('', 'Name one release risk in five words.'), 'peek-typed', 'codex',
-             search={'x': 267, 'y': 585, 'width': 453, 'height': 70}),
-        Shot('peek reply', 'peek-reply', ('peek-reply', 0.5),
-             [(0.8, ('peek-sent', 0.2), ('peek-reply', -0.3)), (2.8, ('peek-reply', -0.3), ('peek-reply', 2.5))],
-             ('@codex', 'Late regressions delay production rollout.'), 'peek-reply', 'codex',
-             cards=(('to', ('peek-sent', 0.2), 'Name one release risk in five words.'),),
-             search={'x': 266, 'y': 104, 'width': 998, 'height': 160}),
     ]),
 ]
 
@@ -224,14 +225,24 @@ shutil.copyfile(font_path, args.directory / 'callout-font.ttf')
 fonts = {size: ImageFont.truetype(str(font_path), size) for size in (CALLOUT_MAIN, CALLOUT_WHO)}
 
 
+def font(size):
+    if size not in fonts:
+        fonts[size] = ImageFont.truetype(str(font_path), size)
+    return fonts[size]
+
+
 def callout_box(ring, who, text):
-    """The callout in app CSS px: below the ring when it fits, otherwise above."""
-    width = max(fonts[CALLOUT_MAIN].getlength(text), fonts[CALLOUT_WHO].getlength(who) if who else 0) + 2 * CALLOUT_PAD
-    height = 2 * 14 + CALLOUT_MAIN * 1.2 + (CALLOUT_WHO * 1.35 if who else 0)
+    """The callout in app CSS px: below the ring when it fits, otherwise above. A long line
+    gets a smaller font so the callout stays inside the app."""
+    size = CALLOUT_MAIN
+    while size > 24 and font(size).getlength(text) + 2 * CALLOUT_PAD > VIEW_W - 16:
+        size -= 1
+    width = max(font(size).getlength(text), font(CALLOUT_WHO).getlength(who) if who else 0) + 2 * CALLOUT_PAD
+    height = 2 * 14 + size * 1.2 + (CALLOUT_WHO * 1.35 if who else 0)
     below, above = ring['y'] + ring['height'] + CALLOUT_GAP, ring['y'] - CALLOUT_GAP - height
     y = below if below + height <= VIEW_H - 8 else above
     x = min(max(ring['x'] + ring['width'] / 2 - width / 2, 8), VIEW_W - 8 - width)
-    return {'x': round(x, 1), 'y': round(y, 1), 'width': round(width, 1), 'height': round(height, 1)}
+    return {'x': round(x, 1), 'y': round(y, 1), 'width': round(width, 1), 'height': round(height, 1), 'size': size}
 
 
 def output_time(source, s):
@@ -242,15 +253,18 @@ def output_time(source, s):
     return None
 
 
-main_cap = fonts[CALLOUT_MAIN].getbbox('H')
-CALLOUT_CAP = main_cap[3] - main_cap[1]
+def cap_of(size):
+    top, bottom = font(size).getbbox('H')[1::2]
+    return bottom - top
+
+
 errors, shots, captions, rows, cards = [], [], [], [], []
 schedules = {'codex': [], 'claude': []}
 active = []
 clock = 0.0
-for caption, scene_shots in SCENES:
+for caption, emphasis, scene_shots in SCENES:
     scene_start = clock
-    active.append([round(scene_start, 3), scene_shots[0].agent])
+    active.append([round(scene_start, 3), emphasis])
     for index, shot in enumerate(scene_shots):
         start, fade = clock, (FADE if shots else 0.0)
         element = events[shot.focus]['focus']
@@ -269,7 +283,7 @@ for caption, scene_shots in SCENES:
         hold = min(end - start - fade, hold_seconds)
         speed = (at(hold_to) - at(hold_from)) / hold_seconds
         who, text = shot.callout
-        quotes = [who, text] + [quote for _, _, quote in shot.cards]
+        quotes = [who, text] + [quote for *_, quote in shot.cards]
         for part in quotes:
             if part and normalize(part) not in SHOWN:
                 errors.append(f'{shot.name}: "{part}" is not text the take showed')
@@ -286,16 +300,16 @@ for caption, scene_shots in SCENES:
         if not 0.6 <= speed <= 1.15:
             errors.append(f'{shot.name}: the hold plays at {speed:.2f}x')
         in_app = cap * APP_SCALE * README_WIDTH / W
-        in_callout = CALLOUT_CAP * APP_SCALE * README_WIDTH / W
+        box = callout_box(ring, who, text)
+        in_callout = cap_of(box['size']) * APP_SCALE * README_WIDTH / W
         if max(in_app, in_callout) < MIN_CAP_README:
             errors.append(f'{shot.name}: focal text is {in_app:.1f}px in the app and {in_callout:.1f}px in the callout at {README_WIDTH}px')
-        for kind, when, quote in shot.cards:
-            t0 = output_time(source, at(when))
+        for sender, recipient, when, quote in shot.cards:
+            t0 = start + when if isinstance(when, float) else output_time(source, at(when))
             if t0 is None:
                 errors.append(f'{shot.name}: card "{quote}" is not inside the shot')
                 continue
-            cards.append({'kind': kind, 'agent': shot.agent, 't0': round(t0, 3), 'text': quote,
-                          'hold': INSTRUCTION_HOLD if kind == 'to' else REPLY_HOLD})
+            cards.append({'from': sender, 'to': recipient, 't0': round(t0, 3), 'text': quote})
         for alias in schedules:
             for at_output, at_source in ((start, source[0][1]), (end - hold, at(hold_from))):
                 key = pane_key(alias, at_source)
@@ -310,8 +324,8 @@ for caption, scene_shots in SCENES:
                       'spot': spot,
                       'ring': {k: round(v, 2) for k, v in ring.items()},
                       'callout': {'who': who, 'text': text, 'from': round(callout_from, 3),
-                                  'box': callout_box(ring, who, text)},
-                      'hold': [round(end - hold, 3), round(end, 3)], 'capCss': cap,
+                                  'box': box},
+                      'hold': [round(end - hold, 3), round(end, 3)], 'capCss': cap, 'agent': shot.agent,
                       **({'label': shot.label} if shot.label else {})})
         rows.append((caption if index == 0 else '', shot, start, end, fade))
         clock = end
@@ -357,7 +371,7 @@ if args.shotlist:
                      f'| {at(shot.segments[0][1]):.1f} to {at(shot.segments[-1][2]):.1f} | {speeds} '
                      f'| {shot.plan["inApp"]:.1f} px | {shot.plan["inCallout"]:.1f} px | {shot.plan["callout"]} |')
     lines += [f'| | end card | {clock:.1f} | {duration:.1f} | | | | | | | |', '',
-              '| Card | Agent | Output time | Real message |', '|---|---|---:|---|',
-              *[f'| {"you to agent" if c["kind"] == "to" else "agent to you"} | @{c["agent"]} | {c["t0"]:.1f} | {c["text"]} |' for c in cards]]
+              '| Card | Output time | Real message |', '|---|---:|---|',
+              *[f'| {c["from"]} to {c["to"]} | {c["t0"]:.1f} | {c["text"]} |' for c in cards]]
     args.shotlist.parent.mkdir(parents=True, exist_ok=True)
     args.shotlist.write_text('\n'.join(lines) + '\n')

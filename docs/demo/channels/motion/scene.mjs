@@ -1,6 +1,6 @@
 // Channels highlight on the Namedrop demo's stage. The real Channels page plays in a still
 // window; the real Codex and Claude Code screens sit beside it; cards quote the real messages
-// between them. renderAt(t) draws one deterministic frame for docs/demo/render.mjs.
+// between Channels and the agents, and between the agents. renderAt(t) draws one deterministic frame for docs/demo/render.mjs.
 import * as THREE from 'three';
 import { CSS3DObject } from 'three/addons/renderers/CSS3DRenderer.js';
 import { D, STILL, Win, camera, cssScene, bgMat, Card, RUNTIME, title, plate, captionAt, heroAt, drawStage, clamp, ease, esc } from '../../stage3d.js';
@@ -146,9 +146,10 @@ function callout(target, { who, text, box }, agent, alpha) {
     target.fillText(who, box.x + pad + 18, y);
     y += small * 1.35;
   }
-  target.font = `${main}px CalloutFont`;
+  const size = box.size || main;
+  target.font = `${size}px CalloutFont`;
   target.fillStyle = '#f5f5f7';
-  target.fillText(text, box.x + pad, y + main * 0.1);
+  target.fillText(text, box.x + pad, y + size * 0.1);
   target.restore();
 }
 
@@ -173,14 +174,13 @@ function label(target, text, alpha) {
 
 const SHOTS = timeline.shots;
 const shotAt = t => { const i = SHOTS.findIndex(shot => t < shot.end); return i < 0 ? SHOTS.length - 1 : i; };
-const agentOf = shot => timeline.active.filter(([t0]) => shot.start >= t0 - 1e-6).at(-1)[1];
 
 async function drawShot(target, shot, t) {
   const image = await frame(nearest(recording.frames, sourceAt(shot, t)).file);
   target.drawImage(image, 0, 0, VIEW.width, VIEW.height);
   const alpha = spotAt(shot, t);
   if (alpha > 0.001) spotlight(target, shot.ring, alpha);
-  if (t >= shot.callout.from) callout(target, shot.callout, agentOf(shot), clamp((t - shot.callout.from) / 0.3));
+  if (t >= shot.callout.from) callout(target, shot.callout, shot.agent, clamp((t - shot.callout.from) / 0.3));
   if (shot.label) label(target, shot.label, clamp((t - shot.start - shot.fade) / 0.35) * clamp((shot.end - t) / 0.2));
 }
 
@@ -220,7 +220,7 @@ for (const [alias, spec] of Object.entries(timeline.agents)) {
   const [left, right] = spec.column, s = (right - left) / win.w;
   const base = { x: (left + right) / 2 - 960, y: 540 - (spec.top + win.h * s / 2), z: 0, s };
   const pose = [];
-  for (const [t0, active] of timeline.active) pose.push([t0, { ...base, o: active === alias ? 1 : QUIET }], [t0 + 0.6, {}]);
+  for (const [t0, active] of timeline.active) pose.push([t0, { ...base, o: [alias, 'both'].includes(active) ? 1 : QUIET }], [t0 + 0.6, {}]);
   pose.push([END - 0.2, {}], [END + 0.5, { o: 0, blur: 10 }]);
   win.pose = pose;
   win.schedule = spec.schedule;
@@ -229,17 +229,26 @@ for (const [alias, spec] of Object.entries(timeline.agents)) {
 }
 const tags = Object.entries(agents).map(([alias, win]) => plate(win, '@' + alias, alias));
 
-// A card sits over the agent's window, so it never covers the Channels window. Its beam runs
-// between the edges of the two windows facing each other.
-const STEPS = { to: [0, 0.25, 0.55, 0.9, 1.2, 1.35], from: [0, 0.3, 1.0, 1.7, 2.4, 2.7] };
+// A card sits over the receiving agent's window, or the sending agent's when it goes to you,
+// so it never covers the Channels window. Its beam runs between the window edges that face
+// each other: Channels and the agent column side by side, the two agents one above the other.
+const STEPS = { quick: [0, 0.25, 0.55, 0.9, 1.2, 1.35], reply: [0, 0.3, 1.0, 1.7, 2.4, 2.7] };
+const windowOf = name => (name === 'you' ? app : agents[name]);
+function edges(fromName, toName) {
+  const from = windowOf(fromName), to = windowOf(toName);
+  if (from === app) return [[app.w / 2, -120], [-to.w / 2, 0]];
+  if (to === app) return [[-from.w / 2, 0], [app.w / 2, -120]];
+  const above = timeline.agents[fromName].top < timeline.agents[toName].top;
+  return [[from.w / 4, above ? -from.h / 2 : null], [to.w / 4, above ? null : -to.h / 2]];
+}
 class StageCard extends Card {
-  constructor({ kind, agent, t0, text }) {
-    const win = agents[agent];
-    super(kind === 'to' ? app : win, kind === 'to' ? win : app, t0, `<div class="msg">${esc(text)}</div>`);
-    this.k = STEPS[kind].map(d => t0 + d);
-    this.over = win;
-    const [fromEdge, toEdge] = kind === 'to' ? [[app.w / 2, -120], [-win.w / 2, 0]] : [[-win.w / 2, 0], [app.w / 2, -120]];
-    Object.assign(this.beam, { fa: fromEdge, ta: toEdge, bend: new THREE.Vector3(0, 40, 160) });
+  constructor({ from, to, t0, text }) {
+    const sender = windowOf(from), recipient = windowOf(to);
+    super(sender, recipient, t0, `<div class="msg">${esc(text)}</div>`);
+    this.k = STEPS[to === 'you' ? 'reply' : 'quick'].map(d => t0 + d);
+    this.over = to === 'you' ? sender : recipient;
+    const [fa, ta] = edges(from, to);
+    Object.assign(this.beam, { fa, ta, bend: new THREE.Vector3(from === 'you' || to === 'you' ? 0 : 70, 40, 160) });
   }
   update(t) {
     const [a, b, , , e, f] = this.k;

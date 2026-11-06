@@ -1,215 +1,235 @@
 {
-  "productRevision": "b9ea2d0d022fe1fd5ea17762f3a90ec01d110303",
-  "sourceRevision": "4767149aeddc857ea3efce72f44724e33a99fd9d",
-  "version": "1.5.0-exp.18",
+  "productRevision": "f5494d6f15f42b5c8c073bbcdbb01f0649dd0350",
+  "sourceRevision": "9fc4501540c8fd11b9ec7c2fc00a912d863d1382",
+  "version": "1.5.0-exp.19",
   "viewport": {
     "width": 1280,
     "height": 720
   },
   "deviceScaleFactor": 2,
-  "startedAtEpochMs": 1794002793648,
-  "duration": 164.027555576,
-  "sourceFrameCount": 1761,
-  "panePairCount": 328,
-  "outputDuration": 39.6,
+  "startedAtEpochMs": 1794005193728,
+  "duration": 181.498861685,
+  "sourceFrameCount": 2018,
+  "panePairCount": 363,
+  "outputDuration": 39.5,
   "events": [
     {
       "name": "ask-wide",
-      "t": 0.0001260939999999664,
-      "at": "2026-11-06T22:06:33.648Z"
+      "t": 0.00016663599999992585,
+      "at": "2026-11-06T22:46:33.728Z"
     },
     {
       "name": "ask-typed",
-      "t": 3.868508247,
-      "at": "2026-11-06T22:06:37.516Z"
+      "t": 3.76196234,
+      "at": "2026-11-06T22:46:37.490Z"
     },
     {
       "name": "ask-sent",
-      "t": 5.800915955,
-      "at": "2026-11-06T22:06:39.449Z"
+      "t": 5.693413079,
+      "at": "2026-11-06T22:46:39.421Z"
     },
     {
       "name": "ask-reply",
-      "t": 17.088163867,
-      "at": "2026-11-06T22:06:50.736Z"
+      "t": 13.473031792000002,
+      "at": "2026-11-06T22:46:47.201Z"
     },
     {
       "name": "followup-open",
-      "t": 22.322159792999997,
-      "at": "2026-11-06T22:06:55.970Z"
+      "t": 18.397722232,
+      "at": "2026-11-06T22:46:52.125Z"
     },
     {
       "name": "followup-typed",
-      "t": 23.307965036000002,
-      "at": "2026-11-06T22:06:56.956Z"
+      "t": 19.444965928000002,
+      "at": "2026-11-06T22:46:53.173Z"
     },
     {
       "name": "followup-sent",
-      "t": 25.149746816,
-      "at": "2026-11-06T22:06:58.798Z"
+      "t": 21.265321338000003,
+      "at": "2026-11-06T22:46:54.993Z"
     },
     {
       "name": "followup-reply",
-      "t": 33.11618084,
-      "at": "2026-11-06T22:07:06.764Z"
+      "t": 28.356000180000002,
+      "at": "2026-11-06T22:47:02.084Z"
+    },
+    {
+      "name": "collab-open",
+      "t": 33.459137304,
+      "at": "2026-11-06T22:47:07.187Z"
+    },
+    {
+      "name": "collab-typed",
+      "t": 35.856409811999995,
+      "at": "2026-11-06T22:47:09.584Z"
+    },
+    {
+      "name": "collab-sent",
+      "t": 37.931048348999994,
+      "at": "2026-11-06T22:47:11.659Z"
+    },
+    {
+      "name": "collab-claude-working",
+      "t": 39.326299303,
+      "at": "2026-11-06T22:47:13.054Z"
+    },
+    {
+      "name": "collab-codex-working",
+      "t": 53.625909677,
+      "at": "2026-11-06T22:47:27.354Z"
+    },
+    {
+      "name": "collab-claude-done",
+      "t": 55.677093377999995,
+      "at": "2026-11-06T22:47:29.405Z"
+    },
+    {
+      "name": "collab-codex-done",
+      "t": 61.140634487999996,
+      "at": "2026-11-06T22:47:34.868Z"
+    },
+    {
+      "name": "collab-done",
+      "t": 80.91799475100001,
+      "at": "2026-11-06T22:47:54.646Z"
+    },
+    {
+      "name": "collab-thread",
+      "t": 82.506235304,
+      "at": "2026-11-06T22:47:56.234Z"
     },
     {
       "name": "dm-open",
-      "t": 38.702264999,
-      "at": "2026-11-06T22:07:12.350Z"
+      "t": 86.923298918,
+      "at": "2026-11-06T22:48:00.651Z"
     },
     {
       "name": "reminder-typed",
-      "t": 40.65739948900001,
-      "at": "2026-11-06T22:07:14.305Z"
+      "t": 88.816756901,
+      "at": "2026-11-06T22:48:02.544Z"
     },
     {
       "name": "reminder-sent",
-      "t": 42.483939608,
-      "at": "2026-11-06T22:07:16.132Z"
+      "t": 90.650261952,
+      "at": "2026-11-06T22:48:04.378Z"
     },
     {
       "name": "reminder-pending",
-      "t": 49.436728191,
-      "at": "2026-11-06T22:07:23.085Z"
+      "t": 97.607737457,
+      "at": "2026-11-06T22:48:11.335Z"
     },
     {
       "name": "reminder-pending-end",
-      "t": 53.465028569000005,
-      "at": "2026-11-06T22:07:27.113Z"
+      "t": 101.63439237200001,
+      "at": "2026-11-06T22:48:15.362Z"
     },
     {
       "name": "reminder-fired",
-      "t": 109.07719868999999,
-      "at": "2026-11-06T22:08:22.725Z"
+      "t": 157.217896371,
+      "at": "2026-11-06T22:49:10.946Z"
     },
     {
       "name": "reminder-answer",
-      "t": 115.061161528,
-      "at": "2026-11-06T22:08:28.709Z"
+      "t": 161.229024707,
+      "at": "2026-11-06T22:49:14.957Z"
     },
     {
       "name": "needs-typed",
-      "t": 121.07709103399999,
-      "at": "2026-11-06T22:08:34.725Z"
+      "t": 167.249281915,
+      "at": "2026-11-06T22:49:20.977Z"
     },
     {
       "name": "needs-sent",
-      "t": 122.61442222,
-      "at": "2026-11-06T22:08:36.262Z"
+      "t": 168.78514461000003,
+      "at": "2026-11-06T22:49:22.513Z"
     },
     {
       "name": "needs-blocked",
-      "t": 128.540293233,
-      "at": "2026-11-06T22:08:42.188Z"
+      "t": 173.19408811299996,
+      "at": "2026-11-06T22:49:26.922Z"
     },
     {
       "name": "needs-esc",
-      "t": 133.360998492,
-      "at": "2026-11-06T22:08:47.009Z"
+      "t": 178.02684716000002,
+      "at": "2026-11-06T22:49:31.755Z"
     },
     {
       "name": "needs-cancelled",
-      "t": 134.174998926,
-      "at": "2026-11-06T22:08:47.823Z"
-    },
-    {
-      "name": "peek-open",
-      "t": 139.91094265499999,
-      "at": "2026-11-06T22:08:53.559Z"
-    },
-    {
-      "name": "peek-typed",
-      "t": 141.585497839,
-      "at": "2026-11-06T22:08:55.233Z"
-    },
-    {
-      "name": "peek-sent",
-      "t": 143.43839387999998,
-      "at": "2026-11-06T22:08:57.086Z"
-    },
-    {
-      "name": "peek-extra-enter",
-      "t": 155.30869427599998,
-      "at": "2026-11-06T22:09:08.957Z"
-    },
-    {
-      "name": "peek-reply",
-      "t": 160.26071597299998,
-      "at": "2026-11-06T22:09:13.909Z"
+      "t": 178.82238646200003,
+      "at": "2026-11-06T22:49:32.550Z"
     }
   ],
   "sourceFrames": [
     {
       "shot": "ask",
       "outputTime": 2.9,
-      "sourceTime": 4.736,
-      "file": "frames/000069.jpg",
+      "sourceTime": 4.658,
+      "file": "frames/000068.jpg",
       "sha256": "3273a1d490cfac5f0470d3297041f61f05bb7713bfbe459798a6437cb34369b9"
     },
     {
       "shot": "reply",
-      "outputTime": 6.6,
-      "sourceTime": 18.299,
-      "file": "frames/000271.jpg",
-      "sha256": "a21a7744ae0ded4210d702dd8efabcc15f4516aa386a4357fcd377e47f08f052"
+      "outputTime": 6.4,
+      "sourceTime": 14.642,
+      "file": "frames/000216.jpg",
+      "sha256": "5383fb504a0af6e2dc13f48bc5e78c33cd207d10da5628c9af35bb43d3dd881c"
     },
     {
       "shot": "follow-up",
-      "outputTime": 10.3,
-      "sourceTime": 24.219,
-      "file": "frames/000358.jpg",
-      "sha256": "3455d3aef32958c71d898e24539605fbdfd242c314178d930e369034f1905274"
+      "outputTime": 10.1,
+      "sourceTime": 20.308,
+      "file": "frames/000300.jpg",
+      "sha256": "5ea7fff8f119e6b892b572b07c466f36cbf339ca1b16140b31ead9743d2ffacf"
     },
     {
       "shot": "thread reply",
-      "outputTime": 14.0,
-      "sourceTime": 34.319,
-      "file": "frames/000507.jpg",
-      "sha256": "f8cf0f859983dabe5eba4eaa5daf6c5a52a255f19b49cae31110dcf71b255ae3"
+      "outputTime": 13.6,
+      "sourceTime": 29.523,
+      "file": "frames/000437.jpg",
+      "sha256": "43757cfcc8074d1d3e201d66b8def5c58d44a545adef365f20ccfe528233a217"
+    },
+    {
+      "shot": "collab ask",
+      "outputTime": 17.9,
+      "sourceTime": 36.71,
+      "file": "frames/000537.jpg",
+      "sha256": "badb5f49c1af04a00ac6704a5c017b77eb4a7d9259789513626637db6d9b5bcb"
+    },
+    {
+      "shot": "agents talk",
+      "outputTime": 21.7,
+      "sourceTime": 84.739,
+      "file": "frames/001243.jpg",
+      "sha256": "601f5d1e9ff3ccffaf96d7ae5d4f835afc320f34cdac2a3fffa5cd8456701cd8"
     },
     {
       "shot": "reminder ask",
-      "outputTime": 18.2,
-      "sourceTime": 41.515,
-      "file": "frames/000614.jpg",
+      "outputTime": 26.0,
+      "sourceTime": 89.705,
+      "file": "frames/001317.jpg",
       "sha256": "d8b0185554220f368be531a3d17c073fa6b940bb9eb6d82fa00828c83f17a5c8"
     },
     {
       "shot": "pending",
-      "outputTime": 21.5,
-      "sourceTime": 50.75,
-      "file": "frames/000751.jpg",
-      "sha256": "2e4626087dcf74daf0ea9294667de82608eb68b544a9127eb4d0502520f4c156"
+      "outputTime": 29.3,
+      "sourceTime": 98.886,
+      "file": "frames/001454.jpg",
+      "sha256": "665cdf221b643f48df6037706f23a9cb7fc95668b622474824c2fb40047b37e5"
     },
     {
       "shot": "reminder fires",
-      "outputTime": 24.625,
-      "sourceTime": 116.412,
-      "file": "frames/001068.jpg",
-      "sha256": "d1f005b20a04bf2b49ae9128f0358c5d94128c298912b69b035f29fdd9627fac"
+      "outputTime": 32.425,
+      "sourceTime": 162.585,
+      "file": "frames/001741.jpg",
+      "sha256": "d4a259adc5591e330301fc05b4c5a2bf2618ee4bbe45c6072c696cdecb98316c"
     },
     {
       "shot": "needs you",
-      "outputTime": 28.05,
-      "sourceTime": 128.813,
-      "file": "frames/001252.jpg",
-      "sha256": "d6d2d039bc75a37273433dbfeb039a539feb49d2b798aad4ec1c9c1940bbb412"
-    },
-    {
-      "shot": "peek input",
-      "outputTime": 32.3,
-      "sourceTime": 142.481,
-      "file": "frames/001451.jpg",
-      "sha256": "70d2c2831d9141278a605cc0bd75217e09bd7fea057df91e3bd735f2d05219eb"
-    },
-    {
-      "shot": "peek reply",
-      "outputTime": 35.8,
-      "sourceTime": 161.329,
-      "file": "frames/001723.jpg",
-      "sha256": "5ee2cf024968b2551852b175ba1de61ca756e286d1c8fafa6cfe59e17cb05902"
+      "outputTime": 35.85,
+      "sourceTime": 173.818,
+      "file": "frames/001908.jpg",
+      "sha256": "9984e796723d6d00a123e920a6d9bc4b23762dd25f4b610109ebe9447dc439d5"
     }
   ],
-  "notes": "Round 6, take 4. Every app frame is a 2x screenshot of the running page, and the agent windows are herdr pane reads with colour taken twice a second. The spotlight, ring, callouts, cards, beams, captions, label and end card are overlays. Codex kept the Live Peek input as a draft, so the take pressed the Peek Enter control once (event peek-extra-enter)."
+  "notes": "Round 7, take 6. Every app frame is a 2x screenshot of the running page, and the agent windows are herdr pane reads with colour taken twice a second. The spotlight, ring, callouts, cards, beams, captions, label and end card are overlays."
 }

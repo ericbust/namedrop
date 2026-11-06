@@ -25,9 +25,19 @@ def without_blocks(mask, stroke=3):
     area = (2 * stroke + 1) ** 2
     solid = box_any(mask, stroke) == area
     mask = mask & ~(box_any(solid, 2 * stroke + 2) > 0)
-    mask[:, mask.mean(axis=0) > 0.9] = False
-    mask[mask.mean(axis=1) > 0.7, :] = False
+    mask[:, longest_runs(mask.T) > 0.9 * mask.shape[0]] = False
+    mask[longest_runs(mask) > 0.7 * mask.shape[1], :] = False
     return mask
+
+
+def longest_runs(mask):
+    """The longest unbroken run of ink in each row. A rule is one long run; bold text has gaps."""
+    runs = []
+    for row in mask:
+        edges = np.diff(np.concatenate(([0], row.astype(np.int8), [0])))
+        starts, stops = np.nonzero(edges == 1)[0], np.nonzero(edges == -1)[0]
+        runs.append((stops - starts).max() if len(starts) else 0)
+    return np.array(runs)
 
 
 def line_caps(mask, gap=2, smallest=10):
