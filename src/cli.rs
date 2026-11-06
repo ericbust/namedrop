@@ -238,6 +238,13 @@ impl Cli {
         }
     }
 
+    pub fn dashboard_tailscale(&self) -> Option<bool> {
+        match &self.command {
+            Command::Dashboard(args) => args.tailscale.as_deref().map(|mode| mode != "off"),
+            _ => None,
+        }
+    }
+
     pub fn dashboard_ui(&self) -> Option<&Path> {
         match &self.command {
             Command::Dashboard(args) => args.ui.as_deref(),
@@ -260,9 +267,13 @@ impl Cli {
         matches!(self.command, Command::DashboardServer { .. })
     }
 
-    pub fn dashboard_observer_terminal(&self) -> Option<&str> {
+    pub fn dashboard_observer(&self) -> Option<(&str, Option<u16>, Option<u16>)> {
         match &self.command {
-            Command::DashboardObserverGuard { terminal } => Some(terminal),
+            Command::DashboardObserverGuard {
+                terminal,
+                rows,
+                cols,
+            } => Some((terminal, *rows, *cols)),
             _ => None,
         }
     }
@@ -372,7 +383,13 @@ enum Command {
         inherit_claim: bool,
     },
     #[command(hide = true)]
-    DashboardObserverGuard { terminal: String },
+    DashboardObserverGuard {
+        terminal: String,
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..=256))]
+        rows: Option<u16>,
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..=512))]
+        cols: Option<u16>,
+    },
     /// Runtime hooks installed for supported agents.
     #[command(hide = true)]
     Hook {
@@ -505,6 +522,9 @@ impl GroupCommand {
 
 #[derive(Debug, Args)]
 struct DashboardArgs {
+    /// Open Channels through Tailscale Serve, or remove its owned handler with off.
+    #[arg(long, num_args = 0..=1, default_missing_value = "on", value_parser = ["on", "off"])]
+    tailscale: Option<String>,
     /// Print the URL without opening a browser.
     #[arg(long = "no-open")]
     no_open: bool,
@@ -767,6 +787,29 @@ mod tests {
                 "removed command {command} was accepted"
             );
         }
+    }
+
+    #[test]
+    fn channels_tailscale_modes_parse() {
+        assert_eq!(
+            Cli::try_parse_from(["namedrop", "channels", "--tailscale"])
+                .unwrap()
+                .dashboard_tailscale(),
+            Some(true)
+        );
+        assert_eq!(
+            Cli::try_parse_from(["namedrop", "channels", "--tailscale", "off"])
+                .unwrap()
+                .dashboard_tailscale(),
+            Some(false)
+        );
+        assert_eq!(
+            Cli::try_parse_from(["namedrop", "channels"])
+                .unwrap()
+                .dashboard_tailscale(),
+            None
+        );
+        assert!(Cli::try_parse_from(["namedrop", "channels", "--tailscale", "anything"]).is_err());
     }
 
     #[test]

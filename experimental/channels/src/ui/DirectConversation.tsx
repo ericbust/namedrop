@@ -1,5 +1,6 @@
 import { type ReactNode, useLayoutEffect, useMemo, useRef } from "react";
 import type { CompletionContext } from "../complete.ts";
+import { presenceWord } from "../copy.ts";
 import {
   directComposer,
   directKey,
@@ -110,7 +111,7 @@ export function DirectConversation({
           <span>
             #{peer.workspaceLabel.replace(/^#/, "")} ·{" "}
             {peer.paneLabel?.text ? `${peer.paneLabel.text} · ` : ""}
-            {peer.presence}
+            {presenceWord[peer.activity]}
           </span>
         </div>
         {peer.threadId !== null && (

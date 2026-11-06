@@ -1,5 +1,7 @@
 import type {
+  Activity,
   AddressId,
+  ChannelSnapshot,
   ComposerId,
   Member,
   Message,
@@ -14,7 +16,7 @@ export type DirectPeer = {
   workspaceLabel: string;
   paneLabel: SafeText | null;
   runtime: string;
-  presence: "idle" | "working" | "gone";
+  activity: Activity;
   closed: boolean;
   threadId: string | null;
   lastActivityMs: number | null;
@@ -40,13 +42,23 @@ export function directPath(
 export function directComposer(peer: DirectPeer): ComposerId {
   return { key: peer.spaceKey, thread: `dm:${directKey(peer)}` };
 }
+export function deriveDirectPeers(
+  peers: readonly DirectPeer[],
+  channels: ReadonlyMap<SpaceKey, Pick<ChannelSnapshot, "members">>,
+): readonly DirectPeer[] {
+  return peers.map((peer) => {
+    const member = channels.get(peer.spaceKey)?.members.get(peer.addressId);
+    return member === undefined || member.activity === peer.activity
+      ? peer
+      : { ...peer, activity: member.activity };
+  });
+}
 export function directMember(peer: DirectPeer): Member {
   return {
     id: peer.addressId,
     alias: peer.alias,
     kind: { type: "agent", runtime: peer.runtime },
-    activity:
-      peer.closed || peer.presence === "gone" ? "offline" : peer.presence,
+    activity: peer.activity,
     recentlyClosed: peer.closed,
     role: null,
     paneLabel: peer.paneLabel,
@@ -64,7 +76,7 @@ export function directPeers(
   return peers
     .filter((peer) => {
       const text =
-        `${directLabel(peer)} ${peer.paneLabel?.text ?? ""} ${peer.runtime} ${peer.presence}`.toLocaleLowerCase();
+        `${directLabel(peer)} ${peer.paneLabel?.text ?? ""} ${peer.runtime} ${peer.activity}`.toLocaleLowerCase();
       return words.every((word) => text.includes(word));
     })
     .sort(

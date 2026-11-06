@@ -13,8 +13,9 @@ export function reminderPath(target: ReminderConversation): string {
   return `/w/${target.key}/${scope}/reminders`;
 }
 
-export function reminderRepeats(reminder: PendingReminder): string {
+export function reminderRepeats(reminder: PendingReminder): string | null {
   if (reminder.repeatUntil !== null)
     return `Repeats until ${new Date(reminder.repeatUntil).toLocaleString()} · up to ${reminder.repeatsLeft} repeats left`;
+  if (reminder.repeatsLeft === 0) return null;
   return `${reminder.repeatsLeft} ${reminder.repeatsLeft === 1 ? "repeat" : "repeats"} left`;
 }

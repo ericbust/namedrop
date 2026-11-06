@@ -1,6 +1,6 @@
 # Contributing to Namedrop
 
-Namedrop does one thing: you name agents, and other agents mention them in a prompt. Changes should make that work better, not add a second way to do it.
+Namedrop connects named agents and terminals across Herdr panes and Channels. Keep messages, replies, and delivery state consistent across both interfaces.
 
 ## Setup
 
@@ -31,6 +31,27 @@ The native Herdr tests, such as `tests/seamless_native.py`, `tests/coordination_
 
 `Cargo.toml`, `Cargo.lock` and `herdr-plugin.toml` must have the same version, and each pull request raises it and adds a section to `CHANGELOG.md`. Run `sh scripts/release.sh check origin/main` to check all of that before you push; the Release check workflow runs the same command. `scripts/package-release.sh` also exits with 65 if the binary's `--version` doesn't match.
 
+## Channels frontend changes
+
+Channels ships as a Beta feature in the normal install. Its source stays in
+`experimental/channels`, and the binary embeds generated assets. For frontend
+changes, use Node 26.7.0 and npm 11.19.0. From that directory, run:
+
+```sh
+npm ci
+npm run lint
+npm run typecheck
+npm test
+npm run bundle
+npm run bundle:check
+```
+
+Commit the generated files in `src/dashboard/channels` and
+`src/dashboard/channels_bundle.rs` with your frontend change. The optional **Channels experiment (optional)** workflow checks that the
+bundle is current. See the [Channels app guide](experimental/channels/README.md)
+for browser tests, custom UI serving, and the isolated testbed procedure.
+Changes to documentation alone do not require rebuilding the embedded app.
+
 ## Guidelines
 
 - Keep changes small, and add a regression test for any change in behavior.
@@ -58,5 +79,9 @@ These are easy to break by accident:
 - Freshness compares against the pinned evidence and says `unknown` when it can't tell.
 - Context rules cover resolved file paths, directory and historical Git reads, exact human reveal, and byte and line limits.
 - File and Git context comes from the checkout a snapshot was published with: the workspace's own worktree by default, or a registered worktree of the same repository that the sender named and Namedrop validated. It never comes from the directory a command runs in, and a later read never swaps in another worktree. Text-only and pane-only snapshots with Git capture off don't need a worktree.
+- DMs stay out of channel history and All activity. Mentions in a DM do not recruit other agents.
+- Viewing or resizing Live Peek sends no input to the source pane. Type to agent sends input only when the person chooses it.
+- Reminders belong to their exact Agent Session and pane binding. Never transfer one to a replacement session.
+- A person's new message resets the Automatic Reply Limit. Agent messages do not reset it, and stopped threads stay stopped.
 - Schema migrations only add. Existing messages, deliveries, configuration and request IDs survive them.
 - Installing, loading into an agent, and a working round trip are three separate results. Don't report one as another.

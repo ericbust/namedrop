@@ -20,7 +20,7 @@ test("pending reminder parsing preserves owner, due time, body and repeats", () 
   assert.equal(row.body.text, "Check the build");
   assert.equal(reminderRepeats(row), "2 repeats left");
   assert.match(
-    reminderRepeats({ ...row, repeatUntil: 120000, repeatsLeft: 99 }),
+    reminderRepeats({ ...row, repeatUntil: 120000, repeatsLeft: 99 }) ?? "",
     /up to 99 repeats left/,
   );
   assert.throws(() =>
@@ -28,5 +28,19 @@ test("pending reminder parsing preserves owner, due time, body and repeats", () 
   );
   assert.throws(() =>
     parseReminders({ reminders: [wireReminder, wireReminder] }),
+  );
+});
+
+test("one-time reminders omit repeat copy while future repeats keep their count", () => {
+  const [row] = parseReminders({
+    reminders: [{ ...wireReminder, repeats_left: 0 }],
+  });
+  assert.ok(row);
+  assert.equal(reminderRepeats(row), null);
+  assert.equal(reminderRepeats({ ...row, repeatsLeft: 1 }), "1 repeat left");
+  assert.equal(reminderRepeats({ ...row, repeatsLeft: 2 }), "2 repeats left");
+  assert.match(
+    reminderRepeats({ ...row, repeatUntil: 120000 }) ?? "",
+    /Repeats until .* · up to 0 repeats left/,
   );
 });

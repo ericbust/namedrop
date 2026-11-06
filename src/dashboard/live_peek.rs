@@ -12,12 +12,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::VecDeque,
+    fs::OpenOptions,
     io::{self, Read, Write},
     net::TcpStream,
     os::{
         fd::{AsRawFd, RawFd},
-        unix::process::CommandExt,
+        unix::{fs::OpenOptionsExt, process::CommandExt},
     },
+    path::{Component, Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
         Arc, Mutex,
@@ -284,6 +286,178 @@ impl NativeIdentity {
     }
 }
 
+struct NativePane {
+    identity: NativeIdentity,
+    source_rows: Option<serde_json::Value>,
+}
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SourceViewport {
+    cols: Option<u16>,
+    rows: Option<u16>,
+}
+impl SourceViewport {
+    fn bounded(cols: Option<u64>, rows: Option<u64>) -> Self {
+        let cols = cols
+            .filter(|cols| *cols > 0)
+            .map(|cols| cols.min(512) as u16);
+        let mut rows = rows
+            .filter(|rows| *rows > 0)
+            .map(|rows| rows.min(256) as u16);
+        if let (Some(cols), Some(height)) = (cols, &mut rows) {
+            *height = u32::from(*height).min(65536 / u32::from(cols)) as u16;
+        }
+        Self { cols, rows }
+    }
+
+    fn has_flags(self) -> bool {
+        self.cols.is_some() || self.rows.is_some()
+    }
+}
+
+fn tty_path(value: &str) -> Option<PathBuf> {
+    if matches!(value, "" | "?" | "??" | "-" | "console" | "/dev/console")
+        || value
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        return None;
+    }
+    let path = Path::new(value);
+    let path = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        Path::new("/dev").join(path)
+    };
+    let relative = path.strip_prefix("/dev").ok()?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        || value.split('/').any(|part| matches!(part, "." | ".."))
+    {
+        return None;
+    }
+    Some(path)
+}
+
+fn tty_viewport(path: &Path) -> Option<SourceViewport> {
+    let Ok(tty) = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(path)
+    else {
+        return None;
+    };
+    let fd = tty.as_raw_fd();
+    // SAFETY: isatty and TIOCGWINSZ borrow this open descriptor without reading or changing the PTY.
+    if unsafe { libc::isatty(fd) } != 1 {
+        return None;
+    }
+    let mut size = std::mem::MaybeUninit::<libc::winsize>::uninit();
+    // SAFETY: ioctl initializes the valid winsize allocation on success.
+    if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, size.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: TIOCGWINSZ succeeded above.
+    let size = unsafe { size.assume_init() };
+    if size.ws_col == 0 || size.ws_row == 0 {
+        return None;
+    }
+    Some(SourceViewport::bounded(
+        Some(u64::from(size.ws_col)),
+        Some(u64::from(size.ws_row)),
+    ))
+}
+
+fn shell_tty(pid: u64, budget: Duration) -> Option<PathBuf> {
+    if pid == 0 || pid > i32::MAX as u64 || budget.is_zero() {
+        return None;
+    }
+    let result = ProcessHerdr::for_binary("/bin/ps").execute_bounded(
+        &["-p", &pid.to_string(), "-o", "tty="],
+        budget.min(Duration::from_millis(150)),
+        &AtomicBool::new(false),
+        1024,
+    );
+    let Ok(result) = result else {
+        return None;
+    };
+    tty_path(result.stdout.trim())
+}
+
+fn source_tty(binding: &LiveBinding, budget: Duration) -> Option<PathBuf> {
+    if budget.is_zero() {
+        return None;
+    }
+    let started = Instant::now();
+    let result = ProcessHerdr::default()
+        .with_socket(Some(binding.namespace.session_socket_id.clone()))
+        .execute_bounded(
+            &["pane", "process-info", "--pane", &binding.pane_id],
+            budget.min(Duration::from_millis(150)),
+            &AtomicBool::new(false),
+            ENCODED_LIMIT,
+        );
+    let result = result.ok()?;
+    let reply = serde_json::from_str::<serde_json::Value>(&result.stdout).ok()?;
+    let info = reply.pointer("/result/process_info")?;
+    if let Some(value) = info.get("tty").filter(|value| !value.is_null()) {
+        tty_path(value.as_str()?)
+    } else if let Some(value) = info.get("shell_pid").filter(|value| !value.is_null()) {
+        shell_tty(value.as_u64()?, budget.saturating_sub(started.elapsed()))
+    } else {
+        None
+    }
+}
+
+struct TtyDiscovery {
+    path: Option<PathBuf>,
+    next_probe: Instant,
+}
+impl TtyDiscovery {
+    fn new() -> Self {
+        Self {
+            path: None,
+            next_probe: Instant::now(),
+        }
+    }
+
+    fn viewport(
+        &mut self,
+        pane: &NativePane,
+        binding: &LiveBinding,
+        budget: Duration,
+    ) -> SourceViewport {
+        if let Some(path) = &self.path {
+            if let Some(viewport) = tty_viewport(path) {
+                return viewport;
+            }
+            self.path = None;
+        }
+        if self.begin_probe(Instant::now(), budget)
+            && let Some(path) = source_tty(binding, budget)
+            && let Some(viewport) = tty_viewport(&path)
+        {
+            self.path = Some(path);
+            return viewport;
+        }
+        SourceViewport::bounded(
+            None,
+            pane.source_rows
+                .as_ref()
+                .and_then(serde_json::Value::as_u64),
+        )
+    }
+
+    fn begin_probe(&mut self, now: Instant, budget: Duration) -> bool {
+        if now < self.next_probe || budget.is_zero() {
+            return false;
+        }
+        self.next_probe = now + Duration::from_secs(1);
+        true
+    }
+}
+
 #[derive(Deserialize)]
 struct PaneReply {
     result: PaneResult,
@@ -299,6 +473,7 @@ struct Pane {
     terminal_id: String,
     agent_session: Option<Session>,
     agent_status: Option<String>,
+    scroll: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 struct Session {
@@ -312,11 +487,11 @@ fn recorded(store: &mut StateStore, key: &SpaceKey, address: &str) -> Result<Liv
     {
         LiveMember::Missing => Err(Status::NotFound),
         LiveMember::Gone => Err(Status::Gone),
-        LiveMember::Bound(binding) => Ok(binding),
+        LiveMember::Bound { binding, .. } => Ok(binding),
     }
 }
 
-fn native(binding: &LiveBinding, budget: Duration) -> Result<NativeIdentity, Status> {
+fn native(binding: &LiveBinding, budget: Duration) -> Result<NativePane, Status> {
     let result = ProcessHerdr::default()
         .with_socket(Some(binding.namespace.session_socket_id.clone()))
         .execute_bounded(
@@ -363,7 +538,12 @@ fn native(binding: &LiveBinding, budget: Duration) -> Result<NativeIdentity, Sta
     {
         return Err(Status::Gone);
     }
-    Ok(identity)
+    Ok(NativePane {
+        identity,
+        source_rows: pane
+            .scroll
+            .and_then(|scroll| scroll.get("viewport_rows").cloned()),
+    })
 }
 
 fn continuity(
@@ -406,10 +586,22 @@ struct Observer {
     stdout: ChildStdout,
 }
 impl Observer {
-    fn open(binding: &LiveBinding, identity: &NativeIdentity) -> io::Result<Self> {
-        let mut guard = Command::new(std::env::current_exe()?)
+    fn open(
+        binding: &LiveBinding,
+        identity: &NativeIdentity,
+        viewport: SourceViewport,
+    ) -> io::Result<Self> {
+        let mut command = Command::new(std::env::current_exe()?);
+        command
             .arg("dashboard-observer-guard")
-            .arg(&identity.terminal)
+            .arg(&identity.terminal);
+        if let Some(rows) = viewport.rows {
+            command.arg("--rows").arg(rows.to_string());
+        }
+        if let Some(cols) = viewport.cols {
+            command.arg("--cols").arg(cols.to_string());
+        }
+        let mut guard = command
             .env("HERDR_SOCKET_PATH", &binding.namespace.session_socket_id)
             .env_remove("HERDR_PANE_ID")
             .env_remove("HERDR_WORKSPACE_ID")
@@ -446,6 +638,105 @@ impl Observer {
 impl Drop for Observer {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+struct Observation {
+    observer: Observer,
+    input: Input,
+    normalizer: Normalizer,
+    viewport: SourceViewport,
+    tty: TtyDiscovery,
+    flagless: bool,
+    deadline: Option<Instant>,
+}
+impl Observation {
+    fn open(binding: &LiveBinding, pane: &NativePane, deadline: Instant) -> Result<Self, Status> {
+        let mut tty = TtyDiscovery::new();
+        let viewport = tty.viewport(
+            pane,
+            binding,
+            deadline.saturating_duration_since(Instant::now()),
+        );
+        if Instant::now() >= deadline {
+            return Err(Status::Unavailable);
+        }
+        Ok(Self {
+            observer: Observer::open(binding, &pane.identity, viewport)
+                .map_err(|_| Status::Unavailable)?,
+            input: Input::default(),
+            normalizer: Normalizer::default(),
+            viewport,
+            tty,
+            flagless: false,
+            deadline: Some(deadline),
+        })
+    }
+
+    fn reconcile(
+        &mut self,
+        binding: &LiveBinding,
+        identity: &NativeIdentity,
+        pane: NativePane,
+    ) -> Result<bool, Status> {
+        if pane.identity != *identity {
+            return Err(Status::Gone);
+        }
+        let deadline = self.deadline.unwrap_or_else(|| Instant::now() + STARTUP);
+        let viewport = self.tty.viewport(
+            &pane,
+            binding,
+            deadline.saturating_duration_since(Instant::now()),
+        );
+        let viewport = SourceViewport::bounded(
+            viewport.cols.or(self.viewport.cols).map(u64::from),
+            viewport.rows.or(self.viewport.rows).map(u64::from),
+        );
+        if viewport == self.viewport {
+            return Ok(false);
+        }
+        if Instant::now() >= deadline {
+            return Err(Status::Unavailable);
+        }
+        self.observer.stop();
+        self.observer =
+            Observer::open(binding, &pane.identity, viewport).map_err(|_| Status::Unavailable)?;
+        self.input = Input::default();
+        self.normalizer = Normalizer::default();
+        self.viewport = viewport;
+        self.flagless = false;
+        self.deadline = Some(deadline);
+        Ok(true)
+    }
+
+    fn retry_flagless(
+        &mut self,
+        binding: &LiveBinding,
+        identity: &NativeIdentity,
+    ) -> io::Result<bool> {
+        if !self.input.eof || self.input.saw_stdout || self.flagless || !self.viewport.has_flags() {
+            return Ok(false);
+        }
+        // The guard owns stdout until exit, so EOF makes this wait finite.
+        // Closing liveness first could mask usage exit 2.
+        if self.observer.guard.wait()?.code() != Some(2) {
+            return Ok(false);
+        }
+        self.observer.stop();
+        self.observer = Observer::open(binding, identity, SourceViewport::default())?;
+        self.input = Input::default();
+        self.normalizer = Normalizer::default();
+        self.flagless = true;
+        Ok(true)
+    }
+
+    fn next(&mut self) -> Result<Option<NativeRecord>, ()> {
+        self.input.next(&mut self.observer.stdout)
+    }
+
+    fn expired(&self) -> bool {
+        self.deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
     }
 }
 
@@ -738,7 +1029,7 @@ impl LivePeeks {
         if binding.pane_type != crate::PaneType::Agent || binding.agent_session_id.is_none() {
             return Err(Status::Gone);
         }
-        let identity = native(&binding, Duration::from_millis(500))?;
+        let identity = native(&binding, Duration::from_millis(500))?.identity;
         if !identity.accepts_input() {
             return Err(Status::Gone);
         }
@@ -760,7 +1051,7 @@ impl LivePeeks {
             InputPost::Text { text, .. } => {
                 send(&["pane", "send-text", &binding.pane_id, &text])?;
                 let current = recorded(&mut store, key, address)?;
-                let updated = native(&binding, Duration::from_millis(500))?;
+                let updated = native(&binding, Duration::from_millis(500))?.identity;
                 if current != binding || updated != identity || !updated.accepts_input() {
                     return Err(Status::Gone);
                 }
@@ -779,6 +1070,7 @@ impl LivePeeks {
         key: &SpaceKey,
         address: &str,
         expected: Option<&str>,
+        tailnet: Option<&super::super::tailscale::OwnedHandler>,
     ) -> io::Result<()> {
         let started = Instant::now();
         socket.set_write_timeout(Some(Duration::from_secs(1)))?;
@@ -802,102 +1094,107 @@ impl LivePeeks {
                 .set_busy_timeout(Duration::from_millis(100))
                 .map_err(|_| Status::Unavailable)?;
             let binding = recorded(&mut store, key, address)?;
-            let identity = native(&binding, STARTUP.saturating_sub(started.elapsed()))?;
-            let continuity = continuity(front, address, &binding, &identity);
+            let pane = native(&binding, STARTUP.saturating_sub(started.elapsed()))?;
+            let continuity = continuity(front, address, &binding, &pane.identity);
             if expected.is_some_and(|value| value != continuity) {
                 return Err(Status::Gone);
             }
-            Ok((store, binding, identity, continuity))
+            Ok((store, binding, pane, continuity))
         })();
-        let (mut store, binding, identity, continuity) = match setup {
+        let (mut store, binding, pane, continuity) = match setup {
             Ok(value) => value,
             Err(status) => return respond_status(&mut socket, status),
         };
-        let mut observer = match Observer::open(&binding, &identity) {
-            Ok(observer) => observer,
-            Err(_) => return respond_status(&mut socket, Status::Unavailable),
+        let mut observation = match Observation::open(&binding, &pane, started + STARTUP) {
+            Ok(observation) => observation,
+            Err(status) => return respond_status(&mut socket, status),
         };
+        let identity = pane.identity;
         socket.set_nonblocking(true)?;
-        let mut input = Input::default();
-        let mut normalizer = Normalizer::default();
         let mut seq = 0;
         let mut output = Output::default();
         // Validate the entire first full paint before committing HTTP headers.
         let first = loop {
-            if started.elapsed() >= STARTUP
-                || front.restarting.load(Ordering::Acquire)
-                || front.files.restarting()
-            {
-                socket.set_nonblocking(false)?;
-                return respond_status(&mut socket, Status::Unavailable);
-            }
-            if disconnected(&socket) {
-                return Ok(());
-            }
-            match input.next(&mut observer.stdout) {
-                Ok(Some(record)) => match normalizer.frame(record) {
-                    Ok(Some(paint)) => break Ok(paint),
-                    Ok(None) => {
-                        break Err(Event::Closed {
-                            reason: Closed::Ended,
-                        });
-                    }
+            let first = loop {
+                if !super::tailnet_still_enabled(front, tailnet)
+                    || started.elapsed() >= STARTUP
+                    || front.restarting.load(Ordering::Acquire)
+                    || front.files.restarting()
+                {
+                    socket.set_nonblocking(false)?;
+                    return respond_status(&mut socket, Status::Unavailable);
+                }
+                if disconnected(&socket) {
+                    return Ok(());
+                }
+                match observation.next() {
+                    Ok(Some(record)) => match observation.normalizer.frame(record) {
+                        Ok(Some(paint)) => break Ok(paint),
+                        Ok(None) => {
+                            break Err(Event::Closed {
+                                reason: Closed::Ended,
+                            });
+                        }
+                        Err(()) => {
+                            break Err(Event::Unavailable {
+                                reason: Unavailable::InvalidSource,
+                            });
+                        }
+                    },
                     Err(()) => {
                         break Err(Event::Unavailable {
                             reason: Unavailable::InvalidSource,
                         });
                     }
-                },
-                Err(()) => {
-                    break Err(Event::Unavailable {
-                        reason: Unavailable::InvalidSource,
-                    });
-                }
-                Ok(None) if input.eof => {
-                    // Only the exact CLI usage exit, with no output at all,
-                    // proves this fixed valid invocation is unsupported.
-                    observer.stop();
-                    let unsupported = observer.guard.wait()?.code() == Some(2) && !input.saw_stdout;
-                    if unsupported {
-                        break Err(Event::Unavailable {
-                            reason: Unavailable::Unsupported,
-                        });
+                    Ok(None) if observation.input.eof => {
+                        if observation.retry_flagless(&binding, &identity)? {
+                            continue;
+                        }
+                        // Only the exact CLI usage exit, with no output at all,
+                        // proves this fixed valid invocation is unsupported.
+                        observation.observer.stop();
+                        let unsupported = observation.observer.guard.wait()?.code() == Some(2)
+                            && !observation.input.saw_stdout;
+                        if unsupported {
+                            break Err(Event::Unavailable {
+                                reason: Unavailable::Unsupported,
+                            });
+                        }
+                        socket.set_nonblocking(false)?;
+                        return respond_status(&mut socket, Status::Unavailable);
                     }
+                    Ok(None) => {}
+                }
+                pause(&socket, observation.observer.stdout.as_raw_fd(), false)?;
+            };
+            let rechecked = recorded(&mut store, key, address).and_then(|current| {
+                if current != binding {
+                    return Err(Status::Gone);
+                }
+                let current = native(&binding, STARTUP.saturating_sub(started.elapsed()))?;
+                observation.reconcile(&binding, &identity, current)
+            });
+            match rechecked {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(status) => {
                     socket.set_nonblocking(false)?;
-                    return respond_status(&mut socket, Status::Unavailable);
+                    return respond_status(&mut socket, status);
                 }
-                Ok(None) => {}
             }
-            pause(&socket, observer.stdout.as_raw_fd(), false)?;
+            if started.elapsed() >= STARTUP {
+                socket.set_nonblocking(false)?;
+                return respond_status(&mut socket, Status::Unavailable);
+            }
+            break first;
         };
-        // Never expose even the first paint until the logical and host identity
-        // were rechecked. These snapshots do not promise atomic session secrecy.
-        let rechecked = recorded(&mut store, key, address).and_then(|current| {
-            if current != binding {
-                return Err(Status::Gone);
-            }
-            native(&binding, STARTUP.saturating_sub(started.elapsed())).and_then(|current| {
-                if current == identity {
-                    Ok(())
-                } else {
-                    Err(Status::Gone)
-                }
-            })
-        });
-        if let Err(status) = rechecked {
-            socket.set_nonblocking(false)?;
-            return respond_status(&mut socket, status);
-        }
-        if started.elapsed() >= STARTUP {
-            socket.set_nonblocking(false)?;
-            return respond_status(&mut socket, Status::Unavailable);
-        }
         output.push(format!("HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\n{SECURITY_HEADERS}Connection: close\r\n\r\n").into_bytes()).map_err(|_|io::Error::other("live output limit"))?;
         let mut ending = match first {
             Ok(paint) => {
                 output
                     .paint(paint, &continuity, &mut seq)
                     .map_err(|_| io::Error::other("live output limit"))?;
+                observation.deadline = None;
                 false
             }
             Err(event) => {
@@ -913,6 +1210,9 @@ impl LivePeeks {
         let mut native_checked = Instant::now();
         let mut last_heartbeat = Instant::now();
         loop {
+            if !super::tailnet_still_enabled(front, tailnet) {
+                return Ok(());
+            }
             if disconnected(&socket) {
                 return Ok(());
             }
@@ -929,43 +1229,18 @@ impl LivePeeks {
                         reason: Closed::Replaced,
                     }),
                 };
-                if native_checked.elapsed() >= Duration::from_secs(1) {
-                    native_checked = Instant::now();
-                    match native(&binding, Duration::from_millis(500)) {
-                        Ok(current) if current == identity => {}
-                        Err(Status::Unavailable) => {
-                            if final_event.is_none() {
-                                final_event = Some(Event::Unavailable {
-                                    reason: Unavailable::SourceLost,
-                                });
-                            }
-                        }
-                        _ => {
-                            final_event = Some(Event::Closed {
-                                reason: Closed::Replaced,
-                            })
-                        }
-                    }
-                }
-                if front.restarting.load(Ordering::Acquire) || front.files.restarting() {
-                    final_event = Some(Event::Unavailable {
-                        reason: Unavailable::ServerStopping,
-                    });
-                }
+                let history_text = history
+                    .as_ref()
+                    .and_then(|history| history.receiver.try_recv().ok());
                 if final_event.is_none()
-                    && let Some(history) = history.as_ref()
-                    && let Ok(text) = history.receiver.try_recv()
+                    && (native_checked.elapsed() >= Duration::from_secs(1)
+                        || history_text.is_some())
                 {
                     native_checked = Instant::now();
-                    match native(&binding, Duration::from_millis(500)) {
-                        Ok(current) if current == identity => {
-                            let line = Record::line(seq + 1, Event::History { text: &text });
-                            if line.is_ok_and(|line| output.pending + line.len() <= PENDING_LIMIT) {
-                                output
-                                    .record(&mut seq, Event::History { text: &text })
-                                    .map_err(|_| io::Error::other("live history output limit"))?;
-                            }
-                        }
+                    match native(&binding, Duration::from_millis(500))
+                        .and_then(|current| observation.reconcile(&binding, &identity, current))
+                    {
+                        Ok(_) => {}
                         Err(Status::Unavailable) => {
                             final_event = Some(Event::Unavailable {
                                 reason: Unavailable::SourceLost,
@@ -978,8 +1253,28 @@ impl LivePeeks {
                         }
                     }
                 }
+                if front.restarting.load(Ordering::Acquire) || front.files.restarting() {
+                    final_event = Some(Event::Unavailable {
+                        reason: Unavailable::ServerStopping,
+                    });
+                }
+                if final_event.is_none() && observation.expired() {
+                    final_event = Some(Event::Unavailable {
+                        reason: Unavailable::SourceLost,
+                    });
+                }
+                if final_event.is_none()
+                    && let Some(text) = history_text
+                {
+                    let line = Record::line(seq + 1, Event::History { text: &text });
+                    if line.is_ok_and(|line| output.pending + line.len() <= PENDING_LIMIT) {
+                        output
+                            .record(&mut seq, Event::History { text: &text })
+                            .map_err(|_| io::Error::other("live history output limit"))?;
+                    }
+                }
                 if let Some(event) = final_event {
-                    observer.stop();
+                    observation.observer.stop();
                     // End at the last complete record. A partially written line
                     // can only end in EOF; the continuity retry then refuses it.
                     if output.discard_and_end(&mut seq, event).is_err() {
@@ -987,11 +1282,11 @@ impl LivePeeks {
                     }
                     ending = true;
                 } else {
-                    let event = match input.next(&mut observer.stdout) {
-                        Ok(Some(record)) => match normalizer.frame(record) {
+                    let event = match observation.next() {
+                        Ok(Some(record)) => match observation.normalizer.frame(record) {
                             Ok(Some(paint)) => {
                                 if output.paint(paint, &continuity, &mut seq).is_err() {
-                                    observer.stop();
+                                    observation.observer.stop();
                                     if output
                                         .discard_and_end(
                                             &mut seq,
@@ -1004,6 +1299,8 @@ impl LivePeeks {
                                         return Ok(());
                                     }
                                     ending = true;
+                                } else {
+                                    observation.deadline = None;
                                 }
                                 None
                             }
@@ -1017,13 +1314,19 @@ impl LivePeeks {
                         Err(()) => Some(Event::Unavailable {
                             reason: Unavailable::InvalidSource,
                         }),
-                        Ok(None) if input.eof => Some(Event::Unavailable {
-                            reason: Unavailable::SourceLost,
-                        }),
+                        Ok(None) if observation.input.eof => {
+                            if observation.retry_flagless(&binding, &identity)? {
+                                None
+                            } else {
+                                Some(Event::Unavailable {
+                                    reason: Unavailable::SourceLost,
+                                })
+                            }
+                        }
                         Ok(None) => None,
                     };
                     if let Some(event) = event {
-                        observer.stop();
+                        observation.observer.stop();
                         if output.record(&mut seq, event).is_err() {
                             return Ok(());
                         }
@@ -1048,7 +1351,7 @@ impl LivePeeks {
                 if ending {
                     -1
                 } else {
-                    observer.stdout.as_raw_fd()
+                    observation.observer.stdout.as_raw_fd()
                 },
                 output.pending > 0,
             )?;
@@ -1186,6 +1489,91 @@ fn decode(text: &str) -> Result<Vec<u8>, ()> {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn tty_discovery_reserves_one_second_between_probe_starts() {
+        let mut discovery = TtyDiscovery::new();
+        let now = discovery.next_probe;
+        let budget = Duration::from_millis(150);
+        assert!(!discovery.begin_probe(now, Duration::ZERO));
+        assert!(discovery.begin_probe(now, budget));
+        assert!(!discovery.begin_probe(now, budget));
+        assert!(!discovery.begin_probe(now + Duration::from_millis(999), budget));
+        assert!(!discovery.begin_probe(now + Duration::from_secs(1), Duration::ZERO));
+        assert!(discovery.begin_probe(now + Duration::from_secs(1), budget));
+        assert!(!discovery.begin_probe(now + Duration::from_millis(1999), budget));
+        assert!(discovery.begin_probe(now + Duration::from_secs(2), budget));
+    }
+
+    #[test]
+    fn geometry_hints_clamp_positive_axes_and_ignore_zero() {
+        for (cols, rows, expected) in [
+            (
+                Some(1),
+                Some(256),
+                SourceViewport {
+                    cols: Some(1),
+                    rows: Some(256),
+                },
+            ),
+            (
+                Some(600),
+                Some(300),
+                SourceViewport {
+                    cols: Some(512),
+                    rows: Some(128),
+                },
+            ),
+            (
+                Some(200),
+                Some(300),
+                SourceViewport {
+                    cols: Some(200),
+                    rows: Some(256),
+                },
+            ),
+            (Some(0), Some(0), SourceViewport::default()),
+            (
+                None,
+                Some(u64::MAX),
+                SourceViewport {
+                    cols: None,
+                    rows: Some(256),
+                },
+            ),
+        ] {
+            assert_eq!(SourceViewport::bounded(cols, rows), expected);
+        }
+    }
+
+    #[test]
+    fn tty_names_accept_linux_and_macos_devices_and_refuse_parent_paths() {
+        for (name, expected) in [
+            ("pts/12", "/dev/pts/12"),
+            ("/dev/pts/12", "/dev/pts/12"),
+            ("ttys012", "/dev/ttys012"),
+            ("/dev/ttys012", "/dev/ttys012"),
+        ] {
+            assert_eq!(tty_path(name).unwrap(), Path::new(expected));
+        }
+        for name in [
+            "",
+            "?",
+            "??",
+            "-",
+            "console",
+            "/dev/console",
+            "/dev",
+            "/tmp/tty",
+            "../tty",
+            "pts/../12",
+            "/dev/./pts/12",
+            "ttys012\n",
+            "/dev/pts/12 extra",
+        ] {
+            assert!(tty_path(name).is_none(), "accepted {name:?}");
+        }
+    }
 
     #[test]
     fn normalization_checks_full_sequence_grid_and_decoded_limits() {

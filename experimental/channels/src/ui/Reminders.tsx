@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { participantCopy } from "../copy.ts";
+import { participantCopy, timeOfDay } from "../copy.ts";
 import type { Directory, PendingReminder } from "../model.ts";
 import {
   type ReminderConversation,
@@ -123,42 +123,47 @@ function ConversationReminders({
           </p>
         )}
         <ul className="reminder-list" aria-label="Pending reminders">
-          {rows.map((row) => (
-            <li className="reminder-item" key={row.id}>
-              <div className="reminder-copy">
-                <strong>
-                  {participantCopy(participant(directory, row.owner)).name}
-                </strong>
-                <span className="reminder-body" title={row.body.text}>
-                  {row.body.text}
-                  {row.body.truncated ? "…" : ""}
-                </span>
-                <span>
-                  {row.dueAt === null ? (
-                    "Delivering now"
-                  ) : (
-                    <time dateTime={new Date(row.dueAt).toISOString()}>
-                      Next {new Date(row.dueAt).toLocaleString()}
-                    </time>
+          {rows.map((row) => {
+            const repeats = reminderRepeats(row);
+            return (
+              <li className="reminder-item" key={row.id}>
+                <div className="reminder-copy">
+                  <strong>
+                    {participantCopy(participant(directory, row.owner)).name}
+                  </strong>
+                  <span className="reminder-body" title={row.body.text}>
+                    {row.body.text}
+                    {row.body.truncated ? "…" : ""}
+                  </span>
+                  <span>
+                    {row.dueAt === null ? (
+                      "Delivering now"
+                    ) : (
+                      <time
+                        dateTime={new Date(row.dueAt).toISOString()}
+                        title={new Date(row.dueAt).toLocaleString()}
+                      >
+                        Next {timeOfDay(row.dueAt)}
+                      </time>
+                    )}
+                    {repeats !== null && <> · {repeats}</>}
+                  </span>
+                  {cancelError === row.id && (
+                    <span role="alert">Couldn't cancel. Try again.</span>
                   )}
-                  {" · "}
-                  {reminderRepeats(row)}
-                </span>
-                {cancelError === row.id && (
-                  <span role="alert">Couldn't cancel. Try again.</span>
-                )}
-              </div>
-              <button
-                type="button"
-                className="text-button"
-                disabled={cancelling !== null}
-                onClick={() => void cancel(row.id)}
-                aria-label={`Cancel reminder ${row.body.text}`}
-              >
-                {cancelling === row.id ? "Cancelling…" : "Cancel"}
-              </button>
-            </li>
-          ))}
+                </div>
+                <button
+                  type="button"
+                  className="text-button"
+                  disabled={cancelling !== null}
+                  onClick={() => void cancel(row.id)}
+                  aria-label={`Cancel reminder ${row.body.text}`}
+                >
+                  {cancelling === row.id ? "Cancelling…" : "Cancel"}
+                </button>
+              </li>
+            );
+          })}
         </ul>
       </div>
     </details>

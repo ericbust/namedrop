@@ -26,7 +26,7 @@
   <a href="#agent-status">Agent status</a> ·
   <a href="#tour">Tour</a> ·
   <a href="#personas">Personas</a> ·
-  <a href="#channels-experimental">Channels</a> ·
+  <a href="#channels-beta">Channels</a> ·
   <a href="#update-namedrop">Update</a> ·
   <a href="#troubleshooting">Troubleshooting</a> ·
   <a href="#uninstall">Uninstall</a> ·
@@ -34,6 +34,12 @@
 </p>
 
 Namedrop is a [Herdr](https://herdr.dev) plugin that lets agents work together across panes. Give an agent a name, mention it in another agent's prompt, and get the result back where you asked.
+
+**Channels (Beta)** brings your workspaces, agent conversations, and requests that need you into one local browser page. Open **Open Namedrop Channels** in Herdr, or run `namedrop channels` from a shell tab.
+
+![Channels with a conversation open in a thread](docs/assets/channels-beta.webp)
+
+<!-- channels-video -->
 
 In one agent pane:
 
@@ -69,6 +75,8 @@ The reply comes back to the workspace you sent from. A mention without a label s
 - **Personas.** Describe what each agent is good at, and your agents pick useful collaborators from the roster themselves.
 - **Named terminals.** `@build cargo test` runs in a shell pane without an LLM and returns stdout, stderr, and the exit status.
 - **Groups.** Save `@review-team` once, then mention it like a name.
+- **Channels (Beta).** Read channels, threads, and direct messages in your browser. Use Live Peek to see an agent's terminal, or open **Needs you** when it needs a decision.
+- **Reminders.** Ask an agent to check something later or on a schedule and answer where you asked.
 - **Agent status.** A floating panel shows what each agent is doing and which replies you're still waiting on.
 - **Tracked coordination.** Read progress and partial results while work runs. The lead saves one final report.
 - **Freshness checks.** See whether a review still matches the code you're about to merge.
@@ -173,7 +181,9 @@ Names belong to a Herdr workspace, and a `#label` before a mention reaches anoth
 
 In the dashboard channel, a top-level post can use plain text. Without a known local agent's embedded `@mention`, the post stays in the channel and no model runs. With embedded mentions, the server asks a separate, tool-free small model which mentioned agents you are addressing. A passing mention such as "nice work by @codex" can stay unrouted. The router prefers Claude Haiku when Claude Code is registered in any workspace, otherwise Codex Luna. It leaves your words unchanged. Set `NAMEDROP_CHANNEL_ROUTER=off` before starting the dashboard to leave plain posts unrouted.
 
-Replies to these channel posts stay visible in the channel. An agent can wake another local agent by mentioning it anywhere in a reply. Escaped mentions, unknown names, terminals, and self-mentions stay text. The thread's existing automatic reply allowance limits agent exchanges. In a thread, your plain follow-up goes to its agent participants without a model call. Embedded mentions of new participants go through the router. Terminals always need an explicit leading mention. Leading mentions keep their existing addressing rules.
+Replies to these channel posts stay in their thread, with the latest reply previewed under the channel message. An agent can wake another local agent by mentioning it anywhere in a reply. Escaped mentions, unknown names, terminals, and self-mentions stay text. The thread's existing automatic reply allowance limits agent exchanges. In a thread with one eligible agent, your plain follow-up goes to that agent without a model call. With several agents, choose recipients with `@name` before sending. Embedded mentions of new participants go through the router. Terminals always need an explicit leading mention. Leading mentions keep their existing addressing rules.
+
+Your own message resets a thread's **Automatic Reply Limit** and lifts a pause caused by that limit. Agent-to-agent exchanges pause after 10 replies until you continue the conversation.
 
 ### Mention agents in other workspaces
 
@@ -329,39 +339,9 @@ At the start of each turn, and with each incoming request, every agent receives 
 
 A persona grants no permissions and no tool access. It isn't proof of skill, and it never overrides your request or an explicit `@mention`. Named terminals can't have a persona.
 
-## Channels (experimental)
+## Channels (Beta)
 
-Channels is a browser page that shows each Herdr workspace as a channel. It shows the workspace's messages, threads, agents, and anything that needs you. You can post to a channel or reply in a thread, and the agents receive your message like an `@mention` from a pane. Channels ships only on the `experimental` branch. It is not part of a `main` release yet.
-
-### Install the experimental branch
-
-For a new installation, follow [Install the plugin](#install-the-plugin) and use the `experimental` ref:
-
-```sh
-herdr plugin install ericbust/namedrop --ref experimental
-herdr plugin pane open --plugin namedrop --entrypoint setup
-```
-
-To switch an existing `main` installation, use the [reinstall steps](#reinstall-an-existing-installation) with the `experimental` ref. Finish active handoffs and exit your Claude Code and Codex sessions first. Your names and message history stay.
-
-```sh
-cd "$HOME"
-namedrop deactivate
-herdr plugin disable namedrop
-herdr plugin uninstall namedrop
-herdr plugin install ericbust/namedrop --ref experimental
-herdr plugin pane open --plugin namedrop --entrypoint setup
-```
-
-Then open a new terminal tab, run `namedrop doctor`, and start fresh agent sessions. **Update Namedrop** follows the ref you installed, so it updates an experimental installation to newer `experimental` commits.
-
-If you already run an older `experimental` build, you get no update notice for this one, because the older update check can't read its `1.5.0-exp` version. Run the update by hand:
-
-```sh
-herdr plugin action invoke update --plugin namedrop
-```
-
-To switch back, run the same commands with `--ref main` in place of `--ref experimental`. Both branches use the same state schema, so your names and history carry over. A local checkout or an archive installation must follow the [migration guide](docs/operations.md#migrate-a-local-link-to-a-managed-installation) first.
+Channels is included in the normal installation. Each Herdr workspace is a channel with its messages, threads, agents, and anything that needs you. **Direct messages** lets you talk to one agent without adding the conversation to a channel. Workspace names beside agents help you tell same-named agents apart.
 
 ### Open Channels
 
@@ -374,23 +354,63 @@ namedrop channels
 
 Both open the page in your browser on macOS, and on Linux when a display is available. If no browser opens, run `namedrop channels` in a shell tab and open the link it prints. Herdr runs the action in its own server process, so the action can't open a browser when that process has no display. Run `namedrop channels --no-open` to print the link only. The link works once. Run the command again for a new link.
 
+### Open Channels from your tailnet
+
+Sign in to Tailscale on this machine and on your phone or Mac, then run:
+
+```sh
+namedrop channels --tailscale --no-open
+```
+
+Open the printed one-time HTTPS link on your other device. Namedrop configures `tailscale serve` and keeps the Channels server on loopback. It chooses another HTTPS port if 443 is already in use and leaves other Serve handlers alone. Your tailnet must have HTTPS enabled. Doctor reports the configured URL and any handler that no longer points at Channels.
+
+Only devices signed in as this machine's Tailscale owner can use this link. Channels checks the identity supplied by Serve on every request, then requires its usual browser session and CSRF checks. Shared-device users and tagged devices cannot sign in. This uses private Serve, never public Funnel. Local programs on the server remain trusted. **Type to agent** from your phone sends real input to the agent's pane.
+
+To remove Namedrop's handler and disable tailnet access, run:
+
+```sh
+namedrop channels --tailscale off
+```
+
+The ordinary `namedrop channels` command and Herdr action still open the local page. Run the tailnet command in a workspace shell tab for a fresh remote link.
+
 ### What to try
 
-- Post `@name` and a request in a channel, and watch the reply arrive in the channel.
-- Open a reply's thread and post a follow-up. Agents already in the thread receive it without a new `@mention`.
-- Post without a leading `@mention`. The post stays in the channel and wakes nobody, unless it mentions an agent in its text.
-- Open **Needs you** when an agent waits on an approval or a reply. Each item opens its conversation or the agent's pane.
-- Select an agent's name to **Peek** at its recent pane output.
-- Narrow the window below 600 pixels wide, and switch your system to dark mode.
+- Post `@name` and a request in a channel, and watch the reply arrive. Replies stay in their thread. The channel shows the top message, reply count, and latest reply.
+- Open a thread with one agent and send a follow-up without `@`. With several agents, pick who receives it with `@name`. Channels keeps the reply unsent until you choose.
+- Post a note without a mention. It stays in the channel and wakes nobody. Embedded agent mentions go through the router described in [Examples](#examples).
+- Choose an agent under **Direct messages**. Your messages go to that agent without a mention and stay out of channels and **All activity**.
+- An agent waiting on permission or a question shows **Needs you** in member chips, the DM sidebar, and DM and Peek headers. Open **Needs you** when an agent waits on an approval or a reply. Handoff warnings offer details and review actions. **All activity** shows work across channels.
+- Select an agent's name to open **Peek**. **Live** shows its terminal, keeps output that scrolls by while you watch, and offers **Expand**. **Text snapshot** gives you a sanitized text view with manual refresh.
+- Use **Type to agent** in Live Peek to submit a prompt or send keys such as Esc and Ctrl-C. This sends input to the real pane. Live Peek keeps streaming through the agent's reply. Watching, scrolling, and resizing Peek do not send input or resize that pane.
+- Type `/` or `$` in a message box or **Type to agent** to see skills for the addressed agent. Claude Code and Codex have separate lists.
+- See how many subagents an agent runs on its member chip and Peek header.
+- Ask for a reminder. Pending reminders in the thread or DM have **Cancel** buttons. One-time reminders show no repeat count.
 
-The [Channels tester checklist](docs/channels-testing.md) lists these checks in order.
+If an agent answers a Channels request only in its terminal, Channels shows the answer marked **From @name's terminal** and flags the conversation as needing you. The [Channels tester checklist](docs/channels-testing.md) covers these flows.
 
-### Known limits
+### Beta limits and privacy
 
-- Status for Codex agents is limited compared with Claude Code agents.
-- The page can't yet tell an agent that you named before its session started from an agent that is offline.
-- A workspace where Namedrop was never turned on shows a **No agents here yet** guide. To start, name an agent there with `namedrop name @alias`.
-- The page is a local browser page on `127.0.0.1`. Other machines can't open it. Any process that runs as your user and can open the page can post as you. See [Channels](docs/operations.md#channels) for the server details.
+Beta means the interface and workflows may still change. Status for Codex agents is limited compared with Claude Code. A name created before its session starts can look like an offline agent. A workspace where Namedrop was never activated shows **No agents here yet**.
+
+Channels listens on `127.0.0.1`. Use `--tailscale` to open it from your other devices. Any process running as your user that can open the page can post as you. Live Peek shows terminal content that can contain secrets. **Text snapshot** redacts recognized secrets, but redaction cannot catch every secret. See [Channels operations](docs/operations.md#channels) for authentication and server details.
+
+[Report a problem](https://github.com/ericbust/namedrop/issues) with your platform, Herdr and agent versions, steps to reproduce, and any errors. Remove credentials and private conversation text from screenshots and logs. The `experimental` branch remains available for trying upcoming features.
+
+## Reminders
+
+Ask an agent to do something later or on a schedule:
+
+```text
+Check the build in 10 minutes and tell me the result here.
+Check the deployment every 5 minutes, three times, and report back here.
+```
+
+Reminders work in plain Herdr panes and in Channels, including threads and DMs. The agent wakes at the scheduled time and answers where you asked. Saved reminders survive process restarts, but they belong to the agent session that created them. If that session or its pane binding is gone, the reminder fails instead of moving to another session.
+
+The minimum delay and repeat interval are **60 seconds**. Each agent can have **20 pending reminders**, and a repeating reminder allows at most **100 total occurrences**, including the first. Pending reminders in Channels offer **Cancel**. In a pane, ask the agent to list or cancel its reminders. See [Reminders operations](docs/operations.md#reminders) for the commands and clock process.
+
+Start a **new agent session after updating** so it learns the reminder commands. Existing sessions keep the instructions they already loaded.
 
 ## Update Namedrop
 
@@ -410,7 +430,7 @@ To turn off both background checks and notices, put `{"check_for_updates":false}
 - **Nothing is forced.** An update keeps your installed source and ref, including a fixed pin. It stops and cancels nothing. If activation fails, Namedrop selects the previous runtime again. Build and setup details go to `last-update.log` in Namedrop's state directory.
 - **Other workspaces.** Other workspaces keep their activation. Run `namedrop doctor` in each one, and open setup if Doctor reports a problem.
 
-If your installed version has no **Update** action, finish your handoffs, exit your agents, and use the [reinstall steps](#reinstall-an-existing-installation). Local checkouts and archives use the [manual upgrade steps](docs/operations.md#manual-upgrade). The [upgrade guide](docs/operations.md#upgrade) covers live schema migration, backups, and recovery.
+If your installed version has no **Update** action, finish your handoffs, exit your agents, and use the [reinstall steps](#reinstall-an-existing-installation). Local checkouts and archives use the [manual upgrade steps](docs/operations.md#manual-upgrade). Version 1.5.0 upgrades the database in place to schema 7 and keeps names and history. Take a backup before upgrading across schemas. The [upgrade guide](docs/operations.md#upgrade) covers migration, backups, and recovery.
 
 ### Reinstall an existing installation
 
@@ -435,9 +455,9 @@ In the Herdr workspace that has the problem, run:
 namedrop doctor
 ```
 
-Doctor reports missing names, setup problems, paused workspaces, and blocked deliveries. It exits with `0` when everything is healthy, `1` when something needs attention, and `2` when it can't check. Read its suggested repair before you act. Don't resend a delivery that Doctor marks as uncertain, because the work may already have run. If the `namedrop` command isn't available, run `sh scripts/setup.sh check` from the installed package directory.
+Doctor reports missing names, setup problems, paused workspaces, blocked deliveries, and the number of pending reminders. It warns when pending reminders have no running clock. It exits with `0` when everything is healthy, `1` when something needs attention, and `2` when it can't check. Read its suggested repair before you act. Don't resend a delivery that Doctor marks as uncertain, because the work may already have run. If the `namedrop` command isn't available, run `sh scripts/setup.sh check` from the installed package directory.
 
-**Prefix**, then **Shift-H** opens the **Namedrop Doctor** panel with the same diagnosis. **<** and **>** page, **R** refreshes, **T** pages through the [tour](#tour) while the workspace has no names, and **Enter** or **Esc** closes. Doctor never repairs anything itself. **A** asks the agent in the pane you opened it from to help with the listed issues.
+**Prefix**, then **Shift-H** opens the **Namedrop Doctor** panel with the same diagnosis. **<** and **>** page, **R** refreshes, **T** pages through the [tour](#tour) while the workspace has no names, and **Enter** or **Esc** closes. Doctor does not apply its suggested repairs. A normal command invocation can restart a missing reminder clock. **A** asks the agent in the pane you opened it from to help with the listed issues.
 
 Everyday commands such as `namedrop name`, `namedrop address list`, `namedrop group list`, and `namedrop doctor` print readable output in a terminal. Use `--json` for scripts, or `--human` to save readable output to a file. See [command output](docs/operations.md#command-output).
 

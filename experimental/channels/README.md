@@ -1,7 +1,10 @@
-# Namedrop channels experiment
+# Namedrop Channels (Beta)
 
-This app shows live Herdr workspaces as channels, with their messages, threads, members,
-presence, and attention requests. You can post to a channel or reply in a thread as the
+Channels is a **Beta** feature included in the normal Namedrop installation on `main`.
+The binary serves the embedded app without Node or npm. This directory holds its frontend source.
+
+The app shows live Herdr workspaces as channels, with messages, threads, members,
+presence, direct messages, reminders, and attention requests. You can post to a channel or reply in a thread as the
 operator. It needs the dashboard's all-workspace stream, its operator post route, and
 `--ui` support. It does not change a workspace's panes or labels.
 
@@ -15,6 +18,7 @@ npm run lint
 npm run typecheck
 npm test
 npm run build
+npm run bundle:check
 ```
 
 `npm test` uses Node's built-in test runner with TypeScript stripping. It runs in
@@ -38,14 +42,19 @@ restoration, late `ready`, slow discovery, replay mismatches, old servers withou
 `POST /w/<key>/messages` that checks the session cookie and CSRF header, keeps request
 IDs idempotent, and returns the server's error codes.
 
-The optional, path-filtered **Channels experiment** workflow runs these checks.
+After changing the app, run `npm run bundle` to regenerate the embedded assets in
+`src/dashboard/channels` and `src/dashboard/channels_bundle.rs`. Commit these
+files with the frontend change.
+`npm run bundle:check` checks that the committed assets match the build.
+
+The optional, path-filtered **Channels experiment (optional)** workflow runs these checks.
 It adds no required-check configuration. Cargo excludes `/experimental/**` from
 the package.
 
 ## Serve and drive the app
 
 From the repository root, use the isolated profile procedure in the
-[channels driver](../../.claude/skills/verify/SKILL.md#channels-browser-app).
+[channels driver](../../.agents/skills/verify/SKILL.md#channels-browser-app).
 Build the app first, then serve it from that profile.
 
 ```sh
@@ -80,10 +89,10 @@ channels remain. OS dark mode switches every token to the indigo night theme.
 ## Read messages and threads
 
 The timeline groups consecutive messages by author within five minutes and
-inserts day dividers. Each request the operator starts with `@name` shows its
-latest reply in a preview box. A channel post, and a conversation an agent
-started, read as a group chat instead: every reply is its own row in time order,
-and a reply whose row above is not its parent shows a one-line reference to it.
+inserts day dividers. A channel message with replies shows a reply count and the latest reply in a
+preview box. Replies stay in their thread when the parent message is loaded.
+The preview and reply count open the **Thread** pane. Replies whose parent is
+not loaded remain visible as **Earlier thread** rows.
 Under each channel-chat message a route line says who got it and why, with the
 receipts until they answer, and offers **Send anyway** for a mentioned agent the
 post did not reach. `routeLine()` in `src/route.ts` holds that line's rules. The
@@ -112,9 +121,11 @@ reset source without restoring discarded rows or creating an artificial gap.
 Failed history requests offer **Try again**. The member strip above the timeline
 wraps to two lines and folds the rest behind **+N more**.
 
-Message bodies render as text. Fenced code uses a monospace font, and HTTP and
+Message bodies render supported Markdown, including emphasis, headings, lists,
+tables, and fenced code. Collaborator text never becomes arbitrary HTML. HTTP and
 HTTPS URLs become links with `rel="noreferrer"`. Bodies over 480 characters have
-**Show more**. Preview boundaries preserve surrogate pairs. Links are recognized
+**Show more**, which can load the full sanitized body up to 64 Ki characters.
+Preview boundaries preserve surrogate pairs. Links are recognized
 before shortening, so a shortened label retains its complete destination and the
 ellipsis stays outside the link. A server truncation note identifies text omitted
 before delivery. A message to a single terminal renders as a command.
@@ -145,10 +156,22 @@ under its own address. Escape closes the drawer and returns focus to the control
 that opened it.
 
 Live shows a passive terminal projection with colors, cursor motion, and TUI
-redraws. Its grid is the observer's projected viewport, which can differ from the
-source PTY dimensions. Scroll the projection locally to see a wider grid. Opening
+redraws. Its grid follows the source terminal, including source resizes, when its
+PTY dimensions are available. Reading those dimensions does not change the source.
+If only source row metadata is available, Live follows those rows. Older Herdr
+builds that reject size flags use their default projection. Scroll the projection
+locally to see a wider grid. Opening
 or resizing Peek sends no terminal input, source resize, focus, or takeover command.
-The browser uses pinned xterm 6.0.0 without a terminal input bridge.
+The browser uses pinned xterm 6.0.0. **Type to agent** is a separate, explicit
+input control for prompts, Esc, Ctrl-C, arrows, and Enter. Input requires a
+current live continuity value and agent binding. It goes to the real pane.
+Live terminal paints can contain secrets. Text snapshots and fetched history
+redact recognized secrets, but redaction cannot catch every secret.
+
+Unusable geometry hints fall back to source row metadata, then observer defaults.
+Positive sizes clamp to 512 columns, 256 rows, and 65,536 cells. A watch caches its
+discovered TTY path, reads dimensions without retaining an open descriptor, and
+retries failed path discovery at most once per second.
 
 Live displays terminal content rather than the Text snapshot route's redacted
 text. Select **Text snapshot** for that sanitized plain-text alternative. Text
@@ -173,22 +196,20 @@ up pauses following while output arrives. Returning to the latest output resumes
 following. Full paints and reconnects preserve your local position where possible;
 a new target or reopened Peek starts at the latest output.
 
-The projection contains the source terminal's current grid. Local scrolling
-exposes rows and columns that do not fit in Peek. It does not fetch or reconstruct
-earlier host scrollback that is absent from the ANSI stream.
+The projection contains the source terminal's current grid. The server also
+passively reads available `recent-unwrapped` history, with up to 2,200 lines and
+1 MiB of sanitized text, and refreshes it while observing. The browser retains
+output that scrolls by while you watch. **Watching since** shows when that
+history began. A quick reopen retains it for five minutes. Unrecoverable text
+shows a gap marker. Local scrolling does not scroll the source application.
 
-## Update an experimental installation
+## Update Channels
 
-An installation that follows the `experimental` ref updates on that ref. Run the
-existing **Update Namedrop** action, or invoke it from your Herdr shell:
-
-```sh
-herdr plugin action invoke update --plugin namedrop
-```
-
-After the update, refresh or reopen Channels and reopen Peek to use the new app.
-If the dashboard session has ended, run `namedrop channels` for a fresh one-time
-link. Updating from exp.7 to exp.8 does not require restarting agent sessions.
+Use [Update Namedrop](../../README.md#update-namedrop) for the installation's
+chosen ref. Normal installations follow `main`. Refresh or reopen Channels
+after an update. If the dashboard session ended, run `namedrop channels` for
+a fresh one-time link. Start fresh agent sessions to load new operations such
+as reminders. Existing sessions keep their loaded instructions.
 
 The strict `npm run test:live-peek` browser check runs Chromium headlessly with
 visible native scrollbars. On Linux it runs official Playwright Firefox on a
@@ -198,12 +219,24 @@ removes its own display socket, HOME, and browser profile without connecting to
 your desktop. `CHROME`, `FIREFOX`, and `PLAYWRIGHT_BROWSERS_PATH` select existing
 browser installations. `LIVE_PEEK_OUTPUT` selects the evidence directory.
 
+`npm run test:source-rows` drives an existing isolated testbed profile with an idle
+Codex pane, which it sizes to 80 rows. Set `PEEK_SOURCE_PROFILE` to its `test-*` profile
+directory and `PEEK_SOURCE_OUTPUT` to a screenshot directory. The test compares the
+native prompt with Live Peek in Chromium and WebKit at scales 1 and 2, then grows
+and shrinks the source terminal. It controls only that test profile's terminal.
+`PEEK_SOURCE_TEXT` overrides the expected Codex prompt text.
+Set `PEEK_SOURCE_ALIAS=shell` to test the shell pane. A prepared marker at column
+190 can be checked with `PEEK_SOURCE_COLUMNS=200`, `PEEK_SOURCE_TEXT=COL190S`, and
+`PEEK_SOURCE_COLUMN_MARKER=COL190S`. The regression also grows and shrinks the source
+width while preserving the marker's column.
+
 ## Live terminal stream v1
 
-The browser calls `observePeek({target, signal, apply, onState})` from
+The browser calls `observePeek({target, signal, retainedContinuity, apply, onState})` from
 `src/livePeek.ts`. That operation owns fetch parsing, continuity, retries, the
-30-second stream watchdog, and abort. `apply` receives reset or data updates as
-`Uint8Array` bytes and resolves after xterm drains each update. A large reset uses
+30-second stream watchdog, and abort. `apply` receives reset and data updates as
+`Uint8Array` bytes, or a history update with sanitized text. It resolves after
+xterm drains each update. A large reset uses
 sequential writes of at most 64 KiB. The view becomes Live after the complete
 paint drains. Target changes, mode changes, and close abort the observation and
 dispose the emulator. Live bytes do not enter React or the Channels store.
@@ -224,6 +257,7 @@ number. Each JSON record has `v: 1` and a positive, contiguous, response-local
 | `kind`        | Other fields                          | Meaning                                                                                                                                                                   |
 | ------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `reset`       | `continuity`, `cols`, `rows`, `bytes` | Replace all emulator and decoder state with the complete base64 ANSI paint at this viewport size. A later full paint produces another reset, even at the same dimensions. |
+| `history`     | `text`                                | Add sanitized available history, limited to 2,200 lines and 1 MiB.                                                                                                        |
 | `data`        | `bytes`                               | Apply ordered base64 ANSI bytes after a reset. Data may split UTF-8 or escape sequences across records.                                                                   |
 | `closed`      | `reason`                              | End with `ended`, `replaced`, or `missing`. Native diagnostic strings are not part of the contract.                                                                       |
 | `unavailable` | `reason`                              | End with `unsupported`, `busy`, `source_lost`, `invalid_source`, `slow_viewer`, or `server_stopping`.                                                                     |
@@ -297,13 +331,39 @@ Text that starts with `@name`, `#channel @name`, or `#all @name` goes only to th
 members it names. Any other text in the channel composer is a channel post, stored
 exactly as typed. A post that mentions no agent reaches no one. A post that mentions
 agents goes to the ones the server's router decides it is for, and only among them.
-The hint under the box says which of these Enter does. A thread reply that does not
-start with mentions goes, as typed, to the thread's agents: every agent who wrote in
-the thread or was sent a message in it, except terminals, retired members, and the
-operator. The "To" label names them. A thread with no such agents, as when its only
-other member is a terminal, needs a reply that starts with `@name`, so a terminal
-never runs text by accident. `postSource()` and `composerHint()` in `src/complete.ts`
-and `threadAgents()` in `src/store.ts` hold these rules.
+The hint under the box says which of these Enter does. A thread reply without leading mentions is sent only when there is one eligible
+agent. The app adds that agent's recipient prefix before posting. With several
+agents, the hint asks you to choose and the draft stays unsent until you select
+recipients with `@name`. A terminal always requires an explicit leading mention.
+`src/thread-recipients.ts` holds the one-agent and multiple-agent guidance.
+`postSource()` and `composerHint()` in `src/complete.ts` apply it.
+
+Typing `/` or `$` offers skills for the addressed agent. Selecting one inserts
+`/name` for Claude Code or `$name` for Codex. Their skill lists stay separate.
+Skill suggestions also work in **Type to agent**.
+
+## Direct messages and reminders
+
+**Direct messages** lists Namedrop agents across workspaces, with a channel label
+beside each name. Selecting an agent opens a private operator-agent conversation.
+No `@` is needed, and body mentions remain text. DMs stay out of channel timelines,
+thread lists, and All activity. They do not use the Automatic Reply Limit.
+
+Pending reminders appear in their thread or DM with a **Cancel** button. The
+list uses `GET /w/<key>/threads/<thread-id>/reminders` or
+`GET /w/<key>/direct-messages/<address-id>/reminders`. Cancel posts to the matching
+path plus `/<reminder-id>/cancel`, with the session and CSRF checks used for
+other mutations. Reminder operations, limits, clock files, and exact-session
+ownership are documented in [operations](../../docs/operations.md#reminders).
+
+If an agent answers a Channels message only in its terminal, the answer appears
+in the originating thread or DM marked **From @name's terminal** and the
+conversation needs you. An ordinary Namedrop reply prevents a duplicate terminal
+relay. Running subagent counts appear on member chips and Peek headers.
+
+A person's new message resets a thread's Automatic Reply Limit to ten and lifts
+a pause caused by that limit. Agent exchanges still consume the allowance.
+A stopped thread stays stopped, and an ordinary manual pause stays paused.
 
 ## State and connection behavior
 

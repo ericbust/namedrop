@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { composerHint, postSource, skillRecipients } from "./complete.ts";
 import {
+  deriveDirectPeers,
   directComposer,
   directKey,
   directMember,
@@ -9,6 +10,7 @@ import {
   directPeers,
   mergeDirectHistory,
 } from "./direct-messages.ts";
+import type { Activity } from "./model.ts";
 import { createPoster } from "./send.ts";
 import { draftKey } from "./store.ts";
 import { parseDirectHistory, parseDirectPeers } from "./wire.ts";
@@ -71,6 +73,78 @@ test("directory filters aliases, workspace, pane and runtime and orders by priva
 });
 test("DM directory members have no subagent facts without a channel snapshot", () => {
   assert.deepEqual(directMember(peer()).subagents, []);
+});
+test("pending attention takes precedence over working in a DM member", () => {
+  const waiting = peer({
+    ...rawPeer(),
+    presence: "working",
+    attention_count: 1,
+  });
+  assert.equal(directMember(waiting).activity, "blocked");
+});
+test("channel activity wins over a separately polled DM status", () => {
+  const stale = peer({ ...rawPeer(), presence: "working" });
+  const activities: readonly Activity[] = [
+    "blocked",
+    "idle",
+    "waiting",
+    "working",
+    "offline",
+    "retired",
+    "unknown",
+  ];
+  for (const activity of activities) {
+    const member = { ...directMember(stale), activity };
+    const channels = new Map([
+      [stale.spaceKey, { members: new Map([[member.id, member]]) }],
+    ]);
+    const [derived] = deriveDirectPeers([stale], channels);
+    assert.ok(derived);
+    assert.equal(directMember(derived).activity, activity);
+  }
+});
+test("DM status uses both workspace and address identity and falls back before discovery", () => {
+  const current = peer();
+  const elsewhere = peer(rawPeer("b".repeat(20), current.addressId));
+  const other = peer(rawPeer(current.spaceKey, "pane-2"));
+  const channels = new Map([
+    [
+      elsewhere.spaceKey,
+      {
+        members: new Map([
+          [
+            elsewhere.addressId,
+            { ...directMember(elsewhere), activity: "blocked" as const },
+          ],
+        ]),
+      },
+    ],
+    [
+      current.spaceKey,
+      {
+        members: new Map([
+          [
+            other.addressId,
+            { ...directMember(other), activity: "working" as const },
+          ],
+        ]),
+      },
+    ],
+  ]);
+  assert.deepEqual(deriveDirectPeers([current], channels), [current]);
+  assert.deepEqual(deriveDirectPeers([current], new Map()), [current]);
+});
+test("closed DM peers stay offline even with pending attention", () => {
+  assert.equal(
+    directMember(
+      peer({
+        ...rawPeer(),
+        closed: true,
+        attention_count: 1,
+      }),
+    ).activity,
+    "offline",
+  );
 });
 test("DM body mentions and channel names never change the fixed recipient or skill target", () => {
   const a = peer();
