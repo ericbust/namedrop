@@ -486,7 +486,6 @@ where
         runtime.session_socket_id,
         session,
         &turn,
-        &input.prompt,
         claim,
         now_ms,
     )

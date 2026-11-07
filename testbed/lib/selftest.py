@@ -507,7 +507,7 @@ def check_judges():
     assert all(check.ok for check in live.judge_settled(live.Backlog(0, 0, 0), doctor, panes, done))
     assert not live.judge_settled(live.Backlog(0, 0, 0), doctor, dict(panes, codex=pane("codex", "idle", "1")), done)[0].ok
     assert not live.judge_settled(live.Backlog(0, 0, 0), doctor, dict(panes, claude=pane("claude", "working")), done)[1].ok
-    assert not live.judge_settled(live.Backlog(0, 0, 0), doctor, panes, dict(done, a3="carried"))[0].ok
+    assert not live.judge_settled(live.Backlog(0, 0, 0), doctor, panes, dict(done, a3="open"))[0].ok
     claude = live.Transcript("claude", "c", "p", (), (live.Turn("x", (), ("It printed `hello`, exit code 0.",)),), frozenset())
     ran = live.TerminalRun("echo hello", 0, "hello\n", True)
     assert all(check.ok for check in live.judge_terminal((ran,), claude))

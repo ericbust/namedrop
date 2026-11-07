@@ -215,8 +215,7 @@ pub(crate) struct Claim {
     pub attempt_id: crate::DeliveryAttemptId,
     pub namespace: crate::StateNamespace,
     pub location: Location,
-    /// The turn this claim waits for. A carried claim takes the turn of the
-    /// continuation that re-opens it.
+    /// The turn this claim waits for.
     pub turn: HostTurn,
     pub plan: Armed,
     pub state: ClaimState,
@@ -228,17 +227,8 @@ pub(crate) struct Claim {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ClaimState {
     Open,
-    /// The turn ended with background work running; the continuation that
-    /// reports it decides.
-    Carried,
     Done(Done),
     Left(LeaveReason),
-}
-
-impl ClaimState {
-    pub(crate) fn is_live(self) -> bool {
-        matches!(self, Self::Open | Self::Carried)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -258,6 +248,9 @@ pub(crate) enum LeaveReason {
     /// host runs Stop for an interrupted turn.
     Interrupted,
     NoFinalText,
+    /// The turn ended with background work running, so its final message
+    /// may not be the answer; the agent settles the delivery in a later turn.
+    Held,
     /// The final message leads with Mentions other than the addressee.
     AddressesOthers,
     OperationFailed,
@@ -284,7 +277,6 @@ pub(crate) struct SettleFacts {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Verdict {
     Ignore,
-    Carry,
     Leave(LeaveReason),
     Superseded,
     Settle(Settlement),
@@ -316,14 +308,14 @@ impl Settlement {
 /// One claim against one Stop of its session.
 pub(crate) fn decide(claim: &Claim, stop: &StopFacts, settle: &SettleFacts) -> Verdict {
     match claim.state {
-        ClaimState::Done(_) | ClaimState::Left(_) | ClaimState::Carried => Verdict::Ignore,
+        ClaimState::Done(_) | ClaimState::Left(_) => Verdict::Ignore,
         ClaimState::Open if stop.turn.as_ref() != Some(&claim.turn) => {
             Verdict::Leave(LeaveReason::Interrupted)
         }
         ClaimState::Open if settle.disposed || settle.explicit_pending => Verdict::Superseded,
         ClaimState::Open => match &claim.plan {
             Armed::NoReply(_) => Verdict::Settle(Settlement::NoReply),
-            Armed::Reply { .. } if stop.background_running => Verdict::Carry,
+            Armed::Reply { .. } if stop.background_running => Verdict::Leave(LeaveReason::Held),
             Armed::Reply { template, tracked } => {
                 match reply_input(template, *tracked, &stop.text) {
                     Ok(input) => Verdict::Settle(Settlement::Reply(input)),
@@ -332,28 +324,6 @@ pub(crate) fn decide(claim: &Claim, stop: &StopFacts, settle: &SettleFacts) -> V
             }
         },
     }
-}
-
-/// The new state for a claim when another prompt of its session begins on
-/// `turn`, or `None` when it stays. A claim still open on an earlier turn lost
-/// that turn; a carried claim waits for the continuation that reports its
-/// background work, and only that prompt re-opens it.
-pub(crate) fn on_prompt(
-    state: ClaimState,
-    claim_turn: &HostTurn,
-    turn: &HostTurn,
-    continuation: bool,
-) -> Option<ClaimState> {
-    match state {
-        ClaimState::Open if claim_turn != turn => Some(ClaimState::Left(LeaveReason::Interrupted)),
-        ClaimState::Carried if continuation => Some(ClaimState::Open),
-        _ => None,
-    }
-}
-
-/// A Claude Code background task reports back as a prompt of its own.
-pub(crate) fn is_continuation(prompt: &str) -> bool {
-    prompt.starts_with("<task-notification>")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -524,15 +494,14 @@ impl Claim {
 }
 
 /// Runs for every prompt of a session that names its turn. It ends claims
-/// that lost their turn, re-opens carried ones on a background continuation,
-/// and arms `arm` when the session holds no other live claim. Whether `arm`
-/// was written is the only thing that decides what the hook tells the agent.
+/// that lost their turn, and arms `arm` when the session holds no other open
+/// claim. Whether `arm` was written is the only thing that decides what the
+/// hook tells the agent.
 pub(crate) fn observe_prompt(
     state: &Path,
     socket: &str,
     session: &str,
     turn: &HostTurn,
-    prompt: &str,
     arm: Option<Claim>,
     now_ms: u64,
 ) -> bool {
@@ -543,17 +512,17 @@ pub(crate) fn observe_prompt(
     let Some(mut claims) = Claims::lock(directory, PROMPT_LOCK_WAIT) else {
         return false;
     };
-    let continuation = is_continuation(prompt);
     for claim in &mut claims.claims {
-        if let Some(next) = on_prompt(claim.state, &claim.turn, turn, continuation) {
-            claim.set(next, now_ms);
-            if next == ClaimState::Open {
-                claim.turn = turn.clone();
-            }
+        if claim.state == ClaimState::Open && claim.turn != *turn {
+            claim.set(ClaimState::Left(LeaveReason::Interrupted), now_ms);
         }
     }
+    let open = claims
+        .claims
+        .iter()
+        .any(|claim| claim.state == ClaimState::Open);
     let armed = match arm {
-        Some(arm) if !claims.claims.iter().any(|claim| claim.state.is_live()) => {
+        Some(arm) if !open => {
             claims
                 .claims
                 .retain(|claim| claim.attempt_id != arm.attempt_id);
@@ -571,7 +540,7 @@ pub(crate) fn observe_prompt(
 pub fn has_live_claims(state: &Path, socket: &str, session: &str) -> bool {
     read_claims(&session_directory(state, socket, session))
         .iter()
-        .any(|claim| claim.state.is_live())
+        .any(|claim| claim.state == ClaimState::Open)
 }
 
 /// The bound operation the Stop runs for a claim: its token, its input, and
@@ -608,7 +577,6 @@ pub fn settle_at_stop(
         };
         let next = match decide(claim, stop, &facts) {
             Verdict::Ignore => continue,
-            Verdict::Carry => ClaimState::Carried,
             Verdict::Leave(reason) => ClaimState::Left(reason),
             Verdict::Superseded => ClaimState::Done(Done::Superseded),
             Verdict::Settle(settlement) => {

@@ -194,7 +194,7 @@ fn a_stop_settles_only_its_own_open_claim_and_explicit_settles_win() {
             },
             Verdict::Superseded,
         ),
-        (&open, background, none, Verdict::Carry),
+        (&open, background, none, Verdict::Leave(LeaveReason::Held)),
         (
             &open,
             stop("prompt-1", "  \n"),
@@ -223,7 +223,7 @@ fn a_stop_settles_only_its_own_open_claim_and_explicit_settles_win() {
         );
     }
     for state in [
-        ClaimState::Carried,
+        ClaimState::Left(LeaveReason::Held),
         ClaimState::Done(Done::Replied),
         ClaimState::Left(LeaveReason::Interrupted),
     ] {
@@ -349,32 +349,6 @@ fn a_tracked_worker_states_its_outcome_on_one_strict_closing_line() {
 }
 
 #[test]
-fn only_a_background_continuation_reopens_a_carried_claim() {
-    let first = turn("prompt-1");
-    let next = turn("prompt-2");
-    assert_eq!(
-        on_prompt(ClaimState::Open, &first, &next, false),
-        Some(ClaimState::Left(LeaveReason::Interrupted))
-    );
-    assert_eq!(on_prompt(ClaimState::Open, &first, &first, false), None);
-    assert_eq!(on_prompt(ClaimState::Carried, &first, &next, false), None);
-    assert_eq!(
-        on_prompt(ClaimState::Carried, &first, &next, true),
-        Some(ClaimState::Open)
-    );
-    let notification: Value = serde_json::from_str(include_str!(
-        "../tests/fixtures/final-reply/claude-2.1.319-task-notification-prompt.json"
-    ))
-    .unwrap();
-    assert!(is_continuation(notification["prompt"].as_str().unwrap()));
-    let person: Value = serde_json::from_str(include_str!(
-        "../tests/fixtures/final-reply/claude-2.1.319-user-prompt-submit.json"
-    ))
-    .unwrap();
-    assert!(!is_continuation(person["prompt"].as_str().unwrap()));
-}
-
-#[test]
 fn both_hooks_of_one_recorded_turn_name_the_same_host_turn() {
     for (prompt, stop) in [
         (
@@ -427,8 +401,8 @@ impl Drop for StateDirectory {
     }
 }
 
-fn observe(state: &StateDirectory, prompt: &str, text: &str, arm: Option<Claim>) -> bool {
-    observe_prompt(&state.0, "socket", "session", &turn(prompt), text, arm, 10)
+fn observe(state: &StateDirectory, prompt: &str, arm: Option<Claim>) -> bool {
+    observe_prompt(&state.0, "socket", "session", &turn(prompt), arm, 10)
 }
 
 fn armed(attempt: &str, prompt: &str, plan: Armed) -> Claim {
@@ -442,7 +416,7 @@ fn armed(attempt: &str, prompt: &str, plan: Armed) -> Claim {
 #[test]
 fn a_session_holds_one_live_claim_and_later_prompts_end_the_ones_that_lost_their_turn() {
     let state = StateDirectory::new();
-    assert!(!observe(&state, "prompt-0", "hello", None));
+    assert!(!observe(&state, "prompt-0", None));
     assert!(
         !session_directory(&state.0, "socket", "session").exists(),
         "an ordinary prompt with no claims wrote state"
@@ -450,14 +424,12 @@ fn a_session_holds_one_live_claim_and_later_prompts_end_the_ones_that_lost_their
     assert!(observe(
         &state,
         "prompt-1",
-        "{}",
         Some(armed("attempt-1", "prompt-1", reply_plan()))
     ));
     assert!(
         !observe(
             &state,
             "prompt-1",
-            "{}",
             Some(armed("attempt-2", "prompt-1", reply_plan()))
         ),
         "a second live claim was armed in one session"
@@ -465,7 +437,7 @@ fn a_session_holds_one_live_claim_and_later_prompts_end_the_ones_that_lost_their
     assert_eq!(state.claims().len(), 1);
     assert!(has_live_claims(&state.0, "socket", "session"));
     assert!(!has_live_claims(&state.0, "socket", "other-session"));
-    assert!(!observe(&state, "prompt-2", "person typed this", None));
+    assert!(!observe(&state, "prompt-2", None));
     assert_eq!(
         state.claims()[0].state,
         ClaimState::Left(LeaveReason::Interrupted)
@@ -474,7 +446,6 @@ fn a_session_holds_one_live_claim_and_later_prompts_end_the_ones_that_lost_their
     assert!(observe(
         &state,
         "prompt-3",
-        "{}",
         Some(armed("attempt-1", "prompt-3", reply_plan()))
     ));
     let claims = state.claims();
@@ -509,7 +480,6 @@ fn the_stop_runs_the_bound_operation_once_and_records_how_the_claim_ended() {
     observe(
         &state,
         "prompt-1",
-        "{}",
         Some(armed("attempt-1", "prompt-1", reply_plan())),
     );
     let log = std::cell::RefCell::new(Vec::new());
@@ -542,7 +512,6 @@ fn the_stop_runs_the_bound_operation_once_and_records_how_the_claim_ended() {
     observe(
         &state,
         "prompt-1",
-        "{}",
         Some(armed(
             "attempt-1",
             "prompt-1",
@@ -567,12 +536,11 @@ fn the_stop_runs_the_bound_operation_once_and_records_how_the_claim_ended() {
 }
 
 #[test]
-fn background_work_carries_a_reply_until_its_continuation_stops() {
+fn background_work_at_the_stop_leaves_a_reply_for_the_agent_to_settle() {
     let state = StateDirectory::new();
     observe(
         &state,
         "prompt-1",
-        "{}",
         Some(armed("attempt-1", "prompt-1", reply_plan())),
     );
     let log = std::cell::RefCell::new(Vec::new());
@@ -581,33 +549,20 @@ fn background_work_carries_a_reply_until_its_continuation_stops() {
         ..stop("prompt-1", "Started the build; I will report when it ends.")
     };
     settle(&state, &background, &mut ran(&log, Ok(json!({}))));
-    assert_eq!(state.claims()[0].state, ClaimState::Carried);
-    observe(&state, "person", "what is the status?", None);
+    assert_eq!(state.claims()[0].state, ClaimState::Left(LeaveReason::Held));
+    observe(&state, "continuation", None);
     settle(
         &state,
-        &stop("person", "Still building."),
+        &stop("continuation", "The build passed."),
         &mut ran(&log, Ok(json!({}))),
     );
-    assert_eq!(
-        state.claims()[0].state,
-        ClaimState::Carried,
-        "a person prompt consumed the carried claim"
-    );
-    observe(
+    assert!(log.into_inner().is_empty(), "a held reply was sent");
+    assert_eq!(state.claims()[0].state, ClaimState::Left(LeaveReason::Held));
+    assert!(observe(
         &state,
-        "notification",
-        "<task-notification>\n<task-id>t</task-id>",
-        None,
-    );
-    settle(
-        &state,
-        &stop("notification", "The build passed."),
-        &mut ran(&log, Ok(json!({}))),
-    );
-    let log = log.into_inner();
-    assert_eq!(log.len(), 1);
-    assert_eq!(log[0].input["source"], "@codex The build passed.");
-    assert_eq!(state.claims()[0].state, ClaimState::Done(Done::Replied));
+        "next",
+        Some(armed("attempt-2", "next", reply_plan()))
+    ));
 }
 
 #[test]
@@ -616,7 +571,6 @@ fn finished_claims_are_pruned_after_a_day() {
     observe(
         &state,
         "prompt-1",
-        "{}",
         Some(armed("attempt-1", "prompt-1", reply_plan())),
     );
     settle(&state, &stop("prompt-1", "pong"), &mut |_| Ok(json!({})));
@@ -626,7 +580,6 @@ fn finished_claims_are_pruned_after_a_day() {
             "socket",
             "session",
             &turn("prompt-2"),
-            "later",
             None,
             now_ms,
         );

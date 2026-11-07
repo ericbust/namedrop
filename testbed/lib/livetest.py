@@ -600,14 +600,14 @@ def without_leading_mention(text, alias):
 
 
 def claim_state(claim):
-    """`open`, `carried`, `done:replied`, `left:interrupted` and so on."""
+    """`open`, `done:replied`, `left:held`, `left:interrupted` and so on."""
     state = claim.get("state")
     if isinstance(state, dict):
         return ":".join("{}:{}".format(key, value) for key, value in state.items())
     return state
 
 
-LIVE_CLAIMS = frozenset({"open", "carried"})
+LIVE_CLAIMS = frozenset({"open"})
 
 
 def judge_hop(label, hop, author, recipient, parent, dispositions, claims, claim):

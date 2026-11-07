@@ -246,6 +246,10 @@ impl Space {
     }
 
     fn stop(&self, session: &str, turn: (&str, &str), text: &str) {
+        self.stop_with(session, turn, text, false);
+    }
+
+    fn stop_with(&self, session: &str, turn: (&str, &str), text: &str, background_running: bool) {
         let (prompt_id, turn_id) = match turn.0 {
             "prompt_id" => (Some(turn.1), None),
             _ => (None, Some(turn.1)),
@@ -253,7 +257,7 @@ impl Space {
         let stop = StopFacts {
             session: session.to_owned(),
             turn: HostTurn::from_ids(prompt_id, turn_id),
-            background_running: false,
+            background_running,
             text: FinalText::bounded(text),
         };
         settle_at_stop(&self.directory.state, "socket-a", &stop, 42, &mut |bound| {
@@ -338,7 +342,7 @@ fn an_ask_and_its_answer_settle_from_final_messages_with_no_settle_command() {
     );
     assert!(
         context.contains(
-            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. For no reply, run this line first. If background work is still running"
+            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. For no reply, run this line first. If background work is still running when your turn ends, Namedrop sends nothing; settle later with the bound reply or complete.no-reply."
         ),
         "{context}"
     );
@@ -527,6 +531,74 @@ fn a_typed_mention_round_trip_shows_the_answer_once_and_closes_without_a_loop() 
             .rows("SELECT message_id FROM collaboration_messages")
             .len(),
         2
+    );
+}
+
+#[test]
+fn background_work_at_the_stop_leaves_the_reply_for_the_agent_to_settle() {
+    let space = Space::new();
+    dispatch::message(
+        "send",
+        json!({"request_id":"ask","source":"@reviewer Run the build and report.",
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    space.stop_with(
+        "session-reviewer",
+        CLAUDE,
+        "Started the build in the background.",
+        true,
+    );
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+
+    // A background agent's report arrives as a prompt no field tells apart
+    // from the person's, so its turn settles nothing on its own.
+    let continuation = ("prompt_id", "continuation-turn");
+    execute_user_prompt_submit_hook(
+        &json!({"hook_event_name":"UserPromptSubmit","session_id":"session-reviewer",
+                "prompt_id":continuation.1,
+                "prompt":"<system-reminder>\nA background agent finished.\n</system-reminder>"})
+        .to_string(),
+        &space.runtime("pane-reviewer"),
+    );
+    space.stop("session-reviewer", continuation, "The build passed.");
+    assert!(space.dispositions().is_empty());
+    assert_eq!(space.herdr.prompt_count("pane-lead"), 0);
+    let inbox =
+        execute_integration_operation("delivery.inbox", json!({}), &space.runtime("pane-reviewer"))
+            .unwrap();
+    assert_eq!(
+        inbox["envelopes"][0]["control"]["attempt_id"], attempt,
+        "a held delivery left the inbox"
+    );
+
+    let reply = ask["control"]["tool"]["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| operation["token"] == "reply")
+        .unwrap();
+    let mut input = reply["input"].clone();
+    input["source"] = json!("@lead The build passed.");
+    dispatch::message(
+        "reply",
+        expand_attempt_reply(input, Some(&space.directory.state)).unwrap(),
+        &space.runtime("pane-reviewer"),
+    )
+    .unwrap();
+    assert_eq!(space.dispositions(), [vec![attempt, "reply".to_owned()]]);
+    assert_eq!(
+        space.herdr.envelope_for("pane-lead")["untrusted_body"],
+        "The build passed."
     );
 }
 

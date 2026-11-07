@@ -1708,17 +1708,17 @@ fn rendered_lines(control: &Value) -> Option<(Vec<RenderedLine<'_>>, Vec<&str>)>
 const FINAL_REPLY_DONE: &str =
     "Namedrop sends it when your turn ends, so run no settle command and write no status line.";
 const FINAL_REPLY_OUTCOME: &str = "End it with one line: work_outcome: completed, work_outcome: needs_continuation, or work_outcome: blocked: <reason>. Without one it is needs_continuation.";
-const FINAL_REPLY_WAITS: &str = "If background work is still running when your turn ends, Namedrop waits for it and sends your final message after.";
+const FINAL_REPLY_HELD: &str = "If background work is still running when your turn ends, Namedrop sends nothing; settle later with the bound reply or complete.no-reply.";
 const REPORT_TO_HUMAN_GUIDANCE: &str = "Namedrop commands: none. Namedrop closes this without a reply when your turn ends; show it to the person once in your final message.";
 const RESULT_SET_GUIDANCE: &str = "Namedrop commands: none. Namedrop closes this without a reply when your turn ends; your final message is the response the envelope asks for.";
 
 /// The context for a delivery whose final message settles it. It says what
 /// the Stop will do and shows only the one line that does the other thing.
-/// `waits` is said only where the Stop reports background work.
+/// `held` is said only where the Stop reports background work.
 pub(crate) fn final_reply_guidance(
     control: &Value,
     armed: &crate::final_reply::Armed,
-    waits: bool,
+    held: bool,
 ) -> Option<String> {
     use crate::final_reply::{Armed, NoReplyCase};
     let (opposite, lead) = match armed {
@@ -1734,9 +1734,9 @@ pub(crate) fn final_reply_guidance(
                 lead.push_str(FINAL_REPLY_OUTCOME);
             }
             lead.push_str(" For no reply, run this line first.");
-            if waits {
+            if held {
                 lead.push(' ');
-                lead.push_str(FINAL_REPLY_WAITS);
+                lead.push_str(FINAL_REPLY_HELD);
             }
             ("complete.no-reply", lead)
         }

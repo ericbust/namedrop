@@ -336,7 +336,7 @@ fn a_final_reply_delivery_says_what_the_stop_does_and_shows_only_the_other_line(
         "{claude}"
     );
     let codex = final_reply_guidance(&control, &reply, false).unwrap();
-    assert!(!codex.contains(FINAL_REPLY_WAITS), "{codex}");
+    assert!(!codex.contains(FINAL_REPLY_HELD), "{codex}");
 
     let tracked = final_reply_guidance(
         &final_reply_control(true),
