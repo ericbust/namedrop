@@ -625,7 +625,7 @@ async function main() {
         200,
       );
       check(
-        "tailscale off revokes the persistent HTTPS cookie and preserves local access",
+        "tailscale off blocks access with the persistent HTTPS cookie and preserves local access",
       );
       await restartedContext.close();
       const beforeLocalIdle = await dashboardInfo();
