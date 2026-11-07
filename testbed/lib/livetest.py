@@ -363,9 +363,10 @@ MARKERS = {
 # is rendered after the envelope authenticated.
 PROOF = {"claude": "verified", "codex": "commands"}
 
-Turn = namedtuple("Turn", "prompt contexts answers")
+Turn = namedtuple("Turn", "prompt contexts answers commands calls", defaults=((), 0))
 """prompt: the submitted text, a human prompt or a pasted envelope. contexts: the hook texts
-attached to it. answers: the assistant texts until the next prompt."""
+attached to it. answers: the assistant texts until the next prompt. commands: the shell commands
+its tool calls ran. calls: the model calls it took (Claude message ids, Codex response ids)."""
 
 Transcript = namedtuple("Transcript", "agent session path session_contexts turns models")
 """session_contexts: hook texts before the first prompt, which is where SessionStart lands."""
@@ -391,7 +392,7 @@ class TranscriptBuilder:
         self.session_contexts, self.turns, self.models = [], [], set()
 
     def prompt(self, text):
-        self.turns.append(Turn(text, [], []))
+        self.turns.append(Turn(text, [], [], [], set()))
 
     def context(self, text):
         (self.turns[-1].contexts if self.turns else self.session_contexts).append(text)
@@ -400,8 +401,17 @@ class TranscriptBuilder:
         if self.turns and text:
             self.turns[-1].answers.append(text)
 
+    def command(self, text):
+        if self.turns and isinstance(text, str):
+            self.turns[-1].commands.append(text)
+
+    def call(self, identity):
+        if self.turns and identity:
+            self.turns[-1].calls.add(identity)
+
     def build(self, agent, session, path):
-        turns = tuple(Turn(t.prompt, tuple(t.contexts), tuple(t.answers)) for t in self.turns)
+        turns = tuple(Turn(t.prompt, tuple(t.contexts), tuple(t.answers), tuple(t.commands),
+                           len(t.calls)) for t in self.turns)
         return Transcript(agent, session, path, tuple(self.session_contexts), turns,
                           frozenset(self.models))
 
@@ -437,10 +447,15 @@ def parse_claude(lines, session, path):
             message = entry.get("message") or {}
             if message.get("model") and not message["model"].startswith("<"):
                 built.models.add(message["model"])
+                if not entry.get("isSidechain"):
+                    built.call(message.get("id"))
             content = message.get("content")
             if isinstance(content, list):
                 built.answer("".join(block.get("text") or "" for block in content
                                      if isinstance(block, dict) and block.get("type") == "text"))
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        built.command((block.get("input") or {}).get("command"))
     return built.build("claude", session, path)
 
 
@@ -465,7 +480,30 @@ def parse_codex(lines, session, path):
                 built.context(text)
             elif role == "assistant":
                 built.answer(text)
+        elif entry.get("type") == "response_item" and payload.get("type") in CODEX_TOOL_CALLS:
+            built.command(codex_tool_command(payload))
+        elif entry.get("type") == "token_usage_record":
+            built.call(payload.get("response_id") or entry.get("ordinal"))
     return built.build("codex", session, path)
+
+
+CODEX_TOOL_CALLS = ("custom_tool_call", "function_call", "local_shell_call")
+
+
+def codex_tool_command(payload):
+    if payload.get("type") == "local_shell_call":
+        return " ".join((payload.get("action") or {}).get("command") or ())
+    return payload.get("input") or payload.get("arguments")
+
+
+SETTLE_COMMAND = re.compile(
+    r"namedrop['\"]?\s+(?:--plugin-state\s+(?:'[^']*'|\S+)\s+)?(?:reply|complete)\b")
+"""A Namedrop `reply` or `complete` command line: the bound form starts with the quoted
+executable and its state directory."""
+
+
+def settle_commands(turn):
+    return sum(bool(SETTLE_COMMAND.search(command)) for command in turn.commands)
 
 
 def strip_markdown(text):
@@ -515,7 +553,7 @@ def judge_hooks(agent, transcript):
 
 
 Hop = namedtuple("Hop", "message_id author recipient in_reply_to deliveries attempts retries "
-                        "acks attempt_id state active disposition")
+                        "acks attempt_id state active disposition body")
 """One message of a thread with its raw delivery counts. attempt_id, state, active and
 disposition belong to its first attempt; disposition is None until the recipient settles it."""
 
@@ -532,45 +570,94 @@ def exchange_done(exchange):
                 for hop in exchange.hops))
 
 
+def delivery_turns(transcript, attempt_id):
+    return [turn for turn in transcript.turns if attempt_id and attempt_id in turn.prompt]
+
+
 def seen(transcript, attempt_id, proof):
-    turns = [turn for turn in transcript.turns if attempt_id and attempt_id in turn.prompt]
+    turns = delivery_turns(transcript, attempt_id)
     proven = sum(proof in markers("\n".join(turn.contexts)) for turn in turns)
     return len(turns), proven
 
 
 def answered(transcript, attempt_id):
-    """True once the turn that carried attempt_id has an answer. The store settles when the
-    agent runs its reply or complete command, which is before its closing line reaches the
-    transcript, so a judge that reads the last answer right after settlement sees the turn
+    """True once the turn that carried attempt_id has an answer. The Stop hook settles the
+    store from the closing line, but a host can write that line to its transcript after the
+    Stop ran, so a judge that reads the last answer right after settlement may see the turn
     before."""
     return any(attempt_id and attempt_id in turn.prompt and turn.answers
                for turn in transcript.turns)
 
 
-def judge_hop(label, hop, author, recipient, parent, dispositions):
+def final_answer(transcript, attempt_id):
+    turns = delivery_turns(transcript, attempt_id)
+    return turns[-1].answers[-1].strip() if turns and turns[-1].answers else ""
+
+
+def without_leading_mention(text, alias):
+    """The reply grammar drops a leading Mention of the addressee from the body it stores."""
+    return re.sub(r"^@{}(?![\w-])[,:]?\s*".format(re.escape(alias)), "", text).strip()
+
+
+def claim_state(claim):
+    """`open`, `carried`, `done:replied`, `left:interrupted` and so on."""
+    state = claim.get("state")
+    if isinstance(state, dict):
+        return ":".join("{}:{}".format(key, value) for key, value in state.items())
+    return state
+
+
+LIVE_CLAIMS = frozenset({"open", "carried"})
+
+
+def judge_hop(label, hop, author, recipient, parent, dispositions, claims, claim):
     return fields(label, [("from", hop.author, author), ("to", hop.recipient, recipient),
                           ("in reply to", hop.in_reply_to, parent),
                           ("deliveries", hop.deliveries, 1), ("attempts", hop.attempts, 1),
                           ("retries", hop.retries, 0), ("acks", hop.acks, 1),
                           ("state", "{}/{}".format(hop.state, hop.active), "settled/0"),
-                          ("disposition", hop.disposition, dispositions)])
+                          ("disposition", hop.disposition, dispositions),
+                          ("claim", claims.get(hop.attempt_id), claim)])
 
 
-def judge_exchange(mention, exchange, sender_tx, target_tx):
+def calls_detail(exchange, sender_tx, target_tx):
+    """Model calls per delivery turn, reported but never failed: what a delivery costs."""
+    rows = []
+    for label, transcript, hop in (("request", target_tx, exchange.hops[0]),
+                                   ("reply", sender_tx, exchange.hops[1])):
+        turns = delivery_turns(transcript, hop.attempt_id)
+        rows.append({"hop": label, "agent": transcript.agent, "attempt_id": hop.attempt_id,
+                     "calls": [turn.calls for turn in turns],
+                     "commands": [len(turn.commands) for turn in turns]})
+    detail = ", ".join("{} {} on the {}".format(row["agent"], "+".join(map(str, row["calls"])) or 0,
+                                                row["hop"]) for row in rows)
+    return rows, Check("model calls", True, "model calls: " + detail)
+
+
+def judge_exchange(mention, exchange, sender_tx, target_tx, claims):
     sender, target = mention.sender, mention.target
     checks = [fields("thread", [("roots", exchange.root_count, 1),
                                 ("messages", len(exchange.hops), 2)])]
     if exchange.root_count != 1 or len(exchange.hops) < 2:
         return checks
     request, reply = exchange.hops[0], exchange.hops[1]
-    checks.append(judge_hop("request", request, sender, target, None, frozenset({"reply"})))
+    checks.append(judge_hop("request", request, sender, target, None, frozenset({"reply"}),
+                            claims, "done:replied"))
     checks.append(judge_hop("reply", reply, target, sender, request.message_id,
-                            frozenset({"reply", "no_reply"})))
+                            frozenset({"no_reply"}), claims, "done:no_replied"))
     for label, transcript, hop in (("{} saw the request".format(target), target_tx, request),
                                    ("{} saw the reply".format(sender), sender_tx, reply)):
         times, proven = seen(transcript, hop.attempt_id, PROOF[transcript.agent])
+        commands = sum(settle_commands(turn) for turn in delivery_turns(transcript, hop.attempt_id))
         checks.append(fields(label, [("times", times, 1),
-                                     (MARKERS[PROOF[transcript.agent]], proven, 1)]))
+                                     (MARKERS[PROOF[transcript.agent]], proven, 1),
+                                     ("settle commands", commands, 0)]))
+    answer = without_leading_mention(final_answer(target_tx, request.attempt_id), sender)
+    checks.append(Check("reply body", (reply.body or "").strip() == answer and bool(answer),
+                        'reply body "{}" {} {}\'s final answer "{}"'.format(
+                            " ".join((reply.body or "").split())[:80],
+                            "is" if (reply.body or "").strip() == answer and answer else "differs from",
+                            target, " ".join(answer.split())[:80])))
     answer = last_answer(sender_tx)
     checks.append(Check("{}'s answer".format(sender), has_word(mention.word, answer),
                         '{} answered "{}"'.format(sender, " ".join(answer.split())[:120]) +
@@ -594,13 +681,15 @@ def judge_terminal_answer(claude_tx):
         " ".join(answer.split())[:120]) + ("" if ok else " (expected hello and 0)"))
 
 
-def judge_settled(backlog, doctor, panes):
+def judge_settled(backlog, doctor, panes, claims):
     awaiting = sorted("{} {}".format(pane.alias, pane.tokens.get("namedrop-awaiting"))
                       for pane in panes.values() if pane.tokens.get("namedrop-awaiting") != "0")
     states = {alias: panes[alias].status for alias in AGENTS}
+    live_claims = sum(state in LIVE_CLAIMS for state in claims.values())
     return [fields("backlog", [("awaiting", backlog.awaiting, 0),
                                ("attention", backlog.open_attention, 0),
                                ("active", backlog.active_attempts, 0),
+                               ("live claims", live_claims, 0),
                                ("doctor waiting", doctor.waiting, 0),
                                ("panes awaiting", ", ".join(awaiting) or "none", "none")]),
             fields("agents", [(alias, status, frozenset({"idle", "done"}))
@@ -692,7 +781,7 @@ SELECT m.message_id, m.author_alias_snapshot,
   (SELECT count(*) FROM delivery_acknowledgements k JOIN delivery_attempts a USING (session_socket_id, worktree_id, attempt_id)
      JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, delivery_id)
      WHERE d.session_socket_id = m.session_socket_id AND d.worktree_id = m.worktree_id AND d.message_id = m.message_id),
-  f.attempt_id, s.state, s.active, p.disposition_kind
+  f.attempt_id, s.state, s.active, p.disposition_kind, m.body
 FROM collaboration_messages m
 LEFT JOIN delivery_attempts f ON f.attempt_id = (
   SELECT a.attempt_id FROM delivery_attempts a JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, delivery_id)
@@ -756,6 +845,20 @@ class Store:
             "JOIN delivery_attempts a USING (session_socket_id, worktree_id, attempt_id) "
             "WHERE t.session_socket_id = ? AND t.worktree_id = ? AND a.created_at_ms >= ? "
             "ORDER BY a.created_at_ms", (self.socket_id, self.workspace, since_ms)))
+
+    def claims(self):
+        """attempt_id: claim state, from the final-reply claim files Namedrop keeps beside
+        its store, one per agent session."""
+        claims = {}
+        for path in sorted((Path(self.path).parent / "final-reply").glob("*/claims.json")):
+            try:
+                rows = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            for claim in rows if isinstance(rows, list) else ():
+                if isinstance(claim, dict):
+                    claims[claim.get("attempt_id")] = claim_state(claim)
+        return claims
 
     def backlog(self):
         scope = (self.socket_id, self.workspace)
@@ -1192,8 +1295,12 @@ def step_mention(mention):
             r.settle(lambda: r.transcript(mention.sender),
                      lambda transcript: answered(transcript, exchange.hops[1].attempt_id),
                      TIMEOUTS.idle, watch=())
-        checks = judge_exchange(mention, exchange, r.transcript(mention.sender),
-                                r.transcript(mention.target))
+        sender_tx, target_tx = r.transcript(mention.sender), r.transcript(mention.target)
+        checks = judge_exchange(mention, exchange, sender_tx, target_tx, r.store.claims())
+        if len(exchange.hops) > 1:
+            rows, detail = calls_detail(exchange, sender_tx, target_tx)
+            r.save("calls.json", rows)
+            checks.append(detail)
         return checks + [expect("still working", ", ".join(idle) or "none", "none")]
     return action
 
@@ -1212,7 +1319,7 @@ def step_terminal(r):
 
 
 def step_settled(r):
-    return judge_settled(r.store.backlog(), r.doctor("final"), r.panes())
+    return judge_settled(r.store.backlog(), r.doctor("final"), r.panes(), r.store.claims())
 
 
 TITLES = {SERVED: "codex warning", IN_PROCESS: "codex in-process"}
