@@ -386,38 +386,6 @@ else: print('{}')
     }
 }
 
-/// A send's receipt starts a detached mailbox worker that can still be writing
-/// into the fixture when the test ends.
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let state = format!("HERDR_PLUGIN_STATE_DIR={}", self.directory.path().display());
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            let listing = Command::new("ps")
-                .args(["axeww", "-o", "pid=,args="])
-                .output()
-                .unwrap();
-            let workers: Vec<i32> = String::from_utf8_lossy(&listing.stdout)
-                .lines()
-                .filter(|line| {
-                    line.contains("hook agent-status-worker")
-                        && line.split_whitespace().any(|entry| entry == state)
-                })
-                .filter_map(|line| line.split_whitespace().next()?.parse().ok())
-                .collect();
-            if workers.is_empty() {
-                return;
-            }
-            if Instant::now() >= deadline {
-                for pid in &workers {
-                    unsafe { libc::kill(*pid, libc::SIGKILL) };
-                }
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-    }
-}
-
 struct Worker(Child);
 impl Drop for Worker {
     fn drop(&mut self) {
