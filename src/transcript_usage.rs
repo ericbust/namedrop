@@ -35,8 +35,20 @@ pub(crate) fn context_tokens(
         return None;
     }
     let path = match host {
-        AgentRuntime::ClaudeCode => claude_transcript(&config.claude(home?), session, cwd)?,
-        AgentRuntime::Codex => codex_transcript(&config.codex(home?), session)?,
+        AgentRuntime::ClaudeCode => {
+            let claude = config
+                .claude
+                .map(Path::to_owned)
+                .or_else(|| Some(config.claude(home?)))?;
+            claude_transcript(&claude, session, cwd)?
+        }
+        AgentRuntime::Codex => {
+            let codex = config
+                .codex
+                .map(Path::to_owned)
+                .or_else(|| Some(config.codex(home?)))?;
+            codex_transcript(&codex, session)?
+        }
     };
     latest_from_end(host, &open_transcript(&path)?)
 }
@@ -387,6 +399,66 @@ mod tests {
         assert!(open_transcript(&root.join("link.jsonl")).is_none());
         assert!(open_transcript(&root).is_none());
         assert!(open_transcript(Path::new("relative.jsonl")).is_none());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_configured_host_directory_is_read_without_a_home() {
+        let root =
+            std::env::temp_dir().join(format!("namedrop-transcript-config-{}", std::process::id()));
+        let claude_id = "0ec24369-ad9a-45c8-a30c-39a5fd652cea";
+        let codex_id = "01a19dc7-2685-7540-a0d4-bee6e6878281";
+        let place = |directory: PathBuf, file: String, transcript: Vec<u8>| {
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(directory.join(file), transcript).unwrap();
+        };
+        for base in [root.join("configured"), root.join("home")] {
+            let (claude, codex) = if base.ends_with("home") {
+                (base.join(".claude"), base.join(".codex"))
+            } else {
+                (base.join("claude"), base.join("codex"))
+            };
+            place(
+                claude.join("projects").join("-work"),
+                format!("{claude_id}.jsonl"),
+                lines(&[claude_turn(1, 2, 3_000)]),
+            );
+            place(
+                codex.join("sessions/2026/11/02"),
+                format!("rollout-2026-11-02T06-08-10-{codex_id}.jsonl"),
+                lines(&[codex_count(4_000)]),
+            );
+        }
+        let read = |home: Option<&Path>, configured: bool| {
+            let claude = root.join("configured/claude");
+            let codex = root.join("configured/codex");
+            let config = AgentConfigDirectories {
+                claude: configured.then_some(claude.as_path()),
+                codex: configured.then_some(codex.as_path()),
+            };
+            (
+                context_tokens(
+                    AgentRuntime::ClaudeCode,
+                    &AgentSessionId::new(claude_id),
+                    None,
+                    home,
+                    config,
+                ),
+                context_tokens(
+                    AgentRuntime::Codex,
+                    &AgentSessionId::new(codex_id),
+                    None,
+                    home,
+                    config,
+                ),
+            )
+        };
+        assert_eq!(read(None, true), (Some(3_003), Some(4_000)));
+        assert_eq!(
+            read(Some(&root.join("home")), false),
+            (Some(3_003), Some(4_000))
+        );
+        assert_eq!(read(None, false), (None, None));
         fs::remove_dir_all(&root).unwrap();
     }
 
