@@ -432,9 +432,9 @@ fn a_session_reads_the_selection_policy_once_and_before_the_first_name() {
     assert!(policy.starts_with(POLICY_MARKER), "{policy}");
     for expected in [
         // A turn without a roster part leaves the last one shown in force.
-        "carries its agent rows, and separately its other-workspaces line, only when they differ \
-         from the last ones shown in this session; until then those still hold",
-        "the last roster shown can be older than this turn",
+        "arrive with your first turn and again whenever they change; a turn or incoming task \
+         without them means the last ones you were shown still hold",
+        "the roster you hold may be out of date",
         // The approved selection policy, exactly the rules a turn used to carry.
         "load the installed Namedrop skill",
         "Host-native team messaging does not reach these panes",

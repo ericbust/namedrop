@@ -268,8 +268,9 @@ def jsonl(*entries):
 
 
 POLICY = ("Namedrop selection policy. A Namedrop workspace roster lists the named agents in this "
-          "Herdr space. A turn or incoming task carries its agent rows only when they differ from "
-          "the last ones shown in this session.")
+          "Herdr space, each one's persona, which row is you, and whether each can take work now. "
+          "Its agent rows, and separately its other-workspaces line, arrive with your first turn "
+          "and again whenever they change.")
 UNCHANGED = "Namedrop workspace roster. The agent rows are unchanged since the last roster shown.\n"
 
 
