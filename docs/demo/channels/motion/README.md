@@ -17,6 +17,7 @@ Only scaling, cuts, dissolves and overlays are added. The overlays are the capti
 | `ink.py` | Finds text ink in a frame and measures the cap height of its lines |
 | `scene.html`, `scene.mjs` | The scene that `docs/demo/render.mjs` steps frame by frame. It builds on `docs/demo/stage3d.js` and `docs/demo/stage.css`, which the Namedrop demo shares |
 | `legibility.py` | Measures the focal text in the app and in the callout in the finished movie at README width, and writes the contact sheet and key frames |
+| `wordcheck.py` | Fails when the word "operator" appears in the movie: in the text the render draws, and in every half second of the decoded movie read with Tesseract |
 
 ## Before you start
 
@@ -62,10 +63,11 @@ python3 -m venv ~/.cache/channels-video/venv
 
    The recorder skips a file name it has already run. To repeat a step, queue a copy under a new name. The last step stops the recorder.
 
-Two steps need care:
+Three steps need care:
 
-- `3-collab.js` asks @claude to ask @codex, then waits until both agents have worked and gone quiet. It fails if either agent stops on a prompt. It then opens the thread that holds the whole exchange.
-- `6-needs.js` checks that Claude is really blocked before it records Needs you, then sends Esc to Claude's pane. It never approves the prompt. Afterwards, check that `release-notes.txt` does not exist in `~/release-planning`.
+- `3-collab.js` asks @claude to reply to you and @codex and to ask @codex for a risk. While the agents work it shows **All activity**, then it opens the thread that holds the whole exchange. It fails if Claude finishes without bringing in @codex or if either agent stops on a prompt. Claude does not route a request to @codex unless the reply is addressed to both, so keep that wording.
+- `8-reminder-fire.js` waits for the first reminder, then presses **Cancel** on the one still pending.
+- `9-needs.js` checks that Claude is really blocked before it records Needs you, then sends Esc to Claude's pane. It never approves the prompt. Afterwards, check that `release-notes.txt` does not exist in `~/release-planning`. `10-stop.js` stops the recorder.
 
 The recorder turns spellcheck off through its own browser profile under the take directory. Chromium ignores `--disable-spell-checking` here, and it would underline typed names such as `@claude`.
 
@@ -77,7 +79,7 @@ The recorder turns spellcheck off through its own browser profile under the take
    ~/.cache/channels-video/venv/bin/python docs/demo/channels/motion/plan.py ~/.cache/channels-video/take --shotlist ~/.cache/channels-video/shotlist.md
    ```
 
-   It fails when a hold is shorter than 2.5 s, a hold plays faster than real time, a callout or card is not text the take showed, a callout shows too briefly, the focal text is under 9.5 px tall at 900 px width both in the app and in the callout, or the cut is not 30 to 40 seconds long. It copies the callout font into the take directory, Liberation Sans Bold by default; pass `--font` to use another TrueType file. To change the cut, edit `SCENES` in `plan.py`. A `search` rectangle limits where a ring looks for ink. Use one for elements the recorder cannot measure, such as the reminder popover or the rows of the Peek terminal.
+   The quoted replies at the top of `SCENES` (`TAKE_TEXT`) are the take's own text, so update them for each new take. It fails when a hold is shorter than 2.5 s, a hold plays faster than real time, a callout or card is not text the take showed, a callout shows too briefly, the focal text is under 9.5 px tall at 900 px width both in the app and in the callout, or the cut is not 55 to 75 seconds long. It copies the callout font into the take directory, Liberation Sans Bold by default; pass `--font` to use another TrueType file. To change the cut, edit `SCENES` in `plan.py`. A `search` rectangle limits where a ring looks for ink. Use one for elements the recorder cannot measure, such as the reminder popover or the rows of the Peek terminal.
 
 2. Serve the demo directory and the take side by side. The scene loads the take from `/take/`. Install the demo's packages once with `npm install` in `docs/demo`.
 
@@ -105,6 +107,7 @@ The recorder turns spellcheck off through its own browser profile under the take
    ```sh
    ~/.cache/channels-video/venv/bin/python docs/demo/channels/motion/legibility.py ~/.cache/channels-video/take/timeline.json docs/assets/namedrop-channels.mp4 ~/.cache/channels-video/report
    python3 docs/demo/channels/check.py ~/.cache/channels-video/report/metadata.json --recording ~/.cache/channels-video/take/recording/recording.json
+   ~/.cache/channels-video/venv/bin/python docs/demo/channels/motion/wordcheck.py ~/.cache/channels-video/take docs/assets/namedrop-channels.mp4 ~/.cache/channels-video/report/wordcheck.md
    ```
 
-   `legibility.py` fails when the focal text is under 9.5 px tall at 900 px width both inside the ring and in the callout. It writes `legibility.md`, a crop of each ring, one 2560 px and one 900 px frame per shot, and `sheet.png` with a frame every two seconds. Look at the sheet and the frames before you publish. `check.py` checks the codec, size, length, fast start, WebP and the take's provenance. Update `capture.json` for the new take first.
+   `legibility.py` fails when the focal text is under 9.5 px tall at 900 px width both inside the ring and in the callout. It writes `legibility.md`, a crop of each ring, one 2560 px and one 900 px frame per shot, and `sheet.png` with a frame every two seconds. Look at the sheet and the frames before you publish. `check.py` checks the codec, size, length, fast start, WebP and the take's provenance. Update `capture.json` for the new take first. `wordcheck.py` needs Tesseract. The person in the movie is "you", so it fails on "operator" anywhere on screen. If a real agent message says it, take that scene again. `plan.py` also refuses the word in callouts, cards and agent windows, unless `--rehearsal` turns that into a warning for a rehearsal take.

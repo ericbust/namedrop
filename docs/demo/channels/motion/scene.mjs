@@ -277,7 +277,8 @@ const captions = timeline.captions.map(({ text, start, end }) => {
 });
 const endCard = document.createElement('div');
 endCard.className = 'end';
-endCard.innerHTML = '<h1 class="grad">Channels (Beta)</h1><p>Included in Namedrop 1.5.0</p><div class="pill"><b>$</b> namedrop channels</div>';
+endCard.innerHTML = '<h1 class="grad">Channels (Beta)</h1><p>Included in Namedrop 1.5.0</p><div class="pill"><b>$</b> namedrop channels</div>' +
+  '<div class="small">On your phone too: <code>namedrop channels --tailscale</code></div>';
 hud.appendChild(endCard);
 
 async function renderAt(t) {

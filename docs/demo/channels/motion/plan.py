@@ -23,6 +23,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('directory', type=Path, help='take directory with recording/recording.json')
 parser.add_argument('--shotlist', type=Path, help='also write a Markdown shot list here')
 parser.add_argument('--font', type=Path, help='TrueType font for the callouts (default: Liberation Sans Bold)')
+parser.add_argument('--rehearsal', action='store_true',
+                    help='report the word "operator" as a warning, to plan a rehearsal take; never for a published take')
 args = parser.parse_args()
 recording = json.loads((args.directory / 'recording/recording.json').read_text())
 events = {event['name']: event for event in recording['events']}
@@ -41,8 +43,8 @@ README_WIDTH = 900
 MIN_HOLD, FADE, SPOT_IN = 2.5, 0.45, 0.6
 MIN_CAP_README = 9.5
 CALLOUT_MAIN, CALLOUT_WHO, CALLOUT_PAD, CALLOUT_GAP = 34, 21, 22, 16
-DURATION = (30, 40)
-END_SECONDS = 2.2
+DURATION = (55, 75)
+END_SECONDS = 3.6
 APP = {'x': APP_LEFT, 'y': APP_TOP + BAR * APP_SCALE, 'scale': APP_SCALE}
 
 
@@ -72,6 +74,7 @@ def ink_box(rect, t, pad):
     return box, min(caps) / DPR
 
 
+BANNED = re.compile('operator', re.I)
 SGR = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)')
 
 
@@ -112,10 +115,18 @@ def shorten_home(line):
     return re.sub('(?:' + '|'.join(re.escape(HOME[:n]) for n in range(len(HOME) - 1, 8, -1)) + ')…', '~…', line)
 
 
+def drop_suggestion(line):
+    """Claude Code draws an unsent prompt suggestion dimmed after its prompt; nobody typed it."""
+    if plain(line).lstrip('│').startswith('❯\xa0') and line.split('❯', 1)[1][1:].startswith('\x1b[0m\x1b[2m'):
+        return line.split('❯', 1)[0] + '❯\xa0\x1b[0m'
+    return line
+
+
 def screen_rows(file):
     """The rows a window shows: what follows the last delivered request, without its JSON
-    envelope or the testbed's private paths, blank runs squeezed, the newest rows kept."""
-    rows = [shorten_home(line.rstrip('\r')) for line in (args.directory / 'recording' / file).read_text().split('\n')]
+    envelope, the testbed's private paths or Claude Code's unsent suggestion, blank runs
+    squeezed, the newest rows kept."""
+    rows = [shorten_home(drop_suggestion(line.rstrip('\r'))) for line in (args.directory / 'recording' / file).read_text().split('\n')]
     marks = [i for i, row in enumerate(rows) if 'untrusted_body' in plain(row)]
     if marks:
         rows = rows[marks[-1] + 1:]
@@ -163,6 +174,18 @@ class Shot:
     plan: dict = field(default_factory=dict)
 
 
+# The quoted replies, reminder bodies and activity lines are the take's own text; update them
+# for a new take. plan.py refuses any that the take did not show.
+TAKE_TEXT = {
+    'name': 'Horizon',
+    'names': 'Beacon, Summit',
+    'asks': 'Hi both. @codex, please name one release risk in exactly five words.',
+    'risk': 'Untested changes disrupt existing workflows.',
+    'activity': 'From @claude: “Hi both. @codex, please name one release risk in exactly five words.”',
+    'pending': 'Remind the operator in this DM: Tag the release. (reminder 1 of 2)',
+    'answer': 'Reminder (1 of 2): Tag the release.',
+}
+
 SCENES = [
     ('Ask an agent in a channel', 'codex', [
         Shot('ask', 'ask-typed', ('ask-typed', 0.2),
@@ -170,9 +193,9 @@ SCENES = [
              ('', '@codex Suggest a name for the 1.5 release. One word.'), 'ask-typed', 'codex'),
         Shot('reply', 'ask-reply', ('ask-reply', 0.5),
              [(0.8, ('ask-sent', 0.2), ('ask-reply', -0.2)), (2.8, ('ask-reply', -0.2), ('ask-reply', 2.6))],
-             ('@codex', 'Horizon'), 'ask-reply', 'codex',
+             ('@codex', TAKE_TEXT['name']), 'ask-reply', 'codex',
              cards=(('you', 'codex', ('ask-sent', 0.2), 'Suggest a name for the 1.5 release. One word.'),
-                    ('codex', 'you', 'ask-reply', 'Horizon'))),
+                    ('codex', 'you', 'ask-reply', TAKE_TEXT['name']))),
     ]),
     ('Follow up in the thread. No @ needed.', 'codex', [
         Shot('follow-up', 'followup-typed', ('followup-typed', 0.2),
@@ -180,35 +203,61 @@ SCENES = [
              ('To @codex', 'Two more, please.'), 'followup-typed', 'codex'),
         Shot('thread reply', 'followup-reply', ('followup-reply', 0.5),
              [(0.8, ('followup-sent', 0.2), ('followup-reply', -0.2)), (2.8, ('followup-reply', -0.2), ('followup-reply', 2.6))],
-             ('@codex', 'Beacon, Summit'), 'followup-reply', 'codex',
+             ('@codex', TAKE_TEXT['names']), 'followup-reply', 'codex',
              cards=(('you', 'codex', ('followup-sent', 0.2), 'Two more, please.'),
-                    ('codex', 'you', 'followup-reply', 'Beacon, Summit'))),
+                    ('codex', 'you', 'followup-reply', TAKE_TEXT['names']))),
     ]),
     ('Agents work together in the open', 'both', [
         Shot('collab ask', 'collab-typed', ('collab-typed', 0.2),
              [(1.6, ('collab-open', 0.4), 'collab-typed'), (2.6, 'collab-typed', ('collab-typed', 1.75))],
-             ('', '@claude Ask @codex for one release risk, in five words.'), 'collab-typed', 'claude'),
-        # The thread opens once both agents are done; the cards replay its two messages in order.
-        Shot('agents talk', 'collab-thread', ('collab-done', 3.0),
-             [(1.0, ('collab-sent', 0.2), ('collab-done', 2.3)), (3.0, ('collab-done', 2.3), ('collab-done', 5.3))],
-             ('@codex to @claude', 'Critical dependencies miss integration deadlines.'), ('collab-done', 2.3), 'codex',
-             cards=(('you', 'claude', ('collab-sent', 0.2), 'Ask @codex for one release risk, in five words.'),
-                    ('claude', 'codex', 1.3, 'Please name one release risk, in five words.'),
-                    ('codex', 'claude', 2.6, 'Critical dependencies miss integration deadlines.'))),
+             ('', '@claude Reply to me and @codex, and ask @codex for a five-word release risk.'), 'collab-typed', 'claude'),
+        Shot('activity', 'activity-both', ('activity-both', 0.5),
+             [(0.8, ('collab-sent', 0.2), ('activity-both', -0.1)), (3.0, ('activity-both', -0.1), ('activity-both', 2.9))],
+             ('All activity', TAKE_TEXT['activity']), 'activity-both', 'codex',
+             cards=(('you', 'claude', ('collab-sent', 0.2), 'Reply to me and @codex, and ask @codex for a five-word release risk.'),
+                    ('claude', 'codex', ('activity-both', -0.1), TAKE_TEXT['asks']))),
+        # The thread opens once both agents are done; Codex's answer card plays during its hold.
+        Shot('agents talk', 'collab-thread', ('collab-thread', 0.5),
+             [(0.6, ('activity-both', 3.0), ('collab-thread', -0.2)), (3.2, ('collab-thread', -0.2), ('collab-thread', 3.0))],
+             ('@codex to @claude', TAKE_TEXT['risk']), ('collab-thread', -0.2), 'codex',
+             cards=(('codex', 'claude', 0.9, TAKE_TEXT['risk']),)),
     ]),
-    ('Ask for a reminder in a DM', 'claude', [
+    ('Two agents in a thread? Pick who gets it.', 'both', [
+        Shot('pick', 'pick-hint', 'pick-hint',
+             [(1.0, ('pick-hint', -1.4), 'pick-hint'), (2.8, 'pick-hint', ('pick-hint', 3.0))],
+             ('', 'Pick who gets this: @claude or @codex'), 'pick-hint', 'codex'),
+    ]),
+    ('Use an agent\'s skills from the composer', 'claude', [
+        Shot('skills', 'skills-list', ('skills-list', 0.5),
+             [(1.2, ('skills-open', 0.2), 'skills-list'), (3.0, 'skills-list', ('skills-list', 3.0))],
+             ('@claude', '/namedrop'), 'skills-list', 'claude'),
+    ]),
+    ('See subagents on the member chip', 'claude', [
+        Shot('subagent ask', 'sub-typed', ('sub-typed', 0.2),
+             [(1.6, ('sub-open', 0.3), 'sub-typed'), (2.6, 'sub-typed', ('sub-typed', 1.75))],
+             ('', '@claude Use two subagents to each name one release risk.'), 'sub-typed', 'claude'),
+        Shot('subagents', 'sub-count', ('sub-count', 0.3),
+             [(0.8, ('sub-sent', 0.2), ('sub-count', -0.2)), (3.0, ('sub-count', -0.2), ('sub-count', 2.8))],
+             ('@claude', '1 subagent'), 'sub-count', 'claude',
+             cards=(('you', 'claude', ('sub-sent', 0.2), 'Use two subagents to each name one release risk.'),)),
+    ]),
+    ('Ask for reminders in a DM. Cancel any time.', 'claude', [
         Shot('reminder ask', 'reminder-typed', ('reminder-typed', 0.2),
              [(1.5, 'dm-open', 'reminder-typed'), (2.6, 'reminder-typed', ('reminder-typed', 1.75))],
-             ('', 'In 1 minute, remind me here: Tag the release.'), 'reminder-typed', 'claude'),
+             ('', 'Every minute, 2 times, remind me here: Tag the release.'), 'reminder-typed', 'claude'),
         Shot('pending', 'reminder-pending', ('reminder-pending', 0.5),
              [(0.6, ('reminder-sent', 0.2), ('reminder-pending', -0.1)), (2.8, ('reminder-pending', -0.1), ('reminder-pending', 2.7))],
-             ('Pending reminders', 'Remind the operator in this direct message: Tag the release.'), 'reminder-pending', 'claude',
-             cards=(('you', 'claude', ('reminder-sent', 0.2), 'In 1 minute, remind me here: Tag the release.'),),
-             search={'x': 840, 'y': 40, 'width': 400, 'height': 140}),
+             ('Pending reminders', TAKE_TEXT['pending']), 'reminder-pending', 'claude',
+             cards=(('you', 'claude', ('reminder-sent', 0.2), 'Every minute, 2 times, remind me here: Tag the release.'),),
+             search={'x': 840, 'y': 40, 'width': 420, 'height': 220}),
         Shot('reminder fires', 'reminder-answer', ('reminder-answer', 0.5),
              [(3.0, ('reminder-answer', -0.2), ('reminder-answer', 2.5))],
-             ('@claude', 'Reminder: Tag the release.'), 'reminder-answer', 'claude',
-             cards=(('claude', 'you', 'reminder-answer', 'Reminder: Tag the release.'),), label='1 minute later'),
+             ('@claude', TAKE_TEXT['answer']), 'reminder-answer', 'claude',
+             cards=(('claude', 'you', 'reminder-answer', TAKE_TEXT['answer']),), label='1 minute later'),
+        Shot('cancel', 'repeat-cancelled', ('repeat-cancelled', 0.5),
+             [(1.0, ('repeat-pending', -0.6), ('repeat-cancelled', -0.2)), (2.8, ('repeat-cancelled', -0.2), ('repeat-cancelled', 2.6))],
+             ('Pending reminders', 'No pending reminders.'), 'repeat-cancelled', 'claude',
+             search={'x': 840, 'y': 40, 'width': 420, 'height': 220}),
     ]),
     ('See when an agent needs you', 'claude', [
         Shot('needs you', 'needs-blocked', 'needs-blocked',
@@ -258,7 +307,7 @@ def cap_of(size):
     return bottom - top
 
 
-errors, shots, captions, rows, cards = [], [], [], [], []
+errors, banned, shots, captions, rows, cards = [], [], [], [], [], []
 schedules = {'codex': [], 'claude': []}
 active = []
 clock = 0.0
@@ -284,6 +333,9 @@ for caption, emphasis, scene_shots in SCENES:
         speed = (at(hold_to) - at(hold_from)) / hold_seconds
         who, text = shot.callout
         quotes = [who, text] + [quote for *_, quote in shot.cards]
+        for part in quotes + [caption, shot.label]:
+            if BANNED.search(part):
+                banned.append(f'{shot.name}: "{part}" says "operator"; the person watching is "you"')
         for part in quotes:
             if part and normalize(part) not in SHOWN:
                 errors.append(f'{shot.name}: "{part}" is not text the take showed')
@@ -337,6 +389,12 @@ if not DURATION[0] <= duration <= DURATION[1]:
 for caption in captions:
     if caption['end'] - caption['start'] < 3:
         errors.append(f'caption "{caption["text"]}" lasts {caption["end"] - caption["start"]:.2f}s')
+banned += [f'agent screen {key} says "operator": {plain(row).strip()}' for key, frame in FRAMES.items()
+           for row in frame['rows'] if BANNED.search(plain(row))]
+if args.rehearsal:
+    print('\n'.join('warning: ' + line for line in banned))
+else:
+    errors += banned
 if errors:
     parser.error('\n'.join(errors))
 

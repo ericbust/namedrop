@@ -23,6 +23,5 @@ async ({ page, mark, record, out }) => {
   await needs.waitFor({ state: 'detached', timeout: 60000 });
   await mark('needs-cancelled', dm, dm);
   await page.waitForTimeout(2500);
-  record.stop();
   return { screen, page: await page.locator('main').innerText() };
 }

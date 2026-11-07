@@ -29,7 +29,7 @@ probe=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_format',
 streams=probe['streams'];duration=float(probe['format']['duration'])
 assert len(streams)==1 and streams[0]['codec_name']=='h264','silent H.264 required'
 assert streams[0]['width']==2560 and streams[0]['height']==1440,'wrong video dimensions'
-assert 30<=duration<=40 and abs(duration-provenance['outputDuration'])<0.05,'wrong movie duration'
+assert 55<=duration<=75 and abs(duration-provenance['outputDuration'])<0.05,'wrong movie duration'
 assert mp4.stat().st_size<15_000_000,'MP4 too large'
 video=mp4.read_bytes();assert 0<video.find(b'moov')<video.find(b'mdat'),'fast-start MP4 required'
 data=webp.read_bytes();assert data[:4]==b'RIFF' and data[8:12]==b'WEBP','not WebP'
