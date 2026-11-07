@@ -31,7 +31,7 @@ fn claude_delivery_guidance_matches_managed_rules_for_every_automatic_operation(
         "input_flag":"--input-json",
         "operations":operations.iter().map(|op| json!({"token":op.token,"argv":op.argv,"input":{}})).collect::<Vec<_>>()
     });
-    let guidance = delivery_command_guidance(&tool).unwrap();
+    let guidance = delivery_command_guidance(&json!({"tool": tool})).unwrap();
     let settings: Value =
         serde_json::from_slice(&fs::read(home.join(".claude/settings.json")).unwrap()).unwrap();
     let rules = settings["permissions"]["allow"].as_array().unwrap();
@@ -83,7 +83,7 @@ fn delivery_guidance_quotes_shell_sensitive_arguments_and_preserves_safe_tokens(
         "".to_owned(),
     ];
     let tool = json!({"executable":executable,"environment":{},"input_flag":"--input-json","operations":[{"token":"send","argv":argv,"input":{}}]});
-    let guidance = delivery_command_guidance(&tool).unwrap();
+    let guidance = delivery_command_guidance(&json!({"tool": tool})).unwrap();
     let command = guidance
         .lines()
         .find_map(|line| line.strip_prefix("send: "))
@@ -108,10 +108,10 @@ fn delivery_guidance_quotes_shell_sensitive_arguments_and_preserves_safe_tokens(
 #[test]
 fn delivery_guidance_says_only_what_its_own_lines_ask_for() {
     let guidance = |operations: Value| {
-        delivery_command_guidance(&json!({
+        delivery_command_guidance(&json!({"tool":{
             "executable":"/bin/namedrop","environment":{},"input_flag":"--input-json",
             "operations":operations
-        }))
+        }}))
         .unwrap()
     };
     let prose = |guidance: &str| guidance.lines().next().unwrap().to_owned();
@@ -148,7 +148,7 @@ fn delivery_guidance_says_only_what_its_own_lines_ask_for() {
 
 #[test]
 fn delivery_guidance_leaves_rarely_used_operations_to_control_tool() {
-    let rendered = delivery_command_guidance(&json!({
+    let rendered = delivery_command_guidance(&json!({"tool":{
         "executable":"/bin/namedrop","environment":{},"input_flag":"--input-json",
         "operations":[
             {"token":"reminder.set","argv":["reminder","set"],"input":{"body":"<what to do later>"}},
@@ -158,7 +158,7 @@ fn delivery_guidance_leaves_rarely_used_operations_to_control_tool() {
             {"token":"context.read","argv":["context","read"],"input":{"grant_id":"g"}},
             {"token":"complete.no-reply","argv":["complete","--no-reply"],"input":{"attempt_id":"a"}}
         ]
-    }))
+    }}))
     .unwrap();
     let tokens = rendered
         .lines()
@@ -170,4 +170,39 @@ fn delivery_guidance_leaves_rarely_used_operations_to_control_tool() {
         !rendered.contains("snapshot contents"),
         "an unrendered line still drove the prose: {rendered}"
     );
+}
+
+#[test]
+fn a_reply_line_drops_only_the_fields_the_cli_derives_to_the_same_value() {
+    let rendered = |input: Value| {
+        let guidance = delivery_command_guidance(&json!({
+            "attempt_id":"attempt-1","message_id":"message-1",
+            "tool":{"executable":"/bin/namedrop","environment":{},"input_flag":"--input-json",
+                "operations":[{"token":"reply","argv":["reply"],"input":input}]}
+        }))
+        .unwrap();
+        let line = guidance.lines().nth(1).unwrap().to_owned();
+        serde_json::from_str::<Value>(
+            line.rsplit_once(" --input-json '")
+                .unwrap()
+                .1
+                .strip_suffix('\'')
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let bound = json!({"attempt_id":"attempt-1","source":"@lead <reply body>",
+        "request_id":"reply-attempt-1","author_kind":"agent_session","in_reply_to":"message-1",
+        "work_outcome":"needs_continuation"});
+    assert_eq!(
+        rendered(bound.clone()),
+        json!({"attempt_id":"attempt-1","source":"@lead <reply body>","work_outcome":"needs_continuation"})
+    );
+    let mut unusual = bound;
+    unusual["request_id"] = json!("custom");
+    unusual["in_reply_to"] = json!("message-2");
+    let kept = rendered(unusual);
+    assert_eq!(kept["request_id"], "custom");
+    assert_eq!(kept["in_reply_to"], "message-2");
+    assert!(kept.get("author_kind").is_none(), "{kept}");
 }

@@ -591,6 +591,26 @@ fn roster_reads_are_fresh_and_wrong_attempts_and_arbitrary_operations_are_reject
     assert_eq!(fixture.message_count(), 1);
 }
 
+/// A compact reply is completed from its attempt before it is queued, so the
+/// queue only ever holds the full form; one naming no attempt is refused first.
+#[test]
+fn a_compact_reply_is_completed_or_refused_before_it_is_queued() {
+    let fixture = Fixture::new();
+    let refused = fixture.sandbox_command(
+        &["reply"],
+        json!({"attempt_id":"not-an-attempt","source":"@reviewer hi"}),
+    );
+    assert_eq!(refused.status.code(), Some(64), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stdout).contains("in_reply_to is required"),
+        "{refused:?}"
+    );
+    assert!(
+        !fixture.directory.path().join("deferred-commands").exists(),
+        "a refused reply was queued"
+    );
+}
+
 #[test]
 fn spool_symlinks_never_read_or_overwrite_their_targets() {
     use std::os::unix::fs::symlink;

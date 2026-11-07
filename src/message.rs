@@ -417,6 +417,74 @@ struct ReplyInput {
     tracking: crate::coordination::TrackingInput,
 }
 
+/// What a reply that names its Delivery Attempt need not spell out: each key
+/// with the value the CLI fills in when it is omitted. The rendered reply line
+/// leaves out exactly these, and only when the bound value is this one, so
+/// both forms are one input. `in_reply_to` is the attempt's delivered message,
+/// which only durable state knows.
+pub(crate) fn derived_reply_fields(
+    attempt_id: &str,
+    delivered_message: Option<&str>,
+) -> impl Iterator<Item = (&'static str, Value)> {
+    [
+        ("request_id", Some(json!(format!("reply-{attempt_id}")))),
+        ("author_kind", Some(json!("agent_session"))),
+        (
+            "in_reply_to",
+            delivered_message.map(|message| json!(message)),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| Some((key, value?)))
+}
+
+/// Completes a reply that names its Delivery Attempt but omits what the
+/// attempt already fixes. It runs before validation and before any deferral,
+/// so the compact and the full form reach idempotency, the message and a
+/// deferred command's key and fingerprint as the same input.
+pub fn expand_attempt_reply(
+    mut input: Value,
+    state_directory: Option<&std::path::Path>,
+) -> Result<Value, String> {
+    let Some(attempt_id) = input
+        .get("attempt_id")
+        .and_then(Value::as_str)
+        .filter(|attempt_id| !attempt_id.is_empty())
+        .map(str::to_owned)
+    else {
+        return Ok(input);
+    };
+    let Some(fields) = input.as_object_mut() else {
+        return Ok(input);
+    };
+    let delivered = if fields.contains_key("in_reply_to") {
+        None
+    } else {
+        Some(
+            state_directory
+                .and_then(|state| attempt_message(state, &attempt_id))
+                .ok_or_else(|| {
+                    format!(
+                        "in_reply_to is required: attempt_id {attempt_id} names no Delivery \
+                         Attempt in this Namedrop state"
+                    )
+                })?,
+        )
+    };
+    for (key, value) in derived_reply_fields(&attempt_id, delivered.as_deref()) {
+        fields.entry(key).or_insert(value);
+    }
+    Ok(input)
+}
+
+fn attempt_message(state_directory: &std::path::Path, attempt_id: &str) -> Option<String> {
+    StateStore::open_read_only(state_directory)
+        .ok()??
+        .transaction(|transaction| transaction.delivered_message_of_attempt(attempt_id))
+        .ok()?
+        .map(|message| message.as_str().to_owned())
+}
+
 fn human_actor() -> ActorKind {
     ActorKind::Human
 }

@@ -236,10 +236,11 @@ impl Fixture {
                     "--input-json"
                 ]
             );
-            assert_eq!(
-                serde_json::from_str::<Value>(args.last().unwrap()).unwrap(),
-                operation["input"]
-            );
+            let mut rendered = serde_json::from_str::<Value>(args.last().unwrap()).unwrap();
+            if *token == "reply" {
+                rendered = namedrop::expand_attempt_reply(rendered, Some(&self.state)).unwrap();
+            }
+            assert_eq!(rendered, operation["input"]);
         }
     }
     fn git(&self, args: &[&str]) {

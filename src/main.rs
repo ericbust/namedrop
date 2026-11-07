@@ -416,6 +416,21 @@ fn main() -> ExitCode {
         };
     }
 
+    let input = if operation == "reply" {
+        let state = cli
+            .runtime
+            .plugin_state
+            .clone()
+            .or_else(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from));
+        match namedrop::expand_attempt_reply(input, state.as_deref()) {
+            Ok(input) => input,
+            Err(error) => {
+                return write_result(&CommandResult::invalid_request(input_error(error)), 64);
+            }
+        }
+    } else {
+        input
+    };
     if is_message_operation(operation)
         && let Err(error) = validate_message_input(operation, input.clone())
     {

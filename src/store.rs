@@ -5230,6 +5230,31 @@ impl StateTransaction<'_> {
         }))
     }
 
+    /// The message one Delivery Attempt delivered, found by the attempt id
+    /// alone: the CLI needs it before it has resolved a namespace. Attempt ids
+    /// are unique by construction; anything but exactly one match is `None`.
+    pub(crate) fn delivered_message_of_attempt(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<MessageId>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT DISTINCT d.message_id
+             FROM delivery_attempts a
+             JOIN mailbox_deliveries d USING (
+                 session_socket_id, worktree_id, delivery_id, address_id
+             )
+             WHERE a.attempt_id = ?1
+             LIMIT 2",
+        )?;
+        let messages = statement
+            .query_map(params![attempt_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(match <[String; 1]>::try_from(messages) {
+            Ok([message]) => Some(MessageId::new(message)),
+            Err(_) => None,
+        })
+    }
+
     pub(crate) fn delivery_envelope(
         &self,
         namespace: &StateNamespace,

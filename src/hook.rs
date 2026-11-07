@@ -313,7 +313,7 @@ where
     // generated wrapper recognizes this output by the marker its serialization
     // starts with.
     if let Some(commands) = envelope
-        .pointer("/control/tool")
+        .get("control")
         .and_then(crate::integration::delivery_command_guidance)
     {
         context.push_str("\n\n");

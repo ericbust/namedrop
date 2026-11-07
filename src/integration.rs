@@ -1490,7 +1490,8 @@ const SANDBOX_SENTENCE: &str = "An OS sandbox access error is not an approval de
 /// that rule: it is then refused by the sandbox rather than by Namedrop, which
 /// is exactly how one live handoff stalled. Location flags therefore follow the
 /// argv, and the input flag is last.
-pub(crate) fn delivery_command_guidance(tool: &Value) -> Option<String> {
+pub(crate) fn delivery_command_guidance(control: &Value) -> Option<String> {
+    let tool = control.get("tool")?;
     let executable = tool.get("executable")?.as_str()?;
     let environment = tool.get("environment")?.as_object()?;
     let input_flag = tool.get("input_flag")?.as_str()?;
@@ -1502,7 +1503,7 @@ pub(crate) fn delivery_command_guidance(tool: &Value) -> Option<String> {
         if UNRENDERED_OPERATIONS.contains(&token) {
             continue;
         }
-        let input = operation.get("input")?;
+        let input = rendered_input(token, operation.get("input")?, control);
         let mut command = shell_single_quote(executable);
         if let Some(state_directory) = located("HERDR_PLUGIN_STATE_DIR") {
             command.push_str(&format!(
@@ -1543,6 +1544,34 @@ pub(crate) fn delivery_command_guidance(tool: &Value) -> Option<String> {
         guidance.push_str(&line);
     }
     Some(guidance)
+}
+
+/// A bound reply as its line shows it: without each field the CLI derives
+/// from its attempt id, when the bound value is exactly the derived one. Any
+/// other value stays, so the line still runs the bound input.
+fn rendered_input(token: &str, input: &Value, control: &Value) -> Value {
+    let mut input = input.clone();
+    let Some(attempt_id) = input
+        .get("attempt_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .filter(|_| token == "reply")
+    else {
+        return input;
+    };
+    let delivered = control
+        .get("message_id")
+        .and_then(Value::as_str)
+        .filter(|_| control.get("attempt_id").and_then(Value::as_str) == Some(&attempt_id));
+    let fields = input
+        .as_object_mut()
+        .expect("an input with an attempt_id is an object");
+    for (key, derived) in crate::message::derived_reply_fields(&attempt_id, delivered) {
+        if fields.get(key) == Some(&derived) {
+            fields.remove(key);
+        }
+    }
+    input
 }
 
 impl IntegrationToolInvocation {

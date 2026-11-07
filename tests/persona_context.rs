@@ -12,7 +12,7 @@ use namedrop::{
     PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
     execute_codex_app_server_hook, execute_integration_operation, execute_lifecycle_operation,
     execute_message_operation, execute_session_start_hook, execute_user_prompt_submit_hook,
-    install_integration_package, issue_registration_challenge,
+    expand_attempt_reply, install_integration_package, issue_registration_challenge,
 };
 use serde_json::{Value, json};
 use std::{
@@ -1622,4 +1622,95 @@ fn the_app_server_notice_stays_silent_outside_a_server_and_for_other_input() {
     ] {
         assert_eq!(execute_codex_app_server_hook(input), None, "{input}");
     }
+}
+
+/// The rendered reply line binds only what its recipient authors plus the
+/// attempt id; the CLI derives request_id, author_kind and in_reply_to from
+/// that id. Older sessions and `control.tool` keep sending the full form, so
+/// the two must be one input: one message, and the second is a replay of the
+/// first whichever ran first.
+#[test]
+fn the_compact_reply_line_and_the_bound_full_input_are_one_reply_in_either_order() {
+    for compact_first in [true, false] {
+        let directory = TestDirectory::new();
+        setup(&directory);
+        let herdr = FakeHerdr::new(&directory);
+        let ids = SequenceIds(AtomicU64::new(1));
+        let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+        let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
+        register("address-lead", AgentRuntime::Codex, &lead);
+        register("address-reviewer", AgentRuntime::ClaudeCode, &reviewer);
+        execute_message_operation(
+            "send",
+            json!({"request_id":"to-claude","source":"@reviewer Check the login path.",
+                   "author_kind":"agent_session"}),
+            &lead,
+        )
+        .unwrap();
+        let envelope = herdr.envelope_for("pane-reviewer");
+        let authored = |input: &Value| {
+            let mut input = input.clone();
+            input["source"] = json!(
+                input["source"]
+                    .as_str()
+                    .unwrap()
+                    .replace("<reply body>", "The login path is fine.")
+            );
+            input
+        };
+        let full = authored(
+            envelope["control"]["tool"]["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|operation| operation["token"] == "reply")
+                .map(|operation| &operation["input"])
+                .unwrap(),
+        );
+        let attested = context(&hook(&envelope.to_string(), &reviewer).unwrap());
+        let line = attested
+            .lines()
+            .find_map(|line| line.strip_prefix("reply: "))
+            .expect("the delivery binds a reply");
+        let rendered: Value = serde_json::from_str(
+            line.rsplit_once(" --input-json '")
+                .and_then(|(_, input)| input.strip_suffix('\''))
+                .unwrap(),
+        )
+        .unwrap();
+        let mut fields = rendered.as_object().unwrap().keys().collect::<Vec<_>>();
+        fields.sort();
+        assert_eq!(fields, ["attempt_id", "source"], "{line}");
+        let compact = authored(&rendered);
+        let expanded = expand_attempt_reply(compact, Some(&directory.state)).unwrap();
+        assert_eq!(expanded, full, "the compact line is not the bound input");
+
+        let (first, second) = if compact_first {
+            (&expanded, &full)
+        } else {
+            (&full, &expanded)
+        };
+        let first = execute_message_operation("reply", first.clone(), &reviewer).unwrap();
+        let second = execute_message_operation("reply", second.clone(), &reviewer).unwrap();
+        assert_eq!(first["idempotent_replay"], false, "{first}");
+        assert_eq!(second["idempotent_replay"], true, "{second}");
+        assert_eq!(first["message_id"], second["message_id"]);
+    }
+}
+
+#[test]
+fn a_compact_reply_names_its_attempt_or_is_refused() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let error = expand_attempt_reply(
+        json!({"attempt_id":"delivery-attempt-unknown","source":"@lead done"}),
+        Some(&directory.state),
+    )
+    .unwrap_err();
+    assert!(error.contains("in_reply_to is required"), "{error}");
+    let human = json!({"request_id":"r","source":"@lead hi","in_reply_to":"m"});
+    assert_eq!(
+        expand_attempt_reply(human.clone(), Some(&directory.state)).unwrap(),
+        human
+    );
 }

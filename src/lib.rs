@@ -89,9 +89,9 @@ pub use lifecycle::{
 };
 pub use message::{
     BodyMention, OperatorSendError, OperatorSendErrorKind, ParsedMessage, RecipientOutlook,
-    RecipientRun, carries_leading_mentions, execute_message_operation, parse_mentions,
-    parse_prompt_mentions, recipient_outlooks, send_operator_direct_message, send_operator_message,
-    validate_message_input,
+    RecipientRun, carries_leading_mentions, execute_message_operation, expand_attempt_reply,
+    parse_mentions, parse_prompt_mentions, recipient_outlooks, send_operator_direct_message,
+    send_operator_message, validate_message_input,
 };
 pub use ports::{Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator, PromptFailureKind};
 pub use runtime::{ProcessHerdr, ProcessIds, SystemClock};
