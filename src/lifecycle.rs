@@ -681,7 +681,13 @@ where
             let input: AddressListInput = parse_input(input)?;
             require_activated(&mut store, &namespace)?;
             match input.workspaces {
-                None => address_rows(&discovered, runtime.session_socket_id, &mut store),
+                None => address_rows(
+                    &discovered,
+                    runtime.session_socket_id,
+                    &mut store,
+                    runtime.home_directory,
+                    runtime.agent_config,
+                ),
                 Some(AllWorkspaces::All) => {
                     every_workspace_addresses(runtime, &discovered.workspace_id, &mut store)
                 }
@@ -1648,6 +1654,8 @@ fn address_rows(
     discovered: &DiscoveredWorktree,
     session_socket_id: &str,
     store: &mut StateStore,
+    home: Option<&Path>,
+    agent_config: crate::AgentConfigDirectories<'_>,
 ) -> Result<Value, String> {
     // A name alone cannot say whether that agent can take work now. The same
     // load the health check and the prompt roster use supplies the two facts
@@ -1668,6 +1676,26 @@ fn address_rows(
             record["registered"] = Value::Bool(registered);
             record["selection"] =
                 crate::persona::selection_note(address, registered, paused).into();
+            // Only a registered address is proven to hold the live pane's
+            // own session, so only its transcript is read.
+            if registered
+                && !address.retired
+                && let Some(session) = &address.agent_session_id
+                && let Some(pane) = setup
+                    .panes
+                    .iter()
+                    .find(|pane| address.pane_id.as_deref() == Some(pane.pane_id.as_str()))
+                && let Some(host) = pane_agent_runtime(pane)
+                && let Some(tokens) = crate::transcript_usage::context_tokens(
+                    host,
+                    session,
+                    pane.cwd.as_deref(),
+                    home,
+                    agent_config,
+                )
+            {
+                record["context_tokens"] = tokens.into();
+            }
             Ok(record)
         })
         .collect::<Result<Vec<Value>, serde_json::Error>>()
@@ -1734,7 +1762,13 @@ where
             "label": label,
             "current": current,
             "paused": state.paused,
-            "addresses": address_rows(&discovered, runtime.session_socket_id, store)?,
+            "addresses": address_rows(
+                &discovered,
+                runtime.session_socket_id,
+                store,
+                runtime.home_directory,
+                runtime.agent_config,
+            )?,
             "groups": groups,
         }));
     }

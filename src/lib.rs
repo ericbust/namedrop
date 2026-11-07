@@ -39,6 +39,7 @@ pub mod subagent;
 pub use shortcuts::install_shortcuts;
 mod terminal;
 pub mod tour;
+mod transcript_usage;
 #[doc(hidden)]
 pub mod update_check;
 pub use terminal::{default_pane_type, detect_pane_type, execute_terminal, verify_inherited_pane};

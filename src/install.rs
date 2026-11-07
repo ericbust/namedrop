@@ -107,7 +107,7 @@ pub struct AgentConfigDirectories<'a> {
     pub codex: Option<&'a Path>,
 }
 impl AgentConfigDirectories<'_> {
-    fn claude(self, home: &Path) -> PathBuf {
+    pub(crate) fn claude(self, home: &Path) -> PathBuf {
         self.claude
             .map(Path::to_owned)
             .unwrap_or_else(|| home.join(".claude"))

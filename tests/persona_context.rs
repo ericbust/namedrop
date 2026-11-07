@@ -118,6 +118,10 @@ impl HerdrCommandExecutor for FakeHerdr {
                 "result": {"worktrees": [{"path": self.worktree, "open_workspace_id": "workspace-1"}]}
             })
             .to_string(),
+            ["worktree", "list", "--workspace", "workspace-1", "--json"] => json!({
+                "result": {"worktrees": [{"path": self.worktree, "open_workspace_id": "workspace-1"}]}
+            })
+            .to_string(),
             ["pane", "list", "--workspace", "workspace-1"] => json!({"result": {"panes": [
                 {"pane_id":"pane-lead","terminal_id":"t1","tab_id":"tab-1","workspace_id":"workspace-1",
                  "agent":"codex","agent_session":{"value":"session-lead"},"agent_status":"idle"},
@@ -1448,6 +1452,139 @@ fn address_list_answers_availability_with_the_rosters_own_rule() {
             "a paused space still offered {alias}"
         );
     }
+}
+
+/// A coordinator gives unrelated work to the lightest agent and a follow-up to
+/// the one already holding its context, so the listing reports each
+/// registered agent's context size from that agent's own transcript.
+#[test]
+fn address_list_reports_each_registered_agents_context_size_from_its_transcript() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+    register("address-lead", AgentRuntime::Codex, &lead);
+    let sizes = |listed: &Value| -> Vec<(String, Option<u64>)> {
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|record| {
+                (
+                    record["alias"].as_str().unwrap().to_owned(),
+                    record
+                        .get("context_tokens")
+                        .map(|tokens| tokens.as_u64().unwrap()),
+                )
+            })
+            .collect()
+    };
+    let expect = |listed: &Value, expected: [(&str, Option<u64>); 4]| {
+        let mut actual = sizes(listed);
+        actual.sort();
+        let mut expected = expected.map(|(alias, tokens)| (alias.to_owned(), tokens));
+        expected.sort();
+        assert_eq!(actual, expected, "{listed}");
+    };
+
+    let before = execute_lifecycle_operation("address.list", json!({}), &lead).unwrap();
+    expect(
+        &before,
+        [
+            ("lead", None),
+            ("reviewer", None),
+            ("quiet", None),
+            ("build", None),
+        ],
+    );
+
+    let codex_day = directory.home.join(".codex/sessions/2026/11/07");
+    fs::create_dir_all(&codex_day).unwrap();
+    fs::write(
+        codex_day.join("rollout-2026-11-07T07-39-21-session-lead.jsonl"),
+        [
+            json!({"type":"session_meta","payload":{"id":"session-lead"}}),
+            json!({"type":"event_msg","payload":{"type":"token_count","info":{
+                "total_token_usage":{"input_tokens":900_000},
+                "last_token_usage":{"input_tokens":363_409,"cached_input_tokens":363_136}}}}),
+            json!({"type":"event_msg","payload":{"type":"token_count","info":null}}),
+        ]
+        .map(|line| format!("{line}\n"))
+        .concat(),
+    )
+    .unwrap();
+    let claude_project = directory.home.join(".claude/projects/-started-elsewhere");
+    fs::create_dir_all(&claude_project).unwrap();
+    fs::write(
+        claude_project.join("session-reviewer.jsonl"),
+        [
+            json!({"type":"assistant","isSidechain":false,"message":{"model":"claude-opus-5-5",
+                "usage":{"input_tokens":2,"cache_creation_input_tokens":989,"cache_read_input_tokens":64_469}}}),
+            json!({"type":"assistant","isSidechain":false,"message":{"model":"claude-opus-5-5",
+                "usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}),
+        ]
+        .map(|line| format!("{line}\n"))
+        .concat(),
+    )
+    .unwrap();
+
+    // The reviewer's transcript is there, but no registration proves that
+    // session is the one in its pane.
+    let unregistered = execute_lifecycle_operation("address.list", json!({}), &lead).unwrap();
+    expect(
+        &unregistered,
+        [
+            ("lead", Some(363_409)),
+            ("reviewer", None),
+            ("quiet", None),
+            ("build", None),
+        ],
+    );
+
+    register(
+        "address-reviewer",
+        AgentRuntime::ClaudeCode,
+        &runtime(&directory, &herdr, &ids, "pane-reviewer"),
+    );
+    let listed = execute_lifecycle_operation("address.list", json!({}), &lead).unwrap();
+    expect(
+        &listed,
+        [
+            ("lead", Some(363_409)),
+            ("reviewer", Some(65_460)),
+            ("quiet", None),
+            ("build", None),
+        ],
+    );
+    let everywhere =
+        execute_lifecycle_operation("address.list", json!({"workspaces":"all"}), &lead).unwrap();
+    assert_eq!(everywhere["workspaces"][0]["addresses"], listed);
+
+    let table = namedrop::render_command_result_to_text(&namedrop::CommandResult::success(
+        "address.list",
+        listed,
+    ));
+    let header = table.lines().next().unwrap();
+    let column = header.find("CONTEXT").expect(&table);
+    let cell = |alias: &str| {
+        let row = table
+            .lines()
+            .find(|line| line.starts_with(&format!("@{alias} ")))
+            .unwrap_or_else(|| panic!("no @{alias} row:\n{table}"));
+        row[column..column + "CONTEXT".len()].trim().to_owned()
+    };
+    assert_eq!(cell("lead"), "363k", "{table}");
+    assert_eq!(cell("reviewer"), "65k", "{table}");
+    assert_eq!(cell("build"), "", "{table}");
+    assert_eq!(cell("quiet"), "", "{table}");
+
+    // The per-turn roster never pays for a transcript read.
+    let roster = context(&hook("Plain prompt.", &lead).unwrap());
+    assert!(
+        !roster.contains("363") && !roster.contains("context_tokens"),
+        "{roster}"
+    );
 }
 
 #[test]
