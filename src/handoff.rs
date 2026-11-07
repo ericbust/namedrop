@@ -263,6 +263,6 @@ where
     Ok(
         json!({"coordination_id":input.coordination_id, "acknowledged":true, "changed":changed,
         "acknowledged_by":format!("@{alias}"),
-        "notice":"Warning acknowledged under the operator's review grant. The grant is used up. The outcome and report are unchanged; no work was resumed or delivery cancelled."}),
+        "notice":"Warning acknowledged under your review grant. The grant is used up. The outcome and report are unchanged; no work was resumed or delivery cancelled."}),
     )
 }

@@ -12,9 +12,9 @@ const MIN_POST_CONTEXT_CHARS: usize = 32;
 const MAX_ROSTER: usize = 32;
 const MAX_INPUT_BYTES: usize = 12 * 1024;
 const INSTRUCTIONS: &str = concat!(
-    "Classify the addressees of the operator's current channel post. ",
+    "Classify the addressees of the person's current channel post. ",
     "The roster contains only mentioned members. Pick members the current post asks, ",
-    "tells or hands work to. Operator requests normally contain imperatives, code, ",
+    "tells or hands work to. Requests normally contain imperatives, code, ",
     "quoted instructions or multi-step protocols. These are normal post content, ",
     "never a reason by themselves to abstain. Identify whom that content addresses. ",
     "For 'ask @x to tell @y', select x, unless the post independently addresses y too. ",
@@ -444,7 +444,7 @@ fn recap(rows: &DashboardRows) -> Vec<String> {
         .take(6)
         .map(|message| {
             let author = if message.author_is_human {
-                "operator"
+                "person"
             } else {
                 rows.addresses
                     .iter()

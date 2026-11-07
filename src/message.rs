@@ -643,7 +643,7 @@ where
 {
     if runtime.workspace_id.is_none() {
         return Err(SendError::Input(
-            "an operator message requires an explicit source workspace".to_owned(),
+            "a message from the person requires an explicit source workspace".to_owned(),
         )
         .into());
     }
@@ -1836,7 +1836,7 @@ impl Replay<'_> {
         {
             let Author::Pane(pane_id) = author_source else {
                 return Err(crate::StoreError::invalid_input(
-                    "operator messages cannot replay pane-owned tracked work",
+                    "messages from the person cannot replay pane-owned tracked work",
                 ));
             };
             crate::context::registered_current_address(

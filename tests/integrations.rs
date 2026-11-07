@@ -2301,6 +2301,49 @@ fn delivery_envelope_keeps_trusted_control_separate_from_verbatim_untrusted_body
     assert!(!instruction.contains(body));
 }
 
+#[test]
+fn human_delivery_instructions_address_the_person_directly_and_keep_the_reply_alias() {
+    for mode in [
+        namedrop::DeliveryReplyMode::Channel,
+        namedrop::DeliveryReplyMode::DirectMessage,
+    ] {
+        let mut draft = delivery_control_draft(Vec::new(), permitted_delivery_operations());
+        draft.reply_mode = mode;
+        let control = DeliveryControl::new(draft, generic_tool_invocation()).unwrap();
+        let instruction = trusted_delivery_instruction(&control);
+        assert!(instruction.contains("the person as 'you'"), "{instruction}");
+        assert!(!instruction.contains("the operator"), "{instruction}");
+        assert!(instruction.contains("bound reply"), "{instruction}");
+        let serialized = serde_json::to_value(&control).unwrap();
+        assert!(serialized.to_string().contains("@operator <reply body>"));
+        if mode == namedrop::DeliveryReplyMode::Channel {
+            assert!(instruction.contains("visible to everyone here"));
+            assert!(instruction.contains("Plain @name wakes a member"));
+            assert!(instruction.contains("never invent an answer"));
+            assert!(instruction.contains("complete.no-reply"));
+        } else {
+            assert!(instruction.contains("Body mentions are literal and never add recipients"));
+            assert!(instruction.contains("Keep this conversation out of channels"));
+            assert!(instruction.contains("The Automatic Reply Limit does not apply"));
+        }
+    }
+}
+
+#[test]
+fn reminder_instructions_request_a_short_task_note_without_naming_the_person() {
+    let catalog = operation_catalog();
+    let description = &catalog.operation("reminder.set").unwrap().description;
+    assert!(description.contains("body as a short task note"));
+    assert!(description.contains("without naming who to remind"));
+    assert!(description.contains("Tag the release."));
+    for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+        let skill = integration_package(runtime).instructions;
+        assert!(skill.contains("short task note"));
+        assert!(skill.contains("without naming who to remind"));
+        assert!(skill.contains("Tag the release."));
+    }
+}
+
 /// Guard the instruction contract, not actual model output (a runtime gate).
 /// One envelope is one kind of delivery, so it carries that kind's rules and
 /// the plugin applies the priority order once, instead of handing every agent

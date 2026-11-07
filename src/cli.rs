@@ -483,7 +483,7 @@ enum HandoffCommand {
     Adopt,
     /// Acknowledge a resolved warning after human review; preserves the outcome and report.
     Acknowledge,
-    /// Acknowledge a warning the operator asked this agent to review; needs their review grant.
+    /// Acknowledge a warning the person asked this agent to review; needs their review grant.
     AcknowledgeGranted,
     Status,
     Results,

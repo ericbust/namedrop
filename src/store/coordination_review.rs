@@ -279,22 +279,22 @@ impl StateTransaction<'_> {
             .optional()?;
         let Some((kind, issuer, granted_at)) = latest else {
             return Err(StoreError::invalid_input(
-                "the operator has not asked you to review this handoff; only the operator's Ask to review button grants this",
+                "the person has not asked you to review this handoff; only their Ask to review button in Channels grants this",
             ));
         };
         if kind != TransitionKind::Opened.as_str() {
             return Err(StoreError::invalid_input(
-                "your review grant for this handoff was already used; ask the operator to press Ask to review again",
+                "your review grant for this handoff was already used; ask the person to press Ask to review again",
             ));
         }
         if now_ms >= from_i64(granted_at)?.saturating_add(REVIEW_GRANT_TTL_MS) {
             return Err(StoreError::invalid_input(
-                "your review grant for this handoff expired; ask the operator to press Ask to review again",
+                "your review grant for this handoff expired; ask the person to press Ask to review again",
             ));
         }
         if operator.map(OperatorSession::actor_id).as_deref() != Some(issuer.as_str()) {
             return Err(StoreError::invalid_input(
-                "the operator session that granted this review has ended; ask the operator to press Ask to review again",
+                "the dashboard session that granted this review has ended; ask the person to press Ask to review again",
             ));
         }
         let by = MutationAttribution::new(ActorKind::AgentSession, caller.as_str(), now_ms);

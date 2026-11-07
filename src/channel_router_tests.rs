@@ -290,7 +290,7 @@ fn input_caps_post_roster_and_channel_recap_including_unicode_and_controls() {
             },
             created_at_ms: index,
             author_address_id: "claude".to_owned(),
-            author_is_human: false,
+            author_is_human: index == 9,
             grammar_version: if index == 0 {
                 "channel/v1"
             } else {
@@ -338,6 +338,7 @@ fn input_caps_post_roster_and_channel_recap_including_unicode_and_controls() {
     let recap = payload["recap"].as_array().unwrap();
     assert_eq!(recap.len(), 6);
     assert!(recap[0].as_str().unwrap().starts_with("claude: 4 "));
+    assert!(recap[5].as_str().unwrap().starts_with("person: 9 "));
     assert!(
         recap
             .iter()
