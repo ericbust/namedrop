@@ -410,17 +410,39 @@ fn main() -> ExitCode {
         };
     }
 
+    match run_bound_operation(operation, input, &cli.runtime) {
+        Ran::Refused(error) => {
+            write_result(&CommandResult::invalid_request(input_error(error)), 64)
+        }
+        Ran::Finished(result) => finish(operation, result),
+    }
+}
+
+/// An input the CLI refuses before running anything, or the operation's own
+/// result.
+enum Ran {
+    Refused(String),
+    Finished(Result<serde_json::Value, String>),
+}
+
+/// One operation the way the CLI runs it once its input is parsed: a compact
+/// reply is completed from its attempt, a message is validated, a sandboxed
+/// pane queues the command outside, and send, reply and complete wake the
+/// mailboxes. The Stop hook settles a final reply through this same path, so
+/// every guard of the agent's own bound line applies to it.
+fn run_bound_operation(
+    operation: &'static str,
+    input: serde_json::Value,
+    options: &RuntimeOptions,
+) -> Ran {
     let input = if operation == "reply" {
-        let state = cli
-            .runtime
+        let state = options
             .plugin_state
             .clone()
             .or_else(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from));
         match namedrop::expand_attempt_reply(input, state.as_deref()) {
             Ok(input) => input,
-            Err(error) => {
-                return write_result(&CommandResult::invalid_request(input_error(error)), 64);
-            }
+            Err(error) => return Ran::Refused(error),
         }
     } else {
         input
@@ -428,11 +450,11 @@ fn main() -> ExitCode {
     if is_message_operation(operation)
         && let Err(error) = validate_message_input(operation, input.clone())
     {
-        return write_result(&CommandResult::invalid_request(input_error(error)), 64);
+        return Ran::Refused(error);
     }
 
-    if let Some(result) = namedrop::deferred_commands::try_defer(operation, &input, &cli.runtime) {
-        return finish(operation, result);
+    if let Some(result) = namedrop::deferred_commands::try_defer(operation, &input, options) {
+        return Ran::Finished(result);
     }
 
     let result = if matches!(
@@ -445,29 +467,28 @@ fn main() -> ExitCode {
             | "handoff.results"
             | "handoff.preview"
     ) {
-        run_operation(operation, input, OperationKind::Handoff, &cli.runtime)
+        run_operation(operation, input, OperationKind::Handoff, options)
     } else if operation.starts_with("reminder.") {
-        run_operation(operation, input, OperationKind::Reminder, &cli.runtime)
+        run_operation(operation, input, OperationKind::Reminder, options)
     } else if matches!(operation, "group.list" | "group.set" | "group.remove") {
-        run_operation(operation, input, OperationKind::Group, &cli.runtime)
+        run_operation(operation, input, OperationKind::Group, options)
     } else if is_control_operation(operation) {
-        run_operation(operation, input, OperationKind::Control, &cli.runtime)
+        run_operation(operation, input, OperationKind::Control, options)
     } else if is_context_operation(operation) {
-        run_operation(operation, input, OperationKind::Context, &cli.runtime)
+        run_operation(operation, input, OperationKind::Context, options)
     } else if is_integration_operation(operation) {
-        run_operation(operation, input, OperationKind::Integration, &cli.runtime)
+        run_operation(operation, input, OperationKind::Integration, options)
     } else if is_message_operation(operation) {
-        run_operation(operation, input, OperationKind::Message, &cli.runtime)
+        run_operation(operation, input, OperationKind::Message, options)
     } else if is_lifecycle_operation(operation) {
-        run_lifecycle(operation, input, &cli.runtime)
+        run_lifecycle(operation, input, options)
     } else {
         Err(format!("unsupported operation: {operation}"))
     };
-    let result = result.map(|mut data| {
-        schedule_dispatch(operation, &mut data, &cli.runtime);
+    Ran::Finished(result.map(|mut data| {
+        schedule_dispatch(operation, &mut data, options);
         data
-    });
-    finish(operation, result)
+    }))
 }
 
 fn run_subagent_hook(state: &Path, host: namedrop::AgentRuntime) -> ExitCode {

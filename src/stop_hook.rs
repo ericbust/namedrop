@@ -1,6 +1,8 @@
 use namedrop::{
     ActorKind, AgentSessionId, Clock, MutationAttribution, ProcessHerdr, StateNamespace,
-    StateStore, SystemClock, TerminalRelayEnd, final_reply::HostTurn,
+    StateStore, SystemClock, TerminalRelayEnd,
+    cli::RuntimeOptions,
+    final_reply::{BoundOperation, FinalText, HostTurn, StopFacts},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,7 +16,6 @@ use std::{
 };
 
 const MAX_INPUT_BYTES: u64 = 1024 * 1024;
-const MAX_TEXT_CHARS: usize = 16_000;
 
 #[derive(Deserialize, Serialize)]
 struct StopInput {
@@ -24,6 +25,13 @@ struct StopInput {
     transcript_path: Option<PathBuf>,
     turn_id: Option<String>,
     prompt_id: Option<String>,
+    #[serde(default)]
+    background_tasks: Vec<BackgroundTask>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct BackgroundTask {
+    status: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -76,7 +84,13 @@ pub fn run(state: &Path) {
     let Ok(executable) = env::current_exe() else {
         return;
     };
-    let Ok(mut child) = Command::new(executable)
+    let mut worker = Command::new(executable);
+    // The front end's short Herdr timeout is for its own deadline; a settle
+    // runs the CLI's operation, which needs the CLI's.
+    if namedrop::final_reply::has_live_claims(state, &captured.socket, &captured.input.session_id) {
+        worker.env_remove("NAMEDROP_HERDR_TIMEOUT_MS");
+    }
+    let Ok(mut child) = worker
         .args(["hook", "stop-worker", "--state-directory"])
         .arg(state)
         .stdin(Stdio::piped())
@@ -92,7 +106,6 @@ pub fn run(state: &Path) {
 }
 
 pub fn run_worker(state: &Path) {
-    deadline(3000);
     let mut bytes = Vec::new();
     if io::stdin()
         .lock()
@@ -105,9 +118,31 @@ pub fn run_worker(state: &Path) {
     let Ok(captured) = serde_json::from_slice::<CapturedStop>(&bytes) else {
         return;
     };
+    let settles =
+        namedrop::final_reply::has_live_claims(state, &captured.socket, &captured.input.session_id);
+    deadline(if settles { 10_000 } else { 3_000 });
     let text = captured
         .input
         .final_text(Some(captured.transcript_end.unwrap_or(0)));
+    if settles {
+        let stop = StopFacts {
+            session: captured.input.session_id.clone(),
+            turn: captured.input.turn(),
+            background_running: captured
+                .input
+                .background_tasks
+                .iter()
+                .any(|task| matches!(task.status.as_str(), "running" | "pending")),
+            text: text.clone(),
+        };
+        namedrop::final_reply::settle_at_stop(
+            state,
+            &captured.socket,
+            &stop,
+            SystemClock.now_unix_ms(),
+            &mut settle,
+        );
+    }
     let herdr = ProcessHerdr::default().with_socket(Some(captured.socket.clone()));
     let Some((workspace, _)) =
         namedrop::locate_agent_session_pane(&herdr, &captured.input.session_id)
@@ -122,12 +157,25 @@ pub fn run_worker(state: &Path) {
         agent_session_id: AgentSessionId::new(captured.input.session_id),
         ended_at_ms: captured.ended_at_ms,
         previous_end_ms: Some(captured.previous_end_ms.unwrap_or(0)),
-        text,
+        text: text.text,
     };
     let attribution = MutationAttribution::new(ActorKind::Plugin, "namedrop", captured.ended_at_ms);
     let _ = store.transaction(|transaction| {
         transaction.relay_terminal_ending(&namespace, &ending, &attribution)
     });
+}
+
+fn settle(bound: BoundOperation) -> Result<Value, String> {
+    let options = RuntimeOptions {
+        plugin_state: Some(bound.state),
+        herdr_socket: Some(bound.socket),
+        herdr_workspace: Some(bound.workspace),
+        herdr_pane: Some(bound.pane),
+    };
+    match crate::run_bound_operation(bound.operation, bound.input, &options) {
+        crate::Ran::Finished(result) => result,
+        crate::Ran::Refused(error) => Err(error),
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -318,12 +366,11 @@ impl StopInput {
         HostTurn::from_ids(self.prompt_id.as_deref(), self.turn_id.as_deref())
     }
 
-    fn final_text(&self, transcript_end: Option<u64>) -> String {
-        let text = match &self.last_assistant_message {
-            Some(text) => text.clone(),
-            None => self.transcript_text(transcript_end).unwrap_or_default(),
-        };
-        text.chars().take(MAX_TEXT_CHARS).collect()
+    fn final_text(&self, transcript_end: Option<u64>) -> FinalText {
+        match &self.last_assistant_message {
+            Some(text) => FinalText::bounded(text),
+            None => FinalText::bounded(&self.transcript_text(transcript_end).unwrap_or_default()),
+        }
     }
 
     fn transcript_text(&self, transcript_end: Option<u64>) -> Option<String> {
@@ -397,6 +444,7 @@ fn content_text(content: &Value, kind: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use namedrop::TERMINAL_RELAY_MAX_CHARS as MAX_TEXT_CHARS;
     use serde_json::json;
 
     fn parse(value: Value) -> StopInput {
@@ -416,7 +464,7 @@ mod tests {
             ),
         ] {
             let input = read_input(fixture.as_bytes()).unwrap();
-            assert_eq!(input.final_text(None), expected);
+            assert_eq!(input.final_text(None).text, expected);
         }
     }
 
@@ -435,7 +483,7 @@ mod tests {
             assert_eq!(bounded.session_id, original.session_id);
             assert_eq!(bounded.prompt_id, original.prompt_id);
             assert_eq!(bounded.turn_id, original.turn_id);
-            assert_eq!(bounded.final_text(None), "");
+            assert_eq!(bounded.final_text(None).text, "");
         }
     }
 
@@ -446,7 +494,7 @@ mod tests {
             json!({"hook_event_name":"Stop", "session_id":"session", "last_assistant_message":text}),
         );
         assert_eq!(
-            input.final_text(None),
+            input.final_text(None).text,
             text.chars().take(MAX_TEXT_CHARS).collect::<String>()
         );
     }
@@ -470,7 +518,10 @@ mod tests {
         let input = parse(
             json!({"hook_event_name":"Stop", "session_id":"test-session", "transcript_path":fixture}),
         );
-        assert_eq!(input.final_text(None), "Would you prefer tea or coffee?");
+        assert_eq!(
+            input.final_text(None).text,
+            "Would you prefer tea or coffee?"
+        );
     }
 
     #[test]
@@ -480,12 +531,12 @@ mod tests {
         let input = parse(
             json!({"hook_event_name":"Stop", "session_id":"codex-session-id", "turn_id":"codex-turn-id", "transcript_path":fixture}),
         );
-        assert_eq!(input.final_text(None), "Hi! What can I help with?");
+        assert_eq!(input.final_text(None).text, "Hi! What can I help with?");
         let other = StopInput {
             turn_id: Some("different-turn".into()),
             ..input
         };
-        assert_eq!(other.final_text(None), "");
+        assert_eq!(other.final_text(None).text, "");
     }
 
     #[test]
@@ -502,21 +553,21 @@ mod tests {
         let mut input = parse(
             json!({"hook_event_name":"Stop", "session_id":"test", "transcript_path":transcript}),
         );
-        assert_eq!(input.final_text(None), "");
+        assert_eq!(input.final_text(None).text, "");
         fs::write(&transcript, &first).unwrap();
-        assert_eq!(input.final_text(None), "old answer");
+        assert_eq!(input.final_text(None).text, "old answer");
         let captured_end = fs::metadata(&transcript).unwrap().len();
         let later = json!({"type":"assistant", "sessionId":"test", "message":{"content":[{"type":"text","text":"later turn"}]}});
         fs::write(&transcript, format!("{first}\n{later}\n")).unwrap();
-        assert_eq!(input.final_text(Some(captured_end)), "old answer");
-        assert_eq!(input.final_text(None), "later turn");
+        assert_eq!(input.final_text(Some(captured_end)).text, "old answer");
+        assert_eq!(input.final_text(None).text, "later turn");
         fs::write(&transcript, first).unwrap();
         input.session_id = "other-session".into();
-        assert_eq!(input.final_text(None), "");
+        assert_eq!(input.final_text(None).text, "");
         let link = root.join("link");
         std::os::unix::fs::symlink(&transcript, &link).unwrap();
         input.transcript_path = Some(link);
-        assert_eq!(input.final_text(None), "");
+        assert_eq!(input.final_text(None).text, "");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -525,6 +576,6 @@ mod tests {
         let input = parse(
             json!({"hook_event_name":"Stop", "session_id":"session", "last_assistant_message":"", "transcript_path":"/not/a/transcript"}),
         );
-        assert_eq!(input.final_text(None), "");
+        assert_eq!(input.final_text(None).text, "");
     }
 }
