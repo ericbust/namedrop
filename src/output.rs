@@ -439,6 +439,7 @@ const AGENT_RESULT_FIELDS: &[(&str, &[Keep])] = &[
             Keep::WhenTrue("idempotent_replay"),
             Keep::Field("state"),
             Keep::Field("guidance"),
+            Keep::Field("dispatch_error"),
         ],
     ),
     (
@@ -452,6 +453,7 @@ const AGENT_RESULT_FIELDS: &[(&str, &[Keep])] = &[
             Keep::WhenTrue("idempotent_replay"),
             Keep::Field("state"),
             Keep::Field("guidance"),
+            Keep::Field("dispatch_error"),
         ],
     ),
     (
@@ -461,6 +463,7 @@ const AGENT_RESULT_FIELDS: &[(&str, &[Keep])] = &[
             Keep::Field("disposition"),
             Keep::Field("state"),
             Keep::Field("guidance"),
+            Keep::Field("dispatch_error"),
         ],
     ),
 ];

@@ -1198,7 +1198,7 @@ fn a_second_disposition_on_an_answered_attempt_is_rejected_and_changes_nothing()
 /// An agent reads the send, reply and complete results after every delivery,
 /// so their default JSON carries only what it acts on: the ids it reuses, one
 /// outlook sentence, and a replay flag only when the send was a replay.
-/// `--json` prints the full result, drain report included, for scripts.
+/// `--json` prints the full result, dispatch state included, for scripts.
 #[test]
 fn settle_results_print_the_agent_view_and_json_prints_the_full_result() {
     let fixture = Fixture::new();
@@ -1253,6 +1253,8 @@ fn settle_results_print_the_agent_view_and_json_prints_the_full_result() {
         })
     );
 
+    // complete only commits; reconcile runs the drain that delivers the next one.
+    fixture.reconcile_drain();
     let second = owed("second");
     let replied = run(
         &["reply"],
@@ -1295,7 +1297,7 @@ fn settle_results_print_the_agent_view_and_json_prints_the_full_result() {
     let full = run(&["send", "--json"], send);
     assert_eq!(full["data"]["message_id"], sent["data"]["message_id"]);
     assert_eq!(full["data"]["idempotent_replay"], true);
-    for field in ["drain", "deliveries", "recipients", "delivery_outlook"] {
+    for field in ["dispatch", "deliveries", "recipients", "delivery_outlook"] {
         assert!(
             full["data"].get(field).is_some(),
             "--json keeps {field}: {full}"

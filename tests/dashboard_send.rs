@@ -1950,7 +1950,7 @@ else:
         let started = Instant::now();
         let receipt = cli(
             &f,
-            &["send"],
+            &["send", "--json"],
             json!({
                 "request_id":"forwarded-lock", "source":"#ws2 @tester inspect",
                 "author_kind":"agent_session"
