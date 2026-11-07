@@ -156,6 +156,7 @@ fn delivery_guidance_leaves_rarely_used_operations_to_control_tool() {
             {"token":"handoff.preview","argv":["handoff","preview"],"input":{"source":"@<recipient> <x>"}},
             {"token":"handoff.preview","argv":["handoff","preview"],"input":{"source":"@<recipient> <x>","context":{"snapshot":{}}}},
             {"token":"context.read","argv":["context","read"],"input":{"grant_id":"g"}},
+            {"token":"context.read","argv":["context","read"],"input":{"grant_id":"<grant_id from context.inspect>","selection":{"kind":"snapshot"}}},
             {"token":"complete.no-reply","argv":["complete","--no-reply"],"input":{"attempt_id":"a"}}
         ]
     }}))

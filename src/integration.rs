@@ -1500,10 +1500,11 @@ pub(crate) fn delivery_command_guidance(control: &Value) -> Option<String> {
     let mut inputs = Vec::new();
     for operation in tool.get("operations")?.as_array()? {
         let token = operation.get("token")?.as_str()?;
-        if UNRENDERED_OPERATIONS.contains(&token) {
+        let bound = operation.get("input")?;
+        if UNRENDERED_OPERATIONS.contains(&token) || waits_on_unrendered(bound) {
             continue;
         }
-        let input = rendered_input(token, operation.get("input")?, control);
+        let input = rendered_input(token, bound, control);
         let mut command = shell_single_quote(executable);
         if let Some(state_directory) = located("HERDR_PLUGIN_STATE_DIR") {
             command.push_str(&format!(
@@ -1544,6 +1545,18 @@ pub(crate) fn delivery_command_guidance(control: &Value) -> Option<String> {
         guidance.push_str(&line);
     }
     Some(guidance)
+}
+
+/// A line whose input still holds a value only an unrendered operation
+/// reports, such as the generic context.read with `<grant_id from
+/// context.inspect>`, cannot run from the block alone. A context.read bound to
+/// a real grant stays.
+fn waits_on_unrendered(input: &Value) -> bool {
+    any_string(input, |text| {
+        UNRENDERED_OPERATIONS
+            .iter()
+            .any(|token| text.contains(&format!("from {token}>")))
+    })
 }
 
 /// A bound reply as its line shows it: without each field the CLI derives
