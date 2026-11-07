@@ -194,19 +194,51 @@ impl Fixture {
         fs::write(&echo, "#!/bin/sh\nprintf '%s\n' \"$@\"\n").unwrap();
         fs::set_permissions(&echo, fs::Permissions::from_mode(0o700)).unwrap();
         // These stay in control.tool without a rendered line, and so does a
-        // line that waits on one of them for a value.
-        let unrendered = ["reminder.set", "context.inspect", "handoff.preview"];
-        let operations = envelope["control"]["tool"]["operations"]
+        // line that waits on one of them for a value. A context reference
+        // gives context.inspect its line.
+        let referenced = envelope["control"]["context_references"]
+            .as_array()
+            .is_some_and(|references| !references.is_empty());
+        let unrendered = if referenced {
+            vec!["reminder.set", "handoff.preview"]
+        } else {
+            vec!["reminder.set", "context.inspect", "handoff.preview"]
+        };
+        let (operations, skipped): (Vec<_>, Vec<_>) = envelope["control"]["tool"]["operations"]
             .as_array()
             .unwrap()
             .iter()
-            .filter(|operation| {
+            .partition(|operation| {
                 !unrendered.contains(&operation["token"].as_str().unwrap())
-                    && !operation["input"]
-                        .to_string()
-                        .contains("from context.inspect>")
-            })
+                    && !unrendered.iter().any(|token| {
+                        operation["input"]
+                            .to_string()
+                            .contains(&format!("from {token}>"))
+                    })
+            });
+        let mut unnamed = skipped
+            .iter()
+            .map(|operation| operation["token"].as_str().unwrap())
+            .filter(|token| !operations.iter().any(|kept| kept["token"] == *token))
             .collect::<Vec<_>>();
+        unnamed.dedup();
+        let prose = guidance
+            .lines()
+            .find(|line| line.starts_with("Namedrop commands:"))
+            .unwrap();
+        match prose.split_once("No line is shown for ") {
+            Some((_, rest)) => {
+                let named = rest.split_once(';').unwrap().0;
+                assert_eq!(
+                    named.split(", ").collect::<Vec<_>>(),
+                    unnamed
+                        .iter()
+                        .map(|token| format!("`{token}`"))
+                        .collect::<Vec<_>>()
+                );
+            }
+            None => assert!(unnamed.is_empty(), "{unnamed:?} have no line: {prose}"),
+        }
         let lines = guidance
             .lines()
             .filter_map(|line| {

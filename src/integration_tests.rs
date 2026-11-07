@@ -31,7 +31,9 @@ fn claude_delivery_guidance_matches_managed_rules_for_every_automatic_operation(
         "input_flag":"--input-json",
         "operations":operations.iter().map(|op| json!({"token":op.token,"argv":op.argv,"input":{}})).collect::<Vec<_>>()
     });
-    let guidance = delivery_command_guidance(&json!({"tool": tool})).unwrap();
+    // A context reference is what gives context.inspect a line.
+    let guidance =
+        delivery_command_guidance(&json!({"context_references":[{}], "tool": tool})).unwrap();
     let settings: Value =
         serde_json::from_slice(&fs::read(home.join(".claude/settings.json")).unwrap()).unwrap();
     let rules = settings["permissions"]["allow"].as_array().unwrap();
@@ -39,7 +41,7 @@ fn claude_delivery_guidance_matches_managed_rules_for_every_automatic_operation(
     for operation in operations {
         let prefix = format!("{}: ", operation.token);
         let command = guidance.lines().find_map(|line| line.strip_prefix(&prefix));
-        if UNRENDERED_OPERATIONS.contains(&operation.token.as_str()) {
+        if ["reminder.set", "handoff.preview"].contains(&operation.token.as_str()) {
             assert!(
                 command.is_none(),
                 "{} was rendered: {guidance}",
@@ -146,9 +148,32 @@ fn delivery_guidance_says_only_what_its_own_lines_ask_for() {
     }
 }
 
+fn rendered_tokens(guidance: &str) -> Vec<&str> {
+    guidance
+        .lines()
+        .skip(1)
+        .map(|line| line.split_once(": ").unwrap().0)
+        .collect()
+}
+
+const UNRENDERED_LEAD: &str = "No line is shown for ";
+
+/// The tokens the unrendered sentence names, or `None` when it is absent.
+fn named_unrendered(guidance: &str) -> Option<Vec<&str>> {
+    let prose = guidance.lines().next().unwrap();
+    let (_, rest) = prose.split_once(UNRENDERED_LEAD)?;
+    let named = rest.split_once(';').unwrap().0;
+    Some(
+        named
+            .split(", ")
+            .map(|token| token.trim_matches('`'))
+            .collect(),
+    )
+}
+
 #[test]
 fn delivery_guidance_leaves_rarely_used_operations_to_control_tool() {
-    let rendered = delivery_command_guidance(&json!({"tool":{
+    let rendered = delivery_command_guidance(&json!({"context_references":[],"tool":{
         "executable":"/bin/namedrop","environment":{},"input_flag":"--input-json",
         "operations":[
             {"token":"reminder.set","argv":["reminder","set"],"input":{"body":"<what to do later>"}},
@@ -161,16 +186,77 @@ fn delivery_guidance_leaves_rarely_used_operations_to_control_tool() {
         ]
     }}))
     .unwrap();
-    let tokens = rendered
-        .lines()
-        .skip(1)
-        .map(|line| line.split_once(": ").unwrap().0)
-        .collect::<Vec<_>>();
-    assert_eq!(tokens, ["context.read", "complete.no-reply"]);
+    assert_eq!(
+        rendered_tokens(&rendered),
+        ["context.read", "complete.no-reply"]
+    );
     assert!(
         !rendered.contains("snapshot contents"),
         "an unrendered line still drove the prose: {rendered}"
     );
+    // context.read keeps a line, so only the operations with none are named.
+    assert_eq!(
+        named_unrendered(&rendered).unwrap(),
+        ["reminder.set", "context.inspect", "handoff.preview"]
+    );
+}
+
+#[test]
+fn a_context_reference_renders_context_inspect_and_the_read_that_waits_on_it() {
+    let guidance = |references: Value| {
+        delivery_command_guidance(&json!({"context_references":references,"tool":{
+            "executable":"/bin/namedrop","environment":{},"input_flag":"--input-json",
+            "operations":[
+                {"token":"reply","argv":["reply"],"input":{"attempt_id":"a","source":"@lead <reply body>"}},
+                {"token":"reminder.set","argv":["reminder","set"],"input":{"body":"<what to do later>"}},
+                {"token":"context.inspect","argv":["context","inspect"],"input":{"message_id":"m","reference_address_id":"r"}},
+                {"token":"context.read","argv":["context","read"],"input":{"grant_id":"<grant_id from context.inspect>","selection":{"kind":"snapshot"}}}
+            ]
+        }}))
+        .unwrap()
+    };
+    let referenced = guidance(json!([{"address_id":"r"}]));
+    assert_eq!(
+        rendered_tokens(&referenced),
+        ["reply", "context.inspect", "context.read"]
+    );
+    assert_eq!(named_unrendered(&referenced).unwrap(), ["reminder.set"]);
+
+    for references in [json!([]), Value::Null] {
+        let unreferenced = guidance(references);
+        assert_eq!(rendered_tokens(&unreferenced), ["reply"]);
+        assert_eq!(
+            named_unrendered(&unreferenced).unwrap(),
+            ["reminder.set", "context.inspect", "context.read"]
+        );
+    }
+}
+
+#[test]
+fn the_unrendered_sentence_says_how_to_build_a_line_in_rendered_order() {
+    let guidance = delivery_command_guidance(&json!({"tool":{
+        "executable":"/bin/namedrop","environment":{},"input_flag":"--input-json",
+        "operations":[{"token":"reminder.set","argv":["reminder","set"],"input":{}}]
+    }}))
+    .unwrap();
+    let prose = guidance.lines().next().unwrap();
+    let order = [
+        "`control.tool`",
+        "executable",
+        "`--plugin-state`",
+        "argv",
+        "`--herdr-socket`",
+        "`--herdr-workspace`",
+        "`--herdr-pane`",
+        "input flag",
+        "JSON",
+    ]
+    .map(|part| {
+        prose
+            .find(part)
+            .unwrap_or_else(|| panic!("{part} is missing: {prose}"))
+    });
+    assert!(order.is_sorted(), "{prose}");
 }
 
 #[test]

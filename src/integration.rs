@@ -1389,11 +1389,38 @@ pub struct DeliveryToolInvocation {
     pub operations: Vec<BoundDeliveryOperation>,
 }
 
-/// Bound operations whose lines are left out of the rendered block: agents
-/// almost never ran them from a delivery (under two uses in 1,276 measured
-/// delivery turns), and each line cost hundreds of characters on every one.
-/// They stay in `control.tool`, so they remain authorized and runnable.
-const UNRENDERED_OPERATIONS: [&str; 3] = ["reminder.set", "context.inspect", "handoff.preview"];
+/// When a bound operation agents rarely ran from a delivery (under two uses in
+/// 1,276 measured delivery turns) still gets a line; each line cost hundreds of
+/// characters on every delivery. Without one it stays in `control.tool`,
+/// authorized and runnable.
+#[derive(Clone, Copy)]
+enum RareLine {
+    Never,
+    /// A delivery that references context without attaching a grant can be
+    /// read only through context.inspect.
+    WhenContextReferenced,
+}
+
+const RARE_OPERATIONS: [(&str, RareLine); 3] = [
+    ("reminder.set", RareLine::Never),
+    ("context.inspect", RareLine::WhenContextReferenced),
+    ("handoff.preview", RareLine::Never),
+];
+
+fn unrendered_operations(control: &Value) -> Vec<&'static str> {
+    let referenced = control
+        .get("context_references")
+        .and_then(Value::as_array)
+        .is_some_and(|references| !references.is_empty());
+    RARE_OPERATIONS
+        .into_iter()
+        .filter(|(_, rule)| match rule {
+            RareLine::Never => true,
+            RareLine::WhenContextReferenced => !referenced,
+        })
+        .map(|(token, _)| token)
+        .collect()
+}
 
 /// Something a rendered line asks its recipient to author before running it.
 #[derive(Clone, Copy)]
@@ -1408,10 +1435,10 @@ impl CommandNeed {
     fn present_in(self, input: &Value) -> bool {
         match self {
             Self::AuthoredText => {
-                any_string(input, |text| text.contains('<') && text.contains('>'))
+                any_string(input, &|text| text.contains('<') && text.contains('>'))
             }
             Self::NewAssignmentKey => {
-                any_string(input, |text| text.contains("<new-assignment-key>"))
+                any_string(input, &|text| text.contains("<new-assignment-key>"))
             }
             Self::WorkOutcome => any_key(input, "work_outcome"),
             Self::Snapshot => any_key(input, "snapshot"),
@@ -1419,7 +1446,7 @@ impl CommandNeed {
     }
 }
 
-fn any_string(value: &Value, found: fn(&str) -> bool) -> bool {
+fn any_string(value: &Value, found: &dyn Fn(&str) -> bool) -> bool {
     match value {
         Value::String(text) => found(text),
         Value::Array(items) => items.iter().any(|item| any_string(item, found)),
@@ -1471,6 +1498,19 @@ const COMMAND_SENTENCES: [(CommandNeed, &str); 5] = [
 /// sandbox refusal of a bound line stalled a live handoff.
 const SANDBOX_SENTENCE: &str = "An OS sandbox access error is not an approval decision: request normal host approval for this exact line, and if policy rejects it, report the blocker and keep the reply pending.";
 
+/// Said when a bound operation has no line, so the delivery still shows it is
+/// authorized and how to run it in the order the Codex approval prefix needs.
+fn unrendered_sentence(tokens: &[&str]) -> String {
+    let named = tokens
+        .iter()
+        .map(|token| format!("`{token}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "No line is shown for {named}; build one from `control.tool` in this order: quoted executable, `--plugin-state` and the state dir, its argv, `--herdr-socket`, `--herdr-workspace`, `--herdr-pane`, then the input flag and its JSON."
+    )
+}
+
 /// The bound operations of one authenticated delivery, rendered as runnable
 /// lines. It reads the envelope the plugin reconstructed and matched, never a
 /// catalog example, so every id is that attempt's own and any coordination
@@ -1492,12 +1532,18 @@ pub(crate) fn delivery_command_guidance(control: &Value) -> Option<String> {
     let environment = tool.get("environment")?.as_object()?;
     let input_flag = tool.get("input_flag")?.as_str()?;
     let located = |key: &str| environment.get(key).and_then(Value::as_str);
+    let unrendered = unrendered_operations(control);
     let mut lines = Vec::new();
     let mut inputs = Vec::new();
+    let mut rendered = Vec::new();
+    let mut skipped = Vec::new();
     for operation in tool.get("operations")?.as_array()? {
         let token = operation.get("token")?.as_str()?;
         let bound = operation.get("input")?;
-        if UNRENDERED_OPERATIONS.contains(&token) || waits_on_unrendered(bound) {
+        if unrendered.contains(&token) || waits_on(bound, &unrendered) {
+            if !skipped.contains(&token) {
+                skipped.push(token);
+            }
             continue;
         }
         let input = rendered_input(token, bound, control);
@@ -1526,6 +1572,7 @@ pub(crate) fn delivery_command_guidance(control: &Value) -> Option<String> {
             shell_single_quote(&input.to_string())
         ));
         inputs.push(input);
+        rendered.push(token);
     }
     let mut guidance = COMMAND_HEADER.to_owned();
     for (need, sentence) in COMMAND_SENTENCES {
@@ -1533,6 +1580,11 @@ pub(crate) fn delivery_command_guidance(control: &Value) -> Option<String> {
             guidance.push(' ');
             guidance.push_str(sentence);
         }
+    }
+    skipped.retain(|token| !rendered.contains(token));
+    if !skipped.is_empty() {
+        guidance.push(' ');
+        guidance.push_str(&unrendered_sentence(&skipped));
     }
     guidance.push(' ');
     guidance.push_str(SANDBOX_SENTENCE);
@@ -1547,9 +1599,9 @@ pub(crate) fn delivery_command_guidance(control: &Value) -> Option<String> {
 /// reports, such as the generic context.read with `<grant_id from
 /// context.inspect>`, cannot run from the block alone. A context.read bound to
 /// a real grant stays.
-fn waits_on_unrendered(input: &Value) -> bool {
-    any_string(input, |text| {
-        UNRENDERED_OPERATIONS
+fn waits_on(input: &Value, unrendered: &[&str]) -> bool {
+    any_string(input, &|text| {
+        unrendered
             .iter()
             .any(|token| text.contains(&format!("from {token}>")))
     })
