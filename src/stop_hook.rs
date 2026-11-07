@@ -1,6 +1,6 @@
 use namedrop::{
     ActorKind, AgentSessionId, Clock, MutationAttribution, ProcessHerdr, StateNamespace,
-    StateStore, SystemClock, TerminalRelayEnd,
+    StateStore, SystemClock, TerminalRelayEnd, final_reply::HostTurn,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -151,11 +151,7 @@ fn record_boundary(
     input: &StopInput,
     ended_at_ms: u64,
 ) -> Option<Option<u64>> {
-    let identity = match (&input.prompt_id, &input.turn_id) {
-        (Some(id), None) if !id.trim().is_empty() => hash(format!("claude:{id}").as_bytes()),
-        (None, Some(id)) if !id.trim().is_empty() => hash(format!("codex:{id}").as_bytes()),
-        _ => return None,
-    };
+    let identity = input.turn()?.as_str().to_owned();
     if !state.is_dir() {
         return None;
     }
@@ -302,14 +298,12 @@ fn stop_identity_prefix(bytes: &[u8]) -> Option<StopInput> {
         ) {
             fields.insert(key, item);
         }
-        if let Ok(input) = serde_json::from_value::<StopInput>(Value::Object(fields.clone())) {
-            let identity = match (&input.prompt_id, &input.turn_id) {
-                (Some(id), None) | (None, Some(id)) => !id.trim().is_empty(),
-                _ => false,
-            };
-            if identity && input.hook_event_name == "Stop" && !input.session_id.trim().is_empty() {
-                return Some(input);
-            }
+        if let Ok(input) = serde_json::from_value::<StopInput>(Value::Object(fields.clone()))
+            && input.turn().is_some()
+            && input.hook_event_name == "Stop"
+            && !input.session_id.trim().is_empty()
+        {
+            return Some(input);
         }
         whitespace(bytes, &mut offset);
         if bytes.get(offset) != Some(&b',') {
@@ -320,6 +314,10 @@ fn stop_identity_prefix(bytes: &[u8]) -> Option<StopInput> {
 }
 
 impl StopInput {
+    fn turn(&self) -> Option<HostTurn> {
+        HostTurn::from_ids(self.prompt_id.as_deref(), self.turn_id.as_deref())
+    }
+
     fn final_text(&self, transcript_end: Option<u64>) -> String {
         let text = match &self.last_assistant_message {
             Some(text) => text.clone(),

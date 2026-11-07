@@ -1,0 +1,24 @@
+{
+  "session_id": "claude-session-id",
+  "transcript_path": "/testbed/claude/transcript_path",
+  "cwd": "/testbed/claude/cwd",
+  "scratchpad_dir": "/testbed/claude/scratchpad_dir",
+  "prompt_id": "claude-prompt-id",
+  "permission_mode": "auto",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "The 60-second sleep is running in the background. A foreground `sleep 60` was blocked. I'll reply \"done\" once it finishes.",
+  "background_tasks": [
+    {
+      "id": "claude-task-id",
+      "type": "shell",
+      "status": "running",
+      "description": "Wait 60 seconds in background",
+      "command": "sleep 60"
+    }
+  ],
+  "session_crons": []
+}

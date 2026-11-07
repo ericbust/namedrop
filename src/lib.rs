@@ -12,6 +12,8 @@ pub mod dashboard;
 pub mod deferred_commands;
 mod delivery;
 mod domain;
+#[doc(hidden)]
+pub mod final_reply;
 mod groups;
 mod handoff;
 mod health;

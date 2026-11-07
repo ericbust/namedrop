@@ -70,30 +70,7 @@ pub fn trusted_delivery_instruction(control: &DeliveryControl) -> String {
     if control.review_source_message_id.is_some() {
         instruction.push_str(REVIEW_RULE);
     }
-    // The priority order: a context request outranks whatever else the same
-    // envelope is, then a result set, then the report to the person, then a
-    // coordination nudge, then an ordinary delivery.
-    instruction.push_str(if control.context_request.is_some() {
-        CONTEXT_REQUEST_RULE
-    } else if control.result_set.is_some() {
-        if control.coordination_id.is_some() {
-            TRACKED_RESULT_SET_RULE
-        } else {
-            RESULT_SET_RULE
-        }
-    } else if control.reply_mode == crate::DeliveryReplyMode::ReportToHuman {
-        REPORT_TO_HUMAN_RULE
-    } else if control.coordination_nudge_stale {
-        STALE_NUDGE_RULE
-    } else if control.coordination_nudge {
-        NUDGE_RULE
-    } else if control.reply_mode == crate::DeliveryReplyMode::DirectMessage {
-        DIRECT_MESSAGE_RULE
-    } else if control.reply_mode == crate::DeliveryReplyMode::Channel {
-        CHANNEL_RULE
-    } else {
-        SETTLE_RULE
-    });
+    instruction.push_str(DeliveryKind::of(control).rule());
     if control.result_set.is_none()
         && control
             .permitted_operations
@@ -104,6 +81,64 @@ pub fn trusted_delivery_instruction(control: &DeliveryControl) -> String {
     }
     instruction.push_str(RECOVERY_RULE);
     instruction
+}
+
+/// The one kind of delivery an envelope is. The instruction states its rule,
+/// and the hook decides from it whether the final message settles it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeliveryKind {
+    ContextRequest,
+    TrackedResultSet,
+    ResultSet,
+    ReportToHuman,
+    StaleNudge,
+    Nudge,
+    DirectMessage,
+    Channel,
+    Settle,
+}
+
+impl DeliveryKind {
+    /// The priority order: a context request outranks whatever else the same
+    /// envelope is, then a result set, then the report to the person, then a
+    /// coordination nudge, then an ordinary delivery.
+    pub(crate) fn of(control: &DeliveryControl) -> Self {
+        if control.context_request.is_some() {
+            Self::ContextRequest
+        } else if control.result_set.is_some() {
+            if control.coordination_id.is_some() {
+                Self::TrackedResultSet
+            } else {
+                Self::ResultSet
+            }
+        } else if control.reply_mode == crate::DeliveryReplyMode::ReportToHuman {
+            Self::ReportToHuman
+        } else if control.coordination_nudge_stale {
+            Self::StaleNudge
+        } else if control.coordination_nudge {
+            Self::Nudge
+        } else if control.reply_mode == crate::DeliveryReplyMode::DirectMessage {
+            Self::DirectMessage
+        } else if control.reply_mode == crate::DeliveryReplyMode::Channel {
+            Self::Channel
+        } else {
+            Self::Settle
+        }
+    }
+
+    fn rule(self) -> &'static str {
+        match self {
+            Self::ContextRequest => CONTEXT_REQUEST_RULE,
+            Self::TrackedResultSet => TRACKED_RESULT_SET_RULE,
+            Self::ResultSet => RESULT_SET_RULE,
+            Self::ReportToHuman => REPORT_TO_HUMAN_RULE,
+            Self::StaleNudge => STALE_NUDGE_RULE,
+            Self::Nudge => NUDGE_RULE,
+            Self::DirectMessage => DIRECT_MESSAGE_RULE,
+            Self::Channel => CHANNEL_RULE,
+            Self::Settle => SETTLE_RULE,
+        }
+    }
 }
 
 const TOOL_DESCRIPTOR: &str = include_str!("../integrations/tool.json");

@@ -1,0 +1,1 @@
+{"isSidechain": false, "promptId": "claude-interrupted-prompt-id", "type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}]}, "interruptedMessageId": "claude-message-id", "sessionId": "claude-session-id", "version": "2.1.319"}
