@@ -10,7 +10,8 @@ use serde::Deserialize;
 use crate::{AgentConfigDirectories, AgentRuntime, AgentSessionId};
 
 /// Claude can write a few hundred kilobytes of request records after its last
-/// usage entry, so the window doubles until it finds one or reaches the cap.
+/// usage entry, so the read reaches back in doubling chunks until it finds one
+/// or reaches the cap.
 const FIRST_WINDOW: u64 = 64 * 1024;
 const LAST_WINDOW: u64 = 8 * 1024 * 1024;
 
@@ -152,21 +153,10 @@ fn open_transcript(path: &Path) -> Option<File> {
 
 fn latest_from_end(host: AgentRuntime, file: &File) -> Option<u64> {
     let length = file.metadata().ok()?.len();
-    let mut window = FIRST_WINDOW;
-    loop {
-        let start = length.saturating_sub(window);
-        let mut bytes = vec![0; usize::try_from(length - start).ok()?];
-        file.read_exact_at(&mut bytes, start).ok()?;
-        if let Some(reading) = latest_reading(host, &bytes) {
-            return match reading {
-                Reading::Tokens(tokens) => Some(tokens),
-                Reading::Compacted => None,
-            };
-        }
-        if start == 0 || window >= LAST_WINDOW {
-            return None;
-        }
-        window *= 2;
+    let read_at = |bytes: &mut [u8], at| file.read_exact_at(bytes, at).ok();
+    match latest_reading(host, length, FIRST_WINDOW, LAST_WINDOW, read_at)? {
+        Reading::Tokens(tokens) => Some(tokens),
+        Reading::Compacted => None,
     }
 }
 
@@ -180,15 +170,49 @@ enum Reading {
     Compacted,
 }
 
-/// The latest reading in a window read from the end of a transcript. A line
-/// the window cut, at either end, is never a whole JSON object, so it does
-/// not parse and is passed over.
-fn latest_reading(host: AgentRuntime, window: &[u8]) -> Option<Reading> {
+/// The latest reading in the last `cap` bytes of a transcript `length` bytes
+/// long. Chunks are read from the end, the first `first` bytes long and each
+/// later one as long as all before it. The line a chunk cuts at its start is
+/// carried into the next chunk, so each byte is read and parsed once. A line
+/// the cap cuts is never parsed, and one still being written at the end is
+/// not a whole JSON object, so it does not parse and is passed over.
+fn latest_reading(
+    host: AgentRuntime,
+    length: u64,
+    first: u64,
+    cap: u64,
+    read_at: impl Fn(&mut [u8], u64) -> Option<()>,
+) -> Option<Reading> {
     let reading = match host {
         AgentRuntime::ClaudeCode => claude_reading,
         AgentRuntime::Codex => codex_reading,
     };
-    window.rsplit(|byte| *byte == b'\n').find_map(reading)
+    let mut end = length;
+    let mut cut = Vec::new();
+    while end > 0 && length - end < cap {
+        let start = end.saturating_sub((length - end).max(first));
+        let mut bytes = vec![0; usize::try_from(end - start).ok()?];
+        read_at(&mut bytes, start)?;
+        bytes.extend_from_slice(&cut);
+        let (cut_length, whole) = if start == 0 {
+            (0, 0)
+        } else {
+            match bytes.iter().position(|byte| *byte == b'\n') {
+                Some(newline) => (newline, newline + 1),
+                None => (bytes.len(), bytes.len()),
+            }
+        };
+        if let Some(found) = bytes[whole..]
+            .rsplit(|byte| *byte == b'\n')
+            .find_map(reading)
+        {
+            return Some(found);
+        }
+        bytes.truncate(cut_length);
+        cut = bytes;
+        end = start;
+    }
+    None
 }
 
 #[derive(Deserialize)]
@@ -300,8 +324,26 @@ mod tests {
         bytes
     }
 
-    fn latest(host: AgentRuntime, window: &[u8]) -> Option<u64> {
-        match latest_reading(host, window)? {
+    fn from_slice(source: &[u8]) -> impl Fn(&mut [u8], u64) -> Option<()> + '_ {
+        |bytes, at| {
+            let at = usize::try_from(at).ok()?;
+            bytes.copy_from_slice(source.get(at..at + bytes.len())?);
+            Some(())
+        }
+    }
+
+    fn scan(host: AgentRuntime, transcript: &[u8], first: u64, cap: u64) -> Option<Reading> {
+        latest_reading(
+            host,
+            transcript.len() as u64,
+            first,
+            cap,
+            from_slice(transcript),
+        )
+    }
+
+    fn latest(host: AgentRuntime, transcript: &[u8]) -> Option<u64> {
+        match scan(host, transcript, FIRST_WINDOW, LAST_WINDOW)? {
             Reading::Tokens(tokens) => Some(tokens),
             Reading::Compacted => None,
         }
@@ -407,19 +449,41 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_first_line_or_a_partial_last_line_is_not_read() {
+    fn a_line_the_cap_cuts_is_not_read_and_one_a_chunk_cuts_is_read_whole() {
         let whole = lines(&[codex_count(1_000)]);
-        assert_eq!(latest(AgentRuntime::Codex, &whole), Some(1_000));
-        for start in 1..whole.len() {
+        let length = whole.len() as u64;
+        assert_eq!(
+            scan(AgentRuntime::Codex, &whole, length, length),
+            Some(Reading::Tokens(1_000))
+        );
+        for cap in 1..length {
             assert_eq!(
-                latest(AgentRuntime::Codex, &whole[start..]),
+                scan(AgentRuntime::Codex, &whole, cap, cap),
                 None,
-                "a line cut at byte {start} was read"
+                "a line cut at byte {} was read",
+                length - cap
             );
         }
-        let mut writing = lines(&[codex_count(2_000)]);
+
+        let mut writing = lines(&[codex_count(1_000), codex_count(2_000)]);
+        let compacted = lines(&[
+            codex_count(1_000),
+            json!({"type":"compacted","payload":{"message":""}}),
+            codex_count(0),
+        ]);
         writing.extend(&lines(&[codex_count(3_000)])[..40]);
-        assert_eq!(latest(AgentRuntime::Codex, &writing), Some(2_000));
+        for first in 1..=writing.len().max(compacted.len()) as u64 {
+            assert_eq!(
+                scan(AgentRuntime::Codex, &writing, first, u64::MAX),
+                Some(Reading::Tokens(2_000)),
+                "first chunk {first}"
+            );
+            assert_eq!(
+                scan(AgentRuntime::Codex, &compacted, first, u64::MAX),
+                Some(Reading::Compacted),
+                "first chunk {first}"
+            );
+        }
     }
 
     #[test]
@@ -439,6 +503,22 @@ mod tests {
             latest_from_end(AgentRuntime::ClaudeCode, &open_transcript(&path).unwrap()),
             Some(300_003)
         );
+        let read = std::cell::Cell::new(0);
+        let counting = |bytes: &mut [u8], at| {
+            read.set(read.get() + bytes.len());
+            from_slice(&near)(bytes, at)
+        };
+        assert_eq!(
+            latest_reading(
+                AgentRuntime::ClaudeCode,
+                near.len() as u64,
+                FIRST_WINDOW,
+                LAST_WINDOW,
+                counting
+            ),
+            Some(Reading::Tokens(300_003))
+        );
+        assert_eq!(read.get(), near.len(), "a byte was read twice");
 
         let mut far = lines(&[claude_turn(1, 2, 300_000)]);
         far.extend(vec![b' '; LAST_WINDOW as usize]);
