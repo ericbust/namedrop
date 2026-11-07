@@ -1008,6 +1008,8 @@ impl StateTransaction<'_> {
         message: &MessageId,
         session: &str,
     ) -> Result<u64, StoreError> {
+        // CROSS JOIN fixes SQLite's join order. Left to choose, it drives from
+        // transition_facts and scans every delivery fact in the workspace.
         let (settled, working) = self.transaction.query_row(
             "WITH settle AS (
                 SELECT MAX(t.occurred_at_ms) AS at, d.mailbox_order AS mailbox_order
