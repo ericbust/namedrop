@@ -1010,6 +1010,7 @@ fn run_context_hook(
     if io::stdin().read_to_string(&mut input).is_err() {
         return ExitCode::SUCCESS;
     }
+    namedrop::forget_shown_roster(&input, state_directory);
     let mut output = namedrop::execute_codex_app_server_hook(&input).or_else(|| {
         with_runtime_at(state_directory, |runtime| {
             let _ = namedrop::deferred_commands::ensure_worker(

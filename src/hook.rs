@@ -17,6 +17,7 @@ const FAILED_HANDOFF_CONTEXTS: [&str; 2] = [
 struct UserPromptSubmitInput {
     hook_event_name: String,
     prompt: String,
+    session_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -28,7 +29,7 @@ struct SessionStartInput {
 /// Supplies the Namedrop selection policy once, when a native session starts
 /// or its host rebuilds the context (resume, clear, compaction, fork). The
 /// policy is fixed text, so reading it per turn would only repeat it; the
-/// roster it governs still arrives with every prompt.
+/// roster it governs arrives with a prompt whenever it changed.
 pub fn execute_session_start_hook<E, C, I>(
     input: &str,
     runtime: &LifecycleRuntime<'_, E, C, I>,
@@ -81,7 +82,8 @@ pub(crate) fn codex_app_server_hook_output() -> Value {
 /// Mention can be confirmed as a Collaboration Message. Non-Mention input stays
 /// invisible; a failed leading handoff preserves the prompt and adds only safe,
 /// non-authoritative local guidance, beneath the same roster the turn it stays
-/// on would have carried.
+/// on would have carried. Every roster carries only the parts this host
+/// session was not last shown.
 pub fn execute_user_prompt_submit_hook<E, C, I>(
     input: &str,
     runtime: &LifecycleRuntime<'_, E, C, I>,
@@ -95,11 +97,17 @@ where
     if input.hook_event_name != "UserPromptSubmit" {
         return None;
     }
+    let session = input.session_id.as_deref().filter(|id| !id.is_empty());
     let carried = carried_envelope(&input.prompt);
     if let Some(carried) = &carried
         && let Some(envelope) = outstanding_envelope(&carried.envelope, runtime)
     {
-        return Some(delivery_hook_output(&envelope, carried.leftover, runtime));
+        return Some(delivery_hook_output(
+            &envelope,
+            carried.leftover,
+            session,
+            runtime,
+        ));
     }
     // An envelope durable state does not hold is never rerouted as a Mention,
     // whatever text leads it; the turn stays local with the ordinary roster.
@@ -108,10 +116,11 @@ where
         None => route_leading_mentions(&input.prompt, runtime),
     };
     let Some(outcome) = outcome else {
-        // An ordinary turn is the persona roster's boundary. With no roster to
-        // supply, non-Mention input stays invisible exactly as before.
-        return crate::persona::workspace_context(runtime)
-            .map(|workspace| context_hook_output(&workspace.roster));
+        // An ordinary turn is the persona roster's boundary. With nothing new
+        // to supply, non-Mention input stays invisible exactly as before.
+        return unseen_roster(session, runtime)
+            .filter(|roster| !roster.parts.is_empty())
+            .map(|roster| context_hook_output(&roster.parts.led()));
     };
     match outcome {
         // The reason stays this exact literal: the generated wrapper wakes the
@@ -134,15 +143,21 @@ where
             }))
         }
         PromptMentionOutcome::Refused(RouteRefusal::UnknownMention { .. }) => {
-            Some(failed_handoff(FAILED_HANDOFF_CONTEXTS[0], runtime))
+            Some(failed_handoff(FAILED_HANDOFF_CONTEXTS[0], session, runtime))
         }
-        PromptMentionOutcome::Failed => Some(failed_handoff(FAILED_HANDOFF_CONTEXTS[1], runtime)),
-        PromptMentionOutcome::NeedsPick { settled, choices } => {
-            Some(under_roster(&workspace_picker(&settled, &choices), runtime))
+        PromptMentionOutcome::Failed => {
+            Some(failed_handoff(FAILED_HANDOFF_CONTEXTS[1], session, runtime))
         }
-        PromptMentionOutcome::NeedsRecipient { scope, names } => {
-            Some(under_roster(&recipient_picker(&scope, &names), runtime))
-        }
+        PromptMentionOutcome::NeedsPick { settled, choices } => Some(under_roster(
+            &workspace_picker(&settled, &choices),
+            session,
+            runtime,
+        )),
+        PromptMentionOutcome::NeedsRecipient { scope, names } => Some(under_roster(
+            &recipient_picker(&scope, &names),
+            session,
+            runtime,
+        )),
         PromptMentionOutcome::Refused(refusal @ RouteRefusal::NotHere { .. }) => {
             Some(under_roster(
                 &format!(
@@ -150,6 +165,7 @@ where
                      you unchanged; do not retry automatically. Tell the person the #label @name \
                      to type."
                 ),
+                session,
                 runtime,
             ))
         }
@@ -158,46 +174,85 @@ where
                 "Namedrop did not send this prompt: {refusal}. The prompt was preserved for you \
                  unchanged; do not retry automatically. Tell the person what to change."
             ),
+            session,
             runtime,
         )),
     }
+}
+
+/// The roster one output carries, and which native host reads it.
+struct UnseenRoster {
+    host: Option<crate::AgentRuntime>,
+    parts: crate::persona::RosterParts,
+}
+
+/// Only the parts of the roster this host session was not last shown. They
+/// are recorded as shown, so the output must carry every one of them.
+fn unseen_roster<E, C, I>(
+    session: Option<&str>,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Option<UnseenRoster>
+where
+    E: HerdrCommandExecutor,
+    C: Clock,
+    I: IdGenerator,
+{
+    crate::persona::workspace_context(runtime).map(|workspace| UnseenRoster {
+        host: workspace.host,
+        parts: crate::shown_roster::unseen(runtime.state_directory, session, &workspace.roster),
+    })
 }
 
 /// A failed handoff leaves the work here, so this turn needs the same roster
 /// an ordinary turn gets: it is what says who else could take it. The roster
 /// leads because a generated wrapper recognizes a dynamic context by the
 /// marker its serialization starts with, so composing under that marker needs
-/// no wrapper change; the guidance follows verbatim, and with no roster to lead
-/// it the exact known-safe literal the wrappers match is emitted unchanged.
-fn failed_handoff<E, C, I>(guidance: &str, runtime: &LifecycleRuntime<'_, E, C, I>) -> Value
+/// no wrapper change; the guidance follows verbatim, and with nothing new to
+/// lead it the exact known-safe literal the wrappers match is emitted unchanged.
+fn failed_handoff<E, C, I>(
+    guidance: &str,
+    session: Option<&str>,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Value
 where
     E: HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
-    context_hook_output(&match crate::persona::workspace_context(runtime) {
-        Some(workspace) => format!("{}\n\n{guidance}", workspace.roster),
-        None => guidance.to_owned(),
+    context_hook_output(&match unseen_roster(session, runtime) {
+        Some(roster) if !roster.parts.is_empty() => {
+            format!("{}\n\n{guidance}", roster.parts.led())
+        }
+        _ => guidance.to_owned(),
     })
 }
 
 /// Guidance with no fixed literal of its own still reaches the agent: it opens
 /// with the roster marker every generated wrapper forwards.
-fn under_roster<E, C, I>(guidance: &str, runtime: &LifecycleRuntime<'_, E, C, I>) -> Value
+fn under_roster<E, C, I>(
+    guidance: &str,
+    session: Option<&str>,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Value
 where
     E: HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
-    let roster = crate::persona::workspace_context(runtime).map_or_else(
-        || {
+    let roster = match unseen_roster(session, runtime) {
+        Some(roster) => roster.parts.led(),
+        None => {
+            // Once told nobody is named here, the session no longer holds the
+            // last roster it was shown, so the next one comes whole.
+            if let Some(session) = session {
+                crate::shown_roster::forget(runtime.state_directory, session);
+            }
             format!(
                 "{} No named agents in this Herdr space.",
                 crate::persona::ROSTER_MARKER
             )
-        },
-        |workspace| workspace.roster,
-    );
+        }
+    };
     context_hook_output(&format!("{roster}\n\n{guidance}"))
 }
 
@@ -283,6 +338,7 @@ fn hook_output(event: &str, context: &str) -> Value {
 fn delivery_hook_output<E, C, I>(
     envelope: &Value,
     leftover: &str,
+    session: Option<&str>,
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Value
 where
@@ -290,17 +346,21 @@ where
     C: Clock,
     I: IdGenerator,
 {
-    let workspace = crate::persona::workspace_context(runtime);
+    let roster = unseen_roster(session, runtime);
     // Codex suppresses the attestation whole, so composing the two together
-    // would cost it the roster on every incoming task. It gets the same
-    // fresh roster on its own instead; the attestation is never sent there,
-    // and the durable envelope is unchanged either way.
-    let codex = workspace
+    // would cost it the roster and the commands on every incoming task. It
+    // gets the roster on its own instead, led by its marker even when nothing
+    // in it is new; the attestation is never sent there, and the durable
+    // envelope is unchanged either way.
+    let codex = roster
         .as_ref()
-        .is_some_and(|workspace| workspace.host == Some(crate::AgentRuntime::Codex));
-    let mut context = match workspace.map(|workspace| workspace.roster) {
-        Some(roster) if codex => roster,
-        Some(roster) => format!("{AUTHENTICATED_DELIVERY_CONTEXT}\n\n{roster}"),
+        .is_some_and(|roster| roster.host == Some(crate::AgentRuntime::Codex));
+    let mut context = match roster.map(|roster| roster.parts) {
+        Some(parts) if codex => parts.led(),
+        Some(parts) => match parts.text() {
+            Some(text) => format!("{AUTHENTICATED_DELIVERY_CONTEXT}\n\n{text}"),
+            None => AUTHENTICATED_DELIVERY_CONTEXT.to_owned(),
+        },
         None => AUTHENTICATED_DELIVERY_CONTEXT.to_owned(),
     };
     if !leftover.is_empty() {

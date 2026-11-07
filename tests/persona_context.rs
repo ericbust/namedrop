@@ -275,6 +275,51 @@ fn hook(
     )
 }
 
+/// The same hook as a host calls it, with its own session id on stdin.
+fn hook_as(
+    session: &str,
+    prompt: &str,
+    runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
+) -> Option<Value> {
+    execute_user_prompt_submit_hook(
+        &json!({"hook_event_name":"UserPromptSubmit","prompt":prompt,"session_id":session})
+            .to_string(),
+        runtime,
+    )
+}
+
+/// The latest live status of one named agent, as a status observation records it.
+fn observe(directory: &TestDirectory, alias: &str, status: &str) {
+    rusqlite::Connection::open(directory.state.join("namedrop.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE agent_session_observations SET status = ?1 WHERE address_id = ?2",
+            (status, format!("address-{alias}")),
+        )
+        .unwrap();
+}
+
+/// What the installed wrapper of `host` hands its host for one hook output.
+fn forwarded(directory: &TestDirectory, host: AgentRuntime, output: &Value) -> String {
+    let executable = directory.root.join("hook-result");
+    let package =
+        install_integration_package(&directory.home, host, &executable, &directory.state).unwrap();
+    fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\nprintf '%s' '{}'\n",
+            output.to_string().replace('\'', "'\"'\"'")
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let result = Command::new(package.join("scripts/user-prompt-submit"))
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{host:?}: {result:?}");
+    String::from_utf8(result.stdout).unwrap()
+}
+
 fn session_start(
     runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
 ) -> Option<Value> {
@@ -386,7 +431,10 @@ fn a_session_reads_the_selection_policy_once_and_before_the_first_name() {
     let policy = context(&output);
     assert!(policy.starts_with(POLICY_MARKER), "{policy}");
     for expected in [
-        "begins with a Namedrop workspace roster",
+        // A turn without a roster part leaves the last one shown in force.
+        "carries its agent rows, and separately its other-workspaces line, only when they differ \
+         from the last ones shown in this session; until then those still hold",
+        "the last roster shown can be older than this turn",
         // The approved selection policy, exactly the rules a turn used to carry.
         "load the installed Namedrop skill",
         "Host-native team messaging does not reach these panes",
@@ -1865,4 +1913,205 @@ fn a_compact_reply_names_its_attempt_or_is_refused() {
         expand_attempt_reply(human.clone(), Some(&directory.state)).unwrap(),
         human
     );
+}
+
+/// A session keeps every roster it was shown, so a turn whose roster matches
+/// the last one only repeats it.
+#[test]
+fn a_session_is_shown_the_rows_again_only_when_a_peer_changed() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+    register("address-lead", AgentRuntime::Codex, &lead);
+    register(
+        "address-reviewer",
+        AgentRuntime::ClaudeCode,
+        &runtime(&directory, &herdr, &ids, "pane-reviewer"),
+    );
+    let prompt = "Plan the SSO work.";
+
+    let first = context(&hook_as("session-1", prompt, &lead).unwrap());
+    assert!(first.starts_with(ROSTER_MARKER), "{first}");
+    assert!(
+        first.contains("- @lead (you) — Generic · available now\n")
+            && first.contains("- @reviewer — Generic · available now\n"),
+        "{first}"
+    );
+    assert_eq!(hook_as("session-1", prompt, &lead), None);
+
+    // The reader's own readiness changes with each of its own turns.
+    observe(&directory, "lead", "working");
+    assert!(
+        context(&hook(prompt, &lead).unwrap()).contains("- @lead (you) — Generic · busy"),
+        "the fixture did not change the reader's own readiness"
+    );
+    assert_eq!(hook_as("session-1", prompt, &lead), None);
+
+    observe(&directory, "reviewer", "working");
+    let changed = context(&hook_as("session-1", prompt, &lead).unwrap());
+    assert!(changed.starts_with(ROSTER_MARKER), "{changed}");
+    assert!(
+        changed.contains("- @reviewer — Generic · busy; work queues until its session settles\n")
+            && changed.contains("- @lead (you) — Generic · busy"),
+        "{changed}"
+    );
+    assert_eq!(hook_as("session-1", prompt, &lead), None);
+
+    // Another session of the same pane has seen nothing yet, and a payload with
+    // no session id is answered whole every time, exactly as before.
+    let whole = hook(prompt, &lead).unwrap();
+    assert_eq!(hook_as("session-2", prompt, &lead).unwrap(), whole);
+    assert_eq!(hook(prompt, &lead).unwrap(), whole);
+    assert_eq!(context(&whole), changed);
+}
+
+/// Every SessionStart may hand the host a context without the roster, so the
+/// next turn carries all of it. The hook resets without a pane runtime, which
+/// under Codex's shared app-server it usually cannot build.
+#[test]
+fn any_session_start_shows_that_session_the_whole_roster_again() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+    register("address-lead", AgentRuntime::Codex, &lead);
+    let prompt = "Plan the SSO work.";
+    let session_start = |session: &str, source: &str| {
+        let output = codex_app_server::run_with_stdin(
+            Command::new(env!("CARGO_BIN_EXE_namedrop"))
+                .args(["hook", "session-start", "--state-directory"])
+                .arg(&directory.state)
+                .env("HOME", &directory.home)
+                .env("CODEX_HOME", directory.home.join(".codex"))
+                .env("CLAUDE_CONFIG_DIR", directory.home.join(".claude"))
+                .env("HERDR_BIN_PATH", directory.root.join("no-herdr"))
+                .env_remove("XDG_CONFIG_HOME")
+                .env_remove("HERDR_PANE_ID")
+                .env_remove("HERDR_WORKSPACE_ID")
+                .env_remove("HERDR_SOCKET_PATH")
+                .env_remove("HERDR_PLUGIN_STATE_DIR"),
+            &json!({"hook_event_name":"SessionStart","source":source,"session_id":session})
+                .to_string(),
+        );
+        assert!(output.status.success(), "{output:?}");
+    };
+
+    let whole = hook_as("session-1", prompt, &lead).unwrap();
+    assert!(context(&whole).starts_with(ROSTER_MARKER), "{whole}");
+    assert_eq!(hook_as("session-1", prompt, &lead), None);
+
+    session_start("session-2", "startup");
+    assert_eq!(
+        hook_as("session-1", prompt, &lead),
+        None,
+        "another session's start reset this one"
+    );
+    for source in ["compact", "resume", "clear", "startup"] {
+        session_start("session-1", source);
+        assert_eq!(
+            hook_as("session-1", prompt, &lead).unwrap(),
+            whole,
+            "{source}"
+        );
+        assert_eq!(hook_as("session-1", prompt, &lead), None, "{source}");
+    }
+}
+
+/// An incoming task with nothing new in its roster still reaches each host
+/// with what proves and settles it, through the wrapper that host installed.
+#[test]
+fn an_incoming_task_with_an_unchanged_roster_still_carries_its_commands_on_both_hosts() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+    let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
+    register("address-lead", AgentRuntime::Codex, &lead);
+    register("address-reviewer", AgentRuntime::ClaudeCode, &reviewer);
+    let shown_lead = context(&hook_as("codex-session", "Plain prompt.", &lead).unwrap());
+    let shown_reviewer = context(&hook_as("claude-session", "Plain prompt.", &reviewer).unwrap());
+    assert!(shown_lead.contains("- @lead (you)"), "{shown_lead}");
+    assert!(
+        shown_reviewer.contains("- @reviewer (you)"),
+        "{shown_reviewer}"
+    );
+
+    dispatch::message(
+        "send",
+        json!({"request_id":"to-claude","source":"@reviewer Check the login path.",
+               "author_kind":"agent_session"}),
+        &lead,
+    )
+    .unwrap();
+    dispatch::message(
+        "send",
+        json!({"request_id":"to-codex","source":"@lead Here is the review.",
+               "author_kind":"agent_session"}),
+        &reviewer,
+    )
+    .unwrap();
+    let to_codex = herdr.envelope_for("pane-lead");
+    let to_claude = herdr.envelope_for("pane-reviewer");
+
+    let codex = hook_as("codex-session", &to_codex.to_string(), &lead).unwrap();
+    let codex_context = context(&codex);
+    assert!(codex_context.starts_with(ROSTER_MARKER), "{codex_context}");
+    assert!(!codex_context.contains("- @"), "{codex_context}");
+    assert!(codex_context.contains(COMMAND_MARKER), "{codex_context}");
+    assert!(
+        codex_context.contains(to_codex["control"]["attempt_id"].as_str().unwrap()),
+        "{codex_context}"
+    );
+    assert_eq!(
+        forwarded(&directory, AgentRuntime::Codex, &codex),
+        codex.to_string()
+    );
+
+    let claude = hook_as("claude-session", &to_claude.to_string(), &reviewer).unwrap();
+    let claude_context = context(&claude);
+    assert!(
+        claude_context.starts_with(DELIVERY_MARKER),
+        "{claude_context}"
+    );
+    assert!(!claude_context.contains(ROSTER_MARKER), "{claude_context}");
+    assert!(
+        claude_context.contains(COMMAND_MARKER)
+            && claude_context.contains(to_claude["control"]["attempt_id"].as_str().unwrap()),
+        "{claude_context}"
+    );
+    assert_eq!(
+        forwarded(&directory, AgentRuntime::ClaudeCode, &claude),
+        claude.to_string()
+    );
+}
+
+/// A miss with nothing new to lead it is the exact literal the wrappers match,
+/// and one with something new still leads with the roster.
+#[test]
+fn a_miss_after_an_unchanged_roster_is_the_exact_known_safe_guidance() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+    register("address-lead", AgentRuntime::Codex, &lead);
+
+    let first = context(&hook_as("session-1", "@missing please look", &lead).unwrap());
+    assert!(
+        first.starts_with(ROSTER_MARKER) && first.ends_with(MISS_GUIDANCE),
+        "{first}"
+    );
+    let again = hook_as("session-1", "@missing please look", &lead).unwrap();
+    assert_eq!(context(&again), MISS_GUIDANCE);
+    for host in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+        assert_eq!(
+            forwarded(&directory, host, &again),
+            again.to_string(),
+            "{host:?}"
+        );
+    }
 }

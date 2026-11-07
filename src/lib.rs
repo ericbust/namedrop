@@ -32,11 +32,13 @@ mod persona;
 mod ports;
 mod runtime;
 mod shortcuts;
+mod shown_roster;
 mod spaces;
 mod store;
 pub mod subagent;
 #[doc(hidden)]
 pub use shortcuts::install_shortcuts;
+pub use shown_roster::forget_shown_roster;
 mod terminal;
 pub mod tour;
 mod transcript_usage;
