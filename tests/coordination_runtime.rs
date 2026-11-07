@@ -345,7 +345,23 @@ impl Fixture {
         dispatch::message("reply", input, &self.runtime(pane)).unwrap()
     }
     fn drain(&self) {
-        drain_mailboxes(&self.runtime("lead")).unwrap();
+        self.drain_report();
+    }
+    fn drain_report(&self) -> DrainReport {
+        drain_mailboxes(&self.runtime("lead")).unwrap()
+    }
+    /// The host reporting a status change, which records an observation of
+    /// every bound session and drains, as a status hook does.
+    fn status_event(&self, pane: &str, status: &str) -> DrainReport {
+        self.status(pane, status);
+        let result = execute_lifecycle_operation(
+            "event.agent-status-changed",
+            json!({"type":"pane_agent_status_changed","pane_id":pane,
+                "workspace_id":"synthetic-workspace","agent_status":status}),
+            &self.runtime(pane),
+        )
+        .unwrap();
+        serde_json::from_value(result["drain"].clone()).unwrap()
     }
     fn complete(&self, attempt: &str) {
         self.complete_for(attempt, "lead");
@@ -3339,8 +3355,18 @@ fn an_open_assignment_whose_worker_idles_past_the_grace_is_not_flagged_and_its_l
         f.unresolved_attention()
     );
 
+    // The turn ended without a reply, but the worker usually resumes, so the
+    // lead hears nothing until it has stayed quiet for ten minutes.
+    let quiet_until = 100 + 31_000 + 600_000;
     f.status("lead", "idle");
+    assert_eq!(f.drain_report().check_in_due_ms, Some(quiet_until));
+    f.now.store(quiet_until - 1, Ordering::Relaxed);
     f.drain();
+    assert_eq!(f.nudge_prompts().len(), 0);
+    assert_eq!(f.attention_count(), 0);
+
+    f.now.store(quiet_until, Ordering::Relaxed);
+    assert_eq!(f.drain_report().check_in_due_ms, None);
     let nudges = f.nudge_prompts();
     assert_eq!(nudges.len(), 1, "{nudges:?}");
     let body = nudges[0]["untrusted_body"].as_str().unwrap();
@@ -3364,6 +3390,141 @@ fn an_open_assignment_whose_worker_idles_past_the_grace_is_not_flagged_and_its_l
         "{:?}",
         f.unresolved_attention()
     );
+}
+
+/// Sends one assignment and lets the worker's turn end without a reply: the
+/// delivery settles at 100 + 31_000 and the lead is idle.
+fn worker_turn_ended_without_reply(f: &Fixture) -> Value {
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    let attempt = f.attempt(&a["message_id"], "worker");
+    f.status("worker", "idle");
+    f.now.store(100 + 31_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.attempt_state(&attempt), "settled");
+    assert_eq!(f.disposition(&attempt), None);
+    f.status("lead", "idle");
+    a
+}
+
+#[test]
+fn a_worker_that_resumes_inside_the_quiet_window_pushes_the_check_in_back() {
+    let f = Fixture::new();
+    let a = worker_turn_ended_without_reply(&f);
+    assert_eq!(
+        f.drain_report().check_in_due_ms,
+        Some(100 + 31_000 + 600_000)
+    );
+
+    f.now.store(100 + 200_000, Ordering::Relaxed);
+    assert_eq!(f.status_event("worker", "working").check_in_due_ms, None);
+    f.now.store(100 + 300_000, Ordering::Relaxed);
+    let resumed_until = 100 + 200_000 + 600_000;
+    assert_eq!(
+        f.status_event("worker", "idle").check_in_due_ms,
+        Some(resumed_until)
+    );
+
+    f.now.store(100 + 31_000 + 600_000, Ordering::Relaxed);
+    assert_eq!(f.drain_report().check_in_due_ms, Some(resumed_until));
+    assert_eq!(f.nudge_prompts().len(), 0);
+    assert_eq!(f.attention_count(), 0);
+
+    f.now.store(resumed_until - 1, Ordering::Relaxed);
+    f.reply(&a, "worker", "first-result", "completed", None);
+    f.settle_lead_inputs();
+    assert_eq!(f.drain_report().check_in_due_ms, None);
+    let nudges = f.nudge_prompts();
+    assert_eq!(nudges.len(), 1, "{nudges:?}");
+    let body = nudges[0]["untrusted_body"].as_str().unwrap();
+    assert!(body.contains(": completed."), "{body}");
+    assert!(!body.contains(": pending."), "{body}");
+}
+
+#[test]
+fn a_worker_that_stays_quiet_gets_its_check_in_at_the_deadline_and_an_ignored_one_is_flagged() {
+    let f = Fixture::new();
+    worker_turn_ended_without_reply(&f);
+    let due = f
+        .drain_report()
+        .check_in_due_ms
+        .expect("a held check-in carries its deadline");
+    assert_eq!(due, 100 + 31_000 + 600_000);
+    assert_eq!(f.nudge_prompts().len(), 0);
+    assert_eq!(f.attention_count(), 0);
+
+    f.now.store(due, Ordering::Relaxed);
+    f.drain();
+    let nudges = f.nudge_prompts();
+    assert_eq!(nudges.len(), 1, "{nudges:?}");
+    assert!(
+        nudges[0]["untrusted_body"]
+            .as_str()
+            .unwrap()
+            .contains(": pending.")
+    );
+    let wake_attempt = nudges[0]["control"]["attempt_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    f.now.store(due + 31_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.disposition(&wake_attempt).as_deref(), Some("no_reply"));
+    assert_eq!(f.attention_count(), 1, "{:?}", f.unresolved_attention());
+    assert_eq!(
+        f.attention_summary(),
+        "The one continuation for this revision ended or is held without a new work decision. Review handoff.results and act explicitly; Namedrop will not repeat the prompt."
+    );
+    f.now.store(due + 3_600_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.nudge_prompts().len(), 1);
+}
+
+#[test]
+fn a_completed_reply_gets_its_check_in_right_away() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    f.reply(&a, "worker", "first-result", "completed", None);
+    f.status("lead", "idle");
+    f.settle_lead_inputs();
+    assert_eq!(f.drain_report().check_in_due_ms, None);
+    let nudges = f.nudge_prompts();
+    assert_eq!(nudges.len(), 1, "{nudges:?}");
+    assert!(
+        nudges[0]["untrusted_body"]
+            .as_str()
+            .unwrap()
+            .contains(": completed.")
+    );
+}
+
+#[test]
+fn a_queued_check_in_whose_worker_resumes_waits_for_a_new_quiet_window() {
+    let f = Fixture::new();
+    worker_turn_ended_without_reply(&f);
+    let due = 100 + 31_000 + 600_000;
+    f.now.store(due, Ordering::Relaxed);
+    *f.fail_next_nudge.lock().unwrap() = true;
+    f.drain();
+    assert_eq!(f.wake_count(), 1);
+    assert_eq!(f.nudge_prompts().len(), 0);
+
+    f.now.store(due + 1_000, Ordering::Relaxed);
+    f.status_event("worker", "working");
+    f.now.store(due + 2_000, Ordering::Relaxed);
+    let resumed_until = due + 1_000 + 600_000;
+    assert_eq!(
+        f.status_event("worker", "idle").check_in_due_ms,
+        Some(resumed_until)
+    );
+    assert_eq!(f.nudge_prompts().len(), 0);
+
+    f.now.store(resumed_until, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.nudge_prompts().len(), 1);
+    assert_eq!(f.wake_count(), 1);
 }
 
 #[test]
