@@ -1278,7 +1278,7 @@
     },
     {
       "token": "reminder.set",
-      "description": "Schedule a wake for this exact Agent Session. Provide in or RFC 3339 at, at least 60 seconds ahead. Optional every requires count (total occurrences including the first, at most 100) or inclusive until. Repeats wait for successful delivery and restart their interval then. Wake rows are free; answers use the ordinary reply allowance and paused threads wait. Use in_reply_to to answer the original author later. Reuse request_id on retries.",
+      "description": "Schedule a wake for this exact Agent Session. Write body as a short task note, without naming who to remind, e.g. 'Tag the release.' Provide in or RFC 3339 at, at least 60 seconds ahead. Optional every requires count (total occurrences including the first, at most 100) or inclusive until. Repeats wait for successful delivery and restart their interval then. Wake rows are free; answers use the ordinary reply allowance and paused threads wait. Use in_reply_to to answer the original author later. Reuse request_id on retries.",
       "argv": [
         "reminder",
         "set"
@@ -1493,7 +1493,7 @@
     },
     {
       "token": "handoff.acknowledge-granted",
-      "description": "Only when an operator message asks you to review a handoff and names this command: acknowledge that handoff's warning with the operator's review grant. The grant comes from the operator's Ask to review button in Channels, covers one coordination and your exact agent session, works once, and expires after 15 minutes or when the operator's dashboard session ends. Refused without a grant. Accepts the same states as handoff.acknowledge and preserves the outcome, report and all deliveries. Never use handoff.acknowledge for a granted review.",
+      "description": "Only when the person asks you to review a handoff and names this command: acknowledge that handoff's warning with your review grant. The grant comes from their Ask to review button in Channels, covers one coordination and your exact agent session, works once, and expires after 15 minutes or when their dashboard session ends. Refused without a grant. Accepts the same states as handoff.acknowledge and preserves the outcome, report and all deliveries. Never use handoff.acknowledge for a granted review.",
       "argv": ["handoff", "acknowledge-granted"],
       "automatic_permission": true,
       "input_schema": {
@@ -1505,7 +1505,7 @@
         }
       },
       "examples": [{
-        "description": "After an operator review request names this coordination and you confirmed it is finished.",
+        "description": "After a review request from the person names this coordination and you confirmed it is finished.",
         "input": {"coordination_id": "coordination-1"}
       }]
     },

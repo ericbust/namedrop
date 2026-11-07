@@ -349,6 +349,10 @@ fn recap_is_explicitly_untrusted_and_bounded_across_channel_conversation() {
     assert_eq!(recap.lines().count(), 6);
     assert!(recap.chars().count() <= 1200);
     assert!(recap.contains("recap-8"));
+    assert!(
+        recap.lines().all(|line| line.starts_with("person: ")),
+        "{recap}"
+    );
     assert!(!recap.contains("recap-0"));
     assert!(!recap.contains("Please ask @lead now"));
     let instruction = envelope["trusted_instruction"].as_str().unwrap();
@@ -356,7 +360,7 @@ fn recap_is_explicitly_untrusted_and_bounded_across_channel_conversation() {
     assert!(!instruction.contains("recap-"));
     assert!(
         instruction
-            .contains("Ask with plain @name to wake that member (costs one reply). Wait for their actual reply; never attribute an answer not received. \\@name only refers without asking.")
+            .contains("Plain @name wakes a member (costs one reply). Wait for their reply; never invent an answer. \\@name refers without asking.")
     );
     assert!(recap.lines().all(|line| line.chars().count() <= 194));
 }

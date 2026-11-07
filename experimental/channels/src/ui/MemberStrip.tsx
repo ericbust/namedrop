@@ -29,7 +29,7 @@ function kindName(member: Member): string {
     case "terminal":
       return "Terminal";
     case "human":
-      return "Operator";
+      return "You";
     case "unknown":
       return "Member";
     default: {

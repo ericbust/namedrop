@@ -2594,7 +2594,8 @@ impl StateTransaction<'_> {
         exclude: &MessageId,
     ) -> Result<String, StoreError> {
         let mut statement = self.transaction.prepare(
-            "SELECT m.author_alias_snapshot, m.body FROM collaboration_messages m
+            "SELECT CASE WHEN m.author_kind = 'human' THEN 'person' ELSE m.author_alias_snapshot END,
+                    m.body FROM collaboration_messages m
              WHERE m.session_socket_id = ?1 AND m.worktree_id = ?2 AND m.message_id <> ?3
                AND m.grammar_version <> 'terminal-relay/v1'
                AND EXISTS(SELECT 1 FROM collaboration_messages root
@@ -8842,7 +8843,7 @@ mod tests {
         assert_eq!(error.kind(), StoreErrorKind::InvalidInput, "{operation}");
         assert_eq!(
             error.message(),
-            "the operator has no pane lifecycle",
+            "the person's identity has no pane lifecycle",
             "{operation}"
         );
         store

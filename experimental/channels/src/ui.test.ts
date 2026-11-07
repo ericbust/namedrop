@@ -300,6 +300,8 @@ test("design-b: member chips order by state, end with the operator as You withou
   const chip = (id: string) =>
     chips.find(([, chipId]) => chipId === id)?.[2] ?? "";
   assert.equal(text(chip("human")), "YYou");
+  assert.ok(chip("human").includes('title="You"'));
+  assert.equal(chip("human").includes("Operator"), false);
   assert.equal(chip("human").includes("presence"), false);
   assert.equal(chip("human").includes("Waiting"), false);
   assert.equal(text(chip("e")), "A@askNeeds you");

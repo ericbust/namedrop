@@ -154,8 +154,8 @@ pub(super) fn render(
         format!("{} tracked handoffs that need", items.len())
     };
     let mut text = format!(
-        "@{reviewer_alias} The operator asks you to review {count} a decision. For each one, continue it, resolve it, or, if it is finished, acknowledge it. Then reply here with what you did for each.\n\n\
-         Acknowledging only clears the warning. The outcome and report stay as they are, and no work resumes or finishes. Acknowledge a handoff when nothing more should happen on it now. You may acknowledge only the coordinations listed here, only with `handoff acknowledge-granted` as your control binds it, and never with `handoff acknowledge`. The operator's grant covers each one once, for your current session, for 15 minutes.\n"
+        "@{reviewer_alias} Please review {count} a decision. For each one, continue it, resolve it, or, if it is finished, acknowledge it. Then reply here with what you did for each.\n\n\
+         Acknowledging only clears the warning. The outcome and report stay as they are, and no work resumes or finishes. Acknowledge a handoff when nothing more should happen on it now. You may acknowledge only the coordinations listed here, only with `handoff acknowledge-granted` as your control binds it, and never with `handoff acknowledge`. Your review grant covers each one once, for your current session, for 15 minutes.\n"
     );
     for (n, item) in items.iter().enumerate() {
         text.push_str(&format!(
@@ -204,9 +204,7 @@ mod tests {
             &PaneAddressId::new("lead"),
             &[warning("c-1", WarningCause::Blocked, "lead")],
         );
-        assert!(text.starts_with(
-            "@lead The operator asks you to review 1 tracked handoff that needs a decision."
-        ));
+        assert!(text.starts_with("@lead Please review 1 tracked handoff that needs a decision."));
         assert!(text.contains("**1. Ship c-1**"));
         assert!(
             text.contains("@lead resolved it as blocked. Recorded reason: Waiting on an API key.")
@@ -231,9 +229,7 @@ mod tests {
                 warning("c-2", WarningCause::Stalled, "codex"),
             ],
         );
-        assert!(text.starts_with(
-            "@claude The operator asks you to review 2 tracked handoffs that need a decision."
-        ));
+        assert!(text.starts_with("@claude Please review 2 tracked handoffs that need a decision."));
         assert!(text.contains("@gone's pane closed"));
         assert!(text.contains("Only @codex can continue or resolve it"));
         assert_eq!(

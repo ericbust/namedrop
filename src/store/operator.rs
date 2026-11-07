@@ -7,7 +7,7 @@ const DESCRIPTION: &str = "Paneless local operator.";
 pub(super) fn refuse_reserved_creation(draft: &PaneAddressDraft) -> Result<(), StoreError> {
     if draft.id.as_str() == ADDRESS || draft.role_id.as_str() == ROLE {
         return Err(StoreError::invalid_input(
-            "the operator identity is reserved",
+            "the person's identity is reserved",
         ));
     }
     Ok(())
@@ -16,7 +16,7 @@ pub(super) fn refuse_reserved_creation(draft: &PaneAddressDraft) -> Result<(), S
 pub(super) fn refuse_pane_mutation(address: &PaneAddressId) -> Result<(), StoreError> {
     if address.as_str() == ADDRESS {
         return Err(StoreError::invalid_input(
-            "the operator has no pane lifecycle",
+            "the person's identity has no pane lifecycle",
         ));
     }
     Ok(())
@@ -63,7 +63,7 @@ impl StateTransaction<'_> {
         )?;
         if !self.is_operator_address(namespace, &PaneAddressId::new(ADDRESS))? {
             return Err(StoreError::internal(
-                "the reserved operator address conflicts with existing state",
+                "the person's reserved address conflicts with existing state",
             ));
         }
         Ok(snapshot())
