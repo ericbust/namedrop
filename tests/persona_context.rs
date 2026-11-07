@@ -420,6 +420,12 @@ fn a_session_reads_the_selection_policy_once_and_before_the_first_name() {
         "Change a persona only when the person asks",
         "Reply and send bodies may use Markdown lists, code, and emphasis, rendered in the Channels page",
         "For multi-line or formatted bodies, write the JSON to a file and use `--input-json-file`",
+        // The other-workspaces rule, which a turn now carries only in brief.
+        "A bare @name in a new message never reaches them, though a reply still reaches whoever wrote to you",
+        "They are not collaborators to recruit on your own",
+        "Address one only when the person names a workspace",
+        "run `address list` with {\"workspaces\":\"all\"}",
+        "`#all @name` for every workspace with that name",
     ] {
         assert!(
             policy.contains(expected),

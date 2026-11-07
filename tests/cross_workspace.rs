@@ -2213,6 +2213,13 @@ fn the_roster_mentions_other_workspaces_without_reading_herdr_labels() {
         "{several}"
     );
     assert!(
+        several.ends_with(
+            "A bare @name never reaches them; address one only when the person asks, as the \
+             selection policy says."
+        ),
+        "a session that loaded an older policy still needs the rule in brief: {several}"
+    );
+    assert!(
         several.starts_with(&single),
         "the paragraph only follows today's roster"
     );
