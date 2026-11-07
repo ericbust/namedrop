@@ -464,7 +464,7 @@ fn a_session_reads_the_selection_policy_once_and_before_the_first_name() {
         // Premature synthesis observed live: a coordinator wrote the answer
         // while a helper it had asked was still working.
         "end this turn with a brief waiting status only",
-        "read it before consolidating or crediting the helper",
+        "Read that reply before consolidating or crediting the helper",
         // A live coordinator answered on the worker reply and again when its
         // saved coordination report returned. Only that report presents it.
         "let report_to_human present it once",
