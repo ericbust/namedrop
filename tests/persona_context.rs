@@ -403,6 +403,9 @@ fn a_session_reads_the_selection_policy_once_and_before_the_first_name() {
         "instead of independently recruiting peers",
         "Generic agents carry no specialization and remain eligible",
         "run `address list` immediately before you choose collaborators, every time",
+        // The listing carries each agent's context size so this choice can be made.
+        "give unrelated work to the one with the smallest `context_tokens`",
+        "a follow-up to the one that already holds its context",
         "Your own persona, on the roster row marked (you), is your default role guidance",
         "an explicit task from the person or from a delivery overrides it",
         "Assignments already in flight are unaffected by the roster",
