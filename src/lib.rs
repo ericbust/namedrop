@@ -7,6 +7,7 @@ mod codex_app_server;
 mod context;
 mod controls;
 mod coordination;
+pub mod dashboard;
 #[doc(hidden)]
 pub mod deferred_commands;
 mod delivery;
@@ -23,12 +24,17 @@ mod lifecycle;
 #[doc(hidden)]
 pub mod linux_sandbox;
 mod message;
+mod pane_effects;
+#[doc(hidden)]
+pub mod reminder;
+pub use reminder::execute_reminder_operation;
 mod persona;
 mod ports;
 mod runtime;
 mod shortcuts;
 mod spaces;
 mod store;
+pub mod subagent;
 #[doc(hidden)]
 pub use shortcuts::install_shortcuts;
 mod terminal;
@@ -41,7 +47,7 @@ pub(crate) const INTEGRATION_PACKAGE_ATTENTION_SOURCE_PREFIX: &str = "integratio
 
 pub use context::{execute_context_operation, execute_human_context_operation};
 pub use controls::execute_control_operation;
-pub use delivery::{DrainReport, GraceDeadline, drain_mailboxes, spaces_to_wake};
+pub use delivery::{DrainReport, GraceDeadline, drain_mailboxes, drain_reports, spaces_to_wake};
 pub(crate) use delivery::{drain_receipt, publish_status_metadata, reconcile_delivery_state};
 pub use domain::*;
 pub use groups::execute_group_operation;
@@ -82,8 +88,9 @@ pub use lifecycle::{
     pane_workspace, reconcile_discovered_panes,
 };
 pub use message::{
-    BodyMention, ParsedMessage, RecipientOutlook, RecipientRun, carries_leading_mentions,
-    execute_message_operation, parse_mentions, parse_prompt_mentions, recipient_outlooks,
+    BodyMention, OperatorSendError, OperatorSendErrorKind, ParsedMessage, RecipientOutlook,
+    RecipientRun, carries_leading_mentions, execute_message_operation, parse_mentions,
+    parse_prompt_mentions, recipient_outlooks, send_operator_direct_message, send_operator_message,
     validate_message_input,
 };
 pub use ports::{Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator, PromptFailureKind};
@@ -92,6 +99,7 @@ use serde::Serialize;
 pub use spaces::{SpaceScope, WorkspaceLabel};
 mod output;
 pub use output::render_command_result_to_text;
+pub use store::coordination_review::{OperatorSession, REVIEW_GRANT_TTL_MS};
 pub use store::{
     StateStore, StateTransaction, StoreError, StoreErrorKind, WorktreePurgeResult,
     WorktreePurgeSummary,
@@ -241,3 +249,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod work_counters;

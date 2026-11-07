@@ -1,0 +1,2 @@
+`not-delivered-1440-{light,dark}.png`: Send anyway pressed for @codex, and the server answered 200 without @codex in `delivered`, so the line reads "Couldn't send to @codex · Try again"; `shots-log.json` records the tooltip, "Namedrop didn't send it. The name may belong to a different agent now."
+Taken from the built app with headless Chromium against a fake server by `~/.local/state/pstack/orchestrate/namedrop-ui/reports/CH-fix-4/evidence/scripts/shoot-fix4.mjs`.

@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -7,6 +10,24 @@ use std::{
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn release_checks_order_stable_and_experimental_versions() {
+    let output = Command::new("sh")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/release_versions.sh"
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
@@ -227,7 +248,7 @@ fn activation_output(installed: bool) -> String {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).unwrap();
+        cleanup::remove_fixture(&self.0).unwrap();
     }
 }
 fn success(output: Output) -> String {
@@ -675,6 +696,30 @@ fn the_archive_bundles_every_declared_entrypoint_including_the_naming_popup() {
             "{id} arguments changed during packaging"
         );
     }
+    let channels = distributed["actions"]
+        .as_array_of_tables()
+        .unwrap()
+        .iter()
+        .find(|action| action["id"].as_str() == Some("channels"))
+        .expect("the archive omits the channels action");
+    assert_eq!(channels["title"].as_str(), Some("Open Namedrop Channels"));
+    assert_eq!(
+        channels["contexts"]
+            .as_array()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .as_str(),
+        Some("workspace")
+    );
+    assert_eq!(
+        bundled
+            .iter()
+            .find(|(id, _)| id == "actions:channels")
+            .unwrap()
+            .1,
+        ["sh", "./scripts/run.sh", "channels"]
+    );
     let naming = distributed["panes"]
         .as_array_of_tables()
         .unwrap()

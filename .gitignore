@@ -6,3 +6,6 @@ __pycache__/
 /docs/demo/node_modules/
 /docs/presentation/node_modules
 /docs/presentation/.cache/
+
+/experimental/channels/node_modules/
+/experimental/channels/dist/

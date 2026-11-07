@@ -1,0 +1,18 @@
+[
+  {
+    "step": "not-delivered",
+    "file": "not-delivered-1440-light.png",
+    "route": "@claude · build question · Working on it · Couldn't send to @codex · Try again",
+    "title": "Namedrop didn't send it. The name may belong to a different agent now.",
+    "focus": "p1 @codex",
+    "scroll": [0, 0, false]
+  },
+  {
+    "step": "not-delivered",
+    "file": "not-delivered-1440-dark.png",
+    "route": "@claude · build question · Working on it · Couldn't send to @codex · Try again",
+    "title": "Namedrop didn't send it. The name may belong to a different agent now.",
+    "focus": "p1 @codex",
+    "scroll": [0, 0, false]
+  }
+]

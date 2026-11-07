@@ -1,0 +1,1024 @@
+//! Host subagent events and independent file facts consumed by Channels.
+use crate::{AgentRuntime, AgentSessionId};
+mod maintenance;
+use maintenance::{CHECKPOINT_CAP, LifecycleCheckpoint};
+pub use maintenance::{FINISHED_GRACE_MS, PARENT_GRACE_MS, ParentPresence, RETENTION_MS, maintain};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::{
+    io::{BufRead, BufReader, Read},
+    os::unix::fs::OpenOptionsExt,
+    path::{Path, PathBuf},
+};
+
+pub const SUBAGENT_TEXT_MAX: usize = 80;
+/// A Codex rollout's first line carries the base instructions (about 23 KiB
+/// today), so the cap leaves room for custom instructions.
+pub const HOST_FILE_CAP: usize = 256 * 1024;
+pub const SUBAGENT_STDIN_CAP: usize = 1024 * 1024;
+const ID_MAX: usize = 128;
+
+/// Host-issued id, safe to splice into a file name and a DOM key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubagentId(String);
+
+impl SubagentId {
+    pub fn parse(raw: &str) -> Option<Self> {
+        is_token(raw).then(|| Self(raw.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn is_token(raw: &str) -> bool {
+    (1..=ID_MAX).contains(&raw.len())
+        && raw != "."
+        && raw != ".."
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// Short host-authored label: no control or invisible formatting characters,
+/// whitespace collapsed, capped, never empty. Redaction still happens once,
+/// at the snapshot, like every other collaborator string.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubagentText(String);
+
+impl SubagentText {
+    pub fn parse(raw: &str) -> Option<Self> {
+        let cleaned: String = raw
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .filter(|c| !crate::domain::is_invisible_format(*c))
+            .collect();
+        let text: String = cleaned
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(SUBAGENT_TEXT_MAX)
+            .collect();
+        (!text.is_empty()).then_some(Self(text))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubagentEdge {
+    Start,
+    Stop,
+}
+
+/// One host hook event, parsed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubagentSighting {
+    pub id: SubagentId,
+    /// The parent agent's session as the host asserts it.
+    pub parent_session: Option<AgentSessionId>,
+    pub edge: SubagentEdge,
+    pub kind: Option<SubagentText>,
+    pub name: Option<SubagentText>,
+}
+
+/// Bounded host file access, a seam so parsing stays testable without disk.
+pub trait HostFiles {
+    /// A regular file's first line, or its whole content, when it fits in
+    /// `cap` bytes. `None` on any error, symlink, or non-regular file.
+    fn read_head(&self, path: &Path, cap: usize, first_line_only: bool) -> Option<String>;
+}
+
+pub struct DiskFiles;
+
+impl HostFiles for DiskFiles {
+    fn read_head(&self, path: &Path, cap: usize, first_line_only: bool) -> Option<String> {
+        if !std::fs::symlink_metadata(path).ok()?.file_type().is_file() {
+            return None;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .ok()?;
+        let mut limited = BufReader::new(file).take(cap as u64 + 1);
+        let mut bytes = Vec::new();
+        if first_line_only {
+            limited.read_until(b'\n', &mut bytes).ok()?;
+            if bytes.last() == Some(&b'\n') {
+                bytes.pop();
+            }
+        } else {
+            limited.read_to_end(&mut bytes).ok()?;
+        }
+        if bytes.len() > cap {
+            return None;
+        }
+        String::from_utf8(bytes).ok()
+    }
+}
+
+#[derive(Deserialize)]
+struct RawPayload {
+    hook_event_name: String,
+    session_id: Option<String>,
+    agent_id: Option<String>,
+    agent_type: Option<String>,
+    transcript_path: Option<PathBuf>,
+    agent_transcript_path: Option<PathBuf>,
+    #[serde(default)]
+    background_tasks: Value,
+    description: Option<String>,
+}
+
+impl SubagentSighting {
+    /// `None` for any other event, bad JSON, or an invalid id. Never waits for
+    /// a file: a name that is not readable now is simply absent.
+    pub fn parse(host: AgentRuntime, stdin: &str, files: &impl HostFiles) -> Option<Self> {
+        let raw: RawPayload = serde_json::from_str(stdin).ok()?;
+        let edge = match raw.hook_event_name.as_str() {
+            "SubagentStart" => SubagentEdge::Start,
+            "SubagentStop" => SubagentEdge::Stop,
+            _ => return None,
+        };
+        let id = SubagentId::parse(raw.agent_id.as_deref()?)?;
+        let parent_session = raw
+            .session_id
+            .as_deref()
+            .filter(|session| is_token(session))
+            .map(AgentSessionId::new);
+        let declared_kind = raw.agent_type.as_deref().and_then(SubagentText::parse);
+        let (kind, name) = match (host, edge) {
+            (AgentRuntime::ClaudeCode, SubagentEdge::Start) => (declared_kind, None),
+            (AgentRuntime::ClaudeCode, SubagentEdge::Stop) => {
+                let (meta_kind, meta_name) = raw
+                    .agent_transcript_path
+                    .as_deref()
+                    .and_then(|path| claude_meta_path(path, &id))
+                    .and_then(|path| files.read_head(&path, HOST_FILE_CAP, false))
+                    .map(|text| claude_meta(&text))
+                    .unwrap_or_default();
+                let task_name = raw
+                    .background_tasks
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|task| task["id"].as_str() == Some(id.as_str()))
+                    .and_then(|task| task["description"].as_str())
+                    .and_then(SubagentText::parse);
+                (meta_kind.or(declared_kind), task_name.or(meta_name))
+            }
+            (AgentRuntime::Codex, edge) => {
+                let rollout = match edge {
+                    SubagentEdge::Start => raw.transcript_path.as_deref(),
+                    SubagentEdge::Stop => raw.agent_transcript_path.as_deref(),
+                };
+                let name = rollout
+                    .and_then(|path| files.read_head(path, HOST_FILE_CAP, true))
+                    .and_then(|line| codex_spawn_name(&line));
+                let kind = declared_kind.filter(|kind| kind.as_str() != "default");
+                (kind, name)
+            }
+        };
+        Some(Self {
+            id,
+            parent_session,
+            edge,
+            kind,
+            name: raw
+                .description
+                .as_deref()
+                .and_then(SubagentText::parse)
+                .or(name),
+        })
+    }
+}
+
+/// The sibling meta file, built from the validated id; only a payload path
+/// that is this subagent's own transcript is trusted for its directory.
+fn claude_meta_path(agent_transcript_path: &Path, id: &SubagentId) -> Option<PathBuf> {
+    let file_name = format!("agent-{}.jsonl", id.as_str());
+    let directory = agent_transcript_path.parent()?;
+    (agent_transcript_path.file_name()?.to_str()? == file_name
+        && directory.file_name()?.to_str()? == "subagents"
+        && agent_transcript_path.is_absolute())
+    .then(|| directory.join(format!("agent-{}.meta.json", id.as_str())))
+}
+
+fn claude_meta(text: &str) -> (Option<SubagentText>, Option<SubagentText>) {
+    let Ok(meta) = serde_json::from_str::<Value>(text) else {
+        return (None, None);
+    };
+    let field = |key: &str| meta.get(key)?.as_str().and_then(SubagentText::parse);
+    (field("agentType"), field("description"))
+}
+
+/// "say_hi (Aristotle)" from a child rollout's `session_meta` line.
+fn codex_spawn_name(first_line: &str) -> Option<SubagentText> {
+    let line: Value = serde_json::from_str(first_line).ok()?;
+    if line.get("type")?.as_str()? != "session_meta" {
+        return None;
+    }
+    let spawn = line.pointer("/payload/source/subagent/thread_spawn")?;
+    let task = spawn
+        .get("agent_path")
+        .and_then(Value::as_str)
+        .and_then(|path| path.rsplit('/').find(|segment| !segment.is_empty()));
+    let nickname = spawn.get("agent_nickname").and_then(Value::as_str);
+    let label = match (task, nickname) {
+        (Some(task), Some(nickname)) => format!("{task} ({nickname})"),
+        (Some(task), None) => task.to_owned(),
+        (None, Some(nickname)) => nickname.to_owned(),
+        (None, None) => return None,
+    };
+    SubagentText::parse(&label)
+}
+
+pub const MAX_RUN_AGE_MS: i64 = 2 * 60 * 60 * 1000;
+const FACT_CAP: u64 = 16 * 1024;
+const FACTS_PER_PARENT: usize = 4096;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ParentIdentity {
+    pub socket: String,
+    pub workspace: String,
+    pub pane: String,
+    pub session: String,
+}
+
+impl ParentIdentity {
+    pub fn new(socket: &str, workspace: &str, pane: &str, session: &str) -> Option<Self> {
+        [socket, workspace, pane, session]
+            .iter()
+            .all(|s| !s.is_empty() && s.len() <= 4096 && !s.contains('\0'))
+            .then(|| Self {
+                socket: socket.to_owned(),
+                workspace: workspace.to_owned(),
+                pane: pane.to_owned(),
+                session: session.to_owned(),
+            })
+    }
+
+    fn directory(&self, state: &Path) -> PathBuf {
+        let mut digest = Sha256::new();
+        for part in [&self.socket, &self.workspace, &self.pane, &self.session] {
+            digest.update((part.len() as u64).to_le_bytes());
+            digest.update(part.as_bytes());
+        }
+        state
+            .join("subagents/v1")
+            .join(crate::lower_hex(&digest.finalize()))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum Event {
+    Start {
+        id: String,
+        #[serde(default)]
+        generation: Option<String>,
+        kind: Option<String>,
+        description: Option<String>,
+    },
+    Stop {
+        id: String,
+        #[serde(default)]
+        generation: Option<String>,
+    },
+    ParentStop {
+        background: Vec<String>,
+        #[serde(default)]
+        generation: Option<String>,
+    },
+    ParentEnd,
+    ParentEndFor {
+        generation: String,
+    },
+    Reset,
+    ResetFor {
+        generation: String,
+    },
+    Resume,
+    Prompt {
+        generation: String,
+    },
+}
+
+impl Event {
+    pub fn parse(
+        host: AgentRuntime,
+        input: &str,
+        files: &impl HostFiles,
+    ) -> Option<(String, Self)> {
+        let value: Value = serde_json::from_str(input).ok()?;
+        let session = value["session_id"]
+            .as_str()
+            .filter(|s| is_token(s))?
+            .to_owned();
+        let hook_event = value["hook_event_name"].as_str()?;
+        // Codex subagent turn_id belongs to the child, not the parent's prompt.
+        let generation = if host == AgentRuntime::Codex && hook_event == "SubagentStart" {
+            None
+        } else {
+            value["prompt_id"]
+                .as_str()
+                .or_else(|| value["turn_id"].as_str())
+                .filter(|value| is_token(value))
+                .map(str::to_owned)
+        };
+        let event = match hook_event {
+            "SubagentStop" => Self::Stop {
+                id: SubagentId::parse(value["agent_id"].as_str()?)?.0,
+                // Completion can arrive on a later parent prompt or child turn.
+                // Without a stable run identity, Stop covers this child ID.
+                generation: None,
+            },
+            "SubagentStart" => {
+                let sighting = SubagentSighting::parse(host, input, files)?;
+                Self::Start {
+                    id: sighting.id.0,
+                    generation,
+                    kind: sighting.kind.map(|text| text.0),
+                    description: sighting.name.map(|text| text.0),
+                }
+            }
+            "Stop" => Self::ParentStop {
+                generation,
+                background: value["background_tasks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|task| {
+                        task["status"]
+                            .as_str()
+                            .is_some_and(|s| matches!(s, "running" | "pending"))
+                    })
+                    .filter_map(|task| {
+                        task["id"]
+                            .as_str()
+                            .filter(|id| is_token(id))
+                            .map(str::to_owned)
+                    })
+                    .take(256)
+                    .collect(),
+            },
+            "SessionEnd" => match generation {
+                Some(generation) => Self::ParentEndFor { generation },
+                None => Self::ParentEnd,
+            },
+            "SessionStart"
+                if value["source"]
+                    .as_str()
+                    .is_some_and(|source| matches!(source, "resume" | "compact")) =>
+            {
+                Self::Resume
+            }
+            "SessionStart" => match generation {
+                Some(generation) => Self::ResetFor { generation },
+                None => Self::Reset,
+            },
+            "UserPromptSubmit" => match generation {
+                Some(generation) => Self::Prompt { generation },
+                None => Self::Resume,
+            },
+            _ => return None,
+        };
+        Some((session, event))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Fact {
+    parent: ParentIdentity,
+    at_ms: i64,
+    event: Event,
+}
+
+#[derive(Debug)]
+pub struct Running {
+    pub id: String,
+    pub kind: Option<String>,
+    pub description: Option<String>,
+    pub started_at_ms: i64,
+}
+
+pub fn record(
+    state: &Path,
+    parent: &ParentIdentity,
+    event: Event,
+    at_ms: i64,
+) -> std::io::Result<()> {
+    publish(state, parent, event, at_ms, |_| {})
+}
+
+fn publish(
+    state: &Path,
+    parent: &ParentIdentity,
+    event: Event,
+    at_ms: i64,
+    mut observe: impl FnMut(PublicationStage),
+) -> std::io::Result<()> {
+    create_directory(&state.join("subagents"))?;
+    create_directory(&state.join("subagents/v1"))?;
+    let directory = parent.directory(state);
+    let name = match &event {
+        Event::Start { id, generation, .. } => {
+            format!("{}.start.json", child_key(id, generation.as_deref()))
+        }
+        Event::Stop { id, generation } => {
+            format!("{}.stop.json", child_key(id, generation.as_deref()))
+        }
+        _ => format!("parent-{at_ms}-{}.json", unique_suffix()),
+    };
+    let bytes = serde_json::to_vec(&Fact {
+        parent: parent.clone(),
+        at_ms,
+        event: event.clone(),
+    })?;
+    for _ in 0..3 {
+        create_directory(&directory)?;
+        if let Event::Start { id, generation, .. } = &event
+            && (is_tombstoned(&directory, id, generation.as_deref())
+                || std::fs::symlink_metadata(directory.join("inactive").join(format!(
+                    "{}.start.json",
+                    child_key(id, generation.as_deref())
+                )))
+                .is_ok())
+        {
+            return Ok(());
+        }
+        match publish_bytes_observed(&directory, &name, &bytes, false, &mut observe) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            result => return result,
+        }
+    }
+    Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+}
+
+fn unique_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}-{}",
+        std::process::id(),
+        NEXT_FILE.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn create_directory(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    if let Some(parent) = path.parent() {
+        if !parent.is_dir() {
+            create_directory(parent)?;
+        }
+        if std::fs::symlink_metadata(parent)?.file_type().is_symlink() {
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+        }
+    }
+    match std::fs::DirBuilder::new().mode(0o700).create(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && real_directory(path) => {
+            Ok(())
+        }
+        result => result,
+    }
+}
+
+fn real_directory(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_dir())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PublicationStage {
+    BeforeOpen,
+    BeforeLink,
+    AfterLink,
+}
+
+fn publish_bytes(directory: &Path, name: &str, bytes: &[u8], replace: bool) -> std::io::Result<()> {
+    publish_bytes_observed(directory, name, bytes, replace, &mut |_| {})
+}
+
+fn publish_bytes_observed(
+    directory: &Path,
+    name: &str,
+    bytes: &[u8],
+    replace: bool,
+    observe: &mut impl FnMut(PublicationStage),
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let temporary = directory.join(format!(".{}.tmp", unique_suffix()));
+    let result = (|| {
+        observe(PublicationStage::BeforeOpen);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        observe(PublicationStage::BeforeLink);
+        let result = if replace {
+            std::fs::rename(&temporary, directory.join(name))
+        } else {
+            match std::fs::hard_link(&temporary, directory.join(name)) {
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+                result => result,
+            }
+        };
+        observe(PublicationStage::AfterLink);
+        result
+    })();
+    let _ = std::fs::remove_file(temporary);
+    result
+}
+
+fn child_key(id: &str, generation: Option<&str>) -> String {
+    hash_id(&format!("{id}\0{}", generation.unwrap_or_default()))
+}
+
+fn is_tombstoned(directory: &Path, id: &str, generation: Option<&str>) -> bool {
+    let tombstones = directory.join("tombstones");
+    // Any existing marker fails closed, including one corrupted by interruption.
+    [child_key(id, generation), child_key(id, None)]
+        .iter()
+        .any(|key| std::fs::symlink_metadata(tombstones.join(key)).is_ok())
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path, cap: u64) -> Option<T> {
+    if !std::fs::symlink_metadata(path).ok()?.file_type().is_file() {
+        return None;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let mut bytes = Vec::new();
+    file.take(cap + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() <= cap as usize)
+        .then(|| serde_json::from_slice(&bytes).ok())
+        .flatten()
+}
+
+fn fact_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            (name.starts_with("parent-") && name.ends_with(".json"))
+                || name.ends_with(".start.json")
+                || name.ends_with(".stop.json")
+        })
+}
+
+fn hash_id(id: &str) -> String {
+    crate::lower_hex(&Sha256::digest(id.as_bytes()))
+}
+
+#[derive(Default)]
+struct FactSnapshot {
+    facts: Vec<Fact>,
+    compacted: bool,
+}
+
+#[cfg(test)]
+fn facts(directory: &Path) -> Vec<Fact> {
+    read_facts(directory, |_| {}).facts
+}
+
+fn read_facts(directory: &Path, mut before_read: impl FnMut(&Path)) -> FactSnapshot {
+    if !real_directory(directory)
+        || !directory.parent().is_some_and(real_directory)
+        || !directory
+            .parent()
+            .and_then(Path::parent)
+            .is_some_and(real_directory)
+    {
+        return FactSnapshot::default();
+    }
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return FactSnapshot::default();
+    };
+    let mut output = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return FactSnapshot::default();
+        };
+        if !fact_path(&entry.path()) {
+            continue;
+        }
+        before_read(&entry.path());
+        let Some(fact) = read_json::<Fact>(&entry.path(), FACT_CAP) else {
+            if std::fs::symlink_metadata(entry.path())
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            {
+                continue;
+            }
+            return FactSnapshot::default();
+        };
+        output.push(fact);
+    }
+    let inactive = directory.join("inactive");
+    if std::fs::symlink_metadata(&inactive).is_ok() {
+        if !real_directory(&inactive) {
+            return FactSnapshot::default();
+        }
+        let Ok(entries) = std::fs::read_dir(&inactive) else {
+            return FactSnapshot::default();
+        };
+        let mut archived = Vec::new();
+        let mut keys = std::collections::HashSet::new();
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return FactSnapshot::default();
+            };
+            if !fact_path(&entry.path()) {
+                continue;
+            }
+            let Some(fact) = read_json::<Fact>(&entry.path(), FACT_CAP) else {
+                if std::fs::symlink_metadata(entry.path())
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                {
+                    continue;
+                }
+                return FactSnapshot::default();
+            };
+            if !matches!(fact.event, Event::Start { .. }) {
+                return FactSnapshot::default();
+            }
+            if let Event::Start { id, generation, .. } = &fact.event {
+                keys.insert(child_key(id, generation.as_deref()));
+            }
+            archived.push(fact);
+        }
+        output.retain(|fact| !matches!(&fact.event, Event::Start { id, generation, .. } if keys.contains(&child_key(id, generation.as_deref()))));
+        output.extend(archived);
+    }
+    // Read the checkpoint after ingress: cleanup publishes it before unlinking
+    // captured facts, so every reader sees at least one copy of each barrier.
+    let mut compacted = false;
+    if std::fs::symlink_metadata(directory.join("lifecycle")).is_ok() {
+        let Some(checkpoint) =
+            read_json::<LifecycleCheckpoint>(&directory.join("lifecycle"), CHECKPOINT_CAP)
+        else {
+            return FactSnapshot::default();
+        };
+        compacted = checkpoint.proof_floor_ms.is_some();
+        if let Some(floor) = checkpoint.proof_floor_ms {
+            let retained: std::collections::HashSet<_> = checkpoint
+                .entries
+                .iter()
+                .filter_map(|entry| match &entry.event {
+                    Event::Prompt { generation } => Some(generation.clone()),
+                    _ => None,
+                })
+                .collect();
+            output.retain(|fact| !matches!(&fact.event, Event::Prompt { generation } if fact.at_ms < floor && !retained.contains(generation)));
+        }
+        output.extend(checkpoint.facts());
+    }
+    FactSnapshot {
+        facts: output,
+        compacted,
+    }
+}
+
+/// `idle_at_ms` is an authoritative native status observation, never derived
+/// from delivery or assignment activity. Persist it before showing the runs.
+pub fn running(
+    state: &Path,
+    parent: &ParentIdentity,
+    now_ms: i64,
+    idle_at_ms: Option<i64>,
+) -> Vec<Running> {
+    let directory = parent.directory(state);
+    let snapshot = read_facts(&directory, |_| {});
+    running_snapshot(state, parent, now_ms, idle_at_ms, &directory, snapshot)
+}
+
+fn running_snapshot(
+    state: &Path,
+    parent: &ParentIdentity,
+    now_ms: i64,
+    idle_at_ms: Option<i64>,
+    directory: &Path,
+    snapshot: FactSnapshot,
+) -> Vec<Running> {
+    let mut runs: Vec<_> = evaluate_runs(state, parent, now_ms, idle_at_ms, directory, snapshot)
+        .into_iter()
+        .filter_map(|outcome| match outcome {
+            RunOutcome::Running(run) => Some(run),
+            _ => None,
+        })
+        .collect();
+    runs.sort_by(|a, b| (a.started_at_ms, &a.id).cmp(&(b.started_at_ms, &b.id)));
+    let mut seen = std::collections::HashSet::new();
+    runs.reverse();
+    runs.retain(|run| seen.insert(run.id.clone()));
+    runs.reverse();
+    if runs.len() > FACTS_PER_PARENT {
+        Vec::new()
+    } else {
+        runs
+    }
+}
+
+enum RunOutcome {
+    Running(Running),
+    Finished { key: String, at_ms: i64 },
+    Inactive { key: String, at_ms: i64 },
+    PendingProof,
+}
+
+fn evaluate_runs(
+    state: &Path,
+    parent: &ParentIdentity,
+    now_ms: i64,
+    idle_at_ms: Option<i64>,
+    directory: &Path,
+    snapshot: FactSnapshot,
+) -> Vec<RunOutcome> {
+    use std::collections::HashMap;
+    let compacted = snapshot.compacted;
+    let facts: Vec<_> = snapshot
+        .facts
+        .into_iter()
+        .filter(|fact| &fact.parent == parent)
+        .collect();
+    // Only UserPromptSubmit proves a new host generation. SessionStart resume
+    // and compact can replay an ended session without any new work.
+    let mut prompts = HashMap::new();
+    for fact in &facts {
+        if let Event::Prompt { generation } = &fact.event {
+            prompts
+                .entry(generation.as_str())
+                .and_modify(|at: &mut i64| *at = (*at).min(fact.at_ms))
+                .or_insert(fact.at_ms);
+        }
+    }
+    let prompt_at = |generation: &str| prompts.get(generation).copied();
+    let prompt_after = |generation: Option<&str>, barrier: &str| {
+        generation.is_some_and(|generation| {
+            generation != barrier
+                && match (prompt_at(generation), prompt_at(barrier)) {
+                    (Some(prompt), Some(frontier)) => prompt > frontier,
+                    _ => false,
+                }
+        })
+    };
+    let resume = facts
+        .iter()
+        .filter(|f| matches!(f.event, Event::Resume | Event::Prompt { .. }))
+        .map(|f| f.at_ms)
+        .max()
+        .unwrap_or(i64::MIN);
+    let stopped: HashMap<_, _> = facts
+        .iter()
+        .filter_map(|f| match &f.event {
+            Event::Stop { id, generation } => Some(((id.as_str(), generation.as_deref()), f.at_ms)),
+            _ => None,
+        })
+        .collect();
+    let mut outcomes = Vec::new();
+    for fact in &facts {
+        let Event::Start {
+            id,
+            generation,
+            kind,
+            description,
+        } = &fact.event
+        else {
+            continue;
+        };
+        let resume = if generation.is_none() {
+            prompts
+                .values()
+                .copied()
+                .filter(|prompt| *prompt <= fact.at_ms)
+                .max()
+                .unwrap_or(i64::MIN)
+        } else {
+            resume
+        };
+        let inactive = |at_ms| RunOutcome::Inactive {
+            key: child_key(id, generation.as_deref()),
+            at_ms,
+        };
+        let finished = |at_ms| RunOutcome::Finished {
+            key: child_key(id, generation.as_deref()),
+            at_ms,
+        };
+        if !is_token(id)
+            || fact.at_ms > now_ms
+            || is_tombstoned(directory, id, generation.as_deref())
+        {
+            outcomes.push(RunOutcome::PendingProof);
+            continue;
+        }
+        if let Some(at_ms) = stopped
+            .get(&(id.as_str(), None))
+            .or_else(|| stopped.get(&(id.as_str(), generation.as_deref())))
+        {
+            outcomes.push(finished(*at_ms));
+            continue;
+        }
+        if now_ms.saturating_sub(fact.at_ms) >= MAX_RUN_AGE_MS {
+            outcomes.push(finished(fact.at_ms.saturating_add(MAX_RUN_AGE_MS)));
+            continue;
+        }
+        if compacted
+            && generation
+                .as_deref()
+                .is_some_and(|turn| prompt_at(turn).is_none())
+        {
+            outcomes.push(RunOutcome::PendingProof);
+            continue;
+        }
+        let blockers: Vec<_> = facts
+            .iter()
+            .filter(|barrier| match &barrier.event {
+                Event::ParentEnd
+                | Event::ParentEndFor { .. }
+                | Event::Reset
+                | Event::ResetFor { .. }
+                    if generation.is_none() =>
+                {
+                    // Unknown parent generations need a new typed prompt before
+                    // Start. Resume alone cannot prove that this is new work.
+                    !prompts
+                        .values()
+                        .any(|prompt| *prompt > barrier.at_ms && *prompt <= fact.at_ms)
+                }
+                Event::ParentEnd | Event::Reset => {
+                    !generation.as_deref().is_some_and(|generation| {
+                        prompt_at(generation).is_some_and(|prompt| prompt > barrier.at_ms)
+                    })
+                }
+                Event::ParentEndFor {
+                    generation: frontier,
+                }
+                | Event::ResetFor {
+                    generation: frontier,
+                } => !prompt_after(generation.as_deref(), frontier),
+                _ => false,
+            })
+            .collect();
+        if !blockers.is_empty() {
+            let completion = blockers
+                .iter()
+                .filter_map(|barrier| {
+                    let proven = match (&generation, &barrier.event) {
+                        (None, _) => fact.at_ms <= barrier.at_ms,
+                        (Some(turn), Event::ParentEnd | Event::Reset) => prompt_at(turn).is_some(),
+                        (
+                            Some(turn),
+                            Event::ParentEndFor {
+                                generation: frontier,
+                            }
+                            | Event::ResetFor {
+                                generation: frontier,
+                            },
+                        ) => {
+                            turn == frontier
+                                || (prompt_at(turn).is_some() && prompt_at(frontier).is_some())
+                        }
+                        _ => false,
+                    };
+                    proven.then_some(barrier.at_ms)
+                })
+                .min();
+            outcomes.push(completion.map_or(RunOutcome::PendingProof, inactive));
+            continue;
+        }
+        // A later turn's complete background snapshot also covers older runs,
+        // but only both prompt frontiers can prove that causal order.
+        let stop_covers_generation = |turn: Option<&str>| {
+            generation.as_deref().is_some_and(|generation| {
+                turn == Some(generation) || prompt_after(turn, generation)
+            })
+        };
+        let parent_stop = facts
+            .iter()
+            .filter(|stop| match &stop.event {
+                Event::ParentStop {
+                    generation: turn, ..
+                } => {
+                    generation.is_none()
+                        || turn.is_none()
+                        || stop_covers_generation(turn.as_deref())
+                }
+                _ => false,
+            })
+            // Typed snapshots follow host prompt order, even if an older
+            // handler arrives late. Unknown frontiers retain the time fallback.
+            .max_by_key(|stop| {
+                let frontier = match &stop.event {
+                    Event::ParentStop {
+                        generation: Some(turn),
+                        ..
+                    } if generation.is_some() => prompt_at(turn),
+                    _ => None,
+                };
+                (frontier.unwrap_or(stop.at_ms), stop.at_ms)
+            });
+        let background = parent_stop.is_some_and(|stop| match &stop.event {
+            Event::ParentStop {
+                generation: turn,
+                background,
+            } => {
+                background.contains(id)
+                    && (stop_covers_generation(turn.as_deref()) || fact.at_ms <= stop.at_ms)
+            }
+            _ => false,
+        });
+        if let Some(stop) = parent_stop
+            && !background
+        {
+            let covered_generation = matches!(&stop.event,
+                Event::ParentStop { generation: turn, .. }
+                if stop_covers_generation(turn.as_deref()));
+            if covered_generation || fact.at_ms <= stop.at_ms || resume <= stop.at_ms {
+                outcomes.push(if covered_generation || fact.at_ms <= stop.at_ms {
+                    inactive(stop.at_ms)
+                } else {
+                    RunOutcome::PendingProof
+                });
+                continue;
+            }
+        }
+        if !background && idle_at_ms.is_some_and(|idle| fact.at_ms <= idle) {
+            let _ = record(
+                state,
+                parent,
+                Event::Stop {
+                    id: id.clone(),
+                    generation: generation.clone(),
+                },
+                now_ms,
+            );
+            outcomes.push(finished(now_ms));
+            continue;
+        }
+        outcomes.push(RunOutcome::Running(Running {
+            id: id.clone(),
+            kind: kind
+                .as_deref()
+                .and_then(SubagentText::parse)
+                .map(|text| text.0),
+            description: description
+                .as_deref()
+                .and_then(SubagentText::parse)
+                .map(|text| text.0),
+            started_at_ms: fact.at_ms,
+        }));
+    }
+    outcomes
+}
+
+/// A digest over names and file metadata catches file-only changes without
+/// requiring a database write or filesystem watcher.
+pub fn revision(state: &Path) -> [u8; 32] {
+    let mut entries = Vec::new();
+    let root = state.join("subagents/v1");
+    if !real_directory(&state.join("subagents")) || !real_directory(&root) {
+        return [0; 32];
+    }
+    if let Ok(directories) = std::fs::read_dir(&root) {
+        for (count, directory) in directories.enumerate().take(4097) {
+            if count == 4096 {
+                return [0xff; 32];
+            }
+            let Ok(directory) = directory else { continue };
+            if !directory.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            if let Ok(files) = std::fs::read_dir(directory.path()) {
+                let mut count = 0;
+                for entry in files.filter_map(Result::ok) {
+                    let path = entry.path();
+                    if !fact_path(&path)
+                        && !matches!(
+                            entry.file_name().to_str(),
+                            Some("identity" | "lifecycle" | "inactive" | "tombstones")
+                        )
+                    {
+                        continue;
+                    }
+                    if count == FACTS_PER_PARENT || entries.len() == 32768 {
+                        return [0xff; 32];
+                    }
+                    count += 1;
+                    if let Ok(meta) = std::fs::symlink_metadata(&path) {
+                        entries.push((path, meta.len(), meta.modified().ok()));
+                    }
+                }
+            }
+        }
+    }
+    entries.sort();
+    Sha256::digest(format!("{entries:?}").as_bytes()).into()
+}

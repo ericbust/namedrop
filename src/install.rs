@@ -29,7 +29,58 @@ const CODEX_MANIFEST_FILE: &str = ".codex-plugin/plugin.json";
 const CLAUDE_MANIFEST_FILE: &str = ".claude-plugin/plugin.json";
 const HOOKS_FILE: &str = "hooks/hooks.json";
 const HOOK_SCRIPT_FILE: &str = "scripts/user-prompt-submit";
+const STOP_SCRIPT_FILE: &str = "scripts/stop";
 const SESSION_START_SCRIPT_FILE: &str = "scripts/session-start";
+const SUBAGENT_SCRIPT_FILE: &str = "scripts/subagent";
+const SUBAGENT_OWNERSHIP_FILE: &str = ".namedrop-subagent-hook.json";
+
+#[derive(Clone, Copy)]
+enum HookScript {
+    Prompt,
+    Session,
+    Subagent,
+    Stop,
+}
+impl HookScript {
+    fn file(self) -> &'static str {
+        match self {
+            Self::Prompt => HOOK_SCRIPT_FILE,
+            Self::Session => SESSION_START_SCRIPT_FILE,
+            Self::Subagent => SUBAGENT_SCRIPT_FILE,
+            Self::Stop => STOP_SCRIPT_FILE,
+        }
+    }
+    fn render(
+        self,
+        runtime: AgentRuntime,
+        executable: &Path,
+        state: &Path,
+    ) -> Result<String, String> {
+        match self {
+            Self::Prompt => hook_script(runtime, executable, state),
+            Self::Session => session_start_script(runtime, executable, state),
+            Self::Subagent => subagent_script(runtime, executable, state),
+            Self::Stop => stop_script(executable, state),
+        }
+    }
+}
+const HOOK_SCRIPTS: [HookScript; 4] = [
+    HookScript::Prompt,
+    HookScript::Session,
+    HookScript::Subagent,
+    HookScript::Stop,
+];
+const HOOK_EVENTS: [(&str, HookScript, bool); 9] = [
+    ("SessionStart", HookScript::Session, false),
+    ("UserPromptSubmit", HookScript::Prompt, false),
+    ("SubagentStart", HookScript::Subagent, true),
+    ("SubagentStop", HookScript::Subagent, true),
+    ("Stop", HookScript::Stop, false),
+    ("Stop", HookScript::Subagent, true),
+    ("SessionEnd", HookScript::Subagent, true),
+    ("SessionStart", HookScript::Subagent, true),
+    ("UserPromptSubmit", HookScript::Subagent, true),
+];
 const MARKETPLACE_FILE: &str = ".agents/plugins/marketplace.json";
 const CODEX_RULES_MARKER: &str = "# Managed by Namedrop: collaboration command permissions.\n";
 const INSTALLED_COMMAND_MARKER: &str = "<!-- namedrop-installed-command -->";
@@ -41,13 +92,11 @@ const PACKAGE_DIRECTORIES: [&str; 6] = [
     "hooks",
     "scripts",
 ];
-const CODEX_SNAPSHOT_FILES: [&str; 6] = [
+const CODEX_SNAPSHOT_FILES: [&str; 4] = [
     CODEX_MANIFEST_FILE,
     INSTRUCTIONS_FILE,
     DESCRIPTOR_FILE,
     HOOKS_FILE,
-    HOOK_SCRIPT_FILE,
-    SESSION_START_SCRIPT_FILE,
 ];
 
 /// Runtime configuration resolved at the CLI boundary. Library callers default
@@ -157,7 +206,7 @@ pub(crate) fn user_hook_activation_guidance(
                 if marketplace != CodexMarketplaceConfiguration::Matching || !plugin_current {
                     steps.push("codex plugin add namedrop@namedrop --json".to_owned());
                 }
-                steps.push("Start a new Codex session and approve Namedrop in /hooks if prompted. Verify a request and reply; doctor alone cannot verify hooks.".to_owned());
+                steps.push("Start a new Codex session and approve Namedrop in /hooks if prompted, including changed SubagentStart, SubagentStop, Stop and SessionEnd hooks. Verify a request and reply; doctor alone cannot verify hooks.".to_owned());
                 json!(steps)
             } else {
                 json!(["resolve an absolute UTF-8 HOME before activating the Codex plugin"])
@@ -280,18 +329,23 @@ fn codex_plugin_configuration(
 }
 
 fn codex_snapshot_matches(installed: &Path, cached: &Path) -> bool {
-    CODEX_SNAPSHOT_FILES.into_iter().all(|relative| {
-        fs::read(installed.join(relative))
-            .ok()
-            .zip(fs::read(cached.join(relative)).ok())
-            .is_some_and(|(installed, cached)| installed == cached)
-    }) && [HOOK_SCRIPT_FILE, SESSION_START_SCRIPT_FILE]
+    CODEX_SNAPSHOT_FILES
         .into_iter()
-        .all(|script| {
-            fs::metadata(cached.join(script)).is_ok_and(|metadata| {
-                metadata.is_file() && metadata.permissions().mode() & 0o100 != 0
-            })
+        .chain(HOOK_SCRIPTS.map(HookScript::file))
+        .all(|relative| {
+            fs::read(installed.join(relative))
+                .ok()
+                .zip(fs::read(cached.join(relative)).ok())
+                .is_some_and(|(installed, cached)| installed == cached)
         })
+        && HOOK_SCRIPTS
+            .into_iter()
+            .map(HookScript::file)
+            .all(|script| {
+                fs::metadata(cached.join(script)).is_ok_and(|metadata| {
+                    metadata.is_file() && metadata.permissions().mode() & 0o100 != 0
+                })
+            })
 }
 
 fn paths_resolve_to_same_target(configured: &Path, installed: &Path) -> bool {
@@ -386,7 +440,7 @@ fn install_integration_package_with_config(
 
 struct PreparedPackage {
     directory: PathBuf,
-    files: [(&'static str, String, Option<u32>); 9],
+    files: Vec<(&'static str, String, Option<u32>)>,
     codex_policy: Option<(PathBuf, String)>,
 }
 
@@ -421,27 +475,46 @@ fn prepare_integration_package(
     let instructions =
         installed_instructions(package.instructions, runtime, executable, state_directory)?;
     let hooks = hooks_manifest(&directory)?;
-    let hook = hook_script(runtime, executable, state_directory)?;
-    let session_start = session_start_script(runtime, executable, state_directory)?;
-    let codex_version = codex_cache_version(&[
+    let scripts = HOOK_SCRIPTS
+        .into_iter()
+        .map(|script| {
+            Ok((
+                script.file(),
+                script.render(runtime, executable, state_directory)?,
+                Some(0o700),
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut cache_contents = vec![
         runtime.as_str(),
         &instructions,
         package.tool_descriptor,
         &hooks,
-        &hook,
-        &session_start,
-    ]);
-    let files = [
+    ];
+    cache_contents.extend(scripts.iter().map(|(_, content, _)| content.as_str()));
+    let codex_version = codex_cache_version(&cache_contents);
+    let mut files = vec![
         (OWNERSHIP_MARKER_FILE, ownership_marker(), None),
         (INSTRUCTIONS_FILE, instructions, None),
         (DESCRIPTOR_FILE, package.tool_descriptor.to_owned(), None),
         (CODEX_MANIFEST_FILE, codex_manifest(&codex_version), None),
         (CLAUDE_MANIFEST_FILE, claude_manifest(), None),
         (HOOKS_FILE, hooks, None),
-        (HOOK_SCRIPT_FILE, hook, Some(0o700)),
-        (SESSION_START_SCRIPT_FILE, session_start, Some(0o700)),
         (MARKETPLACE_FILE, marketplace_manifest(), None),
     ];
+    files.extend(scripts);
+    let subagent = files
+        .iter()
+        .find(|(name, _, _)| *name == SUBAGENT_SCRIPT_FILE)
+        .expect("registered script");
+    files.push((
+        SUBAGENT_OWNERSHIP_FILE,
+        format!(
+            "{}\n",
+            json!({"sha256": crate::lower_hex(&Sha256::digest(subagent.1.as_bytes()))})
+        ),
+        Some(0o600),
+    ));
     verify_owned_plugin_targets(&directory, &files)?;
     let codex_policy = if runtime == AgentRuntime::Codex {
         Some(prepare_codex_policy(
@@ -891,27 +964,20 @@ fn hooks_manifest(package_directory: &Path) -> Result<String, String> {
             shell_single_quote(fallback)
         ))
     };
-    Ok(format!(
-        "{}\n",
-        json!({
-            "hooks": {
-                "SessionStart": [{
-                    "hooks": [{
-                        "type": "command",
-                        "command": launch(SESSION_START_SCRIPT_FILE)?,
-                        "timeout": 10
-                    }]
-                }],
-                "UserPromptSubmit": [{
-                    "hooks": [{
-                        "type": "command",
-                        "command": launch(HOOK_SCRIPT_FILE)?,
-                        "timeout": 10
-                    }]
-                }]
-            }
-        })
-    ))
+    let mut hooks = serde_json::Map::new();
+    for (event, script, silent) in HOOK_EVENTS {
+        let mut command = json!({ "type": "command", "command": launch(script.file())?, "timeout": if matches!(script, HookScript::Stop) { 1 } else if silent { 5 } else { 10 } });
+        if silent {
+            command["async"] = json!(true);
+        }
+        hooks
+            .entry(event)
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .expect("hook array")
+            .push(json!({"hooks": [command]}));
+    }
+    Ok(format!("{}\n", json!({ "hooks": hooks })))
 }
 
 fn marketplace_manifest() -> String {
@@ -931,6 +997,123 @@ fn marketplace_manifest() -> String {
             }]
         })
     )
+}
+
+fn subagent_script(
+    runtime: AgentRuntime,
+    executable: &Path,
+    state: &Path,
+) -> Result<String, String> {
+    let executable = executable
+        .to_str()
+        .ok_or("subagent hook executable path is not valid UTF-8")?;
+    let state = state
+        .to_str()
+        .ok_or("subagent hook state path is not valid UTF-8")?;
+    Ok(format!(
+        "#!/bin/sh\n{} hook subagent --runtime {} --state-directory {} >/dev/null 2>&1\nexit 0\n",
+        shell_single_quote(executable),
+        runtime.as_str(),
+        shell_single_quote(state)
+    ))
+}
+
+pub(crate) fn remove_subagent_hooks(state: &Path, home: Option<&Path>) -> Result<usize, String> {
+    let (_guard, current) = crate::installed_runtime::package_guard()?;
+    if !current {
+        return Ok(0);
+    }
+    if StateStore::open(state)
+        .map_err(|e| e.to_string())?
+        .transaction(|tx| tx.any_activated_worktrees())
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(0);
+    }
+    let Some(home) = home else { return Ok(0) };
+    let mut removed = 0;
+    for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+        let directory = verified_package_directory(home, runtime)?;
+        let path = directory.join(HOOKS_FILE);
+        if !fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file()) {
+            continue;
+        }
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        let expected: Value =
+            serde_json::from_str(&hooks_manifest(&directory)?).map_err(|e| e.to_string())?;
+        let Some(events) = manifest.get_mut("hooks").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let mut changed = false;
+        for (event, _, silent) in HOOK_EVENTS {
+            if !silent {
+                continue;
+            }
+            let Some(groups) = events.get_mut(event).and_then(Value::as_array_mut) else {
+                continue;
+            };
+            let owned = expected["hooks"][event]
+                .as_array()
+                .expect("registered hooks")
+                .iter()
+                .flat_map(|group| group["hooks"].as_array().expect("registered commands"))
+                .filter(|command| command["async"] == true)
+                .collect::<Vec<_>>();
+            groups.retain_mut(|group| {
+                let Some(commands) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+                    return true;
+                };
+                let before = commands.len();
+                commands.retain(|command| !owned.contains(&command));
+                let count = before - commands.len();
+                removed += count;
+                changed |= count > 0;
+                count == 0 || !commands.is_empty()
+            });
+            if groups.is_empty() {
+                events.remove(event);
+            }
+        }
+        if changed {
+            replace_if_changed(&path, &format!("{manifest}\n"), None)?;
+        }
+        let ledger = directory.join(SUBAGENT_OWNERSHIP_FILE);
+        let script = directory.join(SUBAGENT_SCRIPT_FILE);
+        if fs::symlink_metadata(&ledger).is_ok_and(|meta| meta.is_file())
+            && fs::symlink_metadata(&script).is_ok_and(|meta| meta.is_file())
+            && let Ok(record) = fs::read(&ledger)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| {
+                    serde_json::from_slice::<Value>(&bytes).map_err(|e| e.to_string())
+                })
+            && fs::read(&script).is_ok_and(|bytes| {
+                record["sha256"].as_str()
+                    == Some(crate::lower_hex(&Sha256::digest(&bytes)).as_str())
+            })
+        {
+            fs::remove_file(script).map_err(|e| e.to_string())?;
+            fs::remove_file(ledger).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(removed)
+}
+
+fn stop_script(executable: &Path, state_directory: &Path) -> Result<String, String> {
+    let executable = shell_single_quote(
+        executable
+            .to_str()
+            .ok_or("hook executable path is not UTF-8")?,
+    );
+    let state = shell_single_quote(
+        state_directory
+            .to_str()
+            .ok_or("hook state path is not UTF-8")?,
+    );
+    Ok(format!(
+        "#!/bin/sh\nexec >/dev/null 2>&1\nNAMEDROP_HERDR_TIMEOUT_MS=250 {executable} hook stop --state-directory {state} <&0 >/dev/null 2>&1\nexit 0\n"
+    ))
 }
 
 fn hook_script(
@@ -1065,7 +1248,7 @@ fn forward_update_notice(runtime: AgentRuntime) -> String {
     // Validate both versions with shell builtins; wrapper bytes must remain
     // stable when only the release version changes.
     format!(
-        "case \"$output\" in\n  {})\n    versions=${{output##*'Namedrop '}}\n    versions=${{versions%{}}}\n    available=${{versions%%' is available (you have '*}}\n    installed=${{versions#*' is available (you have '}}\n    valid_version() {{\n      case \"$1\" in ''|*[!0-9.]*) return 1 ;; esac\n      [ \"${{#1}}\" -le 32 ] || return 1\n      value=$1\n      IFS=.\n      set -- $value\n      [ \"$#\" -eq 3 ] || return 1\n      [ \"$value\" = \"$1.$2.$3\" ] || return 1\n      for part do\n        case \"$part\" in ''|0[0-9]*) return 1 ;; esac\n      done\n    }}\n    valid_version \"$available\" && valid_version \"$installed\" || exit 0\n    printf '%s' \"$output\"\n    ;;\nesac\n",
+        "case \"$output\" in\n  {})\n    versions=${{output##*'Namedrop '}}\n    versions=${{versions%{}}}\n    available=${{versions%%' is available (you have '*}}\n    installed=${{versions#*' is available (you have '}}\n    valid_version() {{\n      [ \"${{#1}}\" -le 32 ] || return 1\n      value=$1\n      serial=\n      case \"$value\" in\n        *-exp.*) serial=${{value#*-exp.}}; value=${{value%%-exp.*}}; [ -n \"$serial\" ] || return 1 ;;\n      esac\n      case \"$value\" in ''|*[!0-9.]*) return 1 ;; esac\n      IFS=.\n      set -- $value\n      [ \"$#\" -eq 3 ] || return 1\n      [ \"$value\" = \"$1.$2.$3\" ] || return 1\n      if [ -n \"$serial\" ]; then set -- \"$@\" \"$serial\"; fi\n      for part do\n        case \"$part\" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac\n        [ \"${{#part}}\" -le 20 ] || return 1\n        if [ \"${{#part}}\" -eq 20 ]; then\n          high=${{part%??????????}}\n          low=${{part#??????????}}\n          [ \"$high\" -lt 1844674407 ] || {{\n            [ \"$high\" -eq 1844674407 ] && [ \"$low\" -le 3709551615 ]\n          }} || return 1\n        fi\n      done\n    }}\n    valid_version \"$available\" && valid_version \"$installed\" || exit 0\n    printf '%s' \"$output\"\n    ;;\nesac\n",
         patterns.join("|"),
         shell_single_quote(&message_end),
     )
@@ -1281,6 +1464,75 @@ fn conflict(path: &Path, reason: &str) -> String {
 #[cfg(test)]
 mod permission_tests {
     use super::*;
+    use crate::StateNamespace;
+    #[test]
+    fn subagent_hook_removal_waits_for_last_space_and_preserves_user_changes() {
+        let root = std::env::temp_dir().join(format!(
+            "namedrop-subagent-uninstall-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let home = root.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let executable = Path::new("/test/namedrop");
+        for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+            install_integration_package(&home, runtime, executable, &root).unwrap();
+        }
+        let claude = package_directory(&home, AgentRuntime::ClaudeCode);
+        let codex = package_directory(&home, AgentRuntime::Codex);
+        fs::write(claude.join("scripts/subagent"), "user edited script\n").unwrap();
+        fs::write(codex.join("user-file"), "keep me").unwrap();
+        let path = codex.join(HOOKS_FILE);
+        let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let custom = json!({"hooks":[{"type":"command","command":"user-hook","timeout":20}]});
+        manifest["hooks"]["SubagentStart"]
+            .as_array_mut()
+            .unwrap()
+            .push(custom.clone());
+        manifest["hooks"]["SubagentStart"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(7));
+        fs::write(&path, manifest.to_string()).unwrap();
+        let ns_a = StateNamespace::for_space("test-socket", "test-a");
+        let ns_b = StateNamespace::for_space("test-socket", "test-b");
+        let attribution = MutationAttribution::new(crate::ActorKind::Human, "test", 10);
+        let mut store = StateStore::open(&root).unwrap();
+        store
+            .transaction(|tx| {
+                tx.activate_worktree(&ns_a, &attribution)?;
+                tx.activate_worktree(&ns_b, &attribution)
+            })
+            .unwrap();
+        store
+            .transaction(|tx| tx.deactivate_worktree(&ns_a, &attribution))
+            .unwrap();
+        assert_eq!(remove_subagent_hooks(&root, Some(&home)).unwrap(), 0);
+        assert!(codex.join(SUBAGENT_SCRIPT_FILE).exists());
+        store
+            .transaction(|tx| tx.deactivate_worktree(&ns_b, &attribution))
+            .unwrap();
+        assert_eq!(remove_subagent_hooks(&root, Some(&home)).unwrap(), 12);
+        assert!(!codex.join(SUBAGENT_SCRIPT_FILE).exists());
+        assert_eq!(
+            fs::read_to_string(claude.join(SUBAGENT_SCRIPT_FILE)).unwrap(),
+            "user edited script\n"
+        );
+        assert_eq!(
+            fs::read_to_string(codex.join("user-file")).unwrap(),
+            "keep me"
+        );
+        let actual: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(actual["hooks"]["SubagentStart"], json!([custom, 7]));
+        for event in ["SessionStart", "UserPromptSubmit"] {
+            assert_eq!(actual["hooks"][event].as_array().unwrap().len(), 1);
+        }
+        assert!(codex.join(SESSION_START_SCRIPT_FILE).exists());
+        assert!(codex.join(HOOK_SCRIPT_FILE).exists());
+        assert_eq!(remove_subagent_hooks(&root, Some(&home)).unwrap(), 0);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn collaboration_allow_rules_have_the_exact_installed_prefix() {
         let actual =
@@ -1303,7 +1555,11 @@ mod permission_tests {
             "Bash('/opt/namedrop' --plugin-state '/opt/state' handoff begin *)",
             "Bash('/opt/namedrop' --plugin-state '/opt/state' handoff resolve *)",
             "Bash('/opt/namedrop' --plugin-state '/opt/state' handoff adopt *)",
+            "Bash('/opt/namedrop' --plugin-state '/opt/state' reminder set *)",
+            "Bash('/opt/namedrop' --plugin-state '/opt/state' reminder list *)",
+            "Bash('/opt/namedrop' --plugin-state '/opt/state' reminder cancel *)",
             "Bash('/opt/namedrop' --plugin-state '/opt/state' address list *)",
+            "Bash('/opt/namedrop' --plugin-state '/opt/state' handoff acknowledge-granted *)",
         ];
         assert_eq!(actual, expected);
         for operation in crate::operation_catalog()

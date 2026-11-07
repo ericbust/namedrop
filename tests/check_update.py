@@ -53,6 +53,14 @@ class UpdateCheck(unittest.TestCase):
     def cache(self):
         return json.loads((self.state / 'update-check.json').read_text())
 
+    def test_experimental_versions_are_cached_and_reused(self):
+        self.remote = '1.5.0-exp.2'
+        self.check()
+        self.assertEqual(self.cache()['remote_version'], '1.5.0-exp.2')
+        self.check(100_000 + worker.DAY_MS)
+        self.assertEqual(self.calls, ['registration', 'git', 'manifest', 'registration', 'git'])
+        self.assertIsNone(self.cache()['last_error'])
+
     def test_daily_throttle_and_only_changed_commits_fetch_the_manifest(self):
         self.check()
         self.assertEqual(self.cache()['remote_version'], '1.10.0')
@@ -120,7 +128,10 @@ class UpdateCheck(unittest.TestCase):
         (self.state / 'update-check.json').write_text('{')
         self.check()
         self.assertEqual(self.cache()['remote_version'], self.remote)
-        for index, value in enumerate(['1.2.3\nmalice', '1.2.3"', '\x1b[31m1.2.3', '9' * 10000, '01.2.3', '1.2.3-beta', '1.2.3+build']):
+        for index, value in enumerate([
+                '1.2.3\nmalice', '1.2.3"', '\x1b[31m1.2.3', '9' * 10000, '01.2.3',
+                '1.2.3-beta', '1.2.3+build', '1.5.0-exp.', '1.5.0-exp.01',
+                '1.5.0-exp.18446744073709551616', '1.5.0-exp.1.extra', '1.5.0-exp.$(id)']):
             self.commit = str(index) * 40
             self.remote = value
             self.check(100_000 + (index + 1) * worker.DAY_MS)
@@ -139,6 +150,7 @@ class UpdateCheck(unittest.TestCase):
                 return self.data[:size]
         response = Response()
         for data, expected in [(b'id = "namedrop"\nversion = "1.10.0"\n[[build]]\ncommand = ["malice"]', '1.10.0'),
+                               (b'version = "1.5.0-exp.2"', '1.5.0-exp.2'),
                                (b'version = "1.2.3\\nmalice"', None),
                                (b'version = "1.2.3"\nversion = "1.3.0"', None),
                                (b'x' * (worker.LIMIT + 1), None)]:

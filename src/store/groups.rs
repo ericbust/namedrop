@@ -119,6 +119,30 @@ impl StateTransaction<'_> {
                 "Namedrop is not activated for this space",
             ));
         }
+        let closed_alias: bool = self.transaction.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM alias_history h
+                JOIN pane_addresses a USING (session_socket_id, worktree_id, address_id)
+                WHERE h.session_socket_id = ?1 AND h.worktree_id = ?2
+                  AND h.alias = ?3 AND a.retired = 1
+                  AND h.history_order = (
+                      SELECT MAX(latest.history_order) FROM alias_history latest
+                      WHERE latest.session_socket_id = h.session_socket_id
+                        AND latest.worktree_id = h.worktree_id
+                        AND latest.address_id = h.address_id
+                        AND latest.transition_kind = 'claimed'))",
+            params![
+                namespace.session_socket_id,
+                namespace.space_id.as_str(),
+                alias
+            ],
+            |row| row.get(0),
+        )?;
+        if closed_alias {
+            return Err(StoreError::invalid_input(format!(
+                "@{alias} belongs to a closed pane; choose a different group name"
+            )));
+        }
         let resolved = members
             .iter()
             .map(|alias| {

@@ -1,0 +1,42 @@
+[
+  {
+    "name": "desktop-1440",
+    "scrollHeight": 900,
+    "clientHeight": 900,
+    "innerHeight": 900,
+    "bodyScroll": 900,
+    "below": [],
+    "scrollY": 0,
+    "docScrollTop": 0
+  },
+  {
+    "name": "desktop-1024",
+    "scrollHeight": 700,
+    "clientHeight": 700,
+    "innerHeight": 700,
+    "bodyScroll": 700,
+    "below": [],
+    "scrollY": 0,
+    "docScrollTop": 0
+  },
+  {
+    "name": "narrow-640",
+    "scrollHeight": 800,
+    "clientHeight": 800,
+    "innerHeight": 800,
+    "bodyScroll": 800,
+    "below": [],
+    "scrollY": 0,
+    "docScrollTop": 0
+  },
+  {
+    "name": "zoom-125",
+    "scrollHeight": 720,
+    "clientHeight": 720,
+    "innerHeight": 720,
+    "bodyScroll": 720,
+    "below": [],
+    "scrollY": 0,
+    "docScrollTop": 0
+  }
+]

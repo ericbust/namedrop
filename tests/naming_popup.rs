@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
 use serde_json::Value;
@@ -114,7 +117,8 @@ else printf '%s\n' '{}'; fi
     }
     fn command(&self) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_namedrop"));
-        cmd.env("HERDR_BIN_PATH", self.0.join("herdr"))
+        cmd.env("TMPDIR", &self.0)
+            .env("HERDR_BIN_PATH", self.0.join("herdr"))
             .env("HERDR_PLUGIN_STATE_DIR", self.0.join("state"))
             .env("HOME", self.0.join("home"))
             .env("CLAUDE_CONFIG_DIR", self.0.join("home").join(".claude"))
@@ -211,7 +215,7 @@ else printf '%s\n' '{}'; fi
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).unwrap();
+        cleanup::remove_fixture(&self.0).unwrap();
     }
 }
 

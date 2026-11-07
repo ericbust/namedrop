@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use namedrop::*;
 use serde_json::{Value, json};
 use std::{
@@ -228,7 +231,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
+        let _ = cleanup::remove_fixture(&self.root);
     }
 }
 impl Clock for Fixture {
@@ -621,13 +624,18 @@ fn coordination_protocol_and_legacy_routes() {
         .filter(|v| {
             !matches!(
                 v.as_str(),
-                "handoff.adopt" | "handoff.begin" | "handoff.resolve"
+                "handoff.adopt"
+                    | "handoff.begin"
+                    | "handoff.resolve"
+                    | "reminder.set"
+                    | "reminder.list"
+                    | "reminder.cancel"
             )
         })
         .cloned()
         .collect();
     assert_eq!(profile.len(), 14);
-    assert_eq!(complete_capability_profile().len(), 17);
+    assert_eq!(complete_capability_profile().len(), 20);
     let legacy = Fixture::with_profile(&profile);
     legacy.db().execute(
         "INSERT INTO coordinations(session_socket_id,worktree_id,coordination_id,request_id,owner_address_id,owner_session_id,deliverable,created_at_ms,updated_at_ms)

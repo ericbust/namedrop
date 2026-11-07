@@ -70,4 +70,6 @@ For health checks, run `doctor` with the installed prefix above and no input; re
 
 ## Registration and upgrades
 
-`register` requires the complete challenge profile: current 17; legacy 16/14 also register; 14 omits begin/resolve and supports ordinary messaging only. Tracked mode refuses unsupported sessions. Schema 3→5 and 4→5 upgrade live. Recovery: repository `docs/operations.md`.
+`register` requires the full challenge profile. Current 20; legacy 17/16/14 remain accepted. 14 supports ordinary messaging. Schemas 3–6 upgrade live to 7. Recovery: `docs/operations.md`.
+
+Later, run `reminder.set` with `in_reply_to`. Write `body` as a short task note, like "Tag the release.", without naming who to remind. Reply now with the schedule. `reminder.list` lists pending wakes; `reminder.cancel` cancels by `reminder_id`. Reuse `<new-reminder-key>` on retries.

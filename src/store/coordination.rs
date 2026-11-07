@@ -24,6 +24,8 @@ struct CoordinationWakeState {
     deliverable: String,
 }
 
+const NOT_ACKNOWLEDGEABLE: &str = "only a human may acknowledge a blocked or cancelled coordination, an open one whose lead address is retired, or a completed one whose report delivery was cancelled";
+
 pub(super) const SCHEMA: &str = r#"
 CREATE TABLE coordinations (
     session_socket_id TEXT NOT NULL, worktree_id TEXT NOT NULL,
@@ -352,7 +354,12 @@ impl StateTransaction<'_> {
              WHERE a.session_socket_id=?1 AND a.worktree_id=?2
                AND a.source_kind='coordination' AND a.source_id=?3
                AND f.entity_kind='attention_item' AND f.transition_kind='acknowledged'
-               AND f.actor_kind='human')",
+               AND (f.actor_kind='human' OR (f.actor_kind='agent_session' AND EXISTS(
+                 SELECT 1 FROM transition_facts g
+                 WHERE g.session_socket_id=f.session_socket_id AND g.worktree_id=f.worktree_id
+                   AND g.entity_kind='coordination_review_grant'
+                   AND g.entity_id=a.source_id||':'||f.actor_id AND g.transition_kind='resolved'
+                   AND g.actor_kind='agent_session' AND g.actor_id=f.actor_id))))",
             )?
             .query_row(
                 params![ns.session_socket_id, ns.space_id.as_str(), id.as_str()],
@@ -365,6 +372,22 @@ impl StateTransaction<'_> {
         ns: &StateNamespace,
         id: &CoordinationId,
         by: &MutationAttribution,
+    ) -> Result<bool, StoreError> {
+        if by.actor_kind != ActorKind::Human {
+            return Err(StoreError::invalid_input(NOT_ACKNOWLEDGEABLE));
+        }
+        self.record_coordination_acknowledgement(ns, id, by, NOT_ACKNOWLEDGEABLE)
+    }
+
+    /// The acknowledgement itself, after the caller proved its authority: a
+    /// human's own command, or an agent consuming the operator's review grant
+    /// in this same transaction.
+    pub(super) fn record_coordination_acknowledgement(
+        &mut self,
+        ns: &StateNamespace,
+        id: &CoordinationId,
+        by: &MutationAttribution,
+        not_acknowledgeable: &'static str,
     ) -> Result<bool, StoreError> {
         let (outcome, owner_retired, report_delivery): (String, bool, Option<String>) = self.transaction.query_row(
             "SELECT c.outcome, p.retired,
@@ -382,10 +405,8 @@ impl StateTransaction<'_> {
             "completed" => report_delivery.as_deref() == Some("cancelled"),
             _ => false,
         };
-        if by.actor_kind != ActorKind::Human || !acknowledgeable {
-            return Err(StoreError::invalid_input(
-                "only a human may acknowledge a blocked or cancelled coordination, an open one whose lead address is retired, or a completed one whose report delivery was cancelled",
-            ));
+        if !acknowledgeable {
+            return Err(StoreError::invalid_input(not_acknowledgeable));
         }
         if !self.coordination_attention_can_be_acknowledged(ns, id)? {
             return Err(StoreError::invalid_input(

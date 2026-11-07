@@ -1,4 +1,7 @@
 //! Shared wiring and conflict-safe shortcut installation acceptance.
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use std::{
     fs,
     path::PathBuf,
@@ -275,6 +278,7 @@ impl Fixture {
         Command::new(env!("CARGO_BIN_EXE_namedrop"))
             .args(["--json", "ui", "install-shortcuts", "--config"])
             .arg(self.0.join("config.toml"))
+            .env("TMPDIR", &self.0)
             .env_remove("HERDR_PLUGIN_STATE_DIR")
             .output()
             .unwrap()
@@ -282,7 +286,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        let _ = cleanup::remove_fixture(&self.0);
     }
 }
 

@@ -49,6 +49,14 @@ pub struct RuntimeOptions {
 }
 
 impl Cli {
+    pub fn subagent_hook(&self) -> Option<(&Path, crate::AgentRuntime)> {
+        match &self.command {
+            Command::Hook {
+                command: HookCommand::Subagent(args),
+            } => Some((&args.hook.state_directory, args.runtime.into())),
+            _ => None,
+        }
+    }
     pub fn human_output(&self, terminal: bool) -> bool {
         self.human || (!self.json && terminal && !self.machine_operation())
     }
@@ -63,9 +71,13 @@ impl Cli {
                 | "send"
                 | "reply"
                 | "delivery.inbox"
+                | "reminder.set"
+                | "reminder.list"
+                | "reminder.cancel"
                 | "handoff.begin"
                 | "handoff.resolve"
                 | "handoff.adopt"
+                | "handoff.acknowledge-granted"
                 | "handoff.status"
                 | "handoff.results"
                 | "handoff.preview"
@@ -107,6 +119,24 @@ impl Cli {
         match &self.command {
             Command::Hook {
                 command: HookCommand::UserPromptSubmit(args),
+            } => Some(&args.state_directory),
+            _ => None,
+        }
+    }
+
+    pub fn stop_hook_state_directory(&self) -> Option<&Path> {
+        match &self.command {
+            Command::Hook {
+                command: HookCommand::Stop(args),
+            } => Some(&args.state_directory),
+            _ => None,
+        }
+    }
+
+    pub fn stop_worker_state_directory(&self) -> Option<&Path> {
+        match &self.command {
+            Command::Hook {
+                command: HookCommand::StopWorker(args),
             } => Some(&args.state_directory),
             _ => None,
         }
@@ -201,6 +231,53 @@ impl Cli {
         }
     }
 
+    pub fn dashboard_open_browser(&self) -> Option<bool> {
+        match &self.command {
+            Command::Dashboard(args) => Some(!args.no_open),
+            _ => None,
+        }
+    }
+
+    pub fn dashboard_tailscale(&self) -> Option<bool> {
+        match &self.command {
+            Command::Dashboard(args) => args.tailscale.as_deref().map(|mode| mode != "off"),
+            _ => None,
+        }
+    }
+
+    pub fn dashboard_ui(&self) -> Option<&Path> {
+        match &self.command {
+            Command::Dashboard(args) => args.ui.as_deref(),
+            Command::DashboardServer { ui, .. } => ui.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn dashboard_inherit_claim(&self) -> bool {
+        matches!(
+            self.command,
+            Command::DashboardServer {
+                inherit_claim: true,
+                ..
+            }
+        )
+    }
+
+    pub fn is_dashboard_server(&self) -> bool {
+        matches!(self.command, Command::DashboardServer { .. })
+    }
+
+    pub fn dashboard_observer(&self) -> Option<(&str, Option<u16>, Option<u16>)> {
+        match &self.command {
+            Command::DashboardObserverGuard {
+                terminal,
+                rows,
+                cols,
+            } => Some((terminal, *rows, *cols)),
+            _ => None,
+        }
+    }
+
     pub fn is_reset_tour(&self) -> bool {
         matches!(
             self.command,
@@ -224,6 +301,11 @@ enum Command {
     Handoff {
         #[command(subcommand)]
         command: HandoffCommand,
+    },
+    /// Schedule a wake for this exact Agent Session.
+    Reminder {
+        #[command(subcommand)]
+        command: ReminderCommand,
     },
     /// Manage saved groups of agent mentions.
     Group {
@@ -289,6 +371,25 @@ enum Command {
         #[command(subcommand)]
         command: EventCommand,
     },
+    /// Open Channels for this workspace in your browser.
+    #[command(name = "channels", alias = "dashboard")]
+    Dashboard(DashboardArgs),
+    /// The singleton dashboard server; `namedrop channels` starts it.
+    #[command(hide = true)]
+    DashboardServer {
+        #[arg(long, value_name = "DIR")]
+        ui: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        inherit_claim: bool,
+    },
+    #[command(hide = true)]
+    DashboardObserverGuard {
+        terminal: String,
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..=256))]
+        rows: Option<u16>,
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..=512))]
+        cols: Option<u16>,
+    },
     /// Runtime hooks installed for supported agents.
     #[command(hide = true)]
     Hook {
@@ -315,6 +416,7 @@ impl Command {
             Self::TerminalExecute { .. } => "terminal.execute",
             Self::Handoff { command } => command.operation(),
             Self::Group { command } => command.operation(),
+            Self::Reminder { command } => command.operation(),
             Self::Name(_) => "name",
             Self::Activate => "activate",
             Self::Deactivate => "deactivate",
@@ -337,6 +439,9 @@ impl Command {
             Self::Space { command } => command.operation(),
             Self::Reconcile => "reconcile",
             Self::Event { command } => command.operation(),
+            Self::Dashboard(_) => "dashboard",
+            Self::DashboardServer { .. } => "dashboard.server",
+            Self::DashboardObserverGuard { .. } => "dashboard.observer-guard",
             Self::Hook { command } => command.operation(),
         }
     }
@@ -378,6 +483,8 @@ enum HandoffCommand {
     Adopt,
     /// Acknowledge a resolved warning after human review; preserves the outcome and report.
     Acknowledge,
+    /// Acknowledge a warning the person asked this agent to review; needs their review grant.
+    AcknowledgeGranted,
     Status,
     Results,
     Preview,
@@ -389,6 +496,7 @@ impl HandoffCommand {
             Self::Resolve => "handoff.resolve",
             Self::Adopt => "handoff.adopt",
             Self::Acknowledge => "handoff.acknowledge",
+            Self::AcknowledgeGranted => "handoff.acknowledge-granted",
             Self::Status => "handoff.status",
             Self::Results => "handoff.results",
             Self::Preview => "handoff.preview",
@@ -410,6 +518,19 @@ impl GroupCommand {
             Self::Remove => "group.remove",
         }
     }
+}
+
+#[derive(Debug, Args)]
+struct DashboardArgs {
+    /// Open Channels through Tailscale Serve, or remove its owned handler with off.
+    #[arg(long, num_args = 0..=1, default_missing_value = "on", value_parser = ["on", "off"])]
+    tailscale: Option<String>,
+    /// Print the URL without opening a browser.
+    #[arg(long = "no-open")]
+    no_open: bool,
+    /// Serve a custom Channels app from this directory instead of embedded assets.
+    #[arg(long, value_name = "DIR")]
+    ui: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -599,8 +720,12 @@ enum HookCommand {
     AgentStatusChanged,
     AgentStatusWorker,
     MailboxWake(HookArgs),
+    Stop(HookArgs),
+    #[command(hide = true)]
+    StopWorker(HookArgs),
     SessionStart(HookArgs),
     UserPromptSubmit(HookArgs),
+    Subagent(SubagentHookArgs),
 }
 
 impl HookCommand {
@@ -609,8 +734,11 @@ impl HookCommand {
             Self::AgentStatusChanged => "hook.agent-status-changed",
             Self::AgentStatusWorker => "hook.agent-status-worker",
             Self::MailboxWake(_) => "hook.mailbox-wake",
+            Self::Stop(_) => "hook.stop",
+            Self::StopWorker(_) => "hook.stop-worker",
             Self::SessionStart(_) => "hook.session-start",
             Self::UserPromptSubmit(_) => "hook.user-prompt-submit",
+            Self::Subagent(_) => "hook.subagent",
         }
     }
 }
@@ -620,6 +748,29 @@ struct HookArgs {
     /// Plugin-owned state directory for this installed hook.
     #[arg(long, value_name = "PATH")]
     state_directory: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct SubagentHookArgs {
+    #[command(flatten)]
+    hook: HookArgs,
+    #[arg(long, value_enum)]
+    runtime: HookRuntime,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum HookRuntime {
+    ClaudeCode,
+    Codex,
+}
+
+impl From<HookRuntime> for crate::AgentRuntime {
+    fn from(value: HookRuntime) -> Self {
+        match value {
+            HookRuntime::ClaudeCode => Self::ClaudeCode,
+            HookRuntime::Codex => Self::Codex,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -636,6 +787,49 @@ mod tests {
                 "removed command {command} was accepted"
             );
         }
+    }
+
+    #[test]
+    fn channels_tailscale_modes_parse() {
+        assert_eq!(
+            Cli::try_parse_from(["namedrop", "channels", "--tailscale"])
+                .unwrap()
+                .dashboard_tailscale(),
+            Some(true)
+        );
+        assert_eq!(
+            Cli::try_parse_from(["namedrop", "channels", "--tailscale", "off"])
+                .unwrap()
+                .dashboard_tailscale(),
+            Some(false)
+        );
+        assert_eq!(
+            Cli::try_parse_from(["namedrop", "channels"])
+                .unwrap()
+                .dashboard_tailscale(),
+            None
+        );
+        assert!(Cli::try_parse_from(["namedrop", "channels", "--tailscale", "anything"]).is_err());
+    }
+
+    #[test]
+    fn channels_and_hidden_dashboard_alias_parse_identically() {
+        let commands = ["channels", "dashboard"].map(|name| {
+            Cli::try_parse_from(["namedrop", name, "--no-open", "--ui", "custom-app"]).unwrap()
+        });
+        for command in commands {
+            assert_eq!(command.operation(), "dashboard");
+            assert_eq!(command.dashboard_open_browser(), Some(false));
+            assert_eq!(
+                command.dashboard_ui(),
+                Some(std::path::Path::new("custom-app"))
+            );
+        }
+        let help = Cli::try_parse_from(["namedrop", "--help"])
+            .unwrap_err()
+            .to_string();
+        assert!(help.contains("channels"), "{help}");
+        assert!(!help.contains("dashboard"), "{help}");
     }
 
     #[test]
@@ -668,5 +862,21 @@ mod tests {
         assert!(reset.is_reset_tour());
         assert!(Cli::try_parse_from(["namedrop", "ui", "install-shortcuts"]).is_ok());
         assert!(Cli::try_parse_from(["namedrop", "ui", "install-status-shortcut"]).is_ok());
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum ReminderCommand {
+    Set,
+    List,
+    Cancel,
+}
+impl ReminderCommand {
+    fn operation(&self) -> &'static str {
+        match self {
+            Self::Set => "reminder.set",
+            Self::List => "reminder.list",
+            Self::Cancel => "reminder.cancel",
+        }
     }
 }

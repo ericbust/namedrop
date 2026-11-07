@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Namedrop Channels keynote</title>
+<style>
+@font-face { font-family: "Inter Display"; src: url(fonts/InterDisplay-Bold.woff2); font-weight: 700; }
+@font-face { font-family: "Inter Display"; src: url(fonts/InterDisplay-Medium.woff2); font-weight: 500; }
+@font-face { font-family: "Inter Display"; src: url(fonts/InterDisplay-Regular.woff2); font-weight: 400; }
+html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #050509; -webkit-font-smoothing: antialiased; }
+#stage { position: absolute; inset: 0; overflow: hidden; font-family: "Inter Display", sans-serif; color: #f5f5f7;
+  background: radial-gradient(55% 60% at 22% 14%, rgba(99,102,241,0.30), transparent 70%),
+    radial-gradient(50% 55% at 84% 92%, rgba(45,212,191,0.16), transparent 70%),
+    radial-gradient(40% 40% at 72% 18%, rgba(240,171,252,0.10), transparent 70%), #050509; }
+.scene { position: absolute; inset: 0; opacity: 0; visibility: hidden; }
+.h { position: absolute; font-weight: 700; font-size: 92px; line-height: 1.04; letter-spacing: -0.032em; white-space: nowrap; }
+.s { position: absolute; font-weight: 400; font-size: 31px; line-height: 1.38; color: #a1a1ab; letter-spacing: -0.005em; }
+.s b { font-weight: 500; color: #d4d4dc; }
+.c { text-align: center; left: 0; right: 0; }
+.grad { background: linear-gradient(92deg, #a5b4ff 0%, #7de2d1 55%, #f0abfc 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.card { position: absolute; overflow: hidden; border-radius: 26px; background: #fcfcfe; transform-origin: 50% 50%;
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.10), 0 40px 90px rgba(0,0,0,0.55), 0 12px 30px rgba(0,0,0,0.35); }
+.card img { position: absolute; display: block; }
+.glow { position: absolute; border-radius: 50%; filter: blur(90px); opacity: 0; }
+.pill { display: inline-block; vertical-align: middle; font: 500 26px/1 "Inter Display"; letter-spacing: 0.02em; padding: 10px 18px 11px; border-radius: 999px;
+  color: #d9dcff; border: 1px solid rgba(165,180,255,0.45); background: rgba(165,180,255,0.08); }
+.cmd { display: inline-block; font: 500 34px/1 "JetBrains Mono", "JetBrainsMono Nerd Font", ui-monospace, monospace; color: #e8eaff;
+  padding: 16px 26px; border-radius: 16px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); }
+.ring { position: absolute; border-radius: 18px; box-shadow: 0 0 0 3px rgba(239,68,68,0.9), 0 0 40px rgba(239,68,68,0.55); opacity: 0; }
+.later { position: absolute; font: 500 30px/1 "Inter Display"; color: #c9ccff; letter-spacing: 0.01em; opacity: 0; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div class="scene" id="hero">
+    <div class="glow" style="left:460px; top:420px; width:1000px; height:600px; background:#6366f1"></div>
+    <div class="h c" style="top:96px">Namedrop <span class="grad">Channels</span> <span class="pill">Beta</span></div>
+    <div class="s c" style="top:222px">Every Herdr workspace becomes a chat with your agents.</div>
+  </div>
+  <div class="scene" id="ask">
+    <div class="glow" style="left:520px; top:380px; width:900px; height:500px; background:#14b8a6"></div>
+    <div class="h c" style="top:118px">Talk to your <span class="grad">agents.</span></div>
+    <div class="s c" style="top:238px">Mention one. The reply lands right under your message.</div>
+  </div>
+  <div class="scene" id="followup">
+    <div class="glow" style="left:1000px; top:200px; width:800px; height:700px; background:#14b8a6"></div>
+    <div class="h" style="left:150px; top:330px">Follow up<br>in the <span class="grad">thread.</span></div>
+    <div class="s" style="left:154px; top:560px; width:760px">No @ needed. The thread already knows who you mean.</div>
+  </div>
+  <div class="scene" id="collab">
+    <div class="glow" style="left:160px; top:200px; width:900px; height:700px; background:#f97316"></div>
+    <div class="h" style="left:1090px; top:330px">Agents work<br><span class="grad">together.</span></div>
+    <div class="s" style="left:1094px; top:560px; width:700px">Ask <b>@claude</b> to loop in <b>@codex</b>. Every hand-off happens in the open, in the thread.</div>
+  </div>
+  <div class="scene" id="activity">
+    <div class="glow" style="left:460px; top:420px; width:1000px; height:500px; background:#6366f1"></div>
+    <div class="h c" style="top:150px">See who is working, <span class="grad">and for whom.</span></div>
+    <div class="s c" style="top:270px"><b>All activity</b> shows what each agent is doing and who asked.</div>
+  </div>
+  <div class="scene" id="pick">
+    <div class="glow" style="left:1000px; top:200px; width:800px; height:700px; background:#6366f1"></div>
+    <div class="h" style="left:150px; top:330px">Pick who<br><span class="grad">gets it.</span></div>
+    <div class="s" style="left:154px; top:560px; width:680px">When two agents share a thread, Channels asks who your reply is for.</div>
+  </div>
+  <div class="scene" id="skills">
+    <div class="glow" style="left:460px; top:480px; width:1000px; height:500px; background:#a855f7"></div>
+    <div class="h c" style="top:150px">Their skills, <span class="grad">in the composer.</span></div>
+    <div class="s c" style="top:270px">Type <b>/</b> after a mention to use that agent's skills.</div>
+  </div>
+  <div class="scene" id="reminder">
+    <div class="glow" style="left:360px; top:420px; width:1200px; height:560px; background:#14b8a6"></div>
+    <div class="h c" style="top:96px">Reminders, <span class="grad">in a DM.</span></div>
+    <div class="s c" style="top:216px">Ask in plain words. Cancel it, or let it fire.</div>
+    <div class="later" id="later">1 minute later</div>
+  </div>
+  <div class="scene" id="needs">
+    <div class="glow" style="left:160px; top:220px; width:700px; height:700px; background:#ef4444"></div>
+    <div class="h" style="left:860px; top:400px">Know when they<br><span class="grad">need you.</span></div>
+    <div class="s" style="left:864px; top:630px; width:880px">When an agent waits on an approval, it moves to the top under <b>Needs you</b>.</div>
+  </div>
+  <div class="scene" id="subagents">
+    <div class="glow" style="left:460px; top:420px; width:1000px; height:500px; background:#f97316"></div>
+    <div class="h c" style="top:150px">Watch <span class="grad">subagents</span> work.</div>
+    <div class="s c" style="top:270px">The member chip counts the subagents an agent starts.</div>
+  </div>
+  <div class="scene" id="close">
+    <div class="glow" style="left:460px; top:460px; width:1000px; height:600px; background:#6366f1"></div>
+    <div class="h c" style="top:84px">Namedrop <span class="grad">Channels</span> <span class="pill">Beta</span></div>
+    <div class="s c" style="top:210px"><span class="cmd">namedrop channels</span></div>
+  </div>
+</div>
+<script>
+// Every UI pixel comes from the recorded take served at /take/. This page adds only type, glows, cards and motion.
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, k) => a + (b - a) * k;
+const outExpo = (k) => (k >= 1 ? 1 : 1 - Math.pow(2, -10 * k));
+const inOut = (k) => (k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2);
+const ramp = (u, at, dur, ease = outExpo) => ease(clamp((u - at) / dur));
+const $ = (id) => document.getElementById(id);
+
+let REC = [];
+const frameAt = (t) => {
+  let lo = 0, hi = REC.length - 1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (REC[m].t <= t) lo = m; else hi = m - 1; }
+  return '/take/recording/' + REC[lo].file;
+};
+const pending = [];
+const setSrc = (img, t) => {
+  const src = frameAt(t);
+  if (img.dataset.src !== src) { img.dataset.src = src; img.src = src; pending.push(img.decode().catch(() => {})); }
+};
+
+// A card shows region [x, y, w, h] of a recorded 1280×720 app frame, scaled by s.
+// rows: optional y boundaries (app px) inside the crop. The card grows one row at a time,
+// and each new row fades in only after the card has reached its new height, so no edge cuts a row.
+function card(scene, [x, y, w, h], s, rows) {
+  const el = document.createElement('div'); el.className = 'card';
+  const layer = () => {
+    const img = document.createElement('img');
+    Object.assign(img.style, { width: 1280 * s + 'px', height: 720 * s + 'px', left: -x * s + 'px', top: -y * s + 'px' });
+    el.appendChild(img); return img;
+  };
+  const base = layer(), fresh = rows ? layer() : null;
+  Object.assign(el.style, { width: w * s + 'px', height: h * s + 'px' });
+  $(scene).appendChild(el);
+  return { el, base, fresh, w: w * s, h: h * s, s, y, rows };
+}
+function place(c, { x, y, sc = 1, op = 1, t, z }) {
+  Object.assign(c.el.style, { left: x + 'px', top: y + 'px', transform: `scale(${sc})`, opacity: op, zIndex: z ?? '' });
+  setSrc(c.base, t);
+  if (c.fresh) setSrc(c.fresh, t);
+}
+// steps: [[u, rowIndex]]. The first step is the starting state; each later one grows the card to show rows up to rowIndex.
+function reveal(c, u, steps) {
+  let shown = steps[0][1], target = shown, at = steps[0][0];
+  for (const [when, row] of steps.slice(1)) if (u >= when) { shown = target; target = row; at = when; }
+  const kGrow = ramp(u, at, 0.5, inOut), kFade = ramp(u, at + 0.4, 0.4, inOut);
+  const edge = (i) => (c.rows[i] - c.y) * c.s, top = c.y * c.s;
+  c.el.style.height = lerp(edge(shown), edge(target), kGrow) + 'px';
+  const band = (img, a, b) => { img.style.clipPath = `polygon(0 ${top + a}px, 100% ${top + a}px, 100% ${top + b}px, 0 ${top + b}px)`; };
+  band(c.base, 0, edge(shown));
+  band(c.fresh, edge(shown), edge(target));
+  c.fresh.style.opacity = shown === target ? 0 : kFade;
+  c.fresh.style.transform = `translateY(${(1 - kFade) * 14}px)`;
+}
+const rise = (el, k, dy = 36) => { el.style.opacity = k; el.style.transform = `translateY(${(1 - k) * dy}px)`; el.style.filter = k < 0.999 ? `blur(${(1 - k) * 8}px)` : 'none'; };
+const glow = (scene, k) => { $(scene).querySelector('.glow').style.opacity = k; };
+const text = (scene, u) => {
+  const [h, s] = $(scene).querySelectorAll('.h, .s');
+  rise(h, ramp(u, 0.05, 0.8)); rise(s, ramp(u, 0.3, 0.8));
+};
+const centerX = (c) => (1920 - c.w) / 2;
+
+const FULL = [0, 0, 1280, 720];
+const C = {
+  hero: card('hero', FULL, 1.1),
+  askComposer: card('ask', [262, 626, 1004, 86], 1.6),
+  askMessage: card('ask', [252, 172, 640, 118], 2.05),
+  fuThread: card('followup', [893, 62, 375, 362], 1.75, [62, 150, 256, 340, 424]),
+  fuComposer: card('followup', [893, 626, 375, 86], 1.75),
+  collab: card('collab', [893, 62, 375, 326], 2.25, [62, 175, 305, 388]),
+  activity: card('activity', [272, 64, 520, 132], 2.6),
+  pickThread: card('pick', [893, 200, 375, 184], 2.3),
+  pickComposer: card('pick', [893, 626, 375, 86], 2.3),
+  skills: card('skills', [262, 562, 1004, 150], 1.75),
+  dm: card('reminder', [262, 88, 592, 298], 1.6, [88, 168, 248, 284, 386]),
+  popover: card('reminder', [852, 6, 372, 166], 1.75),
+  sidebar: card('needs', [0, 92, 246, 410], 1.95),
+  header: card('needs', [264, 2, 340, 50], 2.4),
+  chips: card('subagents', [266, 52, 548, 36], 2.6),
+  subMessage: card('subagents', [306, 396, 400, 48], 2.4),
+  closeApp: card('close', FULL, 1.1),
+};
+const ring = document.createElement('div'); ring.className = 'ring'; $('needs').appendChild(ring);
+
+// Each scene runs from start to end in seconds; u is the time since its start. Take times are seconds into the recording.
+const SCENES = [
+  { id: 'hero', start: 0, end: 4.2, render(u) {
+    const k = ramp(u, 0.3, 1.4);
+    place(C.hero, { x: centerX(C.hero), y: lerp(560, 318, k), sc: lerp(0.94, 1, k) + 0.008 * u, op: k, t: 79.5 });
+    glow('hero', 0.35 * k);
+  } },
+  { id: 'ask', start: 3.75, end: 9.4, render(u) {
+    const typeStart = 0.45, sendAt = 2.25, replyAt = 3.0;
+    const t = u < sendAt ? 1.5 + clamp(u - typeStart, 0, 9) * 1.5 : u < replyAt ? 5.9 : 13.1;
+    const kIn = ramp(u, 0.15, 0.9), kSend = ramp(u, sendAt, 0.9);
+    place(C.askComposer, { x: centerX(C.askComposer), y: lerp(520, 650, kSend) + (1 - kIn) * 50, sc: lerp(1, C.askMessage.w / C.askComposer.w, kSend), op: kIn, t, z: 2 });
+    place(C.askMessage, { x: centerX(C.askMessage), y: lerp(440, 368, kSend), sc: lerp(0.92, 1, kSend), op: kSend, t });
+    glow('ask', 0.18 + 0.22 * ramp(u, replyAt, 0.8));
+  } },
+  { id: 'followup', start: 8.95, end: 15.2, render(u) {
+    // Real typing of "Two more, please." (19.3 → 20.4 s), the send at 22.3 s, codex's answer at 29.2 s.
+    const sendAt = 2.0, replyAt = 3.3;
+    const t = u < sendAt ? 19.3 + clamp(u - 0.6, 0, 9) : u < replyAt ? 23.4 : 29.6;
+    const kIn = ramp(u, 0.15, 0.9), x = 1920 - 170 - C.fuThread.w, y = 150 + (1 - kIn) * 50;
+    place(C.fuThread, { x, y, op: kIn, t });
+    reveal(C.fuThread, u, [[0, 2], [sendAt + 0.1, 3], [replyAt, 4]]);
+    place(C.fuComposer, { x, y: y + C.fuThread.el.offsetHeight + 36, op: kIn, t });
+    glow('followup', 0.12 + 0.14 * ramp(u, replyAt, 1));
+  } },
+  { id: 'collab', start: 14.75, end: 20.4, render(u) {
+    const kIn = ramp(u, 0.2, 0.9);
+    place(C.collab, { x: 150, y: 172 + (1 - kIn) * 50, op: kIn, t: 79.5 });
+    reveal(C.collab, u, [[0, 1], [1.4, 2], [2.6, 3]]);
+    glow('collab', 0.12 + 0.14 * ramp(u, 1.4, 1.2));
+  } },
+  { id: 'activity', start: 19.95, end: 25.0, render(u) {
+    // Codex works for Claude, then Claude works on Codex's answer.
+    const kIn = ramp(u, 0.2, 0.9);
+    place(C.activity, { x: centerX(C.activity), y: 470 + (1 - kIn) * 50, op: kIn, t: u < 2.6 ? 48.4 : 55.2 });
+    glow('activity', 0.25 * kIn);
+  } },
+  { id: 'pick', start: 24.55, end: 29.6, render(u) {
+    const kIn = ramp(u, 0.2, 0.9), kHint = ramp(u, 1.3, 0.9);
+    const x = 1920 - 170 - C.pickComposer.w;
+    place(C.pickThread, { x, y: 170 + (1 - kIn) * 50, op: kIn, t: 84.2 });
+    place(C.pickComposer, { x, y: 170 + 184 * 2.3 + 40 + (1 - kHint) * 50, op: kHint, t: 84.2 });
+    glow('pick', 0.12 + 0.16 * kHint);
+  } },
+  { id: 'skills', start: 29.15, end: 34.3, render(u) {
+    // Real typing of "@claude /nam" (89.5 → 90.4 s); the skill list opens as the slash is typed.
+    const kIn = ramp(u, 0.2, 0.9);
+    place(C.skills, { x: centerX(C.skills), y: 470 + (1 - kIn) * 50, op: kIn, t: 89.4 + clamp(u - 0.8, 0, 9) * 0.8 });
+    glow('skills', 0.12 + 0.18 * ramp(u, 1.6, 0.9));
+  } },
+  { id: 'reminder', start: 33.85, end: 43.0, render(u) {
+    const later = 4.4;
+    const t = u < 2.2 ? 108.5 : u < later ? 112.0 : 174.1;
+    const kIn = ramp(u, 0.2, 0.9), kPop = ramp(u, 1.0, 0.8) * (1 - ramp(u, later - 0.5, 0.5, inOut));
+    const dmX = 1920 / 2 - (C.dm.w + 60 + C.popover.w) / 2;
+    const kLater = ramp(u, later - 0.3, 0.9, inOut), dmW = lerp(592, 624, kLater) * C.dm.s;
+    C.dm.el.style.width = dmW + 'px';
+    place(C.dm, { x: lerp(dmX, (1920 - dmW) / 2, kLater), y: 330 + (1 - kIn) * 50, op: kIn, t });
+    reveal(C.dm, u, [[0, 1], [2.3, 2], [later + 0.6, 3], [later + 1.4, 4]]);
+    place(C.popover, { x: dmX + C.dm.w + 60, y: 330 + (1 - kPop) * 30, op: kPop, t: 108.5 });
+    const kL = ramp(u, later - 0.2, 0.6) * (1 - ramp(u, later + 2.2, 0.6, inOut));
+    Object.assign($('later').style, { left: (1920 - dmW) / 2 + 'px', top: '282px', opacity: kL });
+    glow('reminder', 0.1 + 0.16 * ramp(u, later + 1.4, 1));
+  } },
+  { id: 'needs', start: 42.55, end: 48.2, render(u) {
+    // Claude blocks on a real permission prompt at 185.1 s.
+    const flip = 1.3, t = u < flip ? 184.9 : 185.3;
+    const kIn = ramp(u, 0.1, 0.9);
+    const x = 250, y = (1080 - C.sidebar.h) / 2 + (1 - kIn) * 50;
+    place(C.sidebar, { x, y, op: kIn, t });
+    place(C.header, { x: 864, y: 170 + (1 - kIn) * 50, op: kIn, t });
+    const kR = ramp(u, flip + 0.15, 0.7), pulse = 0.75 + 0.25 * Math.cos((u - flip) * 3.2);
+    Object.assign(ring.style, { left: x + 4 * C.sidebar.s + 'px', top: y + (106 - 92) * C.sidebar.s + 'px',
+      width: 238 * C.sidebar.s + 'px', height: 76 * C.sidebar.s + 'px', opacity: kR * pulse * kIn });
+    glow('needs', 0.08 + 0.2 * kR);
+  } },
+  { id: 'subagents', start: 47.75, end: 53.4, render(u) {
+    // The chip goes from Working to 1 subagent (217.8 s) to 2 subagents (219.4 s).
+    const t = u < 1.4 ? 213.5 : u < 2.8 ? 218.2 : 219.8;
+    const kIn = ramp(u, 0.2, 0.9);
+    place(C.chips, { x: centerX(C.chips), y: 450 + (1 - kIn) * 50, op: kIn, t });
+    place(C.subMessage, { x: centerX(C.subMessage), y: 640 + (1 - kIn) * 50, op: kIn, t });
+    glow('subagents', 0.12 + 0.16 * ramp(u, 1.4, 1));
+  } },
+  { id: 'close', start: 52.95, end: 58.0, render(u) {
+    const k = ramp(u, 0.3, 1.4);
+    place(C.closeApp, { x: centerX(C.closeApp), y: lerp(560, 330, k), sc: lerp(0.94, 1, k), op: k, t: 79.5 });
+    glow('close', 0.35 * k);
+  } },
+];
+window.DURATION = SCENES[SCENES.length - 1].end;
+
+function sceneOpacity({ start, end }, t, first, last) {
+  const fin = first ? 1 : clamp((t - start - 0.22) / 0.4);
+  const fout = last ? 1 : clamp((end - t) / 0.32);
+  return inOut(Math.min(fin, fout));
+}
+
+window.renderAt = async (t) => {
+  SCENES.forEach((scene, i) => {
+    const op = sceneOpacity(scene, t, i === 0, i === SCENES.length - 1), el = $(scene.id);
+    el.style.opacity = op; el.style.visibility = op > 0.001 ? 'visible' : 'hidden';
+    if (op > 0.001) { const u = t - scene.start; text(scene.id, u); scene.render(u); }
+  });
+  await Promise.all(pending.splice(0));
+};
+window.sceneReady = (async () => {
+  REC = (await (await fetch('/take/recording/recording.json')).json()).frames;
+  await document.fonts.ready;
+  await window.renderAt(Number(new URLSearchParams(location.search).get('t') || 0));
+})();
+</script>
+</body>
+</html>

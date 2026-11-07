@@ -2,6 +2,43 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.5.0] - 2026-11-06
+
+### Added
+
+- Channels (Beta) ships in the normal installation. Open **Open Namedrop Channels** in Herdr or run `namedrop channels`. See your workspaces, messages, threads, agents, and requests that need you in one local browser page. Channels supports Markdown, paged history, repository groups, resizable sidebars, light and dark themes, and **All activity** across workspaces.
+- Reminders let agents wake themselves later or on a schedule and answer where you asked, in a pane, thread, DM, or agent conversation. Pending reminders have Cancel buttons in Channels. Delays and intervals are at least 60 seconds, with at most 20 pending reminders per Agent Session and 100 total occurrences per repeating reminder. Saved schedules survive process restarts but do not transfer to a replacement agent session.
+- Open Channels from a phone or Mac on your tailnet with `namedrop channels --tailscale`. Private HTTPS uses Tailscale Serve and checks this machine's owner identity on every request. Existing handlers stay in place. `namedrop channels --tailscale off` removes only Namedrop's handler.
+- Direct messages let you talk to one agent across workspaces without adding the conversation to a channel. Workspace labels distinguish same-named agents. DMs stay out of channels, threads, and All activity.
+- Live Peek shows an agent's terminal with colors and live updates. It keeps output that scrolls by while you watch, loads available terminal history, and offers Expand and Restore. **Type to agent** submits prompts and sends keys to the real pane. Viewing, scrolling, and resizing remain passive. **Text snapshot** keeps the sanitized text view and manual Refresh.
+- Typing `/` or `$` in a Channels message box or Type to agent suggests the addressed agent's skills. Claude Code and Codex have separate skill lists. Member chips and Peek headers show running subagent counts.
+
+- Channels handoff warnings explain blocked, cancelled, stalled, and unfinished work. Details shows the saved report. Ask to review and Review all send scoped review requests with one-use grants that expire after 15 minutes or when the dashboard session changes.
+
+### Changed
+
+- Thread replies stay in their thread. The channel shows the top message, reply count, and latest reply. With one eligible agent, reply without typing `@`. With several agents, choose who receives the reply.
+- Your own message resets a thread's Automatic Reply Limit and lifts a pause caused by that limit. Agent exchanges still pause after ten replies. A manually paused or stopped thread stays that way.
+- Plain channel notes without known agent mentions stay in the channel and make no model call. Embedded mentions use an isolated small-model router to select only the agents addressed. Leading mentions keep their existing addressing rules.
+- The database upgrades in place to schema 7 and keeps names, history, and queued work. Doctor reports pending reminders and warns when their clock is missing.
+- `namedrop channels` is the public command. `namedrop dashboard` remains a hidden compatibility alias.
+
+### Fixed
+
+- Type to agent submits prompts to Codex reliably instead of sometimes leaving an unsent draft.
+- Agents address you as "you".
+- Tailnet Channels sign-ins last seven days across browser restarts. Missing or expired sign-ins show the command to open a fresh HTTPS link.
+- Live Peek shows the whole terminal in tall and wide panes, keeps working with older Herdr builds, and streams through replies after Type to agent.
+- Agent status agrees across member chips, the DM sidebar, and DM and Peek headers. Pending permissions and questions, including those from DMs, show Needs you and clear when dismissed. DM sidebar rows show the alias once.
+- One-time reminders show no repeat count. Shorter times keep the full date and time on hover.
+- An agent's terminal-only answer to a Channels request now appears in the thread or DM, marked **From @name's terminal**, and the conversation is flagged as needing you. A normal Namedrop reply prevents duplicate relay.
+- Live Peek follows the latest output through resizing, avoids blank flashes while Codex streams, and preserves watched history. Unrecoverable lines show a gap marker.
+- Committed channel posts and queued terminal commands continue delivery after the browser receives its response or disconnects. Dashboard update handoffs retain the port and browser session, and schema checks retry bounded SQLite contention.
+- Update checks fetch only Git metadata and version files, avoiding downloads of unrelated repository content and demo videos.
+- Handoff review grants bind to the exact request and committed message. Replaying a request cannot renew a grant or attach it to another message.
+
+Start new agent sessions after updating so they learn the reminder commands and use the updated instructions. Channels remains Beta. Its interface and workflows may change. Live terminal content can contain secrets; remove private text from screenshots and logs before reporting a problem.
+
 ## [1.4.4] - 2026-11-04
 
 ### Fixed

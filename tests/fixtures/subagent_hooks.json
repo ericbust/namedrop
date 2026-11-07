@@ -1,0 +1,135 @@
+{
+  "claude_start_foreground": {
+    "session_id": "04860049-89c4-4f88-9c07-e1adce50b758",
+    "transcript_path": "/home/ebusta/.claude/projects/-tmp-claude-1000--home-ebusta--herdr-worktrees-namedrop-exp-dashboard-a92bdc43-a49c-428a-babe-b95e2d04185e-scratchpad-spike-work/04860049-89c4-4f88-9c07-e1adce50b758.jsonl",
+    "cwd": "/tmp/claude-1000/-home-ebusta--herdr-worktrees-namedrop-exp-dashboard/a92bdc43-a49c-428a-babe-b95e2d04185e/scratchpad/spike/work",
+    "prompt_id": "d8f6e466-22e4-495a-8c77-18eb5b184094",
+    "agent_id": "a9a6420ee6bb17834",
+    "agent_type": "Explore",
+    "hook_event_name": "SubagentStart"
+  },
+  "claude_stop_foreground": {
+    "session_id": "04860049-89c4-4f88-9c07-e1adce50b758",
+    "transcript_path": "/home/ebusta/.claude/projects/-tmp-claude-1000--home-ebusta--herdr-worktrees-namedrop-exp-dashboard-a92bdc43-a49c-428a-babe-b95e2d04185e-scratchpad-spike-work/04860049-89c4-4f88-9c07-e1adce50b758.jsonl",
+    "cwd": "/tmp/claude-1000/-home-ebusta--herdr-worktrees-namedrop-exp-dashboard/a92bdc43-a49c-428a-babe-b95e2d04185e/scratchpad/spike/work",
+    "prompt_id": "d8f6e466-22e4-495a-8c77-18eb5b184094",
+    "permission_mode": "auto",
+    "agent_id": "a9a6420ee6bb17834",
+    "agent_type": "Explore",
+    "effort": {
+      "level": "medium"
+    },
+    "hook_event_name": "SubagentStop",
+    "stop_hook_active": false,
+    "agent_transcript_path": "/home/ebusta/.claude/projects/-tmp-claude-1000--home-ebusta--herdr-worktrees-namedrop-exp-dashboard-a92bdc43-a49c-428a-babe-b95e2d04185e-scratchpad-spike-work/04860049-89c4-4f88-9c07-e1adce50b758/subagents/agent-a9a6420ee6bb17834.jsonl",
+    "background_tasks": [],
+    "session_crons": []
+  },
+  "claude_start_background": {
+    "session_id": "04860049-89c4-4f88-9c07-e1adce50b758",
+    "transcript_path": "/home/ebusta/.claude/projects/-tmp-claude-1000--home-ebusta--herdr-worktrees-namedrop-exp-dashboard-a92bdc43-a49c-428a-babe-b95e2d04185e-scratchpad-spike-work/04860049-89c4-4f88-9c07-e1adce50b758.jsonl",
+    "cwd": "/tmp/claude-1000/-home-ebusta--herdr-worktrees-namedrop-exp-dashboard/a92bdc43-a49c-428a-babe-b95e2d04185e/scratchpad/spike/work",
+    "prompt_id": "d8f6e466-22e4-495a-8c77-18eb5b184094",
+    "agent_id": "a10c37162903ecfe6",
+    "agent_type": "general-purpose",
+    "hook_event_name": "SubagentStart"
+  },
+  "claude_stop_background": {
+    "session_id": "04860049-89c4-4f88-9c07-e1adce50b758",
+    "transcript_path": "/home/ebusta/.claude/projects/-tmp-claude-1000--home-ebusta--herdr-worktrees-namedrop-exp-dashboard-a92bdc43-a49c-428a-babe-b95e2d04185e-scratchpad-spike-work/04860049-89c4-4f88-9c07-e1adce50b758.jsonl",
+    "cwd": "/tmp/claude-1000/-home-ebusta--herdr-worktrees-namedrop-exp-dashboard/a92bdc43-a49c-428a-babe-b95e2d04185e/scratchpad/spike/work",
+    "prompt_id": "d8f6e466-22e4-495a-8c77-18eb5b184094",
+    "permission_mode": "auto",
+    "agent_id": "a10c37162903ecfe6",
+    "agent_type": "general-purpose",
+    "effort": {
+      "level": "medium"
+    },
+    "hook_event_name": "SubagentStop",
+    "stop_hook_active": false,
+    "agent_transcript_path": "/home/ebusta/.claude/projects/-tmp-claude-1000--home-ebusta--herdr-worktrees-namedrop-exp-dashboard-a92bdc43-a49c-428a-babe-b95e2d04185e-scratchpad-spike-work/04860049-89c4-4f88-9c07-e1adce50b758/subagents/agent-a10c37162903ecfe6.jsonl",
+    "background_tasks": [
+      {
+        "id": "a10c37162903ecfe6",
+        "type": "subagent",
+        "status": "running",
+        "description": "say hi",
+        "agent_type": "general-purpose"
+      }
+    ],
+    "session_crons": []
+  },
+  "codex_start": {
+    "session_id": "01a1466d-8ac5-7af0-90da-222669153464",
+    "turn_id": "01a1466d-e44c-7733-98e1-526fcb5b80f5",
+    "transcript_path": "/home/ebusta/.codex/sessions/2026/10/16/rollout-2026-10-16T16-36-09-01a1466d-e42f-7511-b2b8-d48fcb7f158b.jsonl",
+    "cwd": "/tmp/claude-1000/-home-ebusta--herdr-worktrees-namedrop-exp-dashboard/a92bdc43-a49c-428a-babe-b95e2d04185e/scratchpad/spike/cwork",
+    "hook_event_name": "SubagentStart",
+    "model": "gpt-6.1-sol",
+    "permission_mode": "default",
+    "agent_id": "01a1466d-e42f-7511-b2b8-d48fcb7f158b",
+    "agent_type": "default"
+  },
+  "codex_stop": {
+    "session_id": "01a1466d-8ac5-7af0-90da-222669153464",
+    "turn_id": "01a1466d-e44c-7733-98e1-526fcb5b80f5",
+    "transcript_path": "/home/ebusta/.codex/sessions/2026/10/16/rollout-2026-10-16T16-35-46-01a1466d-8ac5-7af0-90da-222669153464.jsonl",
+    "agent_transcript_path": "/home/ebusta/.codex/sessions/2026/10/16/rollout-2026-10-16T16-36-09-01a1466d-e42f-7511-b2b8-d48fcb7f158b.jsonl",
+    "cwd": "/tmp/claude-1000/-home-ebusta--herdr-worktrees-namedrop-exp-dashboard/a92bdc43-a49c-428a-babe-b95e2d04185e/scratchpad/spike/cwork",
+    "hook_event_name": "SubagentStop",
+    "model": "gpt-6.1-sol",
+    "permission_mode": "default",
+    "stop_hook_active": false,
+    "agent_id": "01a1466d-e42f-7511-b2b8-d48fcb7f158b",
+    "agent_type": "default",
+    "last_assistant_message": "hi"
+  },
+  "codex_child_rollout_first_line": {
+    "timestamp": "2026-10-16T20:36:09.427Z",
+    "ordinal": 0,
+    "type": "session_meta",
+    "payload": {
+      "session_id": "01a1466d-8ac5-7af0-90da-222669153464",
+      "id": "01a1466d-e42f-7511-b2b8-d48fcb7f158b",
+      "parent_thread_id": "01a1466d-8ac5-7af0-90da-222669153464",
+      "timestamp": "2026-10-16T20:36:09.395Z",
+      "cwd": "/tmp/claude-1000/-home-ebusta--herdr-worktrees-namedrop-exp-dashboard/a92bdc43-a49c-428a-babe-b95e2d04185e/scratchpad/spike/cwork",
+      "runtime_workspace_roots": [
+        "/tmp/claude-1000/-home-ebusta--herdr-worktrees-namedrop-exp-dashboard/a92bdc43-a49c-428a-babe-b95e2d04185e/scratchpad/spike/cwork"
+      ],
+      "originator": "codex-tui",
+      "cli_version": "0.162.1",
+      "source": {
+        "subagent": {
+          "thread_spawn": {
+            "parent_thread_id": "01a1466d-8ac5-7af0-90da-222669153464",
+            "depth": 1,
+            "agent_path": "/root/say_hi",
+            "agent_nickname": "Aristotle",
+            "agent_role": null
+          }
+        }
+      },
+      "thread_source": "subagent",
+      "agent_nickname": "Aristotle",
+      "agent_path": "/root/say_hi",
+      "model_provider": "openai",
+      "base_instructions": {
+        "text": "(trimmed)"
+      },
+      "history_mode": "paginated",
+      "multi_agent_version": "v2",
+      "context_window": {
+        "window_id": "01a1466d-e42f-7511-b2b8-d49aac56f06c"
+      }
+    }
+  },
+  "claude_meta_foreground": {
+    "agentType": "Explore",
+    "description": "list files",
+    "toolUseId": "toolu_0177kqrQboyfvi1eyB9dM25C",
+    "spawnDepth": 1,
+    "requestShape": "foreground",
+    "requestNonInteractive": true
+  }
+}

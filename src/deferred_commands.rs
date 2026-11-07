@@ -23,11 +23,17 @@ enum Operation {
     Ack,
     Complete,
     AddressList,
+    ReminderSet,
+    ReminderList,
+    ReminderCancel,
 }
 
 impl Operation {
     fn parse(token: &str) -> Option<Self> {
         match token {
+            "reminder.set" => Some(Self::ReminderSet),
+            "reminder.list" => Some(Self::ReminderList),
+            "reminder.cancel" => Some(Self::ReminderCancel),
             "send" => Some(Self::Send),
             "reply" => Some(Self::Reply),
             "ack" => Some(Self::Ack),
@@ -39,6 +45,9 @@ impl Operation {
 
     fn token(self) -> &'static str {
         match self {
+            Self::ReminderSet => "reminder.set",
+            Self::ReminderList => "reminder.list",
+            Self::ReminderCancel => "reminder.cancel",
             Self::Send => "send",
             Self::Reply => "reply",
             Self::Ack => "ack",
@@ -160,11 +169,34 @@ fn required<'a>(input: &'a Value, field: &str) -> Result<&'a str, String> {
 impl Request {
     fn new(
         operation: Operation,
-        input: Value,
+        mut input: Value,
         caller: Caller,
         cwd: PathBuf,
     ) -> Result<Self, String> {
+        if operation == Operation::ReminderSet && input.get("request_id").is_none() {
+            let identity = hash(
+                &serde_json::to_vec(&(&caller.namespace, &caller.session, &input))
+                    .map_err(|e| e.to_string())?,
+            );
+            input
+                .as_object_mut()
+                .ok_or("reminder input must be an object")?
+                .insert(
+                    "request_id".into(),
+                    json!(format!("deferred-reminder-{identity}")),
+                );
+        }
         match operation {
+            Operation::ReminderSet => {
+                crate::reminder::validate_input(input.clone())?;
+            }
+            Operation::ReminderList if input != json!({}) => {
+                return Err("reminder.list takes no fields".into());
+            }
+            Operation::ReminderList => {}
+            Operation::ReminderCancel => {
+                required(&input, "reminder_id")?;
+            }
             Operation::Send | Operation::Reply => {
                 crate::validate_message_input(operation.token(), input.clone())?;
                 if input["author_kind"] != "agent_session" {
@@ -191,6 +223,9 @@ impl Request {
         let request_id = match operation {
             Operation::Send | Operation::Reply => required(&input, "request_id")?.to_owned(),
             Operation::Ack | Operation::Complete => required(&input, "attempt_id")?.to_owned(),
+            Operation::ReminderSet => required(&input, "request_id")?.to_owned(),
+            Operation::ReminderCancel => required(&input, "reminder_id")?.to_owned(),
+            Operation::ReminderList => ProcessIds::default().next_id("reminder-list"),
             Operation::AddressList => ProcessIds::default().next_id("roster"),
         };
         let family = match operation {
@@ -229,7 +264,10 @@ impl Request {
             self.cwd.clone(),
         )?;
         if rebuilt.fingerprint != self.fingerprint
-            || (self.operation != Operation::AddressList && rebuilt.key != self.key)
+            || (!matches!(
+                self.operation,
+                Operation::AddressList | Operation::ReminderList
+            ) && rebuilt.key != self.key)
         {
             return Err("deferred command content changed".into());
         }
@@ -499,7 +537,7 @@ pub fn execute_queued(
     if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("invalid deferred operation id".into());
     }
-    let _guard = crate::runtime_command_guard(state)?;
+    let _guard = crate::runtime_command_guard(state, None)?;
     reexec_if_updated(state)?;
     let directory = directory(state, socket)?;
     let pending = pending_directory(&directory)?;
@@ -605,6 +643,14 @@ fn execute_request(state: &Path, request: &Request) -> Result<Value, String> {
         ..runtime
     };
     match request.operation {
+        Operation::ReminderSet | Operation::ReminderList | Operation::ReminderCancel => {
+            crate::reminder::execute_with_caller(
+                request.operation.token(),
+                request.input.clone(),
+                &runtime,
+                Some(&request.caller),
+            )
+        }
         Operation::Send | Operation::Reply => {
             crate::message::execute_message_operation_with_caller(
                 request.operation.token(),
@@ -685,7 +731,39 @@ fn recover_committed<E: crate::HerdrCommandExecutor, C: Clock, I: IdGenerator>(
             }
             Ok(Some(result))
         }
-        Operation::AddressList => Ok(None),
+        Operation::ReminderSet => {
+            let fingerprint = serde_json::to_string(&request.input).map_err(|e| e.to_string())?;
+            let recovered = StateStore::open(runtime.state_directory)
+                .map_err(|e| e.to_string())?
+                .transaction(|tx| {
+                    tx.replay_reminder(
+                        &request.caller.namespace,
+                        &request.caller.session,
+                        required(&request.input, "request_id")
+                            .map_err(StoreError::invalid_input)?,
+                        &fingerprint,
+                    )
+                })
+                .map_err(|e| e.to_string())?;
+            if recovered.is_some() {
+                let _ = crate::reminder::ensure_clock(
+                    runtime.state_directory,
+                    Some(runtime.session_socket_id),
+                );
+            }
+            Ok(recovered.map(|r| json!(r)))
+        }
+        Operation::ReminderCancel => StateStore::open(runtime.state_directory)
+            .map_err(|e| e.to_string())?
+            .transaction(|tx| {
+                tx.recover_reminder_cancel(
+                    &request.caller.namespace,
+                    &request.caller.session,
+                    required(&request.input, "reminder_id").map_err(StoreError::invalid_input)?,
+                )
+            })
+            .map_err(|e| e.to_string()),
+        Operation::AddressList | Operation::ReminderList => Ok(None),
     }
 }
 

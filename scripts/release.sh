@@ -13,8 +13,8 @@ lock_version() { awk -F '"' '$0 == "name = \"namedrop\"" {found=1; next} found &
 
 release_version() {
   version=$(package_version < "$namedrop_root/Cargo.toml")
-  printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' ||
-    fail "Cargo.toml version '$version' is not MAJOR.MINOR.PATCH."
+  valid_version "$version" ||
+    fail "Cargo.toml version '$version' is not MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-exp.N."
   manifest=$(package_version < "$namedrop_root/herdr-plugin.toml")
   [ "$manifest" = "$version" ] ||
     fail "herdr-plugin.toml has version '$manifest' but Cargo.toml has '$version'. Set the same version in both."
@@ -24,12 +24,22 @@ release_version() {
   printf '%s\n' "$version"
 }
 
-# Prints 1 when $1 is a higher MAJOR.MINOR.PATCH than $2, otherwise 0.
+valid_version() {
+  printf '%s\n' "$1" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-exp\.(0|[1-9][0-9]*))?$'
+}
+
+# Prints 1 when $1 is a higher release version than $2, otherwise 0.
 version_above() {
   printf '%s %s\n' "$1" "$2" | awk '{
-    split($1, a, "."); split($2, b, ".")
-    for (i = 1; i <= 3; i++) if (a[i] + 0 != b[i] + 0) { print (a[i] + 0 > b[i] + 0) ? 1 : 0; exit }
-    print 0
+    split($1, left, "-exp\\."); split($2, right, "-exp\\.")
+    split(left[1], a, "."); split(right[1], b, ".")
+    for (i = 1; i <= 3; i++) {
+      if (length(a[i]) != length(b[i])) { print (length(a[i]) > length(b[i]) ? 1 : 0); exit }
+      if (("x" a[i]) != ("x" b[i])) { print (("x" a[i]) > ("x" b[i]) ? 1 : 0); exit }
+    }
+    if (left[2] == "" || right[2] == "") { print (right[2] != "" ? 1 : 0); exit }
+    if (length(left[2]) != length(right[2])) { print (length(left[2]) > length(right[2]) ? 1 : 0); exit }
+    print (left[2] != right[2] && ("x" left[2]) > ("x" right[2]) ? 1 : 0)
   }'
 }
 
@@ -56,9 +66,14 @@ case "$1" in
     [ "$#" -eq 2 ] || { usage >&2; exit 64; }
     base=$2
     version=$(release_version)
+    case "${base##*/}:$version" in
+      main:*-exp.*)
+        fail "Experimental version $version cannot be released to main. Choose a stable version for main in Cargo.toml, herdr-plugin.toml and Cargo.lock." ;;
+    esac
     base_toml=$(git -C "$namedrop_root" show "$base:Cargo.toml" 2>/dev/null) ||
       fail "Can't read Cargo.toml at '$base'. Fetch the base branch with full history first."
     base_version=$(printf '%s\n' "$base_toml" | package_version)
+    valid_version "$base_version" || fail "Cargo.toml at '$base' has invalid version '$base_version'."
     [ "$(version_above "$version" "$base_version")" = 1 ] ||
       fail "Version $version is not above $base_version on $base. Every merge to main is a release." \
         "Raise the version in Cargo.toml, herdr-plugin.toml and Cargo.lock (see docs/releasing.md#choose-the-version)." \

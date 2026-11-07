@@ -53,21 +53,39 @@ pub(crate) fn settings() -> Result<bool, String> {
     read_json::<Settings>(&path).map(|settings| settings.check_for_updates)
 }
 
-fn version(value: &str) -> Option<[u64; 3]> {
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Version {
+    core: [u64; 3],
+    release: Release,
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Release {
+    Experimental(u64),
+    Stable,
+}
+
+fn version(value: &str) -> Option<Version> {
+    fn number(part: &str) -> Option<u64> {
+        (!part.is_empty()
+            && part.bytes().all(|byte| byte.is_ascii_digit())
+            && (part.len() == 1 || !part.starts_with('0')))
+        .then(|| part.parse().ok())
+        .flatten()
+    }
+
     if value.len() > 32 {
         return None;
     }
-    let parts = value
-        .split('.')
-        .map(|part| {
-            (!part.is_empty()
-                && part.bytes().all(|byte| byte.is_ascii_digit())
-                && (part.len() == 1 || !part.starts_with('0')))
-            .then(|| part.parse().ok())
-            .flatten()
-        })
-        .collect::<Option<Vec<_>>>()?;
-    parts.try_into().ok()
+    let (core, release) = match value.split_once("-exp.") {
+        Some((core, serial)) => (core, Release::Experimental(number(serial)?)),
+        None => (value, Release::Stable),
+    };
+    let parts = core.split('.').map(number).collect::<Option<Vec<_>>>()?;
+    Some(Version {
+        core: parts.try_into().ok()?,
+        release,
+    })
 }
 
 #[derive(Deserialize)]
@@ -202,6 +220,42 @@ pub fn session_notice(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn experimental_versions_are_valid_and_ordered() {
+        assert!(
+            super::version("1.5.0-exp.1").is_some(),
+            "experimental version must parse"
+        );
+        for (older, newer) in [
+            ("1.5.0-exp.1", "1.5.0-exp.2"),
+            ("1.5.0-exp.2", "1.5.0-exp.10"),
+            ("1.5.0-exp.10", "1.5.0"),
+            ("1.5.0", "1.5.1-exp.0"),
+        ] {
+            assert!(
+                super::version(older).expect("valid older version")
+                    < super::version(newer).expect("valid newer version"),
+                "{older} < {newer}"
+            );
+        }
+    }
+
+    #[test]
+    fn experimental_versions_reject_invalid_identifiers() {
+        for value in [
+            "1.5.0-exp.",
+            "1.5.0-exp.01",
+            "1.5.0-exp.-1",
+            "1.5.0-exp.18446744073709551616",
+            "1.5.0-exp.1.extra",
+            "1.5.0-exp.1+build",
+            "1.5.0-exp.1\n",
+            "1.5.0-exp.$(id)",
+        ] {
+            assert!(super::version(value).is_none(), "{value}");
+        }
+    }
+
     #[test]
     fn version_order_follows_numeric_semver_components() {
         assert!(super::version("1.10.0") > super::version("1.9.0"));
