@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/dispatch.rs"]
+mod dispatch;
 
 use namedrop::*;
 use serde_json::{Value, json};
@@ -190,7 +192,7 @@ impl Fixture {
             .unwrap()
     }
     fn message(&self, pane: &str, op: &str, input: Value) -> Result<Value, String> {
-        execute_message_operation(op, input, &self.runtime(pane))
+        dispatch::message(op, input, &self.runtime(pane))
     }
     fn send(&self, id: &Value, key: &str, source: &str) -> Value {
         self.message("lead","send",json!({"request_id":key,"source":source,"author_kind":"agent_session","coordination_id":id})).unwrap()
@@ -210,7 +212,7 @@ impl Fixture {
             .unwrap()
     }
     fn complete(&self, message: &Value, pane: &str) {
-        execute_integration_operation(
+        dispatch::integration(
             "complete",
             json!({"attempt_id":self.attempt(message,pane)}),
             &self.runtime(pane),
@@ -228,7 +230,7 @@ impl Fixture {
                 return;
             }
             for e in envelopes {
-                execute_integration_operation(
+                dispatch::integration(
                     "complete",
                     json!({"attempt_id":e["control"]["attempt_id"]}),
                     &self.runtime(pane),

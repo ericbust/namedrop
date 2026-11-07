@@ -1,12 +1,13 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/dispatch.rs"]
+mod dispatch;
 
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
     IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
     PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
-    execute_handoff_operation, execute_integration_operation, execute_message_operation,
-    issue_registration_challenge,
+    execute_handoff_operation, execute_integration_operation, issue_registration_challenge,
 };
 use std::{
     fs,
@@ -357,7 +358,7 @@ fn terminal_command_returns_exit_output_once_and_waits_for_shell() {
     )
     .unwrap();
     *herdr.shell_ready.lock().unwrap() = false;
-    let sent=execute_message_operation("send",serde_json::json!({"request_id":"terminal-request","source":"@build printf 'hello'; printf 'problem' >&2; exit 7","author_kind":"agent_session"}),&source).unwrap();
+    let sent=dispatch::message("send",serde_json::json!({"request_id":"terminal-request","source":"@build printf 'hello'; printf 'problem' >&2; exit 7","author_kind":"agent_session"}),&source).unwrap();
     assert!(herdr.terminal_runs.lock().unwrap().is_empty());
     assert!(
         namedrop::execute_lifecycle_operation(
@@ -448,7 +449,7 @@ fn joined_results_do_not_block_a_source_converted_to_terminal() {
         &terminal,
     )
     .unwrap();
-    let sent=execute_message_operation("send",serde_json::json!({"request_id":"group-conversion","source":"@build @researcher true","author_kind":"agent_session"}),&source).unwrap();
+    let sent=dispatch::message("send",serde_json::json!({"request_id":"group-conversion","source":"@build @researcher true","author_kind":"agent_session"}),&source).unwrap();
     namedrop::execute_lifecycle_operation(
         "name",
         serde_json::json!({"alias":"source","pane_type":"terminal"}),
@@ -458,7 +459,7 @@ fn joined_results_do_not_block_a_source_converted_to_terminal() {
     let run = herdr.terminal_runs.lock().unwrap().last().unwrap().clone();
     namedrop::execute_terminal(run.split('\'').rev().nth(1).unwrap(), &terminal).unwrap();
     let envelope = herdr.prompt_for_pane("pane-researcher");
-    execute_integration_operation(
+    dispatch::integration(
         "complete",
         serde_json::json!({"attempt_id":envelope["control"]["attempt_id"]}),
         &researcher,
@@ -490,19 +491,20 @@ fn terminal_results_do_not_block_a_source_converted_to_terminal() {
         &terminal,
     )
     .unwrap();
-    let sent = execute_message_operation(
+    namedrop::execute_message_operation(
         "send",
         serde_json::json!({"request_id":"conversion","source":"@build true"}),
         &source,
     )
     .unwrap();
+    let sent_drain = namedrop::drain_mailboxes(&source).unwrap();
     namedrop::execute_lifecycle_operation(
         "name",
         serde_json::json!({"alias":"source","pane_type":"terminal"}),
         &source,
     )
     .unwrap();
-    let attempt = sent["drain"]["submitted"][0].as_str().unwrap();
+    let attempt = sent_drain.submitted[0].as_str();
     assert_eq!(namedrop::execute_terminal(attempt, &terminal).unwrap(), 0);
     let drain = namedrop::drain_mailboxes(&source).unwrap();
     assert!(
@@ -511,15 +513,15 @@ fn terminal_results_do_not_block_a_source_converted_to_terminal() {
             && drain.terminal_waiting.is_empty()
     );
     // Sending from an already marked terminal is also accepted and cannot poison its mailbox.
-    let sent = execute_message_operation(
+    namedrop::execute_message_operation(
         "send",
         serde_json::json!({"request_id":"terminal-origin","source":"@build true"}),
         &source,
     )
     .unwrap();
+    let sent_drain = namedrop::drain_mailboxes(&source).unwrap();
     assert_eq!(
-        namedrop::execute_terminal(sent["drain"]["submitted"][0].as_str().unwrap(), &terminal)
-            .unwrap(),
+        namedrop::execute_terminal(sent_drain.submitted[0].as_str(), &terminal).unwrap(),
         0
     );
     assert!(
@@ -538,7 +540,7 @@ fn status_reports_only_the_calling_sessions_outstanding_handoffs_without_writes(
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     register("address-source", &source);
-    let sent = execute_message_operation(
+    let sent = dispatch::message(
         "send",
         serde_json::json!({
             "request_id": "status-request", "source": "@reviewer Please inspect this.",
@@ -625,11 +627,11 @@ fn partial_results_leave_the_final_join_pending_and_report_each_terminal_outcome
     ] {
         register(id, rt);
     }
-    let sent = execute_message_operation("send", serde_json::json!({
+    let sent = dispatch::message("send", serde_json::json!({
         "request_id":"partial-request", "source":"@reviewer @researcher Inspect this.", "author_kind":"agent_session"
     }), &source).unwrap();
     let envelope = herdr.prompt_for_pane("pane-reviewer");
-    execute_message_operation("reply", serde_json::json!({
+    dispatch::message("reply", serde_json::json!({
         "request_id":"partial-reply", "source":"@source Found a missing case.", "author_kind":"agent_session",
         "in_reply_to":sent["message_id"], "attempt_id":envelope["control"]["attempt_id"]
     }), &reviewer).unwrap();
@@ -657,14 +659,14 @@ fn partial_results_leave_the_final_join_pending_and_report_each_terminal_outcome
     assert_eq!(partial["completed"], 1);
     assert_eq!(partial["expected"], 2);
     let returned = herdr.prompt_for_pane("pane-source");
-    execute_integration_operation(
+    dispatch::integration(
         "complete",
         serde_json::json!({"attempt_id":returned["control"]["attempt_id"]}),
         &source,
     )
     .unwrap();
     let pending = herdr.prompt_for_pane("pane-researcher");
-    execute_integration_operation(
+    dispatch::integration(
         "complete",
         serde_json::json!({"attempt_id":pending["control"]["attempt_id"]}),
         &researcher,
@@ -710,7 +712,7 @@ fn early_one_and_two_result_reads_preserve_reply_fifo_and_final_answer_instructi
         register(id, rt);
     }
     *herdr.source_working.lock().unwrap() = true;
-    let sent = execute_message_operation("send", serde_json::json!({
+    let sent = dispatch::message("send", serde_json::json!({
         "request_id":"early-polls", "source":"@reviewer @researcher Propose five ideas each; I will rank all ten.",
         "author_kind":"agent_session"
     }), &source).unwrap();
@@ -723,7 +725,7 @@ fn early_one_and_two_result_reads_preserve_reply_fifo_and_final_answer_instructi
     .enumerate()
     {
         let envelope = herdr.prompt_for_pane(pane);
-        let reply = execute_message_operation(
+        let reply = dispatch::message(
             "reply",
             serde_json::json!({
                 "request_id":format!("early-reply-{index}"), "source":format!("@source {body}"),
@@ -772,7 +774,7 @@ fn early_one_and_two_result_reads_preserve_reply_fifo_and_final_answer_instructi
         assert_eq!(reply["control"]["message_id"], reply_id);
         assert_eq!(reply["control"]["reply_mode"], "agent_thread");
         assert!(reply["control"]["result_set"].is_null());
-        execute_integration_operation(
+        dispatch::integration(
             "complete",
             serde_json::json!({"attempt_id":reply["control"]["attempt_id"]}),
             &source,
@@ -807,7 +809,7 @@ fn early_one_and_two_result_reads_preserve_reply_fifo_and_final_answer_instructi
     let operations = joined["control"]["tool"]["operations"].as_array().unwrap();
     assert_eq!(operations.len(), 1);
     assert_eq!(operations[0]["token"], "complete.no-reply");
-    execute_integration_operation("complete", operations[0]["input"].clone(), &source).unwrap();
+    dispatch::integration("complete", operations[0]["input"].clone(), &source).unwrap();
     namedrop::drain_mailboxes(&source).unwrap();
     let inbox =
         execute_integration_operation("delivery.inbox", serde_json::json!({}), &source).unwrap();
@@ -837,7 +839,7 @@ fn groups_expand_atomically_and_replay_keeps_the_original_members() {
     )
     .unwrap();
     let input = serde_json::json!({"request_id":"group-send", "source":"@review-team @reviewer Inspect this.", "author_kind":"agent_session"});
-    let first = execute_message_operation("send", input.clone(), &source).unwrap();
+    let first = dispatch::message("send", input.clone(), &source).unwrap();
     assert_eq!(
         first["recipients"],
         serde_json::json!([
@@ -851,7 +853,7 @@ fn groups_expand_atomically_and_replay_keeps_the_original_members() {
         &source,
     )
     .unwrap();
-    let replay = execute_message_operation("send", input, &source).unwrap();
+    let replay = dispatch::message("send", input, &source).unwrap();
     assert_eq!(replay["message_id"], first["message_id"]);
     assert_eq!(replay["recipients"], first["recipients"]);
     namedrop::execute_group_operation(
@@ -860,7 +862,7 @@ fn groups_expand_atomically_and_replay_keeps_the_original_members() {
         &source,
     )
     .unwrap();
-    let replay = execute_message_operation("send", serde_json::json!({"request_id":"group-send", "source":"@review-team @reviewer Inspect this.", "author_kind":"agent_session"}), &source).unwrap();
+    let replay = dispatch::message("send", serde_json::json!({"request_id":"group-send", "source":"@review-team @reviewer Inspect this.", "author_kind":"agent_session"}), &source).unwrap();
     assert_eq!(replay["recipients"], first["recipients"]);
 }
 
@@ -1061,13 +1063,13 @@ fn returned_reviews_report_fresh_stale_and_unknown_against_the_captured_files() 
         "new untracked evidence\n",
     )
     .unwrap();
-    let sent = execute_message_operation("send",serde_json::json!({
+    let sent = dispatch::message("send",serde_json::json!({
         "request_id":"freshness", "source":"@reviewer Review these changes.","author_kind":"agent_session",
         "context":{"snapshot":{"objective":"Review changes","applicable_user_instructions":[],"decisions":[],"completed_work":[],"current_work":[],"blockers":[],
         "evidence":[{"kind":"diff","locator":"src/notes.txt"},{"kind":"diff","locator":"src/new.txt"}]}}
     }),&source).unwrap();
     let delivered = herdr.prompt_for_pane("pane-reviewer");
-    execute_message_operation("reply",serde_json::json!({"request_id":"freshness-reply","source":"@source Review complete.","author_kind":"agent_session","in_reply_to":sent["message_id"],"attempt_id":delivered["control"]["attempt_id"]}),&reviewer).unwrap();
+    dispatch::message("reply",serde_json::json!({"request_id":"freshness-reply","source":"@source Review complete.","author_kind":"agent_session","in_reply_to":sent["message_id"],"attempt_id":delivered["control"]["attempt_id"]}),&reviewer).unwrap();
     let input = serde_json::json!({"message_id":sent["message_id"]});
     let result = execute_handoff_operation("handoff.results", input.clone(), &source).unwrap();
     assert_eq!(result["recipients"][0]["freshness"]["status"], "fresh");
@@ -1141,7 +1143,7 @@ fn invalid_groups_are_atomic_aliases_are_exclusive_and_members_follow_renames() 
         &source,
     )
     .unwrap();
-    let sent = execute_message_operation(
+    let sent = dispatch::message(
         "send",
         serde_json::json!({"request_id":"renamed-member","source":"@team Inspect this."}),
         &source,
@@ -1167,7 +1169,7 @@ fn a_schema_one_upgrade_preserves_existing_requests_and_replays() {
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let input =
         serde_json::json!({"request_id":"before-upgrade","source":"@reviewer Keep this request."});
-    let before = execute_message_operation("send", input.clone(), &source).unwrap();
+    let before = dispatch::message("send", input.clone(), &source).unwrap();
     // Remove the additive v2/v3/v4 schema to reproduce an installed v1 database.
     let db = rusqlite::Connection::open(directory.state.join("namedrop.sqlite3")).unwrap();
     db.execute_batch("DROP TABLE reminder_fires; DROP TABLE reminders; DROP VIEW delivery_seats; DROP TABLE bridged_threads; DROP TABLE bridged_messages; DROP TABLE space_envoys; DROP TABLE coordination_links; DROP TABLE coordination_assignments; DROP TABLE coordinations; DROP TRIGGER group_alias_conflict; DROP TRIGGER agent_alias_group_conflict; DROP TABLE mention_group_members; DROP TABLE mention_groups; DROP TABLE terminal_executions; ALTER TABLE pane_addresses DROP COLUMN pane_type; ALTER TABLE pane_addresses DROP COLUMN remote_commands_terminal_id; ALTER TABLE pane_addresses DROP COLUMN persona; PRAGMA user_version=1;").unwrap();
@@ -1178,7 +1180,7 @@ fn a_schema_one_upgrade_preserves_existing_requests_and_replays() {
         &source,
     )
     .unwrap();
-    let replay = execute_message_operation("send", input, &source).unwrap();
+    let replay = dispatch::message("send", input, &source).unwrap();
     assert_eq!(replay["message_id"], before["message_id"]);
     assert_eq!(replay["deliveries"], before["deliveries"]);
     assert_eq!(
@@ -1202,7 +1204,7 @@ fn held_work_needs_attention_and_reads_cannot_recover_or_cancel_it() {
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
     register("address-source", &source);
     register("address-reviewer", &reviewer);
-    let sent=execute_message_operation("send",serde_json::json!({"request_id":"held","source":"@reviewer Inspect this.","author_kind":"agent_session"}),&source).unwrap();
+    let sent=dispatch::message("send",serde_json::json!({"request_id":"held","source":"@reviewer Inspect this.","author_kind":"agent_session"}),&source).unwrap();
     let delivered = herdr.prompt_for_pane("pane-reviewer");
     let attempt =
         namedrop::DeliveryAttemptId::new(delivered["control"]["attempt_id"].as_str().unwrap());
@@ -1255,7 +1257,7 @@ fn stale_sessions_cannot_read_results_or_preview_and_status_pages_are_complete()
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     register("address-source", &source);
     for id in ["first", "second"] {
-        execute_message_operation("send",serde_json::json!({"request_id":id,"source":"@reviewer Inspect this.","author_kind":"agent_session"}),&source).unwrap();
+        dispatch::message("send",serde_json::json!({"request_id":id,"source":"@reviewer Inspect this.","author_kind":"agent_session"}),&source).unwrap();
     }
     let first =
         execute_handoff_operation("handoff.status", serde_json::json!({"limit":1}), &source)
@@ -1354,10 +1356,10 @@ fn freshness_handles_directories_and_protected_paths_without_running_custom_filt
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
     register("address-source", &source);
     register("address-reviewer", &reviewer);
-    let sent=execute_message_operation("send",serde_json::json!({"request_id":"directory-review","source":"@reviewer Review source files.","author_kind":"agent_session",
+    let sent=dispatch::message("send",serde_json::json!({"request_id":"directory-review","source":"@reviewer Review source files.","author_kind":"agent_session",
       "context":{"snapshot":{"objective":"Review source","applicable_user_instructions":[],"decisions":[],"completed_work":[],"current_work":[],"blockers":[],"evidence":[{"kind":"diff","locator":"src"}]}}}),&source).unwrap();
     let delivered = herdr.prompt_for_pane("pane-reviewer");
-    execute_message_operation("reply",serde_json::json!({"request_id":"directory-reply","source":"@source Done.","author_kind":"agent_session","in_reply_to":sent["message_id"],"attempt_id":delivered["control"]["attempt_id"]}),&reviewer).unwrap();
+    dispatch::message("reply",serde_json::json!({"request_id":"directory-reply","source":"@source Done.","author_kind":"agent_session","in_reply_to":sent["message_id"],"attempt_id":delivered["control"]["attempt_id"]}),&reviewer).unwrap();
     let input = serde_json::json!({"message_id":sent["message_id"]});
     assert_eq!(
         execute_handoff_operation("handoff.results", input.clone(), &source).unwrap()["recipients"]
@@ -1760,7 +1762,7 @@ fn context_capture_pins_the_spaces_worktree_not_the_calling_directory() {
         ..runtime(&directory, &herdr, &ids, "pane-source")
     };
     let pins_before = pin_refs(&directory.repo).len();
-    execute_message_operation(
+    dispatch::message(
         "send",
         path_review_input("unrelated-review", "src/notes.txt"),
         &elsewhere,
@@ -1814,7 +1816,7 @@ fn a_space_without_a_worktree_refuses_to_capture_context() {
         let mut input = path_review_input("detached-review", "src/notes.txt");
         input["context"]["capture_git_state"] = serde_json::json!(capture);
         input["context"]["snapshot"]["evidence"] = evidence;
-        let refused = execute_message_operation("send", input.clone(), &detached).unwrap_err();
+        let refused = dispatch::message("send", input.clone(), &detached).unwrap_err();
         assert!(refused.contains("no attached Git Worktree"), "{refused}");
         let previewed = execute_handoff_operation(
             "handoff.preview",
@@ -1832,7 +1834,7 @@ fn a_space_without_a_worktree_refuses_to_capture_context() {
     input["context"]["capture_git_state"] = serde_json::json!(false);
     input["context"]["snapshot"]["evidence"] = serde_json::json!([]);
     input["context"]["checkout"] = serde_json::json!({"path": worker});
-    let refused = execute_message_operation("send", input, &detached).unwrap_err();
+    let refused = dispatch::message("send", input, &detached).unwrap_err();
     assert!(refused.contains("no attached Git Worktree"), "{refused}");
     assert!(
         context_pin_refs(&directory).is_empty(),
@@ -1840,7 +1842,7 @@ fn a_space_without_a_worktree_refuses_to_capture_context() {
     );
     // The same send succeeds once the Space's Worktree is attached again.
     *herdr.no_worktree.lock().unwrap() = false;
-    execute_message_operation(
+    dispatch::message(
         "send",
         path_review_input("attached-review", "src/notes.txt"),
         &detached,
@@ -1891,10 +1893,10 @@ fn root_independent_context_can_be_previewed_sent_and_replied_without_a_worktree
             "Review our decisions"
         );
         assert!(preview["context"]["snapshot"]["git_state"].is_null());
-        let sent = execute_message_operation("send", input.clone(), &detached).unwrap();
+        let sent = dispatch::message("send", input.clone(), &detached).unwrap();
         assert_eq!(sent["context_grants"][0]["state"], "active");
         let envelope = herdr.prompt_for_pane("pane-reviewer");
-        let replied = execute_message_operation(
+        let replied = dispatch::message(
             "reply",
             serde_json::json!({
                 "request_id":format!("reply-{request}"),
@@ -1957,9 +1959,9 @@ fn returned_review(
     input: serde_json::Value,
 ) -> serde_json::Value {
     let reply_id = format!("{}-reply", input["request_id"].as_str().unwrap());
-    let sent = execute_message_operation("send", input, source).unwrap();
+    let sent = dispatch::message("send", input, source).unwrap();
     let delivered = herdr.prompt_for_pane("pane-reviewer");
-    execute_message_operation(
+    dispatch::message(
         "reply",
         serde_json::json!({
             "request_id":reply_id, "source":"@source Done.", "author_kind":"agent_session",
@@ -2396,7 +2398,7 @@ fn state_worth_preserving(
         &source,
     )
     .unwrap();
-    execute_message_operation(
+    dispatch::message(
         "send",
         serde_json::json!({
             "request_id": "before-maintenance",
@@ -2421,7 +2423,7 @@ fn state_worth_preserving(
         })
         .unwrap();
     // A second request must wait behind the hold rather than be retried.
-    execute_message_operation(
+    dispatch::message(
         "send",
         serde_json::json!({
             "request_id": "queued-behind-the-hold",

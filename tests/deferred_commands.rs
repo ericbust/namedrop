@@ -476,6 +476,7 @@ fn denied_socket_queues_before_mutation_and_restarts_recover_one_logical_command
     let result = response(fixture.sandbox_command(&["send"], input.clone()));
     assert!(result["data"]["message_id"].is_string(), "{result}");
     assert_eq!(result["data"]["dispatch"], "scheduled", "{result}");
+    assert!(result["data"].get("drain").is_none(), "{result}");
     assert_eq!(fixture.message_count(), 1);
     let agent =
         response(fixture.sandbox_command_with_read_only_state(&["send"], input.clone(), false));

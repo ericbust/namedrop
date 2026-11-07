@@ -1118,7 +1118,7 @@ where
         .current_pane_id
         .ok_or_else(|| format!("the current Herdr pane is required for {operation}"))?;
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
-    let mut result = store
+    store
         .transaction(|transaction| {
             if let Some(caller) = caller {
                 caller.check(transaction, &namespace)?;
@@ -1163,11 +1163,7 @@ where
                 _ => unreachable!("operation was validated"),
             }
         })
-        .map_err(|error| error.to_string())?;
-    if operation == "complete" {
-        result["drain"] = crate::drain_receipt(runtime);
-    }
-    Ok(result)
+        .map_err(|error| error.to_string())
 }
 
 /// The exact Agent Session authorized to act on this pane's Delivery Attempts:

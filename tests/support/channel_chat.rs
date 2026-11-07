@@ -478,13 +478,17 @@ pub(super) fn agent_reply(
     source: &str,
 ) -> Result<Value, String> {
     let attempt = reply_attempt(f, parent, pane, request);
-    namedrop::execute_message_operation(
+    let replied = namedrop::execute_message_operation(
         "reply",
         json!({
             "request_id":request, "source":source, "in_reply_to": parent["message_id"], "author_kind":"agent_session", "attempt_id":attempt
         }),
         &f.runtime("w1", pane),
-    )
+    );
+    if replied.is_ok() {
+        f.wake("w1");
+    }
+    replied
 }
 
 pub(super) fn plain_root(f: &Fixture, request: &str, source: &str) -> Value {

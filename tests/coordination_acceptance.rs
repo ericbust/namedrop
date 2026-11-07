@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/dispatch.rs"]
+mod dispatch;
 
 use namedrop::*;
 use serde_json::{Value, json};
@@ -119,12 +121,12 @@ impl Fixture {
     fn run(&self, pane: &str, token: &str, input: Value) -> Result<Value, String> {
         let r = self.runtime(pane);
         match token {
-            "send" | "reply" => execute_message_operation(token, input, &r),
+            "send" | "reply" => dispatch::message(token, input, &r),
             "handoff.begin" | "handoff.resolve" | "handoff.results" | "handoff.status" => {
                 execute_handoff_operation(token, input, &r)
             }
             "context.inspect" | "context.read" => execute_context_operation(token, input, &r),
-            "complete.no-reply" => execute_integration_operation("complete", input, &r),
+            "complete.no-reply" => dispatch::integration("complete", input, &r),
             _ => panic!("unexpected bound action {token}"),
         }
     }

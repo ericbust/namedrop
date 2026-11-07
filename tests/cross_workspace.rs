@@ -977,11 +977,26 @@ fn a_human_reply_to_local_recipients_refills_every_paired_thread() {
 }
 
 #[test]
-fn a_send_drains_the_workspace_it_forwarded_into() {
+fn a_send_wakes_the_workspace_it_forwarded_into() {
     let fixture = Fixture::new();
     fixture.register_all();
-    let sent = fixture.agent_send("w1", "pane-1-lead", "now-1", "#ws2 @lead Status?");
-    assert!(sent["drains"]["ws2"].is_object(), "{sent}");
+    let sent = fixture
+        .try_send(
+            "w1",
+            "pane-1-lead",
+            json!({"request_id":"now-1","source":"#ws2 @lead Status?","author_kind":"agent_session"}),
+        )
+        .unwrap();
+    assert!(sent.get("drains").is_none(), "{sent}");
+    assert!(
+        fixture.herdr.envelopes("pane-2-lead").is_empty(),
+        "a send only commits"
+    );
+    assert_eq!(
+        spaces_to_wake(&fixture.state, "socket-a", "w1"),
+        ["w1", "w2"]
+    );
+    fixture.drain("w2");
     assert_eq!(
         Fixture::untrusted_body(&fixture.herdr.last_envelope("pane-2-lead")),
         "Status?"
@@ -1128,16 +1143,12 @@ fn a_retry_returns_the_saved_receipt_even_after_the_workspace_is_renamed() {
     let first = fixture
         .try_send("w1", "pane-1-lead", input.clone())
         .unwrap();
+    fixture.wake("w1");
     fixture.herdr.labels.lock().unwrap()[1].1 = "renamed".to_owned();
     fixture.herdr.commands.lock().unwrap().clear();
     let retry = fixture.try_send("w1", "pane-1-lead", input).unwrap();
     assert_eq!(retry["idempotent_replay"], true);
     assert_eq!(retry["forwarded"], first["forwarded"]);
-    assert_eq!(
-        fixture.herdr.envelopes("pane-2-lead").len(),
-        1,
-        "one copy, delivered once"
-    );
     assert!(
         !fixture
             .herdr
@@ -1147,6 +1158,12 @@ fn a_retry_returns_the_saved_receipt_even_after_the_workspace_is_renamed() {
             .iter()
             .any(|c| c == "workspace list"),
         "a retry reads no labels"
+    );
+    fixture.wake("w1");
+    assert_eq!(
+        fixture.herdr.envelopes("pane-2-lead").len(),
+        1,
+        "one copy, delivered once"
     );
 }
 
@@ -1379,14 +1396,6 @@ fn a_wake_from_the_remote_workspace_dispatches_the_authors_result_set() {
     fixture.drain("w2");
     let remote = fixture.herdr.last_envelope("pane-2-tester");
     fixture.reply_to("w2", "pane-2-tester", &remote, "@scout You take this one.");
-    assert!(
-        result_sets(&fixture, "pane-1-lead").is_empty(),
-        "nothing in ws2 drains ws1"
-    );
-
-    for workspace in spaces_to_wake(&fixture.state, "socket-a", "w2") {
-        fixture.drain(&workspace);
-    }
     let joined = result_sets(&fixture, "pane-1-lead");
     assert_eq!(joined.len(), 1, "ws2's wake dispatches ws1's result set");
     let outcomes = joined[0]["control"]["result_set"]["outcomes"].to_string();

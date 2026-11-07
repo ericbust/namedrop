@@ -679,7 +679,11 @@ fn bound_channel_report_from_the_delivered_template_does_not_bounce() {
                 .unwrap()
                 .replace("<reply body>", body)
                 .into();
-            namedrop::execute_message_operation("reply", input, &f.runtime("w1", pane)).unwrap()
+            let replied =
+                namedrop::execute_message_operation("reply", input, &f.runtime("w1", pane))
+                    .unwrap();
+            f.wake("w1");
+            replied
         };
         let answer = reply_from_template("pane-1-lead", answer_body);
         assert_eq!(recipient_aliases(&question), ["operator", "lead"]);

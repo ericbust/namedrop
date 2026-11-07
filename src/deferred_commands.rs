@@ -726,7 +726,6 @@ fn recover_committed<E: crate::HerdrCommandExecutor, C: Clock, I: IdGenerator>(
             let mut result = json!({"attempt_id":request.input["attempt_id"]});
             if request.operation == Operation::Complete {
                 result["disposition"] = json!("no_reply");
-                result["drain"] = crate::drain_receipt(runtime);
             } else {
                 result["state"] = json!("acknowledged");
             }

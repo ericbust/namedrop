@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/dispatch.rs"]
+mod dispatch;
 
 use namedrop::*;
 use serde_json::{Value, json};
@@ -288,7 +290,7 @@ impl Fixture {
         self.handoff("handoff.begin",json!({"request_id":"synthetic-begin","deliverable":"A reviewed synthetic final answer"}))["coordination_id"].clone()
     }
     fn send(&self, id: &Value, key: &str, target: &str) -> Value {
-        execute_message_operation("send",json!({"request_id":key,"source":format!("@{target} synthetic delegated work"),"author_kind":"agent_session","coordination_id":id}),&self.runtime("lead")).unwrap()
+        dispatch::message("send",json!({"request_id":key,"source":format!("@{target} synthetic delegated work"),"author_kind":"agent_session","coordination_id":id}),&self.runtime("lead")).unwrap()
     }
     fn attempt(&self, message: &Value, pane: &str) -> String {
         self.db().query_row("SELECT a.attempt_id FROM delivery_attempts a JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,delivery_id,address_id) WHERE d.message_id=?1 AND a.address_id=?2 ORDER BY a.rowid DESC LIMIT 1",rusqlite::params![message.as_str().unwrap(),pane],|r|r.get(0)).unwrap()
@@ -308,7 +310,7 @@ impl Fixture {
         if let Some(wait) = wait {
             input["waiting_on_assignment_id"] = wait.clone();
         }
-        execute_message_operation("reply", input, &self.runtime(pane)).unwrap()
+        dispatch::message("reply", input, &self.runtime(pane)).unwrap()
     }
     fn drain(&self) {
         drain_mailboxes(&self.runtime("lead")).unwrap();
@@ -317,7 +319,7 @@ impl Fixture {
         self.complete_for(attempt, "lead");
     }
     fn complete_for(&self, attempt: &str, pane: &str) {
-        execute_integration_operation(
+        dispatch::integration(
             "complete",
             json!({"attempt_id":attempt}),
             &self.runtime(pane),
@@ -678,7 +680,7 @@ fn coordinator_callback_adds_two_workers_with_separate_checkout_context() {
         );
         for pane in ["worker", "reviewer"] {
             assert_eq!(
-                execute_message_operation("send", send.clone(), &f.runtime(pane)).unwrap_err(),
+                dispatch::message("send", send.clone(), &f.runtime(pane)).unwrap_err(),
                 "worker replies inherit their assignment from the bound message",
                 "only the original lead may add assignments"
             );
@@ -686,20 +688,20 @@ fn coordinator_callback_adds_two_workers_with_separate_checkout_context() {
         let mut retargeted = continuation["input"].clone();
         retargeted["source"] = json!(format!("@{writer} Take over this existing assignment."));
         assert!(
-            execute_message_operation("send", retargeted, &f.runtime("lead"))
+            dispatch::message("send", retargeted, &f.runtime("lead"))
                 .unwrap_err()
                 .contains("exact recipient session")
         );
         let mut writer_runtime = f.runtime(writer);
         writer_runtime.cwd = &checkout;
-        let sent = execute_message_operation("send", send.clone(), &f.runtime("lead"))
+        let sent = dispatch::message("send", send.clone(), &f.runtime("lead"))
             .expect("one callback must dispatch each independent writer with its own context");
         assert_eq!(sent["coordination"][0]["revision"], 1);
         let assignment_id = sent["coordination"][0]["assignment_id"].clone();
         assert_ne!(assignment_id, first["coordination"][0]["assignment_id"]);
         assert!(!assignment_ids.contains(&assignment_id));
         assignment_ids.push(assignment_id);
-        let retry = execute_message_operation("send", send, &f.runtime("lead")).unwrap();
+        let retry = dispatch::message("send", send, &f.runtime("lead")).unwrap();
         assert_eq!(retry["message_id"], sent["message_id"]);
         let after = f.handoff("handoff.results", json!({"coordination_id":id}));
         assert_eq!(after["assignments"][0], before["assignments"][0]);
@@ -778,7 +780,7 @@ fn coordinator_callback_adds_two_workers_with_separate_checkout_context() {
     for (writer, checkout, reply) in replies {
         let mut writer_runtime = f.runtime(writer);
         writer_runtime.cwd = &checkout;
-        execute_message_operation("reply", reply, &writer_runtime).unwrap();
+        dispatch::message("reply", reply, &writer_runtime).unwrap();
     }
     f.settle_lead_inputs();
     let final_nudge = f.nudge_prompts().pop().unwrap();
@@ -858,7 +860,7 @@ fn new_assignment_variants_do_not_collide_with_authored_key_suffixes() {
             send["context"]["capture_git_state"] = json!(false);
             send["context"]["snapshot"]["objective"] = json!("Context for the slice");
         }
-        let sent = execute_message_operation("send", send.clone(), &f.runtime("lead"))
+        let sent = dispatch::message("send", send.clone(), &f.runtime("lead"))
             .expect("distinct intent keys and variants must dispatch independently");
         assert!(!sent_messages.contains(&sent["message_id"]));
         sent_messages.push(sent["message_id"].clone());
@@ -894,7 +896,7 @@ fn new_assignment_variants_do_not_collide_with_authored_key_suffixes() {
                 "Context for the slice"
             );
         }
-        let retry = execute_message_operation("send", send, &f.runtime("lead")).unwrap();
+        let retry = dispatch::message("send", send, &f.runtime("lead")).unwrap();
         assert_eq!(retry["idempotent_replay"], true);
         assert_eq!(retry["message_id"], sent["message_id"]);
         assert_eq!(retry["coordination"], sent["coordination"]);
@@ -917,10 +919,10 @@ fn same_request_and_source_with_changed_context_replays_original_snapshot() {
         "context":{"capture_git_state":false, "snapshot":{
             "objective":"original context", "applicable_user_instructions":[], "decisions":[],
             "completed_work":[], "current_work":[], "blockers":[], "evidence":[]}}});
-    let sent = execute_message_operation("send", input.clone(), &f.runtime("lead")).unwrap();
+    let sent = dispatch::message("send", input.clone(), &f.runtime("lead")).unwrap();
     let before = f.handoff("handoff.results", json!({"coordination_id":id}));
     input["context"]["snapshot"]["objective"] = json!("different context, same request and source");
-    let replay = execute_message_operation("send", input.clone(), &f.runtime("lead")).unwrap();
+    let replay = dispatch::message("send", input.clone(), &f.runtime("lead")).unwrap();
     assert_eq!(replay["idempotent_replay"], true);
     assert_eq!(replay["message_id"], sent["message_id"]);
     assert_eq!(
@@ -946,7 +948,7 @@ fn same_request_and_source_with_changed_context_replays_original_snapshot() {
     let snapshot = execute_context_operation("context.read", read, &f.runtime("worker")).unwrap();
     assert_eq!(snapshot["content"]["objective"], "original context");
     input["source"] = json!("@worker A different assignment cannot reuse that request ID.");
-    assert!(execute_message_operation("send", input, &f.runtime("lead")).is_err());
+    assert!(dispatch::message("send", input, &f.runtime("lead")).is_err());
 }
 
 #[test]
@@ -998,8 +1000,7 @@ fn coordinator_bound_sends_keep_exact_owner_and_worker_sessions() {
                 })
                 .unwrap();
             let refused =
-                execute_message_operation("send", new_assignment.clone(), &f.runtime("lead"))
-                    .unwrap_err();
+                dispatch::message("send", new_assignment.clone(), &f.runtime("lead")).unwrap_err();
             assert!(
                 refused.contains("retired Mention: @worker")
                     || refused.contains("unknown Mention: @worker"),
@@ -1012,9 +1013,8 @@ fn coordinator_bound_sends_keep_exact_owner_and_worker_sessions() {
             f.replace_session("worker", "replacement-worker");
             "replacement-worker"
         };
-        assert!(execute_message_operation("send", continuation, &f.runtime("lead")).is_err());
-        let sent =
-            execute_message_operation("send", new_assignment.clone(), &f.runtime("lead")).unwrap();
+        assert!(dispatch::message("send", continuation, &f.runtime("lead")).is_err());
+        let sent = dispatch::message("send", new_assignment.clone(), &f.runtime("lead")).unwrap();
         assert_eq!(sent["coordination"][0]["revision"], 1);
         let results = f.handoff("handoff.results", json!({"coordination_id":id}));
         assert_eq!(
@@ -1036,7 +1036,7 @@ fn coordinator_bound_sends_keep_exact_owner_and_worker_sessions() {
         );
         f.replace_session("lead", "replacement-lead");
         assert!(
-            execute_message_operation("send", new_assignment, &f.runtime("lead")).is_err(),
+            dispatch::message("send", new_assignment, &f.runtime("lead")).is_err(),
             "even a registered replacement cannot replay the original owner's bound send"
         );
         assert!(
@@ -1132,7 +1132,7 @@ fn coordination_idle_wake_and_escalation() {
     );
     let mut send = bound.iter().find(|o| o["token"] == "send").unwrap()["input"].clone();
     send["source"] = json!("@worker synthetic followup from bound input");
-    let sent = execute_message_operation("send", send, &actions.runtime("lead")).unwrap();
+    let sent = dispatch::message("send", send, &actions.runtime("lead")).unwrap();
     assert_eq!(sent["coordination"][0]["revision"], 2);
     let mut resolve = bound
         .iter()
@@ -2021,7 +2021,7 @@ fn coordination_retired_participant_recovery() {
         .transaction(|tx| tx.retire_pane_address(&lead_lost.ns(), &PaneAddressId::new("lead"), &by))
         .unwrap();
     lead_lost.status("lead", "idle");
-    let unrelated = execute_message_operation(
+    let unrelated = dispatch::message(
         "send",
         json!({"request_id":"unrelated-live-work","source":"@worker Independent synthetic request","author_kind":"agent_session"}),
         &lead_lost.runtime("reviewer"),
@@ -2124,7 +2124,7 @@ fn a_stale_wake_is_rendered_stale_in_flight_and_settles_as_no_reply_after_the_gr
         .unwrap()["input"]
         .clone();
     send["source"] = json!("@worker Synthetic second round");
-    let second = execute_message_operation("send", send, &f.runtime("lead")).unwrap();
+    let second = dispatch::message("send", send, &f.runtime("lead")).unwrap();
     f.status("worker", "working");
 
     f.now.store(10_100, Ordering::Relaxed);
@@ -2245,7 +2245,7 @@ fn a_stale_wake_is_rendered_stale_in_flight_and_settles_as_no_reply_after_the_gr
         .unwrap()
         .insert("lead".into(), "replacement-lead".into());
     assert!(
-        execute_integration_operation(
+        dispatch::integration(
             "complete",
             json!({"attempt_id":old_attempt}),
             &f.runtime("lead")
@@ -2282,7 +2282,7 @@ fn completed_resolution_retires_all_queued_replies_through_reconciled_revision()
         "needs_continuation",
         None,
     );
-    let continuation = execute_message_operation(
+    let continuation = dispatch::message(
         "send",
         json!({
             "request_id":"retire-continuation",
@@ -2296,7 +2296,7 @@ fn completed_resolution_retires_all_queued_replies_through_reconciled_revision()
     )
     .unwrap();
     let reply = f.reply(&continuation, "worker", "retire-result", "completed", None);
-    let ordinary = execute_message_operation(
+    let ordinary = dispatch::message(
         "send",
         json!({"request_id":"ordinary-note","source":"@lead Synthetic ordinary note","author_kind":"agent_session"}),
         &f.runtime("reviewer"),
@@ -2704,7 +2704,7 @@ fn restarted_lead_adopts_and_continues_its_coordination() {
             .clone()
     };
     assert_eq!(pending_outcome(&f), "needs_continuation");
-    let pending_continuation = execute_message_operation(
+    let pending_continuation = dispatch::message(
         "send",
         json!({
             "request_id":"pending-2",
@@ -2729,7 +2729,7 @@ fn restarted_lead_adopts_and_continues_its_coordination() {
 
     let second = f.send(&id, "second", "reviewer");
     assert_eq!(second["coordination"][0]["revision"], 1);
-    let continuation = execute_message_operation(
+    let continuation = dispatch::message(
         "send",
         json!({
             "request_id":"first-2",
@@ -2864,7 +2864,7 @@ fn superseded_owner_session_cannot_act() {
                 "report":"Stale report.","reason":"Stale owner."}),
             &f.runtime("lead"),
         ),
-        execute_message_operation(
+        dispatch::message(
             "send",
             json!({"request_id":"stale-send","source":"@reviewer stale work",
                 "author_kind":"agent_session","coordination_id":id}),
@@ -2905,7 +2905,7 @@ fn tracked_send_names_the_restarted_owner_not_a_worker() {
     let worker_error = "worker replies inherit their assignment from the bound message";
 
     assert_eq!(
-        execute_message_operation(
+        dispatch::message(
             "send",
             json!({"request_id":"worker-send","source":"@reviewer worker-made assignment",
                 "author_kind":"agent_session","coordination_id":id}),
@@ -2915,7 +2915,7 @@ fn tracked_send_names_the_restarted_owner_not_a_worker() {
         worker_error
     );
     assert_eq!(
-        execute_message_operation(
+        dispatch::message(
             "reply",
             json!({"request_id":"redundant-ids","source":"@lead Synthetic worker result",
                 "author_kind":"agent_session","in_reply_to":first["message_id"],
@@ -2928,7 +2928,7 @@ fn tracked_send_names_the_restarted_owner_not_a_worker() {
     );
 
     assert_eq!(
-        execute_message_operation(
+        dispatch::message(
             "reply",
             json!({"request_id":"before-adopt","source":"@lead Synthetic worker result",
                 "author_kind":"agent_session","in_reply_to":first["message_id"],
@@ -2942,7 +2942,7 @@ fn tracked_send_names_the_restarted_owner_not_a_worker() {
 
     let restarted = "coordination belongs to another session of this address; the restarted owner session can transfer it with handoff adopt";
     assert_eq!(
-        execute_message_operation(
+        dispatch::message(
             "send",
             json!({"request_id":"fresh","source":"@reviewer new work",
                 "author_kind":"agent_session","coordination_id":id}),
@@ -2952,7 +2952,7 @@ fn tracked_send_names_the_restarted_owner_not_a_worker() {
         restarted
     );
     assert_eq!(
-        execute_message_operation(
+        dispatch::message(
             "send",
             json!({"request_id":"fresh-continuation","source":"@worker Continue.",
                 "author_kind":"agent_session","coordination_id":id,
@@ -3123,7 +3123,7 @@ fn a_worker_naming_itself_at_the_start_of_a_tracked_reply_still_reaches_the_lead
     let f = Fixture::new();
     let id = f.begin();
     let request = f.send(&id, "self-label", "worker");
-    let reply = execute_message_operation(
+    let reply = dispatch::message(
         "reply",
         json!({"request_id":"self-label-result","source":"@lead @worker top 3: the parser is fine",
             "author_kind":"agent_session","in_reply_to":request["message_id"],
@@ -3145,7 +3145,7 @@ fn a_tracked_reply_that_also_names_another_agent_says_which_one_and_how_to_fix_i
     let f = Fixture::new();
     let id = f.begin();
     let request = f.send(&id, "extra-recipient", "worker");
-    let refused = execute_message_operation(
+    let refused = dispatch::message(
         "reply",
         json!({"request_id":"extra-recipient-result","source":"@lead @reviewer agreed with this",
             "author_kind":"agent_session","in_reply_to":request["message_id"],
@@ -3161,7 +3161,7 @@ fn a_tracked_reply_that_also_names_another_agent_says_which_one_and_how_to_fix_i
 #[test]
 fn a_message_addressed_only_to_its_author_is_refused() {
     let f = Fixture::new();
-    let refused = execute_message_operation(
+    let refused = dispatch::message(
         "send",
         json!({"request_id":"self-only","source":"@worker note to self","author_kind":"agent_session"}),
         &f.runtime("worker"),
@@ -3423,7 +3423,7 @@ fn a_request_the_lead_supersedes_with_a_follow_up_is_never_flagged() {
     assert_eq!(f.disposition(&attempt), None);
     not_flagged("before the follow-up");
 
-    let follow_up = execute_message_operation(
+    let follow_up = dispatch::message(
         "send",
         json!({"request_id":"second","source":"@worker synthetic follow-up","author_kind":"agent_session",
             "coordination_id":id,"assignment_id":a["coordination"][0]["assignment_id"],"expected_revision":1}),

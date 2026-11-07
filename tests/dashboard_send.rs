@@ -1956,7 +1956,11 @@ else:
                 "author_kind":"agent_session"
             }),
         );
-        assert!(started.elapsed() >= Duration::from_secs(2), "{receipt}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the send waited on the contended pane: {receipt}"
+        );
+        assert_eq!(receipt["dispatch"], "scheduled", "{receipt}");
         assert_eq!(
             f.texts("SELECT state FROM mailbox_deliveries WHERE worktree_id='w2'"),
             ["queued"]

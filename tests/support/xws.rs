@@ -8,7 +8,7 @@ use namedrop::{
     PaneBindingId, PaneRoleId, PromptFailureKind, StateNamespace, StateStore,
     complete_capability_profile, drain_mailboxes, execute_control_operation,
     execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
-    execute_user_prompt_submit_hook, issue_registration_challenge,
+    execute_user_prompt_submit_hook, issue_registration_challenge, spaces_to_wake,
 };
 use serde_json::{Value, json};
 use std::{
@@ -579,17 +579,26 @@ impl Fixture {
         drain_mailboxes(&self.runtime(workspace, "pane-none")).unwrap();
     }
 
+    /// The mailbox worker's pass after the CLI commits a send, reply or complete.
+    pub fn wake(&self, workspace: &str) {
+        for space in spaces_to_wake(&self.state, "socket-a", workspace) {
+            self.drain(&space);
+        }
+    }
+
     pub fn agent_send(&self, workspace: &str, pane: &str, request: &str, source: &str) -> Value {
-        execute_message_operation(
+        let sent = execute_message_operation(
             "send",
             json!({"request_id":request,"source":source,"author_kind":"agent_session"}),
             &self.runtime(workspace, pane),
         )
-        .unwrap()
+        .unwrap();
+        self.wake(workspace);
+        sent
     }
 
     pub fn reply_to(&self, workspace: &str, pane: &str, envelope: &Value, source: &str) -> Value {
-        execute_message_operation(
+        let replied = execute_message_operation(
             "reply",
             json!({"request_id":format!("reply-{}", envelope["control"]["attempt_id"]),
                    "source":source,"author_kind":"agent_session",
@@ -597,7 +606,9 @@ impl Fixture {
                    "attempt_id":envelope["control"]["attempt_id"]}),
             &self.runtime(workspace, pane),
         )
-        .unwrap()
+        .unwrap();
+        self.wake(workspace);
+        replied
     }
 
     pub fn try_send(&self, workspace: &str, pane: &str, input: Value) -> Result<Value, String> {

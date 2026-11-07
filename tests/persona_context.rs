@@ -3,6 +3,8 @@
 //! Mentions route or how a Delivery Envelope authenticates.
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/dispatch.rs"]
+mod dispatch;
 
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
@@ -11,8 +13,8 @@ use namedrop::{
     IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
     PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
     execute_codex_app_server_hook, execute_integration_operation, execute_lifecycle_operation,
-    execute_message_operation, execute_session_start_hook, execute_user_prompt_submit_hook,
-    expand_attempt_reply, install_integration_package, issue_registration_challenge,
+    execute_session_start_hook, execute_user_prompt_submit_hook, expand_attempt_reply,
+    install_integration_package, issue_registration_challenge,
 };
 use serde_json::{Value, json};
 use std::{
@@ -503,7 +505,7 @@ fn mentions_still_route_and_a_delivery_still_authenticates_exactly_as_before() {
     assert_eq!(routed["decision"], "block");
     assert_eq!(routed["reason"], "Collaboration message sent.");
 
-    execute_message_operation(
+    dispatch::message(
         "send",
         json!({"request_id":"req-1","source":"@reviewer Check the login path.",
                "author_kind":"agent_session"}),
@@ -564,7 +566,7 @@ fn a_delivery_the_host_marked_as_pasted_text_still_authenticates() {
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
     register("address-lead", AgentRuntime::Codex, &lead);
     register("address-reviewer", AgentRuntime::ClaudeCode, &reviewer);
-    execute_message_operation(
+    dispatch::message(
         "send",
         json!({"request_id":"to-claude","source":"@reviewer Check the login path.",
                "author_kind":"agent_session"}),
@@ -615,7 +617,7 @@ fn a_delivery_pasted_behind_leftover_input_is_the_delivery_and_never_a_mention()
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
     register("address-lead", AgentRuntime::Codex, &lead);
     register("address-reviewer", AgentRuntime::ClaudeCode, &reviewer);
-    execute_message_operation(
+    dispatch::message(
         "send",
         json!({"request_id":"to-claude","source":"@reviewer local",
                "author_kind":"agent_session"}),
@@ -664,7 +666,7 @@ fn a_delivery_pasted_behind_leftover_input_is_the_delivery_and_never_a_mention()
     );
 
     // Codex marks nothing, so the same leftover runs straight into the JSON.
-    execute_message_operation(
+    dispatch::message(
         "send",
         json!({"request_id":"to-codex","source":"@lead ping",
                "author_kind":"agent_session"}),
@@ -704,14 +706,14 @@ fn an_incoming_task_reaches_both_hosts_with_the_roster_and_only_claude_with_the_
     register("address-reviewer", AgentRuntime::ClaudeCode, &reviewer);
 
     // One delivery in each direction, so each host receives a real envelope.
-    execute_message_operation(
+    dispatch::message(
         "send",
         json!({"request_id":"to-claude","source":"@reviewer Check the login path.",
                "author_kind":"agent_session"}),
         &lead,
     )
     .unwrap();
-    execute_message_operation(
+    dispatch::message(
         "send",
         json!({"request_id":"to-codex","source":"@lead Here is the review.",
                "author_kind":"agent_session"}),
@@ -1097,7 +1099,7 @@ fn the_rendered_line_survives_a_hostile_installed_path() {
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
     register("address-lead", AgentRuntime::Codex, &lead);
     register("address-reviewer", AgentRuntime::ClaudeCode, &reviewer);
-    execute_message_operation(
+    dispatch::message(
         "send",
         json!({"request_id":"to-claude","source":"@reviewer Check the login path.",
                "author_kind":"agent_session"}),
@@ -1170,7 +1172,7 @@ fn every_rendered_line_matches_an_installed_codex_prefix_rule() {
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
     register("address-lead", AgentRuntime::Codex, &lead);
     register("address-reviewer", AgentRuntime::ClaudeCode, &reviewer);
-    execute_message_operation(
+    dispatch::message(
         "send",
         json!({"request_id":"to-codex","source":"@lead Here is the review.",
                "author_kind":"agent_session"}),
@@ -1646,7 +1648,7 @@ fn the_compact_reply_line_and_the_bound_full_input_are_one_reply_in_either_order
         let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
         register("address-lead", AgentRuntime::Codex, &lead);
         register("address-reviewer", AgentRuntime::ClaudeCode, &reviewer);
-        execute_message_operation(
+        dispatch::message(
             "send",
             json!({"request_id":"to-claude","source":"@reviewer Check the login path.",
                    "author_kind":"agent_session"}),
@@ -1696,8 +1698,8 @@ fn the_compact_reply_line_and_the_bound_full_input_are_one_reply_in_either_order
         } else {
             (&full, &expanded)
         };
-        let first = execute_message_operation("reply", first.clone(), &reviewer).unwrap();
-        let second = execute_message_operation("reply", second.clone(), &reviewer).unwrap();
+        let first = dispatch::message("reply", first.clone(), &reviewer).unwrap();
+        let second = dispatch::message("reply", second.clone(), &reviewer).unwrap();
         assert_eq!(first["idempotent_replay"], false, "{first}");
         assert_eq!(second["idempotent_replay"], true, "{second}");
         assert_eq!(first["message_id"], second["message_id"]);

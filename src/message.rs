@@ -607,8 +607,8 @@ where
     }
     let input = prepare_source_message(input)?;
     let author = pane_author(runtime)?;
-    dispatch_prepared_message(input, author, runtime, &workspaces, caller, |_| ())
-        .map(|(receipt, ())| receipt)
+    persist_prepared_message_operation(input, author, runtime, &workspaces, caller)
+        .map(|(receipt, _)| receipt)
         .map_err(|error| error.to_string())
 }
 
@@ -741,7 +741,6 @@ where
         Author::Operator,
         runtime,
         &workspaces,
-        None,
         observe_commit,
     )
     .map_err(OperatorSendError::from)
@@ -818,7 +817,6 @@ where
         Author::Operator,
         runtime,
         &workspaces,
-        None,
         observe_commit,
     )
     .map_err(OperatorSendError::from)
@@ -831,12 +829,13 @@ fn pane_author<'a, E, C, I>(runtime: &LifecycleRuntime<'a, E, C, I>) -> Result<A
         .ok_or_else(|| "the current Herdr pane is required to resolve the sender".to_owned())
 }
 
+/// The dashboard answers inside `observe_commit`, so these drains run after
+/// its response, on the server's own thread.
 fn dispatch_prepared_message<E, C, I, R>(
     input: PreparedMessageOperation,
     author: Author<'_>,
     runtime: &LifecycleRuntime<'_, E, C, I>,
     workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
-    caller: Option<&crate::deferred_commands::Caller>,
     observe_commit: impl FnOnce(&Value) -> R,
 ) -> Result<(Value, R), SendError>
 where
@@ -845,7 +844,7 @@ where
     I: crate::IdGenerator,
 {
     let (mut response, forwarded) =
-        persist_prepared_message_operation(input, author, runtime, workspaces, caller)?;
+        persist_prepared_message_operation(input, author, runtime, workspaces, None)?;
     let observed = observe_commit(&response);
     response["drain"] = crate::drain_receipt(runtime);
     // A copy queued in another workspace drains there now rather than waiting
@@ -933,7 +932,7 @@ where
     let Some(committed) = committed else {
         return Ok(None);
     };
-    let (mut response, forwarded) = present_committed(
+    let (response, _) = present_committed(
         committed,
         &mut store,
         namespace,
@@ -941,23 +940,6 @@ where
         runtime,
     )
     .map_err(|e| e.to_string())?;
-    response["drain"] = crate::drain_receipt(runtime);
-    if !forwarded.is_empty() {
-        response["drains"] = forwarded
-            .iter()
-            .map(|copy| {
-                let there = LifecycleRuntime {
-                    workspace_id: Some(copy.space.as_str()),
-                    ..*runtime
-                };
-                (
-                    copy.workspace.as_str().to_owned(),
-                    crate::drain_receipt(&there),
-                )
-            })
-            .collect::<serde_json::Map<_, _>>()
-            .into();
-    }
     Ok(Some(response))
 }
 

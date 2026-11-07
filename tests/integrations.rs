@@ -834,8 +834,9 @@ fn production_onboarding_challenges_registers_and_drains_queued_work() {
         &author,
     )
     .unwrap();
+    let sent_drain = namedrop::drain_mailboxes(&author).unwrap();
     assert_eq!(sent["deliveries"][0]["state"], "queued");
-    assert!(sent["drain"]["submitted"].as_array().unwrap().is_empty());
+    assert!(sent_drain.submitted.is_empty());
 
     let prompts = herdr.prompts.lock().unwrap();
     let registration_prompts = prompts
@@ -1145,8 +1146,9 @@ fn registered_working_recipient_drains_on_settle_without_explicit_reconciliation
         &author,
     )
     .unwrap();
+    let sent_drain = namedrop::drain_mailboxes(&author).unwrap();
     assert_eq!(sent["deliveries"][0]["state"], "queued");
-    assert!(sent["drain"]["submitted"].as_array().unwrap().is_empty());
+    assert!(sent_drain.submitted.is_empty());
 
     *herdr.status.lock().unwrap() = "idle".to_owned();
     let settled = execute_lifecycle_operation(
@@ -1217,6 +1219,7 @@ fn production_onboarding_failure_keeps_delivery_queued_and_opens_attention() {
         &author,
     )
     .unwrap();
+    let sent_drain = namedrop::drain_mailboxes(&author).unwrap();
     let namespace = space_namespace();
     let attention_items = StateStore::open(directory.path())
         .unwrap()
@@ -1224,7 +1227,7 @@ fn production_onboarding_failure_keeps_delivery_queued_and_opens_attention() {
         .unwrap();
 
     assert_eq!(sent["deliveries"][0]["state"], "queued");
-    assert!(sent["drain"]["submitted"].as_array().unwrap().is_empty());
+    assert!(sent_drain.submitted.is_empty());
     assert_eq!(attention_items.len(), 1);
 }
 
@@ -3599,10 +3602,11 @@ fn an_unowned_package_blocks_its_runtime_until_a_later_refresh_succeeds() {
         &author,
     )
     .unwrap();
+    let sent_drain = namedrop::drain_mailboxes(&author).unwrap();
 
     assert!(herdr.registration_prompts().is_empty());
     assert_eq!(sent["deliveries"][0]["state"], "queued");
-    assert!(sent["drain"]["submitted"].as_array().unwrap().is_empty());
+    assert!(sent_drain.submitted.is_empty());
     // The other runtime is unaffected by this runtime's conflict.
     assert_installed_package(directory.home(), AgentRuntime::Codex);
     assert_eq!(file_fingerprint(&conflict.join("SKILL.md")), unowned);
@@ -4170,6 +4174,7 @@ fn an_unwritable_skill_root_blocks_its_runtime_and_recovers() {
         &author,
     )
     .unwrap();
+    let sent_drain = namedrop::drain_mailboxes(&author).unwrap();
     let namespace = space_namespace();
     let attention = StateStore::open(directory.path())
         .unwrap()
@@ -4178,7 +4183,7 @@ fn an_unwritable_skill_root_blocks_its_runtime_and_recovers() {
 
     assert!(herdr.registration_prompts().is_empty());
     assert_eq!(sent["deliveries"][0]["state"], "queued");
-    assert!(sent["drain"]["submitted"].as_array().unwrap().is_empty());
+    assert!(sent_drain.submitted.is_empty());
     assert_eq!(attention.len(), 1, "{attention:?}");
     assert_eq!(
         attention[0].source_kind,
@@ -4302,12 +4307,12 @@ fn a_registered_runtime_stops_delivering_while_its_package_refresh_fails() {
         &author,
     )
     .unwrap();
+    let sent_drain = namedrop::drain_mailboxes(&author).unwrap();
 
     assert_eq!(sent["deliveries"][0]["state"], "queued");
     assert!(
-        sent["drain"]["submitted"].as_array().unwrap().is_empty(),
-        "queued work was dispatched to a runtime whose package could not be installed: {}",
-        sent["drain"]
+        sent_drain.submitted.is_empty(),
+        "queued work was dispatched to a runtime whose package could not be installed: {sent_drain:?}"
     );
     // No Delivery Envelope reached the pane either: the registration challenge
     // remains the only prompt this pane has ever received.
@@ -4428,7 +4433,7 @@ fn a_failed_package_leaves_the_other_runtime_delivering() {
         &author,
     )
     .unwrap();
-    let sent = execute_message_operation(
+    execute_message_operation(
         "send",
         serde_json::json!({
             "request_id": "other-runtime-1",
@@ -4437,13 +4442,9 @@ fn a_failed_package_leaves_the_other_runtime_delivering() {
         &author,
     )
     .unwrap();
+    let sent_drain = namedrop::drain_mailboxes(&author).unwrap();
 
-    assert_eq!(
-        sent["drain"]["submitted"].as_array().unwrap().len(),
-        1,
-        "{}",
-        sent["drain"]
-    );
+    assert_eq!(sent_drain.submitted.len(), 1, "{sent_drain:?}");
     let namespace = space_namespace();
     let attention = StateStore::open(directory.path())
         .unwrap()

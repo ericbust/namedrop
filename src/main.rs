@@ -513,6 +513,9 @@ fn run_subagent_hook(state: &Path, host: namedrop::AgentRuntime) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Send, reply and complete only commit. The space's mailbox worker, a detached
+/// process, dispatches what they queued after the command has answered, so the
+/// caller never waits on the recipient's settle delay or prompt.
 fn schedule_dispatch(operation: &str, data: &mut serde_json::Value, options: &RuntimeOptions) {
     let hands_off = matches!(operation, "send" | "reply" | "complete");
     if !hands_off && !needs_mailbox_watcher(data) {
