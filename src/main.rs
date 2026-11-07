@@ -56,13 +56,7 @@ fn main() -> ExitCode {
                     Path::new(state),
                     &socket.to_string_lossy(),
                     &key.to_string_lossy(),
-                    |result, options| {
-                        if needs_mailbox_watcher(result)
-                            && let Err(error) = wake_mailboxes(options)
-                        {
-                            eprintln!("Command queued; could not start shell watcher: {error}");
-                        }
-                    },
+                    schedule_dispatch,
                 )
             }
             _ => Err("invalid deferred command arguments".into()),
@@ -469,11 +463,10 @@ fn main() -> ExitCode {
     } else {
         Err(format!("unsupported operation: {operation}"))
     };
-    if result.as_ref().is_ok_and(needs_mailbox_watcher)
-        && let Err(error) = wake_mailboxes(&cli.runtime)
-    {
-        eprintln!("Command queued; could not start shell watcher: {error}");
-    }
+    let result = result.map(|mut data| {
+        schedule_dispatch(operation, &mut data, &cli.runtime);
+        data
+    });
     finish(operation, result)
 }
 
@@ -518,6 +511,27 @@ fn run_subagent_hook(state: &Path, host: namedrop::AgentRuntime) -> ExitCode {
         );
     }
     ExitCode::SUCCESS
+}
+
+fn schedule_dispatch(operation: &str, data: &mut serde_json::Value, options: &RuntimeOptions) {
+    let hands_off = matches!(operation, "send" | "reply" | "complete");
+    if !hands_off && !needs_mailbox_watcher(data) {
+        return;
+    }
+    let woken = wake_mailboxes(options);
+    if let Err(error) = &woken {
+        eprintln!("Command queued; could not start shell watcher: {error}");
+    }
+    if hands_off {
+        data["dispatch"] = serde_json::json!(if woken.is_ok() {
+            "scheduled"
+        } else {
+            "waiting"
+        });
+        if let Err(error) = woken {
+            data["dispatch_error"] = serde_json::json!(error);
+        }
+    }
 }
 
 fn wake_mailboxes(options: &RuntimeOptions) -> Result<(), String> {

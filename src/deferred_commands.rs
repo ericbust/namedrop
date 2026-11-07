@@ -532,7 +532,7 @@ pub fn execute_queued(
     state: &Path,
     socket: &str,
     key: &str,
-    completed: impl FnOnce(&Value, &RuntimeOptions),
+    completed: impl FnOnce(&str, &mut Value, &RuntimeOptions),
 ) -> Result<(), String> {
     if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("invalid deferred operation id".into());
@@ -585,9 +585,10 @@ pub fn execute_queued(
             }
         }
     }
-    let result = execute_request(state, &request);
-    if let Ok(value) = &result {
+    let mut result = execute_request(state, &request);
+    if let Ok(value) = &mut result {
         completed(
+            request.operation.token(),
             value,
             &RuntimeOptions {
                 plugin_state: Some(state.to_path_buf()),
