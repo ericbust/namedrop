@@ -283,6 +283,18 @@ impl Space {
         }
     }
 
+    /// The prompt hook's context with no session or turn id, which arms
+    /// nothing: today's explicit commands.
+    fn unkeyed_prompt(&self, pane: &str, prompt: &str) -> String {
+        let input = json!({"hook_event_name":"UserPromptSubmit","prompt":prompt});
+        let output = execute_user_prompt_submit_hook(&input.to_string(), &self.runtime(pane))
+            .expect("the delivery got no hook context");
+        output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
     fn rows(&self, sql: &str) -> Vec<Vec<String>> {
         let connection =
             rusqlite::Connection::open(self.directory.state.join("namedrop.sqlite3")).unwrap();
@@ -599,6 +611,78 @@ fn background_work_at_the_stop_leaves_the_reply_for_the_agent_to_settle() {
     assert_eq!(
         space.herdr.envelope_for("pane-lead")["untrusted_body"],
         "The build passed."
+    );
+}
+
+/// The armed text shows one line. A delivery whose explicit block shows any
+/// other line asks the agent to run it, so it keeps that block as it is.
+#[test]
+fn a_delivery_that_shows_another_line_keeps_todays_commands() {
+    let space = Space::new();
+    let keeps_todays_commands = |shape: &str,
+                                 (pane, session, turn): (&str, &str, (&str, &str)),
+                                 envelope: &Value,
+                                 line: &str| {
+        let today = space.unkeyed_prompt(pane, &envelope.to_string());
+        assert!(
+            today.contains("Namedrop commands: the runnable lines this delivery authorized")
+                && today.contains(&format!("\n{line}: ")),
+            "{shape}: {today}"
+        );
+        assert_eq!(
+            space.prompt(pane, session, turn, &envelope.to_string()),
+            today,
+            "{shape}"
+        );
+    };
+    dispatch::message(
+        "send",
+        json!({"request_id":"ask","source":"@reviewer Review the attached context.",
+               "author_kind":"agent_session",
+               "context":{"capture_git_state":false,"snapshot":{
+                   "objective":"review the login path","applicable_user_instructions":[],
+                   "decisions":[],"completed_work":[],"current_work":[],"blockers":[],
+                   "evidence":[]}}}),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    assert!(ask["control"]["attached_context"].is_object(), "{ask}");
+    keeps_todays_commands(
+        "attached context",
+        ("pane-reviewer", "session-reviewer", CLAUDE),
+        &ask,
+        "context.read",
+    );
+
+    let reply = ask["control"]["tool"]["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| operation["token"] == "reply")
+        .unwrap();
+    let mut input = reply["input"].clone();
+    input["source"] = json!("@lead The login path is safe.");
+    dispatch::message(
+        "reply",
+        expand_attempt_reply(input, Some(&space.directory.state)).unwrap(),
+        &space.runtime("pane-reviewer"),
+    )
+    .unwrap();
+    let answer = space.herdr.envelope_for("pane-lead");
+    assert!(
+        answer["control"]["review_source_message_id"].is_string(),
+        "{answer}"
+    );
+    keeps_todays_commands(
+        "review source",
+        ("pane-lead", "session-lead", CODEX),
+        &answer,
+        "handoff.results",
+    );
+    assert!(
+        !space.directory.state.join("final-reply").exists(),
+        "a delivery with another line armed a claim"
     );
 }
 

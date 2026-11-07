@@ -91,6 +91,10 @@ pub(crate) enum Explicit {
     /// The person's draft rode in with the envelope, and the agent must
     /// also tell the person about it.
     LeftoverInput,
+    /// The explicit block shows a line besides `reply` and
+    /// `complete.no-reply`, such as an attached context read or a review's
+    /// results, that the delivery asks the agent to run.
+    OtherLine,
     /// The envelope binds no reply line with a body placeholder, or no
     /// complete.no-reply line.
     NoBoundLine,
@@ -108,6 +112,9 @@ pub(crate) struct DeliveryFacts<'a> {
     /// The bound `reply` input, when the envelope permits one.
     pub reply: Option<&'a Value>,
     pub no_reply: bool,
+    /// The explicit block would show a line besides `reply` and
+    /// `complete.no-reply`.
+    pub other_line: bool,
     /// The delivered message answers one this address wrote.
     pub answers_own: bool,
     pub leftover: bool,
@@ -120,6 +127,9 @@ pub(crate) struct DeliveryFacts<'a> {
 pub(crate) fn plan(facts: &DeliveryFacts<'_>) -> Plan {
     if facts.leftover {
         return Plan::Explicit(Explicit::LeftoverInput);
+    }
+    if facts.other_line {
+        return Plan::Explicit(Explicit::OtherLine);
     }
     if !facts.no_reply {
         return Plan::Explicit(Explicit::NoBoundLine);
@@ -173,6 +183,9 @@ pub(crate) fn claim_for(
         kind: delivery.kind,
         reply: bound("reply"),
         no_reply: bound("complete.no-reply").is_some(),
+        other_line: crate::integration::line_tokens(control)?
+            .iter()
+            .any(|token| !matches!(*token, "reply" | "complete.no-reply")),
         answers_own: delivery.answers_own,
         leftover,
     }) else {

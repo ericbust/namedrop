@@ -18,6 +18,7 @@ fn facts<'a>(kind: DeliveryKind, reply: Option<&'a Value>) -> DeliveryFacts<'a> 
         kind,
         reply,
         no_reply: true,
+        other_line: false,
         answers_own: false,
         leftover: false,
     }
@@ -82,6 +83,27 @@ fn plan_follows_the_measured_rule_and_keeps_explicit_kinds_explicit() {
                 ..facts(DeliveryKind::ReportToHuman, None)
             },
             Plan::Explicit(Explicit::LeftoverInput),
+        ),
+        (
+            DeliveryFacts {
+                other_line: true,
+                ..facts(DeliveryKind::Settle, Some(&reply))
+            },
+            Plan::Explicit(Explicit::OtherLine),
+        ),
+        (
+            DeliveryFacts {
+                other_line: true,
+                ..answers_own(facts(DeliveryKind::Settle, Some(&reply)))
+            },
+            Plan::Explicit(Explicit::OtherLine),
+        ),
+        (
+            DeliveryFacts {
+                other_line: true,
+                ..facts(DeliveryKind::ReportToHuman, None)
+            },
+            Plan::Explicit(Explicit::OtherLine),
         ),
     ];
     for (facts, expected) in cases {

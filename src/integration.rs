@@ -1645,6 +1645,12 @@ pub(crate) fn delivery_command_guidance(control: &Value) -> Option<String> {
     Some(guidance)
 }
 
+/// The tokens of the lines a delivery's explicit block shows.
+pub(crate) fn line_tokens(control: &Value) -> Option<Vec<&str>> {
+    let (lines, _) = rendered_lines(control)?;
+    Some(lines.into_iter().map(|line| line.token).collect())
+}
+
 struct RenderedLine<'a> {
     token: &'a str,
     text: String,
