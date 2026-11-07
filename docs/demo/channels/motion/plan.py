@@ -124,8 +124,8 @@ def drop_suggestion(line):
 
 def screen_rows(file):
     """The rows a window shows: what follows the last delivered request, without its JSON
-    envelope, the testbed's private paths or Claude Code's unsent suggestion, blank runs
-    squeezed, the newest rows kept."""
+    envelope, the testbed's private paths, Claude Code's unsent suggestion or the word
+    "operator", blank runs squeezed, the newest rows kept."""
     rows = [shorten_home(drop_suggestion(line.rstrip('\r'))) for line in (args.directory / 'recording' / file).read_text().split('\n')]
     marks = [i for i, row in enumerate(rows) if 'untrusted_body' in plain(row)]
     if marks:
@@ -133,7 +133,9 @@ def screen_rows(file):
     kept = []
     for row in rows:
         text = plain(row)
-        if PRIVATE in text or re.search(r'[{}]"|"[{}:,]|"\]', text):
+        # Namedrop still binds replies to the alias @operator, so an agent may write it in its
+        # pane. The person in the movie is "you": rows that say it are left out, never edited.
+        if PRIVATE in text or re.search(r'[{}]"|"[{}:,]|"\]', text) or BANNED.search(text):
             continue
         if not text.strip() and (not kept or not plain(kept[-1]).strip()):
             continue
