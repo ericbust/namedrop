@@ -85,6 +85,7 @@ mod bridge;
 pub(crate) mod channel_routing;
 mod deferred_commands;
 pub(crate) mod direct_messages;
+mod final_reply;
 mod reminders;
 pub(crate) use bridge::{EnvoyOrigin, ForwardedCopy};
 pub(crate) use groups::addressed_recipients;

@@ -293,3 +293,89 @@ fn a_reply_line_drops_only_the_fields_the_cli_derives_to_the_same_value() {
     assert_eq!(kept["in_reply_to"], "message-2");
     assert!(kept.get("author_kind").is_none(), "{kept}");
 }
+
+fn final_reply_control(tracked: bool) -> Value {
+    let operation =
+        |token: &str, argv: Value, input: Value| json!({"token":token,"argv":argv,"input":input});
+    let mut reply = json!({"request_id":"reply-attempt-1","source":"@lead <reply body>",
+        "in_reply_to":"message-1","author_kind":"agent_session","attempt_id":"attempt-1"});
+    if tracked {
+        reply["work_outcome"] = json!("needs_continuation");
+    }
+    json!({"attempt_id":"attempt-1","message_id":"message-1","context_references":[],"tool":{
+    "executable":"/state/runtime/namedrop","input_flag":"--input-json",
+    "environment":{"HERDR_PLUGIN_STATE_DIR":"/state","HERDR_SOCKET_PATH":"/tmp/herdr.sock",
+                   "HERDR_WORKSPACE_ID":"w1","HERDR_PANE_ID":"w1:p3"},
+    "operations":[
+        operation("reply", json!(["reply"]), reply),
+        operation("complete.no-reply", json!(["complete","--no-reply"]), json!({"attempt_id":"attempt-1"})),
+        operation("reminder.set", json!(["reminder","set"]), json!({"in":"<duration at least 60s>"})),
+        operation("context.inspect", json!(["context","inspect"]), json!({"thread_id":"thread-1"})),
+        operation("context.read", json!(["context","read"]), json!({"grant_id":"<grant_id from context.inspect>"})),
+    ]}})
+}
+
+#[test]
+fn a_final_reply_delivery_says_what_the_stop_does_and_shows_only_the_other_line() {
+    use crate::final_reply::{Armed, NoReplyCase};
+    let control = final_reply_control(false);
+    let reply = Armed::Reply {
+        template: Value::Null,
+        tracked: false,
+    };
+    let claude = final_reply_guidance(&control, &reply, true).unwrap();
+    assert!(
+        claude.starts_with(
+            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. For no reply, run this line first. If background work"
+        ),
+        "{claude}"
+    );
+    assert_eq!(rendered_tokens(&claude), ["complete.no-reply"]);
+    assert!(
+        claude.contains(SANDBOX_SENTENCE) && !claude.contains("work_outcome"),
+        "{claude}"
+    );
+    let codex = final_reply_guidance(&control, &reply, false).unwrap();
+    assert!(!codex.contains(FINAL_REPLY_WAITS), "{codex}");
+
+    let tracked = final_reply_guidance(
+        &final_reply_control(true),
+        &Armed::Reply {
+            template: Value::Null,
+            tracked: true,
+        },
+        false,
+    )
+    .unwrap();
+    assert!(tracked.contains(FINAL_REPLY_OUTCOME), "{tracked}");
+    assert!(
+        !tracked.contains("work_outcome is yours to set"),
+        "{tracked}"
+    );
+
+    let own =
+        final_reply_guidance(&control, &Armed::NoReply(NoReplyCase::AnswersOwn), false).unwrap();
+    assert!(
+        own.contains("To answer @lead instead, run this line."),
+        "{own}"
+    );
+    assert_eq!(rendered_tokens(&own), ["reply"]);
+    assert!(
+        own.contains(COMMAND_SENTENCES[0].1) && own.contains(COMMAND_SENTENCES[1].1),
+        "{own}"
+    );
+
+    for (case, text) in [
+        (NoReplyCase::ReportToHuman, REPORT_TO_HUMAN_GUIDANCE),
+        (NoReplyCase::ResultSet, RESULT_SET_GUIDANCE),
+    ] {
+        assert_eq!(
+            final_reply_guidance(&control, &Armed::NoReply(case), false).unwrap(),
+            text
+        );
+    }
+    for guidance in [&claude, &tracked, &own] {
+        assert!(guidance.starts_with("Namedrop commands: "), "{guidance}");
+        assert!(!guidance.contains("operator"), "{guidance}");
+    }
+}

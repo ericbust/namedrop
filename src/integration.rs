@@ -1255,6 +1255,68 @@ where
     I: crate::IdGenerator,
 {
     let _: DeliveryInboxInput = serde_json::from_value(input).map_err(crate::input_schema_error)?;
+    with_outstanding_envelopes(runtime, |_, _, _, envelopes| {
+        Ok(json!({"envelopes": envelopes}))
+    })
+}
+
+/// One delivery prompt that exactly matches an envelope the pane's registered
+/// session still owes, with the facts the final-reply plan reads.
+pub(crate) struct AuthenticatedDelivery {
+    pub envelope: Value,
+    pub kind: DeliveryKind,
+    pub answers_own: bool,
+    pub agent_session_id: AgentSessionId,
+    pub namespace: StateNamespace,
+}
+
+/// The reconstruction a submitted envelope exactly matches, or `None`. Only
+/// durable exact-session state may add trusted host context, so everything
+/// derived for the host comes from the reconstruction, never the prompt.
+pub(crate) fn authenticate_delivery_prompt<E, C, I>(
+    envelope: &Value,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Option<AuthenticatedDelivery>
+where
+    E: crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
+    with_outstanding_envelopes(runtime, |transaction, namespace, session, envelopes| {
+        for outstanding in envelopes {
+            let value = serde_json::to_value(&outstanding)
+                .map_err(|error| crate::StoreError::invalid_input(error.to_string()))?;
+            if value == *envelope {
+                return Ok(Some(AuthenticatedDelivery {
+                    kind: DeliveryKind::of(&outstanding.control),
+                    answers_own: transaction
+                        .answers_own_message(namespace, &outstanding.control.attempt_id)?,
+                    envelope: value,
+                    agent_session_id: session.clone(),
+                    namespace: namespace.clone(),
+                }));
+            }
+        }
+        Ok(None)
+    })
+    .ok()
+    .flatten()
+}
+
+fn with_outstanding_envelopes<E, C, I, T>(
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+    read: impl FnOnce(
+        &crate::StateTransaction<'_>,
+        &StateNamespace,
+        &AgentSessionId,
+        Vec<DeliveryEnvelope>,
+    ) -> Result<T, crate::StoreError>,
+) -> Result<T, String>
+where
+    E: crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
     let discovered = integration_discovery(runtime)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
     let pane_id = runtime
@@ -1270,20 +1332,20 @@ where
         ),
     );
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
-    let envelopes = store
+    store
         .transaction(|transaction| {
             let (address_id, agent_session_id) =
                 authorized_delivery_session(transaction, &namespace, &discovered, pane_id)?;
-            transaction
+            let envelopes = transaction
                 .outstanding_delivery_attempts(&namespace, &address_id, &agent_session_id)?
                 .iter()
                 .map(|attempt_id| {
                     transaction.delivery_envelope(&namespace, attempt_id, tool.clone())
                 })
-                .collect::<Result<Vec<_>, _>>()
+                .collect::<Result<Vec<_>, _>>()?;
+            read(transaction, &namespace, &agent_session_id, envelopes)
         })
-        .map_err(|error| error.to_string())?;
-    Ok(json!({"envelopes": envelopes}))
+        .map_err(|error| error.to_string())
 }
 
 const EARLIER_PROFILES: [&[&str]; 3] = [
@@ -1562,15 +1624,43 @@ fn unrendered_sentence(tokens: &[&str]) -> String {
 /// is exactly how one live handoff stalled. Location flags therefore follow the
 /// argv, and the input flag is last.
 pub(crate) fn delivery_command_guidance(control: &Value) -> Option<String> {
+    let (lines, skipped) = rendered_lines(control)?;
+    let mut guidance = COMMAND_HEADER.to_owned();
+    for (need, sentence) in COMMAND_SENTENCES {
+        if lines.iter().any(|line| need.present_in(&line.input)) {
+            guidance.push(' ');
+            guidance.push_str(sentence);
+        }
+    }
+    if !skipped.is_empty() {
+        guidance.push(' ');
+        guidance.push_str(&unrendered_sentence(&skipped));
+    }
+    guidance.push(' ');
+    guidance.push_str(SANDBOX_SENTENCE);
+    for line in lines {
+        guidance.push('\n');
+        guidance.push_str(&line.text);
+    }
+    Some(guidance)
+}
+
+struct RenderedLine<'a> {
+    token: &'a str,
+    text: String,
+    input: Value,
+}
+
+/// Every bound operation that gets a line, in the envelope's order, and the
+/// tokens that are bound but get none.
+fn rendered_lines(control: &Value) -> Option<(Vec<RenderedLine<'_>>, Vec<&str>)> {
     let tool = control.get("tool")?;
     let executable = tool.get("executable")?.as_str()?;
     let environment = tool.get("environment")?.as_object()?;
     let input_flag = tool.get("input_flag")?.as_str()?;
     let located = |key: &str| environment.get(key).and_then(Value::as_str);
     let unrendered = unrendered_operations(control);
-    let mut lines = Vec::new();
-    let mut inputs = Vec::new();
-    let mut rendered = Vec::new();
+    let mut lines: Vec<RenderedLine<'_>> = Vec::new();
     let mut skipped = Vec::new();
     for operation in tool.get("operations")?.as_array()? {
         let token = operation.get("token")?.as_str()?;
@@ -1602,32 +1692,90 @@ pub(crate) fn delivery_command_guidance(control: &Value) -> Option<String> {
                 command.push_str(&format!(" {flag} {}", shell_single_quote(value)));
             }
         }
-        lines.push(format!(
-            "{token}: {command} {input_flag} {}",
-            shell_single_quote(&input.to_string())
-        ));
-        inputs.push(input);
-        rendered.push(token);
+        lines.push(RenderedLine {
+            token,
+            text: format!(
+                "{token}: {command} {input_flag} {}",
+                shell_single_quote(&input.to_string())
+            ),
+            input,
+        });
     }
-    let mut guidance = COMMAND_HEADER.to_owned();
+    skipped.retain(|token| !lines.iter().any(|line| line.token == *token));
+    Some((lines, skipped))
+}
+
+const FINAL_REPLY_DONE: &str =
+    "Namedrop sends it when your turn ends, so run no settle command and write no status line.";
+const FINAL_REPLY_OUTCOME: &str = "End it with one line: work_outcome: completed, work_outcome: needs_continuation, or work_outcome: blocked: <reason>. Without one it is needs_continuation.";
+const FINAL_REPLY_WAITS: &str = "If background work is still running when your turn ends, Namedrop waits for it and sends your final message after.";
+const REPORT_TO_HUMAN_GUIDANCE: &str = "Namedrop commands: none. Namedrop closes this without a reply when your turn ends; show it to the person once in your final message.";
+const RESULT_SET_GUIDANCE: &str = "Namedrop commands: none. Namedrop closes this without a reply when your turn ends; your final message is the response the envelope asks for.";
+
+/// The context for a delivery whose final message settles it. It says what
+/// the Stop will do and shows only the one line that does the other thing.
+/// `waits` is said only where the Stop reports background work.
+pub(crate) fn final_reply_guidance(
+    control: &Value,
+    armed: &crate::final_reply::Armed,
+    waits: bool,
+) -> Option<String> {
+    use crate::final_reply::{Armed, NoReplyCase};
+    let (opposite, lead) = match armed {
+        Armed::NoReply(NoReplyCase::ReportToHuman) => return Some(REPORT_TO_HUMAN_GUIDANCE.into()),
+        Armed::NoReply(NoReplyCase::ResultSet) => return Some(RESULT_SET_GUIDANCE.into()),
+        Armed::Reply { tracked, .. } => {
+            let mut lead = format!(
+                "Namedrop commands: your final message is your reply to {}. {FINAL_REPLY_DONE}",
+                addressee(control)?
+            );
+            if *tracked {
+                lead.push(' ');
+                lead.push_str(FINAL_REPLY_OUTCOME);
+            }
+            lead.push_str(" For no reply, run this line first.");
+            if waits {
+                lead.push(' ');
+                lead.push_str(FINAL_REPLY_WAITS);
+            }
+            ("complete.no-reply", lead)
+        }
+        Armed::NoReply(NoReplyCase::AnswersOwn) => (
+            "reply",
+            format!(
+                "Namedrop commands: this answers your message, so Namedrop closes it without a reply when your turn ends and your final message is for the person. To answer {} instead, run this line.",
+                addressee(control)?
+            ),
+        ),
+    };
+    let (lines, _) = rendered_lines(control)?;
+    let line = lines.into_iter().find(|line| line.token == opposite)?;
+    let mut guidance = lead;
     for (need, sentence) in COMMAND_SENTENCES {
-        if inputs.iter().any(|input| need.present_in(input)) {
+        if need.present_in(&line.input) {
             guidance.push(' ');
             guidance.push_str(sentence);
         }
     }
-    skipped.retain(|token| !rendered.contains(token));
-    if !skipped.is_empty() {
-        guidance.push(' ');
-        guidance.push_str(&unrendered_sentence(&skipped));
-    }
     guidance.push(' ');
     guidance.push_str(SANDBOX_SENTENCE);
-    for line in lines {
-        guidance.push('\n');
-        guidance.push_str(&line);
-    }
+    guidance.push('\n');
+    guidance.push_str(&line.text);
     Some(guidance)
+}
+
+/// Who the bound reply goes to, as its source names them: `@codex`, or
+/// `#label @codex` across workspaces.
+fn addressee(control: &Value) -> Option<&str> {
+    control
+        .pointer("/tool/operations")?
+        .as_array()?
+        .iter()
+        .find(|operation| operation["token"] == "reply")?
+        .pointer("/input/source")?
+        .as_str()?
+        .strip_suffix(REPLY_BODY_PLACEHOLDER)
+        .map(str::trim_end)
 }
 
 /// A line whose input still holds a value only an unrendered operation

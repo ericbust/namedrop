@@ -148,6 +148,58 @@ pub(crate) fn plan(facts: &DeliveryFacts<'_>) -> Plan {
     }
 }
 
+/// The claim one authenticated delivery arms, or `None` when it keeps the
+/// explicit commands: by its kind, or because the prompt's session is not the
+/// one the attempt is pinned to.
+pub(crate) fn claim_for(
+    delivery: &crate::integration::AuthenticatedDelivery,
+    session: &str,
+    leftover: bool,
+    turn: &HostTurn,
+    now_ms: u64,
+) -> Option<Claim> {
+    if delivery.agent_session_id.as_str() != session {
+        return None;
+    }
+    let control = &delivery.envelope["control"];
+    let bound = |token: &str| {
+        control["tool"]["operations"]
+            .as_array()?
+            .iter()
+            .find(|operation| operation["token"] == token)
+            .map(|operation| &operation["input"])
+    };
+    let Plan::Armed(plan) = plan(&DeliveryFacts {
+        kind: delivery.kind,
+        reply: bound("reply"),
+        no_reply: bound("complete.no-reply").is_some(),
+        answers_own: delivery.answers_own,
+        leftover,
+    }) else {
+        return None;
+    };
+    let located = |key: &str| {
+        control["tool"]["environment"][key]
+            .as_str()
+            .map(str::to_owned)
+    };
+    Some(Claim {
+        attempt_id: crate::DeliveryAttemptId::new(control["attempt_id"].as_str()?),
+        namespace: delivery.namespace.clone(),
+        location: Location {
+            state: located("HERDR_PLUGIN_STATE_DIR")?,
+            socket: located("HERDR_SOCKET_PATH")?,
+            workspace: located("HERDR_WORKSPACE_ID")?,
+            pane: located("HERDR_PANE_ID")?,
+        },
+        turn: turn.clone(),
+        plan,
+        state: ClaimState::Open,
+        armed_at_ms: now_ms,
+        updated_at_ms: now_ms,
+    })
+}
+
 /// Where the bound operations of one delivery run: the envelope's own tool
 /// location, so the Stop runs exactly the line the agent was shown.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
