@@ -17,7 +17,7 @@ const LAST_WINDOW: u64 = 8 * 1024 * 1024;
 const DAY_MS: u64 = 86_400_000;
 
 /// The context the session's host last reported, or `None` when its
-/// transcript cannot be found or holds no usage yet.
+/// transcript cannot be found, holds no usage yet, or was compacted since.
 pub(crate) fn context_tokens(
     host: AgentRuntime,
     session: &AgentSessionId,
@@ -157,8 +157,11 @@ fn latest_from_end(host: AgentRuntime, file: &File) -> Option<u64> {
         let start = length.saturating_sub(window);
         let mut bytes = vec![0; usize::try_from(length - start).ok()?];
         file.read_exact_at(&mut bytes, start).ok()?;
-        if let Some(tokens) = latest_context_tokens(host, &bytes) {
-            return Some(tokens);
+        if let Some(reading) = latest_reading(host, &bytes) {
+            return match reading {
+                Reading::Tokens(tokens) => Some(tokens),
+                Reading::Compacted => None,
+            };
         }
         if start == 0 || window >= LAST_WINDOW {
             return None;
@@ -167,13 +170,23 @@ fn latest_from_end(host: AgentRuntime, file: &File) -> Option<u64> {
     }
 }
 
-/// The latest context size in a window read from the end of a transcript. A
-/// line the window cut, at either end, is never a whole JSON object, so it
-/// does not parse and is passed over.
-fn latest_context_tokens(host: AgentRuntime, window: &[u8]) -> Option<u64> {
+/// What a transcript line says about the context's size.
+#[derive(Debug, PartialEq)]
+enum Reading {
+    /// A model turn's whole prompt.
+    Tokens(u64),
+    /// The host compacted the context. Until the next model turn the
+    /// transcript holds only the old size, or a zero, so the size is unknown.
+    Compacted,
+}
+
+/// The latest reading in a window read from the end of a transcript. A line
+/// the window cut, at either end, is never a whole JSON object, so it does
+/// not parse and is passed over.
+fn latest_reading(host: AgentRuntime, window: &[u8]) -> Option<Reading> {
     let reading = match host {
-        AgentRuntime::ClaudeCode => claude_context,
-        AgentRuntime::Codex => codex_context,
+        AgentRuntime::ClaudeCode => claude_reading,
+        AgentRuntime::Codex => codex_reading,
     };
     window.rsplit(|byte| *byte == b'\n').find_map(reading)
 }
@@ -182,6 +195,7 @@ fn latest_context_tokens(host: AgentRuntime, window: &[u8]) -> Option<u64> {
 struct ClaudeEntry {
     #[serde(rename = "type")]
     kind: Option<String>,
+    subtype: Option<String>,
     #[serde(rename = "isSidechain")]
     sidechain: Option<bool>,
     message: Option<ClaudeMessage>,
@@ -200,15 +214,22 @@ struct ClaudeUsage {
     cache_read_input_tokens: Option<u64>,
 }
 
-/// A main-thread model turn's whole prompt. Claude writes all-zero usage on
-/// the entries right after a compaction, and `<synthetic>` entries are local
-/// notices no model read, so neither says how large the context is.
-fn claude_context(line: &[u8]) -> Option<u64> {
+/// A main-thread model turn's whole prompt, or the main thread's compaction
+/// boundary. Claude writes all-zero usage on the entries right after a
+/// compaction, and `<synthetic>` entries are local notices no model read, so
+/// neither says how large the context is.
+fn claude_reading(line: &[u8]) -> Option<Reading> {
     let entry: ClaudeEntry = serde_json::from_slice(line).ok()?;
+    if entry.sidechain == Some(true) {
+        return None;
+    }
+    if entry.kind.as_deref() == Some("system")
+        && entry.subtype.as_deref() == Some("compact_boundary")
+    {
+        return Some(Reading::Compacted);
+    }
     let message = entry.message?;
-    if entry.kind.as_deref() != Some("assistant")
-        || entry.sidechain == Some(true)
-        || message.model.as_deref() == Some("<synthetic>")
+    if entry.kind.as_deref() != Some("assistant") || message.model.as_deref() == Some("<synthetic>")
     {
         return None;
     }
@@ -221,7 +242,7 @@ fn claude_context(line: &[u8]) -> Option<u64> {
     .into_iter()
     .map(|tokens| tokens.unwrap_or(0))
     .sum::<u64>();
-    (total > 0).then_some(total)
+    (total > 0).then_some(Reading::Tokens(total))
 }
 
 #[derive(Deserialize)]
@@ -248,16 +269,21 @@ struct CodexUsage {
     input_tokens: Option<u64>,
 }
 
-/// The last model request's input, cached tokens included. Codex also writes
-/// `token_count` events with `info: null`, which carry only rate limits.
-fn codex_context(line: &[u8]) -> Option<u64> {
+/// The last model request's input, cached tokens included, or a compaction.
+/// Codex also writes `token_count` events with `info: null`, which carry only
+/// rate limits, and one with zero input right after a compaction.
+fn codex_reading(line: &[u8]) -> Option<Reading> {
     let entry: CodexEntry = serde_json::from_slice(line).ok()?;
+    if entry.kind.as_deref() == Some("compacted") {
+        return Some(Reading::Compacted);
+    }
     let payload = entry.payload?;
     if entry.kind.as_deref() != Some("event_msg") || payload.kind.as_deref() != Some("token_count")
     {
         return None;
     }
-    payload.info?.last_token_usage?.input_tokens
+    let input = payload.info?.last_token_usage?.input_tokens?;
+    (input > 0).then_some(Reading::Tokens(input))
 }
 
 #[cfg(test)]
@@ -272,6 +298,13 @@ mod tests {
             bytes.push(b'\n');
         }
         bytes
+    }
+
+    fn latest(host: AgentRuntime, window: &[u8]) -> Option<u64> {
+        match latest_reading(host, window)? {
+            Reading::Tokens(tokens) => Some(tokens),
+            Reading::Compacted => None,
+        }
     }
 
     fn claude_turn(input: u64, created: u64, read: u64) -> serde_json::Value {
@@ -300,7 +333,7 @@ mod tests {
             json!({"type":"last-prompt","lastPrompt":"next","sessionId":"s"}),
         ]);
         assert_eq!(
-            latest_context_tokens(AgentRuntime::ClaudeCode, &transcript),
+            latest(AgentRuntime::ClaudeCode, &transcript),
             Some(2 + 989 + 64_469)
         );
     }
@@ -315,16 +348,49 @@ mod tests {
         let mut synthetic = claude_turn(0, 0, 7_000);
         synthetic["message"]["model"] = json!("<synthetic>");
         let transcript = lines(&[
+            json!({"type":"system","subtype":"compact_boundary"}),
             claude_turn(3, 100, 80_000),
             compacted,
             sidechain,
             synthetic,
-            json!({"type":"system","subtype":"compact_boundary"}),
         ]);
+        assert_eq!(latest(AgentRuntime::ClaudeCode, &transcript), Some(80_103));
+    }
+
+    #[test]
+    fn a_compaction_after_the_latest_usage_leaves_the_size_unknown() {
+        let boundary = json!({"type":"system","subtype":"compact_boundary","isSidechain":false,
+            "content":"Conversation compacted","level":"info",
+            "compactMetadata":{"trigger":"auto","preTokens":757_456,"postTokens":36_039}});
+        let mut claude = lines(&[
+            claude_turn(2, 300, 757_000),
+            boundary.clone(),
+            json!({"type":"user","isSidechain":false,"message":{"role":"user","content":"summary"}}),
+            json!({"type":"attachment","isSidechain":false}),
+        ]);
+        assert_eq!(latest(AgentRuntime::ClaudeCode, &claude), None);
+        claude.extend(lines(&[claude_turn(2, 500, 62_000)]));
+        assert_eq!(latest(AgentRuntime::ClaudeCode, &claude), Some(62_502));
+        let mut side_boundary = boundary;
+        side_boundary["isSidechain"] = json!(true);
         assert_eq!(
-            latest_context_tokens(AgentRuntime::ClaudeCode, &transcript),
-            Some(80_103)
+            latest(
+                AgentRuntime::ClaudeCode,
+                &lines(&[claude_turn(2, 300, 757_000), side_boundary])
+            ),
+            Some(757_302)
         );
+
+        let mut codex = lines(&[
+            codex_count(448_739),
+            json!({"timestamp":"2026-11-06T21:19:38.480Z","ordinal":5300,"type":"compacted",
+                   "payload":{"message":"","window_number":2,"replacement_history":[]}}),
+            json!({"type":"turn_context","payload":{"cwd":"/work"}}),
+            codex_count(0),
+        ]);
+        assert_eq!(latest(AgentRuntime::Codex, &codex), None);
+        codex.extend(lines(&[codex_count(37_393)]));
+        assert_eq!(latest(AgentRuntime::Codex, &codex), Some(37_393));
     }
 
     #[test]
@@ -336,36 +402,24 @@ mod tests {
                    "rate_limits":{"limit_id":"codex"}}}),
             json!({"type":"response_item","payload":{"type":"message","info":"not usage"}}),
         ]);
-        assert_eq!(
-            latest_context_tokens(AgentRuntime::Codex, &transcript),
-            Some(363_409)
-        );
-        assert_eq!(
-            latest_context_tokens(AgentRuntime::ClaudeCode, &transcript),
-            None
-        );
+        assert_eq!(latest(AgentRuntime::Codex, &transcript), Some(363_409));
+        assert_eq!(latest(AgentRuntime::ClaudeCode, &transcript), None);
     }
 
     #[test]
     fn a_cut_first_line_or_a_partial_last_line_is_not_read() {
         let whole = lines(&[codex_count(1_000)]);
-        assert_eq!(
-            latest_context_tokens(AgentRuntime::Codex, &whole),
-            Some(1_000)
-        );
+        assert_eq!(latest(AgentRuntime::Codex, &whole), Some(1_000));
         for start in 1..whole.len() {
             assert_eq!(
-                latest_context_tokens(AgentRuntime::Codex, &whole[start..]),
+                latest(AgentRuntime::Codex, &whole[start..]),
                 None,
                 "a line cut at byte {start} was read"
             );
         }
         let mut writing = lines(&[codex_count(2_000)]);
         writing.extend(&lines(&[codex_count(3_000)])[..40]);
-        assert_eq!(
-            latest_context_tokens(AgentRuntime::Codex, &writing),
-            Some(2_000)
-        );
+        assert_eq!(latest(AgentRuntime::Codex, &writing), Some(2_000));
     }
 
     #[test]
