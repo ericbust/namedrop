@@ -29,6 +29,10 @@ struct CoordinationWakeState {
 /// checked in on. Workers usually resume within a few minutes.
 pub(crate) const WORKER_QUIET_MS: u64 = 10 * 60 * 1_000;
 
+/// The longest a worker's activity can hold a check-in after its delivery
+/// settled, so a worker that keeps resuming without replying still surfaces.
+const WORKER_QUIET_CAP_MS: u64 = 30 * 60 * 1_000;
+
 /// Whether a coordination's check-in may go to its lead now.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WakeReadiness {
@@ -921,9 +925,7 @@ impl StateTransaction<'_> {
                 let seat_message = self
                     .copy_of(seat_ns, &ns.space_id, &message)?
                     .unwrap_or(message);
-                let due = self
-                    .worker_quiet_since(seat_ns, address, &seat_message, session)?
-                    .saturating_add(WORKER_QUIET_MS);
+                let due = self.worker_quiet_until(seat_ns, address, &seat_message, session)?;
                 if now_ms < due {
                     quiet_until = quiet_until.max(Some(due));
                 }
@@ -995,27 +997,39 @@ impl StateTransaction<'_> {
         Ok(())
     }
 
-    /// The later of when this delivery settled and when its worker session was
-    /// last seen working.
-    fn worker_quiet_since(
+    /// When the worker of this settled delivery counts as quiet:
+    /// `WORKER_QUIET_MS` after the later of the settle and the session's last
+    /// `working` observation, but never past `WORKER_QUIET_CAP_MS` after the
+    /// settle. Work after the worker's next delivery is that delivery's work.
+    fn worker_quiet_until(
         &self,
         ns: &StateNamespace,
         address: &str,
         message: &MessageId,
         session: &str,
     ) -> Result<u64, StoreError> {
-        let since = self.transaction.query_row(
-            "SELECT MAX(at) FROM (
-                SELECT t.occurred_at_ms AS at FROM mailbox_deliveries d
+        let (settled, working) = self.transaction.query_row(
+            "WITH settle AS (
+                SELECT MAX(t.occurred_at_ms) AS at, d.mailbox_order AS mailbox_order
+                FROM mailbox_deliveries d
                 JOIN transition_facts t ON t.session_socket_id = d.session_socket_id
                  AND t.worktree_id = d.worktree_id AND t.entity_kind = 'mailbox_delivery'
                  AND t.entity_id = d.delivery_id AND t.transition_kind = 'settled'
                 WHERE d.session_socket_id = ?1 AND d.worktree_id = ?2
-                  AND d.message_id = ?3 AND d.address_id = ?4
-                UNION ALL
-                SELECT observed_at_ms FROM agent_session_observations
+                  AND d.message_id = ?3 AND d.address_id = ?4),
+             next AS (
+                SELECT MIN(t.occurred_at_ms) AS at FROM settle, mailbox_deliveries d
+                JOIN transition_facts t ON t.session_socket_id = d.session_socket_id
+                 AND t.worktree_id = d.worktree_id AND t.entity_kind = 'mailbox_delivery'
+                 AND t.entity_id = d.delivery_id AND t.transition_kind = 'dispatching'
+                WHERE d.session_socket_id = ?1 AND d.worktree_id = ?2
+                  AND d.address_id = ?4 AND d.mailbox_order > settle.mailbox_order)
+             SELECT settle.at, (
+                SELECT MAX(observed_at_ms) FROM agent_session_observations
                 WHERE session_socket_id = ?1 AND worktree_id = ?2 AND address_id = ?4
-                  AND agent_session_id = ?5 AND status = 'working')",
+                  AND agent_session_id = ?5 AND status = 'working'
+                  AND observed_at_ms < coalesce((SELECT at FROM next), 9223372036854775807))
+             FROM settle",
             params![
                 ns.session_socket_id,
                 ns.space_id.as_str(),
@@ -1023,9 +1037,15 @@ impl StateTransaction<'_> {
                 address,
                 session
             ],
-            |r| r.get::<_, Option<i64>>(0)?.map(from_i64).transpose(),
+            |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)),
         )?;
-        Ok(since.unwrap_or(0))
+        let Some(settled) = settled.map(from_i64).transpose()? else {
+            return Ok(0);
+        };
+        let since = working.map(from_i64).transpose()?.unwrap_or(0).max(settled);
+        Ok(since
+            .saturating_add(WORKER_QUIET_MS)
+            .min(settled.saturating_add(WORKER_QUIET_CAP_MS)))
     }
 
     fn coordination_paused_assignment(

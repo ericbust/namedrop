@@ -3527,6 +3527,111 @@ fn a_queued_check_in_whose_worker_resumes_waits_for_a_new_quiet_window() {
     assert_eq!(f.wake_count(), 1);
 }
 
+/// `pane` gets an ordinary delivery from a helper at `at`, works on it for a
+/// minute and ends its turn.
+fn ordinary_turn(f: &Fixture, pane: &str, at: u64, key: &str) {
+    f.now.store(at, Ordering::Relaxed);
+    let sent = dispatch::message(
+        "send",
+        json!({"request_id":key,"source":format!("@{pane} synthetic ordinary work"),
+            "author_kind":"agent_session"}),
+        &f.runtime("helper"),
+    )
+    .unwrap();
+    let attempt = f.attempt(&sent["message_id"], pane);
+    f.now.store(at + 1_000, Ordering::Relaxed);
+    f.status_event(pane, "working");
+    f.now.store(at + 60_000, Ordering::Relaxed);
+    f.complete_for(&attempt, pane);
+    f.status_event(pane, "idle");
+}
+
+#[test]
+fn a_worker_busy_with_other_deliveries_still_gets_its_stalled_check_in_and_an_ignored_one_is_flagged()
+ {
+    let f = Fixture::new();
+    f.register_worker("helper");
+    worker_turn_ended_without_reply(&f);
+    let due = 100 + 31_000 + 600_000;
+    for (n, at) in (100 + 31_000 + 100_000..due).step_by(300_000).enumerate() {
+        ordinary_turn(&f, "worker", at, &format!("ordinary-{n}"));
+        assert_eq!(f.drain_report().check_in_due_ms, Some(due));
+        assert_eq!(f.nudge_prompts().len(), 0);
+    }
+
+    f.now.store(due, Ordering::Relaxed);
+    f.drain();
+    let nudges = f.nudge_prompts();
+    assert_eq!(nudges.len(), 1, "{nudges:?}");
+    assert!(
+        nudges[0]["untrusted_body"]
+            .as_str()
+            .unwrap()
+            .contains(": pending.")
+    );
+    let wake_attempt = nudges[0]["control"]["attempt_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.now.store(due + 31_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.disposition(&wake_attempt).as_deref(), Some("no_reply"));
+    assert_eq!(f.attention_count(), 1, "{:?}", f.unresolved_attention());
+    assert_eq!(
+        f.attention_summary(),
+        "The one continuation for this revision ended or is held without a new work decision. Review handoff.results and act explicitly; Namedrop will not repeat the prompt."
+    );
+}
+
+#[test]
+fn a_worker_that_keeps_resuming_without_replying_is_checked_in_on_half_an_hour_after_its_turn_ended()
+ {
+    let f = Fixture::new();
+    worker_turn_ended_without_reply(&f);
+    let cap = 100 + 31_000 + 1_800_000;
+    for at in (100 + 31_000 + 100_000..cap).step_by(300_000) {
+        f.now.store(at, Ordering::Relaxed);
+        f.status_event("worker", "working");
+        f.now.store(at + 60_000, Ordering::Relaxed);
+        assert_eq!(
+            f.status_event("worker", "idle").check_in_due_ms,
+            Some((at + 600_000).min(cap))
+        );
+    }
+    f.now.store(cap - 1, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.nudge_prompts().len(), 0);
+
+    f.now.store(cap, Ordering::Relaxed);
+    assert_eq!(f.drain_report().check_in_due_ms, None);
+    assert_eq!(f.nudge_prompts().len(), 1);
+}
+
+#[test]
+fn another_workers_ordinary_work_does_not_hold_a_stalled_check_in() {
+    let f = Fixture::new();
+    f.register_worker("helper");
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    let b = f.send(&id, "second", "reviewer");
+    f.now.store(100 + 31_000, Ordering::Relaxed);
+    f.drain();
+    for (message, pane) in [(&a, "worker"), (&b, "reviewer")] {
+        let attempt = f.attempt(&message["message_id"], pane);
+        assert_eq!(f.attempt_state(&attempt), "settled");
+    }
+    f.status("lead", "idle");
+    let due = 100 + 31_000 + 600_000;
+    for (n, at) in (100 + 31_000 + 100_000..due).step_by(300_000).enumerate() {
+        ordinary_turn(&f, "reviewer", at, &format!("ordinary-{n}"));
+        assert_eq!(f.drain_report().check_in_due_ms, Some(due));
+    }
+    f.now.store(due, Ordering::Relaxed);
+    assert_eq!(f.drain_report().check_in_due_ms, None);
+    let nudges = f.nudge_prompts();
+    assert_eq!(nudges.len(), 1, "{nudges:?}");
+}
+
 /// A worker's completed reply, which the lead reads at `read_at` while it is
 /// still working, before it goes idle.
 fn lead_reads_a_completed_reply(f: &Fixture, read_at: u64) -> (Value, Value) {
