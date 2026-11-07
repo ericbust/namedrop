@@ -2115,3 +2115,54 @@ fn a_miss_after_an_unchanged_roster_is_the_exact_known_safe_guidance() {
         );
     }
 }
+
+/// Two panes can resume one session id. Each is shown what its own turns
+/// carried, and a SessionStart of that session, which cannot tell which pane
+/// it runs in, shows both the whole roster again.
+#[test]
+fn two_panes_of_one_session_keep_separate_memories_and_one_start_resets_both() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+    let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
+    let prompt = "Plan the SSO work.";
+
+    let shown_lead = hook_as("session-1", prompt, &lead).unwrap();
+    assert!(
+        context(&shown_lead).contains("- @lead (you)"),
+        "{shown_lead}"
+    );
+    let shown_reviewer = hook_as("session-1", prompt, &reviewer)
+        .expect("the other pane was treated as already shown the first pane's roster");
+    assert!(
+        context(&shown_reviewer).contains("- @reviewer (you)"),
+        "{shown_reviewer}"
+    );
+    assert_eq!(hook_as("session-1", prompt, &lead), None);
+    assert_eq!(hook_as("session-1", prompt, &reviewer), None);
+
+    let output = codex_app_server::run_with_stdin(
+        Command::new(env!("CARGO_BIN_EXE_namedrop"))
+            .args(["hook", "session-start", "--state-directory"])
+            .arg(&directory.state)
+            .env("HOME", &directory.home)
+            .env("CODEX_HOME", directory.home.join(".codex"))
+            .env("CLAUDE_CONFIG_DIR", directory.home.join(".claude"))
+            .env("HERDR_BIN_PATH", directory.root.join("no-herdr"))
+            .env("HERDR_PANE_ID", "pane-lead")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("HERDR_WORKSPACE_ID")
+            .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("HERDR_PLUGIN_STATE_DIR"),
+        &json!({"hook_event_name":"SessionStart","source":"resume","session_id":"session-1"})
+            .to_string(),
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(hook_as("session-1", prompt, &lead).unwrap(), shown_lead);
+    assert_eq!(
+        hook_as("session-1", prompt, &reviewer).unwrap(),
+        shown_reviewer
+    );
+}

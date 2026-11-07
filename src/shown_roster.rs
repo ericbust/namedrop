@@ -1,8 +1,9 @@
 //! What each host session was last shown of the workspace roster, so a turn
 //! carries a part only when it changed. Each session keeps one small file of
-//! digests under the plugin state directory, outside the state store, so a
-//! prompt never takes the store's write lock. Losing a file only makes the next
-//! turn show the whole roster, so every failure here shows rather than hides.
+//! digests per pane under the plugin state directory, outside the state store,
+//! so a prompt never takes the store's write lock. Losing a file only makes the
+//! next turn show the whole roster, so every failure here shows rather than
+//! hides.
 
 use crate::persona::{NO_OTHER_WORKSPACES, Roster, RosterParts};
 use serde::{Deserialize, Serialize};
@@ -47,12 +48,20 @@ fn digest(text: &str) -> String {
     crate::lower_hex(&Sha256::digest(text.as_bytes()))
 }
 
-/// The parts of `roster` the session was not last shown, recorded as shown,
-/// so the caller must carry every part returned. With no session, or while
-/// another hook of the same session holds its memory, the whole roster is
+/// Who is shown a roster: one host session in one pane. Two panes can resume
+/// the same session, and each holds only what its own turns carried.
+#[derive(Clone, Copy)]
+pub(crate) struct Reader<'a> {
+    pub(crate) session: &'a str,
+    pub(crate) pane: Option<&'a str>,
+}
+
+/// The parts of `roster` the reader was not last shown, recorded as shown,
+/// so the caller must carry every part returned. With no reader, or while
+/// another hook of the same reader holds its memory, the whole roster is
 /// returned and nothing is recorded.
-pub(crate) fn unseen(state: &Path, session: Option<&str>, roster: &Roster) -> RosterParts {
-    let Some(file) = session.and_then(|session| lock(&path(state, session), Lock::Record)) else {
+pub(crate) fn unseen(state: &Path, reader: Option<Reader<'_>>, roster: &Roster) -> RosterParts {
+    let Some(file) = reader.and_then(|reader| lock(&path(state, reader), Lock::Record)) else {
         return RosterParts::whole(roster);
     };
     let last = read(&file);
@@ -72,13 +81,21 @@ pub(crate) fn unseen(state: &Path, session: Option<&str>, roster: &Roster) -> Ro
     parts
 }
 
-/// Forgets what the session was shown, so its next turn carries the whole
-/// roster. It waits for a prompt hook holding the memory and empties the file
-/// in place, so a write that raced it can never restore what it forgot.
-pub(crate) fn forget(state: &Path, session: &str) {
-    if let Some(file) = lock(&path(state, session), Lock::Forget) {
-        let _ = file.set_len(0);
-    }
+/// Forgets what the reader was shown, so its next roster comes whole, and
+/// says whether it held one.
+pub(crate) fn forget(state: &Path, reader: Reader<'_>) -> bool {
+    forget_file(&path(state, reader))
+}
+
+/// It waits for a prompt hook holding the memory and empties the file in
+/// place, so a write that raced it can never restore what it forgot.
+fn forget_file(path: &Path) -> bool {
+    let Some(file) = lock(path, Lock::Forget) else {
+        return false;
+    };
+    let held = read(&file) != Shown::default();
+    let _ = file.set_len(0);
+    held
 }
 
 #[derive(Deserialize)]
@@ -90,7 +107,9 @@ struct SessionStartInput {
 /// Any SessionStart (startup, resume, clear, compaction, fork) gives the host
 /// a context that may no longer hold the roster, so the session's next turn
 /// shows all of it. It needs only the state directory, because under Codex's
-/// shared app-server the hook's runtime usually cannot be built.
+/// shared app-server the hook's runtime usually cannot be built. Without that
+/// runtime no inherited pane id can be trusted, so every pane's memory of the
+/// session is forgotten.
 pub fn forget_shown_roster(input: &str, state: &Path) {
     let Ok(input) = serde_json::from_str::<SessionStartInput>(input) else {
         return;
@@ -98,14 +117,22 @@ pub fn forget_shown_roster(input: &str, state: &Path) {
     if input.hook_event_name != "SessionStart" {
         return;
     }
-    if let Some(session) = input.session_id.filter(|id| !id.is_empty()) {
-        forget(state, &session);
+    if let Some(session) = input.session_id.filter(|id| !id.is_empty())
+        && let Ok(panes) = fs::read_dir(session_directory(state, &session))
+    {
+        for pane in panes.flatten() {
+            forget_file(&pane.path());
+        }
     }
     prune(state);
 }
 
-fn path(state: &Path, session: &str) -> PathBuf {
+fn session_directory(state: &Path, session: &str) -> PathBuf {
     state.join(DIRECTORY).join(digest(session))
+}
+
+fn path(state: &Path, reader: Reader<'_>) -> PathBuf {
+    session_directory(state, reader.session).join(digest(reader.pane.unwrap_or_default()))
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -157,21 +184,27 @@ fn write(file: &File, shown: &Shown) {
     }
 }
 
-/// Removing a file only ever makes a session see its whole roster again, so
-/// this needs no lock.
+/// Removing a file only ever makes a reader see its whole roster again, so
+/// this needs no lock. A session directory goes once its last file has.
 fn prune(state: &Path) {
-    let Ok(entries) = fs::read_dir(state.join(DIRECTORY)) else {
+    let Ok(sessions) = fs::read_dir(state.join(DIRECTORY)) else {
         return;
     };
     let now = SystemTime::now();
-    for entry in entries.flatten() {
-        let stale = entry
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .is_ok_and(|modified| now.duration_since(modified).is_ok_and(|age| age > KEPT_FOR));
-        if stale {
-            let _ = fs::remove_file(entry.path());
+    for session in sessions.flatten() {
+        let Ok(panes) = fs::read_dir(session.path()) else {
+            continue;
+        };
+        for pane in panes.flatten() {
+            let stale = pane
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .is_ok_and(|modified| now.duration_since(modified).is_ok_and(|age| age > KEPT_FOR));
+            if stale {
+                let _ = fs::remove_file(pane.path());
+            }
         }
+        let _ = fs::remove_dir(session.path());
     }
 }
 
@@ -208,8 +241,13 @@ mod tests {
         }
     }
 
+    const READER: Reader<'static> = Reader {
+        session: "session-1",
+        pane: Some("pane-1"),
+    };
+
     fn shown_whole(state: &State) -> bool {
-        let parts = unseen(&state.0, Some("session-1"), &roster());
+        let parts = unseen(&state.0, Some(READER), &roster());
         match (parts.rows, parts.others) {
             (Some(_), Some(_)) => true,
             (None, None) => false,
@@ -220,7 +258,7 @@ mod tests {
     #[test]
     fn a_contended_prompt_shows_the_whole_roster_and_records_nothing() {
         let state = State::new();
-        let held = lock(&path(&state.0, "session-1"), Lock::Record).unwrap();
+        let held = lock(&path(&state.0, READER), Lock::Record).unwrap();
         assert!(shown_whole(&state));
         drop(held);
         assert!(shown_whole(&state), "the contended prompt recorded");
@@ -230,10 +268,10 @@ mod tests {
     #[test]
     fn a_reset_waits_for_a_racing_write_and_is_never_undone_by_it() {
         let state = State::new();
-        let held = lock(&path(&state.0, "session-1"), Lock::Record).unwrap();
+        let held = lock(&path(&state.0, READER), Lock::Record).unwrap();
         let reset = std::thread::spawn({
             let state = state.0.clone();
-            move || forget(&state, "session-1")
+            move || forget(&state, READER)
         });
         std::thread::sleep(Duration::from_millis(100));
         write(&held, &Shown::of(&roster()));
@@ -249,7 +287,7 @@ mod tests {
         let idle = SystemTime::now() - KEPT_FOR - Duration::from_secs(60);
         File::options()
             .write(true)
-            .open(path(&state.0, "session-1"))
+            .open(path(&state.0, READER))
             .unwrap()
             .set_modified(idle)
             .unwrap();
@@ -257,7 +295,7 @@ mod tests {
             r#"{"hook_event_name":"SessionStart","source":"startup","session_id":"session-2"}"#,
             &state.0,
         );
-        assert!(!path(&state.0, "session-1").exists());
+        assert!(!session_directory(&state.0, READER.session).exists());
         assert!(shown_whole(&state));
     }
 }
