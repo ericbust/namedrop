@@ -532,6 +532,7 @@ where
                                 &namespace,
                                 &second.message_id,
                                 &live.with_here(second_discovery.clone()),
+                                now,
                             )? != WakeReadiness::Ready
                         {
                             return Ok(None);
@@ -579,6 +580,7 @@ where
                     &namespace,
                     &second.message_id,
                     &live.with_here(second_discovery.clone()),
+                    now,
                 )? != WakeReadiness::Ready
                 {
                     return Ok(None);
@@ -768,6 +770,7 @@ where
                         &namespace,
                         &candidate.message_id,
                         &live,
+                        runtime.clock.now_unix_ms(),
                     )? == WakeReadiness::Ready
                 {
                     waiting.push(address);
