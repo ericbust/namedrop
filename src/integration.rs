@@ -1471,8 +1471,8 @@ const COMMAND_SENTENCES: [(CommandNeed, &str); 5] = [
     ),
 ];
 
-/// Said on every delivery: a sandbox refusal of a bound line once stalled a
-/// live handoff when the agent took it for a denial.
+/// Said on every delivery: this sentence is what fixed issue 31, where a
+/// sandbox refusal of a bound line stalled a live handoff.
 const SANDBOX_SENTENCE: &str = "An OS sandbox access error is not an approval decision: request normal host approval for this exact line, and if policy rejects it, report the blocker and keep the reply pending.";
 
 /// The bound operations of one authenticated delivery, rendered as runnable
@@ -1550,28 +1550,26 @@ pub(crate) fn delivery_command_guidance(control: &Value) -> Option<String> {
 /// from its attempt id, when the bound value is exactly the derived one. Any
 /// other value stays, so the line still runs the bound input.
 fn rendered_input(token: &str, input: &Value, control: &Value) -> Value {
-    let mut input = input.clone();
-    let Some(attempt_id) = input
-        .get("attempt_id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .filter(|_| token == "reply")
-    else {
-        return input;
+    let mut rendered = input.clone();
+    if token != "reply" {
+        return rendered;
+    }
+    let (Some(attempt_id), Some(fields)) = (
+        input.get("attempt_id").and_then(Value::as_str),
+        rendered.as_object_mut(),
+    ) else {
+        return rendered;
     };
     let delivered = control
         .get("message_id")
         .and_then(Value::as_str)
-        .filter(|_| control.get("attempt_id").and_then(Value::as_str) == Some(&attempt_id));
-    let fields = input
-        .as_object_mut()
-        .expect("an input with an attempt_id is an object");
-    for (key, derived) in crate::message::derived_reply_fields(&attempt_id, delivered) {
+        .filter(|_| control.get("attempt_id").and_then(Value::as_str) == Some(attempt_id));
+    for (key, derived) in crate::message::derived_reply_fields(attempt_id, delivered) {
         if fields.get(key) == Some(&derived) {
             fields.remove(key);
         }
     }
-    input
+    rendered
 }
 
 impl IntegrationToolInvocation {
