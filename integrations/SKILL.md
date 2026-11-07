@@ -72,4 +72,4 @@ For health checks, run `doctor` with the installed prefix above and no input; re
 
 `register` requires the full challenge profile. Current 20; legacy 17/16/14 remain accepted. 14 supports ordinary messaging. Schemas 3–6 upgrade live to 7. Recovery: `docs/operations.md`.
 
-Later or scheduled work: `reminder.set` with `in_reply_to`. Write the body as a short task note, such as "Tag the release.", without naming who to remind. Reply now with the schedule. `reminder.list` lists pending wakes; `reminder.cancel` cancels by `reminder_id`. Reuse each authored `<new-reminder-key>` on retries.
+Later, run `reminder.set` with `in_reply_to`. Write `body` as a short task note, like "Tag the release.", without naming who to remind. Reply now with the schedule. `reminder.list` lists pending wakes; `reminder.cancel` cancels by `reminder_id`. Reuse `<new-reminder-key>` on retries.
