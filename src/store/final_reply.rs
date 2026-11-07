@@ -1,6 +1,31 @@
 use super::*;
 
 impl StateTransaction<'_> {
+    /// The disposition an attempt has, if any.
+    pub(crate) fn delivery_disposition(
+        &self,
+        namespace: &StateNamespace,
+        attempt_id: &crate::DeliveryAttemptId,
+    ) -> Result<Option<crate::DeliveryDisposition>, StoreError> {
+        let kind = self
+            .transaction
+            .query_row(
+                "SELECT disposition_kind FROM delivery_dispositions
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2 AND attempt_id = ?3",
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    attempt_id.as_str()
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(kind.map(|kind| match kind.as_str() {
+            "reply" => crate::DeliveryDisposition::Reply,
+            _ => crate::DeliveryDisposition::NoReply,
+        }))
+    }
+
     /// Whether the message an attempt delivers answers one its own recipient
     /// address wrote: the reply to a request this agent sent.
     pub(crate) fn answers_own_message(

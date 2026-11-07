@@ -768,3 +768,98 @@ else: print('{{}}')
     }
     assert_eq!(space.claims()[0]["state"], json!({"done":"replied"}));
 }
+
+/// The bound reply of `envelope` with `source` as its text, as the agent
+/// runs it.
+fn bound_reply(space: &Space, envelope: &Value, source: &str) -> Value {
+    let reply = envelope["control"]["tool"]["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| operation["token"] == "reply")
+        .unwrap();
+    let mut input = reply["input"].clone();
+    input["source"] = json!(source);
+    expand_attempt_reply(input, Some(&space.directory.state)).unwrap()
+}
+
+/// A delivery Namedrop closed without a reply at the end of a turn still
+/// takes the agent's later reply, in the same thread; one the agent closed
+/// itself refuses a reply in a plain sentence.
+#[test]
+fn a_reply_after_namedrop_closed_the_delivery_follows_up_in_its_thread() {
+    let space = Space::new();
+    dispatch::message(
+        "send",
+        json!({"request_id":"ask","source":"@reviewer Reply with the single word pong.",
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    space.stop("session-reviewer", CLAUDE, "pong");
+    let answer = space.herdr.envelope_for("pane-lead");
+    let attempt = answer["control"]["attempt_id"].as_str().unwrap().to_owned();
+    space.prompt("pane-lead", "session-lead", CODEX, &answer.to_string());
+    space.stop("session-lead", CODEX, "@reviewer answered: pong.");
+    assert_eq!(
+        space.rows(&format!(
+            "SELECT disposition_id, disposition_kind FROM delivery_dispositions WHERE attempt_id='{attempt}'"
+        )),
+        [vec![format!("final-reply-no-reply:{attempt}"), "no_reply".to_owned()]]
+    );
+
+    let followed = dispatch::message(
+        "reply",
+        bound_reply(&space, &answer, "@reviewer Thanks, one more question."),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    assert_eq!(followed["attempt_id"], json!(attempt));
+    assert_eq!(followed["disposition"], "no_reply", "{followed}");
+    assert_eq!(
+        space.rows(&format!(
+            "SELECT CAST(m.in_reply_to = d.message_id AS TEXT), CAST(m.thread_id = o.thread_id AS TEXT)
+             FROM collaboration_messages m, delivery_attempts a
+             JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, delivery_id, address_id)
+             JOIN collaboration_messages o ON o.message_id = d.message_id
+             WHERE a.attempt_id = '{attempt}' AND m.message_id = '{}'",
+            followed["message_id"].as_str().unwrap()
+        ))
+        .iter()
+        .map(|row| row.join(","))
+        .collect::<Vec<_>>(),
+        ["1,1"]
+    );
+    assert_eq!(
+        space.rows(&format!(
+            "SELECT disposition_kind FROM delivery_dispositions WHERE attempt_id='{attempt}'"
+        )),
+        [vec!["no_reply".to_owned()]]
+    );
+    let second = space.herdr.envelope_for("pane-reviewer");
+    assert_eq!(second["untrusted_body"], "Thanks, one more question.");
+    dispatch::integration(
+        "complete",
+        json!({"attempt_id": second["control"]["attempt_id"]}),
+        &space.runtime("pane-reviewer"),
+    )
+    .unwrap();
+    let refused = dispatch::message(
+        "reply",
+        bound_reply(&space, &second, "@lead It is green."),
+        &space.runtime("pane-reviewer"),
+    )
+    .unwrap_err();
+    assert!(
+        refused.contains("this delivery is already closed without a reply")
+            && !refused.contains("UNIQUE"),
+        "{refused}"
+    );
+}

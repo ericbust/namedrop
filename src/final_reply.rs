@@ -62,6 +62,11 @@ impl FinalText {
 
 const CUT_NOTICE: &str = "[Cut at 16,000 characters by Namedrop.]";
 
+/// The bound `complete` as the Stop runs it: the same operation, recording
+/// Namedrop's own no-reply so a later explicit reply can still follow up.
+/// The CLI has no command for it.
+pub const STOP_NO_REPLY: &str = "complete.final-reply";
+
 /// What the hook promised for one delivery. It is the only thing the Stop
 /// may do with it.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -306,7 +311,7 @@ impl Settlement {
     pub(crate) fn operation(&self, attempt_id: &crate::DeliveryAttemptId) -> (&'static str, Value) {
         match self {
             Self::Reply(input) => ("reply", input.clone()),
-            Self::NoReply => ("complete", serde_json::json!({"attempt_id": attempt_id})),
+            Self::NoReply => (STOP_NO_REPLY, serde_json::json!({"attempt_id": attempt_id})),
         }
     }
 

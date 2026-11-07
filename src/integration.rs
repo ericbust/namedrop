@@ -1139,7 +1139,10 @@ where
     C: crate::Clock,
     I: crate::IdGenerator,
 {
-    if !matches!(operation, "ack" | "complete") {
+    if !matches!(
+        operation,
+        "ack" | "complete" | crate::final_reply::STOP_NO_REPLY
+    ) {
         return Err(format!("{operation} is not an Agent Integration operation"));
     }
     let input: AttemptInput = serde_json::from_value(input).map_err(crate::input_schema_error)?;
@@ -1176,17 +1179,22 @@ where
                     )?;
                     Ok(json!({"attempt_id": attempt_id, "state": "acknowledged"}))
                 }
-                "complete" => {
+                "complete" | crate::final_reply::STOP_NO_REPLY => {
                     transaction.ensure_delivery_attempt_acknowledged(
                         &namespace,
                         &attempt_id,
                         &agent_session_id,
                         &attribution,
                     )?;
+                    let disposition_id = if operation == crate::final_reply::STOP_NO_REPLY {
+                        crate::store::final_reply_no_reply_id(&attempt_id)
+                    } else {
+                        runtime.ids.next_id("delivery-disposition")
+                    };
                     transaction.record_no_reply_disposition(
                         &namespace,
                         &attempt_id,
-                        &runtime.ids.next_id("delivery-disposition"),
+                        &disposition_id,
                         &agent_session_id,
                         &attribution,
                     )?;

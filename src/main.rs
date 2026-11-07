@@ -539,7 +539,10 @@ fn run_subagent_hook(state: &Path, host: namedrop::AgentRuntime) -> ExitCode {
 /// caller never waits on the recipient's settle delay or prompt. When no worker
 /// can start, the command drains before it answers, so delivery still happens.
 fn schedule_dispatch(operation: &str, data: &mut serde_json::Value, options: &RuntimeOptions) {
-    let hands_off = matches!(operation, "send" | "reply" | "complete");
+    let hands_off = matches!(
+        operation,
+        "send" | "reply" | "complete" | namedrop::final_reply::STOP_NO_REPLY
+    );
     if !hands_off && !needs_mailbox_watcher(data) {
         return;
     }

@@ -24,6 +24,16 @@ use std::{
 };
 
 const DATABASE_FILE_NAME: &str = "namedrop.sqlite3";
+/// Dispositions Namedrop records itself when a turn ends: the terminal relay's
+/// and the final-reply claim's no-reply. An explicit reply after either one
+/// still reaches the thread.
+const AUTOMATIC_NO_REPLY_PREFIXES: [&str; 2] =
+    ["terminal-relay-no-reply:", "final-reply-no-reply:"];
+
+/// The id of the no-reply a final-reply claim records for its attempt.
+pub(crate) fn final_reply_no_reply_id(attempt_id: &crate::DeliveryAttemptId) -> String {
+    format!("{}{}", AUTOMATIC_NO_REPLY_PREFIXES[1], attempt_id.as_str())
+}
 pub(crate) const SCHEMA_VERSION: u32 = 7;
 
 const RECONCILIATION_INDEX_REPAIRS: &[SchemaGap] = &[
@@ -6424,6 +6434,10 @@ impl StateTransaction<'_> {
         }
     }
 
+    /// Records `reply_message_id` as the attempt's reply. When Namedrop
+    /// already closed the attempt without a reply at the end of a turn, the
+    /// reply stands as a follow-up in the same thread and the attempt keeps
+    /// that disposition.
     pub fn record_reply_disposition(
         &mut self,
         namespace: &StateNamespace,
@@ -6515,18 +6529,34 @@ impl StateTransaction<'_> {
         let existing = self
             .transaction
             .query_row(
-                "SELECT disposition_kind FROM delivery_dispositions
+                "SELECT disposition_kind, disposition_id FROM delivery_dispositions
                  WHERE session_socket_id = ?1 AND worktree_id = ?2 AND attempt_id = ?3",
                 params![
                     namespace.session_socket_id,
                     namespace.space_id.as_str(),
                     attempt_id.as_str()
                 ],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?;
-        if existing.as_deref() == Some(disposition_kind) {
-            return Ok(());
+        match existing {
+            Some((kind, _)) if kind == disposition_kind => return Ok(()),
+            Some((_, id))
+                if disposition_kind == "reply"
+                    && AUTOMATIC_NO_REPLY_PREFIXES
+                        .iter()
+                        .any(|prefix| id.starts_with(prefix)) =>
+            {
+                return Ok(());
+            }
+            Some((kind, _)) => {
+                return Err(StoreError::invalid_input(if kind == "reply" {
+                    "this delivery already has a reply, so it cannot also close without one"
+                } else {
+                    "this delivery is already closed without a reply, so it takes no reply now"
+                }));
+            }
+            None => {}
         }
         if !matches!(state, DeliveryState::Acknowledged | DeliveryState::Settled) {
             return Err(StoreError::invalid_input(

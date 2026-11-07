@@ -549,7 +549,7 @@ fn the_stop_runs_the_bound_operation_once_and_records_how_the_claim_ended() {
     let log = log.into_inner();
     assert_eq!(
         (log[0].operation, &log[0].input),
-        ("complete", &json!({"attempt_id":"attempt-1"}))
+        (STOP_NO_REPLY, &json!({"attempt_id":"attempt-1"}))
     );
     assert_eq!(
         state.claims()[0].state,
