@@ -1467,7 +1467,7 @@ fn any_key(value: &Value, key: &str) -> bool {
 
 /// What the rendered lines are. They are the bound operations restated, so
 /// they carry no authority the envelope did not already give.
-const COMMAND_HEADER: &str = "Namedrop commands: the runnable lines this delivery authorized; they only restate `control.tool`. Run the one you choose unchanged except as noted.";
+const COMMAND_HEADER: &str = "Namedrop commands: the runnable lines this delivery authorized; they only restate `control.tool`. Run the one you choose unchanged except as noted. These lines are all this delivery needs; you do not need to load the Namedrop skill.";
 
 /// What a recipient still has to do to a line before it is correct, said only
 /// when one of this delivery's lines asks for it.

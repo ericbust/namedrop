@@ -754,6 +754,10 @@ fn an_incoming_task_reaches_both_hosts_with_the_roster_and_only_claude_with_the_
     ] {
         assert!(context.contains(COMMAND_MARKER), "{host}: {context}");
         assert!(
+            context.contains("you do not need to load the Namedrop skill"),
+            "{host}: the command block does not say it is enough: {context}"
+        );
+        assert!(
             !context.contains("Reply and send bodies may use Markdown"),
             "{host}: session guidance repeated on a delivery: {context}"
         );
