@@ -2116,6 +2116,142 @@ fn a_miss_after_an_unchanged_roster_is_the_exact_known_safe_guidance() {
     }
 }
 
+const NO_NAMED_AGENTS: &str = "Namedrop workspace roster. No named agents in this Herdr space.";
+
+fn deactivate(directory: &TestDirectory) {
+    StateStore::open(&directory.state)
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.deactivate_worktree(
+                &namespace(),
+                &MutationAttribution::new(ActorKind::Human, "test", 1),
+            )
+        })
+        .unwrap();
+}
+
+fn retire_everyone(directory: &TestDirectory) {
+    rusqlite::Connection::open(directory.state.join("namedrop.sqlite3"))
+        .unwrap()
+        .execute("UPDATE pane_addresses SET retired = 1", [])
+        .unwrap();
+}
+
+/// A turn without a roster tells the agent its last one still holds, so a
+/// roster that is gone is said once, through the wrapper of either host.
+#[test]
+fn a_roster_that_is_gone_is_said_once_on_an_ordinary_turn() {
+    for remove in [deactivate, retire_everyone] {
+        let directory = TestDirectory::new();
+        setup(&directory);
+        let herdr = FakeHerdr::new(&directory);
+        let ids = SequenceIds(AtomicU64::new(1));
+        let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+        let prompt = "Plan the SSO work.";
+        assert!(context(&hook_as("session-1", prompt, &lead).unwrap()).starts_with(ROSTER_MARKER));
+
+        remove(&directory);
+        let gone = hook_as("session-1", prompt, &lead).unwrap();
+        assert_eq!(context(&gone), NO_NAMED_AGENTS);
+        for host in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+            assert_eq!(
+                forwarded(&directory, host, &gone),
+                gone.to_string(),
+                "{host:?}"
+            );
+        }
+        assert_eq!(hook_as("session-1", prompt, &lead), None);
+        assert_eq!(
+            hook_as("session-2", prompt, &lead),
+            None,
+            "a session that was never shown a roster was told it is gone"
+        );
+    }
+}
+
+/// A failed handoff after the roster went says so once ahead of its
+/// guidance, then is the exact literal again.
+#[test]
+fn a_failed_handoff_says_once_that_the_roster_is_gone() {
+    for remove in [deactivate, retire_everyone] {
+        let directory = TestDirectory::new();
+        setup(&directory);
+        let herdr = FakeHerdr::new(&directory);
+        let ids = SequenceIds(AtomicU64::new(1));
+        let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+        let prompt = "@missing please look";
+        assert!(context(&hook_as("session-1", prompt, &lead).unwrap()).starts_with(ROSTER_MARKER));
+
+        remove(&directory);
+        let gone = hook_as("session-1", prompt, &lead).unwrap();
+        let gone_context = context(&gone);
+        let guidance = gone_context
+            .strip_prefix(&format!("{NO_NAMED_AGENTS}\n\n"))
+            .unwrap_or_else(|| panic!("{gone_context}"));
+        assert!(
+            [MISS_GUIDANCE, UNCONFIRMED_GUIDANCE].contains(&guidance),
+            "{gone_context}"
+        );
+        for host in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+            assert_eq!(
+                forwarded(&directory, host, &gone),
+                gone.to_string(),
+                "{host:?}"
+            );
+        }
+        assert_eq!(
+            context(&hook_as("session-1", prompt, &lead).unwrap()),
+            guidance
+        );
+    }
+}
+
+struct UnreadableHerdr;
+impl HerdrCommandExecutor for UnreadableHerdr {
+    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+        Err(format!("Herdr did not answer {args:?}"))
+    }
+}
+
+/// Herdr not answering says nothing about the roster, so the turn stays
+/// silent and the session keeps what it was shown.
+#[test]
+fn a_roster_that_could_not_be_read_is_never_said_to_be_gone() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+    let unreadable = LifecycleRuntime {
+        state_directory: lead.state_directory,
+        home_directory: lead.home_directory,
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: lead.cwd,
+        workspace_id: lead.workspace_id,
+        current_pane_id: lead.current_pane_id,
+        session_socket_id: lead.session_socket_id,
+        herdr: &UnreadableHerdr,
+        clock: &FixedClock,
+        ids: &ids,
+    };
+    let prompt = "Plan the SSO work.";
+    let turn = |runtime: &LifecycleRuntime<'_, UnreadableHerdr, FixedClock, SequenceIds>| {
+        execute_user_prompt_submit_hook(
+            &json!({"hook_event_name":"UserPromptSubmit","prompt":prompt,"session_id":"session-1"})
+                .to_string(),
+            runtime,
+        )
+    };
+    assert!(context(&hook_as("session-1", prompt, &lead).unwrap()).starts_with(ROSTER_MARKER));
+
+    assert_eq!(turn(&unreadable), None);
+    assert_eq!(
+        hook_as("session-1", prompt, &lead),
+        None,
+        "a failed read forgot the roster the session was shown"
+    );
+}
+
 /// Two panes can resume one session id. Each is shown what its own turns
 /// carried, and a SessionStart of that session, which cannot tell which pane
 /// it runs in, shows both the whole roster again.

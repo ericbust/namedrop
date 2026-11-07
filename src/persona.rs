@@ -120,11 +120,17 @@ struct ActivatedSpace {
     paused: bool,
 }
 
-/// `None` when there is nothing to say: no state, no resolved space, no
+/// A roster read that failed: the state store or Herdr did not answer. Unlike
+/// a space with nothing to say, it tells nothing about the roster.
+pub(crate) struct Unread;
+
+/// `Ok(None)` when there is nothing to say: no state, no space state, no
 /// activation. A hook is a convenience at a session or prompt boundary, so
 /// anything unavailable — the state directory, Herdr, the space — leaves the
 /// turn untouched rather than interrupting the person with a diagnostic.
-fn activated_space<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> Option<ActivatedSpace>
+fn activated_space<E, C, I>(
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Result<Option<ActivatedSpace>, Unread>
 where
     E: HerdrCommandExecutor,
     C: Clock,
@@ -135,29 +141,35 @@ where
     // release already migrated leaves the prompt untouched. This open runs
     // first because it is one local file: where Namedrop was never set up,
     // every prompt skips the Herdr discovery below instead of paying for it.
-    let mut store = StateStore::open_read_only(runtime.state_directory).ok()??;
+    let Some(mut store) =
+        StateStore::open_read_only(runtime.state_directory).map_err(|_| Unread)?
+    else {
+        return Ok(None);
+    };
     let discovered = match runtime.workspace_id {
         Some(workspace_id) => crate::discover_worktree_for_workspace(runtime.herdr, workspace_id),
         None => crate::discover_worktree(runtime.herdr, runtime.cwd),
     }
-    .ok()?;
+    .map_err(|_| Unread)?;
     let setup = crate::lifecycle::load_collaboration_setup_from_store(
         &discovered,
         runtime.session_socket_id,
         &mut store,
     )
-    .ok()?;
-    let state = setup.worktree_state.as_ref()?;
+    .map_err(|_| Unread)?;
+    let Some(state) = setup.worktree_state.as_ref() else {
+        return Ok(None);
+    };
     if !state.activated || state.deactivated {
-        return None;
+        return Ok(None);
     }
     let paused = state.paused;
-    Some(ActivatedSpace {
+    Ok(Some(ActivatedSpace {
         store,
         discovered,
         setup,
         paused,
-    })
+    }))
 }
 
 /// The policy a session reads once, or `None` where no roster will ever follow
@@ -169,28 +181,34 @@ where
     C: Clock,
     I: IdGenerator,
 {
-    activated_space(runtime).map(|_| session_policy_text())
+    activated_space(runtime)
+        .ok()
+        .flatten()
+        .map(|_| session_policy_text())
 }
 
 /// The current space's named agents, their personas, and what sending to each
-/// one would do. `None` when there is nothing useful to say: no state, no
-/// resolved space, no activation, or no named agent at all. A lone agent still
+/// one would do. `Ok(None)` when there is nothing useful to say: no state, no
+/// space state, no activation, or no named agent at all. A lone agent still
 /// gets its own row: its persona is its default role guidance whether or not a
 /// peer exists.
 pub(crate) fn workspace_context<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
-) -> Option<WorkspaceContext>
+) -> Result<Option<WorkspaceContext>, Unread>
 where
     E: HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
-    let ActivatedSpace {
+    let Some(ActivatedSpace {
         mut store,
         discovered,
         setup,
         paused,
-    } = activated_space(runtime)?;
+    }) = activated_space(runtime)?
+    else {
+        return Ok(None);
+    };
     let self_address = runtime.current_pane_id.and_then(|pane_id| {
         setup
             .addresses
@@ -204,7 +222,7 @@ where
         .filter(|address| !address.retired)
         .partition(|address| address.pane_type == PaneType::Agent);
     if agents.is_empty() {
-        return None;
+        return Ok(None);
     }
     // The reader's own row is what tells it which persona is its default role
     // guidance, so it leads the list and is never the row the cap drops.
@@ -278,7 +296,7 @@ where
         .ok()
         .filter(|(_, aliases)| !aliases.is_empty())
         .map(|(workspaces, aliases)| other_workspaces(workspaces, &aliases));
-    Some(WorkspaceContext {
+    Ok(Some(WorkspaceContext {
         host: runtime
             .current_pane_id
             .and_then(|pane_id| discovered.panes.iter().find(|pane| pane.pane_id == pane_id))
@@ -288,7 +306,7 @@ where
             compared_rows,
             others,
         },
-    })
+    }))
 }
 
 const MAX_LISTED_REMOTE_NAMES: usize = 12;

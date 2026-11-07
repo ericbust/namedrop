@@ -126,9 +126,7 @@ where
     let Some(outcome) = outcome else {
         // An ordinary turn is the persona roster's boundary. With nothing new
         // to supply, non-Mention input stays invisible exactly as before.
-        return unseen_roster(reader, runtime)
-            .filter(|roster| !roster.parts.is_empty())
-            .map(|roster| context_hook_output(&roster.parts.led()));
+        return news(reader, runtime).map(|roster| context_hook_output(&roster));
     };
     match outcome {
         // The reason stays this exact literal: the generated wrapper wakes the
@@ -194,21 +192,64 @@ struct UnseenRoster {
     parts: crate::persona::RosterParts,
 }
 
+/// One read of the roster for one reader.
+enum RosterRead {
+    Read(UnseenRoster),
+    /// The read succeeded and found no roster: the space is not active or
+    /// names no agent.
+    Gone,
+    /// Herdr or the state store did not answer, which says nothing about the
+    /// roster the reader holds.
+    Unread,
+}
+
 /// Only the parts of the roster this reader was not last shown. They are
 /// recorded as shown, so the output must carry every one of them.
 fn unseen_roster<E, C, I>(
     reader: Option<Reader<'_>>,
     runtime: &LifecycleRuntime<'_, E, C, I>,
-) -> Option<UnseenRoster>
+) -> RosterRead
 where
     E: HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
-    crate::persona::workspace_context(runtime).map(|workspace| UnseenRoster {
-        host: workspace.host,
-        parts: crate::shown_roster::unseen(runtime.state_directory, reader, &workspace.roster),
-    })
+    match crate::persona::workspace_context(runtime) {
+        Ok(Some(workspace)) => RosterRead::Read(UnseenRoster {
+            host: workspace.host,
+            parts: crate::shown_roster::unseen(runtime.state_directory, reader, &workspace.roster),
+        }),
+        Ok(None) => RosterRead::Gone,
+        Err(crate::persona::Unread) => RosterRead::Unread,
+    }
+}
+
+/// The roster text this reader was not shown, behind the roster marker, or
+/// `None` when nothing is new. A roster that is gone is news once, because
+/// the policy says a turn without one means the last one shown still holds.
+fn news<E, C, I>(
+    reader: Option<Reader<'_>>,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Option<String>
+where
+    E: HerdrCommandExecutor,
+    C: Clock,
+    I: IdGenerator,
+{
+    match unseen_roster(reader, runtime) {
+        RosterRead::Read(roster) => (!roster.parts.is_empty()).then(|| roster.parts.led()),
+        RosterRead::Gone => reader
+            .is_some_and(|reader| crate::shown_roster::forget(runtime.state_directory, reader))
+            .then(no_named_agents),
+        RosterRead::Unread => None,
+    }
+}
+
+fn no_named_agents() -> String {
+    format!(
+        "{} No named agents in this Herdr space.",
+        crate::persona::ROSTER_MARKER
+    )
 }
 
 /// A failed handoff leaves the work here, so this turn needs the same roster
@@ -227,11 +268,9 @@ where
     C: Clock,
     I: IdGenerator,
 {
-    context_hook_output(&match unseen_roster(reader, runtime) {
-        Some(roster) if !roster.parts.is_empty() => {
-            format!("{}\n\n{guidance}", roster.parts.led())
-        }
-        _ => guidance.to_owned(),
+    context_hook_output(&match news(reader, runtime) {
+        Some(roster) => format!("{roster}\n\n{guidance}"),
+        None => guidance.to_owned(),
     })
 }
 
@@ -248,18 +287,19 @@ where
     I: IdGenerator,
 {
     let roster = match unseen_roster(reader, runtime) {
-        Some(roster) => roster.parts.led(),
-        None => {
+        RosterRead::Read(roster) => roster.parts.led(),
+        RosterRead::Gone => {
             // Once told nobody is named here, the reader no longer holds the
             // last roster it was shown, so the next one comes whole.
             if let Some(reader) = reader {
                 crate::shown_roster::forget(runtime.state_directory, reader);
             }
-            format!(
-                "{} No named agents in this Herdr space.",
-                crate::persona::ROSTER_MARKER
-            )
+            no_named_agents()
         }
+        RosterRead::Unread => format!(
+            "{} It could not be read this turn.",
+            crate::persona::ROSTER_MARKER
+        ),
     };
     context_hook_output(&format!("{roster}\n\n{guidance}"))
 }
@@ -354,7 +394,10 @@ where
     C: Clock,
     I: IdGenerator,
 {
-    let roster = unseen_roster(reader, runtime);
+    let roster = match unseen_roster(reader, runtime) {
+        RosterRead::Read(roster) => Some(roster),
+        RosterRead::Gone | RosterRead::Unread => None,
+    };
     // Codex suppresses the attestation whole, so composing the two together
     // would cost it the roster and the commands on every incoming task. It
     // gets the roster on its own instead, led by its marker even when nothing
