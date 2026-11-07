@@ -1185,3 +1185,56 @@ fn a_turn_that_ends_waiting_on_a_helper_holds_the_delivery() {
     assert!(space.relayed().is_empty());
     assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
 }
+
+/// A reply the Stop settles is an agent reply like any other: it spends the
+/// thread's Automatic Reply Limit, and the reply that reaches it pauses the
+/// thread and holds the answer until the person continues.
+#[test]
+fn stop_settled_replies_count_against_the_automatic_reply_limit() {
+    let space = Space::new();
+    dispatch::message(
+        "send",
+        json!({"request_id":"ask","source":"@reviewer Reply with the single word pong.",
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    let thread = space.rows("SELECT thread_id FROM collaboration_messages WHERE request_id='ask'")
+        [0][0]
+        .clone();
+    rusqlite::Connection::open(space.directory.state.join("namedrop.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE thread_controls SET reply_allowance=1 WHERE thread_id=?1",
+            [&thread],
+        )
+        .unwrap();
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    space.stop("session-reviewer", CLAUDE, "pong");
+    assert_eq!(space.dispositions()[0][1], "reply");
+    assert_eq!(
+        space.rows(&format!(
+            "SELECT CAST(paused AS TEXT), CAST(reply_allowance AS TEXT) FROM thread_controls
+             WHERE thread_id='{thread}'"
+        )),
+        [vec!["1".to_owned(), "0".to_owned()]]
+    );
+    assert_eq!(
+        space.rows(&format!(
+            "SELECT source_kind FROM attention_items
+             WHERE source_id='{thread}' AND resolved_at_ms IS NULL"
+        )),
+        [vec!["automatic_reply_limit".to_owned()]]
+    );
+    assert_eq!(
+        space.herdr.prompt_count("pane-lead"),
+        0,
+        "the paused thread delivered the answer"
+    );
+}
