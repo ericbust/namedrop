@@ -286,16 +286,16 @@ where
     }
     rows.push_str(&tail);
     compared_rows.push_str(&tail);
-    let others = store
+    // A failed read here must not announce that the other workspaces emptied.
+    let (workspaces, aliases) = store
         .transaction(|transaction| {
             transaction.other_space_agents(
                 runtime.session_socket_id,
                 &discovered.namespace(runtime.session_socket_id).space_id,
             )
         })
-        .ok()
-        .filter(|(_, aliases)| !aliases.is_empty())
-        .map(|(workspaces, aliases)| other_workspaces(workspaces, &aliases));
+        .map_err(|_| Unread)?;
+    let others = (!aliases.is_empty()).then(|| other_workspaces(workspaces, &aliases));
     Ok(Some(WorkspaceContext {
         host: runtime
             .current_pane_id
