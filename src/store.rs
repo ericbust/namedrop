@@ -43,6 +43,18 @@ const RECONCILIATION_INDEX_REPAIRS: &[SchemaGap] = &[
         ddl: "CREATE INDEX IF NOT EXISTS coordination_links_assignment
               ON coordination_links(session_socket_id, worktree_id, assignment_id, message_id)",
     },
+    SchemaGap {
+        name: "transition_facts_entity",
+        ddl: "CREATE INDEX IF NOT EXISTS transition_facts_entity
+              ON transition_facts(session_socket_id, worktree_id, entity_kind, entity_id,
+                                  transition_kind, occurred_at_ms)",
+    },
+    SchemaGap {
+        name: "agent_session_observations_status",
+        ddl: "CREATE INDEX IF NOT EXISTS agent_session_observations_status
+              ON agent_session_observations(session_socket_id, worktree_id, address_id,
+                                            agent_session_id, status, observed_at_ms)",
+    },
 ];
 
 /// Personas live on the Pane Address, which survives renaming and rebinding,
@@ -8999,7 +9011,7 @@ mod tests {
 
     #[test]
     fn schema_six_repairs_each_missing_index_and_pre_release_piece() {
-        for missing_indexes in 0..8 {
+        for missing_indexes in 0..1 << RECONCILIATION_INDEX_REPAIRS.len() {
             for missing_pieces in 0..4 {
                 let mut fresh = Connection::open_in_memory().unwrap();
                 initialize_schema(&mut fresh, Path::new(".")).unwrap();
@@ -9119,6 +9131,8 @@ mod tests {
         let actual: Vec<&str> = shape.lines().collect();
         let mut expected: Vec<&str> = pinned.lines().collect();
         expected.extend([
+            "index agent_session_observations_status: CREATE INDEX agent_session_observations_status ON agent_session_observations(session_socket_id, worktree_id, address_id, agent_session_id, status, observed_at_ms)",
+            "index transition_facts_entity: CREATE INDEX transition_facts_entity ON transition_facts(session_socket_id, worktree_id, entity_kind, entity_id, transition_kind, occurred_at_ms)",
             "index coordination_links_assignment: CREATE INDEX coordination_links_assignment ON coordination_links(session_socket_id, worktree_id, assignment_id, message_id)",
             "index mailbox_deliveries_message: CREATE INDEX mailbox_deliveries_message ON mailbox_deliveries(session_socket_id, worktree_id, message_id)",
             "index transition_facts_attention_acknowledgement: CREATE INDEX transition_facts_attention_acknowledgement ON transition_facts(session_socket_id, worktree_id, entity_id) WHERE entity_kind='attention_item' AND transition_kind='acknowledged'",

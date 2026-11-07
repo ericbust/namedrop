@@ -1012,14 +1012,15 @@ impl StateTransaction<'_> {
             "WITH settle AS (
                 SELECT MAX(t.occurred_at_ms) AS at, d.mailbox_order AS mailbox_order
                 FROM mailbox_deliveries d
-                JOIN transition_facts t ON t.session_socket_id = d.session_socket_id
+                CROSS JOIN transition_facts t ON t.session_socket_id = d.session_socket_id
                  AND t.worktree_id = d.worktree_id AND t.entity_kind = 'mailbox_delivery'
                  AND t.entity_id = d.delivery_id AND t.transition_kind = 'settled'
                 WHERE d.session_socket_id = ?1 AND d.worktree_id = ?2
                   AND d.message_id = ?3 AND d.address_id = ?4),
              next AS (
-                SELECT MIN(t.occurred_at_ms) AS at FROM settle, mailbox_deliveries d
-                JOIN transition_facts t ON t.session_socket_id = d.session_socket_id
+                SELECT MIN(t.occurred_at_ms) AS at FROM settle
+                CROSS JOIN mailbox_deliveries d
+                CROSS JOIN transition_facts t ON t.session_socket_id = d.session_socket_id
                  AND t.worktree_id = d.worktree_id AND t.entity_kind = 'mailbox_delivery'
                  AND t.entity_id = d.delivery_id AND t.transition_kind = 'dispatching'
                 WHERE d.session_socket_id = ?1 AND d.worktree_id = ?2
