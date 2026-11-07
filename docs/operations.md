@@ -159,7 +159,9 @@ On the Channels machine, sign in to Tailscale as your own user and enable HTTPS 
 namedrop channels --tailscale --no-open
 ```
 
-Open the printed one-time `https://<machine>.<tailnet>.ts.net[:port]/w/<key>?n=<nonce>` link on your phone or Mac, signed in to Tailscale as the same user. The link exchanges its nonce for an HttpOnly, SameSite=Strict, Secure session cookie. Later requests still need that session. Posting and pane input still need the session's CSRF token. Event streams, Live Peek, posting, threads, DMs, and reminder Cancel use the same HTTPS origin.
+Open the printed one-time `https://<machine>.<tailnet>.ts.net[:port]/w/<key>?n=<nonce>` link on your phone or Mac, signed in to Tailscale as the same user. The link exchanges its nonce for an HttpOnly, SameSite=Strict, Secure session cookie with `Max-Age=604800`. The browser keeps this cookie for seven days after redemption, including across browser restarts. Requests do not extend its lifetime. Later requests still need that session. Posting and pane input still need the session's CSRF token. Event streams, Live Peek, posting, threads, DMs, and reminder Cancel use the same HTTPS origin.
+
+If the browser loses its sign-in or the cookie expires, run `namedrop channels --tailscale --no-open` in the workspace on the Channels machine and open the new HTTPS link on your device. Run the same command if a one-time link has expired or was already used. Admitted tailnet requests without a valid session show this recovery command. Local browser cookies remain session cookies.
 
 Namedrop runs `tailscale status --json` to find the machine's MagicDNS name and owner's login, then inspects `tailscale serve status --json`. It creates a background HTTPS proxy to the Channels loopback port. If 443 is occupied, it selects another unused HTTPS port. It records its handler in `<state>/dashboard/tailscale.json` and never adopts an unrecorded handler, even if it points at Channels. It refuses to change unfamiliar configuration or a Funnel-enabled owned port. It never runs Funnel or resets the Serve configuration.
 
@@ -175,7 +177,7 @@ To revoke tailnet access and remove only Namedrop's unchanged handler, run:
 namedrop channels --tailscale off
 ```
 
-Namedrop disables admission before attempting removal and closes existing tailnet event and Live Peek streams when they next check access. If someone changed its handler, it leaves that configuration alone and reports the conflict. Local access remains available.
+Namedrop disables admission before attempting removal and closes existing tailnet event and Live Peek streams when they next check access. If someone changed its handler, it leaves that configuration alone and reports the conflict. Local access remains available. Tailnet and local access use the same session, which has no server-side expiry. Disabling tailnet access does not rotate that session. A retained browser cookie can work again if you re-enable access before the cookie expires and the session has not rotated during a local idle exit.
 
 ### Custom Channels app
 

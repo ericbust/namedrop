@@ -1256,25 +1256,36 @@ fn serve_connection(
     };
     let tailnet_request =
         tailnet.filter(|handler| request.header("host") == Some(handler.authority().as_str()));
-    match route(
+    let route = route(
         &request,
         front.port,
         &front.token,
         &front.session,
         matches!(front.assets, Assets::Directory(_)),
         tailnet,
-    ) {
-        Err(status) => respond_status(&mut writer, status),
-        Ok(Route::Redeem { nonce, .. }) if !front.files.consume_entry(&nonce) => {
-            respond_status(&mut writer, Status::Unauthorized)
+    );
+    let route = match route {
+        Ok(Route::Redeem { ref nonce, .. }) if !front.files.consume_entry(nonce) => {
+            Err(Status::Unauthorized)
         }
+        route => route,
+    };
+    match route {
+        Err(Status::Unauthorized) if tailnet_request.is_some() => respond(
+            &mut writer,
+            Status::Unauthorized.line(),
+            "text/plain; charset=utf-8",
+            "",
+            b"This browser's Channels sign-in is missing or expired, or the one-time link has expired or already been used. Run `namedrop channels --tailscale --no-open` in that workspace on the Channels machine and open the new HTTPS link on this device.\n",
+        ),
+        Err(status) => respond_status(&mut writer, status),
         Ok(Route::Redeem { location, .. }) => {
             let headers = format!(
                 "Location: {location}\r\nSet-Cookie: {}={}; HttpOnly; SameSite=Strict; Path=/{}\r\n",
                 cookie_name(front.port),
                 front.session.as_str(),
                 if tailnet_request.is_some() {
-                    "; Secure"
+                    "; Secure; Max-Age=604800"
                 } else {
                     ""
                 }
