@@ -415,10 +415,151 @@ fn safe_lines(value: &str) -> String {
         .join("\n")
 }
 
+/// One kept field of an agent-facing settle result.
+enum Keep {
+    /// Copied when present and not null, an empty array or an empty object.
+    Field(&'static str),
+    /// Copied only when true; false is the default an agent never acts on.
+    WhenTrue(&'static str),
+    /// `delivery_outlook` objects reduced to one `outlook` string of their statements.
+    Outlook,
+}
+
+/// The settle results an agent reads after every delivery, and the fields it uses:
+/// ids it reuses for `handoff.results` and tracked follow-ups, the delivery outlook,
+/// and the deferred-pending retry guidance. `--json` prints the full result.
+const AGENT_RESULT_FIELDS: &[(&str, &[Keep])] = &[
+    (
+        "send",
+        &[
+            Keep::Field("message_id"),
+            Keep::Field("thread_id"),
+            Keep::Field("coordination"),
+            Keep::Outlook,
+            Keep::WhenTrue("idempotent_replay"),
+            Keep::Field("state"),
+            Keep::Field("guidance"),
+        ],
+    ),
+    (
+        "reply",
+        &[
+            Keep::Field("attempt_id"),
+            Keep::Field("disposition"),
+            Keep::Field("message_id"),
+            Keep::Field("coordination"),
+            Keep::Outlook,
+            Keep::WhenTrue("idempotent_replay"),
+            Keep::Field("state"),
+            Keep::Field("guidance"),
+        ],
+    ),
+    (
+        "complete",
+        &[
+            Keep::Field("attempt_id"),
+            Keep::Field("disposition"),
+            Keep::Field("state"),
+            Keep::Field("guidance"),
+        ],
+    ),
+];
+
+/// The compact JSON an agent reads for a serialized [`CommandResult`]. Results of
+/// operations outside [`AGENT_RESULT_FIELDS`] and every error pass through unchanged.
+pub fn agent_result_view(result: &Value) -> Value {
+    let fields = result["operation"].as_str().and_then(|operation| {
+        AGENT_RESULT_FIELDS
+            .iter()
+            .find(|(token, _)| *token == operation)
+            .map(|(_, fields)| *fields)
+    });
+    let (Some(fields), Some(data)) = (fields, result["data"].as_object()) else {
+        return result.clone();
+    };
+    let mut kept = serde_json::Map::new();
+    for keep in fields {
+        match keep {
+            Keep::Field(name) => {
+                if let Some(value) = data.get(*name).filter(|value| !is_empty(value)) {
+                    kept.insert((*name).to_owned(), value.clone());
+                }
+            }
+            Keep::WhenTrue(name) => {
+                if data.get(*name) == Some(&Value::Bool(true)) {
+                    kept.insert((*name).to_owned(), Value::Bool(true));
+                }
+            }
+            Keep::Outlook => {
+                let statements = data
+                    .get("delivery_outlook")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|outlook| outlook["statement"].as_str())
+                    .collect::<Vec<_>>();
+                if !statements.is_empty() {
+                    kept.insert("outlook".to_owned(), statements.join(" ").into());
+                }
+            }
+        }
+    }
+    let mut view = result.clone();
+    view["data"] = kept.into();
+    view
+}
+
+fn is_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Array(items) => items.is_empty(),
+        Value::Object(fields) => fields.is_empty(),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn agent_view_keeps_retry_guidance_errors_and_other_operations_whole() {
+        let pending = json!({
+            "protocol_version": "collab/v1", "status": "ok", "operation": "reply",
+            "data": {"state": "pending", "operation_id": "key", "committed": null,
+                     "receipt": "/state/key.receipt.json", "guidance": "Retry the exact command."},
+        });
+        assert_eq!(
+            agent_result_view(&pending)["data"],
+            json!({"state": "pending", "guidance": "Retry the exact command."})
+        );
+        let tracked = json!({
+            "protocol_version": "collab/v1", "status": "ok", "operation": "send",
+            "data": {"message_id": "m", "thread_id": "t", "idempotent_replay": false,
+                     "coordination": [{"coordination_id": "c", "assignment_id": "a", "revision": 1}],
+                     "delivery_outlook": [{"statement": "@a: soon."}, {"statement": "@b: later."}],
+                     "drain": {"submitted": []}, "deliveries": [], "context_references": []},
+        });
+        assert_eq!(
+            agent_result_view(&tracked)["data"],
+            json!({"message_id": "m", "thread_id": "t", "outlook": "@a: soon. @b: later.",
+                   "coordination": [{"coordination_id": "c", "assignment_id": "a", "revision": 1}]})
+        );
+        let rejected = serde_json::to_value(CommandResult::rejected(
+            "reply",
+            "operation_failed",
+            "no such attempt",
+        ))
+        .unwrap();
+        assert_eq!(agent_result_view(&rejected), rejected);
+        let listed = serde_json::to_value(CommandResult::success(
+            "address.list",
+            json!([{"alias": "a", "drain": {}}]),
+        ))
+        .unwrap();
+        assert_eq!(agent_result_view(&listed), listed);
+    }
 
     #[test]
     fn naming_keeps_setup_failures_and_delivery_attention_without_agent_noise_for_a_terminal() {

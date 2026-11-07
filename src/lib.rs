@@ -98,7 +98,7 @@ pub use runtime::{ProcessHerdr, ProcessIds, SystemClock};
 use serde::Serialize;
 pub use spaces::{SpaceScope, WorkspaceLabel};
 mod output;
-pub use output::render_command_result_to_text;
+pub use output::{agent_result_view, render_command_result_to_text};
 pub use store::coordination_review::{OperatorSession, REVIEW_GRANT_TTL_MS};
 pub use store::{
     StateStore, StateTransaction, StoreError, StoreErrorKind, WorktreePurgeResult,
