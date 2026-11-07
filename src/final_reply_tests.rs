@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::json;
+use std::path::{Path, PathBuf};
 
 fn reply_template() -> Value {
     json!({"request_id":"reply-attempt-1","source":"@codex <reply body>",
@@ -399,4 +400,238 @@ fn both_hooks_of_one_recorded_turn_name_the_same_host_turn() {
         HostTurn::from_ids(Some("same"), None),
         HostTurn::from_ids(None, Some("same"))
     );
+}
+
+struct StateDirectory(PathBuf);
+
+impl StateDirectory {
+    fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "namedrop-final-reply-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+
+    fn claims(&self) -> Vec<Claim> {
+        read_claims(&session_directory(&self.0, "socket", "session"))
+    }
+}
+
+impl Drop for StateDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn observe(state: &StateDirectory, prompt: &str, text: &str, arm: Option<Claim>) -> bool {
+    observe_prompt(&state.0, "socket", "session", &turn(prompt), text, arm, 10)
+}
+
+fn armed(attempt: &str, prompt: &str, plan: Armed) -> Claim {
+    Claim {
+        attempt_id: crate::DeliveryAttemptId::new(attempt),
+        turn: turn(prompt),
+        ..claim(plan, ClaimState::Open)
+    }
+}
+
+#[test]
+fn a_session_holds_one_live_claim_and_later_prompts_end_the_ones_that_lost_their_turn() {
+    let state = StateDirectory::new();
+    assert!(!observe(&state, "prompt-0", "hello", None));
+    assert!(
+        !session_directory(&state.0, "socket", "session").exists(),
+        "an ordinary prompt with no claims wrote state"
+    );
+    assert!(observe(
+        &state,
+        "prompt-1",
+        "{}",
+        Some(armed("attempt-1", "prompt-1", reply_plan()))
+    ));
+    assert!(
+        !observe(
+            &state,
+            "prompt-1",
+            "{}",
+            Some(armed("attempt-2", "prompt-1", reply_plan()))
+        ),
+        "a second live claim was armed in one session"
+    );
+    assert_eq!(state.claims().len(), 1);
+    assert!(has_live_claims(&state.0, "socket", "session"));
+    assert!(!has_live_claims(&state.0, "socket", "other-session"));
+    assert!(!observe(&state, "prompt-2", "person typed this", None));
+    assert_eq!(
+        state.claims()[0].state,
+        ClaimState::Left(LeaveReason::Interrupted)
+    );
+    assert!(!has_live_claims(&state.0, "socket", "session"));
+    assert!(observe(
+        &state,
+        "prompt-3",
+        "{}",
+        Some(armed("attempt-1", "prompt-3", reply_plan()))
+    ));
+    let claims = state.claims();
+    assert_eq!(claims.len(), 1, "a re-armed attempt kept its old claim");
+    assert_eq!(
+        (claims[0].state, &claims[0].turn),
+        (ClaimState::Open, &turn("prompt-3"))
+    );
+}
+
+fn ran(
+    log: &std::cell::RefCell<Vec<BoundOperation>>,
+    result: Result<Value, String>,
+) -> impl FnMut(BoundOperation) -> Result<Value, String> + '_ {
+    move |operation| {
+        log.borrow_mut().push(operation);
+        result.clone()
+    }
+}
+
+fn settle(
+    state: &StateDirectory,
+    stop: &StopFacts,
+    run: &mut dyn FnMut(BoundOperation) -> Result<Value, String>,
+) {
+    settle_at_stop(&state.0, "socket", stop, 20, run);
+}
+
+#[test]
+fn the_stop_runs_the_bound_operation_once_and_records_how_the_claim_ended() {
+    let state = StateDirectory::new();
+    observe(
+        &state,
+        "prompt-1",
+        "{}",
+        Some(armed("attempt-1", "prompt-1", reply_plan())),
+    );
+    let log = std::cell::RefCell::new(Vec::new());
+    settle(
+        &state,
+        &stop("prompt-1", "pong"),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    settle(
+        &state,
+        &stop("prompt-1", "pong"),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    let log = log.into_inner();
+    assert_eq!(log.len(), 1, "a repeated Stop settled twice");
+    assert_eq!(log[0].operation, "reply");
+    assert_eq!(log[0].input["source"], "@codex pong");
+    assert_eq!(
+        (
+            log[0].state.as_path(),
+            log[0].socket.as_str(),
+            log[0].workspace.as_str(),
+            log[0].pane.as_str()
+        ),
+        (Path::new("/state"), "socket", "workspace", "pane")
+    );
+    assert_eq!(state.claims()[0].state, ClaimState::Done(Done::Replied));
+
+    let state = StateDirectory::new();
+    observe(
+        &state,
+        "prompt-1",
+        "{}",
+        Some(armed(
+            "attempt-1",
+            "prompt-1",
+            Armed::NoReply(NoReplyCase::AnswersOwn),
+        )),
+    );
+    let log = std::cell::RefCell::new(Vec::new());
+    settle(
+        &state,
+        &stop("prompt-1", "Thanks, noted."),
+        &mut ran(&log, Err("refused".into())),
+    );
+    let log = log.into_inner();
+    assert_eq!(
+        (log[0].operation, &log[0].input),
+        ("complete", &json!({"attempt_id":"attempt-1"}))
+    );
+    assert_eq!(
+        state.claims()[0].state,
+        ClaimState::Left(LeaveReason::OperationFailed)
+    );
+}
+
+#[test]
+fn background_work_carries_a_reply_until_its_continuation_stops() {
+    let state = StateDirectory::new();
+    observe(
+        &state,
+        "prompt-1",
+        "{}",
+        Some(armed("attempt-1", "prompt-1", reply_plan())),
+    );
+    let log = std::cell::RefCell::new(Vec::new());
+    let background = StopFacts {
+        background_running: true,
+        ..stop("prompt-1", "Started the build; I will report when it ends.")
+    };
+    settle(&state, &background, &mut ran(&log, Ok(json!({}))));
+    assert_eq!(state.claims()[0].state, ClaimState::Carried);
+    observe(&state, "person", "what is the status?", None);
+    settle(
+        &state,
+        &stop("person", "Still building."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    assert_eq!(
+        state.claims()[0].state,
+        ClaimState::Carried,
+        "a person prompt consumed the carried claim"
+    );
+    observe(
+        &state,
+        "notification",
+        "<task-notification>\n<task-id>t</task-id>",
+        None,
+    );
+    settle(
+        &state,
+        &stop("notification", "The build passed."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    let log = log.into_inner();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].input["source"], "@codex The build passed.");
+    assert_eq!(state.claims()[0].state, ClaimState::Done(Done::Replied));
+}
+
+#[test]
+fn finished_claims_are_pruned_after_a_day() {
+    let state = StateDirectory::new();
+    observe(
+        &state,
+        "prompt-1",
+        "{}",
+        Some(armed("attempt-1", "prompt-1", reply_plan())),
+    );
+    settle(&state, &stop("prompt-1", "pong"), &mut |_| Ok(json!({})));
+    let later = |now_ms| {
+        observe_prompt(
+            &state.0,
+            "socket",
+            "session",
+            &turn("prompt-2"),
+            "later",
+            None,
+            now_ms,
+        );
+        state.claims().len()
+    };
+    assert_eq!(later(19 + KEEP_MS), 1);
+    assert_eq!(later(20 + KEEP_MS), 0);
 }

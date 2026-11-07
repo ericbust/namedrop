@@ -1490,3 +1490,26 @@ fn reminder_common_command_recovers_clock_without_socket_hint() {
         1
     );
 }
+
+/// The Stop leaves a delivery to a sandboxed explicit settle that is still
+/// queued, and only while it has no receipt.
+#[test]
+fn a_queued_explicit_settle_is_visible_until_its_receipt_lands() {
+    let fixture = Fixture::new();
+    let state = fixture.directory.path();
+    let queued = response(fixture.sandbox_command(
+        &["complete", "--no-reply"],
+        json!({"attempt_id":"attempt-queued"}),
+    ));
+    assert_eq!(queued["data"]["state"], "pending", "{queued}");
+    let settle_queued = |session: &str, attempt: &str| {
+        namedrop::deferred_commands::settle_queued(state, &fixture.socket, session, attempt)
+    };
+    assert!(settle_queued("session-author", "attempt-queued"));
+    assert!(!settle_queued("session-author", "attempt-other"));
+    assert!(!settle_queued("session-other", "attempt-queued"));
+    let _worker = fixture.worker();
+    let receipt = PathBuf::from(queued["data"]["receipt"].as_str().unwrap());
+    wait_for(|| receipt.exists());
+    assert!(!settle_queued("session-author", "attempt-queued"));
+}

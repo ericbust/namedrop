@@ -8,6 +8,14 @@ use crate::integration::DeliveryKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::{
+    fs,
+    io::{Read, Write},
+    os::unix::fs::OpenOptionsExt,
+    path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
+};
 
 /// One host turn, by the id both of its hooks carry: Claude Code's
 /// `prompt_id` or Codex's `turn_id`.
@@ -368,6 +376,235 @@ fn reply_input(template: &Value, tracked: bool, text: &FinalText) -> Result<Valu
         None => {}
     }
     Ok(input)
+}
+
+/// How long a finished or abandoned claim is kept, for anyone checking what
+/// a Stop did.
+const KEEP_MS: u64 = 24 * 60 * 60 * 1000;
+const MAX_CLAIMS_BYTES: u64 = 1024 * 1024;
+/// A prompt hook that cannot take the lock arms nothing, so the agent gets
+/// today's explicit commands; it never waits on a Stop that is settling.
+const PROMPT_LOCK_WAIT: Duration = Duration::from_millis(500);
+const STOP_LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// The claims of one agent session, in one file only this module writes.
+struct Claims {
+    directory: PathBuf,
+    claims: Vec<Claim>,
+    _lock: fs::File,
+}
+
+fn session_directory(state: &Path, socket: &str, session: &str) -> PathBuf {
+    let key = serde_json::to_vec(&(socket, session)).unwrap_or_default();
+    state
+        .join("final-reply")
+        .join(crate::lower_hex(&Sha256::digest(key)))
+}
+
+fn read_claims(directory: &Path) -> Vec<Claim> {
+    let Ok(file) = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(directory.join("claims.json"))
+    else {
+        return Vec::new();
+    };
+    let mut bytes = Vec::new();
+    if !file.metadata().is_ok_and(|metadata| metadata.is_file())
+        || file.take(MAX_CLAIMS_BYTES).read_to_end(&mut bytes).is_err()
+    {
+        return Vec::new();
+    }
+    serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+impl Claims {
+    fn lock(directory: PathBuf, wait: Duration) -> Option<Self> {
+        fs::create_dir_all(&directory).ok()?;
+        let lock = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(directory.join("lock"))
+            .ok()?;
+        let until = Instant::now() + wait;
+        while lock.try_lock().is_err() {
+            if Instant::now() >= until {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Some(Self {
+            claims: read_claims(&directory),
+            directory,
+            _lock: lock,
+        })
+    }
+
+    fn save(mut self, now_ms: u64) {
+        self.claims
+            .retain(|claim| claim.updated_at_ms.saturating_add(KEEP_MS) > now_ms);
+        let next = self.directory.join("claims.next");
+        let written = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&next)
+            .and_then(|mut file| {
+                file.write_all(&serde_json::to_vec_pretty(&self.claims)?)?;
+                file.sync_all()
+            });
+        if written.is_ok() {
+            let _ = fs::rename(next, self.directory.join("claims.json"));
+        }
+    }
+}
+
+impl Claim {
+    fn set(&mut self, state: ClaimState, now_ms: u64) {
+        self.state = state;
+        self.updated_at_ms = now_ms;
+    }
+}
+
+/// Runs for every prompt of a session that names its turn. It ends claims
+/// that lost their turn, re-opens carried ones on a background continuation,
+/// and arms `arm` when the session holds no other live claim. Whether `arm`
+/// was written is the only thing that decides what the hook tells the agent.
+pub(crate) fn observe_prompt(
+    state: &Path,
+    socket: &str,
+    session: &str,
+    turn: &HostTurn,
+    prompt: &str,
+    arm: Option<Claim>,
+    now_ms: u64,
+) -> bool {
+    let directory = session_directory(state, socket, session);
+    if arm.is_none() && !directory.join("claims.json").exists() {
+        return false;
+    }
+    let Some(mut claims) = Claims::lock(directory, PROMPT_LOCK_WAIT) else {
+        return false;
+    };
+    let continuation = is_continuation(prompt);
+    for claim in &mut claims.claims {
+        if let Some(next) = on_prompt(claim.state, &claim.turn, turn, continuation) {
+            claim.set(next, now_ms);
+            if next == ClaimState::Open {
+                claim.turn = turn.clone();
+            }
+        }
+    }
+    let armed = match arm {
+        Some(arm) if !claims.claims.iter().any(|claim| claim.state.is_live()) => {
+            claims
+                .claims
+                .retain(|claim| claim.attempt_id != arm.attempt_id);
+            claims.claims.push(arm);
+            true
+        }
+        _ => false,
+    };
+    claims.save(now_ms);
+    armed
+}
+
+/// Whether a Stop of this session has anything to settle. It reads without
+/// the lock, so the Stop can size its own deadline first.
+pub fn has_live_claims(state: &Path, socket: &str, session: &str) -> bool {
+    read_claims(&session_directory(state, socket, session))
+        .iter()
+        .any(|claim| claim.state.is_live())
+}
+
+/// The bound operation the Stop runs for a claim: its token, its input, and
+/// the location flags of the envelope's own tool.
+pub struct BoundOperation {
+    pub operation: &'static str,
+    pub input: Value,
+    pub state: PathBuf,
+    pub socket: String,
+    pub workspace: String,
+    pub pane: String,
+}
+
+/// Decides every live claim of the stopping session and runs each settle
+/// through `run`, the same pipeline the CLI runs, so every guard of `reply`
+/// and `complete` applies. A failed settle leaves its delivery pending.
+pub fn settle_at_stop(
+    state: &Path,
+    socket: &str,
+    stop: &StopFacts,
+    now_ms: u64,
+    run: &mut dyn FnMut(BoundOperation) -> Result<Value, String>,
+) {
+    let directory = session_directory(state, socket, &stop.session);
+    let Some(mut claims) = Claims::lock(directory, STOP_LOCK_WAIT) else {
+        return;
+    };
+    for claim in &mut claims.claims {
+        let current = claim.state == ClaimState::Open && stop.turn.as_ref() == Some(&claim.turn);
+        let facts = if current {
+            settle_facts(state, &stop.session, claim)
+        } else {
+            SettleFacts::default()
+        };
+        let next = match decide(claim, stop, &facts) {
+            Verdict::Ignore => continue,
+            Verdict::Carry => ClaimState::Carried,
+            Verdict::Leave(reason) => ClaimState::Left(reason),
+            Verdict::Superseded => ClaimState::Done(Done::Superseded),
+            Verdict::Settle(settlement) => {
+                let (operation, input) = settlement.operation(&claim.attempt_id);
+                let location = &claim.location;
+                match run(BoundOperation {
+                    operation,
+                    input,
+                    state: PathBuf::from(&location.state),
+                    socket: location.socket.clone(),
+                    workspace: location.workspace.clone(),
+                    pane: location.pane.clone(),
+                }) {
+                    Ok(_) => ClaimState::Done(settlement.done()),
+                    Err(_) if disposed(state, claim) => ClaimState::Done(Done::Superseded),
+                    Err(_) => ClaimState::Left(LeaveReason::OperationFailed),
+                }
+            }
+        };
+        claim.set(next, now_ms);
+    }
+    claims.save(now_ms);
+}
+
+fn settle_facts(state: &Path, session: &str, claim: &Claim) -> SettleFacts {
+    SettleFacts {
+        disposed: disposed(state, claim),
+        explicit_pending: crate::deferred_commands::settle_queued(
+            state,
+            &claim.namespace.session_socket_id,
+            session,
+            claim.attempt_id.as_str(),
+        ),
+    }
+}
+
+fn disposed(state: &Path, claim: &Claim) -> bool {
+    crate::StateStore::open_read_only(state)
+        .ok()
+        .flatten()
+        .and_then(|mut store| {
+            store
+                .transaction(|transaction| {
+                    transaction.delivery_disposition_exists(&claim.namespace, &claim.attempt_id)
+                })
+                .ok()
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
