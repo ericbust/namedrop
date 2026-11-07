@@ -1,0 +1,226 @@
+{
+ "productRevision": "82d381c94db2c8be888a651b5904c49cec396dd0",
+ "sourceRevision": "2c9ea6e025be0b6d8fe5986c67dd8bb6f1b0fc23",
+ "version": "1.5.0-exp.20",
+ "viewport": {
+  "width": 1280,
+  "height": 720
+ },
+ "deviceScaleFactor": 2,
+ "startedAtEpochMs": 1794016045091,
+ "duration": 240.754008727,
+ "sourceFrameCount": 2519,
+ "events": [
+  {
+   "name": "ask-wide",
+   "t": 0.0001595600000000559,
+   "at": "2026-11-07T01:47:25.091Z"
+  },
+  {
+   "name": "ask-typed",
+   "t": 3.8671104639999996,
+   "at": "2026-11-07T01:47:28.958Z"
+  },
+  {
+   "name": "ask-sent",
+   "t": 5.895231818999999,
+   "at": "2026-11-07T01:47:30.986Z"
+  },
+  {
+   "name": "ask-reply",
+   "t": 13.720201135,
+   "at": "2026-11-07T01:47:38.811Z"
+  },
+  {
+   "name": "followup-open",
+   "t": 19.256649277,
+   "at": "2026-11-07T01:47:44.347Z"
+  },
+  {
+   "name": "followup-typed",
+   "t": 20.405841023,
+   "at": "2026-11-07T01:47:45.497Z"
+  },
+  {
+   "name": "followup-sent",
+   "t": 22.258518903,
+   "at": "2026-11-07T01:47:47.349Z"
+  },
+  {
+   "name": "followup-reply",
+   "t": 29.525552981,
+   "at": "2026-11-07T01:47:54.616Z"
+  },
+  {
+   "name": "collab-open",
+   "t": 35.363036047,
+   "at": "2026-11-07T01:48:00.454Z"
+  },
+  {
+   "name": "collab-typed",
+   "t": 38.618718642,
+   "at": "2026-11-07T01:48:03.709Z"
+  },
+  {
+   "name": "collab-sent",
+   "t": 40.612981405,
+   "at": "2026-11-07T01:48:05.704Z"
+  },
+  {
+   "name": "activity-open",
+   "t": 42.056773905,
+   "at": "2026-11-07T01:48:07.147Z"
+  },
+  {
+   "name": "collab-claude-working",
+   "t": 42.750957922000005,
+   "at": "2026-11-07T01:48:07.842Z"
+  },
+  {
+   "name": "collab-codex-working",
+   "t": 48.228514231,
+   "at": "2026-11-07T01:48:13.319Z"
+  },
+  {
+   "name": "activity-ask",
+   "t": 48.231546664,
+   "at": "2026-11-07T01:48:13.322Z"
+  },
+  {
+   "name": "collab-claude-done",
+   "t": 50.28847812,
+   "at": "2026-11-07T01:48:15.379Z"
+  },
+  {
+   "name": "activity-answer",
+   "t": 55.070404277,
+   "at": "2026-11-07T01:48:20.161Z"
+  },
+  {
+   "name": "collab-codex-done",
+   "t": 55.761775434,
+   "at": "2026-11-07T01:48:20.853Z"
+  },
+  {
+   "name": "collab-done",
+   "t": 75.94945974199999,
+   "at": "2026-11-07T01:48:41.040Z"
+  },
+  {
+   "name": "collab-channel",
+   "t": 77.258055077,
+   "at": "2026-11-07T01:48:42.349Z"
+  },
+  {
+   "name": "collab-thread",
+   "t": 78.82302628599999,
+   "at": "2026-11-07T01:48:43.914Z"
+  },
+  {
+   "name": "pick-hint",
+   "t": 84.04794002,
+   "at": "2026-11-07T01:48:49.139Z"
+  },
+  {
+   "name": "pick-cleared",
+   "t": 87.600387156,
+   "at": "2026-11-07T01:48:52.691Z"
+  },
+  {
+   "name": "skills-open",
+   "t": 89.409423259,
+   "at": "2026-11-07T01:48:54.500Z"
+  },
+  {
+   "name": "skills-list",
+   "t": 91.351913451,
+   "at": "2026-11-07T01:48:56.443Z"
+  },
+  {
+   "name": "skills-closed",
+   "t": 95.23823679499999,
+   "at": "2026-11-07T01:49:00.329Z"
+  },
+  {
+   "name": "dm-open",
+   "t": 96.952814795,
+   "at": "2026-11-07T01:49:02.044Z"
+  },
+  {
+   "name": "reminder-typed",
+   "t": 99.518857028,
+   "at": "2026-11-07T01:49:04.610Z"
+  },
+  {
+   "name": "reminder-sent",
+   "t": 101.36097701999999,
+   "at": "2026-11-07T01:49:06.452Z"
+  },
+  {
+   "name": "reminder-pending",
+   "t": 108.354175327,
+   "at": "2026-11-07T01:49:13.445Z"
+  },
+  {
+   "name": "reminder-pending-end",
+   "t": 112.363663698,
+   "at": "2026-11-07T01:49:17.454Z"
+  },
+  {
+   "name": "reminder-fired",
+   "t": 167.596581295,
+   "at": "2026-11-07T01:50:12.687Z"
+  },
+  {
+   "name": "reminder-answer",
+   "t": 173.984649163,
+   "at": "2026-11-07T01:50:19.075Z"
+  },
+  {
+   "name": "needs-typed",
+   "t": 179.81499583599998,
+   "at": "2026-11-07T01:50:24.906Z"
+  },
+  {
+   "name": "needs-sent",
+   "t": 181.345421193,
+   "at": "2026-11-07T01:50:26.436Z"
+  },
+  {
+   "name": "needs-blocked",
+   "t": 185.833897521,
+   "at": "2026-11-07T01:50:30.925Z"
+  },
+  {
+   "name": "needs-esc",
+   "t": 190.762910858,
+   "at": "2026-11-07T01:50:35.854Z"
+  },
+  {
+   "name": "needs-cancelled",
+   "t": 191.577182328,
+   "at": "2026-11-07T01:50:36.668Z"
+  },
+  {
+   "name": "sub-open",
+   "t": 195.967700552,
+   "at": "2026-11-07T01:50:41.058Z"
+  },
+  {
+   "name": "sub-typed",
+   "t": 198.547572752,
+   "at": "2026-11-07T01:50:43.638Z"
+  },
+  {
+   "name": "sub-sent",
+   "t": 200.38708925699999,
+   "at": "2026-11-07T01:50:45.478Z"
+  },
+  {
+   "name": "sub-count",
+   "t": 218.69264622900002,
+   "at": "2026-11-07T01:51:03.783Z"
+  }
+ ],
+ "notes": "The take behind the Channels keynote, recorded with ../record on 1.5.0-exp.20. Every app frame is a 2x screenshot of the running page. scene.html picks frames by their time in this take; the event times here are the moments it uses."
+}

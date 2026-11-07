@@ -59,8 +59,69 @@ The screens come from an isolated profile under `~/namedrop-demo`, so no persona
 
 ## Re-capture and render Channels
 
-The Channels highlight is one continuous take of the real Channels page on the 1.5.0-exp.20 build, recorded at a 1280×720 viewport at 2x. It starts from an empty channel named **Release planning**. Eight scenes follow, each with one caption: ask an agent in a channel, follow up in the thread without @, let one agent ask another in the open while **All activity** shows who works for whom, pick who gets a reply in a two-agent thread, use an agent's skills from the composer, ask for a reminder in a DM, see Needs you, and see subagents on the member chip. It plays on the same stage as the Namedrop demo above: the whole Channels window stays on screen with the real Codex and Claude Code windows beside it, and cards quote each real message as it travels between Channels and the agents, and between the agents. The camera does not move. A gentle spotlight and a ring mark the focal element, and a callout beside it repeats its real text in large type. The movie is 55 to 75 seconds long. The animated WebP is the first scene. The person in the movie is "you": `channels/motion/wordcheck.py` fails the render if the word "operator" appears anywhere on screen.
+The Channels movie is a silent keynote film built from one continuous take of the real Channels page on the 1.5.0-exp.20 build, recorded at a 1280×720 viewport at 2x. Each beat has one headline and shows one idea for four to six seconds: the full app, asking an agent, following up in the thread without @, Claude asking Codex in the open, **All activity**, picking who gets a reply, skills from the composer, a reminder in a DM, Needs you, subagents on the member chip, and a closing card with `namedrop channels`. The app appears as large rounded crops of recorded frames. The camera does not move. Only type, glows, cards, the **1 minute later** label, a ring around Needs you, and motion are added; no app text is drawn or changed. The movie is 50 to 60 seconds long, and the animated WebP is its first nine seconds. The person in the movie is "you", and `wordcheck.py` fails the render if the word "operator" appears anywhere on screen.
 
-Follow [Record and render the Channels highlight](channels/motion/README.md) to stage a take in the testbed, record it, plan the cut, render it, and check it. `channels/motion/capture.json` records the published take's build and source hashes. `channels/motion/legibility.py` measures the focal text in the app and in the callout at README width, and writes the contact sheet. Look at the sheet and one frame per shot before you publish.
+| Path | Purpose |
+|---|---|
+| `channels/record/stage.py` | Builds a clean take in a `test-` profile: an empty workspace named **Release planning**, both agents started in `~/release-planning`, idle, and Claude in manual permission mode |
+| `channels/record/record.mjs`, `queue.mjs` | Opens Channels in Chromium, records timestamped 2x frames, and runs queued step files |
+| `channels/record/steps/*.js` | The capture steps, typed and sent through the real UI |
+| `channels/record/profile.py` | The only bridge to the profile: build check, link, agent status, screen text, and Esc on a real blocked prompt |
+| `channels/keynote/scene.html` | The film. Each scene picks recorded frames by their time in the take |
+| `channels/keynote/render.mjs` | Serves the scene and the take, and steps the film frame by frame into ffmpeg at 2560×1440 |
+| `channels/keynote/capture.json` | The published take's build, source revisions and event times |
+| `channels/keynote/check.py`, `wordcheck.py` | Check the encoded assets against the take, and read every half second of the movie for the banned word |
+| `channels/keynote/fonts/` | Inter Display, under the SIL Open Font License in `LICENSE.txt` |
 
-The cropped still scene in `channels/` is an earlier version. It is not the source of the published movie.
+### Capture a take
+
+You need the Namedrop testbed, Chromium, Node.js, ffmpeg, and Python 3 with Pillow. Keep the take and renders outside `/tmp`; a take is about 1 GB. Run the commands from the repository root.
+
+1. Build a `test-` profile from the product revision. The testbed links logins read-only and isolates `HOME` and `XDG_CONFIG_HOME`.
+
+   ```sh
+   export TESTBED_HOME=~/.cache/channels-video/testbed
+   testbed/testbed test --link . --profile test-channels --codex no-daemon --keep
+   ```
+
+2. Stage a clean workspace before every take. Claude Code starts in auto mode, which would run the Needs-you command without asking, so `stage.py` presses Shift-Tab until the pane shows `manual mode on`. It also tells the agents not to send a thank-you after another agent answers, because a thank-you tends to name you by your Namedrop alias.
+
+   ```sh
+   python3 docs/demo/channels/record/stage.py test-channels
+   ```
+
+3. Start the recorder. It refuses a profile that is not `test-`, a product that differs from the revision in `profile.py`, and agents that are not registered and idle.
+
+   ```sh
+   CHROME=/usr/bin/chromium node docs/demo/channels/record/record.mjs test-channels ~/.cache/channels-video/take
+   ```
+
+4. In another shell, queue the steps one at a time and read each result before you queue the next. The last step stops the recorder.
+
+   ```sh
+   for step in docs/demo/channels/record/steps/*.js; do
+     node docs/demo/channels/record/queue.mjs ~/.cache/channels-video/take "$step"
+     until [ -f ~/.cache/channels-video/take/actions/$(basename "$step" .js).json.result ]; do sleep 1; done
+     head -c 600 ~/.cache/channels-video/take/actions/$(basename "$step" .js).json.result; echo
+   done
+   ```
+
+   `3-collab.js` fails if Claude finishes without bringing in @codex; keep its wording, because Claude routes to @codex only when the reply is addressed to both. `6-reminder.js` gives Claude the reminder's exact text. `8-needs.js` checks that Claude is really blocked, then sends Esc and never approves the prompt; afterwards, check that `release-notes.txt` does not exist in `~/release-planning`. `9-subagents.js` waits for the subagent count on Claude's member chip; if a subagent stops on a prompt, send Esc with `profile.py cancel`.
+
+A new take has new timings. Update `capture.json` from the take's `recording/recording.json`, and update the take times in `scene.html` (each scene names the moments it uses) before you render.
+
+### Render
+
+Install the demo's packages once with `npm install` in `docs/demo`; the renderer uses its `playwright-core`.
+
+```sh
+cd docs/demo/channels/keynote
+CHROME=/usr/bin/chromium node render.mjs ~/.cache/channels-video/take --stills 6.5,22,47 a.png,b.png,c.png   # preview frames
+CHROME=/usr/bin/chromium node render.mjs ~/.cache/channels-video/take ~/.cache/channels-video/master.mp4
+ffmpeg -y -i ~/.cache/channels-video/master.mp4 -c:v libx264 -preset slow -crf 20 -pix_fmt yuv420p -an -movflags +faststart ../../../assets/namedrop-channels.mp4
+ffmpeg -y -i ~/.cache/channels-video/master.mp4 -t 9 -vf 'fps=15,scale=1400:-1:flags=lanczos' -c:v libwebp_anim -quality 80 -compression_level 6 -loop 0 ../../../assets/namedrop-channels.webp
+python3 check.py ~/.cache/channels-video/take ../../../assets/namedrop-channels.mp4 ../../../assets/namedrop-channels.webp
+python3 wordcheck.py ../../../assets/namedrop-channels.mp4 ~/.cache/channels-video/wordcheck.md
+```
+
+On macOS, leave out `CHROME` to use Google Chrome. `wordcheck.py` needs Tesseract. If a real agent message says the banned word, take that step again. Look at a frame every two seconds before you publish.
