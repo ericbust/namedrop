@@ -267,8 +267,10 @@ def jsonl(*entries):
     return [json.dumps(entry) for entry in entries]
 
 
-POLICY = ("Namedrop selection policy. Each of your turns, and each incoming task, begins with a "
-          "Namedrop workspace roster: the named agents in this Herdr space.")
+POLICY = ("Namedrop selection policy. A Namedrop workspace roster lists the named agents in this "
+          "Herdr space. A turn or incoming task carries its agent rows only when they differ from "
+          "the last ones shown in this session.")
+UNCHANGED = "Namedrop workspace roster. The agent rows are unchanged since the last roster shown.\n"
 
 
 def roster(agent):
@@ -289,7 +291,6 @@ def claude_lines(reply_attempt):
         hook("UserPromptSubmit", roster("claude")),
         {"type": "assistant", "message": {"model": "claude-opus-5-5", "content": [{"type": "text", "text": "ready"}]}},
         {"type": "user", "message": {"role": "user", "content": "Ask @codex to reply with the single word pong."}},
-        hook("UserPromptSubmit", roster("claude")),
         {"type": "assistant", "message": {"model": "claude-opus-5-5", "content": [{"type": "tool_use", "id": "t"}]}},
         {"type": "user", "toolUseResult": {}, "message": {"role": "user", "content": [
             {"type": "tool_result", "content": '{"attempt_id":"' + reply_attempt + '"}'}]}},
@@ -298,10 +299,15 @@ def claude_lines(reply_attempt):
         {"type": "assistant", "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "sent"}]}},
         {"type": "user", "message": {"role": "user", "content": '\n\n<pasted_content id="5a5c">\n{"envelope_kind":'
                                      '"delivery","control":{"attempt_id":"' + reply_attempt + '"}}\n</pasted_content id="5a5c">'}},
-        hook("UserPromptSubmit", "Namedrop verification: the adjacent prompt exactly matches.\n\n" +
-             roster("claude") + "\n\nNamedrop commands: reply ..."),
+        hook("UserPromptSubmit", "Namedrop verification: the adjacent prompt exactly matches."
+             "\n\nNamedrop commands: reply ..."),
         {"type": "assistant", "message": {"model": "claude-opus-5-5", "content": [
             {"type": "text", "text": "@codex replied **pong**."}]}}) + ['{"type": "assistant", "mess']
+
+
+def developer(text):
+    return {"type": "response_item", "payload": {
+        "type": "message", "role": "developer", "content": [{"type": "input_text", "text": text}]}}
 
 
 def codex_lines(request_attempt):
@@ -320,7 +326,7 @@ def codex_lines(request_attempt):
         {"type": "event_msg", "payload": {"type": "user_message", "message": request_attempt}},
         {"type": "turn_context", "payload": {"model": "gpt-6.1-sol"}},
         item("user", '{"trusted_instruction":"collab/v1","control":{"attempt_id":"' + request_attempt + '"}}'),
-        item("developer", roster("codex") + "\n\n\nNamedrop commands: the operations this delivery authorized"),
+        item("developer", UNCHANGED + "\n\nNamedrop commands: the operations this delivery authorized"),
         item("assistant", "Sent “pong” to @claude."))
 
 
@@ -338,6 +344,13 @@ def check_transcripts():
     assert live.seen(codex, "delivery-attempt-A", "verified") == (1, 0)
     assert all(check.ok for check in live.judge_hooks("codex", codex))
     assert not live.judge_hooks("claude", codex)[0].ok, "a roster without (you) on the right row fails"
+    busy = roster("codex").replace("(you) — Generic · available now", "(you) — Generic · busy")
+    repeated = live.parse_codex(codex_lines("a")[:9] + jsonl(developer(busy)) + codex_lines("a")[9:],
+                                "x", "x.jsonl")
+    assert "unchanged roster repeated 1 (expected 0)" in live.judge_hooks("codex", repeated)[0].detail
+    restarted = live.parse_codex(codex_lines("a")[:9] + jsonl(developer(POLICY), developer(busy))
+                                 + codex_lines("a")[9:], "x", "x.jsonl")
+    assert "unchanged roster repeated 0" in live.judge_hooks("codex", restarted)[0].detail
     twice = live.parse_codex(codex_lines("a")[:6] + codex_lines("a")[5:], "x", "x.jsonl")
     assert "policy 2 (expected 1)" in live.judge_hooks("codex", twice)[0].detail
     assert live.strip_markdown("“**pong**”") == "pong" and not live.has_word("pong", "ping-pongs")

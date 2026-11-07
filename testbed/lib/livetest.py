@@ -483,13 +483,35 @@ def has_word(word, text):
     return re.search(r"(?i)\b" + re.escape(word) + r"\b", strip_markdown(text)) is not None
 
 
+def roster_rows(text):
+    """The agent rows a hook text carries, without the readiness on the (you) row, or None."""
+    if "roster" not in markers(text):
+        return None
+    rows = text[text.index(MARKERS["roster"]):].split("\n\n", 1)[0]
+    return re.sub(r"(?m)^(- @\S+ \(you\) — .*) · .*$", r"\1", rows)
+
+
+def repeated_rosters(transcript):
+    """Rosters whose rows match the last ones shown since the policy last arrived: Namedrop
+    sends the rows again only when they change, and every SessionStart starts over."""
+    last, repeated = None, 0
+    for text in [text for turn in transcript.turns for text in turn.contexts]:
+        if "policy" in markers(text):
+            last = None
+        elif roster_rows(text) is not None:
+            repeated += roster_rows(text) == last
+            last = roster_rows(text)
+    return repeated
+
+
 def judge_hooks(agent, transcript):
     policy = sum("policy" in markers(text) for text in transcript.session_contexts)
     first = transcript.turns[0] if transcript.turns else Turn("", (), ())
     you = "- @{} (you)".format(agent)
     roster = any("roster" in markers(text) and you in text for text in first.contexts)
     return [fields("{} hooks".format(agent),
-                   [("policy", policy, 1), ("first-turn roster with (you)", roster, True)])]
+                   [("policy", policy, 1), ("first-turn roster with (you)", roster, True),
+                    ("unchanged roster repeated", repeated_rosters(transcript), 0)])]
 
 
 Hop = namedtuple("Hop", "message_id author recipient in_reply_to deliveries attempts retries "
