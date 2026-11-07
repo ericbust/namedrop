@@ -179,10 +179,10 @@ class Shot:
 # The quoted replies, reminder bodies and activity lines are the take's own text; update them
 # for a new take. plan.py refuses any that the take did not show.
 TAKE_TEXT = {
-    'name': 'Horizon',
-    'names': 'Beacon, Summit',
-    'asks': 'Hi both. @codex, could you share a five-word release risk?',
-    'risk': 'Late dependencies could delay launch.',
+    'name': 'Crescendo',
+    'names': 'Momentum, Horizon',
+    'asks': 'Hi both. @codex, please reply with a five-word release risk.',
+    'risk': 'Unresolved dependencies may delay launch.',
     'pending': 'Tag the release.',
     'answer': 'Reminder: Tag the release.',
     'subagents': '1 subagent',
@@ -263,8 +263,8 @@ SCENES = [
              [(1.6, ('sub-open', 0.3), 'sub-typed'), (2.6, 'sub-typed', ('sub-typed', 1.75))],
              ('', '@claude Use two subagents to each name one release risk.'), 'sub-typed', 'claude'),
         Shot('subagents', 'sub-count', ('sub-count', 0.3),
-             [(0.8, ('sub-sent', 0.2), ('sub-count', -0.4)), (2.6, ('sub-count', -0.4), ('sub-count', 1.7))],
-             ('@claude', TAKE_TEXT['subagents']), ('sub-count', -0.4), 'claude',
+             [(0.8, ('sub-sent', 0.2), ('sub-count', -0.85)), (2.6, ('sub-count', -0.85), ('sub-count', 0.71))],
+             ('@claude', TAKE_TEXT['subagents']), ('sub-count', -0.85), 'claude',
              cards=(('you', 'claude', ('sub-sent', 0.2), 'Use two subagents to each name one release risk.'),)),
     ]),
 ]

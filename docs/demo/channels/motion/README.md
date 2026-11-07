@@ -63,11 +63,14 @@ python3 -m venv ~/.cache/channels-video/venv
 
    The recorder skips a file name it has already run. To repeat a step, queue a copy under a new name. The last step stops the recorder.
 
-Three steps need care:
+Four steps need care:
 
 - `3-collab.js` asks @claude to reply to you and @codex and to ask @codex for a risk. While the agents work it shows **All activity**, then it opens the thread that holds the whole exchange. It fails if Claude finishes without bringing in @codex or if either agent stops on a prompt. Claude does not route a request to @codex unless the reply is addressed to both, so keep that wording.
-- `8-reminder-fire.js` waits for the first reminder, then presses **Cancel** on the one still pending.
-- `9-needs.js` checks that Claude is really blocked before it records Needs you, then sends Esc to Claude's pane. It never approves the prompt. Afterwards, check that `release-notes.txt` does not exist in `~/release-planning`. `10-stop.js` stops the recorder.
+- `6-reminder.js` gives Claude the reminder's exact text. Without it, Claude writes its own body, which may call you by your Namedrop alias.
+- `8-needs.js` checks that Claude is really blocked before it records Needs you, then sends Esc to Claude's pane. It never approves the prompt. Afterwards, check that `release-notes.txt` does not exist in `~/release-planning`.
+- `9-subagents.js` waits for the subagent count on Claude's member chip. A subagent may stop on a permission prompt; the step then fails, and you send Esc with `profile.py cancel`. The count shows for a few seconds only, so check its window in the frames before you plan the cut. `10-stop.js` stops the recorder.
+
+`stage.py` adds one line to the demo project's `CLAUDE.md` and `AGENTS.md`: agents send no thank-you after another agent answers. A thank-you message tends to name you by your Namedrop alias.
 
 The recorder turns spellcheck off through its own browser profile under the take directory. Chromium ignores `--disable-spell-checking` here, and it would underline typed names such as `@claude`.
 
