@@ -366,11 +366,15 @@ Open the printed one-time HTTPS link on your other device. Namedrop configures `
 
 Only devices signed in as this machine's Tailscale owner can use this link. Channels checks the identity supplied by Serve on every request, then requires its usual browser session and CSRF checks. Shared-device users and tagged devices cannot sign in. This uses private Serve, never public Funnel. Local programs on the server remain trusted. **Type to agent** from your phone sends real input to the agent's pane.
 
+The browser keeps its tailnet sign-in cookie for seven days after you open a fresh one-time link, including across browser restarts. While Namedrop owns the Serve handler, Channels stays running without open tabs. If the browser loses its sign-in or the cookie expires, run `namedrop channels --tailscale --no-open` in the workspace on the Channels machine and open the new HTTPS link on your device.
+
 To remove Namedrop's handler and disable tailnet access, run:
 
 ```sh
 namedrop channels --tailscale off
 ```
+
+Disabling tailnet access does not rotate the shared browser session. A retained cookie can work again if you re-enable access before it expires. The session itself has no server-side expiry.
 
 The ordinary `namedrop channels` command and Herdr action still open the local page. Run the tailnet command in a workspace shell tab for a fresh remote link.
 

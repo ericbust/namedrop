@@ -2,6 +2,12 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.5.0-exp.21] - 2026-11-06
+
+### Fixed
+
+- Tailnet Channels sign-ins now persist for seven days across browser restarts. Missing or expired sign-ins show the command to open a fresh HTTPS link.
+
 ## [1.5.0-exp.20] - 2026-11-06
 
 ### Fixed

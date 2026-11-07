@@ -47,10 +47,11 @@ Prepare the profile through the testbed, which links logins read-only.
 Run the proof against the binary containing the Tailscale implementation.
   TESTBED_HOME=/home/ebusta/.cache/tailscale/tb node ${script} --profile test-tailscale --binary /absolute/path/to/namedrop
 
-Options are --profile NAME, --binary PATH, --testbed-home DIR, and --output DIR.
+Options are --profile NAME, --binary PATH, --testbed-home DIR, --output DIR,
+and --session-proof-only to skip fixture panes and unrelated UI mutations.
 TESTBED_HOME is required unless --testbed-home is supplied. CHROME overrides Chromium.
 The proof uses fake Tailscale only, binds HTTPS to loopback port 8443, and refuses active agents.
-It creates and closes one fixture pane. It leaves the testbed and evidence for inspection.
+The full proof creates and closes one fixture pane. It leaves the testbed and evidence for inspection.
 Evidence defaults to PROFILE/tailscale-proof/RUN. Output must stay inside the profile.
 The profile must have no existing dashboard/tailscale.json configuration.`);
 } else {
@@ -61,6 +62,11 @@ async function main() {
   const options = {};
   for (let at = 2; at < process.argv.length; at += 2) {
     const name = process.argv[at];
+    if (name === "--session-proof-only") {
+      options.sessionProofOnly = true;
+      at -= 1;
+      continue;
+    }
     assert.ok(
       ["--profile", "--binary", "--testbed-home", "--output"].includes(name),
       `unknown option ${name}; use --help`,
@@ -209,6 +215,8 @@ async function main() {
   const errors = [];
   const proxyRequests = [];
   const liveRecords = [];
+  const eventStreams = new Set();
+  const sessionProof = {};
   let proxyLogin = ownerLogin;
   try {
     assert.equal(
@@ -245,9 +253,9 @@ async function main() {
     check("stopped daemon fails without changing Serve");
     initial.status.BackendState = "Running";
     await writeFake(initial);
-    const enabled = await namedrop(["channels", "--no-open", "--tailscale"]);
+    let enabled = await namedrop(["channels", "--no-open", "--tailscale"]);
     installed = true;
-    const link = new URL(enabled.value.data.url);
+    let link = new URL(enabled.value.data.url);
     assert.equal(link.protocol, "https:");
     assert.equal(link.hostname, dnsName);
     assert.equal(link.port, "8443", "443 belongs to another Serve handler");
@@ -297,6 +305,385 @@ async function main() {
       "owned Serve backend must stay alive past idle without browser tabs",
     );
     check("owned Serve backend stays alive without tabs past the idle timeout");
+
+    const keyFile = join(output, "tls.key");
+    const certFile = join(output, "tls.crt");
+    await run("/usr/bin/openssl", [
+      "req",
+      "-x509",
+      "-newkey",
+      "rsa:2048",
+      "-nodes",
+      "-days",
+      "1",
+      "-subj",
+      `/CN=${dnsName}`,
+      "-addext",
+      `subjectAltName=DNS:${dnsName}`,
+      "-keyout",
+      keyFile,
+      "-out",
+      certFile,
+    ]);
+    proxy = createServer(
+      { key: await readFile(keyFile), cert: await readFile(certFile) },
+      (req, res) => {
+        const headers = Object.fromEntries(
+          Object.entries(req.headers).filter(
+            ([name]) => !/^(tailscale-user-|x-forwarded-)/i.test(name),
+          ),
+        );
+        if (proxyLogin !== null) headers["tailscale-user-login"] = proxyLogin;
+        headers["x-forwarded-host"] = req.headers.host;
+        headers["x-forwarded-for"] = req.socket.remoteAddress;
+        headers["x-forwarded-proto"] = "https";
+        proxyRequests.push({
+          method: req.method,
+          path: req.url.split("?")[0],
+          host: headers.host,
+          origin: headers.origin ?? null,
+          login: headers["tailscale-user-login"] ?? null,
+        });
+        const upstream = httpRequest(
+          {
+            hostname: "127.0.0.1",
+            port: backend,
+            path: req.url,
+            method: req.method,
+            headers,
+          },
+          (reply) => {
+            res.writeHead(reply.statusCode, reply.headers);
+            if (
+              reply.statusCode === 200 &&
+              req.url.split("?")[0] === "/api/events"
+            ) {
+              eventStreams.add(res);
+              res.once("close", () => eventStreams.delete(res));
+            }
+            if (
+              reply.statusCode === 200 &&
+              req.url.split("?")[0].endsWith("/live")
+            ) {
+              let pending = "";
+              reply.on("data", (bytes) => {
+                pending += bytes.toString("utf8");
+                const lines = pending.split("\n");
+                pending = lines.pop();
+                for (const line of lines) {
+                  if (line.trim()) {
+                    try {
+                      liveRecords.push(JSON.parse(line));
+                    } catch {
+                      errors.push("Live Peek returned a malformed JSON record");
+                    }
+                  }
+                }
+              });
+            }
+            reply.pipe(res);
+          },
+        );
+        upstream.on("error", (error) => res.destroy(error));
+        res.on("close", () => upstream.destroy());
+        req.pipe(upstream);
+      },
+    );
+    await new Promise((done, reject) => {
+      proxy.once("error", reject);
+      proxy.listen(8443, "127.0.0.1", done);
+    });
+    const { chromium } = await import("playwright-core");
+    browser = await chromium.launch({
+      executablePath: process.env.CHROME ?? "/usr/bin/chromium",
+      headless: true,
+      env,
+      args: [
+        "--no-sandbox",
+        "--no-proxy-server",
+        `--host-resolver-rules=MAP ${dnsName} 127.0.0.1`,
+      ],
+    });
+    {
+      const dashboardInfo = async () =>
+        JSON.parse(await readFile(join(state, "dashboard/server.json")));
+      const signedInContext = await browser.newContext({
+        ignoreHTTPSErrors: true,
+      });
+      page = await signedInContext.newPage();
+      const signedInAt = Date.now() / 1000;
+      await page.goto(link.href);
+      assert.equal(
+        await page.evaluate(async () => (await fetch("/api/session")).status),
+        200,
+        "the one-time link signs the owner in before browser-session loss",
+      );
+      await eventually(
+        async () => eventStreams.size > 0,
+        "the signed-in browser opens an event stream before backgrounding",
+      );
+      const sessionCookie = (await signedInContext.cookies(link.origin)).find(
+        (cookie) => cookie.name.startsWith("namedrop_dashboard_"),
+      );
+      assert.ok(
+        sessionCookie,
+        "one-time sign-in sets a dashboard session cookie",
+      );
+      assert.ok(sessionCookie.secure && sessionCookie.httpOnly);
+      assert.equal(sessionCookie.sameSite, "Strict");
+      const sessionHeaders = {
+        Host: link.host,
+        Cookie: `${sessionCookie.name}=${sessionCookie.value}`,
+        Origin: link.origin,
+      };
+      assert.equal(
+        (
+          await request(
+            8443,
+            `${link.pathname}${link.search}`,
+            { Host: link.host },
+            true,
+          )
+        ).status,
+        401,
+        "a redeemed one-time nonce cannot sign in a second browser",
+      );
+      const unsignedOwner = await request(
+        8443,
+        "/api/session",
+        { Host: link.host },
+        true,
+      );
+      assert.equal(
+        unsignedOwner.status,
+        401,
+        "an authenticated owner still needs the one-time sign-in or a session cookie",
+      );
+      check("tailnet identity does not bypass the one-time sign-in gate");
+
+      const beforeIdle = await dashboardInfo();
+      const storage = await signedInContext.storageState();
+      sessionProof.cookie = {
+        secure: sessionCookie.secure,
+        httpOnly: sessionCookie.httpOnly,
+        sameSite: sessionCookie.sameSite,
+        expires: sessionCookie.expires,
+      };
+      // A clean browser restart discards session cookies even though Playwright exports them.
+      storage.cookies = storage.cookies.filter(
+        (cookie) => cookie.expires > Date.now() / 1000,
+      );
+      const storageFile = join(output, "persistent-browser-storage.json");
+      await writeFile(storageFile, JSON.stringify(storage), { mode: 0o600 });
+      await signedInContext.close();
+      await eventually(
+        async () => eventStreams.size === 0,
+        "closing the browser context closes every dashboard event stream",
+      );
+      await delay(3000);
+      assert.equal(
+        (await request(8443, "/api/session", sessionHeaders, true)).status,
+        200,
+        "closing every browser stream past idle preserves the owned tailnet session",
+      );
+      const afterIdle = await dashboardInfo();
+      assert.equal(afterIdle.instance, beforeIdle.instance);
+      sessionProof.idle = { before: beforeIdle, after: afterIdle };
+      check(
+        "closed event streams past idle preserve the owned backend and session",
+      );
+
+      const restoredContext = await browser.newContext({
+        ignoreHTTPSErrors: true,
+        storageState: storageFile,
+      });
+      page = await restoredContext.newPage();
+      await page.goto(link.origin);
+      sessionProof.reopenedStatus = await page.evaluate(
+        async () => (await fetch("/api/session")).status,
+      );
+      assert.equal(
+        sessionProof.reopenedStatus,
+        200,
+        "tailnet sign-in survives browser-session loss using only persistent cookie storage",
+      );
+      const now = Date.now() / 1000;
+      assert.ok(
+        sessionCookie.expires > now,
+        "tailnet session cookie has a future expiry",
+      );
+      assert.ok(
+        sessionCookie.expires <= now + 30 * 24 * 60 * 60 + 60,
+        "tailnet session cookie expires within 30 days plus a 60-second clock margin",
+      );
+      assert.ok(
+        sessionCookie.expires >= signedInAt + 7 * 24 * 60 * 60 - 1 &&
+          sessionCookie.expires <= signedInAt + 7 * 24 * 60 * 60 + 60,
+        "tailnet sign-in grants a seven-day cookie with a 60-second clock margin",
+      );
+      const unsignedPage = await request(8443, "/", { Host: link.host }, true);
+      assert.equal(unsignedPage.status, 401);
+      assert.ok(
+        unsignedPage.body.includes("namedrop channels --tailscale --no-open"),
+        "the tailnet sign-in page gives the exact recovery command",
+      );
+      check(
+        "Secure HttpOnly Strict cookie survives a reopened browser with a bounded seven-day expiry",
+      );
+
+      await restoredContext.close();
+      const command = (
+        await readFile(`/proc/${afterIdle.pid}/cmdline`, "utf8")
+      ).split("\0");
+      assert.ok(
+        command.includes("dashboard-server") && command.includes(state),
+        "only the isolated profile dashboard process may be stopped",
+      );
+      process.kill(afterIdle.pid, "SIGKILL");
+      await eventually(
+        async () =>
+          (
+            await readFile(`/proc/${afterIdle.pid}/cmdline`).catch((error) => {
+              if (error.code === "ENOENT") return Buffer.alloc(0);
+              throw error;
+            })
+          ).length === 0,
+        "the isolated backend stops before it is restarted",
+      );
+      const restarted = await namedrop([
+        "channels",
+        "--no-open",
+        "--tailscale",
+      ]);
+      assert.equal(new URL(restarted.value.data.url).origin, link.origin);
+      const afterRestart = await dashboardInfo();
+      assert.notEqual(afterRestart.instance, afterIdle.instance);
+      assert.equal(afterRestart.port, backend);
+      sessionProof.restart = { before: afterIdle, after: afterRestart };
+      const restartedContext = await browser.newContext({
+        ignoreHTTPSErrors: true,
+        storageState: storageFile,
+      });
+      page = await restartedContext.newPage();
+      await page.goto(link.origin);
+      sessionProof.restartedStatus = await page.evaluate(
+        async () => (await fetch("/api/session")).status,
+      );
+      assert.equal(
+        sessionProof.restartedStatus,
+        200,
+        "the original persistent cookie survives a forced backend restart without redeeming another nonce",
+      );
+      for (const login of [null, "other@example.invalid"]) {
+        proxyLogin = login;
+        assert.equal(
+          (await request(8443, "/api/session", sessionHeaders, true)).status,
+          403,
+        );
+      }
+      proxyLogin = ownerLogin;
+      check(
+        "persistent sign-in survives backend restart and still rejects missing or foreign identity",
+      );
+
+      const local = await namedrop(["channels", "--no-open"]);
+      const localLink = new URL(local.value.data.url);
+      const localSignIn = await request(
+        backend,
+        `${localLink.pathname}${localLink.search}`,
+        {
+          Host: localLink.host,
+        },
+      );
+      assert.ok([302, 303].includes(localSignIn.status));
+      assert.ok(
+        localSignIn.headers["set-cookie"].every(
+          (cookie) => !/;\s*(Secure|Max-Age|Expires)\b/i.test(cookie),
+        ),
+        "local cookies stay non-Secure and scoped to the browser session",
+      );
+      const localHeaders = {
+        Host: localLink.host,
+        Origin: localLink.origin,
+        Cookie: localSignIn.headers["set-cookie"]
+          .map((cookie) => cookie.split(";")[0])
+          .join("; "),
+      };
+      assert.equal(
+        (await request(backend, "/api/session", localHeaders)).status,
+        200,
+      );
+      await namedrop(["channels", "--no-open", "--tailscale", "off"]);
+      installed = false;
+      assert.equal(
+        (await request(8443, "/api/session", sessionHeaders, true)).status,
+        403,
+      );
+      assert.deepEqual((await readFake()).serve, foreign);
+      assert.equal(
+        (await request(backend, "/api/session", localHeaders)).status,
+        200,
+      );
+      check(
+        "tailscale off blocks access with the persistent HTTPS cookie and preserves local access",
+      );
+      await restartedContext.close();
+      const beforeLocalIdle = await dashboardInfo();
+      await eventually(
+        async () =>
+          (
+            await readFile(`/proc/${beforeLocalIdle.pid}/cmdline`).catch(
+              (error) => {
+                if (error.code === "ENOENT") return Buffer.alloc(0);
+                throw error;
+              },
+            )
+          ).length === 0,
+        "the local backend exits after all tabs close and Tailscale is off",
+      );
+      const localRestarted = await namedrop(["channels", "--no-open"]);
+      const localRestartedLink = new URL(localRestarted.value.data.url);
+      const afterLocalIdle = await dashboardInfo();
+      assert.notEqual(afterLocalIdle.instance, beforeLocalIdle.instance);
+      assert.equal(localRestartedLink.host, localLink.host);
+      sessionProof.localIdle = {
+        before: beforeLocalIdle,
+        after: afterLocalIdle,
+      };
+      assert.equal(
+        (await request(backend, "/api/session", localHeaders)).status,
+        401,
+        "local idle rotation rejects the previous local cookie after restart",
+      );
+      check(
+        "local-only idle shutdown still rotates and rejects the old browser session",
+      );
+      if (options.sessionProofOnly) {
+        await writeFile(
+          join(output, "result.json"),
+          JSON.stringify(
+            {
+              passed: true,
+              checks,
+              binary,
+              profile,
+              origin: link.origin,
+              backend,
+              sessionProof,
+              errors,
+              proxyRequests,
+            },
+            null,
+            2,
+          ),
+        );
+        console.log(`PASS Tailscale session integration. Evidence ${output}`);
+        return;
+      }
+    }
+    enabled = await namedrop(["channels", "--no-open", "--tailscale"]);
+    installed = true;
+    link = new URL(enabled.value.data.url);
 
     fixturePane = (
       await herdr([
@@ -367,97 +754,6 @@ print(json.dumps({'address':address,'binding':binding}))
 `,
     );
 
-    const keyFile = join(output, "tls.key");
-    const certFile = join(output, "tls.crt");
-    await run("/usr/bin/openssl", [
-      "req",
-      "-x509",
-      "-newkey",
-      "rsa:2048",
-      "-nodes",
-      "-days",
-      "1",
-      "-subj",
-      `/CN=${dnsName}`,
-      "-addext",
-      `subjectAltName=DNS:${dnsName}`,
-      "-keyout",
-      keyFile,
-      "-out",
-      certFile,
-    ]);
-    proxy = createServer(
-      { key: await readFile(keyFile), cert: await readFile(certFile) },
-      (req, res) => {
-        const headers = Object.fromEntries(
-          Object.entries(req.headers).filter(
-            ([name]) => !/^(tailscale-user-|x-forwarded-)/i.test(name),
-          ),
-        );
-        if (proxyLogin !== null) headers["tailscale-user-login"] = proxyLogin;
-        headers["x-forwarded-host"] = req.headers.host;
-        headers["x-forwarded-for"] = req.socket.remoteAddress;
-        headers["x-forwarded-proto"] = "https";
-        proxyRequests.push({
-          method: req.method,
-          path: req.url.split("?")[0],
-          host: headers.host,
-          origin: headers.origin ?? null,
-          login: headers["tailscale-user-login"] ?? null,
-        });
-        const upstream = httpRequest(
-          {
-            hostname: "127.0.0.1",
-            port: backend,
-            path: req.url,
-            method: req.method,
-            headers,
-          },
-          (reply) => {
-            res.writeHead(reply.statusCode, reply.headers);
-            if (
-              reply.statusCode === 200 &&
-              req.url.split("?")[0].endsWith("/live")
-            ) {
-              let pending = "";
-              reply.on("data", (bytes) => {
-                pending += bytes.toString("utf8");
-                const lines = pending.split("\n");
-                pending = lines.pop();
-                for (const line of lines) {
-                  if (line.trim()) {
-                    try {
-                      liveRecords.push(JSON.parse(line));
-                    } catch {
-                      errors.push("Live Peek returned a malformed JSON record");
-                    }
-                  }
-                }
-              });
-            }
-            reply.pipe(res);
-          },
-        );
-        upstream.on("error", (error) => res.destroy(error));
-        res.on("close", () => upstream.destroy());
-        req.pipe(upstream);
-      },
-    );
-    await new Promise((done, reject) => {
-      proxy.once("error", reject);
-      proxy.listen(8443, "127.0.0.1", done);
-    });
-    const { chromium } = await import("playwright-core");
-    browser = await chromium.launch({
-      executablePath: process.env.CHROME ?? "/usr/bin/chromium",
-      headless: true,
-      env,
-      args: [
-        "--no-sandbox",
-        "--no-proxy-server",
-        `--host-resolver-rules=MAP ${dnsName} 127.0.0.1`,
-      ],
-    });
     const context = await browser.newContext({
       ignoreHTTPSErrors: true,
       viewport: { width: 1440, height: 1000 },
@@ -947,6 +1243,7 @@ print(json.dumps({'state':db.execute('SELECT state FROM reminders WHERE reminder
           errors,
           proxyRequests,
           liveRecords,
+          sessionProof,
         },
         null,
         2,
@@ -969,6 +1266,7 @@ print(json.dumps({'state':db.execute('SELECT state FROM reminders WHERE reminder
           errors,
           proxyRequests,
           liveRecords,
+          sessionProof,
         },
         null,
         2,
