@@ -525,13 +525,15 @@ impl StateTransaction<'_> {
     }
 
     /// Run after result-set reconciliation. The immediate SQLite transaction
-    /// contains both the semantic wake claim and its mailbox row.
+    /// contains both the semantic wake claim and its mailbox row. Returns the
+    /// earliest time a held check-in becomes due.
     pub(crate) fn reconcile_coordinations(
         &mut self,
         ns: &StateNamespace,
         live: &crate::spaces::LiveSpaces,
         by: &MutationAttribution,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Option<u64>, StoreError> {
+        let mut check_in_due_ms: Option<u64> = None;
         let discovered = live.local();
         self.reconcile_missing_dispositions(ns, by)?;
         let mut statement = self.transaction.prepare("SELECT coordination_id FROM coordinations WHERE session_socket_id=?1 AND worktree_id=?2 ORDER BY rowid")?;
@@ -685,10 +687,13 @@ impl StateTransaction<'_> {
                 id.as_str(),
                 by,
             )?;
-            if self.coordination_wake_readiness(ns, &id, live, by.occurred_at_ms)?
-                != WakeReadiness::Ready
-            {
-                continue;
+            match self.coordination_wake_readiness(ns, &id, live, by.occurred_at_ms)? {
+                WakeReadiness::Ready => {}
+                WakeReadiness::NotNow => continue,
+                WakeReadiness::QuietUntil(due) => {
+                    check_in_due_ms = Some(check_in_due_ms.map_or(due, |at| at.min(due)));
+                    continue;
+                }
             }
             let message =
                 crate::MessageId::new(format!("coordination-wake:{}:{revision}", id.as_str()));
@@ -755,7 +760,7 @@ impl StateTransaction<'_> {
                 by,
             )?;
         }
-        Ok(())
+        Ok(check_in_due_ms)
     }
 
     pub(crate) fn coordination_wake_readiness(

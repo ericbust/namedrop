@@ -638,10 +638,7 @@ mod drain_report_tests {
             ..DrainReport::default()
         };
         let result = json!({"attempt_id": "attempt-1", "drain": grace});
-        assert_eq!(
-            drain_report(&result).unwrap().next_grace_due_ms(),
-            Some(31_000)
-        );
+        assert_eq!(drain_report(&result).unwrap().next_due_ms(), Some(31_000));
         assert!(needs_mailbox_watcher(&result));
 
         let requeued = DrainReport {
@@ -1446,7 +1443,7 @@ fn run_agent_status_worker_queue_with_io(
                     deadline_ms = deadline_ms
                         .into_iter()
                         .chain(retry_due_ms)
-                        .chain(report.next_grace_due_ms())
+                        .chain(report.next_due_ms())
                         .min();
                     if work.remove_marker().is_err() {
                         wait_for_reconciliation_retry(&mut failures, false);
@@ -1629,7 +1626,7 @@ mod worker_shutdown_tests {
 
     #[test]
     fn deadline_drains_without_marker_writes_and_keeps_report_deadlines() {
-        for mode in ["complete", "retry", "grace", "error"] {
+        for mode in ["complete", "retry", "grace", "check-in", "error"] {
             let queue = QueueFixture::new(&format!("deadline-{mode}"));
             let lock = queue.lock();
             fs::set_permissions(&queue.0, fs::Permissions::from_mode(0o500)).unwrap();
@@ -1664,6 +1661,9 @@ mod worker_shutdown_tests {
                                 attempt_id: namedrop::DeliveryAttemptId::new("grace"),
                                 due_at_ms: SystemClock.now_unix_ms() + 10,
                             }),
+                            "check-in" => {
+                                report.check_in_due_ms = Some(SystemClock.now_unix_ms() + 10)
+                            }
                             "error" => return Err("temporary storage failure".to_owned()),
                             _ => {}
                         }
