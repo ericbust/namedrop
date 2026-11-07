@@ -935,11 +935,7 @@ fn with_runtime_options<T>(
         .clone()
         .or_else(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from))
         .ok_or_else(|| "HERDR_PLUGIN_STATE_DIR or --plugin-state is required".to_owned())?;
-    let home_directory = env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute());
-    let claude_config = env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
-    let codex_config = env::var_os("CODEX_HOME").map(PathBuf::from);
+    let directories = namedrop::InheritedDirectories::from_environment();
     let cwd = env::current_dir().map_err(|error| error.to_string())?;
     let herdr = ProcessHerdr::default().with_socket(options.herdr_socket.clone());
     let mut workspace_id = options
@@ -988,11 +984,8 @@ fn with_runtime_options<T>(
     let ids = ProcessIds::default();
     action(&LifecycleRuntime {
         state_directory: &state_directory,
-        home_directory: home_directory.as_deref(),
-        agent_config: namedrop::AgentConfigDirectories {
-            claude: claude_config.as_deref(),
-            codex: codex_config.as_deref(),
-        },
+        home_directory: directories.home(),
+        agent_config: directories.agent_config(),
         cwd: &cwd,
         workspace_id: workspace_id.as_deref(),
         current_pane_id: pane_id.as_deref(),

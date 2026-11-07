@@ -619,10 +619,13 @@ fn clear_pending(pending: &Dir, key: &str) -> Result<(), String> {
 fn execute_request(state: &Path, request: &Request) -> Result<Value, String> {
     let herdr = ProcessHerdr::default()
         .with_socket(Some(request.caller.namespace.session_socket_id.clone()));
+    // From the worker's own environment, so a deferred `address list` reports
+    // context sizes as a direct one does.
+    let directories = crate::InheritedDirectories::from_environment();
     let runtime = LifecycleRuntime {
         state_directory: state,
-        home_directory: None,
-        agent_config: crate::AgentConfigDirectories::default(),
+        home_directory: directories.home(),
+        agent_config: directories.agent_config(),
         cwd: state,
         workspace_id: Some(request.caller.namespace.space_id.as_str()),
         current_pane_id: Some(&request.caller.pane),

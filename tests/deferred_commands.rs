@@ -593,6 +593,41 @@ fn roster_reads_are_fresh_and_wrong_attempts_and_arbitrary_operations_are_reject
     assert_eq!(fixture.message_count(), 1);
 }
 
+/// The outside worker answers a sandboxed roster read, so it reads each
+/// agent's transcript from its own environment, as a direct read would.
+#[test]
+fn a_sandboxed_roster_read_reports_context_size_from_the_workers_home() {
+    let fixture = Fixture::new();
+    let mut panes = panes("session-author");
+    panes["result"]["panes"][0]["agent"] = json!("codex");
+    fs::write(
+        fixture.directory.path().join("panes.json"),
+        panes.to_string(),
+    )
+    .unwrap();
+    let day = fixture.directory.home().join(".codex/sessions/2026/11/07");
+    fs::create_dir_all(&day).unwrap();
+    fs::write(
+        day.join("rollout-2026-11-07T07-39-21-session-author.jsonl"),
+        format!(
+            "{}\n",
+            json!({"type":"event_msg","payload":{"type":"token_count",
+                "info":{"last_token_usage":{"input_tokens":120_000}}}})
+        ),
+    )
+    .unwrap();
+    let _worker = fixture.worker();
+    let listed = response(fixture.sandbox_command(&["address", "list"], json!({})));
+    let author = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|record| record["id"] == "author")
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(author["registered"], true, "{listed}");
+    assert_eq!(author["context_tokens"], 120_000, "{listed}");
+}
+
 /// A compact reply is completed from its attempt before it is queued, so the
 /// queue only ever holds the full form; one naming no attempt is refused first.
 #[test]

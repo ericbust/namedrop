@@ -119,6 +119,35 @@ impl AgentConfigDirectories<'_> {
     }
 }
 
+/// The home and agent config directories a process inherited. The CLI and
+/// the deferred worker read them the same way.
+#[derive(Default)]
+pub struct InheritedDirectories {
+    home: Option<PathBuf>,
+    claude: Option<PathBuf>,
+    codex: Option<PathBuf>,
+}
+impl InheritedDirectories {
+    pub fn from_environment() -> Self {
+        Self {
+            home: std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute()),
+            claude: std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
+            codex: std::env::var_os("CODEX_HOME").map(PathBuf::from),
+        }
+    }
+    pub fn home(&self) -> Option<&Path> {
+        self.home.as_deref()
+    }
+    pub fn agent_config(&self) -> AgentConfigDirectories<'_> {
+        AgentConfigDirectories {
+            claude: self.claude.as_deref(),
+            codex: self.codex.as_deref(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum CodexMarketplaceConfiguration {
     Missing,
