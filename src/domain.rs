@@ -791,6 +791,9 @@ pub enum TransitionEntityKind {
     CoordinationReviewRequest,
     /// A committed review message, as the JSON pair `[request_id, message_id]`.
     CoordinationReviewMessage,
+    /// One revision of a coordination. The entity id is
+    /// `{coordination_id}:{revision}`.
+    CoordinationRevision,
     TerminalRelaySession,
     TerminalRelayAttempt,
 }
@@ -811,6 +814,7 @@ impl TransitionEntityKind {
             Self::CoordinationReviewGrant => "coordination_review_grant",
             Self::CoordinationReviewRequest => "coordination_review_request",
             Self::CoordinationReviewMessage => "coordination_review_message",
+            Self::CoordinationRevision => "coordination_revision",
             Self::TerminalRelaySession => "terminal_relay_session",
             Self::TerminalRelayAttempt => "terminal_relay_attempt",
         }
@@ -855,6 +859,8 @@ pub enum TransitionKind {
     Opened,
     Resolved,
     Adopted,
+    /// The coordination's owner session read its results.
+    Read,
 }
 
 impl TransitionKind {
@@ -895,6 +901,7 @@ impl TransitionKind {
             Self::Opened => "opened",
             Self::Resolved => "resolved",
             Self::Adopted => "adopted",
+            Self::Read => "read",
         }
     }
 }

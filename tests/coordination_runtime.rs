@@ -3527,6 +3527,126 @@ fn a_queued_check_in_whose_worker_resumes_waits_for_a_new_quiet_window() {
     assert_eq!(f.wake_count(), 1);
 }
 
+/// A worker's completed reply, which the lead reads at `read_at` while it is
+/// still working, before it goes idle.
+fn lead_reads_a_completed_reply(f: &Fixture, read_at: u64) -> (Value, Value) {
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    f.reply(&a, "worker", "first-result", "completed", None);
+    f.now.store(read_at, Ordering::Relaxed);
+    let results = f.handoff("handoff.results", json!({"coordination_id":id}));
+    assert_eq!(results["assignments"][0]["work_outcome"], "completed");
+    (id, a)
+}
+
+#[test]
+fn a_lead_that_read_the_results_gets_no_check_in_until_the_window_passes() {
+    let f = Fixture::new();
+    let read_at = 5_000;
+    lead_reads_a_completed_reply(&f, read_at);
+    f.status("lead", "idle");
+    f.settle_lead_inputs();
+    let due = read_at + 600_000;
+    assert_eq!(f.drain_report().check_in_due_ms, Some(due));
+    assert_eq!(f.wake_count(), 0);
+
+    f.now.store(due - 1, Ordering::Relaxed);
+    assert_eq!(f.drain_report().check_in_due_ms, Some(due));
+    assert_eq!(f.nudge_prompts().len(), 0);
+    assert_eq!(f.attention_count(), 0);
+
+    f.now.store(due, Ordering::Relaxed);
+    assert_eq!(f.drain_report().check_in_due_ms, None);
+    let nudges = f.nudge_prompts();
+    assert_eq!(nudges.len(), 1, "{nudges:?}");
+    assert!(
+        nudges[0]["untrusted_body"]
+            .as_str()
+            .unwrap()
+            .contains(": completed.")
+    );
+}
+
+#[test]
+fn a_change_after_the_lead_read_the_results_gets_its_check_in_as_usual() {
+    let f = Fixture::new();
+    let (id, _) = lead_reads_a_completed_reply(&f, 5_000);
+    let b = f.send(&id, "second", "reviewer");
+    f.now.store(6_000, Ordering::Relaxed);
+    f.reply(&b, "reviewer", "second-result", "completed", None);
+    f.status("lead", "idle");
+    f.settle_lead_inputs();
+    assert_eq!(f.drain_report().check_in_due_ms, None);
+    let nudges = f.nudge_prompts();
+    assert_eq!(nudges.len(), 1, "{nudges:?}");
+    let body = nudges[0]["untrusted_body"].as_str().unwrap();
+    assert!(!body.contains(": pending."), "{body}");
+}
+
+#[test]
+fn reads_by_another_session_or_of_another_coordination_hold_nothing() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let other = f.handoff(
+        "handoff.begin",
+        json!({"request_id":"other-begin","deliverable":"Another synthetic answer"}),
+    )["coordination_id"]
+        .clone();
+    let a = f.send(&id, "first", "worker");
+    f.reply(&a, "worker", "first-result", "completed", None);
+    f.now.store(5_000, Ordering::Relaxed);
+    f.handoff("handoff.results", json!({"coordination_id":other}));
+    for pane in ["worker", "reviewer"] {
+        let status =
+            execute_handoff_operation("handoff.status", json!({}), &f.runtime(pane)).unwrap();
+        assert_eq!(status["coordinations"], json!([]));
+        assert!(
+            execute_handoff_operation(
+                "handoff.results",
+                json!({"coordination_id":id}),
+                &f.runtime(pane)
+            )
+            .is_err()
+        );
+    }
+    f.status("lead", "idle");
+    f.settle_lead_inputs();
+    assert_eq!(f.drain_report().check_in_due_ms, None);
+    assert_eq!(f.nudge_prompts().len(), 1);
+}
+
+#[test]
+fn a_read_after_the_check_in_was_queued_holds_it() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    f.reply(&a, "worker", "first-result", "completed", None);
+    f.status("lead", "idle");
+    f.drain();
+    let inbox =
+        execute_integration_operation("delivery.inbox", json!({}), &f.runtime("lead")).unwrap();
+    let delivered = inbox["envelopes"].as_array().unwrap();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    *f.fail_next_nudge.lock().unwrap() = true;
+    f.complete(delivered[0]["control"]["attempt_id"].as_str().unwrap());
+    assert_eq!(f.wake_count(), 1);
+    assert_eq!(f.nudge_prompts().len(), 0);
+
+    let read_at = 5_000;
+    f.now.store(read_at, Ordering::Relaxed);
+    let status = f.handoff("handoff.status", json!({}));
+    assert_eq!(status["coordinations"][0]["coordination_id"], id);
+    f.now.store(read_at + 1_000, Ordering::Relaxed);
+    let due = read_at + 600_000;
+    assert_eq!(f.drain_report().check_in_due_ms, Some(due));
+    assert_eq!(f.nudge_prompts().len(), 0);
+
+    f.now.store(due, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.nudge_prompts().len(), 1);
+    assert_eq!(f.wake_count(), 1);
+}
+
 #[test]
 fn a_tracked_request_still_unanswered_when_its_coordination_resolves_is_flagged() {
     let f = Fixture::new();

@@ -7588,6 +7588,7 @@ fn parse_transition_entity_kind(value: String) -> rusqlite::Result<TransitionEnt
         "coordination_review_grant" => Ok(TransitionEntityKind::CoordinationReviewGrant),
         "coordination_review_request" => Ok(TransitionEntityKind::CoordinationReviewRequest),
         "coordination_review_message" => Ok(TransitionEntityKind::CoordinationReviewMessage),
+        "coordination_revision" => Ok(TransitionEntityKind::CoordinationRevision),
         "terminal_relay_session" => Ok(TransitionEntityKind::TerminalRelaySession),
         "terminal_relay_attempt" => Ok(TransitionEntityKind::TerminalRelayAttempt),
         _ => Err(invalid_text("transition entity kind", value)),
@@ -7631,6 +7632,7 @@ fn parse_transition_kind(value: String) -> rusqlite::Result<TransitionKind> {
         "opened" => Ok(TransitionKind::Opened),
         "resolved" => Ok(TransitionKind::Resolved),
         "adopted" => Ok(TransitionKind::Adopted),
+        "read" => Ok(TransitionKind::Read),
         _ => Err(invalid_text("transition kind", value)),
     }
 }

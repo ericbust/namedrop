@@ -370,7 +370,17 @@ fn separate_assignments() -> Value {
         "Bounds checked, including zero.",
         Some("completed"),
     );
-    assert_eq!(f.results(&id)["outcome"], "open");
+    // Checked in the store: the lead reading its results here would hold the
+    // check-in this scenario goes on to act on.
+    let outcome: String = f
+        .db()
+        .query_row(
+            "SELECT outcome FROM coordinations WHERE coordination_id=?1",
+            [id.as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(outcome, "open");
     let before = f.snapshot();
     assert!(
         f.run(

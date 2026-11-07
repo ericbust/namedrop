@@ -113,10 +113,9 @@ where
         .transaction(|tx| tx.queued_remote_seat_spaces(&namespace))
         .map_err(|e| e.to_string())?;
     let live = crate::spaces::LiveSpaces::load(runtime.herdr, discovered.clone(), &remote);
-    store.transaction(|tx| {
+    let (result, author) = store.transaction(|tx| {
         let author = crate::context::registered_current_address(tx, &namespace, pane, &discovered)?;
-        if let Some(id) = coordination_id { return tx.coordination_report(&namespace,&id,&author); }
-        if let Some(message_id) = message_id {
+        let result = if let Some(id) = coordination_id { tx.coordination_report(&namespace,&id,&author)? } else if let Some(message_id) = message_id {
             let mut report = tx.handoff_report(&namespace, &author, &message_id, runtime.clock.now_unix_ms(), true)?;
             tx.add_handoff_outlooks(&namespace, &live, &mut report)?;
             for recipient in report["recipients"].as_array_mut().unwrap() {
@@ -138,7 +137,7 @@ where
             }
             let links = tx.coordination_links(&namespace, &message_id)?;
             if let Some(link)=links.first() { report["coordination"] = tx.coordination_report(&namespace,&link.coordination_id,&author)?; }
-            Ok(report)
+            report
         } else {
             let status = status.expect("status input was parsed");
             let mut ids = tx.handoff_message_ids(&namespace, &author, status.include_completed, status.limit + 1, status.offset)?;
@@ -153,9 +152,47 @@ where
             })
                 .collect::<Result<Vec<_>, crate::StoreError>>()?;
             let adoptable = tx.adoptable_coordinations(&namespace, &author)?;
-            Ok(json!({"handoffs":reports, "coordinations":coordinations, "adoptable":adoptable, "has_more":has_more, "next_offset":has_more.then_some(status.offset as u64 + status.limit as u64)}))
-        }
-    }).map_err(|e| e.to_string())
+            json!({"handoffs":reports, "coordinations":coordinations, "adoptable":adoptable, "has_more":has_more, "next_offset":has_more.then_some(status.offset as u64 + status.limit as u64)})
+        };
+        Ok((result, author))
+    }).map_err(|e| e.to_string())?;
+    if let Some(session) = &author.agent_session_id {
+        record_reads(runtime, &namespace, session, &result);
+    }
+    Ok(result)
+}
+
+/// Note which coordinations' results their owner just read, so a check-in on
+/// a revision the lead has seen waits. The read has already succeeded, and a
+/// read that goes unrecorded only lets that check-in come sooner, so a store
+/// that cannot be written is left alone.
+fn record_reads<E, C, I>(
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+    namespace: &crate::StateNamespace,
+    session: &crate::AgentSessionId,
+    result: &Value,
+) where
+    C: crate::Clock,
+{
+    let reports = std::iter::once(result)
+        .chain(result.get("coordination"))
+        .chain(result["coordinations"].as_array().into_iter().flatten());
+    let reads = reports
+        .filter(|report| report["outcome"] == "open")
+        .filter_map(|report| {
+            Some((
+                crate::CoordinationId::new(report["coordination_id"].as_str()?),
+                report["revision"].as_u64()?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    if reads.is_empty() {
+        return;
+    }
+    let now = runtime.clock.now_unix_ms();
+    let _ = StateStore::open(runtime.state_directory).and_then(|mut store| {
+        store.transaction(|tx| tx.record_coordination_reads(namespace, session, &reads, now))
+    });
 }
 
 fn preview<E, C, I>(input: Value, runtime: &LifecycleRuntime<'_, E, C, I>) -> Result<Value, String>

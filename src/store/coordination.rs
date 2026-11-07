@@ -24,8 +24,9 @@ struct CoordinationWakeState {
     deliverable: String,
 }
 
-/// How long a worker whose turn ended without a reply must stay quiet before
-/// its lead is checked in on. Workers usually resume within a few minutes.
+/// How long a worker whose turn ended without a reply must stay quiet, or a
+/// lead that read the results must go without a change, before the lead is
+/// checked in on. Workers usually resume within a few minutes.
 pub(crate) const WORKER_QUIET_MS: u64 = 10 * 60 * 1_000;
 
 /// Whether a coordination's check-in may go to its lead now.
@@ -772,7 +773,7 @@ impl StateTransaction<'_> {
     ) -> Result<WakeReadiness, StoreError> {
         use WakeReadiness::NotNow;
         let discovered = live.local();
-        let (address,session,outcome):(String,String,String)=self.transaction.query_row("SELECT owner_address_id,owner_session_id,outcome FROM coordinations WHERE session_socket_id=?1 AND worktree_id=?2 AND coordination_id=?3",params![ns.session_socket_id,ns.space_id.as_str(),id.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        let (address,session,outcome,revision):(String,String,String,i64)=self.transaction.query_row("SELECT owner_address_id,owner_session_id,outcome,revision FROM coordinations WHERE session_socket_id=?1 AND worktree_id=?2 AND coordination_id=?3",params![ns.session_socket_id,ns.space_id.as_str(),id.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
         if outcome != "open"
             || !self
                 .worktree_state(ns)?
@@ -928,7 +929,70 @@ impl StateTransaction<'_> {
                 }
             }
         }
-        Ok(quiet_until.map_or(WakeReadiness::Ready, WakeReadiness::QuietUntil))
+        // A lead that has read this revision's results already knows them.
+        let read_until = self
+            .owner_read_at(ns, id, revision)?
+            .map(|at| at.saturating_add(WORKER_QUIET_MS))
+            .filter(|due| now_ms < *due);
+        Ok(quiet_until
+            .max(read_until)
+            .map_or(WakeReadiness::Ready, WakeReadiness::QuietUntil))
+    }
+
+    /// When the owner session last read this revision of the coordination.
+    /// Only the owner's reads are recorded.
+    fn owner_read_at(
+        &self,
+        ns: &StateNamespace,
+        id: &CoordinationId,
+        revision: i64,
+    ) -> Result<Option<u64>, StoreError> {
+        self.transaction
+            .query_row(
+                "SELECT MAX(occurred_at_ms) FROM transition_facts
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2 AND entity_kind = ?3
+                   AND entity_id = ?4 AND transition_kind = ?5",
+                params![
+                    ns.session_socket_id,
+                    ns.space_id.as_str(),
+                    TransitionEntityKind::CoordinationRevision.as_str(),
+                    format!("{}:{revision}", id.as_str()),
+                    TransitionKind::Read.as_str()
+                ],
+                |r| r.get::<_, Option<i64>>(0)?.map(from_i64).transpose(),
+            )
+            .map_err(StoreError::from)
+    }
+
+    /// Record that the owner session read these coordinations' results at the
+    /// revision it was shown. A coordination that changed since, or that this
+    /// session does not own, records nothing.
+    pub(crate) fn record_coordination_reads(
+        &mut self,
+        ns: &StateNamespace,
+        session: &crate::AgentSessionId,
+        reads: &[(CoordinationId, u64)],
+        at_ms: u64,
+    ) -> Result<(), StoreError> {
+        let by = MutationAttribution::new(ActorKind::AgentSession, session.as_str(), at_ms);
+        for (id, revision) in reads {
+            let current: bool = self.transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM coordinations WHERE session_socket_id=?1 AND worktree_id=?2
+                 AND coordination_id=?3 AND outcome='open' AND revision=?4 AND owner_session_id=?5)",
+                params![ns.session_socket_id, ns.space_id.as_str(), id.as_str(), to_i64(*revision)?, session.as_str()],
+                |r| r.get(0),
+            )?;
+            if current {
+                self.append_transition(
+                    ns,
+                    TransitionEntityKind::CoordinationRevision,
+                    &format!("{}:{revision}", id.as_str()),
+                    TransitionKind::Read,
+                    &by,
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// The later of when this delivery settled and when its worker session was
