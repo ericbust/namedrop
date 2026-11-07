@@ -4,7 +4,7 @@ use crate::{
     HerdrCommandExecutor, IdGenerator, InflightDeliveryAttempt, IntegrationToolInvocation,
     LeaseDraft, LifecycleRuntime, MutationAttribution, PromptFailureKind, StateNamespace,
     StateStore, StateTransaction, StoreError, collaboration_executable, discover_worktree,
-    tool_environment,
+    store::WakeReadiness, tool_environment,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -528,11 +528,11 @@ where
                             .dispatch_candidate(&namespace, &address_id)?
                             .as_ref()
                             != Some(&second)
-                            || !transaction.coordination_wake_message_eligible(
+                            || transaction.coordination_wake_message_readiness(
                                 &namespace,
                                 &second.message_id,
                                 &live.with_here(second_discovery.clone()),
-                            )?
+                            )? != WakeReadiness::Ready
                         {
                             return Ok(None);
                         }
@@ -575,11 +575,12 @@ where
         );
         let leased = store
             .transaction(|transaction| {
-                if !transaction.coordination_wake_message_eligible(
+                if transaction.coordination_wake_message_readiness(
                     &namespace,
                     &second.message_id,
                     &live.with_here(second_discovery.clone()),
-                )? {
+                )? != WakeReadiness::Ready
+                {
                     return Ok(None);
                 }
                 let leased = transaction.lease_mailbox_head(
@@ -763,11 +764,11 @@ where
                 };
                 if candidate.pane_type == crate::PaneType::Terminal
                     && live_candidate_matches(&candidate, &first_discovery)
-                    && tx.coordination_wake_message_eligible(
+                    && tx.coordination_wake_message_readiness(
                         &namespace,
                         &candidate.message_id,
                         &live,
-                    )?
+                    )? == WakeReadiness::Ready
                 {
                     waiting.push(address);
                 }

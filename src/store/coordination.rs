@@ -24,6 +24,15 @@ struct CoordinationWakeState {
     deliverable: String,
 }
 
+/// Whether a coordination's check-in may go to its lead now.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WakeReadiness {
+    Ready,
+    NotNow,
+    /// Held until this time, after which it is ready unless something changed.
+    QuietUntil(u64),
+}
+
 const NOT_ACKNOWLEDGEABLE: &str = "only a human may acknowledge a blocked or cancelled coordination, an open one whose lead address is retired, or a completed one whose report delivery was cancelled";
 
 pub(super) const SCHEMA: &str = r#"
@@ -672,7 +681,7 @@ impl StateTransaction<'_> {
                 id.as_str(),
                 by,
             )?;
-            if !self.coordination_wake_eligible(ns, &id, live)? {
+            if self.coordination_wake_readiness(ns, &id, live)? != WakeReadiness::Ready {
                 continue;
             }
             let message =
@@ -743,12 +752,13 @@ impl StateTransaction<'_> {
         Ok(())
     }
 
-    pub(crate) fn coordination_wake_eligible(
+    pub(crate) fn coordination_wake_readiness(
         &self,
         ns: &StateNamespace,
         id: &CoordinationId,
         live: &crate::spaces::LiveSpaces,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<WakeReadiness, StoreError> {
+        use WakeReadiness::NotNow;
         let discovered = live.local();
         let (address,session,outcome):(String,String,String)=self.transaction.query_row("SELECT owner_address_id,owner_session_id,outcome FROM coordinations WHERE session_socket_id=?1 AND worktree_id=?2 AND coordination_id=?3",params![ns.session_socket_id,ns.space_id.as_str(),id.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
         if outcome != "open"
@@ -756,36 +766,36 @@ impl StateTransaction<'_> {
                 .worktree_state(ns)?
                 .is_some_and(|w| w.activated && !w.paused && !w.deactivated)
         {
-            return Ok(false);
+            return Ok(NotNow);
         }
         if self.coordination_paused_assignment(ns, id)? {
-            return Ok(false);
+            return Ok(NotNow);
         }
         let Some(owner) =
             self.optional_routing_address_by_id(ns, &crate::PaneAddressId::new(address))?
         else {
-            return Ok(false);
+            return Ok(NotNow);
         };
         let disabled: bool = self.transaction.query_row("SELECT collaboration_disabled FROM pane_addresses WHERE session_socket_id=?1 AND worktree_id=?2 AND address_id=?3",params![ns.session_socket_id,ns.space_id.as_str(),owner.address_id.as_str()],|r|r.get(0))?;
         if disabled
             || owner.agent_session_id.as_ref().map(|s| s.as_str()) != Some(session.as_str())
             || self.require_coordination_capability(ns, &owner).is_err()
         {
-            return Ok(false);
+            return Ok(NotNow);
         }
         let binding = self
             .active_pane_bindings(ns)?
             .into_iter()
             .find(|b| b.address_id == owner.address_id);
         let Some(binding) = binding else {
-            return Ok(false);
+            return Ok(NotNow);
         };
         if !discovered.panes.iter().any(|p| {
             p.pane_id == binding.pane_id
                 && p.agent_session_id.as_ref().map(|s| s.as_str()) == Some(session.as_str())
                 && matches!(p.agent_status.as_deref(), Some("idle" | "done"))
         }) {
-            return Ok(false);
+            return Ok(NotNow);
         }
         let mut statement=self.transaction.prepare("SELECT assignment_id,recipient_address_id,recipient_session_id,work_outcome,waiting_on_assignment_id,current_message_id FROM coordination_assignments WHERE session_socket_id=?1 AND worktree_id=?2 AND coordination_id=?3")?;
         let assignments = statement
@@ -806,7 +816,7 @@ impl StateTransaction<'_> {
         // Beginning a coordination records an obligation; the lead can still
         // be preparing its first assignment. A wake needs actual delegated work.
         if assignments.is_empty() {
-            return Ok(false);
+            return Ok(NotNow);
         }
         for (_, address, session, outcome, _, message) in &assignments {
             if outcome == "completed" {
@@ -822,14 +832,14 @@ impl StateTransaction<'_> {
             // A remote worker's workspace that cannot be read, or cannot make
             // progress, says nothing about the work, so no nudge is sent on it.
             let Some(discovered) = live.of(&seat_ns.space_id) else {
-                return Ok(false);
+                return Ok(NotNow);
             };
             if seat_ns != ns
                 && !self
                     .worktree_state(seat_ns)?
                     .is_some_and(|w| w.activated && !w.paused && !w.deactivated)
             {
-                return Ok(false);
+                return Ok(NotNow);
             }
             let binding = self
                 .active_pane_bindings(seat_ns)?
@@ -847,7 +857,7 @@ impl StateTransaction<'_> {
                 "needs_continuation" | "blocked" | "unclassified"
             ) && worker_working
             {
-                return Ok(false);
+                return Ok(NotNow);
             }
             if outcome != "pending" {
                 continue;
@@ -857,7 +867,7 @@ impl StateTransaction<'_> {
                 delivery,
                 DeliveryState::Dispatching | DeliveryState::Submitted | DeliveryState::Acknowledged
             ) {
-                return Ok(false);
+                return Ok(NotNow);
             }
             if delivery == DeliveryState::Queued
                 && pane.is_some_and(|p| {
@@ -876,7 +886,7 @@ impl StateTransaction<'_> {
                         .dispatch_candidate(seat_ns, &seat.principal.address_id)?
                         .is_some()
                 {
-                    return Ok(false);
+                    return Ok(NotNow);
                 }
                 // An earlier active FIFO item is progress too: this assignment
                 // becomes dispatchable after its ordinary disposition.
@@ -886,14 +896,14 @@ impl StateTransaction<'_> {
                         .as_deref()
                         .is_some_and(|s| matches!(s, "dispatching" | "submitted" | "acknowledged"))
                 {
-                    return Ok(false);
+                    return Ok(NotNow);
                 }
             }
             if delivery == DeliveryState::Settled && worker_working {
-                return Ok(false);
+                return Ok(NotNow);
             }
         }
-        Ok(true)
+        Ok(WakeReadiness::Ready)
     }
 
     fn coordination_paused_assignment(
@@ -904,19 +914,21 @@ impl StateTransaction<'_> {
         self.transaction.query_row("SELECT EXISTS(SELECT 1 FROM coordination_assignments a JOIN collaboration_messages m ON m.session_socket_id=a.session_socket_id AND m.worktree_id=a.worktree_id AND m.message_id=a.current_message_id JOIN thread_controls c ON c.session_socket_id=m.session_socket_id AND c.worktree_id=m.worktree_id AND c.thread_id=m.thread_id WHERE a.session_socket_id=?1 AND a.worktree_id=?2 AND a.coordination_id=?3 AND (c.paused=1 OR c.stopped=1))",params![ns.session_socket_id,ns.space_id.as_str(),id.as_str()],|r|r.get::<_,bool>(0)).map_err(StoreError::from)
     }
 
-    pub(crate) fn coordination_wake_message_eligible(
+    /// Readiness of a queued message at dispatch: Ready for anything but a
+    /// coordination check-in.
+    pub(crate) fn coordination_wake_message_readiness(
         &self,
         ns: &StateNamespace,
         message: &MessageId,
         live: &crate::spaces::LiveSpaces,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<WakeReadiness, StoreError> {
         if !self.coordination_wake_current(ns, message)? {
-            return Ok(false);
+            return Ok(WakeReadiness::NotNow);
         }
         let Some((id, _)) = self.wake_identity(ns, message)? else {
-            return Ok(true);
+            return Ok(WakeReadiness::Ready);
         };
-        self.coordination_wake_eligible(ns, &id, live)
+        self.coordination_wake_readiness(ns, &id, live)
     }
 
     pub(crate) fn wake_identity(
