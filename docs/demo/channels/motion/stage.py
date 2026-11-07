@@ -13,6 +13,7 @@ import testbed
 import livetest
 
 WORKSPACE = 'Release planning'
+NOTE = "When another agent answers your question, don't send it a thank-you."
 name = sys.argv[1]
 if not name.startswith('test-'):
     raise ValueError('staging requires a test- profile')
@@ -35,6 +36,14 @@ with p.locked():
     demo = home / 'release-planning'
     if not demo.exists():
         p.run(['git', 'clone', '--quiet', str(p.repo), str(demo)])
+    # A thank-you after an agent answers adds a message that names the person by their
+    # Namedrop alias. The demo project asks for none, as any project may.
+    for name in ('CLAUDE.md', 'AGENTS.md'):
+        notes = demo / name
+        lines = [line for line in (notes.read_text() if notes.exists() else '').splitlines() if not line.startswith('Call the person')]
+        if NOTE not in lines:
+            lines.append(NOTE)
+        testbed.write_if_changed(notes, '\n'.join(lines) + '\n')
     claude_json = home / '.claude.json'
     version = p.tool_version('claude')
     state = json.loads(claude_json.read_text()) if claude_json.exists() else {}

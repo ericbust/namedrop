@@ -23,7 +23,6 @@ async ({ page, mark, record }) => {
   await items.first().waitFor({ timeout: 60000 });
   await page.waitForTimeout(400);
   await mark('activity-open', activity, items.first().locator('.activity-text'));
-  let both = false;
   const status = async alias => (await record.helper('status', alias)).trim();
   const seen = new Set();
   let quiet = 0, idleWithoutCodex = 0;
@@ -40,7 +39,11 @@ async ({ page, mark, record }) => {
     }
     if (Object.values(now).includes('blocked')) throw new Error('an agent is blocked on a prompt: ' + JSON.stringify(now));
     if (seen.has('collab-claude-done') && !seen.has('collab-codex-working') && ++idleWithoutCodex > 90) throw new Error('Claude finished without bringing in @codex');
-    if (!both && (await items.count()) > 1) { both = true; await mark('activity-both', activity, items.nth(1).locator('.activity-text')); }
+    // All activity names who each agent is working for: Codex for Claude, then Claude for Codex.
+    const texts = (await items.allInnerTexts().catch(() => [])).join('\n');
+    for (const [name, from] of [['activity-ask', 'From @claude'], ['activity-answer', 'From @codex']]) {
+      if (!seen.has(name) && texts.includes(from)) { seen.add(name); await mark(name, activity, activity).catch(() => seen.delete(name)); }
+    }
     quiet = seen.has('collab-codex-done') && seen.has('collab-claude-done') && Object.values(now).every(s => ['idle', 'done'].includes(s)) ? quiet + 1 : 0;
   }
   await mark('collab-done');

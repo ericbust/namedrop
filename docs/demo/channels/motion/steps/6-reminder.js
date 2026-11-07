@@ -5,7 +5,7 @@ async ({ page, mark, record }) => {
   await page.waitForTimeout(1500);
   await mark('dm-open', box);
   await box.click();
-  await box.pressSequentially('Every minute, 2 times, remind me here: Tag the release.', { delay: 35 });
+  await box.pressSequentially('Set a 1-minute reminder here with the text: Tag the release.', { delay: 35 });
   await mark('reminder-typed', box);
   await page.waitForTimeout(1800);
   await box.press('Enter');
