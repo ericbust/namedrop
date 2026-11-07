@@ -258,6 +258,25 @@ fn a_stop_settles_only_its_own_open_claim_and_explicit_settles_win() {
         (&open, background, none, Verdict::Leave(LeaveReason::Held)),
         (
             &open,
+            stop("prompt-1", "I asked @claude; the answer follows."),
+            SettleFacts {
+                waiting: true,
+                ..none
+            },
+            Verdict::Leave(LeaveReason::Held),
+        ),
+        (
+            &open,
+            stop("prompt-1", "pong"),
+            SettleFacts {
+                disposition: Some(crate::DeliveryDisposition::NoReply),
+                waiting: true,
+                ..none
+            },
+            Verdict::Superseded,
+        ),
+        (
+            &open,
             stop("prompt-1", "  \n"),
             none,
             Verdict::Leave(LeaveReason::NoFinalText),
@@ -323,6 +342,22 @@ fn a_stop_settles_only_its_own_open_claim_and_explicit_settles_win() {
             Verdict::Leave(LeaveReason::NoFinalText),
         ),
         (
+            StopFacts {
+                background_running: true,
+                ..stop("prompt-1", "Research is running.")
+            },
+            none,
+            Verdict::Leave(LeaveReason::Held),
+        ),
+        (
+            stop("prompt-1", "Research is running."),
+            SettleFacts {
+                waiting: true,
+                ..none
+            },
+            Verdict::Leave(LeaveReason::Held),
+        ),
+        (
             stop("prompt-2", "Option B."),
             none,
             Verdict::Leave(LeaveReason::Interrupted),
@@ -330,18 +365,33 @@ fn a_stop_settles_only_its_own_open_claim_and_explicit_settles_win() {
     ] {
         assert_eq!(decide(&relayed, &stop, &settle), expected, "{settle:?}");
     }
-    let no_reply = claim(Armed::NoReply(NoReplyCase::ReportToHuman), ClaimState::Open);
-    for stop in [
-        stop("prompt-1", ""),
-        StopFacts {
-            background_running: true,
-            ..stop("prompt-1", "@claude still going")
-        },
+    let waiting = SettleFacts {
+        waiting: true,
+        ..none
+    };
+    for case in [
+        NoReplyCase::ReportToHuman,
+        NoReplyCase::AnswersOwn,
+        NoReplyCase::ResultSet,
     ] {
-        assert_eq!(
-            decide(&no_reply, &stop, &none),
-            Verdict::Settle(Settlement::NoReply)
-        );
+        let no_reply = claim(Armed::NoReply(case), ClaimState::Open);
+        for (stop, settle) in [
+            (stop("prompt-1", ""), none),
+            (
+                StopFacts {
+                    background_running: true,
+                    ..stop("prompt-1", "@claude still going")
+                },
+                none,
+            ),
+            (stop("prompt-1", "Asked @claude."), waiting),
+        ] {
+            assert_eq!(
+                decide(&no_reply, &stop, &settle),
+                Verdict::Settle(Settlement::NoReply),
+                "{case:?}"
+            );
+        }
     }
 }
 

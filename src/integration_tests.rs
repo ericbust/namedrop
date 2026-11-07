@@ -323,10 +323,10 @@ fn a_final_reply_delivery_says_what_the_stop_does_and_shows_only_the_other_line(
         template: Value::Null,
         tracked: false,
     };
-    let claude = final_reply_guidance(&control, &reply, true).unwrap();
+    let claude = final_reply_guidance(&control, &reply).unwrap();
     assert!(
         claude.starts_with(
-            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. For no reply, run this line first. If background work"
+            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper or background work, Namedrop sends nothing and you reply later. For no reply, run this line first."
         ),
         "{claude}"
     );
@@ -335,8 +335,6 @@ fn a_final_reply_delivery_says_what_the_stop_does_and_shows_only_the_other_line(
         claude.contains(SANDBOX_SENTENCE) && !claude.contains("work_outcome"),
         "{claude}"
     );
-    let codex = final_reply_guidance(&control, &reply, false).unwrap();
-    assert!(!codex.contains(FINAL_REPLY_HELD), "{codex}");
 
     let tracked = final_reply_guidance(
         &final_reply_control(true),
@@ -344,7 +342,6 @@ fn a_final_reply_delivery_says_what_the_stop_does_and_shows_only_the_other_line(
             template: Value::Null,
             tracked: true,
         },
-        false,
     )
     .unwrap();
     assert!(tracked.contains(FINAL_REPLY_OUTCOME), "{tracked}");
@@ -353,8 +350,7 @@ fn a_final_reply_delivery_says_what_the_stop_does_and_shows_only_the_other_line(
         "{tracked}"
     );
 
-    let own =
-        final_reply_guidance(&control, &Armed::NoReply(NoReplyCase::AnswersOwn), false).unwrap();
+    let own = final_reply_guidance(&control, &Armed::NoReply(NoReplyCase::AnswersOwn)).unwrap();
     assert!(
         own.contains("To answer @lead instead, run this line."),
         "{own}"
@@ -370,20 +366,22 @@ fn a_final_reply_delivery_says_what_the_stop_does_and_shows_only_the_other_line(
         (NoReplyCase::ResultSet, RESULT_SET_GUIDANCE),
     ] {
         assert_eq!(
-            final_reply_guidance(&control, &Armed::NoReply(case), false).unwrap(),
+            final_reply_guidance(&control, &Armed::NoReply(case)).unwrap(),
             text
         );
     }
     let relayed = Armed::NoReply(NoReplyCase::Relayed);
     assert_eq!(
-        final_reply_guidance(&control, &relayed, false).unwrap(),
-        RELAYED_GUIDANCE
+        final_reply_guidance(&control, &relayed).unwrap(),
+        format!("{RELAYED_GUIDANCE} {FINAL_REPLY_WAITING}")
     );
     let mut channel = control.clone();
     channel["reply_mode"] = json!("channel");
-    let channel = final_reply_guidance(&channel, &relayed, false).unwrap();
+    let channel = final_reply_guidance(&channel, &relayed).unwrap();
     assert!(
-        channel.starts_with(&format!("{RELAYED_GUIDANCE}{RELAYED_CHANNEL}")),
+        channel.starts_with(&format!(
+            "{RELAYED_GUIDANCE} {FINAL_REPLY_WAITING}{RELAYED_CHANNEL}"
+        )),
         "{channel}"
     );
     assert_eq!(rendered_tokens(&channel), ["reply"]);

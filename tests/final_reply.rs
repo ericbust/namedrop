@@ -382,7 +382,7 @@ fn an_ask_and_its_answer_settle_from_final_messages_with_no_settle_command() {
     );
     assert!(
         context.contains(
-            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. For no reply, run this line first. If background work is still running when your turn ends, Namedrop sends nothing; settle later with the bound reply or complete.no-reply."
+            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper or background work, Namedrop sends nothing and you reply later. For no reply, run this line first."
         ),
         "{context}"
     );
@@ -403,7 +403,7 @@ fn an_ask_and_its_answer_settle_from_final_messages_with_no_settle_command() {
     );
     assert!(context.contains("\nreply: "), "{context}");
     assert!(!context.contains("complete.no-reply: "), "{context}");
-    assert!(!context.contains("If background work"), "{context}");
+    assert!(!context.contains("If your turn ends while"), "{context}");
 
     space.stop("session-lead", CODEX, "@reviewer answered: pong.");
     assert_eq!(
@@ -936,7 +936,7 @@ fn a_message_from_the_person_is_answered_in_its_thread_by_the_final_message() {
     );
     assert!(
         context.ends_with(
-            "\n\nNamedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line."
+            "\n\nNamedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper or background work, Namedrop sends nothing and you reply later."
         ),
         "{context}"
     );
@@ -1034,4 +1034,83 @@ fn a_prompt_typed_into_the_pane_is_never_relayed() {
         execute_integration_operation("delivery.inbox", json!({}), &space.runtime("pane-reviewer"))
             .unwrap();
     assert_eq!(inbox["envelopes"][0]["control"]["attempt_id"], attempt);
+}
+
+/// A turn that ends while the agent waits on a helper it asked during the
+/// turn ends with a status, not the answer: Namedrop posts nothing and the
+/// delivery stays open. Once the helper has answered, the final message is
+/// the answer again.
+#[test]
+fn a_turn_that_ends_waiting_on_a_helper_holds_the_delivery() {
+    for answered in [false, true] {
+        let space = Space::new();
+        space.send_as_person(
+            "question",
+            "@reviewer Is option B safe? Ask the lead.",
+            None,
+        );
+        let ask = space.herdr.envelope_for("pane-reviewer");
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+        space.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            CLAUDE,
+            &ask.to_string(),
+        );
+        dispatch::message(
+            "send",
+            json!({"request_id":"helper","source":"@lead Is option B safe?",
+                   "author_kind":"agent_session"}),
+            &space.runtime("pane-reviewer"),
+        )
+        .unwrap();
+        if answered {
+            let helper = space.herdr.envelope_for("pane-lead");
+            dispatch::message(
+                "reply",
+                bound_reply(&space, &helper, "@reviewer Yes, it is safe."),
+                &space.runtime("pane-lead"),
+            )
+            .unwrap();
+        }
+        space.stop(
+            "session-reviewer",
+            CLAUDE,
+            "I asked @lead and will answer when it replies.",
+        );
+        if answered {
+            assert_eq!(space.relayed().len(), 1, "{answered}");
+            continue;
+        }
+        assert!(space.relayed().is_empty(), "{:?}", space.relayed());
+        assert!(space.dispositions().is_empty());
+        assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+        let inbox = execute_integration_operation(
+            "delivery.inbox",
+            json!({}),
+            &space.runtime("pane-reviewer"),
+        )
+        .unwrap();
+        assert!(
+            inbox["envelopes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|envelope| envelope["control"]["attempt_id"] == attempt.as_str()),
+            "a held delivery left the inbox"
+        );
+    }
+
+    let space = Space::new();
+    space.send_as_person("question", "@reviewer Run the build and report.", None);
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    space.stop_with("session-reviewer", CLAUDE, "The build is running.", true);
+    assert!(space.relayed().is_empty());
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
 }

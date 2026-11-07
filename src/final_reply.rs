@@ -280,8 +280,9 @@ pub(crate) enum LeaveReason {
     /// host runs Stop for an interrupted turn.
     Interrupted,
     NoFinalText,
-    /// The turn ended with background work running, so its final message
-    /// may not be the answer; the agent settles the delivery in a later turn.
+    /// The turn ended with background work running or a helper still to
+    /// answer, so its final message may not be the answer; the agent settles
+    /// the delivery in a later turn.
     Held,
     /// The final message leads with Mentions other than the addressee.
     AddressesOthers,
@@ -304,6 +305,9 @@ pub(crate) struct SettleFacts {
     /// A sandboxed explicit reply or complete for the attempt is queued and
     /// has not committed yet.
     pub explicit_pending: bool,
+    /// During the claim's turn the session asked a helper who has not
+    /// answered yet, so its final message is a status, not the answer.
+    pub waiting: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -345,22 +349,28 @@ pub(crate) fn decide(claim: &Claim, stop: &StopFacts, settle: &SettleFacts) -> V
         {
             Verdict::Superseded
         }
-        // An explicit no-reply still leaves the person's answer to post.
-        ClaimState::Open => match &claim.plan {
-            Armed::NoReply(NoReplyCase::Relayed) => match stop.text.text.trim() {
-                "" => Verdict::Leave(LeaveReason::NoFinalText),
-                text => Verdict::Settle(Settlement::Relay(text.to_owned())),
-            },
-            _ if settle.disposition.is_some() => Verdict::Superseded,
-            Armed::NoReply(_) => Verdict::Settle(Settlement::NoReply),
-            Armed::Reply { .. } if stop.background_running => Verdict::Leave(LeaveReason::Held),
-            Armed::Reply { template, tracked } => {
-                match reply_input(template, *tracked, &stop.text) {
-                    Ok(input) => Verdict::Settle(Settlement::Reply(input)),
-                    Err(reason) => Verdict::Leave(reason),
+        ClaimState::Open => {
+            let relayed = claim.plan == Armed::NoReply(NoReplyCase::Relayed);
+            let waiting = stop.background_running || settle.waiting;
+            match &claim.plan {
+                // An explicit no-reply still leaves the person's answer to post.
+                _ if settle.disposition.is_some() && !relayed => Verdict::Superseded,
+                Armed::NoReply(NoReplyCase::Relayed) | Armed::Reply { .. } if waiting => {
+                    Verdict::Leave(LeaveReason::Held)
+                }
+                Armed::NoReply(NoReplyCase::Relayed) => match stop.text.text.trim() {
+                    "" => Verdict::Leave(LeaveReason::NoFinalText),
+                    text => Verdict::Settle(Settlement::Relay(text.to_owned())),
+                },
+                Armed::NoReply(_) => Verdict::Settle(Settlement::NoReply),
+                Armed::Reply { template, tracked } => {
+                    match reply_input(template, *tracked, &stop.text) {
+                        Ok(input) => Verdict::Settle(Settlement::Reply(input)),
+                        Err(reason) => Verdict::Leave(reason),
+                    }
                 }
             }
-        },
+        }
     }
 }
 
@@ -574,7 +584,7 @@ pub(crate) fn observe_prompt(
 }
 
 /// Whether a Stop of this session has anything to settle. It reads without
-/// the lock, so the Stop can size its own deadline first.
+/// the lock, so a Stop with nothing to settle starts no worker.
 pub fn has_live_claims(state: &Path, socket: &str, session: &str) -> bool {
     read_claims(&session_directory(state, socket, session))
         .iter()
@@ -609,7 +619,7 @@ pub fn settle_at_stop(
     for claim in &mut claims.claims {
         let current = claim.state == ClaimState::Open && stop.turn.as_ref() == Some(&claim.turn);
         let facts = if current {
-            settle_facts(state, &stop.session, claim)
+            settle_facts(state, &stop.session, claim, now_ms)
         } else {
             SettleFacts::default()
         };
@@ -662,15 +672,35 @@ impl Claim {
     }
 }
 
-fn settle_facts(state: &Path, session: &str, claim: &Claim) -> SettleFacts {
+fn settle_facts(state: &Path, session: &str, claim: &Claim, now_ms: u64) -> SettleFacts {
+    let (disposition, waiting) = crate::StateStore::open_read_only(state)
+        .ok()
+        .flatten()
+        .and_then(|mut store| {
+            store
+                .transaction(|transaction| {
+                    Ok((
+                        transaction.delivery_disposition(&claim.namespace, &claim.attempt_id)?,
+                        transaction.awaits_helper(
+                            &claim.namespace,
+                            &claim.attempt_id,
+                            claim.armed_at_ms,
+                            now_ms,
+                        )?,
+                    ))
+                })
+                .ok()
+        })
+        .unwrap_or_default();
     SettleFacts {
-        disposition: disposition(state, claim),
+        disposition,
         explicit_pending: crate::deferred_commands::settle_queued(
             state,
             &claim.namespace.session_socket_id,
             session,
             claim.attempt_id.as_str(),
         ),
+        waiting,
     }
 }
 

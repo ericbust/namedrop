@@ -1725,7 +1725,7 @@ fn rendered_lines(control: &Value) -> Option<(Vec<RenderedLine<'_>>, Vec<&str>)>
 const FINAL_REPLY_DONE: &str =
     "Namedrop sends it when your turn ends, so run no settle command and write no status line.";
 const FINAL_REPLY_OUTCOME: &str = "End it with one line: work_outcome: completed, work_outcome: needs_continuation, or work_outcome: blocked: <reason>. Without one it is needs_continuation.";
-const FINAL_REPLY_HELD: &str = "If background work is still running when your turn ends, Namedrop sends nothing; settle later with the bound reply or complete.no-reply.";
+const FINAL_REPLY_WAITING: &str = "If your turn ends while you wait on a helper or background work, Namedrop sends nothing and you reply later.";
 const REPORT_TO_HUMAN_GUIDANCE: &str = "Namedrop commands: none. Namedrop closes this without a reply when your turn ends; show it to the person once in your final message.";
 const RESULT_SET_GUIDANCE: &str = "Namedrop commands: none. Namedrop closes this without a reply when your turn ends; your final message is the response the envelope asks for.";
 const RELAYED_GUIDANCE: &str = "Namedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line.";
@@ -1733,25 +1733,24 @@ const RELAYED_CHANNEL: &str = " To wake a member with @name, run this reply line
 
 /// The context for a delivery whose final message settles it. It says what
 /// the Stop will do and shows only the one line that does the other thing.
-/// `held` is said only where the Stop reports background work.
 pub(crate) fn final_reply_guidance(
     control: &Value,
     armed: &crate::final_reply::Armed,
-    held: bool,
 ) -> Option<String> {
     use crate::final_reply::{Armed, NoReplyCase};
     let (opposite, lead) = match armed {
         Armed::NoReply(NoReplyCase::ReportToHuman) => return Some(REPORT_TO_HUMAN_GUIDANCE.into()),
         Armed::NoReply(NoReplyCase::ResultSet) => return Some(RESULT_SET_GUIDANCE.into()),
         Armed::NoReply(NoReplyCase::Relayed) if control["reply_mode"] != "channel" => {
-            return Some(RELAYED_GUIDANCE.into());
+            return Some(format!("{RELAYED_GUIDANCE} {FINAL_REPLY_WAITING}"));
         }
-        Armed::NoReply(NoReplyCase::Relayed) => {
-            ("reply", format!("{RELAYED_GUIDANCE}{RELAYED_CHANNEL}"))
-        }
+        Armed::NoReply(NoReplyCase::Relayed) => (
+            "reply",
+            format!("{RELAYED_GUIDANCE} {FINAL_REPLY_WAITING}{RELAYED_CHANNEL}"),
+        ),
         Armed::Reply { tracked, .. } => {
             let mut lead = format!(
-                "Namedrop commands: your final message is your reply to {}. {FINAL_REPLY_DONE}",
+                "Namedrop commands: your final message is your reply to {}. {FINAL_REPLY_DONE} {FINAL_REPLY_WAITING}",
                 addressee(control)?
             );
             if *tracked {
@@ -1759,10 +1758,6 @@ pub(crate) fn final_reply_guidance(
                 lead.push_str(FINAL_REPLY_OUTCOME);
             }
             lead.push_str(" For no reply, run this line first.");
-            if held {
-                lead.push(' ');
-                lead.push_str(FINAL_REPLY_HELD);
-            }
             ("complete.no-reply", lead)
         }
         Armed::NoReply(NoReplyCase::AnswersOwn) => (

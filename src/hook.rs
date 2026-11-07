@@ -434,15 +434,9 @@ where
     // generated wrapper recognizes this output by the marker its serialization
     // starts with.
     let commands = envelope.get("control").and_then(|control| {
-        match armed {
-            Some(armed) => crate::integration::final_reply_guidance(
-                control,
-                armed,
-                host == Some(crate::AgentRuntime::ClaudeCode),
-            ),
-            None => None,
-        }
-        .or_else(|| crate::integration::delivery_command_guidance(control))
+        armed
+            .and_then(|armed| crate::integration::final_reply_guidance(control, armed))
+            .or_else(|| crate::integration::delivery_command_guidance(control))
     });
     if let Some(commands) = commands {
         context.push_str("\n\n");
