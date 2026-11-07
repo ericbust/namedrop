@@ -142,7 +142,7 @@ pub fn spaces_to_wake(
     spaces
 }
 
-pub(crate) fn drain_receipt<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> Value
+pub fn drain_receipt<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> Value
 where
     E: HerdrCommandExecutor,
     C: Clock,

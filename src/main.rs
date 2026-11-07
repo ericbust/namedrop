@@ -515,7 +515,8 @@ fn run_subagent_hook(state: &Path, host: namedrop::AgentRuntime) -> ExitCode {
 
 /// Send, reply and complete only commit. The space's mailbox worker, a detached
 /// process, dispatches what they queued after the command has answered, so the
-/// caller never waits on the recipient's settle delay or prompt.
+/// caller never waits on the recipient's settle delay or prompt. When no worker
+/// can start, the command drains before it answers, so delivery still happens.
 fn schedule_dispatch(operation: &str, data: &mut serde_json::Value, options: &RuntimeOptions) {
     let hands_off = matches!(operation, "send" | "reply" | "complete");
     if !hands_off && !needs_mailbox_watcher(data) {
@@ -525,16 +526,40 @@ fn schedule_dispatch(operation: &str, data: &mut serde_json::Value, options: &Ru
     if let Err(error) = &woken {
         eprintln!("Command queued; could not start shell watcher: {error}");
     }
-    if hands_off {
-        data["dispatch"] = serde_json::json!(if woken.is_ok() {
-            "scheduled"
-        } else {
-            "waiting"
+    if !hands_off {
+        return;
+    }
+    let Err(error) = woken else {
+        data["dispatch"] = serde_json::json!("scheduled");
+        return;
+    };
+    data["dispatch"] = serde_json::json!("waiting");
+    data["dispatch_error"] = serde_json::json!(error);
+    if let Err(error) = with_runtime_options(options, |runtime| drain_inline(data, runtime)) {
+        data["drain"] = serde_json::json!({"error": error});
+    }
+}
+
+/// Drains every space a mailbox worker would have: this one into `drain`, the
+/// others into `drains` by space id.
+fn drain_inline(
+    data: &mut serde_json::Value,
+    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
+) -> Result<(), String> {
+    let here = current_space(runtime)?;
+    for space in namedrop::spaces_to_wake(runtime.state_directory, runtime.session_socket_id, &here)
+    {
+        let receipt = namedrop::drain_receipt(&LifecycleRuntime {
+            workspace_id: Some(&space),
+            ..*runtime
         });
-        if let Err(error) = woken {
-            data["dispatch_error"] = serde_json::json!(error);
+        if space == here {
+            data["drain"] = receipt;
+        } else {
+            data["drains"][&space] = receipt;
         }
     }
+    Ok(())
 }
 
 fn wake_mailboxes(options: &RuntimeOptions) -> Result<(), String> {
@@ -632,16 +657,21 @@ mod drain_report_tests {
 fn wake_runtime_mailboxes(
     runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
 ) -> Result<(), String> {
-    let here = match runtime.workspace_id {
-        Some(id) => id.to_owned(),
-        None => namedrop::discover_worktree(runtime.herdr, runtime.cwd)?.workspace_id,
-    };
     schedule_mailbox_workers(
         runtime.state_directory,
         runtime.session_socket_id,
-        &here,
+        &current_space(runtime)?,
         false,
     )
+}
+
+fn current_space(
+    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
+) -> Result<String, String> {
+    match runtime.workspace_id {
+        Some(id) => Ok(id.to_owned()),
+        None => Ok(namedrop::discover_worktree(runtime.herdr, runtime.cwd)?.workspace_id),
+    }
 }
 
 fn schedule_mailbox_workers(

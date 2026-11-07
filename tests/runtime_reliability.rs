@@ -1305,6 +1305,45 @@ fn settle_results_print_the_agent_view_and_json_prints_the_full_result() {
     }
 }
 
+/// When no mailbox worker can start, a settle command dispatches what it freed
+/// itself before it answers, and says why the worker did not start.
+#[test]
+fn a_settle_command_drains_inline_when_the_mailbox_worker_cannot_start() {
+    let fixture = Fixture::new();
+    fixture.initialize();
+    fixture.connect_recipient();
+    fixture.set_herdr(&recipient_host("session-1"));
+    fixture.queue_message_numbered(1, "first");
+    fixture.queue_message_numbered(2, "second");
+    fixture.reconcile_drain();
+    let first = fixture.inbox()[0]["control"]["attempt_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let prompted = fixture.prompt_counts();
+    // The worker's queue directory cannot be created over a file.
+    fs::write(fixture.state().join("agent-status-reconciliation"), "").unwrap();
+
+    let output = fixture
+        .command()
+        .args(["complete", "--no-reply", "--input-json"])
+        .arg(serde_json::json!({"attempt_id": first}).to_string())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let completed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        completed["data"]["dispatch_error"].is_string(),
+        "the agent view keeps dispatch_error: {completed}"
+    );
+    assert_eq!(
+        fixture.prompt_counts(),
+        (prompted.0 + 1, prompted.1 + 1),
+        "complete must prompt the recipient with the next message itself"
+    );
+    assert_eq!(fixture.inbox_bodies(), vec!["second".to_owned()]);
+}
+
 /// Namestack verify run v10111443b186, capture `restart-adopt-stall`: an
 /// acknowledged delivery settles by observation only once the session is idle
 /// and thirty seconds have passed since the attempt was created, yet every
