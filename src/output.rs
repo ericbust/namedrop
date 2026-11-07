@@ -427,7 +427,14 @@ enum Keep {
     WhenTrue(&'static str),
     /// `delivery_outlook` objects reduced to one `outlook` string of their statements.
     Outlook,
+    /// [`TRACKED_NEXT`] as `next` when the send started tracked work, which its
+    /// `coordination` links show.
+    TrackedNext,
 }
+
+/// What a lead reads after it starts tracked work.
+const TRACKED_NEXT: &str =
+    "The answer arrives as a new delivery, so end your turn. Do not wait or poll for it.";
 
 /// The settle results an agent reads after every delivery, and the fields it uses:
 /// ids it reuses for `handoff.results` and tracked follow-ups, the delivery outlook,
@@ -439,6 +446,7 @@ const AGENT_RESULT_FIELDS: &[(&str, &[Keep])] = &[
             Keep::Field("message_id"),
             Keep::Field("thread_id"),
             Keep::Field("coordination"),
+            Keep::TrackedNext,
             Keep::Outlook,
             Keep::WhenTrue("idempotent_replay"),
             Keep::Field("state"),
@@ -509,6 +517,14 @@ pub fn agent_result_view(result: &Value) -> Value {
                     kept.insert("outlook".to_owned(), statements.join(" ").into());
                 }
             }
+            Keep::TrackedNext => {
+                if data
+                    .get("coordination")
+                    .is_some_and(|links| !is_empty(links))
+                {
+                    kept.insert("next".to_owned(), TRACKED_NEXT.into());
+                }
+            }
         }
     }
     let mut view = result.clone();
@@ -560,7 +576,17 @@ mod tests {
         assert_eq!(
             agent_result_view(&tracked)["data"],
             json!({"message_id": "m", "thread_id": "t", "outlook": "@a: soon. @b: later.",
-                   "coordination": [{"coordination_id": "c", "assignment_id": "a", "revision": 1}]})
+                   "coordination": [{"coordination_id": "c", "assignment_id": "a", "revision": 1}],
+                   "next": "The answer arrives as a new delivery, so end your turn. Do not wait or poll for it."})
+        );
+        let mut ordinary = tracked.clone();
+        ordinary["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("coordination");
+        assert_eq!(
+            agent_result_view(&ordinary)["data"],
+            json!({"message_id": "m", "thread_id": "t", "outlook": "@a: soon. @b: later."})
         );
         let rejected = serde_json::to_value(CommandResult::rejected(
             "reply",

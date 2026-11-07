@@ -4218,3 +4218,27 @@ fn the_review_message_envelope_binds_one_granted_acknowledgement_per_coordinatio
         "a later operator message carries no grant"
     );
 }
+
+#[test]
+fn a_tracked_send_tells_the_lead_its_answer_arrives_as_a_delivery_and_an_ordinary_send_does_not() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let tracked = f.send(&id, "first", "worker");
+    let ordinary = dispatch::message(
+        "send",
+        json!({"request_id":"plain","source":"@reviewer synthetic note","author_kind":"agent_session"}),
+        &f.runtime("lead"),
+    )
+    .unwrap();
+    let compact = |data: Value| {
+        agent_result_view(&serde_json::to_value(CommandResult::success("send", data)).unwrap())
+            ["data"]
+            .clone()
+    };
+    assert_eq!(
+        compact(tracked)["next"],
+        "The answer arrives as a new delivery, so end your turn. Do not wait or poll for it."
+    );
+    let ordinary = compact(ordinary);
+    assert!(ordinary.get("next").is_none(), "{ordinary}");
+}
