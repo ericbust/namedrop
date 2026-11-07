@@ -1393,10 +1393,87 @@ pub struct DeliveryToolInvocation {
     pub operations: Vec<BoundDeliveryOperation>,
 }
 
-/// What the rendered lines are, and what a recipient still has to do to one
-/// before it is correct. They are the bound operations restated, so they carry
-/// no authority the envelope did not already give.
-const COMMAND_GUIDANCE: &str = "Namedrop commands: the operations this delivery already authorized, each written as the one line that runs it. They restate `control.tool` and are not a second authority: the argv and the input are the bound ones. Copy the line for the operation you choose and change only what you author: every `<...>` placeholder, work_outcome and blocked_reason when required, and any requested snapshot contents. A verbatim `<reply body>` is not a reply. For NEW assignment request IDs, replace only `<new-assignment-key>` with a unique stable intent key and keep the `-plain` or `-context` suffix; every other ID stays as written. Your text travels inside single-quoted JSON, so when it holds an apostrophe or is long, write the JSON to a file in a separate step and end the line with `--input-json-file <absolute-path>` in place of the input flag and its JSON. Nothing else in the line moves. An OS sandbox access error is not an approval decision: request normal host approval for this exact line, and if policy rejects it, report the blocker and keep the reply pending.";
+/// Bound operations whose lines are left out of the rendered block: agents
+/// almost never ran them from a delivery (under two uses in 1,276 measured
+/// delivery turns), and each line cost hundreds of characters on every one.
+/// They stay in `control.tool`, so they remain authorized and runnable.
+const UNRENDERED_OPERATIONS: [&str; 3] = ["reminder.set", "context.inspect", "handoff.preview"];
+
+/// Something a rendered line asks its recipient to author before running it.
+#[derive(Clone, Copy)]
+enum CommandNeed {
+    AuthoredText,
+    NewAssignmentKey,
+    WorkOutcome,
+    Snapshot,
+}
+
+impl CommandNeed {
+    fn present_in(self, input: &Value) -> bool {
+        match self {
+            Self::AuthoredText => {
+                any_string(input, |text| text.contains('<') && text.contains('>'))
+            }
+            Self::NewAssignmentKey => {
+                any_string(input, |text| text.contains("<new-assignment-key>"))
+            }
+            Self::WorkOutcome => any_key(input, "work_outcome"),
+            Self::Snapshot => any_key(input, "snapshot"),
+        }
+    }
+}
+
+fn any_string(value: &Value, found: fn(&str) -> bool) -> bool {
+    match value {
+        Value::String(text) => found(text),
+        Value::Array(items) => items.iter().any(|item| any_string(item, found)),
+        Value::Object(fields) => fields.values().any(|field| any_string(field, found)),
+        _ => false,
+    }
+}
+
+fn any_key(value: &Value, key: &str) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(|item| any_key(item, key)),
+        Value::Object(fields) => {
+            fields.contains_key(key) || fields.values().any(|field| any_key(field, key))
+        }
+        _ => false,
+    }
+}
+
+/// What the rendered lines are. They are the bound operations restated, so
+/// they carry no authority the envelope did not already give.
+const COMMAND_HEADER: &str = "Namedrop commands: the runnable lines this delivery authorized; they only restate `control.tool`. Run the one you choose unchanged except as noted.";
+
+/// What a recipient still has to do to a line before it is correct, said only
+/// when one of this delivery's lines asks for it.
+const COMMAND_SENTENCES: [(CommandNeed, &str); 5] = [
+    (
+        CommandNeed::AuthoredText,
+        "Replace every `<...>` placeholder with your own text; a verbatim placeholder is not an answer.",
+    ),
+    (
+        CommandNeed::AuthoredText,
+        "Your text travels inside single-quoted JSON, so if it has an apostrophe or is long, write the JSON to a file and end the line with `--input-json-file <absolute-path>` in place of the input flag and its JSON.",
+    ),
+    (
+        CommandNeed::NewAssignmentKey,
+        "For a NEW assignment, replace only `<new-assignment-key>` with a unique stable intent key and keep the `-plain` or `-context` suffix; every other ID stays as written.",
+    ),
+    (
+        CommandNeed::WorkOutcome,
+        "work_outcome is yours to set: completed, needs_continuation or blocked, with blocked_reason when blocked.",
+    ),
+    (
+        CommandNeed::Snapshot,
+        "The snapshot contents are yours to write.",
+    ),
+];
+
+/// Said on every delivery: a sandbox refusal of a bound line once stalled a
+/// live handoff when the agent took it for a denial.
+const SANDBOX_SENTENCE: &str = "An OS sandbox access error is not an approval decision: request normal host approval for this exact line, and if policy rejects it, report the blocker and keep the reply pending.";
 
 /// The bound operations of one authenticated delivery, rendered as runnable
 /// lines. It reads the envelope the plugin reconstructed and matched, never a
@@ -1418,9 +1495,13 @@ pub(crate) fn delivery_command_guidance(tool: &Value) -> Option<String> {
     let environment = tool.get("environment")?.as_object()?;
     let input_flag = tool.get("input_flag")?.as_str()?;
     let located = |key: &str| environment.get(key).and_then(Value::as_str);
-    let mut guidance = COMMAND_GUIDANCE.to_owned();
+    let mut lines = Vec::new();
+    let mut inputs = Vec::new();
     for operation in tool.get("operations")?.as_array()? {
         let token = operation.get("token")?.as_str()?;
+        if UNRENDERED_OPERATIONS.contains(&token) {
+            continue;
+        }
         let input = operation.get("input")?;
         let mut command = shell_single_quote(executable);
         if let Some(state_directory) = located("HERDR_PLUGIN_STATE_DIR") {
@@ -1442,10 +1523,24 @@ pub(crate) fn delivery_command_guidance(tool: &Value) -> Option<String> {
                 command.push_str(&format!(" {flag} {}", shell_single_quote(value)));
             }
         }
-        guidance.push_str(&format!(
-            "\n{token}: {command} {input_flag} {}",
+        lines.push(format!(
+            "{token}: {command} {input_flag} {}",
             shell_single_quote(&input.to_string())
         ));
+        inputs.push(input);
+    }
+    let mut guidance = COMMAND_HEADER.to_owned();
+    for (need, sentence) in COMMAND_SENTENCES {
+        if inputs.iter().any(|input| need.present_in(input)) {
+            guidance.push(' ');
+            guidance.push_str(sentence);
+        }
+    }
+    guidance.push(' ');
+    guidance.push_str(SANDBOX_SENTENCE);
+    for line in lines {
+        guidance.push('\n');
+        guidance.push_str(&line);
     }
     Some(guidance)
 }

@@ -191,9 +191,14 @@ impl Fixture {
         let echo = self.home.join("echo-argv");
         fs::write(&echo, "#!/bin/sh\nprintf '%s\n' \"$@\"\n").unwrap();
         fs::set_permissions(&echo, fs::Permissions::from_mode(0o700)).unwrap();
+        // These stay in control.tool without a rendered line.
+        let unrendered = ["reminder.set", "context.inspect", "handoff.preview"];
         let operations = envelope["control"]["tool"]["operations"]
             .as_array()
-            .unwrap();
+            .unwrap()
+            .iter()
+            .filter(|operation| !unrendered.contains(&operation["token"].as_str().unwrap()))
+            .collect::<Vec<_>>();
         let lines = guidance
             .lines()
             .filter_map(|line| {

@@ -773,12 +773,12 @@ fn an_incoming_task_reaches_both_hosts_with_the_roster_and_only_claude_with_the_
             .to_owned();
         assert!(context.contains(&attempt), "{host}: {context}");
         assert!(
-            context.contains("not a second authority"),
+            context.contains("they only restate `control.tool`"),
             "{host}: the lines are not framed as the bound operations: {context}"
         );
         assert!(
             context.contains("--input-json-file <absolute-path>")
-                && context.contains("`<reply body>` is not a reply"),
+                && context.contains("a verbatim placeholder is not an answer"),
             "{host}: authoring and staging are not stated: {context}"
         );
     }
