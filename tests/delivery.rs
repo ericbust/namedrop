@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, AttentionSourceKind, Clock, DeliveryAttemptId,
     DeliveryId, DeliveryState, GraceDeadline, HealthRepairKind, HerdrCommandExecutor,
@@ -71,7 +74,7 @@ impl TestDirectory {
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.path).unwrap();
+        cleanup::remove_fixture(&self.path).unwrap();
     }
 }
 
@@ -290,6 +293,289 @@ fn address(id: &str, alias: &str) -> PaneAddressDraft {
         role_description: format!("{alias} test role"),
         alias: alias.to_owned(),
     }
+}
+
+#[test]
+fn a_contended_pane_defers_only_its_mailbox_until_the_next_drain() {
+    use sha2::{Digest, Sha256};
+    use std::os::{
+        fd::AsRawFd,
+        unix::fs::{DirBuilderExt, OpenOptionsExt},
+    };
+
+    let directory = TestDirectory::new();
+    let namespace = StateNamespace::for_space("socket-a", "workspace-1");
+    let attribution = MutationAttribution::new(ActorKind::Human, "test", 10);
+    let author = address("address-human", "human");
+    let blocked = address("address-1-blocked", "blocked");
+    let free = address("address-2-free", "free");
+    let recipients = [
+        (&blocked, "pane-author", "session-author"),
+        (&free, "pane-recipient", "session-recipient"),
+    ];
+    let thread_id = ThreadId::new("thread-1");
+    StateStore::open(directory.path())
+        .unwrap()
+        .transaction(|tx| {
+            tx.activate_worktree(&namespace, &attribution)?;
+            tx.create_pane_address(&namespace, &author, &attribution)?;
+            for (recipient, pane, session) in recipients {
+                tx.create_pane_address(&namespace, recipient, &attribution)?;
+                tx.bind_pane(
+                    &namespace,
+                    &PaneBindingId::new(format!("binding-{pane}")),
+                    &recipient.id,
+                    pane,
+                    &attribution,
+                )?;
+                tx.observe_agent_session(
+                    &namespace,
+                    &format!("observation-{pane}"),
+                    &recipient.id,
+                    &AgentSessionId::new(session),
+                    "idle",
+                    &attribution,
+                )?;
+            }
+            tx.create_thread(&namespace, &thread_id, "Queued work", &attribution)?;
+            tx.complete_reconciliation(&namespace)
+        })
+        .unwrap();
+    let herdr = FakeHerdr::default();
+    let clock = TestClock::default();
+    clock.now_ms.store(100, Ordering::Relaxed);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let runtime = LifecycleRuntime {
+        state_directory: directory.path(),
+        home_directory: Some(directory.home()),
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new("/repo"),
+        workspace_id: None,
+        current_pane_id: None,
+        session_socket_id: "socket-a",
+        herdr: &herdr,
+        clock: &clock,
+        ids: &ids,
+    };
+    for (recipient, pane, _) in recipients {
+        let registration_runtime = LifecycleRuntime {
+            current_pane_id: Some(pane),
+            ..runtime
+        };
+        let challenge =
+            issue_registration_challenge(&recipient.id, AgentRuntime::Codex, &registration_runtime)
+                .unwrap();
+        execute_integration_operation(
+            "register",
+            serde_json::json!({
+                "runtime": "codex", "protocol_version": "collab/v1",
+                "nonce": challenge.nonce, "capabilities": complete_capability_profile(),
+            }),
+            &registration_runtime,
+        )
+        .unwrap();
+    }
+    StateStore::open(directory.path())
+        .unwrap()
+        .transaction(|tx| {
+            tx.append_message(
+                &namespace,
+                &MessageDraft {
+                    thread_id,
+                    message_id: MessageId::new("message-1"),
+                    in_reply_to: None,
+                    author_address_id: author.id.clone(),
+                    author_kind: ActorKind::Human,
+                    author_alias_snapshot: "human".into(),
+                    author_agent_session_snapshot: None,
+                    request_id: "request-1".into(),
+                    authored_source: "@blocked @free Review this".into(),
+                    body: "Review this".into(),
+                    grammar_version: "mention/v1".into(),
+                    recipients: recipients
+                        .iter()
+                        .map(|(recipient, _, session)| MessageRecipientDraft {
+                            address_id: recipient.id.clone(),
+                            alias_snapshot: recipient.alias.clone(),
+                            agent_session_snapshot: Some(AgentSessionId::new(*session)),
+                            delivery_id: DeliveryId::new(format!("delivery-{}", recipient.alias)),
+                        })
+                        .collect(),
+                    context_references: Vec::new(),
+                },
+                &attribution,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let effects_directory = directory.path().join("pane-effects");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&effects_directory)
+        .unwrap();
+    let key = Sha256::digest(serde_json::to_vec(&("socket-a", "pane-author")).unwrap())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let gate = fs::OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(effects_directory.join(format!("{key}.lock")))
+        .unwrap();
+    assert_eq!(
+        unsafe { libc::flock(gate.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    let mailbox_state = || {
+        rusqlite::Connection::open(directory.path().join("namedrop.sqlite3"))
+            .unwrap()
+            .prepare("SELECT d.address_id, d.state, (SELECT COUNT(*) FROM delivery_attempts a WHERE a.delivery_id = d.delivery_id) FROM mailbox_deliveries d ORDER BY d.address_id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)))
+            .unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+    };
+
+    let first = drain_mailboxes(&runtime).expect("a contended pane must not abort other mailboxes");
+    assert_eq!(
+        serde_json::to_value(&first).unwrap()["pane_lock_deferred"],
+        serde_json::json!([blocked.id])
+    );
+    assert_eq!(first.submitted.len(), 1);
+    assert!(first.held.is_empty());
+    assert!(first.failed.is_empty());
+    assert!(first.requeued.is_empty());
+    assert_eq!(
+        mailbox_state(),
+        vec![
+            (blocked.id.as_str().into(), "queued".into(), 0),
+            (free.id.as_str().into(), "acknowledged".into(), 1),
+        ]
+    );
+    let envelopes = || {
+        herdr
+            .prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|prompt| serde_json::from_str::<serde_json::Value>(prompt).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let submitted = envelopes();
+    assert_eq!(submitted.len(), 1);
+    assert_eq!(
+        submitted[0]["control"]["attempt_id"],
+        serde_json::json!(first.submitted[0])
+    );
+    assert_eq!(
+        submitted[0]["control"]["tool"]["environment"]["HERDR_PANE_ID"],
+        "pane-recipient"
+    );
+
+    drop(gate);
+    let second = drain_mailboxes(&runtime).unwrap();
+    assert!(
+        serde_json::to_value(&second)
+            .unwrap()
+            .get("pane_lock_deferred")
+            .is_none()
+    );
+    assert_eq!(second.submitted.len(), 1);
+    assert_eq!(
+        mailbox_state(),
+        vec![
+            (blocked.id.as_str().into(), "acknowledged".into(), 1),
+            (free.id.as_str().into(), "acknowledged".into(), 1),
+        ]
+    );
+    let submitted = envelopes();
+    assert_eq!(submitted.len(), 2);
+    assert_eq!(
+        submitted[1]["control"]["attempt_id"],
+        serde_json::json!(second.submitted[0])
+    );
+    assert_eq!(
+        submitted[1]["control"]["tool"]["environment"]["HERDR_PANE_ID"],
+        "pane-author"
+    );
+    assert!(drain_mailboxes(&runtime).unwrap().submitted.is_empty());
+    assert_eq!(envelopes().len(), 2);
+}
+
+#[test]
+fn drain_receipts_expose_local_and_forwarded_reports_to_both_frontends() {
+    use namedrop::{DrainReport, PaneAddressId, drain_reports};
+    use serde_json::json;
+    let pending = DrainReport {
+        delivery_notice: "",
+        pane_lock_deferred: vec![PaneAddressId::new("address-1")],
+        ..DrainReport::default()
+    };
+    for receipt in [
+        json!(pending),
+        json!({"drain": pending}),
+        json!({"delivery": pending}),
+        json!({"delivery": {"drain": pending}}),
+    ] {
+        let reports = drain_reports(&receipt).collect::<Vec<_>>();
+        assert_eq!(reports, vec![(None, pending.clone())]);
+        assert!(reports[0].1.needs_mailbox_worker());
+    }
+    let settled = DrainReport {
+        delivery_notice: "",
+        ..DrainReport::default()
+    };
+    let receipt = json!({
+        "drain": DrainReport::default(),
+        "delivery": {"error": "unavailable"},
+        "drains": {"ws1": pending, "ws2": {"drain": pending}, "ws3": {"error": "unavailable"}}
+    });
+    let reports = drain_reports(&receipt).collect::<Vec<_>>();
+    assert_eq!(
+        reports,
+        vec![
+            (None, settled),
+            (Some("ws1"), pending.clone()),
+            (Some("ws2"), pending)
+        ]
+    );
+    assert_eq!(
+        reports
+            .iter()
+            .filter(|(_, report)| report.needs_mailbox_worker())
+            .map(|(workspace, _)| *workspace)
+            .collect::<Vec<_>>(),
+        vec![Some("ws1"), Some("ws2")]
+    );
+    for invalid in [
+        json!(null),
+        json!({}),
+        json!({"drain": {"error": "unavailable"}}),
+    ] {
+        assert_eq!(drain_reports(&invalid).count(), 0);
+    }
+}
+
+#[test]
+fn drain_report_preserves_legacy_json_and_round_trips_pane_lock_deferrals() {
+    let legacy = serde_json::json!({
+        "terminal_waiting": [], "terminal_running": [], "delivery_notice": "",
+        "submitted": ["attempt-1"], "requeued": [], "failed": [], "settled": [],
+        "held": [], "expired": [], "pending_grace": [],
+    });
+    let report: namedrop::DrainReport = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(serde_json::to_value(report).unwrap(), legacy);
+    assert!(
+        serde_json::to_value(namedrop::DrainReport::default())
+            .unwrap()
+            .get("pane_lock_deferred")
+            .is_none()
+    );
+    let mut deferred = legacy;
+    deferred["pane_lock_deferred"] = serde_json::json!(["address-1-blocked"]);
+    let report: namedrop::DrainReport = serde_json::from_value(deferred.clone()).unwrap();
+    assert_eq!(serde_json::to_value(report).unwrap(), deferred);
 }
 
 #[test]
@@ -728,7 +1014,7 @@ fn human_mention_round_trip(hold_report: bool) {
     // the body.
     assert_eq!(
         envelope["control"]["permitted_operations"],
-        serde_json::json!(["reply", "complete.no-reply"])
+        serde_json::json!(["reply", "complete.no-reply", "reminder.set"])
     );
     for forged in ["attempt-forged", "delivery.rescind", "reply to nobody"] {
         let carriers = envelope

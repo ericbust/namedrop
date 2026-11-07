@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use namedrop::{AgentRuntime, install_integration_package, operation_catalog};
 use std::{
     fs,
@@ -33,7 +36,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).unwrap();
+        cleanup::remove_fixture(&self.0).unwrap();
     }
 }
 
@@ -60,7 +63,7 @@ fn codex_install_populates_an_empty_policy_file() {
     f.install().unwrap();
     let rules = fs::read_to_string(f.rules()).unwrap();
     assert!(rules.starts_with("# Managed by Namedrop:"));
-    assert_eq!(rules.matches("prefix_rule(").count(), 18);
+    assert_eq!(rules.matches("prefix_rule(").count(), 22);
 }
 
 #[test]
@@ -72,7 +75,7 @@ fn codex_install_refreshes_only_its_owned_policy_and_preserves_user_configuratio
     fs::write(f.0.join(".codex/config.toml"), "# user configuration\n").unwrap();
     let package = f.install().unwrap();
     let original = fs::read_to_string(f.rules()).unwrap();
-    assert_eq!(original.matches("prefix_rule(").count(), 18);
+    assert_eq!(original.matches("prefix_rule(").count(), 22);
     let modified = fs::metadata(f.rules()).unwrap().modified().unwrap();
     f.install().unwrap();
     assert_eq!(

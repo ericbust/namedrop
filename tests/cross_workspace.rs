@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use namedrop::{
     AgentRuntime, StateNamespace, StateStore, diagnose_collaboration, execute_control_operation,
     execute_group_operation, execute_handoff_operation, execute_integration_operation,
@@ -635,6 +638,25 @@ fn envoys_never_appear_where_a_workspace_lists_its_own_names() {
         Fixture::untrusted_body(&fixture.herdr.last_envelope("pane-1-planner")),
         "Plan received."
     );
+
+    let mut store = StateStore::open(&fixture.state).unwrap();
+    for workspace in ["w1", "w2"] {
+        let namespace = StateNamespace::for_space("socket-a", workspace);
+        let snapshot = namedrop::dashboard::snapshot::build(
+            &store.dashboard_rows(&namespace).unwrap(),
+            None,
+            1,
+        );
+        let lanes: Vec<&str> = snapshot
+            .participants
+            .iter()
+            .map(|lane| lane.address_id.as_str())
+            .collect();
+        assert!(
+            lanes.iter().all(|lane| !lane.starts_with("envoy:")),
+            "{workspace} dashboard lanes: {lanes:?}"
+        );
+    }
 }
 
 fn receive_until_result_set(fixture: &Fixture, workspace: &str, pane: &str) -> Vec<Value> {
@@ -912,6 +934,46 @@ fn a_conversation_across_workspaces_pauses_at_the_local_reply_limit() {
     );
     assert!(local_replies > 0);
     assert_eq!(remote_replies, local_replies);
+}
+
+#[test]
+fn a_human_reply_to_local_recipients_refills_every_paired_thread() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    assert_eq!(
+        ping_pong(
+            &fixture,
+            ("w1", "pane-1-lead"),
+            ("w2", "pane-2-tester"),
+            "#ws2 @tester Ping."
+        ),
+        10
+    );
+    assert_eq!(
+        fixture
+            .count("SELECT count(*) FROM thread_controls WHERE paused = 1 AND reply_allowance = 0"),
+        2
+    );
+    let last = fixture.herdr.last_envelope("pane-1-lead");
+    execute_message_operation(
+        "reply",
+        json!({
+            "request_id": "human-local-reset",
+            "source": "@planner Follow this guidance.",
+            "author_kind": "human",
+            "in_reply_to": last["control"]["message_id"]
+        }),
+        &fixture.runtime("w1", "pane-1-lead"),
+    )
+    .unwrap();
+    assert_eq!(
+        fixture.count("SELECT count(*) FROM thread_controls WHERE paused = 0 AND stopped = 0 AND reply_allowance = 10"),
+        2
+    );
+    assert_eq!(
+        fixture.count("SELECT count(*) FROM attention_items WHERE source_kind = 'automatic_reply_limit' AND resolved_at_ms IS NULL"),
+        0
+    );
 }
 
 #[test]

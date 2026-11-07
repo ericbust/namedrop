@@ -3,7 +3,7 @@ use crate::integration::pane_agent_runtime;
 use crate::lifecycle::{CollaborationSetup, terminal_safe_text};
 use crate::{
     AgentSessionId, AttentionSourceKind, Clock, HerdrCommandExecutor, IdGenerator,
-    LifecycleRuntime, PaneAddressLifecycle, PromptFailureKind, StateStore, discover_worktree,
+    LifecycleRuntime, PaneAddressLifecycle, StateStore, discover_worktree,
     discover_worktree_for_workspace,
 };
 use serde::{Deserialize, Serialize};
@@ -64,12 +64,59 @@ pub struct HealthReport {
     #[serde(default)]
     pub available_terminals: u64,
     pub waiting_messages: u64,
+    #[serde(default)]
+    pub pending_reminders: u64,
     pub issues: Vec<HealthIssue>,
     pub hook_verification: String,
 }
 
 /// Inspect Namedrop without reconciling, retrying, cancelling, or changing state.
 pub fn diagnose_collaboration<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> HealthReport
+where
+    E: HerdrCommandExecutor,
+    C: Clock,
+    I: IdGenerator,
+{
+    let mut report = diagnose_space(runtime);
+    if let Some(diagnostic) = crate::dashboard::tailscale::diagnose(runtime.state_directory) {
+        let explanation = match (&diagnostic.url, &diagnostic.problem) {
+            (Some(url), Some(problem)) => format!("{url}: {problem}"),
+            (Some(url), None) => url.clone(),
+            (None, Some(problem)) => problem.clone(),
+            (None, None) => unreachable!(),
+        };
+        let problem = diagnostic.problem.is_some();
+        let mut check = issue(
+            "ND-TAILSCALE-001",
+            if problem {
+                HealthSeverity::Notice
+            } else {
+                HealthSeverity::Info
+            },
+            if problem {
+                "Channels Tailscale access needs attention."
+            } else {
+                "Channels is configured for your tailnet."
+            },
+            &explanation,
+            HealthRepairKind::HumanDecision,
+            if problem {
+                "Run `namedrop channels --tailscale off`, then `namedrop channels --tailscale` to configure access again."
+            } else {
+                "Run `namedrop channels --tailscale --no-open` for a one-time sign-in link."
+            },
+        );
+        check.diagnostic =
+            serde_json::json!({"url": diagnostic.url, "problem": diagnostic.problem});
+        report.issues.push(check);
+        if problem && report.status == HealthStatus::Healthy {
+            report.status = HealthStatus::NeedsAttention;
+        }
+    }
+    report
+}
+
+fn diagnose_space<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> HealthReport
 where
     E: HerdrCommandExecutor,
     C: Clock,
@@ -109,6 +156,7 @@ where
                 available_agents: 0,
                 available_terminals: 0,
                 waiting_messages,
+                pending_reminders: 0,
                 hook_verification: "unverified".to_owned(),
                 issues: vec![worktree_issue],
             };
@@ -134,6 +182,7 @@ where
             available_agents: 0,
             available_terminals: 0,
             waiting_messages: 0,
+            pending_reminders: 0,
             hook_verification: "unverified".to_owned(),
             issues: vec![inactive],
         };
@@ -150,7 +199,7 @@ where
         issues.push(issue(
             "ND-MODEL-001",
             HealthSeverity::Notice,
-            "Codex summaries and persona suggestions are unavailable on this setup.",
+            "Codex summaries, persona suggestions, and channel routing are unavailable on this setup.",
             &error,
             HealthRepairKind::HumanDecision,
             "Resolve the reported Landlock or native Codex installation requirement, then retry the helper. Collaboration messages remain available.",
@@ -217,7 +266,7 @@ where
                 "ND-HOOK-001",
                 HealthSeverity::Blocked,
                 "Codex hook setup is incomplete or outdated.",
-                "Complete the current Codex plugin setup. If this session predates installation or refresh, restart and approve Namedrop in /hooks if prompted; otherwise verify with a round trip. Doctor alone cannot verify hooks.",
+                "Complete the current Codex plugin setup. If this session predates installation or refresh, restart and approve changed Namedrop hooks in /hooks if prompted, including SubagentStart, SubagentStop, Stop and SessionEnd; otherwise verify with a round trip. Doctor alone cannot verify hooks.",
                 HealthRepairKind::ProductAction,
                 "Follow the reported Codex plugin setup steps.",
             );
@@ -531,7 +580,18 @@ where
             continue;
         }
         let mut attention = health_issue_for_attention(item.source_kind);
-        attention.explanation = crate::context::redact_disclosure_text(&item.summary);
+        let cause = if item.source_kind == AttentionSourceKind::ContextGrant {
+            item.summary
+                .strip_prefix("Shared context failed:")
+                .map(str::trim_start)
+                .unwrap_or(&item.summary)
+        } else {
+            &item.summary
+        };
+        let explanation = crate::context::redact_disclosure_text(cause);
+        if explanation != attention.summary {
+            attention.explanation = explanation;
+        }
         attention.diagnostic = serde_json::json!({"attention_id":item.id,"source_kind":item.source_kind,"source_id":item.source_id});
         match item.source_kind {
             AttentionSourceKind::AutomaticReplyLimit => add_operation(
@@ -555,6 +615,17 @@ where
         issues.insert(0, attention);
     }
 
+    let pending_reminders = crate::reminder::pending_count(runtime.state_directory);
+    if pending_reminders > 0 && !crate::reminder::clock_running(runtime.state_directory) {
+        issues.push(issue(
+            "ND-REMINDER-001",
+            HealthSeverity::Blocked,
+            "Pending reminders have no running clock.",
+            "Run any Namedrop command to restart the clock.",
+            HealthRepairKind::ProductAction,
+            "Restart the reminder clock.",
+        ));
+    }
     HealthReport {
         status: if issues
             .iter()
@@ -567,6 +638,7 @@ where
         available_agents,
         available_terminals,
         waiting_messages,
+        pending_reminders,
         issues,
         hook_verification: "unverified".to_owned(),
     }
@@ -625,22 +697,45 @@ where
     {
         return Err("No issues remain; nothing was sent.".to_owned());
     }
+    let alias = StateStore::open_read_only(runtime.state_directory)
+        .ok()
+        .flatten()
+        .and_then(|mut store| {
+            store
+                .transaction(|tx| {
+                    tx.routing_author_for_pane(
+                        &crate::StateNamespace::for_space(runtime.session_socket_id, space_id),
+                        pane_id,
+                    )
+                })
+                .ok()
+        })
+        .map(|address| address.alias);
     // Immediately before dispatch: the pane must still hold the exact Agent
     // Session the popup was opened for, so a replacement session can never
     // receive the session-bound diagnostics of the one it replaced.
+    let effects = crate::pane_effects::PaneEffects::acquire(
+        runtime.state_directory,
+        runtime.session_socket_id,
+        pane_id,
+    )
+    .map_err(|error| error.with_alias(alias.as_deref()).to_string())?;
     let live = live_agent_session(runtime, space_id, pane_id)?;
     if live.as_str() != expected_session_id {
         return Err("The pane changed session; nothing was sent.".to_owned());
     }
     let prompt = doctor_assistance_prompt(&report, pane_id, &live);
-    match runtime
-        .herdr
-        .execute(&["agent", "prompt", pane_id, &prompt])
-    {
+    match effects.prompt(
+        runtime.herdr,
+        &crate::pane_effects::InputOwner::Other,
+        &prompt,
+    ) {
         Ok(_) => Ok(()),
         Err(error)
-            if runtime.herdr.classify_prompt_failure(&error)
-                == PromptFailureKind::TemporaryPreInvocation =>
+            if runtime
+                .herdr
+                .classify_prompt_failure(&error)
+                .is_temporary_pre_invocation() =>
         {
             Err(format!("Not sent, the agent did not accept it: {error}"))
         }
@@ -779,6 +874,7 @@ fn unavailable_report(error: &str) -> HealthReport {
         available_agents: 0,
         available_terminals: 0,
         waiting_messages: 0,
+        pending_reminders: 0,
         hook_verification: "unverified".to_owned(),
         issues: vec![issue(
             "ND-INSPECT-001",
@@ -801,6 +897,14 @@ fn health_issue_for_attention(source: AttentionSourceKind) -> HealthIssue {
             HealthRepairKind::HumanDecision,
             "Review the delivery?",
         ),
+        AttentionSourceKind::TerminalRelay => issue(
+            "ND-DELIVERY-004",
+            HealthSeverity::Notice,
+            "An agent answered in its terminal.",
+            "Its answer was saved in the conversation and may need your reply.",
+            HealthRepairKind::HumanDecision,
+            "Review the answer?",
+        ),
         AttentionSourceKind::AgentDisposition => issue(
             "ND-DELIVERY-003",
             HealthSeverity::Blocked,
@@ -813,7 +917,7 @@ fn health_issue_for_attention(source: AttentionSourceKind) -> HealthIssue {
             "ND-THREAD-001",
             HealthSeverity::Notice,
             "A collaboration thread is waiting for approval.",
-            "Automatic replies paused at the configured human checkpoint.",
+            "Automatic replies paused at the configured human checkpoint. Your message resets the count and continues the thread.",
             HealthRepairKind::HumanDecision,
             "Continue the thread?",
         ),
@@ -836,10 +940,10 @@ fn health_issue_for_attention(source: AttentionSourceKind) -> HealthIssue {
         AttentionSourceKind::ContextGrant => issue(
             "ND-CONTEXT-001",
             HealthSeverity::Notice,
-            "Shared context is waiting for a decision.",
-            "Namedrop will not reveal or reuse it without a valid grant.",
+            "Shared context failed.",
+            "The recipient could not use the shared context.",
             HealthRepairKind::HumanDecision,
-            "Review the context request?",
+            "Ask the sender to fix the problem and share the context again.",
         ),
         AttentionSourceKind::Coordination => issue(
             "ND-COORDINATION-001",
@@ -993,8 +1097,8 @@ pub fn render_health_report_to_text(report: &HealthReport) -> String {
         String::new()
     };
     let passed = format!(
-        "Namedrop checks passed; runtime hooks remain unverified.\n{} {agents} available.{terminals} {} messages await progress.",
-        report.available_agents, report.waiting_messages,
+        "Namedrop checks passed; runtime hooks remain unverified.\n{} {agents} available.{terminals} {} messages await progress. {} reminders pending.",
+        report.available_agents, report.waiting_messages, report.pending_reminders,
     );
     if report.issues.is_empty() {
         return passed;
@@ -1071,6 +1175,7 @@ mod tests {
             available_agents: 0,
             available_terminals: 0,
             waiting_messages: 0,
+            pending_reminders: 0,
             hook_verification: "unverified".to_owned(),
             issues: vec![issue(
                 "ND-SETUP-002",

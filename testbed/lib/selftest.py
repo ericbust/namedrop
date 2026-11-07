@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import tempfile
 import urllib.error
+from unittest.mock import patch
 
 import livetest as live
 import source as sources
@@ -455,6 +456,90 @@ def check_judges():
     return "judges: doctor must agree with the daemon oracle; backlog, idle panes and the terminal run are exact"
 
 
+class TerminalRunner:
+    settle = live.Run.settle
+
+    def __init__(self, answers, status="idle"):
+        self.answers = answers
+        self.status = status
+        self.reads = 0
+        self.elapsed = 0
+
+    def prompt(self, *args):
+        pass
+
+    def save(self, *args):
+        pass
+
+    def budget(self, seconds):
+        return seconds
+
+    def sleep(self, seconds):
+        self.elapsed += seconds
+
+    def panes(self):
+        return {alias: live.Pane(alias, "p", alias, self.status, None, None, {})
+                for alias in live.AGENTS}
+
+    def text(self, alias):
+        return "Permission required"
+
+    def transcript(self, alias):
+        answer = self.answers[min(self.reads, len(self.answers) - 1)]
+        self.reads += 1
+        return live.Transcript("claude", "c", "p", (), (
+            live.Turn(live.TERMINAL_PROMPT, (), ("The command is running.",)),
+            live.Turn("terminal result", (), (answer,))), frozenset())
+
+    def run(self):
+        with patch.object(live.time, "monotonic", lambda: self.elapsed), \
+                patch.object(live.time, "sleep", self.sleep):
+            return live.step_terminal(self)
+
+    store = type("Store", (), {
+        "terminal_runs": lambda self, since: (live.TerminalRun("echo hello", 0, "hello\n", True),),
+        "backlog": lambda self: live.Backlog(0, 0, 0)})()
+
+
+def check_terminal_answer_wait():
+    runner = TerminalRunner(("The result arrived. I'll report it.", "stdout: hello; exit code 0."))
+    checks = runner.run()
+    assert all(check.ok for check in checks), checks
+    assert runner.reads == 2, "checker judged Claude's interim answer"
+    for answer in ("hello; exit code 1", "goodbye; exit code 0", "hello; exit code 10"):
+        wrong = TerminalRunner((answer,))
+        checks = wrong.run()
+        assert checks[0].ok and not checks[1].ok, checks
+        assert wrong.elapsed == live.TIMEOUTS.idle, "wrong answer stopped the wait early"
+    return "terminal answer: waits for the final reply; wrong answers time out and fail"
+
+
+def check_terminal_answer_blocked():
+    runner = TerminalRunner(("Permission required",), status="blocked")
+    try:
+        runner.run()
+    except live.StepFailed as error:
+        assert error.check.what == "claude blocked", error.check
+        assert "Permission required" in error.check.detail, error.check
+        assert runner.elapsed < live.TIMEOUTS.idle, "blocked pane consumed the answer timeout"
+    else:
+        raise AssertionError("Step 9 did not report Claude's blocked pane")
+    return "terminal answer: Claude blocked fails before the answer timeout"
+
+
+def check_terminal_answer_rule():
+    runner = TerminalRunner(("hello; exit code 0", "new answer rule"))
+    def answer_rule(transcript):
+        return live.Check("claude's answer", live.last_answer(transcript) == "new answer rule", "test rule")
+    with patch.object(live, "judge_terminal_answer", answer_rule):
+        checks = runner.run()
+        assert runner.reads == 2 and all(check.ok for check in checks), checks
+        wrong = TerminalRunner(("hello; exit code 0",))
+        checks = wrong.run()
+        assert wrong.elapsed == live.TIMEOUTS.idle and not checks[-1].ok, checks
+    return "terminal answer: wait and final judgment share the answer rule"
+
+
 def check_plan_and_gates():
     old, current = live.features("1.1.0"), live.features("1.2.0-rc.1")
     assert live.choose_mode(None, old).name == "no-daemon"
@@ -488,6 +573,14 @@ def check_report():
                          (ok,) + tuple(live.StepResult(step, (live.Check("a", True, "fine"),), 1)
                                        for step in steps[1:]), "- **host**, line.", "/ev", "/r.txt")
     assert passed.passed and live.render(passed).splitlines()[-1] == "- **host**, line."
+    for version in ("1.5.0-exp.1", "1.5.0-exp.1+codex.abc123"):
+        report = passed._replace(feats=live.features(version))
+        header = live.render(report).splitlines()[0]
+        assert "Namedrop {},".format(version) in header, header
+        reported = live.report_json(report)["namedrop"]
+        assert reported == version, (reported, version)
+        assert report.feats.version == (1, 5, 0)
+        assert live.choose_mode(None, report.feats) == live.MODES["plain"]
     assert "Mentions went both ways" in live.outcome_sentence(passed.results)
     failed = passed._replace(results=(ok, live.StepResult(steps[1], (live.Check("b", False, "bad"),), 2),
                                       live.StepResult(steps[2], None, 0)), compat=None)
@@ -516,6 +609,26 @@ def check_seeds():
     return "seeds: merge into Claude's files and Codex's config, keep every other key, idempotent"
 
 
+def check_pane_exit(scratch):
+    # A slow printf holds .exit open empty, which is when the poll used to read it.
+    profile = object.__new__(testbed.Profile)
+    profile.dir = scratch / "pane-exit"
+    (profile.dir / "logs").mkdir(parents=True)
+    started = []
+
+    def run(command):
+        slow = 'printf() { sleep 0.3; command printf "$@"; }; '
+        started.append(subprocess.Popen(["bash", "-c", slow + command[-1]]))
+
+    profile.run = run
+    try:
+        assert profile.in_pane("w:p", "echo out; (exit 3)", "probe", timeout=10) == (3, "out\n")
+    finally:
+        for process in started:
+            process.wait()
+    return "pane exit: .exit appears only with the exit code in it"
+
+
 def check_checklist_prompts(kit):
     checklist = (kit / "CHECKLIST.md").read_text()
     for prompt in [mention.prompt for mention in live.MENTIONS] + [live.TERMINAL_PROMPT]:
@@ -538,9 +651,13 @@ def run(kit):
                   ("transcripts", check_transcripts),
                   ("exchange", lambda: check_exchange(base)),
                   ("judges", check_judges),
+                  ("terminal answer", check_terminal_answer_wait),
+                  ("terminal blocked", check_terminal_answer_blocked),
+                  ("terminal answer rule", check_terminal_answer_rule),
                   ("plan and gates", check_plan_and_gates),
                   ("report", check_report),
                   ("seeds", check_seeds),
+                  ("pane exit", lambda: check_pane_exit(base)),
                   ("CHECKLIST prompts", lambda: check_checklist_prompts(kit))]
         for label, check in checks:
             try:

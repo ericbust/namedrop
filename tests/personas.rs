@@ -1,5 +1,8 @@
 //! Persona persistence, lifecycle, and validation, exercised through the public
 //! lifecycle operations and the CLI the user actually types.
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use namedrop::{
     Clock, HerdrCommandExecutor, HerdrCommandOutput, LifecycleRuntime, ProcessIds, StateNamespace,
     StateStore, execute_lifecycle_operation,
@@ -32,7 +35,7 @@ impl TestDirectory {
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).unwrap();
+        cleanup::remove_fixture(&self.0).unwrap();
     }
 }
 
@@ -347,7 +350,7 @@ fn upgrading_keeps_custom_descriptions_and_starts_native_names_generic() {
             .unwrap();
     }
     database
-        .execute_batch("DROP VIEW delivery_seats; DROP TABLE bridged_threads; DROP TABLE bridged_messages; DROP TABLE space_envoys; ALTER TABLE pane_addresses DROP COLUMN remote_commands_terminal_id; ALTER TABLE pane_addresses DROP COLUMN persona; PRAGMA user_version=4;")
+        .execute_batch("DROP TABLE reminder_fires; DROP TABLE reminders; DROP VIEW delivery_seats; DROP TABLE bridged_threads; DROP TABLE bridged_messages; DROP TABLE space_envoys; ALTER TABLE pane_addresses DROP COLUMN remote_commands_terminal_id; ALTER TABLE pane_addresses DROP COLUMN persona; PRAGMA user_version=4;")
         .unwrap();
     drop(database);
 

@@ -117,6 +117,7 @@ import json, os, pathlib, sys
 args = sys.argv[1:]
 if args[:1] == ['-C']: args = args[2:]
 if args[:1] in (['init'], ['fetch']): pass
+elif args[:2] == ['remote', 'add']: pass
 elif args[:1] == ['rev-parse']:
     registry = json.loads((pathlib.Path(os.environ['FIXTURE'])/'registry').read_text())
     pinned = registry['result']['plugins'][0]['source']['requested_ref'].lower() == 'a'*40

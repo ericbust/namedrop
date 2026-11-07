@@ -1,0 +1,412 @@
+{
+  "url": "http://127.0.0.1:37115/w/0be74f17d6e7110afd09?n=<nonce>",
+  "steps": {
+    "hint": {
+      "heads up: I'm rotating the staging API keys at 3pm today": "Enter posts to the channel \u00b7 Mention @name to bring someone in",
+      "can @claude tell me in one short sentence what this repository is for?": "Enter posts to the channel \u00b7 Namedrop checks if it's for @claude",
+      "quick question for @codex: in five words or fewer, what does git stash do?": "Enter posts to the channel \u00b7 Namedrop checks if it's for @codex",
+      "@claude please write a 500-word short story about a lighthouse keeper and send it back to me here.": "Enter sends only to @claude"
+    },
+    "plain": {
+      "route": null,
+      "claudeAnswered": false,
+      "codexAnswered": false,
+      "pass": true
+    },
+    "mention": {
+      "route": "@claude repository description Queued",
+      "parts": ["@claude", "repository description", "Queued"],
+      "topic": "repository description",
+      "title": "Picked by claude-haiku-4-5",
+      "wire": {
+        "mentioned": ["claude"],
+        "reason": "repository description",
+        "router": "claude-haiku-4-5",
+        "state": "routed",
+        "to": ["claude"]
+      },
+      "reply": "C @claude 11:01 PM It is a code-free Namedrop testbed workspace for testing messaging between Claude Code, Codex and a plain shell.",
+      "pass": true
+    },
+    "codex": {
+      "route": "@codex definition request 1 reply",
+      "parts": ["@codex", "definition request", "Queued"],
+      "topic": "definition request",
+      "title": "Picked by claude-haiku-4-5",
+      "wire": {
+        "mentioned": ["codex"],
+        "reason": "definition request",
+        "router": "claude-haiku-4-5",
+        "state": "routed",
+        "to": ["codex"]
+      },
+      "reply": "C @codex 11:02 PM Temporarily saves uncommitted changes.",
+      "pass": true
+    },
+    "thread": {
+      "label": "To @claude",
+      "sentSource": "thanks. which programming language is it mostly written in? one word please",
+      "inReplyTo": "message-1793329304864850706-945041-1",
+      "reply": "C @claude 11:02 PM Markdown (the repo has no code, only three .md files).",
+      "pass": true
+    },
+    "needsyou": {
+      "pass": false,
+      "error": "@claude did not answer in 240s",
+      "verified": {
+        "harness_note": "The driver's wait counted @claude rows only in the main timeline. A reply in a request thread shows there as a preview card, so the wait timed out at 240 s although @claude answered within seconds. final-9-respond-answered.png was taken at that timeout.",
+        "item": "@claude didn't answer a request \u00b7 It ended its turn without replying \u00b7 Show message \u00b7 Respond \u00b7 Details (final-6-needs-you.png). It opened after the driver pressed Escape in @claude's pane mid-turn.",
+        "show_message": "The thread opened with the request tinted and focused; the timeline row was tinted too (final-7-show-message.png).",
+        "respond": "The thread opened with '@claude ' in the reply box and the caret after it; the label was hidden because the text names its recipient (final-8-respond-prefill.png).",
+        "sent": {
+          "source": "@claude no need for the story after all. just reply with the word ok.",
+          "in_reply_to": "message-1793329331391599091-939563-2",
+          "request_message_id": "message-1793329331391599091-939563-2",
+          "same_thread": true
+        },
+        "answer": "@claude replied 'ok' in the thread at 11:02 PM, and the operator's reply showed 'Replied' (final-9-respond-answered.png).",
+        "item_after": "The item stayed open after the answer: the interrupted request itself still has no disposition."
+      }
+    },
+    "closed": {
+      "closed": "{\"id\":\"cli:pane:close\",\"result\":{\"type\":\"ok\"}}",
+      "before": "C @claude Idle C @codex Idle @shell Idle Y You",
+      "after": "C @claude Idle @shell Idle C @codex Retired Y You",
+      "peek": "C @codex Retired in #testbed-test-ch-2-final Refresh Pane closed @codex no longer has a pane Namedrop can read.",
+      "codexRoute": "@codex definition request 1 reply",
+      "pass": true
+    }
+  },
+  "receipts": [
+    {
+      "at": 1.886,
+      "status": 200,
+      "sent": {
+        "request_id": "44962f11-948a-4c69-a1e1-a3ed6447c9ef",
+        "source": "heads up: I'm rotating the staging API keys at 3pm today"
+      },
+      "body": {
+        "channel": {
+          "mentioned": [],
+          "state": "unrouted",
+          "to": []
+        },
+        "context_references": [],
+        "deliveries": [],
+        "delivery_outlook": [],
+        "idempotent_replay": false,
+        "message_id": "message-1793329275704116729-939563-2",
+        "recipients": [],
+        "thread_id": "thread-1793329275703746843-939563-1",
+        "thread_order": 1
+      }
+    },
+    {
+      "at": 24.233,
+      "status": 200,
+      "sent": {
+        "request_id": "9fcdff40-14ef-410a-88cd-e10385370d74",
+        "source": "can @claude tell me in one short sentence what this repository is for?"
+      },
+      "body": {
+        "channel": {
+          "mentioned": ["claude"],
+          "reason": "repository description",
+          "router": "claude-haiku-4-5",
+          "state": "routed",
+          "to": ["claude"]
+        },
+        "context_references": [],
+        "deliveries": [
+          {
+            "address_id": "pane-address-1793329103534096502-907027-1",
+            "delivery_id": "delivery-1793329298053727677-939563-4",
+            "mailbox_order": 4,
+            "message_id": "message-1793329298053725754-939563-3",
+            "state": "queued"
+          }
+        ],
+        "delivery_outlook": [
+          {
+            "agent_status": "idle",
+            "alias": "claude",
+            "lifecycle": "occupied",
+            "statement": "@claude: Agent Session status idle \u2014 settled, so delivery is imminent."
+          }
+        ],
+        "idempotent_replay": false,
+        "message_id": "message-1793329298053725754-939563-3",
+        "recipients": [
+          {
+            "address_id": "pane-address-1793329103534096502-907027-1",
+            "alias": "claude"
+          }
+        ],
+        "routing_usage": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "fallback_credit": null,
+          "inference_geo": "not_available",
+          "input_tokens": 934,
+          "iterations": [
+            {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 0,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 934,
+              "output_tokens": 20,
+              "type": "message"
+            }
+          ],
+          "output_tokens": 20,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "server_tool_use": {
+            "web_fetch_requests": 0,
+            "web_search_requests": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        },
+        "thread_id": "thread-1793329298052891653-939563-2",
+        "thread_order": 1
+      }
+    },
+    {
+      "at": 35.096,
+      "status": 200,
+      "sent": {
+        "request_id": "c141a7d3-3ded-4991-a557-f6edae3fef4f",
+        "source": "quick question for @codex: in five words or fewer, what does git stash do?"
+      },
+      "body": {
+        "channel": {
+          "mentioned": ["codex"],
+          "reason": "definition request",
+          "router": "claude-haiku-4-5",
+          "state": "routed",
+          "to": ["codex"]
+        },
+        "context_references": [],
+        "deliveries": [
+          {
+            "address_id": "pane-address-1793329103736932702-907103-1",
+            "delivery_id": "delivery-1793329308916352114-939563-4",
+            "mailbox_order": 3,
+            "message_id": "message-1793329308916350020-939563-3",
+            "state": "queued"
+          }
+        ],
+        "delivery_outlook": [
+          {
+            "agent_status": "idle",
+            "alias": "codex",
+            "lifecycle": "occupied",
+            "statement": "@codex: Agent Session status idle \u2014 settled, so delivery is imminent."
+          }
+        ],
+        "idempotent_replay": false,
+        "message_id": "message-1793329308916350020-939563-3",
+        "recipients": [
+          {
+            "address_id": "pane-address-1793329103736932702-907103-1",
+            "alias": "codex"
+          }
+        ],
+        "routing_usage": {
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "fallback_credit": null,
+          "inference_geo": "not_available",
+          "input_tokens": 989,
+          "iterations": [
+            {
+              "cache_creation": {
+                "ephemeral_1h_input_tokens": 0,
+                "ephemeral_5m_input_tokens": 0
+              },
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "input_tokens": 989,
+              "output_tokens": 21,
+              "type": "message"
+            }
+          ],
+          "output_tokens": 21,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "server_tool_use": {
+            "web_fetch_requests": 0,
+            "web_search_requests": 0
+          },
+          "service_tier": "standard",
+          "speed": "standard"
+        },
+        "thread_id": "thread-1793329308915557478-939563-2",
+        "thread_order": 1
+      }
+    },
+    {
+      "at": 49.883,
+      "status": 200,
+      "sent": {
+        "request_id": "58819d81-449d-46b7-af22-80e98250d0bf",
+        "source": "thanks. which programming language is it mostly written in? one word please",
+        "in_reply_to": "message-1793329304864850706-945041-1"
+      },
+      "body": {
+        "context_references": [],
+        "deliveries": [
+          {
+            "address_id": "pane-address-1793329103534096502-907027-1",
+            "delivery_id": "delivery-1793329323700151275-939563-2",
+            "mailbox_order": 5,
+            "message_id": "message-1793329323700146817-939563-1",
+            "state": "queued"
+          }
+        ],
+        "delivery_outlook": [
+          {
+            "agent_status": "idle",
+            "alias": "claude",
+            "lifecycle": "occupied",
+            "statement": "@claude: Agent Session status idle \u2014 settled, so delivery is imminent."
+          }
+        ],
+        "idempotent_replay": false,
+        "message_id": "message-1793329323700146817-939563-1",
+        "recipients": [
+          {
+            "address_id": "pane-address-1793329103534096502-907027-1",
+            "alias": "claude"
+          }
+        ],
+        "thread_id": "thread-1793329298052891653-939563-2",
+        "thread_order": 3
+      }
+    },
+    {
+      "at": 57.585,
+      "status": 200,
+      "sent": {
+        "request_id": "32a2bb1e-c6aa-462a-b6db-790b026bb7af",
+        "source": "@claude please write a 500-word short story about a lighthouse keeper and send it back to me here."
+      },
+      "body": {
+        "context_references": [],
+        "deliveries": [
+          {
+            "address_id": "pane-address-1793329103534096502-907027-1",
+            "delivery_id": "delivery-1793329331391602367-939563-3",
+            "mailbox_order": 6,
+            "message_id": "message-1793329331391599091-939563-2",
+            "state": "queued"
+          }
+        ],
+        "delivery_outlook": [
+          {
+            "agent_status": "idle",
+            "alias": "claude",
+            "lifecycle": "occupied",
+            "statement": "@claude: Agent Session status idle \u2014 settled, so delivery is imminent."
+          }
+        ],
+        "idempotent_replay": false,
+        "message_id": "message-1793329331391599091-939563-2",
+        "recipients": [
+          {
+            "address_id": "pane-address-1793329103534096502-907027-1",
+            "alias": "claude"
+          }
+        ],
+        "thread_id": "thread-1793329331390929530-939563-1",
+        "thread_order": 1
+      }
+    },
+    {
+      "at": 91.7,
+      "status": 200,
+      "sent": {
+        "request_id": "96a4986b-6b60-43c1-9495-25b84383dc81",
+        "source": "@claude no need for the story after all. just reply with the word ok.",
+        "in_reply_to": "message-1793329331391599091-939563-2"
+      },
+      "body": {
+        "context_references": [],
+        "deliveries": [
+          {
+            "address_id": "pane-address-1793329103534096502-907027-1",
+            "delivery_id": "delivery-1793329365515453152-939563-2",
+            "mailbox_order": 7,
+            "message_id": "message-1793329365515448683-939563-1",
+            "state": "queued"
+          }
+        ],
+        "delivery_outlook": [
+          {
+            "agent_status": "idle",
+            "alias": "claude",
+            "lifecycle": "occupied",
+            "statement": "@claude: Agent Session status idle \u2014 settled, so delivery is imminent."
+          }
+        ],
+        "idempotent_replay": false,
+        "message_id": "message-1793329365515448683-939563-1",
+        "recipients": [
+          {
+            "address_id": "pane-address-1793329103534096502-907027-1",
+            "alias": "claude"
+          }
+        ],
+        "thread_id": "thread-1793329331390929530-939563-1",
+        "thread_order": 2
+      }
+    }
+  ],
+  "errors": [],
+  "marks": [
+    {
+      "name": "plain",
+      "at": 1.77
+    },
+    {
+      "name": "mention",
+      "at": 22.667
+    },
+    {
+      "name": "codex",
+      "at": 33.268
+    },
+    {
+      "name": "thread",
+      "at": 49.763
+    },
+    {
+      "name": "needsyou",
+      "at": 57.466
+    },
+    {
+      "name": "closed",
+      "at": 332.354
+    },
+    {
+      "name": "end",
+      "at": 336.209
+    }
+  ],
+  "members": "C @claude Idle C @codex Idle @shell Idle",
+  "pageOverflow": 0
+}

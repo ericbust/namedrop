@@ -1,12 +1,5 @@
-//! Isolated cheap-model worker that turns an agent status snapshot into short
-//! descriptions, and suggests a persona for a named agent.
-//!
-//! The worker is a fresh child of the invoking host CLI. It never resumes or
-//! forks the active conversation, carries no Herdr or Namedrop identifiers, and
-//! runs with tools, MCP, hooks, skills and project instruction loading disabled
-//! through controls verified against each CLI's real outbound request. Facts
-//! come from the snapshot alone, or for a persona from the name and draft the
-//! user supplied: the model writes prose and nothing else.
+#[path = "channel_router.rs"]
+pub(crate) mod channel_router;
 
 use crate::MAX_PERSONA_CHARS;
 use crate::runtime::stop_process_group;
@@ -657,7 +650,22 @@ impl WorkerPlan {
     }
 }
 
-fn codex_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, String> {
+fn instructions_for_format(prompt: &WorkerPrompt, structured: bool) -> String {
+    if structured {
+        prompt.instructions.to_owned()
+    } else {
+        format!(
+            "{}\nOutput JSON schema: {}",
+            prompt.instructions, prompt.schema
+        )
+    }
+}
+
+fn codex_plan(
+    prompt: &WorkerPrompt,
+    payload: &str,
+    structured: bool,
+) -> Result<WorkerPlan, String> {
     let binary = resolve_executable(&codex_binary())?;
 
     let directory = reserve_worker_directory()?;
@@ -677,6 +685,7 @@ fn codex_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, String
     let mut command = crate::linux_sandbox::command(&binary, &directory.0, &codex_home()?)?;
     command
         .arg("exec")
+        .arg("--json")
         // No user config, no project rules, no persisted session.
         .args(["--ignore-user-config", "--ignore-rules", "--ephemeral"])
         .arg("--skip-git-repo-check")
@@ -693,23 +702,30 @@ fn codex_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, String
         // provider error rather than a faster call.
         .args(["-c", "model_reasoning_effort=\"low\""])
         .args(["--color", "never"])
-        .args(["-m", CODEX_MODEL])
-        .arg("--output-schema")
-        .arg(&schema_path)
-        .arg("-o")
-        .arg(&output_path);
+        .args(["-m", CODEX_MODEL]);
+    if structured {
+        command.arg("--output-schema").arg(&schema_path);
+    }
+    command.arg("-o").arg(&output_path);
 
     Ok(WorkerPlan {
         command,
         // Codex takes its whole prompt on stdin, so our instructions and our
         // payload travel together.
-        stdin: format!("{}\n\n<data>\n{payload}\n</data>\n", prompt.instructions),
+        stdin: format!(
+            "{}\n\n<data>\n{payload}\n</data>\n",
+            instructions_for_format(prompt, structured)
+        ),
         result_path: Some(output_path),
         directory,
     })
 }
 
-fn claude_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, String> {
+fn claude_plan(
+    prompt: &WorkerPrompt,
+    payload: &str,
+    structured: bool,
+) -> Result<WorkerPlan, String> {
     let directory = reserve_worker_directory()?;
     let mut command = Command::new(claude_binary());
     command
@@ -724,9 +740,11 @@ fn claude_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, Strin
         .arg("--no-session-persistence")
         // Anything that would prompt is denied instead of waiting for a human.
         .args(["--permission-prompts", "none"])
-        .args(["--system-prompt", prompt.instructions])
+        .args([
+            "--system-prompt",
+            &instructions_for_format(prompt, structured),
+        ])
         .args(["--output-format", "json"])
-        .args(["--json-schema", &prompt.schema])
         .args(["--max-budget-usd", CLAUDE_BUDGET_USD])
         // Writing one short sentence per agent from text already supplied needs
         // no reasoning. Captured requests showed the CLI asking for a
@@ -736,6 +754,9 @@ fn claude_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, Strin
         .env("MAX_THINKING_TOKENS", "0")
         .current_dir(neutral_worker_directory());
 
+    if structured {
+        command.args(["--json-schema", &prompt.schema]);
+    }
     Ok(WorkerPlan {
         command,
         stdin: payload.to_owned(),
@@ -744,117 +765,277 @@ fn claude_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, Strin
     })
 }
 
-/// Polls the isolated worker until it exits or the caller cancels it. Silence
-/// alone is not failure: a provider request may take longer than expected.
 fn run_worker(
     host: &str,
     prompt: &WorkerPrompt,
     payload: &str,
     cancelled: &AtomicBool,
 ) -> Result<String, String> {
-    let mut plan = match host {
-        "codex" => codex_plan(prompt, payload)?,
-        _ => claude_plan(prompt, payload)?,
-    };
-    let worker_directory = plan.directory.0.clone();
-    let command = &mut plan.command;
-    // The worker runs in its own private directory: no project configuration is
-    // reachable from it, and the sandbox need allow only this one path.
-    command.current_dir(&worker_directory).process_group(0);
+    capture_worker(host, prompt, payload, cancelled, None, true).result
+}
 
-    // Strip the collaboration identity so the worker cannot be mistaken for the
-    // registered agent session or reach its mailbox. Both hosts get this.
-    for key in [
-        "HERDR_PLUGIN_STATE_DIR",
-        "HERDR_SOCKET_PATH",
-        "HERDR_WORKSPACE_ID",
-        "HERDR_PANE_ID",
-        "HERDR_SESSION_ID",
-        "NAMEDROP_AGENT_SESSION_ID",
-        "NAMEDROP_REGISTRATION_ID",
-        // The invoking agent's own session markers, observed in a live pane.
-        // Left in place they would mark the worker as that agent's child.
-        "CLAUDE_CODE_SESSION_ID",
-        "CLAUDE_CODE_CHILD_SESSION",
-        "CLAUDE_CODE_SESSION_ATTENDED",
-        "CLAUDE_CODE_ENTRYPOINT",
-        "CODEX_SESSION_ID",
-        "CODEX_THREAD_ID",
-        "AI_AGENT",
-        // Live handles to the invoking session's own IPC. Measured harmless to
-        // latency, but an isolated worker has no business holding them.
-        "CLAUDE_CODE_MESSAGING_SOCKET",
-        "CLAUDE_CODE_MESSAGING_TOKEN",
-        "CLAUDE_CODE_EXECPATH",
-        "CLAUDE_PID",
-        "CLAUDECODE",
-        "CLAUDE_EFFORT",
-    ] {
-        command.env_remove(key);
-    }
+#[derive(Clone, Copy, Debug)]
+enum WorkerFailure {
+    PreparationFailed,
+    Failed,
+    Timeout,
+    Cancelled,
+    OutputLimit,
+    MissingOutput,
+}
 
-    // The whole prompt is handed over as a file rather than written into a
-    // pipe. A pipe's capacity is not a portable guarantee, so a child that
-    // never reads its stdin could otherwise block this thread before the
-    // cancellation loop had started.
-    let input_file = capture_file()?;
-    write_capture(&input_file, plan.stdin.as_bytes())?;
+struct WorkerCapture {
+    result: Result<String, String>,
+    raw_stdout: String,
+    failure: WorkerFailure,
+}
 
-    let stdout = capture_file()?;
-    let stderr = capture_file()?;
-    let mut child = command
-        .stdin(Stdio::from(input_file))
-        .stdout(Stdio::from(stdout.try_clone().map_err(|error| {
-            format!("failed to capture worker stdout: {error}")
-        })?))
-        .stderr(Stdio::from(stderr.try_clone().map_err(|error| {
-            format!("failed to capture worker stderr: {error}")
-        })?))
-        .spawn()
-        .map_err(|error| format!("failed to run the model worker: {error}"))?;
+fn capture_worker(
+    host: &str,
+    prompt: &WorkerPrompt,
+    payload: &str,
+    cancelled: &AtomicBool,
+    deadline: Option<Instant>,
+    structured: bool,
+) -> WorkerCapture {
+    let mut capture = None;
+    let mut failure = WorkerFailure::PreparationFailed;
+    let result = (|| {
+        let mut plan = match host {
+            "codex" => codex_plan(prompt, payload, structured)?,
+            _ => claude_plan(prompt, payload, structured)?,
+        };
+        let worker_directory = plan.directory.0.clone();
+        let command = &mut plan.command;
+        // The worker runs in its own private directory: no project configuration is
+        // reachable from it, and the sandbox need allow only this one path.
+        command.current_dir(&worker_directory).process_group(0);
 
-    loop {
-        if cancelled.load(Ordering::Relaxed) {
-            stop_process_group(&mut child);
-            return Err("agent status summary cancelled".to_owned());
-        }
-        // Stop an oversized worker while it is still running, so the caps end
-        // the work rather than only rejecting its output afterwards.
-        if oversized(&stdout) || oversized(&stderr) || plan.result_oversized() {
-            stop_process_group(&mut child);
-            return Err("model worker output exceeded its limit".to_owned());
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    let detail = read_capture(stderr).unwrap_or_default();
-                    let detail = sanitize_text(&detail);
-                    let detail = truncate_chars(&detail, 200);
-                    return Err(if detail.is_empty() {
-                        "the model worker failed".to_owned()
-                    } else {
-                        format!("the model worker failed: {detail}")
-                    });
-                }
-                break;
+        for (key, _) in env::vars_os() {
+            let name = key.to_string_lossy();
+            if name.starts_with("HERDR_") || name.starts_with("NAMEDROP_") {
+                command.env_remove(key);
             }
-            Ok(None) => {}
-            Err(error) => {
+        }
+        for key in [
+            // The invoking agent's own session markers, observed in a live pane.
+            // Left in place they would mark the worker as that agent's child.
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_CODE_SESSION_ATTENDED",
+            "CLAUDE_CODE_ENTRYPOINT",
+            "CODEX_SESSION_ID",
+            "CODEX_THREAD_ID",
+            "AI_AGENT",
+            "CLAUDE_CODE_MESSAGING_SOCKET",
+            "CLAUDE_CODE_MESSAGING_TOKEN",
+            "CLAUDE_CODE_EXECPATH",
+            "CLAUDE_PID",
+            "CLAUDECODE",
+            "CLAUDE_EFFORT",
+        ] {
+            command.env_remove(key);
+        }
+
+        // The whole prompt is handed over as a file rather than written into a
+        // pipe. A pipe's capacity is not a portable guarantee, so a child that
+        // never reads its stdin could otherwise block this thread before the
+        // cancellation loop had started.
+        let input_file = capture_file()?;
+        write_capture(&input_file, plan.stdin.as_bytes())?;
+
+        let stdout = capture_file()?;
+        let stderr = capture_file()?;
+        capture = Some(stdout.try_clone().map_err(|error| error.to_string())?);
+        #[cfg(target_os = "linux")]
+        let _parent_lifetime = protect_worker_group(command)?;
+        let mut child = command
+            .stdin(Stdio::from(input_file))
+            .stdout(Stdio::from(stdout.try_clone().map_err(|error| {
+                format!("failed to capture worker stdout: {error}")
+            })?))
+            .stderr(Stdio::from(stderr.try_clone().map_err(|error| {
+                format!("failed to capture worker stderr: {error}")
+            })?))
+            .spawn()
+            .map_err(|error| format!("failed to run the model worker: {error}"))?;
+
+        failure = WorkerFailure::Failed;
+        loop {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 stop_process_group(&mut child);
-                return Err(format!("failed to wait for the model worker: {error}"));
+                failure = WorkerFailure::Timeout;
+                return Err("model worker deadline exceeded".to_owned());
             }
+            if cancelled.load(Ordering::Relaxed) {
+                stop_process_group(&mut child);
+                failure = WorkerFailure::Cancelled;
+                return Err("agent status summary cancelled".to_owned());
+            }
+            if oversized(&stdout) || oversized(&stderr) || plan.result_oversized() {
+                stop_process_group(&mut child);
+                failure = WorkerFailure::OutputLimit;
+                return Err("model worker output exceeded its limit".to_owned());
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    stop_process_group(&mut child);
+                    if !status.success() {
+                        let detail = read_capture(stderr).unwrap_or_default();
+                        let detail = sanitize_text(&detail);
+                        let detail = truncate_chars(&detail, 200);
+                        return Err(if detail.is_empty() {
+                            "the model worker failed".to_owned()
+                        } else {
+                            format!("the model worker failed: {detail}")
+                        });
+                    }
+                    break;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    stop_process_group(&mut child);
+                    return Err(format!("failed to wait for the model worker: {error}"));
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
         }
-        thread::sleep(Duration::from_millis(10));
-    }
 
-    match &plan.result_path {
-        // Read through the same bounded reader as the capture files, so an
-        // oversized result can never be slurped into memory first.
-        Some(result) => read_capture(
-            fs::File::open(result).map_err(|_| "the model worker returned nothing".to_owned())?,
-        ),
-        None => read_capture(stdout),
+        failure = WorkerFailure::MissingOutput;
+        let raw_stdout = read_capture(stdout)?;
+        let response = match &plan.result_path {
+            Some(result) => read_capture(
+                fs::File::open(result)
+                    .map_err(|_| "the model worker returned nothing".to_owned())?,
+            )?,
+            None => raw_stdout,
+        };
+        if response.trim().is_empty() {
+            return Err("the model worker returned nothing".to_owned());
+        }
+        Ok(response)
+    })();
+    let raw_stdout = capture
+        .and_then(|mut file: fs::File| {
+            file.seek(SeekFrom::Start(0)).ok()?;
+            let mut bytes = Vec::new();
+            file.take(MAX_RAW_STDOUT_BYTES as u64)
+                .read_to_end(&mut bytes)
+                .ok()?;
+            Some(String::from_utf8_lossy(&bytes).into_owned())
+        })
+        .unwrap_or_default();
+    WorkerCapture {
+        result,
+        raw_stdout,
+        failure,
     }
+}
+
+#[cfg(target_os = "linux")]
+static WORKER_LIFETIME_LEASE: Mutex<Option<std::sync::Arc<fs::File>>> = Mutex::new(None);
+
+#[cfg(target_os = "linux")]
+pub(crate) fn set_worker_lifetime_lease(lease: Option<std::sync::Arc<fs::File>>) {
+    *WORKER_LIFETIME_LEASE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = lease;
+}
+
+#[cfg(target_os = "linux")]
+fn protect_worker_group(
+    command: &mut Command,
+) -> Result<(fs::File, fs::File, Option<std::sync::Arc<fs::File>>), String> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let mut pipe = [0; 2];
+    if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(format!(
+            "worker lifetime pipe: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let reader = unsafe { fs::File::from_raw_fd(pipe[0]) };
+    let writer = unsafe { fs::File::from_raw_fd(pipe[1]) };
+    let read_fd = reader.as_raw_fd();
+    let write_fd = writer.as_raw_fd();
+    let lease = WORKER_LIFETIME_LEASE
+        .lock()
+        .map_err(|_| "worker lifetime lease poisoned".to_owned())?
+        .clone();
+    let lease_fd = lease.as_ref().map(|file| file.as_raw_fd());
+    let parent = unsafe { libc::getpid() };
+    // Only async-signal-safe syscalls run between fork and exec. The watchdog
+    // retains only the parent pipe and manager lease until it kills the group.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent {
+                libc::_exit(125);
+            }
+            let group = libc::getpid();
+            let watchdog = libc::fork();
+            if watchdog < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if watchdog == 0 {
+                libc::close(write_fd);
+                let (low, high) =
+                    lease_fd.map_or((read_fd, read_fd), |fd| (fd.min(read_fd), fd.max(read_fd)));
+                let close = |first: u32, last: u32| {
+                    if first <= last && libc::syscall(libc::SYS_close_range, first, last, 0u32) != 0
+                    {
+                        libc::kill(-group, libc::SIGKILL);
+                        libc::_exit(126);
+                    }
+                };
+                if low > 3 {
+                    close(3, (low - 1) as u32);
+                }
+                if high > low + 1 {
+                    close((low + 1) as u32, (high - 1) as u32);
+                }
+                close((high + 1) as u32, u32::MAX);
+                let mut byte = 0u8;
+                loop {
+                    let count = libc::read(read_fd, (&mut byte as *mut u8).cast(), 1);
+                    if count == 0 {
+                        break;
+                    }
+                    if count < 0 && *libc::__errno_location() != libc::EINTR {
+                        break;
+                    }
+                }
+                libc::kill(-group, libc::SIGKILL);
+                libc::_exit(0);
+            }
+            libc::close(read_fd);
+            libc::close(write_fd);
+            Ok(())
+        });
+    }
+    Ok((reader, writer, lease))
+}
+
+fn worker_usage(raw: &str) -> Option<Value> {
+    if let Ok(value) = serde_json::from_str::<Value>(raw) {
+        return value
+            .get("usage")
+            .filter(|usage| usage.is_object())
+            .cloned();
+    }
+    // Codex emits JSONL events; the completed turn carries the token receipt.
+    raw.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some("turn.completed"))
+        .filter_map(|event| {
+            event
+                .get("usage")
+                .filter(|usage| usage.is_object())
+                .cloned()
+        })
+        .next_back()
 }
 
 /// Pulls the model's own JSON out of the host result envelope.
@@ -883,7 +1064,10 @@ fn extract_response(raw: &str, expected_field: &str) -> Result<Value, String> {
         });
     }
 
-    let candidate = match parsed.get("result") {
+    let candidate = match parsed
+        .get("structured_output")
+        .or_else(|| parsed.get("result"))
+    {
         Some(result) => result.clone(),
         None => parsed,
     };
@@ -899,8 +1083,15 @@ fn extract_response(raw: &str, expected_field: &str) -> Result<Value, String> {
     if text.len() > MAX_RESPONSE_BYTES {
         return Err("the model worker response exceeded its limit".to_owned());
     }
-    serde_json::from_str(text.trim())
-        .map_err(|_| "the model worker returned malformed output".to_owned())
+    let text = text.trim();
+    let text = match text.split_once('\n') {
+        Some((header, body)) if matches!(header.trim(), "```json" | "```") => body
+            .rsplit_once('\n')
+            .filter(|(_, closing)| closing.trim() == "```")
+            .map_or(text, |(content, _)| content.trim()),
+        _ => text,
+    };
+    serde_json::from_str(text).map_err(|_| "the model worker returned malformed output".to_owned())
 }
 
 /// Accepts prose and nothing else: identities must already be known, and every
@@ -1117,4 +1308,97 @@ fn store(key: String, summary: &Value) {
             stored_at: Instant::now(),
         },
     );
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+
+    #[test]
+    fn json_fenced_model_response_is_extracted() {
+        let response = json!({
+            "type": "result",
+            "result": "```json\n{\n \"to\": [\"claude\"],\n \"reason\": \"Post requests Claude to take first turn and provide bound reply\"\n}\n```"
+        });
+        assert_eq!(
+            extract_response(&response.to_string(), "to"),
+            Ok(json!({
+                "to": ["claude"],
+                "reason": "Post requests Claude to take first turn and provide bound reply"
+            }))
+        );
+    }
+
+    #[test]
+    fn response_framing_preserves_supported_envelopes_and_caller_fields() {
+        for field in ["to", "origin_description", "description"] {
+            let response = json!({field: "text containing ``` stays intact"});
+            for envelope in [
+                response.clone(),
+                json!({"structured_output": response}),
+                json!({"result": response}),
+                json!({"result": response.to_string()}),
+            ] {
+                assert_eq!(
+                    extract_response(&envelope.to_string(), field),
+                    Ok(response.clone())
+                );
+            }
+            for (opening, newline) in [("```json", "\n"), ("```", "\n"), ("```json  ", "\r\n")] {
+                let text = format!("  {opening}{newline}{response}{newline}``` \n");
+                for envelope in [
+                    json!({"result": text}),
+                    json!({"structured_output": text}),
+                    json!(text),
+                ] {
+                    assert_eq!(
+                        extract_response(&envelope.to_string(), field),
+                        Ok(response.clone())
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn response_framing_does_not_recover_prose_unknown_fences_or_invalid_json() {
+        let response = r#"{"to":["claude"],"reason":"request"}"#;
+        for text in [
+            format!("Here is the JSON:\n```json\n{response}\n```"),
+            format!("```json\n{response}\n```\nDone."),
+            format!("```json\n{response}\n```\n```json\n{response}\n```"),
+            format!("```javascript\n{response}\n```"),
+            format!("```JSON\n{response}\n```"),
+            format!("```json\n{response}"),
+            format!("```json {response}```"),
+            format!("```json\n{response}```"),
+            format!("```json\n```json\n{response}\n```\n```"),
+            format!("```json\n{response}\n{response}\n```"),
+            "```json\n{\"to\":[\"claude\"],}\n```".to_owned(),
+        ] {
+            assert_eq!(
+                extract_response(&json!({"result": text}).to_string(), "to"),
+                Err("the model worker returned malformed output".to_owned()),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn response_size_is_checked_before_removing_framing() {
+        let response = json!({"description": "x".repeat(MAX_RESPONSE_BYTES - 18)});
+        let text = response.to_string();
+        assert_eq!(text.len(), MAX_RESPONSE_BYTES);
+        assert_eq!(
+            extract_response(&json!({"result": text}).to_string(), "description"),
+            Ok(response)
+        );
+        assert_eq!(
+            extract_response(
+                &json!({"result": format!("```json\n{text}\n```")}).to_string(),
+                "description"
+            ),
+            Err("the model worker response exceeded its limit".to_owned())
+        );
+    }
 }

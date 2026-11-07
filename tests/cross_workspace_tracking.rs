@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use namedrop::{
     ActorKind, AgentSessionId, MutationAttribution, PaneAddressId, StateNamespace, StateStore,
     drain_mailboxes, execute_control_operation, execute_handoff_operation,

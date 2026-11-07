@@ -1,11 +1,15 @@
 //! Where setup writes shortcuts. This binary holds a single test because it
 //! changes the process environment.
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use std::fs;
 
 #[test]
 fn xdg_config_home_applies_only_to_this_users_own_home() {
     let root =
         std::env::temp_dir().join(format!("namedrop-shortcut-config-{}", std::process::id()));
+    let _cleanup = cleanup::FixtureDirectory(root.clone());
     let (home, xdg) = (root.join("home"), root.join("xdg"));
     let default = home.join(".config/herdr/config.toml");
     fs::create_dir_all(&home).unwrap();
@@ -36,5 +40,4 @@ fn xdg_config_home_applies_only_to_this_users_own_home() {
     unsafe { std::env::set_var("XDG_CONFIG_HOME", "relative/config") };
     let report = namedrop::install_shortcuts(None, Some(&home)).unwrap();
     assert_eq!(report["path"], default.to_str().unwrap());
-    let _ = fs::remove_dir_all(&root);
 }

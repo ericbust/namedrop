@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
 use clap::Parser;
@@ -54,7 +57,7 @@ impl TestDirectory {
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.path).unwrap();
+        cleanup::remove_fixture(&self.path).unwrap();
     }
 }
 
@@ -1925,7 +1928,7 @@ fn lifecycle_operations_activate_create_bind_and_list_through_one_contract() {
         true
     );
     let rules = fs::read_to_string(directory.home().join(".codex/rules/namedrop.rules")).unwrap();
-    assert_eq!(rules.matches("prefix_rule(").count(), 18);
+    assert_eq!(rules.matches("prefix_rule(").count(), 22);
     let executable = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
     for argv in [vec!["address", "list"], vec!["complete", "--no-reply"]] {
         let mut pattern = vec![
@@ -2066,6 +2069,13 @@ fn lifecycle_operations_mutate_addresses_without_losing_identity() {
     let deactivated =
         execute_lifecycle_operation("deactivate", serde_json::json!({}), &runtime).unwrap();
     assert_eq!(deactivated["deactivated"], true);
+    assert_eq!(deactivated["subagent_hooks"]["removed_entries"], 12);
+    for agent_runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+        let package = package_directory(directory.home(), agent_runtime);
+        assert!(!package.join("scripts/subagent").exists());
+        assert!(package.join("scripts/session-start").exists());
+        assert!(package.join("scripts/user-prompt-submit").exists());
+    }
 }
 
 #[test]

@@ -307,3 +307,48 @@ fn complete_rechecks_caller_after_live_validation() {
     assert_eq!(fixture.count("delivery_acknowledgements"), 1);
     assert_eq!(fixture.count("delivery_dispositions"), 1);
 }
+
+#[test]
+fn deferred_reminder_retry_recovers_absolute_deadline_after_caller_rotates() {
+    let f = Fixture::new();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(f.state.join("reminder-clock.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let caller = f.validated_caller();
+    let request = Request::new(
+        Operation::ReminderSet,
+        json!({"in":"1m","body":"check later"}),
+        caller.clone(),
+        PathBuf::from("/repo"),
+    )
+    .unwrap();
+    request.validate().unwrap();
+    let duplicate = Request::new(
+        Operation::ReminderSet,
+        json!({"in":"1m","body":"check later"}),
+        caller,
+        PathBuf::from("/repo"),
+    )
+    .unwrap();
+    assert_eq!(request.key, duplicate.key);
+    let first = crate::reminder::execute_with_caller(
+        "reminder.set",
+        request.input.clone(),
+        &f.runtime(),
+        Some(&request.caller),
+    )
+    .unwrap();
+    f.rotate_session();
+    let recovered = recover_committed(&request, &f.runtime()).unwrap().unwrap();
+    assert_eq!(recovered["reminder_id"], first["reminder_id"]);
+    assert_eq!(
+        recovered["spec"]["first_due_at_ms"],
+        first["spec"]["first_due_at_ms"]
+    );
+    assert_eq!(f.count("reminders"), 1);
+}

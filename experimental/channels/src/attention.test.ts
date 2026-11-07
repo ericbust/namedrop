@@ -1,0 +1,672 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { test } from "node:test";
+import {
+  absence,
+  attentionConversation,
+  attentionReplyTo,
+  evidenceReduce,
+  evidenceThread,
+  type FocusedEvidence,
+  type MessageIntent,
+  messageIntent,
+  prepareChannelMessage,
+  replyPrefill,
+} from "./attention.ts";
+import { absenceCopy, attentionCopy, timeOfDay } from "./copy.ts";
+import type {
+  AddressId,
+  Attention,
+  Directory,
+  Member,
+  MessageContext,
+} from "./model.ts";
+import { parseEvent, parseMessageContext } from "./wire.ts";
+
+const raw = JSON.parse(
+  readFileSync(
+    new URL("./fixtures/real-frames.jsonl", import.meta.url),
+    "utf8",
+  ).split("\n")[0] ?? "null",
+);
+const event = parseEvent("space", JSON.stringify(raw));
+if (event?.type !== "space") throw new Error("Missing fixture");
+const channel = event.channel;
+const member = [...channel.members.values()][0];
+if (member === undefined) throw new Error("Missing member");
+const target = { threadId: "old-thread", messageId: "old-message" };
+const reply = {
+  kind: "reply",
+  ...target,
+  addressId: member.id,
+  subject: null,
+} as const;
+const request = { key: channel.key, target, response: reply };
+const root = {
+  message_id: "root",
+  thread_id: "old-thread",
+  in_reply_to: null,
+  at_ms: 1,
+  author: "human",
+  kind: "mention",
+  body: { text: "Request", truncated: false },
+  legs: [],
+};
+const anchor = {
+  ...root,
+  message_id: target.messageId,
+  in_reply_to: "root",
+  at_ms: 2,
+  kind: "reply",
+};
+const context: MessageContext = parseMessageContext(
+  {
+    thread_id: target.threadId,
+    message_count: 200,
+    earlier_omitted: true,
+    messages: [anchor, root],
+  },
+  target,
+);
+
+test("context validates exact thread and target, projects safe rows, and sorts messages", () => {
+  assert.deepEqual(
+    context.messages.map((row) => row.id),
+    ["root", "old-message"],
+  );
+  assert.equal(context.earlierOmitted, true);
+  for (const malformed of [
+    {
+      thread_id: "wrong",
+      message_count: 2,
+      earlier_omitted: false,
+      messages: [root, anchor],
+    },
+    {
+      thread_id: target.threadId,
+      message_count: 1,
+      earlier_omitted: false,
+      messages: [root],
+    },
+    {
+      thread_id: target.threadId,
+      message_count: 2,
+      earlier_omitted: false,
+      messages: [root, { ...anchor, thread_id: "other" }],
+    },
+    {
+      thread_id: target.threadId,
+      message_count: 1,
+      earlier_omitted: false,
+      messages: [root, anchor],
+    },
+  ])
+    assert.throws(() => parseMessageContext(malformed, target));
+});
+test("focused evidence ignores stale loads and failures after new navigation or retry", () => {
+  const initial: FocusedEvidence = { kind: "closed", version: 0 };
+  const first = evidenceReduce(initial, { type: "open", request });
+  const second = evidenceReduce(first, {
+    type: "open",
+    request: { ...request, target: { ...target, messageId: "new" } },
+  });
+  assert.equal(
+    evidenceReduce(second, { type: "loaded", version: first.version, context }),
+    second,
+  );
+  assert.equal(
+    evidenceReduce(second, {
+      type: "failed",
+      version: first.version,
+      reason: "Late error",
+    }),
+    second,
+  );
+  const failed = evidenceReduce(first, {
+    type: "failed",
+    version: first.version,
+    reason: "HTTP 404",
+  });
+  assert.equal(failed.kind, "error");
+  const retry = evidenceReduce(failed, { type: "retry" });
+  assert.equal(retry.kind, "loading");
+  assert.equal(
+    evidenceReduce(retry, { type: "loaded", version: first.version, context }),
+    retry,
+  );
+  const ready = evidenceReduce(retry, {
+    type: "loaded",
+    version: retry.version,
+    context,
+  });
+  assert.equal(ready.kind, "ready");
+  const closed = evidenceReduce(ready, { type: "close" });
+  assert.equal(
+    evidenceReduce(closed, { type: "loaded", version: retry.version, context }),
+    closed,
+  );
+});
+test("historical reply target survives live frame eviction and newer replies", () => {
+  const loaded = evidenceReduce(
+    evidenceReduce({ kind: "closed", version: 0 }, { type: "open", request }),
+    { type: "loaded", version: 1, context },
+  );
+  assert.equal(loaded.kind, "ready");
+  if (loaded.kind !== "ready") return;
+  const newer = {
+    ...context.messages[1],
+    id: "newer",
+    threadId: target.threadId,
+    inReplyTo: target.messageId,
+    at: 100,
+    author: member.id,
+    kind: "reply",
+    body: { text: "Later", truncated: false },
+    legs: [],
+    routing: null,
+    woke: [],
+  } as const;
+  const merged = evidenceThread(
+    loaded.context,
+    new Map([[newer.id, newer]]),
+    channel.members,
+  );
+  assert.deepEqual(
+    merged.replies.map((row) => row.id),
+    [target.messageId, "newer"],
+  );
+  assert.equal(
+    loaded.request.response?.kind === "reply"
+      ? loaded.request.response.messageId
+      : null,
+    target.messageId,
+  );
+  assert.equal(loaded.request.response?.addressId, member.id);
+  assert.equal(
+    evidenceThread(loaded.context, new Map(), channel.members).replies[0]?.id,
+    target.messageId,
+  );
+  const sent = evidenceReduce(loaded, {
+    type: "sent",
+    key: channel.key,
+    messageId: target.messageId,
+  });
+  assert.ok(sent.kind === "ready");
+  assert.equal(sent.request.response, null);
+  assert.equal(sent.context, loaded.context);
+});
+test("reply intent addresses the responsible member, preserves typed drafts and rejects retired or missing identities", () => {
+  const directory = { members: channel.members, homes: new Map() };
+  const to = attentionReplyTo(reply, directory);
+  assert.deepEqual(to, { names: [member.alias], mentions: member.alias });
+  assert.ok(to);
+  assert.deepEqual(replyPrefill("", to), {
+    text: `${member.alias} `,
+    preserved: false,
+  });
+  assert.deepEqual(replyPrefill("@someone keep my draft", to), {
+    text: "@someone keep my draft",
+    preserved: true,
+  });
+  assert.equal(
+    attentionReplyTo(reply, { ...directory, members: new Map() }),
+    null,
+  );
+  assert.equal(
+    attentionReplyTo(reply, {
+      ...directory,
+      members: new Map([[member.id, { ...member, activity: "retired" }]]),
+    }),
+    null,
+  );
+});
+test("an unreachable response says why: its pane is closed, or it left the frame, with the card's name when the page has one", () => {
+  const item: Attention = {
+    rowKey: "unanswered",
+    source: "delivery_attempt",
+    response: { kind: "message", addressId: member.id },
+    conversation: target,
+    summary: { text: "Unanswered", truncated: false },
+    subjectSummary: null,
+    openedAt: 1,
+    subjectAlias: member.alias,
+    messageId: null,
+    threadId: null,
+    actions: [],
+  };
+  const intent = messageIntent(item, target, true);
+  assert.ok(intent);
+  assert.equal(intent.subject, member.alias);
+  const closed: Directory = {
+    members: new Map([[member.id, { ...member, activity: "retired" }]]),
+    homes: new Map(),
+  };
+  const removed: Directory = { members: new Map(), homes: new Map() };
+  assert.deepEqual(absence(intent, closed), {
+    kind: "closed",
+    alias: member.alias,
+  });
+  assert.deepEqual(absence({ ...intent, subject: null }, closed), {
+    kind: "closed",
+    alias: member.alias,
+  });
+  assert.deepEqual(absence(intent, removed), {
+    kind: "gone",
+    alias: member.alias,
+  });
+  assert.deepEqual(absence(reply, removed), { kind: "gone", alias: null });
+  assert.equal(
+    messageIntent({ ...item, subjectAlias: null }, target, true)?.subject,
+    null,
+  );
+});
+const envoy = {
+  addressId: "envoy:w2:pane-9" as AddressId,
+  subject: "@lead",
+};
+const lead: Member = { ...member, id: "pane-9" as AddressId, alias: "@lead" };
+const leadHome = (token: string | null): Directory => ({
+  members: channel.members,
+  homes: new Map([
+    [
+      "w2",
+      {
+        key: channel.key,
+        name: "beta",
+        token,
+        members: new Map([[lead.id, lead]]),
+      },
+    ],
+  ]),
+});
+test("H5: an agent whose workspace has no label Namedrop can mention is unreachable, not gone", () => {
+  assert.equal(attentionReplyTo(envoy, leadHome(null)), null);
+  assert.deepEqual(absence(envoy, leadHome(null)), {
+    kind: "unreachable",
+    alias: "@lead",
+  });
+  assert.equal(
+    absenceCopy({ kind: "unreachable", alias: "@codex" }),
+    "@codex's workspace has no label Namedrop can mention, so it can't take a message from here.",
+  );
+  assert.deepEqual(attentionReplyTo(envoy, leadHome("#beta")), {
+    names: ["@lead · #beta"],
+    mentions: "#beta @lead",
+  });
+});
+test("H6: an agent that can take a message has no absence, and a card whose agent can't reads the absence line in place of its hint", () => {
+  const directory = { members: channel.members, homes: new Map() };
+  assert.ok(attentionReplyTo(reply, directory));
+  assert.equal(absence(reply, directory), null);
+  assert.equal(absence(envoy, leadHome("#beta")), null);
+  const item: Attention = {
+    rowKey: "decision",
+    source: "coordination",
+    response: { kind: "message", addressId: member.id },
+    conversation: target,
+    summary: { text: "Pick a plan", truncated: false },
+    subjectSummary: null,
+    openedAt: 1,
+    subjectAlias: member.alias,
+    messageId: null,
+    threadId: null,
+    actions: [],
+  };
+  const line = "@codex's pane is closed, so it can't take a message.";
+  assert.deepEqual(
+    attentionCopy(item, member, { kind: "closed", alias: "@codex" }),
+    { ...attentionCopy(item, member), hint: line, hintTitle: null },
+  );
+  assert.equal(
+    attentionCopy(item, member).hint,
+    "Read the report, then answer the lead.",
+  );
+});
+test("legacy attention links only to an available loaded message and does not invent a response", () => {
+  const attention: Attention = {
+    rowKey: "legacy",
+    source: "delivery_attempt",
+    messageId: target.messageId,
+    subjectAlias: member.alias,
+    summary: { text: "Old", truncated: false },
+    subjectSummary: null,
+    openedAt: 1,
+    threadId: null,
+    actions: [],
+  };
+  assert.equal(attentionConversation(attention, channel), null);
+  assert.deepEqual(
+    attentionConversation(attention, {
+      messages: new Map(context.messages.map((row) => [row.id, row])),
+    }),
+    target,
+  );
+});
+
+test("tracked response prepares plain words on the first line, the caret at its end, and the exact reference on a last line", () => {
+  const item: Attention = {
+    rowKey: "decision",
+    source: "coordination",
+    coordinationId: "coordination-1",
+    response: { kind: "message", addressId: member.id },
+    conversation: target,
+    summary: { text: "Decision", truncated: false },
+    subjectSummary: null,
+    openedAt: 1,
+    subjectAlias: null,
+    messageId: null,
+    threadId: null,
+    actions: [],
+  };
+  const intent = messageIntent(item, target, true);
+  assert.ok(intent);
+  const directory = { members: channel.members, homes: new Map() };
+  const first = `${member.alias} About your coordination report: `;
+  assert.deepEqual(
+    prepareChannelMessage(intent, directory, "", false, context),
+    {
+      kind: "prepared",
+      text: `${first}\nRef: coordination-1`,
+      caret: first.length,
+    },
+  );
+  assert.deepEqual(
+    prepareChannelMessage(
+      intent,
+      directory,
+      "My authored draft",
+      false,
+      context,
+    ),
+    { kind: "preserved" },
+  );
+  assert.deepEqual(
+    prepareChannelMessage(intent, directory, "", true, context),
+    { kind: "preserved" },
+  );
+  assert.deepEqual(
+    prepareChannelMessage(
+      intent,
+      directory,
+      `${first}\nRef: coordination-1`,
+      false,
+      context,
+    ),
+    {
+      kind: "prepared",
+      text: `${first}\nRef: coordination-1`,
+      caret: first.length,
+    },
+    "the message this item prepared is not someone else's draft",
+  );
+  assert.deepEqual(
+    prepareChannelMessage(
+      intent,
+      directory,
+      `${first}ship it\nRef: coordination-1`,
+      false,
+      context,
+    ),
+    { kind: "preserved" },
+  );
+  assert.deepEqual(
+    prepareChannelMessage(
+      intent,
+      { ...directory, members: new Map() },
+      "",
+      false,
+      context,
+    ),
+    { kind: "unavailable" },
+  );
+  assert.deepEqual(
+    prepareChannelMessage(
+      intent,
+      {
+        ...directory,
+        members: new Map([
+          [member.id, { ...member, kind: { type: "terminal" } }],
+        ]),
+      },
+      "",
+      false,
+      context,
+    ),
+    { kind: "unavailable" },
+  );
+  const message = messageIntent(
+    { ...item, source: "delivery_attempt", coordinationId: null },
+    target,
+    false,
+  );
+  assert.ok(message);
+  assert.equal(message.preparation, "idle");
+  const about = `${member.alias} About your message at ${timeOfDay(anchor.at_ms)}: `;
+  assert.deepEqual(
+    prepareChannelMessage(message, directory, "", false, context),
+    {
+      kind: "prepared",
+      text: `${about}\nRef: old-message`,
+      caret: about.length,
+    },
+  );
+});
+test("a response whose agent is gone reads unavailable on the first press, whatever the box holds, and prepares no text", () => {
+  const intent: MessageIntent = {
+    kind: "message",
+    addressId: member.id,
+    subject: null,
+    reference: { kind: "coordination", id: "coordination-1" },
+    preparation: "requested",
+  };
+  const directories: Record<string, Directory> = {
+    closed: {
+      members: new Map([[member.id, { ...member, activity: "retired" }]]),
+      homes: new Map(),
+    },
+    removed: { members: new Map(), homes: new Map() },
+  };
+  for (const [gone, directory] of Object.entries(directories))
+    for (const [draft, pending] of [
+      ["My authored draft", false],
+      ["My authored draft", true],
+      ["", true],
+      ["", false],
+    ] as const)
+      assert.deepEqual(
+        prepareChannelMessage(intent, directory, draft, pending, context),
+        { kind: "unavailable" },
+        JSON.stringify({ gone, draft, pending }),
+      );
+});
+test("channel preparation retries after preserved drafts without losing the tracked evidence boundary", () => {
+  const response = {
+    kind: "message",
+    addressId: member.id,
+    subject: null,
+    reference: { kind: "coordination", id: "coordination-1" },
+    preparation: "requested",
+  } as const;
+  let state = evidenceReduce(
+    { kind: "closed", version: 0 },
+    { type: "open", request: { ...request, response } },
+  );
+  state = evidenceReduce(state, {
+    type: "loaded",
+    version: state.version,
+    context,
+  });
+  state = evidenceReduce(state, {
+    type: "message-prepared",
+    version: state.version,
+    result: "preserved",
+  });
+  assert.ok(
+    state.kind === "ready" && state.request.response?.kind === "message",
+  );
+  assert.equal(state.request.response.preparation, "preserved");
+  const retried = evidenceReduce(state, {
+    type: "prepare-message",
+    draftEmpty: false,
+  });
+  assert.ok(
+    retried.kind === "ready" && retried.request.response?.kind === "message",
+  );
+  assert.equal(retried.request.response.preparation, "requested");
+  const prepared = evidenceReduce(retried, {
+    type: "message-prepared",
+    version: retried.version,
+    result: "prepared",
+  });
+  const sent = evidenceReduce(prepared, {
+    type: "sent",
+    key: channel.key,
+    messageId: null,
+  });
+  assert.ok(sent.kind === "ready" && sent.request.response?.kind === "message");
+  assert.equal(sent.request.response.preparation, "idle");
+  assert.equal(sent.context, context);
+  assert.equal(
+    evidenceReduce(sent, {
+      type: "message-prepared",
+      version: sent.version - 1,
+      result: "prepared",
+    }),
+    sent,
+  );
+});
+
+test("an edit of the channel box ends a preserved preparation, so the kept-draft notice gives way, and leaves every other state alone", () => {
+  for (const preparation of [
+    "idle",
+    "requested",
+    "prepared",
+    "preserved",
+    "unavailable",
+  ] as const) {
+    const response: MessageIntent = {
+      kind: "message",
+      addressId: member.id,
+      subject: null,
+      reference: { kind: "coordination", id: "coordination-1" },
+      preparation,
+    };
+    const state = evidenceReduce(
+      evidenceReduce(
+        { kind: "closed", version: 0 },
+        { type: "open", request: { ...request, response } },
+      ),
+      { type: "loaded", version: 1, context },
+    );
+    assert.ok(state.kind === "ready");
+    const edited = evidenceReduce(state, {
+      type: "draft-edited",
+      key: channel.key,
+    });
+    if (preparation !== "preserved" && preparation !== "unavailable") {
+      assert.equal(edited, state, preparation);
+      continue;
+    }
+    assert.deepEqual(edited, {
+      ...state,
+      request: {
+        ...state.request,
+        response: { ...response, preparation: "idle" },
+      },
+    });
+    assert.equal(
+      evidenceReduce(state, {
+        type: "draft-edited",
+        key: "b".repeat(20) as typeof channel.key,
+      }),
+      state,
+      "another channel's box",
+    );
+  }
+});
+
+test("channel preparation is idempotent while requested or already prepared", () => {
+  for (const preparation of ["requested", "prepared"] as const) {
+    const response = {
+      kind: "message",
+      addressId: member.id,
+      subject: null,
+      reference: { kind: "coordination", id: "coordination-1" },
+      preparation,
+    } as const;
+    const state = evidenceReduce(
+      evidenceReduce(
+        { kind: "closed", version: 0 },
+        {
+          type: "open",
+          request: { ...request, response },
+        },
+      ),
+      { type: "loaded", version: 1, context },
+    );
+    assert.equal(
+      evidenceReduce(state, { type: "prepare-message", draftEmpty: false }),
+      state,
+    );
+    const cleared = evidenceReduce(state, {
+      type: "prepare-message",
+      draftEmpty: true,
+    });
+    if (preparation === "requested") assert.equal(cleared, state);
+    else {
+      assert.ok(
+        cleared.kind === "ready" &&
+          cleared.request.response?.kind === "message",
+      );
+      assert.equal(cleared.request.response.preparation, "requested");
+    }
+  }
+});
+
+test("a response handed to the channel keeps its request for the line under the channel composer, still ends at an edit or a send, and only a ready pane can hand it over", () => {
+  const response: MessageIntent = {
+    kind: "message",
+    addressId: member.id,
+    subject: null,
+    reference: { kind: "coordination", id: "coordination-1" },
+    preparation: "preserved",
+  };
+  const loading = evidenceReduce(
+    { kind: "closed", version: 0 },
+    { type: "open", request: { ...request, response } },
+  );
+  assert.equal(evidenceReduce(loading, { type: "to-channel" }), loading);
+  const ready = evidenceReduce(loading, {
+    type: "loaded",
+    version: loading.version,
+    context,
+  });
+  assert.ok(ready.kind === "ready");
+  const handed = evidenceReduce(ready, { type: "to-channel" });
+  assert.deepEqual(handed, {
+    kind: "in-channel",
+    version: ready.version,
+    request: ready.request,
+  });
+  assert.equal(evidenceReduce(handed, { type: "to-channel" }), handed);
+  assert.equal(
+    evidenceReduce(handed, { type: "prepare-message", draftEmpty: true }),
+    handed,
+    "no pane is left to press Message in",
+  );
+  for (const event of [
+    { type: "draft-edited", key: channel.key },
+    { type: "sent", key: channel.key, messageId: null },
+  ] as const)
+    assert.deepEqual(evidenceReduce(handed, event), {
+      ...handed,
+      request: {
+        ...handed.request,
+        response: { ...response, preparation: "idle" },
+      },
+    });
+  assert.deepEqual(evidenceReduce(handed, { type: "close" }), {
+    kind: "closed",
+    version: handed.version + 1,
+  });
+});

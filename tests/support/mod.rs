@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use crate::cleanup;
+
 use namedrop::{
     ActorKind, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator,
     MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId, PaneRoleId,
@@ -44,7 +46,7 @@ impl TestDirectory {
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.path).unwrap();
+        cleanup::remove_fixture(&self.path).unwrap();
     }
 }
 

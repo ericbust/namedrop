@@ -5,6 +5,9 @@
 //! a replaced session, a pane in another space, a wait invented from pane text,
 //! an unreadable store reported as emptiness, or a read that outruns its budget.
 
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
     IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
@@ -62,7 +65,7 @@ impl TestDirectory {
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
+        let _ = cleanup::remove_fixture(&self.root);
     }
 }
 
@@ -579,7 +582,7 @@ fn origin_is_bound_and_peers_are_named_from_namedrop_state() {
         .unwrap()
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6, "exercise the installed runtime schema");
+    assert_eq!(version, 7, "exercise the installed runtime schema");
     let before_read = std::fs::read(&database_path).unwrap();
 
     let snapshot = collect(
@@ -958,12 +961,12 @@ fn unreadable_namedrop_state_is_unavailable_evidence_not_zero_dependencies() {
 
     // State written by a newer Namedrop is reported, never migrated or guessed.
     let database = rusqlite::Connection::open(directory.state.join("namedrop.sqlite3")).unwrap();
-    database.pragma_update(None, "user_version", 7).unwrap();
+    database.pragma_update(None, "user_version", 8).unwrap();
     drop(database);
     let newer = collect(&lead, "terminal-lead", Some("session-lead"), None, &open).unwrap();
     assert_eq!(newer["handoffs_available"], false);
     assert!(
-        warnings(&newer).contains("schema 7"),
+        warnings(&newer).contains("schema 8"),
         "{}",
         warnings(&newer)
     );
@@ -973,7 +976,7 @@ fn unreadable_namedrop_state_is_unavailable_evidence_not_zero_dependencies() {
         .unwrap()
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7, "active state must not be migrated by a read");
+    assert_eq!(version, 8, "active state must not be migrated by a read");
 }
 
 #[test]

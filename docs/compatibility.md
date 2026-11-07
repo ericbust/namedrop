@@ -5,7 +5,7 @@
 | Platform | Status |
 |---|---|
 | macOS on Apple silicon | Supported. Tested by hand on 2026-09-10. |
-| Linux x86_64 (glibc) | Supported. Tested by hand on 2026-09-26. |
+| Linux x86_64 (glibc) | Supported. Tested with real agents on 2026-10-28. |
 | Linux aarch64 (glibc) | Builds and passes CI, but hasn't been tested by hand yet. |
 
 Nobody has tried musl (Alpine), NixOS or other Linux setups.

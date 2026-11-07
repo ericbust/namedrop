@@ -464,6 +464,101 @@ impl StateTransaction<'_> {
         Ok(())
     }
 
+    pub(super) fn mirror_terminal_relay(
+        &mut self,
+        namespace: &StateNamespace,
+        source: &MessageId,
+        relay: &MessageId,
+        attribution: &MutationAttribution,
+    ) -> Result<Option<(StateNamespace, MessageId)>, StoreError> {
+        let Some((space, original)) = self.copy_origin(namespace, source)? else {
+            return Ok(None);
+        };
+        let target = StateNamespace::new(namespace.session_socket_id.clone(), space);
+        let (source_label, target_label) = self.transaction.query_row(
+            "SELECT label_snapshot, origin_label_snapshot FROM bridged_messages
+             WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3",
+            params![
+                namespace.session_socket_id,
+                namespace.space_id.as_str(),
+                source.as_str()
+            ],
+            |row| {
+                Ok((
+                    WorkspaceLabel::from_herdr(&row.get::<_, String>(0)?),
+                    WorkspaceLabel::from_herdr(&row.get::<_, String>(1)?),
+                ))
+            },
+        )?;
+        let (author, alias, thread) = self.transaction.query_row(
+            "SELECT author_address_id, author_alias_snapshot, thread_id
+             FROM collaboration_messages
+             WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3",
+            params![
+                namespace.session_socket_id,
+                namespace.space_id.as_str(),
+                relay.as_str()
+            ],
+            |row| {
+                Ok((
+                    PaneAddressId::new(row.get::<_, String>(0)?),
+                    row.get::<_, String>(1)?,
+                    ThreadId::new(row.get::<_, String>(2)?),
+                ))
+            },
+        )?;
+        let author = self.stand_in(
+            &target,
+            namespace,
+            &author,
+            &alias,
+            (&source_label, &target_label),
+            attribution.occurred_at_ms,
+        )?;
+        let thread = self.bridged_thread(namespace, &thread, &target, attribution)?;
+        let order = self.next_order(&target, "thread_message", thread.as_str())?;
+        let copy = MessageId::new(bridged_id(&namespace.space_id, relay.as_str()));
+        self.transaction.execute(
+            "INSERT INTO collaboration_messages (
+                session_socket_id, worktree_id, message_id, thread_id, thread_order, in_reply_to,
+                author_address_id, author_alias_snapshot, author_kind, author_session_snapshot,
+                request_id, authored_source, body, grammar_version, created_at_ms)
+             SELECT session_socket_id, ?4, ?5, ?6, ?7, ?8, ?9, author_alias_snapshot,
+                author_kind, author_session_snapshot, ?5, authored_source, body, grammar_version,
+                created_at_ms FROM collaboration_messages
+             WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3",
+            params![
+                namespace.session_socket_id,
+                namespace.space_id.as_str(),
+                relay.as_str(),
+                target.space_id.as_str(),
+                copy.as_str(),
+                thread.as_str(),
+                to_i64(order)?,
+                original.as_str(),
+                author.address_id.as_str()
+            ],
+        )?;
+        self.record_bridged_message(
+            &target,
+            &copy,
+            &BridgeOrigin {
+                space: &namespace.space_id,
+                message_id: relay,
+                label: &source_label,
+                holder_label: &target_label,
+            },
+        )?;
+        self.append_transition(
+            &target,
+            TransitionEntityKind::CollaborationMessage,
+            copy.as_str(),
+            TransitionKind::Created,
+            attribution,
+        )?;
+        Ok(Some((target, copy)))
+    }
+
     fn bridged_thread(
         &mut self,
         namespace: &StateNamespace,

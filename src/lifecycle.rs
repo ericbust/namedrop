@@ -238,7 +238,11 @@ where
     I: IdGenerator,
 {
     let discovered = match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
+        Some(workspace_id) => discover_reminder_workspace(
+            runtime.state_directory,
+            &StateNamespace::for_space(runtime.session_socket_id, workspace_id),
+            runtime.herdr,
+        )?,
         None => discover_worktree(runtime.herdr, runtime.cwd)?,
     };
     if discovered.worktree_attached && matches!(operation, "activate" | "name") {
@@ -571,10 +575,15 @@ where
             let permission_removal =
                 crate::install::remove_claude_permissions(runtime.state_directory);
             let sandbox_removal = crate::install::codex_sandbox::remove(runtime.state_directory);
+            let subagent_removal = crate::install::remove_subagent_hooks(
+                runtime.state_directory,
+                runtime.home_directory,
+            );
             Ok(json!({
                 "space_id": discovered.workspace_id,
                 "worktree_id": discovered.worktree_attached.then_some(discovered.worktree_id),
                 "codex_sandbox": {"removed_entries": sandbox_removal.as_ref().ok(), "error": sandbox_removal.err()},
+                "subagent_hooks": {"removed_entries": subagent_removal.as_ref().ok(), "error": subagent_removal.err()},
                 "claude_permissions": {"removed": permission_removal.as_ref().is_ok_and(|count| *count > 0), "removed_entries": permission_removal.as_ref().ok(), "error": permission_removal.err()},
                 "deactivated": true,
                 "state_preserved": true
@@ -829,9 +838,11 @@ where
             let event: PaneLifecycleEvent = parse_input(input)?;
             match event {
                 PaneLifecycleEvent::Created { pane } => {
-                    if let Ok(event_worktree) =
-                        discover_worktree_for_workspace(runtime.herdr, &pane.workspace_id)
-                    {
+                    if let Ok(event_worktree) = discover_reminder_workspace(
+                        runtime.state_directory,
+                        &StateNamespace::for_space(runtime.session_socket_id, &pane.workspace_id),
+                        runtime.herdr,
+                    ) {
                         let event_namespace = event_worktree.namespace(runtime.session_socket_id);
                         let event_runtime = LifecycleRuntime {
                             workspace_id: Some(&pane.workspace_id),
@@ -854,8 +865,11 @@ where
                     pane_id,
                     workspace_id,
                 } => {
-                    let event_worktree =
-                        discover_worktree_for_workspace(runtime.herdr, &workspace_id)?;
+                    let event_worktree = discover_reminder_workspace(
+                        runtime.state_directory,
+                        &StateNamespace::for_space(runtime.session_socket_id, &workspace_id),
+                        runtime.herdr,
+                    )?;
                     let event_namespace = event_worktree.namespace(runtime.session_socket_id);
                     require_activated(&mut store, &event_namespace)?;
                     let removed_address_id = store
@@ -879,7 +893,11 @@ where
                         workspace_id: Some(&workspace_id),
                         ..*runtime
                     };
-                    let refreshed = discover_worktree_for_workspace(runtime.herdr, &workspace_id)?;
+                    let refreshed = discover_reminder_workspace(
+                        runtime.state_directory,
+                        &StateNamespace::for_space(runtime.session_socket_id, &workspace_id),
+                        runtime.herdr,
+                    )?;
                     let _ = reconcile_managed_tab_labels(
                         &mut store,
                         &event_namespace,
@@ -910,8 +928,11 @@ where
                     tab_id,
                     workspace_id,
                 } => {
-                    let event_worktree =
-                        discover_worktree_for_workspace(runtime.herdr, &workspace_id)?;
+                    let event_worktree = discover_reminder_workspace(
+                        runtime.state_directory,
+                        &StateNamespace::for_space(runtime.session_socket_id, &workspace_id),
+                        runtime.herdr,
+                    )?;
                     let event_namespace = event_worktree.namespace(runtime.session_socket_id);
                     require_activated(&mut store, &event_namespace)?;
                     let removed_bindings = store
@@ -948,7 +969,11 @@ where
                         workspace_id: Some(&workspace_id),
                         ..*runtime
                     };
-                    let refreshed = discover_worktree_for_workspace(runtime.herdr, &workspace_id)?;
+                    let refreshed = discover_reminder_workspace(
+                        runtime.state_directory,
+                        &StateNamespace::for_space(runtime.session_socket_id, &workspace_id),
+                        runtime.herdr,
+                    )?;
                     let _ = reconcile_managed_tab_labels(
                         &mut store,
                         &event_namespace,
@@ -983,12 +1008,21 @@ where
                         closed_tab_id,
                         closed_workspace_id,
                     );
-                    let source =
-                        discover_worktree_for_workspace(runtime.herdr, &previous_workspace_id)?;
+                    let source = discover_reminder_workspace(
+                        runtime.state_directory,
+                        &StateNamespace::for_space(
+                            runtime.session_socket_id,
+                            &previous_workspace_id,
+                        ),
+                        runtime.herdr,
+                    )?;
                     let source_namespace = source.namespace(runtime.session_socket_id);
                     require_activated(&mut store, &source_namespace)?;
-                    let destination =
-                        discover_worktree_for_workspace(runtime.herdr, &pane.workspace_id)?;
+                    let destination = discover_reminder_workspace(
+                        runtime.state_directory,
+                        &StateNamespace::for_space(runtime.session_socket_id, &pane.workspace_id),
+                        runtime.herdr,
+                    )?;
                     store
                         .transaction(|transaction| {
                             apply_pane_move(
@@ -1015,8 +1049,14 @@ where
                         workspace_id: Some(&previous_workspace_id),
                         ..*runtime
                     };
-                    let refreshed =
-                        discover_worktree_for_workspace(runtime.herdr, &previous_workspace_id)?;
+                    let refreshed = discover_reminder_workspace(
+                        runtime.state_directory,
+                        &StateNamespace::for_space(
+                            runtime.session_socket_id,
+                            &previous_workspace_id,
+                        ),
+                        runtime.herdr,
+                    )?;
                     let _ = reconcile_managed_tab_labels(
                         &mut store,
                         &source_namespace,
@@ -1055,8 +1095,11 @@ where
                 event.title,
                 event.state_labels,
             );
-            let event_worktree =
-                discover_worktree_for_workspace(runtime.herdr, &event.workspace_id)?;
+            let event_worktree = discover_reminder_workspace(
+                runtime.state_directory,
+                &StateNamespace::for_space(runtime.session_socket_id, &event.workspace_id),
+                runtime.herdr,
+            )?;
             let event_namespace = event_worktree.namespace(runtime.session_socket_id);
             require_activated(&mut store, &event_namespace)?;
             if !event_worktree
@@ -1886,6 +1929,25 @@ fn owned_worktree_index(result: &WorktreeListResult, workspace_id: &str) -> Opti
         })
 }
 
+pub(crate) fn discover_reminder_workspace(
+    state: &Path,
+    namespace: &StateNamespace,
+    herdr: &impl HerdrCommandExecutor,
+) -> Result<DiscoveredWorktree, String> {
+    let result = discover_worktree_for_workspace(herdr, namespace.space_id.as_str());
+    if result
+        .as_ref()
+        .err()
+        .is_some_and(|error| herdr_error_code(error).as_deref() == Some("workspace_not_found"))
+    {
+        StateStore::open(state)
+            .map_err(|error| error.to_string())?
+            .transaction(|tx| tx.fail_reminder_workspace(namespace))
+            .map_err(|error| error.to_string())?;
+    }
+    result
+}
+
 pub fn discover_worktree_for_workspace(
     herdr: &impl HerdrCommandExecutor,
     workspace_id: &str,
@@ -1955,7 +2017,7 @@ pub fn pane_workspace(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> Resul
         })
 }
 
-fn herdr_error_code(error: &str) -> Option<String> {
+pub(crate) fn herdr_error_code(error: &str) -> Option<String> {
     serde_json::from_str::<Value>(error).ok().and_then(|value| {
         value
             .pointer("/error/code")

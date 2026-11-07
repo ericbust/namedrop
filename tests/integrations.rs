@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 #[path = "support/bash_rules.rs"]
 mod bash_rules;
 use bash_rules::bash_rule_matches;
@@ -26,7 +29,7 @@ use std::{
     },
 };
 
-const COMPLETE_PROFILE: [&str; 17] = [
+const COMPLETE_PROFILE: [&str; 20] = [
     "describe",
     "register",
     "ack",
@@ -44,6 +47,9 @@ const COMPLETE_PROFILE: [&str; 17] = [
     "handoff.begin",
     "handoff.resolve",
     "handoff.adopt",
+    "reminder.set",
+    "reminder.list",
+    "reminder.cancel",
 ];
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -79,7 +85,7 @@ impl TestDirectory {
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.path).unwrap();
+        cleanup::remove_fixture(&self.path).unwrap();
     }
 }
 
@@ -508,6 +514,262 @@ fn registration_input_from_prompt(prompt: &str) -> serde_json::Value {
         .and_then(|(_, input)| input.strip_suffix('\''))
         .expect("registration prompt must end with one exact JSON input");
     serde_json::from_str(serialized).unwrap()
+}
+
+fn registration_pane_lock(directory: &TestDirectory) -> fs::File {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+
+    let effects = directory.path().join("pane-effects");
+    fs::DirBuilder::new().mode(0o700).create(&effects).unwrap();
+    let key = Sha256::digest(serde_json::to_vec(&("socket-a", "pane-agent")).unwrap())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(effects.join(format!("{key}.lock")))
+        .unwrap()
+}
+
+#[test]
+fn registration_explains_unsafe_lock_permissions_without_internal_terms() {
+    let directory = TestDirectory::new();
+    setup_registered_address(&directory);
+    let herdr = ProductionHerdr::default();
+    let ids = SequenceIds(AtomicU64::new(1));
+    let runtime = LifecycleRuntime {
+        state_directory: directory.path(),
+        home_directory: Some(directory.home()),
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new("/repo"),
+        workspace_id: None,
+        current_pane_id: Some("pane-agent"),
+        session_socket_id: "socket-a",
+        herdr: &herdr,
+        clock: &FixedClock,
+        ids: &ids,
+    };
+    issue_registration_challenge(
+        &PaneAddressId::new("address-agent"),
+        AgentRuntime::Codex,
+        &runtime,
+    )
+    .unwrap();
+    let lock = registration_pane_lock(&directory);
+    lock.set_permissions(fs::Permissions::from_mode(0o666))
+        .unwrap();
+
+    let error = execute_lifecycle_operation(
+        "event.agent-status-changed",
+        status_event("codex"),
+        &runtime,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        "Namedrop's pane lock for @implementer is not private to you"
+    );
+    assert!(!error.contains("pane effects"), "{error}");
+    assert!(herdr.prompts.lock().unwrap().is_empty());
+}
+
+#[test]
+fn registration_gate_timeout_keeps_the_same_challenge_retryable() {
+    use std::os::fd::AsRawFd;
+
+    let directory = TestDirectory::new();
+    setup_registered_address(&directory);
+    let herdr = ProductionHerdr::default();
+    let ids = SequenceIds(AtomicU64::new(1));
+    let runtime = LifecycleRuntime {
+        state_directory: directory.path(),
+        home_directory: Some(directory.home()),
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new("/repo"),
+        workspace_id: None,
+        current_pane_id: Some("pane-agent"),
+        session_socket_id: "socket-a",
+        herdr: &herdr,
+        clock: &FixedClock,
+        ids: &ids,
+    };
+    let challenge = issue_registration_challenge(
+        &PaneAddressId::new("address-agent"),
+        AgentRuntime::Codex,
+        &runtime,
+    )
+    .unwrap();
+    let lock = registration_pane_lock(&directory);
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+
+    let error = execute_lifecycle_operation(
+        "event.agent-status-changed",
+        status_event("codex"),
+        &runtime,
+    )
+    .unwrap_err();
+    assert!(error.contains("pane effects:"), "{error}");
+    assert!(herdr.prompts.lock().unwrap().is_empty());
+    let transitions = StateStore::open(directory.path())
+        .unwrap()
+        .transaction(|transaction| transaction.transition_facts(&space_namespace()))
+        .unwrap();
+    assert_eq!(
+        transitions
+            .iter()
+            .rev()
+            .find(|fact| fact.entity_id == challenge.registration_id)
+            .unwrap()
+            .transition_kind,
+        namedrop::TransitionKind::Challenged,
+        "gate contention claimed a challenge without sending its prompt"
+    );
+
+    drop(lock);
+    for _ in 0..2 {
+        execute_lifecycle_operation(
+            "event.agent-status-changed",
+            status_event("codex"),
+            &runtime,
+        )
+        .unwrap();
+    }
+    let prompts = herdr.registration_prompts();
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    assert_eq!(
+        registration_input_from_prompt(&prompts[0])["nonce"],
+        challenge.nonce
+    );
+    StateStore::open(directory.path())
+        .unwrap()
+        .transaction(|transaction| {
+            let transitions = transaction.transition_facts(&space_namespace())?;
+            assert_eq!(
+                transitions
+                    .iter()
+                    .rev()
+                    .find(|fact| fact.entity_id == challenge.registration_id)
+                    .unwrap()
+                    .transition_kind,
+                namedrop::TransitionKind::Submitted
+            );
+            let bindings = transaction.active_pane_bindings(&space_namespace())?;
+            assert_eq!(bindings.len(), 1);
+            assert_eq!(bindings[0].id, PaneBindingId::new("binding-agent"));
+            let addresses = transaction.list_pane_addresses(&space_namespace())?;
+            assert_eq!(addresses.len(), 1);
+            assert_eq!(
+                addresses[0].agent_session_id,
+                Some(AgentSessionId::new("session-1"))
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn registration_final_discovery_failure_keeps_the_challenge_retryable() {
+    use std::{os::fd::AsRawFd, sync::atomic::AtomicBool};
+
+    struct FailingDiscovery {
+        herdr: ProductionHerdr,
+        lock: fs::File,
+        fail: AtomicBool,
+    }
+
+    impl HerdrCommandExecutor for FailingDiscovery {
+        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+            if args == ["pane", "list", "--workspace", "workspace-1"]
+                && self.fail.load(Ordering::Relaxed)
+            {
+                let acquired =
+                    unsafe { libc::flock(self.lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+                if acquired == 0 {
+                    assert_eq!(
+                        unsafe { libc::flock(self.lock.as_raw_fd(), libc::LOCK_UN) },
+                        0
+                    );
+                } else {
+                    assert_eq!(
+                        std::io::Error::last_os_error().raw_os_error(),
+                        Some(libc::EWOULDBLOCK)
+                    );
+                    self.fail.store(false, Ordering::Relaxed);
+                    return Err("injected discovery failure while holding pane gate".to_owned());
+                }
+            }
+            self.herdr.execute(args)
+        }
+    }
+
+    let directory = TestDirectory::new();
+    setup_registered_address(&directory);
+    let herdr = FailingDiscovery {
+        herdr: ProductionHerdr::default(),
+        lock: registration_pane_lock(&directory),
+        fail: AtomicBool::new(true),
+    };
+    let ids = SequenceIds(AtomicU64::new(1));
+    let runtime = LifecycleRuntime {
+        state_directory: directory.path(),
+        home_directory: Some(directory.home()),
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new("/repo"),
+        workspace_id: None,
+        current_pane_id: Some("pane-agent"),
+        session_socket_id: "socket-a",
+        herdr: &herdr,
+        clock: &FixedClock,
+        ids: &ids,
+    };
+    let challenge = issue_registration_challenge(
+        &PaneAddressId::new("address-agent"),
+        AgentRuntime::Codex,
+        &runtime,
+    )
+    .unwrap();
+    let error = execute_lifecycle_operation(
+        "event.agent-status-changed",
+        status_event("codex"),
+        &runtime,
+    )
+    .unwrap_err();
+    assert!(error.contains("injected discovery failure"), "{error}");
+    assert!(herdr.herdr.prompts.lock().unwrap().is_empty());
+    let transitions = StateStore::open(directory.path())
+        .unwrap()
+        .transaction(|transaction| transaction.transition_facts(&space_namespace()))
+        .unwrap();
+    assert_eq!(
+        transitions
+            .iter()
+            .rev()
+            .find(|fact| fact.entity_id == challenge.registration_id)
+            .unwrap()
+            .transition_kind,
+        namedrop::TransitionKind::Challenged,
+        "discovery failure claimed a challenge without sending its prompt"
+    );
+
+    execute_lifecycle_operation(
+        "event.agent-status-changed",
+        status_event("codex"),
+        &runtime,
+    )
+    .unwrap();
+    let prompts = herdr.herdr.registration_prompts();
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    assert_eq!(
+        registration_input_from_prompt(&prompts[0])["nonce"],
+        challenge.nonce
+    );
 }
 
 #[test]
@@ -1252,7 +1514,7 @@ fn generated_skill_command_forms_are_covered_by_managed_settings() {
         serde_json::from_value(settings["permissions"]["allow"].clone()).unwrap();
     assert_eq!(
         permissions.len(),
-        18,
+        22,
         "registration uses the same fixed prefix as the other operations"
     );
     for rule in &permissions {
@@ -1503,7 +1765,7 @@ fn packaged_skill_profiles_stay_compact_and_defer_delivery_discovery() {
         // session. The permissions section adds the persistent Claude settings
         // contract; keep the remaining profile within the existing budget.
         assert!(
-            instructions.len() < 7_800,
+            instructions.len() < 8_000,
             "{} packaged profile is {} bytes",
             runtime.as_str(),
             instructions.len()
@@ -1953,6 +2215,7 @@ fn delivery_control_draft(
         result_set: None,
         permitted_operations,
         reply_mode: namedrop::DeliveryReplyMode::AgentThread,
+        review_grants: Vec::new(),
     }
 }
 
@@ -2028,6 +2291,7 @@ fn delivery_envelope_keeps_trusted_control_separate_from_verbatim_untrusted_body
         serde_json::json!([
             "reply",
             "complete.no-reply",
+            "reminder.set",
             "context.inspect",
             "context.read"
         ])
@@ -2035,6 +2299,49 @@ fn delivery_envelope_keeps_trusted_control_separate_from_verbatim_untrusted_body
     assert_eq!(serialized["untrusted_body"], body);
     assert!(serialized["control"].to_string().find(body).is_none());
     assert!(!instruction.contains(body));
+}
+
+#[test]
+fn human_delivery_instructions_address_the_person_directly_and_keep_the_reply_alias() {
+    for mode in [
+        namedrop::DeliveryReplyMode::Channel,
+        namedrop::DeliveryReplyMode::DirectMessage,
+    ] {
+        let mut draft = delivery_control_draft(Vec::new(), permitted_delivery_operations());
+        draft.reply_mode = mode;
+        let control = DeliveryControl::new(draft, generic_tool_invocation()).unwrap();
+        let instruction = trusted_delivery_instruction(&control);
+        assert!(instruction.contains("the person as 'you'"), "{instruction}");
+        assert!(!instruction.contains("the operator"), "{instruction}");
+        assert!(instruction.contains("bound reply"), "{instruction}");
+        let serialized = serde_json::to_value(&control).unwrap();
+        assert!(serialized.to_string().contains("@operator <reply body>"));
+        if mode == namedrop::DeliveryReplyMode::Channel {
+            assert!(instruction.contains("visible to everyone here"));
+            assert!(instruction.contains("Plain @name wakes a member"));
+            assert!(instruction.contains("never invent an answer"));
+            assert!(instruction.contains("complete.no-reply"));
+        } else {
+            assert!(instruction.contains("Body mentions are literal and never add recipients"));
+            assert!(instruction.contains("Keep this conversation out of channels"));
+            assert!(instruction.contains("The Automatic Reply Limit does not apply"));
+        }
+    }
+}
+
+#[test]
+fn reminder_instructions_request_a_short_task_note_without_naming_the_person() {
+    let catalog = operation_catalog();
+    let description = &catalog.operation("reminder.set").unwrap().description;
+    assert!(description.contains("body as a short task note"));
+    assert!(description.contains("without naming who to remind"));
+    assert!(description.contains("Tag the release."));
+    for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+        let skill = integration_package(runtime).instructions;
+        assert!(skill.contains("short task note"));
+        assert!(skill.contains("without naming who to remind"));
+        assert!(skill.contains("Tag the release."));
+    }
 }
 
 /// Guard the instruction contract, not actual model output (a runtime gate).
@@ -2491,7 +2798,10 @@ fn roster_management_descriptor_binds_runnable_cli_without_expanding_registratio
     for management in &operation_catalog().management_operations {
         assert_eq!(
             management.automatic_permission,
-            management.token == "address.list"
+            matches!(
+                management.token.as_str(),
+                "address.list" | "handoff.acknowledge-granted"
+            )
         );
     }
 
@@ -2762,12 +3072,18 @@ fn older_complete_profiles_stay_registered_and_registerable() {
             &runtime,
         )
     };
-    let current = [&PROFILE_16[..], &["handoff.adopt"]].concat();
+    let prior = [&PROFILE_16[..], &["handoff.adopt"]].concat();
+    let current = [
+        &prior[..],
+        &["reminder.set", "reminder.list", "reminder.cancel"],
+    ]
+    .concat();
 
     register(&current).unwrap();
     assert_eq!(complete_capability_profile(), current);
 
     for (observation, profile) in [
+        ("observation-17", &prior[..]),
         ("observation-16", &PROFILE_16[..]),
         ("observation-14", &PROFILE_14[..]),
     ] {
@@ -2820,7 +3136,7 @@ fn older_complete_profiles_stay_registered_and_registerable() {
         .copied()
         .filter(|token| !matches!(*token, "handoff.begin" | "handoff.resolve"))
         .collect::<Vec<_>>();
-    assert_eq!(partial.len(), 15);
+    assert_eq!(partial.len(), 18);
     restart("session-4", 45);
     assert_eq!(
         register(&partial).unwrap_err(),
@@ -2873,37 +3189,45 @@ fn assert_installed_package(home_directory: &Path, runtime: AgentRuntime) {
     .unwrap();
     assert_eq!(claude_manifest["name"], "namedrop");
     assert_eq!(claude_manifest["version"], env!("CARGO_PKG_VERSION"));
-    let fallback_hook = directory.join("scripts/user-prompt-submit");
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(
-            &fs::read_to_string(directory.join("hooks/hooks.json")).unwrap()
-        )
-        .unwrap(),
-        serde_json::json!({
-            "hooks": {
-                "SessionStart": [{
-                    "hooks": [{
-                        "type": "command",
-                        "command": format!(
-                            "if [ -n \"${{PLUGIN_ROOT:-}}\" ]; then \"${{PLUGIN_ROOT}}/scripts/session-start\"; elif [ -n \"${{CLAUDE_PLUGIN_ROOT:-}}\" ]; then \"${{CLAUDE_PLUGIN_ROOT}}/scripts/session-start\"; else '{}'; fi",
-                            directory.join("scripts/session-start").display()
-                        ),
-                        "timeout": 10
-                    }]
-                }],
-                "UserPromptSubmit": [{
-                    "hooks": [{
-                        "type": "command",
-                        "command": format!(
-                            "if [ -n \"${{PLUGIN_ROOT:-}}\" ]; then \"${{PLUGIN_ROOT}}/scripts/user-prompt-submit\"; elif [ -n \"${{CLAUDE_PLUGIN_ROOT:-}}\" ]; then \"${{CLAUDE_PLUGIN_ROOT}}/scripts/user-prompt-submit\"; else '{}'; fi",
-                            fallback_hook.display()
-                        ),
-                        "timeout": 10
-                    }]
-                }]
-            }
-        })
-    );
+    let hooks: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(directory.join("hooks/hooks.json")).unwrap())
+            .unwrap();
+    for event in [
+        "SessionStart",
+        "UserPromptSubmit",
+        "SubagentStart",
+        "SubagentStop",
+        "Stop",
+        "SessionEnd",
+    ] {
+        let entries = hooks["hooks"][event].as_array().expect(event);
+        assert!(
+            entries.iter().any(
+                |entry| entry["hooks"][0]["async"] == true && entry["hooks"][0]["timeout"] == 5
+            ),
+            "{event}"
+        );
+    }
+    for (event, script) in [
+        ("SessionStart", "session-start"),
+        ("UserPromptSubmit", "user-prompt-submit"),
+    ] {
+        let command = hooks["hooks"][event][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert!(command.contains(&format!("/scripts/{script}")));
+        assert_eq!(hooks["hooks"][event][0]["hooks"][0]["timeout"], 10);
+        assert!(hooks["hooks"][event][0]["hooks"][0].get("async").is_none());
+    }
+    let stop = &hooks["hooks"]["Stop"][0]["hooks"][0];
+    assert!(stop["command"].as_str().unwrap().contains("/scripts/stop"));
+    assert_eq!(stop["timeout"], 1);
+    assert!(stop.get("async").is_none());
+    let subagent = directory.join("scripts/subagent");
+    assert!(fs::metadata(&subagent).unwrap().permissions().mode() & 0o100 != 0);
+    let subagent = fs::read_to_string(subagent).unwrap();
+    assert!(subagent.contains(&format!("hook subagent --runtime {}", runtime.as_str())));
+    assert!(subagent.contains(">/dev/null 2>&1\nexit 0"));
     let script = directory.join("scripts/user-prompt-submit");
     assert!(
         fs::metadata(&script).unwrap().permissions().mode() & 0o111 != 0,
@@ -2938,6 +3262,7 @@ fn assert_installed_package(home_directory: &Path, runtime: AgentRuntime) {
             ".claude-plugin",
             ".codex-plugin",
             ".namedrop-package.json",
+            ".namedrop-subagent-hook.json",
             "SKILL.md",
             "hooks",
             "scripts",
@@ -3060,7 +3385,7 @@ fn activation_installs_both_shared_packages_before_challenging_either_runtime() 
             .unwrap();
     assert_eq!(
         settings["permissions"]["allow"].as_array().unwrap().len(),
-        18
+        22
     );
 
     execute_lifecycle_operation(
@@ -3189,7 +3514,7 @@ fn a_previous_version_package_is_replaced_without_touching_unrelated_files() {
     assert_eq!(settings["unrelated"], true);
     assert_eq!(
         settings["permissions"]["allow"].as_array().unwrap().len(),
-        18
+        22
     );
     assert_eq!(installed_names(&skill_root), ["namedrop", "other-skill"]);
 }
@@ -3738,6 +4063,40 @@ fn installed_hook_manifest_launches_from_the_codex_plugin_root() {
         r#"{"decision":"block","reason":"Collaboration message sent."}"#
     );
     assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
+fn installed_subagent_wrapper_swallows_all_output_and_failures() {
+    let directory = TestDirectory::new();
+    let executable = directory.path().join("hook-result");
+    for code in [0, 23] {
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf 'untrusted context'\nprintf 'untrusted error' >&2\nexit {code}\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+            let package = install_integration_package(
+                directory.home(),
+                runtime,
+                &executable,
+                directory.path(),
+            )
+            .unwrap();
+            let output = Command::new(package.join("scripts/subagent"))
+                .env_clear()
+                .env("HOME", directory.home())
+                .env("XDG_CONFIG_HOME", directory.home().join(".config"))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{runtime:?}: {output:?}");
+            assert!(output.stdout.is_empty(), "{runtime:?}: {output:?}");
+            assert!(output.stderr.is_empty(), "{runtime:?}: {output:?}");
+        }
+    }
 }
 
 /// An unwritable skill root is the other way installation fails, and it produces

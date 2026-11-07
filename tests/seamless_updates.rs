@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 #[test]
 fn codex_activation_installs_and_verifies_the_local_plugin() {
     let output = std::process::Command::new("python3")
@@ -69,7 +72,8 @@ fn live_schema_migration_preserves_commands_and_recovers_interruption() {
 fn linux_preflight_requires_landlock_and_named_prerequisites() {
     use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
     let root = std::env::temp_dir().join(format!("namedrop-preflight-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let _cleanup = cleanup::FixtureDirectory(root.clone());
+
     let bin = root.join("bin");
     fs::create_dir_all(&bin).unwrap();
     let stub = |name: &str, body: &str| {
@@ -160,5 +164,4 @@ fn linux_preflight_requires_landlock_and_named_prerequisites() {
     let (code, out, _) = run("x86_64", "3");
     assert_eq!(code, Some(1), "{out}");
     assert!(out.contains("missing required: codex\n"), "{out}");
-    fs::remove_dir_all(&root).unwrap();
 }

@@ -1,8 +1,3 @@
-//! Linux containment for the two short-lived Codex model helpers.
-//!
-//! Landlock ABI 1 supplies the read/execute restrictions used on macOS. Rules
-//! are built in the parent; only two allocation-free syscalls run after fork.
-//! Authentication/network access and the existing write policy are unchanged.
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom},

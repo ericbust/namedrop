@@ -1,0 +1,49 @@
+{
+  "marks": [
+    {
+      "name": "loaded",
+      "at": 1.819
+    },
+    {
+      "name": "send",
+      "at": 6.298
+    },
+    {
+      "name": "wait-reply",
+      "at": 7.565
+    },
+    {
+      "name": "reply-arrived",
+      "at": 11.37
+    },
+    {
+      "name": "thread-send",
+      "at": 16.833
+    },
+    {
+      "name": "wait-thread-reply",
+      "at": 48.84
+    },
+    {
+      "name": "thread-reply-arrived",
+      "at": 48.854
+    },
+    {
+      "name": "end",
+      "at": 53.976
+    }
+  ],
+  "errors": [],
+  "checks": {
+    "afterAutocomplete": "#alpha @lead ",
+    "toLabel": "To @lead · #alpha",
+    "threadError": null,
+    "threadReplies": 4,
+    "ghostError-light": "Unknown Mention: @ghost.",
+    "ghostError-dark": "Unknown Mention: @ghost."
+  },
+  "perf": {
+    "namedrop:keystroke-to-popup": [2.1, 1.4, 1.3, 1.8, 1.4, 1],
+    "namedrop:enter-to-sent": [975.1, 979.9]
+  }
+}

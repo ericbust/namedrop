@@ -537,8 +537,12 @@ class Profile:
         done = self.dir / "logs" / (label + ".exit")
         if done.exists():
             done.unlink()
+        # The poll below stops once .exit exists, so the code lands in a temp
+        # file first and the rename makes .exit appear already written.
+        written = self.dir / "logs" / (label + ".exit.tmp")
         shell = "{ " + command + "; } > " + shlex.quote(str(output)) + \
-                ' 2>&1; printf "%s" "$?" > ' + shlex.quote(str(done))
+                ' 2>&1; printf "%s" "$?" > ' + shlex.quote(str(written)) + \
+                " && mv -f " + shlex.quote(str(written)) + " " + shlex.quote(str(done))
         self.run(["herdr", "pane", "run", pane, shell])
         deadline = time.monotonic() + timeout
         while not done.exists() and time.monotonic() < deadline:

@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use namedrop::*;
 use serde_json::{Value, json};
 use std::{
@@ -258,7 +261,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
+        let _ = cleanup::remove_fixture(&self.root);
     }
 }
 impl Clock for Fixture {
@@ -330,7 +333,7 @@ fn coordination_migration_and_reopen() {
             )
         })
         .unwrap();
-    f.db().execute_batch("DROP VIEW delivery_seats; DROP TABLE bridged_threads; DROP TABLE bridged_messages; DROP TABLE space_envoys; DROP TABLE coordination_links; DROP TABLE coordination_assignments; DROP TABLE coordinations; ALTER TABLE pane_addresses DROP COLUMN remote_commands_terminal_id; ALTER TABLE pane_addresses DROP COLUMN persona; PRAGMA user_version=3;").unwrap();
+    f.db().execute_batch("DROP TABLE reminder_fires; DROP TABLE reminders; DROP VIEW delivery_seats; DROP TABLE bridged_threads; DROP TABLE bridged_messages; DROP TABLE space_envoys; DROP TABLE coordination_links; DROP TABLE coordination_assignments; DROP TABLE coordinations; ALTER TABLE pane_addresses DROP COLUMN remote_commands_terminal_id; ALTER TABLE pane_addresses DROP COLUMN persona; PRAGMA user_version=3;").unwrap();
     let before = f.snapshot();
     for table in [
         "pane_addresses",
@@ -366,7 +369,7 @@ fn coordination_migration_and_reopen() {
             .unwrap()
             .schema_version()
             .unwrap(),
-        6
+        7
     );
     let after = f.snapshot();
     // Migration is additive: every legacy row keeps its rows and its existing
@@ -394,7 +397,7 @@ fn coordination_migration_and_reopen() {
             .all(|row| row.len() == before["pane_addresses"][0].len() + 2),
         "migration did not add the persona and remote-command columns"
     );
-    assert_eq!(after.len(), before.len() + 6);
+    assert_eq!(after.len(), before.len() + 8);
     assert_eq!(
         f.handoff(
             "lead",
@@ -955,7 +958,12 @@ fn coordination_authority_and_revisions() {
         .filter(|c| {
             !matches!(
                 c.as_str(),
-                "handoff.adopt" | "handoff.begin" | "handoff.resolve"
+                "handoff.adopt"
+                    | "handoff.begin"
+                    | "handoff.resolve"
+                    | "reminder.set"
+                    | "reminder.list"
+                    | "reminder.cancel"
             )
         })
         .cloned()

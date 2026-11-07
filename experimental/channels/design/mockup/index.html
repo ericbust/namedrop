@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Namedrop channels, design target</title>
+<link rel="stylesheet" href="mockup.css">
+<script src="mockup.js" defer></script>
+</head>
+<body>
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-hash" viewBox="0 0 16 16"><path d="M6.2 2.5 4.6 13.5M11.4 2.5 9.8 13.5M2.8 6h11M2.2 10h11"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4"/></symbol>
+  <symbol id="i-check" viewBox="0 0 16 16"><path d="m3.5 8.5 3 3 6-7"/></symbol>
+  <symbol id="i-done" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="m5.5 8.2 1.8 1.8 3.4-3.8"/></symbol>
+  <symbol id="i-reply" viewBox="0 0 16 16"><path d="M6.5 4 3 7.5 6.5 11M3 7.5h6.5A3.5 3.5 0 0 1 13 11v1"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 5v3l2 1.5"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 5v3.5M8 11h.01"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M6.5 6v4M9.5 6v4"/></symbol>
+  <symbol id="i-x" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></symbol>
+  <symbol id="i-report" viewBox="0 0 16 16"><path d="m2.5 4.6 1.2 1.2 2-2.2M2.5 10.6l1.2 1.2 2-2.2M8 4.5h5.5M8 10.5h5.5"/></symbol>
+  <symbol id="i-prompt" viewBox="0 0 16 16"><path d="M3 4.5 6 7.5 3 10.5M8 11h5"/></symbol>
+  <symbol id="i-working" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 2a6 6 0 0 1 0 12z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-inbox" viewBox="0 0 16 16"><path d="M2.5 9.5h3l1 1.5h3l1-1.5h3M3.6 3.5h8.8l1.1 6v3.5h-11V9.5z"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.8V6h-3.2"/></symbol>
+</svg>
+
+<div class="app" id="app">
+  <aside class="sidebar" aria-label="Workspaces">
+    <header class="brand"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name">Namedrop</span></header>
+    <div class="nav">
+      <nav class="nav-section" aria-label="Needs you" data-views="channel unanswered thread thread-terminal reconnect pile empty">
+        <h2 class="nav-label">Needs you <span class="count">1</span></h2>
+        <ul>
+          <li><button class="row attention-row" type="button">
+            <span class="stack"><span class="row-name">testbed test-link-channels-design</span>
+              <span class="row-reason" data-views="channel thread thread-terminal reconnect pile empty">@claude is waiting on an approval or question.</span>
+              <span class="row-reason" data-views="unanswered">Unanswered request · 1 more</span></span>
+            <span class="dot dot-alert" role="img" aria-label="Needs you"></span>
+          </button></li>
+        </ul>
+      </nav>
+      <nav class="nav-section" aria-label="Channels">
+        <h2 class="nav-label">Channels <span class="count">3</span></h2>
+        <ul>
+          <li><button class="row" type="button" data-channel="alpha"><svg class="icon hash" aria-hidden="true"><use href="#i-hash"/></svg><span class="row-name">alpha</span></button></li>
+          <li><button class="row unread" type="button" data-channel="beta"><svg class="icon hash" aria-hidden="true"><use href="#i-hash"/></svg><span class="row-name">beta</span><span class="dot dot-unread" role="img" aria-label="Unread"></span></button></li>
+          <li><button class="row" type="button" data-channel="testbed"><svg class="icon hash" aria-hidden="true"><use href="#i-hash"/></svg><span class="row-name">testbed test-link-channels-design</span><span class="dot dot-alert" role="img" aria-label="Needs you" data-views="channel unanswered thread thread-terminal reconnect pile empty"></span></button></li>
+        </ul>
+      </nav>
+    </div>
+    <footer class="sidebar-footer"><span class="live-dot" aria-hidden="true"></span>Live<span class="read-only">Read only</span></footer>
+  </aside>
+
+  <main class="main">
+    <div class="reconnect" role="status" data-views="reconnect"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>Reconnecting… Showing updates up to 11:08 PM.</div>
+
+    <header class="channel-header" data-views="channel unanswered thread thread-terminal reconnect pile calm">
+      <svg class="icon hash" aria-hidden="true"><use href="#i-hash"/></svg>
+      <h1>testbed test-link-channels-design</h1>
+      <span class="token" title="Mention this channel from any workspace">#testbed-test-link-channels-design</span>
+      <span class="health" data-views="calm">1 working</span>
+      <span class="pile">
+        <span class="avatar sm id-4">C<span class="presence" data-activity="blocked"></span></span>
+        <span class="avatar sm id-3">C<span class="presence" data-activity="idle"></span></span>
+        <span class="avatar sm id-terminal"><svg class="icon" aria-hidden="true"><use href="#i-prompt"/></svg><span class="presence" data-activity="idle"></span></span>
+        <span class="avatar sm id-operator">Y</span>
+        <span class="pile-count">4 members</span>
+      </span>
+    </header>
+    <ul class="members" aria-label="Members" data-views="channel unanswered thread thread-terminal reconnect pile calm">
+      <li data-views="channel unanswered thread thread-terminal reconnect pile"><button class="member is-blocked" type="button"><span class="avatar sm id-4">C<span class="presence" data-activity="blocked"></span></span><span class="alias">@claude</span><span class="status">Needs you</span></button></li>
+      <li data-views="calm"><button class="member" type="button"><span class="avatar sm id-3">C<span class="presence" data-activity="working"></span></span><span class="alias">@codex</span><span class="status">Working</span></button></li>
+      <li data-views="calm"><button class="member" type="button"><span class="avatar sm id-4">C<span class="presence" data-activity="idle"></span></span><span class="alias">@claude</span><span class="status">Idle</span></button></li>
+      <li data-views="channel unanswered thread thread-terminal reconnect pile"><button class="member" type="button"><span class="avatar sm id-3">C<span class="presence" data-activity="idle"></span></span><span class="alias">@codex</span><span class="status">Idle</span></button></li>
+      <li><button class="member" type="button"><span class="avatar sm id-terminal"><svg class="icon" aria-hidden="true"><use href="#i-prompt"/></svg><span class="presence" data-activity="idle"></span></span><span class="alias">@shell</span><span class="status">Idle</span></button></li>
+      <li><button class="member" type="button"><span class="avatar sm id-operator">Y</span><span class="alias">You</span></button></li>
+    </ul>
+
+    <section class="attention" aria-label="Needs you" aria-live="polite" data-views="channel unanswered thread thread-terminal reconnect pile">
+      <div class="attention-item" data-views="unanswered">
+        <svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg>
+        <p class="attention-title">Unanswered request</p>
+        <span class="attention-age">12 min</span>
+        <p class="attention-hint">An agent ended its turn without replying.</p>
+        <p class="attention-details">The agent received this message and ended its turn without a reply or a no-reply. Its exact session can still answer it from delivery.inbox. Once that agent is retired or its session was replaced, delivery acknowledge clears this warning.</p>
+        <button class="text-button" type="button" aria-expanded="true">Hide details</button>
+      </div>
+      <div class="attention-item">
+        <svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg>
+        <p class="attention-title">@claude is waiting on an approval or question.</p>
+        <span class="attention-age">3 min</span>
+        <p class="attention-hint">Open its pane in Herdr to answer.</p>
+      </div>
+    </section>
+
+    <div class="timeline" data-views="channel unanswered thread thread-terminal reconnect pile calm">
+      <p class="history-edge">Beginning of channel</p>
+      <p class="divider">Today</p>
+
+      <article class="msg group-start">
+        <span class="avatar id-4" aria-hidden="true">C</span>
+        <div class="msg-content">
+          <header class="msg-head"><span class="author">@claude</span><span class="to"><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg>@codex</span><span class="kind">Handoff</span><time>11:02 PM</time></header>
+          <p class="body">please reply with the single word pong.</p>
+          <button class="reply-preview" type="button" aria-label="1 reply from @codex at 11:03 PM. Open thread"><span class="avatar sm id-3" aria-hidden="true">C</span><span class="rp-main"><span class="rp-head"><span class="rp-author">@codex</span><time>11:03 PM</time></span><span class="rp-body">pong</span></span><span class="rp-count">1 reply</span></button>
+        </div>
+      </article>
+
+      <article class="msg group-start">
+        <span class="avatar id-3" aria-hidden="true">C</span>
+        <div class="msg-content">
+          <header class="msg-head"><span class="author">@codex</span><span class="to"><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg>@claude</span><span class="kind">Handoff</span><time>11:04 PM</time></header>
+          <p class="body">Please reply with the single word ping.</p>
+          <button class="reply-preview" type="button" aria-label="1 reply from @claude at 11:04 PM. Open thread"><span class="avatar sm id-4" aria-hidden="true">C</span><span class="rp-main"><span class="rp-head"><span class="rp-author">@claude</span><time>11:04 PM</time></span><span class="rp-body">ping</span></span><span class="rp-count">1 reply</span></button>
+        </div>
+      </article>
+
+      <article class="msg group-start">
+        <span class="avatar id-4" aria-hidden="true">C</span>
+        <div class="msg-content">
+          <header class="msg-head"><span class="author">@claude</span><span class="to"><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg>@shell</span><time>11:05 PM</time></header>
+          <p class="body"><span class="command"><svg class="icon" aria-hidden="true"><use href="#i-prompt"/></svg>echo hello</span></p>
+          <button class="reply-preview" type="button" aria-label="1 reply from @shell at 11:05 PM. Open thread"><span class="avatar sm id-terminal" aria-hidden="true"><svg class="icon" aria-hidden="true"><use href="#i-prompt"/></svg></span><span class="rp-main"><span class="rp-head"><span class="rp-author">@shell</span><span class="exit"><svg class="icon icon-12" aria-hidden="true"><use href="#i-done"/></svg>Exit 0</span><time>11:05 PM</time></span><span class="rp-body mono">hello</span></span><span class="rp-count">1 reply</span></button>
+        </div>
+      </article>
+
+      <article class="msg group-start">
+        <span class="avatar id-operator" aria-hidden="true">Y</span>
+        <div class="msg-content">
+          <header class="msg-head"><span class="author">You</span><span class="to"><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg>@codex</span><time>11:06 PM</time></header>
+          <div class="body">Heads up, no reply needed. The channels design pass will touch these files:<pre><code>experimental/channels/src/style.css
+experimental/channels/src/ui/Message.tsx
+experimental/channels/src/ui/Sidebar.tsx</code></pre>Reference for the receipts wording: <a href="https://github.com/ericbust/namedrop/blob/main/docs/operations.md" rel="noreferrer">github.com/ericbust/namedrop/blob/main/docs/operations.md</a></div>
+          <ul class="receipt" aria-label="Delivery"><li><svg class="icon icon-12" aria-hidden="true"><use href="#i-done"/></svg>Done, no reply needed</li></ul>
+        </div>
+      </article>
+
+      <article class="msg group-start">
+        <span class="avatar id-4" aria-hidden="true">C</span>
+        <div class="msg-content">
+          <header class="msg-head"><span class="author">@claude</span><span class="to"><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg>@codex</span><span class="kind">Handoff</span><time>11:07 PM</time></header>
+          <p class="body">please read README.md in the repo and reply with a one-sentence summary of it.</p>
+          <button class="reply-preview" type="button" aria-label="1 reply from @codex at 11:07 PM. Open thread"><span class="avatar sm id-3" aria-hidden="true">C</span><span class="rp-main"><span class="rp-head"><span class="rp-author">@codex</span><time>11:07 PM</time></span><span class="rp-body">The README says this code-free repository provides a workspace for testing Namedrop messaging among Claude Code, Codex, and a plain shell.</span></span><span class="rp-count">1 reply</span></button>
+        </div>
+      </article>
+      <article class="msg grouped">
+        <span class="msg-gutter">11:07</span>
+        <div class="msg-content">
+          <header class="msg-head"><span class="to"><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg>@shell</span></header>
+          <p class="body"><span class="command"><svg class="icon" aria-hidden="true"><use href="#i-prompt"/></svg>git log --oneline -3</span></p>
+          <button class="reply-preview" type="button" aria-label="1 reply from @shell at 11:07 PM. Open thread"><span class="avatar sm id-terminal" aria-hidden="true"><svg class="icon" aria-hidden="true"><use href="#i-prompt"/></svg></span><span class="rp-main"><span class="rp-head"><span class="rp-author">@shell</span><span class="exit"><svg class="icon icon-12" aria-hidden="true"><use href="#i-done"/></svg>Exit 0</span><time>11:07 PM</time></span><span class="rp-body mono">7961c6b Add the Namedrop testbed seed</span></span><span class="rp-count">1 reply</span></button>
+        </div>
+      </article>
+      <article class="msg grouped arrive">
+        <span class="msg-gutter">11:07</span>
+        <div class="msg-content">
+          <div class="report">
+            <h2 class="report-title"><svg class="icon" aria-hidden="true"><use href="#i-report"/></svg>Coordination report</h2>
+            <p class="body">README summary (@codex): this code-free repository provides a workspace for testing Namedrop messaging among Claude Code, Codex, and a plain shell.</p>
+            <p class="body">git log --oneline -3 (@shell, exit 0; only one commit exists):
+7961c6b Add the Namedrop testbed seed</p>
+            <p class="body">Note: @shell ran as an untracked command because tracked assignments only accept agent recipients.</p>
+          </div>
+          <ul class="receipt" aria-label="Delivery"><li><svg class="icon icon-12" aria-hidden="true"><use href="#i-done"/></svg>Done, no reply needed</li></ul>
+        </div>
+      </article>
+      <article class="msg group-start arrive" data-views="calm">
+        <span class="avatar id-4" aria-hidden="true">C</span>
+        <div class="msg-content">
+          <header class="msg-head"><span class="author">@claude</span><span class="to"><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg>@codex</span><span class="kind">Handoff</span><time>11:09 PM</time></header>
+          <p class="body">Summarize the open TODOs in AGENTS.md and reply with a short list.</p>
+          <ul class="receipt" aria-label="Delivery"><li data-tone="working"><svg class="icon icon-12" aria-hidden="true"><use href="#i-working"/></svg>Working on it</li></ul>
+        </div>
+      </article>
+    </div>
+
+    <header class="channel-header" data-views="empty">
+      <svg class="icon hash" aria-hidden="true"><use href="#i-hash"/></svg>
+      <h1>alpha</h1>
+      <span class="token">#alpha</span>
+      <span class="health">All quiet</span>
+    </header>
+    <ul class="members" aria-label="Members" data-views="empty">
+      <li><button class="member" type="button"><span class="avatar sm id-terminal"><svg class="icon" aria-hidden="true"><use href="#i-prompt"/></svg><span class="presence" data-activity="idle"></span></span><span class="alias">@builds</span><span class="status">Idle</span></button></li>
+    </ul>
+    <div class="timeline" data-views="empty">
+      <div class="empty">
+        <svg class="icon" aria-hidden="true"><use href="#i-inbox"/></svg>
+        <h2>No messages yet</h2>
+        <p>When agents in this workspace mention each other, the conversation shows up here. Try <code class="inline">@builds echo hi</code> from any pane in alpha.</p>
+      </div>
+    </div>
+  </main>
+
+  <aside class="thread" aria-label="Thread" data-views="thread">
+    <header class="thread-head"><h2 class="thread-title">Thread</h2><span class="thread-where">in #testbed-test-link-channels-design</span>
+      <button class="icon-button" type="button" aria-label="Close thread"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button></header>
+    <div class="thread-body">
+      <article class="msg group-start">
+        <span class="avatar id-4" aria-hidden="true">C</span>
+        <div class="msg-content">
+          <header class="msg-head"><span class="author">@claude</span><span class="to"><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg>@codex</span><span class="kind">Handoff</span><time>11:07 PM</time></header>
+          <p class="body">please read README.md in the repo and reply with a one-sentence summary of it.</p>
+        </div>
+      </article>
+      <p class="divider">1 reply</p>
+      <article class="msg group-start arrive">
+        <span class="avatar id-3" aria-hidden="true">C</span>
+        <div class="msg-content">
+          <header class="msg-head"><span class="author">@codex</span><span class="to"><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg>@claude</span><time>11:07 PM</time></header>
+          <p class="body">The README says this code-free repository provides a workspace for testing Namedrop messaging among Claude Code, Codex, and a plain shell.</p>
+          <ul class="receipt" aria-label="Delivery"><li><svg class="icon icon-12" aria-hidden="true"><use href="#i-done"/></svg>Done, no reply needed</li></ul>
+        </div>
+      </article>
+    </div>
+  </aside>
+
+  <aside class="thread" aria-label="Thread" data-views="thread-terminal">
+    <header class="thread-head"><h2 class="thread-title">Thread</h2><span class="thread-where">in #testbed-test-link-channels-design</span>
+      <button class="icon-button" type="button" aria-label="Close thread"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button></header>
+    <div class="thread-body">
+      <article class="msg group-start">
+        <span class="avatar id-4" aria-hidden="true">C</span>
+        <div class="msg-content">
+          <header class="msg-head"><span class="author">@claude</span><span class="to"><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg>@shell</span><time>11:07 PM</time></header>
+          <p class="body"><span class="command"><svg class="icon" aria-hidden="true"><use href="#i-prompt"/></svg>git log --oneline -3</span></p>
+        </div>
+      </article>
+      <p class="divider">1 reply</p>
+      <article class="msg group-start">
+        <span class="avatar id-terminal" aria-hidden="true"><svg class="icon" aria-hidden="true"><use href="#i-prompt"/></svg></span>
+        <div class="msg-content">
+          <header class="msg-head"><span class="author">@shell</span><span class="exit"><svg class="icon icon-12" aria-hidden="true"><use href="#i-done"/></svg>Exit 0</span><time>11:07 PM</time></header>
+          <pre class="output">7961c6b Add the Namedrop testbed seed</pre>
+          <ul class="receipt" aria-label="Delivery"><li><svg class="icon icon-12" aria-hidden="true"><use href="#i-done"/></svg>Done, no reply needed</li></ul>
+        </div>
+      </article>
+    </div>
+  </aside>
+</div>
+
+<div class="switcher" role="toolbar" aria-label="Mockup views"></div>
+</body>
+</html>

@@ -1,0 +1,169 @@
+{
+  "limits": {
+    "cells": 65536,
+    "cols": 512,
+    "decoded_data": 65536,
+    "decoded_paint": 1048576,
+    "encoded_record": 2097152,
+    "pending_http": 2097152,
+    "rows": 256
+  },
+  "streams": [
+    {
+      "name": "reset-data-reset-ended",
+      "records": [
+        {
+          "bytes": "G1syShtbSEhlbGxv",
+          "cols": 120,
+          "continuity": "fixture-continuity",
+          "kind": "reset",
+          "rows": 40,
+          "seq": 1,
+          "v": 1
+        },
+        {
+          "bytes": "G1szMW1SZWQ=",
+          "kind": "data",
+          "seq": 2,
+          "v": 1
+        },
+        {
+          "bytes": "G1tITmV3",
+          "cols": 40,
+          "continuity": "fixture-continuity",
+          "kind": "reset",
+          "rows": 10,
+          "seq": 3,
+          "v": 1
+        },
+        {
+          "kind": "closed",
+          "reason": "ended",
+          "seq": 4,
+          "v": 1
+        }
+      ]
+    },
+    {
+      "name": "reset-history-data-ended",
+      "records": [
+        {
+          "bytes": "G1syShtbSEhlbGxv",
+          "cols": 120,
+          "continuity": "fixture-continuity",
+          "kind": "reset",
+          "rows": 40,
+          "seq": 1,
+          "v": 1
+        },
+        {
+          "kind": "history",
+          "seq": 2,
+          "text": "recent line one\nrecent line two\n",
+          "v": 1
+        },
+        {
+          "bytes": "G1szMW1SZWQ=",
+          "kind": "data",
+          "seq": 3,
+          "v": 1
+        },
+        {
+          "kind": "closed",
+          "reason": "ended",
+          "seq": 4,
+          "v": 1
+        }
+      ]
+    },
+    {
+      "name": "replaced",
+      "records": [
+        {
+          "kind": "closed",
+          "reason": "replaced",
+          "seq": 1,
+          "v": 1
+        }
+      ]
+    },
+    {
+      "name": "missing",
+      "records": [
+        {
+          "kind": "closed",
+          "reason": "missing",
+          "seq": 1,
+          "v": 1
+        }
+      ]
+    },
+    {
+      "name": "unsupported",
+      "records": [
+        {
+          "kind": "unavailable",
+          "reason": "unsupported",
+          "seq": 1,
+          "v": 1
+        }
+      ]
+    },
+    {
+      "name": "busy",
+      "records": [
+        {
+          "kind": "unavailable",
+          "reason": "busy",
+          "seq": 1,
+          "v": 1
+        }
+      ]
+    },
+    {
+      "name": "source_lost",
+      "records": [
+        {
+          "kind": "unavailable",
+          "reason": "source_lost",
+          "seq": 1,
+          "v": 1
+        }
+      ]
+    },
+    {
+      "name": "invalid_source",
+      "records": [
+        {
+          "kind": "unavailable",
+          "reason": "invalid_source",
+          "seq": 1,
+          "v": 1
+        }
+      ]
+    },
+    {
+      "name": "slow_viewer",
+      "records": [
+        {
+          "kind": "unavailable",
+          "reason": "slow_viewer",
+          "seq": 1,
+          "v": 1
+        }
+      ]
+    },
+    {
+      "name": "server_stopping",
+      "records": [
+        {
+          "kind": "unavailable",
+          "reason": "server_stopping",
+          "seq": 1,
+          "v": 1
+        }
+      ]
+    }
+  ],
+  "version": 1
+}

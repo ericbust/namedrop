@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
 #[path = "support/update_profile.rs"]
@@ -411,6 +414,59 @@ fn doctor_checks_current_package_files_and_preserves_the_exact_error_read_only()
 }
 
 #[test]
+fn doctor_reports_missing_stale_and_nonexecutable_subagent_hooks() {
+    use std::os::unix::fs::PermissionsExt;
+    for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+        for mutation in ["missing", "stale", "nonexecutable"] {
+            let f = Fixture::new();
+            f.register();
+            install_integration_package(
+                &f.home,
+                runtime,
+                &fs::canonicalize(std::env::current_exe().unwrap()).unwrap(),
+                &f.root,
+            )
+            .unwrap();
+            if runtime == AgentRuntime::Codex {
+                StateStore::open(&f.root)
+                    .unwrap()
+                    .transaction(|tx| {
+                        tx.open_attention_item(
+                            &StateNamespace::for_space("socket-a", "workspace-1"),
+                            &AttentionItemDraft {
+                                id: AttentionItemId::new("codex-package"),
+                                source_kind: AttentionSourceKind::IntegrationRegistration,
+                                source_id: "integration-package-codex".into(),
+                                summary: "inspect Codex integration".into(),
+                            },
+                            &MutationAttribution::new(ActorKind::Plugin, "test", 100),
+                        )
+                    })
+                    .unwrap();
+            }
+            let hook = package_directory(&f.home, runtime).join("scripts/subagent");
+            match mutation {
+                "missing" => fs::remove_file(&hook).unwrap(),
+                "stale" => fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap(),
+                _ => fs::set_permissions(&hook, fs::Permissions::from_mode(0o600)).unwrap(),
+            }
+            let database = fs::read(f.root.join("namedrop.sqlite3")).unwrap();
+            let report = diagnose_collaboration(&f.runtime());
+            let issue = report
+                .issues
+                .iter()
+                .find(|issue| {
+                    issue.code == "ND-INTEGRATION-001"
+                        && issue.explanation.contains(hook.to_str().unwrap())
+                })
+                .unwrap_or_else(|| panic!("{mutation} {runtime:?}: {report:?}"));
+            assert_eq!(issue.diagnostic["runtime"], runtime.as_str());
+            assert_eq!(fs::read(f.root.join("namedrop.sqlite3")).unwrap(), database);
+        }
+    }
+}
+
+#[test]
 fn doctor_uses_current_package_evidence_without_rewriting_stale_attention() {
     let f = Fixture::new();
     f.register();
@@ -438,6 +494,116 @@ fn doctor_uses_current_package_evidence_without_rewriting_stale_attention() {
         "current files should supersede stale saved installation errors"
     );
     assert_eq!(fs::read(f.root.join("namedrop.sqlite3")).unwrap(), database);
+}
+
+#[test]
+fn doctor_names_failed_context_sharing_and_how_to_retry() {
+    let f = Fixture::new();
+    f.register();
+    StateStore::open(&f.root)
+        .unwrap()
+        .transaction(|tx| {
+            tx.open_attention_item(
+                &StateNamespace::for_space("socket-a", "workspace-1"),
+                &AttentionItemDraft {
+                    id: AttentionItemId::new("failed-context"),
+                    source_kind: AttentionSourceKind::ContextGrant,
+                    source_id: "grant-1".into(),
+                    summary: "Context Grant activation failed: snapshot exceeds 65536 bytes".into(),
+                },
+                &MutationAttribution::new(ActorKind::Plugin, "test", 100),
+            )
+        })
+        .unwrap();
+    let report = diagnose_collaboration(&f.runtime());
+    let issue = report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "ND-CONTEXT-001")
+        .unwrap();
+    assert_eq!(issue.summary, "Shared context failed.");
+    assert!(issue.explanation.contains("65536 bytes"));
+    assert_eq!(
+        issue.repair.prompt,
+        "Ask the sender to fix the problem and share the context again."
+    );
+}
+
+#[test]
+fn doctor_shows_a_generic_context_failure_once_with_a_manual_next_step() {
+    let f = Fixture::new();
+    f.register();
+    StateStore::open(&f.root)
+        .unwrap()
+        .transaction(|tx| {
+            tx.open_attention_item(
+                &StateNamespace::for_space("socket-a", "workspace-1"),
+                &AttentionItemDraft {
+                    id: AttentionItemId::new("generic-context-failure"),
+                    source_kind: AttentionSourceKind::ContextGrant,
+                    source_id: "grant-generic".into(),
+                    summary: "Shared context failed.".into(),
+                },
+                &MutationAttribution::new(ActorKind::Plugin, "test", 100),
+            )
+        })
+        .unwrap();
+    let report = diagnose_collaboration(&f.runtime());
+    let text = render_health_report_to_text(&report);
+    assert_eq!(text.matches("Shared context failed.").count(), 1, "{text}");
+    assert!(text.contains("Ask the sender to fix the problem and share the context again."));
+    let issue = report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "ND-CONTEXT-001")
+        .unwrap();
+    assert!(issue.repair.operation.is_none());
+    assert!(!issue.repair.prompt.ends_with('?'));
+}
+
+#[test]
+fn doctor_shows_the_production_context_failure_cause_once_and_redacts_secrets() {
+    let f = Fixture::new();
+    f.register();
+    let secret = "sk-abcdefghijklmnopqrstuvwxyz0123456789";
+    StateStore::open(&f.root)
+        .unwrap()
+        .transaction(|tx| {
+            tx.open_attention_item(
+                &StateNamespace::for_space("socket-a", "workspace-1"),
+                &AttentionItemDraft {
+                    id: AttentionItemId::new("production-context-failure"),
+                    source_kind: AttentionSourceKind::ContextGrant,
+                    source_id: "grant-production".into(),
+                    summary: format!(
+                        "Shared context failed: snapshot exceeds 65536 bytes for {secret}"
+                    ),
+                },
+                &MutationAttribution::new(ActorKind::Plugin, "test", 100),
+            )
+        })
+        .unwrap();
+    let report = diagnose_collaboration(&f.runtime());
+    let issue = report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "ND-CONTEXT-001")
+        .unwrap();
+    assert_eq!(issue.summary, "Shared context failed.");
+    assert_eq!(
+        issue.explanation,
+        "snapshot exceeds 65536 bytes for [REDACTED TOKEN]"
+    );
+    assert_eq!(
+        issue.repair.prompt,
+        "Ask the sender to fix the problem and share the context again."
+    );
+    assert!(issue.repair.operation.is_none());
+    let text = render_health_report_to_text(&report);
+    assert_eq!(text.matches("Shared context failed").count(), 1, "{text}");
+    assert!(!text.contains(secret), "{text}");
+    assert!(text.contains(&issue.explanation), "{text}");
+    assert!(text.contains(&issue.repair.prompt), "{text}");
 }
 
 #[test]
@@ -917,6 +1083,37 @@ fn doctor_assistance_prompts_only_the_bound_live_session_and_never_claims_delive
     let failure = request_doctor_assistance(&runtime, "session-old").unwrap_err();
     assert!(failure.starts_with("Unconfirmed"), "{failure}");
     assert_eq!(f.host.prompts.borrow().len(), 2);
+}
+
+#[test]
+fn doctor_assistance_explains_unsafe_lock_permissions_without_internal_terms() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = Fixture::new();
+    f.register();
+    let runtime = LifecycleRuntime {
+        workspace_id: Some("workspace-1"),
+        ..f.runtime()
+    };
+    execute_control_operation("worktree.pause", json!({}), &runtime).unwrap();
+    let directory = f.root.join("pane-effects");
+    fs::create_dir_all(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
+
+    for (pane_id, target) in [("pane-1", "@reviewer"), ("unnamed-pane", "unnamed-pane")] {
+        let runtime = LifecycleRuntime {
+            current_pane_id: Some(pane_id),
+            workspace_id: Some("workspace-1"),
+            ..f.runtime()
+        };
+        let error = request_doctor_assistance(&runtime, "session-old").unwrap_err();
+        assert_eq!(
+            error,
+            format!("Namedrop's pane lock for {target} is not private to you")
+        );
+        assert!(!error.contains("pane effects"), "{error}");
+    }
+    assert!(f.host.prompts.borrow().is_empty());
 }
 
 /// A Doctor popup can sit open while its pane starts a different Agent Session
