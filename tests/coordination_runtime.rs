@@ -3758,7 +3758,7 @@ fn a_grant_is_refused_for_another_coordination_another_agent_after_expiry_and_af
     grant(&f, &a, "worker", &operator).unwrap();
     operator_session(&f, 'b');
     let ended = granted_ack(&f, &a, "worker").unwrap_err();
-    assert!(ended.contains("operator session"), "{ended}");
+    assert!(ended.contains("dashboard session"), "{ended}");
     assert!(warning_open(&f, &a));
 
     let operator = operator_session(&f, 'c');

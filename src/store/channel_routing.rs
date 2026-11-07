@@ -209,7 +209,7 @@ impl StateTransaction<'_> {
             || !draft.recipients.is_empty()
         {
             return Err(StoreError::invalid_input(
-                "pending channel posts require the local operator and no recipients",
+                "pending channel posts require the local person and no recipients",
             ));
         }
         let receipt = self.append_message_mode(

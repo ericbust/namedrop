@@ -524,7 +524,7 @@ fn delivery_answers_with_eof_before_drain_and_keeps_original_operator_envelope()
             envelope["trusted_instruction"]
                 .as_str()
                 .unwrap()
-                .contains("operator")
+                .contains("address the person as 'you'")
         );
         assert!(gate.0.exists());
         let (status, later) =

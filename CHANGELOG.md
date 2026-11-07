@@ -2,6 +2,12 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.5.0-exp.20] - 2026-11-06
+
+### Fixed
+
+- Agents no longer call you "the operator". Start new sessions to pick up the change.
+
 ## [1.5.0-exp.19] - 2026-11-06
 
 ### Fixed

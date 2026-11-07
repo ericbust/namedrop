@@ -35,7 +35,7 @@ impl DirectMessage {
             Ok(PaneAddressId::new("operator:local"))
         } else {
             Err(StoreError::invalid_input(
-                "only the operator and the addressed agent can participate in a direct message",
+                "only the person and the addressed agent can participate in a direct message",
             ))
         }
     }
@@ -90,7 +90,7 @@ impl StateTransaction<'_> {
                 || draft.recipients.len() != 1
             {
                 return Err(StoreError::invalid_input(
-                    "a direct message root requires the operator and exactly one agent",
+                    "a direct message root requires the person and exactly one agent",
                 ));
             }
             let peer = draft.recipients[0].address_id.clone();

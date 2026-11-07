@@ -755,7 +755,7 @@ fn operator_identity_survives_reopen_and_refuses_pane_lifecycle_mutations() {
                     .transaction($mutation)
                     .unwrap_err()
                     .to_string()
-                    .contains("operator")
+                    .contains("the person's identity")
             );
         };
     }
@@ -892,7 +892,7 @@ fn conflicting_reserved_identity_is_never_adopted_or_rewritten() {
             send_operator_message("conflict", "@planner inspect", None, &runtime)
                 .unwrap_err()
                 .to_string()
-                .contains("operator"),
+                .contains("the person's reserved address conflicts with existing state"),
             "{conflict}"
         );
         assert_eq!(f.message_rows(), before);
@@ -933,7 +933,7 @@ fn conflicting_operator_identity_keeps_home_and_envoy_projection_in_agent_lanes(
             send_operator_message("conflict", "@planner inspect", None, &runtime)
                 .unwrap_err()
                 .to_string()
-                .contains("operator"),
+                .contains("the person's reserved address conflicts with existing state"),
             "{conflict}"
         );
         assert_eq!(f.message_rows(), (0, 0), "{conflict}");
@@ -3154,7 +3154,7 @@ fn direct_message_round_trip_binds_operator_identity_and_ignores_body_mentions()
         envelope["trusted_instruction"]
             .as_str()
             .unwrap()
-            .contains("private direct message")
+            .contains("Private direct message")
     );
     assert_eq!(
         envelope["control"]["recipients"].as_array().unwrap().len(),
