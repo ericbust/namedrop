@@ -433,8 +433,7 @@ enum Keep {
 }
 
 /// What a lead reads after it starts tracked work.
-const TRACKED_NEXT: &str =
-    "The answer arrives as a new delivery, so end your turn. Do not wait or poll for it.";
+const TRACKED_NEXT: &str = "The answer arrives as a new delivery. Finish your other sends and independent work, then end your turn; do not wait or poll.";
 
 /// The settle results an agent reads after every delivery, and the fields it uses:
 /// ids it reuses for `handoff.results` and tracked follow-ups, the delivery outlook,
@@ -577,7 +576,7 @@ mod tests {
             agent_result_view(&tracked)["data"],
             json!({"message_id": "m", "thread_id": "t", "outlook": "@a: soon. @b: later.",
                    "coordination": [{"coordination_id": "c", "assignment_id": "a", "revision": 1}],
-                   "next": "The answer arrives as a new delivery, so end your turn. Do not wait or poll for it."})
+                   "next": "The answer arrives as a new delivery. Finish your other sends and independent work, then end your turn; do not wait or poll."})
         );
         let mut ordinary = tracked.clone();
         ordinary["data"]

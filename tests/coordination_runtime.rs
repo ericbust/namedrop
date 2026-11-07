@@ -4237,7 +4237,7 @@ fn a_tracked_send_tells_the_lead_its_answer_arrives_as_a_delivery_and_an_ordinar
     };
     assert_eq!(
         compact(tracked)["next"],
-        "The answer arrives as a new delivery, so end your turn. Do not wait or poll for it."
+        "The answer arrives as a new delivery. Finish your other sends and independent work, then end your turn; do not wait or poll."
     );
     let ordinary = compact(ordinary);
     assert!(ordinary.get("next").is_none(), "{ordinary}");
