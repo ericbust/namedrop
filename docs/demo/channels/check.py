@@ -13,7 +13,7 @@ root=Path(__file__).resolve().parent
 assets=root.parent.parent/'assets'
 mp4=assets/'namedrop-channels.mp4';webp=assets/'namedrop-channels.webp'
 provenance=json.loads((root/'motion/capture.json').read_text())
-assert provenance['productRevision']=='127e3d151df1db3369e5242f28c7368a2bda249e','expected exp.20 product'
+assert provenance['productRevision']=='82d381c94db2c8be888a651b5904c49cec396dd0','expected exp.20 product'
 if args.recording:
  recording=json.loads(args.recording.read_text())
  assert recording['productRevision']==provenance['productRevision'],'wrong product revision'
