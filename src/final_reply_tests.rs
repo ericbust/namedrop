@@ -20,6 +20,7 @@ fn facts<'a>(kind: DeliveryKind, reply: Option<&'a Value>) -> DeliveryFacts<'a> 
         no_reply: true,
         other_line: false,
         answers_own: false,
+        relayed: false,
         leftover: false,
     }
 }
@@ -109,6 +110,44 @@ fn plan_follows_the_measured_rule_and_keeps_explicit_kinds_explicit() {
     for (facts, expected) in cases {
         assert_eq!(plan(&facts), expected);
     }
+    fn relayed(facts: DeliveryFacts<'_>) -> DeliveryFacts<'_> {
+        DeliveryFacts {
+            relayed: true,
+            ..facts
+        }
+    }
+    for kind in [
+        DeliveryKind::Settle,
+        DeliveryKind::Channel,
+        DeliveryKind::DirectMessage,
+    ] {
+        assert_eq!(
+            plan(&relayed(answers_own(facts(kind, Some(&reply))))),
+            Plan::Armed(Armed::NoReply(NoReplyCase::Relayed)),
+            "{kind:?}"
+        );
+        assert_eq!(
+            plan(&DeliveryFacts {
+                leftover: true,
+                ..relayed(facts(kind, Some(&reply)))
+            }),
+            Plan::Explicit(Explicit::LeftoverInput)
+        );
+    }
+    assert_eq!(
+        plan(&relayed(facts(DeliveryKind::Settle, Some(&unbound)))),
+        Plan::Explicit(Explicit::NoBoundLine)
+    );
+    for kind in [DeliveryKind::ContextRequest, DeliveryKind::Nudge] {
+        assert_eq!(
+            plan(&relayed(facts(kind, Some(&reply)))),
+            Plan::Explicit(Explicit::Kind(kind))
+        );
+    }
+    assert_eq!(
+        plan(&relayed(facts(DeliveryKind::ReportToHuman, None))),
+        Plan::Armed(Armed::NoReply(NoReplyCase::ReportToHuman))
+    );
     for kind in [
         DeliveryKind::ContextRequest,
         DeliveryKind::TrackedResultSet,
@@ -202,7 +241,7 @@ fn a_stop_settles_only_its_own_open_claim_and_explicit_settles_win() {
             &open,
             stop("prompt-1", "pong"),
             SettleFacts {
-                disposed: true,
+                disposition: Some(crate::DeliveryDisposition::NoReply),
                 ..none
             },
             Verdict::Superseded,
@@ -254,6 +293,42 @@ fn a_stop_settles_only_its_own_open_claim_and_explicit_settles_win() {
             decide(&claim, &stop("prompt-1", "pong"), &none),
             Verdict::Ignore
         );
+    }
+    let relayed = claim(Armed::NoReply(NoReplyCase::Relayed), ClaimState::Open);
+    for (stop, settle, expected) in [
+        (
+            stop("prompt-1", "  Option B.\n"),
+            none,
+            Verdict::Settle(Settlement::Relay("Option B.".into())),
+        ),
+        (
+            stop("prompt-1", "Option B."),
+            SettleFacts {
+                disposition: Some(crate::DeliveryDisposition::NoReply),
+                ..none
+            },
+            Verdict::Settle(Settlement::Relay("Option B.".into())),
+        ),
+        (
+            stop("prompt-1", "Option B."),
+            SettleFacts {
+                disposition: Some(crate::DeliveryDisposition::Reply),
+                ..none
+            },
+            Verdict::Superseded,
+        ),
+        (
+            stop("prompt-1", " "),
+            none,
+            Verdict::Leave(LeaveReason::NoFinalText),
+        ),
+        (
+            stop("prompt-2", "Option B."),
+            none,
+            Verdict::Leave(LeaveReason::Interrupted),
+        ),
+    ] {
+        assert_eq!(decide(&relayed, &stop, &settle), expected, "{settle:?}");
     }
     let no_reply = claim(Armed::NoReply(NoReplyCase::ReportToHuman), ClaimState::Open);
     for stop in [

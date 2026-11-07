@@ -1743,30 +1743,28 @@ fn reminder_terminal_only_answers_relay_once_in_the_original_conversation() {
             )?;
             let ending = crate::TerminalRelayEnd {
                 agent_session_id: owner().session,
+                attempt_id: wake.attempt_id.clone(),
+                turn_started_at_ms: 60_000,
                 ended_at_ms: 60_010,
-                previous_end_ms: Some(5),
                 text: "the current time".into(),
             };
-            let relayed = tx.relay_terminal_ending(&ns(), &ending, &by(60_010))?;
-            assert_eq!(relayed.len(), 1);
+            let relayed = tx
+                .relay_final_message(&ns(), &ending, &by(60_010))?
+                .expect("the reminder's answer is relayed");
             let (parent, body): (String, String) = tx.transaction.query_row(
                 "SELECT in_reply_to,body FROM collaboration_messages WHERE message_id=?1",
-                [relayed[0].as_str()],
+                [relayed.as_str()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
             assert_eq!(parent, original.as_str());
             assert_eq!(body, "the current time");
-            assert!(
-                tx.relay_terminal_ending(&ns(), &ending, &by(60_010))?
-                    .is_empty()
-            );
             let later = crate::TerminalRelayEnd {
                 ended_at_ms: 60_020,
                 ..ending
             };
             assert!(
-                tx.relay_terminal_ending(&ns(), &later, &by(60_020))?
-                    .is_empty()
+                tx.relay_final_message(&ns(), &later, &by(60_020))?
+                    .is_none()
             );
             if private {
                 assert!(tx.dashboard_rows(&ns())?.messages.is_empty());

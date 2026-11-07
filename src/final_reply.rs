@@ -76,7 +76,8 @@ pub(crate) enum Armed {
     /// bound input, `<reply body>` placeholder included, so every rewrite the
     /// envelope made (reminder target, remote label, pre-bound outcome) holds.
     Reply { template: Value, tracked: bool },
-    /// Namedrop records no reply; the final message is for the person.
+    /// Namedrop records no reply; the final message is for the person, and
+    /// for a delivery the person sent it goes back to their thread.
     NoReply(NoReplyCase),
 }
 
@@ -87,6 +88,9 @@ pub(crate) enum NoReplyCase {
     AnswersOwn,
     ReportToHuman,
     ResultSet,
+    /// The person sent it: the final message is posted in its thread, in
+    /// reply to their message.
+    Relayed,
 }
 
 /// Why a delivery keeps today's explicit commands.
@@ -122,10 +126,14 @@ pub(crate) struct DeliveryFacts<'a> {
     pub other_line: bool,
     /// The delivered message answers one this address wrote.
     pub answers_own: bool,
+    /// The person sent the delivered message, from their own address or an
+    /// envoy of it.
+    pub relayed: bool,
     pub leftover: bool,
 }
 
-/// The measured rule: a tracked worker replies, a delivery that answers the
+/// The measured rule: a message from the person gets the final message back
+/// in its thread, a tracked worker replies, a delivery that answers the
 /// recipient's own message closes without one, and anything else replies,
 /// because a wrong no-reply strands a sender while a wrong reply costs one
 /// extra message.
@@ -147,6 +155,11 @@ pub(crate) fn plan(facts: &DeliveryFacts<'_>) -> Plan {
     match (facts.kind, reply) {
         (DeliveryKind::ReportToHuman, _) => Plan::Armed(Armed::NoReply(NoReplyCase::ReportToHuman)),
         (DeliveryKind::ResultSet, _) => Plan::Armed(Armed::NoReply(NoReplyCase::ResultSet)),
+        (DeliveryKind::Settle | DeliveryKind::Channel | DeliveryKind::DirectMessage, Some(_))
+            if facts.relayed =>
+        {
+            Plan::Armed(Armed::NoReply(NoReplyCase::Relayed))
+        }
         (DeliveryKind::Settle, Some(template)) => {
             let tracked = template.get("work_outcome").is_some();
             Plan::Armed(if !tracked && facts.answers_own {
@@ -192,6 +205,7 @@ pub(crate) fn claim_for(
             .iter()
             .any(|token| !matches!(*token, "reply" | "complete.no-reply")),
         answers_own: delivery.answers_own,
+        relayed: delivery.relayed,
         leftover,
     }) else {
         return None;
@@ -286,7 +300,7 @@ pub struct StopFacts {
 /// What durable state says about the claim's attempt when the Stop decides.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct SettleFacts {
-    pub disposed: bool,
+    pub disposition: Option<crate::DeliveryDisposition>,
     /// A sandboxed explicit reply or complete for the attempt is queued and
     /// has not committed yet.
     pub explicit_pending: bool,
@@ -300,25 +314,20 @@ pub(crate) enum Verdict {
     Settle(Settlement),
 }
 
-/// The bound operation that settles a claim.
+/// The bound operation that settles a claim, or the relay's post.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Settlement {
     Reply(Value),
     NoReply,
+    /// The final message, trimmed, for the person's thread.
+    Relay(String),
 }
 
 impl Settlement {
-    pub(crate) fn operation(&self, attempt_id: &crate::DeliveryAttemptId) -> (&'static str, Value) {
-        match self {
-            Self::Reply(input) => ("reply", input.clone()),
-            Self::NoReply => (STOP_NO_REPLY, serde_json::json!({"attempt_id": attempt_id})),
-        }
-    }
-
     pub(crate) fn done(&self) -> Done {
         match self {
             Self::Reply(_) => Done::Replied,
-            Self::NoReply => Done::NoReplied,
+            Self::NoReply | Self::Relay(_) => Done::NoReplied,
         }
     }
 }
@@ -330,8 +339,19 @@ pub(crate) fn decide(claim: &Claim, stop: &StopFacts, settle: &SettleFacts) -> V
         ClaimState::Open if stop.turn.as_ref() != Some(&claim.turn) => {
             Verdict::Leave(LeaveReason::Interrupted)
         }
-        ClaimState::Open if settle.disposed || settle.explicit_pending => Verdict::Superseded,
+        ClaimState::Open
+            if settle.explicit_pending
+                || settle.disposition == Some(crate::DeliveryDisposition::Reply) =>
+        {
+            Verdict::Superseded
+        }
+        // An explicit no-reply still leaves the person's answer to post.
         ClaimState::Open => match &claim.plan {
+            Armed::NoReply(NoReplyCase::Relayed) => match stop.text.text.trim() {
+                "" => Verdict::Leave(LeaveReason::NoFinalText),
+                text => Verdict::Settle(Settlement::Relay(text.to_owned())),
+            },
+            _ if settle.disposition.is_some() => Verdict::Superseded,
             Armed::NoReply(_) => Verdict::Settle(Settlement::NoReply),
             Armed::Reply { .. } if stop.background_running => Verdict::Leave(LeaveReason::Held),
             Armed::Reply { template, tracked } => {
@@ -597,31 +617,54 @@ pub fn settle_at_stop(
             Verdict::Ignore => continue,
             Verdict::Leave(reason) => ClaimState::Left(reason),
             Verdict::Superseded => ClaimState::Done(Done::Superseded),
-            Verdict::Settle(settlement) => {
-                let (operation, input) = settlement.operation(&claim.attempt_id);
-                let location = &claim.location;
-                match run(BoundOperation {
-                    operation,
-                    input,
-                    state: PathBuf::from(&location.state),
-                    socket: location.socket.clone(),
-                    workspace: location.workspace.clone(),
-                    pane: location.pane.clone(),
-                }) {
-                    Ok(_) => ClaimState::Done(settlement.done()),
-                    Err(_) if disposed(state, claim) => ClaimState::Done(Done::Superseded),
+            Verdict::Settle(Settlement::Relay(text)) => {
+                match relay(state, &stop.session, claim, &text, now_ms) {
+                    // The relay recorded the no-reply. The Stop's bound
+                    // no-reply finds it, changes nothing, and wakes the
+                    // mailboxes as the agent's own line would.
+                    Ok(Some(_)) => {
+                        let _ = run(claim.bound(&Settlement::NoReply));
+                        ClaimState::Done(Done::NoReplied)
+                    }
+                    Ok(None) => ClaimState::Done(Done::Superseded),
                     Err(_) => ClaimState::Left(LeaveReason::OperationFailed),
                 }
             }
+            Verdict::Settle(settlement) => match run(claim.bound(&settlement)) {
+                Ok(_) => ClaimState::Done(settlement.done()),
+                Err(_) if disposition(state, claim).is_some() => ClaimState::Done(Done::Superseded),
+                Err(_) => ClaimState::Left(LeaveReason::OperationFailed),
+            },
         };
         claim.set(next, now_ms);
     }
     claims.save(now_ms);
 }
 
+impl Claim {
+    /// The CLI operation for `settlement`, at the envelope's own location.
+    fn bound(&self, settlement: &Settlement) -> BoundOperation {
+        let (operation, input) = match settlement {
+            Settlement::Reply(input) => ("reply", input.clone()),
+            Settlement::NoReply | Settlement::Relay(_) => (
+                STOP_NO_REPLY,
+                serde_json::json!({"attempt_id": self.attempt_id}),
+            ),
+        };
+        BoundOperation {
+            operation,
+            input,
+            state: PathBuf::from(&self.location.state),
+            socket: self.location.socket.clone(),
+            workspace: self.location.workspace.clone(),
+            pane: self.location.pane.clone(),
+        }
+    }
+}
+
 fn settle_facts(state: &Path, session: &str, claim: &Claim) -> SettleFacts {
     SettleFacts {
-        disposed: disposed(state, claim),
+        disposition: disposition(state, claim),
         explicit_pending: crate::deferred_commands::settle_queued(
             state,
             &claim.namespace.session_socket_id,
@@ -631,18 +674,41 @@ fn settle_facts(state: &Path, session: &str, claim: &Claim) -> SettleFacts {
     }
 }
 
-fn disposed(state: &Path, claim: &Claim) -> bool {
+fn disposition(state: &Path, claim: &Claim) -> Option<crate::DeliveryDisposition> {
     crate::StateStore::open_read_only(state)
         .ok()
         .flatten()
         .and_then(|mut store| {
             store
                 .transaction(|transaction| {
-                    transaction.delivery_disposition_exists(&claim.namespace, &claim.attempt_id)
+                    transaction.delivery_disposition(&claim.namespace, &claim.attempt_id)
                 })
                 .ok()
         })
-        .unwrap_or(false)
+        .flatten()
+}
+
+/// Posts a Relayed claim's final message through the terminal relay.
+fn relay(
+    state: &Path,
+    session: &str,
+    claim: &Claim,
+    text: &str,
+    now_ms: u64,
+) -> Result<Option<crate::MessageId>, crate::StoreError> {
+    crate::StateStore::open(state)?.transaction(|transaction| {
+        transaction.relay_final_message(
+            &claim.namespace,
+            &crate::TerminalRelayEnd {
+                agent_session_id: crate::AgentSessionId::new(session),
+                attempt_id: claim.attempt_id.clone(),
+                turn_started_at_ms: claim.armed_at_ms,
+                ended_at_ms: now_ms,
+                text: text.to_owned(),
+            },
+            &crate::MutationAttribution::new(crate::ActorKind::Plugin, "namedrop", now_ms),
+        )
+    })
 }
 
 #[cfg(test)]

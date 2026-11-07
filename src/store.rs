@@ -6155,9 +6155,6 @@ impl StateTransaction<'_> {
             transition,
             attribution,
         )?;
-        if next == DeliveryState::Submitted {
-            self.arm_terminal_relay(namespace, attempt_id, &source_message_id, attribution)?;
-        }
         if matches!(next, DeliveryState::Held | DeliveryState::Failed) {
             self.open_delivery_attempt_attention(
                 namespace,

@@ -1274,6 +1274,7 @@ pub(crate) struct AuthenticatedDelivery {
     pub envelope: Value,
     pub kind: DeliveryKind,
     pub answers_own: bool,
+    pub relayed: bool,
     pub agent_session_id: AgentSessionId,
     pub namespace: StateNamespace,
 }
@@ -1299,6 +1300,8 @@ where
                     kind: DeliveryKind::of(&outstanding.control),
                     answers_own: transaction
                         .answers_own_message(namespace, &outstanding.control.attempt_id)?,
+                    relayed: transaction
+                        .relays_to_person(namespace, &outstanding.control.attempt_id)?,
                     envelope: value,
                     agent_session_id: session.clone(),
                     namespace: namespace.clone(),
@@ -1725,6 +1728,8 @@ const FINAL_REPLY_OUTCOME: &str = "End it with one line: work_outcome: completed
 const FINAL_REPLY_HELD: &str = "If background work is still running when your turn ends, Namedrop sends nothing; settle later with the bound reply or complete.no-reply.";
 const REPORT_TO_HUMAN_GUIDANCE: &str = "Namedrop commands: none. Namedrop closes this without a reply when your turn ends; show it to the person once in your final message.";
 const RESULT_SET_GUIDANCE: &str = "Namedrop commands: none. Namedrop closes this without a reply when your turn ends; your final message is the response the envelope asks for.";
+const RELAYED_GUIDANCE: &str = "Namedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line.";
+const RELAYED_CHANNEL: &str = " To wake a member with @name, run this reply line instead.";
 
 /// The context for a delivery whose final message settles it. It says what
 /// the Stop will do and shows only the one line that does the other thing.
@@ -1738,6 +1743,12 @@ pub(crate) fn final_reply_guidance(
     let (opposite, lead) = match armed {
         Armed::NoReply(NoReplyCase::ReportToHuman) => return Some(REPORT_TO_HUMAN_GUIDANCE.into()),
         Armed::NoReply(NoReplyCase::ResultSet) => return Some(RESULT_SET_GUIDANCE.into()),
+        Armed::NoReply(NoReplyCase::Relayed) if control["reply_mode"] != "channel" => {
+            return Some(RELAYED_GUIDANCE.into());
+        }
+        Armed::NoReply(NoReplyCase::Relayed) => {
+            ("reply", format!("{RELAYED_GUIDANCE}{RELAYED_CHANNEL}"))
+        }
         Armed::Reply { tracked, .. } => {
             let mut lead = format!(
                 "Namedrop commands: your final message is your reply to {}. {FINAL_REPLY_DONE}",

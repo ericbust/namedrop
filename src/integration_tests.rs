@@ -374,7 +374,20 @@ fn a_final_reply_delivery_says_what_the_stop_does_and_shows_only_the_other_line(
             text
         );
     }
-    for guidance in [&claude, &tracked, &own] {
+    let relayed = Armed::NoReply(NoReplyCase::Relayed);
+    assert_eq!(
+        final_reply_guidance(&control, &relayed, false).unwrap(),
+        RELAYED_GUIDANCE
+    );
+    let mut channel = control.clone();
+    channel["reply_mode"] = json!("channel");
+    let channel = final_reply_guidance(&channel, &relayed, false).unwrap();
+    assert!(
+        channel.starts_with(&format!("{RELAYED_GUIDANCE}{RELAYED_CHANNEL}")),
+        "{channel}"
+    );
+    assert_eq!(rendered_tokens(&channel), ["reply"]);
+    for guidance in [&claude, &tracked, &own, &channel] {
         assert!(guidance.starts_with("Namedrop commands: "), "{guidance}");
         assert!(!guidance.contains("operator"), "{guidance}");
     }

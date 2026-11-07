@@ -11,7 +11,7 @@ use namedrop::{
     PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
     execute_integration_operation, execute_user_prompt_submit_hook, expand_attempt_reply,
     final_reply::{BoundOperation, FinalText, HostTurn, StopFacts, settle_at_stop},
-    issue_registration_challenge,
+    issue_registration_challenge, send_operator_message,
 };
 use serde_json::{Value, json};
 use std::{
@@ -90,6 +90,10 @@ impl HerdrCommandExecutor for FakeHerdr {
                 json!({"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}).to_string()
             }
             ["worktree", "list", "--cwd", cwd, "--json"] if *cwd == self.worktree => json!({
+                "result": {"worktrees": [{"path": self.worktree, "open_workspace_id": "workspace-1"}]}
+            })
+            .to_string(),
+            ["worktree", "list", "--workspace", "workspace-1", "--json"] => json!({
                 "result": {"worktrees": [{"path": self.worktree, "open_workspace_id": "workspace-1"}]}
             })
             .to_string(),
@@ -309,6 +313,30 @@ impl Space {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
+    }
+
+    /// A message the person sends from the app, as the Channels composer
+    /// does, then dispatched.
+    fn send_as_person(&self, request_id: &str, source: &str, in_reply_to: Option<&str>) -> Value {
+        let mut runtime = self.runtime("pane-lead");
+        runtime.current_pane_id = None;
+        runtime.workspace_id = Some("workspace-1");
+        let sent = send_operator_message(
+            request_id,
+            source,
+            in_reply_to.map(namedrop::MessageId::new).as_ref(),
+            &runtime,
+        )
+        .unwrap();
+        dispatch::wake(&runtime);
+        sent
+    }
+
+    fn relayed(&self) -> Vec<Vec<String>> {
+        self.rows(
+            "SELECT message_id, thread_id, in_reply_to, body FROM collaboration_messages
+             WHERE grammar_version='terminal-relay/v1' ORDER BY created_at_ms, rowid",
+        )
     }
 
     fn dispositions(&self) -> Vec<Vec<String>> {
@@ -686,6 +714,86 @@ fn a_delivery_that_shows_another_line_keeps_todays_commands() {
     );
 }
 
+impl Space {
+    /// The installed Stop hook as the host runs it, against a Herdr that
+    /// answers like the space. It returns once the hook and any detached
+    /// worker have exited.
+    fn installed_stop(&self, session: &str, prompt_id: &str, text: &str) {
+        use std::os::{fd::AsRawFd, unix::process::CommandExt};
+        let root = &self.directory.root;
+        let herdr = root.join("herdr");
+        fs::write(
+            &herdr,
+            format!(
+                r#"#!/usr/bin/env python3
+import json, sys
+args = sys.argv[1:]
+if args[:1] == ['--socket']: args = args[2:]
+panes = {{'result': {{'panes': [
+    {{'pane_id':'pane-lead','terminal_id':'t1','tab_id':'tab-1','workspace_id':'workspace-1','agent':'codex','agent_session':{{'value':'session-lead'}},'agent_status':'idle'}},
+    {{'pane_id':'pane-reviewer','terminal_id':'t2','tab_id':'tab-2','workspace_id':'workspace-1','agent':'claude','agent_session':{{'value':'session-reviewer'}},'agent_status':'idle'}}]}}}}
+if args[:2] == ['workspace','list']: print(json.dumps({{'result':{{'workspaces':[{{'workspace_id':'workspace-1'}}]}}}}))
+elif args[:2] == ['worktree','list']: print(json.dumps({{'result':{{'worktrees':[{{'path':{repo:?},'open_workspace_id':'workspace-1'}}]}}}}))
+elif args[:2] == ['pane','list']: print(json.dumps(panes))
+else: print('{{}}')
+"#,
+                repo = self.directory.repo.display().to_string()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+        let payload = json!({"hook_event_name":"Stop","session_id":session,
+                             "prompt_id":prompt_id,"last_assistant_message":text,"background_tasks":[]});
+        let (mut done, lifetime) = std::os::unix::net::UnixStream::pair().unwrap();
+        let lifetime_fd = lifetime.as_raw_fd();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        // The hook and its detached worker inherit this descriptor, so its
+        // end of file means both have exited.
+        unsafe {
+            command.pre_exec(move || {
+                let flags = libc::fcntl(lifetime_fd, libc::F_GETFD);
+                if flags == -1
+                    || libc::fcntl(lifetime_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &self.directory.home)
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("HERDR_SOCKET_PATH", "socket-a")
+            .env("HERDR_BIN_PATH", &herdr)
+            .env("NAMEDROP_HERDR_TIMEOUT_MS", "250")
+            .current_dir(&self.directory.repo)
+            .args(["hook", "stop", "--state-directory"])
+            .arg(&self.directory.state)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        drop(lifetime);
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        done.set_read_timeout(Some(std::time::Duration::from_secs(15)))
+            .unwrap();
+        assert_eq!(
+            std::io::Read::read(&mut done, &mut [0]).unwrap(),
+            0,
+            "the Stop worker outlived its deadline"
+        );
+    }
+}
+
 /// The installed Stop hook and its detached worker run the same CLI pipeline
 /// as the agent's own bound line, against a Herdr that answers like the space.
 #[test]
@@ -706,66 +814,12 @@ fn the_installed_stop_hook_settles_through_the_cli_pipeline() {
         CLAUDE,
         &ask.to_string(),
     );
-
-    let root = &space.directory.root;
-    let herdr = root.join("herdr");
-    fs::write(
-        &herdr,
-        format!(
-            r#"#!/usr/bin/env python3
-import json, sys
-args = sys.argv[1:]
-if args[:1] == ['--socket']: args = args[2:]
-panes = {{'result': {{'panes': [
-    {{'pane_id':'pane-lead','terminal_id':'t1','tab_id':'tab-1','workspace_id':'workspace-1','agent':'codex','agent_session':{{'value':'session-lead'}},'agent_status':'idle'}},
-    {{'pane_id':'pane-reviewer','terminal_id':'t2','tab_id':'tab-2','workspace_id':'workspace-1','agent':'claude','agent_session':{{'value':'session-reviewer'}},'agent_status':'idle'}}]}}}}
-if args[:2] == ['workspace','list']: print(json.dumps({{'result':{{'workspaces':[{{'workspace_id':'workspace-1'}}]}}}}))
-elif args[:2] == ['worktree','list']: print(json.dumps({{'result':{{'worktrees':[{{'path':{repo:?},'open_workspace_id':'workspace-1'}}]}}}}))
-elif args[:2] == ['pane','list']: print(json.dumps(panes))
-else: print('{{}}')
-"#,
-            repo = space.directory.repo.display().to_string()
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
-    let payload = json!({"hook_event_name":"Stop","session_id":"session-reviewer",
-                         "prompt_id":CLAUDE.1,"last_assistant_message":"pong","background_tasks":[]});
-    let mut child = Command::new(env!("CARGO_BIN_EXE_namedrop"))
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", &space.directory.home)
-        .env("XDG_CONFIG_HOME", root.join("config"))
-        .env("HERDR_SOCKET_PATH", "socket-a")
-        .env("HERDR_BIN_PATH", &herdr)
-        .env("NAMEDROP_HERDR_TIMEOUT_MS", "250")
-        .current_dir(&space.directory.repo)
-        .args(["hook", "stop", "--state-directory"])
-        .arg(&space.directory.state)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(payload.to_string().as_bytes())
-        .unwrap();
-    assert!(child.wait().unwrap().success());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while space.dispositions().is_empty() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    space.installed_stop("session-reviewer", CLAUDE.1, "pong");
     assert_eq!(space.dispositions(), [vec![attempt, "reply".to_owned()]]);
     assert_eq!(
         space.rows("SELECT body FROM collaboration_messages ORDER BY created_at_ms DESC, rowid DESC LIMIT 1"),
         [vec!["pong".to_owned()]]
     );
-    while space.claims()[0]["state"] == json!("open") && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
     assert_eq!(space.claims()[0]["state"], json!({"done":"replied"}));
 }
 
@@ -862,4 +916,122 @@ fn a_reply_after_namedrop_closed_the_delivery_follows_up_in_its_thread() {
             && !refused.contains("UNIQUE"),
         "{refused}"
     );
+}
+
+/// A message from the person is answered by the agent's final message, posted
+/// once in the thread it came from, in reply to it, as the terminal relay
+/// posts it; a thread reply stays in its thread, and the agent can still
+/// follow up with its bound reply.
+#[test]
+fn a_message_from_the_person_is_answered_in_its_thread_by_the_final_message() {
+    let space = Space::new();
+    let question = space.send_as_person("question", "@reviewer Option A or option B?", None);
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    let context = space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    assert!(
+        context.ends_with(
+            "\n\nNamedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line."
+        ),
+        "{context}"
+    );
+    assert!(
+        !context.contains("Settle only through the bound operations."),
+        "{context}"
+    );
+
+    space.stop("session-reviewer", CLAUDE, "Option B.");
+    let thread = question["thread_id"].as_str().unwrap().to_owned();
+    let first = format!("terminal-relay:{attempt}");
+    assert_eq!(
+        space.relayed(),
+        [vec![
+            first.clone(),
+            thread.clone(),
+            question["message_id"].as_str().unwrap().to_owned(),
+            "Option B.".to_owned()
+        ]]
+    );
+    assert_eq!(
+        space.rows("SELECT disposition_id, disposition_kind FROM delivery_dispositions"),
+        [vec![
+            format!("terminal-relay-no-reply:{attempt}"),
+            "no_reply".to_owned()
+        ]]
+    );
+    assert_eq!(space.claims()[0]["state"], json!({"done":"no_replied"}));
+
+    let why = space.send_as_person("why", "@reviewer Why B?", Some(&first));
+    assert_eq!(why["thread_id"], json!(thread));
+    let followup = space.herdr.envelope_for("pane-reviewer");
+    let second = followup["control"]["attempt_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(second, attempt);
+    let turn = ("prompt_id", "why-turn");
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        turn,
+        &followup.to_string(),
+    );
+    space.stop("session-reviewer", turn, "Because it is faster.");
+    let relayed = space.relayed();
+    assert_eq!(relayed.len(), 2, "{relayed:?}");
+    assert_eq!(
+        relayed[1],
+        [
+            format!("terminal-relay:{second}"),
+            thread.clone(),
+            why["message_id"].as_str().unwrap().to_owned(),
+            "Because it is faster.".to_owned()
+        ]
+    );
+
+    let more = dispatch::message(
+        "reply",
+        bound_reply(&space, &followup, "@operator It also uses less memory."),
+        &space.runtime("pane-reviewer"),
+    )
+    .unwrap();
+    assert_eq!(more["thread_id"], json!(thread));
+    assert_eq!(more["disposition"], "no_reply", "{more}");
+    assert_eq!(
+        space.rows(&format!(
+            "SELECT in_reply_to FROM collaboration_messages WHERE message_id='{}'",
+            more["message_id"].as_str().unwrap()
+        )),
+        [vec![why["message_id"].as_str().unwrap().to_owned()]]
+    );
+}
+
+/// What the person types into the pane through Live Peek is a plain prompt
+/// with no envelope: it arms nothing, so its turn's final message is never
+/// posted anywhere, even while a message from the person is outstanding.
+#[test]
+fn a_prompt_typed_into_the_pane_is_never_relayed() {
+    let space = Space::new();
+    space.send_as_person("question", "@reviewer Option A or option B?", None);
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    execute_user_prompt_submit_hook(
+        &json!({"hook_event_name":"UserPromptSubmit","session_id":"session-reviewer",
+                "prompt_id":"typed-turn","prompt":"Which file did you change?"})
+        .to_string(),
+        &space.runtime("pane-reviewer"),
+    );
+    space.installed_stop("session-reviewer", "typed-turn", "I changed src/main.rs.");
+    assert!(space.relayed().is_empty(), "{:?}", space.relayed());
+    assert!(space.dispositions().is_empty());
+    assert!(!space.directory.state.join("final-reply").exists());
+    let inbox =
+        execute_integration_operation("delivery.inbox", json!({}), &space.runtime("pane-reviewer"))
+            .unwrap();
+    assert_eq!(inbox["envelopes"][0]["control"]["attempt_id"], attempt);
 }
