@@ -436,7 +436,7 @@ To turn off both background checks and notices, put `{"check_for_updates":false}
 - **Nothing is forced.** An update keeps your installed source and ref, including a fixed pin. It stops and cancels nothing. If activation fails, Namedrop selects the previous runtime again. Build and setup details go to `last-update.log` in Namedrop's state directory.
 - **Other workspaces.** Other workspaces keep their activation. Run `namedrop doctor` in each one, and open setup if Doctor reports a problem.
 
-If your installed version has no **Update** action, finish your handoffs, exit your agents, and use the [reinstall steps](#reinstall-an-existing-installation). Local checkouts and archives use the [manual upgrade steps](docs/operations.md#manual-upgrade). Version 1.5.0 upgrades the database in place to schema 7 and keeps names and history. Take a backup before upgrading across schemas. The [upgrade guide](docs/operations.md#upgrade) covers migration, backups, and recovery.
+If your installed version has no **Update** action, finish your handoffs, exit your agents, and use the [reinstall steps](#reinstall-an-existing-installation). Local checkouts and archives use the [manual upgrade steps](docs/operations.md#manual-upgrade). Version 1.5.0 upgrades the database in place to schema 7 and keeps names and history. Start new agent sessions after updating to load the reminder commands and updated instructions. Take a backup before upgrading across schemas. The [upgrade guide](docs/operations.md#upgrade) covers migration, backups, and recovery.
 
 ### Reinstall an existing installation
 

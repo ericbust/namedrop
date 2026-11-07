@@ -2,7 +2,7 @@
 
 Start from a reviewed commit. Build each archive on the machine it's for: `aarch64-apple-darwin` on an Apple silicon Mac, and `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu` on GNU/Linux of that architecture. The packager runs the executable to check its version, so it refuses one built for another platform. Each release attaches the Linux aarch64 archive, but [compatibility](compatibility.md) lists it as untested by hand until someone tests it.
 
-Set the same version in `Cargo.toml`, `herdr-plugin.toml` and `Cargo.lock`, and check them with `sh scripts/release.sh version`. The packager also refuses a mismatch between the manifests and the built executable's `--version`. Nothing checks versions written in prose, so search `README.md`, `CONTRIBUTING.md` and `docs/*.md` for the old archive name and version by hand.
+Set the same version in `Cargo.toml`, `herdr-plugin.toml` and `Cargo.lock`, and check them with `sh scripts/release.sh version`. The packager also refuses a mismatch between the manifests and the built executable's `--version`. Nothing checks versions written in prose. Search `README.md`, `CONTRIBUTING.md`, `docs/*.md`, and `experimental/channels/README.md` for old archive names, versions, and installation instructions. Channels ships as Beta in the normal installation on `main`. Keep `--ref experimental` only for trying upcoming features. When promoting an experimental series, replace its changelog sections with one stable release section for people upgrading from the last stable release.
 
 Check that the crate includes the source, lockfile and documentation:
 

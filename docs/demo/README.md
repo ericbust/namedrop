@@ -77,7 +77,7 @@ The Channels movie is a silent keynote film built from one continuous take of th
 
 You need the Namedrop testbed, Chromium, Node.js, ffmpeg, and Python 3 with Pillow. Keep the take and renders outside `/tmp`; a take is about 1 GB. Run the commands from the repository root.
 
-1. Build a `test-` profile from the product revision. The testbed links logins read-only and isolates `HOME` and `XDG_CONFIG_HOME`.
+1. Build a `test-` profile from the product revision. The testbed isolates `HOME` and `XDG_CONFIG_HOME` and links your existing login files.
 
    ```sh
    export TESTBED_HOME=~/.cache/channels-video/testbed
@@ -99,8 +99,9 @@ You need the Namedrop testbed, Chromium, Node.js, ffmpeg, and Python 3 with Pill
 4. In another shell, queue the steps one at a time and read each result before you queue the next. The last step stops the recorder.
 
    ```sh
-   for step in docs/demo/channels/record/steps/*.js; do
-     node docs/demo/channels/record/queue.mjs ~/.cache/channels-video/take "$step"
+   steps_dir=docs/demo/channels/record/steps
+   for step in $(cd "$steps_dir" && printf '%s\n' *.js | sort -n); do
+     node docs/demo/channels/record/queue.mjs ~/.cache/channels-video/take "$steps_dir/$step"
      until [ -f ~/.cache/channels-video/take/actions/$(basename "$step" .js).json.result ]; do sleep 1; done
      head -c 600 ~/.cache/channels-video/take/actions/$(basename "$step" .js).json.result; echo
    done
