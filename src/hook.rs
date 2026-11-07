@@ -114,13 +114,14 @@ where
     let delivery = carried.as_ref().and_then(|carried| {
         crate::integration::authenticate_delivery_prompt(&carried.envelope, runtime)
     });
-    let armed = observe_final_reply(&input, carried.as_ref(), delivery.as_ref(), runtime);
+    let (armed, held) = observe_final_reply(&input, carried.as_ref(), delivery.as_ref(), runtime);
     if let (Some(carried), Some(delivery)) = (&carried, delivery) {
         return Some(delivery_hook_output(
             &delivery.envelope,
             carried.leftover,
             reader,
             armed.as_ref(),
+            &held,
             runtime,
         ));
     }
@@ -131,6 +132,11 @@ where
         None => route_leading_mentions(&input.prompt, runtime),
     };
     let Some(outcome) = outcome else {
+        // A delivery a Stop held stays open until the agent answers it, so
+        // every later turn says how.
+        if !held.is_empty() {
+            return Some(under_roster(&held.join("\n\n"), reader, runtime));
+        }
         // An ordinary turn is the persona roster's boundary. With nothing new
         // to supply, non-Mention input stays invisible exactly as before.
         return news(reader, runtime).map(|roster| context_hook_output(&roster));
@@ -395,6 +401,7 @@ fn delivery_hook_output<E, C, I>(
     leftover: &str,
     reader: Option<Reader<'_>>,
     armed: Option<&crate::final_reply::Armed>,
+    held: &[String],
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Value
 where
@@ -438,32 +445,37 @@ where
             .and_then(|armed| crate::integration::final_reply_guidance(control, armed))
             .or_else(|| crate::integration::delivery_command_guidance(control))
     });
-    if let Some(commands) = commands {
+    for text in commands.iter().chain(held) {
         context.push_str("\n\n");
-        context.push_str(&commands);
+        context.push_str(text);
     }
     context_hook_output(&context)
 }
 
 /// Keeps the session's final-reply claims in step with this prompt, and arms
 /// one for `delivery` when it can. The returned plan is what the hook may
-/// promise; `None` keeps today's explicit commands.
+/// promise; `None` keeps today's explicit commands. Each text says how to
+/// answer a delivery a Stop held that is still open.
 fn observe_final_reply<E, C, I>(
     input: &UserPromptSubmitInput,
     carried: Option<&CarriedEnvelope<'_>>,
     delivery: Option<&crate::integration::AuthenticatedDelivery>,
     runtime: &LifecycleRuntime<'_, E, C, I>,
-) -> Option<crate::final_reply::Armed>
+) -> (Option<crate::final_reply::Armed>, Vec<String>)
 where
     E: HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
-    let session = input.session_id.as_deref()?;
-    let turn = crate::final_reply::HostTurn::from_ids(
-        input.prompt_id.as_deref(),
-        input.turn_id.as_deref(),
-    )?;
+    let (Some(session), Some(turn)) = (
+        input.session_id.as_deref(),
+        crate::final_reply::HostTurn::from_ids(
+            input.prompt_id.as_deref(),
+            input.turn_id.as_deref(),
+        ),
+    ) else {
+        return (None, Vec::new());
+    };
     let now_ms = runtime.clock.now_unix_ms();
     let claim = carried.zip(delivery).and_then(|(carried, delivery)| {
         crate::final_reply::claim_for(
@@ -475,16 +487,22 @@ where
         )
     });
     let plan = claim.as_ref().map(|claim| claim.plan.clone());
-    crate::final_reply::observe_prompt(
+    let observed = crate::final_reply::observe_prompt(
         runtime.state_directory,
         runtime.session_socket_id,
         session,
         &turn,
         claim,
         now_ms,
+    );
+    (
+        observed.armed.then_some(plan).flatten(),
+        observed
+            .held
+            .iter()
+            .map(|(attempt, line)| crate::integration::held_delivery_guidance(attempt, line))
+            .collect(),
     )
-    .then_some(plan)
-    .flatten()
 }
 
 /// A Delivery Envelope at the end of the submitted text, and the text the

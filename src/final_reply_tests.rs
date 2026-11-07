@@ -182,6 +182,7 @@ fn claim(plan: Armed, state: ClaimState) -> Claim {
         state,
         armed_at_ms: 1,
         updated_at_ms: 1,
+        reply_line: Some("reply: namedrop reply --input-json '{}'".into()),
     }
 }
 
@@ -549,7 +550,7 @@ impl Drop for StateDirectory {
 }
 
 fn observe(state: &StateDirectory, prompt: &str, arm: Option<Claim>) -> bool {
-    observe_prompt(&state.0, "socket", "session", &turn(prompt), arm, 10)
+    observe_prompt(&state.0, "socket", "session", &turn(prompt), arm, 10).armed
 }
 
 fn armed(attempt: &str, prompt: &str, plan: Armed) -> Claim {
@@ -704,6 +705,13 @@ fn background_work_at_the_stop_leaves_a_reply_for_the_agent_to_settle() {
         &mut ran(&log, Ok(json!({}))),
     );
     assert!(log.into_inner().is_empty(), "a held reply was sent");
+    assert_eq!(
+        observe_prompt(&state.0, "socket", "session", &turn("later"), None, 30).held,
+        [(
+            crate::DeliveryAttemptId::new("attempt-1"),
+            "reply: namedrop reply --input-json '{}'".to_owned()
+        )]
+    );
     assert_eq!(state.claims()[0].state, ClaimState::Left(LeaveReason::Held));
     assert!(observe(
         &state,

@@ -229,6 +229,7 @@ pub(crate) fn claim_for(
         state: ClaimState::Open,
         armed_at_ms: now_ms,
         updated_at_ms: now_ms,
+        reply_line: crate::integration::rendered_line(control, "reply"),
     })
 }
 
@@ -253,6 +254,10 @@ pub(crate) struct Claim {
     pub state: ClaimState,
     pub armed_at_ms: u64,
     pub updated_at_ms: u64,
+    /// The delivery's bound reply line, shown again while a held claim's
+    /// delivery stays open.
+    #[serde(default)]
+    pub reply_line: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -541,10 +546,20 @@ impl Claim {
     }
 }
 
+/// What one prompt found in its session's claims.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub(crate) struct Observed {
+    /// Whether `arm` was written: the only thing that decides what the hook
+    /// tells the agent about this prompt's delivery.
+    pub armed: bool,
+    /// The bound reply line of each delivery a Stop held that is still open,
+    /// so the agent can answer it in its thread.
+    pub held: Vec<(crate::DeliveryAttemptId, String)>,
+}
+
 /// Runs for every prompt of a session that names its turn. It ends claims
-/// that lost their turn, and arms `arm` when the session holds no other open
-/// claim. Whether `arm` was written is the only thing that decides what the
-/// hook tells the agent.
+/// that lost their turn, arms `arm` when the session holds no other open
+/// claim, and finishes held claims whose deliveries were settled since.
 pub(crate) fn observe_prompt(
     state: &Path,
     socket: &str,
@@ -552,13 +567,13 @@ pub(crate) fn observe_prompt(
     turn: &HostTurn,
     arm: Option<Claim>,
     now_ms: u64,
-) -> bool {
+) -> Observed {
     let directory = session_directory(state, socket, session);
     if arm.is_none() && !directory.join("claims.json").exists() {
-        return false;
+        return Observed::default();
     }
     let Some(mut claims) = Claims::lock(directory, PROMPT_LOCK_WAIT) else {
-        return false;
+        return Observed::default();
     };
     for claim in &mut claims.claims {
         if claim.state == ClaimState::Open && claim.turn != *turn {
@@ -579,8 +594,19 @@ pub(crate) fn observe_prompt(
         }
         _ => false,
     };
+    let mut held = Vec::new();
+    for claim in &mut claims.claims {
+        if claim.state != ClaimState::Left(LeaveReason::Held) {
+            continue;
+        }
+        match (disposition(state, claim), &claim.reply_line) {
+            (Some(_), _) => claim.set(ClaimState::Done(Done::Superseded), now_ms),
+            (None, Some(line)) => held.push((claim.attempt_id.clone(), line.clone())),
+            (None, None) => {}
+        }
+    }
     claims.save(now_ms);
-    armed
+    Observed { armed, held }
 }
 
 /// Whether a Stop of this session has anything to settle. It reads without

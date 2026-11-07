@@ -1099,6 +1099,77 @@ fn a_turn_that_ends_waiting_on_a_helper_holds_the_delivery() {
                 .any(|envelope| envelope["control"]["attempt_id"] == attempt.as_str()),
             "a held delivery left the inbox"
         );
+
+        // Every later turn says how to answer it: the helper's answer, and
+        // a prompt typed into the pane alike.
+        let way_back = |context: &str| {
+            let (head, line) = context.rsplit_once('\n').unwrap();
+            head.ends_with(&format!(
+                "\n\nNamedrop: delivery {attempt} from an earlier turn is still open; to answer it, run this line with your text in place of <reply body>."
+            )) && line.starts_with("reply: ")
+                && line.contains(&format!(r#""attempt_id":"{attempt}""#))
+        };
+        // The agent going idle settles the attempt's state without a
+        // disposition, as reconciliation does, so the mailbox moves on.
+        StateStore::open(&space.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.transition_delivery_attempt(
+                    &namespace(),
+                    &namedrop::DeliveryAttemptId::new(&attempt),
+                    namedrop::DeliveryState::Settled,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 42),
+                )
+            })
+            .unwrap();
+        let helper = space.herdr.envelope_for("pane-lead");
+        dispatch::message(
+            "reply",
+            bound_reply(&space, &helper, "@reviewer Yes, it is safe."),
+            &space.runtime("pane-lead"),
+        )
+        .unwrap();
+        let answer = space.herdr.envelope_for("pane-reviewer");
+        assert_eq!(answer["untrusted_body"], "Yes, it is safe.");
+        let turn = ("prompt_id", "answer-turn");
+        let context = space.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            turn,
+            &answer.to_string(),
+        );
+        assert!(way_back(&context), "{context}");
+        space.stop("session-reviewer", turn, "The lead says option B is safe.");
+        let typed = space.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            ("prompt_id", "typed-turn"),
+            "Did you hear back?",
+        );
+        assert!(way_back(&typed), "{typed}");
+
+        let answered = dispatch::message(
+            "reply",
+            bound_reply(
+                &space,
+                &ask,
+                "@operator Yes: the lead says option B is safe.",
+            ),
+            &space.runtime("pane-reviewer"),
+        )
+        .unwrap();
+        assert_eq!(answered["disposition"], "reply");
+        let after = execute_user_prompt_submit_hook(
+            &json!({"hook_event_name":"UserPromptSubmit","session_id":"session-reviewer",
+                    "prompt_id":"after-turn","prompt":"Thanks."})
+            .to_string(),
+            &space.runtime("pane-reviewer"),
+        );
+        let after = after
+            .as_ref()
+            .and_then(|output| output["hookSpecificOutput"]["additionalContext"].as_str())
+            .unwrap_or_default();
+        assert!(!after.contains("is still open"), "{after}");
     }
 
     let space = Space::new();

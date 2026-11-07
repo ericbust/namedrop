@@ -1656,6 +1656,24 @@ pub(crate) fn delivery_command_guidance(control: &Value) -> Option<String> {
     Some(guidance)
 }
 
+/// The line a delivery's explicit block shows for `token`.
+pub(crate) fn rendered_line(control: &Value, token: &str) -> Option<String> {
+    let (lines, _) = rendered_lines(control)?;
+    lines
+        .into_iter()
+        .find(|line| line.token == token)
+        .map(|line| line.text)
+}
+
+/// What a later prompt says about a delivery a Stop held: one sentence and
+/// its bound reply line.
+pub(crate) fn held_delivery_guidance(attempt: &DeliveryAttemptId, line: &str) -> String {
+    format!(
+        "Namedrop: delivery {} from an earlier turn is still open; to answer it, run this line with your text in place of <reply body>.\n{line}",
+        attempt.as_str()
+    )
+}
+
 /// The tokens of the lines a delivery's explicit block shows.
 pub(crate) fn line_tokens(control: &Value) -> Option<Vec<&str>> {
     let (lines, _) = rendered_lines(control)?;
