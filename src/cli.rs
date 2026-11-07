@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Parser)]
 #[command(name = "namedrop", version, about)]
 pub struct Cli {
-    /// Print the complete JSON response, including when running in a terminal.
+    /// Print the complete JSON response, including when running in a terminal
+    /// and for send, reply and complete, which otherwise print a compact result.
     #[arg(long, global = true, conflicts_with = "human")]
     pub json: bool,
 
@@ -34,6 +35,15 @@ pub struct Cli {
     command: Command,
 }
 
+/// How a command result reaches stdout: readable text, the compact agent view
+/// of `agent_result_view`, or the complete JSON `--json` asks for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResultFormat {
+    Human,
+    Agent,
+    Full,
+}
+
 /// Explicit transport context for permission-matchable direct invocations.
 /// Omitted values retain the existing Herdr environment behavior.
 #[derive(Debug, Default, Args)]
@@ -57,8 +67,14 @@ impl Cli {
             _ => None,
         }
     }
-    pub fn human_output(&self, terminal: bool) -> bool {
-        self.human || (!self.json && terminal && !self.machine_operation())
+    pub fn result_format(&self, terminal: bool) -> ResultFormat {
+        if self.json {
+            ResultFormat::Full
+        } else if self.human || (terminal && !self.machine_operation()) {
+            ResultFormat::Human
+        } else {
+            ResultFormat::Agent
+        }
     }
 
     fn machine_operation(&self) -> bool {

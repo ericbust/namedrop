@@ -1195,6 +1195,114 @@ fn a_second_disposition_on_an_answered_attempt_is_rejected_and_changes_nothing()
     );
 }
 
+/// An agent reads the send, reply and complete results after every delivery,
+/// so their default JSON carries only what it acts on: the ids it reuses, one
+/// outlook sentence, and a replay flag only when the send was a replay.
+/// `--json` prints the full result, drain report included, for scripts.
+#[test]
+fn settle_results_print_the_agent_view_and_json_prints_the_full_result() {
+    let fixture = Fixture::new();
+    fixture.initialize();
+    fixture.connect_recipient();
+    fixture.set_herdr(&recipient_host("session-1"));
+    fixture.queue_message_numbered(1, "first");
+    fixture.queue_message_numbered(2, "second");
+    fixture.reconcile_drain();
+    let run = |args: &[&str], input: serde_json::Value| {
+        let output = fixture
+            .command()
+            .args(args)
+            .args(["--input-json", &input.to_string()])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let owed = |body: &str| {
+        let envelope = fixture
+            .inbox()
+            .into_iter()
+            .next()
+            .expect("an owed envelope");
+        assert_eq!(envelope["untrusted_body"], body);
+        envelope["control"]["attempt_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let data_keys = |result: &serde_json::Value| {
+        result["data"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    let first = owed("first");
+    assert_eq!(
+        run(
+            &["complete", "--no-reply"],
+            serde_json::json!({"attempt_id": first})
+        ),
+        serde_json::json!({
+            "protocol_version": "collab/v1",
+            "status": "ok",
+            "operation": "complete",
+            "data": {"attempt_id": first, "disposition": "no_reply"},
+        })
+    );
+
+    let second = owed("second");
+    let replied = run(
+        &["reply"],
+        serde_json::json!({
+            "attempt_id": second,
+            "author_kind": "agent_session",
+            "in_reply_to": "message-2",
+            "request_id": "reply-2",
+            "source": "@author reviewed",
+        }),
+    );
+    assert_eq!(
+        data_keys(&replied),
+        ["attempt_id", "disposition", "message_id", "outlook"]
+    );
+    assert_eq!(replied["data"]["attempt_id"], second.as_str());
+    assert_eq!(replied["data"]["disposition"], "reply");
+    assert!(
+        replied["data"]["outlook"]
+            .as_str()
+            .unwrap()
+            .starts_with("@author: ")
+    );
+
+    let send = serde_json::json!({
+        "request_id": "send-1",
+        "author_kind": "agent_session",
+        "source": "@author status update",
+    });
+    let sent = run(&["send"], send.clone());
+    assert_eq!(data_keys(&sent), ["message_id", "outlook", "thread_id"]);
+    let replayed = run(&["send"], send.clone());
+    assert_eq!(
+        data_keys(&replayed),
+        ["idempotent_replay", "message_id", "outlook", "thread_id"]
+    );
+    assert_eq!(replayed["data"]["idempotent_replay"], true);
+    assert_eq!(replayed["data"]["message_id"], sent["data"]["message_id"]);
+
+    let full = run(&["send", "--json"], send);
+    assert_eq!(full["data"]["message_id"], sent["data"]["message_id"]);
+    assert_eq!(full["data"]["idempotent_replay"], true);
+    for field in ["drain", "deliveries", "recipients", "delivery_outlook"] {
+        assert!(
+            full["data"].get(field).is_some(),
+            "--json keeps {field}: {full}"
+        );
+    }
+}
+
 /// Namestack verify run v10111443b186, capture `restart-adopt-stall`: an
 /// acknowledged delivery settles by observation only once the session is idle
 /// and thirty seconds have passed since the attempt was created, yet every

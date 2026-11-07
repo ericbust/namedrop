@@ -248,8 +248,9 @@ else: print('{}')
         )
     }
 
+    /// The full result, which carries the spool fields these tests inspect.
     fn sandbox_command(&self, operation: &[&str], input: Value) -> Output {
-        self.sandbox_command_with_read_only_state(operation, input, false)
+        self.sandbox_command_with_read_only_state(&[operation, &["--json"]].concat(), input, false)
     }
 
     fn sandbox_command_with_read_only_state(
@@ -442,6 +443,12 @@ fn denied_socket_queues_before_mutation_and_restarts_recover_one_logical_command
     wait_for(|| receipt.exists());
     let result = response(fixture.sandbox_command(&["send"], input.clone()));
     assert!(result["data"]["message_id"].is_string(), "{result}");
+    assert!(result["data"]["drain"].is_object(), "{result}");
+    assert_eq!(fixture.message_count(), 1);
+    let agent =
+        response(fixture.sandbox_command_with_read_only_state(&["send"], input.clone(), false));
+    assert_eq!(agent["data"]["message_id"], result["data"]["message_id"]);
+    assert!(agent["data"].get("drain").is_none(), "{agent}");
     assert_eq!(fixture.message_count(), 1);
     let conflict = fixture.sandbox_command(&["send"], send("original-id", "changed"));
     assert!(!conflict.status.success());

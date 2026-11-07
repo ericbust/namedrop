@@ -57,6 +57,8 @@ Activation exits with `1` if it couldn't install a shared agent integration, eve
 
 Commands that agents use (`describe`, registration, messaging, inbox, handoffs and context) print JSON by default, even in a terminal. Hooks and terminal execution have their own formats. Scripts that run inside a terminal should pass `--json` explicitly.
 
+`send`, `reply` and `complete` print a compact result by default. It keeps the ids an agent reuses, one `outlook` sentence about delivery, and `idempotent_replay` only when it is true. Pass `--json` for the full response, including the drain report.
+
 The setup helper prints readable output even when captured. With `--json`, it prints the raw action response on stdout and progress on stderr. The checks and exit status are the same either way. Formatting never runs a repair or repeats an action. The setup tab passes `--keep-open` so it waits for Enter. The helper waits up to 60 seconds for the action. If it times out, the action may still be running, so read the log it names before trying again.
 
 ## Popups

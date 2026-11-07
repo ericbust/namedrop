@@ -5,8 +5,8 @@ mod popup_input;
 mod stop_hook;
 use namedrop::{
     Clock, CommandResult, HerdrCommandExecutor, LifecycleRuntime, ProcessHerdr, ProcessIds,
-    SystemClock,
-    cli::{Cli, RuntimeOptions},
+    SystemClock, agent_result_view,
+    cli::{Cli, ResultFormat, RuntimeOptions},
     describe_operations, diagnose_collaboration, execute_context_operation,
     execute_control_operation, execute_group_operation, execute_handoff_operation,
     execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
@@ -145,12 +145,17 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             let args: Vec<_> = env::args_os().skip(1).collect();
-            let human = !args.iter().any(|arg| arg == "--json")
-                && (args.iter().any(|arg| arg == "--human") || io::stdout().is_terminal());
+            let format = if args.iter().any(|arg| arg == "--json") {
+                ResultFormat::Full
+            } else if args.iter().any(|arg| arg == "--human") || io::stdout().is_terminal() {
+                ResultFormat::Human
+            } else {
+                ResultFormat::Agent
+            };
             return write_result(
                 &CommandResult::invalid_request(error.to_string()),
                 64,
-                human,
+                format,
             );
         }
     };
@@ -227,7 +232,7 @@ fn main() -> ExitCode {
         return finish(
             "dashboard",
             result,
-            cli.human_output(io::stdout().is_terminal()),
+            cli.result_format(io::stdout().is_terminal()),
         );
     }
     if let Some(state) = selected_state.as_deref() {
@@ -250,10 +255,10 @@ fn main() -> ExitCode {
             cli.dashboard_inherit_claim(),
         );
     }
-    let human = cli.human_output(io::stdout().is_terminal());
+    let format = cli.result_format(io::stdout().is_terminal());
     let input_file = cli.input_is_file();
     let omitted = "Input file rejected; file contents are omitted from diagnostics.";
-    let write_result = |result: &CommandResult, code| write_result(result, code, human);
+    let write_result = |result: &CommandResult, code| write_result(result, code, format);
     let input_error = |error: String| {
         if input_file && error.starts_with("invalid operation input: ") {
             omitted.to_owned()
@@ -262,7 +267,7 @@ fn main() -> ExitCode {
         }
     };
     let finish = |operation, result: Result<serde_json::Value, String>| {
-        finish(operation, result.map_err(input_error), human)
+        finish(operation, result.map_err(input_error), format)
     };
 
     if let Some(state_directory) = cli.user_prompt_submit_hook_state_directory() {
@@ -684,7 +689,7 @@ fn choose_name_type(cli: &Cli) -> Result<Option<namedrop::PaneType>, String> {
 fn finish(
     operation: &'static str,
     result: Result<serde_json::Value, String>,
-    human: bool,
+    format: ResultFormat,
 ) -> ExitCode {
     match result {
         Ok(data) => {
@@ -695,12 +700,12 @@ fn finish(
                 (operation == "activate" && !activation_complete(&data))
                     || (operation == "ui.install-shortcuts" && data["status"] == "needs_attention"),
             );
-            write_result(&CommandResult::success(operation, data), code, human)
+            write_result(&CommandResult::success(operation, data), code, format)
         }
         Err(error) => write_result(
             &CommandResult::rejected(operation, "operation_failed", error),
             65,
-            human,
+            format,
         ),
     }
 }
@@ -2173,8 +2178,8 @@ fn retryable_agent_status_reconciliation(error: &str) -> bool {
     )
 }
 
-fn write_result(result: &CommandResult, exit_code: u8, human: bool) -> ExitCode {
-    if human {
+fn write_result(result: &CommandResult, exit_code: u8, format: ResultFormat) -> ExitCode {
+    if format == ResultFormat::Human {
         let text = render_command_result_to_text(result);
         let written = if exit_code == 0 {
             writeln!(io::stdout().lock(), "{text}")
@@ -2184,7 +2189,13 @@ fn write_result(result: &CommandResult, exit_code: u8, human: bool) -> ExitCode 
         return ExitCode::from(if written.is_ok() { exit_code } else { 74 });
     }
     let mut output = io::stdout().lock();
-    if serde_json::to_writer(&mut output, result).is_err() || writeln!(output).is_err() {
+    let written = if format == ResultFormat::Full {
+        serde_json::to_writer(&mut output, result)
+    } else {
+        serde_json::to_value(result)
+            .and_then(|full| serde_json::to_writer(&mut output, &agent_result_view(&full)))
+    };
+    if written.is_err() || writeln!(output).is_err() {
         return ExitCode::from(74);
     }
     ExitCode::from(exit_code)
