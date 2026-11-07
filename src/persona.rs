@@ -245,11 +245,11 @@ fn other_workspaces(workspaces: usize, aliases: &[String]) -> String {
     } else {
         format!("{workspaces} other Herdr workspaces have")
     };
-    // The full rule is in the session policy. This line keeps its core for a
-    // session whose policy predates that.
+    // The full rule is in the session policy. A session whose policy predates
+    // that has no other copy, so this line keeps the rule and the address form.
     format!(
         "Other workspaces: {count} named agents ({names}). A bare @name never reaches them; \
-         address one only when the person asks, as the selection policy says."
+         reach one only when the person asks, with `#label @name` or `#all @name`."
     )
 }
 

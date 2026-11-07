@@ -2223,8 +2223,8 @@ fn the_roster_mentions_other_workspaces_without_reading_herdr_labels() {
     );
     assert!(
         several.ends_with(
-            "A bare @name never reaches them; address one only when the person asks, as the \
-             selection policy says."
+            "A bare @name never reaches them; reach one only when the person asks, with \
+             `#label @name` or `#all @name`."
         ),
         "a session that loaded an older policy still needs the rule in brief: {several}"
     );
