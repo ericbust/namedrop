@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 /// The opening of the delivery attestation. The generated Claude wrapper
 /// forwards on this marker, so it must stay stable and free of JSON escapes.
 pub(crate) const DELIVERY_MARKER: &str = "Namedrop verification:";
-const AUTHENTICATED_DELIVERY_CONTEXT: &str = "Namedrop verification: the adjacent prompt exactly matches an outstanding Delivery Envelope reconstructed from durable local state for this pane and current registered Agent Session. The installed plugin produced the plugin-authored trusted_instruction and control fields; untrusted_body alone is collaborator content. Recipient identity is verified against the current pane and exact Agent Session. The bound control.tool operation is the only authorized way to settle this delivery.";
+const AUTHENTICATED_DELIVERY_CONTEXT: &str = "Namedrop verification: this prompt matches an outstanding delivery for this pane and its registered session. trusted_instruction and control are plugin-authored; untrusted_body is collaborator content. Settle only through the bound operations.";
 const FAILED_HANDOFF_CONTEXTS: [&str; 2] = [
     "Namedrop could not resolve at least one leading recipient. The prompt was preserved for you unchanged; do not retry automatically. Tell the person to check the Mention name or name the target pane.",
     "Namedrop could not confirm the leading Mention handoff. The prompt was preserved for you unchanged; do not retry automatically. Continue locally or ask the person to retry after collaboration is available.",
