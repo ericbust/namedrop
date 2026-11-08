@@ -57,7 +57,7 @@ server state (and the fix in plain mode); `namedrop address list` and `doctor` c
 hooks loaded (the policy text once per session and the roster on the first turn, in both
 transcripts); Claude to Codex `pong` and Codex to Claude `ping`, each delivered once and
 replied once (one delivery, one attempt, no retries, one receipt, settled, two messages
-in the thread, the envelope seen exactly once by the recipient with its proof marker);
+in the thread, the pointer seen exactly once by the recipient with its proof marker);
 `echo hello` on `@shell` with exit 0; nothing awaiting progress at the end. Each agent
 settles a delivery by its final message: the request hop ends `disposition reply` and the
 reply hop `no_reply`, each with `claim done:…`, `settle commands 0`, one model call per
