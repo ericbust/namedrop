@@ -93,6 +93,49 @@ def check_names():
     return "slugs and default profile names"
 
 
+def check_host_tools(scratch):
+    base = scratch / "path"
+
+    def executable(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
+        return path
+
+    def linked(path, target):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(target)
+        return path
+
+    mise = executable(base / "usr/mise")
+    wrappers, shims = base / "wrappers", base / "shims"
+    linked(wrappers / "claude", mise)
+    linked(shims / "claude", mise)
+    linked(shims / "node", mise)
+    real = executable(base / "installs/claude/latest/claude")
+    native = executable(base / "versions/2.1.310")
+    linked(base / "native/claude", native)
+    npm = executable(base / "lib/cli.js")
+    linked(base / "npm/claude", npm)
+    rustup = executable(base / "cargo/rustup")
+    linked(base / "cargo/bin/cargo", rustup)
+
+    def on_path(*directories):
+        return os.pathsep.join(str(directory) for directory in directories)
+
+    tool = testbed.real_tool
+    assert tool("claude", on_path(wrappers, real.parent, shims)) == str(real.resolve())
+    assert tool("claude", on_path(wrappers, shims)) is None, "only mise links is no tool at all"
+    assert tool("claude", on_path(wrappers, base / "native", real.parent)) == str(real.resolve())
+    assert tool("claude", on_path(wrappers, base / "native")) == str(native.resolve())
+    assert tool("claude", on_path(base / "npm")) == str(npm.resolve())
+    assert tool("cargo", on_path(base / "cargo/bin")) == str(rustup.resolve()), "rustup's proxy stays"
+    assert tool("node", on_path(shims)) is None
+    tools = testbed.host_tools(search_path=on_path(wrappers, real.parent))
+    assert tools["claude"] == str(real.resolve()) and "node" not in tools, tools
+    return "host tools: mise wrappers and shims are skipped; native, npm and rustup installs resolve"
+
+
 def check_codex_settings(scratch):
     config = scratch / "codex/config.toml"
     config.parent.mkdir(parents=True)
@@ -707,6 +750,7 @@ def run(kit):
         checks = [("install table", check_install_table),
                   ("PR resolution", check_pull_resolution),
                   ("names", check_names),
+                  ("host tools", lambda: check_host_tools(base)),
                   ("Codex config", lambda: check_codex_settings(base)),
                   ("seed", lambda: check_seed(kit, base)),
                   ("profile safety", lambda: check_profile_safety(base)),

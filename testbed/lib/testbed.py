@@ -31,6 +31,7 @@ AGENTS = ("claude", "codex")
 REQUIRED_TOOLS = ("herdr", "git", "cargo")
 OPTIONAL_TOOLS = ("node", "rustc", "cc")
 TOOLS = REQUIRED_TOOLS + AGENTS + OPTIONAL_TOOLS + ("python3",)
+VERSION_MANAGERS = frozenset(("mise",))
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SHELL_PS1 = "[testbed {}] \\w $ "
 
@@ -116,11 +117,24 @@ def env_command(env, command):
     return ["env", "-i"] + [key + "=" + value for key, value in sorted(env.items())] + list(command)
 
 
-def host_tools(herdr_bin=None):
+def real_tool(name, search_path):
+    """The file a tool name should run from PATH, or None. mise's wrappers and shims are symlinks
+    to mise itself, which in a profile's clean environment hangs instead of starting the tool. An
+    agent CLI prefers a file of its own name, but a native or npm install resolves to a file like
+    versions/2.1.310 or cli.js, so another name is still accepted when nothing better is on PATH."""
+    found = [Path(hit).resolve() for hit in
+             (shutil.which(name, path=entry) for entry in search_path.split(os.pathsep) if entry) if hit]
+    found = [path for path in found if path.name not in VERSION_MANAGERS]
+    exact = [path for path in found if path.name == name] if name in AGENTS else []
+    return str((exact or found)[0]) if found else None
+
+
+def host_tools(herdr_bin=None, search_path=None):
     """Resolve host launchers to real files so profile runs bypass version-manager shims."""
+    search_path = os.environ.get("PATH", "") if search_path is None else search_path
     tools = {}
     for name in TOOLS:
-        located = sys.executable if name == "python3" else shutil.which(name)
+        located = sys.executable if name == "python3" else real_tool(name, search_path)
         if name == "herdr" and herdr_bin:
             located = herdr_bin
             if not os.access(located, os.X_OK):
