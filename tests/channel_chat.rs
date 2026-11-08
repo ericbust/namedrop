@@ -458,6 +458,133 @@ fn the_server_start_clears_a_mirrored_answers_flags_and_keeps_a_scraped_relays()
 }
 
 #[test]
+fn a_mirror_whose_origin_space_was_purged_stays_private_and_flagged() {
+    use namedrop::{AttentionItemDraft, AttentionItemId, AttentionSourceKind};
+    const TEXT: &str = "SCRAPED_SECRET option A";
+    const VISIBLE: &str = "VISIBLE_CONTROL";
+    for armed in [true, false] {
+        let f = fixture();
+        let root_id = namedrop::MessageId::new(
+            plain_root(&f, "root", VISIBLE)["message_id"]
+                .as_str()
+                .unwrap(),
+        );
+        let mut runtime = f.runtime("w1", "unused");
+        runtime.current_pane_id = None;
+        namedrop::send_operator_message(
+            "remote-question",
+            "#ws2 @tester inspect",
+            Some(&root_id),
+            &runtime,
+        )
+        .unwrap();
+        let envelope = f.herdr.last_envelope("pane-2-tester");
+        let attempt = envelope["control"]["attempt_id"].as_str().unwrap();
+        if armed {
+            arm_attempt(&f, "w2", attempt);
+        }
+        let relay = relay_ending(&f, "w2", "pane-2-tester", attempt, TEXT);
+        let copy: String = f
+            .db()
+            .query_row(
+                "SELECT message_id FROM bridged_messages WHERE origin_message_id=?1",
+                [&relay],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let home = StateNamespace::for_space("socket-a", "w1");
+        let origin = StateNamespace::for_space("socket-a", "w2");
+        let at = namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test", 50);
+        let mut store = StateStore::open(&f.state).unwrap();
+        store
+            .transaction(|tx| {
+                tx.open_attention_item(
+                    &home,
+                    &AttentionItemDraft {
+                        id: AttentionItemId::new(format!("terminal-relay:{attempt}")),
+                        source_kind: AttentionSourceKind::TerminalRelay,
+                        source_id: copy.clone(),
+                        summary: "An old flag".to_owned(),
+                    },
+                    &at,
+                )
+            })
+            .unwrap();
+        let wire_kind = |store: &mut StateStore| {
+            let wire = serde_json::to_value(namedrop::dashboard::snapshot::build(
+                &store.dashboard_rows(&home).unwrap(),
+                None,
+                50,
+            ))
+            .unwrap();
+            wire["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["body"]["text"] == TEXT)
+                .expect("the copy stays in the surviving conversation")["kind"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(
+            wire_kind(&mut store),
+            if armed { "terminal_relay" } else { "reply" },
+            "armed={armed} before the purge"
+        );
+
+        store
+            .transaction(|tx| tx.deactivate_worktree(&origin, &at))
+            .unwrap();
+        store.purge_worktree(&origin, "w2", &at).unwrap();
+
+        let server = Server::start(&f, r#"{"to":[],"reason":"statement"}"#, false);
+        let (status, next_root) = post(&server, "next-root", "Nice work by @planner.", None);
+        assert_eq!(status, 200, "{next_root}");
+        drop(server);
+        let flag_open = store
+            .transaction(|tx| tx.unresolved_attention_items(&home))
+            .unwrap()
+            .iter()
+            .any(|item| {
+                item.source_kind == AttentionSourceKind::TerminalRelay && item.source_id == copy
+            });
+        let router_prompt = calls(&f).last().unwrap()["stdin"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(router_prompt.contains(VISIBLE), "{router_prompt}");
+
+        namedrop::send_operator_message(
+            "next-send",
+            "@lead Do you agree?",
+            Some(&namedrop::MessageId::new(
+                next_root["message_id"].as_str().unwrap(),
+            )),
+            &runtime,
+        )
+        .unwrap();
+        let recap = f.herdr.last_envelope("pane-1-lead")["control"]["untrusted_channel_recap"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(recap.contains(VISIBLE), "{recap}");
+
+        assert_eq!(
+            (
+                wire_kind(&mut store).as_str(),
+                router_prompt.contains(TEXT),
+                recap.contains(TEXT),
+                flag_open,
+            ),
+            ("terminal_relay", false, false, true),
+            "armed={armed}: wire kind, router recap leak, channel recap leak, flag open\n\
+             channel recap: {recap}"
+        );
+    }
+}
+
+#[test]
 fn recap_is_explicitly_untrusted_and_bounded_across_channel_conversation() {
     let f = Fixture::new();
     f.register_all();
