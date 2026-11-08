@@ -694,6 +694,246 @@ fn an_entry_link_works_once_and_carries_no_lasting_secret() {
     );
 }
 
+const TAILNET_REQUEST: [(&str, &str); 3] = [
+    ("Host", "fixture.tail0000.ts.net"),
+    ("Tailscale-User-Login", "owner@example.com"),
+    ("X-Forwarded-For", "100.64.0.1"),
+];
+
+fn start_on_tailnet(state: &Path) -> Server {
+    let backend_port = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    fs::create_dir_all(state.join("dashboard")).unwrap();
+    fs::write(
+        state.join("dashboard/tailscale.json"),
+        serde_json::json!({
+            "version": 1,
+            "state": "enabled",
+            "handler": {
+                "dns_name": "fixture.tail0000.ts.net",
+                "https_port": 443,
+                "owner_login": "owner@example.com",
+                "backend_port": backend_port,
+            },
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let server = Server::start(state, None);
+    assert_eq!(server.port, backend_port);
+    server
+}
+
+fn with_cookie<'a>(via: &[(&'a str, &'a str)], cookie: &'a str) -> Vec<(&'a str, &'a str)> {
+    let mut headers = via.to_vec();
+    headers.push(("Cookie", cookie));
+    headers
+}
+
+fn set_cookie(response: &Response) -> Option<&str> {
+    response
+        .headers
+        .lines()
+        .find(|line| line.starts_with("Set-Cookie:"))
+}
+
+/// An event stream never ends, so this reads only as far as its headers.
+fn response_head(mut stream: TcpStream) -> Response {
+    let mut raw = Vec::new();
+    let mut byte = [0];
+    while !raw.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte).unwrap();
+        raw.push(byte[0]);
+    }
+    Response::parse(std::str::from_utf8(&raw).unwrap())
+}
+
+fn assert_redirects_to(response: &Response, location: &str) {
+    assert!(response.status.contains("303"), "{}", response.status);
+    assert!(
+        response
+            .headers
+            .contains(&format!("Location: {location}\r\n")),
+        "{}",
+        response.headers
+    );
+}
+
+fn assert_signed_in_browser_follows_a_spent_link(
+    server: &Server,
+    state: &Path,
+    page: &str,
+    via: &[(&str, &str)],
+) {
+    let signed_in = server.cookie();
+    let signed_in = with_cookie(via, &signed_in);
+    let wrong = format!("namedrop_dashboard_{}=wrong", server.port);
+    let wrong = with_cookie(via, &wrong);
+
+    let link = format!("{page}?n={}", mint_entry(state));
+    assert_redirects_to(&server.get(&link, &signed_in), page);
+    assert!(
+        server.get(&link, via).status.contains("401"),
+        "a signed-in browser still spends a fresh nonce"
+    );
+    assert_redirects_to(&server.get(&link, &signed_in), page);
+    assert!(server.get(&link, &wrong).status.contains("401"));
+
+    let spent_with_query = format!("{link}&view=activity");
+    assert_redirects_to(
+        &server.get(&spent_with_query, &signed_in),
+        &format!("{page}?view=activity"),
+    );
+
+    let bogus = format!("{page}?n=not-a-nonce");
+    assert_redirects_to(&server.get(&bogus, &signed_in), page);
+    assert!(server.get(&bogus, via).status.contains("401"));
+    assert!(server.get(&bogus, &wrong).status.contains("401"));
+}
+
+#[test]
+fn a_signed_in_browser_reopening_a_spent_link_is_redirected_on_loopback() {
+    let directory = TestDirectory::new();
+    let ns = seed(&state(&directory), "w1", &["a"]);
+    let server = Server::start(&state(&directory), None);
+    let page = format!("/w/{}", SpaceKey::of(&ns).as_str());
+    assert_signed_in_browser_follows_a_spent_link(&server, &state(&directory), &page, &[]);
+}
+
+#[test]
+fn a_signed_in_browser_reopening_a_spent_link_is_redirected_over_the_tailnet() {
+    let directory = TestDirectory::new();
+    let ns = seed(&state(&directory), "w1", &["a"]);
+    let server = start_on_tailnet(&state(&directory));
+    let page = format!("/w/{}", SpaceKey::of(&ns).as_str());
+    assert_signed_in_browser_follows_a_spent_link(
+        &server,
+        &state(&directory),
+        &page,
+        &TAILNET_REQUEST,
+    );
+}
+
+#[test]
+fn tailnet_page_loads_and_event_streams_renew_the_session_cookie() {
+    let directory = TestDirectory::new();
+    let ns = seed(&state(&directory), "w1", &["a"]);
+    let server = start_on_tailnet(&state(&directory));
+    let page = format!("/w/{}", SpaceKey::of(&ns).as_str());
+    let cookie = server.cookie();
+    let signed_in = with_cookie(&TAILNET_REQUEST, &cookie);
+
+    let responses = [
+        ("page", server.get(&page, &signed_in)),
+        (
+            "space events",
+            response_head(server.connect(&format!("{page}/events"), &signed_in)),
+        ),
+        (
+            "all events",
+            response_head(server.connect("/api/events", &signed_in)),
+        ),
+    ];
+    for (name, response) in &responses {
+        assert!(
+            response.status.contains("200"),
+            "{name}: {}",
+            response.status
+        );
+        let renewed = set_cookie(response).unwrap_or_else(|| panic!("{name} renews the cookie"));
+        for attribute in [
+            format!("{cookie};").as_str(),
+            "HttpOnly",
+            "SameSite=Strict",
+            "Path=/",
+            "Secure",
+            "Max-Age=604800",
+        ] {
+            assert!(renewed.contains(attribute), "{name}: {renewed}");
+        }
+    }
+}
+
+#[test]
+fn only_signed_in_tailnet_pages_and_streams_renew_the_cookie() {
+    let local_directory = TestDirectory::new();
+    let ns = seed(&state(&local_directory), "w1", &["a"]);
+    let local = Server::start(&state(&local_directory), None);
+    let page = format!("/w/{}", SpaceKey::of(&ns).as_str());
+    let local_cookie = local.cookie();
+    let signed_in = [("Cookie", local_cookie.as_str())];
+    let local_page = local.get(&page, &signed_in);
+    assert!(local_page.status.contains("200"), "{}", local_page.status);
+    assert_eq!(set_cookie(&local_page), None);
+    let local_events = response_head(local.connect(&format!("{page}/events"), &signed_in));
+    assert!(local_events.status.contains("200"));
+    assert_eq!(set_cookie(&local_events), None);
+    assert_eq!(set_cookie(&local.get(&page, &[])), None);
+
+    let tailnet_directory = TestDirectory::new();
+    let ns = seed(&state(&tailnet_directory), "w1", &["a"]);
+    let tailnet = start_on_tailnet(&state(&tailnet_directory));
+    let page = format!("/w/{}", SpaceKey::of(&ns).as_str());
+    let tailnet_cookie = tailnet.cookie();
+    let signed_in = with_cookie(&TAILNET_REQUEST, &tailnet_cookie);
+
+    let unauthorized = tailnet.get(&page, &TAILNET_REQUEST);
+    assert!(unauthorized.status.contains("401"));
+    assert_eq!(set_cookie(&unauthorized), None);
+    let unauthorized = response_head(tailnet.connect("/api/events", &TAILNET_REQUEST));
+    assert!(unauthorized.status.contains("401"));
+    assert_eq!(set_cookie(&unauthorized), None);
+
+    let body = tailnet.get(&page, &signed_in).body;
+    let script = body
+        .split("src=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    let asset = tailnet.get(script, &signed_in);
+    assert!(asset.status.contains("200"), "{}", asset.status);
+    assert_eq!(set_cookie(&asset), None);
+}
+
+#[test]
+fn sign_in_messages_work_without_a_terminal_in_reach() {
+    let directory = TestDirectory::new();
+    let ns = seed(&state(&directory), "w1", &["a"]);
+    let server = start_on_tailnet(&state(&directory));
+    let page = format!("/w/{}", SpaceKey::of(&ns).as_str());
+
+    let tailnet = server.get(&page, &TAILNET_REQUEST);
+    assert!(tailnet.status.contains("401"));
+    for expected in [
+        "namedrop channels --tailscale --no-open",
+        "No terminal nearby?",
+    ] {
+        assert!(tailnet.body.contains(expected), "{}", tailnet.body);
+    }
+
+    let loopback = server.get(&page, &[]);
+    assert!(loopback.status.contains("401"));
+    assert!(
+        loopback.body.contains("namedrop channels"),
+        "{}",
+        loopback.body
+    );
+    for body in [&tailnet.body, &loopback.body] {
+        assert!(
+            body.starts_with("This browser isn't signed in to Channels."),
+            "{body}"
+        );
+        for retired in ["needs its key", "operator"] {
+            assert!(!body.contains(retired), "{body}");
+        }
+    }
+}
+
 #[test]
 fn an_idle_exit_rotates_the_browser_session() {
     let directory = TestDirectory::new();

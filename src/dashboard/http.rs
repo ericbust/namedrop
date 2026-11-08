@@ -460,7 +460,7 @@ impl Status {
         match self {
             Self::NoContent => "",
             Self::Unauthorized => {
-                "This dashboard needs its key. Run `namedrop channels` in that workspace to open it.\n"
+                "This browser isn't signed in to Channels. Your agents and messages are fine.\n\nOn the machine running Channels, run `namedrop channels` in a workspace and open the link it prints. Away from that machine? Run `namedrop channels --tailscale --no-open` there over SSH and open the HTTPS link on this device.\n"
             }
             Self::PayloadTooLarge => "Request body is too large.\n",
             Self::TooManyRequests => "Too many input requests.\n",
@@ -1233,6 +1233,29 @@ fn cookie_name(port: u16) -> String {
     format!("namedrop_dashboard_{port}")
 }
 
+fn session_cookie(front: &Front, tailnet: Option<&super::tailscale::OwnedHandler>) -> String {
+    format!(
+        "Set-Cookie: {}={}; HttpOnly; SameSite=Strict; Path=/{}\r\n",
+        cookie_name(front.port),
+        front.session.as_str(),
+        if tailnet.is_some() {
+            "; Secure; Max-Age=604800"
+        } else {
+            ""
+        }
+    )
+}
+
+/// A local cookie ends with the browser session, so only a tailnet cookie has a lifetime to renew.
+fn renewed_session_cookie(
+    front: &Front,
+    tailnet: Option<&super::tailscale::OwnedHandler>,
+) -> String {
+    tailnet
+        .map(|_| session_cookie(front, tailnet))
+        .unwrap_or_default()
+}
+
 fn serve_connection(
     stream: TcpStream,
     front: &Front,
@@ -1265,7 +1288,10 @@ fn serve_connection(
         tailnet,
     );
     let route = match route {
-        Ok(Route::Redeem { ref nonce, .. }) if !front.files.consume_entry(nonce) => {
+        Ok(Route::Redeem { ref nonce, .. })
+            if !front.files.consume_entry(nonce)
+                && authenticate_session(&request, front.port, &front.session).is_err() =>
+        {
             Err(Status::Unauthorized)
         }
         route => route,
@@ -1276,19 +1302,13 @@ fn serve_connection(
             Status::Unauthorized.line(),
             "text/plain; charset=utf-8",
             "",
-            b"This browser's Channels sign-in is missing or expired, or the one-time link has expired or already been used. Run `namedrop channels --tailscale --no-open` in that workspace on the Channels machine and open the new HTTPS link on this device.\n",
+            b"This browser isn't signed in to Channels. Your agents and messages are fine.\n\nTo sign in, run this on the machine running Channels, then open the new HTTPS link on this device:\n\n    namedrop channels --tailscale --no-open\n\nNo terminal nearby? Connect to that machine over SSH from this device, or open Channels in a browser that's still signed in and ask an agent to run the command and send you the link. Otherwise, sign in when you're next at that machine.\n",
         ),
         Err(status) => respond_status(&mut writer, status),
         Ok(Route::Redeem { location, .. }) => {
             let headers = format!(
-                "Location: {location}\r\nSet-Cookie: {}={}; HttpOnly; SameSite=Strict; Path=/{}\r\n",
-                cookie_name(front.port),
-                front.session.as_str(),
-                if tailnet_request.is_some() {
-                    "; Secure; Max-Age=604800"
-                } else {
-                    ""
-                }
+                "Location: {location}\r\n{}",
+                session_cookie(front, tailnet_request)
             );
             respond(&mut writer, "303 See Other", "text/plain", &headers, b"")
         }
@@ -1692,8 +1712,14 @@ fn serve_connection(
                 Err(status) => respond_status(&mut writer, status),
             }
         }
-        Ok(Route::Page) => serve_asset(&mut writer, front, &request, "/index.html"),
-        Ok(Route::Asset(path)) => serve_asset(&mut writer, front, &request, &path),
+        Ok(Route::Page) => serve_asset(
+            &mut writer,
+            front,
+            &request,
+            "/index.html",
+            &renewed_session_cookie(front, tailnet_request),
+        ),
+        Ok(Route::Asset(path)) => serve_asset(&mut writer, front, &request, &path, ""),
         Ok(Route::Favicon) => respond(&mut writer, "204 No Content", "text/plain", "", b""),
         Ok(Route::Health) => respond(
             &mut writer,
@@ -2202,6 +2228,7 @@ fn serve_asset(
     front: &Front,
     request: &Request,
     path: &str,
+    extra_headers: &str,
 ) -> io::Result<()> {
     writer.set_write_timeout(Some(Duration::from_secs(1)))?;
     let Some(asset) = front.assets.resolve(path) else {
@@ -2216,7 +2243,7 @@ fn serve_asset(
     }
     write!(
         writer,
-        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n{SECURITY_HEADERS}{}Connection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n{SECURITY_HEADERS}{}{extra_headers}Connection: close\r\n\r\n",
         content_type(path),
         asset.length,
         if asset.is_index {
@@ -2250,9 +2277,10 @@ fn stream_events(
     subscription: Subscription,
     tailnet: Option<&super::tailscale::OwnedHandler>,
 ) -> io::Result<()> {
+    let renewal = renewed_session_cookie(front, tailnet);
     write!(
         writer,
-        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n{SECURITY_HEADERS}Connection: close\r\n\r\nretry: 1000\n\n"
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n{SECURITY_HEADERS}{renewal}Connection: close\r\n\r\nretry: 1000\n\n"
     )?;
     writer.flush()?;
     let id = next_id.fetch_add(1, Ordering::Relaxed);

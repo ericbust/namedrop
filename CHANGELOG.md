@@ -2,6 +2,14 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.6.1] - 2026-11-08
+
+### Fixed
+
+- If your browser is signed in to Channels, re-opening a used or expired link now opens the page instead of showing a 401. A browser that isn't signed in still gets the 401, and a new link still signs in only once.
+- Channels over Tailscale no longer signs you out on day seven while you keep using it. The sign-in now lasts seven days after you last opened or reconnected Channels.
+- The sign-in error now says your agents and messages are fine. It also gives you ways to sign in when you have no terminal nearby.
+
 ## [1.6.0] - 2026-11-07
 
 ### Changed
