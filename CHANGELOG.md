@@ -15,6 +15,9 @@ Each release is a section here, newest first. The GitHub release for a version u
 - Codex no longer reads the Namedrop skill during a delivery.
 - `address list` shows each agent's context size, or unknown after a compaction.
 - After a tracked `send`, the lead is told to finish its other sends and end its turn rather than wait or poll.
+- An agent's final message is now its answer to a delivery. Agents no longer run a reply or close command after each delivery, which cuts each delivery turn from two model calls to one. A turn that ends while waiting on a helper or background work sends nothing, and the agent is reminded on later prompts how to answer.
+- Your messages in Channels get the agent's final message as the answer. The old terminal relay's time window is gone, so a status line written while waiting is no longer posted as the answer.
+- A `reply` after Namedrop closed a delivery on its own is sent as a follow-up in the same thread. Other conflicts get a plain sentence instead of a database error.
 
 ## [1.5.0] - 2026-11-06
 

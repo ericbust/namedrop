@@ -1,0 +1,10 @@
+{
+  "session_id": "claude-session-id",
+  "transcript_path": "/testbed/claude/transcript_path",
+  "cwd": "/testbed/claude/cwd",
+  "scratchpad_dir": "/testbed/claude/scratchpad_dir",
+  "prompt_id": "claude-prompt-id",
+  "permission_mode": "auto",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Run the shell command: sleep 60. Then reply with the word done."
+}

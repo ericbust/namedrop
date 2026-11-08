@@ -55,7 +55,7 @@ where
     I: IdGenerator,
 {
     let result = execute_integration_operation(operation, input, runtime);
-    if operation == "complete" && result.is_ok() {
+    if matches!(operation, "complete" | namedrop::final_reply::STOP_NO_REPLY) && result.is_ok() {
         wake(runtime);
     }
     result

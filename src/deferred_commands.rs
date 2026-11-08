@@ -389,6 +389,36 @@ pub fn try_defer(
     })())
 }
 
+/// Whether `session` queued a `reply` or `complete` naming `attempt_id` that
+/// has no receipt yet: an explicit settle the sandbox is still carrying.
+pub fn settle_queued(state: &Path, socket: &str, session: &str, attempt_id: &str) -> bool {
+    let Ok(directory) = directory(state, socket) else {
+        return false;
+    };
+    let Ok(names) = pending_directory(&directory)
+        .and_then(|pending| pending.entries().map_err(|e| e.to_string()))
+    else {
+        return false;
+    };
+    names
+        .iter()
+        .filter_map(|name| name.to_str()?.strip_suffix(".json"))
+        .any(|key| {
+            directory
+                .read(&format!("{key}.request.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Request>(&bytes).ok())
+                .is_some_and(|request| {
+                    matches!(request.operation, Operation::Reply | Operation::Complete)
+                        && request.caller.session.as_str() == session
+                        && request.input["attempt_id"] == attempt_id
+                })
+                && !directory
+                    .contains(&format!("{key}.receipt.json"))
+                    .unwrap_or(false)
+        })
+}
+
 fn launcher(state: &Path) -> Result<PathBuf, String> {
     let launcher = state.join("runtime/namedrop");
     if launcher.is_file() {

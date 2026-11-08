@@ -1,20 +1,23 @@
 use namedrop::{
-    ActorKind, AgentSessionId, Clock, MutationAttribution, ProcessHerdr, StateNamespace,
-    StateStore, SystemClock, TerminalRelayEnd,
+    Clock, SystemClock,
+    cli::RuntimeOptions,
+    final_reply::{BoundOperation, FinalText, HostTurn, StopFacts},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::{
     env, fs,
-    io::{self, Read, Seek, SeekFrom, Write},
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+    io::{self, Read, Seek, SeekFrom},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    time::{Duration, Instant},
 };
 
 const MAX_INPUT_BYTES: u64 = 1024 * 1024;
-const MAX_TEXT_CHARS: usize = 16_000;
+/// How long the worker waits for Claude Code to record how every Stop hook
+/// of this Stop ended. It writes that record as soon as the last hook exits.
+const STOP_OUTCOME_WAIT: Duration = Duration::from_secs(3);
 
 #[derive(Deserialize, Serialize)]
 struct StopInput {
@@ -24,6 +27,13 @@ struct StopInput {
     transcript_path: Option<PathBuf>,
     turn_id: Option<String>,
     prompt_id: Option<String>,
+    #[serde(default)]
+    background_tasks: Vec<BackgroundTask>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct BackgroundTask {
+    status: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -31,7 +41,6 @@ struct CapturedStop {
     input: StopInput,
     socket: String,
     ended_at_ms: u64,
-    previous_end_ms: Option<u64>,
     transcript_end: Option<u64>,
 }
 
@@ -42,6 +51,8 @@ fn deadline(milliseconds: u64) {
     });
 }
 
+/// Hands a Stop to the detached worker when the session holds a claim the
+/// prompt hook armed. A Stop with none has nothing to settle.
 pub fn run(state: &Path) {
     deadline(250);
     let ended_at_ms = SystemClock.now_unix_ms();
@@ -51,32 +62,32 @@ pub fn run(state: &Path) {
     let Ok(socket) = env::var("HERDR_SOCKET_PATH") else {
         return;
     };
-    let Some(previous_end_ms) = record_boundary(state, &socket, &input, ended_at_ms) else {
+    if !namedrop::final_reply::has_live_claims(state, &socket, &input.session_id) {
         return;
-    };
-    let transcript_end = input
-        .last_assistant_message
-        .is_none()
-        .then(|| {
-            let path = input.transcript_path.as_ref()?;
-            if !path.is_absolute() {
-                return None;
-            }
-            let metadata = fs::symlink_metadata(path).ok()?;
-            metadata.is_file().then_some(metadata.len())
-        })
-        .flatten();
+    }
+    let transcript_end = input.transcript_path.as_ref().and_then(|path| {
+        if !path.is_absolute() {
+            return None;
+        }
+        let metadata = fs::symlink_metadata(path).ok()?;
+        metadata.is_file().then_some(metadata.len())
+    });
+    if let Some(turn) = input.turn() {
+        namedrop::final_reply::mark_stopped(state, &socket, &input.session_id, &turn, ended_at_ms);
+    }
     let captured = CapturedStop {
         input,
         socket,
         ended_at_ms,
-        previous_end_ms,
         transcript_end,
     };
     let Ok(executable) = env::current_exe() else {
         return;
     };
+    // The front end's short Herdr timeout is for its own deadline; a settle
+    // runs the CLI's operation, which needs the CLI's.
     let Ok(mut child) = Command::new(executable)
+        .env_remove("NAMEDROP_HERDR_TIMEOUT_MS")
         .args(["hook", "stop-worker", "--state-directory"])
         .arg(state)
         .stdin(Stdio::piped())
@@ -92,7 +103,6 @@ pub fn run(state: &Path) {
 }
 
 pub fn run_worker(state: &Path) {
-    deadline(3000);
     let mut bytes = Vec::new();
     if io::stdin()
         .lock()
@@ -105,147 +115,95 @@ pub fn run_worker(state: &Path) {
     let Ok(captured) = serde_json::from_slice::<CapturedStop>(&bytes) else {
         return;
     };
-    let text = captured
-        .input
-        .final_text(Some(captured.transcript_end.unwrap_or(0)));
-    let herdr = ProcessHerdr::default().with_socket(Some(captured.socket.clone()));
-    let Some((workspace, _)) =
-        namedrop::locate_agent_session_pane(&herdr, &captured.input.session_id)
-    else {
+    deadline(10_000);
+    if let (Some(_), Some(path), Some(from)) = (
+        &captured.input.prompt_id,
+        &captured.input.transcript_path,
+        captured.transcript_end,
+    ) && another_hook_blocked(path, from)
+    {
         return;
-    };
-    let Ok(Some(mut store)) = StateStore::open_for_terminal_relay(state) else {
-        return;
-    };
-    let namespace = StateNamespace::for_space(captured.socket, workspace);
-    let ending = TerminalRelayEnd {
-        agent_session_id: AgentSessionId::new(captured.input.session_id),
-        ended_at_ms: captured.ended_at_ms,
-        previous_end_ms: Some(captured.previous_end_ms.unwrap_or(0)),
-        text,
-    };
-    let attribution = MutationAttribution::new(ActorKind::Plugin, "namedrop", captured.ended_at_ms);
-    let _ = store.transaction(|transaction| {
-        transaction.relay_terminal_ending(&namespace, &ending, &attribution)
-    });
-}
-
-#[derive(Deserialize, Serialize)]
-struct StopBoundary {
-    identity: String,
-    ended_at_ms: u64,
-}
-
-fn hash(value: &[u8]) -> String {
-    Sha256::digest(value)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-// The latest boundary also marks its own ID. Retire it to an immutable marker
-// before replacement so a crash between writes cannot make an old Stop reusable.
-fn record_boundary(
-    state: &Path,
-    socket: &str,
-    input: &StopInput,
-    ended_at_ms: u64,
-) -> Option<Option<u64>> {
-    let identity = match (&input.prompt_id, &input.turn_id) {
-        (Some(id), None) if !id.trim().is_empty() => hash(format!("claude:{id}").as_bytes()),
-        (None, Some(id)) if !id.trim().is_empty() => hash(format!("codex:{id}").as_bytes()),
-        _ => return None,
-    };
-    if !state.is_dir() {
-        return None;
     }
-    let session = hash(
-        serde_json::to_vec(&(socket, &input.session_id))
-            .ok()?
-            .as_slice(),
+    let stop = StopFacts {
+        session: captured.input.session_id.clone(),
+        turn: captured.input.turn(),
+        background_running: captured
+            .input
+            .background_tasks
+            .iter()
+            .any(|task| matches!(task.status.as_str(), "running" | "pending")),
+        text: captured
+            .input
+            .final_text(Some(captured.transcript_end.unwrap_or(0))),
+    };
+    namedrop::final_reply::settle_at_stop(
+        state,
+        &captured.socket,
+        &stop,
+        captured.ended_at_ms,
+        &mut settle,
     );
-    let directory = state.join("terminal-relay-stops").join(session);
-    fs::create_dir_all(&directory).ok()?;
-    let lock = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(directory.join("lock"))
-        .ok()?;
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return None;
-    }
-    let boundary_path = directory.join("latest.json");
-    let previous: Option<StopBoundary> = match fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&boundary_path)
-    {
-        Ok(file) => {
-            if !file.metadata().ok()?.is_file() {
-                return None;
-            }
-            let mut bytes = Vec::new();
-            file.take(4097).read_to_end(&mut bytes).ok()?;
-            if bytes.len() > 4096 {
-                return None;
-            }
-            Some(serde_json::from_slice(&bytes).ok()?)
+}
+
+/// Whether another Stop hook blocked this Stop, so Claude Code continues the
+/// turn and the text this Stop carries is not its final message. Claude Code
+/// records how the Stop's hooks ended after the transcript's end at the
+/// Stop: a "Stop hook feedback" prompt when one blocked, then a
+/// `stop_hook_summary`. The turn's next Stop settles the claim instead.
+/// With no summary in time it settles as it would without the check.
+fn another_hook_blocked(path: &Path, from: u64) -> bool {
+    let until = Instant::now() + STOP_OUTCOME_WAIT;
+    loop {
+        let mut bytes = Vec::new();
+        let read = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .and_then(|mut file| {
+                file.seek(SeekFrom::Start(from))?;
+                file.take(MAX_INPUT_BYTES).read_to_end(&mut bytes)
+            });
+        if read.is_err() {
+            return false;
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-        Err(_) => return None,
-    };
-    if previous
-        .as_ref()
-        .is_some_and(|last| last.identity == identity)
-        || directory.join(&identity).try_exists().ok()?
-    {
-        return None;
-    }
-    let mark_seen = |id: &str| -> Option<()> {
-        // IDs read from disk remain data, never path components.
-        if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return None;
-        }
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(directory.join(id))
+        let complete = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(&[][..], |end| &bytes[..end]);
+        for record in complete
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
         {
-            Ok(_) => Some(()),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Some(()),
-            Err(_) => None,
+            if record["type"] == "user"
+                && record["isMeta"] == true
+                && record["message"]["content"]
+                    .as_str()
+                    .is_some_and(|content| content.starts_with("Stop hook feedback:"))
+            {
+                return true;
+            }
+            if record["type"] == "system" && record["subtype"] == "stop_hook_summary" {
+                return false;
+            }
         }
-    };
-    if previous
-        .as_ref()
-        .is_some_and(|last| last.ended_at_ms >= ended_at_ms)
-    {
-        mark_seen(&identity)?;
-        return None;
+        if Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
     }
-    if let Some(last) = &previous {
-        mark_seen(&last.identity)?;
-    }
-    let boundary = StopBoundary {
-        identity,
-        ended_at_ms,
+}
+
+fn settle(bound: BoundOperation) -> Result<Value, String> {
+    let options = RuntimeOptions {
+        plugin_state: Some(bound.state),
+        herdr_socket: Some(bound.socket),
+        herdr_workspace: Some(bound.workspace),
+        herdr_pane: Some(bound.pane),
     };
-    let temporary = directory.join("next.json");
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&temporary)
-        .ok()?;
-    file.write_all(&serde_json::to_vec(&boundary).ok()?).ok()?;
-    fs::rename(temporary, boundary_path).ok()?;
-    Some(previous.map(|last| last.ended_at_ms))
+    match crate::run_bound_operation(bound.operation, bound.input, &options) {
+        crate::Ran::Finished(result) => result,
+        crate::Ran::Refused(error) => Err(error),
+    }
 }
 
 fn read_input(input: impl Read) -> Option<StopInput> {
@@ -302,14 +260,12 @@ fn stop_identity_prefix(bytes: &[u8]) -> Option<StopInput> {
         ) {
             fields.insert(key, item);
         }
-        if let Ok(input) = serde_json::from_value::<StopInput>(Value::Object(fields.clone())) {
-            let identity = match (&input.prompt_id, &input.turn_id) {
-                (Some(id), None) | (None, Some(id)) => !id.trim().is_empty(),
-                _ => false,
-            };
-            if identity && input.hook_event_name == "Stop" && !input.session_id.trim().is_empty() {
-                return Some(input);
-            }
+        if let Ok(input) = serde_json::from_value::<StopInput>(Value::Object(fields.clone()))
+            && input.turn().is_some()
+            && input.hook_event_name == "Stop"
+            && !input.session_id.trim().is_empty()
+        {
+            return Some(input);
         }
         whitespace(bytes, &mut offset);
         if bytes.get(offset) != Some(&b',') {
@@ -320,12 +276,15 @@ fn stop_identity_prefix(bytes: &[u8]) -> Option<StopInput> {
 }
 
 impl StopInput {
-    fn final_text(&self, transcript_end: Option<u64>) -> String {
-        let text = match &self.last_assistant_message {
-            Some(text) => text.clone(),
-            None => self.transcript_text(transcript_end).unwrap_or_default(),
-        };
-        text.chars().take(MAX_TEXT_CHARS).collect()
+    fn turn(&self) -> Option<HostTurn> {
+        HostTurn::from_ids(self.prompt_id.as_deref(), self.turn_id.as_deref())
+    }
+
+    fn final_text(&self, transcript_end: Option<u64>) -> FinalText {
+        match &self.last_assistant_message {
+            Some(text) => FinalText::bounded(text),
+            None => FinalText::bounded(&self.transcript_text(transcript_end).unwrap_or_default()),
+        }
     }
 
     fn transcript_text(&self, transcript_end: Option<u64>) -> Option<String> {
@@ -399,6 +358,7 @@ fn content_text(content: &Value, kind: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use namedrop::TERMINAL_RELAY_MAX_CHARS as MAX_TEXT_CHARS;
     use serde_json::json;
 
     fn parse(value: Value) -> StopInput {
@@ -418,7 +378,7 @@ mod tests {
             ),
         ] {
             let input = read_input(fixture.as_bytes()).unwrap();
-            assert_eq!(input.final_text(None), expected);
+            assert_eq!(input.final_text(None).text, expected);
         }
     }
 
@@ -437,7 +397,7 @@ mod tests {
             assert_eq!(bounded.session_id, original.session_id);
             assert_eq!(bounded.prompt_id, original.prompt_id);
             assert_eq!(bounded.turn_id, original.turn_id);
-            assert_eq!(bounded.final_text(None), "");
+            assert_eq!(bounded.final_text(None).text, "");
         }
     }
 
@@ -448,7 +408,7 @@ mod tests {
             json!({"hook_event_name":"Stop", "session_id":"session", "last_assistant_message":text}),
         );
         assert_eq!(
-            input.final_text(None),
+            input.final_text(None).text,
             text.chars().take(MAX_TEXT_CHARS).collect::<String>()
         );
     }
@@ -472,7 +432,10 @@ mod tests {
         let input = parse(
             json!({"hook_event_name":"Stop", "session_id":"test-session", "transcript_path":fixture}),
         );
-        assert_eq!(input.final_text(None), "Would you prefer tea or coffee?");
+        assert_eq!(
+            input.final_text(None).text,
+            "Would you prefer tea or coffee?"
+        );
     }
 
     #[test]
@@ -482,12 +445,12 @@ mod tests {
         let input = parse(
             json!({"hook_event_name":"Stop", "session_id":"codex-session-id", "turn_id":"codex-turn-id", "transcript_path":fixture}),
         );
-        assert_eq!(input.final_text(None), "Hi! What can I help with?");
+        assert_eq!(input.final_text(None).text, "Hi! What can I help with?");
         let other = StopInput {
             turn_id: Some("different-turn".into()),
             ..input
         };
-        assert_eq!(other.final_text(None), "");
+        assert_eq!(other.final_text(None).text, "");
     }
 
     #[test]
@@ -504,21 +467,21 @@ mod tests {
         let mut input = parse(
             json!({"hook_event_name":"Stop", "session_id":"test", "transcript_path":transcript}),
         );
-        assert_eq!(input.final_text(None), "");
+        assert_eq!(input.final_text(None).text, "");
         fs::write(&transcript, &first).unwrap();
-        assert_eq!(input.final_text(None), "old answer");
+        assert_eq!(input.final_text(None).text, "old answer");
         let captured_end = fs::metadata(&transcript).unwrap().len();
         let later = json!({"type":"assistant", "sessionId":"test", "message":{"content":[{"type":"text","text":"later turn"}]}});
         fs::write(&transcript, format!("{first}\n{later}\n")).unwrap();
-        assert_eq!(input.final_text(Some(captured_end)), "old answer");
-        assert_eq!(input.final_text(None), "later turn");
+        assert_eq!(input.final_text(Some(captured_end)).text, "old answer");
+        assert_eq!(input.final_text(None).text, "later turn");
         fs::write(&transcript, first).unwrap();
         input.session_id = "other-session".into();
-        assert_eq!(input.final_text(None), "");
+        assert_eq!(input.final_text(None).text, "");
         let link = root.join("link");
         std::os::unix::fs::symlink(&transcript, &link).unwrap();
         input.transcript_path = Some(link);
-        assert_eq!(input.final_text(None), "");
+        assert_eq!(input.final_text(None).text, "");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -527,6 +490,6 @@ mod tests {
         let input = parse(
             json!({"hook_event_name":"Stop", "session_id":"session", "last_assistant_message":"", "transcript_path":"/not/a/transcript"}),
         );
-        assert_eq!(input.final_text(None), "");
+        assert_eq!(input.final_text(None).text, "");
     }
 }

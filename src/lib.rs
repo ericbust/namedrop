@@ -12,6 +12,8 @@ pub mod dashboard;
 pub mod deferred_commands;
 mod delivery;
 mod domain;
+#[doc(hidden)]
+pub mod final_reply;
 mod groups;
 mod handoff;
 mod health;
@@ -200,7 +202,7 @@ pub fn is_message_operation(operation: &str) -> bool {
 pub fn is_integration_operation(operation: &str) -> bool {
     matches!(
         operation,
-        "register" | "ack" | "complete" | "delivery.inbox"
+        "register" | "ack" | "complete" | final_reply::STOP_NO_REPLY | "delivery.inbox"
     )
 }
 

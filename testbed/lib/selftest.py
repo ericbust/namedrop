@@ -290,9 +290,10 @@ def claude_lines(reply_attempt):
         hook("SessionStart", POLICY),
         {"type": "user", "message": {"role": "user", "content": "Reply with the single word ready."}},
         hook("UserPromptSubmit", roster("claude")),
-        {"type": "assistant", "message": {"model": "claude-opus-5-5", "content": [{"type": "text", "text": "ready"}]}},
+        {"type": "assistant", "message": {"id": "msg-1", "model": "claude-opus-5-5", "content": [{"type": "text", "text": "ready"}]}},
         {"type": "user", "message": {"role": "user", "content": "Ask @codex to reply with the single word pong."}},
-        {"type": "assistant", "message": {"model": "claude-opus-5-5", "content": [{"type": "tool_use", "id": "t"}]}},
+        {"type": "assistant", "message": {"id": "msg-2", "model": "claude-opus-5-5", "content": [{"type": "tool_use", "id": "t", "input": {
+            "command": "'/s/namedrop' --plugin-state '/s' send --input-json '{\"source\":\"@codex Reply with pong.\"}'"}}]}},
         {"type": "user", "toolUseResult": {}, "message": {"role": "user", "content": [
             {"type": "tool_result", "content": '{"attempt_id":"' + reply_attempt + '"}'}]}},
         {"type": "user", "isMeta": True, "message": {"role": "user", "content": [
@@ -301,8 +302,10 @@ def claude_lines(reply_attempt):
         {"type": "user", "message": {"role": "user", "content": '\n\n<pasted_content id="5a5c">\n{"envelope_kind":'
                                      '"delivery","control":{"attempt_id":"' + reply_attempt + '"}}\n</pasted_content id="5a5c">'}},
         hook("UserPromptSubmit", "Namedrop verification: the adjacent prompt exactly matches."
-             "\n\nNamedrop commands: reply ..."),
-        {"type": "assistant", "message": {"model": "claude-opus-5-5", "content": [
+             "\n\nNamedrop commands: none. Namedrop closes this without a reply"),
+        {"type": "assistant", "message": {"id": "msg-3", "model": "claude-opus-5-5", "content": [
+            {"type": "thinking", "thinking": "Show it once."}]}},
+        {"type": "assistant", "message": {"id": "msg-3", "model": "claude-opus-5-5", "content": [
             {"type": "text", "text": "@codex replied **pong**."}]}}) + ['{"type": "assistant", "mess']
 
 
@@ -311,7 +314,11 @@ def developer(text):
         "type": "message", "role": "developer", "content": [{"type": "input_text", "text": text}]}}
 
 
-def codex_lines(request_attempt):
+SETTLE_LINE = ("'/s/runtime/namedrop' --plugin-state '/s' reply --herdr-socket '/tmp/nd.sock' "
+               "--input-json '{\"attempt_id\":\"a1\"}'")
+
+
+def codex_lines(request_attempt, settle=False):
     item = lambda role, text: {"type": "response_item", "payload": {
         "type": "message", "role": role, "content": [{"type": "input_text", "text": text}]}}
     return jsonl(
@@ -327,8 +334,14 @@ def codex_lines(request_attempt):
         {"type": "event_msg", "payload": {"type": "user_message", "message": request_attempt}},
         {"type": "turn_context", "payload": {"model": "gpt-6.1-sol"}},
         item("user", '{"trusted_instruction":"collab/v1","control":{"attempt_id":"' + request_attempt + '"}}'),
-        item("developer", UNCHANGED + "\n\nNamedrop commands: the operations this delivery authorized"),
-        item("assistant", "Sent “pong” to @claude."))
+        item("developer", UNCHANGED + "\n\nNamedrop commands: your final message is your reply to @claude."),
+        *([{"type": "response_item", "payload": {
+            "type": "custom_tool_call", "name": "exec",
+            "input": 'const r = await tools.exec_command({cmd:"' + SETTLE_LINE.replace('"', '\\"') + '"});'}},
+           {"type": "token_usage_record", "payload": {"turn_id": "t2", "response_id": "resp-settle"}}]
+          if settle else []),
+        {"type": "token_usage_record", "payload": {"turn_id": "t2", "response_id": "resp-final"}},
+        item("assistant", "pong"))
 
 
 def check_transcripts():
@@ -343,6 +356,14 @@ def check_transcripts():
     assert len(codex.turns) == 2 and codex.models == {"gpt-6.1-sol"}, codex.turns
     assert live.seen(codex, "delivery-attempt-A", "commands") == (1, 1)
     assert live.seen(codex, "delivery-attempt-A", "verified") == (1, 0)
+    assert [(turn.calls, live.settle_commands(turn)) for turn in codex.turns] == [(0, 0), (1, 0)]
+    settled = live.parse_codex(codex_lines("delivery-attempt-A", settle=True), "x", "x.jsonl")
+    assert [(turn.calls, live.settle_commands(turn)) for turn in settled.turns] == [(0, 0), (2, 1)]
+    assert [(turn.calls, len(turn.commands), live.settle_commands(turn)) for turn in claude.turns] == [
+        (1, 0, 0), (1, 1, 0), (1, 0, 0)], [(turn.calls, turn.commands) for turn in claude.turns]
+    assert live.settle_commands(live.Turn("x", (), (), ("namedrop complete --no-reply --input-json '{}'",))) == 1
+    assert live.settle_commands(live.Turn("x", (), (), (
+        "'/s/namedrop' --plugin-state '/s' send --input-json '{\"source\":\"@codex reply soon\"}'",))) == 0
     assert all(check.ok for check in live.judge_hooks("codex", codex))
     assert not live.judge_hooks("claude", codex)[0].ok, "a roster without (you) on the right row fails"
     busy = roster("codex").replace("(you) — Generic · available now", "(you) — Generic · busy")
@@ -360,7 +381,7 @@ def check_transcripts():
 
 DDL = """
 CREATE TABLE collaboration_messages (session_socket_id, worktree_id, message_id, thread_id,
-  thread_order, in_reply_to, author_alias_snapshot, created_at_ms);
+  thread_order, in_reply_to, author_alias_snapshot, created_at_ms, body);
 CREATE TABLE message_recipients (session_socket_id, worktree_id, message_id, recipient_order, alias_snapshot);
 CREATE TABLE mailbox_deliveries (session_socket_id, worktree_id, delivery_id, message_id, state, created_at_ms);
 CREATE TABLE delivery_attempts (session_socket_id, worktree_id, attempt_id, delivery_id,
@@ -375,10 +396,10 @@ CREATE TABLE terminal_executions (session_socket_id, worktree_id, attempt_id, co
 SCOPE = ("/tmp/nd-tb.sock", "w1")
 
 
-def hop_rows(db, number, author, recipient, parent, disposition, at, scope=SCOPE):
+def hop_rows(db, number, author, recipient, parent, disposition, at, scope=SCOPE, body="pong"):
     message, delivery, attempt = "m{}".format(number), "d{}".format(number), "a{}".format(number)
-    db.execute("INSERT INTO collaboration_messages VALUES (?,?,?,?,?,?,?,?)",
-               scope + (message, "t-" + scope[1], number, parent, author, at))
+    db.execute("INSERT INTO collaboration_messages VALUES (?,?,?,?,?,?,?,?,?)",
+               scope + (message, "t-" + scope[1], number, parent, author, at, body))
     db.execute("INSERT INTO message_recipients VALUES (?,?,?,1,?)", scope + (message, recipient))
     db.execute("INSERT INTO mailbox_deliveries VALUES (?,?,?,?,'settled',?)", scope + (delivery, message, at))
     db.execute("INSERT INTO delivery_attempts VALUES (?,?,?,?,NULL,?)", scope + (attempt, delivery, at + 1))
@@ -387,18 +408,32 @@ def hop_rows(db, number, author, recipient, parent, disposition, at, scope=SCOPE
     db.execute("INSERT INTO delivery_dispositions VALUES (?,?,?,?,?)", scope + ("p" + attempt, attempt, disposition))
 
 
+def write_claims(path, states):
+    """One claim file per agent session, as Namedrop keeps them beside its store."""
+    root = path.parent / "final-reply"
+    if root.exists():
+        for old in root.glob("*/claims.json"):
+            old.unlink()
+    for session, (attempt, state) in enumerate(states.items()):
+        (root / str(session)).mkdir(parents=True, exist_ok=True)
+        (root / str(session) / "claims.json").write_text(json.dumps([{"attempt_id": attempt, "state": state}]))
+
+
 def round_trip(path, defect=None):
     if path.exists():
         path.unlink()
     db = sqlite3.connect(str(path))
     db.executescript(DDL)
-    hop_rows(db, 1, "claude", "codex", None, "reply", 1000)
-    hop_rows(db, 2, "codex", "claude", "m1", "no_reply", 2000)
+    hop_rows(db, 1, "claude", "codex", None, "reply", 1000, body="Reply with the single word pong.")
+    hop_rows(db, 2, "codex", "claude", "m1", "no_reply", 2000,
+             body="pong. Ask me anything." if defect == "body differs" else "pong")
+    write_claims(path, {"a1": {"left": "interrupted"} if defect == "claim left" else {"done": "replied"},
+                        "a2": "open" if defect == "claim open" else {"done": "no_replied"}})
     hop_rows(db, 1, "claude", "codex", None, "reply", 1000, scope=(SCOPE[0], "w9"))
     if defect == "retry":
         db.execute("INSERT INTO delivery_attempts VALUES (?,?,'a1r','d1','a1',1500)", SCOPE)
     elif defect == "second root":
-        db.execute("INSERT INTO collaboration_messages VALUES (?,?,'m9','t9',1,NULL,'claude',1200)", SCOPE)
+        db.execute("INSERT INTO collaboration_messages VALUES (?,?,'m9','t9',1,NULL,'claude',1200,'x')", SCOPE)
     elif defect == "third hop":
         hop_rows(db, 3, "claude", "codex", "m2", "no_reply", 3000)
     elif defect == "missing ack":
@@ -416,9 +451,11 @@ def check_exchange(scratch):
     codex = live.parse_codex(codex_lines("a1"), "x", "x.jsonl")
     path = scratch / "namedrop.sqlite3"
 
-    def failing(defect):
-        exchange = round_trip(path, defect).exchange("claude", 900)
-        return [check.what for check in live.judge_exchange(mention, exchange, claude, codex) if not check.ok]
+    def failing(defect, codex=codex):
+        store = round_trip(path, defect)
+        exchange = store.exchange("claude", 900)
+        return [check.what for check in live.judge_exchange(mention, exchange, claude, codex, store.claims())
+                if not check.ok]
 
     store = round_trip(path)
     exchange = store.exchange("claude", 900)
@@ -430,16 +467,27 @@ def check_exchange(scratch):
     assert failing("second root") == ["thread"]
     assert failing("third hop") == ["thread"]
     assert failing("missing ack") == ["reply"]
+    assert failing("claim left") == ["request"]
+    assert failing("claim open") == ["reply"]
+    assert failing("body differs") == ["reply body"]
+    settled = live.parse_codex(codex_lines("a1", settle=True), "x", "x.jsonl")
+    assert failing(None, codex=settled) == ["codex saw the request"]
+    rows, detail = live.calls_detail(exchange, claude, codex)
+    assert [(row["agent"], row["calls"]) for row in rows] == [("codex", [1]), ("claude", [1])]
+    assert detail.ok and detail.detail == "model calls: codex 1 on the request, claude 1 on the reply"
+    assert store.claims() == {"a1": "done:replied", "a2": "done:no_replied"}
     assert not live.exchange_done(round_trip(path, "active").exchange("claude", 900))
     assert round_trip(path, "active").backlog() == live.Backlog(0, 0, 1)
+    round_trip(path)
     assert failing(None) == [] and live.judge_exchange(
-        mention._replace(word="ping"), store.exchange("claude", 900), claude, codex)[-1].ok is False
+        mention._replace(word="ping"), store.exchange("claude", 900), claude, codex, store.claims())[-1].ok is False
     try:
         live.Store(scratch / "missing.sqlite3", *SCOPE).backlog()
         raise AssertionError("an unreadable store must not read as an empty backlog")
     except live.StoreBusy:
         pass
-    return "exchange: a clean round trip passes; a retry, second root, third hop or lost ack fails its own check"
+    return ("exchange: a clean round trip passes; a retry, second root, third hop, lost ack, left claim, "
+            "settle command or changed body fails its own check")
 
 
 def check_judges():
@@ -455,9 +503,11 @@ def check_judges():
                                                         {"namedrop-awaiting": waiting})
     panes = {alias: pane(alias, "idle") for alias in ("shell", "claude", "codex")}
     doctor = live.Doctor(0, "healthy", (), 0)
-    assert all(check.ok for check in live.judge_settled(live.Backlog(0, 0, 0), doctor, panes))
-    assert not live.judge_settled(live.Backlog(0, 0, 0), doctor, dict(panes, codex=pane("codex", "idle", "1")))[0].ok
-    assert not live.judge_settled(live.Backlog(0, 0, 0), doctor, dict(panes, claude=pane("claude", "working")))[1].ok
+    done = {"a1": "done:replied", "a2": "left:no_final_text"}
+    assert all(check.ok for check in live.judge_settled(live.Backlog(0, 0, 0), doctor, panes, done))
+    assert not live.judge_settled(live.Backlog(0, 0, 0), doctor, dict(panes, codex=pane("codex", "idle", "1")), done)[0].ok
+    assert not live.judge_settled(live.Backlog(0, 0, 0), doctor, dict(panes, claude=pane("claude", "working")), done)[1].ok
+    assert not live.judge_settled(live.Backlog(0, 0, 0), doctor, panes, dict(done, a3="open"))[0].ok
     claude = live.Transcript("claude", "c", "p", (), (live.Turn("x", (), ("It printed `hello`, exit code 0.",)),), frozenset())
     ran = live.TerminalRun("echo hello", 0, "hello\n", True)
     assert all(check.ok for check in live.judge_terminal((ran,), claude))

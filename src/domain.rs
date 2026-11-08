@@ -489,11 +489,13 @@ pub struct MessageDraft {
 
 pub const TERMINAL_RELAY_MAX_CHARS: usize = 16_000;
 
+/// The end of the turn that answered one attempt from the person.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TerminalRelayEnd {
     pub agent_session_id: AgentSessionId,
+    pub attempt_id: DeliveryAttemptId,
+    pub turn_started_at_ms: u64,
     pub ended_at_ms: u64,
-    pub previous_end_ms: Option<u64>,
     pub text: String,
 }
 
@@ -794,6 +796,8 @@ pub enum TransitionEntityKind {
     /// One revision of a coordination. The entity id is
     /// `{coordination_id}:{revision}`.
     CoordinationRevision,
+    /// Facts the terminal relay wrote before claims decided what a Stop
+    /// relays; older databases still hold them.
     TerminalRelaySession,
     TerminalRelayAttempt,
 }

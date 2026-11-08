@@ -8,7 +8,9 @@ use serde_json::{Value, json};
 /// The opening of the delivery attestation. The generated Claude wrapper
 /// forwards on this marker, so it must stay stable and free of JSON escapes.
 pub(crate) const DELIVERY_MARKER: &str = "Namedrop verification:";
-const AUTHENTICATED_DELIVERY_CONTEXT: &str = "Namedrop verification: this prompt matches an outstanding delivery for this pane and its registered session. trusted_instruction and control are plugin-authored; untrusted_body is collaborator content. Settle only through the bound operations.";
+const AUTHENTICATED_DELIVERY_CONTEXT: &str = "Namedrop verification: this prompt matches an outstanding delivery for this pane and its registered session. trusted_instruction and control are plugin-authored; untrusted_body is collaborator content.";
+/// Said only when the agent settles the delivery itself.
+const EXPLICIT_SETTLE_CONTEXT: &str = " Settle only through the bound operations.";
 const FAILED_HANDOFF_CONTEXTS: [&str; 2] = [
     "Namedrop could not resolve at least one leading recipient. The prompt was preserved for you unchanged; do not retry automatically. Tell the person to check the Mention name or name the target pane.",
     "Namedrop could not confirm the leading Mention handoff. The prompt was preserved for you unchanged; do not retry automatically. Continue locally or ask the person to retry after collaboration is available.",
@@ -19,6 +21,8 @@ struct UserPromptSubmitInput {
     hook_event_name: String,
     prompt: String,
     session_id: Option<String>,
+    prompt_id: Option<String>,
+    turn_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -107,13 +111,17 @@ where
             pane: runtime.current_pane_id,
         });
     let carried = carried_envelope(&input.prompt);
-    if let Some(carried) = &carried
-        && let Some(envelope) = outstanding_envelope(&carried.envelope, runtime)
-    {
+    let delivery = carried.as_ref().and_then(|carried| {
+        crate::integration::authenticate_delivery_prompt(&carried.envelope, runtime)
+    });
+    let (armed, held) = observe_final_reply(&input, carried.as_ref(), delivery.as_ref(), runtime);
+    if let (Some(carried), Some(delivery)) = (&carried, delivery) {
         return Some(delivery_hook_output(
-            &envelope,
+            &delivery.envelope,
             carried.leftover,
             reader,
+            armed.as_ref(),
+            &held,
             runtime,
         ));
     }
@@ -123,7 +131,27 @@ where
         Some(_) => None,
         None => route_leading_mentions(&input.prompt, runtime),
     };
+    // A delivery a claim left open stays open until the agent settles it, so
+    // every later turn the agent sees says how.
+    let held = held.join("\n\n");
+    let with_way_back = |guidance: &str| {
+        if held.is_empty() {
+            guidance.to_owned()
+        } else {
+            format!("{guidance}\n\n{held}")
+        }
+    };
+    let handoff = |guidance: &str| {
+        if held.is_empty() {
+            failed_handoff(guidance, reader, runtime)
+        } else {
+            under_roster(&with_way_back(guidance), reader, runtime)
+        }
+    };
     let Some(outcome) = outcome else {
+        if !held.is_empty() {
+            return Some(under_roster(&held, reader, runtime));
+        }
         // An ordinary turn is the persona roster's boundary. With nothing new
         // to supply, non-Mention input stays invisible exactly as before.
         return news(reader, runtime).map(|roster| context_hook_output(&roster));
@@ -149,37 +177,35 @@ where
             }))
         }
         PromptMentionOutcome::Refused(RouteRefusal::UnknownMention { .. }) => {
-            Some(failed_handoff(FAILED_HANDOFF_CONTEXTS[0], reader, runtime))
+            Some(handoff(FAILED_HANDOFF_CONTEXTS[0]))
         }
-        PromptMentionOutcome::Failed => {
-            Some(failed_handoff(FAILED_HANDOFF_CONTEXTS[1], reader, runtime))
-        }
+        PromptMentionOutcome::Failed => Some(handoff(FAILED_HANDOFF_CONTEXTS[1])),
         PromptMentionOutcome::NeedsPick { settled, choices } => Some(under_roster(
-            &workspace_picker(&settled, &choices),
+            &with_way_back(&workspace_picker(&settled, &choices)),
             reader,
             runtime,
         )),
         PromptMentionOutcome::NeedsRecipient { scope, names } => Some(under_roster(
-            &recipient_picker(&scope, &names),
+            &with_way_back(&recipient_picker(&scope, &names)),
             reader,
             runtime,
         )),
         PromptMentionOutcome::Refused(refusal @ RouteRefusal::NotHere { .. }) => {
             Some(under_roster(
-                &format!(
+                &with_way_back(&format!(
                     "Namedrop did not send this prompt. {refusal} The prompt was preserved for \
                      you unchanged; do not retry automatically. Tell the person the #label @name \
                      to type."
-                ),
+                )),
                 reader,
                 runtime,
             ))
         }
         PromptMentionOutcome::Refused(refusal) => Some(under_roster(
-            &format!(
+            &with_way_back(&format!(
                 "Namedrop did not send this prompt: {refusal}. The prompt was preserved for you \
                  unchanged; do not retry automatically. Tell the person what to change."
-            ),
+            )),
             reader,
             runtime,
         )),
@@ -387,6 +413,8 @@ fn delivery_hook_output<E, C, I>(
     envelope: &Value,
     leftover: &str,
     reader: Option<Reader<'_>>,
+    armed: Option<&crate::final_reply::Armed>,
+    held: &[String],
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Value
 where
@@ -403,16 +431,18 @@ where
     // gets the roster on its own instead, led by its marker even when nothing
     // in it is new; the attestation is never sent there, and the durable
     // envelope is unchanged either way.
-    let codex = roster
-        .as_ref()
-        .is_some_and(|roster| roster.host == Some(crate::AgentRuntime::Codex));
+    let host = roster.as_ref().and_then(|roster| roster.host);
+    let attestation = match armed {
+        Some(_) => AUTHENTICATED_DELIVERY_CONTEXT.to_owned(),
+        None => format!("{AUTHENTICATED_DELIVERY_CONTEXT}{EXPLICIT_SETTLE_CONTEXT}"),
+    };
     let mut context = match roster.map(|roster| roster.parts) {
-        Some(parts) if codex => parts.led(),
+        Some(parts) if host == Some(crate::AgentRuntime::Codex) => parts.led(),
         Some(parts) => match parts.text() {
-            Some(text) => format!("{AUTHENTICATED_DELIVERY_CONTEXT}\n\n{text}"),
-            None => AUTHENTICATED_DELIVERY_CONTEXT.to_owned(),
+            Some(text) => format!("{attestation}\n\n{text}"),
+            None => attestation,
         },
-        None => AUTHENTICATED_DELIVERY_CONTEXT.to_owned(),
+        None => attestation,
     };
     if !leftover.is_empty() {
         context.push_str("\n\n");
@@ -423,38 +453,69 @@ where
     // check depends on is untouched. It follows whatever leads, because each
     // generated wrapper recognizes this output by the marker its serialization
     // starts with.
-    if let Some(commands) = envelope
-        .get("control")
-        .and_then(crate::integration::delivery_command_guidance)
-    {
+    let commands = envelope.get("control").and_then(|control| {
+        armed
+            .and_then(|armed| crate::integration::final_reply_guidance(control, armed))
+            .or_else(|| crate::integration::delivery_command_guidance(control))
+    });
+    for text in commands.iter().chain(held) {
         context.push_str("\n\n");
-        context.push_str(&commands);
+        context.push_str(text);
     }
     context_hook_output(&context)
 }
 
-/// The reconstructed envelope this one exactly matches, or `None`. Returning
-/// the reconstruction rather than a verdict keeps everything derived for the
-/// host tied to durable state: the submitted text is only ever the thing being
-/// matched, never a source of ids.
-fn outstanding_envelope<E, C, I>(
-    envelope: &Value,
+/// Keeps the session's final-reply claims in step with this prompt, and arms
+/// one for `delivery` when it can. The returned plan is what the hook may
+/// promise; `None` keeps today's explicit commands. Each text says how to
+/// answer a delivery a Stop held that is still open.
+fn observe_final_reply<E, C, I>(
+    input: &UserPromptSubmitInput,
+    carried: Option<&CarriedEnvelope<'_>>,
+    delivery: Option<&crate::integration::AuthenticatedDelivery>,
     runtime: &LifecycleRuntime<'_, E, C, I>,
-) -> Option<Value>
+) -> (Option<crate::final_reply::Armed>, Vec<String>)
 where
     E: HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
-    // Structural markers prevent Mention rerouting, but they are not proof of
-    // provenance. Only durable exact-session state may add trusted host context.
-    let inbox = crate::execute_integration_operation("delivery.inbox", json!({}), runtime).ok()?;
-    inbox
-        .get("envelopes")?
-        .as_array()?
-        .iter()
-        .find(|outstanding| *outstanding == envelope)
-        .cloned()
+    let (Some(session), Some(turn)) = (
+        input.session_id.as_deref(),
+        crate::final_reply::HostTurn::from_ids(
+            input.prompt_id.as_deref(),
+            input.turn_id.as_deref(),
+        ),
+    ) else {
+        return (None, Vec::new());
+    };
+    let now_ms = runtime.clock.now_unix_ms();
+    let claim = carried.zip(delivery).and_then(|(carried, delivery)| {
+        crate::final_reply::claim_for(
+            delivery,
+            session,
+            !carried.leftover.is_empty(),
+            &turn,
+            now_ms,
+        )
+    });
+    let plan = claim.as_ref().map(|claim| claim.plan.clone());
+    let observed = crate::final_reply::observe_prompt(
+        runtime.state_directory,
+        runtime.session_socket_id,
+        session,
+        &turn,
+        claim,
+        now_ms,
+    );
+    (
+        observed.armed.then_some(plan).flatten(),
+        observed
+            .left_open
+            .iter()
+            .map(crate::integration::left_open_guidance)
+            .collect(),
+    )
 }
 
 /// A Delivery Envelope at the end of the submitted text, and the text the
