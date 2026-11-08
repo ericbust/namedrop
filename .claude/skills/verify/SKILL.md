@@ -152,8 +152,8 @@ Namedrop run through the profile's `env -i` line as the manual drive notes show:
   Stop hook blocks (settles at the turn's second Stop, with the real final text); a turn that
   ends waiting on a helper or background work (posts nothing, later prompts show the
   "is still open" line, and its reply lands in the same thread); and a person's Channels
-  message answered by the final message (one `terminal-relay/v1` post in the thread, using
-  the Channels browser app below).
+  message answered by the final message (one post stored as `terminal-relay/v1` that shows
+  as an ordinary reply with no attention item, using the Channels browser app below).
 - No route written yet: tracked handoffs inside one workspace and the 30-second settle
   (`src/handoff.rs`, `src/coordination.rs`, `ND-DELIVERY-003`, `ND-COORDINATION-001`), popups other than
   Doctor's (`src/naming_ui.rs`, `src/agent_status_ui.rs`), the tour (`src/tour.rs`), shared
