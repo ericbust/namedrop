@@ -734,9 +734,14 @@ struct RunningStop {
 impl RunningStop {
     fn wait(mut self) {
         assert!(self.child.wait().unwrap().success());
-        self.done
+        // macOS refuses a socket option with EINVAL once the peer has closed, and
+        // then the read below returns end of file at once.
+        if let Err(error) = self
+            .done
             .set_read_timeout(Some(std::time::Duration::from_secs(15)))
-            .unwrap();
+        {
+            assert_eq!(error.raw_os_error(), Some(libc::EINVAL), "{error}");
+        }
         assert_eq!(
             std::io::Read::read(&mut self.done, &mut [0]).unwrap(),
             0,
