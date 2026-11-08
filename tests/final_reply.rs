@@ -3659,7 +3659,9 @@ fn pasting_the_inbox_envelope_of_a_pointer_delivery_never_attests_or_arms() {
 /// that envelope, and a person's sentence that quotes a header is still theirs.
 #[test]
 fn a_quoted_header_neither_hides_an_envelope_nor_swallows_a_mention() {
-    let header = "Namedrop message 0a1b2c3d from the person. Its trusted details arrive as Namedrop hook context. If none arrived, print them with: x";
+    let first = Space::new();
+    first.ask_without_prompting();
+    let header = typed_pointer(&first, "pane-reviewer");
     let space = Space::new();
     dispatch::message(
         "send",
@@ -3685,7 +3687,7 @@ fn a_quoted_header_neither_hides_an_envelope_nor_swallows_a_mention() {
     let space = Space::new();
     let output = execute_user_prompt_submit_hook(
         &json!({"hook_event_name":"UserPromptSubmit",
-                "prompt":format!("@reviewer what is this? {header}")})
+                "prompt":format!("@reviewer what is this? {}", header.lines().next().unwrap())})
         .to_string(),
         &space.runtime("pane-lead"),
     )

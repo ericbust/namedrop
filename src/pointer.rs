@@ -177,6 +177,13 @@ mod tests {
     }
 
     #[test]
+    fn a_whole_pointer_quoted_in_an_envelope_body_is_not_a_pointer() {
+        let typed = prompt(&envelope("hi"), &pointer()).unwrap();
+        let quoted = serde_json::to_string(&envelope(&typed)).unwrap();
+        assert!(!looks_like_pointer(&quoted));
+    }
+
+    #[test]
     fn a_rewrapped_header_is_still_recognized_and_still_matches() {
         let typed = prompt(&envelope("hi"), &pointer()).unwrap();
         let wrapped = typed
