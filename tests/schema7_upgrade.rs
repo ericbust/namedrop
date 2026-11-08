@@ -30,15 +30,26 @@ const HELD_ATTEMPT: &str = "delivery-attempt-1794161504622630621-2120858-3";
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
+const GOLDEN_SOCKET: &str = "/tmp/nd-golden.sock";
+const GOLDEN_CLOCK: u64 = 1_794_000_705_500;
+
 struct Fixture {
     root: PathBuf,
     state: PathBuf,
+    socket: &'static str,
+    clock: FixedClock,
     herdr: FakeHerdr,
     ids: Ids,
 }
 
 impl Fixture {
     fn new() -> Self {
+        let fixture = Self::at(SOCKET, 1_794_170_000_000, REAL_PANES.to_vec());
+        fixture.load(include_str!("fixtures/schema7/state.sql"));
+        fixture
+    }
+
+    fn at(socket: &'static str, now_ms: u64, panes: Vec<Pane>) -> Self {
         let root = std::env::temp_dir().join(format!(
             "namedrop-schema7-{}-{}",
             std::process::id(),
@@ -46,16 +57,23 @@ impl Fixture {
         ));
         let state = root.join("state");
         fs::create_dir_all(&state).unwrap();
-        rusqlite::Connection::open(state.join("namedrop.sqlite3"))
-            .unwrap()
-            .execute_batch(include_str!("fixtures/schema7/state.sql"))
-            .unwrap();
         Self {
             root,
             state,
-            herdr: FakeHerdr(Mutex::new(Vec::new())),
+            socket,
+            clock: FixedClock(now_ms),
+            herdr: FakeHerdr {
+                panes,
+                prompts: Mutex::new(Vec::new()),
+            },
             ids: Ids(AtomicU64::new(1)),
         }
+    }
+
+    fn load(&self, sql: &str) {
+        let connection = rusqlite::Connection::open(self.state.join("namedrop.sqlite3")).unwrap();
+        connection.execute_batch(sql).unwrap();
+        connection.pragma_update(None, "user_version", 7).unwrap();
     }
 
     fn runtime<'a>(&'a self, pane: &'a str) -> LifecycleRuntime<'a, FakeHerdr, FixedClock, Ids> {
@@ -66,9 +84,9 @@ impl Fixture {
             cwd: &self.root,
             workspace_id: Some(WORKSPACE),
             current_pane_id: Some(pane),
-            session_socket_id: SOCKET,
+            session_socket_id: self.socket,
             herdr: &self.herdr,
-            clock: &FixedClock,
+            clock: &self.clock,
             ids: &self.ids,
         }
     }
@@ -104,7 +122,15 @@ impl Drop for Fixture {
     }
 }
 
-struct FakeHerdr(Mutex<Vec<(String, String)>>);
+/// `(pane, session)`, every one an agent; only the session has to match.
+type Pane = (&'static str, &'static str);
+
+const REAL_PANES: [Pane; 2] = [(CLAUDE_PANE, CLAUDE_SESSION), (CODEX_PANE, CODEX_SESSION)];
+
+struct FakeHerdr {
+    panes: Vec<Pane>,
+    prompts: Mutex<Vec<(String, String)>>,
+}
 
 impl HerdrCommandExecutor for FakeHerdr {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
@@ -116,16 +142,22 @@ impl HerdrCommandExecutor for FakeHerdr {
                 {"path": "/repo", "open_workspace_id": WORKSPACE}
             ]}})
             .to_string(),
-            ["pane", "list", ..] => json!({"result": {"panes": [
-                {"pane_id":"w1:p1","terminal_id":"t1","tab_id":"w1:t1","workspace_id":WORKSPACE},
-                {"pane_id":CLAUDE_PANE,"terminal_id":"t2","tab_id":"w1:t2","workspace_id":WORKSPACE,
-                 "agent":"claude","agent_session":{"value":CLAUDE_SESSION},"agent_status":"idle"},
-                {"pane_id":CODEX_PANE,"terminal_id":"t3","tab_id":"w1:t3","workspace_id":WORKSPACE,
-                 "agent":"codex","agent_session":{"value":CODEX_SESSION},"agent_status":"idle"}
-            ]}})
-            .to_string(),
+            ["pane", "list", ..] => {
+                let panes = self
+                    .panes
+                    .iter()
+                    .enumerate()
+                    .map(|(at, (pane, session))| {
+                        json!({"pane_id":pane,"terminal_id":format!("t{at}"),
+                               "tab_id":format!("w1:t{at}"),"workspace_id":WORKSPACE,
+                               "agent":"claude","agent_session":{"value":session},
+                               "agent_status":"idle"})
+                    })
+                    .collect::<Vec<_>>();
+                json!({"result": {"panes": panes}}).to_string()
+            }
             ["agent", "prompt", pane, prompt] => {
-                self.0
+                self.prompts
                     .lock()
                     .unwrap()
                     .push(((*pane).to_owned(), (*prompt).to_owned()));
@@ -138,10 +170,10 @@ impl HerdrCommandExecutor for FakeHerdr {
     }
 }
 
-struct FixedClock;
+struct FixedClock(u64);
 impl Clock for FixedClock {
     fn now_unix_ms(&self) -> u64 {
-        1_794_170_000_000
+        self.0
     }
     fn wait_ms(&self, _: u64) {}
 }
@@ -280,7 +312,7 @@ fn after_the_upgrade_a_new_delivery_is_a_pointer_to_the_same_sessions() {
     namedrop::drain_mailboxes(&runtime).unwrap();
     let typed = fixture
         .herdr
-        .0
+        .prompts
         .lock()
         .unwrap()
         .iter()
@@ -295,4 +327,64 @@ fn after_the_upgrade_a_new_delivery_is_a_pointer_to_the_same_sessions() {
     let context = fixture.hook(CLAUDE_PANE, CLAUDE_SESSION, "new-turn", &typed);
     assert!(context.contains("Namedrop verification:"), "{context}");
     assert!(context.contains("Namedrop delivery details"), "{context}");
+}
+
+/// What 1.6.0 typed for each kind of delivery, from `generate_goldens.rs` at
+/// caf657d. Authentication is byte equality, so any change to an envelope's
+/// instruction, control or tool fails here, under the kind it broke.
+#[test]
+fn every_kind_of_delivery_1_6_0_typed_still_authenticates_unchanged() {
+    const GOLDEN_PANES: [Pane; 3] = [
+        ("w1:p1", "session-lead"),
+        ("w1:p2", "session-reviewer"),
+        ("w1:p3", "session-researcher"),
+    ];
+    macro_rules! golden {
+        ($kind:literal, $pane:literal, $session:literal) => {
+            (
+                $kind,
+                include_str!(concat!("fixtures/schema7/golden/", $kind, ".sql")),
+                include_str!(concat!("fixtures/schema7/golden/", $kind, ".prompt")),
+                $pane,
+                $session,
+            )
+        };
+    }
+    for (kind, data, prompt, pane, session) in [
+        golden!("agent-ask", "w1:p2", "session-reviewer"),
+        golden!("person-mention", "w1:p2", "session-reviewer"),
+        golden!("reply-to-source", "w1:p1", "session-lead"),
+        golden!("result-set", "w1:p1", "session-lead"),
+        golden!("tracked-assignment", "w1:p3", "session-researcher"),
+        golden!("nudge", "w1:p1", "session-lead"),
+    ] {
+        let fixture = Fixture::at(GOLDEN_SOCKET, GOLDEN_CLOCK, GOLDEN_PANES.to_vec());
+        let state = fixture.state.to_str().unwrap();
+        assert!(!data.contains("/EXE"), "{kind}");
+        fixture.load(&format!(
+            "{}\n{}",
+            include_str!("fixtures/schema7/golden/schema.sql"),
+            data.replace("/STATE", state)
+        ));
+        let executable = namedrop::execute_integration_operation(
+            "delivery.inbox",
+            json!({}),
+            &fixture.runtime(pane),
+        )
+        .unwrap()["envelopes"][0]["control"]["tool"]["executable"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{kind}: nothing is outstanding"))
+            .to_owned();
+        let typed = prompt.replace("/EXE", &executable).replace("/STATE", state);
+        let context = fixture.hook(pane, session, "after-upgrade", &typed);
+        assert!(
+            context.contains("Namedrop verification:"),
+            "{kind}: the prompt 1.6.0 typed no longer authenticates: {context}"
+        );
+        assert!(context.contains("Namedrop commands:"), "{kind}: {context}");
+        assert!(
+            !context.contains("Namedrop delivery details"),
+            "{kind}: {context}"
+        );
+    }
 }

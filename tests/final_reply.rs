@@ -3715,3 +3715,16 @@ fn explicit_pointer_details_name_the_reply_mode_the_settle_rule_uses() {
     );
     assert!(context.contains("\nreply: "), "{context}");
 }
+
+#[test]
+#[should_panic(expected = "already presented")]
+fn a_test_cannot_repeat_a_delivery_by_accident() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+}
