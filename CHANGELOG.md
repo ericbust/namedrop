@@ -14,7 +14,7 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 ### Upgrade
 
-- This release raises the state schema to 8. The update migrates it on the first command. Downgrading to 1.6.0 afterwards needs the backup, as with earlier schema changes.
+- This release raises the state schema to 8. The update migrates it live behind the command lock, so agent sessions and pending deliveries carry on. Keep the matching executable and a database backup together in case you roll back.
 
 ## [1.6.6] - 2026-11-09
 
