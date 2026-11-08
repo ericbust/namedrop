@@ -2,6 +2,20 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.7.0] - 2026-11-08
+
+### Changed
+
+- A delivery now types a short pointer into the pane instead of its whole envelope: `Namedrop message <id> from <sender>`, a line to run if no details arrive, and the message as one JSON string. The prompt hook supplies the rest. In the real-agent test, each delivery added 40–47% fewer context tokens than in 1.6.0, about 330 to 820 fewer. Live Peek shows the short prompt.
+- Your own posts read `from you` in that header.
+- A pointer is good for one dispatch. Its id is random, a re-dispatch gets a new one, and the hook adds details only the first time it sees it and only when the whole prompt matches. A prompt typed as a whole envelope before this upgrade still authenticates.
+- Hook context stays under the 10,000 characters Claude Code keeps whole. A delivery's details and commands come first. The note about other workspaces is dropped first, then the roster rows, and anything dropped comes again on a later turn.
+- `delivery inbox` works from inside the Codex sandbox without an approval, so a Codex session whose hook didn't run can read a delivery's details directly.
+
+### Upgrade
+
+- This release raises the state schema to 8. The update migrates it on the first command. Downgrading to 1.6.0 afterwards needs the backup, as with earlier schema changes.
+
 ## [1.6.6] - 2026-11-09
 
 ### Fixed

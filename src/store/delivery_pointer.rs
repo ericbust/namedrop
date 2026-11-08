@@ -31,8 +31,8 @@ pub(super) fn add_columns(connection: &Connection) -> Result<(), StoreError> {
 }
 
 /// What a lease writes for a new attempt's nonce. SQLite's randomness keeps the
-/// draw inside the lease transaction; the nonce only selects, because the hook
-/// still compares the whole prompt.
+/// draw inside the lease transaction; the nonce need not be secret, because the
+/// hook still compares the whole prompt.
 pub(super) const NEW_NONCE_SQL: &str = "lower(hex(randomblob(4)))";
 
 /// The durable facts a pointer prompt is rendered from, beyond its envelope.
