@@ -12,7 +12,7 @@ use namedrop::{
     IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
     PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
     execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
-    execute_user_prompt_submit_hook, expand_attempt_reply,
+    execute_session_start_hook, execute_user_prompt_submit_hook, expand_attempt_reply,
     final_reply::{BoundOperation, FinalText, HostTurn, StopFacts, mark_stopped, settle_at_stop},
     issue_registration_challenge, send_operator_message,
 };
@@ -3729,4 +3729,50 @@ fn a_test_cannot_repeat_a_delivery_by_accident() {
         CLAUDE,
         &ask.to_string(),
     );
+}
+
+fn session_start(space: &Space, pane: &str, source: &str) -> String {
+    execute_session_start_hook(
+        &json!({"hook_event_name":"SessionStart","source":source}).to_string(),
+        &space.runtime(pane),
+    )
+    .expect("the policy always arrives")["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// A pointer's details live only in hook context, so a summary can lose them. An
+/// explicit delivery arms no claim, and its turn may never come back by itself.
+#[test]
+fn a_rebuilt_context_is_told_which_deliveries_are_still_open_and_how_to_read_them() {
+    let space = Space::new();
+    let ask = space.ask_without_prompting();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    let typed = typed_pointer(&space, "pane-reviewer");
+    space.unkeyed_prompt("pane-reviewer", &typed);
+    assert!(space.claims().is_empty(), "the delivery should be explicit");
+
+    for source in ["compact", "resume", "clear"] {
+        let context = session_start(&space, "pane-reviewer", source);
+        assert!(
+            context.starts_with("Namedrop selection policy"),
+            "{context}"
+        );
+        assert!(
+            context.contains(&format!("{attempt} from @lead")),
+            "{source}: {context}"
+        );
+        assert!(context.contains(" delivery inbox "), "{source}: {context}");
+    }
+    assert!(!session_start(&space, "pane-reviewer", "startup").contains(&attempt));
+    assert!(!session_start(&space, "pane-lead", "compact").contains(&attempt));
+
+    dispatch::message(
+        "reply",
+        bound_reply(&space, &ask, "@lead pong"),
+        &space.runtime("pane-reviewer"),
+    )
+    .unwrap();
+    assert!(!session_start(&space, "pane-reviewer", "compact").contains(&attempt));
 }

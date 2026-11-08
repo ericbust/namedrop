@@ -4355,3 +4355,42 @@ fn a_tracked_send_tells_the_lead_its_answer_arrives_as_a_delivery_and_an_ordinar
     let ordinary = compact(ordinary);
     assert!(ordinary.get("next").is_none(), "{ordinary}");
 }
+
+#[test]
+fn a_many_assignment_nudge_keeps_its_hook_under_the_cap_and_says_what_it_left_out() {
+    let f = Fixture::new();
+    let id = f.begin();
+    for part in 0..8 {
+        let sent = f.send(&id, &format!("part-{part}"), "worker");
+        f.reply(
+            &sent,
+            "worker",
+            &format!("part-result-{part}"),
+            "completed",
+            None,
+        );
+    }
+    f.status("lead", "idle");
+    f.settle_lead_inputs();
+    let nudge = f.nudge_prompts().pop().expect("a lead callback");
+    let prompt = {
+        let typed = f.typed.lock().unwrap();
+        delivered::as_typed(typed.iter().map(String::as_str), &nudge.to_string())
+    };
+    let hook = execute_user_prompt_submit_hook(
+        &json!({"hook_event_name":"UserPromptSubmit", "prompt":prompt}).to_string(),
+        &f.runtime("lead"),
+    )
+    .unwrap();
+    let context = hook["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.encode_utf16().count() < 10_000, "{}", context.len());
+    assert!(
+        context.contains("more bound lines did not fit"),
+        "{context}"
+    );
+    assert!(context.contains("\ncomplete.no-reply: "), "{context}");
+    assert!(context.contains("\nhandoff.resolve: "), "{context}");
+    assert!(context.contains("\nsend: "), "{context}");
+}

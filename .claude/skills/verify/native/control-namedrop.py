@@ -5,6 +5,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import shutil
@@ -1062,7 +1063,7 @@ def main():
                     require(sent.get("status") == "ok", "allowed: the send is accepted", sent)
                     message_id = sent["data"]["message_id"]
                     wait(marker("allowed").exists, "the command to run in Beta Space's terminal")
-                    result = wait(lambda: next((e for e in read_envelopes(agents["alpha-lead"]["envelopes"])
+                    result = wait(lambda: next((e for e in read_envelopes(agents["alpha-lead"]["envelopes"], env)
                                                 if e["control"]["sender"]["alias"] == "build"), None),
                                   "the terminal result envelope in alpha", timeout=60)
                     require("exit code 0" in result["untrusted_body"] and "remote-ok" in result["untrusted_body"],
