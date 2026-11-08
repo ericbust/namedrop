@@ -629,7 +629,7 @@ test("send errors show the server's words as a sentence for 400, 404 and 409 and
     [400, "   ", generic],
     [403, "Forbidden.", expired],
     [413, "Request body is too large.", "This message is too long."],
-    [401, "This dashboard needs its key.", expired],
+    [401, "This browser isn't signed in to Channels.", expired],
     [500, "internal detail", generic],
     [503, "", generic],
     [0, "", generic],
