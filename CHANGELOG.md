@@ -10,6 +10,11 @@ Each release is a section here, newest first. The GitHub release for a version u
 - `send`, `reply` and `complete` print a short result when an agent runs them. Pass `--json` for the complete result, for example in scripts.
 - `send`, `reply` and `complete` return as soon as the message is saved, and a background worker delivers it. They take about 40 ms instead of about 900 ms, and Codex no longer has to poll or retry them. If the worker can't start, the command delivers the message itself, as before.
 - The rule for reaching agents in other workspaces is now part of the policy each session gets at start. A session upgraded without a restart keeps its old policy until it restarts or compacts. Each turn still shows the `#label @name` form.
+- A lead gets fewer check-ins while its worker is busy. A check-in waits until the worker has been quiet for 10 minutes, and for 10 minutes after the lead reads its results, but never more than 30 minutes after the worker last finished. Stalled work is still flagged.
+- The workspace roster appears only when it changes, and again after a session starts or compacts.
+- Codex no longer reads the Namedrop skill during a delivery.
+- `address list` shows each agent's context size, or unknown after a compaction.
+- After a tracked `send`, the lead is told to finish its other sends and end its turn rather than wait or poll.
 
 ## [1.5.0] - 2026-11-06
 
