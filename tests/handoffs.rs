@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/delivered.rs"]
+mod delivered;
 #[path = "support/dispatch.rs"]
 mod dispatch;
 
@@ -111,7 +113,7 @@ impl FakeHerdr {
             .rev()
             .find(|(pane, _)| pane == pane_id)
             .unwrap_or_else(|| panic!("no envelope was dispatched to {pane_id}"));
-        serde_json::from_str(envelope).unwrap()
+        delivered::envelope_of(envelope)
     }
 }
 
@@ -417,7 +419,7 @@ fn schema_two_upgrade_preserves_names_as_agents() {
     db.execute_batch("DROP TABLE reminder_fires; DROP TABLE reminders; DROP VIEW delivery_seats; DROP TABLE bridged_threads; DROP TABLE bridged_messages; DROP TABLE space_envoys; DROP TABLE coordination_links; DROP TABLE coordination_assignments; DROP TABLE coordinations; DROP TABLE terminal_executions; ALTER TABLE pane_addresses DROP COLUMN pane_type; ALTER TABLE pane_addresses DROP COLUMN remote_commands_terminal_id; ALTER TABLE pane_addresses DROP COLUMN persona; PRAGMA user_version=2;").unwrap();
     drop(db);
     let mut store = StateStore::open(&directory.state).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 7);
+    assert_eq!(store.schema_version().unwrap(), 8);
     let addresses = store
         .transaction(|tx| {
             tx.list_pane_addresses(&StateNamespace::for_space("socket-a", "workspace-1"))
@@ -1189,7 +1191,7 @@ fn a_schema_one_upgrade_preserves_existing_requests_and_replays() {
             .unwrap()
             .schema_version()
             .unwrap(),
-        7
+        8
     );
 }
 
@@ -2522,7 +2524,7 @@ fn a_replacement_installation_preserves_every_durable_record_and_resends_nothing
             .unwrap()
             .schema_version()
             .unwrap(),
-        7,
+        8,
         "reactivation after a replacement installation changed the schema"
     );
     // The held attempt still needs a human decision, addressed to the same
@@ -2573,7 +2575,7 @@ fn state_newer_than_the_executable_is_refused_instead_of_downgraded() {
     let before = durable_records(&directory);
     let database = directory.state.join("namedrop.sqlite3");
     let connection = rusqlite::Connection::open(&database).unwrap();
-    connection.execute_batch("PRAGMA user_version=8;").unwrap();
+    connection.execute_batch("PRAGMA user_version=9;").unwrap();
     drop(connection);
 
     let writable = StateStore::open(&directory.state)
@@ -2583,7 +2585,7 @@ fn state_newer_than_the_executable_is_refused_instead_of_downgraded() {
     assert!(
         writable
             .message()
-            .contains("database schema 8 is not supported; expected 7"),
+            .contains("database schema 9 is not supported; expected 8"),
         "{}",
         writable.message()
     );
@@ -2597,7 +2599,7 @@ fn state_newer_than_the_executable_is_refused_instead_of_downgraded() {
     assert!(
         read_only
             .message()
-            .contains("state has schema 8; expected 7"),
+            .contains("state has schema 9; expected 8"),
         "{}",
         read_only.message()
     );
@@ -2621,7 +2623,7 @@ fn state_newer_than_the_executable_is_refused_instead_of_downgraded() {
         issue["explanation"]
             .as_str()
             .unwrap()
-            .contains("state has schema 8; expected 7"),
+            .contains("state has schema 9; expected 8"),
         "{issue}"
     );
 
@@ -2630,7 +2632,7 @@ fn state_newer_than_the_executable_is_refused_instead_of_downgraded() {
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
     drop(connection);
-    assert_eq!(version, 8, "a refused open rewrote the schema version");
+    assert_eq!(version, 9, "a refused open rewrote the schema version");
     assert_eq!(
         durable_records(&directory),
         before,
@@ -2648,7 +2650,7 @@ fn state_newer_than_the_executable_is_refused_instead_of_downgraded() {
             .unwrap()
             .schema_version()
             .unwrap(),
-        7
+        8
     );
 }
 
@@ -2726,7 +2728,7 @@ fn pre_release_schema_6_state_is_completed_on_open() {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         drop(connection);
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         assert_eq!(
             durable_records(&directory),
             before,
@@ -2792,7 +2794,7 @@ fn read_only_opens_name_pre_release_schema_6_and_never_complete_it() {
             .unwrap()
             .schema_version()
             .unwrap(),
-        7
+        8
     );
     assert!(missing_schema_6_pieces(&database).is_empty());
     assert!(
@@ -2832,7 +2834,7 @@ fn a_matching_backup_restores_exactly_the_records_a_rollback_needs() {
     assert_eq!(
         copy.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .unwrap(),
-        7,
+        8,
         "the backup does not record the schema it must be restored against"
     );
     drop(copy);
@@ -2882,7 +2884,7 @@ fn a_matching_backup_restores_exactly_the_records_a_rollback_needs() {
         "the restore kept work the backup never held"
     );
     let restored = StateStore::open(&directory.state).unwrap();
-    assert_eq!(restored.schema_version().unwrap(), 7);
+    assert_eq!(restored.schema_version().unwrap(), 8);
 }
 
 /// Backup guidance has to match how this state is actually journalled. Namedrop

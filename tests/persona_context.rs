@@ -3,6 +3,8 @@
 //! Mentions route or how a Delivery Envelope authenticates.
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/delivered.rs"]
+mod delivered;
 #[path = "support/dispatch.rs"]
 mod dispatch;
 
@@ -104,7 +106,7 @@ impl FakeHerdr {
             .rev()
             .find(|(pane, _)| pane == pane_id)
             .unwrap_or_else(|| panic!("no envelope was dispatched to {pane_id}"));
-        serde_json::from_str(envelope).unwrap()
+        delivered::envelope_of(envelope)
     }
 }
 
@@ -441,7 +443,7 @@ fn a_session_reads_the_selection_policy_once_and_before_the_first_name() {
         // Finalization names the one artifact that runs as given, because
         // reassembling it from executable, environment, argv and flag is the
         // step a live run got wrong three times in a row.
-        "run its bound control.tool reply or completion once",
+        "run its bound reply or completion once",
         "using the operation's argv first",
         "local answer does not return a helper's result",
         "return the findings through the bound reply",
@@ -840,7 +842,7 @@ fn an_incoming_task_reaches_both_hosts_with_the_roster_and_only_claude_with_the_
             .to_owned();
         assert!(context.contains(&attempt), "{host}: {context}");
         assert!(
-            context.contains("they only restate `control.tool`"),
+            context.contains("the runnable lines this delivery authorized"),
             "{host}: the lines are not framed as the bound operations: {context}"
         );
         assert!(
@@ -1098,6 +1100,79 @@ fn persona_text_saved_before_the_limits_is_escaped_and_bounded_but_never_rewritt
             .persona,
         Some(legacy),
         "reading the roster rewrote the user's stored description"
+    );
+}
+
+/// A delivery's own details and commands always fit. The roster gets the room
+/// left, and what did not fit comes again on a later turn.
+#[test]
+fn a_roster_too_large_for_the_hook_budget_gives_way_to_the_delivery() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+    let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
+    register("address-lead", AgentRuntime::Codex, &lead);
+    register("address-reviewer", AgentRuntime::ClaudeCode, &reviewer);
+    let attribution = MutationAttribution::new(ActorKind::Human, "test", 1);
+    StateStore::open(&directory.state)
+        .unwrap()
+        .transaction(|transaction| {
+            for peer in 0..20 {
+                let draft = draft(&format!("peer{peer}"));
+                transaction.create_pane_address(&namespace(), &draft, &attribution)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    rusqlite::Connection::open(directory.state.join("namedrop.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE pane_addresses SET persona = ?1 WHERE address_id LIKE 'address-peer%'",
+            ["p".repeat(namedrop::MAX_PERSONA_CHARS)],
+        )
+        .unwrap();
+
+    dispatch::message(
+        "send",
+        json!({"request_id":"to-reviewer","source":"@reviewer Look at this.",
+               "author_kind":"agent_session"}),
+        &lead,
+    )
+    .unwrap();
+    let typed = herdr
+        .prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(pane, _)| pane == "pane-reviewer")
+        .unwrap()
+        .1
+        .clone();
+    let delivered = context(&hook_as("session-reviewer", &typed, &reviewer).unwrap());
+    assert!(delivered.encode_utf16().count() < 10_000, "{delivered}");
+    assert!(delivered.starts_with(DELIVERY_MARKER), "{delivered}");
+    assert!(
+        delivered.contains("Namedrop delivery details:"),
+        "{delivered}"
+    );
+    assert!(delivered.contains(COMMAND_MARKER), "{delivered}");
+    assert!(delivered.contains("run `address list`"), "{delivered}");
+    assert!(!delivered.contains("@peer19"), "{delivered}");
+
+    rusqlite::Connection::open(directory.state.join("namedrop.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE pane_addresses SET persona = 'short' WHERE address_id LIKE 'address-peer%'",
+            [],
+        )
+        .unwrap();
+    let later = context(&hook_as("session-reviewer", "Who is here?", &reviewer).unwrap());
+    assert!(
+        later.contains("@peer19"),
+        "the cut rows counted as shown: {later}"
     );
 }
 

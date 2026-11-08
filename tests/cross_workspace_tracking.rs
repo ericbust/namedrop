@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/delivered.rs"]
+mod delivered;
 
 use namedrop::{
     ActorKind, AgentSessionId, MutationAttribution, PaneAddressId, StateNamespace, StateStore,
@@ -1150,7 +1152,14 @@ fn a_single_workspace_tracked_handoff_issues_the_same_herdr_commands() {
             .lock()
             .unwrap()
             .iter()
-            .map(|command| command.split(" {").next().unwrap().to_owned())
+            .map(|command| {
+                let command = command.split(" {").next().unwrap();
+                command
+                    .split(" Namedrop message ")
+                    .next()
+                    .unwrap()
+                    .to_owned()
+            })
             .collect::<Vec<_>>()
     };
     let single = Fixture::with_activated(1);

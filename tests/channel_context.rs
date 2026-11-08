@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/delivered.rs"]
+mod delivered;
 
 #[allow(dead_code)]
 #[path = "support/channel_chat.rs"]

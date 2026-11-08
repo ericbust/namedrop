@@ -581,7 +581,7 @@ fn manually_delivered_router_followup_under_a_mention_root_keeps_agent_thread_mo
             if args[0] != "agent" || args[1] != "prompt" || args[2] != "pane-1-lead" {
                 return None;
             }
-            let prompt: Value = serde_json::from_str(args[3].as_str()?).ok()?;
+            let prompt: Value = crate::delivered::envelope_of(args[3].as_str()?);
             Some(prompt)
         })
         .expect("manual delivery envelope for lead");

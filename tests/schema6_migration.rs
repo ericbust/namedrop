@@ -53,16 +53,16 @@ fn migrated_experimental_store_opens_again_while_the_first_handle_is_alive() {
     )
     .unwrap();
     let first = namedrop::StateStore::open(&state).unwrap();
-    assert_eq!(first.schema_version().unwrap(), 7);
+    assert_eq!(first.schema_version().unwrap(), 8);
     let second = namedrop::StateStore::open(&state).unwrap();
-    assert_eq!(second.schema_version().unwrap(), 7);
+    assert_eq!(second.schema_version().unwrap(), 8);
     drop((first, second));
     assert_eq!(
         namedrop::StateStore::open(&state)
             .unwrap()
             .schema_version()
             .unwrap(),
-        7
+        8
     );
     assert_eq!(
         database.query_row(

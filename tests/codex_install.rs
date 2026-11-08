@@ -64,6 +64,10 @@ fn codex_install_populates_an_empty_policy_file() {
     let rules = fs::read_to_string(f.rules()).unwrap();
     assert!(rules.starts_with("# Managed by Namedrop:"));
     assert_eq!(rules.matches("prefix_rule(").count(), 22);
+    assert!(
+        rules.contains(r#""delivery","inbox"]"#),
+        "a pointer prompt's fallback line needs approval on every delivery:\n{rules}"
+    );
 }
 
 #[test]

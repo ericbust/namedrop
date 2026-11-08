@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/delivered.rs"]
+mod delivered;
 #[path = "support/dispatch.rs"]
 mod dispatch;
 
@@ -555,7 +557,7 @@ impl HerdrCommandExecutor for Fixture {
                 json!({"result":{"panes":(statuses.keys().map(String::as_str).map(|name|json!({"pane_id":name,"agent":"codex","terminal_id":format!("terminal-{name}"),"tab_id":"synthetic-tab","workspace_id":"synthetic-workspace","agent_session":{"value":sessions.get(name).cloned().unwrap_or_else(||format!("session-{name}"))},"agent_status":if (name=="lead" && count>=self.lead_working_after.load(Ordering::Relaxed)) || (name=="worker" && count>=self.worker_working_after.load(Ordering::Relaxed)) {"working"} else {statuses.get(name).map(String::as_str).unwrap_or("unknown")}})).collect::<Vec<_>>())}})
             }
             ["agent", "prompt", pane, prompt] => {
-                let envelope: Value = serde_json::from_str(prompt).unwrap();
+                let envelope: Value = delivered::envelope_of(prompt);
                 if envelope["untrusted_body"]
                     .as_str()
                     .unwrap_or("")

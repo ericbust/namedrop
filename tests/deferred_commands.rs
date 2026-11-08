@@ -594,6 +594,19 @@ fn roster_reads_are_fresh_and_wrong_attempts_and_arbitrary_operations_are_reject
     assert_eq!(fixture.message_count(), 1);
 }
 
+/// A pointer prompt's fallback line has to answer from inside the sandbox, with
+/// no escalation, or a host without hooks pays an approval on every delivery.
+#[test]
+fn a_sandboxed_delivery_inbox_is_answered_by_the_worker() {
+    let fixture = Fixture::new();
+    let _worker = fixture.worker();
+    let inbox = response(fixture.sandbox_command(&["delivery", "inbox"], json!({})));
+    assert_eq!(inbox["data"], json!({"envelopes": []}), "{inbox}");
+    let extra = fixture.sandbox_command(&["delivery", "inbox"], json!({"attempt_id":"a"}));
+    assert!(!extra.status.success());
+    assert!(String::from_utf8_lossy(&extra.stdout).contains("takes no fields"));
+}
+
 /// The outside worker answers a sandboxed roster read, so it reads each
 /// agent's transcript from its own environment, as a direct read would.
 #[test]

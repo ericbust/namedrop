@@ -3,6 +3,9 @@ mod cleanup;
 
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
+#[path = "support/delivered.rs"]
+mod delivered;
+
 use clap::Parser;
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, DeliveryAttemptId, DeliveryId, DeliveryState,
@@ -2702,8 +2705,7 @@ fn agent_status_event_reconciles_every_replaced_session_before_onboarding() {
     let prompts = herdr.prompts.lock().unwrap();
     assert_eq!(prompts.len(), 2);
     assert!(prompts.iter().all(|(_, prompt)| {
-        serde_json::from_str::<serde_json::Value>(prompt).unwrap()["untrusted_body"]
-            == "Reply with exactly: FANOUT PASS"
+        delivered::envelope_of(prompt)["untrusted_body"] == "Reply with exactly: FANOUT PASS"
     }));
     drop(prompts);
 

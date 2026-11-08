@@ -1892,3 +1892,51 @@ fn eventless_rejections_keep_pane_lock_deferrals_on_the_short_retry() {
         released.elapsed()
     );
 }
+
+#[test]
+fn a_requeue_clears_the_pointer_and_a_re_dispatch_gets_a_new_one() {
+    let fixture = Fixture::new();
+    fixture.initialize();
+    let nonce = |attempt: &DeliveryAttemptId| -> Option<String> {
+        rusqlite::Connection::open(fixture.state().join("namedrop.sqlite3"))
+            .unwrap()
+            .query_row(
+                "SELECT pointer_nonce FROM delivery_attempt_state WHERE attempt_id = ?1",
+                [attempt.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let first = fixture.active_lease();
+    let leased = nonce(&first).expect("a lease sets the nonce");
+    assert_eq!(leased.len(), 8);
+    assert!(leased.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let retry = DeliveryAttemptId::new("retry-attempt");
+    let namespace = fixture.namespace();
+    let now = now_ms();
+    let attribution = MutationAttribution::new(ActorKind::Plugin, "fixture", now);
+    StateStore::open(fixture.state())
+        .unwrap()
+        .transaction(|tx| {
+            tx.return_delivery_attempt_to_queue(&namespace, &first, &attribution)?;
+            tx.lease_mailbox_head(
+                &namespace,
+                &PaneAddressId::new("recipient"),
+                &LeaseDraft {
+                    attempt_id: retry.clone(),
+                    binding_id: PaneBindingId::new("binding-1"),
+                    agent_session_id: AgentSessionId::new("session-1"),
+                    retry_of_attempt_id: Some(first.clone()),
+                    owner: "retry-dispatcher".to_owned(),
+                    acquired_at_ms: now,
+                    expires_at_ms: now + 30_000,
+                },
+                &attribution,
+            )
+            .map(|_| ())
+        })
+        .unwrap();
+    assert_eq!(nonce(&first), None, "the requeue kept the old pointer");
+    let renewed = nonce(&retry).expect("the re-dispatch has a pointer");
+    assert_ne!(renewed, leased);
+}

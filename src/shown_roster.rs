@@ -56,27 +56,46 @@ pub(crate) struct Reader<'a> {
     pub(crate) pane: Option<&'a str>,
 }
 
-/// The parts of `roster` the reader was not last shown, recorded as shown,
-/// so the caller must carry every part returned. With no reader, or while
-/// another hook of the same reader holds its memory, the whole roster is
-/// returned and nothing is recorded.
-pub(crate) fn unseen(state: &Path, reader: Option<Reader<'_>>, roster: &Roster) -> RosterParts {
+/// The parts of `roster` the reader was not last shown that fit in `room`,
+/// recorded as shown, so the caller must carry every part returned. A part cut
+/// for room stays unrecorded and comes again. With no reader, or while another
+/// hook of the same reader holds its memory, the whole roster is offered and
+/// nothing is recorded.
+pub(crate) fn unseen(
+    state: &Path,
+    reader: Option<Reader<'_>>,
+    roster: &Roster,
+    room: usize,
+) -> RosterParts {
     let Some(file) = reader.and_then(|reader| lock(&path(state, reader), Lock::Record)) else {
-        return RosterParts::whole(roster);
+        return RosterParts::whole(roster).within(room);
     };
     let last = read(&file);
     let shown = Shown::of(roster);
-    let parts = RosterParts {
-        rows: (shown.rows != last.rows).then(|| roster.rows.clone()),
-        others: (shown.others != last.others).then(|| {
+    let parts = RosterParts::of(
+        (shown.rows != last.rows).then(|| roster.rows.clone()),
+        (shown.others != last.others).then(|| {
             roster
                 .others
                 .clone()
                 .unwrap_or_else(|| NO_OTHER_WORKSPACES.to_owned())
         }),
+    )
+    .within(room);
+    let carried = Shown {
+        rows: if parts.rows_cut {
+            last.rows.clone()
+        } else {
+            shown.rows
+        },
+        others: if parts.others_cut {
+            last.others.clone()
+        } else {
+            shown.others
+        },
     };
-    if shown != last {
-        write(&file, &shown);
+    if carried != last {
+        write(&file, &carried);
     }
     parts
 }
@@ -247,12 +266,29 @@ mod tests {
     };
 
     fn shown_whole(state: &State) -> bool {
-        let parts = unseen(&state.0, Some(READER), &roster());
+        let parts = unseen(&state.0, Some(READER), &roster(), usize::MAX);
         match (parts.rows, parts.others) {
             (Some(_), Some(_)) => true,
             (None, None) => false,
             parts => panic!("only part of an unchanged roster came again: {parts:?}"),
         }
+    }
+
+    #[test]
+    fn a_part_cut_for_room_is_not_recorded_and_comes_again() {
+        let state = State::new();
+        let rows_only = roster().rows.encode_utf16().count();
+        let first = unseen(&state.0, Some(READER), &roster(), rows_only);
+        assert!(first.rows.is_some() && first.others.is_none() && first.others_cut);
+        let second = unseen(&state.0, Some(READER), &roster(), usize::MAX);
+        assert!(second.rows.is_none(), "the rows were carried last time");
+        assert_eq!(second.others.as_deref(), Some("Other workspaces: @scout."));
+
+        let state = State::new();
+        let cut = unseen(&state.0, Some(READER), &roster(), 1);
+        assert!(cut.rows_cut && cut.others_cut);
+        assert!(cut.rows.unwrap().contains("address list"));
+        assert!(shown_whole(&state), "a cut roster counted as shown");
     }
 
     #[test]

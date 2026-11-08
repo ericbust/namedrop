@@ -120,7 +120,7 @@ impl FakeHerdr {
             .unwrap()
             .iter()
             .filter(|(target, _)| target == pane)
-            .filter_map(|(_, prompt)| serde_json::from_str::<Value>(prompt).ok())
+            .map(|(_, prompt)| crate::delivered::envelope_of(prompt))
             .filter(|prompt| prompt.get("control").is_some())
             .collect()
     }

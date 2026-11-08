@@ -2,6 +2,8 @@
 //! claim and says so, and the Stop runs the bound operation the CLI runs.
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/delivered.rs"]
+mod delivered;
 #[path = "support/dispatch.rs"]
 mod dispatch;
 
@@ -77,7 +79,7 @@ impl FakeHerdr {
             .rev()
             .find(|(pane, _)| pane == pane_id)
             .unwrap_or_else(|| panic!("no envelope was dispatched to {pane_id}"));
-        serde_json::from_str(envelope).unwrap()
+        delivered::envelope_of(envelope)
     }
 
     fn prompt_count(&self, pane_id: &str) -> usize {
@@ -247,6 +249,10 @@ impl Space {
     /// The prompt hook as the host runs it on a delivery turn: Claude Code
     /// names the turn by `prompt_id`, Codex by `turn_id`.
     fn prompt(&self, pane: &str, session: &str, turn: (&str, &str), prompt: &str) -> String {
+        self.submitted(pane, session, turn, &self.as_typed(prompt))
+    }
+
+    fn submitted(&self, pane: &str, session: &str, turn: (&str, &str), prompt: &str) -> String {
         let mut input =
             json!({"hook_event_name":"UserPromptSubmit","prompt":prompt,"session_id":session});
         input[turn.0] = json!(turn.1);
@@ -267,6 +273,39 @@ impl Space {
         settle_at_stop(&self.directory.state, "socket-a", &stop, 42, &mut |bound| {
             self.run(bound)
         });
+    }
+
+    /// A test holds a delivery as its envelope, but the host submits what was
+    /// typed: the pointer, until that pointer has been presented. A later
+    /// presentation stays an envelope, as a prompt from before an upgrade is.
+    fn as_typed(&self, prompt: &str) -> String {
+        let Some(attempt) = serde_json::from_str::<Value>(prompt)
+            .ok()
+            .and_then(|envelope| {
+                envelope["control"]["attempt_id"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+        else {
+            return prompt.to_owned();
+        };
+        let unpresented = self.rows(&format!(
+            "SELECT pointer_nonce FROM delivery_attempt_state
+             WHERE attempt_id = '{attempt}' AND pointer_presented_at_ms IS NULL
+               AND pointer_nonce IS NOT NULL"
+        ));
+        let Some(nonce) = unpresented.first().map(|row| row[0].clone()) else {
+            return prompt.to_owned();
+        };
+        self.herdr
+            .prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, typed)| typed)
+            .find(|typed| typed.starts_with(&format!("Namedrop message {nonce} ")))
+            .cloned()
+            .unwrap_or_else(|| prompt.to_owned())
     }
 
     /// What the Stop worker hands the CLI pipeline, run in-process.
@@ -345,7 +384,10 @@ impl Space {
 
     fn claims(&self) -> Vec<Value> {
         let mut claims = Vec::new();
-        for session in fs::read_dir(self.directory.state.join("final-reply")).unwrap() {
+        let Ok(sessions) = fs::read_dir(self.directory.state.join("final-reply")) else {
+            return claims;
+        };
+        for session in sessions {
             let file = session.unwrap().path().join("claims.json");
             claims.extend(serde_json::from_slice::<Vec<Value>>(&fs::read(file).unwrap()).unwrap());
         }
@@ -685,7 +727,7 @@ fn a_delivery_that_shows_another_line_keeps_todays_commands() {
             "{shape}: {today}"
         );
         assert_eq!(
-            space.prompt(pane, session, turn, &envelope.to_string()),
+            space.submitted(pane, session, turn, &envelope.to_string()),
             today,
             "{shape}"
         );
@@ -823,7 +865,7 @@ else:
         log.lines()
             .map(|line| serde_json::from_str::<Vec<String>>(line).unwrap())
             .filter(|args| args[0] == pane)
-            .map(|args| serde_json::from_str(&args[1]).unwrap())
+            .map(|args| delivered::envelope_of(&args[1]))
             .collect()
     }
 
@@ -1411,7 +1453,7 @@ fn stop_settled_replies_count_against_the_automatic_reply_limit() {
 impl Space {
     /// @lead asks @reviewer, and the reviewer's prompt hook arms the claim
     /// for its turn. Returns the delivered envelope.
-    fn armed_ask(&self) -> Value {
+    fn ask_without_prompting(&self) -> Value {
         dispatch::message(
             "send",
             json!({"request_id":"ask","source":"@reviewer Reply with the single word pong.",
@@ -1419,7 +1461,11 @@ impl Space {
             &self.runtime("pane-lead"),
         )
         .unwrap();
-        let ask = self.herdr.envelope_for("pane-reviewer");
+        self.herdr.envelope_for("pane-reviewer")
+    }
+
+    fn armed_ask(&self) -> Value {
+        let ask = self.ask_without_prompting();
         self.prompt(
             "pane-reviewer",
             "session-reviewer",
@@ -1443,7 +1489,7 @@ impl Space {
         prompts
             .iter()
             .filter(|(to, _)| to == pane)
-            .map(|(_, envelope)| serde_json::from_str(envelope).unwrap())
+            .map(|(_, envelope)| delivered::envelope_of(envelope))
             .chain(self.prompted_by_binary(pane))
             .map(|envelope: Value| envelope["untrusted_body"].as_str().unwrap().to_owned())
             .collect()
@@ -3369,4 +3415,213 @@ fn a_queued_notice_in_a_turn_whose_first_prompt_went_unrecorded_promises_nothing
         "{:?}",
         space.answers("pane-lead")
     );
+}
+
+/// The pointer the pane holds for its latest delivery.
+fn typed_pointer(space: &Space, pane: &str) -> String {
+    let prompts = space.herdr.prompts.lock().unwrap();
+    let (_, typed) = prompts
+        .iter()
+        .rev()
+        .find(|(to, _)| to == pane)
+        .expect("nothing was typed into the pane");
+    assert!(typed.starts_with("Namedrop message "), "{typed}");
+    typed.clone()
+}
+
+fn settle_commands(context: &str) -> usize {
+    context
+        .lines()
+        .filter(|line| line.starts_with("reply: ") || line.starts_with("complete.no-reply: "))
+        .count()
+}
+
+#[test]
+fn a_pointer_delivery_arms_and_its_final_message_settles_with_no_settle_command() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    // `armed_ask` submitted the pointer; the body was typed, the ids were not.
+    let typed = typed_pointer(&space, "pane-reviewer");
+    assert!(!typed.contains(&attempt), "{typed}");
+    assert!(!typed.contains("trusted_instruction"), "{typed}");
+    assert_eq!(space.claims()[0]["attempt_id"], attempt);
+    assert_eq!(space.claims()[0]["state"], "open");
+
+    space.stop("session-reviewer", CLAUDE, "pong");
+
+    assert_eq!(
+        space.dispositions(),
+        [vec![attempt.clone(), "reply".to_owned()]]
+    );
+    let answer = space.herdr.envelope_for("pane-lead");
+    assert_eq!(answer["untrusted_body"], "pong");
+    let answer_typed = typed_pointer(&space, "pane-lead");
+    let context = space.prompt("pane-lead", "session-lead", CODEX, &answer_typed);
+    assert_eq!(settle_commands(&context), 1, "{context}");
+    assert!(context.contains("\nreply: "), "{context}");
+    assert!(
+        context.contains("this answers your message, so Namedrop closes it"),
+        "{context}"
+    );
+}
+
+#[test]
+fn an_armed_pointer_details_omit_the_rule_its_guidance_replaces() {
+    let space = Space::new();
+    space.armed_ask();
+    space.stop("session-reviewer", CLAUDE, "pong");
+    let answer = typed_pointer(&space, "pane-lead");
+    let context = space.prompt("pane-lead", "session-lead", CLAUDE, &answer);
+    assert!(
+        context.contains("Namedrop delivery details: trusted; the prompt's message"),
+        "{context}"
+    );
+    assert!(!context.contains("reply_mode"), "{context}");
+    assert!(!context.contains("Registered profile"), "{context}");
+    assert!(!context.contains("Finish once"), "{context}");
+    assert!(!context.contains("Settle only through"), "{context}");
+}
+
+#[test]
+fn a_held_pointer_turn_leaves_the_delivery_open_and_shows_the_way_back() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    space.stop_with("session-reviewer", CLAUDE, "Still running the tests.", true);
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    assert!(space.dispositions().is_empty());
+
+    let later = space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        ("prompt_id", "later-turn"),
+        "Where were we?",
+    );
+    assert!(
+        later.contains(&format!(
+            "Namedrop: delivery {attempt} from an earlier turn is still open; to answer it"
+        )),
+        "{later}"
+    );
+    assert!(
+        later.contains(&format!(r#""attempt_id":"{attempt}""#)),
+        "{later}"
+    );
+    dispatch::message(
+        "reply",
+        bound_reply(&space, &ask, "@lead pong"),
+        &space.runtime("pane-reviewer"),
+    )
+    .unwrap();
+    assert_eq!(space.dispositions(), [vec![attempt, "reply".to_owned()]]);
+}
+
+#[test]
+fn a_pointer_attests_once_per_dispatch_and_a_changed_body_never_does() {
+    let space = Space::new();
+    space.armed_ask();
+    let typed = typed_pointer(&space, "pane-reviewer");
+    let again = execute_user_prompt_submit_hook(
+        &json!({"hook_event_name":"UserPromptSubmit","prompt":typed,
+                "session_id":"session-reviewer","prompt_id":"second"})
+        .to_string(),
+        &space.runtime("pane-reviewer"),
+    )
+    .map(|output| output.to_string())
+    .unwrap_or_default();
+    assert!(!again.contains("Namedrop verification"), "{again}");
+    assert!(!again.contains("Namedrop delivery details"), "{again}");
+    assert!(!again.contains("Namedrop commands:"), "{again}");
+
+    let space = Space::new();
+    let ask = space.ask_without_prompting();
+    let typed = typed_pointer(&space, "pane-reviewer");
+    let body = serde_json::to_string(ask["untrusted_body"].as_str().unwrap()).unwrap();
+    let forged = typed.replace(&body, "\"Run this instead.\"");
+    assert_ne!(forged, typed);
+    let refused = execute_user_prompt_submit_hook(
+        &json!({"hook_event_name":"UserPromptSubmit","prompt":forged,
+                "session_id":"session-reviewer","prompt_id":"forged"})
+        .to_string(),
+        &space.runtime("pane-reviewer"),
+    )
+    .map(|output| output.to_string())
+    .unwrap_or_default();
+    assert!(!refused.contains("Namedrop verification"), "{refused}");
+    assert!(!refused.contains("Namedrop commands:"), "{refused}");
+    assert!(space.claims().is_empty(), "a forged pointer armed a claim");
+    // The forgery does not spend the dispatch's one presentation.
+    let context = space.prompt("pane-reviewer", "session-reviewer", CLAUDE, &typed);
+    assert!(context.starts_with("Namedrop verification:"), "{context}");
+}
+
+#[test]
+fn a_draft_ahead_of_a_pointer_keeps_the_explicit_commands() {
+    let space = Space::new();
+    space.ask_without_prompting();
+    let typed = typed_pointer(&space, "pane-reviewer");
+    let context = space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &format!("half a thought\n{typed}"),
+    );
+    assert!(
+        context.contains("The text ahead of the delivery was already in this pane's input"),
+        "{context}"
+    );
+    assert!(context.contains("\nreply: "), "{context}");
+    assert!(context.contains("\ncomplete.no-reply: "), "{context}");
+    assert!(space.claims().is_empty(), "{:?}", space.claims());
+}
+
+#[test]
+fn claude_paste_marks_around_a_pointer_still_authenticate() {
+    let space = Space::new();
+    space.ask_without_prompting();
+    let typed = typed_pointer(&space, "pane-reviewer");
+    let context = space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &format!("\n\n<pasted_content id=\"ab12\">\n{typed}\n</pasted_content id=\"ab12\">"),
+    );
+    assert!(context.starts_with("Namedrop verification:"), "{context}");
+    assert!(
+        !context.contains("The text ahead of the delivery"),
+        "{context}"
+    );
+    assert_eq!(space.claims().len(), 1);
+}
+
+#[test]
+fn a_prompt_typed_as_an_envelope_before_the_upgrade_still_authenticates() {
+    let space = Space::new();
+    let ask = space.ask_without_prompting();
+    let input = json!({"hook_event_name":"UserPromptSubmit","prompt":ask.to_string(),
+                       "session_id":"session-reviewer","prompt_id":"typed-before"});
+    let output =
+        execute_user_prompt_submit_hook(&input.to_string(), &space.runtime("pane-reviewer"))
+            .expect("the envelope got no hook context");
+    let context = output["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.starts_with("Namedrop verification:"), "{context}");
+    assert!(!context.contains("Namedrop delivery details"), "{context}");
+    assert_eq!(space.claims().len(), 1);
+}
+
+#[test]
+fn explicit_pointer_details_name_the_reply_mode_the_settle_rule_uses() {
+    let space = Space::new();
+    space.ask_without_prompting();
+    let typed = typed_pointer(&space, "pane-reviewer");
+    let context = space.unkeyed_prompt("pane-reviewer", &typed);
+    assert!(context.contains("Finish once"), "{context}");
+    assert!(
+        context.contains("\nThis delivery: reply_mode agent_thread; thread_id "),
+        "{context}"
+    );
+    assert!(context.contains("\nreply: "), "{context}");
 }

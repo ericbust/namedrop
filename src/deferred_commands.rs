@@ -23,6 +23,7 @@ enum Operation {
     Ack,
     Complete,
     AddressList,
+    DeliveryInbox,
     ReminderSet,
     ReminderList,
     ReminderCancel,
@@ -39,6 +40,7 @@ impl Operation {
             "ack" => Some(Self::Ack),
             "complete" => Some(Self::Complete),
             "address.list" => Some(Self::AddressList),
+            "delivery.inbox" => Some(Self::DeliveryInbox),
             _ => None,
         }
     }
@@ -53,6 +55,7 @@ impl Operation {
             Self::Ack => "ack",
             Self::Complete => "complete",
             Self::AddressList => "address.list",
+            Self::DeliveryInbox => "delivery.inbox",
         }
     }
 }
@@ -219,6 +222,10 @@ impl Request {
                 return Err("deferred address.list is limited to the current workspace".into());
             }
             Operation::AddressList => {}
+            Operation::DeliveryInbox if input != json!({}) => {
+                return Err("delivery.inbox takes no fields".into());
+            }
+            Operation::DeliveryInbox => {}
         }
         let request_id = match operation {
             Operation::Send | Operation::Reply => required(&input, "request_id")?.to_owned(),
@@ -227,6 +234,7 @@ impl Request {
             Operation::ReminderCancel => required(&input, "reminder_id")?.to_owned(),
             Operation::ReminderList => ProcessIds::default().next_id("reminder-list"),
             Operation::AddressList => ProcessIds::default().next_id("roster"),
+            Operation::DeliveryInbox => ProcessIds::default().next_id("inbox"),
         };
         let family = match operation {
             Operation::Send | Operation::Reply => "message",
@@ -266,7 +274,7 @@ impl Request {
         if rebuilt.fingerprint != self.fingerprint
             || (!matches!(
                 self.operation,
-                Operation::AddressList | Operation::ReminderList
+                Operation::AddressList | Operation::DeliveryInbox | Operation::ReminderList
             ) && rebuilt.key != self.key)
         {
             return Err("deferred command content changed".into());
@@ -734,6 +742,11 @@ fn execute_request(state: &Path, request: &Request) -> Result<Value, String> {
         Operation::AddressList => {
             crate::execute_lifecycle_operation("address.list", request.input.clone(), &runtime)
         }
+        Operation::DeliveryInbox => crate::integration::execute_integration_operation(
+            "delivery.inbox",
+            request.input.clone(),
+            &runtime,
+        ),
     }
 }
 
@@ -828,7 +841,7 @@ fn recover_committed<E: crate::HerdrCommandExecutor, C: Clock, I: IdGenerator>(
                 )
             })
             .map_err(|e| e.to_string()),
-        Operation::AddressList | Operation::ReminderList => Ok(None),
+        Operation::AddressList | Operation::DeliveryInbox | Operation::ReminderList => Ok(None),
     }
 }
 

@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/delivered.rs"]
+mod delivered;
 #[path = "support/dispatch.rs"]
 mod dispatch;
 
@@ -270,7 +272,7 @@ impl HerdrCommandExecutor for Fixture {
                 self.prompts
                     .lock()
                     .unwrap()
-                    .push(((*pane).into(), serde_json::from_str(prompt).unwrap()));
+                    .push(((*pane).into(), delivered::envelope_of(prompt)));
                 json!({})
             }
             ["pane", "report-metadata", ..] => json!({}),

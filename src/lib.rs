@@ -28,6 +28,7 @@ mod lifecycle;
 pub mod linux_sandbox;
 mod message;
 mod pane_effects;
+mod pointer;
 #[doc(hidden)]
 pub mod reminder;
 pub use reminder::execute_reminder_operation;
