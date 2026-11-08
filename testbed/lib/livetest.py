@@ -553,9 +553,10 @@ def judge_hooks(agent, transcript):
 
 
 Hop = namedtuple("Hop", "message_id author recipient in_reply_to deliveries attempts retries "
-                        "acks attempt_id state active disposition body")
-"""One message of a thread with its raw delivery counts. attempt_id, state, active and
-disposition belong to its first attempt; disposition is None until the recipient settles it."""
+                        "acks attempt_id state active disposition body pointer_nonce")
+"""One message of a thread with its raw delivery counts. attempt_id, state, active,
+disposition and pointer_nonce belong to its first attempt; disposition is None until the
+recipient settles it."""
 
 Exchange = namedtuple("Exchange", "root_count hops")
 
@@ -570,27 +571,33 @@ def exchange_done(exchange):
                 for hop in exchange.hops))
 
 
-def delivery_turns(transcript, attempt_id):
-    return [turn for turn in transcript.turns if attempt_id and attempt_id in turn.prompt]
+def carries(prompt, hop):
+    """True when a submitted prompt is this hop's pointer, or its whole envelope."""
+    if hop.pointer_nonce and "Namedrop message {} from ".format(hop.pointer_nonce) in prompt:
+        return True
+    return bool(hop.attempt_id) and hop.attempt_id in prompt
 
 
-def seen(transcript, attempt_id, proof):
-    turns = delivery_turns(transcript, attempt_id)
+def delivery_turns(transcript, hop):
+    return [turn for turn in transcript.turns if carries(turn.prompt, hop)]
+
+
+def seen(transcript, hop, proof):
+    turns = delivery_turns(transcript, hop)
     proven = sum(proof in markers("\n".join(turn.contexts)) for turn in turns)
     return len(turns), proven
 
 
-def answered(transcript, attempt_id):
-    """True once the turn that carried attempt_id has an answer. The Stop hook settles the
+def answered(transcript, hop):
+    """True once the turn that carried the hop has an answer. The Stop hook settles the
     store from the closing line, but a host can write that line to its transcript after the
     Stop ran, so a judge that reads the last answer right after settlement may see the turn
     before."""
-    return any(attempt_id and attempt_id in turn.prompt and turn.answers
-               for turn in transcript.turns)
+    return any(carries(turn.prompt, hop) and turn.answers for turn in transcript.turns)
 
 
-def final_answer(transcript, attempt_id):
-    turns = delivery_turns(transcript, attempt_id)
+def final_answer(transcript, hop):
+    turns = delivery_turns(transcript, hop)
     return turns[-1].answers[-1].strip() if turns and turns[-1].answers else ""
 
 
@@ -625,7 +632,7 @@ def calls_detail(exchange, sender_tx, target_tx):
     rows = []
     for label, transcript, hop in (("request", target_tx, exchange.hops[0]),
                                    ("reply", sender_tx, exchange.hops[1])):
-        turns = delivery_turns(transcript, hop.attempt_id)
+        turns = delivery_turns(transcript, hop)
         rows.append({"hop": label, "agent": transcript.agent, "attempt_id": hop.attempt_id,
                      "calls": [turn.calls for turn in turns],
                      "commands": [len(turn.commands) for turn in turns]})
@@ -647,12 +654,12 @@ def judge_exchange(mention, exchange, sender_tx, target_tx, claims):
                             frozenset({"no_reply"}), claims, "done:no_replied"))
     for label, transcript, hop in (("{} saw the request".format(target), target_tx, request),
                                    ("{} saw the reply".format(sender), sender_tx, reply)):
-        times, proven = seen(transcript, hop.attempt_id, PROOF[transcript.agent])
-        commands = sum(settle_commands(turn) for turn in delivery_turns(transcript, hop.attempt_id))
+        times, proven = seen(transcript, hop, PROOF[transcript.agent])
+        commands = sum(settle_commands(turn) for turn in delivery_turns(transcript, hop))
         checks.append(fields(label, [("times", times, 1),
                                      (MARKERS[PROOF[transcript.agent]], proven, 1),
                                      ("settle commands", commands, 0)]))
-    answer = without_leading_mention(final_answer(target_tx, request.attempt_id), sender)
+    answer = without_leading_mention(final_answer(target_tx, request), sender)
     checks.append(Check("reply body", (reply.body or "").strip() == answer and bool(answer),
                         'reply body "{}" {} {}\'s final answer "{}"'.format(
                             " ".join((reply.body or "").split())[:80],
@@ -781,7 +788,7 @@ SELECT m.message_id, m.author_alias_snapshot,
   (SELECT count(*) FROM delivery_acknowledgements k JOIN delivery_attempts a USING (session_socket_id, worktree_id, attempt_id)
      JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, delivery_id)
      WHERE d.session_socket_id = m.session_socket_id AND d.worktree_id = m.worktree_id AND d.message_id = m.message_id),
-  f.attempt_id, s.state, s.active, p.disposition_kind, m.body
+  f.attempt_id, s.state, s.active, p.disposition_kind, m.body, s.pointer_nonce
 FROM collaboration_messages m
 LEFT JOIN delivery_attempts f ON f.attempt_id = (
   SELECT a.attempt_id FROM delivery_attempts a JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, delivery_id)
@@ -1297,7 +1304,7 @@ def step_mention(mention):
                 if not r.wait_agent(alias, ("idle", "done"), TIMEOUTS.idle)]
         if len(exchange.hops) > 1:
             r.settle(lambda: r.transcript(mention.sender),
-                     lambda transcript: answered(transcript, exchange.hops[1].attempt_id),
+                     lambda transcript: answered(transcript, exchange.hops[1]),
                      TIMEOUTS.idle, watch=())
         sender_tx, target_tx = r.transcript(mention.sender), r.transcript(mention.target)
         checks = judge_exchange(mention, exchange, sender_tx, target_tx, r.store.claims())
