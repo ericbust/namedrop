@@ -1,7 +1,7 @@
 //! The dashboard's read model: plain rows for one space, read in one short
 //! deferred transaction. Context payloads, evidence and terminal output are
 //! never selected, so no later layer can render them.
-use super::terminal_relay::effective_grammar_sql;
+use super::terminal_relay::{LEG_DISPOSITION_SQL, effective_grammar_sql, leg_answer_joins_sql};
 use super::*;
 use crate::{AgentSessionId, PaneBindingId};
 
@@ -484,13 +484,15 @@ impl StateTransaction<'_> {
                    AND d.message_id IN (SELECT message_id FROM page_recipients)
              )
              SELECT r.message_id, r.address_id, d.state, ack.acknowledged_at_ms,
-                    p.disposition_kind, p.disposition_id
+                    {LEG_DISPOSITION_SQL}
              FROM page_recipients r
              LEFT JOIN page_deliveries d USING (session_socket_id, worktree_id, message_id, address_id)
              LEFT JOIN delivery_attempts a ON {LATEST_ATTEMPT}
              LEFT JOIN delivery_acknowledgements ack USING (session_socket_id, worktree_id, attempt_id)
              LEFT JOIN delivery_dispositions p USING (session_socket_id, worktree_id, attempt_id)
-             ORDER BY r.message_id, r.recipient_order"
+             {answers}
+             ORDER BY r.message_id, r.recipient_order",
+            answers = leg_answer_joins_sql(),
         );
         let values = std::iter::once(ns[0].to_owned())
             .chain(std::iter::once(ns[1].to_owned()))
@@ -719,15 +721,17 @@ impl StateTransaction<'_> {
         let legs = self.rows(
             &format!(
                 "SELECT r.message_id, r.address_id, d.state, ack.acknowledged_at_ms,
-                        p.disposition_kind, p.disposition_id
+                        {LEG_DISPOSITION_SQL}
                  FROM message_recipients r
                  LEFT JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, message_id, address_id)
                  LEFT JOIN delivery_attempts a ON {LATEST_ATTEMPT}
                  LEFT JOIN delivery_acknowledgements ack USING (session_socket_id, worktree_id, attempt_id)
                  LEFT JOIN delivery_dispositions p USING (session_socket_id, worktree_id, attempt_id)
+                 {answers}
                  WHERE r.session_socket_id = ?1 AND r.worktree_id = ?2
                    AND r.message_id IN ({WINDOW_MESSAGE_IDS})
-                 ORDER BY r.message_id, r.recipient_order"
+                 ORDER BY r.message_id, r.recipient_order",
+                answers = leg_answer_joins_sql(),
             ),
             windowed,
             |row| {

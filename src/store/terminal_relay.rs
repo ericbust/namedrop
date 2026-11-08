@@ -1,6 +1,7 @@
 use super::*;
 
 const GRAMMAR: &str = "terminal-relay/v1";
+const ANSWER_GRAMMAR: &str = "final-message/v1";
 const RELAY_ID_PREFIX: &str = "terminal-relay:";
 
 /// SQL for the grammar a message row reads as, with `message` as its table
@@ -44,10 +45,43 @@ pub(super) fn effective_grammar_sql(message: &str) -> String {
              WHERE origin.session_socket_id = {message}.session_socket_id
                AND origin.worktree_id = COALESCE({space}, {message}.worktree_id)
                AND origin.message_id = COALESCE({relay}, {message}.message_id))
-         THEN 'final-message/v1' ELSE {message}.grammar_version END",
+         THEN '{ANSWER_GRAMMAR}' ELSE {message}.grammar_version END",
         space = origin("origin_space_id"),
         relay = origin("origin_message_id"),
         attempt_at = RELAY_ID_PREFIX.len() + 1,
+    )
+}
+
+/// The disposition kind and id a leg reports, read with `leg_answer_joins_sql`.
+pub(super) const LEG_DISPOSITION_SQL: &str =
+    "CASE WHEN answer.message_id IS NULL THEN p.disposition_kind ELSE 'reply' END,
+     COALESCE(answer.message_id, p.disposition_id)";
+
+/// SQL joins that find the answer behind a leg's `no_reply`, with `a` as the
+/// leg's attempt and `p` as its disposition.
+///
+/// `relay_final_message` closes the attempt with a stored `no_reply` that
+/// deferred commands and its own idempotence depend on, so the leg reads as a
+/// reply here and nowhere earlier. An envoy's attempt is reflected from the
+/// workspace that holds the agent, as `bridge:<space>:<attempt>`, and its answer
+/// is the copy mirrored back, as `bridge:<space>:terminal-relay:<attempt>`.
+pub(super) fn leg_answer_joins_sql() -> String {
+    let bridged = format!(
+        "COALESCE({}, '')",
+        super::bridge::bridged_prefix_sql("envoy.origin_space_id")
+    );
+    format!(
+        "LEFT JOIN space_envoys envoy
+           ON envoy.session_socket_id = a.session_socket_id
+          AND envoy.worktree_id = a.worktree_id AND envoy.address_id = a.address_id
+         LEFT JOIN collaboration_messages answer
+           ON p.disposition_kind = 'no_reply'
+          AND answer.session_socket_id = p.session_socket_id
+          AND answer.worktree_id = p.worktree_id
+          AND answer.message_id = {bridged} || '{RELAY_ID_PREFIX}'
+              || substr(p.attempt_id, length({bridged}) + 1)
+          AND {grammar} = '{ANSWER_GRAMMAR}'",
+        grammar = effective_grammar_sql("answer"),
     )
 }
 

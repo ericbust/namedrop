@@ -113,6 +113,11 @@ pub(super) fn bridged_id(space: &SpaceId, id: &str) -> String {
     format!("bridge:{}:{id}", space.as_str())
 }
 
+/// SQL for what `bridged_id` puts before an id, NULL when `space` is NULL.
+pub(super) fn bridged_prefix_sql(space: &str) -> String {
+    format!("'bridge:' || {space} || ':'")
+}
+
 impl StateTransaction<'_> {
     pub(crate) fn envoy_for(
         &mut self,
