@@ -262,7 +262,7 @@ def timeout(fixture):
     assert old.stdout.readline() == b'busy\n'
     migration = fixture.migration(timeout=.3)
     out, err = migration.communicate(timeout=8)
-    assert migration.returncode != 0 and b'Retry the update shortly' in err, (out, err)
+    assert migration.returncode != 0 and b'Close any open Namedrop popup' in err and b'retry the update' in err, (out, err)
     assert old.poll() is None, 'Updater stopped a running command'
     fixture.verify_rows(3)
     assert runtime.current(fixture.rt) == fixture.old

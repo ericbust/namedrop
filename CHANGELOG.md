@@ -15,6 +15,8 @@ Each release is a section here, newest first. The GitHub release for a version u
 ### Upgrade
 
 - This release raises the state schema to 8. The update migrates it live behind the command lock, so agent sessions and pending deliveries carry on. Keep the matching executable and a database backup together in case you roll back.
+- Close any open Namedrop popup, such as the tour, before you update. An open popup makes the migration wait, then ask you to retry.
+- Codex sessions started before the update lose their hooks. They still settle each delivery through the prompt's `delivery inbox` line, which takes 3 model calls instead of 1, until you start a new session.
 
 ## [1.6.6] - 2026-11-09
 

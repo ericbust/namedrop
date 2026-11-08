@@ -116,7 +116,7 @@ def lock(runtime, name, timeout=None):
                     break
                 except BlockingIOError:
                     require(time.monotonic() < deadline,
-                            'Namedrop commands are still finishing. Retry the update shortly; agent sessions can stay open.')
+                            'Namedrop commands are still finishing. Close any open Namedrop popup, such as the tour, and retry the update; agent sessions can stay open.')
                     time.sleep(.05)
     except BaseException:
         stream.close()
