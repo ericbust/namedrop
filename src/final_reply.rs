@@ -574,6 +574,13 @@ impl Claims {
             .retain(|claim| claim.updated_at_ms.saturating_add(KEEP_MS) > now_ms);
         if let Ok(entries) = fs::read_dir(self.directory.join("stops")) {
             for entry in entries.flatten() {
+                if entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "next")
+                {
+                    continue;
+                }
                 let live = self.claims.iter().any(|claim| {
                     claim.state == ClaimState::Open
                         && entry.file_name().to_str() == Some(claim.turn.as_str())

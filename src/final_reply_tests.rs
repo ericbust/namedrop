@@ -907,3 +907,16 @@ fn a_late_stop_worker_leaves_the_next_turns_claim_alone() {
         ]
     );
 }
+
+#[test]
+fn pruning_stop_markers_spares_one_still_being_written() {
+    let state = StateDirectory::new();
+    let stops = session_directory(&state.0, "socket", "session").join("stops");
+    mark_stopped(&state.0, "socket", "session", &turn("prompt-3"), 30);
+    fs::write(stops.join("in-flight.next"), "30").unwrap();
+    observe_prompt(&state.0, "socket", "session", &turn("prompt-4"), None, 30);
+    assert!(
+        stops.join("in-flight.next").exists(),
+        "a marker still being written was deleted"
+    );
+}
