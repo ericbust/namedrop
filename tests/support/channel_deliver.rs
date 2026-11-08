@@ -525,7 +525,7 @@ fn delivery_answers_with_eof_before_drain_and_keeps_original_operator_envelope()
         assert_eq!(envelope["control"]["reply_mode"], "channel");
         assert_eq!(envelope["untrusted_body"], source);
         let typed = prompted_text(&f);
-        assert!(typed.contains(" from you. "), "{typed}");
+        assert!(typed.contains(" from the person. "), "{typed}");
         assert!(!typed.contains("operator"), "{typed}");
         assert!(
             envelope["trusted_instruction"]

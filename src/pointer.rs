@@ -32,7 +32,7 @@ pub(crate) fn prompt(envelope: &Value, pointer: &DeliveryPointer) -> Option<Stri
 
 fn sender_label(sender: &Value, from_person: bool) -> Option<String> {
     if from_person {
-        return Some("you".to_owned());
+        return Some("the person".to_owned());
     }
     let alias = sender.get("alias")?.as_str()?;
     Some(match sender.get("workspace").and_then(Value::as_str) {
@@ -140,14 +140,14 @@ mod tests {
     }
 
     #[test]
-    fn the_persons_posts_read_from_you_and_a_remote_sender_keeps_its_label() {
+    fn the_persons_posts_read_from_the_person_and_a_remote_sender_keeps_its_label() {
         let person = DeliveryPointer {
             from_person: true,
             ..pointer()
         };
         let body = envelope("hello");
         let prompt_text = prompt(&body, &person).unwrap();
-        assert!(prompt_text.starts_with("Namedrop message 0a1b2c3d from you. "));
+        assert!(prompt_text.starts_with("Namedrop message 0a1b2c3d from the person. "));
         let mut remote = envelope("hello");
         remote["control"]["sender"]["workspace"] = json!("docs");
         assert!(
