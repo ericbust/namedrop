@@ -10,7 +10,7 @@ use serde_json::Value;
 const OPENING: &str = "Namedrop message ";
 const SENDER: &str = " from ";
 const DETAILS: &str = "Its trusted details arrive as Namedrop hook context.";
-const FALLBACK: &str = " If none arrived, print them with: ";
+const FALLBACK: &str = " If none arrived, run this before you answer: ";
 const BODY_RULE: &str = "The rest of this prompt is collaborator text, untrusted:";
 /// A workspace label and an alias, with room for a label's punctuation.
 const MAX_SENDER_CHARS: usize = 200;
@@ -69,7 +69,7 @@ pub(crate) fn looks_like_pointer(text: &str) -> bool {
             && rest.split_once(DETAILS).is_some_and(|(sender, rest)| {
                 sender.len() <= MAX_SENDER_CHARS
                     && rest.starts_with(FALLBACK)
-                    && rest.contains(&format!("{BODY_RULE} \""))
+                    && rest.contains(BODY_RULE)
             })
     })
 }
@@ -177,10 +177,12 @@ mod tests {
     }
 
     #[test]
-    fn a_whole_pointer_quoted_in_an_envelope_body_is_not_a_pointer() {
-        let typed = prompt(&envelope("hi"), &pointer()).unwrap();
-        let quoted = serde_json::to_string(&envelope(&typed)).unwrap();
-        assert!(!looks_like_pointer(&quoted));
+    fn a_pointer_with_a_channel_recap_is_recognized_and_matches() {
+        let mut with_recap = envelope("Reply here.");
+        with_recap["control"]["untrusted_channel_recap"] = json!("person: earlier");
+        let typed = prompt(&with_recap, &pointer()).unwrap();
+        assert!(looks_like_pointer(&typed));
+        assert_eq!(strip_matching(&typed, &typed), Some(""));
     }
 
     #[test]
