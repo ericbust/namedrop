@@ -531,6 +531,30 @@ async function main() {
         "Secure HttpOnly Strict cookie survives a reopened browser with a bounded seven-day expiry",
       );
 
+      const spentLink = await page.goto(link.href);
+      assert.equal(
+        spentLink.status(),
+        200,
+        "a signed-in browser re-opening the spent sign-in link lands on the page",
+      );
+      assert.equal(new URL(page.url()).searchParams.has("n"), false);
+      const beforeRenewal = Date.now() / 1000;
+      await restoredContext.addCookies([
+        { ...sessionCookie, expires: beforeRenewal + 60 * 60 },
+      ]);
+      await page.goto(link.origin);
+      const renewedCookie = (await restoredContext.cookies(link.origin)).find(
+        (cookie) => cookie.name === sessionCookie.name,
+      );
+      assert.ok(
+        renewedCookie.expires >= beforeRenewal + 7 * 24 * 60 * 60 - 1 &&
+          renewedCookie.expires <= Date.now() / 1000 + 7 * 24 * 60 * 60 + 60,
+        "a tailnet page load renews the cookie to seven days from now",
+      );
+      check(
+        "a signed-in browser follows a spent link and a page load renews its cookie",
+      );
+
       await restoredContext.close();
       const command = (
         await readFile(`/proc/${afterIdle.pid}/cmdline`, "utf8")
