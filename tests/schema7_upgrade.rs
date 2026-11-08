@@ -339,26 +339,40 @@ fn every_kind_of_delivery_1_6_0_typed_still_authenticates_unchanged() {
         ("w1:p2", "session-reviewer"),
         ("w1:p3", "session-researcher"),
     ];
+    const CHANNEL_SOCKET: &str = "/tmp/nd-tb-1000-580f53432796f20f.sock";
+    const CHANNEL_PANES: [Pane; 1] = [("w1:p2", "fede1ffd-6bc2-4287-b070-894529caa1cd")];
     macro_rules! golden {
-        ($kind:literal, $pane:literal, $session:literal) => {
+        ($kind:literal, $socket:expr, $panes:expr, $pane:literal, $session:literal) => {
             (
                 $kind,
+                $socket,
+                $panes,
                 include_str!(concat!("fixtures/schema7/golden/", $kind, ".sql")),
                 include_str!(concat!("fixtures/schema7/golden/", $kind, ".prompt")),
                 $pane,
                 $session,
             )
         };
+        ($kind:literal, $pane:literal, $session:literal) => {
+            golden!($kind, GOLDEN_SOCKET, &GOLDEN_PANES[..], $pane, $session)
+        };
     }
-    for (kind, data, prompt, pane, session) in [
+    for (kind, socket, panes, data, prompt, pane, session) in [
         golden!("agent-ask", "w1:p2", "session-reviewer"),
         golden!("person-mention", "w1:p2", "session-reviewer"),
         golden!("reply-to-source", "w1:p1", "session-lead"),
         golden!("result-set", "w1:p1", "session-lead"),
         golden!("tracked-assignment", "w1:p3", "session-researcher"),
         golden!("nudge", "w1:p1", "session-lead"),
+        golden!(
+            "channel-recap",
+            CHANNEL_SOCKET,
+            &CHANNEL_PANES[..],
+            "w1:p2",
+            "fede1ffd-6bc2-4287-b070-894529caa1cd"
+        ),
     ] {
-        let fixture = Fixture::at(GOLDEN_SOCKET, GOLDEN_CLOCK, GOLDEN_PANES.to_vec());
+        let fixture = Fixture::at(socket, GOLDEN_CLOCK, panes.to_vec());
         let state = fixture.state.to_str().unwrap();
         assert!(!data.contains("/EXE"), "{kind}");
         fixture.load(&format!(
