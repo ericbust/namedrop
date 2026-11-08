@@ -9,7 +9,8 @@ use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
     IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
     PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
-    execute_integration_operation, execute_user_prompt_submit_hook, expand_attempt_reply,
+    execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
+    execute_user_prompt_submit_hook, expand_attempt_reply,
     final_reply::{BoundOperation, FinalText, HostTurn, StopFacts, settle_at_stop},
     issue_registration_challenge, send_operator_message,
 };
@@ -254,16 +255,7 @@ impl Space {
     }
 
     fn stop_with(&self, session: &str, turn: (&str, &str), text: &str, background_running: bool) {
-        let (prompt_id, turn_id) = match turn.0 {
-            "prompt_id" => (Some(turn.1), None),
-            _ => (None, Some(turn.1)),
-        };
-        let stop = StopFacts {
-            session: session.to_owned(),
-            turn: HostTurn::from_ids(prompt_id, turn_id),
-            background_running,
-            text: FinalText::bounded(text),
-        };
+        let stop = stop_facts(session, turn, text, background_running);
         settle_at_stop(&self.directory.state, "socket-a", &stop, 42, &mut |bound| {
             self.run(bound)
         });
@@ -350,6 +342,24 @@ impl Space {
             claims.extend(serde_json::from_slice::<Vec<Value>>(&fs::read(file).unwrap()).unwrap());
         }
         claims
+    }
+}
+
+fn stop_facts(
+    session: &str,
+    turn: (&str, &str),
+    text: &str,
+    background_running: bool,
+) -> StopFacts {
+    let (prompt_id, turn_id) = match turn.0 {
+        "prompt_id" => (Some(turn.1), None),
+        _ => (None, Some(turn.1)),
+    };
+    StopFacts {
+        session: session.to_owned(),
+        turn: HostTurn::from_ids(prompt_id, turn_id),
+        background_running,
+        text: FinalText::bounded(text),
     }
 }
 
@@ -714,19 +724,38 @@ fn a_delivery_that_shows_another_line_keeps_todays_commands() {
     );
 }
 
+/// One installed Stop hook the host started, and the descriptor whose end of
+/// file means the hook and any worker it detached have exited.
+struct RunningStop {
+    child: std::process::Child,
+    done: std::os::unix::net::UnixStream,
+}
+
+impl RunningStop {
+    fn wait(mut self) {
+        assert!(self.child.wait().unwrap().success());
+        self.done
+            .set_read_timeout(Some(std::time::Duration::from_secs(15)))
+            .unwrap();
+        assert_eq!(
+            std::io::Read::read(&mut self.done, &mut [0]).unwrap(),
+            0,
+            "the Stop worker outlived its deadline"
+        );
+    }
+}
+
 impl Space {
-    /// The installed Stop hook as the host runs it, against a Herdr that
-    /// answers like the space. It returns once the hook and any detached
-    /// worker have exited.
-    fn installed_stop(&self, session: &str, prompt_id: &str, text: &str) {
-        use std::os::{fd::AsRawFd, unix::process::CommandExt};
-        let root = &self.directory.root;
-        let herdr = root.join("herdr");
+    /// A Herdr that answers like the space and logs every prompt it is
+    /// handed, for the binary's own processes.
+    fn herdr_script(&self) -> PathBuf {
+        let herdr = self.directory.root.join("herdr");
         fs::write(
             &herdr,
             format!(
                 r#"#!/usr/bin/env python3
 import json, sys
+from pathlib import Path
 args = sys.argv[1:]
 if args[:1] == ['--socket']: args = args[2:]
 panes = {{'result': {{'panes': [
@@ -735,18 +764,59 @@ panes = {{'result': {{'panes': [
 if args[:2] == ['workspace','list']: print(json.dumps({{'result':{{'workspaces':[{{'workspace_id':'workspace-1'}}]}}}}))
 elif args[:2] == ['worktree','list']: print(json.dumps({{'result':{{'worktrees':[{{'path':{repo:?},'open_workspace_id':'workspace-1'}}]}}}}))
 elif args[:2] == ['pane','list']: print(json.dumps(panes))
-else: print('{{}}')
+else:
+    if args[:2] == ['agent','prompt']:
+        with (Path(__file__).parent / 'herdr-prompts').open('a') as log: log.write(json.dumps(args[2:]) + '\n')
+    print('{{}}')
 "#,
                 repo = self.directory.repo.display().to_string()
             ),
         )
         .unwrap();
         fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+        herdr
+    }
+
+    /// The binary as a host runs it, against the script Herdr.
+    fn command(&self) -> Command {
+        let root = &self.directory.root;
+        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        command
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &self.directory.home)
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("HERDR_SOCKET_PATH", "socket-a")
+            .env("HERDR_BIN_PATH", self.herdr_script())
+            .current_dir(&self.directory.repo);
+        command
+    }
+
+    /// The envelopes the binary's own processes prompted into `pane`.
+    fn prompted_by_binary(&self, pane: &str) -> Vec<Value> {
+        let Ok(log) = fs::read_to_string(self.directory.root.join("herdr-prompts")) else {
+            return Vec::new();
+        };
+        log.lines()
+            .map(|line| serde_json::from_str::<Vec<String>>(line).unwrap())
+            .filter(|args| args[0] == pane)
+            .map(|args| serde_json::from_str(&args[1]).unwrap())
+            .collect()
+    }
+
+    /// The installed Stop hook as the host runs it. It returns once the hook
+    /// and any detached worker have exited.
+    fn installed_stop(&self, session: &str, prompt_id: &str, text: &str) {
+        self.start_installed_stop(session, prompt_id, text).wait();
+    }
+
+    fn start_installed_stop(&self, session: &str, prompt_id: &str, text: &str) -> RunningStop {
+        use std::os::{fd::AsRawFd, unix::process::CommandExt};
         let payload = json!({"hook_event_name":"Stop","session_id":session,
                              "prompt_id":prompt_id,"last_assistant_message":text,"background_tasks":[]});
-        let (mut done, lifetime) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (done, lifetime) = std::os::unix::net::UnixStream::pair().unwrap();
         let lifetime_fd = lifetime.as_raw_fd();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = self.command();
         // The hook and its detached worker inherit this descriptor, so its
         // end of file means both have exited.
         unsafe {
@@ -761,14 +831,7 @@ else: print('{{}}')
             });
         }
         let mut child = command
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", &self.directory.home)
-            .env("XDG_CONFIG_HOME", root.join("config"))
-            .env("HERDR_SOCKET_PATH", "socket-a")
-            .env("HERDR_BIN_PATH", &herdr)
             .env("NAMEDROP_HERDR_TIMEOUT_MS", "250")
-            .current_dir(&self.directory.repo)
             .args(["hook", "stop", "--state-directory"])
             .arg(&self.directory.state)
             .stdin(Stdio::piped())
@@ -783,14 +846,7 @@ else: print('{{}}')
             .unwrap()
             .write_all(payload.to_string().as_bytes())
             .unwrap();
-        assert!(child.wait().unwrap().success());
-        done.set_read_timeout(Some(std::time::Duration::from_secs(15)))
-            .unwrap();
-        assert_eq!(
-            std::io::Read::read(&mut done, &mut [0]).unwrap(),
-            0,
-            "the Stop worker outlived its deadline"
-        );
+        RunningStop { child, done }
     }
 }
 
@@ -1237,4 +1293,233 @@ fn stop_settled_replies_count_against_the_automatic_reply_limit() {
         0,
         "the paused thread delivered the answer"
     );
+}
+
+impl Space {
+    /// @lead asks @reviewer, and the reviewer's prompt hook arms the claim
+    /// for its turn. Returns the delivered envelope.
+    fn armed_ask(&self) -> Value {
+        dispatch::message(
+            "send",
+            json!({"request_id":"ask","source":"@reviewer Reply with the single word pong.",
+                   "author_kind":"agent_session"}),
+            &self.runtime("pane-lead"),
+        )
+        .unwrap();
+        let ask = self.herdr.envelope_for("pane-reviewer");
+        self.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            CLAUDE,
+            &ask.to_string(),
+        );
+        ask
+    }
+
+    fn claims_file(&self) -> PathBuf {
+        let mut sessions = fs::read_dir(self.directory.state.join("final-reply")).unwrap();
+        let file = sessions.next().unwrap().unwrap().path().join("claims.json");
+        assert!(sessions.next().is_none());
+        file
+    }
+
+    /// The body of every envelope that reached `pane`, from this process's
+    /// drains and from the binary's.
+    fn answers(&self, pane: &str) -> Vec<String> {
+        let prompts = self.herdr.prompts.lock().unwrap();
+        prompts
+            .iter()
+            .filter(|(to, _)| to == pane)
+            .map(|(_, envelope)| serde_json::from_str(envelope).unwrap())
+            .chain(self.prompted_by_binary(pane))
+            .map(|envelope: Value| envelope["untrusted_body"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// What `delivery inbox` prints for `pane`, run as the agent runs it.
+    fn inbox(&self, pane: &str) -> Vec<Value> {
+        let output = self
+            .command()
+            .arg("--plugin-state")
+            .arg(&self.directory.state)
+            .args(["delivery", "inbox", "--herdr-socket", "socket-a"])
+            .args(["--herdr-workspace", "workspace-1", "--herdr-pane", pane])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let printed: Value = serde_json::from_slice(&output.stdout).unwrap();
+        printed["data"]["envelopes"].as_array().unwrap().clone()
+    }
+
+    fn bodies(&self) -> Vec<String> {
+        self.rows("SELECT body FROM collaboration_messages ORDER BY created_at_ms, rowid")
+            .into_iter()
+            .map(|row| row[0].clone())
+            .collect()
+    }
+}
+
+/// A Stop hook the host runs again for the same turn, at once or after the
+/// first worker died before it recorded the claim, settles the delivery once.
+#[test]
+fn a_retried_stop_hook_settles_the_delivery_once() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    let armed = fs::read(space.claims_file()).unwrap();
+
+    let first = space.start_installed_stop("session-reviewer", CLAUDE.1, "pong");
+    let retry = space.start_installed_stop("session-reviewer", CLAUDE.1, "pong");
+    first.wait();
+    retry.wait();
+    space.installed_stop("session-reviewer", CLAUDE.1, "pong");
+    fs::write(space.claims_file(), &armed).unwrap();
+    space.installed_stop("session-reviewer", CLAUDE.1, "pong");
+
+    assert_eq!(space.dispositions(), [vec![attempt, "reply".to_owned()]]);
+    assert_eq!(space.bodies(), ["Reply with the single word pong.", "pong"]);
+    assert_eq!(space.answers("pane-lead"), ["pong"]);
+    assert!(
+        space.claims()[0]["state"]["done"].is_string(),
+        "{:?}",
+        space.claims()
+    );
+}
+
+/// A Stop worker that dies once its reply is recorded, before any mailbox
+/// worker runs, leaves the reply queued: the restart's reconciliation delivers
+/// it once, and neither the host's retried Stop nor a later restart sends it
+/// again.
+#[test]
+fn a_reply_recorded_before_the_stop_worker_died_is_delivered_once_after_a_restart() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    let stop = stop_facts("session-reviewer", CLAUDE, "pong", false);
+    let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        settle_at_stop(
+            &space.directory.state,
+            "socket-a",
+            &stop,
+            42,
+            &mut |bound| {
+                execute_message_operation(
+                    bound.operation,
+                    expand_attempt_reply(bound.input, Some(&bound.state))?,
+                    &space.runtime(&bound.pane),
+                )?;
+                std::panic::resume_unwind(Box::new("the Stop worker died"))
+            },
+        );
+    }));
+    assert!(died.is_err());
+    assert_eq!(
+        space.dispositions(),
+        [vec![attempt.clone(), "reply".to_owned()]]
+    );
+    assert!(space.answers("pane-lead").is_empty());
+
+    let restart = || {
+        execute_lifecycle_operation("reconcile", json!({}), &space.runtime("pane-lead")).unwrap();
+    };
+    restart();
+    assert_eq!(space.answers("pane-lead"), ["pong"]);
+    space.stop("session-reviewer", CLAUDE, "pong");
+    restart();
+
+    assert_eq!(space.dispositions(), [vec![attempt, "reply".to_owned()]]);
+    assert_eq!(space.bodies(), ["Reply with the single word pong.", "pong"]);
+    assert_eq!(space.answers("pane-lead"), ["pong"]);
+    assert!(
+        space.claims()[0]["state"]["done"].is_string(),
+        "{:?}",
+        space.claims()
+    );
+}
+
+/// An agent that settles with its bound line before its turn ends has
+/// answered: the installed Stop hook that follows records and sends nothing.
+#[test]
+fn an_explicit_settle_leaves_the_stop_hook_nothing_to_do() {
+    for (line, kind, answers) in [
+        ("reply", "reply", vec!["pong"]),
+        ("complete.no-reply", "no_reply", vec![]),
+    ] {
+        let space = Space::new();
+        let ask = space.armed_ask();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+        let reviewer = space.runtime("pane-reviewer");
+        match line {
+            "reply" => {
+                dispatch::message("reply", bound_reply(&space, &ask, "@lead pong"), &reviewer)
+            }
+            _ => dispatch::integration("complete", json!({"attempt_id": attempt}), &reviewer),
+        }
+        .unwrap();
+
+        space.installed_stop("session-reviewer", CLAUDE.1, "I answered @lead: pong.");
+
+        assert_eq!(
+            space.dispositions(),
+            [vec![attempt, kind.to_owned()]],
+            "{line}"
+        );
+        let mut bodies = vec!["Reply with the single word pong."];
+        bodies.extend(&answers);
+        assert_eq!(space.bodies(), bodies, "{line}");
+        assert_eq!(space.answers("pane-lead"), answers, "{line}");
+        assert_eq!(
+            space.claims()[0]["state"],
+            json!({"done":"superseded"}),
+            "{line}"
+        );
+    }
+}
+
+/// A turn whose Stop hook never runs leaves its delivery pending: `delivery
+/// inbox` hands it back to that session in a later turn, and its bound reply
+/// settles it once however often the agent runs it.
+#[test]
+fn a_delivery_whose_stop_never_ran_stays_in_the_inbox_until_settled_once() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    let attempts = |envelopes: &[Value]| -> Vec<String> {
+        envelopes
+            .iter()
+            .map(|envelope| {
+                envelope["control"]["attempt_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    };
+
+    execute_user_prompt_submit_hook(
+        &json!({"hook_event_name":"UserPromptSubmit","session_id":"session-reviewer",
+                "prompt_id":"later-turn","prompt":"Anything waiting for you?"})
+        .to_string(),
+        &space.runtime("pane-reviewer"),
+    );
+    space.installed_stop("session-reviewer", "later-turn", "Let me check my inbox.");
+    assert!(space.dispositions().is_empty());
+    assert!(space.answers("pane-lead").is_empty());
+    assert_eq!(space.claims()[0]["state"], json!({"left":"interrupted"}));
+    assert!(attempts(&space.inbox("pane-lead")).is_empty());
+    let recovered = space.inbox("pane-reviewer");
+    assert_eq!(attempts(&recovered), [attempt.as_str()]);
+
+    for _ in 0..2 {
+        dispatch::message(
+            "reply",
+            bound_reply(&space, &recovered[0], "@lead pong"),
+            &space.runtime("pane-reviewer"),
+        )
+        .unwrap();
+    }
+    assert_eq!(space.dispositions(), [vec![attempt, "reply".to_owned()]]);
+    assert_eq!(space.bodies(), ["Reply with the single word pong.", "pong"]);
+    assert_eq!(space.answers("pane-lead"), ["pong"]);
+    assert!(attempts(&space.inbox("pane-reviewer")).is_empty());
 }
