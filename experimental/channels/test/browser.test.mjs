@@ -6195,7 +6195,7 @@ test("UI-4: a closed pane reads Pane closed, a busy Herdr offers Try again, and 
     { status: 503, body: "Screen is temporarily unavailable.\n" },
     { body: "earlier text" },
     { status: 503, body: "Screen is temporarily unavailable.\n" },
-    { status: 401, body: "This dashboard needs its key.\n" },
+    { status: 401, body: "This browser isn't signed in to Channels.\n" },
   ];
   const ui = await open(t, (client) => replay(client, busyTeam()), undefined, {
     onScreen: () => answers.shift() ?? { body: "" },
