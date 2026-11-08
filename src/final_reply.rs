@@ -455,6 +455,10 @@ const MAX_CLAIMS_BYTES: u64 = 1024 * 1024;
 /// today's explicit commands; it never waits on a Stop that is settling.
 const PROMPT_LOCK_WAIT: Duration = Duration::from_millis(500);
 const STOP_LOCK_WAIT: Duration = Duration::from_secs(2);
+/// How long after its Stop a claim's worker may still settle it: the
+/// worker's lock wait and deadline, with room to spare. A claim still open
+/// after that lost its worker.
+const STOPPED_GRACE_MS: u64 = 30_000;
 
 /// The claims of one agent session, in one file only this module writes.
 struct Claims {
@@ -468,6 +472,41 @@ fn session_directory(state: &Path, socket: &str, session: &str) -> PathBuf {
     state
         .join("final-reply")
         .join(crate::lower_hex(&Sha256::digest(key)))
+}
+
+fn stopped_at(directory: &Path, turn: &HostTurn) -> Option<u64> {
+    let mut text = String::new();
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(directory.join("stops").join(turn.as_str()))
+        .ok()?
+        .take(32)
+        .read_to_string(&mut text)
+        .ok()?;
+    text.trim().parse().ok()
+}
+
+/// Records that a Stop of `turn` is handing its claims to a worker, before
+/// the worker starts, so the session's next prompt leaves them to it. It
+/// takes no lock: the Stop hook must not wait on a worker that is settling.
+pub fn mark_stopped(state: &Path, socket: &str, session: &str, turn: &HostTurn, now_ms: u64) {
+    let directory = session_directory(state, socket, session).join("stops");
+    if fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    let next = directory.join(format!("{}.next", turn.as_str()));
+    let written = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&next)
+        .and_then(|mut file| file.write_all(now_ms.to_string().as_bytes()));
+    if written.is_ok() {
+        let _ = fs::rename(next, directory.join(turn.as_str()));
+    }
 }
 
 fn read_claims(directory: &Path) -> Vec<Claim> {
@@ -512,9 +551,35 @@ impl Claims {
         })
     }
 
+    /// When a Stop of `turn` handed its claims to a worker, if one did.
+    fn stopped_at(&self, turn: &HostTurn) -> Option<u64> {
+        stopped_at(&self.directory, turn)
+    }
+
+    /// What a claim armed on another turn becomes when this session moves
+    /// on: still open while its Stop's worker may settle it, otherwise left.
+    fn moved_on(&self, claim: &Claim, now_ms: u64) -> Option<ClaimState> {
+        match self.stopped_at(&claim.turn) {
+            Some(at) if now_ms < at.saturating_add(STOPPED_GRACE_MS) => None,
+            Some(_) => Some(ClaimState::Left(LeaveReason::OperationFailed)),
+            None => Some(ClaimState::Left(LeaveReason::Interrupted)),
+        }
+    }
+
     fn save(mut self, now_ms: u64) {
         self.claims
             .retain(|claim| claim.updated_at_ms.saturating_add(KEEP_MS) > now_ms);
+        if let Ok(entries) = fs::read_dir(self.directory.join("stops")) {
+            for entry in entries.flatten() {
+                let live = self.claims.iter().any(|claim| {
+                    claim.state == ClaimState::Open
+                        && entry.file_name().to_str() == Some(claim.turn.as_str())
+                });
+                if !live {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
         let next = self.directory.join("claims.next");
         let written = fs::OpenOptions::new()
             .write(true)
@@ -569,15 +634,26 @@ pub(crate) fn observe_prompt(
     let Some(mut claims) = Claims::lock(directory, PROMPT_LOCK_WAIT) else {
         return Observed::default();
     };
-    for claim in &mut claims.claims {
-        if claim.state == ClaimState::Open && claim.turn != *turn {
-            claim.set(ClaimState::Left(LeaveReason::Interrupted), now_ms);
+    let moved: Vec<_> = claims
+        .claims
+        .iter()
+        .map(|claim| {
+            (claim.state == ClaimState::Open && claim.turn != *turn)
+                .then(|| claims.moved_on(claim, now_ms))
+                .flatten()
+        })
+        .collect();
+    for (claim, next) in claims.claims.iter_mut().zip(moved) {
+        if let Some(next) = next {
+            claim.set(next, now_ms);
         }
     }
+    // A claim whose Stop already ran belongs to that Stop's worker; only one
+    // still waiting for its own turn's Stop keeps this delivery explicit.
     let open = claims
         .claims
         .iter()
-        .any(|claim| claim.state == ClaimState::Open);
+        .any(|claim| claim.state == ClaimState::Open && claims.stopped_at(&claim.turn).is_none());
     let armed = match arm {
         Some(arm) if !open => {
             claims
@@ -636,7 +712,23 @@ pub fn settle_at_stop(
     let Some(mut claims) = Claims::lock(directory, STOP_LOCK_WAIT) else {
         return;
     };
-    for claim in &mut claims.claims {
+    let moved: Vec<_> = claims
+        .claims
+        .iter()
+        .map(|claim| {
+            (claim.state == ClaimState::Open && stop.turn.as_ref() != Some(&claim.turn))
+                .then(|| claims.moved_on(claim, now_ms))
+        })
+        .collect();
+    for (claim, moved) in claims.claims.iter_mut().zip(moved) {
+        match moved {
+            Some(Some(next)) => {
+                claim.set(next, now_ms);
+                continue;
+            }
+            Some(None) => continue,
+            None => {}
+        }
         let current = claim.state == ClaimState::Open && stop.turn.as_ref() == Some(&claim.turn);
         let facts = if current {
             settle_facts(state, &stop.session, claim, now_ms)

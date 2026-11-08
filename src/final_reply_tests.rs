@@ -751,3 +751,73 @@ fn finished_claims_are_pruned_after_a_day() {
     assert_eq!(later(19 + KEEP_MS), 1);
     assert_eq!(later(20 + KEEP_MS), 0);
 }
+
+#[test]
+fn a_prompt_queued_behind_a_stop_leaves_the_claim_to_that_stops_worker() {
+    let state = StateDirectory::new();
+    observe(
+        &state,
+        "prompt-1",
+        Some(armed("attempt-1", "prompt-1", reply_plan())),
+    );
+    mark_stopped(&state.0, "socket", "session", &turn("prompt-1"), 10);
+    assert!(
+        observe(
+            &state,
+            "prompt-2",
+            Some(armed("attempt-2", "prompt-2", reply_plan()))
+        ),
+        "a delivery queued behind a Stop lost its claim"
+    );
+    settle(&state, &stop("prompt-2", "Second answer."), &mut |_| {
+        Ok(json!({}))
+    });
+    let log = std::cell::RefCell::new(Vec::new());
+    settle(
+        &state,
+        &stop("prompt-1", "First answer."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    let log = log.into_inner();
+    assert_eq!(log.len(), 1, "the stopped turn's answer was lost");
+    assert_eq!(log[0].input["source"], "@codex First answer.");
+    assert_eq!(
+        state
+            .claims()
+            .iter()
+            .map(|claim| claim.state)
+            .collect::<Vec<_>>(),
+        [
+            ClaimState::Done(Done::Replied),
+            ClaimState::Done(Done::Replied)
+        ]
+    );
+    assert!(
+        fs::read_dir(session_directory(&state.0, "socket", "session").join("stops"))
+            .unwrap()
+            .next()
+            .is_none(),
+        "a settled turn kept its Stop marker"
+    );
+
+    let state = StateDirectory::new();
+    observe(
+        &state,
+        "prompt-1",
+        Some(armed("attempt-1", "prompt-1", reply_plan())),
+    );
+    mark_stopped(&state.0, "socket", "session", &turn("prompt-1"), 10);
+    observe_prompt(
+        &state.0,
+        "socket",
+        "session",
+        &turn("prompt-2"),
+        None,
+        10 + STOPPED_GRACE_MS,
+    );
+    assert_eq!(
+        state.claims()[0].state,
+        ClaimState::Left(LeaveReason::OperationFailed),
+        "a claim whose worker died stayed open"
+    );
+}

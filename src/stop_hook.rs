@@ -61,6 +61,9 @@ pub fn run(state: &Path) {
     if !namedrop::final_reply::has_live_claims(state, &socket, &input.session_id) {
         return;
     }
+    if let Some(turn) = input.turn() {
+        namedrop::final_reply::mark_stopped(state, &socket, &input.session_id, &turn, ended_at_ms);
+    }
     let transcript_end = input
         .last_assistant_message
         .is_none()
