@@ -17,6 +17,11 @@ const RELAY_ID_PREFIX: &str = "terminal-relay:";
 /// current code never does, so that fact tells the two apart for good. A
 /// mirrored copy has no fact of its own, so it follows `bridged_messages` to its
 /// origin and classifies like the row it copies.
+///
+/// A purge deletes the origin space with its facts and leaves the copy behind, so
+/// a missing fact proves nothing unless the origin row is still there. Without
+/// that row the copy stays private and keeps any open flag, even if it was a
+/// real answer.
 pub(super) fn effective_grammar_sql(message: &str) -> String {
     let origin = |column: &str| {
         format!(
@@ -34,6 +39,11 @@ pub(super) fn effective_grammar_sql(message: &str) -> String {
                AND arm.entity_kind = 'terminal_relay_attempt'
                AND arm.entity_id = substr(COALESCE({relay}, {message}.message_id), {attempt_at})
                AND arm.transition_kind = 'activated')
+           AND EXISTS (
+             SELECT 1 FROM collaboration_messages origin
+             WHERE origin.session_socket_id = {message}.session_socket_id
+               AND origin.worktree_id = COALESCE({space}, {message}.worktree_id)
+               AND origin.message_id = COALESCE({relay}, {message}.message_id))
          THEN 'final-message/v1' ELSE {message}.grammar_version END",
         space = origin("origin_space_id"),
         relay = origin("origin_message_id"),
