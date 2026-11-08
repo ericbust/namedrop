@@ -58,7 +58,10 @@ hooks loaded (the policy text once per session and the roster on the first turn,
 transcripts); Claude to Codex `pong` and Codex to Claude `ping`, each delivered once and
 replied once (one delivery, one attempt, no retries, one receipt, settled, two messages
 in the thread, the envelope seen exactly once by the recipient with its proof marker);
-`echo hello` on `@shell` with exit 0; nothing awaiting progress at the end. It does not
+`echo hello` on `@shell` with exit 0; nothing awaiting progress at the end. Each agent
+settles a delivery by its final message: the request hop ends `disposition reply` and the
+reply hop `no_reply`, each with `claim done:…`, `settle commands 0`, one model call per
+delivery turn, a reply body equal to the target's final answer, and no live claims left. It does not
 show the update notice (Namedrop 1.3.0 and later): a `--link` install never checks for
 updates. Use the update notice probe under **Push on it** for that.
 
@@ -144,6 +147,13 @@ Namedrop run through the profile's `env -i` line as the manual drive notes show:
   comes back; `#all @codex` from Claude brings both workspaces' `@codex` replies back to
   Claude. Every delivery must settle. It empties Claude's input box at the end, takes
   about 2.5 minutes and exits 0 when all six checks pass.
+- Final message as the reply (`src/final_reply.rs`, `src/stop_hook.rs`): the checklist
+  covers only a plain ask and its answer. Drive these on a kept profile: a Stop that another
+  Stop hook blocks (settles at the turn's second Stop, with the real final text); a turn that
+  ends waiting on a helper or background work (posts nothing, later prompts show the
+  "is still open" line, and its reply lands in the same thread); and a person's Channels
+  message answered by the final message (one `terminal-relay/v1` post in the thread, using
+  the Channels browser app below).
 - No route written yet: tracked handoffs inside one workspace and the 30-second settle
   (`src/handoff.rs`, `src/coordination.rs`, `ND-DELIVERY-003`, `ND-COORDINATION-001`), popups other than
   Doctor's (`src/naming_ui.rs`, `src/agent_status_ui.rs`), the tour (`src/tour.rs`), shared

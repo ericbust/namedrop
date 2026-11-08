@@ -2240,6 +2240,72 @@ fn the_roster_mentions_other_workspaces_without_reading_herdr_labels() {
     );
 }
 
+/// The other-workspaces line is compared on its own: when only it changed,
+/// it comes under the marker without the rows, and when it no longer holds
+/// the session is told so once.
+#[test]
+fn the_other_workspaces_line_comes_again_only_when_it_changes() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    let prompt = "What should we do next?";
+    let hook = || {
+        fixture
+            .hook_as("session-1", "w1", "pane-1-lead", prompt)
+            .map(|output| additional_context(&Some(output)).to_owned())
+    };
+
+    let first = hook().unwrap();
+    assert!(first.contains("- @lead (you)"), "{first}");
+    assert!(
+        first.contains(
+            "Other workspaces: 2 other Herdr workspaces have named agents (@lead, @scout, @tester)."
+        ),
+        "{first}"
+    );
+    assert_eq!(hook(), None);
+
+    fixture.rename("w2", "scout", "ranger");
+    let renamed = hook().unwrap();
+    assert!(renamed.starts_with(ROSTER_MARKER), "{renamed}");
+    assert!(
+        !renamed.contains("- @"),
+        "the unchanged rows came again: {renamed}"
+    );
+    assert!(
+        renamed.contains(
+            "Other workspaces: 2 other Herdr workspaces have named agents (@lead, @ranger, @scout, \
+             @tester)."
+        ),
+        "{renamed}"
+    );
+    assert_eq!(hook(), None);
+
+    // A refusal with nothing new still opens with the marker its wrapper forwards.
+    let refused = additional_context(&fixture.hook_as(
+        "session-1",
+        "w1",
+        "pane-1-lead",
+        "@tester Run the suite.",
+    ))
+    .to_owned();
+    assert!(refused.starts_with(ROSTER_MARKER), "{refused}");
+    assert!(refused.contains("do not retry automatically"), "{refused}");
+    assert!(
+        !refused.contains("- @") && !refused.contains("Other workspaces"),
+        "{refused}"
+    );
+
+    fixture.sql("UPDATE pane_bindings SET active = 0 WHERE worktree_id IN ('w2', 'w3')");
+    let gone = hook().unwrap();
+    assert!(gone.starts_with(ROSTER_MARKER), "{gone}");
+    assert!(!gone.contains("- @"), "{gone}");
+    assert!(
+        gone.ends_with("Other workspaces: none of them has named agents now."),
+        "{gone}"
+    );
+    assert_eq!(hook(), None);
+}
+
 #[test]
 fn the_roster_leaves_out_workspaces_with_no_live_agents() {
     let prompt = "What should we do next?";

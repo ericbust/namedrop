@@ -1992,12 +1992,17 @@ where
         context_request_grant,
         declined_context_request,
     } = committed;
-    let (links, forwarded) = store.transaction(|tx| {
+    let (links, forwarded, disposition) = store.transaction(|tx| {
         Ok((
             tx.tracked_message(namespace, &routed.receipt.message_id)?
                 .map(|tracked| tracked.links)
                 .unwrap_or_default(),
             tx.forwarded_copies(namespace, &routed.receipt.message_id)?,
+            disposition_attempt_id
+                .as_ref()
+                .map(|attempt| tx.delivery_disposition(namespace, attempt))
+                .transpose()?
+                .flatten(),
         ))
     })?;
     let mut response = receipt_json(routed, outlook);
@@ -2021,10 +2026,15 @@ where
     }
     // A reply that finished a Delivery Attempt keeps its whole message receipt and adds the
     // same terminal fields `complete --no-reply` returns, so an Agent Session reads the
-    // recorded disposition instead of inferring it.
+    // recorded disposition instead of inferring it. A follow-up to an attempt Namedrop
+    // closed without a reply reports that disposition.
     if let Some(attempt_id) = &disposition_attempt_id {
         response["attempt_id"] = json!(attempt_id);
-        response["disposition"] = json!(crate::DeliveryDisposition::Reply.as_str());
+        response["disposition"] = json!(
+            disposition
+                .unwrap_or(crate::DeliveryDisposition::Reply)
+                .as_str()
+        );
     }
     if let Some(relay) = relay {
         response["relay"] = present_relay_result(&relay, runtime);

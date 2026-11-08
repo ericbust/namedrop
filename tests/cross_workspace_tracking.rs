@@ -796,6 +796,49 @@ fn a_busy_remote_worker_holds_the_nudge_and_its_idle_wakes_the_lead() {
 }
 
 #[test]
+fn a_remote_worker_whose_turn_ended_without_a_reply_holds_the_nudge_until_it_stays_quiet() {
+    let fixture = fixture();
+    let worker = Topology::Remote.worker();
+    let id = begin(&fixture, "release-quiet");
+    assign(&fixture, &id, "assign-quiet", worker.mention).unwrap();
+    delivered(&fixture, worker.workspace, worker.pane);
+    fixture.advance(31_000);
+    fixture.drain(worker.workspace);
+    let settled_at = fixture.clock.0.load(std::sync::atomic::Ordering::Relaxed);
+    let nudges = |fixture: &Fixture| {
+        fixture
+            .herdr
+            .envelopes(LEAD.1)
+            .into_iter()
+            .filter(|envelope| envelope["control"]["coordination_nudge"] == true)
+            .collect::<Vec<_>>()
+    };
+    let lead_drain = |fixture: &Fixture| {
+        drain_mailboxes(&fixture.runtime(LEAD.0, "pane-none"))
+            .unwrap()
+            .check_in_due_ms
+    };
+
+    assert_eq!(lead_drain(&fixture), Some(settled_at + 600_000));
+    assert!(nudges(&fixture).is_empty());
+    fixture.advance(600_000 - 1);
+    assert_eq!(lead_drain(&fixture), Some(settled_at + 600_000));
+    assert!(nudges(&fixture).is_empty());
+
+    fixture.advance(1);
+    assert_eq!(lead_drain(&fixture), None);
+    let nudges = nudges(&fixture);
+    assert_eq!(nudges.len(), 1, "{nudges:?}");
+    assert!(
+        nudges[0]["untrusted_body"]
+            .as_str()
+            .unwrap()
+            .contains(": pending.")
+    );
+    assert_nothing_mirrored(&fixture);
+}
+
+#[test]
 fn an_unreadable_remote_workspace_never_nudges_on_a_guess() {
     let fixture = fixture();
     let worker = Topology::Remote.worker();

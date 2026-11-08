@@ -593,6 +593,41 @@ fn roster_reads_are_fresh_and_wrong_attempts_and_arbitrary_operations_are_reject
     assert_eq!(fixture.message_count(), 1);
 }
 
+/// The outside worker answers a sandboxed roster read, so it reads each
+/// agent's transcript from its own environment, as a direct read would.
+#[test]
+fn a_sandboxed_roster_read_reports_context_size_from_the_workers_home() {
+    let fixture = Fixture::new();
+    let mut panes = panes("session-author");
+    panes["result"]["panes"][0]["agent"] = json!("codex");
+    fs::write(
+        fixture.directory.path().join("panes.json"),
+        panes.to_string(),
+    )
+    .unwrap();
+    let day = fixture.directory.home().join(".codex/sessions/2026/11/07");
+    fs::create_dir_all(&day).unwrap();
+    fs::write(
+        day.join("rollout-2026-11-07T07-39-21-session-author.jsonl"),
+        format!(
+            "{}\n",
+            json!({"type":"event_msg","payload":{"type":"token_count",
+                "info":{"last_token_usage":{"input_tokens":120_000}}}})
+        ),
+    )
+    .unwrap();
+    let _worker = fixture.worker();
+    let listed = response(fixture.sandbox_command(&["address", "list"], json!({})));
+    let author = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|record| record["id"] == "author")
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(author["registered"], true, "{listed}");
+    assert_eq!(author["context_tokens"], 120_000, "{listed}");
+}
+
 /// A compact reply is completed from its attempt before it is queued, so the
 /// queue only ever holds the full form; one naming no attempt is refused first.
 #[test]
@@ -1454,4 +1489,27 @@ fn reminder_common_command_recovers_clock_without_socket_hint() {
             .unwrap(),
         1
     );
+}
+
+/// The Stop leaves a delivery to a sandboxed explicit settle that is still
+/// queued, and only while it has no receipt.
+#[test]
+fn a_queued_explicit_settle_is_visible_until_its_receipt_lands() {
+    let fixture = Fixture::new();
+    let state = fixture.directory.path();
+    let queued = response(fixture.sandbox_command(
+        &["complete", "--no-reply"],
+        json!({"attempt_id":"attempt-queued"}),
+    ));
+    assert_eq!(queued["data"]["state"], "pending", "{queued}");
+    let settle_queued = |session: &str, attempt: &str| {
+        namedrop::deferred_commands::settle_queued(state, &fixture.socket, session, attempt)
+    };
+    assert!(settle_queued("session-author", "attempt-queued"));
+    assert!(!settle_queued("session-author", "attempt-other"));
+    assert!(!settle_queued("session-other", "attempt-queued"));
+    let _worker = fixture.worker();
+    let receipt = PathBuf::from(queued["data"]["receipt"].as_str().unwrap());
+    wait_for(|| receipt.exists());
+    assert!(!settle_queued("session-author", "attempt-queued"));
 }

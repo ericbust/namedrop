@@ -489,11 +489,13 @@ pub struct MessageDraft {
 
 pub const TERMINAL_RELAY_MAX_CHARS: usize = 16_000;
 
+/// The end of the turn that answered one attempt from the person.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TerminalRelayEnd {
     pub agent_session_id: AgentSessionId,
+    pub attempt_id: DeliveryAttemptId,
+    pub turn_started_at_ms: u64,
     pub ended_at_ms: u64,
-    pub previous_end_ms: Option<u64>,
     pub text: String,
 }
 
@@ -791,6 +793,11 @@ pub enum TransitionEntityKind {
     CoordinationReviewRequest,
     /// A committed review message, as the JSON pair `[request_id, message_id]`.
     CoordinationReviewMessage,
+    /// One revision of a coordination. The entity id is
+    /// `{coordination_id}:{revision}`.
+    CoordinationRevision,
+    /// Facts the terminal relay wrote before claims decided what a Stop
+    /// relays; older databases still hold them.
     TerminalRelaySession,
     TerminalRelayAttempt,
 }
@@ -811,6 +818,7 @@ impl TransitionEntityKind {
             Self::CoordinationReviewGrant => "coordination_review_grant",
             Self::CoordinationReviewRequest => "coordination_review_request",
             Self::CoordinationReviewMessage => "coordination_review_message",
+            Self::CoordinationRevision => "coordination_revision",
             Self::TerminalRelaySession => "terminal_relay_session",
             Self::TerminalRelayAttempt => "terminal_relay_attempt",
         }
@@ -855,6 +863,8 @@ pub enum TransitionKind {
     Opened,
     Resolved,
     Adopted,
+    /// The coordination's owner session read its results.
+    Read,
 }
 
 impl TransitionKind {
@@ -895,6 +905,7 @@ impl TransitionKind {
             Self::Opened => "opened",
             Self::Resolved => "resolved",
             Self::Adopted => "adopted",
+            Self::Read => "read",
         }
     }
 }

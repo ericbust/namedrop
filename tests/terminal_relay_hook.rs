@@ -5,9 +5,10 @@ use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, DeliveryAttemptId, DeliveryId, DeliveryState,
     LeaseDraft, MessageDraft, MessageId, MessageRecipientDraft, MutationAttribution,
     PaneAddressDraft, PaneAddressId, PaneBindingId, PaneRoleId, StateNamespace, StateStore,
-    SystemClock, ThreadId, install_integration_package,
+    SystemClock, ThreadId, final_reply::HostTurn, install_integration_package,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{Read, Write},
@@ -52,8 +53,31 @@ impl Drop for Fixture {
     }
 }
 
+/// A claim as the prompt hook arms it, for a Stop of `turn` to settle.
+fn arm_claim(fixture: &Fixture, turn: &HostTurn) {
+    let key = serde_json::to_vec(&("test-socket", "session")).unwrap();
+    let session: String = Sha256::digest(key)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let directory = fixture.state().join("final-reply").join(session);
+    fs::create_dir_all(&directory).unwrap();
+    let claim = json!([{
+        "attempt_id": "first",
+        "namespace": fixture.namespace(),
+        "location": {"state": fixture.state(), "socket": "test-socket",
+                     "workspace": "workspace", "pane": "pane"},
+        "turn": turn.as_str(),
+        "plan": {"no_reply": "answers_own"},
+        "state": "open",
+        "armed_at_ms": SystemClock.now_unix_ms(),
+        "updated_at_ms": SystemClock.now_unix_ms(),
+    }]);
+    fs::write(directory.join("claims.json"), claim.to_string()).unwrap();
+}
+
 #[test]
-fn both_installed_stop_hooks_capture_the_boundary_before_returning_while_the_worker_runs() {
+fn both_installed_stop_hooks_return_before_the_worker_settles_a_claim() {
     for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
         let fixture = Fixture::new();
         fixture.initialize_relay();
@@ -73,11 +97,12 @@ fn both_installed_stop_hooks_capture_the_boundary_before_returning_while_the_wor
         let launch = manifest["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
-        let identity = match runtime {
-            AgentRuntime::ClaudeCode => "prompt_id",
-            AgentRuntime::Codex => "turn_id",
+        let (identity, turn) = match runtime {
+            AgentRuntime::ClaudeCode => ("prompt_id", HostTurn::from_ids(Some("first-turn"), None)),
+            AgentRuntime::Codex => ("turn_id", HostTurn::from_ids(None, Some("first-turn"))),
         };
-        let mut payload = json!({"hook_event_name":"Stop", "session_id":"session", "last_assistant_message":"Which one?"});
+        arm_claim(&fixture, &turn.unwrap());
+        let mut payload = json!({"hook_event_name":"Stop", "session_id":"session", "last_assistant_message":"Thanks, noted."});
         payload[identity] = json!("first-turn");
         let mut child = fixture
             .command("/bin/sh")
@@ -100,18 +125,6 @@ fn both_installed_stop_hooks_capture_the_boundary_before_returning_while_the_wor
         assert!(output.status.success());
         assert!(output.stdout.is_empty());
         assert!(output.stderr.is_empty());
-        let sessions: Vec<_> = fs::read_dir(fixture.state().join("terminal-relay-stops"))
-            .unwrap()
-            .collect();
-        assert_eq!(sessions.len(), 1);
-        assert!(
-            sessions[0]
-                .as_ref()
-                .unwrap()
-                .path()
-                .join("latest.json")
-                .is_file()
-        );
         assert!(
             !fixture.0.join("finished").exists(),
             "Stop waited for Herdr"
@@ -122,7 +135,7 @@ fn both_installed_stop_hooks_capture_the_boundary_before_returning_while_the_wor
             }
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(fixture.0.join("ready").exists());
+        assert!(fixture.0.join("ready").exists(), "the worker never settled");
         fs::write(fixture.0.join("release"), "").unwrap();
         for _ in 0..200 {
             if fixture.0.join("finished").exists() {
@@ -280,16 +293,7 @@ impl Fixture {
             .unwrap();
     }
 
-    fn boundary(&self) -> Option<Vec<u8>> {
-        let session = fs::read_dir(self.state().join("terminal-relay-stops"))
-            .ok()?
-            .next()?
-            .ok()?;
-        fs::read(session.path().join("latest.json")).ok()
-    }
-
     fn stop(&self, identity_key: &str, identity: &str, text: &str) {
-        let previous_boundary = self.boundary();
         let worker_pid_file = self.0.join("worker-pid");
         let _ = fs::remove_file(&worker_pid_file);
         let (mut worker_done, worker_lifetime) = UnixStream::pair().unwrap();
@@ -362,17 +366,10 @@ impl Fixture {
             0,
             "unexpected Stop completion bytes"
         );
-        if self.boundary() == previous_boundary {
-            assert!(
-                !worker_pid_file.exists(),
-                "duplicate Stop launched a worker"
-            );
-        } else {
-            assert!(
-                worker_pid_file.exists(),
-                "captured Stop launched its worker"
-            );
-        }
+        assert!(
+            !worker_pid_file.exists(),
+            "a Stop with no claim reached Herdr"
+        );
     }
 
     fn relays(&self) -> Vec<(String, String)> {
@@ -383,85 +380,21 @@ impl Fixture {
     }
 }
 
+/// Only a claim the prompt hook armed settles anything. A Stop whose turn
+/// armed none, such as one the person typed into the pane, posts nothing
+/// even while a message from the person is outstanding.
 #[test]
-fn an_oversized_stop_cannot_relay_an_unrelated_later_answer() {
+fn a_stop_without_a_claim_relays_nothing() {
     for identity_key in ["prompt_id", "turn_id"] {
         let fixture = Fixture::new();
         fixture.initialize_relay();
+        fixture.stop(identity_key, "typed-turn", "Which file did you change?");
         fixture.stop(
             identity_key,
             "oversized-turn",
             &"x".repeat(1024 * 1024 + 100),
         );
-        fixture.stop(identity_key, "unrelated-turn", "Unrelated answer");
-        assert!(
-            fixture.relays().is_empty(),
-            "oversized Stop lost its boundary: {:?}",
-            fixture.relays()
-        );
-    }
-}
-
-#[test]
-fn a_missed_stop_cannot_relay_an_unrelated_later_answer() {
-    for identity_key in ["prompt_id", "turn_id"] {
-        for (database_busy, first_text) in [
-            (false, "First question?"),
-            (true, "First question?"),
-            (false, ""),
-            (true, ""),
-        ] {
-            let fixture = Fixture::new();
-            fixture.initialize_relay();
-            let connection =
-                rusqlite::Connection::open(fixture.state().join("namedrop.sqlite3")).unwrap();
-            if database_busy {
-                connection.execute_batch("BEGIN IMMEDIATE").unwrap();
-            } else {
-                fixture.set_herdr(false);
-            }
-            fixture.stop(identity_key, "missed-turn", first_text);
-            if database_busy {
-                connection.execute_batch("ROLLBACK").unwrap();
-            }
-            fixture.set_herdr(true);
-            thread::sleep(Duration::from_millis(2));
-            fixture.stop(identity_key, "unrelated-turn", "Unrelated answer");
-            assert!(fixture.relays().is_empty());
-        }
-    }
-}
-
-#[test]
-fn replaying_a_native_stop_cannot_consume_the_next_delivery() {
-    for identity_key in ["prompt_id", "turn_id"] {
-        let fixture = Fixture::new();
-        fixture.initialize_relay();
-        fixture.stop(identity_key, "first-turn", "First question?");
-        assert_eq!(
-            fixture.relays(),
-            [("terminal-relay:first".into(), "First question?".into())]
-        );
-        thread::sleep(Duration::from_millis(2));
-        fixture.submit("second");
-        fixture.stop(identity_key, "first-turn", "First question?");
-        assert_eq!(fixture.relays().len(), 1);
-        fixture.stop(identity_key, "second-turn", "Second question?");
-        assert_eq!(
-            fixture.relays(),
-            [
-                ("terminal-relay:first".into(), "First question?".into()),
-                ("terminal-relay:second".into(), "Second question?".into()),
-            ]
-        );
-        thread::sleep(Duration::from_millis(2));
-        fixture.submit("third");
-        fixture.stop(identity_key, "first-turn", "First question?");
-        assert_eq!(fixture.relays().len(), 2);
-        fixture.stop(identity_key, "third-turn", "Third question?");
-        assert_eq!(
-            fixture.relays().last().unwrap(),
-            &("terminal-relay:third".into(), "Third question?".into())
-        );
+        assert!(fixture.relays().is_empty(), "{:?}", fixture.relays());
+        assert!(!fixture.state().join("final-reply").exists());
     }
 }

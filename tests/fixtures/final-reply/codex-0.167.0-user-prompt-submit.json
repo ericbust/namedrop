@@ -1,0 +1,10 @@
+{
+  "session_id": "codex-session-id",
+  "turn_id": "codex-turn-id",
+  "transcript_path": "/testbed/codex/transcript_path",
+  "cwd": "/testbed/codex/cwd",
+  "hook_event_name": "UserPromptSubmit",
+  "model": "gpt-6-sol",
+  "permission_mode": "default",
+  "prompt": "Reply with the single word pong."
+}

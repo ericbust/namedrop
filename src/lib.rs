@@ -12,6 +12,8 @@ pub mod dashboard;
 pub mod deferred_commands;
 mod delivery;
 mod domain;
+#[doc(hidden)]
+pub mod final_reply;
 mod groups;
 mod handoff;
 mod health;
@@ -32,13 +34,16 @@ mod persona;
 mod ports;
 mod runtime;
 mod shortcuts;
+mod shown_roster;
 mod spaces;
 mod store;
 pub mod subagent;
 #[doc(hidden)]
 pub use shortcuts::install_shortcuts;
+pub use shown_roster::forget_shown_roster;
 mod terminal;
 pub mod tour;
+mod transcript_usage;
 #[doc(hidden)]
 pub mod update_check;
 pub use terminal::{default_pane_type, detect_pane_type, execute_terminal, verify_inherited_pane};
@@ -61,7 +66,9 @@ pub use health::{
 pub use hook::{
     execute_codex_app_server_hook, execute_session_start_hook, execute_user_prompt_submit_hook,
 };
-pub use install::{AgentConfigDirectories, install_integration_package, package_directory};
+pub use install::{
+    AgentConfigDirectories, InheritedDirectories, install_integration_package, package_directory,
+};
 pub(crate) use install::{
     IntegrationPackageInstallation, disclosed_user_package_targets,
     integration_package_attention_source, refresh_user_integration_packages,
@@ -195,7 +202,7 @@ pub fn is_message_operation(operation: &str) -> bool {
 pub fn is_integration_operation(operation: &str) -> bool {
     matches!(
         operation,
-        "register" | "ack" | "complete" | "delivery.inbox"
+        "register" | "ack" | "complete" | final_reply::STOP_NO_REPLY | "delivery.inbox"
     )
 }
 

@@ -4,7 +4,7 @@ use crate::{
     HerdrCommandExecutor, IdGenerator, InflightDeliveryAttempt, IntegrationToolInvocation,
     LeaseDraft, LifecycleRuntime, MutationAttribution, PromptFailureKind, StateNamespace,
     StateStore, StateTransaction, StoreError, collaboration_executable, discover_worktree,
-    tool_environment,
+    store::WakeReadiness, tool_environment,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -30,6 +30,10 @@ pub struct DrainReport {
     pub held: Vec<DeliveryAttemptId>,
     pub expired: Vec<crate::DeliveryId>,
     pub pending_grace: Vec<GraceDeadline>,
+    /// The earliest time a coordination check-in held for a quiet worker
+    /// becomes due. The drain runs again then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_in_due_ms: Option<u64>,
 }
 
 /// An idle submitted or acknowledged attempt still inside the acknowledgement
@@ -55,6 +59,7 @@ impl Default for DrainReport {
             held: Vec::new(),
             expired: Vec::new(),
             pending_grace: Vec::new(),
+            check_in_due_ms: None,
         }
     }
 }
@@ -68,18 +73,30 @@ impl DrainReport {
         !self.pane_lock_deferred.is_empty()
             || self.retry_without_event
             || self.awaits_terminal()
-            || self.next_grace_due_ms().is_some()
+            || self.next_due_ms().is_some()
     }
 
     pub fn awaits_terminal(&self) -> bool {
         !self.terminal_waiting.is_empty() || !self.terminal_running.is_empty()
     }
 
-    pub fn next_grace_due_ms(&self) -> Option<u64> {
+    /// When the drain must run again with no other event: the end of an
+    /// acknowledgement grace or of a held check-in.
+    pub fn next_due_ms(&self) -> Option<u64> {
         self.pending_grace
             .iter()
             .map(|deadline| deadline.due_at_ms)
+            .chain(self.check_in_due_ms)
             .min()
+    }
+
+    /// Whether a queued message may be dispatched now. A held check-in keeps
+    /// its deadline so the drain comes back for it.
+    fn dispatchable(&mut self, readiness: WakeReadiness) -> bool {
+        if let WakeReadiness::QuietUntil(due) = readiness {
+            self.check_in_due_ms = Some(self.check_in_due_ms.map_or(due, |at| at.min(due)));
+        }
+        readiness == WakeReadiness::Ready
     }
 }
 
@@ -421,7 +438,7 @@ where
         .map_err(|error| error.to_string())?;
     let live =
         crate::spaces::LiveSpaces::load(runtime.herdr, first_discovery.clone(), &remote_seats);
-    store
+    let check_in_due_ms = store
         .transaction(|transaction| {
             transaction.complete_ready_result_sets(
                 &namespace,
@@ -431,8 +448,7 @@ where
                 &namespace,
                 &live,
                 &MutationAttribution::new(ActorKind::Plugin, "namedrop-coordination", now),
-            )?;
-            Ok(())
+            )
         })
         .map_err(|error| error.to_string())?;
     let addresses = store
@@ -443,6 +459,7 @@ where
         held: reconciled.held,
         expired,
         pending_grace: reconciled.pending_grace,
+        check_in_due_ms,
         ..DrainReport::default()
     };
 
@@ -528,11 +545,14 @@ where
                             .dispatch_candidate(&namespace, &address_id)?
                             .as_ref()
                             != Some(&second)
-                            || !transaction.coordination_wake_message_eligible(
-                                &namespace,
-                                &second.message_id,
-                                &live.with_here(second_discovery.clone()),
-                            )?
+                            || !report.dispatchable(
+                                transaction.coordination_wake_message_readiness(
+                                    &namespace,
+                                    &second.message_id,
+                                    &live.with_here(second_discovery.clone()),
+                                    now,
+                                )?,
+                            )
                         {
                             return Ok(None);
                         }
@@ -575,11 +595,12 @@ where
         );
         let leased = store
             .transaction(|transaction| {
-                if !transaction.coordination_wake_message_eligible(
+                if !report.dispatchable(transaction.coordination_wake_message_readiness(
                     &namespace,
                     &second.message_id,
                     &live.with_here(second_discovery.clone()),
-                )? {
+                    now,
+                )?) {
                     return Ok(None);
                 }
                 let leased = transaction.lease_mailbox_head(
@@ -763,11 +784,12 @@ where
                 };
                 if candidate.pane_type == crate::PaneType::Terminal
                     && live_candidate_matches(&candidate, &first_discovery)
-                    && tx.coordination_wake_message_eligible(
+                    && tx.coordination_wake_message_readiness(
                         &namespace,
                         &candidate.message_id,
                         &live,
-                    )?
+                        runtime.clock.now_unix_ms(),
+                    )? == WakeReadiness::Ready
                 {
                     waiting.push(address);
                 }

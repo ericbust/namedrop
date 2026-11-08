@@ -345,7 +345,23 @@ impl Fixture {
         dispatch::message("reply", input, &self.runtime(pane)).unwrap()
     }
     fn drain(&self) {
-        drain_mailboxes(&self.runtime("lead")).unwrap();
+        self.drain_report();
+    }
+    fn drain_report(&self) -> DrainReport {
+        drain_mailboxes(&self.runtime("lead")).unwrap()
+    }
+    /// The host reporting a status change, which records an observation of
+    /// every bound session and drains, as a status hook does.
+    fn status_event(&self, pane: &str, status: &str) -> DrainReport {
+        self.status(pane, status);
+        let result = execute_lifecycle_operation(
+            "event.agent-status-changed",
+            json!({"type":"pane_agent_status_changed","pane_id":pane,
+                "workspace_id":"synthetic-workspace","agent_status":status}),
+            &self.runtime(pane),
+        )
+        .unwrap();
+        serde_json::from_value(result["drain"].clone()).unwrap()
     }
     fn complete(&self, attempt: &str) {
         self.complete_for(attempt, "lead");
@@ -3339,8 +3355,18 @@ fn an_open_assignment_whose_worker_idles_past_the_grace_is_not_flagged_and_its_l
         f.unresolved_attention()
     );
 
+    // The turn ended without a reply, but the worker usually resumes, so the
+    // lead hears nothing until it has stayed quiet for ten minutes.
+    let quiet_until = 100 + 31_000 + 600_000;
     f.status("lead", "idle");
+    assert_eq!(f.drain_report().check_in_due_ms, Some(quiet_until));
+    f.now.store(quiet_until - 1, Ordering::Relaxed);
     f.drain();
+    assert_eq!(f.nudge_prompts().len(), 0);
+    assert_eq!(f.attention_count(), 0);
+
+    f.now.store(quiet_until, Ordering::Relaxed);
+    assert_eq!(f.drain_report().check_in_due_ms, None);
     let nudges = f.nudge_prompts();
     assert_eq!(nudges.len(), 1, "{nudges:?}");
     let body = nudges[0]["untrusted_body"].as_str().unwrap();
@@ -3364,6 +3390,366 @@ fn an_open_assignment_whose_worker_idles_past_the_grace_is_not_flagged_and_its_l
         "{:?}",
         f.unresolved_attention()
     );
+}
+
+/// Sends one assignment and lets the worker's turn end without a reply: the
+/// delivery settles at 100 + 31_000 and the lead is idle.
+fn worker_turn_ended_without_reply(f: &Fixture) -> Value {
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    let attempt = f.attempt(&a["message_id"], "worker");
+    f.status("worker", "idle");
+    f.now.store(100 + 31_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.attempt_state(&attempt), "settled");
+    assert_eq!(f.disposition(&attempt), None);
+    f.status("lead", "idle");
+    a
+}
+
+#[test]
+fn a_worker_that_resumes_inside_the_quiet_window_pushes_the_check_in_back() {
+    let f = Fixture::new();
+    let a = worker_turn_ended_without_reply(&f);
+    assert_eq!(
+        f.drain_report().check_in_due_ms,
+        Some(100 + 31_000 + 600_000)
+    );
+
+    f.now.store(100 + 200_000, Ordering::Relaxed);
+    assert_eq!(f.status_event("worker", "working").check_in_due_ms, None);
+    f.now.store(100 + 300_000, Ordering::Relaxed);
+    let resumed_until = 100 + 200_000 + 600_000;
+    assert_eq!(
+        f.status_event("worker", "idle").check_in_due_ms,
+        Some(resumed_until)
+    );
+
+    f.now.store(100 + 31_000 + 600_000, Ordering::Relaxed);
+    assert_eq!(f.drain_report().check_in_due_ms, Some(resumed_until));
+    assert_eq!(f.nudge_prompts().len(), 0);
+    assert_eq!(f.attention_count(), 0);
+
+    f.now.store(resumed_until - 1, Ordering::Relaxed);
+    f.reply(&a, "worker", "first-result", "completed", None);
+    f.settle_lead_inputs();
+    assert_eq!(f.drain_report().check_in_due_ms, None);
+    let nudges = f.nudge_prompts();
+    assert_eq!(nudges.len(), 1, "{nudges:?}");
+    let body = nudges[0]["untrusted_body"].as_str().unwrap();
+    assert!(body.contains(": completed."), "{body}");
+    assert!(!body.contains(": pending."), "{body}");
+}
+
+#[test]
+fn a_worker_that_stays_quiet_gets_its_check_in_at_the_deadline_and_an_ignored_one_is_flagged() {
+    let f = Fixture::new();
+    worker_turn_ended_without_reply(&f);
+    let due = f
+        .drain_report()
+        .check_in_due_ms
+        .expect("a held check-in carries its deadline");
+    assert_eq!(due, 100 + 31_000 + 600_000);
+    assert_eq!(f.nudge_prompts().len(), 0);
+    assert_eq!(f.attention_count(), 0);
+
+    f.now.store(due, Ordering::Relaxed);
+    f.drain();
+    let nudges = f.nudge_prompts();
+    assert_eq!(nudges.len(), 1, "{nudges:?}");
+    assert!(
+        nudges[0]["untrusted_body"]
+            .as_str()
+            .unwrap()
+            .contains(": pending.")
+    );
+    let wake_attempt = nudges[0]["control"]["attempt_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    f.now.store(due + 31_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.disposition(&wake_attempt).as_deref(), Some("no_reply"));
+    assert_eq!(f.attention_count(), 1, "{:?}", f.unresolved_attention());
+    assert_eq!(
+        f.attention_summary(),
+        "The one continuation for this revision ended or is held without a new work decision. Review handoff.results and act explicitly; Namedrop will not repeat the prompt."
+    );
+    f.now.store(due + 3_600_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.nudge_prompts().len(), 1);
+}
+
+#[test]
+fn a_completed_reply_gets_its_check_in_right_away() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    f.reply(&a, "worker", "first-result", "completed", None);
+    f.status("lead", "idle");
+    f.settle_lead_inputs();
+    assert_eq!(f.drain_report().check_in_due_ms, None);
+    let nudges = f.nudge_prompts();
+    assert_eq!(nudges.len(), 1, "{nudges:?}");
+    assert!(
+        nudges[0]["untrusted_body"]
+            .as_str()
+            .unwrap()
+            .contains(": completed.")
+    );
+}
+
+#[test]
+fn a_queued_check_in_whose_worker_resumes_waits_for_a_new_quiet_window() {
+    let f = Fixture::new();
+    worker_turn_ended_without_reply(&f);
+    let due = 100 + 31_000 + 600_000;
+    f.now.store(due, Ordering::Relaxed);
+    *f.fail_next_nudge.lock().unwrap() = true;
+    f.drain();
+    assert_eq!(f.wake_count(), 1);
+    assert_eq!(f.nudge_prompts().len(), 0);
+
+    f.now.store(due + 1_000, Ordering::Relaxed);
+    f.status_event("worker", "working");
+    f.now.store(due + 2_000, Ordering::Relaxed);
+    let resumed_until = due + 1_000 + 600_000;
+    assert_eq!(
+        f.status_event("worker", "idle").check_in_due_ms,
+        Some(resumed_until)
+    );
+    assert_eq!(f.nudge_prompts().len(), 0);
+
+    f.now.store(resumed_until, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.nudge_prompts().len(), 1);
+    assert_eq!(f.wake_count(), 1);
+}
+
+/// `pane` gets an ordinary delivery from a helper at `at`, works on it for a
+/// minute and ends its turn.
+fn ordinary_turn(f: &Fixture, pane: &str, at: u64, key: &str) {
+    f.now.store(at, Ordering::Relaxed);
+    let sent = dispatch::message(
+        "send",
+        json!({"request_id":key,"source":format!("@{pane} synthetic ordinary work"),
+            "author_kind":"agent_session"}),
+        &f.runtime("helper"),
+    )
+    .unwrap();
+    let attempt = f.attempt(&sent["message_id"], pane);
+    f.now.store(at + 1_000, Ordering::Relaxed);
+    f.status_event(pane, "working");
+    f.now.store(at + 60_000, Ordering::Relaxed);
+    f.complete_for(&attempt, pane);
+    f.status_event(pane, "idle");
+}
+
+#[test]
+fn a_worker_busy_with_other_deliveries_still_gets_its_stalled_check_in_and_an_ignored_one_is_flagged()
+ {
+    let f = Fixture::new();
+    f.register_worker("helper");
+    worker_turn_ended_without_reply(&f);
+    let due = 100 + 31_000 + 600_000;
+    for (n, at) in (100 + 31_000 + 100_000..due).step_by(300_000).enumerate() {
+        ordinary_turn(&f, "worker", at, &format!("ordinary-{n}"));
+        assert_eq!(f.drain_report().check_in_due_ms, Some(due));
+        assert_eq!(f.nudge_prompts().len(), 0);
+    }
+
+    f.now.store(due, Ordering::Relaxed);
+    f.drain();
+    let nudges = f.nudge_prompts();
+    assert_eq!(nudges.len(), 1, "{nudges:?}");
+    assert!(
+        nudges[0]["untrusted_body"]
+            .as_str()
+            .unwrap()
+            .contains(": pending.")
+    );
+    let wake_attempt = nudges[0]["control"]["attempt_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    f.now.store(due + 31_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.disposition(&wake_attempt).as_deref(), Some("no_reply"));
+    assert_eq!(f.attention_count(), 1, "{:?}", f.unresolved_attention());
+    assert_eq!(
+        f.attention_summary(),
+        "The one continuation for this revision ended or is held without a new work decision. Review handoff.results and act explicitly; Namedrop will not repeat the prompt."
+    );
+}
+
+#[test]
+fn a_worker_that_keeps_resuming_without_replying_is_checked_in_on_half_an_hour_after_its_turn_ended()
+ {
+    let f = Fixture::new();
+    worker_turn_ended_without_reply(&f);
+    let cap = 100 + 31_000 + 1_800_000;
+    for at in (100 + 31_000 + 100_000..cap).step_by(300_000) {
+        f.now.store(at, Ordering::Relaxed);
+        f.status_event("worker", "working");
+        f.now.store(at + 60_000, Ordering::Relaxed);
+        assert_eq!(
+            f.status_event("worker", "idle").check_in_due_ms,
+            Some((at + 600_000).min(cap))
+        );
+    }
+    f.now.store(cap - 1, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.nudge_prompts().len(), 0);
+
+    f.now.store(cap, Ordering::Relaxed);
+    assert_eq!(f.drain_report().check_in_due_ms, None);
+    assert_eq!(f.nudge_prompts().len(), 1);
+}
+
+#[test]
+fn another_workers_ordinary_work_does_not_hold_a_stalled_check_in() {
+    let f = Fixture::new();
+    f.register_worker("helper");
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    let b = f.send(&id, "second", "reviewer");
+    f.now.store(100 + 31_000, Ordering::Relaxed);
+    f.drain();
+    for (message, pane) in [(&a, "worker"), (&b, "reviewer")] {
+        let attempt = f.attempt(&message["message_id"], pane);
+        assert_eq!(f.attempt_state(&attempt), "settled");
+    }
+    f.status("lead", "idle");
+    let due = 100 + 31_000 + 600_000;
+    for (n, at) in (100 + 31_000 + 100_000..due).step_by(300_000).enumerate() {
+        ordinary_turn(&f, "reviewer", at, &format!("ordinary-{n}"));
+        assert_eq!(f.drain_report().check_in_due_ms, Some(due));
+    }
+    f.now.store(due, Ordering::Relaxed);
+    assert_eq!(f.drain_report().check_in_due_ms, None);
+    let nudges = f.nudge_prompts();
+    assert_eq!(nudges.len(), 1, "{nudges:?}");
+}
+
+/// A worker's completed reply, which the lead reads at `read_at` while it is
+/// still working, before it goes idle.
+fn lead_reads_a_completed_reply(f: &Fixture, read_at: u64) -> (Value, Value) {
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    f.reply(&a, "worker", "first-result", "completed", None);
+    f.now.store(read_at, Ordering::Relaxed);
+    let results = f.handoff("handoff.results", json!({"coordination_id":id}));
+    assert_eq!(results["assignments"][0]["work_outcome"], "completed");
+    (id, a)
+}
+
+#[test]
+fn a_lead_that_read_the_results_gets_no_check_in_until_the_window_passes() {
+    let f = Fixture::new();
+    let read_at = 5_000;
+    lead_reads_a_completed_reply(&f, read_at);
+    f.status("lead", "idle");
+    f.settle_lead_inputs();
+    let due = read_at + 600_000;
+    assert_eq!(f.drain_report().check_in_due_ms, Some(due));
+    assert_eq!(f.wake_count(), 0);
+
+    f.now.store(due - 1, Ordering::Relaxed);
+    assert_eq!(f.drain_report().check_in_due_ms, Some(due));
+    assert_eq!(f.nudge_prompts().len(), 0);
+    assert_eq!(f.attention_count(), 0);
+
+    f.now.store(due, Ordering::Relaxed);
+    assert_eq!(f.drain_report().check_in_due_ms, None);
+    let nudges = f.nudge_prompts();
+    assert_eq!(nudges.len(), 1, "{nudges:?}");
+    assert!(
+        nudges[0]["untrusted_body"]
+            .as_str()
+            .unwrap()
+            .contains(": completed.")
+    );
+}
+
+#[test]
+fn a_change_after_the_lead_read_the_results_gets_its_check_in_as_usual() {
+    let f = Fixture::new();
+    let (id, _) = lead_reads_a_completed_reply(&f, 5_000);
+    let b = f.send(&id, "second", "reviewer");
+    f.now.store(6_000, Ordering::Relaxed);
+    f.reply(&b, "reviewer", "second-result", "completed", None);
+    f.status("lead", "idle");
+    f.settle_lead_inputs();
+    assert_eq!(f.drain_report().check_in_due_ms, None);
+    let nudges = f.nudge_prompts();
+    assert_eq!(nudges.len(), 1, "{nudges:?}");
+    let body = nudges[0]["untrusted_body"].as_str().unwrap();
+    assert!(!body.contains(": pending."), "{body}");
+}
+
+#[test]
+fn reads_by_another_session_or_of_another_coordination_hold_nothing() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let other = f.handoff(
+        "handoff.begin",
+        json!({"request_id":"other-begin","deliverable":"Another synthetic answer"}),
+    )["coordination_id"]
+        .clone();
+    let a = f.send(&id, "first", "worker");
+    f.reply(&a, "worker", "first-result", "completed", None);
+    f.now.store(5_000, Ordering::Relaxed);
+    f.handoff("handoff.results", json!({"coordination_id":other}));
+    for pane in ["worker", "reviewer"] {
+        let status =
+            execute_handoff_operation("handoff.status", json!({}), &f.runtime(pane)).unwrap();
+        assert_eq!(status["coordinations"], json!([]));
+        assert!(
+            execute_handoff_operation(
+                "handoff.results",
+                json!({"coordination_id":id}),
+                &f.runtime(pane)
+            )
+            .is_err()
+        );
+    }
+    f.status("lead", "idle");
+    f.settle_lead_inputs();
+    assert_eq!(f.drain_report().check_in_due_ms, None);
+    assert_eq!(f.nudge_prompts().len(), 1);
+}
+
+#[test]
+fn a_read_after_the_check_in_was_queued_holds_it() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    f.reply(&a, "worker", "first-result", "completed", None);
+    f.status("lead", "idle");
+    f.drain();
+    let inbox =
+        execute_integration_operation("delivery.inbox", json!({}), &f.runtime("lead")).unwrap();
+    let delivered = inbox["envelopes"].as_array().unwrap();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    *f.fail_next_nudge.lock().unwrap() = true;
+    f.complete(delivered[0]["control"]["attempt_id"].as_str().unwrap());
+    assert_eq!(f.wake_count(), 1);
+    assert_eq!(f.nudge_prompts().len(), 0);
+
+    let read_at = 5_000;
+    f.now.store(read_at, Ordering::Relaxed);
+    let status = f.handoff("handoff.status", json!({}));
+    assert_eq!(status["coordinations"][0]["coordination_id"], id);
+    f.now.store(read_at + 1_000, Ordering::Relaxed);
+    let due = read_at + 600_000;
+    assert_eq!(f.drain_report().check_in_due_ms, Some(due));
+    assert_eq!(f.nudge_prompts().len(), 0);
+
+    f.now.store(due, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.nudge_prompts().len(), 1);
+    assert_eq!(f.wake_count(), 1);
 }
 
 #[test]
@@ -3936,4 +4322,28 @@ fn the_review_message_envelope_binds_one_granted_acknowledgement_per_coordinatio
             .contains(&json!("handoff.acknowledge-granted")),
         "a later operator message carries no grant"
     );
+}
+
+#[test]
+fn a_tracked_send_tells_the_lead_its_answer_arrives_as_a_delivery_and_an_ordinary_send_does_not() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let tracked = f.send(&id, "first", "worker");
+    let ordinary = dispatch::message(
+        "send",
+        json!({"request_id":"plain","source":"@reviewer synthetic note","author_kind":"agent_session"}),
+        &f.runtime("lead"),
+    )
+    .unwrap();
+    let compact = |data: Value| {
+        agent_result_view(&serde_json::to_value(CommandResult::success("send", data)).unwrap())
+            ["data"]
+            .clone()
+    };
+    assert_eq!(
+        compact(tracked)["next"],
+        "The answer arrives as a new delivery. Finish your other sends and independent work, then end your turn; do not wait or poll."
+    );
+    let ordinary = compact(ordinary);
+    assert!(ordinary.get("next").is_none(), "{ordinary}");
 }

@@ -622,6 +622,21 @@ impl Fixture {
         )
     }
 
+    /// The hook as a host calls it, with its own session id on stdin.
+    pub fn hook_as(
+        &self,
+        session: &str,
+        workspace: &str,
+        pane: &str,
+        prompt: &str,
+    ) -> Option<Value> {
+        execute_user_prompt_submit_hook(
+            &json!({"hook_event_name":"UserPromptSubmit","prompt":prompt,"session_id":session})
+                .to_string(),
+            &self.runtime(workspace, pane),
+        )
+    }
+
     pub fn advance(&self, ms: u64) {
         self.clock.0.fetch_add(ms, Ordering::Relaxed);
     }
