@@ -1794,3 +1794,131 @@ fn a_stop_another_hook_blocked_settles_at_the_turns_next_stop() {
     assert_eq!(space.answers("pane-lead"), ["pong"]);
     assert_eq!(space.claims()[0]["state"], json!({"done":"replied"}));
 }
+
+/// A retried Stop may carry other text, as when the host replays a Stop
+/// after the turn's text changed. The delivery still gets one answer: the
+/// first Stop's.
+#[test]
+fn a_retried_stop_with_other_text_settles_the_delivery_once() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    let armed = fs::read(space.claims_file()).unwrap();
+    space.installed_stop("session-reviewer", CLAUDE.1, "pong");
+    space.installed_stop("session-reviewer", CLAUDE.1, "pong, and one more thing.");
+    fs::write(space.claims_file(), &armed).unwrap();
+    space.installed_stop("session-reviewer", CLAUDE.1, "A different answer.");
+    assert_eq!(space.dispositions(), [vec![attempt, "reply".to_owned()]]);
+    assert_eq!(space.bodies(), ["Reply with the single word pong.", "pong"]);
+    assert_eq!(space.answers("pane-lead"), ["pong"]);
+
+    let space = Space::new();
+    space.send_as_person("question", "@reviewer Option A or option B?", None);
+    let question = space.herdr.envelope_for("pane-reviewer");
+    let attempt = question["control"]["attempt_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &question.to_string(),
+    );
+    let armed = fs::read(space.claims_file()).unwrap();
+    space.installed_stop("session-reviewer", CLAUDE.1, "Option B.");
+    space.installed_stop("session-reviewer", CLAUDE.1, "Option C.");
+    fs::write(space.claims_file(), &armed).unwrap();
+    space.installed_stop("session-reviewer", CLAUDE.1, "Option C.");
+    assert_eq!(
+        space
+            .relayed()
+            .iter()
+            .map(|row| row[3].as_str())
+            .collect::<Vec<_>>(),
+        ["Option B."]
+    );
+    assert_eq!(space.dispositions(), [vec![attempt, "no_reply".to_owned()]]);
+}
+
+/// A prompt typed into the pane is never a delivery, whatever claim the
+/// session holds: its final message is posted nowhere, and an armed claim
+/// it interrupts or a held one stays open for the agent to settle.
+#[test]
+fn a_typed_prompt_after_an_armed_or_held_claim_is_never_sent() {
+    for held in [false, true] {
+        let space = Space::new();
+        space.send_as_person("question", "@reviewer Run the build and report.", None);
+        let question = space.herdr.envelope_for("pane-reviewer");
+        let attempt = question["control"]["attempt_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        space.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            CLAUDE,
+            &question.to_string(),
+        );
+        if held {
+            space.stop_with("session-reviewer", CLAUDE, "The build is running.", true);
+        }
+        let typed = space.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            ("prompt_id", "typed-turn"),
+            "Which file did you change?",
+        );
+        space.installed_stop("session-reviewer", "typed-turn", "I changed src/main.rs.");
+        assert!(space.relayed().is_empty(), "{held}: {:?}", space.relayed());
+        assert!(space.dispositions().is_empty(), "{held}");
+        let state = if held { "held" } else { "interrupted" };
+        assert_eq!(space.claims()[0]["state"], json!({"left": state}));
+        assert!(
+            typed.contains(&format!(
+                "Namedrop: delivery {attempt} from an earlier turn"
+            )),
+            "{held}: {typed}"
+        );
+    }
+}
+
+/// The Stop worker's own pipeline, the one the CLI runs, spends the thread's
+/// Automatic Reply Limit: the reply that reaches it pauses the thread and
+/// holds the answer.
+#[test]
+fn the_stop_workers_pipeline_spends_the_automatic_reply_limit() {
+    let space = Space::new();
+    space.armed_ask();
+    let thread = space.rows("SELECT thread_id FROM collaboration_messages WHERE request_id='ask'")
+        [0][0]
+        .clone();
+    rusqlite::Connection::open(space.directory.state.join("namedrop.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE thread_controls SET reply_allowance=1 WHERE thread_id=?1",
+            [&thread],
+        )
+        .unwrap();
+    space.installed_stop("session-reviewer", CLAUDE.1, "pong");
+    assert_eq!(space.dispositions()[0][1], "reply");
+    assert_eq!(space.bodies(), ["Reply with the single word pong.", "pong"]);
+    assert_eq!(
+        space.rows(&format!(
+            "SELECT CAST(paused AS TEXT), CAST(reply_allowance AS TEXT) FROM thread_controls
+             WHERE thread_id='{thread}'"
+        )),
+        [vec!["1".to_owned(), "0".to_owned()]]
+    );
+    assert_eq!(
+        space.rows(&format!(
+            "SELECT source_kind FROM attention_items
+             WHERE source_id='{thread}' AND resolved_at_ms IS NULL"
+        )),
+        [vec!["automatic_reply_limit".to_owned()]]
+    );
+    assert!(
+        space.answers("pane-lead").is_empty(),
+        "the paused thread delivered the answer"
+    );
+}
