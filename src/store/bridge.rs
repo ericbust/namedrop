@@ -470,9 +470,9 @@ impl StateTransaction<'_> {
         source: &MessageId,
         relay: &MessageId,
         attribution: &MutationAttribution,
-    ) -> Result<Option<(StateNamespace, MessageId)>, StoreError> {
+    ) -> Result<(), StoreError> {
         let Some((space, original)) = self.copy_origin(namespace, source)? else {
-            return Ok(None);
+            return Ok(());
         };
         let target = StateNamespace::new(namespace.session_socket_id.clone(), space);
         let (source_label, target_label) = self.transaction.query_row(
@@ -555,8 +555,7 @@ impl StateTransaction<'_> {
             copy.as_str(),
             TransitionKind::Created,
             attribution,
-        )?;
-        Ok(Some((target, copy)))
+        )
     }
 
     fn bridged_thread(

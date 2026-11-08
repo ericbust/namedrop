@@ -2619,15 +2619,17 @@ impl StateTransaction<'_> {
         namespace: &StateNamespace,
         exclude: &MessageId,
     ) -> Result<String, StoreError> {
-        let mut statement = self.transaction.prepare(
+        let mut statement = self.transaction.prepare(&format!(
             "SELECT CASE WHEN m.author_kind = 'human' THEN 'person' ELSE m.author_alias_snapshot END,
                     m.body FROM collaboration_messages m
              WHERE m.session_socket_id = ?1 AND m.worktree_id = ?2 AND m.message_id <> ?3
-               AND m.grammar_version <> 'terminal-relay/v1'
+               AND {} <> 'terminal-relay/v1'
                AND EXISTS(SELECT 1 FROM collaboration_messages root
                    WHERE root.session_socket_id = m.session_socket_id AND root.worktree_id = m.worktree_id
                      AND root.thread_id = m.thread_id AND root.in_reply_to IS NULL AND root.grammar_version = 'channel/v1')
-             ORDER BY m.created_at_ms DESC, m.rowid DESC LIMIT 6")?;
+             ORDER BY m.created_at_ms DESC, m.rowid DESC LIMIT 6",
+            terminal_relay::effective_grammar_sql("m")
+        ))?;
         let mut lines = statement
             .query_map(
                 params![
@@ -3919,12 +3921,13 @@ impl StateTransaction<'_> {
             |row| row.get::<_, String>(0),
         )?;
         let prior_messages = {
-            let mut statement = self.transaction.prepare(
-                "SELECT body FROM collaboration_messages
+            let mut statement = self.transaction.prepare(&format!(
+                "SELECT body FROM collaboration_messages m
                  WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3
-                   AND grammar_version <> 'terminal-relay/v1'
+                   AND {} <> 'terminal-relay/v1'
                  ORDER BY thread_order DESC LIMIT 20",
-            )?;
+                terminal_relay::effective_grammar_sql("m")
+            ))?;
             statement
                 .query_map(
                     params![

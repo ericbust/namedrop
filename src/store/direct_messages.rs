@@ -402,9 +402,10 @@ impl StateTransaction<'_> {
         if matches!(cursor, Some(None)) {
             return Ok(None);
         }
-        let mut statement=self.transaction.prepare("SELECT message_id,thread_id,in_reply_to,created_at_ms,author_address_id,author_kind,grammar_version,body
-            FROM collaboration_messages WHERE session_socket_id=?1 AND worktree_id=?2 AND thread_id=?3
-                AND (?4 IS NULL OR thread_order<?4) ORDER BY thread_order DESC LIMIT ?5")?;
+        let mut statement=self.transaction.prepare(&format!("SELECT message_id,thread_id,in_reply_to,created_at_ms,author_address_id,author_kind,{},body
+            FROM collaboration_messages m WHERE session_socket_id=?1 AND worktree_id=?2 AND thread_id=?3
+                AND (?4 IS NULL OR thread_order<?4) ORDER BY thread_order DESC LIMIT ?5",
+            super::terminal_relay::effective_grammar_sql("m")))?;
         let mut messages = statement
             .query_map(
                 params![
@@ -890,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_ending_stays_in_direct_message_with_private_attention_and_unread_metadata() {
+    fn final_message_answer_stays_in_direct_message_with_no_attention_and_unread_metadata() {
         let mut f = Fixture::new();
         let root = f.send("dm-terminal-request", "Which option should we use?");
         let session = crate::AgentSessionId::new("session-peer");
@@ -973,10 +974,7 @@ mod tests {
         );
         assert_eq!(peer.last_message_id.as_deref(), Some(relay.as_str()));
         assert_eq!(peer.last_agent_message_id.as_deref(), Some(relay.as_str()));
-        assert_eq!(
-            peer.attention_count, 1,
-            "DM terminal reply must need the operator"
-        );
+        assert_eq!(peer.attention_count, 0, "an answer flags nothing");
         let rows = f.store.dashboard_rows(&f.ns).unwrap();
         assert!(
             rows.messages.is_empty(),

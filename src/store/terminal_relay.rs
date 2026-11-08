@@ -1,6 +1,45 @@
 use super::*;
 
 const GRAMMAR: &str = "terminal-relay/v1";
+const RELAY_ID_PREFIX: &str = "terminal-relay:";
+
+/// SQL for the grammar a message row reads as, with `message` as its table
+/// alias.
+///
+/// `terminal-relay/v1` has had two writers. Through 1.5.0 the text was scraped
+/// from an agent's terminal, so it may be private and stays out of recaps and
+/// flagged for the person. Since 1.6.0 it is the final message the agent wrote
+/// as its answer, which reads as an ordinary reply under the name
+/// `final-message/v1`. That name is never stored, because messages are
+/// immutable and the old rows can't be rewritten.
+///
+/// The old code recorded an arm fact for every attempt it could scrape, and the
+/// current code never does, so that fact tells the two apart for good. A
+/// mirrored copy has no fact of its own, so it follows `bridged_messages` to its
+/// origin and classifies like the row it copies.
+pub(super) fn effective_grammar_sql(message: &str) -> String {
+    let origin = |column: &str| {
+        format!(
+            "(SELECT copy.{column} FROM bridged_messages copy
+              WHERE copy.session_socket_id = {message}.session_socket_id
+                AND copy.worktree_id = {message}.worktree_id
+                AND copy.message_id = {message}.message_id)"
+        )
+    };
+    format!(
+        "CASE WHEN {message}.grammar_version = '{GRAMMAR}' AND NOT EXISTS (
+             SELECT 1 FROM transition_facts arm
+             WHERE arm.session_socket_id = {message}.session_socket_id
+               AND arm.worktree_id = COALESCE({space}, {message}.worktree_id)
+               AND arm.entity_kind = 'terminal_relay_attempt'
+               AND arm.entity_id = substr(COALESCE({relay}, {message}.message_id), {attempt_at})
+               AND arm.transition_kind = 'activated')
+         THEN 'final-message/v1' ELSE {message}.grammar_version END",
+        space = origin("origin_space_id"),
+        relay = origin("origin_message_id"),
+        attempt_at = RELAY_ID_PREFIX.len() + 1,
+    )
+}
 
 struct RelayAttempt {
     address_id: String,
@@ -115,7 +154,7 @@ impl StateTransaction<'_> {
             &attribution.actor_id,
             ending.ended_at_ms,
         );
-        let message_id = MessageId::new(format!("terminal-relay:{}", ending.attempt_id.as_str()));
+        let message_id = MessageId::new(format!("{RELAY_ID_PREFIX}{}", ending.attempt_id.as_str()));
         let replied = self.transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM collaboration_messages
                WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?8)
@@ -182,29 +221,47 @@ impl StateTransaction<'_> {
                 &at,
             )?;
         }
-        let mut conversations = vec![(namespace.clone(), message_id.clone())];
-        if let Some(copy) = self.mirror_terminal_relay(namespace, &source, &message_id, &at)? {
-            conversations.push(copy);
-        }
-        for (conversation, relay) in conversations {
-            self.open_attention_item(
-                &conversation,
-                &AttentionItemDraft {
-                    id: crate::AttentionItemId::new(format!(
-                        "terminal-relay:{}",
-                        ending.attempt_id.as_str()
-                    )),
-                    source_kind: crate::AttentionSourceKind::TerminalRelay,
-                    source_id: relay.as_str().to_owned(),
-                    summary: format!(
-                        "@{} answered in their terminal and may need your reply.",
-                        attempt.alias
-                    ),
-                },
-                &at,
+        self.mirror_terminal_relay(namespace, &source, &message_id, &at)?;
+        Ok(Some(message_id))
+    }
+
+    /// Clears the flags 1.6.0 and 1.6.1 opened on final-message answers, in
+    /// every space. Scraped rows keep theirs until the person replies.
+    pub(crate) fn resolve_answer_attention(
+        &mut self,
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        let answers = {
+            let mut statement = self.transaction.prepare(&format!(
+                "SELECT i.session_socket_id, i.worktree_id, i.source_id
+                 FROM attention_items i JOIN collaboration_messages m
+                   ON m.session_socket_id=i.session_socket_id AND m.worktree_id=i.worktree_id
+                     AND m.message_id=i.source_id
+                 WHERE i.source_kind='terminal_relay' AND i.resolved_at_ms IS NULL
+                   AND {} <> '{GRAMMAR}'",
+                effective_grammar_sql("m")
+            ))?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        StateNamespace::for_space(
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                        ),
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (namespace, answer) in answers {
+            self.resolve_attention_source(
+                &namespace,
+                crate::AttentionSourceKind::TerminalRelay,
+                &answer,
+                attribution,
             )?;
         }
-        Ok(Some(message_id))
+        Ok(())
     }
 
     pub(super) fn resolve_terminal_relay_attention(

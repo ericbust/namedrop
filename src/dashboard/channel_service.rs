@@ -142,9 +142,20 @@ fn recover(state: &Path) -> Result<(), String> {
     if !state.join("namedrop.sqlite3").is_file() {
         return Ok(());
     }
+    let now = crate::SystemClock.now_unix_ms();
     let namespaces = StateStore::open(state)
         .and_then(|mut store| {
-            store.transaction(|tx| tx.fail_abandoned_channels(crate::SystemClock.now_unix_ms()))
+            store.transaction(|tx| {
+                // Updating restarts this server with no action from the person,
+                // and activation only runs when they ask for it, so old flags
+                // clear here, before Channels shows its first frame.
+                tx.resolve_answer_attention(&crate::MutationAttribution::new(
+                    crate::ActorKind::Plugin,
+                    "namedrop-channels",
+                    now,
+                ))?;
+                tx.fail_abandoned_channels(now)
+            })
         })
         .map_err(|e| e.to_string())?;
     for ns in namespaces {
@@ -403,7 +414,7 @@ mod tests {
         ] {
             database.execute_batch(sql).unwrap();
         }
-        let mut store = StateStore::open(&root).unwrap();
+        let store = StateStore::open(&root).unwrap();
         database
             .execute_batch(
                 "INSERT INTO collaboration_messages (
@@ -419,19 +430,33 @@ mod tests {
                  INSERT INTO attention_items
                  SELECT session_socket_id, worktree_id, 'unarmed-attention', source_kind,
                      'terminal-relay:unarmed', summary, opened_at_ms, NULL
-                 FROM attention_items WHERE attention_item_id='relay-attention';",
+                 FROM attention_items WHERE attention_item_id='relay-attention';
+                 INSERT INTO order_counters
+                 VALUES ('test-schema-socket','home','worktree_transition','',3);",
             )
             .unwrap();
-        let ns = StateNamespace::for_space("test-schema-socket", "home");
-        assert_eq!(open_terminal_relay_items(&mut store, &ns).len(), 2);
+        let open = || -> Vec<String> {
+            database
+                .prepare(
+                    "SELECT source_id FROM attention_items
+                     WHERE source_kind='terminal_relay' AND resolved_at_ms IS NULL
+                     ORDER BY source_id",
+                )
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            open(),
+            ["terminal-relay:dm-attempt", "terminal-relay:unarmed"]
+        );
 
         let mut service = ChannelService::start(&root).unwrap();
         service.shutdown().unwrap();
 
-        assert_eq!(
-            open_terminal_relay_items(&mut store, &ns),
-            ["terminal-relay:dm-attempt"]
-        );
+        assert_eq!(open(), ["terminal-relay:dm-attempt"]);
         drop((store, database));
         std::fs::remove_dir_all(root).unwrap();
     }
