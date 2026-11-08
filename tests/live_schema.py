@@ -383,6 +383,10 @@ def main():
     with tempfile.TemporaryDirectory(prefix='namedrop-live-schema-') as directory:
         base = Path(directory)
         simulators = {gated: simulator(base, gated) for gated in (True, False)}
+        released_1_6_0 = {'runtime_protocol': 1, 'live_upgrade_epoch': 1, 'state_schema': 7,
+                          'collaboration_protocol': 'collab/v1', 'command_gate': 1,
+                          'live_migrate_from': [3, 4, 5, 6]}
+        assert runtime.live_compatible(released_1_6_0, contracts(True)[1])
         for old, new in (contracts(True), contracts(False)):
             assert runtime.live_compatible(old, new)
             assert runtime.live_compatible(dict(new), new)
