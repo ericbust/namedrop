@@ -131,11 +131,26 @@ where
         Some(_) => None,
         None => route_leading_mentions(&input.prompt, runtime),
     };
+    // A delivery a claim left open stays open until the agent settles it, so
+    // every later turn the agent sees says how.
+    let held = held.join("\n\n");
+    let with_way_back = |guidance: &str| {
+        if held.is_empty() {
+            guidance.to_owned()
+        } else {
+            format!("{guidance}\n\n{held}")
+        }
+    };
+    let handoff = |guidance: &str| {
+        if held.is_empty() {
+            failed_handoff(guidance, reader, runtime)
+        } else {
+            under_roster(&with_way_back(guidance), reader, runtime)
+        }
+    };
     let Some(outcome) = outcome else {
-        // A delivery a Stop held stays open until the agent answers it, so
-        // every later turn says how.
         if !held.is_empty() {
-            return Some(under_roster(&held.join("\n\n"), reader, runtime));
+            return Some(under_roster(&held, reader, runtime));
         }
         // An ordinary turn is the persona roster's boundary. With nothing new
         // to supply, non-Mention input stays invisible exactly as before.
@@ -162,37 +177,35 @@ where
             }))
         }
         PromptMentionOutcome::Refused(RouteRefusal::UnknownMention { .. }) => {
-            Some(failed_handoff(FAILED_HANDOFF_CONTEXTS[0], reader, runtime))
+            Some(handoff(FAILED_HANDOFF_CONTEXTS[0]))
         }
-        PromptMentionOutcome::Failed => {
-            Some(failed_handoff(FAILED_HANDOFF_CONTEXTS[1], reader, runtime))
-        }
+        PromptMentionOutcome::Failed => Some(handoff(FAILED_HANDOFF_CONTEXTS[1])),
         PromptMentionOutcome::NeedsPick { settled, choices } => Some(under_roster(
-            &workspace_picker(&settled, &choices),
+            &with_way_back(&workspace_picker(&settled, &choices)),
             reader,
             runtime,
         )),
         PromptMentionOutcome::NeedsRecipient { scope, names } => Some(under_roster(
-            &recipient_picker(&scope, &names),
+            &with_way_back(&recipient_picker(&scope, &names)),
             reader,
             runtime,
         )),
         PromptMentionOutcome::Refused(refusal @ RouteRefusal::NotHere { .. }) => {
             Some(under_roster(
-                &format!(
+                &with_way_back(&format!(
                     "Namedrop did not send this prompt. {refusal} The prompt was preserved for \
                      you unchanged; do not retry automatically. Tell the person the #label @name \
                      to type."
-                ),
+                )),
                 reader,
                 runtime,
             ))
         }
         PromptMentionOutcome::Refused(refusal) => Some(under_roster(
-            &format!(
+            &with_way_back(&format!(
                 "Namedrop did not send this prompt: {refusal}. The prompt was preserved for you \
                  unchanged; do not retry automatically. Tell the person what to change."
-            ),
+            )),
             reader,
             runtime,
         )),

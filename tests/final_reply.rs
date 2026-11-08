@@ -1688,3 +1688,26 @@ fn every_unsettled_ending_shows_the_way_back_on_later_prompts() {
     );
     assert!(typed.contains("complete.no-reply: "), "{typed}");
 }
+
+/// A prompt that leads with a Mention Namedrop cannot send still reaches the
+/// agent, so it still says how to settle a delivery left open.
+#[test]
+fn a_leading_mention_prompt_keeps_the_way_back() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    space.stop("session-reviewer", CLAUDE, " ");
+    let context = space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        ("prompt_id", "mention-turn"),
+        "@ghost please take a look",
+    );
+    assert!(context.contains("Namedrop could not resolve"), "{context}");
+    assert!(
+        context.contains(&format!(
+            "Namedrop: delivery {attempt} from an earlier turn is still open;"
+        )),
+        "{context}"
+    );
+}
