@@ -29,6 +29,7 @@ pub fn remove_fixture(root: &Path) -> io::Result<()> {
 /// reminder clock. Their work is moot once the test is over, and one blocked on
 /// a fixture's fake Herdr would hold the fixture for its whole Herdr timeout, so
 /// each is killed and then awaited.
+#[cfg(target_os = "linux")]
 const BACKGROUND_MODES: [&[u8]; 4] = [
     b"agent-status-worker",
     b"--deferred-worker",
