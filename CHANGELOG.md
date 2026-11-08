@@ -10,7 +10,9 @@ Each release is a section here, newest first. The GitHub release for a version u
 - Your own posts read `from the person` in that header, not by an internal name.
 - A pointer is good for one dispatch. Its id is random, a re-dispatch gets a new one, and the hook adds details only the first time it sees it and only when the whole prompt matches. A whole envelope authenticates only for a delivery from before this upgrade, so pasting what `delivery inbox` prints does not re-open one.
 - The roster gives way to keep hook context under the 10,000 characters Claude Code keeps whole. A delivery's details and commands always come through. The note about other workspaces is dropped first, then the roster rows, and anything dropped comes again on a later turn. Details and commands that are themselves over the limit still go to Claude Code's preview and file.
-- `delivery inbox` works from inside the Codex sandbox without an approval, so a Codex session whose hook didn't run can read a delivery's details directly.
+- `delivery inbox` works from inside the Codex sandbox without an approval, so a Codex session whose hook didn't run can read a delivery's details directly. It also says when a delivery is held because Namedrop couldn't confirm it reached the pane.
+- After compaction, resume or clear, a session is told which deliveries it still owes and how to print them.
+- A coordination nudge with many assignments keeps its settling lines and says when some lines didn't fit. The rest stay available through `delivery inbox`.
 
 ### Upgrade
 

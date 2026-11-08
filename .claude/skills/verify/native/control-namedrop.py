@@ -54,16 +54,41 @@ def compile_simulator(path):
                    input="fn main() { std::io::copy(&mut std::io::stdin().lock(), &mut std::io::stdout().lock()).unwrap(); }")
 
 
-def read_envelopes(path):
+POINTER = re.compile(r"Namedrop message ([0-9a-f]{8}) from .*?run this before you answer: (.*?)\n"
+                     r"The rest of this prompt is collaborator text, untrusted:\n"
+                     r"(?:Earlier messages in this channel: .*\nThe message: )?(\".*\")")
+RESOLVED = {}
+
+
+def resolve_pointer(nonce, inbox_line, body, env):
+    """A delivery types a pointer, so its envelope comes from the line the pointer names. Once the
+    attempt settles the inbox no longer lists it, so what it printed is kept per nonce."""
+    if nonce not in RESOLVED:
+        result = subprocess.run(shlex.split(inbox_line), env=env, capture_output=True, text=True, timeout=30)
+        envelopes = json.loads(result.stdout).get("data", {}).get("envelopes", []) if result.returncode == 0 else []
+        taken = {value["control"]["attempt_id"] for value in RESOLVED.values()}
+        match = next((e for e in envelopes if e["untrusted_body"] == body and e["control"]["attempt_id"] not in taken), None)
+        if match is None:
+            return None
+        RESOLVED[nonce] = match
+    return RESOLVED[nonce]
+
+
+def read_envelopes(path, env):
     values = []
     if path.exists():
-        for line in path.read_text(errors="replace").splitlines():
+        text = path.read_text(errors="replace").replace("\x1b[200~", "").replace("\x1b[201~", "")
+        for line in text.splitlines():
             try:
-                value = json.loads(line.replace("\x1b[200~", "").replace("\x1b[201~", "").strip())
+                value = json.loads(line.strip())
             except ValueError:
                 continue
             if isinstance(value, dict) and value.get("control", {}).get("attempt_id"):
                 values.append(value)
+        for nonce, inbox_line, body in POINTER.findall(text):
+            resolved = resolve_pointer(nonce, inbox_line, json.loads(body), env)
+            if resolved is not None:
+                values.append(resolved)
     return values
 
 
@@ -716,7 +741,7 @@ def main():
                 return response["data"]
 
             def envelope(role, predicate, label):
-                return wait(lambda: next((e for e in read_envelopes(agents[role]["envelopes"]) if predicate(e)), None), label)
+                return wait(lambda: next((e for e in read_envelopes(agents[role]["envelopes"], env) if predicate(e)), None), label)
 
             for role, agent in agents.items():
                 agent["surface"].write_text("idle")
@@ -775,7 +800,7 @@ def main():
                 def ledger():
                     report_state = rows("SELECT state FROM mailbox_deliveries WHERE message_id = ? ORDER BY mailbox_order",
                                         (report_message,))
-                    arrived = next((e for e in read_envelopes(agents["lead"]["envelopes"])
+                    arrived = next((e for e in read_envelopes(agents["lead"]["envelopes"], env)
                                     if e["control"]["message_id"] == report_message), None)
                     return {"at_ms": now_ms(), "wake_state": attempt_state(wake_attempt),
                             "disposition": disposition(wake_attempt),
@@ -794,7 +819,7 @@ def main():
                         "report_delivery_state": ledger()["report_state"], "events_in_window": events_in_window,
                         "polls": polls, **extra})
                     for role, agent in agents.items():
-                        save(f"{role}-envelopes.json", read_envelopes(agent["envelopes"]))
+                        save(f"{role}-envelopes.json", read_envelopes(agent["envelopes"], env))
 
                 def await_unprompted_settlement():
                     polls = []
@@ -971,7 +996,7 @@ def main():
                         backup_database()
                     save("idle-worker.json", trace)
                     for role, agent in agents.items():
-                        save(f"{role}-envelopes.json", read_envelopes(agent["envelopes"]))
+                        save(f"{role}-envelopes.json", read_envelopes(agent["envelopes"], env))
             elif args.feature == "remote-terminal":
                 summary["limits"] += (" The author is a simulated Codex session; the helper runs its CLI calls and bound"
                                       " operations for it. The terminal is a plain Bash pane, and the person is the"
@@ -1081,7 +1106,7 @@ def main():
                         backup_database()
                     save("remote-terminal.json", trace)
                     for role, agent in agents.items():
-                        save(f"{role}-envelopes.json", read_envelopes(agent["envelopes"]))
+                        save(f"{role}-envelopes.json", read_envelopes(agent["envelopes"], env))
             else:
                 summary["limits"] += (" Each prompt hook runs as a host process that Herdr vouches for through the pane's"
                                       " CODEX_SESSION_ID, not as a child of a real agent process. Herdr cannot list"
@@ -1122,7 +1147,7 @@ def main():
                             cwd=agent["cwd"], context=dict(tool_environment(agent["pane"]), CODEX_SESSION_ID=agent["session"]))
 
                 def counts():
-                    return {role: len(read_envelopes(agent["envelopes"])) for role, agent in agents.items()}
+                    return {role: len(read_envelopes(agent["envelopes"], env)) for role, agent in agents.items()}
 
                 def deliveries(step, recipients):
                     for role in recipients:
@@ -1134,7 +1159,7 @@ def main():
                     time.sleep(3)
                     observed = counts()
                     require(observed == expected, f"{step}: exactly {recipients or 'nobody'} receive a new envelope", observed)
-                    return {role: read_envelopes(agents[role]["envelopes"])[-1] for role in recipients}
+                    return {role: read_envelopes(agents[role]["envelopes"], env)[-1] for role in recipients}
 
                 def message_state():
                     return {table: rows(f"SELECT COUNT(*) FROM {table}")[0][0] for table in
@@ -1470,7 +1495,7 @@ def main():
                         backup_database()
                     save(f"{args.feature}.json", trace)
                     for role, agent in agents.items():
-                        save(f"{role}-envelopes.json", read_envelopes(agent["envelopes"]))
+                        save(f"{role}-envelopes.json", read_envelopes(agent["envelopes"], env))
         backup_database()
         success = True
     finally:

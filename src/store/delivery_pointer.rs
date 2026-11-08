@@ -95,6 +95,36 @@ impl StateTransaction<'_> {
         }))
     }
 
+    /// The pointers of this session's attempts that dispatch left held.
+    pub(crate) fn held_pointers_for_session(
+        &self,
+        namespace: &StateNamespace,
+        agent_session_id: &crate::AgentSessionId,
+    ) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT s.pointer_nonce
+             FROM delivery_attempt_state s
+             JOIN delivery_attempts a USING (
+                 session_socket_id, worktree_id, attempt_id, address_id
+             )
+             WHERE s.session_socket_id = ?1 AND s.worktree_id = ?2
+               AND a.agent_session_id = ?3 AND s.state = 'held'
+               AND s.pointer_nonce IS NOT NULL
+             ORDER BY a.created_at_ms",
+        )?;
+        statement
+            .query_map(
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    agent_session_id.as_str()
+                ],
+                |row| row.get(0),
+            )?
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(StoreError::from)
+    }
+
     /// Records the one presentation a hook attests. Later ones find it set.
     pub(crate) fn mark_pointer_presented(
         &self,

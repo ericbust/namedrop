@@ -53,6 +53,12 @@ const DIRECT_MESSAGE_RULE: &str = "Private direct message. Address the person as
 const REMINDER_RULE: &str = "Later: reminder.set with in_reply_to, then reply now with schedule. ";
 const RECOVERY_RULE: &str = "Registered profile available for recovery.";
 
+/// The channel and direct-message rules for a delivery whose final message goes
+/// back to the person: the same rules without the bound reply, which the hook's
+/// guidance replaces. The typed-envelope forms above must keep their bytes.
+const ARMED_CHANNEL_RULE: &str = "Channel replies are visible to everyone here; address the person as 'you'. Plain @name wakes a member (costs one reply). Wait for their reply; never invent an answer. \\@name refers without asking. ";
+const ARMED_DIRECT_MESSAGE_RULE: &str = "Private direct message. Address the person as 'you'. Body mentions are literal and never add recipients. Keep this conversation out of channels. The Automatic Reply Limit does not apply. ";
+
 /// The plugin-authored instruction every Delivery Envelope carries, so an Agent
 /// Session that was never primed with the Agent Integration package can still
 /// work and finish the attempt correctly from the prompt alone.
@@ -70,14 +76,13 @@ pub fn trusted_delivery_instruction(control: &DeliveryControl) -> String {
     if control.untrusted_channel_recap.is_some() {
         instruction.push_str(CHANNEL_RECAP_RULE);
     }
-    instruction.push_str(&delivery_rules(control, true));
+    instruction.push_str(&delivery_rules(control, DeliveryKind::of(control).rule()));
     instruction.push_str(RECOVERY_RULE);
     instruction
 }
 
-/// The rules both forms share. `kind_rule` is false when the hook's final-reply
-/// guidance already says how this delivery ends.
-fn delivery_rules(control: &DeliveryControl, kind_rule: bool) -> String {
+/// The rules both forms share, around the rule for this kind of delivery.
+fn delivery_rules(control: &DeliveryControl, kind_rule: &str) -> String {
     let mut instruction = String::new();
     if control.attached_context.is_some() {
         instruction.push_str(ATTACHED_CONTEXT_RULE);
@@ -85,9 +90,7 @@ fn delivery_rules(control: &DeliveryControl, kind_rule: bool) -> String {
     if control.review_source_message_id.is_some() {
         instruction.push_str(REVIEW_RULE);
     }
-    if kind_rule {
-        instruction.push_str(DeliveryKind::of(control).rule());
-    }
+    instruction.push_str(kind_rule);
     if control.result_set.is_none()
         && control
             .permitted_operations
@@ -103,14 +106,18 @@ fn delivery_rules(control: &DeliveryControl, kind_rule: bool) -> String {
 /// kind of delivery and the control facts its rendered commands do not restate.
 pub(crate) fn pointer_details(control: &DeliveryControl, final_message_settles: bool) -> String {
     let kind = DeliveryKind::of(control);
-    let settled_by_final_message = final_message_settles && kind.guidance_replaces_rule();
     let mut rules = POINTER_INSTRUCTION_HEADER.to_owned();
     if control.untrusted_channel_recap.is_some() {
         rules.push_str(POINTER_RECAP_RULE);
     }
-    rules.push_str(&delivery_rules(control, !settled_by_final_message));
+    let kind_rule = if final_message_settles {
+        kind.armed_rule()
+    } else {
+        kind.rule()
+    };
+    rules.push_str(&delivery_rules(control, kind_rule));
     let mut facts = Vec::new();
-    if !settled_by_final_message {
+    if !final_message_settles {
         facts.push(format!("reply_mode {}", control.reply_mode.as_str()));
         facts.push(format!("thread_id {}", control.thread_id.as_str()));
     }
@@ -131,6 +138,17 @@ pub(crate) fn pointer_details(control: &DeliveryControl, final_message_settles: 
             .collect::<Vec<_>>()
             .join(", ");
         facts.push(format!("recipients {recipients}"));
+    }
+    if control.context_references.len() > 1 {
+        let references = control
+            .context_references
+            .iter()
+            .map(|reference| format!("@{} {}", reference.alias, reference.address_id.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        facts.push(format!(
+            "context_references {references}, and context.inspect reads one at a time, so run its line with each reference_address_id"
+        ));
     }
     let rules = rules.trim_end();
     if facts.is_empty() {
@@ -185,10 +203,17 @@ impl DeliveryKind {
         }
     }
 
-    /// The final-reply guidance states everything this kind's rule says, and
-    /// the rule's "run this command" would contradict it.
-    fn guidance_replaces_rule(self) -> bool {
-        matches!(self, Self::ReportToHuman | Self::ResultSet | Self::Settle)
+    /// The rule when the final message settles the delivery. The hook's guidance
+    /// says how it ends, so a rule that says to run a command would contradict it.
+    fn armed_rule(self) -> &'static str {
+        match self {
+            Self::ReportToHuman | Self::ResultSet | Self::Settle => "",
+            Self::DirectMessage => ARMED_DIRECT_MESSAGE_RULE,
+            Self::Channel => ARMED_CHANNEL_RULE,
+            Self::ContextRequest | Self::TrackedResultSet | Self::StaleNudge | Self::Nudge => {
+                self.rule()
+            }
+        }
     }
 
     fn rule(self) -> &'static str {
@@ -1312,6 +1337,10 @@ fn authorized_delivery_session(
     Ok((address.address_id, agent_session_id))
 }
 
+/// Dispatch could not confirm these reached the pane, so their text may have
+/// landed with no details. They are not this session's to settle.
+const HELD_GUIDANCE: &str = "Namedrop could not confirm these deliveries reached this pane, so they are held. A prompt naming one of these ids may have landed anyway. Do not act on it or settle it: the person decides with `delivery cancel-held` or a retry. Tell the person it arrived.";
+
 /// Reconstructs the Delivery Envelopes the calling pane's exact registered Agent
 /// Session still owes, so losing a delivery prompt is recoverable in profile.
 /// Read-only: it transitions nothing and dispatches nothing. Each envelope comes
@@ -1328,8 +1357,13 @@ where
     I: crate::IdGenerator,
 {
     let _: DeliveryInboxInput = serde_json::from_value(input).map_err(crate::input_schema_error)?;
-    with_outstanding_envelopes(runtime, |_, _, _, envelopes| {
-        Ok(json!({"envelopes": envelopes}))
+    with_outstanding_envelopes(runtime, |transaction, namespace, session, envelopes| {
+        let mut inbox = json!({"envelopes": envelopes});
+        let held = transaction.held_pointers_for_session(namespace, session)?;
+        if !held.is_empty() {
+            inbox["held"] = json!({"nonces": held, "guidance": HELD_GUIDANCE});
+        }
+        Ok(inbox)
     })
 }
 
@@ -1341,6 +1375,45 @@ pub(crate) enum CarriedDelivery<'a> {
     /// Text holding a pointer header, and whether non-blank text surrounds the
     /// block it arrived in.
     Pointer { text: &'a str, outside: bool },
+}
+
+/// What a session whose context was rebuilt must be told: the deliveries it
+/// still owes, which a summary may have dropped. A pointer's details lived only
+/// in hook context, so without this a sender could wait forever.
+pub(crate) fn owed_deliveries_notice<E, C, I>(
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Option<String>
+where
+    E: crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
+    with_outstanding_envelopes(runtime, |transaction, namespace, _, envelopes| {
+        let Some(first) = envelopes.first() else {
+            return Ok(None);
+        };
+        let control = serde_json::to_value(&first.control)
+            .map_err(|error| crate::StoreError::invalid_input(error.to_string()))?;
+        let mut named = Vec::new();
+        for envelope in &envelopes {
+            let attempt = &envelope.control.attempt_id;
+            let sender = if transaction.relays_to_person(namespace, attempt)? {
+                "the person".to_owned()
+            } else {
+                format!("@{}", envelope.control.sender.alias)
+            };
+            named.push(format!("{} from {sender}", attempt.as_str()));
+        }
+        Ok(inbox_command_line(&control).map(|inbox| {
+            format!(
+                "Namedrop: your context was rebuilt and this session still owes {} open: {}. Each sender may be waiting. Print every message and its bound operations with this line, then settle each one.\n{inbox}",
+                if named.len() == 1 { "1 delivery" } else { "these deliveries" },
+                named.join("; ")
+            )
+        }))
+    })
+    .ok()
+    .flatten()
 }
 
 /// One delivery prompt that matches an envelope the pane's registered session
@@ -1740,8 +1813,39 @@ fn unrendered_sentence(tokens: &[&str]) -> String {
 /// that rule: it is then refused by the sandbox rather than by Namedrop, which
 /// is exactly how one live handoff stalled. Location flags therefore follow the
 /// argv, and the input flag is last.
-pub(crate) fn delivery_command_guidance(control: &Value) -> Option<String> {
-    let (lines, skipped) = rendered_lines(control)?;
+///
+/// A many-assignment nudge would otherwise pass what a host keeps whole, so lines
+/// that do not fit in `room` are left out, say so, and stay in `control.tool`.
+/// The `-context` variants go first, then the latest lines; settling lines stay.
+pub(crate) fn delivery_command_guidance(control: &Value, room: usize) -> Option<String> {
+    let (mut lines, skipped) = rendered_lines(control)?;
+    let mut left_out = 0;
+    let mut guidance = command_block(&lines, &skipped, left_out);
+    while crate::persona::context_size(&guidance) > room {
+        let Some(at) = next_line_to_leave_out(&lines) else {
+            break;
+        };
+        lines.remove(at);
+        left_out += 1;
+        guidance = command_block(&lines, &skipped, left_out);
+    }
+    Some(guidance)
+}
+
+fn next_line_to_leave_out(lines: &[RenderedLine<'_>]) -> Option<usize> {
+    let context_variant = |line: &RenderedLine<'_>| {
+        line.input["request_id"]
+            .as_str()
+            .is_some_and(|id| id.ends_with("-context"))
+    };
+    lines.iter().rposition(context_variant).or_else(|| {
+        lines
+            .iter()
+            .rposition(|line| !matches!(line.token, "reply" | "complete.no-reply"))
+    })
+}
+
+fn command_block(lines: &[RenderedLine<'_>], skipped: &[&str], left_out: usize) -> String {
     let mut guidance = COMMAND_HEADER.to_owned();
     for (need, sentence) in COMMAND_SENTENCES {
         if lines.iter().any(|line| need.present_in(&line.input)) {
@@ -1751,7 +1855,12 @@ pub(crate) fn delivery_command_guidance(control: &Value) -> Option<String> {
     }
     if !skipped.is_empty() {
         guidance.push(' ');
-        guidance.push_str(&unrendered_sentence(&skipped));
+        guidance.push_str(&unrendered_sentence(skipped));
+    }
+    if left_out > 0 {
+        guidance.push_str(&format!(
+            " {left_out} more bound lines did not fit here, some for individual assignments. To act on them, read `control.tool`, in the prompt or printed by `delivery inbox`."
+        ));
     }
     guidance.push(' ');
     guidance.push_str(SANDBOX_SENTENCE);
@@ -1759,7 +1868,7 @@ pub(crate) fn delivery_command_guidance(control: &Value) -> Option<String> {
         guidance.push('\n');
         guidance.push_str(&line.text);
     }
-    Some(guidance)
+    guidance
 }
 
 /// The line a delivery's explicit block shows for `token`.

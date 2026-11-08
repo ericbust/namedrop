@@ -51,7 +51,21 @@ where
     if input.hook_event_name != "SessionStart" {
         return None;
     }
-    crate::persona::session_policy(runtime).map(|policy| hook_output("SessionStart", &policy))
+    let policy = crate::persona::session_policy(runtime)?;
+    let rebuilt = matches!(
+        input.source.as_deref(),
+        Some("compact" | "resume" | "clear")
+    );
+    Some(hook_output(
+        "SessionStart",
+        &match rebuilt
+            .then(|| crate::integration::owed_deliveries_notice(runtime))
+            .flatten()
+        {
+            Some(notice) => format!("{policy}\n\n{notice}"),
+            None => policy,
+        },
+    ))
 }
 
 /// The shared app-server notice for a SessionStart that runs inside Codex's
@@ -443,17 +457,29 @@ where
     // generated wrapper recognizes this output by the marker its serialization
     // starts with.
     let control = delivery.envelope.get("control");
-    let commands = control.and_then(|control| {
-        armed
-            .and_then(|armed| crate::integration::final_reply_guidance(control, armed))
-            .or_else(|| crate::integration::delivery_command_guidance(control))
-    });
     let details = delivery
         .control
         .as_ref()
         .map(|control| crate::integration::pointer_details(control, armed.is_some()));
-    let mut below = String::new();
     let leftover = delivery.leftover.then(|| LEFTOVER_INPUT_CONTEXT.to_owned());
+    let fixed = [&attestation]
+        .into_iter()
+        .chain(&leftover)
+        .chain(&details)
+        .chain(held)
+        .map(|text| context_size(text) + 2)
+        .sum::<usize>();
+    let commands = control.and_then(|control| {
+        armed
+            .and_then(|armed| crate::integration::final_reply_guidance(control, armed))
+            .or_else(|| {
+                crate::integration::delivery_command_guidance(
+                    control,
+                    CONTEXT_BUDGET.saturating_sub(fixed + crate::persona::ROWS_CUT_SIZE),
+                )
+            })
+    });
+    let mut below = String::new();
     for text in leftover.iter().chain(&details).chain(&commands).chain(held) {
         below.push_str("\n\n");
         below.push_str(text);

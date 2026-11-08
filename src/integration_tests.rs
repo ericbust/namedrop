@@ -1,9 +1,14 @@
 use super::*;
+use std::collections::BTreeMap;
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
 #[path = "../tests/support/bash_rules.rs"]
 mod bash_rules;
 use bash_rules::bash_rule_matches;
+
+fn guidance_of(control: &Value) -> Option<String> {
+    delivery_command_guidance(control, usize::MAX)
+}
 
 #[test]
 fn claude_delivery_guidance_matches_managed_rules_for_every_automatic_operation() {
@@ -32,8 +37,7 @@ fn claude_delivery_guidance_matches_managed_rules_for_every_automatic_operation(
         "operations":operations.iter().map(|op| json!({"token":op.token,"argv":op.argv,"input":{}})).collect::<Vec<_>>()
     });
     // A context reference is what gives context.inspect a line.
-    let guidance =
-        delivery_command_guidance(&json!({"context_references":[{}], "tool": tool})).unwrap();
+    let guidance = guidance_of(&json!({"context_references":[{}], "tool": tool})).unwrap();
     let settings: Value =
         serde_json::from_slice(&fs::read(home.join(".claude/settings.json")).unwrap()).unwrap();
     let rules = settings["permissions"]["allow"].as_array().unwrap();
@@ -85,7 +89,7 @@ fn delivery_guidance_quotes_shell_sensitive_arguments_and_preserves_safe_tokens(
         "".to_owned(),
     ];
     let tool = json!({"executable":executable,"environment":{},"input_flag":"--input-json","operations":[{"token":"send","argv":argv,"input":{}}]});
-    let guidance = delivery_command_guidance(&json!({"tool": tool})).unwrap();
+    let guidance = guidance_of(&json!({"tool": tool})).unwrap();
     let command = guidance
         .lines()
         .find_map(|line| line.strip_prefix("send: "))
@@ -110,7 +114,7 @@ fn delivery_guidance_quotes_shell_sensitive_arguments_and_preserves_safe_tokens(
 #[test]
 fn delivery_guidance_says_only_what_its_own_lines_ask_for() {
     let guidance = |operations: Value| {
-        delivery_command_guidance(&json!({"tool":{
+        guidance_of(&json!({"tool":{
             "executable":"/bin/namedrop","environment":{},"input_flag":"--input-json",
             "operations":operations
         }}))
@@ -173,7 +177,7 @@ fn named_unrendered(guidance: &str) -> Option<Vec<&str>> {
 
 #[test]
 fn delivery_guidance_leaves_rarely_used_operations_to_control_tool() {
-    let rendered = delivery_command_guidance(&json!({"context_references":[],"tool":{
+    let rendered = guidance_of(&json!({"context_references":[],"tool":{
         "executable":"/bin/namedrop","environment":{},"input_flag":"--input-json",
         "operations":[
             {"token":"reminder.set","argv":["reminder","set"],"input":{"body":"<what to do later>"}},
@@ -204,7 +208,7 @@ fn delivery_guidance_leaves_rarely_used_operations_to_control_tool() {
 #[test]
 fn a_context_reference_renders_context_inspect_and_the_read_that_waits_on_it() {
     let guidance = |references: Value| {
-        delivery_command_guidance(&json!({"context_references":references,"tool":{
+        guidance_of(&json!({"context_references":references,"tool":{
             "executable":"/bin/namedrop","environment":{},"input_flag":"--input-json",
             "operations":[
                 {"token":"reply","argv":["reply"],"input":{"attempt_id":"a","source":"@lead <reply body>"}},
@@ -234,7 +238,7 @@ fn a_context_reference_renders_context_inspect_and_the_read_that_waits_on_it() {
 
 #[test]
 fn the_unrendered_sentence_says_how_to_build_a_line_in_rendered_order() {
-    let guidance = delivery_command_guidance(&json!({"tool":{
+    let guidance = guidance_of(&json!({"tool":{
         "executable":"/bin/namedrop","environment":{},"input_flag":"--input-json",
         "operations":[{"token":"reminder.set","argv":["reminder","set"],"input":{}}]
     }}))
@@ -262,7 +266,7 @@ fn the_unrendered_sentence_says_how_to_build_a_line_in_rendered_order() {
 #[test]
 fn a_reply_line_drops_only_the_fields_the_cli_derives_to_the_same_value() {
     let rendered = |input: Value| {
-        let guidance = delivery_command_guidance(&json!({
+        let guidance = guidance_of(&json!({
             "attempt_id":"attempt-1","message_id":"message-1",
             "tool":{"executable":"/bin/namedrop","environment":{},"input_flag":"--input-json",
                 "operations":[{"token":"reply","argv":["reply"],"input":input}]}
@@ -388,5 +392,134 @@ fn a_final_reply_delivery_says_what_the_stop_does_and_shows_only_the_other_line(
     for guidance in [&claude, &tracked, &own, &channel] {
         assert!(guidance.starts_with("Namedrop commands: "), "{guidance}");
         assert!(!guidance.contains("operator"), "{guidance}");
+    }
+}
+
+fn nudge_control(assignments: usize) -> Value {
+    let mut operations = vec![
+        json!({"token":"complete.no-reply","argv":["complete","--no-reply"],"input":{"attempt_id":"a"}}),
+        json!({"token":"handoff.results","argv":["handoff","results"],"input":{"coordination_id":"c"}}),
+    ];
+    for assignment in 0..assignments {
+        for suffix in ["", "-context"] {
+            operations.push(json!({"token":"send","argv":["send"],"input":{
+                "request_id":format!("continue-a-assignment-{assignment}{suffix}"),
+                "source":format!("@worker{assignment} <specific continuation instruction>"),
+                "author_kind":"agent_session","coordination_id":"c",
+                "assignment_id":format!("assignment-{assignment}"),"expected_revision":1,
+            }}));
+        }
+    }
+    json!({"tool":{
+        "executable":"/state/runtime/namedrop",
+        "environment":{"HERDR_PLUGIN_STATE_DIR":"/state","HERDR_SOCKET_PATH":"/socket",
+                       "HERDR_WORKSPACE_ID":"w1","HERDR_PANE_ID":"w1:p1"},
+        "input_flag":"--input-json",
+        "operations":operations,
+    }})
+}
+
+#[test]
+fn a_many_assignment_nudge_stays_in_room_and_says_what_it_left_out() {
+    let control = nudge_control(40);
+    let whole = guidance_of(&control).unwrap();
+    assert!(whole.len() > 10_000, "the fixture needs to overflow");
+    assert!(!whole.contains("did not fit"), "{whole}");
+
+    let room = 5_000;
+    let fitted = delivery_command_guidance(&control, room).unwrap();
+    assert!(crate::persona::context_size(&fitted) <= room, "{fitted}");
+    assert!(fitted.contains("more bound lines did not fit"), "{fitted}");
+    assert!(fitted.contains("`delivery inbox`"), "{fitted}");
+    assert!(fitted.contains("\ncomplete.no-reply: "), "{fitted}");
+    assert!(fitted.contains("\nhandoff.results: "), "{fitted}");
+    assert!(
+        fitted.contains("\nsend: ") && fitted.contains("assignment-0"),
+        "the plain lines should outlast the context variants: {fitted}"
+    );
+    assert!(!fitted.contains("-context"), "{fitted}");
+
+    let tiny = delivery_command_guidance(&control, 1).unwrap();
+    assert!(tiny.contains("\ncomplete.no-reply: "), "{tiny}");
+}
+
+fn draft_control(
+    reply_mode: crate::DeliveryReplyMode,
+    context_references: Vec<DeliveryAddress>,
+) -> DeliveryControl {
+    let tool = IntegrationToolInvocation::new(
+        "/state/runtime/namedrop",
+        BTreeMap::from([
+            ("HERDR_PLUGIN_STATE_DIR".to_owned(), "/state".to_owned()),
+            ("HERDR_SOCKET_PATH".to_owned(), "/socket".to_owned()),
+            ("HERDR_WORKSPACE_ID".to_owned(), "w1".to_owned()),
+            ("HERDR_PANE_ID".to_owned(), "w1:p1".to_owned()),
+        ]),
+    );
+    DeliveryControl::new(
+        DeliveryControlDraft {
+            attempt_id: DeliveryAttemptId::new("attempt"),
+            thread_id: ThreadId::new("thread"),
+            message_id: MessageId::new("message"),
+            sender: DeliveryAddress::new(PaneAddressId::new("sender"), "operator"),
+            recipients: vec![DeliveryAddress::new(PaneAddressId::new("me"), "me")],
+            context_references,
+            attached_context: None,
+            context_request: None,
+            result_set: None,
+            permitted_operations: DELIVERY_PERMITTED_OPERATIONS
+                .iter()
+                .map(|token| (*token).to_owned())
+                .collect(),
+            reply_mode,
+            review_grants: Vec::new(),
+        },
+        tool,
+    )
+    .unwrap()
+}
+
+#[test]
+fn every_context_reference_is_named_when_there_is_more_than_one() {
+    let references = vec![
+        DeliveryAddress::new(PaneAddressId::new("address-a"), "alpha"),
+        DeliveryAddress::new(PaneAddressId::new("address-b"), "beta"),
+    ];
+    let details = pointer_details(
+        &draft_control(crate::DeliveryReplyMode::AgentThread, references),
+        false,
+    );
+    assert!(details.contains("@alpha address-a"), "{details}");
+    assert!(details.contains("@beta address-b"), "{details}");
+    assert!(details.contains("reference_address_id"), "{details}");
+    let one = pointer_details(
+        &draft_control(
+            crate::DeliveryReplyMode::AgentThread,
+            vec![DeliveryAddress::new(
+                PaneAddressId::new("address-a"),
+                "alpha",
+            )],
+        ),
+        false,
+    );
+    assert!(!one.contains("context_references"), "{one}");
+}
+
+#[test]
+fn an_armed_direct_message_or_channel_rule_never_asks_for_the_bound_reply() {
+    for mode in [
+        crate::DeliveryReplyMode::DirectMessage,
+        crate::DeliveryReplyMode::Channel,
+    ] {
+        let control = draft_control(mode, Vec::new());
+        let armed = pointer_details(&control, true);
+        assert!(!armed.contains("bound reply"), "{armed}");
+        assert!(
+            armed.contains("address the person as 'you'")
+                || armed.contains("Address the person as 'you'"),
+            "{armed}"
+        );
+        assert!(pointer_details(&control, false).contains("bound reply"));
+        assert!(trusted_delivery_instruction(&control).contains("bound reply"));
     }
 }

@@ -111,7 +111,7 @@
           "attempt_id": {
             "type": "string",
             "minLength": 1,
-            "description": "The delivered control.attempt_id."
+            "description": "The delivery's attempt id, as its command lines show it."
           }
         }
       },
@@ -372,7 +372,7 @@
           "in_reply_to": {
             "type": "string",
             "minLength": 1,
-            "description": "The message being replied to: control.message_id, never control.thread_id."
+            "description": "The message being replied to: its message id, never its thread id."
           },
           "reply_all": {
             "type": "boolean",

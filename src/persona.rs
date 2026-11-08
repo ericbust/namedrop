@@ -62,6 +62,8 @@ pub(crate) fn context_size(text: &str) -> usize {
 }
 
 const ROWS_CUT: &str = "Namedrop workspace roster. It did not fit in this turn; run `address list` before you choose collaborators.";
+/// Kept free below the budget, so a cut roster can still say it was cut.
+pub(crate) const ROWS_CUT_SIZE: usize = ROWS_CUT.len() + 2;
 
 /// Replaces an other-workspaces line that no longer holds.
 pub(crate) const NO_OTHER_WORKSPACES: &str = "Other workspaces: none of them has named agents now.";
