@@ -183,6 +183,7 @@ fn claim(plan: Armed, state: ClaimState) -> Claim {
         armed_at_ms: 1,
         updated_at_ms: 1,
         reply_line: Some("reply: namedrop reply --input-json '{}'".into()),
+        no_reply_line: Some("complete.no-reply: namedrop complete --no-reply".into()),
     }
 }
 
@@ -714,11 +715,12 @@ fn background_work_at_the_stop_leaves_a_reply_for_the_agent_to_settle() {
     );
     assert!(log.into_inner().is_empty(), "a held reply was sent");
     assert_eq!(
-        observe_prompt(&state.0, "socket", "session", &turn("later"), None, 30).held,
-        [(
-            crate::DeliveryAttemptId::new("attempt-1"),
-            "reply: namedrop reply --input-json '{}'".to_owned()
-        )]
+        observe_prompt(&state.0, "socket", "session", &turn("later"), None, 30).left_open,
+        [WayBack {
+            attempt_id: crate::DeliveryAttemptId::new("attempt-1"),
+            line: "reply: namedrop reply --input-json '{}'".to_owned(),
+            answers: true,
+        }]
     );
     assert_eq!(state.claims()[0].state, ClaimState::Left(LeaveReason::Held));
     assert!(observe(
@@ -819,5 +821,28 @@ fn a_prompt_queued_behind_a_stop_leaves_the_claim_to_that_stops_worker() {
         state.claims()[0].state,
         ClaimState::Left(LeaveReason::OperationFailed),
         "a claim whose worker died stayed open"
+    );
+}
+
+#[test]
+fn a_claim_left_open_stays_while_later_prompts_show_it() {
+    let state = StateDirectory::new();
+    observe(
+        &state,
+        "prompt-1",
+        Some(armed("attempt-1", "prompt-1", reply_plan())),
+    );
+    let shown = |prompt: &str, now_ms| {
+        observe_prompt(&state.0, "socket", "session", &turn(prompt), None, now_ms)
+            .left_open
+            .len()
+    };
+    assert_eq!(shown("prompt-2", 20), 1);
+    assert_eq!(shown("prompt-3", 19 + KEEP_MS), 1);
+    assert_eq!(shown("prompt-4", 18 + 2 * KEEP_MS), 1);
+    assert_eq!(
+        state.claims().len(),
+        1,
+        "a claim the agent was still being shown was pruned"
     );
 }

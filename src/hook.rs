@@ -498,9 +498,9 @@ where
     (
         observed.armed.then_some(plan).flatten(),
         observed
-            .held
+            .left_open
             .iter()
-            .map(|(attempt, line)| crate::integration::held_delivery_guidance(attempt, line))
+            .map(crate::integration::left_open_guidance)
             .collect(),
     )
 }

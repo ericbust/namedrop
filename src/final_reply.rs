@@ -230,6 +230,7 @@ pub(crate) fn claim_for(
         armed_at_ms: now_ms,
         updated_at_ms: now_ms,
         reply_line: crate::integration::rendered_line(control, "reply"),
+        no_reply_line: crate::integration::rendered_line(control, "complete.no-reply"),
     })
 }
 
@@ -254,10 +255,12 @@ pub(crate) struct Claim {
     pub state: ClaimState,
     pub armed_at_ms: u64,
     pub updated_at_ms: u64,
-    /// The delivery's bound reply line, shown again while a held claim's
-    /// delivery stays open.
+    /// The delivery's bound reply and no-reply lines, the way back shown
+    /// while a claim that ended unsettled leaves its delivery open.
     #[serde(default)]
     pub reply_line: Option<String>,
+    #[serde(default)]
+    pub no_reply_line: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -603,6 +606,31 @@ impl Claim {
         self.state = state;
         self.updated_at_ms = now_ms;
     }
+
+    /// The line that settles this claim's delivery the way the hook said it
+    /// would: the reply when the final message was to answer, otherwise the
+    /// no-reply.
+    fn way_back(&self) -> Option<WayBack> {
+        let (line, answers) = match self.plan {
+            Armed::Reply { .. } | Armed::NoReply(NoReplyCase::Relayed) => (&self.reply_line, true),
+            Armed::NoReply(_) => (&self.no_reply_line, false),
+        };
+        Some(WayBack {
+            attempt_id: self.attempt_id.clone(),
+            line: line.clone()?,
+            answers,
+        })
+    }
+}
+
+/// How the agent settles a delivery whose claim ended without settling it.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct WayBack {
+    pub attempt_id: crate::DeliveryAttemptId,
+    pub line: String,
+    /// The line is the reply, with a body to write; otherwise it closes the
+    /// delivery without one.
+    pub answers: bool,
 }
 
 /// What one prompt found in its session's claims.
@@ -611,14 +639,15 @@ pub(crate) struct Observed {
     /// Whether `arm` was written: the only thing that decides what the hook
     /// tells the agent about this prompt's delivery.
     pub armed: bool,
-    /// The bound reply line of each delivery a Stop held that is still open,
-    /// so the agent can answer it in its thread.
-    pub held: Vec<(crate::DeliveryAttemptId, String)>,
+    /// The way back to each delivery a claim left open, so the agent can
+    /// still settle it: in its thread, for a reply.
+    pub left_open: Vec<WayBack>,
 }
 
 /// Runs for every prompt of a session that names its turn. It ends claims
 /// that lost their turn, arms `arm` when the session holds no other open
-/// claim, and finishes held claims whose deliveries were settled since.
+/// claim, and finishes left claims whose deliveries are no longer
+/// outstanding. A claim it shows stays fresh, so pruning never hides it.
 pub(crate) fn observe_prompt(
     state: &Path,
     socket: &str,
@@ -664,19 +693,20 @@ pub(crate) fn observe_prompt(
         }
         _ => false,
     };
-    let mut held = Vec::new();
+    let mut left_open = Vec::new();
     for claim in &mut claims.claims {
-        if claim.state != ClaimState::Left(LeaveReason::Held) {
+        if !matches!(claim.state, ClaimState::Left(_)) {
             continue;
         }
-        match (disposition(state, claim), &claim.reply_line) {
-            (Some(_), _) => claim.set(ClaimState::Done(Done::Superseded), now_ms),
-            (None, Some(line)) => held.push((claim.attempt_id.clone(), line.clone())),
-            (None, None) => {}
+        if outstanding(state, claim) == Some(false) {
+            claim.set(ClaimState::Done(Done::Superseded), now_ms);
+        } else if let Some(way_back) = claim.way_back() {
+            left_open.push(way_back);
+            claim.updated_at_ms = now_ms;
         }
     }
     claims.save(now_ms);
-    Observed { armed, held }
+    Observed { armed, left_open }
 }
 
 /// Whether a Stop of this session has anything to settle. It reads without
@@ -814,6 +844,19 @@ fn settle_facts(state: &Path, session: &str, claim: &Claim, now_ms: u64) -> Sett
         ),
         waiting,
     }
+}
+
+/// Whether the claim's attempt is still in its session's delivery inbox, or
+/// `None` when the store cannot say; then the way back is shown, since a
+/// line that no longer applies is refused in a plain sentence.
+fn outstanding(state: &Path, claim: &Claim) -> Option<bool> {
+    crate::StateStore::open_read_only(state)
+        .ok()
+        .flatten()?
+        .transaction(|transaction| {
+            transaction.attempt_outstanding(&claim.namespace, &claim.attempt_id)
+        })
+        .ok()
 }
 
 fn disposition(state: &Path, claim: &Claim) -> Option<crate::DeliveryDisposition> {

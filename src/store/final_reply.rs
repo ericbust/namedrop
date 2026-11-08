@@ -26,6 +26,37 @@ impl StateTransaction<'_> {
         }))
     }
 
+    /// Whether the attempt is still in its own session's delivery inbox.
+    pub(crate) fn attempt_outstanding(
+        &self,
+        namespace: &StateNamespace,
+        attempt_id: &crate::DeliveryAttemptId,
+    ) -> Result<bool, StoreError> {
+        let Some((address, session)) = self
+            .transaction
+            .query_row(
+                "SELECT address_id, agent_session_id FROM delivery_attempts
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2 AND attempt_id = ?3",
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    attempt_id.as_str()
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(false);
+        };
+        Ok(self
+            .outstanding_delivery_attempts(
+                namespace,
+                &PaneAddressId::new(address),
+                &crate::AgentSessionId::new(session),
+            )?
+            .contains(attempt_id))
+    }
+
     /// Whether the message an attempt delivers answers one its own recipient
     /// address wrote: the reply to a request this agent sent.
     pub(crate) fn answers_own_message(

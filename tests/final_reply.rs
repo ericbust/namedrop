@@ -1610,3 +1610,81 @@ fn a_delivery_whose_stop_never_ran_stays_in_the_inbox_until_settled_once() {
     assert_eq!(space.answers("pane-lead"), ["pong"]);
     assert!(attempts(&space.inbox("pane-reviewer")).is_empty());
 }
+
+/// Every way a claim can end without settling leaves the delivery open after
+/// the hook said to run no settle command, so every later prompt shows the
+/// line that settles it, until it is settled.
+#[test]
+fn every_unsettled_ending_shows_the_way_back_on_later_prompts() {
+    let way_back = |context: &str, attempt: &str, how: &str| {
+        context.contains(&format!(
+            "Namedrop: delivery {attempt} from an earlier turn is still open; {how}.\n"
+        )) && context.contains(&format!(r#""attempt_id":"{attempt}""#))
+    };
+    const ANSWER: &str = "to answer it, run this line with your text in place of <reply body>";
+    for (ending, state) in [
+        ("addresses_others", json!({"left":"addresses_others"})),
+        ("no_final_text", json!({"left":"no_final_text"})),
+        ("interrupted", json!({"left":"interrupted"})),
+    ] {
+        let space = Space::new();
+        let ask = space.armed_ask();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+        match ending {
+            "addresses_others" => {
+                space.stop("session-reviewer", CLAUDE, "@qa can you check this first?");
+            }
+            "no_final_text" => space.stop("session-reviewer", CLAUDE, "  "),
+            _ => {}
+        }
+        let typed = space.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            ("prompt_id", "typed-turn"),
+            "Where were we?",
+        );
+        assert_eq!(space.claims()[0]["state"], state, "{ending}");
+        assert!(way_back(&typed, &attempt, ANSWER), "{ending}: {typed}");
+        assert!(space.dispositions().is_empty(), "{ending}");
+
+        dispatch::message(
+            "reply",
+            bound_reply(&space, &ask, "@lead pong"),
+            &space.runtime("pane-reviewer"),
+        )
+        .unwrap();
+        let after = execute_user_prompt_submit_hook(
+            &json!({"hook_event_name":"UserPromptSubmit","session_id":"session-reviewer",
+                    "prompt_id":"after-turn","prompt":"Thanks."})
+            .to_string(),
+            &space.runtime("pane-reviewer"),
+        );
+        let after = after
+            .as_ref()
+            .and_then(|output| output["hookSpecificOutput"]["additionalContext"].as_str())
+            .unwrap_or_default();
+        assert!(!after.contains("is still open"), "{ending}: {after}");
+    }
+
+    let space = Space::new();
+    let ask = space.armed_ask();
+    space.stop("session-reviewer", CLAUDE, "pong");
+    let answer = space.herdr.envelope_for("pane-lead");
+    let attempt = answer["control"]["attempt_id"].as_str().unwrap().to_owned();
+    assert_ne!(
+        answer["control"]["attempt_id"],
+        ask["control"]["attempt_id"]
+    );
+    space.prompt("pane-lead", "session-lead", CODEX, &answer.to_string());
+    let typed = space.prompt(
+        "pane-lead",
+        "session-lead",
+        ("turn_id", "typed-turn"),
+        "What did the reviewer say?",
+    );
+    assert!(
+        way_back(&typed, &attempt, "to close it, run this line"),
+        "{typed}"
+    );
+    assert!(typed.contains("complete.no-reply: "), "{typed}");
+}

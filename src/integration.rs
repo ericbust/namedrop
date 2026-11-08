@@ -1665,12 +1665,18 @@ pub(crate) fn rendered_line(control: &Value, token: &str) -> Option<String> {
         .map(|line| line.text)
 }
 
-/// What a later prompt says about a delivery a Stop held: one sentence and
-/// its bound reply line.
-pub(crate) fn held_delivery_guidance(attempt: &DeliveryAttemptId, line: &str) -> String {
+/// What a later prompt says about a delivery a claim left open: one
+/// sentence and the bound line that settles it.
+pub(crate) fn left_open_guidance(way_back: &crate::final_reply::WayBack) -> String {
+    let how = if way_back.answers {
+        "to answer it, run this line with your text in place of <reply body>"
+    } else {
+        "to close it, run this line"
+    };
     format!(
-        "Namedrop: delivery {} from an earlier turn is still open; to answer it, run this line with your text in place of <reply body>.\n{line}",
-        attempt.as_str()
+        "Namedrop: delivery {} from an earlier turn is still open; {how}.\n{}",
+        way_back.attempt_id.as_str(),
+        way_back.line
     )
 }
 
