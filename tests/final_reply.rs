@@ -811,9 +811,12 @@ else:
     }
 
     fn start_installed_stop(&self, session: &str, prompt_id: &str, text: &str) -> RunningStop {
+        self.start_installed_stop_with(json!({"hook_event_name":"Stop","session_id":session,
+            "prompt_id":prompt_id,"last_assistant_message":text,"background_tasks":[]}))
+    }
+
+    fn start_installed_stop_with(&self, payload: Value) -> RunningStop {
         use std::os::{fd::AsRawFd, unix::process::CommandExt};
-        let payload = json!({"hook_event_name":"Stop","session_id":session,
-                             "prompt_id":prompt_id,"last_assistant_message":text,"background_tasks":[]});
         let (done, lifetime) = std::os::unix::net::UnixStream::pair().unwrap();
         let lifetime_fd = lifetime.as_raw_fd();
         let mut command = self.command();
@@ -1710,4 +1713,84 @@ fn a_leading_mention_prompt_keeps_the_way_back() {
         )),
         "{context}"
     );
+}
+
+/// When another Stop hook blocks, Claude Code continues the turn, so the
+/// text that Stop carried is not the final message. Namedrop settles at the
+/// turn's next Stop, with the text the turn really ended on.
+#[test]
+fn a_stop_another_hook_blocked_settles_at_the_turns_next_stop() {
+    let space = Space::new();
+    space.armed_ask();
+    let transcript = space.directory.root.join("transcript.jsonl");
+    let append = |records: &[Value]| {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        for record in records {
+            writeln!(file, "{record}").unwrap();
+        }
+    };
+    let assistant = |text: &str| {
+        json!({"type":"assistant","sessionId":"session-reviewer",
+               "message":{"role":"assistant","content":[{"type":"text","text":text}]}})
+    };
+    let recorded: Vec<Value> =
+        include_str!("fixtures/final-reply/claude-2.1.319-blocked-stop.jsonl")
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+    let (feedback, blocked, summary) = (&recorded[0], &recorded[1], &recorded[2]);
+    let marker = || {
+        let session = fs::read_dir(space.directory.state.join("final-reply"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        session.join("stops").join(
+            HostTurn::from_ids(Some("reviewer-turn"), None)
+                .unwrap()
+                .as_str(),
+        )
+    };
+    // Claude Code writes how the Stop's hooks ended once they have all run,
+    // so after this hook measured the transcript and recorded the Stop.
+    let stop = |text: &str, active: bool| {
+        let _ = fs::remove_file(marker());
+        let running = space.start_installed_stop_with(json!({"hook_event_name":"Stop",
+            "session_id":"session-reviewer","prompt_id":"reviewer-turn",
+            "transcript_path":transcript,"stop_hook_active":active,
+            "last_assistant_message":text,"background_tasks":[]}));
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !marker().exists() {
+            assert!(
+                std::time::Instant::now() < until,
+                "the Stop hook recorded no Stop"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        running
+    };
+
+    append(&[assistant("Let me check one thing first.")]);
+    let first = stop("Let me check one thing first.", false);
+    append(&[feedback.clone(), blocked.clone()]);
+    first.wait();
+    assert!(
+        space.dispositions().is_empty(),
+        "{:?}",
+        space.dispositions()
+    );
+    assert_eq!(space.claims()[0]["state"], json!("open"));
+
+    append(&[assistant("pong")]);
+    let second = stop("pong", true);
+    append(std::slice::from_ref(summary));
+    second.wait();
+    assert_eq!(space.dispositions()[0][1], "reply");
+    assert_eq!(space.answers("pane-lead"), ["pong"]);
+    assert_eq!(space.claims()[0]["state"], json!({"done":"replied"}));
 }

@@ -11,9 +11,13 @@ use std::{
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    time::{Duration, Instant},
 };
 
 const MAX_INPUT_BYTES: u64 = 1024 * 1024;
+/// How long the worker waits for Claude Code to record how every Stop hook
+/// of this Stop ended. It writes that record as soon as the last hook exits.
+const STOP_OUTCOME_WAIT: Duration = Duration::from_secs(3);
 
 #[derive(Deserialize, Serialize)]
 struct StopInput {
@@ -61,21 +65,16 @@ pub fn run(state: &Path) {
     if !namedrop::final_reply::has_live_claims(state, &socket, &input.session_id) {
         return;
     }
+    let transcript_end = input.transcript_path.as_ref().and_then(|path| {
+        if !path.is_absolute() {
+            return None;
+        }
+        let metadata = fs::symlink_metadata(path).ok()?;
+        metadata.is_file().then_some(metadata.len())
+    });
     if let Some(turn) = input.turn() {
         namedrop::final_reply::mark_stopped(state, &socket, &input.session_id, &turn, ended_at_ms);
     }
-    let transcript_end = input
-        .last_assistant_message
-        .is_none()
-        .then(|| {
-            let path = input.transcript_path.as_ref()?;
-            if !path.is_absolute() {
-                return None;
-            }
-            let metadata = fs::symlink_metadata(path).ok()?;
-            metadata.is_file().then_some(metadata.len())
-        })
-        .flatten();
     let captured = CapturedStop {
         input,
         socket,
@@ -117,6 +116,14 @@ pub fn run_worker(state: &Path) {
         return;
     };
     deadline(10_000);
+    if let (Some(_), Some(path), Some(from)) = (
+        &captured.input.prompt_id,
+        &captured.input.transcript_path,
+        captured.transcript_end,
+    ) && another_hook_blocked(path, from)
+    {
+        return;
+    }
     let stop = StopFacts {
         session: captured.input.session_id.clone(),
         turn: captured.input.turn(),
@@ -136,6 +143,54 @@ pub fn run_worker(state: &Path) {
         captured.ended_at_ms,
         &mut settle,
     );
+}
+
+/// Whether another Stop hook blocked this Stop, so Claude Code continues the
+/// turn and the text this Stop carries is not its final message. Claude Code
+/// records how the Stop's hooks ended after the transcript's end at the
+/// Stop: a "Stop hook feedback" prompt when one blocked, then a
+/// `stop_hook_summary`. The turn's next Stop settles the claim instead.
+/// With no summary in time it settles as it would without the check.
+fn another_hook_blocked(path: &Path, from: u64) -> bool {
+    let until = Instant::now() + STOP_OUTCOME_WAIT;
+    loop {
+        let mut bytes = Vec::new();
+        let read = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .and_then(|mut file| {
+                file.seek(SeekFrom::Start(from))?;
+                file.take(MAX_INPUT_BYTES).read_to_end(&mut bytes)
+            });
+        if read.is_err() {
+            return false;
+        }
+        let complete = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(&[][..], |end| &bytes[..end]);
+        for record in complete
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        {
+            if record["type"] == "user"
+                && record["isMeta"] == true
+                && record["message"]["content"]
+                    .as_str()
+                    .is_some_and(|content| content.starts_with("Stop hook feedback:"))
+            {
+                return true;
+            }
+            if record["type"] == "system" && record["subtype"] == "stop_hook_summary" {
+                return false;
+            }
+        }
+        if Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn settle(bound: BoundOperation) -> Result<Value, String> {
