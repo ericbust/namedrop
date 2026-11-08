@@ -276,36 +276,22 @@ impl Space {
     }
 
     /// A test holds a delivery as its envelope, but the host submits what was
-    /// typed: the pointer, until that pointer has been presented. A later
-    /// presentation stays an envelope, as a prompt from before an upgrade is.
+    /// typed.
     fn as_typed(&self, prompt: &str) -> String {
-        let Some(attempt) = serde_json::from_str::<Value>(prompt)
-            .ok()
-            .and_then(|envelope| {
-                envelope["control"]["attempt_id"]
-                    .as_str()
-                    .map(str::to_owned)
-            })
-        else {
-            return prompt.to_owned();
-        };
-        let unpresented = self.rows(&format!(
-            "SELECT pointer_nonce FROM delivery_attempt_state
-             WHERE attempt_id = '{attempt}' AND pointer_presented_at_ms IS NULL
-               AND pointer_nonce IS NOT NULL"
-        ));
-        let Some(nonce) = unpresented.first().map(|row| row[0].clone()) else {
-            return prompt.to_owned();
-        };
-        self.herdr
-            .prompts
-            .lock()
+        let typed = self.herdr.prompts.lock().unwrap();
+        delivered::as_typed(typed.iter().map(|(_, typed)| typed.as_str()), prompt)
+    }
+
+    /// Lets a test show a second rendering of one delivery; production never
+    /// attests twice.
+    fn forget_presentation(&self) {
+        rusqlite::Connection::open(self.directory.state.join("namedrop.sqlite3"))
             .unwrap()
-            .iter()
-            .map(|(_, typed)| typed)
-            .find(|typed| typed.starts_with(&format!("Namedrop message {nonce} ")))
-            .cloned()
-            .unwrap_or_else(|| prompt.to_owned())
+            .execute(
+                "UPDATE delivery_attempt_state SET pointer_presented_at_ms = NULL",
+                [],
+            )
+            .unwrap();
     }
 
     /// What the Stop worker hands the CLI pipeline, run in-process.
@@ -329,6 +315,7 @@ impl Space {
     /// The prompt hook's context with no session or turn id, which arms
     /// nothing: today's explicit commands.
     fn unkeyed_prompt(&self, pane: &str, prompt: &str) -> String {
+        let prompt = self.as_typed(prompt);
         let input = json!({"hook_event_name":"UserPromptSubmit","prompt":prompt});
         let output = execute_user_prompt_submit_hook(&input.to_string(), &self.runtime(pane))
             .expect("the delivery got no hook context");
@@ -527,10 +514,12 @@ fn an_explicit_settle_wins_and_a_prompt_without_turn_ids_keeps_todays_commands()
     let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
 
     let unkeyed = execute_user_prompt_submit_hook(
-        &json!({"hook_event_name":"UserPromptSubmit","prompt":ask.to_string()}).to_string(),
+        &json!({"hook_event_name":"UserPromptSubmit","prompt":space.as_typed(&ask.to_string())})
+            .to_string(),
         &space.runtime("pane-reviewer"),
     )
     .unwrap();
+    space.forget_presentation();
     let unkeyed = unkeyed["hookSpecificOutput"]["additionalContext"]
         .as_str()
         .unwrap();
@@ -588,6 +577,7 @@ fn a_prompt_from_another_session_or_a_later_turn_never_settles_the_delivery() {
         "{other}"
     );
 
+    space.forget_presentation();
     space.prompt("pane-reviewer", "session-reviewer", CLAUDE, &ask);
     space.stop("session-reviewer", ("prompt_id", "a-later-turn"), "pong");
     assert!(space.dispositions().is_empty());
@@ -720,14 +710,16 @@ fn a_delivery_that_shows_another_line_keeps_todays_commands() {
                                  (pane, session, turn): (&str, &str, (&str, &str)),
                                  envelope: &Value,
                                  line: &str| {
-        let today = space.unkeyed_prompt(pane, &envelope.to_string());
+        let typed = space.as_typed(&envelope.to_string());
+        let today = space.unkeyed_prompt(pane, &typed);
         assert!(
             today.contains("Namedrop commands: the runnable lines this delivery authorized")
                 && today.contains(&format!("\n{line}: ")),
             "{shape}: {today}"
         );
+        space.forget_presentation();
         assert_eq!(
-            space.submitted(pane, session, turn, &envelope.to_string()),
+            space.submitted(pane, session, turn, &typed),
             today,
             "{shape}"
         );
@@ -3533,6 +3525,18 @@ fn a_pointer_attests_once_per_dispatch_and_a_changed_body_never_does() {
     assert!(!again.contains("Namedrop verification"), "{again}");
     assert!(!again.contains("Namedrop delivery details"), "{again}");
     assert!(!again.contains("Namedrop commands:"), "{again}");
+    assert_eq!(space.claims().len(), 1, "the repeat armed a second claim");
+    assert_eq!(space.claims()[0]["state"], json!({"left":"interrupted"}));
+    space.stop(
+        "session-reviewer",
+        ("prompt_id", "second"),
+        "Still checking.",
+    );
+    assert!(
+        space.dispositions().is_empty(),
+        "a repeat turn's text was sent"
+    );
+    assert_eq!(space.herdr.prompt_count("pane-lead"), 0);
 
     let space = Space::new();
     let ask = space.ask_without_prompting();
@@ -3595,21 +3599,107 @@ fn claude_paste_marks_around_a_pointer_still_authenticate() {
     assert_eq!(space.claims().len(), 1);
 }
 
+/// `delivery inbox` prints the whole envelope, so pasting it must not re-open a
+/// dispatch the pointer already spent, or the Stop would send a status as the
+/// reply. An envelope stands only for an attempt with no pointer.
 #[test]
-fn a_prompt_typed_as_an_envelope_before_the_upgrade_still_authenticates() {
+fn pasting_the_inbox_envelope_of_a_pointer_delivery_never_attests_or_arms() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    let again = |prompt_id: &str, prompt: String| {
+        execute_user_prompt_submit_hook(
+            &json!({"hook_event_name":"UserPromptSubmit","prompt":prompt,
+                    "session_id":"session-reviewer","prompt_id":prompt_id})
+            .to_string(),
+            &space.runtime("pane-reviewer"),
+        )
+        .map(|output| output.to_string())
+        .unwrap_or_default()
+    };
+    assert_eq!(
+        space.inbox("pane-reviewer")[0]["control"]["attempt_id"],
+        ask["control"]["attempt_id"]
+    );
+
+    let context = again("pasted-turn", ask.to_string());
+    assert!(!context.contains("Namedrop verification"), "{context}");
+    assert!(!context.contains("Namedrop commands:"), "{context}");
+    assert_eq!(space.claims().len(), 1, "the paste armed a second claim");
+    assert_eq!(space.claims()[0]["state"], json!({"left":"interrupted"}));
+    space.stop(
+        "session-reviewer",
+        ("prompt_id", "pasted-turn"),
+        "Still checking.",
+    );
+    assert!(
+        space.dispositions().is_empty(),
+        "a status went out as the reply"
+    );
+    assert_eq!(space.herdr.prompt_count("pane-lead"), 0);
+
     let space = Space::new();
     let ask = space.ask_without_prompting();
+    let typed = typed_pointer(&space, "pane-reviewer");
     let input = json!({"hook_event_name":"UserPromptSubmit","prompt":ask.to_string(),
-                       "session_id":"session-reviewer","prompt_id":"typed-before"});
+                       "session_id":"session-reviewer","prompt_id":"never-presented"});
     let output =
         execute_user_prompt_submit_hook(&input.to_string(), &space.runtime("pane-reviewer"))
-            .expect("the envelope got no hook context");
-    let context = output["hookSpecificOutput"]["additionalContext"]
-        .as_str()
+            .map(|output| output.to_string())
+            .unwrap_or_default();
+    assert!(!output.contains("Namedrop verification"), "{output}");
+    assert!(space.claims().is_empty(), "the paste armed a claim");
+    let context = space.prompt("pane-reviewer", "session-reviewer", CLAUDE, &typed);
+    assert!(
+        context.starts_with("Namedrop verification:"),
+        "the paste spent the pointer: {context}"
+    );
+}
+
+/// An envelope 1.6.0 typed may quote a pointer header in its body. It is still
+/// that envelope, and a person's sentence that quotes a header is still theirs.
+#[test]
+fn a_quoted_header_neither_hides_an_envelope_nor_swallows_a_mention() {
+    let header = "Namedrop message 0a1b2c3d from the person. Its trusted details arrive as Namedrop hook context. If none arrived, print them with: x";
+    let space = Space::new();
+    dispatch::message(
+        "send",
+        json!({"request_id":"ask","source":format!("@reviewer What is this?\n{header}"),
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    rusqlite::Connection::open(space.directory.state.join("namedrop.sqlite3"))
+        .unwrap()
+        .execute("UPDATE delivery_attempt_state SET pointer_nonce = NULL", [])
         .unwrap();
+    let context = space.submitted(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
     assert!(context.starts_with("Namedrop verification:"), "{context}");
     assert!(!context.contains("Namedrop delivery details"), "{context}");
-    assert_eq!(space.claims().len(), 1);
+
+    let space = Space::new();
+    let output = execute_user_prompt_submit_hook(
+        &json!({"hook_event_name":"UserPromptSubmit",
+                "prompt":format!("@reviewer what is this? {header}")})
+        .to_string(),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    assert_eq!(
+        output["decision"], "block",
+        "the Mention stayed local: {output}"
+    );
+    assert_eq!(
+        space
+            .rows("SELECT message_id FROM collaboration_messages")
+            .len(),
+        1
+    );
 }
 
 #[test]

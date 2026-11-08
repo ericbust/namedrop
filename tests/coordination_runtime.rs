@@ -27,6 +27,7 @@ struct Fixture {
     statuses: Mutex<BTreeMap<String, String>>,
     sessions: Mutex<BTreeMap<String, String>>,
     prompts: Mutex<Vec<(String, Value)>>,
+    typed: Mutex<Vec<String>>,
     fail_next_nudge: Mutex<bool>,
     pane_lists: AtomicU64,
     lead_working_after: AtomicU64,
@@ -56,6 +57,7 @@ impl Fixture {
             ])),
             sessions: Mutex::new(BTreeMap::new()),
             prompts: Mutex::new(Vec::new()),
+            typed: Mutex::new(Vec::new()),
             fail_next_nudge: Mutex::new(false),
             pane_lists: AtomicU64::new(0),
             lead_working_after: AtomicU64::new(u64::MAX),
@@ -183,9 +185,12 @@ impl Fixture {
     }
     fn check_rendered_actions(&self, envelope: &Value) {
         use std::os::unix::fs::PermissionsExt;
+        let prompt = {
+            let typed = self.typed.lock().unwrap();
+            delivered::as_typed(typed.iter().map(String::as_str), &envelope.to_string())
+        };
         let hook = execute_user_prompt_submit_hook(
-            &json!({"hook_event_name":"UserPromptSubmit", "prompt":envelope.to_string()})
-                .to_string(),
+            &json!({"hook_event_name":"UserPromptSubmit", "prompt":prompt}).to_string(),
             &self.runtime("lead"),
         )
         .unwrap();
@@ -566,6 +571,7 @@ impl HerdrCommandExecutor for Fixture {
                 {
                     return Err("synthetic-preinvocation".into());
                 }
+                self.typed.lock().unwrap().push((*prompt).to_owned());
                 self.prompts
                     .lock()
                     .unwrap()

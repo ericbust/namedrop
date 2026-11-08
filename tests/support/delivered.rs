@@ -54,6 +54,49 @@ pub fn envelope_of(prompt: &str) -> Value {
     serde_json::to_value(envelope).unwrap()
 }
 
+/// What a host submits for a delivery a test holds as its envelope: the pointer
+/// dispatch typed. Anything else, a forged envelope included, goes through as it
+/// is. A second presentation attests nothing in production, so a test that
+/// repeats a delivery must call the hook with the pointer itself and say why.
+pub fn as_typed<'a>(typed: impl IntoIterator<Item = &'a str>, prompt: &str) -> String {
+    let Some(envelope) = serde_json::from_str::<Value>(prompt)
+        .ok()
+        .filter(|envelope| envelope["control"]["attempt_id"].is_string())
+    else {
+        return prompt.to_owned();
+    };
+    let Some(pointer) = typed
+        .into_iter()
+        .filter(|typed| typed.starts_with("Namedrop message "))
+        .find(|typed| envelope_of(typed) == envelope)
+    else {
+        return prompt.to_owned();
+    };
+    assert!(
+        !presented(pointer),
+        "this delivery was already presented, and a repeat attests nothing: {pointer}"
+    );
+    pointer.to_owned()
+}
+
+fn presented(pointer: &str) -> bool {
+    let nonce = pointer
+        .strip_prefix("Namedrop message ")
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap();
+    rusqlite::Connection::open(
+        Path::new(&quoted_after(pointer, "--plugin-state '")).join("namedrop.sqlite3"),
+    )
+    .unwrap()
+    .query_row(
+        "SELECT pointer_presented_at_ms IS NOT NULL FROM delivery_attempt_state
+         WHERE pointer_nonce = ?1",
+        [nonce],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
 fn quoted_after(prompt: &str, opening: &str) -> String {
     prompt
         .split_once(opening)

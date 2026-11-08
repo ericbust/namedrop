@@ -1360,7 +1360,9 @@ pub(crate) struct AuthenticatedDelivery {
 /// The reconstruction a submitted prompt matches, or `None`. Only durable
 /// exact-session state may add trusted host context, so everything derived for
 /// the host comes from the reconstruction, never the prompt. A pointer attests
-/// once per dispatch; a typed envelope stays limited by its attempt's settle.
+/// once per dispatch. A whole envelope attests only for an attempt with no
+/// pointer, which 1.6.0 or earlier typed; otherwise pasting what `delivery inbox`
+/// prints would attest and arm the dispatch again.
 pub(crate) fn authenticate_delivery_prompt<E, C, I>(
     carried: &CarriedDelivery<'_>,
     runtime: &LifecycleRuntime<'_, E, C, I>,
@@ -1376,9 +1378,11 @@ where
             let value = serde_json::to_value(&outstanding)
                 .map_err(|error| crate::StoreError::invalid_input(error.to_string()))?;
             let leftover = match carried {
-                CarriedDelivery::Envelope { envelope, leftover } => {
-                    (value == *envelope).then_some(*leftover)
-                }
+                CarriedDelivery::Envelope { envelope, leftover } => (value == *envelope
+                    && transaction
+                        .delivery_pointer(namespace, attempt_id)?
+                        .is_none())
+                .then_some(*leftover),
                 CarriedDelivery::Pointer { text, outside } => transaction
                     .delivery_pointer(namespace, attempt_id)?
                     .filter(|pointer| !pointer.presented)

@@ -267,10 +267,16 @@ fn register(
     .unwrap();
 }
 
+fn as_typed(herdr: &FakeHerdr, prompt: &str) -> String {
+    let typed = herdr.prompts.lock().unwrap();
+    delivered::as_typed(typed.iter().map(|(_, typed)| typed.as_str()), prompt)
+}
+
 fn hook(
     prompt: &str,
     runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
 ) -> Option<Value> {
+    let prompt = as_typed(runtime.herdr, prompt);
     execute_user_prompt_submit_hook(
         &json!({"hook_event_name":"UserPromptSubmit","prompt":prompt}).to_string(),
         runtime,
@@ -283,6 +289,7 @@ fn hook_as(
     prompt: &str,
     runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
 ) -> Option<Value> {
+    let prompt = as_typed(runtime.herdr, prompt);
     execute_user_prompt_submit_hook(
         &json!({"hook_event_name":"UserPromptSubmit","prompt":prompt,"session_id":session})
             .to_string(),
@@ -635,17 +642,10 @@ fn a_delivery_the_host_marked_as_pasted_text_still_authenticates() {
         .as_str()
         .unwrap()
         .to_owned();
-    let envelope = envelope.to_string();
+    let envelope = as_typed(&herdr, &envelope.to_string());
     let marked = |id: &str, body: &str| {
         format!("\n\n<pasted_content id=\"{id}\">\n{body}\n</pasted_content id=\"{id}\">\n")
     };
-
-    let attested = context(&hook(&marked("29f6", &envelope), &reviewer).unwrap());
-    assert!(attested.starts_with(DELIVERY_MARKER), "{attested}");
-    assert!(
-        attested.contains(COMMAND_MARKER) && attested.contains(&attempt),
-        "{attested}"
-    );
 
     let prompt = format!("<pasted_content id=\"29f6\">\n{envelope}\n</pasted_content id=\"552d\">");
     let output = hook(&prompt, &reviewer).map(|output| context(&output));
@@ -654,6 +654,13 @@ fn a_delivery_the_host_marked_as_pasted_text_still_authenticates() {
             !context.contains(DELIVERY_MARKER) && !context.contains(COMMAND_MARKER)
         }),
         "{prompt:?} was attested: {output:?}"
+    );
+
+    let attested = context(&hook(&marked("29f6", &envelope), &reviewer).unwrap());
+    assert!(attested.starts_with(DELIVERY_MARKER), "{attested}");
+    assert!(
+        attested.contains(COMMAND_MARKER) && attested.contains(&attempt),
+        "{attested}"
     );
 }
 
@@ -696,6 +703,7 @@ fn a_delivery_pasted_behind_leftover_input_is_the_delivery_and_never_a_mention()
             .count()
     };
     let before = prompts_to_lead();
+    let envelope = as_typed(&herdr, &envelope.to_string());
 
     // The live shape: the blocked-and-restored Mention, then the marked paste.
     let prompt = format!(
@@ -732,6 +740,7 @@ fn a_delivery_pasted_behind_leftover_input_is_the_delivery_and_never_a_mention()
     .unwrap();
     let to_codex = herdr.envelope_for("pane-lead");
     let before = herdr.prompts.lock().unwrap().len();
+    let to_codex = as_typed(&herdr, &to_codex.to_string());
     let output = hook(&format!("@reviewer reply with pong{to_codex}"), &lead).unwrap();
     assert!(
         output.get("decision").is_none(),

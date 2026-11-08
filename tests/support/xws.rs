@@ -297,6 +297,11 @@ pub struct Fixture {
 pub type Runtime<'a> = LifecycleRuntime<'a, FakeHerdr, TestClock, SequenceIds>;
 
 impl Fixture {
+    fn as_typed(&self, prompt: &str) -> String {
+        let typed = self.herdr.prompts.lock().unwrap();
+        crate::delivered::as_typed(typed.iter().map(|(_, typed)| typed.as_str()), prompt)
+    }
+
     pub fn new() -> Self {
         Self::with_activated(SPACES.len())
     }
@@ -616,6 +621,7 @@ impl Fixture {
     }
 
     pub fn hook(&self, workspace: &str, pane: &str, prompt: &str) -> Option<Value> {
+        let prompt = self.as_typed(prompt);
         execute_user_prompt_submit_hook(
             &json!({"hook_event_name":"UserPromptSubmit","prompt":prompt}).to_string(),
             &self.runtime(workspace, pane),

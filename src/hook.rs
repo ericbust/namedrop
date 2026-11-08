@@ -419,7 +419,8 @@ fn hook_output(event: &str, context: &str) -> Value {
 
 /// The context for one authenticated delivery, built from the reconstruction
 /// it authenticated against rather than from the submitted text. What the agent
-/// needs to act on it is counted first and the roster gets the room left.
+/// needs to act on it is counted first and only the roster gives way, so that
+/// text alone can still pass the host's limit.
 fn delivery_hook_output<E, C, I>(
     delivery: &AuthenticatedDelivery,
     reader: Option<Reader<'_>>,
@@ -600,21 +601,25 @@ fn carried_delivery(prompt: &str) -> Option<CarriedDelivery<'_>> {
         Some((leftover, inside)) => (Some(leftover), inside),
         None => (None, prompt),
     };
-    if crate::pointer::looks_like_pointer(text) {
-        return Some(CarriedDelivery::Pointer {
-            text,
-            outside: marked.is_some_and(|outside| !outside.trim().is_empty()),
+    let trimmed = text.trim_end();
+    let envelope = trimmed.match_indices('{').find_map(|(at, _)| {
+        serde_json::from_str::<Value>(&trimmed[at..])
+            .ok()
+            .map(|envelope| (&trimmed[..at], envelope))
+    });
+    // The envelope goes first: its body may quote a pointer header, while a
+    // pointer's closing JSON string can never parse as an envelope.
+    if let Some((before, envelope)) = envelope
+        && is_delivery_envelope(&envelope)
+    {
+        return Some(CarriedDelivery::Envelope {
+            leftover: !marked.unwrap_or(before).trim().is_empty(),
+            envelope,
         });
     }
-    let text = text.trim_end();
-    let (before, envelope) = text.match_indices('{').find_map(|(at, _)| {
-        serde_json::from_str::<Value>(&text[at..])
-            .ok()
-            .map(|envelope| (&text[..at], envelope))
-    })?;
-    is_delivery_envelope(&envelope).then(|| CarriedDelivery::Envelope {
-        leftover: !marked.unwrap_or(before).trim().is_empty(),
-        envelope,
+    crate::pointer::looks_like_pointer(text).then(|| CarriedDelivery::Pointer {
+        text,
+        outside: marked.is_some_and(|outside| !outside.trim().is_empty()),
     })
 }
 
