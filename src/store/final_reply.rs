@@ -63,9 +63,9 @@ impl StateTransaction<'_> {
     }
 
     /// Whether the attempt's recipient, in its own session, sent a message
-    /// between `since_ms` and `until_ms` that asks someone besides the person
-    /// and has no answer yet: the turn ended waiting on a helper. Its reply to
-    /// the attempt's own message is not such a message.
+    /// between `since_ms` and `until_ms` that opens a request to someone
+    /// besides the person and has no answer yet: the turn ended waiting on a
+    /// helper. Its replies, to this delivery or any other, open no request.
     pub(crate) fn awaits_helper(
         &self,
         namespace: &StateNamespace,
@@ -75,7 +75,7 @@ impl StateTransaction<'_> {
     ) -> Result<bool, StoreError> {
         let unanswered = {
             let mut statement = self.transaction.prepare(
-                "SELECT r.address_id
+                "SELECT r.address_id, m.grammar_version, m.in_reply_to IS NOT NULL
                  FROM delivery_attempts a
                  JOIN mailbox_deliveries d USING (
                      session_socket_id, worktree_id, delivery_id, address_id
@@ -122,8 +122,22 @@ impl StateTransaction<'_> {
                         to_i64(since_ms)?,
                         to_i64(until_ms)?
                     ],
-                    |row| row.get::<_, String>(0),
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, bool>(2)?,
+                        ))
+                    },
                 )?
+                .filter_map(|row| match row {
+                    Ok((address, grammar, is_reply)) => {
+                        crate::dashboard::snapshot::MessageKind::of(&grammar, is_reply)
+                            .opens_request()
+                            .then_some(Ok(address))
+                    }
+                    Err(error) => Some(Err(error)),
+                })
                 .collect::<Result<Vec<_>, _>>()?
         };
         if unanswered.is_empty() {

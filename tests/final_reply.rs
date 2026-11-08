@@ -1242,6 +1242,63 @@ fn a_turn_that_ends_waiting_on_a_helper_holds_the_delivery() {
     assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
 }
 
+/// A reply the agent sends during the turn opens no request, even to an
+/// agent who has not answered it: a late answer to an earlier delivery does
+/// not make the turn wait, so the person still gets the final message.
+#[test]
+fn a_reply_to_an_earlier_delivery_does_not_hold_the_turn() {
+    let space = Space::new();
+    dispatch::message(
+        "send",
+        json!({"request_id":"earlier","source":"@reviewer Which branch is the release on?",
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    let earlier = space.herdr.envelope_for("pane-reviewer");
+    StateStore::open(&space.directory.state)
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.transition_delivery_attempt(
+                &namespace(),
+                &namedrop::DeliveryAttemptId::new(
+                    earlier["control"]["attempt_id"].as_str().unwrap(),
+                ),
+                namedrop::DeliveryState::Settled,
+                &MutationAttribution::new(ActorKind::Plugin, "test", 42),
+            )
+        })
+        .unwrap();
+    space.send_as_person("question", "@reviewer Is option B safe?", None);
+    let question = space.herdr.envelope_for("pane-reviewer");
+    assert_ne!(
+        question["control"]["attempt_id"],
+        earlier["control"]["attempt_id"]
+    );
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &question.to_string(),
+    );
+    dispatch::message(
+        "reply",
+        bound_reply(&space, &earlier, "@lead It is on release-2."),
+        &space.runtime("pane-reviewer"),
+    )
+    .unwrap();
+    space.stop("session-reviewer", CLAUDE, "Yes, option B is safe.");
+    assert_eq!(
+        space
+            .relayed()
+            .iter()
+            .map(|row| row[3].as_str())
+            .collect::<Vec<_>>(),
+        ["Yes, option B is safe."]
+    );
+    assert_eq!(space.claims()[0]["state"], json!({"done":"no_replied"}));
+}
+
 /// A reply the Stop settles is an agent reply like any other: it spends the
 /// thread's Automatic Reply Limit, and the reply that reaches it pauses the
 /// thread and holds the answer until the person continues.
