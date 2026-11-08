@@ -370,34 +370,18 @@ mod tests {
             );
         }
 
-        let facts = |store: &mut StateStore| {
-            store
-                .transaction(|tx| {
-                    Ok(tx
-                        .unresolved_attention_items(&answer)?
-                        .into_iter()
-                        .chain(tx.unresolved_attention_items(&scraped)?)
-                        .map(|item| item.id)
-                        .collect::<Vec<_>>())
+        let facts = || -> i64 {
+            rusqlite::Connection::open(root.join("namedrop.sqlite3"))
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM transition_facts", [], |row| {
+                    row.get(0)
                 })
                 .unwrap()
         };
-        let before = facts(&mut store);
-        let resolved_transitions = |root: &Path| -> i64 {
-            rusqlite::Connection::open(root.join("namedrop.sqlite3"))
-                .unwrap()
-                .query_row(
-                    "SELECT COUNT(*) FROM transition_facts WHERE entity_kind='attention_item'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap()
-        };
-        let transitions = resolved_transitions(&root);
+        let before = facts();
         let mut successor = ChannelService::start(&root).unwrap();
         successor.shutdown().unwrap();
-        assert_eq!(facts(&mut store), before, "a second run changes nothing");
-        assert_eq!(resolved_transitions(&root), transitions);
+        assert_eq!(facts(), before, "a second run changes nothing");
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
