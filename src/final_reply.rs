@@ -731,6 +731,7 @@ pub struct BoundOperation {
 /// Decides every live claim of the stopping session and runs each settle
 /// through `run`, the same pipeline the CLI runs, so every guard of `reply`
 /// and `complete` applies. A failed settle leaves its delivery pending.
+/// `now_ms` is when the Stop ended, however late its worker runs.
 pub fn settle_at_stop(
     state: &Path,
     socket: &str,
@@ -742,12 +743,19 @@ pub fn settle_at_stop(
     let Some(mut claims) = Claims::lock(directory, STOP_LOCK_WAIT) else {
         return;
     };
+    // A claim of another turn armed after this Stop ended belongs to a turn
+    // that started after it: a late worker leaves it to that turn.
     let moved: Vec<_> = claims
         .claims
         .iter()
         .map(|claim| {
-            (claim.state == ClaimState::Open && stop.turn.as_ref() != Some(&claim.turn))
-                .then(|| claims.moved_on(claim, now_ms))
+            (claim.state == ClaimState::Open && stop.turn.as_ref() != Some(&claim.turn)).then(
+                || {
+                    (claim.armed_at_ms <= now_ms)
+                        .then(|| claims.moved_on(claim, now_ms))
+                        .flatten()
+                },
+            )
         })
         .collect();
     for (claim, moved) in claims.claims.iter_mut().zip(moved) {

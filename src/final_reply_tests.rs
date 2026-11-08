@@ -846,3 +846,64 @@ fn a_claim_left_open_stays_while_later_prompts_show_it() {
         "a claim the agent was still being shown was pruned"
     );
 }
+
+#[test]
+fn a_late_stop_worker_leaves_the_next_turns_claim_alone() {
+    let state = StateDirectory::new();
+    let at = |attempt: &str, prompt: &str, armed_at_ms| Claim {
+        armed_at_ms,
+        updated_at_ms: armed_at_ms,
+        ..armed(attempt, prompt, reply_plan())
+    };
+    let prompt = |prompt: &str, arm: Claim, now_ms| {
+        observe_prompt(
+            &state.0,
+            "socket",
+            "session",
+            &turn(prompt),
+            Some(arm),
+            now_ms,
+        )
+        .armed
+    };
+    assert!(prompt("prompt-1", at("attempt-1", "prompt-1", 10), 10));
+    mark_stopped(&state.0, "socket", "session", &turn("prompt-1"), 12);
+    assert!(prompt("prompt-2", at("attempt-2", "prompt-2", 15), 15));
+    let log = std::cell::RefCell::new(Vec::new());
+    settle_at_stop(
+        &state.0,
+        "socket",
+        &stop("prompt-1", "First answer."),
+        12,
+        &mut ran(&log, Ok(json!({}))),
+    );
+    assert_eq!(
+        state
+            .claims()
+            .iter()
+            .map(|claim| claim.state)
+            .collect::<Vec<_>>(),
+        [ClaimState::Done(Done::Replied), ClaimState::Open],
+        "a late worker ended the next turn's claim"
+    );
+    assert!(has_live_claims(&state.0, "socket", "session"));
+    settle_at_stop(
+        &state.0,
+        "socket",
+        &stop("prompt-2", "Second answer."),
+        20,
+        &mut ran(&log, Ok(json!({}))),
+    );
+    let sources: Vec<_> = log
+        .into_inner()
+        .iter()
+        .map(|operation| operation.input["source"].clone())
+        .collect();
+    assert_eq!(
+        sources,
+        [
+            json!("@codex First answer."),
+            json!("@codex Second answer.")
+        ]
+    );
+}
