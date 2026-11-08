@@ -348,6 +348,128 @@ fn relay_ending(f: &Fixture, space: &str, pane: &str, attempt: &str, text: &str)
         .to_owned()
 }
 
+fn leg_stage(f: &Fixture, space: &str, message: &str) -> Value {
+    let rows = StateStore::open(&f.state)
+        .unwrap()
+        .dashboard_rows(&StateNamespace::for_space("socket-a", space))
+        .unwrap();
+    let wire = serde_json::to_value(namedrop::dashboard::snapshot::build(&rows, None, 50)).unwrap();
+    let posted = wire["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|posted| posted["message_id"] == message)
+        .unwrap_or_else(|| panic!("{message} is not in the {space} snapshot"));
+    assert_eq!(posted["legs"].as_array().unwrap().len(), 1, "{posted}");
+    posted["legs"][0]["stage"].clone()
+}
+
+fn replied(answer: &str) -> Value {
+    json!({"stage": "replied", "reply_id": answer})
+}
+
+fn closed_without_reply() -> Value {
+    json!({"stage": "completed", "kind": "no_reply"})
+}
+
+#[test]
+fn a_thread_ask_answered_by_a_final_message_reads_as_replied() {
+    let f = Fixture::new();
+    f.register_all();
+    let root = plain_root(&f, "root", "Which option?");
+    let root_id = root["message_id"].as_str().unwrap();
+    let root_attempt = reply_attempt(&f, &root, "pane-1-planner", "root");
+    let mut runtime = f.runtime("w1", "unused");
+    runtime.current_pane_id = None;
+    let ask = namedrop::send_operator_message(
+        "thread-ask",
+        "@lead Do you agree?",
+        Some(&namedrop::MessageId::new(root_id)),
+        &runtime,
+    )
+    .unwrap();
+    let ask_id = ask["message_id"].as_str().unwrap();
+    let ask_attempt = reply_attempt(&f, &ask, "pane-1-lead", "thread-ask");
+
+    let root_answer = relay_ending(&f, "w1", "pane-1-planner", &root_attempt, "Option A");
+    assert_eq!(leg_stage(&f, "w1", root_id), replied(&root_answer));
+    assert_ne!(
+        leg_stage(&f, "w1", ask_id)["stage"],
+        "replied",
+        "another agent's answer doesn't answer this ask"
+    );
+
+    let ask_answer = relay_ending(&f, "w1", "pane-1-lead", &ask_attempt, "Yes");
+    assert_eq!(leg_stage(&f, "w1", ask_id), replied(&ask_answer));
+    assert_eq!(leg_stage(&f, "w1", root_id), replied(&root_answer));
+}
+
+#[test]
+fn a_cross_workspace_ask_reads_like_its_answer_in_both_workspaces() {
+    for armed in [false, true] {
+        let f = Fixture::new();
+        f.register_all();
+        let mut runtime = f.runtime("w1", "unused");
+        runtime.current_pane_id = None;
+        let ask = namedrop::send_operator_message(
+            "remote-question",
+            "#ws2 @tester inspect",
+            None,
+            &runtime,
+        )
+        .unwrap();
+        let ask_id = ask["message_id"].as_str().unwrap();
+        let envelope = f.herdr.last_envelope("pane-2-tester");
+        let attempt = envelope["control"]["attempt_id"].as_str().unwrap();
+        if armed {
+            arm_attempt(&f, "w2", attempt);
+        }
+        let relay = relay_ending(&f, "w2", "pane-2-tester", attempt, "Option A");
+        let copy_of = |origin: &str| -> String {
+            f.db()
+                .query_row(
+                    "SELECT message_id FROM bridged_messages WHERE origin_message_id=?1",
+                    [origin],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        let (home, away) = if armed {
+            (closed_without_reply(), closed_without_reply())
+        } else {
+            (replied(&copy_of(&relay)), replied(&relay))
+        };
+        assert_eq!(leg_stage(&f, "w1", ask_id), home, "armed={armed}");
+        assert_eq!(leg_stage(&f, "w2", &copy_of(ask_id)), away, "armed={armed}");
+    }
+}
+
+#[test]
+fn a_mirrored_answer_whose_origin_space_was_purged_no_longer_reads_as_replied() {
+    let f = Fixture::new();
+    f.register_all();
+    let mut runtime = f.runtime("w1", "unused");
+    runtime.current_pane_id = None;
+    let ask =
+        namedrop::send_operator_message("remote-question", "#ws2 @tester inspect", None, &runtime)
+            .unwrap();
+    let ask_id = ask["message_id"].as_str().unwrap();
+    let envelope = f.herdr.last_envelope("pane-2-tester");
+    let attempt = envelope["control"]["attempt_id"].as_str().unwrap();
+    relay_ending(&f, "w2", "pane-2-tester", attempt, "Option A");
+    assert_eq!(leg_stage(&f, "w1", ask_id)["stage"], "replied");
+
+    let origin = StateNamespace::for_space("socket-a", "w2");
+    let at = namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test", 60);
+    let mut store = StateStore::open(&f.state).unwrap();
+    store
+        .transaction(|tx| tx.deactivate_worktree(&origin, &at))
+        .unwrap();
+    store.purge_worktree(&origin, "w2", &at).unwrap();
+
+    assert_eq!(leg_stage(&f, "w1", ask_id), closed_without_reply());
+}
+
 #[test]
 fn a_final_message_answer_reaches_later_agents_only_as_untrusted_recap() {
     for armed in [false, true] {

@@ -563,6 +563,79 @@ pub(super) mod tests {
         }
     }
 
+    /// The wire stage of the request's leg in the channel snapshot, the paged
+    /// history and the thread pane.
+    fn request_stages(store: &mut StateStore, ns: &StateNamespace) -> [serde_json::Value; 3] {
+        let of = |messages: &[crate::store::dashboard::MessageRow],
+                  legs: &[crate::store::dashboard::LegRow]| {
+            let request = messages.iter().find(|m| m.message_id == "request").unwrap();
+            serde_json::to_value(crate::dashboard::snapshot::message(request, legs)).unwrap()
+                ["legs"][0]["stage"]
+                .clone()
+        };
+        let window = store.dashboard_rows(ns).unwrap();
+        let history = store.dashboard_history(ns, None, 10).unwrap().unwrap();
+        let thread = store
+            .dashboard_thread_context(ns, "request")
+            .unwrap()
+            .unwrap();
+        [
+            of(&window.messages, &window.legs),
+            of(&history.messages, &history.legs),
+            of(&thread.history.messages, &thread.history.legs),
+        ]
+    }
+
+    fn close_without_reply(store: &mut StateStore, ns: &StateNamespace, time: u64) {
+        store
+            .transaction(|tx| {
+                let attempt = DeliveryAttemptId::new("attempt");
+                let session = AgentSessionId::new("session");
+                tx.ensure_delivery_attempt_acknowledged(ns, &attempt, &session, &at(time))?;
+                tx.record_no_reply_disposition(ns, &attempt, "no-reply", &session, &at(time))
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_final_message_answer_reads_as_replied_in_every_leg_read() {
+        let replied = serde_json::json!({"stage": "replied", "reply_id": "terminal-relay:attempt"});
+        for grammar in ["channel/v1", "mention/v1"] {
+            let (mut store, ns) = fixture(grammar, true);
+            relay(&mut store, &ns, 20, "An answer");
+            assert_eq!(
+                request_stages(&mut store, &ns),
+                [(); 3].map(|()| replied.clone())
+            );
+        }
+        let (mut store, ns) = fixture("mention/v1", true);
+        close_without_reply(&mut store, &ns, 15);
+        relay(&mut store, &ns, 20, "An answer after closing");
+        assert_eq!(
+            request_stages(&mut store, &ns),
+            [(); 3].map(|()| replied.clone())
+        );
+    }
+
+    #[test]
+    fn a_scraped_relay_and_a_plain_no_reply_keep_their_receipt() {
+        let closed = serde_json::json!({"stage": "completed", "kind": "no_reply"});
+        let (mut store, ns) = fixture("channel/v1", true);
+        arm(&mut store, &ns, "attempt");
+        relay(&mut store, &ns, 20, "Scraped text");
+        assert_eq!(
+            request_stages(&mut store, &ns),
+            [(); 3].map(|()| closed.clone())
+        );
+
+        let (mut store, ns) = fixture("channel/v1", true);
+        close_without_reply(&mut store, &ns, 15);
+        assert_eq!(
+            request_stages(&mut store, &ns),
+            [(); 3].map(|()| closed.clone())
+        );
+    }
+
     #[test]
     fn a_scraped_relay_keeps_its_private_label_and_attention() {
         let (mut store, ns) = fixture("mention/v1", true);

@@ -965,6 +965,16 @@ mod tests {
                 .iter()
                 .all(|leg| leg.message_id != relay.as_str())
         );
+        let request = serde_json::to_value(crate::dashboard::snapshot::message(
+            &history.history.messages[0],
+            &history.history.legs,
+        ))
+        .unwrap();
+        assert_eq!(
+            request["legs"][0]["stage"],
+            serde_json::json!({"stage": "replied", "reply_id": relay.as_str()}),
+            "the person's message reads as answered"
+        );
         let peers = f.store.direct_message_peers().unwrap();
         assert_eq!(peers.len(), 1);
         let peer = &peers[0];
