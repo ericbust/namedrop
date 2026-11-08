@@ -1067,6 +1067,36 @@ fn a_message_from_the_person_is_answered_in_its_thread_by_the_final_message() {
     );
 }
 
+/// An agent that closes the person's message itself has said there is no
+/// answer to post, so its final message stays in the pane.
+#[test]
+fn an_explicit_no_reply_to_the_person_posts_no_final_message() {
+    let space = Space::new();
+    space.send_as_person("question", "@reviewer Thanks, that is all.", None);
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    execute_integration_operation(
+        "complete",
+        json!({"attempt_id": attempt}),
+        &space.runtime("pane-reviewer"),
+    )
+    .unwrap();
+    space.stop(
+        "session-reviewer",
+        CLAUDE,
+        "Closed the delivery with no reply.",
+    );
+    assert!(space.relayed().is_empty(), "{:?}", space.relayed());
+    assert_eq!(space.dispositions(), [vec![attempt, "no_reply".to_owned()]]);
+    assert_eq!(space.claims()[0]["state"], json!({"done":"superseded"}));
+}
+
 /// What the person types into the pane through Live Peek is a plain prompt
 /// with no envelope: it arms nothing, so its turn's final message is never
 /// posted anywhere, even while a message from the person is outstanding.

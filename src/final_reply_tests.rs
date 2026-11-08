@@ -327,7 +327,15 @@ fn a_stop_settles_only_its_own_open_claim_and_explicit_settles_win() {
                 disposition: Some(crate::DeliveryDisposition::NoReply),
                 ..none
             },
-            Verdict::Settle(Settlement::Relay("Option B.".into())),
+            Verdict::Superseded,
+        ),
+        (
+            stop("prompt-1", "Option B."),
+            SettleFacts {
+                explicit_pending: true,
+                ..none
+            },
+            Verdict::Superseded,
         ),
         (
             stop("prompt-1", "Option B."),

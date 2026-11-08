@@ -348,18 +348,12 @@ pub(crate) fn decide(claim: &Claim, stop: &StopFacts, settle: &SettleFacts) -> V
         ClaimState::Open if stop.turn.as_ref() != Some(&claim.turn) => {
             Verdict::Leave(LeaveReason::Interrupted)
         }
-        ClaimState::Open
-            if settle.explicit_pending
-                || settle.disposition == Some(crate::DeliveryDisposition::Reply) =>
-        {
+        ClaimState::Open if settle.explicit_pending || settle.disposition.is_some() => {
             Verdict::Superseded
         }
         ClaimState::Open => {
-            let relayed = claim.plan == Armed::NoReply(NoReplyCase::Relayed);
             let waiting = stop.background_running || settle.waiting;
             match &claim.plan {
-                // An explicit no-reply still leaves the person's answer to post.
-                _ if settle.disposition.is_some() && !relayed => Verdict::Superseded,
                 Armed::NoReply(NoReplyCase::Relayed) | Armed::Reply { .. } if waiting => {
                     Verdict::Leave(LeaveReason::Held)
                 }
