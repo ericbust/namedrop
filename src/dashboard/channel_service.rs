@@ -300,6 +300,142 @@ pub(super) fn drain(state: &Path, namespace: &StateNamespace) {
 mod tests {
     use super::*;
 
+    fn state_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "channel-{name}-{}",
+            crate::IdGenerator::next_id(&crate::ProcessIds::default(), "test")
+        ));
+        std::fs::create_dir_all(root.join("dashboard")).unwrap();
+        root
+    }
+
+    fn open_terminal_relay_items(store: &mut StateStore, ns: &StateNamespace) -> Vec<String> {
+        store
+            .transaction(|tx| tx.unresolved_attention_items(ns))
+            .unwrap()
+            .into_iter()
+            .filter(|item| item.source_kind == crate::AttentionSourceKind::TerminalRelay)
+            .map(|item| item.source_id)
+            .collect()
+    }
+
+    #[test]
+    fn starting_clears_flags_left_on_answers_and_keeps_scraped_and_other_warnings() {
+        let root = state_root("backlog");
+        let answer = StateNamespace::for_space("socket", "answer");
+        let scraped = StateNamespace::for_space("socket", "scraped");
+        let warning = crate::AttentionItemDraft {
+            id: crate::AttentionItemId::new("unanswered"),
+            source_kind: crate::AttentionSourceKind::AgentDisposition,
+            source_id: "attempt".to_owned(),
+            summary: "An agent ended its turn without replying.".to_owned(),
+        };
+        let at = crate::MutationAttribution::new(crate::ActorKind::Plugin, "test", 30);
+        let mut store = StateStore::open(&root).unwrap();
+        for (ns, armed) in [(&answer, false), (&scraped, true)] {
+            crate::store::seed_flagged_relay(&mut store, ns, armed, "An ending");
+            store
+                .transaction(|tx| tx.open_attention_item(ns, &warning, &at))
+                .unwrap();
+        }
+
+        let mut service = ChannelService::start(&root).unwrap();
+        service.shutdown().unwrap();
+
+        assert!(open_terminal_relay_items(&mut store, &answer).is_empty());
+        assert_eq!(
+            open_terminal_relay_items(&mut store, &scraped),
+            ["terminal-relay:attempt"]
+        );
+        for ns in [&answer, &scraped] {
+            let items = store
+                .transaction(|tx| tx.unresolved_attention_items(ns))
+                .unwrap();
+            assert!(
+                items
+                    .iter()
+                    .any(|item| item.source_kind == crate::AttentionSourceKind::AgentDisposition),
+                "{items:?}"
+            );
+        }
+
+        let facts = |store: &mut StateStore| {
+            store
+                .transaction(|tx| {
+                    Ok(tx
+                        .unresolved_attention_items(&answer)?
+                        .into_iter()
+                        .chain(tx.unresolved_attention_items(&scraped)?)
+                        .map(|item| item.id)
+                        .collect::<Vec<_>>())
+                })
+                .unwrap()
+        };
+        let before = facts(&mut store);
+        let resolved_transitions = |root: &Path| -> i64 {
+            rusqlite::Connection::open(root.join("namedrop.sqlite3"))
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM transition_facts WHERE entity_kind='attention_item'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        let transitions = resolved_transitions(&root);
+        let mut successor = ChannelService::start(&root).unwrap();
+        successor.shutdown().unwrap();
+        assert_eq!(facts(&mut store), before, "a second run changes nothing");
+        assert_eq!(resolved_transitions(&root), transitions);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_store_migrated_from_schema_six_keeps_its_scraped_flag_and_clears_an_answers() {
+        let root = state_root("schema6-backlog");
+        let database = rusqlite::Connection::open(root.join("namedrop.sqlite3")).unwrap();
+        database.pragma_update(None, "foreign_keys", true).unwrap();
+        for sql in [
+            include_str!("../../tests/fixtures/schema6/schema.sql"),
+            include_str!("../../tests/fixtures/schema6/common.sql"),
+            include_str!("../../tests/fixtures/schema6/experimental.sql"),
+        ] {
+            database.execute_batch(sql).unwrap();
+        }
+        let mut store = StateStore::open(&root).unwrap();
+        database
+            .execute_batch(
+                "INSERT INTO collaboration_messages (
+                     session_socket_id, worktree_id, message_id, thread_id, thread_order,
+                     in_reply_to, author_address_id, author_alias_snapshot, author_kind,
+                     author_session_snapshot, request_id, authored_source, body,
+                     grammar_version, created_at_ms)
+                 SELECT session_socket_id, worktree_id, 'terminal-relay:unarmed', thread_id,
+                     thread_order + 1, in_reply_to, author_address_id, author_alias_snapshot,
+                     author_kind, author_session_snapshot, 'terminal-relay:unarmed',
+                     authored_source, body, grammar_version, created_at_ms
+                 FROM collaboration_messages WHERE message_id='terminal-relay:dm-attempt';
+                 INSERT INTO attention_items
+                 SELECT session_socket_id, worktree_id, 'unarmed-attention', source_kind,
+                     'terminal-relay:unarmed', summary, opened_at_ms, NULL
+                 FROM attention_items WHERE attention_item_id='relay-attention';",
+            )
+            .unwrap();
+        let ns = StateNamespace::for_space("test-schema-socket", "home");
+        assert_eq!(open_terminal_relay_items(&mut store, &ns).len(), 2);
+
+        let mut service = ChannelService::start(&root).unwrap();
+        service.shutdown().unwrap();
+
+        assert_eq!(
+            open_terminal_relay_items(&mut store, &ns),
+            ["terminal-relay:dm-attempt"]
+        );
+        drop((store, database));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn notification_between_probe_and_wait_is_not_lost() {
         let wake = ChannelWake::default();

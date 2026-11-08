@@ -955,7 +955,7 @@ mod tests {
             Some(root.receipt.message_id.as_str())
         );
         assert_eq!(message.author_address_id, f.peer.as_str());
-        assert_eq!(message.grammar_version, "terminal-relay/v1");
+        assert_eq!(message.grammar_version, "final-message/v1");
         assert_eq!(message.body, ending.text);
         assert!(
             history

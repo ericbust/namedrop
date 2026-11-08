@@ -452,7 +452,7 @@ pub(super) fn history(server: &Server) -> Value {
     serde_json::from_str(&response.body).unwrap()
 }
 
-fn reply_attempt(f: &Fixture, parent: &Value, pane: &str, request: &str) -> String {
+pub(super) fn reply_attempt(f: &Fixture, parent: &Value, pane: &str, request: &str) -> String {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         match f.db().query_row(

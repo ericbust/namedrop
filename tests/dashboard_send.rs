@@ -172,28 +172,17 @@ fn cross_space_operator_terminal_relay_returns_to_the_human_and_routes_the_next_
         let frame =
             namedrop::dashboard::snapshot::build(&store.dashboard_rows(&home).unwrap(), None, 50);
         let wire = serde_json::to_value(&frame).unwrap();
-        let message = wire["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|message| message["kind"] == "terminal_relay")
-            .expect("relay in original human conversation");
+        let message = relayed_message(&wire);
+        assert_eq!(message["kind"], "reply");
         assert_eq!(message["thread_id"], sent["thread_id"]);
-        assert_eq!(message["body"]["text"], "Which option?");
         assert!(message["legs"].as_array().unwrap().is_empty());
-        let attention = wire["attention"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|item| item["source_kind"] == "terminal_relay")
-            .unwrap();
-        assert_eq!(attention["response"]["kind"], "reply");
-        assert_eq!(
-            attention["response"]["address_id"],
-            "envoy:w2:address-w2-tester"
-        );
-        assert_eq!(attention["response"]["message_id"], message["message_id"]);
-        assert_eq!(wire["health"]["level"], "needs_you");
+        assert_eq!(wire["attention"], json!([]));
+        assert_ne!(wire["health"]["level"], "needs_you");
+        let origin =
+            namedrop::dashboard::snapshot::build(&store.dashboard_rows(&remote).unwrap(), None, 50);
+        let origin = serde_json::to_value(&origin).unwrap();
+        assert_eq!(relayed_message(&origin)["kind"], "reply");
+        assert_eq!(origin["attention"], json!([]));
         f.advance(20);
         send_operator_message(
             "remote-answer",
@@ -208,18 +197,119 @@ fn cross_space_operator_terminal_relay_returns_to_the_human_and_routes_the_next_
             envelope["control"]["attempt_id"]
         );
         assert_eq!(Fixture::untrusted_body(&followup), "First option");
-        for ns in [&home, &remote] {
-            assert!(
-                !store
-                    .dashboard_rows(ns)
-                    .unwrap()
-                    .attention
-                    .iter()
-                    .any(|item| item.item.source_kind
-                        == namedrop::AttentionSourceKind::TerminalRelay
-                        && item.item.resolved_at_ms.is_none())
-            );
-        }
+    }
+}
+
+fn relayed_message(wire: &serde_json::Value) -> &serde_json::Value {
+    wire["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["body"]["text"] == "Which option?")
+        .expect("relay in the conversation")
+}
+
+#[test]
+fn cross_space_scraped_relay_keeps_its_label_and_attention_on_both_sides() {
+    use namedrop::{
+        AgentSessionId, AttentionItemDraft, AttentionItemId, AttentionSourceKind,
+        DeliveryAttemptId, MessageId, TerminalRelayEnd,
+    };
+    let f = Fixture::new();
+    f.register_all();
+    let mut runtime = f.runtime("w1", "unused");
+    runtime.current_pane_id = None;
+    send_operator_message("remote-question", "#ws2 @tester inspect", None, &runtime).unwrap();
+    let envelope = f.herdr.last_envelope("pane-2-tester");
+    let attempt = envelope["control"]["attempt_id"].as_str().unwrap();
+    f.db()
+        .execute(
+            "INSERT INTO transition_facts VALUES ('socket-a','w2',1000000,
+             'terminal_relay_attempt',?1,'activated','plugin','terminal-relay',10)",
+            [attempt],
+        )
+        .unwrap();
+    let remote = StateNamespace::for_space("socket-a", "w2");
+    let home = StateNamespace::for_space("socket-a", "w1");
+    let mut store = StateStore::open(&f.state).unwrap();
+    let at = MutationAttribution::new(ActorKind::Plugin, "test-relay", 50);
+    let relay = store
+        .transaction(|tx| {
+            tx.relay_final_message(
+                &remote,
+                &TerminalRelayEnd {
+                    agent_session_id: AgentSessionId::new(xws::session("pane-2-tester")),
+                    attempt_id: DeliveryAttemptId::new(attempt),
+                    turn_started_at_ms: 0,
+                    ended_at_ms: 50,
+                    text: "Which option?".to_owned(),
+                },
+                &at,
+            )
+        })
+        .unwrap()
+        .unwrap();
+    let copy: String = f
+        .db()
+        .query_row(
+            "SELECT message_id FROM bridged_messages WHERE origin_message_id=?1",
+            [relay.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    for (ns, source) in [(&remote, relay.as_str()), (&home, copy.as_str())] {
+        store
+            .transaction(|tx| {
+                tx.open_attention_item(
+                    ns,
+                    &AttentionItemDraft {
+                        id: AttentionItemId::new(format!("terminal-relay:{attempt}")),
+                        source_kind: AttentionSourceKind::TerminalRelay,
+                        source_id: source.to_owned(),
+                        summary: "@tester answered in their terminal and may need your reply."
+                            .to_owned(),
+                    },
+                    &at,
+                )
+            })
+            .unwrap();
+    }
+    let wire = |store: &mut StateStore, ns: &StateNamespace| {
+        serde_json::to_value(namedrop::dashboard::snapshot::build(
+            &store.dashboard_rows(ns).unwrap(),
+            None,
+            50,
+        ))
+        .unwrap()
+    };
+    let origin = wire(&mut store, &remote);
+    assert_eq!(relayed_message(&origin)["kind"], "terminal_relay");
+    let held = wire(&mut store, &home);
+    let message = relayed_message(&held);
+    assert_eq!(message["kind"], "terminal_relay");
+    let card = held["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["source_kind"] == "terminal_relay")
+        .unwrap();
+    assert_eq!(card["response"]["kind"], "reply");
+    assert_eq!(card["response"]["address_id"], "envoy:w2:address-w2-tester");
+    assert_eq!(card["response"]["message_id"], message["message_id"]);
+    assert_eq!(held["health"]["level"], "needs_you");
+    f.advance(20);
+    send_operator_message(
+        "remote-answer",
+        "@tester First option",
+        Some(&MessageId::new(message["message_id"].as_str().unwrap())),
+        &runtime,
+    )
+    .unwrap();
+    for ns in [&home, &remote] {
+        assert!(!store.dashboard_rows(ns).unwrap().attention.iter().any(
+            |item| item.item.source_kind == AttentionSourceKind::TerminalRelay
+                && item.item.resolved_at_ms.is_none()
+        ));
     }
 }
 

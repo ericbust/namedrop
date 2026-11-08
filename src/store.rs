@@ -113,6 +113,8 @@ mod groups;
 mod handoff;
 mod terminal;
 mod terminal_relay;
+#[cfg(test)]
+pub(crate) use terminal_relay::tests::seed_flagged_relay;
 
 pub struct StateStore {
     connection: Connection,
