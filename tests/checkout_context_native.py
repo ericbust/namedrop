@@ -108,7 +108,7 @@ class Lane(Fixture):
             env['HERDR_PANE_ID'] = self.panes[as_name]
         command = [tool['executable'], '--plugin-state', env['HERDR_PLUGIN_STATE_DIR'], *argv, tool['input_flag'],
                    json.dumps(body), '--herdr-socket', env['HERDR_SOCKET_PATH'],
-                   '--herdr-workspace', env['HERDR_WORKSPACE_ID'], '--herdr-pane', env['HERDR_PANE_ID']]
+                   '--herdr-workspace', env['HERDR_WORKSPACE_ID'], '--herdr-pane', env['HERDR_PANE_ID'], '--json']
         response = json.loads(self.command(*command, cwd=self.cwd[as_name or owner], context=env, check=False))
         if check:
             assert response.get('status') == 'ok', response

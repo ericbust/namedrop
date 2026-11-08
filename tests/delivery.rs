@@ -1054,12 +1054,13 @@ fn human_mention_round_trip(hold_report: bool) {
         &runtime,
     )
     .unwrap();
+    let disposition_drain = namedrop::drain_mailboxes(&runtime).unwrap();
     assert_eq!(disposition["disposition"], "reply");
     assert_eq!(disposition["relay"]["mode"], "return_to_source");
     assert_eq!(disposition["relay"]["notification_shown"], true);
-    let returned_attempts = disposition["drain"]["submitted"].as_array().unwrap();
+    let returned_attempts = disposition_drain.submitted;
     assert_eq!(returned_attempts.len(), 1);
-    let return_attempt_id = returned_attempts[0].as_str().unwrap().to_owned();
+    let return_attempt_id = returned_attempts[0].as_str().to_owned();
     assert_eq!(herdr.prompts.lock().unwrap().len(), 2);
     let notifications = herdr.notifications.lock().unwrap();
     assert_eq!(notifications.len(), 1);

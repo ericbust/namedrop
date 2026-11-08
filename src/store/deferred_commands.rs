@@ -30,14 +30,30 @@ impl StateTransaction<'_> {
         attempt: &crate::DeliveryAttemptId,
         session: &crate::AgentSessionId,
     ) -> Result<bool, StoreError> {
-        Ok(self.transaction.query_row(
-            "SELECT 1 FROM delivery_attempts a JOIN delivery_dispositions d
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT 1 FROM delivery_attempts a JOIN delivery_dispositions d
              USING (session_socket_id, worktree_id, attempt_id)
              WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2 AND a.attempt_id = ?3
-               AND a.agent_session_id = ?4 AND d.disposition_kind = 'reply' AND d.disposition_id = ?5",
-            params![namespace.session_socket_id, namespace.space_id.as_str(), attempt.as_str(), session.as_str(), message.as_str()],
-            |_| Ok(()),
-        ).optional()?.is_some())
+               AND a.agent_session_id = ?4
+               AND ((d.disposition_kind = 'reply' AND d.disposition_id = ?5)
+                 OR (d.disposition_kind = 'no_reply'
+                   AND (substr(d.disposition_id, 1, length(?6)) = ?6
+                     OR substr(d.disposition_id, 1, length(?7)) = ?7)))",
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    attempt.as_str(),
+                    session.as_str(),
+                    message.as_str(),
+                    AUTOMATIC_NO_REPLY_PREFIXES[0],
+                    AUTOMATIC_NO_REPLY_PREFIXES[1]
+                ],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
     }
 
     pub(crate) fn deferred_attempt_committed(

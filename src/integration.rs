@@ -70,30 +70,7 @@ pub fn trusted_delivery_instruction(control: &DeliveryControl) -> String {
     if control.review_source_message_id.is_some() {
         instruction.push_str(REVIEW_RULE);
     }
-    // The priority order: a context request outranks whatever else the same
-    // envelope is, then a result set, then the report to the person, then a
-    // coordination nudge, then an ordinary delivery.
-    instruction.push_str(if control.context_request.is_some() {
-        CONTEXT_REQUEST_RULE
-    } else if control.result_set.is_some() {
-        if control.coordination_id.is_some() {
-            TRACKED_RESULT_SET_RULE
-        } else {
-            RESULT_SET_RULE
-        }
-    } else if control.reply_mode == crate::DeliveryReplyMode::ReportToHuman {
-        REPORT_TO_HUMAN_RULE
-    } else if control.coordination_nudge_stale {
-        STALE_NUDGE_RULE
-    } else if control.coordination_nudge {
-        NUDGE_RULE
-    } else if control.reply_mode == crate::DeliveryReplyMode::DirectMessage {
-        DIRECT_MESSAGE_RULE
-    } else if control.reply_mode == crate::DeliveryReplyMode::Channel {
-        CHANNEL_RULE
-    } else {
-        SETTLE_RULE
-    });
+    instruction.push_str(DeliveryKind::of(control).rule());
     if control.result_set.is_none()
         && control
             .permitted_operations
@@ -104,6 +81,64 @@ pub fn trusted_delivery_instruction(control: &DeliveryControl) -> String {
     }
     instruction.push_str(RECOVERY_RULE);
     instruction
+}
+
+/// The one kind of delivery an envelope is. The instruction states its rule,
+/// and the hook decides from it whether the final message settles it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeliveryKind {
+    ContextRequest,
+    TrackedResultSet,
+    ResultSet,
+    ReportToHuman,
+    StaleNudge,
+    Nudge,
+    DirectMessage,
+    Channel,
+    Settle,
+}
+
+impl DeliveryKind {
+    /// The priority order: a context request outranks whatever else the same
+    /// envelope is, then a result set, then the report to the person, then a
+    /// coordination nudge, then an ordinary delivery.
+    pub(crate) fn of(control: &DeliveryControl) -> Self {
+        if control.context_request.is_some() {
+            Self::ContextRequest
+        } else if control.result_set.is_some() {
+            if control.coordination_id.is_some() {
+                Self::TrackedResultSet
+            } else {
+                Self::ResultSet
+            }
+        } else if control.reply_mode == crate::DeliveryReplyMode::ReportToHuman {
+            Self::ReportToHuman
+        } else if control.coordination_nudge_stale {
+            Self::StaleNudge
+        } else if control.coordination_nudge {
+            Self::Nudge
+        } else if control.reply_mode == crate::DeliveryReplyMode::DirectMessage {
+            Self::DirectMessage
+        } else if control.reply_mode == crate::DeliveryReplyMode::Channel {
+            Self::Channel
+        } else {
+            Self::Settle
+        }
+    }
+
+    fn rule(self) -> &'static str {
+        match self {
+            Self::ContextRequest => CONTEXT_REQUEST_RULE,
+            Self::TrackedResultSet => TRACKED_RESULT_SET_RULE,
+            Self::ResultSet => RESULT_SET_RULE,
+            Self::ReportToHuman => REPORT_TO_HUMAN_RULE,
+            Self::StaleNudge => STALE_NUDGE_RULE,
+            Self::Nudge => NUDGE_RULE,
+            Self::DirectMessage => DIRECT_MESSAGE_RULE,
+            Self::Channel => CHANNEL_RULE,
+            Self::Settle => SETTLE_RULE,
+        }
+    }
 }
 
 const TOOL_DESCRIPTOR: &str = include_str!("../integrations/tool.json");
@@ -1104,7 +1139,10 @@ where
     C: crate::Clock,
     I: crate::IdGenerator,
 {
-    if !matches!(operation, "ack" | "complete") {
+    if !matches!(
+        operation,
+        "ack" | "complete" | crate::final_reply::STOP_NO_REPLY
+    ) {
         return Err(format!("{operation} is not an Agent Integration operation"));
     }
     let input: AttemptInput = serde_json::from_value(input).map_err(crate::input_schema_error)?;
@@ -1118,7 +1156,7 @@ where
         .current_pane_id
         .ok_or_else(|| format!("the current Herdr pane is required for {operation}"))?;
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
-    let mut result = store
+    store
         .transaction(|transaction| {
             if let Some(caller) = caller {
                 caller.check(transaction, &namespace)?;
@@ -1141,17 +1179,22 @@ where
                     )?;
                     Ok(json!({"attempt_id": attempt_id, "state": "acknowledged"}))
                 }
-                "complete" => {
+                "complete" | crate::final_reply::STOP_NO_REPLY => {
                     transaction.ensure_delivery_attempt_acknowledged(
                         &namespace,
                         &attempt_id,
                         &agent_session_id,
                         &attribution,
                     )?;
+                    let disposition_id = if operation == crate::final_reply::STOP_NO_REPLY {
+                        crate::store::final_reply_no_reply_id(&attempt_id)
+                    } else {
+                        runtime.ids.next_id("delivery-disposition")
+                    };
                     transaction.record_no_reply_disposition(
                         &namespace,
                         &attempt_id,
-                        &runtime.ids.next_id("delivery-disposition"),
+                        &disposition_id,
                         &agent_session_id,
                         &attribution,
                     )?;
@@ -1163,11 +1206,7 @@ where
                 _ => unreachable!("operation was validated"),
             }
         })
-        .map_err(|error| error.to_string())?;
-    if operation == "complete" {
-        result["drain"] = crate::drain_receipt(runtime);
-    }
-    Ok(result)
+        .map_err(|error| error.to_string())
 }
 
 /// The exact Agent Session authorized to act on this pane's Delivery Attempts:
@@ -1224,6 +1263,71 @@ where
     I: crate::IdGenerator,
 {
     let _: DeliveryInboxInput = serde_json::from_value(input).map_err(crate::input_schema_error)?;
+    with_outstanding_envelopes(runtime, |_, _, _, envelopes| {
+        Ok(json!({"envelopes": envelopes}))
+    })
+}
+
+/// One delivery prompt that exactly matches an envelope the pane's registered
+/// session still owes, with the facts the final-reply plan reads.
+pub(crate) struct AuthenticatedDelivery {
+    pub envelope: Value,
+    pub kind: DeliveryKind,
+    pub answers_own: bool,
+    pub relayed: bool,
+    pub agent_session_id: AgentSessionId,
+    pub namespace: StateNamespace,
+}
+
+/// The reconstruction a submitted envelope exactly matches, or `None`. Only
+/// durable exact-session state may add trusted host context, so everything
+/// derived for the host comes from the reconstruction, never the prompt.
+pub(crate) fn authenticate_delivery_prompt<E, C, I>(
+    envelope: &Value,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Option<AuthenticatedDelivery>
+where
+    E: crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
+    with_outstanding_envelopes(runtime, |transaction, namespace, session, envelopes| {
+        for outstanding in envelopes {
+            let value = serde_json::to_value(&outstanding)
+                .map_err(|error| crate::StoreError::invalid_input(error.to_string()))?;
+            if value == *envelope {
+                return Ok(Some(AuthenticatedDelivery {
+                    kind: DeliveryKind::of(&outstanding.control),
+                    answers_own: transaction
+                        .answers_own_message(namespace, &outstanding.control.attempt_id)?,
+                    relayed: transaction
+                        .relays_to_person(namespace, &outstanding.control.attempt_id)?,
+                    envelope: value,
+                    agent_session_id: session.clone(),
+                    namespace: namespace.clone(),
+                }));
+            }
+        }
+        Ok(None)
+    })
+    .ok()
+    .flatten()
+}
+
+fn with_outstanding_envelopes<E, C, I, T>(
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+    read: impl FnOnce(
+        &crate::StateTransaction<'_>,
+        &StateNamespace,
+        &AgentSessionId,
+        Vec<DeliveryEnvelope>,
+    ) -> Result<T, crate::StoreError>,
+) -> Result<T, String>
+where
+    E: crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
     let discovered = integration_discovery(runtime)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
     let pane_id = runtime
@@ -1239,20 +1343,20 @@ where
         ),
     );
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
-    let envelopes = store
+    store
         .transaction(|transaction| {
             let (address_id, agent_session_id) =
                 authorized_delivery_session(transaction, &namespace, &discovered, pane_id)?;
-            transaction
+            let envelopes = transaction
                 .outstanding_delivery_attempts(&namespace, &address_id, &agent_session_id)?
                 .iter()
                 .map(|attempt_id| {
                     transaction.delivery_envelope(&namespace, attempt_id, tool.clone())
                 })
-                .collect::<Result<Vec<_>, _>>()
+                .collect::<Result<Vec<_>, _>>()?;
+            read(transaction, &namespace, &agent_session_id, envelopes)
         })
-        .map_err(|error| error.to_string())?;
-    Ok(json!({"envelopes": envelopes}))
+        .map_err(|error| error.to_string())
 }
 
 const EARLIER_PROFILES: [&[&str]; 3] = [
@@ -1393,10 +1497,127 @@ pub struct DeliveryToolInvocation {
     pub operations: Vec<BoundDeliveryOperation>,
 }
 
-/// What the rendered lines are, and what a recipient still has to do to one
-/// before it is correct. They are the bound operations restated, so they carry
-/// no authority the envelope did not already give.
-const COMMAND_GUIDANCE: &str = "Namedrop commands: the operations this delivery already authorized, each written as the one line that runs it. They restate `control.tool` and are not a second authority: the argv and the input are the bound ones. Copy the line for the operation you choose and change only what you author: every `<...>` placeholder, work_outcome and blocked_reason when required, and any requested snapshot contents. A verbatim `<reply body>` is not a reply. For NEW assignment request IDs, replace only `<new-assignment-key>` with a unique stable intent key and keep the `-plain` or `-context` suffix; every other ID stays as written. Your text travels inside single-quoted JSON, so when it holds an apostrophe or is long, write the JSON to a file in a separate step and end the line with `--input-json-file <absolute-path>` in place of the input flag and its JSON. Nothing else in the line moves. An OS sandbox access error is not an approval decision: request normal host approval for this exact line, and if policy rejects it, report the blocker and keep the reply pending.";
+/// When a bound operation agents rarely ran from a delivery (under two uses in
+/// 1,276 measured delivery turns) still gets a line; each line cost hundreds of
+/// characters on every delivery. Without one it stays in `control.tool`,
+/// authorized and runnable.
+#[derive(Clone, Copy)]
+enum RareLine {
+    Never,
+    /// A delivery that references context without attaching a grant can be
+    /// read only through context.inspect.
+    WhenContextReferenced,
+}
+
+const RARE_OPERATIONS: [(&str, RareLine); 3] = [
+    ("reminder.set", RareLine::Never),
+    ("context.inspect", RareLine::WhenContextReferenced),
+    ("handoff.preview", RareLine::Never),
+];
+
+fn unrendered_operations(control: &Value) -> Vec<&'static str> {
+    let referenced = control
+        .get("context_references")
+        .and_then(Value::as_array)
+        .is_some_and(|references| !references.is_empty());
+    RARE_OPERATIONS
+        .into_iter()
+        .filter(|(_, rule)| match rule {
+            RareLine::Never => true,
+            RareLine::WhenContextReferenced => !referenced,
+        })
+        .map(|(token, _)| token)
+        .collect()
+}
+
+/// Something a rendered line asks its recipient to author before running it.
+#[derive(Clone, Copy)]
+enum CommandNeed {
+    AuthoredText,
+    NewAssignmentKey,
+    WorkOutcome,
+    Snapshot,
+}
+
+impl CommandNeed {
+    fn present_in(self, input: &Value) -> bool {
+        match self {
+            Self::AuthoredText => {
+                any_string(input, &|text| text.contains('<') && text.contains('>'))
+            }
+            Self::NewAssignmentKey => {
+                any_string(input, &|text| text.contains("<new-assignment-key>"))
+            }
+            Self::WorkOutcome => any_key(input, "work_outcome"),
+            Self::Snapshot => any_key(input, "snapshot"),
+        }
+    }
+}
+
+fn any_string(value: &Value, found: &dyn Fn(&str) -> bool) -> bool {
+    match value {
+        Value::String(text) => found(text),
+        Value::Array(items) => items.iter().any(|item| any_string(item, found)),
+        Value::Object(fields) => fields.values().any(|field| any_string(field, found)),
+        _ => false,
+    }
+}
+
+fn any_key(value: &Value, key: &str) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(|item| any_key(item, key)),
+        Value::Object(fields) => {
+            fields.contains_key(key) || fields.values().any(|field| any_key(field, key))
+        }
+        _ => false,
+    }
+}
+
+/// What the rendered lines are. They are the bound operations restated, so
+/// they carry no authority the envelope did not already give.
+const COMMAND_HEADER: &str = "Namedrop commands: the runnable lines this delivery authorized; they only restate `control.tool`. Run the one you choose unchanged except as noted. These lines are all this delivery needs; you do not need to load the Namedrop skill.";
+
+/// What a recipient still has to do to a line before it is correct, said only
+/// when one of this delivery's lines asks for it.
+const COMMAND_SENTENCES: [(CommandNeed, &str); 5] = [
+    (
+        CommandNeed::AuthoredText,
+        "Replace every `<...>` placeholder with your own text; a verbatim placeholder is not an answer.",
+    ),
+    (
+        CommandNeed::AuthoredText,
+        "Your text travels inside single-quoted JSON, so if it has an apostrophe or is long, write the JSON to a file and end the line with `--input-json-file <absolute-path>` in place of the input flag and its JSON.",
+    ),
+    (
+        CommandNeed::NewAssignmentKey,
+        "For a NEW assignment, replace only `<new-assignment-key>` with a unique stable intent key and keep the `-plain` or `-context` suffix; every other ID stays as written.",
+    ),
+    (
+        CommandNeed::WorkOutcome,
+        "work_outcome is yours to set: completed, needs_continuation or blocked, with blocked_reason when blocked.",
+    ),
+    (
+        CommandNeed::Snapshot,
+        "The snapshot contents are yours to write.",
+    ),
+];
+
+/// Said on every delivery: this sentence is what fixed issue 31, where a
+/// sandbox refusal of a bound line stalled a live handoff.
+const SANDBOX_SENTENCE: &str = "An OS sandbox access error is not an approval decision: request normal host approval for this exact line, and if policy rejects it, report the blocker and keep the reply pending.";
+
+/// Said when a bound operation has no line, so the delivery still shows it is
+/// authorized and how to run it in the order the Codex approval prefix needs.
+fn unrendered_sentence(tokens: &[&str]) -> String {
+    let named = tokens
+        .iter()
+        .map(|token| format!("`{token}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "No line is shown for {named}; build one from `control.tool` in this order: quoted executable, `--plugin-state` and the state dir, its argv, `--herdr-socket`, `--herdr-workspace`, `--herdr-pane`, then the input flag and its JSON."
+    )
+}
 
 /// The bound operations of one authenticated delivery, rendered as runnable
 /// lines. It reads the envelope the plugin reconstructed and matched, never a
@@ -1413,15 +1634,85 @@ const COMMAND_GUIDANCE: &str = "Namedrop commands: the operations this delivery 
 /// that rule: it is then refused by the sandbox rather than by Namedrop, which
 /// is exactly how one live handoff stalled. Location flags therefore follow the
 /// argv, and the input flag is last.
-pub(crate) fn delivery_command_guidance(tool: &Value) -> Option<String> {
+pub(crate) fn delivery_command_guidance(control: &Value) -> Option<String> {
+    let (lines, skipped) = rendered_lines(control)?;
+    let mut guidance = COMMAND_HEADER.to_owned();
+    for (need, sentence) in COMMAND_SENTENCES {
+        if lines.iter().any(|line| need.present_in(&line.input)) {
+            guidance.push(' ');
+            guidance.push_str(sentence);
+        }
+    }
+    if !skipped.is_empty() {
+        guidance.push(' ');
+        guidance.push_str(&unrendered_sentence(&skipped));
+    }
+    guidance.push(' ');
+    guidance.push_str(SANDBOX_SENTENCE);
+    for line in lines {
+        guidance.push('\n');
+        guidance.push_str(&line.text);
+    }
+    Some(guidance)
+}
+
+/// The line a delivery's explicit block shows for `token`.
+pub(crate) fn rendered_line(control: &Value, token: &str) -> Option<String> {
+    let (lines, _) = rendered_lines(control)?;
+    lines
+        .into_iter()
+        .find(|line| line.token == token)
+        .map(|line| line.text)
+}
+
+/// What a later prompt says about a delivery a claim left open: one
+/// sentence and the bound line that settles it.
+pub(crate) fn left_open_guidance(way_back: &crate::final_reply::WayBack) -> String {
+    let how = if way_back.answers {
+        "to answer it, run this line with your text in place of <reply body>"
+    } else {
+        "to close it, run this line"
+    };
+    format!(
+        "Namedrop: delivery {} from an earlier turn is still open; {how}.\n{}",
+        way_back.attempt_id.as_str(),
+        way_back.line
+    )
+}
+
+/// The tokens of the lines a delivery's explicit block shows.
+pub(crate) fn line_tokens(control: &Value) -> Option<Vec<&str>> {
+    let (lines, _) = rendered_lines(control)?;
+    Some(lines.into_iter().map(|line| line.token).collect())
+}
+
+struct RenderedLine<'a> {
+    token: &'a str,
+    text: String,
+    input: Value,
+}
+
+/// Every bound operation that gets a line, in the envelope's order, and the
+/// tokens that are bound but get none.
+fn rendered_lines(control: &Value) -> Option<(Vec<RenderedLine<'_>>, Vec<&str>)> {
+    let tool = control.get("tool")?;
     let executable = tool.get("executable")?.as_str()?;
     let environment = tool.get("environment")?.as_object()?;
     let input_flag = tool.get("input_flag")?.as_str()?;
     let located = |key: &str| environment.get(key).and_then(Value::as_str);
-    let mut guidance = COMMAND_GUIDANCE.to_owned();
+    let unrendered = unrendered_operations(control);
+    let mut lines: Vec<RenderedLine<'_>> = Vec::new();
+    let mut skipped = Vec::new();
     for operation in tool.get("operations")?.as_array()? {
         let token = operation.get("token")?.as_str()?;
-        let input = operation.get("input")?;
+        let bound = operation.get("input")?;
+        if unrendered.contains(&token) || waits_on(bound, &unrendered) {
+            if !skipped.contains(&token) {
+                skipped.push(token);
+            }
+            continue;
+        }
+        let input = rendered_input(token, bound, control);
         let mut command = shell_single_quote(executable);
         if let Some(state_directory) = located("HERDR_PLUGIN_STATE_DIR") {
             command.push_str(&format!(
@@ -1442,12 +1733,131 @@ pub(crate) fn delivery_command_guidance(tool: &Value) -> Option<String> {
                 command.push_str(&format!(" {flag} {}", shell_single_quote(value)));
             }
         }
-        guidance.push_str(&format!(
-            "\n{token}: {command} {input_flag} {}",
-            shell_single_quote(&input.to_string())
-        ));
+        lines.push(RenderedLine {
+            token,
+            text: format!(
+                "{token}: {command} {input_flag} {}",
+                shell_single_quote(&input.to_string())
+            ),
+            input,
+        });
     }
+    skipped.retain(|token| !lines.iter().any(|line| line.token == *token));
+    Some((lines, skipped))
+}
+
+const FINAL_REPLY_DONE: &str =
+    "Namedrop sends it when your turn ends, so run no settle command and write no status line.";
+const FINAL_REPLY_OUTCOME: &str = "End it with one line: work_outcome: completed, work_outcome: needs_continuation, or work_outcome: blocked: <reason>. Without one it is needs_continuation.";
+const FINAL_REPLY_WAITING: &str = "If your turn ends while you wait on a helper or background work, Namedrop sends nothing and you reply later.";
+const REPORT_TO_HUMAN_GUIDANCE: &str = "Namedrop commands: none. Namedrop closes this without a reply when your turn ends; show it to the person once in your final message.";
+const RESULT_SET_GUIDANCE: &str = "Namedrop commands: none. Namedrop closes this without a reply when your turn ends; your final message is the response the envelope asks for.";
+const RELAYED_GUIDANCE: &str = "Namedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line.";
+const RELAYED_CHANNEL: &str = " To wake a member with @name, run this reply line instead.";
+
+/// The context for a delivery whose final message settles it. It says what
+/// the Stop will do and shows only the one line that does the other thing.
+pub(crate) fn final_reply_guidance(
+    control: &Value,
+    armed: &crate::final_reply::Armed,
+) -> Option<String> {
+    use crate::final_reply::{Armed, NoReplyCase};
+    let (opposite, lead) = match armed {
+        Armed::NoReply(NoReplyCase::ReportToHuman) => return Some(REPORT_TO_HUMAN_GUIDANCE.into()),
+        Armed::NoReply(NoReplyCase::ResultSet) => return Some(RESULT_SET_GUIDANCE.into()),
+        Armed::NoReply(NoReplyCase::Relayed) if control["reply_mode"] != "channel" => {
+            return Some(format!("{RELAYED_GUIDANCE} {FINAL_REPLY_WAITING}"));
+        }
+        Armed::NoReply(NoReplyCase::Relayed) => (
+            "reply",
+            format!("{RELAYED_GUIDANCE} {FINAL_REPLY_WAITING}{RELAYED_CHANNEL}"),
+        ),
+        Armed::Reply { tracked, .. } => {
+            let mut lead = format!(
+                "Namedrop commands: your final message is your reply to {}. {FINAL_REPLY_DONE} {FINAL_REPLY_WAITING}",
+                addressee(control)?
+            );
+            if *tracked {
+                lead.push(' ');
+                lead.push_str(FINAL_REPLY_OUTCOME);
+            }
+            lead.push_str(" For no reply, run this line first.");
+            ("complete.no-reply", lead)
+        }
+        Armed::NoReply(NoReplyCase::AnswersOwn) => (
+            "reply",
+            format!(
+                "Namedrop commands: this answers your message, so Namedrop closes it without a reply when your turn ends and your final message is for the person. To answer {} instead, run this line.",
+                addressee(control)?
+            ),
+        ),
+    };
+    let (lines, _) = rendered_lines(control)?;
+    let line = lines.into_iter().find(|line| line.token == opposite)?;
+    let mut guidance = lead;
+    for (need, sentence) in COMMAND_SENTENCES {
+        if need.present_in(&line.input) {
+            guidance.push(' ');
+            guidance.push_str(sentence);
+        }
+    }
+    guidance.push(' ');
+    guidance.push_str(SANDBOX_SENTENCE);
+    guidance.push('\n');
+    guidance.push_str(&line.text);
     Some(guidance)
+}
+
+/// Who the bound reply goes to, as its source names them: `@codex`, or
+/// `#label @codex` across workspaces.
+fn addressee(control: &Value) -> Option<&str> {
+    control
+        .pointer("/tool/operations")?
+        .as_array()?
+        .iter()
+        .find(|operation| operation["token"] == "reply")?
+        .pointer("/input/source")?
+        .as_str()?
+        .strip_suffix(REPLY_BODY_PLACEHOLDER)
+        .map(str::trim_end)
+}
+
+/// A line whose input still holds a value only an unrendered operation
+/// reports, such as the generic context.read with `<grant_id from
+/// context.inspect>`, cannot run from the block alone. A context.read bound to
+/// a real grant stays.
+fn waits_on(input: &Value, unrendered: &[&str]) -> bool {
+    any_string(input, &|text| {
+        unrendered
+            .iter()
+            .any(|token| text.contains(&format!("from {token}>")))
+    })
+}
+
+/// A bound reply as its line shows it: without each field the CLI derives
+/// from its attempt id, when the bound value is exactly the derived one. Any
+/// other value stays, so the line still runs the bound input.
+fn rendered_input(token: &str, input: &Value, control: &Value) -> Value {
+    let mut rendered = input.clone();
+    if token != "reply" {
+        return rendered;
+    }
+    let (Some(attempt_id), Some(fields)) = (
+        input.get("attempt_id").and_then(Value::as_str),
+        rendered.as_object_mut(),
+    ) else {
+        return rendered;
+    };
+    let delivered = control
+        .get("message_id")
+        .and_then(Value::as_str)
+        .filter(|_| control.get("attempt_id").and_then(Value::as_str) == Some(attempt_id));
+    for (key, derived) in crate::message::derived_reply_fields(attempt_id, delivered) {
+        if fields.get(key) == Some(&derived) {
+            fields.remove(key);
+        }
+    }
+    rendered
 }
 
 impl IntegrationToolInvocation {

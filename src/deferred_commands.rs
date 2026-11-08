@@ -389,6 +389,36 @@ pub fn try_defer(
     })())
 }
 
+/// Whether `session` queued a `reply` or `complete` naming `attempt_id` that
+/// has no receipt yet: an explicit settle the sandbox is still carrying.
+pub fn settle_queued(state: &Path, socket: &str, session: &str, attempt_id: &str) -> bool {
+    let Ok(directory) = directory(state, socket) else {
+        return false;
+    };
+    let Ok(names) = pending_directory(&directory)
+        .and_then(|pending| pending.entries().map_err(|e| e.to_string()))
+    else {
+        return false;
+    };
+    names
+        .iter()
+        .filter_map(|name| name.to_str()?.strip_suffix(".json"))
+        .any(|key| {
+            directory
+                .read(&format!("{key}.request.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Request>(&bytes).ok())
+                .is_some_and(|request| {
+                    matches!(request.operation, Operation::Reply | Operation::Complete)
+                        && request.caller.session.as_str() == session
+                        && request.input["attempt_id"] == attempt_id
+                })
+                && !directory
+                    .contains(&format!("{key}.receipt.json"))
+                    .unwrap_or(false)
+        })
+}
+
 fn launcher(state: &Path) -> Result<PathBuf, String> {
     let launcher = state.join("runtime/namedrop");
     if launcher.is_file() {
@@ -532,7 +562,7 @@ pub fn execute_queued(
     state: &Path,
     socket: &str,
     key: &str,
-    completed: impl FnOnce(&Value, &RuntimeOptions),
+    completed: impl FnOnce(&str, &mut Value, &RuntimeOptions),
 ) -> Result<(), String> {
     if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("invalid deferred operation id".into());
@@ -585,9 +615,10 @@ pub fn execute_queued(
             }
         }
     }
-    let result = execute_request(state, &request);
-    if let Ok(value) = &result {
+    let mut result = execute_request(state, &request);
+    if let Ok(value) = &mut result {
         completed(
+            request.operation.token(),
             value,
             &RuntimeOptions {
                 plugin_state: Some(state.to_path_buf()),
@@ -618,10 +649,13 @@ fn clear_pending(pending: &Dir, key: &str) -> Result<(), String> {
 fn execute_request(state: &Path, request: &Request) -> Result<Value, String> {
     let herdr = ProcessHerdr::default()
         .with_socket(Some(request.caller.namespace.session_socket_id.clone()));
+    // From the worker's own environment, so a deferred `address list` reports
+    // context sizes as a direct one does.
+    let directories = crate::InheritedDirectories::from_environment();
     let runtime = LifecycleRuntime {
         state_directory: state,
-        home_directory: None,
-        agent_config: crate::AgentConfigDirectories::default(),
+        home_directory: directories.home(),
+        agent_config: directories.agent_config(),
         cwd: state,
         workspace_id: Some(request.caller.namespace.space_id.as_str()),
         current_pane_id: Some(&request.caller.pane),
@@ -725,7 +759,6 @@ fn recover_committed<E: crate::HerdrCommandExecutor, C: Clock, I: IdGenerator>(
             let mut result = json!({"attempt_id":request.input["attempt_id"]});
             if request.operation == Operation::Complete {
                 result["disposition"] = json!("no_reply");
-                result["drain"] = crate::drain_receipt(runtime);
             } else {
                 result["state"] = json!("acknowledged");
             }

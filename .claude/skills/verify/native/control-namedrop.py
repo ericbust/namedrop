@@ -673,7 +673,7 @@ def main():
 
             def agent_call(*argv, pane, **payload):
                 invocation = [str(launcher), "--plugin-state", str(state), "--herdr-socket", env["HERDR_SOCKET_PATH"],
-                              "--herdr-workspace", space_of[pane], "--herdr-pane", pane, *map(str, argv)]
+                              "--herdr-workspace", space_of[pane], "--herdr-pane", pane, "--json", *map(str, argv)]
                 if payload:
                     invocation += ["--input-json", json.dumps(payload)]
                 result = command(*invocation, context=tool_environment(pane), check=False, kind="agent-cli")
@@ -709,7 +709,8 @@ def main():
                      f"attempt {attempt} to leave dispatching before its bound {token}")
                 invocation = [tool["executable"], "--plugin-state", bound_env["HERDR_PLUGIN_STATE_DIR"], *operation["argv"],
                               tool["input_flag"], json.dumps(payload), "--herdr-socket", bound_env["HERDR_SOCKET_PATH"],
-                              "--herdr-workspace", bound_env["HERDR_WORKSPACE_ID"], "--herdr-pane", bound_env["HERDR_PANE_ID"]]
+                              "--herdr-workspace", bound_env["HERDR_WORKSPACE_ID"], "--herdr-pane", bound_env["HERDR_PANE_ID"],
+                              "--json"]
                 response = json.loads(command(*invocation, context=bound_env, kind="bound").stdout)
                 assert response.get("status") == "ok", response
                 return response["data"]
@@ -986,7 +987,7 @@ def main():
 
                 def send(step, source):
                     invocation = [str(launcher), "--plugin-state", str(state), "--herdr-socket", env["HERDR_SOCKET_PATH"],
-                                  "--herdr-workspace", spaces["lead"], "--herdr-pane", alpha_lead, "send", "--input-json",
+                                  "--herdr-workspace", spaces["lead"], "--herdr-pane", alpha_lead, "--json", "send", "--input-json",
                                   json.dumps({"request_id": f"remote-terminal-{step}", "source": source,
                                               "author_kind": "agent_session"})]
                     result = command(*invocation, context=tool_environment(alpha_lead), check=False, kind="agent-cli")

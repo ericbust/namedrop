@@ -3,6 +3,8 @@
 //! Mentions route or how a Delivery Envelope authenticates.
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/dispatch.rs"]
+mod dispatch;
 
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
@@ -11,7 +13,7 @@ use namedrop::{
     IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
     PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
     execute_codex_app_server_hook, execute_integration_operation, execute_lifecycle_operation,
-    execute_message_operation, execute_session_start_hook, execute_user_prompt_submit_hook,
+    execute_session_start_hook, execute_user_prompt_submit_hook, expand_attempt_reply,
     install_integration_package, issue_registration_challenge,
 };
 use serde_json::{Value, json};
@@ -113,6 +115,10 @@ impl HerdrCommandExecutor for FakeHerdr {
             ["workspace", "list"] => json!({"result":{"workspaces":[{"workspace_id":"workspace-1"}]}})
             .to_string(),
             ["worktree", "list", "--cwd", cwd, "--json"] if *cwd == self.worktree => json!({
+                "result": {"worktrees": [{"path": self.worktree, "open_workspace_id": "workspace-1"}]}
+            })
+            .to_string(),
+            ["worktree", "list", "--workspace", "workspace-1", "--json"] => json!({
                 "result": {"worktrees": [{"path": self.worktree, "open_workspace_id": "workspace-1"}]}
             })
             .to_string(),
@@ -269,6 +275,51 @@ fn hook(
     )
 }
 
+/// The same hook as a host calls it, with its own session id on stdin.
+fn hook_as(
+    session: &str,
+    prompt: &str,
+    runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
+) -> Option<Value> {
+    execute_user_prompt_submit_hook(
+        &json!({"hook_event_name":"UserPromptSubmit","prompt":prompt,"session_id":session})
+            .to_string(),
+        runtime,
+    )
+}
+
+/// The latest live status of one named agent, as a status observation records it.
+fn observe(directory: &TestDirectory, alias: &str, status: &str) {
+    rusqlite::Connection::open(directory.state.join("namedrop.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE agent_session_observations SET status = ?1 WHERE address_id = ?2",
+            (status, format!("address-{alias}")),
+        )
+        .unwrap();
+}
+
+/// What the installed wrapper of `host` hands its host for one hook output.
+fn forwarded(directory: &TestDirectory, host: AgentRuntime, output: &Value) -> String {
+    let executable = directory.root.join("hook-result");
+    let package =
+        install_integration_package(&directory.home, host, &executable, &directory.state).unwrap();
+    fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\nprintf '%s' '{}'\n",
+            output.to_string().replace('\'', "'\"'\"'")
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let result = Command::new(package.join("scripts/user-prompt-submit"))
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{host:?}: {result:?}");
+    String::from_utf8(result.stdout).unwrap()
+}
+
 fn session_start(
     runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
 ) -> Option<Value> {
@@ -380,7 +431,10 @@ fn a_session_reads_the_selection_policy_once_and_before_the_first_name() {
     let policy = context(&output);
     assert!(policy.starts_with(POLICY_MARKER), "{policy}");
     for expected in [
-        "begins with a Namedrop workspace roster",
+        // A turn without a roster part leaves the last one shown in force.
+        "arrive with your first turn and again whenever they change; a turn or incoming task \
+         without them means the last ones you were shown still hold",
+        "the roster you hold may be out of date",
         // The approved selection policy, exactly the rules a turn used to carry.
         "load the installed Namedrop skill",
         "Host-native team messaging does not reach these panes",
@@ -397,6 +451,9 @@ fn a_session_reads_the_selection_policy_once_and_before_the_first_name() {
         "instead of independently recruiting peers",
         "Generic agents carry no specialization and remain eligible",
         "run `address list` immediately before you choose collaborators, every time",
+        // The listing carries each agent's context size so this choice can be made.
+        "give unrelated work to the one with the smallest `context_tokens` when shown",
+        "a follow-up to the one that already holds its context",
         "Your own persona, on the roster row marked (you), is your default role guidance",
         "an explicit task from the person or from a delivery overrides it",
         "Assignments already in flight are unaffected by the roster",
@@ -407,7 +464,7 @@ fn a_session_reads_the_selection_policy_once_and_before_the_first_name() {
         // Premature synthesis observed live: a coordinator wrote the answer
         // while a helper it had asked was still working.
         "end this turn with a brief waiting status only",
-        "read it before consolidating or crediting the helper",
+        "Read that reply before consolidating or crediting the helper",
         // A live coordinator answered on the worker reply and again when its
         // saved coordination report returned. Only that report presents it.
         "let report_to_human present it once",
@@ -420,6 +477,12 @@ fn a_session_reads_the_selection_policy_once_and_before_the_first_name() {
         "Change a persona only when the person asks",
         "Reply and send bodies may use Markdown lists, code, and emphasis, rendered in the Channels page",
         "For multi-line or formatted bodies, write the JSON to a file and use `--input-json-file`",
+        // The other-workspaces rule, which a turn now carries only in brief.
+        "A bare @name in a new message never reaches them, though a reply still reaches whoever wrote to you",
+        "They are not collaborators to recruit on your own",
+        "Address one only when the person names a workspace",
+        "run `address list` with {\"workspaces\":\"all\"}",
+        "`#all @name` for every workspace with that name",
     ] {
         assert!(
             policy.contains(expected),
@@ -497,7 +560,7 @@ fn mentions_still_route_and_a_delivery_still_authenticates_exactly_as_before() {
     assert_eq!(routed["decision"], "block");
     assert_eq!(routed["reason"], "Collaboration message sent.");
 
-    execute_message_operation(
+    dispatch::message(
         "send",
         json!({"request_id":"req-1","source":"@reviewer Check the login path.",
                "author_kind":"agent_session"}),
@@ -558,7 +621,7 @@ fn a_delivery_the_host_marked_as_pasted_text_still_authenticates() {
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
     register("address-lead", AgentRuntime::Codex, &lead);
     register("address-reviewer", AgentRuntime::ClaudeCode, &reviewer);
-    execute_message_operation(
+    dispatch::message(
         "send",
         json!({"request_id":"to-claude","source":"@reviewer Check the login path.",
                "author_kind":"agent_session"}),
@@ -609,7 +672,7 @@ fn a_delivery_pasted_behind_leftover_input_is_the_delivery_and_never_a_mention()
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
     register("address-lead", AgentRuntime::Codex, &lead);
     register("address-reviewer", AgentRuntime::ClaudeCode, &reviewer);
-    execute_message_operation(
+    dispatch::message(
         "send",
         json!({"request_id":"to-claude","source":"@reviewer local",
                "author_kind":"agent_session"}),
@@ -658,7 +721,7 @@ fn a_delivery_pasted_behind_leftover_input_is_the_delivery_and_never_a_mention()
     );
 
     // Codex marks nothing, so the same leftover runs straight into the JSON.
-    execute_message_operation(
+    dispatch::message(
         "send",
         json!({"request_id":"to-codex","source":"@lead ping",
                "author_kind":"agent_session"}),
@@ -698,14 +761,14 @@ fn an_incoming_task_reaches_both_hosts_with_the_roster_and_only_claude_with_the_
     register("address-reviewer", AgentRuntime::ClaudeCode, &reviewer);
 
     // One delivery in each direction, so each host receives a real envelope.
-    execute_message_operation(
+    dispatch::message(
         "send",
         json!({"request_id":"to-claude","source":"@reviewer Check the login path.",
                "author_kind":"agent_session"}),
         &lead,
     )
     .unwrap();
-    execute_message_operation(
+    dispatch::message(
         "send",
         json!({"request_id":"to-codex","source":"@lead Here is the review.",
                "author_kind":"agent_session"}),
@@ -746,6 +809,10 @@ fn an_incoming_task_reaches_both_hosts_with_the_roster_and_only_claude_with_the_
     ] {
         assert!(context.contains(COMMAND_MARKER), "{host}: {context}");
         assert!(
+            context.contains("you do not need to load the Namedrop skill"),
+            "{host}: the command block does not say it is enough: {context}"
+        );
+        assert!(
             !context.contains("Reply and send bodies may use Markdown"),
             "{host}: session guidance repeated on a delivery: {context}"
         );
@@ -773,12 +840,12 @@ fn an_incoming_task_reaches_both_hosts_with_the_roster_and_only_claude_with_the_
             .to_owned();
         assert!(context.contains(&attempt), "{host}: {context}");
         assert!(
-            context.contains("not a second authority"),
+            context.contains("they only restate `control.tool`"),
             "{host}: the lines are not framed as the bound operations: {context}"
         );
         assert!(
             context.contains("--input-json-file <absolute-path>")
-                && context.contains("`<reply body>` is not a reply"),
+                && context.contains("a verbatim placeholder is not an answer"),
             "{host}: authoring and staging are not stated: {context}"
         );
     }
@@ -1091,7 +1158,7 @@ fn the_rendered_line_survives_a_hostile_installed_path() {
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
     register("address-lead", AgentRuntime::Codex, &lead);
     register("address-reviewer", AgentRuntime::ClaudeCode, &reviewer);
-    execute_message_operation(
+    dispatch::message(
         "send",
         json!({"request_id":"to-claude","source":"@reviewer Check the login path.",
                "author_kind":"agent_session"}),
@@ -1164,7 +1231,7 @@ fn every_rendered_line_matches_an_installed_codex_prefix_rule() {
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
     register("address-lead", AgentRuntime::Codex, &lead);
     register("address-reviewer", AgentRuntime::ClaudeCode, &reviewer);
-    execute_message_operation(
+    dispatch::message(
         "send",
         json!({"request_id":"to-codex","source":"@lead Here is the review.",
                "author_kind":"agent_session"}),
@@ -1438,6 +1505,139 @@ fn address_list_answers_availability_with_the_rosters_own_rule() {
     }
 }
 
+/// A coordinator gives unrelated work to the lightest agent and a follow-up to
+/// the one already holding its context, so the listing reports each
+/// registered agent's context size from that agent's own transcript.
+#[test]
+fn address_list_reports_each_registered_agents_context_size_from_its_transcript() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+    register("address-lead", AgentRuntime::Codex, &lead);
+    let sizes = |listed: &Value| -> Vec<(String, Option<u64>)> {
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|record| {
+                (
+                    record["alias"].as_str().unwrap().to_owned(),
+                    record
+                        .get("context_tokens")
+                        .map(|tokens| tokens.as_u64().unwrap()),
+                )
+            })
+            .collect()
+    };
+    let expect = |listed: &Value, expected: [(&str, Option<u64>); 4]| {
+        let mut actual = sizes(listed);
+        actual.sort();
+        let mut expected = expected.map(|(alias, tokens)| (alias.to_owned(), tokens));
+        expected.sort();
+        assert_eq!(actual, expected, "{listed}");
+    };
+
+    let before = execute_lifecycle_operation("address.list", json!({}), &lead).unwrap();
+    expect(
+        &before,
+        [
+            ("lead", None),
+            ("reviewer", None),
+            ("quiet", None),
+            ("build", None),
+        ],
+    );
+
+    let codex_day = directory.home.join(".codex/sessions/2026/11/07");
+    fs::create_dir_all(&codex_day).unwrap();
+    fs::write(
+        codex_day.join("rollout-2026-11-07T07-39-21-session-lead.jsonl"),
+        [
+            json!({"type":"session_meta","payload":{"id":"session-lead"}}),
+            json!({"type":"event_msg","payload":{"type":"token_count","info":{
+                "total_token_usage":{"input_tokens":900_000},
+                "last_token_usage":{"input_tokens":363_409,"cached_input_tokens":363_136}}}}),
+            json!({"type":"event_msg","payload":{"type":"token_count","info":null}}),
+        ]
+        .map(|line| format!("{line}\n"))
+        .concat(),
+    )
+    .unwrap();
+    let claude_project = directory.home.join(".claude/projects/-started-elsewhere");
+    fs::create_dir_all(&claude_project).unwrap();
+    fs::write(
+        claude_project.join("session-reviewer.jsonl"),
+        [
+            json!({"type":"assistant","isSidechain":false,"message":{"model":"claude-opus-5-5",
+                "usage":{"input_tokens":2,"cache_creation_input_tokens":989,"cache_read_input_tokens":64_469}}}),
+            json!({"type":"assistant","isSidechain":false,"message":{"model":"claude-opus-5-5",
+                "usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}),
+        ]
+        .map(|line| format!("{line}\n"))
+        .concat(),
+    )
+    .unwrap();
+
+    // The reviewer's transcript is there, but no registration proves that
+    // session is the one in its pane.
+    let unregistered = execute_lifecycle_operation("address.list", json!({}), &lead).unwrap();
+    expect(
+        &unregistered,
+        [
+            ("lead", Some(363_409)),
+            ("reviewer", None),
+            ("quiet", None),
+            ("build", None),
+        ],
+    );
+
+    register(
+        "address-reviewer",
+        AgentRuntime::ClaudeCode,
+        &runtime(&directory, &herdr, &ids, "pane-reviewer"),
+    );
+    let listed = execute_lifecycle_operation("address.list", json!({}), &lead).unwrap();
+    expect(
+        &listed,
+        [
+            ("lead", Some(363_409)),
+            ("reviewer", Some(65_460)),
+            ("quiet", None),
+            ("build", None),
+        ],
+    );
+    let everywhere =
+        execute_lifecycle_operation("address.list", json!({"workspaces":"all"}), &lead).unwrap();
+    assert_eq!(everywhere["workspaces"][0]["addresses"], listed);
+
+    let table = namedrop::render_command_result_to_text(&namedrop::CommandResult::success(
+        "address.list",
+        listed,
+    ));
+    let header = table.lines().next().unwrap();
+    let column = header.find("CONTEXT").expect(&table);
+    let cell = |alias: &str| {
+        let row = table
+            .lines()
+            .find(|line| line.starts_with(&format!("@{alias} ")))
+            .unwrap_or_else(|| panic!("no @{alias} row:\n{table}"));
+        row[column..column + "CONTEXT".len()].trim().to_owned()
+    };
+    assert_eq!(cell("lead"), "363k", "{table}");
+    assert_eq!(cell("reviewer"), "65k", "{table}");
+    assert_eq!(cell("build"), "", "{table}");
+    assert_eq!(cell("quiet"), "", "{table}");
+
+    // The per-turn roster never pays for a transcript read.
+    let roster = context(&hook("Plain prompt.", &lead).unwrap());
+    assert!(
+        !roster.contains("363") && !roster.contains("context_tokens"),
+        "{roster}"
+    );
+}
+
 #[test]
 fn both_installed_wrappers_forward_a_roster_and_only_claude_forwards_the_attestation() {
     let directory = TestDirectory::new();
@@ -1622,4 +1822,483 @@ fn the_app_server_notice_stays_silent_outside_a_server_and_for_other_input() {
     ] {
         assert_eq!(execute_codex_app_server_hook(input), None, "{input}");
     }
+}
+
+/// The rendered reply line binds only what its recipient authors plus the
+/// attempt id; the CLI derives request_id, author_kind and in_reply_to from
+/// that id. Older sessions and `control.tool` keep sending the full form, so
+/// the two must be one input: one message, and the second is a replay of the
+/// first whichever ran first.
+#[test]
+fn the_compact_reply_line_and_the_bound_full_input_are_one_reply_in_either_order() {
+    for compact_first in [true, false] {
+        let directory = TestDirectory::new();
+        setup(&directory);
+        let herdr = FakeHerdr::new(&directory);
+        let ids = SequenceIds(AtomicU64::new(1));
+        let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+        let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
+        register("address-lead", AgentRuntime::Codex, &lead);
+        register("address-reviewer", AgentRuntime::ClaudeCode, &reviewer);
+        dispatch::message(
+            "send",
+            json!({"request_id":"to-claude","source":"@reviewer Check the login path.",
+                   "author_kind":"agent_session"}),
+            &lead,
+        )
+        .unwrap();
+        let envelope = herdr.envelope_for("pane-reviewer");
+        let authored = |input: &Value| {
+            let mut input = input.clone();
+            input["source"] = json!(
+                input["source"]
+                    .as_str()
+                    .unwrap()
+                    .replace("<reply body>", "The login path is fine.")
+            );
+            input
+        };
+        let full = authored(
+            envelope["control"]["tool"]["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|operation| operation["token"] == "reply")
+                .map(|operation| &operation["input"])
+                .unwrap(),
+        );
+        let attested = context(&hook(&envelope.to_string(), &reviewer).unwrap());
+        let line = attested
+            .lines()
+            .find_map(|line| line.strip_prefix("reply: "))
+            .expect("the delivery binds a reply");
+        let rendered: Value = serde_json::from_str(
+            line.rsplit_once(" --input-json '")
+                .and_then(|(_, input)| input.strip_suffix('\''))
+                .unwrap(),
+        )
+        .unwrap();
+        let mut fields = rendered.as_object().unwrap().keys().collect::<Vec<_>>();
+        fields.sort();
+        assert_eq!(fields, ["attempt_id", "source"], "{line}");
+        let compact = authored(&rendered);
+        let expanded = expand_attempt_reply(compact, Some(&directory.state)).unwrap();
+        assert_eq!(expanded, full, "the compact line is not the bound input");
+
+        let (first, second) = if compact_first {
+            (&expanded, &full)
+        } else {
+            (&full, &expanded)
+        };
+        let first = dispatch::message("reply", first.clone(), &reviewer).unwrap();
+        let second = dispatch::message("reply", second.clone(), &reviewer).unwrap();
+        assert_eq!(first["idempotent_replay"], false, "{first}");
+        assert_eq!(second["idempotent_replay"], true, "{second}");
+        assert_eq!(first["message_id"], second["message_id"]);
+    }
+}
+
+#[test]
+fn a_compact_reply_names_its_attempt_or_is_refused() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let error = expand_attempt_reply(
+        json!({"attempt_id":"delivery-attempt-unknown","source":"@lead done"}),
+        Some(&directory.state),
+    )
+    .unwrap_err();
+    assert!(error.contains("in_reply_to is required"), "{error}");
+    let human = json!({"request_id":"r","source":"@lead hi","in_reply_to":"m"});
+    assert_eq!(
+        expand_attempt_reply(human.clone(), Some(&directory.state)).unwrap(),
+        human
+    );
+}
+
+/// A session keeps every roster it was shown, so a turn whose roster matches
+/// the last one only repeats it.
+#[test]
+fn a_session_is_shown_the_rows_again_only_when_a_peer_changed() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+    register("address-lead", AgentRuntime::Codex, &lead);
+    register(
+        "address-reviewer",
+        AgentRuntime::ClaudeCode,
+        &runtime(&directory, &herdr, &ids, "pane-reviewer"),
+    );
+    let prompt = "Plan the SSO work.";
+
+    let first = context(&hook_as("session-1", prompt, &lead).unwrap());
+    assert!(first.starts_with(ROSTER_MARKER), "{first}");
+    assert!(
+        first.contains("- @lead (you) — Generic · available now\n")
+            && first.contains("- @reviewer — Generic · available now\n"),
+        "{first}"
+    );
+    assert_eq!(hook_as("session-1", prompt, &lead), None);
+
+    // The reader's own readiness changes with each of its own turns.
+    observe(&directory, "lead", "working");
+    assert!(
+        context(&hook(prompt, &lead).unwrap()).contains("- @lead (you) — Generic · busy"),
+        "the fixture did not change the reader's own readiness"
+    );
+    assert_eq!(hook_as("session-1", prompt, &lead), None);
+
+    observe(&directory, "reviewer", "working");
+    let changed = context(&hook_as("session-1", prompt, &lead).unwrap());
+    assert!(changed.starts_with(ROSTER_MARKER), "{changed}");
+    assert!(
+        changed.contains("- @reviewer — Generic · busy; work queues until its session settles\n")
+            && changed.contains("- @lead (you) — Generic · busy"),
+        "{changed}"
+    );
+    assert_eq!(hook_as("session-1", prompt, &lead), None);
+
+    // Another session of the same pane has seen nothing yet, and a payload with
+    // no session id is answered whole every time, exactly as before.
+    let whole = hook(prompt, &lead).unwrap();
+    assert_eq!(hook_as("session-2", prompt, &lead).unwrap(), whole);
+    assert_eq!(hook(prompt, &lead).unwrap(), whole);
+    assert_eq!(context(&whole), changed);
+}
+
+/// Every SessionStart may hand the host a context without the roster, so the
+/// next turn carries all of it. The hook resets without a pane runtime, which
+/// under Codex's shared app-server it usually cannot build.
+#[test]
+fn any_session_start_shows_that_session_the_whole_roster_again() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+    register("address-lead", AgentRuntime::Codex, &lead);
+    let prompt = "Plan the SSO work.";
+    let session_start = |session: &str, source: &str| {
+        let output = codex_app_server::run_with_stdin(
+            Command::new(env!("CARGO_BIN_EXE_namedrop"))
+                .args(["hook", "session-start", "--state-directory"])
+                .arg(&directory.state)
+                .env("HOME", &directory.home)
+                .env("CODEX_HOME", directory.home.join(".codex"))
+                .env("CLAUDE_CONFIG_DIR", directory.home.join(".claude"))
+                .env("HERDR_BIN_PATH", directory.root.join("no-herdr"))
+                .env_remove("XDG_CONFIG_HOME")
+                .env_remove("HERDR_PANE_ID")
+                .env_remove("HERDR_WORKSPACE_ID")
+                .env_remove("HERDR_SOCKET_PATH")
+                .env_remove("HERDR_PLUGIN_STATE_DIR"),
+            &json!({"hook_event_name":"SessionStart","source":source,"session_id":session})
+                .to_string(),
+        );
+        assert!(output.status.success(), "{output:?}");
+    };
+
+    let whole = hook_as("session-1", prompt, &lead).unwrap();
+    assert!(context(&whole).starts_with(ROSTER_MARKER), "{whole}");
+    assert_eq!(hook_as("session-1", prompt, &lead), None);
+
+    session_start("session-2", "startup");
+    assert_eq!(
+        hook_as("session-1", prompt, &lead),
+        None,
+        "another session's start reset this one"
+    );
+    for source in ["compact", "resume", "clear", "startup"] {
+        session_start("session-1", source);
+        assert_eq!(
+            hook_as("session-1", prompt, &lead).unwrap(),
+            whole,
+            "{source}"
+        );
+        assert_eq!(hook_as("session-1", prompt, &lead), None, "{source}");
+    }
+}
+
+/// An incoming task with nothing new in its roster still reaches each host
+/// with what proves and settles it, through the wrapper that host installed.
+#[test]
+fn an_incoming_task_with_an_unchanged_roster_still_carries_its_commands_on_both_hosts() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+    let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
+    register("address-lead", AgentRuntime::Codex, &lead);
+    register("address-reviewer", AgentRuntime::ClaudeCode, &reviewer);
+    let shown_lead = context(&hook_as("codex-session", "Plain prompt.", &lead).unwrap());
+    let shown_reviewer = context(&hook_as("claude-session", "Plain prompt.", &reviewer).unwrap());
+    assert!(shown_lead.contains("- @lead (you)"), "{shown_lead}");
+    assert!(
+        shown_reviewer.contains("- @reviewer (you)"),
+        "{shown_reviewer}"
+    );
+
+    dispatch::message(
+        "send",
+        json!({"request_id":"to-claude","source":"@reviewer Check the login path.",
+               "author_kind":"agent_session"}),
+        &lead,
+    )
+    .unwrap();
+    dispatch::message(
+        "send",
+        json!({"request_id":"to-codex","source":"@lead Here is the review.",
+               "author_kind":"agent_session"}),
+        &reviewer,
+    )
+    .unwrap();
+    let to_codex = herdr.envelope_for("pane-lead");
+    let to_claude = herdr.envelope_for("pane-reviewer");
+
+    let codex = hook_as("codex-session", &to_codex.to_string(), &lead).unwrap();
+    let codex_context = context(&codex);
+    assert!(codex_context.starts_with(ROSTER_MARKER), "{codex_context}");
+    assert!(!codex_context.contains("- @"), "{codex_context}");
+    assert!(codex_context.contains(COMMAND_MARKER), "{codex_context}");
+    assert!(
+        codex_context.contains(to_codex["control"]["attempt_id"].as_str().unwrap()),
+        "{codex_context}"
+    );
+    assert_eq!(
+        forwarded(&directory, AgentRuntime::Codex, &codex),
+        codex.to_string()
+    );
+
+    let claude = hook_as("claude-session", &to_claude.to_string(), &reviewer).unwrap();
+    let claude_context = context(&claude);
+    assert!(
+        claude_context.starts_with(DELIVERY_MARKER),
+        "{claude_context}"
+    );
+    assert!(!claude_context.contains(ROSTER_MARKER), "{claude_context}");
+    assert!(
+        claude_context.contains(COMMAND_MARKER)
+            && claude_context.contains(to_claude["control"]["attempt_id"].as_str().unwrap()),
+        "{claude_context}"
+    );
+    assert_eq!(
+        forwarded(&directory, AgentRuntime::ClaudeCode, &claude),
+        claude.to_string()
+    );
+}
+
+/// A miss with nothing new to lead it is the exact literal the wrappers match,
+/// and one with something new still leads with the roster.
+#[test]
+fn a_miss_after_an_unchanged_roster_is_the_exact_known_safe_guidance() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+    register("address-lead", AgentRuntime::Codex, &lead);
+
+    let first = context(&hook_as("session-1", "@missing please look", &lead).unwrap());
+    assert!(
+        first.starts_with(ROSTER_MARKER) && first.ends_with(MISS_GUIDANCE),
+        "{first}"
+    );
+    let again = hook_as("session-1", "@missing please look", &lead).unwrap();
+    assert_eq!(context(&again), MISS_GUIDANCE);
+    for host in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+        assert_eq!(
+            forwarded(&directory, host, &again),
+            again.to_string(),
+            "{host:?}"
+        );
+    }
+}
+
+const NO_NAMED_AGENTS: &str = "Namedrop workspace roster. No named agents in this Herdr space.";
+
+fn deactivate(directory: &TestDirectory) {
+    StateStore::open(&directory.state)
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.deactivate_worktree(
+                &namespace(),
+                &MutationAttribution::new(ActorKind::Human, "test", 1),
+            )
+        })
+        .unwrap();
+}
+
+fn retire_everyone(directory: &TestDirectory) {
+    rusqlite::Connection::open(directory.state.join("namedrop.sqlite3"))
+        .unwrap()
+        .execute("UPDATE pane_addresses SET retired = 1", [])
+        .unwrap();
+}
+
+/// A turn without a roster tells the agent its last one still holds, so a
+/// roster that is gone is said once, through the wrapper of either host.
+#[test]
+fn a_roster_that_is_gone_is_said_once_on_an_ordinary_turn() {
+    for remove in [deactivate, retire_everyone] {
+        let directory = TestDirectory::new();
+        setup(&directory);
+        let herdr = FakeHerdr::new(&directory);
+        let ids = SequenceIds(AtomicU64::new(1));
+        let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+        let prompt = "Plan the SSO work.";
+        assert!(context(&hook_as("session-1", prompt, &lead).unwrap()).starts_with(ROSTER_MARKER));
+
+        remove(&directory);
+        let gone = hook_as("session-1", prompt, &lead).unwrap();
+        assert_eq!(context(&gone), NO_NAMED_AGENTS);
+        for host in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+            assert_eq!(
+                forwarded(&directory, host, &gone),
+                gone.to_string(),
+                "{host:?}"
+            );
+        }
+        assert_eq!(hook_as("session-1", prompt, &lead), None);
+        assert_eq!(
+            hook_as("session-2", prompt, &lead),
+            None,
+            "a session that was never shown a roster was told it is gone"
+        );
+    }
+}
+
+/// A failed handoff after the roster went says so once ahead of its
+/// guidance, then is the exact literal again.
+#[test]
+fn a_failed_handoff_says_once_that_the_roster_is_gone() {
+    for remove in [deactivate, retire_everyone] {
+        let directory = TestDirectory::new();
+        setup(&directory);
+        let herdr = FakeHerdr::new(&directory);
+        let ids = SequenceIds(AtomicU64::new(1));
+        let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+        let prompt = "@missing please look";
+        assert!(context(&hook_as("session-1", prompt, &lead).unwrap()).starts_with(ROSTER_MARKER));
+
+        remove(&directory);
+        let gone = hook_as("session-1", prompt, &lead).unwrap();
+        let gone_context = context(&gone);
+        let guidance = gone_context
+            .strip_prefix(&format!("{NO_NAMED_AGENTS}\n\n"))
+            .unwrap_or_else(|| panic!("{gone_context}"));
+        assert!(
+            [MISS_GUIDANCE, UNCONFIRMED_GUIDANCE].contains(&guidance),
+            "{gone_context}"
+        );
+        for host in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+            assert_eq!(
+                forwarded(&directory, host, &gone),
+                gone.to_string(),
+                "{host:?}"
+            );
+        }
+        assert_eq!(
+            context(&hook_as("session-1", prompt, &lead).unwrap()),
+            guidance
+        );
+    }
+}
+
+struct UnreadableHerdr;
+impl HerdrCommandExecutor for UnreadableHerdr {
+    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+        Err(format!("Herdr did not answer {args:?}"))
+    }
+}
+
+/// Herdr not answering says nothing about the roster, so the turn stays
+/// silent and the session keeps what it was shown.
+#[test]
+fn a_roster_that_could_not_be_read_is_never_said_to_be_gone() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+    let unreadable = LifecycleRuntime {
+        state_directory: lead.state_directory,
+        home_directory: lead.home_directory,
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: lead.cwd,
+        workspace_id: lead.workspace_id,
+        current_pane_id: lead.current_pane_id,
+        session_socket_id: lead.session_socket_id,
+        herdr: &UnreadableHerdr,
+        clock: &FixedClock,
+        ids: &ids,
+    };
+    let prompt = "Plan the SSO work.";
+    let turn = |runtime: &LifecycleRuntime<'_, UnreadableHerdr, FixedClock, SequenceIds>| {
+        execute_user_prompt_submit_hook(
+            &json!({"hook_event_name":"UserPromptSubmit","prompt":prompt,"session_id":"session-1"})
+                .to_string(),
+            runtime,
+        )
+    };
+    assert!(context(&hook_as("session-1", prompt, &lead).unwrap()).starts_with(ROSTER_MARKER));
+
+    assert_eq!(turn(&unreadable), None);
+    assert_eq!(
+        hook_as("session-1", prompt, &lead),
+        None,
+        "a failed read forgot the roster the session was shown"
+    );
+}
+
+/// Two panes can resume one session id. Each is shown what its own turns
+/// carried, and a SessionStart of that session, which cannot tell which pane
+/// it runs in, shows both the whole roster again.
+#[test]
+fn two_panes_of_one_session_keep_separate_memories_and_one_start_resets_both() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+    let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
+    let prompt = "Plan the SSO work.";
+
+    let shown_lead = hook_as("session-1", prompt, &lead).unwrap();
+    assert!(
+        context(&shown_lead).contains("- @lead (you)"),
+        "{shown_lead}"
+    );
+    let shown_reviewer = hook_as("session-1", prompt, &reviewer)
+        .expect("the other pane was treated as already shown the first pane's roster");
+    assert!(
+        context(&shown_reviewer).contains("- @reviewer (you)"),
+        "{shown_reviewer}"
+    );
+    assert_eq!(hook_as("session-1", prompt, &lead), None);
+    assert_eq!(hook_as("session-1", prompt, &reviewer), None);
+
+    let output = codex_app_server::run_with_stdin(
+        Command::new(env!("CARGO_BIN_EXE_namedrop"))
+            .args(["hook", "session-start", "--state-directory"])
+            .arg(&directory.state)
+            .env("HOME", &directory.home)
+            .env("CODEX_HOME", directory.home.join(".codex"))
+            .env("CLAUDE_CONFIG_DIR", directory.home.join(".claude"))
+            .env("HERDR_BIN_PATH", directory.root.join("no-herdr"))
+            .env("HERDR_PANE_ID", "pane-lead")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("HERDR_WORKSPACE_ID")
+            .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("HERDR_PLUGIN_STATE_DIR"),
+        &json!({"hook_event_name":"SessionStart","source":"resume","session_id":"session-1"})
+            .to_string(),
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(hook_as("session-1", prompt, &lead).unwrap(), shown_lead);
+    assert_eq!(
+        hook_as("session-1", prompt, &reviewer).unwrap(),
+        shown_reviewer
+    );
 }

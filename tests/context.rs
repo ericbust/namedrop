@@ -1,12 +1,14 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/dispatch.rs"]
+mod dispatch;
 
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
     IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
     PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
     execute_context_operation, execute_human_context_operation, execute_integration_operation,
-    execute_message_operation, issue_registration_challenge,
+    issue_registration_challenge,
 };
 use std::{
     fs,
@@ -320,7 +322,7 @@ fn register(address_id: &str, runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClo
 fn create_referenced_thread(
     runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
 ) -> serde_json::Value {
-    execute_message_operation(
+    dispatch::message(
         "send",
         serde_json::json!({
             "request_id": "request-context",
@@ -805,7 +807,7 @@ fn grants_expire_on_binding_change_and_new_participants_inherit_only_a_thread_sn
     .unwrap();
     let grant_id = published["grants"][0]["grant_id"].as_str().unwrap();
 
-    let joined = execute_message_operation(
+    let joined = dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "request-add-researcher",
@@ -1890,7 +1892,7 @@ fn send_with_context_activates_one_grant_per_recipient_and_binds_each_envelope()
         {"kind": "diff", "locator": "src/notes.txt"},
         {"kind": "diff", "locator": ".env"}
     ]);
-    let sent = execute_message_operation(
+    let sent = dispatch::message(
         "send",
         serde_json::json!({
             "request_id": "send-context-1",
@@ -1987,7 +1989,7 @@ fn send_with_context_activates_one_grant_per_recipient_and_binds_each_envelope()
 
     // A reply can hand context back the same way, finishing the attempt.
     let attempt_id = reviewer_envelope["control"]["attempt_id"].as_str().unwrap();
-    let replied = execute_message_operation(
+    let replied = dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "reply-context-1",
@@ -2034,7 +2036,7 @@ fn a_failing_send_with_context_delivers_no_message_and_no_grant() {
     register("address-reviewer", &reviewer);
 
     // Snapshot validation fails before any routing state is written.
-    let invalid = execute_message_operation(
+    let invalid = dispatch::message(
         "send",
         serde_json::json!({
             "request_id": "send-context-invalid",
@@ -2051,7 +2053,7 @@ fn a_failing_send_with_context_delivers_no_message_and_no_grant() {
     );
 
     // A context block is an agent-authored surface only.
-    let human = execute_message_operation(
+    let human = dispatch::message(
         "send",
         serde_json::json!({
             "request_id": "send-context-human",
@@ -2065,7 +2067,7 @@ fn a_failing_send_with_context_delivers_no_message_and_no_grant() {
 
     // A grant failure inside the transaction rolls the whole send back:
     // no message, no delivery, and the orphaned pin ref stays for the sweep.
-    let self_grant = execute_message_operation(
+    let self_grant = dispatch::message(
         "send",
         serde_json::json!({
             "request_id": "send-context-self",
@@ -2099,7 +2101,7 @@ fn a_failing_send_with_context_delivers_no_message_and_no_grant() {
 
     // The successful retry then delivers, and the earlier orphan is swept by the
     // next pinning publish because no stored grant knows it (after the grace).
-    let sent = execute_message_operation(
+    let sent = dispatch::message(
         "send",
         serde_json::json!({
             "request_id": "send-context-retry",
@@ -2132,8 +2134,8 @@ fn replaying_a_send_with_context_reuses_the_original_message_and_grants() {
         "context": {"capture_git_state": false, "snapshot": valid_snapshot()}
     });
 
-    let first = execute_message_operation("send", input.clone(), &source).unwrap();
-    let replay = execute_message_operation("send", input, &source).unwrap();
+    let first = dispatch::message("send", input.clone(), &source).unwrap();
+    let replay = dispatch::message("send", input, &source).unwrap();
 
     assert_eq!(replay["idempotent_replay"], true);
     assert_eq!(replay["message_id"], first["message_id"]);
@@ -2168,7 +2170,7 @@ fn a_reply_can_request_context_and_the_caller_fulfills_it() {
     register("address-reviewer", &reviewer);
 
     // The caller mentions the reviewer without any context attached.
-    let sent = execute_message_operation(
+    let sent = dispatch::message(
         "send",
         serde_json::json!({
             "request_id": "send-plain-1",
@@ -2187,7 +2189,7 @@ fn a_reply_can_request_context_and_the_caller_fulfills_it() {
     );
 
     // The reviewer asks for the caller's context in its reply.
-    let requested = execute_message_operation(
+    let requested = dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "reply-request-1",
@@ -2225,7 +2227,7 @@ fn a_reply_can_request_context_and_the_caller_fulfills_it() {
     );
 
     // The caller fulfills: activate-mode names exactly the pending grant.
-    let fulfilled = execute_message_operation(
+    let fulfilled = dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "reply-fulfill-1",
@@ -2278,7 +2280,7 @@ fn a_context_request_decline_revokes_the_pending_grant() {
     register("address-source", &source);
     register("address-reviewer", &reviewer);
     register("address-researcher", &researcher);
-    let sent = execute_message_operation(
+    let sent = dispatch::message(
         "send",
         serde_json::json!({
             "request_id": "send-plain-2",
@@ -2289,7 +2291,7 @@ fn a_context_request_decline_revokes_the_pending_grant() {
     )
     .unwrap();
     let reviewer_envelope = herdr.prompt_for_pane("pane-reviewer");
-    let requested = execute_message_operation(
+    let requested = dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "reply-request-2",
@@ -2307,7 +2309,7 @@ fn a_context_request_decline_revokes_the_pending_grant() {
     // Only the request's exact source may settle it; a bystander with its own
     // live attempt in the thread cannot decline on the caller's behalf.
     let researcher_envelope = herdr.prompt_for_pane("pane-researcher");
-    let not_source = execute_message_operation(
+    let not_source = dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "reply-bystander-decline",
@@ -2323,7 +2325,7 @@ fn a_context_request_decline_revokes_the_pending_grant() {
     assert!(not_source.contains("source"), "{not_source}");
 
     let caller_envelope = herdr.prompt_for_pane("pane-source");
-    let declined = execute_message_operation(
+    let declined = dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "reply-decline-2",
@@ -2351,7 +2353,7 @@ fn a_context_request_decline_revokes_the_pending_grant() {
     .unwrap_err();
     assert!(read.contains("active"), "{read}");
     let reviewer_decline_envelope = herdr.prompt_for_pane("pane-reviewer");
-    let reconsider = execute_message_operation(
+    let reconsider = dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "reply-reconsider",
@@ -2364,7 +2366,7 @@ fn a_context_request_decline_revokes_the_pending_grant() {
     )
     .unwrap();
     let source_envelope = herdr.prompt_for_pane("pane-source");
-    let late = execute_message_operation(
+    let late = dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "reply-late-fulfill",
@@ -2401,7 +2403,7 @@ fn a_pending_context_request_expires_when_the_callers_session_changes() {
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
     register("address-source", &source);
     register("address-reviewer", &reviewer);
-    let sent = execute_message_operation(
+    let sent = dispatch::message(
         "send",
         serde_json::json!({
             "request_id": "send-plain-4",
@@ -2412,7 +2414,7 @@ fn a_pending_context_request_expires_when_the_callers_session_changes() {
     )
     .unwrap();
     let reviewer_envelope = herdr.prompt_for_pane("pane-reviewer");
-    let requested = execute_message_operation(
+    let requested = dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "reply-request-4",
@@ -2465,7 +2467,7 @@ fn a_pending_context_request_expires_when_the_callers_session_changes() {
     // rejects it before the grant guard is even consulted. (The grant guard's
     // own not-Pending rejection is covered by the decline test above and the
     // binding-change expiry test earlier in this file.)
-    let late = execute_message_operation(
+    let late = dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "reply-late-fulfill-4",
@@ -2502,7 +2504,7 @@ fn context_request_and_fulfillment_guard_their_reply_routes() {
     register("address-source", &source);
     register("address-reviewer", &reviewer);
     register("address-researcher", &researcher);
-    let sent = execute_message_operation(
+    let sent = dispatch::message(
         "send",
         serde_json::json!({
             "request_id": "send-plain-3",
@@ -2516,7 +2518,7 @@ fn context_request_and_fulfillment_guard_their_reply_routes() {
     let attempt_id = reviewer_envelope["control"]["attempt_id"].as_str().unwrap();
 
     // Fulfillment rides the requesting thread's reply, never a fresh send.
-    let fulfillment_on_send = execute_message_operation(
+    let fulfillment_on_send = dispatch::message(
         "send",
         serde_json::json!({
             "request_id": "send-grant-ids",
@@ -2537,7 +2539,7 @@ fn context_request_and_fulfillment_guard_their_reply_routes() {
     );
 
     // `send` has no request grammar at all.
-    let on_send = execute_message_operation(
+    let on_send = dispatch::message(
         "send",
         serde_json::json!({
             "request_id": "send-request-context",
@@ -2551,7 +2553,7 @@ fn context_request_and_fulfillment_guard_their_reply_routes() {
     assert!(on_send.contains("request_context"), "{on_send}");
 
     // A human reply cannot carry the request marker.
-    let human = execute_message_operation(
+    let human = dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "reply-human-request",
@@ -2565,7 +2567,7 @@ fn context_request_and_fulfillment_guard_their_reply_routes() {
     assert!(human.contains("agent-authored"), "{human}");
 
     // One reply carries one direction: never both ask and attach.
-    let both = execute_message_operation(
+    let both = dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "reply-both-directions",
@@ -2582,7 +2584,7 @@ fn context_request_and_fulfillment_guard_their_reply_routes() {
     assert!(both.contains("request"), "{both}");
 
     // The request must reach the disposed delivery's sender.
-    let misaddressed = execute_message_operation(
+    let misaddressed = dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "reply-misaddressed-request",
@@ -2599,7 +2601,7 @@ fn context_request_and_fulfillment_guard_their_reply_routes() {
 
     // A second thread to the same pair, opened before the request so its
     // delivery reaches the caller first (one active attempt per address).
-    let side_channel = execute_message_operation(
+    let side_channel = dispatch::message(
         "send",
         serde_json::json!({
             "request_id": "send-side-channel",
@@ -2612,7 +2614,7 @@ fn context_request_and_fulfillment_guard_their_reply_routes() {
     let side_envelope = herdr.prompt_for_pane("pane-source");
 
     // A real request, then a fulfillment that dodges the requester: rejected.
-    let requested = execute_message_operation(
+    let requested = dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "reply-request-3",
@@ -2629,7 +2631,7 @@ fn context_request_and_fulfillment_guard_their_reply_routes() {
 
     // A fulfillment answers its request in the requesting thread: a reply in
     // the side thread to the same requester cannot activate the grant.
-    let cross_thread = execute_message_operation(
+    let cross_thread = dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "reply-cross-thread-fulfill",
@@ -2652,7 +2654,7 @@ fn context_request_and_fulfillment_guard_their_reply_routes() {
     );
 
     // Settle the side thread so the queued request delivery reaches the caller.
-    execute_message_operation(
+    dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "reply-side-channel",
@@ -2669,7 +2671,7 @@ fn context_request_and_fulfillment_guard_their_reply_routes() {
         caller_envelope["control"]["context_request"]["grant_id"], grant_id,
         "{caller_envelope}"
     );
-    let dodged = execute_message_operation(
+    let dodged = dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "reply-dodged-fulfill",
@@ -2702,7 +2704,7 @@ fn context_request_and_fulfillment_guard_their_reply_routes() {
 
     // A fulfillment that fails validation before the routing transaction also
     // lands on the same open Attention Item (idempotently).
-    let oversized = execute_message_operation(
+    let oversized = dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "reply-oversized-fulfill",
@@ -2754,7 +2756,7 @@ fn context_request_and_fulfillment_guard_their_reply_routes() {
 
     // The correctly addressed in-thread fulfillment then succeeds and resolves
     // the failure Attention Item.
-    let fulfilled = execute_message_operation(
+    let fulfilled = dispatch::message(
         "reply",
         serde_json::json!({
             "request_id": "reply-guarded-fulfill",
@@ -3396,7 +3398,7 @@ fn an_invalid_or_unattached_checkout_selector_writes_nothing() {
                 runtime,
             )
             .unwrap_err();
-            let sent = execute_message_operation(
+            let sent = dispatch::message(
                 "send",
                 serde_json::json!({
                     "request_id": format!("invalid-{path}"),

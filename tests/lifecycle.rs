@@ -2679,9 +2679,10 @@ fn agent_status_event_reconciles_every_replaced_session_before_onboarding() {
         &author,
     )
     .unwrap();
+    let sent_drain = namedrop::drain_mailboxes(&author).unwrap();
     assert_eq!(sent["deliveries"][0]["state"], "queued");
     assert_eq!(sent["deliveries"][1]["state"], "queued");
-    assert!(sent["drain"]["submitted"].as_array().unwrap().is_empty());
+    assert!(sent_drain.submitted.is_empty());
 
     let event = execute_lifecycle_operation(
         "event.agent-status-changed",

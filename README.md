@@ -335,7 +335,7 @@ namedrop name @reviewer --generic   # clear it
 
 Personas are optional. An agent without one is **Generic**. It has no specialty, and other agents still pick it for ordinary work. Naming an agent again keeps its saved persona. Only `--generic`, the persona editor, or an explicit request changes it.
 
-At the start of each turn, and with each incoming request, every agent receives the workspace roster. The roster lists each named agent, its persona, and whether it can take work right now. Your agent picks collaborators from the roster, tells you who it used, and gives you one answer.
+Every agent receives the workspace roster with its first turn, and again with a later turn or incoming request when the roster changed. The roster lists each named agent, its persona, and whether it can take work right now. Your agent picks collaborators from the roster, tells you who it used, and gives you one answer.
 
 A persona grants no permissions and no tool access. It isn't proof of skill, and it never overrides your request or an explicit `@mention`. Named terminals can't have a persona.
 

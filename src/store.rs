@@ -24,6 +24,16 @@ use std::{
 };
 
 const DATABASE_FILE_NAME: &str = "namedrop.sqlite3";
+/// Dispositions Namedrop records itself when a turn ends: the terminal relay's
+/// and the final-reply claim's no-reply. An explicit reply after either one
+/// still reaches the thread.
+const AUTOMATIC_NO_REPLY_PREFIXES: [&str; 2] =
+    ["terminal-relay-no-reply:", "final-reply-no-reply:"];
+
+/// The id of the no-reply a final-reply claim records for its attempt.
+pub(crate) fn final_reply_no_reply_id(attempt_id: &crate::DeliveryAttemptId) -> String {
+    format!("{}{}", AUTOMATIC_NO_REPLY_PREFIXES[1], attempt_id.as_str())
+}
 pub(crate) const SCHEMA_VERSION: u32 = 7;
 
 const RECONCILIATION_INDEX_REPAIRS: &[SchemaGap] = &[
@@ -42,6 +52,18 @@ const RECONCILIATION_INDEX_REPAIRS: &[SchemaGap] = &[
         name: "coordination_links_assignment",
         ddl: "CREATE INDEX IF NOT EXISTS coordination_links_assignment
               ON coordination_links(session_socket_id, worktree_id, assignment_id, message_id)",
+    },
+    SchemaGap {
+        name: "transition_facts_entity",
+        ddl: "CREATE INDEX IF NOT EXISTS transition_facts_entity
+              ON transition_facts(session_socket_id, worktree_id, entity_kind, entity_id,
+                                  transition_kind, occurred_at_ms)",
+    },
+    SchemaGap {
+        name: "agent_session_observations_status",
+        ddl: "CREATE INDEX IF NOT EXISTS agent_session_observations_status
+              ON agent_session_observations(session_socket_id, worktree_id, address_id,
+                                            agent_session_id, status, observed_at_ms)",
     },
 ];
 
@@ -73,6 +95,7 @@ mod bridge;
 pub(crate) mod channel_routing;
 mod deferred_commands;
 pub(crate) mod direct_messages;
+mod final_reply;
 mod reminders;
 pub(crate) use bridge::{EnvoyOrigin, ForwardedCopy};
 pub(crate) use groups::addressed_recipients;
@@ -83,6 +106,7 @@ pub(crate) mod coordination_review;
 pub mod dashboard;
 mod missing_disposition;
 mod operator;
+pub(crate) use coordination::WakeReadiness;
 pub(crate) use coordination_bridge::TrackedMessage;
 pub(crate) use coordination_ownership::CoordinationRole;
 mod groups;
@@ -5230,6 +5254,31 @@ impl StateTransaction<'_> {
         }))
     }
 
+    /// The message one Delivery Attempt delivered, found by the attempt id
+    /// alone: the CLI needs it before it has resolved a namespace. Attempt ids
+    /// are unique by construction; anything but exactly one match is `None`.
+    pub(crate) fn delivered_message_of_attempt(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<MessageId>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT DISTINCT d.message_id
+             FROM delivery_attempts a
+             JOIN mailbox_deliveries d USING (
+                 session_socket_id, worktree_id, delivery_id, address_id
+             )
+             WHERE a.attempt_id = ?1
+             LIMIT 2",
+        )?;
+        let messages = statement
+            .query_map(params![attempt_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(match <[String; 1]>::try_from(messages) {
+            Ok([message]) => Some(MessageId::new(message)),
+            Err(_) => None,
+        })
+    }
+
     pub(crate) fn delivery_envelope(
         &self,
         namespace: &StateNamespace,
@@ -6106,9 +6155,6 @@ impl StateTransaction<'_> {
             transition,
             attribution,
         )?;
-        if next == DeliveryState::Submitted {
-            self.arm_terminal_relay(namespace, attempt_id, &source_message_id, attribution)?;
-        }
         if matches!(next, DeliveryState::Held | DeliveryState::Failed) {
             self.open_delivery_attempt_attention(
                 namespace,
@@ -6385,6 +6431,10 @@ impl StateTransaction<'_> {
         }
     }
 
+    /// Records `reply_message_id` as the attempt's reply. When Namedrop
+    /// already closed the attempt without a reply at the end of a turn, the
+    /// reply stands as a follow-up in the same thread and the attempt keeps
+    /// that disposition.
     pub fn record_reply_disposition(
         &mut self,
         namespace: &StateNamespace,
@@ -6476,18 +6526,34 @@ impl StateTransaction<'_> {
         let existing = self
             .transaction
             .query_row(
-                "SELECT disposition_kind FROM delivery_dispositions
+                "SELECT disposition_kind, disposition_id FROM delivery_dispositions
                  WHERE session_socket_id = ?1 AND worktree_id = ?2 AND attempt_id = ?3",
                 params![
                     namespace.session_socket_id,
                     namespace.space_id.as_str(),
                     attempt_id.as_str()
                 ],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?;
-        if existing.as_deref() == Some(disposition_kind) {
-            return Ok(());
+        match existing {
+            Some((kind, _)) if kind == disposition_kind => return Ok(()),
+            Some((_, id))
+                if disposition_kind == "reply"
+                    && AUTOMATIC_NO_REPLY_PREFIXES
+                        .iter()
+                        .any(|prefix| id.starts_with(prefix)) =>
+            {
+                return Ok(());
+            }
+            Some((kind, _)) => {
+                return Err(StoreError::invalid_input(if kind == "reply" {
+                    "this delivery already has a reply, so it cannot also close without one"
+                } else {
+                    "this delivery is already closed without a reply, so it takes no reply now"
+                }));
+            }
+            None => {}
         }
         if !matches!(state, DeliveryState::Acknowledged | DeliveryState::Settled) {
             return Err(StoreError::invalid_input(
@@ -7562,6 +7628,7 @@ fn parse_transition_entity_kind(value: String) -> rusqlite::Result<TransitionEnt
         "coordination_review_grant" => Ok(TransitionEntityKind::CoordinationReviewGrant),
         "coordination_review_request" => Ok(TransitionEntityKind::CoordinationReviewRequest),
         "coordination_review_message" => Ok(TransitionEntityKind::CoordinationReviewMessage),
+        "coordination_revision" => Ok(TransitionEntityKind::CoordinationRevision),
         "terminal_relay_session" => Ok(TransitionEntityKind::TerminalRelaySession),
         "terminal_relay_attempt" => Ok(TransitionEntityKind::TerminalRelayAttempt),
         _ => Err(invalid_text("transition entity kind", value)),
@@ -7605,6 +7672,7 @@ fn parse_transition_kind(value: String) -> rusqlite::Result<TransitionKind> {
         "opened" => Ok(TransitionKind::Opened),
         "resolved" => Ok(TransitionKind::Resolved),
         "adopted" => Ok(TransitionKind::Adopted),
+        "read" => Ok(TransitionKind::Read),
         _ => Err(invalid_text("transition kind", value)),
     }
 }
@@ -8971,7 +9039,7 @@ mod tests {
 
     #[test]
     fn schema_six_repairs_each_missing_index_and_pre_release_piece() {
-        for missing_indexes in 0..8 {
+        for missing_indexes in 0..1 << RECONCILIATION_INDEX_REPAIRS.len() {
             for missing_pieces in 0..4 {
                 let mut fresh = Connection::open_in_memory().unwrap();
                 initialize_schema(&mut fresh, Path::new(".")).unwrap();
@@ -9091,6 +9159,8 @@ mod tests {
         let actual: Vec<&str> = shape.lines().collect();
         let mut expected: Vec<&str> = pinned.lines().collect();
         expected.extend([
+            "index agent_session_observations_status: CREATE INDEX agent_session_observations_status ON agent_session_observations(session_socket_id, worktree_id, address_id, agent_session_id, status, observed_at_ms)",
+            "index transition_facts_entity: CREATE INDEX transition_facts_entity ON transition_facts(session_socket_id, worktree_id, entity_kind, entity_id, transition_kind, occurred_at_ms)",
             "index coordination_links_assignment: CREATE INDEX coordination_links_assignment ON coordination_links(session_socket_id, worktree_id, assignment_id, message_id)",
             "index mailbox_deliveries_message: CREATE INDEX mailbox_deliveries_message ON mailbox_deliveries(session_socket_id, worktree_id, message_id)",
             "index transition_facts_attention_acknowledgement: CREATE INDEX transition_facts_attention_acknowledgement ON transition_facts(session_socket_id, worktree_id, entity_id) WHERE entity_kind='attention_item' AND transition_kind='acknowledged'",

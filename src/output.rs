@@ -141,8 +141,8 @@ pub fn render_command_result_to_text(result: &CommandResult) -> String {
                     );
                 } else {
                     lines.push(format!(
-                        "{:<18} {:<9} {:<12} {:<12} {:<29} ADDRESS ID",
-                        "NAME", "TYPE", "STATE", "PANE", "PERSONA"
+                        "{:<18} {:<9} {:<12} {:<12} {:<7} {:<29} ADDRESS ID",
+                        "NAME", "TYPE", "STATE", "PANE", "CONTEXT", "PERSONA"
                     ));
                     for address in addresses {
                         let state = if address["collaboration_disabled"] == true {
@@ -159,11 +159,15 @@ pub fn render_command_result_to_text(result: &CommandResult) -> String {
                             text(&address["lifecycle"])
                         };
                         lines.push(format!(
-                            "{:<18} {:<9} {:<12} {:<12} {:<29} {}",
+                            "{:<18} {:<9} {:<12} {:<12} {:<7} {:<29} {}",
                             alias(&address["alias"]),
                             text(&address["pane_type"]),
                             state,
                             text(&address["pane_id"]),
+                            address["context_tokens"]
+                                .as_u64()
+                                .map(token_count)
+                                .unwrap_or_default(),
                             // Terminals cannot hold one, so the column stays
                             // blank for them rather than claiming Generic.
                             if address["pane_type"] == "terminal" {
@@ -415,10 +419,217 @@ fn safe_lines(value: &str) -> String {
         .join("\n")
 }
 
+/// One kept field of an agent-facing settle result.
+enum Keep {
+    /// Copied when present and not null, an empty array or an empty object.
+    Field(&'static str),
+    /// Copied only when true; false is the default an agent never acts on.
+    WhenTrue(&'static str),
+    /// `delivery_outlook` objects reduced to one `outlook` string of their statements.
+    Outlook,
+    /// [`TRACKED_NEXT`] as `next` when the send started tracked work, which its
+    /// `coordination` links show.
+    TrackedNext,
+}
+
+/// What a lead reads after it starts tracked work.
+const TRACKED_NEXT: &str = "The answer arrives as a new delivery. Finish your other sends and independent work, then end your turn; do not wait or poll.";
+
+/// The settle results an agent reads after every delivery, and the fields it uses:
+/// ids it reuses for `handoff.results` and tracked follow-ups, the delivery outlook,
+/// and the deferred-pending retry guidance. `--json` prints the full result.
+const AGENT_RESULT_FIELDS: &[(&str, &[Keep])] = &[
+    (
+        "send",
+        &[
+            Keep::Field("message_id"),
+            Keep::Field("thread_id"),
+            Keep::Field("coordination"),
+            Keep::TrackedNext,
+            Keep::Outlook,
+            Keep::WhenTrue("idempotent_replay"),
+            Keep::Field("state"),
+            Keep::Field("guidance"),
+            Keep::Field("dispatch_error"),
+        ],
+    ),
+    (
+        "reply",
+        &[
+            Keep::Field("attempt_id"),
+            Keep::Field("disposition"),
+            Keep::Field("message_id"),
+            Keep::Field("coordination"),
+            Keep::Outlook,
+            Keep::WhenTrue("idempotent_replay"),
+            Keep::Field("state"),
+            Keep::Field("guidance"),
+            Keep::Field("dispatch_error"),
+        ],
+    ),
+    (
+        "complete",
+        &[
+            Keep::Field("attempt_id"),
+            Keep::Field("disposition"),
+            Keep::Field("state"),
+            Keep::Field("guidance"),
+            Keep::Field("dispatch_error"),
+        ],
+    ),
+];
+
+/// The compact JSON an agent reads for a serialized [`CommandResult`]. Results of
+/// operations outside [`AGENT_RESULT_FIELDS`] and every error pass through unchanged.
+pub fn agent_result_view(result: &Value) -> Value {
+    let fields = result["operation"].as_str().and_then(|operation| {
+        AGENT_RESULT_FIELDS
+            .iter()
+            .find(|(token, _)| *token == operation)
+            .map(|(_, fields)| *fields)
+    });
+    let (Some(fields), Some(data)) = (fields, result["data"].as_object()) else {
+        return result.clone();
+    };
+    let mut kept = serde_json::Map::new();
+    for keep in fields {
+        match keep {
+            Keep::Field(name) => {
+                if let Some(value) = data.get(*name).filter(|value| !is_empty(value)) {
+                    kept.insert((*name).to_owned(), value.clone());
+                }
+            }
+            Keep::WhenTrue(name) => {
+                if data.get(*name) == Some(&Value::Bool(true)) {
+                    kept.insert((*name).to_owned(), Value::Bool(true));
+                }
+            }
+            Keep::Outlook => {
+                let statements = data
+                    .get("delivery_outlook")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|outlook| outlook["statement"].as_str())
+                    .collect::<Vec<_>>();
+                if !statements.is_empty() {
+                    kept.insert("outlook".to_owned(), statements.join(" ").into());
+                }
+            }
+            Keep::TrackedNext => {
+                if data
+                    .get("coordination")
+                    .is_some_and(|links| !is_empty(links))
+                {
+                    kept.insert("next".to_owned(), TRACKED_NEXT.into());
+                }
+            }
+        }
+    }
+    let mut view = result.clone();
+    view["data"] = kept.into();
+    view
+}
+
+fn is_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Array(items) => items.is_empty(),
+        Value::Object(fields) => fields.is_empty(),
+        _ => false,
+    }
+}
+
+/// A context size as a person reads it: `310k`, or `1.2M` from a million.
+fn token_count(tokens: u64) -> String {
+    if tokens >= 999_500 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else {
+        format!("{}k", (tokens + 500) / 1000)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn agent_view_keeps_retry_guidance_errors_and_other_operations_whole() {
+        let pending = json!({
+            "protocol_version": "collab/v1", "status": "ok", "operation": "reply",
+            "data": {"state": "pending", "operation_id": "key", "committed": null,
+                     "receipt": "/state/key.receipt.json", "guidance": "Retry the exact command."},
+        });
+        assert_eq!(
+            agent_result_view(&pending)["data"],
+            json!({"state": "pending", "guidance": "Retry the exact command."})
+        );
+        let tracked = json!({
+            "protocol_version": "collab/v1", "status": "ok", "operation": "send",
+            "data": {"message_id": "m", "thread_id": "t", "idempotent_replay": false,
+                     "coordination": [{"coordination_id": "c", "assignment_id": "a", "revision": 1}],
+                     "delivery_outlook": [{"statement": "@a: soon."}, {"statement": "@b: later."}],
+                     "drain": {"submitted": []}, "deliveries": [], "context_references": []},
+        });
+        assert_eq!(
+            agent_result_view(&tracked)["data"],
+            json!({"message_id": "m", "thread_id": "t", "outlook": "@a: soon. @b: later.",
+                   "coordination": [{"coordination_id": "c", "assignment_id": "a", "revision": 1}],
+                   "next": "The answer arrives as a new delivery. Finish your other sends and independent work, then end your turn; do not wait or poll."})
+        );
+        let mut ordinary = tracked.clone();
+        ordinary["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("coordination");
+        assert_eq!(
+            agent_result_view(&ordinary)["data"],
+            json!({"message_id": "m", "thread_id": "t", "outlook": "@a: soon. @b: later."})
+        );
+        let rejected = serde_json::to_value(CommandResult::rejected(
+            "reply",
+            "operation_failed",
+            "no such attempt",
+        ))
+        .unwrap();
+        assert_eq!(agent_result_view(&rejected), rejected);
+        let listed = serde_json::to_value(CommandResult::success(
+            "address.list",
+            json!([{"alias": "a", "drain": {}}]),
+        ))
+        .unwrap();
+        assert_eq!(agent_result_view(&listed), listed);
+    }
+
+    #[test]
+    fn address_list_shows_each_agents_context_size_in_thousands_or_millions() {
+        let rendered = render_command_result_to_text(&CommandResult::success(
+            "address.list",
+            json!([
+                {"alias":"lead","pane_type":"agent","lifecycle":"bound","pane_id":"p1",
+                 "id":"a1","context_tokens":310_499},
+                {"alias":"big","pane_type":"agent","lifecycle":"bound","pane_id":"p2",
+                 "id":"a2","context_tokens":1_249_000},
+                {"alias":"next","pane_type":"agent","lifecycle":"bound","pane_id":"p3",
+                 "id":"a3","context_tokens":310_500},
+                {"alias":"quiet","pane_type":"agent","lifecycle":"empty","id":"a4"},
+            ]),
+        ));
+        let column = |alias: &str| {
+            let header = rendered.lines().next().unwrap();
+            let start = header.find("CONTEXT").unwrap();
+            let row = rendered
+                .lines()
+                .find(|line| line.starts_with(&format!("@{alias} ")))
+                .unwrap_or_else(|| panic!("no @{alias} row in {rendered}"));
+            row[start..start + 7].trim().to_owned()
+        };
+        assert_eq!(column("lead"), "310k");
+        assert_eq!(column("big"), "1.2M");
+        assert_eq!(column("next"), "311k");
+        assert_eq!(column("quiet"), "");
+    }
 
     #[test]
     fn naming_keeps_setup_failures_and_delivery_attention_without_agent_noise_for_a_terminal() {

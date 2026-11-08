@@ -662,7 +662,7 @@ pub enum MessageKind {
 }
 
 impl MessageKind {
-    fn of(grammar_version: &str, is_reply: bool) -> Self {
+    pub(crate) fn of(grammar_version: &str, is_reply: bool) -> Self {
         match grammar_version {
             "delegated/v1" => Self::Handoff,
             "result-set/v1" | "coordination-report/v1" => Self::ResultSet,
@@ -676,7 +676,7 @@ impl MessageKind {
         }
     }
 
-    fn opens_request(self) -> bool {
+    pub(crate) fn opens_request(self) -> bool {
         matches!(self, Self::Mention | Self::Handoff | Self::Hook)
     }
 }

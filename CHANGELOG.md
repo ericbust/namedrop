@@ -2,6 +2,23 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.6.0] - 2026-11-07
+
+### Changed
+
+- Namedrop adds fewer tokens to agent sessions. The instructions that come with each delivery are 22–43% shorter, depending on the kind of delivery, and the note about other workspaces on each turn is a third shorter. Delivery prompts themselves are unchanged, so prompts sent before the upgrade still authenticate.
+- `send`, `reply` and `complete` print a short result when an agent runs them. Pass `--json` for the complete result, for example in scripts.
+- `send`, `reply` and `complete` return as soon as the message is saved, and a background worker delivers it. They take about 40 ms instead of about 900 ms, and Codex no longer has to poll or retry them. If the worker can't start, the command delivers the message itself, as before.
+- The rule for reaching agents in other workspaces is now part of the policy each session gets at start. A session upgraded without a restart keeps its old policy until it restarts or compacts. Each turn still shows the `#label @name` form.
+- A lead gets fewer check-ins while its worker is busy. A check-in waits until the worker has been quiet for 10 minutes, and for 10 minutes after the lead reads its results, but never more than 30 minutes after the worker last finished. Stalled work is still flagged.
+- The workspace roster appears only when it changes, and again after a session starts or compacts.
+- Codex no longer reads the Namedrop skill during a delivery.
+- `address list` shows each agent's context size, or unknown after a compaction.
+- After a tracked `send`, the lead is told to finish its other sends and end its turn rather than wait or poll.
+- An agent's final message is now its answer to a delivery. Agents no longer run a reply or close command after each delivery, which cuts each delivery turn from two model calls to one. A turn that ends while waiting on a helper or background work sends nothing, and the agent is reminded on later prompts how to answer.
+- Your messages in Channels get the agent's final message as the answer. The old terminal relay's time window is gone, so a status line written while waiting is no longer posted as the answer.
+- A `reply` after Namedrop closed a delivery on its own is sent as a follow-up in the same thread. Other conflicts get a plain sentence instead of a database error.
+
 ## [1.5.0] - 2026-11-06
 
 ### Added

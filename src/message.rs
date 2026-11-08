@@ -417,6 +417,74 @@ struct ReplyInput {
     tracking: crate::coordination::TrackingInput,
 }
 
+/// What a reply that names its Delivery Attempt need not spell out: each key
+/// with the value the CLI fills in when it is omitted. The rendered reply line
+/// leaves out exactly these, and only when the bound value is this one, so
+/// both forms are one input. `in_reply_to` is the attempt's delivered message,
+/// which only durable state knows.
+pub(crate) fn derived_reply_fields(
+    attempt_id: &str,
+    delivered_message: Option<&str>,
+) -> impl Iterator<Item = (&'static str, Value)> {
+    [
+        ("request_id", Some(json!(format!("reply-{attempt_id}")))),
+        ("author_kind", Some(json!("agent_session"))),
+        (
+            "in_reply_to",
+            delivered_message.map(|message| json!(message)),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| Some((key, value?)))
+}
+
+/// Completes a reply that names its Delivery Attempt but omits what the
+/// attempt already fixes. It runs before validation and before any deferral,
+/// so the compact and the full form reach idempotency, the message and a
+/// deferred command's key and fingerprint as the same input.
+pub fn expand_attempt_reply(
+    mut input: Value,
+    state_directory: Option<&std::path::Path>,
+) -> Result<Value, String> {
+    let Some(attempt_id) = input
+        .get("attempt_id")
+        .and_then(Value::as_str)
+        .filter(|attempt_id| !attempt_id.is_empty())
+        .map(str::to_owned)
+    else {
+        return Ok(input);
+    };
+    let Some(fields) = input.as_object_mut() else {
+        return Ok(input);
+    };
+    let delivered = if fields.contains_key("in_reply_to") {
+        None
+    } else {
+        Some(
+            state_directory
+                .and_then(|state| attempt_message(state, &attempt_id))
+                .ok_or_else(|| {
+                    format!(
+                        "in_reply_to is required: attempt_id {attempt_id} names no Delivery \
+                         Attempt in this Namedrop state"
+                    )
+                })?,
+        )
+    };
+    for (key, value) in derived_reply_fields(&attempt_id, delivered.as_deref()) {
+        fields.entry(key).or_insert(value);
+    }
+    Ok(input)
+}
+
+fn attempt_message(state_directory: &std::path::Path, attempt_id: &str) -> Option<String> {
+    StateStore::open_read_only(state_directory)
+        .ok()??
+        .transaction(|transaction| transaction.delivered_message_of_attempt(attempt_id))
+        .ok()?
+        .map(|message| message.as_str().to_owned())
+}
+
 fn human_actor() -> ActorKind {
     ActorKind::Human
 }
@@ -539,8 +607,8 @@ where
     }
     let input = prepare_source_message(input)?;
     let author = pane_author(runtime)?;
-    dispatch_prepared_message(input, author, runtime, &workspaces, caller, |_| ())
-        .map(|(receipt, ())| receipt)
+    persist_prepared_message_operation(input, author, runtime, &workspaces, caller)
+        .map(|(receipt, _)| receipt)
         .map_err(|error| error.to_string())
 }
 
@@ -673,7 +741,6 @@ where
         Author::Operator,
         runtime,
         &workspaces,
-        None,
         observe_commit,
     )
     .map_err(OperatorSendError::from)
@@ -750,7 +817,6 @@ where
         Author::Operator,
         runtime,
         &workspaces,
-        None,
         observe_commit,
     )
     .map_err(OperatorSendError::from)
@@ -763,12 +829,13 @@ fn pane_author<'a, E, C, I>(runtime: &LifecycleRuntime<'a, E, C, I>) -> Result<A
         .ok_or_else(|| "the current Herdr pane is required to resolve the sender".to_owned())
 }
 
+/// The dashboard answers inside `observe_commit`, so these drains run after
+/// its response, on the server's own thread.
 fn dispatch_prepared_message<E, C, I, R>(
     input: PreparedMessageOperation,
     author: Author<'_>,
     runtime: &LifecycleRuntime<'_, E, C, I>,
     workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
-    caller: Option<&crate::deferred_commands::Caller>,
     observe_commit: impl FnOnce(&Value) -> R,
 ) -> Result<(Value, R), SendError>
 where
@@ -777,7 +844,7 @@ where
     I: crate::IdGenerator,
 {
     let (mut response, forwarded) =
-        persist_prepared_message_operation(input, author, runtime, workspaces, caller)?;
+        persist_prepared_message_operation(input, author, runtime, workspaces, None)?;
     let observed = observe_commit(&response);
     response["drain"] = crate::drain_receipt(runtime);
     // A copy queued in another workspace drains there now rather than waiting
@@ -865,7 +932,7 @@ where
     let Some(committed) = committed else {
         return Ok(None);
     };
-    let (mut response, forwarded) = present_committed(
+    let (response, _) = present_committed(
         committed,
         &mut store,
         namespace,
@@ -873,23 +940,6 @@ where
         runtime,
     )
     .map_err(|e| e.to_string())?;
-    response["drain"] = crate::drain_receipt(runtime);
-    if !forwarded.is_empty() {
-        response["drains"] = forwarded
-            .iter()
-            .map(|copy| {
-                let there = LifecycleRuntime {
-                    workspace_id: Some(copy.space.as_str()),
-                    ..*runtime
-                };
-                (
-                    copy.workspace.as_str().to_owned(),
-                    crate::drain_receipt(&there),
-                )
-            })
-            .collect::<serde_json::Map<_, _>>()
-            .into();
-    }
     Ok(Some(response))
 }
 
@@ -1942,12 +1992,17 @@ where
         context_request_grant,
         declined_context_request,
     } = committed;
-    let (links, forwarded) = store.transaction(|tx| {
+    let (links, forwarded, disposition) = store.transaction(|tx| {
         Ok((
             tx.tracked_message(namespace, &routed.receipt.message_id)?
                 .map(|tracked| tracked.links)
                 .unwrap_or_default(),
             tx.forwarded_copies(namespace, &routed.receipt.message_id)?,
+            disposition_attempt_id
+                .as_ref()
+                .map(|attempt| tx.delivery_disposition(namespace, attempt))
+                .transpose()?
+                .flatten(),
         ))
     })?;
     let mut response = receipt_json(routed, outlook);
@@ -1971,10 +2026,15 @@ where
     }
     // A reply that finished a Delivery Attempt keeps its whole message receipt and adds the
     // same terminal fields `complete --no-reply` returns, so an Agent Session reads the
-    // recorded disposition instead of inferring it.
+    // recorded disposition instead of inferring it. A follow-up to an attempt Namedrop
+    // closed without a reply reports that disposition.
     if let Some(attempt_id) = &disposition_attempt_id {
         response["attempt_id"] = json!(attempt_id);
-        response["disposition"] = json!(crate::DeliveryDisposition::Reply.as_str());
+        response["disposition"] = json!(
+            disposition
+                .unwrap_or(crate::DeliveryDisposition::Reply)
+                .as_str()
+        );
     }
     if let Some(relay) = relay {
         response["relay"] = present_relay_result(&relay, runtime);

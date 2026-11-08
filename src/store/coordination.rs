@@ -24,6 +24,24 @@ struct CoordinationWakeState {
     deliverable: String,
 }
 
+/// How long a worker whose turn ended without a reply must stay quiet, or a
+/// lead that read the results must go without a change, before the lead is
+/// checked in on. Workers usually resume within a few minutes.
+pub(crate) const WORKER_QUIET_MS: u64 = 10 * 60 * 1_000;
+
+/// The longest a worker's activity can hold a check-in after its delivery
+/// settled, so a worker that keeps resuming without replying still surfaces.
+const WORKER_QUIET_CAP_MS: u64 = 30 * 60 * 1_000;
+
+/// Whether a coordination's check-in may go to its lead now.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WakeReadiness {
+    Ready,
+    NotNow,
+    /// Held until this time, after which it is ready unless something changed.
+    QuietUntil(u64),
+}
+
 const NOT_ACKNOWLEDGEABLE: &str = "only a human may acknowledge a blocked or cancelled coordination, an open one whose lead address is retired, or a completed one whose report delivery was cancelled";
 
 pub(super) const SCHEMA: &str = r#"
@@ -512,13 +530,15 @@ impl StateTransaction<'_> {
     }
 
     /// Run after result-set reconciliation. The immediate SQLite transaction
-    /// contains both the semantic wake claim and its mailbox row.
+    /// contains both the semantic wake claim and its mailbox row. Returns the
+    /// earliest time a held check-in becomes due.
     pub(crate) fn reconcile_coordinations(
         &mut self,
         ns: &StateNamespace,
         live: &crate::spaces::LiveSpaces,
         by: &MutationAttribution,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Option<u64>, StoreError> {
+        let mut check_in_due_ms: Option<u64> = None;
         let discovered = live.local();
         self.reconcile_missing_dispositions(ns, by)?;
         let mut statement = self.transaction.prepare("SELECT coordination_id FROM coordinations WHERE session_socket_id=?1 AND worktree_id=?2 ORDER BY rowid")?;
@@ -672,8 +692,13 @@ impl StateTransaction<'_> {
                 id.as_str(),
                 by,
             )?;
-            if !self.coordination_wake_eligible(ns, &id, live)? {
-                continue;
+            match self.coordination_wake_readiness(ns, &id, live, by.occurred_at_ms)? {
+                WakeReadiness::Ready => {}
+                WakeReadiness::NotNow => continue,
+                WakeReadiness::QuietUntil(due) => {
+                    check_in_due_ms = Some(check_in_due_ms.map_or(due, |at| at.min(due)));
+                    continue;
+                }
             }
             let message =
                 crate::MessageId::new(format!("coordination-wake:{}:{revision}", id.as_str()));
@@ -740,52 +765,54 @@ impl StateTransaction<'_> {
                 by,
             )?;
         }
-        Ok(())
+        Ok(check_in_due_ms)
     }
 
-    pub(crate) fn coordination_wake_eligible(
+    pub(crate) fn coordination_wake_readiness(
         &self,
         ns: &StateNamespace,
         id: &CoordinationId,
         live: &crate::spaces::LiveSpaces,
-    ) -> Result<bool, StoreError> {
+        now_ms: u64,
+    ) -> Result<WakeReadiness, StoreError> {
+        use WakeReadiness::NotNow;
         let discovered = live.local();
-        let (address,session,outcome):(String,String,String)=self.transaction.query_row("SELECT owner_address_id,owner_session_id,outcome FROM coordinations WHERE session_socket_id=?1 AND worktree_id=?2 AND coordination_id=?3",params![ns.session_socket_id,ns.space_id.as_str(),id.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        let (address,session,outcome,revision):(String,String,String,i64)=self.transaction.query_row("SELECT owner_address_id,owner_session_id,outcome,revision FROM coordinations WHERE session_socket_id=?1 AND worktree_id=?2 AND coordination_id=?3",params![ns.session_socket_id,ns.space_id.as_str(),id.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
         if outcome != "open"
             || !self
                 .worktree_state(ns)?
                 .is_some_and(|w| w.activated && !w.paused && !w.deactivated)
         {
-            return Ok(false);
+            return Ok(NotNow);
         }
         if self.coordination_paused_assignment(ns, id)? {
-            return Ok(false);
+            return Ok(NotNow);
         }
         let Some(owner) =
             self.optional_routing_address_by_id(ns, &crate::PaneAddressId::new(address))?
         else {
-            return Ok(false);
+            return Ok(NotNow);
         };
         let disabled: bool = self.transaction.query_row("SELECT collaboration_disabled FROM pane_addresses WHERE session_socket_id=?1 AND worktree_id=?2 AND address_id=?3",params![ns.session_socket_id,ns.space_id.as_str(),owner.address_id.as_str()],|r|r.get(0))?;
         if disabled
             || owner.agent_session_id.as_ref().map(|s| s.as_str()) != Some(session.as_str())
             || self.require_coordination_capability(ns, &owner).is_err()
         {
-            return Ok(false);
+            return Ok(NotNow);
         }
         let binding = self
             .active_pane_bindings(ns)?
             .into_iter()
             .find(|b| b.address_id == owner.address_id);
         let Some(binding) = binding else {
-            return Ok(false);
+            return Ok(NotNow);
         };
         if !discovered.panes.iter().any(|p| {
             p.pane_id == binding.pane_id
                 && p.agent_session_id.as_ref().map(|s| s.as_str()) == Some(session.as_str())
                 && matches!(p.agent_status.as_deref(), Some("idle" | "done"))
         }) {
-            return Ok(false);
+            return Ok(NotNow);
         }
         let mut statement=self.transaction.prepare("SELECT assignment_id,recipient_address_id,recipient_session_id,work_outcome,waiting_on_assignment_id,current_message_id FROM coordination_assignments WHERE session_socket_id=?1 AND worktree_id=?2 AND coordination_id=?3")?;
         let assignments = statement
@@ -806,8 +833,9 @@ impl StateTransaction<'_> {
         // Beginning a coordination records an obligation; the lead can still
         // be preparing its first assignment. A wake needs actual delegated work.
         if assignments.is_empty() {
-            return Ok(false);
+            return Ok(NotNow);
         }
+        let mut quiet_until = None;
         for (_, address, session, outcome, _, message) in &assignments {
             if outcome == "completed" {
                 continue;
@@ -822,14 +850,14 @@ impl StateTransaction<'_> {
             // A remote worker's workspace that cannot be read, or cannot make
             // progress, says nothing about the work, so no nudge is sent on it.
             let Some(discovered) = live.of(&seat_ns.space_id) else {
-                return Ok(false);
+                return Ok(NotNow);
             };
             if seat_ns != ns
                 && !self
                     .worktree_state(seat_ns)?
                     .is_some_and(|w| w.activated && !w.paused && !w.deactivated)
             {
-                return Ok(false);
+                return Ok(NotNow);
             }
             let binding = self
                 .active_pane_bindings(seat_ns)?
@@ -847,7 +875,7 @@ impl StateTransaction<'_> {
                 "needs_continuation" | "blocked" | "unclassified"
             ) && worker_working
             {
-                return Ok(false);
+                return Ok(NotNow);
             }
             if outcome != "pending" {
                 continue;
@@ -857,7 +885,7 @@ impl StateTransaction<'_> {
                 delivery,
                 DeliveryState::Dispatching | DeliveryState::Submitted | DeliveryState::Acknowledged
             ) {
-                return Ok(false);
+                return Ok(NotNow);
             }
             if delivery == DeliveryState::Queued
                 && pane.is_some_and(|p| {
@@ -876,7 +904,7 @@ impl StateTransaction<'_> {
                         .dispatch_candidate(seat_ns, &seat.principal.address_id)?
                         .is_some()
                 {
-                    return Ok(false);
+                    return Ok(NotNow);
                 }
                 // An earlier active FIFO item is progress too: this assignment
                 // becomes dispatchable after its ordinary disposition.
@@ -886,14 +914,141 @@ impl StateTransaction<'_> {
                         .as_deref()
                         .is_some_and(|s| matches!(s, "dispatching" | "submitted" | "acknowledged"))
                 {
-                    return Ok(false);
+                    return Ok(NotNow);
                 }
             }
-            if delivery == DeliveryState::Settled && worker_working {
-                return Ok(false);
+            if delivery == DeliveryState::Settled {
+                if worker_working {
+                    return Ok(NotNow);
+                }
+                let message = MessageId::new(message.clone());
+                let seat_message = self
+                    .copy_of(seat_ns, &ns.space_id, &message)?
+                    .unwrap_or(message);
+                let due = self.worker_quiet_until(seat_ns, address, &seat_message, session)?;
+                if now_ms < due {
+                    quiet_until = quiet_until.max(Some(due));
+                }
             }
         }
-        Ok(true)
+        // A lead that has read this revision's results already knows them.
+        let read_until = self
+            .owner_read_at(ns, id, revision)?
+            .map(|at| at.saturating_add(WORKER_QUIET_MS))
+            .filter(|due| now_ms < *due);
+        Ok(quiet_until
+            .max(read_until)
+            .map_or(WakeReadiness::Ready, WakeReadiness::QuietUntil))
+    }
+
+    /// When the owner session last read this revision of the coordination.
+    /// Only the owner's reads are recorded.
+    fn owner_read_at(
+        &self,
+        ns: &StateNamespace,
+        id: &CoordinationId,
+        revision: i64,
+    ) -> Result<Option<u64>, StoreError> {
+        self.transaction
+            .query_row(
+                "SELECT MAX(occurred_at_ms) FROM transition_facts
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2 AND entity_kind = ?3
+                   AND entity_id = ?4 AND transition_kind = ?5",
+                params![
+                    ns.session_socket_id,
+                    ns.space_id.as_str(),
+                    TransitionEntityKind::CoordinationRevision.as_str(),
+                    format!("{}:{revision}", id.as_str()),
+                    TransitionKind::Read.as_str()
+                ],
+                |r| r.get::<_, Option<i64>>(0)?.map(from_i64).transpose(),
+            )
+            .map_err(StoreError::from)
+    }
+
+    /// Record that the owner session read these coordinations' results at the
+    /// revision it was shown. A coordination that changed since, or that this
+    /// session does not own, records nothing.
+    pub(crate) fn record_coordination_reads(
+        &mut self,
+        ns: &StateNamespace,
+        session: &crate::AgentSessionId,
+        reads: &[(CoordinationId, u64)],
+        at_ms: u64,
+    ) -> Result<(), StoreError> {
+        let by = MutationAttribution::new(ActorKind::AgentSession, session.as_str(), at_ms);
+        for (id, revision) in reads {
+            let current: bool = self.transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM coordinations WHERE session_socket_id=?1 AND worktree_id=?2
+                 AND coordination_id=?3 AND outcome='open' AND revision=?4 AND owner_session_id=?5)",
+                params![ns.session_socket_id, ns.space_id.as_str(), id.as_str(), to_i64(*revision)?, session.as_str()],
+                |r| r.get(0),
+            )?;
+            if current {
+                self.append_transition(
+                    ns,
+                    TransitionEntityKind::CoordinationRevision,
+                    &format!("{}:{revision}", id.as_str()),
+                    TransitionKind::Read,
+                    &by,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// When the worker of this settled delivery counts as quiet:
+    /// `WORKER_QUIET_MS` after the later of the settle and the session's last
+    /// `working` observation, but never past `WORKER_QUIET_CAP_MS` after the
+    /// settle. Work after the worker's next delivery is that delivery's work.
+    fn worker_quiet_until(
+        &self,
+        ns: &StateNamespace,
+        address: &str,
+        message: &MessageId,
+        session: &str,
+    ) -> Result<u64, StoreError> {
+        // CROSS JOIN fixes SQLite's join order. Left to choose, it drives from
+        // transition_facts and scans every delivery fact in the workspace.
+        let (settled, working) = self.transaction.query_row(
+            "WITH settle AS (
+                SELECT MAX(t.occurred_at_ms) AS at, d.mailbox_order AS mailbox_order
+                FROM mailbox_deliveries d
+                CROSS JOIN transition_facts t ON t.session_socket_id = d.session_socket_id
+                 AND t.worktree_id = d.worktree_id AND t.entity_kind = 'mailbox_delivery'
+                 AND t.entity_id = d.delivery_id AND t.transition_kind = 'settled'
+                WHERE d.session_socket_id = ?1 AND d.worktree_id = ?2
+                  AND d.message_id = ?3 AND d.address_id = ?4),
+             next AS (
+                SELECT MIN(t.occurred_at_ms) AS at FROM settle
+                CROSS JOIN mailbox_deliveries d
+                CROSS JOIN transition_facts t ON t.session_socket_id = d.session_socket_id
+                 AND t.worktree_id = d.worktree_id AND t.entity_kind = 'mailbox_delivery'
+                 AND t.entity_id = d.delivery_id AND t.transition_kind = 'dispatching'
+                WHERE d.session_socket_id = ?1 AND d.worktree_id = ?2
+                  AND d.address_id = ?4 AND d.mailbox_order > settle.mailbox_order)
+             SELECT settle.at, (
+                SELECT MAX(observed_at_ms) FROM agent_session_observations
+                WHERE session_socket_id = ?1 AND worktree_id = ?2 AND address_id = ?4
+                  AND agent_session_id = ?5 AND status = 'working'
+                  AND observed_at_ms < coalesce((SELECT at FROM next), 9223372036854775807))
+             FROM settle",
+            params![
+                ns.session_socket_id,
+                ns.space_id.as_str(),
+                message.as_str(),
+                address,
+                session
+            ],
+            |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?)),
+        )?;
+        let Some(settled) = settled.map(from_i64).transpose()? else {
+            return Ok(0);
+        };
+        let since = working.map(from_i64).transpose()?.unwrap_or(0).max(settled);
+        Ok(since
+            .saturating_add(WORKER_QUIET_MS)
+            .min(settled.saturating_add(WORKER_QUIET_CAP_MS)))
     }
 
     fn coordination_paused_assignment(
@@ -904,19 +1059,22 @@ impl StateTransaction<'_> {
         self.transaction.query_row("SELECT EXISTS(SELECT 1 FROM coordination_assignments a JOIN collaboration_messages m ON m.session_socket_id=a.session_socket_id AND m.worktree_id=a.worktree_id AND m.message_id=a.current_message_id JOIN thread_controls c ON c.session_socket_id=m.session_socket_id AND c.worktree_id=m.worktree_id AND c.thread_id=m.thread_id WHERE a.session_socket_id=?1 AND a.worktree_id=?2 AND a.coordination_id=?3 AND (c.paused=1 OR c.stopped=1))",params![ns.session_socket_id,ns.space_id.as_str(),id.as_str()],|r|r.get::<_,bool>(0)).map_err(StoreError::from)
     }
 
-    pub(crate) fn coordination_wake_message_eligible(
+    /// Readiness of a queued message at dispatch. Anything but a coordination
+    /// check-in is Ready.
+    pub(crate) fn coordination_wake_message_readiness(
         &self,
         ns: &StateNamespace,
         message: &MessageId,
         live: &crate::spaces::LiveSpaces,
-    ) -> Result<bool, StoreError> {
+        now_ms: u64,
+    ) -> Result<WakeReadiness, StoreError> {
         if !self.coordination_wake_current(ns, message)? {
-            return Ok(false);
+            return Ok(WakeReadiness::NotNow);
         }
         let Some((id, _)) = self.wake_identity(ns, message)? else {
-            return Ok(true);
+            return Ok(WakeReadiness::Ready);
         };
-        self.coordination_wake_eligible(ns, &id, live)
+        self.coordination_wake_readiness(ns, &id, live, now_ms)
     }
 
     pub(crate) fn wake_identity(

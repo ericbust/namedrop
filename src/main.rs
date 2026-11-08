@@ -5,8 +5,8 @@ mod popup_input;
 mod stop_hook;
 use namedrop::{
     Clock, CommandResult, HerdrCommandExecutor, LifecycleRuntime, ProcessHerdr, ProcessIds,
-    SystemClock,
-    cli::{Cli, RuntimeOptions},
+    SystemClock, agent_result_view,
+    cli::{Cli, ResultFormat, RuntimeOptions},
     describe_operations, diagnose_collaboration, execute_context_operation,
     execute_control_operation, execute_group_operation, execute_handoff_operation,
     execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
@@ -56,13 +56,7 @@ fn main() -> ExitCode {
                     Path::new(state),
                     &socket.to_string_lossy(),
                     &key.to_string_lossy(),
-                    |result, options| {
-                        if needs_mailbox_watcher(result)
-                            && let Err(error) = wake_mailboxes(options)
-                        {
-                            eprintln!("Command queued; could not start shell watcher: {error}");
-                        }
-                    },
+                    schedule_dispatch,
                 )
             }
             _ => Err("invalid deferred command arguments".into()),
@@ -145,12 +139,17 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             let args: Vec<_> = env::args_os().skip(1).collect();
-            let human = !args.iter().any(|arg| arg == "--json")
-                && (args.iter().any(|arg| arg == "--human") || io::stdout().is_terminal());
+            let format = if args.iter().any(|arg| arg == "--json") {
+                ResultFormat::Full
+            } else if args.iter().any(|arg| arg == "--human") || io::stdout().is_terminal() {
+                ResultFormat::Human
+            } else {
+                ResultFormat::Agent
+            };
             return write_result(
                 &CommandResult::invalid_request(error.to_string()),
                 64,
-                human,
+                format,
             );
         }
     };
@@ -227,7 +226,7 @@ fn main() -> ExitCode {
         return finish(
             "dashboard",
             result,
-            cli.human_output(io::stdout().is_terminal()),
+            cli.result_format(io::stdout().is_terminal()),
         );
     }
     if let Some(state) = selected_state.as_deref() {
@@ -250,10 +249,10 @@ fn main() -> ExitCode {
             cli.dashboard_inherit_claim(),
         );
     }
-    let human = cli.human_output(io::stdout().is_terminal());
+    let format = cli.result_format(io::stdout().is_terminal());
     let input_file = cli.input_is_file();
     let omitted = "Input file rejected; file contents are omitted from diagnostics.";
-    let write_result = |result: &CommandResult, code| write_result(result, code, human);
+    let write_result = |result: &CommandResult, code| write_result(result, code, format);
     let input_error = |error: String| {
         if input_file && error.starts_with("invalid operation input: ") {
             omitted.to_owned()
@@ -262,7 +261,7 @@ fn main() -> ExitCode {
         }
     };
     let finish = |operation, result: Result<serde_json::Value, String>| {
-        finish(operation, result.map_err(input_error), human)
+        finish(operation, result.map_err(input_error), format)
     };
 
     if let Some(state_directory) = cli.user_prompt_submit_hook_state_directory() {
@@ -411,14 +410,51 @@ fn main() -> ExitCode {
         };
     }
 
+    match run_bound_operation(operation, input, &cli.runtime) {
+        Ran::Refused(error) => {
+            write_result(&CommandResult::invalid_request(input_error(error)), 64)
+        }
+        Ran::Finished(result) => finish(operation, result),
+    }
+}
+
+/// An input the CLI refuses before running anything, or the operation's own
+/// result.
+enum Ran {
+    Refused(String),
+    Finished(Result<serde_json::Value, String>),
+}
+
+/// One operation the way the CLI runs it once its input is parsed: a compact
+/// reply is completed from its attempt, a message is validated, a sandboxed
+/// pane queues the command outside, and send, reply and complete wake the
+/// mailboxes. The Stop hook settles a final reply through this same path, so
+/// every guard of the agent's own bound line applies to it.
+fn run_bound_operation(
+    operation: &'static str,
+    input: serde_json::Value,
+    options: &RuntimeOptions,
+) -> Ran {
+    let input = if operation == "reply" {
+        let state = options
+            .plugin_state
+            .clone()
+            .or_else(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from));
+        match namedrop::expand_attempt_reply(input, state.as_deref()) {
+            Ok(input) => input,
+            Err(error) => return Ran::Refused(error),
+        }
+    } else {
+        input
+    };
     if is_message_operation(operation)
         && let Err(error) = validate_message_input(operation, input.clone())
     {
-        return write_result(&CommandResult::invalid_request(input_error(error)), 64);
+        return Ran::Refused(error);
     }
 
-    if let Some(result) = namedrop::deferred_commands::try_defer(operation, &input, &cli.runtime) {
-        return finish(operation, result);
+    if let Some(result) = namedrop::deferred_commands::try_defer(operation, &input, options) {
+        return Ran::Finished(result);
     }
 
     let result = if matches!(
@@ -431,30 +467,28 @@ fn main() -> ExitCode {
             | "handoff.results"
             | "handoff.preview"
     ) {
-        run_operation(operation, input, OperationKind::Handoff, &cli.runtime)
+        run_operation(operation, input, OperationKind::Handoff, options)
     } else if operation.starts_with("reminder.") {
-        run_operation(operation, input, OperationKind::Reminder, &cli.runtime)
+        run_operation(operation, input, OperationKind::Reminder, options)
     } else if matches!(operation, "group.list" | "group.set" | "group.remove") {
-        run_operation(operation, input, OperationKind::Group, &cli.runtime)
+        run_operation(operation, input, OperationKind::Group, options)
     } else if is_control_operation(operation) {
-        run_operation(operation, input, OperationKind::Control, &cli.runtime)
+        run_operation(operation, input, OperationKind::Control, options)
     } else if is_context_operation(operation) {
-        run_operation(operation, input, OperationKind::Context, &cli.runtime)
+        run_operation(operation, input, OperationKind::Context, options)
     } else if is_integration_operation(operation) {
-        run_operation(operation, input, OperationKind::Integration, &cli.runtime)
+        run_operation(operation, input, OperationKind::Integration, options)
     } else if is_message_operation(operation) {
-        run_operation(operation, input, OperationKind::Message, &cli.runtime)
+        run_operation(operation, input, OperationKind::Message, options)
     } else if is_lifecycle_operation(operation) {
-        run_lifecycle(operation, input, &cli.runtime)
+        run_lifecycle(operation, input, options)
     } else {
         Err(format!("unsupported operation: {operation}"))
     };
-    if result.as_ref().is_ok_and(needs_mailbox_watcher)
-        && let Err(error) = wake_mailboxes(&cli.runtime)
-    {
-        eprintln!("Command queued; could not start shell watcher: {error}");
-    }
-    finish(operation, result)
+    Ran::Finished(result.map(|mut data| {
+        schedule_dispatch(operation, &mut data, options);
+        data
+    }))
 }
 
 fn run_subagent_hook(state: &Path, host: namedrop::AgentRuntime) -> ExitCode {
@@ -498,6 +532,58 @@ fn run_subagent_hook(state: &Path, host: namedrop::AgentRuntime) -> ExitCode {
         );
     }
     ExitCode::SUCCESS
+}
+
+/// Send, reply and complete only commit. The space's mailbox worker, a detached
+/// process, dispatches what they queued after the command has answered, so the
+/// caller never waits on the recipient's settle delay or prompt. When no worker
+/// can start, the command drains before it answers, so delivery still happens.
+fn schedule_dispatch(operation: &str, data: &mut serde_json::Value, options: &RuntimeOptions) {
+    let hands_off = matches!(
+        operation,
+        "send" | "reply" | "complete" | namedrop::final_reply::STOP_NO_REPLY
+    );
+    if !hands_off && !needs_mailbox_watcher(data) {
+        return;
+    }
+    let woken = wake_mailboxes(options);
+    if let Err(error) = &woken {
+        eprintln!("Command queued; could not start shell watcher: {error}");
+    }
+    if !hands_off {
+        return;
+    }
+    let Err(error) = woken else {
+        data["dispatch"] = serde_json::json!("scheduled");
+        return;
+    };
+    data["dispatch"] = serde_json::json!("waiting");
+    data["dispatch_error"] = serde_json::json!(error);
+    if let Err(error) = with_runtime_options(options, |runtime| drain_inline(data, runtime)) {
+        data["drain"] = serde_json::json!({"error": error});
+    }
+}
+
+/// Drains every space a mailbox worker would have: this one into `drain`, the
+/// others into `drains` by space id.
+fn drain_inline(
+    data: &mut serde_json::Value,
+    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
+) -> Result<(), String> {
+    let here = current_space(runtime)?;
+    for space in namedrop::spaces_to_wake(runtime.state_directory, runtime.session_socket_id, &here)
+    {
+        let receipt = namedrop::drain_receipt(&LifecycleRuntime {
+            workspace_id: Some(&space),
+            ..*runtime
+        });
+        if space == here {
+            data["drain"] = receipt;
+        } else {
+            data["drains"][&space] = receipt;
+        }
+    }
+    Ok(())
 }
 
 fn wake_mailboxes(options: &RuntimeOptions) -> Result<(), String> {
@@ -576,10 +662,7 @@ mod drain_report_tests {
             ..DrainReport::default()
         };
         let result = json!({"attempt_id": "attempt-1", "drain": grace});
-        assert_eq!(
-            drain_report(&result).unwrap().next_grace_due_ms(),
-            Some(31_000)
-        );
+        assert_eq!(drain_report(&result).unwrap().next_due_ms(), Some(31_000));
         assert!(needs_mailbox_watcher(&result));
 
         let requeued = DrainReport {
@@ -595,16 +678,21 @@ mod drain_report_tests {
 fn wake_runtime_mailboxes(
     runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
 ) -> Result<(), String> {
-    let here = match runtime.workspace_id {
-        Some(id) => id.to_owned(),
-        None => namedrop::discover_worktree(runtime.herdr, runtime.cwd)?.workspace_id,
-    };
     schedule_mailbox_workers(
         runtime.state_directory,
         runtime.session_socket_id,
-        &here,
+        &current_space(runtime)?,
         false,
     )
+}
+
+fn current_space(
+    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
+) -> Result<String, String> {
+    match runtime.workspace_id {
+        Some(id) => Ok(id.to_owned()),
+        None => Ok(namedrop::discover_worktree(runtime.herdr, runtime.cwd)?.workspace_id),
+    }
 }
 
 fn schedule_mailbox_workers(
@@ -684,7 +772,7 @@ fn choose_name_type(cli: &Cli) -> Result<Option<namedrop::PaneType>, String> {
 fn finish(
     operation: &'static str,
     result: Result<serde_json::Value, String>,
-    human: bool,
+    format: ResultFormat,
 ) -> ExitCode {
     match result {
         Ok(data) => {
@@ -695,12 +783,12 @@ fn finish(
                 (operation == "activate" && !activation_complete(&data))
                     || (operation == "ui.install-shortcuts" && data["status"] == "needs_attention"),
             );
-            write_result(&CommandResult::success(operation, data), code, human)
+            write_result(&CommandResult::success(operation, data), code, format)
         }
         Err(error) => write_result(
             &CommandResult::rejected(operation, "operation_failed", error),
             65,
-            human,
+            format,
         ),
     }
 }
@@ -871,11 +959,7 @@ fn with_runtime_options<T>(
         .clone()
         .or_else(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from))
         .ok_or_else(|| "HERDR_PLUGIN_STATE_DIR or --plugin-state is required".to_owned())?;
-    let home_directory = env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute());
-    let claude_config = env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
-    let codex_config = env::var_os("CODEX_HOME").map(PathBuf::from);
+    let directories = namedrop::InheritedDirectories::from_environment();
     let cwd = env::current_dir().map_err(|error| error.to_string())?;
     let herdr = ProcessHerdr::default().with_socket(options.herdr_socket.clone());
     let mut workspace_id = options
@@ -924,11 +1008,8 @@ fn with_runtime_options<T>(
     let ids = ProcessIds::default();
     action(&LifecycleRuntime {
         state_directory: &state_directory,
-        home_directory: home_directory.as_deref(),
-        agent_config: namedrop::AgentConfigDirectories {
-            claude: claude_config.as_deref(),
-            codex: codex_config.as_deref(),
-        },
+        home_directory: directories.home(),
+        agent_config: directories.agent_config(),
         cwd: &cwd,
         workspace_id: workspace_id.as_deref(),
         current_pane_id: pane_id.as_deref(),
@@ -953,6 +1034,7 @@ fn run_context_hook(
     if io::stdin().read_to_string(&mut input).is_err() {
         return ExitCode::SUCCESS;
     }
+    namedrop::forget_shown_roster(&input, state_directory);
     let mut output = namedrop::execute_codex_app_server_hook(&input).or_else(|| {
         with_runtime_at(state_directory, |runtime| {
             let _ = namedrop::deferred_commands::ensure_worker(
@@ -1379,7 +1461,7 @@ fn run_agent_status_worker_queue_with_io(
                     deadline_ms = deadline_ms
                         .into_iter()
                         .chain(retry_due_ms)
-                        .chain(report.next_grace_due_ms())
+                        .chain(report.next_due_ms())
                         .min();
                     if work.remove_marker().is_err() {
                         wait_for_reconciliation_retry(&mut failures, false);
@@ -1562,7 +1644,7 @@ mod worker_shutdown_tests {
 
     #[test]
     fn deadline_drains_without_marker_writes_and_keeps_report_deadlines() {
-        for mode in ["complete", "retry", "grace", "error"] {
+        for mode in ["complete", "retry", "grace", "check-in", "error"] {
             let queue = QueueFixture::new(&format!("deadline-{mode}"));
             let lock = queue.lock();
             fs::set_permissions(&queue.0, fs::Permissions::from_mode(0o500)).unwrap();
@@ -1597,6 +1679,9 @@ mod worker_shutdown_tests {
                                 attempt_id: namedrop::DeliveryAttemptId::new("grace"),
                                 due_at_ms: SystemClock.now_unix_ms() + 10,
                             }),
+                            "check-in" => {
+                                report.check_in_due_ms = Some(SystemClock.now_unix_ms() + 10)
+                            }
                             "error" => return Err("temporary storage failure".to_owned()),
                             _ => {}
                         }
@@ -2173,8 +2258,8 @@ fn retryable_agent_status_reconciliation(error: &str) -> bool {
     )
 }
 
-fn write_result(result: &CommandResult, exit_code: u8, human: bool) -> ExitCode {
-    if human {
+fn write_result(result: &CommandResult, exit_code: u8, format: ResultFormat) -> ExitCode {
+    if format == ResultFormat::Human {
         let text = render_command_result_to_text(result);
         let written = if exit_code == 0 {
             writeln!(io::stdout().lock(), "{text}")
@@ -2184,7 +2269,13 @@ fn write_result(result: &CommandResult, exit_code: u8, human: bool) -> ExitCode 
         return ExitCode::from(if written.is_ok() { exit_code } else { 74 });
     }
     let mut output = io::stdout().lock();
-    if serde_json::to_writer(&mut output, result).is_err() || writeln!(output).is_err() {
+    let written = if format == ResultFormat::Full {
+        serde_json::to_writer(&mut output, result)
+    } else {
+        serde_json::to_value(result)
+            .and_then(|full| serde_json::to_writer(&mut output, &agent_result_view(&full)))
+    };
+    if written.is_err() || writeln!(output).is_err() {
         return ExitCode::from(74);
     }
     ExitCode::from(exit_code)

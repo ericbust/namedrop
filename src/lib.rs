@@ -12,6 +12,8 @@ pub mod dashboard;
 pub mod deferred_commands;
 mod delivery;
 mod domain;
+#[doc(hidden)]
+pub mod final_reply;
 mod groups;
 mod handoff;
 mod health;
@@ -32,13 +34,16 @@ mod persona;
 mod ports;
 mod runtime;
 mod shortcuts;
+mod shown_roster;
 mod spaces;
 mod store;
 pub mod subagent;
 #[doc(hidden)]
 pub use shortcuts::install_shortcuts;
+pub use shown_roster::forget_shown_roster;
 mod terminal;
 pub mod tour;
+mod transcript_usage;
 #[doc(hidden)]
 pub mod update_check;
 pub use terminal::{default_pane_type, detect_pane_type, execute_terminal, verify_inherited_pane};
@@ -47,8 +52,10 @@ pub(crate) const INTEGRATION_PACKAGE_ATTENTION_SOURCE_PREFIX: &str = "integratio
 
 pub use context::{execute_context_operation, execute_human_context_operation};
 pub use controls::execute_control_operation;
-pub use delivery::{DrainReport, GraceDeadline, drain_mailboxes, drain_reports, spaces_to_wake};
-pub(crate) use delivery::{drain_receipt, publish_status_metadata, reconcile_delivery_state};
+pub use delivery::{
+    DrainReport, GraceDeadline, drain_mailboxes, drain_receipt, drain_reports, spaces_to_wake,
+};
+pub(crate) use delivery::{publish_status_metadata, reconcile_delivery_state};
 pub use domain::*;
 pub use groups::execute_group_operation;
 pub use handoff::execute_handoff_operation;
@@ -59,7 +66,9 @@ pub use health::{
 pub use hook::{
     execute_codex_app_server_hook, execute_session_start_hook, execute_user_prompt_submit_hook,
 };
-pub use install::{AgentConfigDirectories, install_integration_package, package_directory};
+pub use install::{
+    AgentConfigDirectories, InheritedDirectories, install_integration_package, package_directory,
+};
 pub(crate) use install::{
     IntegrationPackageInstallation, disclosed_user_package_targets,
     integration_package_attention_source, refresh_user_integration_packages,
@@ -89,16 +98,16 @@ pub use lifecycle::{
 };
 pub use message::{
     BodyMention, OperatorSendError, OperatorSendErrorKind, ParsedMessage, RecipientOutlook,
-    RecipientRun, carries_leading_mentions, execute_message_operation, parse_mentions,
-    parse_prompt_mentions, recipient_outlooks, send_operator_direct_message, send_operator_message,
-    validate_message_input,
+    RecipientRun, carries_leading_mentions, execute_message_operation, expand_attempt_reply,
+    parse_mentions, parse_prompt_mentions, recipient_outlooks, send_operator_direct_message,
+    send_operator_message, validate_message_input,
 };
 pub use ports::{Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator, PromptFailureKind};
 pub use runtime::{ProcessHerdr, ProcessIds, SystemClock};
 use serde::Serialize;
 pub use spaces::{SpaceScope, WorkspaceLabel};
 mod output;
-pub use output::render_command_result_to_text;
+pub use output::{agent_result_view, render_command_result_to_text};
 pub use store::coordination_review::{OperatorSession, REVIEW_GRANT_TTL_MS};
 pub use store::{
     StateStore, StateTransaction, StoreError, StoreErrorKind, WorktreePurgeResult,
@@ -193,7 +202,7 @@ pub fn is_message_operation(operation: &str) -> bool {
 pub fn is_integration_operation(operation: &str) -> bool {
     matches!(
         operation,
-        "register" | "ack" | "complete" | "delivery.inbox"
+        "register" | "ack" | "complete" | final_reply::STOP_NO_REPLY | "delivery.inbox"
     )
 }
 

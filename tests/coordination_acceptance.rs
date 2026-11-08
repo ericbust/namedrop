@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/dispatch.rs"]
+mod dispatch;
 
 use namedrop::*;
 use serde_json::{Value, json};
@@ -19,6 +21,7 @@ struct Fixture {
     state: PathBuf,
     home: PathBuf,
     ids: AtomicU64,
+    now: AtomicU64,
     statuses: Mutex<BTreeMap<String, String>>,
     sessions: Mutex<BTreeMap<String, String>>,
     prompts: Mutex<Vec<(String, Value)>>,
@@ -38,6 +41,7 @@ impl Fixture {
             home: root.join("home"),
             root,
             ids: AtomicU64::new(1),
+            now: AtomicU64::new(100),
             statuses: Mutex::new(BTreeMap::from([
                 ("lead".into(), "working".into()),
                 ("worker".into(), "idle".into()),
@@ -119,12 +123,12 @@ impl Fixture {
     fn run(&self, pane: &str, token: &str, input: Value) -> Result<Value, String> {
         let r = self.runtime(pane);
         match token {
-            "send" | "reply" => execute_message_operation(token, input, &r),
+            "send" | "reply" => dispatch::message(token, input, &r),
             "handoff.begin" | "handoff.resolve" | "handoff.results" | "handoff.status" => {
                 execute_handoff_operation(token, input, &r)
             }
             "context.inspect" | "context.read" => execute_context_operation(token, input, &r),
-            "complete.no-reply" => execute_integration_operation("complete", input, &r),
+            "complete.no-reply" => dispatch::integration("complete", input, &r),
             _ => panic!("unexpected bound action {token}"),
         }
     }
@@ -236,7 +240,7 @@ impl Drop for Fixture {
 }
 impl Clock for Fixture {
     fn now_unix_ms(&self) -> u64 {
-        100
+        self.now.load(Ordering::Relaxed)
     }
     fn wait_ms(&self, _: u64) {}
 }
@@ -368,7 +372,17 @@ fn separate_assignments() -> Value {
         "Bounds checked, including zero.",
         Some("completed"),
     );
-    assert_eq!(f.results(&id)["outcome"], "open");
+    // Checked in the store: the lead reading its results here would hold the
+    // check-in this scenario goes on to act on.
+    let outcome: String = f
+        .db()
+        .query_row(
+            "SELECT outcome FROM coordinations WHERE coordination_id=?1",
+            [id.as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(outcome, "open");
     let before = f.snapshot();
     assert!(
         f.run(
@@ -736,4 +750,63 @@ fn coordination_protocol_and_legacy_routes() {
         "Synthetic context reviewed.",
         Some("completed"),
     );
+}
+
+#[test]
+fn a_lead_that_reads_the_reply_and_goes_idle_is_checked_in_on_after_the_hold() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let a = f.send(
+        &id,
+        "implementation",
+        "@worker Compute the synthetic checksum.",
+    );
+    f.status("lead", "idle");
+    f.reply(
+        "worker",
+        &a["message_id"],
+        "Checksum 42.",
+        Some("completed"),
+    );
+    f.drain();
+    let delivered: Vec<Value> = f
+        .prompts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(pane, _)| pane == "lead")
+        .map(|(_, e)| e.clone())
+        .collect();
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    let reply = &delivered[0];
+
+    let read_at = 5_000;
+    f.now.store(read_at, Ordering::Relaxed);
+    f.status("lead", "working");
+    let results = f.results(&id);
+    assert_eq!(results["assignments"][0]["work_outcome"], "completed");
+    f.complete("lead", reply);
+    f.status("lead", "idle");
+    f.drain();
+    assert!(f.nudges().is_empty());
+
+    f.now.store(read_at + 600_000 - 1, Ordering::Relaxed);
+    f.drain();
+    assert!(f.nudges().is_empty());
+
+    f.now.store(read_at + 600_000, Ordering::Relaxed);
+    f.drain();
+    let nudges = f.nudges();
+    assert_eq!(nudges.len(), 1, "{nudges:?}");
+    let mut resolve = nudges[0]["control"]["tool"]["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["token"] == "handoff.resolve" && o["input"]["outcome"] == "completed")
+        .expect("the check-in binds the resolve")
+        .clone();
+    resolve["input"]["report"] = json!("Checksum 42.");
+    f.status("lead", "working");
+    let saved = f.execute("lead", resolve);
+    assert!(saved["report_message_id"].is_string(), "{saved}");
 }

@@ -649,6 +649,8 @@ mod tests {
 import json, pathlib, sys
 root = pathlib.Path(__file__).parent
 args = sys.argv[1:]
+if args == ['--probe']:
+    sys.exit(0)
 def read(name):
     return json.loads((root / name).read_text())
 def write(name, value):
@@ -686,6 +688,20 @@ else:
             )
             .unwrap();
             fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+            // Another test's fork can hold the script's write descriptor until its own
+            // exec, and running the script meanwhile fails with ETXTBSY.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match Command::new(&executable).arg("--probe").status() {
+                    Err(error)
+                        if error.raw_os_error() == Some(libc::ETXTBSY)
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    result => break assert!(result.unwrap().success()),
+                }
+            }
             let fixture = Self {
                 root,
                 files,

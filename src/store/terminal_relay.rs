@@ -3,54 +3,30 @@ use super::*;
 const GRAMMAR: &str = "terminal-relay/v1";
 
 struct RelayAttempt {
-    attempt_id: String,
     address_id: String,
     alias: String,
     message_id: String,
     thread_id: String,
-    started_at_ms: u64,
-}
-
-impl StateStore {
-    pub fn open_for_terminal_relay(
-        state_directory: impl AsRef<Path>,
-    ) -> Result<Option<Self>, StoreError> {
-        let state_directory = state_directory.as_ref();
-        let database_path = state_directory.join(DATABASE_FILE_NAME);
-        if !database_path.is_file() {
-            return Ok(None);
-        }
-        let connection =
-            Connection::open_with_flags(&database_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-        connection.busy_timeout(Duration::from_millis(25))?;
-        connection.pragma_update(None, "foreign_keys", true)?;
-        check_read_only_schema(&connection)?;
-        Ok(Some(Self {
-            connection,
-            state_directory: state_directory.to_owned(),
-            read_only: false,
-        }))
-    }
 }
 
 impl StateTransaction<'_> {
-    pub(super) fn arm_terminal_relay(
-        &mut self,
+    /// Whether the person sent the message an attempt delivers, so its final
+    /// message goes back to them in the thread.
+    pub(crate) fn relays_to_person(
+        &self,
         namespace: &StateNamespace,
         attempt: &crate::DeliveryAttemptId,
-        message: &MessageId,
-        attribution: &MutationAttribution,
-    ) -> Result<(), StoreError> {
-        if self.terminal_relay_source(namespace, message)?.is_some() {
-            self.append_transition(
-                namespace,
-                TransitionEntityKind::TerminalRelayAttempt,
-                attempt.as_str(),
-                TransitionKind::Activated,
-                attribution,
-            )?;
-        }
-        Ok(())
+    ) -> Result<bool, StoreError> {
+        let message = self.transaction.query_row(
+            "SELECT d.message_id FROM delivery_attempts a
+             JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, delivery_id, address_id)
+             WHERE a.session_socket_id=?1 AND a.worktree_id=?2 AND a.attempt_id=?3",
+            params![namespace.session_socket_id, namespace.space_id.as_str(), attempt.as_str()],
+            |row| row.get::<_, String>(0),
+        )?;
+        Ok(self
+            .terminal_relay_source(namespace, &MessageId::new(message))?
+            .is_some())
     }
 
     fn terminal_relay_source(
@@ -76,186 +52,159 @@ impl StateTransaction<'_> {
         .then_some(source))
     }
 
-    pub fn relay_terminal_ending(
+    /// Posts the final message of the turn that answered one attempt from the
+    /// person, in that attempt's thread and in reply to their message, and
+    /// closes the attempt without a reply. It posts nothing when the agent
+    /// already replied in the thread during the turn.
+    pub fn relay_final_message(
         &mut self,
         namespace: &StateNamespace,
         ending: &crate::TerminalRelayEnd,
         attribution: &MutationAttribution,
-    ) -> Result<Vec<MessageId>, StoreError> {
+    ) -> Result<Option<MessageId>, StoreError> {
         let ns = namespace_params(namespace);
-        let previous_end: Option<i64> = self.transaction.query_row(
-            "SELECT MAX(occurred_at_ms) FROM transition_facts
-             WHERE session_socket_id=?1 AND worktree_id=?2
-               AND entity_kind='terminal_relay_session' AND entity_id=?3
-               AND transition_kind='stopped'",
-            params![ns[0], ns[1], ending.agent_session_id.as_str()],
-            |row| row.get(0),
-        )?;
-        let previous_end = ending
-            .previous_end_ms
-            .map(to_i64)
-            .transpose()?
-            .or(previous_end);
-        let ended_at = to_i64(ending.ended_at_ms)?;
-        if previous_end.is_some_and(|previous| previous >= ended_at) {
-            return Ok(Vec::new());
-        }
-        let attempts = {
-            let mut statement = self.transaction.prepare(
-                "SELECT a.attempt_id, a.address_id, r.alias_snapshot, m.message_id,
-                        m.thread_id, arm.occurred_at_ms
+        let attempt = self
+            .transaction
+            .query_row(
+                "SELECT a.address_id, r.alias_snapshot, m.message_id, m.thread_id
                  FROM delivery_attempts a
                  JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, delivery_id, address_id)
                  JOIN collaboration_messages m USING (session_socket_id, worktree_id, message_id)
                  JOIN message_recipients r ON r.session_socket_id=a.session_socket_id
                    AND r.worktree_id=a.worktree_id AND r.message_id=m.message_id AND r.address_id=a.address_id
                  JOIN delivery_attempt_state s USING (session_socket_id, worktree_id, attempt_id, address_id)
-                 JOIN transition_facts arm ON arm.session_socket_id=a.session_socket_id
-                   AND arm.worktree_id=a.worktree_id AND arm.entity_kind='terminal_relay_attempt'
-                   AND arm.entity_id=a.attempt_id AND arm.transition_kind='activated'
-                 WHERE a.session_socket_id=?1 AND a.worktree_id=?2 AND a.agent_session_id=?3
-                   AND arm.occurred_at_ms > ?4 AND arm.occurred_at_ms <= ?5
+                 WHERE a.session_socket_id=?1 AND a.worktree_id=?2 AND a.attempt_id=?3
+                   AND a.agent_session_id=?4
                    AND s.state IN ('submitted','acknowledged','settled')
                    AND NOT EXISTS (SELECT 1 FROM delivery_attempts newer
                        WHERE newer.session_socket_id=a.session_socket_id AND newer.worktree_id=a.worktree_id
-                         AND newer.delivery_id=a.delivery_id AND newer.rowid>a.rowid)
-                 ORDER BY arm.occurred_at_ms, a.rowid",
-            )?;
-            statement
-                .query_map(
-                    params![
-                        ns[0],
-                        ns[1],
-                        ending.agent_session_id.as_str(),
-                        previous_end.unwrap_or(-1),
-                        ended_at
-                    ],
-                    |row| {
-                        Ok(RelayAttempt {
-                            attempt_id: row.get(0)?,
-                            address_id: row.get(1)?,
-                            alias: row.get(2)?,
-                            message_id: row.get(3)?,
-                            thread_id: row.get(4)?,
-                            started_at_ms: from_i64(row.get(5)?)?,
-                        })
-                    },
-                )?
-                .collect::<Result<Vec<_>, _>>()?
-        };
+                         AND newer.delivery_id=a.delivery_id AND newer.rowid>a.rowid)",
+                params![
+                    ns[0],
+                    ns[1],
+                    ending.attempt_id.as_str(),
+                    ending.agent_session_id.as_str()
+                ],
+                |row| {
+                    Ok(RelayAttempt {
+                        address_id: row.get(0)?,
+                        alias: row.get(1)?,
+                        message_id: row.get(2)?,
+                        thread_id: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
         let text: String = ending
             .text
             .trim()
             .chars()
             .take(crate::TERMINAL_RELAY_MAX_CHARS)
             .collect();
+        let Some(attempt) = attempt.filter(|_| !text.is_empty()) else {
+            return Ok(None);
+        };
+        let Some(source) =
+            self.terminal_relay_source(namespace, &MessageId::new(&attempt.message_id))?
+        else {
+            return Ok(None);
+        };
+        let ended_at = to_i64(ending.ended_at_ms)?;
         let at = MutationAttribution::new(
             attribution.actor_kind,
             &attribution.actor_id,
             ending.ended_at_ms,
         );
-        let mut messages = Vec::new();
-        if !text.is_empty() {
-            for attempt in attempts {
-                let Some(source) =
-                    self.terminal_relay_source(namespace, &MessageId::new(&attempt.message_id))?
-                else {
-                    continue;
-                };
-                let message_id = MessageId::new(format!("terminal-relay:{}", attempt.attempt_id));
-                let exists = self.transaction.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM collaboration_messages
-                     WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3)",
-                    params![ns[0], ns[1], message_id.as_str()],
-                    |row| row.get::<_, bool>(0),
-                )?;
-                if exists {
-                    continue;
-                }
-                let replied = self.transaction.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM collaboration_messages reply
-                       WHERE reply.session_socket_id=?1 AND reply.worktree_id=?2 AND reply.thread_id=?3
-                         AND reply.author_address_id=?4 AND reply.author_kind='agent_session'
-                         AND reply.grammar_version NOT IN ('terminal-relay/v1','reminder/v1')
-                         AND reply.created_at_ms >= ?5 AND reply.created_at_ms <= ?6)
-                     OR EXISTS(SELECT 1 FROM delivery_dispositions
-                       WHERE session_socket_id=?1 AND worktree_id=?2 AND attempt_id=?7 AND disposition_kind='reply')",
-                    params![ns[0], ns[1], attempt.thread_id, attempt.address_id,
-                        to_i64(attempt.started_at_ms)?, ended_at, attempt.attempt_id],
-                    |row| row.get::<_, bool>(0),
-                )?;
-                if replied {
-                    continue;
-                }
-                let order = self.next_order(namespace, "thread_message", &attempt.thread_id)?;
-                self.transaction.execute(
-                    "INSERT INTO collaboration_messages (
-                        session_socket_id, worktree_id, message_id, thread_id, thread_order, in_reply_to,
-                        author_address_id, author_alias_snapshot, author_kind, author_session_snapshot,
-                        request_id, authored_source, body, grammar_version, created_at_ms)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'agent_session',?9,?3,?10,?10,?11,?12)",
-                    params![ns[0], ns[1], message_id.as_str(), attempt.thread_id, to_i64(order)?,
-                        source.as_str(), attempt.address_id, attempt.alias,
-                        ending.agent_session_id.as_str(), text, GRAMMAR, ended_at],
-                )?;
-                self.append_transition(
-                    namespace,
-                    TransitionEntityKind::CollaborationMessage,
-                    message_id.as_str(),
-                    TransitionKind::Created,
-                    &at,
-                )?;
-                let attempt_id = crate::DeliveryAttemptId::new(&attempt.attempt_id);
-                self.ensure_delivery_attempt_acknowledged(
-                    namespace,
-                    &attempt_id,
-                    &ending.agent_session_id,
-                    &at,
-                )?;
-                if !self.delivery_disposition_exists(namespace, &attempt_id)? {
-                    self.record_no_reply_disposition(
-                        namespace,
-                        &attempt_id,
-                        &format!("terminal-relay-no-reply:{}", attempt.attempt_id),
-                        &ending.agent_session_id,
-                        &at,
-                    )?;
-                }
-                let mut conversations = vec![(namespace.clone(), message_id.clone())];
-                if let Some(copy) =
-                    self.mirror_terminal_relay(namespace, &source, &message_id, &at)?
-                {
-                    conversations.push(copy);
-                }
-                for (conversation, relay) in conversations {
-                    self.open_attention_item(
-                        &conversation,
-                        &AttentionItemDraft {
-                            id: crate::AttentionItemId::new(format!(
-                                "terminal-relay:{}",
-                                attempt.attempt_id
-                            )),
-                            source_kind: crate::AttentionSourceKind::TerminalRelay,
-                            source_id: relay.as_str().to_owned(),
-                            summary: format!(
-                                "@{} answered in their terminal and may need your reply.",
-                                attempt.alias
-                            ),
-                        },
-                        &at,
-                    )?;
-                }
-                messages.push(message_id);
-            }
+        let message_id = MessageId::new(format!("terminal-relay:{}", ending.attempt_id.as_str()));
+        let replied = self.transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM collaboration_messages
+               WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?8)
+             OR EXISTS(SELECT 1 FROM collaboration_messages reply
+               WHERE reply.session_socket_id=?1 AND reply.worktree_id=?2 AND reply.thread_id=?3
+                 AND reply.author_address_id=?4 AND reply.author_kind='agent_session'
+                 AND reply.grammar_version NOT IN ('terminal-relay/v1','reminder/v1')
+                 AND reply.created_at_ms >= ?5 AND reply.created_at_ms <= ?6)
+             OR EXISTS(SELECT 1 FROM delivery_dispositions
+               WHERE session_socket_id=?1 AND worktree_id=?2 AND attempt_id=?7 AND disposition_kind='reply')",
+            params![ns[0], ns[1], attempt.thread_id, attempt.address_id,
+                to_i64(ending.turn_started_at_ms)?, ended_at, ending.attempt_id.as_str(),
+                message_id.as_str()],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if replied {
+            return Ok(None);
         }
+        let order = self.next_order(namespace, "thread_message", &attempt.thread_id)?;
+        self.transaction.execute(
+            "INSERT INTO collaboration_messages (
+                session_socket_id, worktree_id, message_id, thread_id, thread_order, in_reply_to,
+                author_address_id, author_alias_snapshot, author_kind, author_session_snapshot,
+                request_id, authored_source, body, grammar_version, created_at_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'agent_session',?9,?3,?10,?10,?11,?12)",
+            params![
+                ns[0],
+                ns[1],
+                message_id.as_str(),
+                attempt.thread_id,
+                to_i64(order)?,
+                source.as_str(),
+                attempt.address_id,
+                attempt.alias,
+                ending.agent_session_id.as_str(),
+                text,
+                GRAMMAR,
+                ended_at
+            ],
+        )?;
         self.append_transition(
             namespace,
-            TransitionEntityKind::TerminalRelaySession,
-            ending.agent_session_id.as_str(),
-            TransitionKind::Stopped,
+            TransitionEntityKind::CollaborationMessage,
+            message_id.as_str(),
+            TransitionKind::Created,
             &at,
         )?;
-        Ok(messages)
+        self.ensure_delivery_attempt_acknowledged(
+            namespace,
+            &ending.attempt_id,
+            &ending.agent_session_id,
+            &at,
+        )?;
+        if !self.delivery_disposition_exists(namespace, &ending.attempt_id)? {
+            self.record_no_reply_disposition(
+                namespace,
+                &ending.attempt_id,
+                &format!(
+                    "{}{}",
+                    AUTOMATIC_NO_REPLY_PREFIXES[0],
+                    ending.attempt_id.as_str()
+                ),
+                &ending.agent_session_id,
+                &at,
+            )?;
+        }
+        let mut conversations = vec![(namespace.clone(), message_id.clone())];
+        if let Some(copy) = self.mirror_terminal_relay(namespace, &source, &message_id, &at)? {
+            conversations.push(copy);
+        }
+        for (conversation, relay) in conversations {
+            self.open_attention_item(
+                &conversation,
+                &AttentionItemDraft {
+                    id: crate::AttentionItemId::new(format!(
+                        "terminal-relay:{}",
+                        ending.attempt_id.as_str()
+                    )),
+                    source_kind: crate::AttentionSourceKind::TerminalRelay,
+                    source_id: relay.as_str().to_owned(),
+                    summary: format!(
+                        "@{} answered in their terminal and may need your reply.",
+                        attempt.alias
+                    ),
+                },
+                &at,
+            )?;
+        }
+        Ok(Some(message_id))
     }
 
     pub(super) fn resolve_terminal_relay_attention(
@@ -429,15 +378,23 @@ mod tests {
         }
     }
 
-    fn relay(store: &mut StateStore, ns: &StateNamespace, time: u64, text: &str) -> Vec<MessageId> {
+    fn relay_attempt(
+        store: &mut StateStore,
+        ns: &StateNamespace,
+        attempt: &str,
+        session: &str,
+        time: u64,
+        text: &str,
+    ) -> Option<MessageId> {
         store
             .transaction(|tx| {
-                tx.relay_terminal_ending(
+                tx.relay_final_message(
                     ns,
                     &TerminalRelayEnd {
-                        agent_session_id: AgentSessionId::new("session"),
+                        agent_session_id: AgentSessionId::new(session),
+                        attempt_id: DeliveryAttemptId::new(attempt),
+                        turn_started_at_ms: 10,
                         ended_at_ms: time,
-                        previous_end_ms: None,
                         text: text.to_owned(),
                     },
                     &at(time),
@@ -446,13 +403,22 @@ mod tests {
             .unwrap()
     }
 
+    fn relay(
+        store: &mut StateStore,
+        ns: &StateNamespace,
+        time: u64,
+        text: &str,
+    ) -> Option<MessageId> {
+        relay_attempt(store, ns, "attempt", "session", time, text)
+    }
+
     #[test]
     fn relays_operator_channel_and_direct_deliveries_without_recipient_mail() {
         for grammar in ["channel/v1", "mention/v1"] {
             let (mut store, ns) = fixture(grammar, true);
             assert_eq!(
                 relay(&mut store, &ns, 20, "Which option?"),
-                [MessageId::new("terminal-relay:attempt")]
+                Some(MessageId::new("terminal-relay:attempt"))
             );
             store.transaction(|tx| {
                 assert_eq!(tx.delivery_attempt_state(&ns, &DeliveryAttemptId::new("attempt"))?, DeliveryState::Settled);
@@ -519,31 +485,6 @@ mod tests {
     }
 
     #[test]
-    fn native_stop_intervals_survive_workers_finishing_out_of_order() {
-        let (mut store, ns) = fixture("mention/v1", true);
-        for (previous, end, text, expected) in [
-            (20, 40, "Later unrelated answer", 0),
-            (0, 20, "Original question?", 1),
-        ] {
-            let messages = store
-                .transaction(|tx| {
-                    tx.relay_terminal_ending(
-                        &ns,
-                        &TerminalRelayEnd {
-                            agent_session_id: AgentSessionId::new("session"),
-                            ended_at_ms: end,
-                            previous_end_ms: Some(previous),
-                            text: text.to_owned(),
-                        },
-                        &at(end),
-                    )
-                })
-                .unwrap();
-            assert_eq!(messages.len(), expected);
-        }
-    }
-
-    #[test]
     fn explicit_no_reply_still_relays() {
         let (mut store, ns) = fixture("mention/v1", true);
         store
@@ -564,7 +505,7 @@ mod tests {
                 )
             })
             .unwrap();
-        assert_eq!(relay(&mut store, &ns, 20, "Which one? ").len(), 1);
+        assert!(relay(&mut store, &ns, 20, "Which one? ").is_some());
     }
 
     #[test]
@@ -586,7 +527,7 @@ mod tests {
                 )
             })
             .unwrap();
-        assert!(relay(&mut store, &ns, 20, "Which one?").is_empty());
+        assert!(relay(&mut store, &ns, 20, "Which one?").is_none());
     }
 
     #[test]
@@ -608,52 +549,53 @@ mod tests {
                 )
             })
             .unwrap();
-        assert_eq!(relay(&mut store, &ns, 20, "Which one?").len(), 1);
+        assert!(relay(&mut store, &ns, 20, "Which one?").is_some());
     }
 
     #[test]
     fn ignores_agent_and_native_human_sources_and_other_sessions() {
         let (mut store, ns) = fixture("mention/v1", false);
-        assert!(relay(&mut store, &ns, 20, "Which one?").is_empty());
+        assert!(relay(&mut store, &ns, 20, "Which one?").is_none());
         let (mut store, ns) = fixture("mention/v1", true);
         store
             .connection
             .execute_batch("DROP TRIGGER immutable_messages_update")
             .unwrap();
         store.connection.execute("UPDATE collaboration_messages SET author_address_id='peer' WHERE message_id='request'", []).unwrap();
-        assert!(relay(&mut store, &ns, 20, "Which one?").is_empty());
+        assert!(relay(&mut store, &ns, 20, "Which one?").is_none());
         let (mut store, ns) = fixture("mention/v1", true);
-        let results = store
-            .transaction(|tx| {
-                tx.relay_terminal_ending(
-                    &ns,
-                    &TerminalRelayEnd {
-                        agent_session_id: AgentSessionId::new("other-session"),
-                        ended_at_ms: 20,
-                        previous_end_ms: None,
-                        text: "Other answer".to_owned(),
-                    },
-                    &at(20),
-                )
-            })
-            .unwrap();
-        assert!(results.is_empty());
-        assert_eq!(relay(&mut store, &ns, 20, "Which one?").len(), 1);
+        assert!(
+            relay_attempt(
+                &mut store,
+                &ns,
+                "attempt",
+                "other-session",
+                20,
+                "Other answer"
+            )
+            .is_none()
+        );
+        assert!(relay(&mut store, &ns, 20, "Which one?").is_some());
     }
 
     #[test]
-    fn stop_watermark_and_attempt_identity_prevent_duplicates_and_stale_relay() {
+    fn an_attempt_relays_once_and_never_with_empty_text() {
         let (mut store, ns) = fixture("mention/v1", true);
-        assert_eq!(relay(&mut store, &ns, 20, "Which one?").len(), 1);
-        assert!(relay(&mut store, &ns, 20, "Different extraction").is_empty());
-        assert!(relay(&mut store, &ns, 21, "Different extraction").is_empty());
-        assert!(relay(&mut store, &ns, 19, "Stale stop").is_empty());
-        let (mut store, ns) = fixture("mention/v1", true);
-        assert!(relay(&mut store, &ns, 9, "Before delivery").is_empty());
-        assert_eq!(relay(&mut store, &ns, 20, "Actual delivered turn").len(), 1);
-        let (mut store, ns) = fixture("mention/v1", true);
-        assert!(relay(&mut store, &ns, 20, " ").is_empty());
-        assert!(relay(&mut store, &ns, 30, "Unrelated later turn").is_empty());
+        assert!(relay(&mut store, &ns, 20, " ").is_none());
+        assert!(relay(&mut store, &ns, 20, "Which one?").is_some());
+        assert!(relay(&mut store, &ns, 21, "Different extraction").is_none());
+        assert!(
+            relay_attempt(&mut store, &ns, "unknown", "session", 21, "No such attempt").is_none()
+        );
+        let rows = store.transaction(|tx| tx.dashboard_rows(&ns)).unwrap();
+        assert_eq!(
+            rows.messages
+                .iter()
+                .filter(|m| m.grammar_version == GRAMMAR)
+                .map(|m| m.body.as_str())
+                .collect::<Vec<_>>(),
+            ["Which one?"]
+        );
     }
 
     #[test]
@@ -665,9 +607,8 @@ mod tests {
                 &ns,
                 20,
                 &"界".repeat(crate::TERMINAL_RELAY_MAX_CHARS + 5)
-            )
-            .len(),
-            1
+            ),
+            Some(MessageId::new("terminal-relay:attempt"))
         );
         let rows = store.transaction(|tx| tx.dashboard_rows(&ns)).unwrap();
         let snapshot = crate::dashboard::snapshot::build(&rows, None, 20);
@@ -737,82 +678,16 @@ mod tests {
                 )
             })
             .unwrap();
-        assert_eq!(relay(&mut store, &ns, 40, "Another answer?").len(), 1);
-    }
-    #[test]
-    fn persisted_stop_and_relay_survive_hook_safe_reopen() {
-        let directory = std::env::temp_dir().join(format!(
-            "namedrop-terminal-relay-{}",
-            crate::IdGenerator::next_id(&crate::ProcessIds::default(), "test")
-        ));
         assert!(
-            StateStore::open_for_terminal_relay(&directory)
-                .unwrap()
-                .is_none()
-        );
-        assert!(!directory.exists());
-        fs::create_dir(&directory).unwrap();
-        let (mut store, ns) = fixture("mention/v1", true);
-        relay(&mut store, &ns, 20, "Which one?");
-        store
-            .connection
-            .execute(
-                "VACUUM INTO ?1",
-                [directory.join(DATABASE_FILE_NAME).to_str().unwrap()],
+            relay_attempt(
+                &mut store,
+                &ns,
+                "followup-attempt",
+                "session",
+                40,
+                "Another answer?"
             )
-            .unwrap();
-        drop(store);
-        let mut reopened = StateStore::open_for_terminal_relay(&directory)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            reopened
-                .connection
-                .pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0))
-                .unwrap(),
-            25
-        );
-        assert!(relay(&mut reopened, &ns, 20, "Different extraction").is_empty());
-        assert!(relay(&mut reopened, &ns, 21, "Later unrelated answer").is_empty());
-        reopened
-            .transaction(|tx| {
-                let rows = tx.dashboard_rows(&ns)?;
-                assert_eq!(
-                    rows.messages
-                        .iter()
-                        .filter(|m| m.grammar_version == GRAMMAR)
-                        .count(),
-                    1
-                );
-                assert_eq!(
-                    rows.attention
-                        .iter()
-                        .filter(|item| item.item.source_kind
-                            == crate::AttentionSourceKind::TerminalRelay)
-                        .count(),
-                    1
-                );
-                Ok(())
-            })
-            .unwrap();
-        drop(reopened);
-        fs::remove_dir_all(directory).unwrap();
-    }
-    #[test]
-    fn legacy_submitted_attempt_without_activation_is_not_relayed() {
-        let (mut store, ns) = fixture("mention/v1", true);
-        store
-            .connection
-            .execute(
-                "DELETE FROM transition_facts WHERE entity_kind='terminal_relay_attempt'",
-                [],
-            )
-            .unwrap();
-        assert!(relay(&mut store, &ns, 20, "Unrelated later answer").is_empty());
-        let (mut store, ns) = fixture("mention/v1", true);
-        assert_eq!(
-            relay(&mut store, &ns, 20, "Current delivered turn?").len(),
-            1
+            .is_some()
         );
     }
 }

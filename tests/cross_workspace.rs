@@ -977,11 +977,26 @@ fn a_human_reply_to_local_recipients_refills_every_paired_thread() {
 }
 
 #[test]
-fn a_send_drains_the_workspace_it_forwarded_into() {
+fn a_send_wakes_the_workspace_it_forwarded_into() {
     let fixture = Fixture::new();
     fixture.register_all();
-    let sent = fixture.agent_send("w1", "pane-1-lead", "now-1", "#ws2 @lead Status?");
-    assert!(sent["drains"]["ws2"].is_object(), "{sent}");
+    let sent = fixture
+        .try_send(
+            "w1",
+            "pane-1-lead",
+            json!({"request_id":"now-1","source":"#ws2 @lead Status?","author_kind":"agent_session"}),
+        )
+        .unwrap();
+    assert!(sent.get("drains").is_none(), "{sent}");
+    assert!(
+        fixture.herdr.envelopes("pane-2-lead").is_empty(),
+        "a send only commits"
+    );
+    assert_eq!(
+        spaces_to_wake(&fixture.state, "socket-a", "w1"),
+        ["w1", "w2"]
+    );
+    fixture.drain("w2");
     assert_eq!(
         Fixture::untrusted_body(&fixture.herdr.last_envelope("pane-2-lead")),
         "Status?"
@@ -1128,16 +1143,12 @@ fn a_retry_returns_the_saved_receipt_even_after_the_workspace_is_renamed() {
     let first = fixture
         .try_send("w1", "pane-1-lead", input.clone())
         .unwrap();
+    fixture.wake("w1");
     fixture.herdr.labels.lock().unwrap()[1].1 = "renamed".to_owned();
     fixture.herdr.commands.lock().unwrap().clear();
     let retry = fixture.try_send("w1", "pane-1-lead", input).unwrap();
     assert_eq!(retry["idempotent_replay"], true);
     assert_eq!(retry["forwarded"], first["forwarded"]);
-    assert_eq!(
-        fixture.herdr.envelopes("pane-2-lead").len(),
-        1,
-        "one copy, delivered once"
-    );
     assert!(
         !fixture
             .herdr
@@ -1147,6 +1158,12 @@ fn a_retry_returns_the_saved_receipt_even_after_the_workspace_is_renamed() {
             .iter()
             .any(|c| c == "workspace list"),
         "a retry reads no labels"
+    );
+    fixture.wake("w1");
+    assert_eq!(
+        fixture.herdr.envelopes("pane-2-lead").len(),
+        1,
+        "one copy, delivered once"
     );
 }
 
@@ -1379,14 +1396,6 @@ fn a_wake_from_the_remote_workspace_dispatches_the_authors_result_set() {
     fixture.drain("w2");
     let remote = fixture.herdr.last_envelope("pane-2-tester");
     fixture.reply_to("w2", "pane-2-tester", &remote, "@scout You take this one.");
-    assert!(
-        result_sets(&fixture, "pane-1-lead").is_empty(),
-        "nothing in ws2 drains ws1"
-    );
-
-    for workspace in spaces_to_wake(&fixture.state, "socket-a", "w2") {
-        fixture.drain(&workspace);
-    }
     let joined = result_sets(&fixture, "pane-1-lead");
     assert_eq!(joined.len(), 1, "ws2's wake dispatches ws1's result set");
     let outcomes = joined[0]["control"]["result_set"]["outcomes"].to_string();
@@ -2213,6 +2222,13 @@ fn the_roster_mentions_other_workspaces_without_reading_herdr_labels() {
         "{several}"
     );
     assert!(
+        several.ends_with(
+            "A bare @name never reaches them; reach one only when the person asks, with \
+             `#label @name` or `#all @name`."
+        ),
+        "a session that loaded an older policy still needs the rule in brief: {several}"
+    );
+    assert!(
         several.starts_with(&single),
         "the paragraph only follows today's roster"
     );
@@ -2222,6 +2238,72 @@ fn the_roster_mentions_other_workspaces_without_reading_herdr_labels() {
             .iter()
             .any(|command| command == "workspace list")
     );
+}
+
+/// The other-workspaces line is compared on its own: when only it changed,
+/// it comes under the marker without the rows, and when it no longer holds
+/// the session is told so once.
+#[test]
+fn the_other_workspaces_line_comes_again_only_when_it_changes() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    let prompt = "What should we do next?";
+    let hook = || {
+        fixture
+            .hook_as("session-1", "w1", "pane-1-lead", prompt)
+            .map(|output| additional_context(&Some(output)).to_owned())
+    };
+
+    let first = hook().unwrap();
+    assert!(first.contains("- @lead (you)"), "{first}");
+    assert!(
+        first.contains(
+            "Other workspaces: 2 other Herdr workspaces have named agents (@lead, @scout, @tester)."
+        ),
+        "{first}"
+    );
+    assert_eq!(hook(), None);
+
+    fixture.rename("w2", "scout", "ranger");
+    let renamed = hook().unwrap();
+    assert!(renamed.starts_with(ROSTER_MARKER), "{renamed}");
+    assert!(
+        !renamed.contains("- @"),
+        "the unchanged rows came again: {renamed}"
+    );
+    assert!(
+        renamed.contains(
+            "Other workspaces: 2 other Herdr workspaces have named agents (@lead, @ranger, @scout, \
+             @tester)."
+        ),
+        "{renamed}"
+    );
+    assert_eq!(hook(), None);
+
+    // A refusal with nothing new still opens with the marker its wrapper forwards.
+    let refused = additional_context(&fixture.hook_as(
+        "session-1",
+        "w1",
+        "pane-1-lead",
+        "@tester Run the suite.",
+    ))
+    .to_owned();
+    assert!(refused.starts_with(ROSTER_MARKER), "{refused}");
+    assert!(refused.contains("do not retry automatically"), "{refused}");
+    assert!(
+        !refused.contains("- @") && !refused.contains("Other workspaces"),
+        "{refused}"
+    );
+
+    fixture.sql("UPDATE pane_bindings SET active = 0 WHERE worktree_id IN ('w2', 'w3')");
+    let gone = hook().unwrap();
+    assert!(gone.starts_with(ROSTER_MARKER), "{gone}");
+    assert!(!gone.contains("- @"), "{gone}");
+    assert!(
+        gone.ends_with("Other workspaces: none of them has named agents now."),
+        "{gone}"
+    );
+    assert_eq!(hook(), None);
 }
 
 #[test]

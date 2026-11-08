@@ -897,8 +897,9 @@ mod tests {
         let attempt = crate::DeliveryAttemptId::new("dm-terminal-attempt");
         let ending = crate::TerminalRelayEnd {
             agent_session_id: session.clone(),
+            attempt_id: attempt.clone(),
+            turn_started_at_ms: 3,
             ended_at_ms: 20,
-            previous_end_ms: None,
             text: "Do you prefer option A or option B?".to_owned(),
         };
         let relay = f
@@ -926,17 +927,18 @@ mod tests {
                     crate::DeliveryState::Submitted,
                     &MutationAttribution::new(ActorKind::Plugin, "test", 3),
                 )?;
-                let relayed = tx.relay_terminal_ending(
-                    &f.ns,
-                    &ending,
-                    &MutationAttribution::new(ActorKind::Plugin, "test", 20),
-                )?;
-                assert_eq!(relayed.len(), 1);
+                let relayed = tx
+                    .relay_final_message(
+                        &f.ns,
+                        &ending,
+                        &MutationAttribution::new(ActorKind::Plugin, "test", 20),
+                    )?
+                    .expect("the direct message's answer is relayed");
                 assert_eq!(
                     tx.delivery_attempt_state(&f.ns, &attempt)?,
                     crate::DeliveryState::Settled
                 );
-                Ok(relayed[0].clone())
+                Ok(relayed)
             })
             .unwrap();
         let history = f
@@ -1016,7 +1018,7 @@ mod tests {
         }
         f.store
             .transaction(|tx| {
-                assert!(tx.relay_terminal_ending(&f.ns, &ending, &f.at)?.is_empty());
+                assert!(tx.relay_final_message(&f.ns, &ending, &f.at)?.is_none());
                 Ok(())
             })
             .unwrap();

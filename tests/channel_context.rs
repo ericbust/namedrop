@@ -79,6 +79,7 @@ fn channel_context_request_bound_reply_fulfills_the_requester() {
     request["request_context"] = true.into();
     let requested = execute_message_operation("reply", request, &f.runtime("w1", "pane-1-lead"))
         .expect("a Channel agent delivery must accept a context request to its sender");
+    f.wake("w1");
     assert_eq!(requested["thread_id"], first["thread_id"]);
     assert_eq!(
         support::recipient_aliases(&requested),
@@ -115,6 +116,7 @@ fn channel_context_request_bound_reply_fulfills_the_requester() {
     let fulfilled =
         execute_message_operation("reply", fulfillment, &f.runtime("w1", "pane-1-planner"))
             .expect("the bound Channel context fulfillment must reach its requester");
+    f.wake("w1");
     assert_eq!(bound_source, "@lead <reply body>");
     assert_eq!(fulfilled["recipients"][0]["alias"], "lead");
     assert_eq!(
