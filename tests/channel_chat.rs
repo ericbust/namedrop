@@ -1963,21 +1963,15 @@ fn a_named_recap_reads_the_answer_to_an_ask_typed_into_a_pane() {
     assert!(recap.contains("scout: marmalade"), "{recap}");
 }
 
-#[test]
-fn a_withdrawn_or_undelivered_post_stays_out_of_the_recap() {
-    let f = Fixture::new();
-    f.register_all();
-    asks_and_is_answered(&f, "w2", "pane-2-scout", "@scout pick", "marmalade");
-
-    let withdrawn = person_says(&f, "w2", "withdrawn", "@scout WITHDRAWN_TEXT");
-    let attempt = reply_attempt(&f, &withdrawn, "pane-2-scout", "withdrawn");
+fn withdraw(f: &Fixture, space: &str, message: &Value, pane: &str, request: &str) {
+    let attempt = reply_attempt(f, message, pane, request);
     let delivery = f
         .text(&format!(
             "SELECT delivery_id FROM delivery_attempts WHERE attempt_id = '{attempt}'"
         ))
         .unwrap();
     let at = namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test", 60);
-    let namespace = StateNamespace::for_space("socket-a", "w2");
+    let namespace = StateNamespace::for_space("socket-a", space);
     StateStore::open(&f.state)
         .unwrap()
         .transaction(|tx| {
@@ -1994,6 +1988,16 @@ fn a_withdrawn_or_undelivered_post_stays_out_of_the_recap() {
             )
         })
         .unwrap();
+}
+
+#[test]
+fn a_withdrawn_or_undelivered_post_stays_out_of_the_recap() {
+    let f = Fixture::new();
+    f.register_all();
+    asks_and_is_answered(&f, "w2", "pane-2-scout", "@scout pick", "marmalade");
+
+    let withdrawn = person_says(&f, "w2", "withdrawn", "@scout WITHDRAWN_TEXT");
+    withdraw(&f, "w2", &withdrawn, "pane-2-scout", "withdrawn");
     assert_eq!(
         f.delivery_states("w2", &withdrawn["message_id"]),
         ["cancelled"]
@@ -2010,6 +2014,54 @@ fn a_withdrawn_or_undelivered_post_stays_out_of_the_recap() {
     assert!(recap.contains("scout: marmalade"), "{recap}");
     assert!(!recap.contains("WITHDRAWN_TEXT"), "{recap}");
     assert!(!recap.contains("QUEUED_TEXT"), "{recap}");
+}
+
+#[test]
+fn a_plain_channel_recap_leaves_out_withdrawn_and_queued_posts_and_reminders() {
+    let f = Fixture::new();
+    f.register_all();
+    let post = person_posts_to_channel(&f, "w2", "post", "CHANNEL_TEXT");
+
+    let withdrawn = person_replies(
+        &f,
+        "w2",
+        "withdrawn",
+        "@scout WITHDRAWN_TEXT",
+        Some(&post["message_id"]),
+    );
+    withdraw(&f, "w2", &withdrawn, "pane-2-scout", "withdrawn");
+    assert_eq!(
+        f.delivery_states("w2", &withdrawn["message_id"]),
+        ["cancelled"]
+    );
+
+    f.status("pane-2-tester", "working");
+    let queued = person_replies(
+        &f,
+        "w2",
+        "queued",
+        "@tester QUEUED_TEXT",
+        Some(&post["message_id"]),
+    );
+    assert_eq!(f.delivery_states("w2", &queued["message_id"]), ["queued"]);
+
+    fired_reminder(&f, "w2", &post, "scout");
+
+    person_replies(
+        &f,
+        "w2",
+        "ask",
+        "@lead what do you think?",
+        Some(&post["message_id"]),
+    );
+
+    let envelope = f.herdr.last_envelope("pane-2-lead");
+    assert_eq!(envelope["control"]["reply_mode"], "channel");
+    let recap = recap_of(&envelope);
+    assert!(recap.contains("CHANNEL_TEXT"), "{recap}");
+    assert!(!recap.contains("WITHDRAWN_TEXT"), "{recap}");
+    assert!(!recap.contains("QUEUED_TEXT"), "{recap}");
+    assert!(!recap.contains("REMINDER_TEXT"), "{recap}");
 }
 
 #[test]
@@ -2087,17 +2139,11 @@ fn shell_output_from_a_mixed_mention_stays_out_of_the_recap() {
     assert!(!recap.contains("build:"), "{recap}");
 }
 
-#[test]
-fn an_agents_reminder_stays_out_of_the_recap() {
-    let f = Fixture::new();
-    f.register_all();
-    let asked = person_says(&f, "w2", "ask", "@scout pick");
-    let attempt = reply_attempt(&f, &asked, "pane-2-scout", "ask");
-    relay_ending(&f, "w2", "pane-2-scout", &attempt, "marmalade");
+fn fired_reminder(f: &Fixture, space: &str, parent: &Value, author: &str) {
     let thread = f
         .text(&format!(
             "SELECT thread_id FROM collaboration_messages WHERE message_id = {}",
-            asked["message_id"].to_string().replace('"', "'")
+            parent["message_id"].to_string().replace('"', "'")
         ))
         .unwrap();
     let at = namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test", 60);
@@ -2105,24 +2151,24 @@ fn an_agents_reminder_stays_out_of_the_recap() {
         .unwrap()
         .transaction(|tx| {
             tx.append_message(
-                &StateNamespace::for_space("socket-a", "w2"),
+                &StateNamespace::for_space("socket-a", space),
                 &namedrop::MessageDraft {
                     thread_id: namedrop::ThreadId::new(thread.as_str()),
                     message_id: namedrop::MessageId::new("reminder-fired"),
                     in_reply_to: Some(namedrop::MessageId::new(
-                        asked["message_id"].as_str().unwrap(),
+                        parent["message_id"].as_str().unwrap(),
                     )),
-                    author_address_id: namedrop::PaneAddressId::new(xws::address_id("w2", "scout")),
+                    author_address_id: namedrop::PaneAddressId::new(xws::address_id(space, author)),
                     author_kind: namedrop::ActorKind::AgentSession,
-                    author_alias_snapshot: "scout".to_owned(),
+                    author_alias_snapshot: author.to_owned(),
                     author_agent_session_snapshot: None,
                     request_id: "reminder-fired".to_owned(),
                     authored_source: "REMINDER_TEXT".to_owned(),
                     body: "REMINDER_TEXT".to_owned(),
                     grammar_version: "reminder/v1".to_owned(),
                     recipients: vec![namedrop::MessageRecipientDraft {
-                        address_id: namedrop::PaneAddressId::new(xws::address_id("w2", "scout")),
-                        alias_snapshot: "scout".to_owned(),
+                        address_id: namedrop::PaneAddressId::new(xws::address_id(space, author)),
+                        alias_snapshot: author.to_owned(),
                         agent_session_snapshot: None,
                         delivery_id: namedrop::DeliveryId::new("reminder-delivery"),
                     }],
@@ -2132,6 +2178,16 @@ fn an_agents_reminder_stays_out_of_the_recap() {
             )
         })
         .unwrap();
+}
+
+#[test]
+fn an_agents_reminder_stays_out_of_the_recap() {
+    let f = Fixture::new();
+    f.register_all();
+    let asked = person_says(&f, "w2", "ask", "@scout pick");
+    let attempt = reply_attempt(&f, &asked, "pane-2-scout", "ask");
+    relay_ending(&f, "w2", "pane-2-scout", &attempt, "marmalade");
+    fired_reminder(&f, "w2", &asked, "scout");
     f.wake("w2");
     assert_eq!(
         f.text("SELECT state FROM mailbox_deliveries WHERE delivery_id = 'reminder-delivery'")
