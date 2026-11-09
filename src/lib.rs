@@ -18,6 +18,7 @@ mod groups;
 mod handoff;
 mod health;
 mod hook;
+mod hook_runs;
 mod install;
 mod installed_runtime;
 mod integration;

@@ -60,6 +60,15 @@ pub struct LifecycleRuntime<'a, E, C, I> {
     pub ids: &'a I,
 }
 
+impl<'a, E, C, I> LifecycleRuntime<'a, E, C, I> {
+    pub(crate) fn hook_runs(&self) -> crate::hook_runs::HookRuns<'a> {
+        crate::hook_runs::HookRuns {
+            state: self.state_directory,
+            home: self.home_directory,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EmptyInput {}
@@ -917,6 +926,7 @@ where
                                 &event_namespace,
                                 &refreshed.panes,
                                 false,
+                                runtime.hook_runs(),
                                 &attribution,
                             )?;
                             Ok(())
@@ -1076,6 +1086,7 @@ where
                                 &source_namespace,
                                 &refreshed.panes,
                                 false,
+                                runtime.hook_runs(),
                                 &attribution,
                             )?;
                             Ok(())
@@ -1131,6 +1142,7 @@ where
                         &event_namespace,
                         &event_worktree.panes,
                         false,
+                        runtime.hook_runs(),
                         &attribution,
                     )?;
                     Ok(())
@@ -1291,6 +1303,7 @@ where
                 namespace,
                 &discovered.panes,
                 after_restart,
+                runtime.hook_runs(),
                 attribution,
             )?;
             Ok(())

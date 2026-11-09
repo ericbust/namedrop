@@ -187,6 +187,7 @@ pub(crate) fn reconcile_delivery_state(
     namespace: &StateNamespace,
     panes: &[DiscoveredPane],
     restart: bool,
+    hook_runs: crate::hook_runs::HookRuns<'_>,
     attribution: &MutationAttribution,
 ) -> Result<DeliveryReconciliationReport, StoreError> {
     let mut report = DeliveryReconciliationReport::default();
@@ -245,6 +246,18 @@ pub(crate) fn reconcile_delivery_state(
             }
             Observation::Settle => {
                 transaction.settle_observed_attempt(namespace, &attempt.attempt_id, attribution)?;
+                if pane.and_then(crate::integration::pane_agent_runtime)
+                    == Some(crate::AgentRuntime::Codex)
+                    && hook_runs.refused(attempt.agent_session_id.as_str())
+                {
+                    transaction.flag_failed_settle(
+                        namespace,
+                        &attempt.attempt_id,
+                        true,
+                        crate::hook_runs::REFUSED_REASON,
+                        attribution,
+                    )?;
+                }
                 report.settled.push(attempt.attempt_id);
             }
             Observation::PendingGrace { due_at_ms } => report.pending_grace.push(GraceDeadline {
@@ -417,6 +430,7 @@ where
                 &namespace,
                 &first_discovery.panes,
                 false,
+                runtime.hook_runs(),
                 &MutationAttribution::new(ActorKind::Plugin, "namedrop-dispatch", now),
             )?;
             transaction.maintain_reminder_owners(&namespace, &first_discovery)?;

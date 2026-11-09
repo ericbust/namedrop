@@ -64,6 +64,7 @@ impl Drop for TestDirectory {
 
 struct FakeHerdr {
     worktree: String,
+    reviewer_host: Mutex<&'static str>,
     prompts: Mutex<Vec<(String, String)>>,
     notifications: Mutex<Vec<String>>,
 }
@@ -103,7 +104,7 @@ impl HerdrCommandExecutor for FakeHerdr {
                 {"pane_id":"pane-lead","terminal_id":"t1","tab_id":"tab-1","workspace_id":"workspace-1",
                  "agent":"codex","agent_session":{"value":"session-lead"},"agent_status":"idle"},
                 {"pane_id":"pane-reviewer","terminal_id":"t2","tab_id":"tab-2","workspace_id":"workspace-1",
-                 "agent":"claude","agent_session":{"value":"session-reviewer"},"agent_status":"idle"}
+                 "agent":*self.reviewer_host.lock().unwrap(),"agent_session":{"value":"session-reviewer"},"agent_status":"idle"}
             ]}})
             .to_string(),
             ["agent", "prompt", pane_id, envelope] => {
@@ -193,6 +194,7 @@ impl Space {
             .transaction(|transaction| transaction.complete_reconciliation(&namespace()))
             .unwrap();
         let herdr = FakeHerdr {
+            reviewer_host: Mutex::new("claude"),
             worktree: directory.repo.display().to_string(),
             prompts: Mutex::new(Vec::new()),
             notifications: Mutex::new(Vec::new()),
@@ -2267,6 +2269,134 @@ fn a_tracked_settle_that_fails_warns_the_person_until_the_agent_answers() {
     reply["work_outcome"] = json!("completed");
     dispatch::message("reply", reply, &space.runtime("pane-reviewer")).unwrap();
     assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
+struct AfterTheGrace;
+impl Clock for AfterTheGrace {
+    fn now_unix_ms(&self) -> u64 {
+        42 + 60_000
+    }
+    fn wait_ms(&self, _: u64) {}
+}
+
+impl Space {
+    /// A reviewer whose hooks have run under this package.
+    fn reviewer_on(host: &'static str) -> Self {
+        let space = Self::new();
+        *space.herdr.reviewer_host.lock().unwrap() = host;
+        space.install_package("first");
+        space
+    }
+
+    fn install_package(&self, executable: &str) {
+        let path = self.directory.home.join(executable);
+        fs::write(&path, executable).unwrap();
+        namedrop::install_integration_package(
+            &self.directory.home,
+            namedrop::AgentRuntime::Codex,
+            &path,
+            &self.directory.state,
+        )
+        .unwrap();
+    }
+
+    fn observe_settled(&self) {
+        let runtime = self.runtime("pane-lead");
+        namedrop::execute_lifecycle_operation(
+            "reconcile",
+            json!({}),
+            &LifecycleRuntime {
+                clock: &AfterTheGrace,
+                herdr: runtime.herdr,
+                ids: runtime.ids,
+                state_directory: runtime.state_directory,
+                home_directory: runtime.home_directory,
+                agent_config: runtime.agent_config,
+                cwd: runtime.cwd,
+                workspace_id: runtime.workspace_id,
+                current_pane_id: runtime.current_pane_id,
+                session_socket_id: runtime.session_socket_id,
+            },
+        )
+        .unwrap();
+    }
+
+    fn refused_sessions_in_doctor(&self) -> Vec<String> {
+        namedrop::diagnose_collaboration(&self.runtime("pane-lead"))
+            .issues
+            .into_iter()
+            .filter(|issue| issue.code == "ND-SETUP-005")
+            .map(|issue| issue.summary)
+            .collect()
+    }
+}
+
+/// Codex refuses a running session's hooks once the plugin changes, so that
+/// session's Stop never runs and nothing there can report the lost answer.
+#[test]
+fn a_session_codex_refuses_warns_at_settle_even_for_tracked_work() {
+    let space = Space::reviewer_on("codex");
+    space.armed_tracked_ask();
+    space.install_package("second");
+    space.observe_settled();
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0][0].contains("new Codex session"), "{warnings:?}");
+}
+
+#[test]
+fn an_untracked_warning_says_codex_refused_the_hooks() {
+    let space = Space::reviewer_on("codex");
+    space.armed_ask();
+    space.install_package("second");
+    space.observe_settled();
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0][0].contains("new Codex session"), "{warnings:?}");
+}
+
+#[test]
+fn a_session_whose_hooks_still_run_raises_nothing_new() {
+    let space = Space::reviewer_on("codex");
+    space.armed_tracked_ask();
+    space.install_package("first");
+    space.observe_settled();
+    assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
+#[test]
+fn only_codex_refuses_hooks_when_the_package_changes() {
+    let space = Space::reviewer_on("claude");
+    space.armed_tracked_ask();
+    space.install_package("second");
+    space.observe_settled();
+    assert!(space.unresolved_disposition_warnings().is_empty());
+    assert!(space.refused_sessions_in_doctor().is_empty());
+}
+
+/// Before any answer is lost, and until a hook runs there again.
+#[test]
+fn doctor_names_a_running_session_whose_hooks_are_refused() {
+    let space = Space::reviewer_on("codex");
+    assert!(
+        space.refused_sessions_in_doctor().is_empty(),
+        "a session that has run no hook yet may just be starting"
+    );
+    space.armed_ask();
+    assert!(space.refused_sessions_in_doctor().is_empty());
+
+    space.install_package("second");
+    let refused = space.refused_sessions_in_doctor();
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert!(refused[0].contains("@reviewer"), "{refused:?}");
+
+    execute_user_prompt_submit_hook(
+        &json!({"hook_event_name":"UserPromptSubmit","session_id":"session-reviewer",
+                "prompt_id":"later-turn","prompt":"Anything waiting for you?"})
+        .to_string(),
+        &space.runtime("pane-reviewer"),
+    );
+    assert!(space.refused_sessions_in_doctor().is_empty());
 }
 
 /// A tracked request raises no warning of its own while its coordination is
