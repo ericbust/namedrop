@@ -236,10 +236,14 @@ ANSWER_WAIT = 240
 HOLD_PROMPT = ("Ask the agent named {helper}, using a new `namedrop send` and not your reply line, to run "
                "`sleep 30` in its shell and then reply with the single word {word}. End this turn with a "
                "one-line waiting status; do not poll or wait. When it answers, tell me the word.")
-SCRIPTED_HOLD_PROMPT = (
+UNCOACHED_HOLD_PROMPT = (
     "Run this shell command in the foreground and wait for it: python3 -c 'import time; time.sleep(15)'. Then "
     "end this turn at once with a one-line waiting status. Don't wait or poll for anything else in this turn. "
     "A helper's answer holding a word arrives in a later turn; when it does, tell me the word.")
+SCRIPTED_HOLD_PROMPT = (UNCOACHED_HOLD_PROMPT + " Tell me by running the reply line Namedrop shows you for this "
+                        "delivery, with the word as its body.")
+"""Told to use the way-back line, because a real Codex sometimes writes the answer as its final
+message instead, which never reaches the person. check_uncoached_hold reports how that went."""
 SCRIPTED_HELP = "@{helper} Run `sleep 60` in your shell, then reply with the single word {word}."
 TOOL_WAIT = 60
 
@@ -303,14 +307,13 @@ def judge_late_answer(label, word, hop, answers, thread, way_back, interim, reso
             Check(label + " warning", True, "{}: warning during the hold: {}".format(label, interim or "none"))]
 
 
-def run_hold(r, holder, helper, scripted, rng):
+def run_hold(r, holder, helper, scripted, rng, prompt=SCRIPTED_HOLD_PROMPT):
     channels, word = r.channels, marker(rng)
     label = "{} held on {}".format(holder, helper)
     address, helper_address = channels.address(holder), channels.address(helper)
     baseline = dc.baseline_of(channels.latest(), channels.peers())
     mark, since = channels.mark(), live.now_ms()
-    prompt = SCRIPTED_HOLD_PROMPT if scripted else HOLD_PROMPT.format(helper=helper, word=word)
-    sent = channels.post("@{} {}".format(holder, prompt))
+    sent = channels.post("@{} {}".format(holder, prompt if scripted else HOLD_PROMPT.format(helper=helper, word=word)))
     hop = r.settle(lambda: du.hop_for(r.store, sent.message_id), lambda found: found and found.attempt_id,
                    TIMEOUTS.label, watch=()) or du.NO_HOP
     attempt = hop.attempt_id
@@ -352,6 +355,24 @@ def check_held(r):
             checks.append(Check(holder + " held", False, str(error)))
             checks += du.quiesce(r)
     return checks
+
+
+def report_uncoached(label, checks):
+    """A held turn's answer with no instructions on how to give it: shown, not judged."""
+    lost = [check.detail for check in checks if not check.ok]
+    if lost:
+        return [Check(label, True, "{}: FINDING, the answer did not land: {}".format(label, lost[0][:200]))]
+    return [Check(label, True, "{}: the answer landed through the way-back line".format(label))]
+
+
+def run_uncoached_hold(r, rng):
+    label = "codex uncoached hold"
+    checks = run_hold(r, "codex", "claude", True, rng, UNCOACHED_HOLD_PROMPT)
+    if not all(check.ok for check in checks):
+        attempts = [row[0] for row in du.open_attempts(r.store) if row[2] == "settled"]
+        for attempt in attempts:
+            du.close_no_reply(r, "codex", attempt)
+    return report_uncoached(label, checks)
 
 
 STEPS = (

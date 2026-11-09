@@ -360,8 +360,9 @@ def new_session(r, agent):
 
 
 def check_natural(r):
-    """What natural wording costs a new session. Shown rather than judged, and last, so the habit
-    it can teach a session reaches no other check."""
+    """What natural wording costs a new session, and whether a new Codex finds its way back from a
+    hold when nobody tells it how. Shown rather than judged, and last, so the habit it can teach a
+    session reaches no other check."""
     checks = []
     for agent in AGENTS:
         try:
@@ -369,6 +370,11 @@ def check_natural(r):
             checks += dc.run_natural(r, agent)
         except du.RECOVERABLE as error:
             checks.append(Check(agent + " natural wording", False, str(error)))
+    try:
+        new_session(r, "codex")
+        checks += dco.run_uncoached_hold(r, random.Random())
+    except du.RECOVERABLE as error:
+        checks.append(Check("codex uncoached hold", False, str(error)))
     return checks
 
 

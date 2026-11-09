@@ -293,6 +293,14 @@ def check_hold_judges():
     return "daily hold judges: a post during the hold, a lost way-back line or a doubled answer each fail"
 
 
+def check_uncoached_report():
+    fine = [live.Check("a", True, "a")]
+    assert "landed" in dco.report_uncoached("u", fine)[0].detail and dco.report_uncoached("u", fine)[0].ok
+    lost = dco.report_uncoached("u", fine + [live.Check("b", False, "answers 0 (expected 1)")])
+    assert lost[0].ok and "FINDING" in lost[0].detail and "answers 0" in lost[0].detail, "shown, not judged, and named"
+    return "daily uncoached hold: a lost answer is shown as a finding without failing the lane"
+
+
 def check_continuity_judges():
     assert dcn.compactions("claude", ['{"type":"system","subtype":"compact_boundary"}', "{}"]) == 1
     assert dcn.compactions("codex", ['{"type": "compacted"}', '{"type":"compacted"}']) == 2
@@ -499,7 +507,7 @@ def checks(scratch):
             ("daily warning judge", check_warning_judge), ("daily answer judge", check_answer_judge),
             ("daily natural wording", check_natural_judge), ("daily recap judge", check_recap_judge), ("daily prompt key", lambda: check_prompt_key(scratch)),
             ("daily Channels client", check_client), ("daily tracked judge", check_tracked_judge),
-            ("daily hold judges", check_hold_judges), ("daily continuity judges", check_continuity_judges),
+            ("daily hold judges", check_hold_judges), ("daily uncoached hold", check_uncoached_report), ("daily continuity judges", check_continuity_judges),
             ("daily probe parsing", check_probe_parsing), ("daily backlog judge", check_backlog_judge),
             ("daily step boundary", check_step_boundary), ("daily stretch judge", check_stretch_judge),
             ("daily interrupted judge", check_interrupted_judge), ("daily reminder judge", check_reminder_judge),
