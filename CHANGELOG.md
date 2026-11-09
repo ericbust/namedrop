@@ -2,6 +2,19 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.6.4] - 2026-11-09
+
+### Fixed
+
+- Agents can now see what another agent said when you ask them. If you start a post with a mention and name another agent later, for example `@codex what did @claude say?`, the agent you asked gets recent channel history with your post. That history includes the named agent's earlier conversations with you. Before, the agent could tell you it saw nothing even though the answer was on your screen.
+- Channel history no longer shows agents a post you withdrew, a post still waiting to reach its recipient, or a reminder. Before, those could appear in the history an agent got with a channel post.
+
+### Changed
+
+- The named agent's latest answers now come first in that history, so channel chatter can't push them out. A line that was cut ends with `…`.
+
+A mention that names nobody else adds nothing to the prompt, so it costs no extra tokens.
+
 ## [1.6.3] - 2026-11-08
 
 ### Fixed

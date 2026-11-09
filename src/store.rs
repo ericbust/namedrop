@@ -2620,14 +2620,44 @@ impl StateTransaction<'_> {
         exclude: &MessageId,
     ) -> Result<String, StoreError> {
         let mut statement = self.transaction.prepare(&format!(
-            "SELECT CASE WHEN m.author_kind = 'human' THEN 'person' ELSE m.author_alias_snapshot END,
-                    m.body FROM collaboration_messages m
-             WHERE m.session_socket_id = ?1 AND m.worktree_id = ?2 AND m.message_id <> ?3
-               AND {} <> 'terminal-relay/v1'
-               AND EXISTS(SELECT 1 FROM collaboration_messages root
-                   WHERE root.session_socket_id = m.session_socket_id AND root.worktree_id = m.worktree_id
-                     AND root.thread_id = m.thread_id AND root.in_reply_to IS NULL AND root.grammar_version = 'channel/v1')
-             ORDER BY m.created_at_ms DESC, m.rowid DESC LIMIT 6",
+            "WITH named(address_id) AS (
+                 SELECT c.address_id FROM context_references c
+                 JOIN collaboration_messages asker USING (session_socket_id, worktree_id, message_id)
+                 JOIN pane_addresses a USING (session_socket_id, worktree_id, address_id)
+                 WHERE c.session_socket_id = ?1 AND c.worktree_id = ?2 AND c.message_id = ?3
+                   AND asker.author_kind = 'human' AND asker.author_address_id = 'operator:local'
+                   AND a.pane_type = 'agent')
+             SELECT author, body, is_named, at, turn FROM (
+                 SELECT CASE WHEN m.author_kind = 'human' THEN 'person' ELSE m.author_alias_snapshot END AS author,
+                        m.body AS body, m.created_at_ms AS at, m.rowid AS turn,
+                        m.author_address_id IN (SELECT address_id FROM named) AS is_named,
+                        ROW_NUMBER() OVER (PARTITION BY m.author_address_id
+                                           ORDER BY m.created_at_ms DESC, m.rowid DESC) AS nth
+                 FROM collaboration_messages m
+                 WHERE m.session_socket_id = ?1 AND m.worktree_id = ?2 AND m.message_id <> ?3
+                   AND {} NOT IN ('terminal-relay/v1', 'terminal-result/v1', 'reminder/v1')
+                   AND (NOT EXISTS(SELECT 1 FROM mailbox_deliveries d
+                            WHERE d.session_socket_id = m.session_socket_id AND d.worktree_id = m.worktree_id
+                              AND d.message_id = m.message_id)
+                        OR EXISTS(SELECT 1 FROM mailbox_deliveries d
+                            WHERE d.session_socket_id = m.session_socket_id AND d.worktree_id = m.worktree_id
+                              AND d.message_id = m.message_id
+                              AND d.state IN ('submitted', 'acknowledged', 'settled')))
+                   AND EXISTS(SELECT 1 FROM collaboration_messages root
+                       WHERE root.session_socket_id = m.session_socket_id AND root.worktree_id = m.worktree_id
+                         AND root.thread_id = m.thread_id AND root.in_reply_to IS NULL
+                         AND (root.grammar_version = 'channel/v1'
+                              OR ((root.grammar_version = 'mention-hook/v1'
+                                   OR (root.grammar_version = 'mention/v1'
+                                       AND root.author_address_id = 'operator:local'))
+                                  AND root.author_kind = 'human'
+                                  AND EXISTS(SELECT 1 FROM named JOIN thread_participants p
+                                        ON p.address_id = named.address_id
+                                      WHERE p.session_socket_id = m.session_socket_id
+                                        AND p.worktree_id = m.worktree_id AND p.thread_id = m.thread_id)))))
+             ORDER BY (is_named AND nth <= 3) DESC, CASE WHEN is_named AND nth <= 3 THEN nth ELSE 0 END,
+                      at DESC, turn DESC
+             LIMIT 6",
             terminal_relay::effective_grammar_sql("m")
         ))?;
         let mut lines = statement
@@ -2637,12 +2667,20 @@ impl StateTransaction<'_> {
                     namespace.space_id.as_str(),
                     exclude.as_str()
                 ],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
             )?
             .collect::<Result<Vec<_>, _>>()?;
-        lines.reverse();
-        let single_line = |source: &str, cap| {
-            source
+        lines.sort_by_key(|line| (line.3, line.4));
+        let single_line = |source: &str, cap: usize| {
+            let mut line = source
                 .chars()
                 .map(|ch| {
                     if ch.is_whitespace() || ch.is_control() {
@@ -2652,18 +2690,63 @@ impl StateTransaction<'_> {
                     }
                 })
                 .take(cap)
-                .collect::<String>()
+                .collect::<String>();
+            if source.chars().nth(cap).is_some() {
+                line.push('…');
+            }
+            line
         };
+        let render = |author: &str, body: &str, cap| {
+            format!("{}: {}", single_line(author, 32), single_line(body, cap))
+        };
+        let named_latest = lines.iter().rposition(|line| line.2);
+        let used_by_others = lines
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != named_latest)
+            .map(|(_, line)| render(&line.0, &line.1, 160).chars().count() + 1)
+            .sum::<usize>();
         Ok(lines
-            .into_iter()
-            .map(|(author, body)| {
-                format!("{}: {}", single_line(&author, 32), single_line(&body, 160))
+            .iter()
+            .enumerate()
+            .map(|(index, line)| {
+                let cap = if Some(index) == named_latest {
+                    let room = 1200usize.saturating_sub(used_by_others);
+                    room.saturating_sub(render(&line.0, "", 0).chars().count() + 1)
+                        .max(160)
+                } else {
+                    160
+                };
+                render(&line.0, &line.1, cap)
             })
             .collect::<Vec<_>>()
             .join("\n")
             .chars()
             .take(1200)
             .collect())
+    }
+
+    fn person_post_names_another_agent(
+        &self,
+        namespace: &StateNamespace,
+        message_id: &str,
+        recipient_address_id: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(self.transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM collaboration_messages m
+                 JOIN context_references c USING (session_socket_id, worktree_id, message_id)
+                 JOIN pane_addresses a USING (session_socket_id, worktree_id, address_id)
+                 WHERE m.session_socket_id = ?1 AND m.worktree_id = ?2 AND m.message_id = ?3
+                   AND m.author_kind = 'human' AND m.author_address_id = 'operator:local'
+                   AND a.pane_type = 'agent' AND c.address_id <> ?4)",
+            params![
+                namespace.session_socket_id,
+                namespace.space_id.as_str(),
+                message_id,
+                recipient_address_id,
+            ],
+            |row| row.get(0),
+        )?)
     }
 
     pub(crate) fn message_route(
@@ -5481,6 +5564,12 @@ impl StateTransaction<'_> {
         if !review_grants.is_empty() {
             permitted_operations.push("handoff.acknowledge-granted".to_owned());
         }
+        let names_another_agent = grammar_version == "mention/v1"
+            && self.person_post_names_another_agent(
+                namespace,
+                &message_id,
+                &recipient_address_id,
+            )?;
         let sender_workspace =
             self.bridged_sender_label(namespace, &MessageId::new(message_id.clone()))?;
         let draft = crate::DeliveryControlDraft {
@@ -5508,7 +5597,7 @@ impl StateTransaction<'_> {
             review_source_message_id,
         )
         .map_err(StoreError::invalid_input)?;
-        if reply_mode == crate::DeliveryReplyMode::Channel {
+        if reply_mode == crate::DeliveryReplyMode::Channel || names_another_agent {
             let recap = self.channel_recap(namespace, &control.message_id)?;
             if !recap.is_empty() {
                 control.untrusted_channel_recap = Some(recap);
