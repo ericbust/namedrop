@@ -3,10 +3,10 @@
 agents, on a profile kept by `testbed/testbed test --keep` (Namedrop 1.6.3 and later).
 
 Usage: final-message-mention-probe.py PROFILE_NAME [HELPER CASE]   (e.g. test-link-<checkout name>)
-HELPER is claude or codex and CASE is relayed, real or opens, to run that one exchange.
+HELPER is claude or codex and CASE is relayed, real, opens or asker, to run that one exchange.
 
 Each agent asks the other for a one-line answer that names an agent that isn't here, names
-one that is, or opens with a name. The answer must arrive as the helper's reply, go only
+one that is, opens with a name, or opens with the asker's own name. The answer must arrive as the helper's reply, go only
 to the asker, and leave the claim done. Exit 0 when every check passes.
 """
 
@@ -134,6 +134,8 @@ CASES = [
     # and Enter then accepts that instead of submitting.
     ('names an agent that is here', 'real', '{token} for @claude today', '{token} for @claude today'),
     ('opens with a name', 'opens', '@ghost said {token}', '\\@ghost said {token}'),
+    ('opens with the asker\'s name', 'asker', '@{asker} is wrong about {token}',
+     '\\@{asker} is wrong about {token}'),
 ]
 for asker, helper in (('claude', 'codex'), ('codex', 'claude')):
     for label, slug, line, stored in CASES:
@@ -141,7 +143,7 @@ for asker, helper in (('claude', 'codex'), ('codex', 'claude')):
             continue
         token = f'{slug}{helper}{stamp}'
         attempt, replies, recipients = exchange(
-            asker, helper, token, line.format(token=token))
+            asker, helper, token, line.format(token=token, asker=asker))
         claim = claim_for(attempt) if attempt else None
         disposition = rows("select disposition_kind from delivery_dispositions where attempt_id = :a",
                            a=attempt) if attempt else []
@@ -149,7 +151,7 @@ for asker, helper in (('claude', 'codex'), ('codex', 'claude')):
                            and source_id = :a and resolved_at_ms is null""", a=attempt) if attempt else []
         body = replies[0][2] if replies else None
         check(f'{helper} answering {asker}, final message {label}',
-              body == stored.format(token=token) and recipients == [asker]
+              body == stored.format(token=token, asker=asker) and recipients == [asker]
               and claim and claim['state'] == {'done': 'replied'}
               and disposition == [('reply',)] and not warnings,
               f'body {body!r}; to {recipients}; claim {claim and claim["state"]}; '
