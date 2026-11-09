@@ -4,8 +4,8 @@ agents, on a profile kept by `testbed/testbed test --keep` (Namedrop 1.6.3 and l
 
 Usage: final-message-mention-probe.py PROFILE_NAME   (e.g. test-link-<checkout name>)
 
-Each agent asks the other for a one-line answer that names an agent that isn't here, the
-asker itself, or opens with a name. The answer must arrive as the helper's reply, go only
+Each agent asks the other for a one-line answer that names an agent that isn't here, names
+one that is, or opens with a name. The answer must arrive as the helper's reply, go only
 to the asker, and leave the claim done. Exit 0 when every check passes.
 """
 
@@ -67,17 +67,42 @@ def clear_claude_input():
         herdr('agent', 'send-keys', panes['claude'], 'esc')
 
 
+def clear_codex_input():
+    """Codex can keep a typed mention in its composer too, and the next typed mention
+    then merges with it into one prompt that no hook reads as a mention."""
+    screen = herdr('pane', 'read', panes['codex'], '--source', 'visible').stdout
+    composer = [row for row in screen.splitlines() if row.startswith('\u203a ')]
+    if composer and 'Ask Codex to do anything' not in composer[-1]:
+        herdr('agent', 'send-keys', panes['codex'], 'c-c')
+        time.sleep(1)
+
+
+def wait_until_quiet():
+    """An agent reads idle between the turn that ended and a reply still to dispatch, and
+    text typed then waits in its composer."""
+    deadline = time.time() + 60
+    while time.time() < deadline and rows(
+            """select 1 from mailbox_deliveries
+               where state not in ('settled', 'failed', 'cancelled', 'held')"""):
+        time.sleep(1)
+    for pane in (panes['claude'], panes['codex']):
+        herdr('agent', 'wait', pane, '--until', 'idle', '--until', 'done', '--timeout', '120000')
+
+
 def exchange(asker, helper, token, line):
     """One typed ask and whatever came back. A typed mention keeps its body as written,
     so the ask can quote the names it wants repeated."""
-    for pane in (panes['claude'], panes['codex']):
-        herdr('agent', 'wait', pane, '--until', 'idle', '--until', 'done', '--timeout', '120000')
+    wait_until_quiet()
     herdr('agent', 'prompt', panes[asker],
           f'@{helper} Run no tools and no commands. Your whole final message is this line, '
           f'copied character for character with no backslash and no backticks: {line}',
           '--wait', '--until', 'idle', '--until', 'done', '--timeout', '120000')
-    if asker == 'claude':
-        clear_claude_input()
+    # Clearing before the ask has a row would wipe an ask still waiting to submit.
+    deadline = time.time() + 20
+    while time.time() < deadline and not rows(
+            "select 1 from collaboration_messages where body like :t", t=f'%{token}%'):
+        time.sleep(1)
+    clear_claude_input() if asker == 'claude' else clear_codex_input()
     deadline = time.time() + ANSWER_S
     while time.time() < deadline:
         sent = rows("""select m.message_id, a.attempt_id from collaboration_messages m
@@ -104,14 +129,16 @@ def exchange(asker, helper, token, line):
 stamp = int(time.time())
 CASES = [
     ('names an agent that is not here', 'relayed', '{token} from @ghost', '{token} from @ghost'),
-    ('names an agent that is here', 'real', '{token} for @{asker}', '{token} for @{asker}'),
+    # Not last in the line: Codex's composer offers a completion for a name the cursor is on,
+    # and Enter then accepts that instead of submitting.
+    ('names an agent that is here', 'real', '{token} for @claude today', '{token} for @claude today'),
     ('opens with a name', 'opens', '@ghost said {token}', '\\@ghost said {token}'),
 ]
 for asker, helper in (('claude', 'codex'), ('codex', 'claude')):
     for label, slug, line, stored in CASES:
         token = f'{slug}{helper}{stamp}'
         attempt, replies, recipients = exchange(
-            asker, helper, token, line.format(token=token, asker=asker))
+            asker, helper, token, line.format(token=token))
         claim = claim_for(attempt) if attempt else None
         disposition = rows("select disposition_kind from delivery_dispositions where attempt_id = :a",
                            a=attempt) if attempt else []
@@ -119,7 +146,7 @@ for asker, helper in (('claude', 'codex'), ('codex', 'claude')):
                            and source_id = :a and resolved_at_ms is null""", a=attempt) if attempt else []
         body = replies[0][2] if replies else None
         check(f'{helper} answering {asker}, final message {label}',
-              body == stored.format(token=token, asker=asker) and recipients == [asker]
+              body == stored.format(token=token) and recipients == [asker]
               and claim and claim['state'] == {'done': 'replied'}
               and disposition == [('reply',)] and not warnings,
               f'body {body!r}; to {recipients}; claim {claim and claim["state"]}; '
