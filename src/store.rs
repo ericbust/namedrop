@@ -2626,7 +2626,17 @@ impl StateTransaction<'_> {
                AND {} <> 'terminal-relay/v1'
                AND EXISTS(SELECT 1 FROM collaboration_messages root
                    WHERE root.session_socket_id = m.session_socket_id AND root.worktree_id = m.worktree_id
-                     AND root.thread_id = m.thread_id AND root.in_reply_to IS NULL AND root.grammar_version = 'channel/v1')
+                     AND root.thread_id = m.thread_id AND root.in_reply_to IS NULL
+                     AND (root.grammar_version = 'channel/v1'
+                          OR (root.grammar_version = 'mention/v1' AND root.author_kind = 'human'
+                              AND EXISTS(SELECT 1 FROM context_references named
+                                  JOIN pane_addresses a ON a.session_socket_id = named.session_socket_id
+                                    AND a.worktree_id = named.worktree_id AND a.address_id = named.address_id
+                                  JOIN thread_participants p ON p.session_socket_id = named.session_socket_id
+                                    AND p.worktree_id = named.worktree_id AND p.address_id = named.address_id
+                                  WHERE named.session_socket_id = m.session_socket_id AND named.worktree_id = m.worktree_id
+                                    AND named.message_id = ?3 AND p.thread_id = m.thread_id
+                                    AND a.pane_type = 'agent'))))
              ORDER BY m.created_at_ms DESC, m.rowid DESC LIMIT 6",
             terminal_relay::effective_grammar_sql("m")
         ))?;
@@ -2664,6 +2674,29 @@ impl StateTransaction<'_> {
             .chars()
             .take(1200)
             .collect())
+    }
+
+    fn person_post_names_another_agent(
+        &self,
+        namespace: &StateNamespace,
+        message_id: &str,
+        recipient_address_id: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(self.transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM collaboration_messages m
+                 JOIN context_references c USING (session_socket_id, worktree_id, message_id)
+                 JOIN pane_addresses a USING (session_socket_id, worktree_id, address_id)
+                 WHERE m.session_socket_id = ?1 AND m.worktree_id = ?2 AND m.message_id = ?3
+                   AND m.author_kind = 'human' AND a.pane_type = 'agent'
+                   AND c.address_id <> ?4)",
+            params![
+                namespace.session_socket_id,
+                namespace.space_id.as_str(),
+                message_id,
+                recipient_address_id,
+            ],
+            |row| row.get(0),
+        )?)
     }
 
     pub(crate) fn message_route(
@@ -5481,6 +5514,12 @@ impl StateTransaction<'_> {
         if !review_grants.is_empty() {
             permitted_operations.push("handoff.acknowledge-granted".to_owned());
         }
+        let names_another_agent = grammar_version == "mention/v1"
+            && self.person_post_names_another_agent(
+                namespace,
+                &message_id,
+                &recipient_address_id,
+            )?;
         let sender_workspace =
             self.bridged_sender_label(namespace, &MessageId::new(message_id.clone()))?;
         let draft = crate::DeliveryControlDraft {
@@ -5508,7 +5547,7 @@ impl StateTransaction<'_> {
             review_source_message_id,
         )
         .map_err(StoreError::invalid_input)?;
-        if reply_mode == crate::DeliveryReplyMode::Channel {
+        if reply_mode == crate::DeliveryReplyMode::Channel || names_another_agent {
             let recap = self.channel_recap(namespace, &control.message_id)?;
             if !recap.is_empty() {
                 control.untrusted_channel_recap = Some(recap);
