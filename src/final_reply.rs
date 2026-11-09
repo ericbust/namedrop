@@ -233,12 +233,15 @@ pub(crate) fn claim_for(
         no_reply_line: crate::integration::rendered_line(control, "complete.no-reply"),
         failure: None,
         awaits: Vec::new(),
+        first_armed_at_ms: None,
+        wake: None,
     })
 }
 
 /// The tasks one Claude Code turn put in the background, from the tool results
 /// its transcript records under `prompt_id`: Bash's `backgroundTaskId`, a
-/// background Agent's `agentId` and Monitor's `taskId`.
+/// background Agent's `agentId`, a resumed one's `resumedAgentId` and
+/// Monitor's `taskId`.
 pub fn started_tasks(transcript: &[u8], prompt_id: &str) -> Vec<String> {
     let mut started = Vec::new();
     if prompt_id.is_empty() {
@@ -258,7 +261,7 @@ pub fn started_tasks(transcript: &[u8], prompt_id: &str) -> Vec<String> {
             continue;
         }
         let result = &record["toolUseResult"];
-        for key in ["backgroundTaskId", "agentId", "taskId"] {
+        for key in ["backgroundTaskId", "agentId", "resumedAgentId", "taskId"] {
             if let Some(id) = result[key].as_str() {
                 started.push(id.to_owned());
             }
@@ -312,6 +315,21 @@ pub(crate) struct Claim {
     /// The background tasks a held claim waits for.
     #[serde(default)]
     pub awaits: Vec<String>,
+    /// When a claim that a task's notice re-armed was first armed.
+    #[serde(default)]
+    pub first_armed_at_ms: Option<u64>,
+    /// A task's notice that reached the session before this claim's Stop
+    /// worker decided it.
+    #[serde(default)]
+    pub wake: Option<Wake>,
+}
+
+/// The turn a task's notice started, and the tasks it named.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct Wake {
+    pub turn: HostTurn,
+    pub at_ms: u64,
+    pub tasks: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -674,6 +692,27 @@ impl Claims {
 }
 
 impl Claim {
+    /// Since when a helper the session asked still owes this claim's answer.
+    fn helpers_since_ms(&self) -> u64 {
+        self.first_armed_at_ms.unwrap_or(self.armed_at_ms)
+    }
+
+    /// Moves a held claim to the turn a notice of its work started, so that
+    /// turn's final message is the answer.
+    fn wake_on(&mut self, turn: HostTurn, at_ms: u64) -> ClaimState {
+        self.first_armed_at_ms.get_or_insert(self.armed_at_ms);
+        self.turn = turn;
+        self.armed_at_ms = at_ms;
+        self.wake = None;
+        ClaimState::Open
+    }
+
+    fn waits_for_any(&self, tasks: &[impl AsRef<str>]) -> bool {
+        tasks
+            .iter()
+            .any(|task| self.awaits.iter().any(|id| id == task.as_ref()))
+    }
+
     fn set(&mut self, state: ClaimState, now_ms: u64) {
         self.state = state;
         self.updated_at_ms = now_ms;
@@ -833,17 +872,32 @@ pub(crate) fn observe_prompt(
         }
     }
     // Work a held claim waits for woke the session: this turn's final message
-    // is the answer the hold kept back.
-    for claim in &mut claims.claims {
-        if claim.state == ClaimState::Left(LeaveReason::Held)
-            && claim
-                .awaits
-                .iter()
-                .any(|id| notified.contains(&id.as_str()))
-        {
-            claim.turn = turn.clone();
-            claim.armed_at_ms = now_ms;
-            claim.set(ClaimState::Open, now_ms);
+    // is the answer the hold kept back. A claim whose Stop worker has not
+    // decided yet keeps the notice for that worker.
+    if !notified.is_empty() {
+        let deciding: Vec<_> = claims
+            .claims
+            .iter()
+            .map(|claim| {
+                claim.state == ClaimState::Open && claims.stopped_at(&claim.turn).is_some()
+            })
+            .collect();
+        for (claim, deciding) in claims.claims.iter_mut().zip(deciding) {
+            if deciding {
+                let mut tasks = claim.wake.take().map(|wake| wake.tasks).unwrap_or_default();
+                tasks.extend(notified.iter().map(|id| (*id).to_owned()));
+                claim.wake = Some(Wake {
+                    turn: turn.clone(),
+                    at_ms: now_ms,
+                    tasks,
+                });
+            } else if claim.state == ClaimState::Left(LeaveReason::Held)
+                && claim.waits_for_any(notified)
+                && outstanding(state, claim) != Some(false)
+            {
+                let next = claim.wake_on(turn.clone(), now_ms);
+                claim.set(next, now_ms);
+            }
         }
     }
     // A claim whose Stop already ran belongs to that Stop's worker; only one
@@ -955,7 +1009,12 @@ pub fn settle_at_stop(
             Verdict::Ignore => continue,
             Verdict::Leave(LeaveReason::Held) => {
                 claim.awaits = stop.awaited(claim);
-                ClaimState::Left(LeaveReason::Held)
+                match claim.wake.take() {
+                    Some(wake) if claim.waits_for_any(&wake.tasks) => {
+                        claim.wake_on(wake.turn, wake.at_ms)
+                    }
+                    _ => ClaimState::Left(LeaveReason::Held),
+                }
             }
             Verdict::Leave(reason) => ClaimState::Left(reason),
             Verdict::Superseded => ClaimState::Done(Done::Superseded),
@@ -1016,7 +1075,7 @@ fn settle_facts(state: &Path, session: &str, claim: &Claim, now_ms: u64) -> Sett
                         transaction.awaits_helper(
                             &claim.namespace,
                             &claim.attempt_id,
-                            claim.armed_at_ms,
+                            claim.helpers_since_ms(),
                             now_ms,
                         )?,
                     ))

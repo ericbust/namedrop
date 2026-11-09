@@ -186,6 +186,8 @@ fn claim(plan: Armed, state: ClaimState) -> Claim {
         no_reply_line: Some("complete.no-reply: namedrop complete --no-reply".into()),
         failure: None,
         awaits: Vec::new(),
+        first_armed_at_ms: None,
+        wake: None,
     }
 }
 
@@ -1086,6 +1088,11 @@ fn a_held_answer_settles_once_the_work_it_waits_for_wakes_the_session() {
         (claim.state, &claim.turn, claim.armed_at_ms),
         (ClaimState::Open, &turn("build-ended"), 40)
     );
+    assert_eq!(
+        claim.helpers_since_ms(),
+        1,
+        "a helper asked before the wake no longer kept the answer back"
+    );
     settle(
         &state,
         &stop("build-ended", "The build passed."),
@@ -1105,6 +1112,7 @@ fn the_stop_reads_which_tasks_its_turn_started_and_which_tasks_a_notice_names() 
         json!({"type":"user","promptId":"turn","toolUseResult":{"stdout":"","backgroundTaskId":"shell-1"}}),
         json!({"type":"user","promptId":"turn","toolUseResult":{"isAsync":true,"status":"async_launched","agentId":"agent-1"}}),
         json!({"type":"user","promptId":"turn","toolUseResult":{"taskId":"monitor-1","timeoutMs":1800000}}),
+        json!({"type":"user","promptId":"turn","toolUseResult":{"success":true,"resumedAgentId":"agent-0"}}),
         json!({"type":"user","promptId":"turn","toolUseResult":{"stdout":"old-shell is still running"}}),
         json!({"type":"assistant","promptId":"turn","message":{"content":[{"type":"text","text":"ok"}]}}),
     ]
@@ -1114,7 +1122,7 @@ fn the_stop_reads_which_tasks_its_turn_started_and_which_tasks_a_notice_names() 
     .join("\n");
     assert_eq!(
         started_tasks(transcript.as_bytes(), "turn"),
-        ["shell-1", "agent-1", "monitor-1"]
+        ["shell-1", "agent-1", "monitor-1", "agent-0"]
     );
     assert!(started_tasks(transcript.as_bytes(), "").is_empty());
     assert_eq!(
@@ -1124,4 +1132,45 @@ fn the_stop_reads_which_tasks_its_turn_started_and_which_tasks_a_notice_names() 
         ["shell-1", "agent-1"]
     );
     assert!(notified_tasks("Please check <task-id>shell-1</task-id>").is_empty());
+}
+
+#[test]
+fn a_notice_that_arrives_before_the_stop_worker_decides_still_wakes_the_claim() {
+    let state = StateDirectory::new();
+    observe(
+        &state,
+        "prompt-1",
+        Some(armed("attempt-1", "prompt-1", reply_plan())),
+    );
+    mark_stopped(&state.0, "socket", "session", &turn("prompt-1"), 15);
+    let woken = observe_prompt(
+        &state.0,
+        "socket",
+        "session",
+        &turn("build-ended"),
+        None,
+        &["build-1"],
+        18,
+    );
+    assert!(!woken.armed && woken.left_open.is_empty());
+    let log = std::cell::RefCell::new(Vec::new());
+    settle(
+        &state,
+        &started("prompt-1", "build-1", "Started the build."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    let claim = &state.claims()[0];
+    assert_eq!(
+        (claim.state, &claim.turn, claim.armed_at_ms),
+        (ClaimState::Open, &turn("build-ended"), 18),
+        "the notice went by while the worker decided, so the claim stayed held"
+    );
+    settle(
+        &state,
+        &stop("build-ended", "The build passed."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    let log = log.into_inner();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].input["source"], "@codex The build passed.");
 }
