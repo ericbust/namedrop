@@ -1065,6 +1065,22 @@ fn an_agents_mention_naming_another_agent_earns_no_recap() {
         "scout"
     );
     assert_has_no_recap(&replied);
+
+    let f = answered();
+    person_posts_to_channel(&f, "w2", "channel", "CHANNEL_TEXT");
+    namedrop::execute_message_operation(
+        "send",
+        json!({"request_id":"no-kind","source":"@lead what did @scout say?"}),
+        &f.runtime("w2", "pane-2-tester"),
+    )
+    .unwrap();
+    f.wake("w2");
+    let without_a_kind = f.herdr.last_envelope("pane-2-lead");
+    assert_eq!(
+        without_a_kind["control"]["context_references"][0]["alias"],
+        "scout"
+    );
+    assert_has_no_recap(&without_a_kind);
 }
 
 #[test]
@@ -1091,14 +1107,26 @@ fn a_named_recap_skips_an_agents_older_mention_root() {
 fn a_named_recap_keeps_the_channel_recap_limits() {
     let f = Fixture::new();
     f.register_all();
+    f.advance(1_000);
     let asked = person_says(&f, "w1", "round-0", "@planner round-0");
+    let attempt = reply_attempt(&f, &asked, "pane-1-planner", "round-0");
+    relay_ending(&f, "w1", "pane-1-planner", &attempt, "answer-0");
     for round in 1..=8 {
-        person_replies(
+        let request = format!("round-{round}");
+        let posted = person_replies(
             &f,
             "w1",
-            &format!("round-{round}"),
+            &request,
             &format!("@planner round-{round} {}\nmore\r\nlines", "x".repeat(200)),
             Some(&asked["message_id"]),
+        );
+        let attempt = reply_attempt(&f, &posted, "pane-1-planner", &request);
+        relay_ending(
+            &f,
+            "w1",
+            "pane-1-planner",
+            &attempt,
+            &format!("answer-{round}"),
         );
     }
 
@@ -1110,10 +1138,12 @@ fn a_named_recap_keeps_the_channel_recap_limits() {
     assert!(recap.chars().count() <= 1200);
     assert!(recap.contains("round-8"), "{recap}");
     assert!(!recap.contains("round-2"), "{recap}");
+    assert!(recap.contains("planner: answer-8"), "{recap}");
     assert!(
         recap
             .lines()
-            .all(|line| line.chars().count() == "person: ".len() + 160),
+            .filter(|line| line.starts_with("person: "))
+            .all(|line| line.chars().count() == "person: ".len() + 160 + 1 && line.ends_with('…')),
         "{recap}"
     );
 }
@@ -1792,4 +1822,328 @@ fn a_captured_router_pick_survives_rebinding_or_session_changes() {
             assert_eq!(recipient_aliases(&receipt), ["planner"]);
         });
     }
+}
+
+#[test]
+fn channel_chatter_does_not_push_out_the_named_agents_answer() {
+    let f = Fixture::new();
+    f.register_all();
+    asks_and_is_answered(&f, "w2", "pane-2-scout", "@scout pick", "marmalade");
+    for index in 0..6 {
+        person_posts_to_channel(
+            &f,
+            "w2",
+            &format!("chatter-{index}"),
+            &format!("chatter {index}"),
+        );
+    }
+
+    person_says(&f, "w2", "what", "@lead what did @scout say?");
+
+    let envelope = f.herdr.last_envelope("pane-2-lead");
+    let recap = recap_of(&envelope);
+    assert!(recap.contains("scout: marmalade"), "{recap}");
+    assert!(recap.contains("chatter 5"), "{recap}");
+    assert_eq!(recap.lines().count(), 6, "{recap}");
+}
+
+#[test]
+fn channel_chatter_keeps_room_for_each_agent_a_post_names() {
+    let f = Fixture::new();
+    f.register_all();
+    asks_and_is_answered(&f, "w2", "pane-2-scout", "@scout pick", "marmalade");
+    asks_and_is_answered(&f, "w2", "pane-2-tester", "@tester pick", "quince");
+    for index in 0..6 {
+        person_posts_to_channel(
+            &f,
+            "w2",
+            &format!("chatter-{index}"),
+            &format!("chatter {index}"),
+        );
+    }
+
+    person_says(&f, "w2", "what", "@lead what did @scout and @tester say?");
+
+    let envelope = f.herdr.last_envelope("pane-2-lead");
+    let recap = recap_of(&envelope);
+    assert!(recap.contains("scout: marmalade"), "{recap}");
+    assert!(recap.contains("tester: quince"), "{recap}");
+    assert_eq!(recap.lines().count(), 6, "{recap}");
+}
+
+#[test]
+fn every_named_agent_keeps_a_line_when_three_are_named() {
+    let f = Fixture::new();
+    f.register_all();
+    for (pane, alias) in [
+        ("pane-2-tester", "tester"),
+        ("pane-2-scout", "scout"),
+        ("pane-2-lead", "lead"),
+    ] {
+        for round in 0..3 {
+            asks_and_is_answered(
+                &f,
+                "w2",
+                pane,
+                &format!("@{alias} round {round}"),
+                &format!("{alias}-answer-{round}"),
+            );
+        }
+    }
+
+    person_says(
+        &f,
+        "w2",
+        "what",
+        "@lead what did @tester, @scout and @lead say?",
+    );
+
+    let envelope = f.herdr.last_envelope("pane-2-lead");
+    let recap = recap_of(&envelope);
+    for alias in ["tester", "scout", "lead"] {
+        assert!(
+            recap.contains(&format!("{alias}: {alias}-answer-2")),
+            "{recap}"
+        );
+    }
+}
+
+#[test]
+fn a_cut_recap_line_says_it_was_cut_and_the_named_answer_gets_the_room() {
+    let f = Fixture::new();
+    f.register_all();
+    let older = "o".repeat(300);
+    let latest = "n".repeat(900);
+    asks_and_is_answered(&f, "w2", "pane-2-scout", "@scout first", &older);
+    asks_and_is_answered(&f, "w2", "pane-2-scout", "@scout second", &latest);
+
+    person_says(&f, "w2", "what", "@lead what did @scout say?");
+
+    let envelope = f.herdr.last_envelope("pane-2-lead");
+    let recap = recap_of(&envelope);
+    assert!(
+        recap.contains(&format!("scout: {}…", "o".repeat(160))),
+        "{recap}"
+    );
+    assert!(recap.contains(&format!("scout: {latest}")), "{recap}");
+    assert!(recap.chars().count() <= 1200, "{recap}");
+
+    let f = Fixture::new();
+    f.register_all();
+    let longest = "m".repeat(3000);
+    asks_and_is_answered(&f, "w2", "pane-2-scout", "@scout third", &longest);
+    person_says(&f, "w2", "again", "@lead what did @scout say now?");
+    let envelope = f.herdr.last_envelope("pane-2-lead");
+    let recap = recap_of(&envelope);
+    assert!(recap.ends_with('…'), "{recap}");
+    assert!(recap.contains("scout: mmm"), "{recap}");
+    assert!(recap.chars().count() <= 1200, "{recap}");
+}
+
+#[test]
+fn a_named_recap_reads_the_answer_to_an_ask_typed_into_a_pane() {
+    let f = Fixture::new();
+    f.register_all();
+    f.hook("w2", "pane-2-tester", "@scout pick a word");
+    f.wake("w2");
+    assert_eq!(
+        f.count(
+            "SELECT COUNT(*) FROM collaboration_messages WHERE grammar_version = 'mention-hook/v1'"
+        ),
+        1
+    );
+    let asked = f.herdr.last_envelope("pane-2-scout");
+    f.reply_to("w2", "pane-2-scout", &asked, "@tester marmalade");
+
+    person_says(&f, "w2", "what", "@lead what did @scout say?");
+
+    let envelope = f.herdr.last_envelope("pane-2-lead");
+    let recap = recap_of(&envelope);
+    assert!(recap.contains("pick a word"), "{recap}");
+    assert!(recap.contains("scout: marmalade"), "{recap}");
+}
+
+#[test]
+fn a_withdrawn_or_undelivered_post_stays_out_of_the_recap() {
+    let f = Fixture::new();
+    f.register_all();
+    asks_and_is_answered(&f, "w2", "pane-2-scout", "@scout pick", "marmalade");
+
+    let withdrawn = person_says(&f, "w2", "withdrawn", "@scout WITHDRAWN_TEXT");
+    let attempt = reply_attempt(&f, &withdrawn, "pane-2-scout", "withdrawn");
+    let delivery = f
+        .text(&format!(
+            "SELECT delivery_id FROM delivery_attempts WHERE attempt_id = '{attempt}'"
+        ))
+        .unwrap();
+    let at = namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test", 60);
+    let namespace = StateNamespace::for_space("socket-a", "w2");
+    StateStore::open(&f.state)
+        .unwrap()
+        .transaction(|tx| {
+            tx.transition_delivery_attempt(
+                &namespace,
+                &namedrop::DeliveryAttemptId::new(attempt.as_str()),
+                namedrop::DeliveryState::Held,
+                &at,
+            )?;
+            tx.cancel_held_delivery(
+                &namespace,
+                &namedrop::DeliveryId::new(delivery.as_str()),
+                &at,
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        f.delivery_states("w2", &withdrawn["message_id"]),
+        ["cancelled"]
+    );
+
+    f.status("pane-2-tester", "working");
+    let queued = person_says(&f, "w2", "queued", "@tester QUEUED_TEXT");
+    assert_eq!(f.delivery_states("w2", &queued["message_id"]), ["queued"]);
+
+    person_says(&f, "w2", "what", "@lead what did @scout and @tester say?");
+
+    let envelope = f.herdr.last_envelope("pane-2-lead");
+    let recap = recap_of(&envelope);
+    assert!(recap.contains("scout: marmalade"), "{recap}");
+    assert!(!recap.contains("WITHDRAWN_TEXT"), "{recap}");
+    assert!(!recap.contains("QUEUED_TEXT"), "{recap}");
+}
+
+#[test]
+fn an_agents_reply_without_a_kind_does_not_widen_a_channel_recap() {
+    let f = Fixture::new();
+    f.register_all();
+    asks_and_is_answered(&f, "w1", "pane-1-lead", "@lead pick", "marmalade");
+    let root = plain_root(&f, "root", "A room statement.");
+
+    namedrop::execute_message_operation(
+        "reply",
+        json!({"request_id":"no-kind","in_reply_to":root["message_id"],
+               "source":"@lead what did @lead say?"}),
+        &f.runtime("w1", "pane-1-planner"),
+    )
+    .unwrap();
+    f.wake("w1");
+
+    let envelope = f.herdr.last_envelope("pane-1-lead");
+    assert_eq!(envelope["control"]["reply_mode"], "channel");
+    assert_eq!(
+        envelope["control"]["context_references"][0]["alias"],
+        "lead"
+    );
+    assert!(!recap_of(&envelope).contains("marmalade"), "{envelope}");
+}
+
+#[test]
+fn an_agents_root_without_a_kind_is_not_read_as_the_persons_thread() {
+    let f = Fixture::new();
+    f.register_all();
+    namedrop::execute_message_operation(
+        "send",
+        json!({"request_id":"no-kind","source":"@scout AGENT_ROOT_TEXT"}),
+        &f.runtime("w2", "pane-2-tester"),
+    )
+    .unwrap();
+    f.wake("w2");
+    let asked = f.herdr.last_envelope("pane-2-scout");
+    f.reply_to("w2", "pane-2-scout", &asked, "@tester AGENT_THREAD_ANSWER");
+    person_posts_to_channel(&f, "w2", "channel", "CHANNEL_TEXT");
+
+    person_says(&f, "w2", "what", "@lead what did @scout say?");
+
+    let envelope = f.herdr.last_envelope("pane-2-lead");
+    let recap = recap_of(&envelope);
+    assert_eq!(recap, "person: CHANNEL_TEXT", "{recap}");
+}
+
+#[test]
+fn shell_output_from_a_mixed_mention_stays_out_of_the_recap() {
+    let f = Fixture::new();
+    f.register_all();
+    f.add_terminal("w2", "build", "pane-2-build");
+    person_says(&f, "w2", "mixed", "@scout @build echo MIXED_TEXT");
+    assert_eq!(
+        f.herdr.runs("pane-2-build").len(),
+        1,
+        "a person's mention can name both"
+    );
+    let asked = f.herdr.last_envelope("pane-2-scout");
+    f.reply_to("w2", "pane-2-scout", &asked, "@operator marmalade");
+    f.run_terminal("w2", "pane-2-build").unwrap();
+    f.wake("w2");
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM collaboration_messages WHERE grammar_version = 'terminal-result/v1'"),
+        1
+    );
+
+    person_says(&f, "w2", "what", "@lead what did @scout say?");
+
+    let envelope = f.herdr.last_envelope("pane-2-lead");
+    let recap = recap_of(&envelope);
+    assert!(recap.contains("scout: marmalade"), "{recap}");
+    assert!(!recap.contains("build:"), "{recap}");
+}
+
+#[test]
+fn an_agents_reminder_stays_out_of_the_recap() {
+    let f = Fixture::new();
+    f.register_all();
+    let asked = person_says(&f, "w2", "ask", "@scout pick");
+    let attempt = reply_attempt(&f, &asked, "pane-2-scout", "ask");
+    relay_ending(&f, "w2", "pane-2-scout", &attempt, "marmalade");
+    let thread = f
+        .text(&format!(
+            "SELECT thread_id FROM collaboration_messages WHERE message_id = {}",
+            asked["message_id"].to_string().replace('"', "'")
+        ))
+        .unwrap();
+    let at = namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test", 60);
+    StateStore::open(&f.state)
+        .unwrap()
+        .transaction(|tx| {
+            tx.append_message(
+                &StateNamespace::for_space("socket-a", "w2"),
+                &namedrop::MessageDraft {
+                    thread_id: namedrop::ThreadId::new(thread.as_str()),
+                    message_id: namedrop::MessageId::new("reminder-fired"),
+                    in_reply_to: Some(namedrop::MessageId::new(
+                        asked["message_id"].as_str().unwrap(),
+                    )),
+                    author_address_id: namedrop::PaneAddressId::new(xws::address_id("w2", "scout")),
+                    author_kind: namedrop::ActorKind::AgentSession,
+                    author_alias_snapshot: "scout".to_owned(),
+                    author_agent_session_snapshot: None,
+                    request_id: "reminder-fired".to_owned(),
+                    authored_source: "REMINDER_TEXT".to_owned(),
+                    body: "REMINDER_TEXT".to_owned(),
+                    grammar_version: "reminder/v1".to_owned(),
+                    recipients: vec![namedrop::MessageRecipientDraft {
+                        address_id: namedrop::PaneAddressId::new(xws::address_id("w2", "scout")),
+                        alias_snapshot: "scout".to_owned(),
+                        agent_session_snapshot: None,
+                        delivery_id: namedrop::DeliveryId::new("reminder-delivery"),
+                    }],
+                    context_references: Vec::new(),
+                },
+                &at,
+            )
+        })
+        .unwrap();
+    f.wake("w2");
+    assert_eq!(
+        f.text("SELECT state FROM mailbox_deliveries WHERE delivery_id = 'reminder-delivery'")
+            .unwrap(),
+        "acknowledged",
+        "delivered, so only its grammar keeps it out"
+    );
+
+    person_says(&f, "w2", "what", "@lead what did @scout say?");
+
+    let envelope = f.herdr.last_envelope("pane-2-lead");
+    let recap = recap_of(&envelope);
+    assert!(recap.contains("scout: marmalade"), "{recap}");
+    assert!(!recap.contains("REMINDER_TEXT"), "{recap}");
 }

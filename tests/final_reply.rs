@@ -2499,3 +2499,48 @@ fn a_final_message_to_the_person_naming_an_unknown_agent_is_posted() {
     assert_eq!(space.relayed()[0][3], text);
     assert_eq!(space.claims()[0]["state"], json!({"done":"no_replied"}));
 }
+
+#[test]
+fn an_envelope_carrying_a_recap_authenticates_and_a_changed_recap_does_not() {
+    let space = Space::new();
+    space.send_as_person("ask", "@reviewer pick a word", None);
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    space.stop("session-reviewer", CLAUDE, "marmalade");
+    space.send_as_person("what", "@lead what did @reviewer say?", None);
+    let mut envelope = space.herdr.envelope_for("pane-lead");
+    assert!(
+        envelope["control"]["untrusted_channel_recap"]
+            .as_str()
+            .unwrap()
+            .contains("marmalade"),
+        "{envelope}"
+    );
+
+    let hook = |prompt: &str| {
+        execute_user_prompt_submit_hook(
+            &json!({"hook_event_name":"UserPromptSubmit","prompt":prompt,
+                    "session_id":"session-lead","prompt_id":"lead-turn"})
+            .to_string(),
+            &space.runtime("pane-lead"),
+        )
+        .unwrap()["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let exact = envelope.to_string();
+    envelope["control"]["untrusted_channel_recap"] = json!("person: something else");
+    assert!(!hook(&envelope.to_string()).contains("Namedrop commands"));
+    let authenticated = hook(&exact);
+    assert!(
+        authenticated.contains("Namedrop commands"),
+        "{authenticated}"
+    );
+    assert!(!authenticated.contains("marmalade"), "{authenticated}");
+}
