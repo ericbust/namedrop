@@ -839,12 +839,21 @@ def cmd_up(args):
 def cmd_test(args):
     import livetest
     lane = None
-    if args.daily_use:
-        if args.codex == "plain":
-            fail("the daily-use lane runs Codex with --no-daemon; the plain lane owns --codex plain")
+    if (args.daily_use or args.upgrade_check) and args.codex == "plain":
+        fail("the daily-use and upgrade lanes run Codex with --no-daemon; the plain lane owns --codex plain")
+    if args.upgrade_from and not args.upgrade_check:
+        fail("--upgrade-from needs --upgrade-check")
+    if args.upgrade_check:
+        if not args.link:
+            fail("--upgrade-check needs --link: the build under test is activated over the previous release")
+        import daily_upgrade
+        lane = daily_upgrade.lane(args.upgrade_from, args.repo, args.link)
+    elif args.daily_use:
         import dailyuse
         lane = dailyuse.lane()
-    profile, request = profile_for(args, prefix="test-")
+    profile, request = profile_for(args, prefix="test-upgrade-" if args.upgrade_check else "test-")
+    if args.upgrade_check and profile.marker.exists():
+        fail("an upgrade check needs a new profile, because its build replaces the release; pass --fresh")
     created = not profile.marker.exists()
     profile.create()
     if created:
@@ -1043,8 +1052,13 @@ def main():
     test.add_argument("--codex", choices=("plain", "no-daemon"),
                       help="how Codex starts (default: plain on Namedrop 1.2.0 and later)")
     test.add_argument("--keep", action="store_true", help="keep the profile after a pass")
-    test.add_argument("--daily-use", action="store_true",
-                      help="run the scripted daily-use lane instead of CHECKLIST.md")
+    lanes = test.add_mutually_exclusive_group()
+    lanes.add_argument("--daily-use", action="store_true",
+                       help="run the scripted daily-use lane instead of CHECKLIST.md")
+    lanes.add_argument("--upgrade-check", action="store_true",
+                       help="activate --link over the previous release with deliveries open")
+    test.add_argument("--upgrade-from", metavar="REF",
+                      help="the release --upgrade-check starts from (default: the newest v* tag below --link)")
     command("attach", cmd_attach, "open the profile's Herdr from a plain terminal")
     command("status", cmd_status, "show the server, plugin, names and doctor")
     command("stop", cmd_stop, "stop the profile's server and keep its files")

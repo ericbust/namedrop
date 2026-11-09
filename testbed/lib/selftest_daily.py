@@ -12,6 +12,7 @@ import dailyuse as du
 import daily_channels as dc
 import daily_continuity as dcn
 import daily_coordination as dco
+import daily_upgrade as dup
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -456,6 +457,35 @@ def check_reminder_judge():
     return "daily reminder judge: a doubled, labelled or misthreaded answer each fail"
 
 
+def check_upgrade_judges():
+    listing = ("a\trefs/tags/v1.0.2\nb\trefs/tags/v1.6.1\nc\trefs/tags/v1.10.0\n"
+               "d\trefs/tags/v2.0.0-exp.1\ne\trefs/tags/archive/v9.9.9\n")
+    assert dup.newest_tag(listing, (9, 0, 0)) == "v1.10.0", "versions compare as numbers, and pre-releases don't count"
+    assert dup.newest_tag(listing, (1, 10, 0)) == "v1.6.1", "the release before the build under test, never itself"
+    assert dup.newest_tag(listing, (1, 0, 0)) is None and dup.newest_tag("", (9, 0, 0)) is None
+    old, new = live.features("1.6.1"), live.features("1.6.2")
+    both = {"claude": True, "codex": True}
+    assert dup.judge_activation(0, old, new, both, both, "running").ok
+    assert not dup.judge_activation(0, new, new, both, both, "running").ok, "1.6.2 over 1.6.2 proves nothing"
+    assert not dup.judge_activation(0, new, old, both, both, "running").ok, "a downgrade"
+    assert not dup.judge_activation(0, old, None, both, both, "running").ok
+    assert not dup.judge_activation(1, old, new, both, both, "running").ok
+    assert not dup.judge_activation(0, old, new, both, dict(both, codex=False), "running").ok, "not open when it ran"
+    before = {"claude": dup.Standing("s1", (1,)), "codex": dup.Standing("s2", (2,))}
+    assert all(check.ok for check in dup.judge_standing(before, before))
+    restarted = dict(before, codex=dup.Standing("s2", (3,)))
+    assert not all(check.ok for check in dup.judge_standing(before, restarted)), "a restarted agent didn't stay up"
+    gone = dict(before, claude=dup.Standing(None, ()))
+    assert not all(check.ok for check in dup.judge_standing(before, gone))
+    hop = live.Hop("m", "person", "codex", None, 1, 1, 0, 1, "a", "settled", 0, "no_reply", "q")
+    answer = du.parse_message({"message_id": "x", "thread_id": "t", "body": {"text": "amber1"}})
+    assert dup.judge_open_delivery("o", hop, (answer,), "amber1", "done:no_replied").ok
+    assert not dup.judge_open_delivery("o", hop, (), "amber1", "open").ok, "settled by observation, answer lost"
+    assert not dup.judge_open_delivery("o", hop._replace(disposition=None), (answer,), "amber1", None).ok
+    assert not dup.judge_open_delivery("o", hop._replace(attempts=2), (answer,), "amber1", None).ok
+    return "daily upgrade judges: newest tag, a restarted agent, a lost or doubled open delivery"
+
+
 def checks(scratch):
     return [("daily frames", check_frames), ("daily quiet judge", check_quiet_judge),
             ("daily warning judge", check_warning_judge), ("daily answer judge", check_answer_judge),
@@ -465,4 +495,4 @@ def checks(scratch):
             ("daily probe parsing", check_probe_parsing), ("daily backlog judge", check_backlog_judge),
             ("daily step boundary", check_step_boundary), ("daily stretch judge", check_stretch_judge),
             ("daily interrupted judge", check_interrupted_judge), ("daily reminder judge", check_reminder_judge),
-            ("daily plan", check_lane_plan)]
+            ("daily upgrade judges", check_upgrade_judges), ("daily plan", check_lane_plan)]
