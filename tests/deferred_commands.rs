@@ -3,9 +3,10 @@
 mod cleanup;
 mod support;
 use namedrop::{
-    ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
-    LifecycleRuntime, MutationAttribution, PaneAddressId, PaneBindingId, ProcessIds,
-    StateNamespace, StateStore, SystemClock, complete_capability_profile,
+    ActorKind, AgentRuntime, AgentSessionId, Clock, DeliveryAttemptId, DeliveryId, DeliveryState,
+    HerdrCommandExecutor, HerdrCommandOutput, LeaseDraft, LifecycleRuntime, MessageDraft,
+    MessageId, MessageRecipientDraft, MutationAttribution, PaneAddressId, PaneBindingId,
+    ProcessIds, StateNamespace, StateStore, SystemClock, ThreadId, complete_capability_profile,
     execute_integration_operation,
 };
 use serde_json::{Value, json};
@@ -1512,4 +1513,91 @@ fn a_queued_explicit_settle_is_visible_until_its_receipt_lands() {
     let receipt = PathBuf::from(queued["data"]["receipt"].as_str().unwrap());
     wait_for(|| receipt.exists());
     assert!(!settle_queued("session-author", "attempt-queued"));
+}
+
+/// A sandboxed agent gets `pending` back and may never retry, so a reply the
+/// worker later refuses has to warn the person.
+#[test]
+fn a_queued_reply_the_worker_refuses_warns_the_person() {
+    let fixture = Fixture::new();
+    let namespace = StateNamespace::for_space(&fixture.socket, "workspace-1");
+    let attribution = MutationAttribution::new(ActorKind::Human, "test", 1);
+    let attempt = DeliveryAttemptId::new("attempt-ask");
+    StateStore::open(fixture.directory.path())
+        .unwrap()
+        .transaction(|tx| {
+            tx.create_thread(
+                &namespace,
+                &ThreadId::new("thread-ask"),
+                "An ask",
+                &attribution,
+            )?;
+            tx.append_message(
+                &namespace,
+                &MessageDraft {
+                    thread_id: ThreadId::new("thread-ask"),
+                    message_id: MessageId::new("message-ask"),
+                    in_reply_to: None,
+                    author_address_id: PaneAddressId::new("reviewer"),
+                    author_kind: ActorKind::Human,
+                    author_alias_snapshot: "reviewer".to_owned(),
+                    author_agent_session_snapshot: None,
+                    request_id: "request-ask".to_owned(),
+                    authored_source: "@author please answer".to_owned(),
+                    body: "please answer".to_owned(),
+                    grammar_version: "mention-hook/v1".to_owned(),
+                    recipients: vec![MessageRecipientDraft {
+                        address_id: PaneAddressId::new("author"),
+                        alias_snapshot: "author".to_owned(),
+                        agent_session_snapshot: Some(AgentSessionId::new("session-author")),
+                        delivery_id: DeliveryId::new("delivery-ask"),
+                    }],
+                    context_references: Vec::new(),
+                },
+                &attribution,
+            )?;
+            tx.lease_mailbox_head(
+                &namespace,
+                &PaneAddressId::new("author"),
+                &LeaseDraft {
+                    attempt_id: attempt.clone(),
+                    binding_id: PaneBindingId::new("binding"),
+                    agent_session_id: AgentSessionId::new("session-author"),
+                    retry_of_attempt_id: None,
+                    owner: "test".into(),
+                    acquired_at_ms: 2,
+                    expires_at_ms: u64::MAX / 2,
+                },
+                &attribution,
+            )?;
+            tx.transition_delivery_attempt(
+                &namespace,
+                &attempt,
+                DeliveryState::Submitted,
+                &attribution,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let database =
+        rusqlite::Connection::open(fixture.directory.path().join("namedrop.sqlite3")).unwrap();
+
+    let queued = response(fixture.sandbox_command(
+        &["reply"],
+        json!({"attempt_id":attempt.as_str(),"author_kind":"agent_session","in_reply_to":"message-ask",
+               "request_id":"reply-refused","source":"@ghost pong"}),
+    ));
+    assert_eq!(queued["data"]["state"], "pending", "{queued}");
+    let _worker = fixture.worker();
+    let receipt = PathBuf::from(queued["data"]["receipt"].as_str().unwrap());
+    wait_for(|| receipt.exists());
+    let warning: String = database
+        .query_row(
+            "SELECT summary FROM attention_items WHERE source_kind = 'agent_disposition'
+             AND source_id = ?1 AND resolved_at_ms IS NULL",
+            [attempt.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(warning.contains("@ghost"), "{warning}");
 }

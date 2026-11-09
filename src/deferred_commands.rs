@@ -616,6 +616,9 @@ pub fn execute_queued(
         }
     }
     let mut result = execute_request(state, &request);
+    if let Err(error) = &result {
+        warn_refused_settle(state, &request, error);
+    }
     if let Ok(value) = &mut result {
         completed(
             request.operation.token(),
@@ -638,6 +641,35 @@ pub fn execute_queued(
         },
     )?;
     clear_pending(&pending, key)
+}
+
+/// The agent got `pending` back and may never retry, so a settle refused here
+/// has to warn the person.
+fn warn_refused_settle(state: &Path, request: &Request, error: &str) {
+    let answers = match request.operation {
+        Operation::Reply => true,
+        Operation::Complete => false,
+        _ => return,
+    };
+    let Some(attempt) = request.input["attempt_id"].as_str() else {
+        return;
+    };
+    let by = crate::MutationAttribution::new(
+        crate::ActorKind::Plugin,
+        "namedrop",
+        SystemClock.now_unix_ms(),
+    );
+    let _ = StateStore::open(state).and_then(|mut store| {
+        store.transaction(|transaction| {
+            transaction.flag_failed_settle(
+                &request.caller.namespace,
+                &crate::DeliveryAttemptId::new(attempt),
+                answers,
+                error,
+                &by,
+            )
+        })
+    });
 }
 
 fn clear_pending(pending: &Dir, key: &str) -> Result<(), String> {

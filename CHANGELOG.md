@@ -9,6 +9,7 @@ Each release is a section here, newest first. The GitHub release for a version u
 - A release that changes nothing a running session uses no longer changes any byte of the installed plugin. Codex refuses a running session's hooks when any byte differs, so these updates no longer strand Codex sessions or ask you to approve the hooks again. Upgrading to this version changes the plugin once.
 - When Codex refuses a session's hooks, tracked work now warns you too. Before, an answer lost this way raised no warning while the handoff stayed open.
 - ND-DELIVERY-003 now says when Codex refused the session's hooks and tells you to start a new session.
+- A reply or close that a sandboxed agent queued now warns you if the outside worker later refuses it. Before, the agent saw `pending` and nothing reported the refusal.
 
 ### Added
 
