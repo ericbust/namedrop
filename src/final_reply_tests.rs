@@ -187,6 +187,7 @@ fn claim(plan: Armed, state: ClaimState) -> Claim {
         failure: None,
         awaits: Vec::new(),
         first_armed_at_ms: None,
+        promised_turn: None,
     }
 }
 
@@ -636,14 +637,20 @@ fn a_session_holds_one_live_claim_and_later_prompts_end_the_ones_that_lost_their
         "a second live claim was armed in one session"
     );
     assert_eq!(state.claims().len(), 1);
-    assert!(has_live_claims(&state.0, "socket", "session"));
-    assert!(!has_live_claims(&state.0, "socket", "other-session"));
+    assert!(stop_has_work(&state.0, "socket", "session", None, || None));
+    assert!(!stop_has_work(
+        &state.0,
+        "socket",
+        "other-session",
+        None,
+        || None
+    ));
     assert!(!observe(&state, "prompt-2", None));
     assert_eq!(
         state.claims()[0].state,
         ClaimState::Left(LeaveReason::Interrupted)
     );
-    assert!(!has_live_claims(&state.0, "socket", "session"));
+    assert!(!stop_has_work(&state.0, "socket", "session", None, || None));
     assert!(observe(
         &state,
         "prompt-3",
@@ -989,7 +996,7 @@ fn a_late_stop_worker_leaves_the_next_turns_claim_alone() {
         [ClaimState::Done(Done::Replied), ClaimState::Open],
         "a late worker ended the next turn's claim"
     );
-    assert!(has_live_claims(&state.0, "socket", "session"));
+    assert!(stop_has_work(&state.0, "socket", "session", None, || None));
     settle_at_stop(
         &state.0,
         "socket",
@@ -1102,7 +1109,7 @@ fn a_held_answer_settles_at_the_stop_of_the_turn_its_works_notice_reached() {
     assert_eq!(held.state, ClaimState::Left(LeaveReason::Held));
     assert_eq!(held.awaits, ["build-1"]);
     assert!(
-        has_live_claims(&state.0, "socket", "session"),
+        stop_has_work(&state.0, "socket", "session", None, || None),
         "a Stop of the session would start no worker to wake it"
     );
     let other = observe_prompt(

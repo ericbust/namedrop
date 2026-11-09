@@ -234,6 +234,7 @@ pub(crate) fn claim_for(
         failure: None,
         awaits: Vec::new(),
         first_armed_at_ms: None,
+        promised_turn: None,
     })
 }
 
@@ -257,10 +258,27 @@ pub fn turn_tasks(transcript: &[u8], whole: bool, prompt_id: &str) -> TurnTasks 
     let (mut started, mut found, mut earlier_turn) = (Vec::new(), false, whole);
     // Records with no `promptId` belong to the turn whose record came last.
     let mut in_turn = false;
-    for record in transcript
-        .split(|byte| *byte == b'\n')
-        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
-    {
+    let own_key = format!(r#""promptId":"{prompt_id}""#);
+    let (own_key, any_key) = (
+        memchr::memmem::Finder::new(own_key.as_bytes()),
+        memchr::memmem::Finder::new(br#""promptId":""#),
+    );
+    let queued = memchr::memmem::Finder::new(br#""queued_command""#);
+    for line in transcript.split(|byte| *byte == b'\n') {
+        // Only this turn's own records and the queued notices inside it are
+        // parsed; any other line only says whose turn follows.
+        let carries_id = any_key.find(line).is_some();
+        let maybe_own = !prompt_id.is_empty() && own_key.find(line).is_some();
+        if !maybe_own && !(in_turn && queued.find(line).is_some()) {
+            if carries_id {
+                in_turn = false;
+                earlier_turn |= !found;
+            }
+            continue;
+        }
+        let Ok(record) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
         let own = !prompt_id.is_empty() && record["promptId"] == prompt_id;
         if record["promptId"].is_string() {
             in_turn = own;
@@ -339,6 +357,11 @@ pub(crate) struct Claim {
     /// When a claim that a task's notice woke was first armed.
     #[serde(default)]
     pub first_armed_at_ms: Option<u64>,
+    /// The turn whose prompt carried a notice of this held claim's work and
+    /// so left out its way back. That turn's Stop wakes it, even when it can't
+    /// read the notice itself.
+    #[serde(default)]
+    pub promised_turn: Option<HostTurn>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -661,8 +684,25 @@ impl Claims {
     /// carried a delivery of its own wakes none, since its final message is
     /// about that delivery.
     fn woken(&self, state: &Path, turn: &HostTurn, tasks: &[String]) -> Option<usize> {
-        if tasks.is_empty()
-            || self.claims.iter().any(|claim| claim.turn == *turn)
+        self.oldest_held(state, turn, |claim| claim.waits_for_any(tasks))
+    }
+
+    /// The held claim a prompt of `turn` promised that turn's Stop.
+    fn promised(&self, state: &Path, turn: &HostTurn) -> Option<usize> {
+        self.oldest_held(state, turn, |claim| {
+            claim.promised_turn.as_ref() == Some(turn)
+        })
+    }
+
+    /// The oldest held claim still outstanding that `matches`, when `turn`
+    /// carries no delivery of its own.
+    fn oldest_held(
+        &self,
+        state: &Path,
+        turn: &HostTurn,
+        matches: impl Fn(&Claim) -> bool,
+    ) -> Option<usize> {
+        if self.claims.iter().any(|claim| claim.turn == *turn)
             || self.turn_seen(turn).is_some_and(|seen| seen.delivery)
         {
             return None;
@@ -672,7 +712,7 @@ impl Claims {
             .enumerate()
             .filter(|(_, claim)| {
                 claim.state == ClaimState::Left(LeaveReason::Held)
-                    && claim.waits_for_any(tasks)
+                    && matches(claim)
                     && outstanding(state, claim) != Some(false)
             })
             .min_by_key(|(_, claim)| claim.helpers_since_ms())
@@ -997,16 +1037,24 @@ pub(crate) fn observe_prompt(
         }
         _ => false,
     };
-    // The claim this prompt's notice wakes answers at this turn's Stop.
-    let woken = (!armed)
-        .then(|| claims.woken(state, turn, notified))
-        .flatten();
+    // The claim this prompt's notice wakes answers at this turn's Stop. A
+    // turn promises one claim; a later notice in it shows its claim's way back.
+    let promised = claims
+        .claims
+        .iter()
+        .any(|claim| claim.promised_turn.as_ref() == Some(turn));
+    if !armed
+        && !promised
+        && let Some(index) = claims.woken(state, turn, notified)
+    {
+        claims.claims[index].promised_turn = Some(turn.clone());
+    }
     let mut left_open = Vec::new();
-    for (index, claim) in claims.claims.iter_mut().enumerate() {
+    for claim in &mut claims.claims {
         if !matches!(claim.state, ClaimState::Left(_)) {
             continue;
         }
-        if Some(index) == woken {
+        if claim.promised_turn.as_ref() == Some(turn) {
             claim.updated_at_ms = now_ms;
         } else if outstanding(state, claim) == Some(false) {
             claim.set(ClaimState::Done(Done::Superseded), now_ms);
@@ -1019,16 +1067,42 @@ pub(crate) fn observe_prompt(
     Observed { armed, left_open }
 }
 
-/// Whether a Stop of this session has anything to settle. It reads without
-/// the lock, so a Stop with nothing to settle starts no worker.
-pub fn has_live_claims(state: &Path, socket: &str, session: &str) -> bool {
-    read_claims(&session_directory(state, socket, session))
+/// Whether a Stop of `turn` has anything to settle: an open claim, or a held
+/// one this turn's prompt promised or whose work's notice `tail`, the end of
+/// the transcript, names. It reads without the lock, so a Stop with nothing to
+/// settle starts no worker.
+pub fn stop_has_work(
+    state: &Path,
+    socket: &str,
+    session: &str,
+    turn: Option<&HostTurn>,
+    tail: impl FnOnce() -> Option<Vec<u8>>,
+) -> bool {
+    let claims = read_claims(&session_directory(state, socket, session));
+    let held: Vec<&Claim> = claims
         .iter()
-        .any(|claim| match claim.state {
-            ClaimState::Open => true,
-            ClaimState::Left(LeaveReason::Held) => !claim.awaits.is_empty(),
-            _ => false,
+        .filter(|claim| {
+            claim.state == ClaimState::Left(LeaveReason::Held) && !claim.awaits.is_empty()
         })
+        .collect();
+    if claims.iter().any(|claim| claim.state == ClaimState::Open)
+        || held
+            .iter()
+            .any(|claim| turn.is_some() && claim.promised_turn.as_ref() == turn)
+    {
+        return true;
+    }
+    if held.is_empty() {
+        return false;
+    }
+    // A held claim the Stop can't tell apart from one it may wake keeps the
+    // worker, so an unreadable transcript never skips a wake.
+    let Some(tail) = tail() else {
+        return true;
+    };
+    held.iter().flat_map(|claim| &claim.awaits).any(|id| {
+        memchr::memmem::find(&tail, format!("<task-id>{id}</task-id>").as_bytes()).is_some()
+    })
 }
 
 /// The bound operation the Stop runs for a claim: its token, its input, and
@@ -1066,15 +1140,27 @@ pub fn settle_at_stop(
         );
         return;
     };
-    if let Some(turn) = &stop.turn
-        && let Some(index) = claims.woken(state, turn, &stop.notified_tasks)
-    {
-        // The relay looks for an answer the agent already posted this turn
-        // from the turn's start.
-        let started_at_ms = claims
-            .turn_seen(turn)
-            .map_or(claims.claims[index].armed_at_ms, |seen| seen.started_at_ms);
-        claims.claims[index].wake_on(turn.clone(), started_at_ms);
+    if let Some(turn) = &stop.turn {
+        // A claim this turn's prompt promised comes first: the agent was shown
+        // no other way to answer it.
+        let woken = claims
+            .promised(state, turn)
+            .or_else(|| claims.woken(state, turn, &stop.notified_tasks));
+        if let Some(index) = woken {
+            // The relay looks for an answer the agent already posted this
+            // turn from the turn's start.
+            let started_at_ms = claims
+                .turn_seen(turn)
+                .map_or(claims.claims[index].armed_at_ms, |seen| seen.started_at_ms);
+            claims.claims[index].wake_on(turn.clone(), started_at_ms);
+        }
+        // A promise this Stop didn't keep ends here, so later prompts show
+        // that claim's way back.
+        for claim in &mut claims.claims {
+            if claim.promised_turn.as_ref() == Some(turn) {
+                claim.promised_turn = None;
+            }
+        }
     }
     // A claim of another turn armed after this Stop ended belongs to a turn
     // that started after it: a late worker leaves it to that turn.

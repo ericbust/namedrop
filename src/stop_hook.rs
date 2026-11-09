@@ -67,7 +67,18 @@ pub fn run(state: &Path) {
     let Ok(socket) = env::var("HERDR_SOCKET_PATH") else {
         return;
     };
-    if !namedrop::final_reply::has_live_claims(state, &socket, &input.session_id) {
+    let tail = || {
+        input
+            .transcript_tail(None, TURN_SCAN_BYTES)
+            .map(|(bytes, _)| bytes)
+    };
+    if !namedrop::final_reply::stop_has_work(
+        state,
+        &socket,
+        &input.session_id,
+        input.turn().as_ref(),
+        tail,
+    ) {
         return;
     }
     let transcript_end = input.transcript_path.as_ref().and_then(|path| {

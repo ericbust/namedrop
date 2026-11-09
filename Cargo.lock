@@ -303,6 +303,7 @@ version = "1.6.6"
 dependencies = [
  "clap",
  "libc",
+ "memchr",
  "rusqlite",
  "semver",
  "serde",

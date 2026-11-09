@@ -3144,3 +3144,47 @@ fn a_turn_that_carries_an_explicit_delivery_wakes_no_held_one() {
     );
     assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
 }
+
+/// The prompt that carries a held delivery's notice hides that delivery's way
+/// back, so the Stop must answer it even when it can't read the notice itself.
+#[test]
+fn a_held_delivery_its_notice_prompt_promised_wakes_when_the_stop_cannot_read() {
+    let space = Space::new();
+    space.held_on_first_task();
+    let notice = recorded_turn("prompt-notice", "notice-turn");
+    let text = notice[0]["message"]["content"]
+        .as_str()
+        .unwrap()
+        .replace("task-second", "task-first");
+    let context = space
+        .reviewer_prompt("notice-turn", &text)
+        .unwrap_or_default();
+    assert!(
+        !context.contains("from an earlier turn is still open"),
+        "{context}"
+    );
+    let missing = space.directory.root.join("no-transcript.jsonl");
+    space.reviewer_stop("notice-turn", "It printed first-done.", &[], &missing);
+    assert_eq!(space.answers("pane-lead"), ["It printed first-done."]);
+    assert_eq!(space.claims()[0]["state"], json!({"done":"replied"}));
+}
+
+/// While a delivery is held, a Stop of a turn its work's notice never reached
+/// hands nothing to a worker.
+#[test]
+fn a_stop_no_held_delivery_can_wake_on_starts_no_worker() {
+    let space = Space::new();
+    space.held_on_first_task();
+    space.reviewer_prompt("typed-turn", "Which file did you change?");
+    space.append_transcript(&recorded_turn("prompt-wait", "typed-turn"));
+    // Every worker saves the claims by renaming a new file over them.
+    let saved = || {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(space.claims_file()).unwrap().ino()
+    };
+    let before = saved();
+    space.reviewer_stop("typed-turn", "src/main.rs.", &[], &space.transcript());
+    assert_eq!(saved(), before, "the Stop handed its turn to a worker");
+    assert!(space.answers("pane-lead").is_empty());
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+}
