@@ -668,7 +668,7 @@ impl MessageKind {
             "result-set/v1" | "coordination-report/v1" => Self::ResultSet,
             "coordination-nudge/v1" => Self::Nudge,
             "mention-hook/v1" => Self::Hook,
-            "terminal-result/v1" => Self::Reply,
+            "terminal-result/v1" | "final-message/v1" => Self::Reply,
             "terminal-relay/v1" => Self::TerminalRelay,
             "reminder/v1" => Self::Reminder,
             _ if is_reply => Self::Reply,
@@ -1144,7 +1144,10 @@ pub(crate) fn message(row: &rows::MessageRow, legs: &[rows::LegRow]) -> MessageR
         kind: MessageKind::of(&row.grammar_version, row.in_reply_to.is_some()),
         body: SafeText::from_untrusted(
             &row.body,
-            if row.grammar_version == "terminal-relay/v1" {
+            if matches!(
+                row.grammar_version.as_str(),
+                "terminal-relay/v1" | "final-message/v1"
+            ) {
                 crate::TERMINAL_RELAY_MAX_CHARS
             } else {
                 BODY_CHARS

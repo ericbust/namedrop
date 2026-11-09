@@ -1,6 +1,7 @@
 //! The dashboard's read model: plain rows for one space, read in one short
 //! deferred transaction. Context payloads, evidence and terminal output are
 //! never selected, so no later layer can render them.
+use super::terminal_relay::{LEG_DISPOSITION_SQL, effective_grammar_sql, leg_answer_joins_sql};
 use super::*;
 use crate::{AgentSessionId, PaneBindingId};
 
@@ -94,6 +95,8 @@ pub struct MessageRow {
     pub created_at_ms: i64,
     pub author_address_id: String,
     pub author_is_human: bool,
+    /// The grammar the row reads as, so a final-message answer stored as
+    /// `terminal-relay/v1` arrives here as `final-message/v1`.
     pub grammar_version: String,
     pub body: String,
 }
@@ -410,11 +413,12 @@ impl StateTransaction<'_> {
         };
         let sql = format!(
             "SELECT message_id, thread_id, in_reply_to, created_at_ms, author_address_id,
-                    author_kind, grammar_version, body
-             FROM channel_messages
+                    author_kind, {grammar}, body
+             FROM channel_messages m
              WHERE session_socket_id = ?1 AND worktree_id = ?2 {predicate}
              ORDER BY created_at_ms DESC, rowid DESC LIMIT {}",
-            if cursor.is_some() { "?5" } else { "?3" }
+            if cursor.is_some() { "?5" } else { "?3" },
+            grammar = effective_grammar_sql("m"),
         );
         let args: Vec<rusqlite::types::Value> = match cursor {
             Some((at, rowid)) => vec![
@@ -480,13 +484,15 @@ impl StateTransaction<'_> {
                    AND d.message_id IN (SELECT message_id FROM page_recipients)
              )
              SELECT r.message_id, r.address_id, d.state, ack.acknowledged_at_ms,
-                    p.disposition_kind, p.disposition_id
+                    {LEG_DISPOSITION_SQL}
              FROM page_recipients r
              LEFT JOIN page_deliveries d USING (session_socket_id, worktree_id, message_id, address_id)
              LEFT JOIN delivery_attempts a ON {LATEST_ATTEMPT}
              LEFT JOIN delivery_acknowledgements ack USING (session_socket_id, worktree_id, attempt_id)
              LEFT JOIN delivery_dispositions p USING (session_socket_id, worktree_id, attempt_id)
-             ORDER BY r.message_id, r.recipient_order"
+             {answers}
+             ORDER BY r.message_id, r.recipient_order",
+            answers = leg_answer_joins_sql(),
         );
         let values = std::iter::once(ns[0].to_owned())
             .chain(std::iter::once(ns[1].to_owned()))
@@ -527,7 +533,7 @@ impl StateTransaction<'_> {
             |row| row.get(0),
         )?;
         let mut messages = self.rows(
-            "WITH scoped AS MATERIALIZED (
+            &format!("WITH scoped AS MATERIALIZED (
                  SELECT rowid AS message_order, message_id, created_at_ms
                  FROM channel_messages
                  WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3
@@ -537,11 +543,11 @@ impl StateTransaction<'_> {
                  UNION SELECT message_id FROM scoped WHERE message_id = ?4
              )
              SELECT m.message_id, m.thread_id, m.in_reply_to, m.created_at_ms, m.author_address_id,
-                    m.author_kind, m.grammar_version, m.body
+                    m.author_kind, {}, m.body
              FROM channel_messages m
              WHERE m.session_socket_id = ?1 AND m.worktree_id = ?2 AND m.thread_id = ?3
                AND m.message_id IN (SELECT message_id FROM selected)
-             ORDER BY m.created_at_ms, m.rowid",
+             ORDER BY m.created_at_ms, m.rowid", effective_grammar_sql("m")),
             params![ns[0], ns[1], thread_id, message_id],
             |row| Ok(MessageRow {
                 channel_to: None, channel_state: None, channel_mentioned: None, woke: Vec::new(),
@@ -684,11 +690,14 @@ impl StateTransaction<'_> {
         let ns = namespace_params(namespace);
         let windowed = params![ns[0], ns[1], MESSAGE_WINDOW];
         let mut messages = self.rows(
-            "SELECT message_id, thread_id, in_reply_to, created_at_ms, author_address_id,
-                    author_kind, grammar_version, body
-             FROM channel_messages
+            &format!(
+                "SELECT message_id, thread_id, in_reply_to, created_at_ms, author_address_id,
+                    author_kind, {}, body
+             FROM channel_messages m
              WHERE session_socket_id = ?1 AND worktree_id = ?2
              ORDER BY created_at_ms DESC, rowid DESC LIMIT ?3",
+                effective_grammar_sql("m")
+            ),
             windowed,
             |row| {
                 Ok(MessageRow {
@@ -712,15 +721,17 @@ impl StateTransaction<'_> {
         let legs = self.rows(
             &format!(
                 "SELECT r.message_id, r.address_id, d.state, ack.acknowledged_at_ms,
-                        p.disposition_kind, p.disposition_id
+                        {LEG_DISPOSITION_SQL}
                  FROM message_recipients r
                  LEFT JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, message_id, address_id)
                  LEFT JOIN delivery_attempts a ON {LATEST_ATTEMPT}
                  LEFT JOIN delivery_acknowledgements ack USING (session_socket_id, worktree_id, attempt_id)
                  LEFT JOIN delivery_dispositions p USING (session_socket_id, worktree_id, attempt_id)
+                 {answers}
                  WHERE r.session_socket_id = ?1 AND r.worktree_id = ?2
                    AND r.message_id IN ({WINDOW_MESSAGE_IDS})
-                 ORDER BY r.message_id, r.recipient_order"
+                 ORDER BY r.message_id, r.recipient_order",
+                answers = leg_answer_joins_sql(),
             ),
             windowed,
             |row| {

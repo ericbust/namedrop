@@ -395,6 +395,7 @@ def confirm_when_ready(before, live=False):
             print("\n  Ready to install.")
             if live:
                 print(f"  {state['session_count']} open sessions can keep working. Pending handoffs stay in place.")
+                print("  Restart any running Codex sessions afterward: they lose their hooks after an update.")
             else:
                 print("  During installation, keep new agents and handoffs stopped.")
                 print("  Finish standalone agents and work in other profiles first.")

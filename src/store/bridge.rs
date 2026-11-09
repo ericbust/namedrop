@@ -113,6 +113,11 @@ pub(super) fn bridged_id(space: &SpaceId, id: &str) -> String {
     format!("bridge:{}:{id}", space.as_str())
 }
 
+/// SQL for what `bridged_id` puts before an id, NULL when `space` is NULL.
+pub(super) fn bridged_prefix_sql(space: &str) -> String {
+    format!("'bridge:' || {space} || ':'")
+}
+
 impl StateTransaction<'_> {
     pub(crate) fn envoy_for(
         &mut self,
@@ -470,9 +475,9 @@ impl StateTransaction<'_> {
         source: &MessageId,
         relay: &MessageId,
         attribution: &MutationAttribution,
-    ) -> Result<Option<(StateNamespace, MessageId)>, StoreError> {
+    ) -> Result<(), StoreError> {
         let Some((space, original)) = self.copy_origin(namespace, source)? else {
-            return Ok(None);
+            return Ok(());
         };
         let target = StateNamespace::new(namespace.session_socket_id.clone(), space);
         let (source_label, target_label) = self.transaction.query_row(
@@ -555,8 +560,7 @@ impl StateTransaction<'_> {
             copy.as_str(),
             TransitionKind::Created,
             attribution,
-        )?;
-        Ok(Some((target, copy)))
+        )
     }
 
     fn bridged_thread(

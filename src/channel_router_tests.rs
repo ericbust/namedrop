@@ -251,6 +251,28 @@ fn response_normalizes_empty_single_word_unicode_and_control_topics_idempotently
 }
 
 #[test]
+fn router_recap_shows_answers_and_keeps_scraped_relays_out() {
+    for armed in [false, true] {
+        let state = std::env::temp_dir().join(format!(
+            "namedrop-router-recap-{}-{armed}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&state);
+        let mut store = crate::StateStore::open(&state).unwrap();
+        let ns = StateNamespace::for_space("socket", "w1");
+        crate::store::seed_flagged_relay(&mut store, &ns, armed, "ROUTER_SENTINEL");
+        let lines = recap(&store.dashboard_rows(&ns).unwrap());
+        drop(store);
+        fs::remove_dir_all(&state).unwrap();
+        assert_eq!(
+            lines.iter().any(|line| line.contains("ROUTER_SENTINEL")),
+            !armed,
+            "armed={armed}: {lines:?}"
+        );
+    }
+}
+
+#[test]
 fn input_caps_post_roster_and_channel_recap_including_unicode_and_controls() {
     let mut rows = rows();
     for index in 0..10 {

@@ -356,10 +356,11 @@ path plus `/<reminder-id>/cancel`, with the session and CSRF checks used for
 other mutations. Reminder operations, limits, clock files, and exact-session
 ownership are documented in [operations](../../docs/operations.md#reminders).
 
-If an agent answers a Channels message only in its terminal, the answer appears
-in the originating thread or DM marked **From @name's terminal** and the
-conversation needs you. An ordinary Namedrop reply prevents a duplicate terminal
-relay. Running subagent counts appear on member chips and Peek headers.
+An agent's final message answers your Channels message and appears in the
+originating thread or DM as an ordinary reply. A reply the agent already sent in
+that turn prevents a duplicate. Older text that a release before 1.6.0 copied
+from a terminal stays marked **From @name's terminal**, and its conversation
+needs you. Running subagent counts appear on member chips and Peek headers.
 
 A person's new message resets a thread's Automatic Reply Limit to ten and lifts
 a pause caused by that limit. Agent exchanges still consume the allowance.

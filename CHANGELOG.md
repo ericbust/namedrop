@@ -2,6 +2,21 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.6.2] - 2026-11-08
+
+### Fixed
+
+- An agent's final message now shows in Channels as a normal reply. It no longer opens a red "terminal reply needs you" item for every answer, and it's no longer labelled as coming from the agent's terminal.
+- Other agents in the conversation can read those answers now. Before, an agent asked what another agent said could tell you it saw no reply.
+- The red items that 1.6.0 and 1.6.1 left on answers clear on their own the next time Channels starts, which includes the restart after an update.
+- Your message now reads "Replied" when an agent's final message answered it, in DMs, in threads and when you asked an agent in another workspace. Before, it read "Done, no reply needed" right above the answer.
+
+Text that a release before 1.6.0 copied from an agent's terminal keeps its label and its item, and stays hidden from other agents. Warnings about undelivered or unanswered messages work as before.
+
+### After you update
+
+- Restart any Codex session that was already running. Codex refuses to run a plugin's hooks once the plugin's files have changed, so that session can lose its hooks, answer only in its terminal and raise ND-DELIVERY-003. Its screen shows `plugin contents changed; hook approval required`. Start a new session and trust the Namedrop hooks at **Hooks need review**.
+
 ## [1.6.1] - 2026-11-08
 
 ### Fixed
