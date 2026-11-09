@@ -407,7 +407,7 @@ fn an_ask_and_its_answer_settle_from_final_messages_with_no_settle_command() {
     );
     assert!(
         context.contains(
-            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper or background work, Namedrop sends nothing and you reply later. For no reply, run this line first."
+            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, your final message when that work ends is the reply. For no reply, run this line first."
         ),
         "{context}"
     );
@@ -1016,7 +1016,7 @@ fn a_message_from_the_person_is_answered_in_its_thread_by_the_final_message() {
     );
     assert!(
         context.ends_with(
-            "\n\nNamedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper or background work, Namedrop sends nothing and you reply later."
+            "\n\nNamedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, your final message when that work ends is the reply."
         ),
         "{context}"
     );

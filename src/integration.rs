@@ -1760,7 +1760,7 @@ fn rendered_lines(control: &Value) -> Option<(Vec<RenderedLine<'_>>, Vec<&str>)>
 const FINAL_REPLY_DONE: &str =
     "Namedrop sends it when your turn ends, so run no settle command and write no status line.";
 const FINAL_REPLY_OUTCOME: &str = "End it with one line: work_outcome: completed, work_outcome: needs_continuation, or work_outcome: blocked: <reason>. Without one it is needs_continuation.";
-const FINAL_REPLY_WAITING: &str = "If your turn ends while you wait on a helper or background work, Namedrop sends nothing and you reply later.";
+const FINAL_REPLY_WAITING: &str = "If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, your final message when that work ends is the reply.";
 const REPORT_TO_HUMAN_GUIDANCE: &str = "Namedrop commands: none. Namedrop closes this without a reply when your turn ends; show it to the person once in your final message.";
 const RESULT_SET_GUIDANCE: &str = "Namedrop commands: none. Namedrop closes this without a reply when your turn ends; your final message is the response the envelope asks for.";
 const RELAYED_GUIDANCE: &str = "Namedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line.";
