@@ -395,7 +395,7 @@ def confirm_when_ready(before, live=False):
             print("\n  Ready to install.")
             if live:
                 print(f"  {state['session_count']} open sessions can keep working. Pending handoffs stay in place.")
-                print("  If this update changes the plugin, Doctor names any Codex session to restart.")
+                print("  If a running Codex session then shows Hook failed, or Doctor names it, restart that session.")
             else:
                 print("  During installation, keep new agents and handoffs stopped.")
                 print("  Finish standalone agents and work in other profiles first.")

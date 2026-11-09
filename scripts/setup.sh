@@ -236,7 +236,7 @@ def show_report(payload):
             hook.get("status") not in ("setup_required", "setup_failed")
             for hook in data.get("agent_integration_hook_activation", {}).values())
     if live_update:
-        print("\n  Your current agents can keep working. If this update changed the plugin, Doctor names any Codex session to restart.")
+        print("\n  Your current agents can keep working. If a running Codex session shows Hook failed, or Doctor names it, restart that session.")
         commands = [instruction for hook in data.get("agent_integration_hook_activation", {}).values()
                     for instruction in hook.get("steps", []) if instruction.startswith("codex ")]
         if commands:
