@@ -3019,3 +3019,70 @@ fn a_stop_that_cannot_read_its_transcript_holds_on_running_work() {
     );
     assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
 }
+
+/// While answering the person's second question in a thread, the agent
+/// answers the first one, which its background work held, with that
+/// delivery's line. That answer is to another message, so the second
+/// question's final message is still relayed.
+#[test]
+fn an_explicit_answer_to_another_message_in_the_thread_does_not_stand_in_for_this_one() {
+    let space = Space::new();
+    space.send_as_person(
+        "first",
+        "@reviewer When the build ends, what did it print?",
+        None,
+    );
+    let first = space.herdr.envelope_for("pane-reviewer");
+    let attempt = first["control"]["attempt_id"].as_str().unwrap().to_owned();
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &first.to_string(),
+    );
+    space.stop_with("session-reviewer", CLAUDE, "The build is running.", true);
+    StateStore::open(&space.directory.state)
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.transition_delivery_attempt(
+                &namespace(),
+                &namedrop::DeliveryAttemptId::new(&attempt),
+                namedrop::DeliveryState::Settled,
+                &MutationAttribution::new(ActorKind::Plugin, "test", 42),
+            )
+        })
+        .unwrap();
+    space.send_as_person(
+        "second",
+        "@reviewer And which file did you change?",
+        first["control"]["message_id"].as_str(),
+    );
+    let second = space.herdr.envelope_for("pane-reviewer");
+    assert_ne!(
+        second["control"]["attempt_id"],
+        first["control"]["attempt_id"]
+    );
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        ("prompt_id", "second-turn"),
+        &second.to_string(),
+    );
+    dispatch::message(
+        "reply",
+        bound_reply(&space, &first, "@operator The build printed built-ok."),
+        &space.runtime("pane-reviewer"),
+    )
+    .unwrap();
+    space.stop(
+        "session-reviewer",
+        ("prompt_id", "second-turn"),
+        "I changed src/main.rs.",
+    );
+    let bodies: Vec<_> = space
+        .relayed()
+        .into_iter()
+        .map(|row| row[3].clone())
+        .collect();
+    assert_eq!(bodies, ["I changed src/main.rs."]);
+}

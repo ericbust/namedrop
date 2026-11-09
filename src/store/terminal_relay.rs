@@ -206,12 +206,13 @@ impl StateTransaction<'_> {
                WHERE reply.session_socket_id=?1 AND reply.worktree_id=?2 AND reply.thread_id=?3
                  AND reply.author_address_id=?4 AND reply.author_kind='agent_session'
                  AND reply.grammar_version NOT IN ('terminal-relay/v1','reminder/v1')
+                 AND (reply.in_reply_to IS NULL OR reply.in_reply_to=?9)
                  AND reply.created_at_ms >= ?5 AND reply.created_at_ms <= ?6)
              OR EXISTS(SELECT 1 FROM delivery_dispositions
                WHERE session_socket_id=?1 AND worktree_id=?2 AND attempt_id=?7 AND disposition_kind='reply')",
             params![ns[0], ns[1], attempt.thread_id, attempt.address_id,
                 to_i64(ending.turn_started_at_ms)?, ended_at, ending.attempt_id.as_str(),
-                message_id.as_str()],
+                message_id.as_str(), attempt.message_id],
             |row| row.get::<_, bool>(0),
         )?;
         if replied {
