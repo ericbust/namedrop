@@ -10,6 +10,7 @@ import threading
 import livetest as live
 import dailyuse as du
 import daily_channels as dc
+import daily_continuity as dcn
 import daily_coordination as dco
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
@@ -287,11 +288,30 @@ def check_hold_judges():
     return "daily hold judges: a post during the hold, a lost way-back line or a doubled answer each fail"
 
 
+def check_continuity_judges():
+    assert dcn.compactions("claude", ['{"type":"system","subtype":"compact_boundary"}', "{}"]) == 1
+    assert dcn.compactions("codex", ['{"type": "compacted"}', '{"type":"compacted"}']) == 2
+    assert dcn.judge_compaction("c", 0, 1, "left:held", 0).ok
+    assert not dcn.judge_compaction("c", 1, 1, "left:held", 0).ok, "no compaction proves nothing"
+    assert not dcn.judge_compaction("c", 0, 1, "done:no_replied", 1).ok
+    mode = live.MODES["no-daemon"]
+    assert dcn.resume_command("claude", mode, "abc", {}) == "claude --resume abc"
+    assert dcn.resume_command("codex", mode, "abc", {}) == "codex --no-daemon resume abc"
+    next_hop = live.Hop("m", "person", "claude", None, 1, 1, 0, 1, "a", "settled", 0, "no_reply", "q")
+    held = ("held", 0, "held")
+    assert dcn.judge_crash("x", held, 1, 0, next_hop, "delivery_attempt").ok
+    assert not dcn.judge_crash("x", held, 2, 0, next_hop, "delivery_attempt").ok, "doubled by a retry"
+    assert not dcn.judge_crash("x", held, 1, 1, next_hop, "delivery_attempt").ok
+    assert not dcn.judge_crash("x", held, 1, 0, next_hop, None).ok, "lost without a word to the person"
+    assert not dcn.judge_crash("x", held, 1, 0, next_hop._replace(state="queued", active=None), "delivery_attempt").ok
+    return "daily continuity judges: a missed compaction, a retried crash or a silent loss each fail"
+
+
 def check_lane_plan():
     lane = du.lane()
     keys = [step.key for step in lane.setup + lane.checks]
     assert keys[:4] == ["first-run", "names", "hooks", "channels"]
-    assert keys[4:] == ["answers", "recap", "warnings", "tracked", "held"]
+    assert keys[4:] == ["answers", "recap", "warnings", "tracked", "held", "continuity"]
     ran, results = [], []
 
     class Fake:
@@ -395,5 +415,6 @@ def checks(scratch):
             ("daily warning judge", check_warning_judge), ("daily answer judge", check_answer_judge),
             ("daily natural wording", check_natural_judge), ("daily recap judge", check_recap_judge), ("daily prompt key", lambda: check_prompt_key(scratch)),
             ("daily Channels client", check_client), ("daily tracked judge", check_tracked_judge),
-            ("daily hold judges", check_hold_judges), ("daily step boundary", check_step_boundary), ("daily stretch judge", check_stretch_judge),
+            ("daily hold judges", check_hold_judges), ("daily continuity judges", check_continuity_judges),
+            ("daily step boundary", check_step_boundary), ("daily stretch judge", check_stretch_judge),
             ("daily interrupted judge", check_interrupted_judge), ("daily plan", check_lane_plan)]
