@@ -287,13 +287,43 @@ fn a_stop_settles_only_its_own_open_claim_and_explicit_settles_win() {
             &open,
             stop("prompt-1", "@claude can you check this?"),
             none,
-            Verdict::Leave(LeaveReason::AddressesOthers),
+            replied("@codex \\@claude can you check this?"),
         ),
         (
             &open,
             stop("prompt-1", "@codex pong"),
             none,
             replied("@codex @codex pong"),
+        ),
+        (
+            &open,
+            stop("prompt-1", "@codex @claude,\n@qa: pong"),
+            none,
+            replied("@codex @codex \\@claude,\n\\@qa: pong"),
+        ),
+        (
+            &open,
+            stop("prompt-1", "@claude @codex, pong"),
+            none,
+            replied("@codex \\@claude pong"),
+        ),
+        (
+            &open,
+            stop("prompt-1", "@codex"),
+            none,
+            replied("@codex \\@codex"),
+        ),
+        (
+            &open,
+            stop("prompt-1", "@codex, @claude"),
+            none,
+            replied("@codex \\@codex, \\@claude"),
+        ),
+        (
+            &open,
+            stop("prompt-1", "\\@claude and `@qa` agree, as does @reviewer."),
+            none,
+            replied("@codex \\@claude and `@qa` agree, as does @reviewer."),
         ),
     ];
     for (claim, stop, settle, expected) in cases {

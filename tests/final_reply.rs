@@ -1631,19 +1631,14 @@ fn every_unsettled_ending_shows_the_way_back_on_later_prompts() {
     };
     const ANSWER: &str = "to answer it, run this line with your text in place of <reply body>";
     for (ending, state) in [
-        ("addresses_others", json!({"left":"addresses_others"})),
         ("no_final_text", json!({"left":"no_final_text"})),
         ("interrupted", json!({"left":"interrupted"})),
     ] {
         let space = Space::new();
         let ask = space.armed_ask();
         let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
-        match ending {
-            "addresses_others" => {
-                space.stop("session-reviewer", CLAUDE, "@qa can you check this first?");
-            }
-            "no_final_text" => space.stop("session-reviewer", CLAUDE, "  "),
-            _ => {}
+        if ending == "no_final_text" {
+            space.stop("session-reviewer", CLAUDE, "  ");
         }
         let typed = space.prompt(
             "pane-reviewer",

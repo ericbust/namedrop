@@ -77,22 +77,12 @@ pub fn parse_mentions(source: &str) -> Result<ParsedMessage, String> {
         mut cursor,
     } = leading_labels(source);
 
-    let mut recipients = Vec::new();
-    loop {
-        cursor = skip_whitespace(source, cursor);
-        let token_end = token_end(source, cursor);
-        let token = &source[cursor..token_end];
-        let token = token.strip_suffix([',', ':']).unwrap_or(token);
-        let Some(alias) = token.strip_prefix('@') else {
-            break;
-        };
-        if alias.is_empty() || validate_alias(alias).is_err() {
-            break;
-        }
+    let mut recipients: Vec<String> = Vec::new();
+    for (alias, token) in mention_run(source, cursor) {
         if !recipients.iter().any(|existing| existing == alias) {
             recipients.push(alias.to_owned());
         }
-        cursor = token_end;
+        cursor = token.end;
     }
 
     if recipients.is_empty() {
@@ -124,6 +114,58 @@ pub fn parse_mentions(source: &str) -> Result<ParsedMessage, String> {
         body: body.to_owned(),
         context_mentions: context_mentions(body),
     })
+}
+
+/// The run of Mentions at `cursor`: each alias and its whole token, separator
+/// included.
+fn mention_run(source: &str, mut cursor: usize) -> Vec<(&str, std::ops::Range<usize>)> {
+    let mut run = Vec::new();
+    loop {
+        cursor = skip_whitespace(source, cursor);
+        let end = token_end(source, cursor);
+        let token = &source[cursor..end];
+        let token = token.strip_suffix([',', ':']).unwrap_or(token);
+        let Some(alias) = token.strip_prefix('@') else {
+            return run;
+        };
+        if alias.is_empty() || validate_alias(alias).is_err() {
+            return run;
+        }
+        run.push((alias, cursor..end));
+        cursor = end;
+    }
+}
+
+/// `body` as the text of a reply to `addressees`, adding no recipient. Each
+/// Mention it opens with gets the `\@name` escape, separators as written. One
+/// of an addressee is dropped, as the grammar drops any repeat in a run, unless
+/// the names are all there is to say.
+pub(crate) fn literal_leading_mentions(body: &str, addressees: &[String]) -> String {
+    let run = mention_run(body, 0);
+    let names_only = run
+        .last()
+        .is_some_and(|(_, token)| body[token.end..].trim().is_empty());
+    let mut literal = String::new();
+    let mut copied = 0;
+    let mut escaped = false;
+    for (alias, token) in run {
+        let addressee = !names_only && addressees.iter().any(|name| name == alias);
+        if addressee && !escaped {
+            // Left in place: nothing has ended the run, so the grammar drops it.
+            continue;
+        }
+        literal.push_str(&body[copied..token.start]);
+        if addressee {
+            copied = skip_whitespace(body, token.end);
+        } else {
+            literal.push('\\');
+            literal.push_str(&body[token.clone()]);
+            copied = token.end;
+            escaped = true;
+        }
+    }
+    literal.push_str(&body[copied..]);
+    literal
 }
 
 struct LeadingLabels {

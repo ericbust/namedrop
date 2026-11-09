@@ -292,8 +292,10 @@ pub(crate) enum LeaveReason {
     /// answer, so its final message may not be the answer; the agent settles
     /// the delivery in a later turn.
     Held,
-    /// The final message leads with Mentions other than the addressee.
-    AddressesOthers,
+    /// The bound operation failed or its worker died. Claims a release before
+    /// 1.6.3 left because the final message led with other Mentions read as
+    /// this, since one unknown variant makes `read_claims` drop the whole file.
+    #[serde(alias = "addresses_others")]
     OperationFailed,
 }
 
@@ -367,8 +369,8 @@ pub(crate) fn decide(claim: &Claim, stop: &StopFacts, settle: &SettleFacts) -> V
                 Armed::NoReply(_) => Verdict::Settle(Settlement::NoReply),
                 Armed::Reply { template, tracked } => {
                     match reply_input(template, *tracked, &stop.text) {
-                        Ok(input) => Verdict::Settle(Settlement::Reply(input)),
-                        Err(reason) => Verdict::Leave(reason),
+                        Some(input) => Verdict::Settle(Settlement::Reply(input)),
+                        None => Verdict::Leave(LeaveReason::NoFinalText),
                     }
                 }
             }
@@ -408,10 +410,9 @@ pub(crate) fn split_outcome_trailer(body: &str) -> (&str, TrackedOutcome) {
     }
 }
 
-/// The bound reply input that carries `text`. A leading Mention of the
-/// addressee is dropped by the reply's own grammar, so it is allowed; a
-/// leading Mention of anyone else would add a recipient, so it is refused.
-fn reply_input(template: &Value, tracked: bool, text: &FinalText) -> Result<Value, LeaveReason> {
+/// The bound reply input that carries `text`, or `None` when it has no text.
+/// However it opens, it reaches only the template's addressee.
+fn reply_input(template: &Value, tracked: bool, text: &FinalText) -> Option<Value> {
     let source = template["source"].as_str().unwrap_or_default();
     let (body, outcome) = if tracked {
         let (body, outcome) = split_outcome_trailer(&text.text);
@@ -421,21 +422,19 @@ fn reply_input(template: &Value, tracked: bool, text: &FinalText) -> Result<Valu
     };
     let body = body.trim();
     if body.is_empty() {
-        return Err(LeaveReason::NoFinalText);
+        return None;
     }
     let body = if text.truncated {
         format!("{body}\n\n{CUT_NOTICE}")
     } else {
         body.to_owned()
     };
-    let recipients = |source: &str| crate::parse_mentions(source).ok().map(|m| m.recipients);
-    let filled = source.replacen(crate::REPLY_BODY_PLACEHOLDER, &body, 1);
-    let expected = recipients(&source.replacen(crate::REPLY_BODY_PLACEHOLDER, "body", 1));
-    if expected.is_none() || recipients(&filled) != expected {
-        return Err(LeaveReason::AddressesOthers);
-    }
+    let addressees =
+        crate::parse_mentions(&source.replacen(crate::REPLY_BODY_PLACEHOLDER, "body", 1))
+            .map_or_else(|_| Vec::new(), |parsed| parsed.recipients.aliases);
+    let body = crate::message::literal_leading_mentions(&body, &addressees);
     let mut input = template.clone();
-    input["source"] = Value::String(filled);
+    input["source"] = Value::String(source.replacen(crate::REPLY_BODY_PLACEHOLDER, &body, 1));
     match outcome {
         Some(TrackedOutcome::Completed) => input["work_outcome"] = "completed".into(),
         Some(TrackedOutcome::NeedsContinuation) => {
@@ -447,7 +446,7 @@ fn reply_input(template: &Value, tracked: bool, text: &FinalText) -> Result<Valu
         }
         None => {}
     }
-    Ok(input)
+    Some(input)
 }
 
 /// How long a finished or abandoned claim is kept, for anyone checking what
