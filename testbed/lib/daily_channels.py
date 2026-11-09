@@ -302,8 +302,108 @@ def check_answers(r):
                                 late._replace(needs_you=0, dots=()))
 
 
+Recap = namedtuple("Recap", "answerer asker")
+RECAPS = (Recap("claude", "codex"), Recap("codex", "claude"))
+LETTERS = "bcdfghjklmnpqrstvwxz"
+RECAP_LENGTH = 7
+ROUTING_WAIT = 25
+
+
+def recap_word(rng):
+    """Lowercase letters the agent is asked to uppercase. The person's own line carries them too, so
+    only the uppercase form, which is in no one's prompt but the answerer's answer, proves the recap."""
+    return "".join(rng.sample(LETTERS, RECAP_LENGTH))
+
+
+def sentinel_in(body, letters):
+    return letters.upper() if letters.upper() in body else None
+
+
+def judge_recap(label, sentinel, prompt_turns, transcripts, answer):
+    """sentinel in the asker's prompt, in no hook context, and in its answer. The prompt is
+    collaborator text; a hook context is the trusted voice, so a recap there would launder it."""
+    hooks = sum(sentinel in text for transcript in transcripts
+                for text in transcript.session_contexts + tuple(
+                    context for turn in transcript.turns for context in turn.contexts))
+    carried = any(sentinel in turn.prompt for turn in prompt_turns)
+    if not carried:
+        return [Check(label, False, "{}: recap missing, {}'s delivery prompt does not hold the answer {}"
+                                    .format(label, label.split(" to ")[-1], sentinel))] + \
+               [fields(label + " detail", [("hook contexts holding it", hooks, 0),
+                                           ('asker\'s answer', " ".join(answer.split())[:120], None)])]
+    return [fields(label, [("answer", sentinel, None), ("in the asker's prompt", carried, True),
+                           ("hook contexts holding it", hooks, 0),
+                           ("in the asker's answer", sentinel in answer, True)])]
+
+
+def route(r, sent, answerer):
+    """Wake the answerer as the page would: let the router pick, then use the page's picker if it
+    declined. Returns the path taken, reported because the router is a model call."""
+    def state():
+        row = next((row for row in r.channels.latest().messages if row.message_id == sent.message_id), None)
+        return (row.channel or {}) if row else {}
+    channel = r.settle(state, lambda value: value.get("state") not in (None, "routing", "queued"),
+                       ROUTING_WAIT, watch=())
+    if channel.get("state") == "routed" and answerer in (channel.get("to") or ()):
+        return "router"
+    r.channels.deliver(sent.message_id, (answerer,))
+    return "deliver after {}".format(channel.get("state") or "no channel state")
+
+
+def run_recap(r, recap, rng):
+    channels = r.channels
+    answerer_address = channels.address(recap.answerer)
+    asker_address = channels.address(recap.asker)
+    label = "{} to {}".format(recap.answerer, recap.asker)
+    letters = recap_word(rng)
+    root = channels.post("Please answer this, @{}: what is {} in capital letters? Only that, please.{}".format(
+        recap.answerer, letters, FINAL_MESSAGE))
+    path = route(r, root, recap.answerer)
+    hop = du.wait_closed(r, root.message_id)
+    answers = wait_answer(r, root, PUBLIC, answerer_address) if du.closed(hop) else ()
+    path_detail = Check(label + " path", True, "{}: woken by {}".format(label, path))
+    if not answers:
+        return [path_detail, Check(label, False, "{}: {} never answered the plain post ({})".format(
+            label, recap.answerer, hop.state))]
+    sentinel = sentinel_in(answers[0].body, letters)
+    if not sentinel:
+        return [path_detail, Check(label, False, '{}: no {} in capitals in the answer "{}"'.format(
+            label, letters, answers[0].body[:120]))]
+    if not answers[0].message_id.startswith("terminal-relay:"):
+        return [path_detail, Check(label, False, "{}: inconclusive, {} ran its reply line, and a recap has only "
+                                                 "ever lost final-message answers".format(label, recap.answerer))]
+    r.wait_agent(recap.answerer, ("idle", "done"), TIMEOUTS.idle)
+    ask = channels.post("@{} What did {} answer? Only that, please.".format(recap.asker, recap.answerer),
+                        in_reply_to=answers[0].message_id)
+    asked = du.wait_closed(r, ask.message_id)
+    answered = wait_answer(r, ask, PUBLIC, asker_address) if du.closed(asked) else ()
+    turns = delivery_turns(r, recap.asker, asked)
+    r.wait_agent(recap.asker, ("idle", "done"), TIMEOUTS.idle)
+    r.save("recap-{}.json".format(recap.answerer),
+           {"letters": letters, "sentinel": sentinel, "path": path, "asked": asked._asdict(),
+            "prompt": turns[-1].prompt[:4000] if turns else None,
+            "answer": answered[0].body if answered else None})
+    return [path_detail] + judge_recap(label, sentinel, turns,
+                                       (r.transcript(recap.answerer), r.transcript(recap.asker)),
+                                       answered[0].body if answered else "")
+
+
+def check_recap(r):
+    """Check 2: an agent reads another agent's final-message answer in its recap."""
+    rng = random.Random()
+    checks = []
+    for recap in RECAPS:
+        try:
+            checks += run_recap(r, recap, rng)
+        except du.RECOVERABLE as error:
+            checks.append(Check("{} to {}".format(recap.answerer, recap.asker), False, str(error)))
+            checks += du.quiesce(r)
+    return checks
+
+
 STEPS = (
     du.check_step("answers", "channels answers", check_answers,
                   "A person's Channels questions to Claude and Codex came back as ordinary replies "
                   "with no false warning."),
+    du.check_step("recap", "recap", check_recap, "Each agent read the other's answer in its recap."),
 )

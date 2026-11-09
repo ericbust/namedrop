@@ -133,6 +133,22 @@ def check_natural_judge():
     return "daily natural wording: the cost is shown, a lost or retried answer still fails"
 
 
+def check_recap_judge():
+    turn = live.Turn("Earlier: claude: VWXYZ", (), ("VWXYZ",), (), 1)
+    transcript = live.Transcript("codex", "s", "p", (), (turn,), frozenset())
+    assert all(check.ok for check in dc.judge_recap("claude to codex", "VWXYZ", (turn,), (transcript,), "VWXYZ"))
+    missing = dc.judge_recap("claude to codex", "VWXYZ", (turn._replace(prompt="no recap"),), (transcript,), "none")
+    assert not missing[0].ok and "recap missing" in missing[0].detail
+    hooked = transcript._replace(turns=(turn._replace(contexts=("claude: VWXYZ",)),))
+    assert not dc.judge_recap("claude to codex", "VWXYZ", (turn,), (hooked,), "VWXYZ")[0].ok, "a hook context holding it"
+    session = transcript._replace(session_contexts=("VWXYZ",))
+    assert not dc.judge_recap("claude to codex", "VWXYZ", (turn,), (session,), "VWXYZ")[0].ok
+    assert not dc.judge_recap("claude to codex", "VWXYZ", (turn,), (transcript,), "I see no reply")[0].ok
+    assert dc.sentinel_in("It is KFRZTMB.", "kfrztmb") == "KFRZTMB"
+    assert dc.sentinel_in("It is kfrztmb.", "kfrztmb") is None, "the question's own letters are not an answer"
+    return "daily recap judge: a missing recap, a recap in hook context and a lost answer each fail"
+
+
 def key_store(path, nonce_column):
     columns = "session_socket_id, worktree_id, attempt_id" + (", pointer_nonce" if nonce_column else "")
     connection = sqlite3.connect(str(path))
@@ -222,7 +238,7 @@ def check_lane_plan():
     lane = du.lane()
     keys = [step.key for step in lane.setup + lane.checks]
     assert keys[:4] == ["first-run", "names", "hooks", "channels"]
-    assert keys[4:] == ["answers"]
+    assert keys[4:] == ["answers", "recap"]
     ran, results = [], []
 
     class Fake:
@@ -313,6 +329,6 @@ def check_stretch_judge():
 def checks(scratch):
     return [("daily frames", check_frames), ("daily quiet judge", check_quiet_judge),
             ("daily warning judge", check_warning_judge), ("daily answer judge", check_answer_judge),
-            ("daily natural wording", check_natural_judge), ("daily prompt key", lambda: check_prompt_key(scratch)),
+            ("daily natural wording", check_natural_judge), ("daily recap judge", check_recap_judge), ("daily prompt key", lambda: check_prompt_key(scratch)),
             ("daily Channels client", check_client), ("daily step boundary", check_step_boundary), ("daily stretch judge", check_stretch_judge),
             ("daily plan", check_lane_plan)]
