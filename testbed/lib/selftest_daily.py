@@ -307,11 +307,23 @@ def check_continuity_judges():
     return "daily continuity judges: a missed compaction, a retried crash or a silent loss each fail"
 
 
+def check_probe_parsing():
+    text = ("ok    bare @lead stays in alpha: no messages\nnoise\n"
+            "FAIL  #beta @lead from claude: alpha claude\nPASS 1/2\n")
+    checks = dcn.parse_probe(text)
+    assert [(check.what, check.ok) for check in checks] == [("bare @lead stays in alpha", True),
+                                                            ("#beta @lead from claude", False)]
+    assert not dcn.parse_probe("Traceback\n")[0].ok, "a script that prints no checks has failed"
+    env = dcn.script_env({"HERDR_SOCKET_PATH": "/real", "PATH": "/bin"}, "/home")
+    assert env == {"PATH": "/bin", "TESTBED_HOME": "/home"}, "the real socket never reaches a script"
+    return "daily probe parsing: ok and FAIL lines become checks, no lines is a failure, no Herdr env leaks"
+
+
 def check_lane_plan():
     lane = du.lane()
     keys = [step.key for step in lane.setup + lane.checks]
     assert keys[:4] == ["first-run", "names", "hooks", "channels"]
-    assert keys[4:] == ["answers", "recap", "warnings", "tracked", "held", "continuity"]
+    assert keys[4:] == ["answers", "recap", "warnings", "tracked", "held", "continuity", "routes"]
     ran, results = [], []
 
     class Fake:
@@ -410,11 +422,25 @@ def check_interrupted_judge():
     return "daily interrupted judge: an answer, a disposition or a silent Doctor each fail"
 
 
+def check_reminder_judge():
+    hop = live.Hop("m", "namedrop", "codex", None, 1, 1, 0, 1, "a", "settled", 0, "no_reply", "q")
+    turn = live.Turn("a", (), ("amber1",), (), 1)
+    assert dcn.judge_reminder("r", 1, hop, (turn,), "amber1", None).ok
+    assert dcn.judge_reminder("r", 1, hop, (turn,), "amber1", [("reply", True)]).ok
+    assert not dcn.judge_reminder("r", 1, hop, (turn,), "amber1", [("terminal_relay", True)]).ok, "the label on an answer"
+    assert not dcn.judge_reminder("r", 1, hop, (turn,), "amber1", [("reply", True), ("reply", True)]).ok, "doubled"
+    assert not dcn.judge_reminder("r", 1, hop, (turn,), "amber1", [("reply", False)]).ok, "another thread"
+    assert not dcn.judge_reminder("r", 2, hop, (turn,), "amber1", None).ok
+    assert not dcn.judge_reminder("r", 1, hop, (), "amber1", None).ok
+    return "daily reminder judge: a doubled, labelled or misthreaded answer each fail"
+
+
 def checks(scratch):
     return [("daily frames", check_frames), ("daily quiet judge", check_quiet_judge),
             ("daily warning judge", check_warning_judge), ("daily answer judge", check_answer_judge),
             ("daily natural wording", check_natural_judge), ("daily recap judge", check_recap_judge), ("daily prompt key", lambda: check_prompt_key(scratch)),
             ("daily Channels client", check_client), ("daily tracked judge", check_tracked_judge),
             ("daily hold judges", check_hold_judges), ("daily continuity judges", check_continuity_judges),
-            ("daily step boundary", check_step_boundary), ("daily stretch judge", check_stretch_judge),
-            ("daily interrupted judge", check_interrupted_judge), ("daily plan", check_lane_plan)]
+            ("daily probe parsing", check_probe_parsing), ("daily step boundary", check_step_boundary), ("daily stretch judge", check_stretch_judge),
+            ("daily interrupted judge", check_interrupted_judge), ("daily reminder judge", check_reminder_judge),
+            ("daily plan", check_lane_plan)]

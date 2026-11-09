@@ -237,7 +237,117 @@ def check_continuity(r):
     return checks
 
 
+SCRIPTS = testbed.KIT.parent / ".claude/skills/verify/scripts"
+PROBE_LINE = re.compile(r"^(ok  |FAIL)  (.*)$")
+SCRIPT_WAIT = 480
+
+
+def parse_probe(text):
+    """One Check per ok/FAIL line a verify script printed. A script that prints neither has failed."""
+    checks = [Check(found.group(2).split(":")[0], found.group(1) == "ok  ", found.group(2))
+              for found in map(PROBE_LINE.match, text.splitlines()) if found]
+    return checks or [Check("probe", False, "probe printed no checks: " + text[-300:])]
+
+
+def script_env(environ, home):
+    """The scripts run their own `env -i`, but a Herdr pane's variables still don't belong here."""
+    return dict({key: value for key, value in environ.items() if not key.startswith("HERDR_")},
+                TESTBED_HOME=str(home))
+
+
+def run_script(r, name):
+    result = subprocess.run([sys.executable, str(SCRIPTS / name), r.profile.name], text=True, timeout=SCRIPT_WAIT,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            env=script_env(os.environ, testbed.testbed_home()))
+    r.save(name + ".txt", result.stdout)
+    return result
+
+
+def run_cross_workspace(r):
+    added = run_script(r, "second-workspace.py")
+    if added.returncode:
+        return [Check("second workspace", False, "second-workspace.py exited {}: {}".format(
+            added.returncode, added.stdout[-300:]))]
+    probe = run_script(r, "cross-workspace-probe.py")
+    checks = parse_probe(probe.stdout)
+    return checks + [live.expect("cross-workspace probe exit", probe.returncode, 0)]
+
+
+REMINDER_WAIT = 150
+
+
+def reminder_view(store, reminder_id):
+    fires = store._rows("SELECT message_id, delivery_id FROM reminder_fires WHERE session_socket_id = ? AND "
+                        "worktree_id = ? AND reminder_id = ?", (store.socket_id, store.workspace, reminder_id))
+    return fires
+
+
+def run_reminders(r, rng):
+    """Both at once, because the 60 s floor can't be shortened: one a session sets by itself, and one
+    set from a person's message, whose answer belongs in that person's thread."""
+    channels = r.channels
+    plain_word, thread_word = dco.marker(rng), dco.marker(rng)
+    ask = channels.post("@codex " + dc.NEXT_PROMPT)
+    du.wait_closed(r, ask.message_id)
+    r.wait_agent("codex", ("idle", "done"), TIMEOUTS.idle)
+    baseline = dc.baseline_of(channels.latest(), channels.peers())
+    mark, since = channels.mark(), live.now_ms()
+    plain = dco.as_pane(r, "claude", ("reminder", "set"),
+                        {"in": "60s", "body": "Say the word {}.{}".format(plain_word, dc.FINAL_MESSAGE),
+                         "request_id": str(uuid.uuid4())})
+    threaded = dco.as_pane(r, "codex", ("reminder", "set"),
+                           {"in": "60s", "body": "Say the word {}.{}".format(thread_word, dc.FINAL_MESSAGE),
+                            "in_reply_to": ask.message_id, "request_id": str(uuid.uuid4())})
+    checks = []
+    for agent, word, data, parent in (("claude", plain_word, plain, None),
+                                      ("codex", thread_word, threaded, ask)):
+        checks += run_reminder(r, agent, word, data["reminder_id"], parent)
+    return checks + dc.judge_stretch(r, "reminders", "an agent", mark, baseline, since)
+
+
+def judge_reminder(label, fires, hop, turns, word, in_thread):
+    """in_thread: (kind, thread matches) of the answers to the person's message, or None when the
+    reminder wasn't set from one."""
+    final = turns[-1].answers[-1] if turns and turns[-1].answers else ""
+    pairs = [("fires", fires, 1), ("attempts", hop.attempts, 1), ("retries", hop.retries, 0),
+             ("state", "{}/{}".format(hop.state, hop.active), "settled/0"),
+             ("disposition", hop.disposition, "no_reply"), ("turns", len(turns), 1),
+             ("word in the final answer", word in final, True)]
+    if in_thread is not None:
+        pairs.append(("answers in the person's thread", in_thread, [("reply", True)]))
+    return fields(label, pairs)
+
+
+def run_reminder(r, agent, word, reminder_id, parent):
+    fires = r.settle(lambda: reminder_view(r.store, reminder_id), bool, REMINDER_WAIT)
+    label = "{} reminder".format(agent)
+    if not fires:
+        return [Check(label, False, "{}: never fired".format(label))]
+    hop = du.wait_closed(r, fires[0][0])
+    r.wait_agent(agent, ("idle", "done"), TIMEOUTS.idle)
+    dc.listen(r, dc.QUIET)
+    turns = dc.delivery_turns(r, agent, hop)
+    in_thread = None
+    if parent:
+        address = r.channels.address(agent)
+        # The reminder's own row names the agent as author too.
+        in_thread = [(row.kind, row.thread_id == parent.thread_id)
+                     for row in dc.replies_to(r.channels.latest().messages, address, parent.message_id)
+                     if row.kind != "reminder" and word in row.body]
+    return [judge_reminder(label, len(fires), hop, turns, word, in_thread)]
+
+
+def check_routes(r):
+    """Check 7: `#beta @name` across workspaces and a reminder."""
+    checks = run_cross_workspace(r)
+    try:
+        return checks + run_reminders(r, random.Random())
+    except du.RECOVERABLE as error:
+        return checks + [Check("reminders", False, str(error))] + du.quiesce(r)
+
+
 STEPS = (
     du.check_step("continuity", "session continuity", check_continuity,
                   "A compacted session and an exited and resumed session each settled their open delivery once."),
+    du.check_step("routes", "other routes", check_routes, "Cross-workspace mentions and reminders arrived and settled."),
 )
