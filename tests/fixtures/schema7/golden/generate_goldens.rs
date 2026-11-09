@@ -1,5 +1,5 @@
-//! Writes the golden prompts and state with the 1.6.0 code. It is not built here:
-//! copy it to `tests/` of a checkout of caf657d and run
+//! Writes the golden prompts and state with the 1.6.5 code. It is not built here:
+//! copy it to `tests/` of a checkout of d533eee and run
 //! `GOLDEN_DIR=<this directory> cargo test --locked --test generate_goldens`.
 #[path = "support/cleanup.rs"]
 mod cleanup;
@@ -9,6 +9,7 @@ use namedrop::{
     PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
     drain_mailboxes, execute_handoff_operation, execute_integration_operation,
     execute_message_operation, execute_user_prompt_submit_hook, issue_registration_challenge,
+    send_operator_message,
 };
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf, process::Command, sync::Mutex, sync::atomic::*};
@@ -87,6 +88,14 @@ impl F {
             clock: &self.clock,
             ids: &self.ids,
         }
+    }
+
+    /// The person posting in the workspace's channel.
+    fn post(&self, request_id: &str, source: &str) {
+        let mut rt = self.rt(LEAD);
+        rt.current_pane_id = None;
+        send_operator_message(request_id, source, None, &rt).unwrap();
+        drain_mailboxes(&rt).unwrap();
     }
 
     fn typed(&self, pane: &str) -> String {
@@ -173,6 +182,18 @@ fn generate() {
         let challenge = issue_registration_challenge(&PaneAddressId::new(format!("address-{alias}")), AgentRuntime::ClaudeCode, &rt).unwrap();
         execute_integration_operation("register", json!({"runtime":"claude-code","protocol_version":"collab/v1","nonce":challenge.nonce,"capabilities":complete_capability_profile()}), &rt).unwrap();
     }
+
+    f.post("pick", "@reviewer Pick a word for the release name.");
+    let e: Value = serde_json::from_str(&f.typed(REVIEWER)).unwrap();
+    let reply = e["control"]["tool"]["operations"].as_array().unwrap().iter()
+        .find(|o| o["token"] == "reply").unwrap()["input"]["source"].as_str().unwrap()
+        .replace("<reply body>", "marmalade");
+    f.reply(REVIEWER, &e, &reply);
+    drain_mailboxes(&f.rt(REVIEWER)).unwrap();
+    f.post("which", "@lead Which word did @reviewer pick?");
+    let e = f.snap("channel-recap", LEAD);
+    assert!(e["control"]["untrusted_channel_recap"].as_str().unwrap().contains("marmalade"), "{e}");
+    f.close(LEAD, &e);
 
     execute_message_operation("send", json!({"request_id":"agent-ask","source":"@reviewer Review the callback handler.","author_kind":"agent_session"}), &f.rt(LEAD)).unwrap();
     drain_mailboxes(&f.rt(LEAD)).unwrap();

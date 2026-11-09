@@ -364,6 +364,7 @@ fn every_kind_of_delivery_1_6_0_typed_still_authenticates_unchanged() {
         golden!("result-set", "w1:p1", "session-lead"),
         golden!("tracked-assignment", "w1:p3", "session-researcher"),
         golden!("nudge", "w1:p1", "session-lead"),
+        golden!("named-recap", "w1:p1", "session-lead"),
         golden!(
             "channel-recap",
             CHANNEL_SOCKET,
@@ -380,20 +381,35 @@ fn every_kind_of_delivery_1_6_0_typed_still_authenticates_unchanged() {
             include_str!("fixtures/schema7/golden/schema.sql"),
             data.replace("/STATE", state)
         ));
-        let executable = namedrop::execute_integration_operation(
+        let outstanding = namedrop::execute_integration_operation(
             "delivery.inbox",
             json!({}),
             &fixture.runtime(pane),
         )
-        .unwrap()["envelopes"][0]["control"]["tool"]["executable"]
+        .unwrap()["envelopes"][0]["control"]
+            .clone();
+        let executable = outstanding["tool"]["executable"]
             .as_str()
-            .unwrap_or_else(|| panic!("{kind}: nothing is outstanding"))
-            .to_owned();
-        let typed = prompt.replace("/EXE", &executable).replace("/STATE", state);
+            .unwrap_or_else(|| panic!("{kind}: nothing is outstanding"));
+        let mut typed = prompt.replace("/EXE", executable).replace("/STATE", state);
+        if kind == "channel-recap" {
+            // Since 1.6.1 an agent's final message counts as a reply, so the
+            // recap rebuilt for this 1.6.0 post also holds Codex's answer, on
+            // main as here. Every other byte must still match.
+            let recap = |text: &Value| serde_json::to_string(text).unwrap();
+            let typed_recap = recap(&json!(
+                "person: Quick check: could you, @codex, reply with the single word GOLDENSEED?"
+            ));
+            assert!(typed.contains(&typed_recap), "{kind}: {typed}");
+            typed = typed.replace(
+                &typed_recap,
+                &recap(&outstanding["untrusted_channel_recap"]),
+            );
+        }
         let context = fixture.hook(pane, session, "after-upgrade", &typed);
         assert!(
             context.contains("Namedrop verification:"),
-            "{kind}: the prompt 1.6.0 typed no longer authenticates: {context}"
+            "{kind}: the prompt its release typed no longer authenticates: {context}"
         );
         assert!(context.contains("Namedrop commands:"), "{kind}: {context}");
         assert!(
