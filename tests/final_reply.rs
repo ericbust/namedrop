@@ -1927,3 +1927,269 @@ fn the_stop_workers_pipeline_spends_the_automatic_reply_limit() {
         "the paused thread delivered the answer"
     );
 }
+
+impl Space {
+    /// `recipient` holds an armed claim for an ask from `sender`, on the turn
+    /// its host names. Returns the delivered envelope.
+    fn armed_ask_to(
+        &self,
+        (sender, recipient, session): (&str, &str, &str),
+        turn: (&str, &str),
+    ) -> Value {
+        dispatch::message(
+            "send",
+            json!({"request_id":"ask","source":format!("@{recipient} Reply with the single word pong."),
+                   "author_kind":"agent_session"}),
+            &self.runtime(&format!("pane-{sender}")),
+        )
+        .unwrap();
+        let ask = self.herdr.envelope_for(&format!("pane-{recipient}"));
+        self.prompt(
+            &format!("pane-{recipient}"),
+            session,
+            turn,
+            &ask.to_string(),
+        );
+        ask
+    }
+
+    fn last_message_recipients(&self) -> Vec<Vec<String>> {
+        self.rows(
+            "SELECT alias_snapshot FROM message_recipients WHERE message_id =
+             (SELECT message_id FROM collaboration_messages
+              ORDER BY created_at_ms DESC, rowid DESC LIMIT 1)",
+        )
+    }
+
+    fn references(&self) -> Vec<Vec<String>> {
+        self.rows("SELECT alias_snapshot FROM context_references")
+    }
+
+    fn unresolved_disposition_warnings(&self) -> Vec<Vec<String>> {
+        self.rows(
+            "SELECT summary FROM attention_items
+             WHERE source_kind = 'agent_disposition' AND resolved_at_ms IS NULL",
+        )
+    }
+
+    fn retired_name(&self, alias: &str) {
+        let attribution = MutationAttribution::new(ActorKind::Human, "test", 2);
+        let address = PaneAddressId::new(format!("address-{alias}"));
+        StateStore::open(&self.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.create_pane_address(
+                    &namespace(),
+                    &PaneAddressDraft {
+                        id: address.clone(),
+                        role_id: PaneRoleId::new(format!("role-{alias}")),
+                        role_name: alias.to_owned(),
+                        role_description: format!("Native collaborator addressed as @{alias}."),
+                        alias: alias.to_owned(),
+                    },
+                    &attribution,
+                )?;
+                transaction.retire_pane_address(&namespace(), &address, &attribution)
+            })
+            .unwrap();
+    }
+}
+
+/// Agents name each other in prose, and the delivery rules say a body Mention
+/// adds no recipient. An answer can't depend on who happens to be named in it,
+/// on either host.
+#[test]
+fn a_final_message_naming_an_agent_that_is_not_here_still_answers() {
+    for (who, turn) in [
+        (("lead", "reviewer", "session-reviewer"), CLAUDE),
+        (("reviewer", "lead", "session-lead"), CODEX),
+    ] {
+        for text in [
+            "The result, as relayed from @codex, is pong.",
+            "Ask @retired about the rest. The result is pong.",
+        ] {
+            let space = Space::new();
+            space.retired_name("retired");
+            let ask = space.armed_ask_to(who, turn);
+            let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+            space.stop(who.2, turn, text);
+            assert_eq!(
+                space.claims()[0]["state"],
+                json!({"done":"replied"}),
+                "{text}"
+            );
+            assert_eq!(space.dispositions(), [vec![attempt, "reply".to_owned()]]);
+            assert_eq!(space.bodies().last().unwrap(), text);
+            assert_eq!(space.last_message_recipients(), [vec![who.0.to_owned()]]);
+            assert!(space.references().is_empty(), "{text}");
+            assert!(space.unresolved_disposition_warnings().is_empty(), "{text}");
+        }
+    }
+}
+
+/// A name that does resolve means what it means in any reply: a context
+/// reference, never a recipient.
+#[test]
+fn a_final_message_and_a_reply_treat_a_real_name_the_same_way() {
+    let text = "Compare with @lead and @codex. The result is pong.";
+    let by_stop = Space::new();
+    by_stop.armed_ask();
+    by_stop.stop("session-reviewer", CLAUDE, text);
+    let by_command = Space::new();
+    let ask = by_command.armed_ask();
+    dispatch::message(
+        "reply",
+        bound_reply(&by_command, &ask, &format!("@lead {text}")),
+        &by_command.runtime("pane-reviewer"),
+    )
+    .unwrap();
+    for space in [&by_stop, &by_command] {
+        assert_eq!(space.bodies().last().unwrap(), text);
+        assert_eq!(space.last_message_recipients(), [vec!["lead".to_owned()]]);
+        assert_eq!(space.references(), [vec!["lead".to_owned()]]);
+    }
+}
+
+/// A new send still names who it reaches, so a typo there is refused.
+#[test]
+fn a_send_still_refuses_an_unknown_body_mention() {
+    let space = Space::new();
+    let refused = dispatch::message(
+        "send",
+        json!({"request_id":"send","source":"@reviewer Compare with @codex.",
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap_err();
+    assert!(refused.contains("unknown Mention: @codex"), "{refused}");
+}
+
+/// A final message isn't a send, so opening with a name reaches nobody new.
+/// The answer still goes to the agent that asked.
+#[test]
+fn a_final_message_that_opens_with_a_name_still_answers_only_the_asker() {
+    for (text, shown) in [
+        ("@codex said pong", "\\@codex said pong"),
+        ("@reviewer said pong", "\\@reviewer said pong"),
+        (
+            "@lead @codex, @reviewer: pong",
+            "\\@codex, \\@reviewer: pong",
+        ),
+    ] {
+        let space = Space::new();
+        space.armed_ask();
+        space.stop("session-reviewer", CLAUDE, text);
+        assert_eq!(
+            space.claims()[0]["state"],
+            json!({"done":"replied"}),
+            "{text}"
+        );
+        assert_eq!(space.bodies().last().unwrap(), shown);
+        assert_eq!(space.last_message_recipients(), [vec!["lead".to_owned()]]);
+        assert!(space.references().is_empty(), "{text}");
+    }
+}
+
+/// A claim a release before this one left behind still shows its way back.
+#[test]
+fn a_claim_left_by_an_earlier_release_keeps_its_way_back() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    let mut claims: Value =
+        serde_json::from_slice(&fs::read(space.claims_file()).unwrap()).unwrap();
+    claims[0]["state"] = json!({"left":"addresses_others"});
+    fs::write(space.claims_file(), claims.to_string()).unwrap();
+    let typed = space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        ("prompt_id", "typed-turn"),
+        "Where were we?",
+    );
+    assert!(
+        typed.contains(&format!("delivery {attempt} from an earlier turn")),
+        "{typed}"
+    );
+}
+
+/// When a settle fails for any other reason nothing else would say why: the
+/// claim keeps the error, the person gets a warning naming it, the agent's next
+/// prompt shows it with the way back, and the agent's answer clears the warning.
+#[test]
+fn a_settle_that_fails_says_why_and_keeps_the_way_back() {
+    for generic_warning_first in [false, true] {
+        let space = Space::new();
+        let ask = space.armed_ask();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+        if generic_warning_first {
+            StateStore::open(&space.directory.state)
+                .unwrap()
+                .transaction(|transaction| {
+                    transaction.open_attention_item(
+                        &namespace(),
+                        &namedrop::AttentionItemDraft {
+                            id: namedrop::AttentionItemId::new(format!(
+                                "attention-agent-disposition-{attempt}"
+                            )),
+                            source_kind: namedrop::AttentionSourceKind::AgentDisposition,
+                            source_id: attempt.clone(),
+                            summary: "generic".to_owned(),
+                        },
+                        &MutationAttribution::new(ActorKind::Plugin, "test", 41),
+                    )
+                })
+                .unwrap();
+        }
+        let stop = stop_facts("session-reviewer", CLAUDE, "pong", false);
+        settle_at_stop(&space.directory.state, "socket-a", &stop, 42, &mut |_| {
+            Err("the router is out of cheese".to_owned())
+        });
+        let claim = &space.claims()[0];
+        assert_eq!(claim["state"], json!({"left":"operation_failed"}));
+        assert_eq!(claim["failure"], "the router is out of cheese");
+        let warnings = space.unresolved_disposition_warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0][0].contains("the router is out of cheese"),
+            "{warnings:?}"
+        );
+
+        let typed = space.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            ("prompt_id", "typed-turn"),
+            "Where were we?",
+        );
+        assert!(typed.contains("the router is out of cheese"), "{typed}");
+        assert!(
+            typed.contains(&format!(r#""attempt_id":"{attempt}""#)),
+            "{typed}"
+        );
+
+        dispatch::message(
+            "reply",
+            bound_reply(&space, &ask, "@lead pong"),
+            &space.runtime("pane-reviewer"),
+        )
+        .unwrap();
+        assert!(space.unresolved_disposition_warnings().is_empty());
+    }
+}
+
+/// The person's thread takes the final message verbatim, whatever it names.
+#[test]
+fn a_final_message_to_the_person_naming_an_unknown_agent_is_posted() {
+    let space = Space::new();
+    space.send_as_person("question", "@reviewer Option A or option B?", None);
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    let text = "@codex and @lead both say option B.";
+    space.stop("session-reviewer", CLAUDE, text);
+    assert_eq!(space.relayed()[0][3], text);
+    assert_eq!(space.claims()[0]["state"], json!({"done":"no_replied"}));
+}
