@@ -294,13 +294,13 @@ fn a_stop_settles_only_its_own_open_claim_and_explicit_settles_win() {
             &open,
             stop("prompt-1", "@codex pong"),
             none,
-            replied("@codex @codex pong"),
+            replied("@codex \\@codex pong"),
         ),
         (
             &open,
             stop("prompt-1", "@codex @claude,\n@qa: pong"),
             none,
-            replied("@codex @codex \\@claude,\n\\@qa: pong"),
+            replied("@codex \\@codex \\@claude,\n\\@qa: pong"),
         ),
         (
             &open,

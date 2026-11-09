@@ -11,7 +11,7 @@ use namedrop::{
     PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
     execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
     execute_user_prompt_submit_hook, expand_attempt_reply,
-    final_reply::{BoundOperation, FinalText, HostTurn, StopFacts, settle_at_stop},
+    final_reply::{BoundOperation, FinalText, HostTurn, StopFacts, mark_stopped, settle_at_stop},
     issue_registration_challenge, send_operator_message,
 };
 use serde_json::{Value, json};
@@ -65,6 +65,7 @@ impl Drop for TestDirectory {
 struct FakeHerdr {
     worktree: String,
     prompts: Mutex<Vec<(String, String)>>,
+    notifications: Mutex<Vec<String>>,
 }
 
 impl FakeHerdr {
@@ -113,6 +114,10 @@ impl HerdrCommandExecutor for FakeHerdr {
                 "{}".to_owned()
             }
             ["pane", "report-metadata", ..] => "{}".to_owned(),
+            ["notification", "show", _, "--body", body, ..] => {
+                self.notifications.lock().unwrap().push((*body).to_owned());
+                "{}".to_owned()
+            }
             _ => return Err(format!("unexpected Herdr command: {args:?}")),
         };
         Ok(HerdrCommandOutput { stdout })
@@ -190,6 +195,7 @@ impl Space {
         let herdr = FakeHerdr {
             worktree: directory.repo.display().to_string(),
             prompts: Mutex::new(Vec::new()),
+            notifications: Mutex::new(Vec::new()),
         };
         let space = Self {
             directory,
@@ -759,8 +765,9 @@ impl Space {
             &herdr,
             format!(
                 r#"#!/usr/bin/env python3
-import json, sys
+import json, sys, time
 from pathlib import Path
+if (Path(__file__).parent / 'herdr-slow').exists(): time.sleep(6)
 args = sys.argv[1:]
 if args[:1] == ['--socket']: args = args[2:]
 panes = {{'result': {{'panes': [
@@ -1948,6 +1955,31 @@ impl Space {
         ask
     }
 
+    fn armed_tracked_ask(&self) -> Value {
+        let coordination = namedrop::execute_handoff_operation(
+            "handoff.begin",
+            json!({"request_id":"begin","deliverable":"A reviewed answer"}),
+            &self.runtime("pane-lead"),
+        )
+        .unwrap()["coordination_id"]
+            .clone();
+        dispatch::message(
+            "send",
+            json!({"request_id":"ask","source":"@reviewer Reply with the single word pong.",
+                   "author_kind":"agent_session","coordination_id":coordination}),
+            &self.runtime("pane-lead"),
+        )
+        .unwrap();
+        let ask = self.herdr.envelope_for("pane-reviewer");
+        self.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            CLAUDE,
+            &ask.to_string(),
+        );
+        ask
+    }
+
     fn last_message_recipients(&self) -> Vec<Vec<String>> {
         self.rows(
             "SELECT alias_snapshot FROM message_recipients WHERE message_id =
@@ -2107,8 +2139,11 @@ fn a_final_message_that_opens_with_a_name_still_answers_only_the_asker() {
         ("@reviewer said pong", "\\@reviewer said pong"),
         (
             "@lead @codex, @reviewer: pong",
-            "\\@codex, \\@reviewer: pong",
+            "\\@lead \\@codex, \\@reviewer: pong",
         ),
+        // Naming the asker can be the point of the sentence, so it stays.
+        ("@lead is wrong about pong", "\\@lead is wrong about pong"),
+        ("@lead", "\\@lead"),
     ] {
         let space = Space::new();
         space.armed_ask();
@@ -2213,29 +2248,9 @@ fn a_settle_that_fails_says_why_and_keeps_the_way_back() {
 /// Tracked work raises no warning of its own while its coordination is open,
 /// so a failed settle has to.
 #[test]
-fn a_tracked_settle_that_fails_warns_the_person() {
+fn a_tracked_settle_that_fails_warns_the_person_until_the_agent_answers() {
     let space = Space::new();
-    let coordination = namedrop::execute_handoff_operation(
-        "handoff.begin",
-        json!({"request_id":"begin","deliverable":"A reviewed answer"}),
-        &space.runtime("pane-lead"),
-    )
-    .unwrap()["coordination_id"]
-        .clone();
-    dispatch::message(
-        "send",
-        json!({"request_id":"ask","source":"@reviewer Reply with the single word pong.",
-               "author_kind":"agent_session","coordination_id":coordination}),
-        &space.runtime("pane-lead"),
-    )
-    .unwrap();
-    let ask = space.herdr.envelope_for("pane-reviewer");
-    space.prompt(
-        "pane-reviewer",
-        "session-reviewer",
-        CLAUDE,
-        &ask.to_string(),
-    );
+    let ask = space.armed_tracked_ask();
     assert_eq!(space.claims()[0]["plan"]["reply"]["tracked"], true);
     let stop = stop_facts("session-reviewer", CLAUDE, "pong", false);
     settle_at_stop(&space.directory.state, "socket-a", &stop, 42, &mut |_| {
@@ -2247,6 +2262,188 @@ fn a_tracked_settle_that_fails_warns_the_person() {
         warnings[0][0].contains("final message could not be sent")
             && warnings[0][0].contains("the router is out of cheese"),
         "{warnings:?}"
+    );
+    let mut reply = bound_reply(&space, &ask, "@lead pong");
+    reply["work_outcome"] = json!("completed");
+    dispatch::message("reply", reply, &space.runtime("pane-reviewer")).unwrap();
+    assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
+/// A tracked request raises no warning of its own while its coordination is
+/// open, so a Stop worker that never finished has to say so.
+#[test]
+fn a_tracked_claim_whose_stop_worker_was_lost_warns_the_person() {
+    let space = Space::new();
+    space.armed_tracked_ask();
+    let turn = HostTurn::from_ids(Some(CLAUDE.1), None).unwrap();
+    mark_stopped(
+        &space.directory.state,
+        "socket-a",
+        "session-reviewer",
+        &turn,
+        42,
+    );
+    let later = stop_facts("session-reviewer", ("prompt_id", "later"), "later", false);
+    settle_at_stop(
+        &space.directory.state,
+        "socket-a",
+        &later,
+        40_000,
+        &mut |_| panic!("nothing is left to run"),
+    );
+    let claim = &space.claims()[0];
+    assert_eq!(claim["state"], json!({"left":"operation_failed"}));
+    let failure = claim["failure"].as_str().unwrap();
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0][0].contains(failure), "{warnings:?}");
+}
+
+/// A Stop that can't take its session's claims leaves them open for the next
+/// prompt, which may never come.
+#[test]
+fn a_tracked_stop_that_misses_the_claims_lock_warns_the_person() {
+    let space = Space::new();
+    space.armed_tracked_ask();
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .open(space.claims_file().with_file_name("lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    let stop = stop_facts("session-reviewer", CLAUDE, "pong", false);
+    settle_at_stop(&space.directory.state, "socket-a", &stop, 42, &mut |_| {
+        panic!("the claims are locked")
+    });
+    drop(lock);
+    assert_eq!(space.claims()[0]["state"], "open");
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0][0].contains("claims"), "{warnings:?}");
+}
+
+/// The worker's deadline ends it mid-settle, with no chance to save its claim.
+#[test]
+fn a_tracked_stop_worker_that_hits_its_deadline_warns_the_person() {
+    let space = Space::new();
+    space.armed_tracked_ask();
+    fs::write(space.directory.root.join("herdr-slow"), "").unwrap();
+    let running = space.start_installed_stop("session-reviewer", CLAUDE.1, "pong");
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(25);
+    while space.unresolved_disposition_warnings().is_empty() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    drop(running);
+    assert_eq!(space.claims()[0]["state"], "open");
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0][0].contains("10 seconds"), "{warnings:?}");
+}
+
+/// Nobody can answer a held or cancelled attempt and acknowledge refuses it,
+/// so a warning on one would never clear.
+#[test]
+fn a_settle_refused_for_a_closed_attempt_opens_no_warning() {
+    for cancelled in [false, true] {
+        let space = Space::new();
+        let ask = space.armed_ask();
+        let attempt =
+            namedrop::DeliveryAttemptId::new(ask["control"]["attempt_id"].as_str().unwrap());
+        let by = MutationAttribution::new(ActorKind::Human, "test", 41);
+        StateStore::open(&space.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.hold_delivery_attempt(&namespace(), &attempt, &by)?;
+                if cancelled {
+                    transaction.transition_delivery_attempt(
+                        &namespace(),
+                        &attempt,
+                        namedrop::DeliveryState::Cancelled,
+                        &by,
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        space.stop("session-reviewer", CLAUDE, "pong");
+        assert_eq!(
+            space.claims()[0]["state"],
+            json!({"left":"operation_failed"})
+        );
+        assert!(space.claims()[0]["failure"].is_string());
+        assert!(
+            space
+                .rows("SELECT summary FROM attention_items WHERE source_kind='agent_disposition'")
+                .is_empty(),
+            "cancelled {cancelled}"
+        );
+    }
+}
+
+/// A warning the person acknowledged stays closed.
+#[test]
+fn a_failed_settle_does_not_reopen_an_acknowledged_warning() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    let id = namedrop::DeliveryAttemptId::new(attempt.clone());
+    let by = MutationAttribution::new(ActorKind::Human, "test", 41);
+    StateStore::open(&space.directory.state)
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.open_attention_item(
+                &namespace(),
+                &namedrop::AttentionItemDraft {
+                    id: namedrop::AttentionItemId::new(format!(
+                        "attention-agent-disposition-{attempt}"
+                    )),
+                    source_kind: namedrop::AttentionSourceKind::AgentDisposition,
+                    source_id: attempt.clone(),
+                    summary: "generic".to_owned(),
+                },
+                &by,
+            )?;
+            transaction.observe_agent_session(
+                &namespace(),
+                "observation-replaced",
+                &PaneAddressId::new("address-reviewer"),
+                &AgentSessionId::new("session-replaced"),
+                "idle",
+                &by,
+            )?;
+            transaction.acknowledge_disposition_attention(&namespace(), &id, &by)
+        })
+        .unwrap();
+    let stop = stop_facts("session-reviewer", CLAUDE, "pong", false);
+    settle_at_stop(&space.directory.state, "socket-a", &stop, 42, &mut |_| {
+        Err("the router is out of cheese".to_owned())
+    });
+    assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
+/// The person reads the name, not the escape that keeps it from waking anyone.
+#[test]
+fn the_persons_notification_shows_a_leading_name_without_its_escape() {
+    let space = Space::new();
+    let context = execute_user_prompt_submit_hook(
+        &json!({"hook_event_name":"UserPromptSubmit","session_id":"session-lead",
+                "turn_id":"typed","prompt":"@reviewer Who said pong?"})
+        .to_string(),
+        &space.runtime("pane-lead"),
+    );
+    assert!(context.is_some());
+    dispatch::wake(&space.runtime("pane-lead"));
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    space.stop("session-reviewer", CLAUDE, "@ghost said pong");
+    assert_eq!(space.bodies().last().unwrap(), "\\@ghost said pong");
+    assert_eq!(
+        *space.herdr.notifications.lock().unwrap(),
+        ["@ghost said pong"]
     );
 }
 
