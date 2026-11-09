@@ -334,8 +334,10 @@ def stuck_helpers(fixture):
         migration = fixture.migration(timeout=10)
         out, err = migration.communicate(timeout=40)
         assert migration.returncode == 0 and b'migration completed' in out, (out, err)
-        assert b'Restarted Namedrop helpers after the update: status worker' in err, err
-        assert b'deferred worker' in err and b'reminder clock' in err, err
+        restarted = [line for line in err.splitlines() if line.startswith(b'Restarted Namedrop helpers after the update: ')]
+        assert len(restarted) == 1, err
+        for kind in (b'status worker', b'deferred worker', b'reminder clock'):
+            assert kind + b' (was PID ' in restarted[0], err
         for helper in helpers:
             assert helper.wait(timeout=5) == -signal.SIGTERM, helper.returncode
         fixture.verify_rows(8)
