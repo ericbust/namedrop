@@ -319,11 +319,32 @@ def check_probe_parsing():
     return "daily probe parsing: ok and FAIL lines become checks, no lines is a failure, no Herdr env leaks"
 
 
+def check_backlog_judge():
+    class Quiet:
+        def __init__(self, backlog):
+            self.result = backlog
+
+        def backlog(self):
+            return self.result
+
+    clean = live.Doctor(0, "healthy", (), 0)
+    space = dcn.Space("alpha", Quiet(live.Backlog(0, 0, 0)), clean, "calm")
+    assert dcn.judge_backlog(space, 0, 0, 0)[0].ok
+    defects = (dcn.judge_backlog(space._replace(store=Quiet(live.Backlog(1, 0, 0))), 0, 0, 0),
+               dcn.judge_backlog(space._replace(store=Quiet(live.Backlog(0, 1, 0))), 0, 0, 0),
+               dcn.judge_backlog(space._replace(store=Quiet(live.Backlog(0, 0, 1))), 0, 0, 0),
+               dcn.judge_backlog(space, 1, 0, 0), dcn.judge_backlog(space, 0, 1, 0), dcn.judge_backlog(space, 0, 0, 1),
+               dcn.judge_backlog(space._replace(level="needs_you"), 0, 0, 0),
+               dcn.judge_backlog(space._replace(doctor=live.Doctor(1, "attention", (live.Issue("ND-X", "warn", {}),), 0)), 0, 0, 0))
+    assert not any(result[0].ok for result in defects)
+    return "daily backlog judge: anything awaiting, open or unhealthy fails, with no exceptions"
+
+
 def check_lane_plan():
     lane = du.lane()
     keys = [step.key for step in lane.setup + lane.checks]
     assert keys[:4] == ["first-run", "names", "hooks", "channels"]
-    assert keys[4:] == ["answers", "recap", "warnings", "tracked", "held", "continuity", "routes"]
+    assert keys[4:] == ["answers", "recap", "warnings", "tracked", "held", "continuity", "routes", "backlog"]
     ran, results = [], []
 
     class Fake:
@@ -441,6 +462,7 @@ def checks(scratch):
             ("daily natural wording", check_natural_judge), ("daily recap judge", check_recap_judge), ("daily prompt key", lambda: check_prompt_key(scratch)),
             ("daily Channels client", check_client), ("daily tracked judge", check_tracked_judge),
             ("daily hold judges", check_hold_judges), ("daily continuity judges", check_continuity_judges),
-            ("daily probe parsing", check_probe_parsing), ("daily step boundary", check_step_boundary), ("daily stretch judge", check_stretch_judge),
+            ("daily probe parsing", check_probe_parsing), ("daily backlog judge", check_backlog_judge),
+            ("daily step boundary", check_step_boundary), ("daily stretch judge", check_stretch_judge),
             ("daily interrupted judge", check_interrupted_judge), ("daily reminder judge", check_reminder_judge),
             ("daily plan", check_lane_plan)]

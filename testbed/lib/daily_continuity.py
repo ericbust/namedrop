@@ -346,8 +346,70 @@ def check_routes(r):
         return checks + [Check("reminders", False, str(error))] + du.quiesce(r)
 
 
+Space = namedtuple("Space", "label store doctor level")
+
+
+def beta_space(r):
+    """The second workspace, once check 7 made it: its own store scope and its own doctor."""
+    path = r.profile.dir / "beta.json"
+    if not path.exists():
+        return None
+    workspace = json.loads(path.read_text())["workspace"]
+    state = r.profile.dir / "state/herdr/plugins/namedrop"
+    result = r.profile.run([str(state / "runtime/namedrop"), "--plugin-state", str(state),
+                            "--herdr-workspace", workspace, "doctor", "--json"], check=False)
+    r.save("doctor-beta.json", result.stdout)
+    return Space("beta", live.Store(r.store.path, r.store.socket_id, workspace),
+                 live.parse_doctor(result.returncode, result.stdout), r.channels.level_of_workspace(workspace))
+
+
+def judge_backlog(space, open_work, reminders, live_claims):
+    backlog = space.store.backlog()
+    # Beta's frame may never have arrived, and only alpha's recording is held to the page's level.
+    level = "calm" if space.label == "alpha" else frozenset({"calm", "no frame"})
+    return [fields(space.label + " backlog", [("awaiting", backlog.awaiting, 0),
+                                              ("active", backlog.active_attempts, 0),
+                                              ("attention", backlog.open_attention, 0),
+                                              ("live claims", live_claims, 0),
+                                              ("open coordinations", open_work, 0),
+                                              ("pending reminders", reminders, 0),
+                                              ("wire level", space.level or "no frame", level),
+                                              ("doctor exit", space.doctor.exit, 0),
+                                              ("doctor status", space.doctor.status, "healthy"),
+                                              ("doctor issues", ", ".join(issue.code for issue in space.doctor.issues)
+                                               or "none", "none")])]
+
+
+def counts(store):
+    scope = (store.socket_id, store.workspace)
+    work = store._rows("SELECT count(*) FROM coordinations WHERE session_socket_id = ? AND worktree_id = ? "
+                       "AND outcome = 'open'", scope)[0][0]
+    reminders = store._rows("SELECT count(*) FROM reminders WHERE session_socket_id = ? AND worktree_id = ? "
+                            "AND state IN ('scheduled', 'awaiting_delivery')", scope)[0][0]
+    return work, reminders
+
+
+def check_backlog(r):
+    """Check 8: nothing awaiting, no live claims, no open attention, doctor clean, in each workspace."""
+    r.settle(lambda: r.store.backlog(), lambda backlog: backlog == live.Backlog(0, 0, 0), TIMEOUTS.idle, watch=())
+    claims = r.store.claims()
+    live_claims = sum(state in live.LIVE_CLAIMS for state in claims.values())
+    spaces = [Space("alpha", r.store, r.doctor("final"), r.channels.latest().level)]
+    beta = beta_space(r)
+    if beta:
+        spaces.append(beta)
+    checks = []
+    for space in spaces:
+        work, reminders = counts(space.store)
+        checks += judge_backlog(space, work, reminders, live_claims)
+    panes = r.panes()
+    return checks + [fields("agents", [(alias, panes[alias].status, frozenset({"idle", "done"}))
+                                       for alias in AGENTS])] + dc.judge_known(r)
+
+
 STEPS = (
     du.check_step("continuity", "session continuity", check_continuity,
                   "A compacted session and an exited and resumed session each settled their open delivery once."),
     du.check_step("routes", "other routes", check_routes, "Cross-workspace mentions and reminders arrived and settled."),
+    du.check_step("backlog", "backlog", check_backlog, ""),
 )
