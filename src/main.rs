@@ -1260,7 +1260,9 @@ fn retryable_queue_scan(error: &io::Error) -> bool {
 fn run_agent_status_worker() -> ExitCode {
     // The hook that starts the worker runs in a pane's directory, which can be
     // removed while the worker lives; every reconcile reads the current one.
-    if let Some(state) = env::var_os("HERDR_PLUGIN_STATE_DIR") {
+    if let Some(state) = env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from)
+        && state.is_absolute()
+    {
         let _ = env::set_current_dir(state);
     }
     let directory = match agent_status_reconciliation_directory() {
@@ -1447,7 +1449,10 @@ fn run_agent_status_worker_queue_with_policy(
                         read_failures.remove(marker);
                         bytes
                     }
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        namedrop::status_queue::clear_failure(directory, marker);
+                        continue;
+                    }
                     Err(error) if !permanently_unreadable_marker(&error) => {
                         let count = read_failures.entry(marker.clone()).or_default();
                         *count += 1;
@@ -1534,13 +1539,26 @@ fn run_agent_status_worker_queue_with_policy(
                     );
                     // A later status event inspects the same current state, so
                     // one that keeps failing must not hold every later one back.
-                    if namedrop::status_queue::should_set_aside(&failure, give_up_after)
-                        && namedrop::status_queue::set_aside(directory, marker, &failure, now)
-                            .is_ok()
+                    // A queued wake carries a delivery's retry, so it waits out
+                    // any error instead.
+                    if event != serde_json::json!({"operation":"mailbox-wake"})
+                        && namedrop::status_queue::should_set_aside(&failure, give_up_after)
                     {
-                        let _ = prune_rejected_markers(directory);
-                        failures = 0;
-                        continue;
+                        match namedrop::status_queue::set_aside(directory, marker, &failure, now) {
+                            Ok(()) => {
+                                let _ = prune_rejected_markers(directory);
+                                failures = 0;
+                                // A delivery queued behind the event still drains
+                                // once the cause clears.
+                                deadline_ms = Some(now);
+                                continue;
+                            }
+                            Err(_) if !marker.exists() => {
+                                namedrop::status_queue::clear_failure(directory, marker);
+                                continue;
+                            }
+                            Err(_) => {}
+                        }
                     }
                 }
                 if matches!(work, ReconciliationWork::Wake) {
@@ -2057,7 +2075,11 @@ mod worker_shutdown_tests {
             ),
             ExitCode::SUCCESS
         );
-        assert_eq!(handled, vec![serde_json::json!("w5F:p2")]);
+        assert_eq!(
+            handled,
+            vec![serde_json::json!("w5F:p2"), serde_json::Value::Null],
+            "after a set-aside the mailboxes drain once, as a wake"
+        );
         assert!(!stuck.exists() && queue.0.join("rejected-pending-0-stuck").exists());
         let (failing, set_aside) = namedrop::status_queue::health(&queue.0);
         assert!(failing.is_none(), "{failing:?}");
@@ -2072,6 +2094,71 @@ mod worker_shutdown_tests {
         );
         assert_eq!(set_aside.failure.pane_id.as_deref(), Some("w5F:p1"));
         assert!(set_aside.failure.attempts >= 5);
+        queue.lock();
+    }
+
+    /// A queued wake, such as the one activation writes for a restarted
+    /// worker, carries a delivery's retry. It waits out any error.
+    #[test]
+    fn a_queued_wake_is_never_set_aside() {
+        let queue = QueueFixture::new("queued-wake");
+        let wake = queue.0.join("pending-activation-1");
+        fs::write(&wake, br#"{"operation":"mailbox-wake"}"#).unwrap();
+        let mut attempts = 0;
+        assert_eq!(
+            run_agent_status_worker_queue_with_policy(
+                &queue.0,
+                queue.lock(),
+                None,
+                pending_agent_status_reconciliations,
+                |path| fs::read(path),
+                |_| {
+                    attempts += 1;
+                    if attempts <= 6 {
+                        Err("Herdr did not answer".to_owned())
+                    } else {
+                        Ok(serde_json::json!({"drain": namedrop::DrainReport::default()}))
+                    }
+                },
+                Duration::ZERO,
+            ),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(attempts, 7);
+        assert!(!wake.exists() && !queue.0.join("rejected-pending-activation-1").exists());
+        assert!(namedrop::status_queue::health(&queue.0).1.is_none());
+        queue.lock();
+    }
+
+    /// A marker that vanishes while it fails ends its failure, so Doctor
+    /// doesn't keep reporting it.
+    #[test]
+    fn a_vanished_failing_marker_clears_its_failure() {
+        let queue = QueueFixture::new("vanished-failing");
+        let marker = queue.0.join("pending-0-gone");
+        let event = serde_json::json!({"type":"pane_agent_detected","pane_id":"w5F:p1"});
+        fs::write(&marker, event.to_string()).unwrap();
+        namedrop::status_queue::record_failure(&queue.0, &marker, &event, "No such file", 1);
+        assert!(namedrop::status_queue::health(&queue.0).0.is_some());
+        assert_eq!(
+            run_agent_status_worker_queue_with_policy(
+                &queue.0,
+                queue.lock(),
+                None,
+                |directory| {
+                    let pending = pending_agent_status_reconciliations(directory)?;
+                    Ok(pending)
+                },
+                |path| {
+                    let _ = fs::remove_file(path);
+                    Err(io::Error::from(io::ErrorKind::NotFound))
+                },
+                |_| Ok(serde_json::json!({"drain": namedrop::DrainReport::default()})),
+                Duration::ZERO,
+            ),
+            ExitCode::SUCCESS
+        );
+        assert!(namedrop::status_queue::health(&queue.0).0.is_none());
         queue.lock();
     }
 

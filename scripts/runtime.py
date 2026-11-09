@@ -141,42 +141,52 @@ def gate_holders(path):
             candidates = [pid for pid in all_pids() if pid != me
                           and process(pid, executables)]
         except (OSError, RuntimeError):
-            candidates = []
+            executables, candidates = {}, []
         holding = listed(['-a', '-p', ','.join(map(str, candidates))]) if candidates else set()
         holding = holding or listed([])
         holders = []
         for pid in sorted(holding):
             found = process(pid)
-            holders.append((pid, command_words(found[1]) if found and found[1] else 'unknown'))
+            holders.append((pid, command_words(found[1]) if found and found[1] else 'unknown',
+                            executables.get(os.path.realpath(found[0])) if found else None))
         return holders
+    try:
+        executables = retained_executables(Path(path).parent)
+    except OSError:
+        executables = {}
     holders = []
     for entry in os.listdir('/proc'):
         if not entry.isdigit() or int(entry) == me or not opens(int(entry), target):
             continue
         found = process(int(entry))
         if found and found[1]:
-            holders.append((int(entry), command_words(found[1])))
+            holders.append((int(entry), command_words(found[1]), executables.get(os.path.realpath(found[0]))))
     return sorted(holders)
 
 
 def busy_gate_message(path):
+    """Each holder is (PID, Namedrop subcommand, whether its release holds the
+    gate only per job: True, False before 1.7.0, None when not a release)."""
     holders = gate_holders(path)
     if not holders:
         return ('Namedrop commands are still finishing. Close any open Namedrop popup, such as the tour, '
                 'and retry the update; agent sessions can stay open.')
-    named = ' '.join(f'PID {pid} ({what}) holds the command lock.' for pid, what in holders)
-    popups = [pid for pid, what in holders if ' ui ' in f' {what} ']
-    workers = [pid for pid, what in holders if pid not in popups and 'agent-status-worker' in what]
-    others = [pid for pid, _ in holders if pid not in popups + workers]
+    named = ' '.join(f'PID {pid} ({what}) holds the command lock.' for pid, what, _ in holders)
+    popups = [pid for pid, what, _ in holders if ' ui ' in f' {what} ']
+    # A status worker from before 1.7.0 holds the lock between jobs too; any
+    # other holder is in the middle of a job, such as a delivery, so it is
+    # waited for rather than stopped.
+    old_workers = [pid for pid, what, per_job in holders
+                   if pid not in popups and 'agent-status-worker' in what and per_job is False]
+    working = [pid for pid, _, _ in holders if pid not in popups + old_workers]
     steps = []
     if popups:
         steps.append('close the open Namedrop popup, such as the tour')
-    if workers:
-        steps.append("stop Namedrop's status worker with `kill " + ' '.join(map(str, workers))
-                     + '`, which loses nothing because its events stay queued')
-    if others:
-        steps.append('wait for the other command to finish, or stop it with `kill '
-                     + ' '.join(map(str, others)) + '`')
+    if old_workers:
+        steps.append("stop the status worker from the earlier version with `kill "
+                     + ' '.join(map(str, old_workers)) + '`, which loses nothing because its events stay queued')
+    if working:
+        steps.append('wait a moment for the command that is still working to finish')
     return (f'Namedrop commands are still finishing. {named} To continue, ' + '; '.join(steps)
             + '. Then retry the update; agent sessions can stay open.')
 
@@ -394,15 +404,23 @@ def signal_helper(helper, number):
     return True
 
 
-def stop_helpers(helpers):
-    stopped = [helper for helper in helpers if signal_helper(helper, signal.SIGTERM)]
+def stop_helpers(helpers, stopped):
+    """Signals each helper, recording it in `stopped` first, so an interrupt
+    partway through still restarts every helper already signalled."""
+    signalled = []
+    for helper in helpers:
+        stopped.append(helper)
+        if signal_helper(helper, signal.SIGTERM):
+            signalled.append(helper)
+        else:
+            stopped.remove(helper)
     deadline = time.monotonic() + 3
-    while not all(gone(helper['pid']) for helper in stopped) and time.monotonic() < deadline:
+    while not all(gone(helper['pid']) for helper in signalled) and time.monotonic() < deadline:
         time.sleep(.05)
-    for helper in stopped:
+    for helper in signalled:
         if not gone(helper['pid']):
             signal_helper(helper, signal.SIGKILL)
-    return stopped
+    return signalled
 
 
 def queue_wake(helper):
@@ -431,9 +449,13 @@ def restart_helpers(runtime, helpers):
     restarted, failed = [], []
     # Process listing order differs between Linux and macOS; the report doesn't.
     for helper in sorted(helpers, key=lambda helper: (helper['kind'], helper['pid'])):
-        try:
-            if helper['kind'] == 'status worker':
+        if helper['kind'] == 'status worker':
+            try:
                 queue_wake(helper)
+            except (OSError, ValueError) as error:
+                print(f"Could not queue a wake for Namedrop's status worker (was PID {helper['pid']}): {error}. "
+                      'A timed retry it was waiting on runs at its next event.', file=sys.stderr)
+        try:
             subprocess.Popen([str(runtime / 'namedrop'), *helper['argv'][1:]], env=helper['environment'],
                              cwd='/', stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
@@ -471,7 +493,7 @@ def command_gate(runtime, timeout=20, grace=2):
                 if now >= deadline:
                     raise RuntimeError(busy_gate_message(runtime / 'commands.lock')) from None
                 if now >= check_at:
-                    stopped += stop_helpers(gate_helpers(runtime))
+                    stop_helpers(gate_helpers(runtime), stopped)
                     check_at = time.monotonic() + grace
                 time.sleep(.05)
     except BaseException:

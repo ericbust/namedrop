@@ -2109,3 +2109,74 @@ fn doctor_names_the_status_event_that_keeps_failing_and_the_one_set_aside() {
     );
     assert!(queue.join("rejected-pending-stuck").exists() && !marker.exists());
 }
+
+/// After a reboot, or once its worker was killed, nobody retries a recorded
+/// failure, so Doctor must stop saying it keeps failing.
+#[test]
+fn doctor_forgets_a_failure_nobody_is_retrying() {
+    use namedrop::status_queue;
+    let fixture = Fixture::new();
+    fixture.initialize();
+    fixture.connect_recipient();
+    let shown = || {
+        let output = fixture.command().arg("doctor").output().unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        json["data"]["issues"]
+            .as_array()
+            .is_some_and(|issues| issues.iter().any(|issue| issue["code"] == "ND-STATUS-001"))
+    };
+    let queue = status_queue::directory(&fixture.state(), "test-socket", "workspace-1");
+    fs::create_dir_all(&queue).unwrap();
+    let marker = queue.join("pending-stuck");
+    let event = serde_json::json!({"type":"pane_agent_detected","pane_id":"pane-recipient"});
+    fs::write(&marker, event.to_string()).unwrap();
+    let failing = queue.join("failing.json");
+
+    let old = now_ms() - 10 * 60_000;
+    status_queue::record_failure(&queue, &marker, &event, "No such file", old - 5 * 60_000);
+    status_queue::record_failure(&queue, &marker, &event, "No such file", old);
+    assert!(
+        !shown(),
+        "a failure last retried 10 minutes ago is still shown"
+    );
+    assert!(!failing.exists());
+
+    status_queue::record_failure(
+        &queue,
+        &marker,
+        &event,
+        "No such file",
+        now_ms() - 5 * 60_000,
+    );
+    let mut failure =
+        status_queue::record_failure(&queue, &marker, &event, "No such file", now_ms());
+    assert!(shown());
+    let mut gone = Command::new("true").spawn().unwrap();
+    gone.wait().unwrap();
+    failure.worker_pid = gone.id();
+    fs::write(&failing, serde_json::to_vec(&failure).unwrap()).unwrap();
+    assert!(!shown(), "a failure whose worker has exited is still shown");
+}
+
+/// The state directory is only worth moving into when it names the same place
+/// from anywhere.
+#[test]
+fn a_status_worker_with_a_relative_state_path_still_reconciles() {
+    let fixture = Fixture::new();
+    fixture.initialize();
+    let marker = fixture.queue_status("relative-state");
+    let mut worker = Worker(
+        fixture
+            .command()
+            .env("HERDR_PLUGIN_STATE_DIR", "state")
+            .current_dir(&fixture.root)
+            .args(["hook", "agent-status-worker"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    worker.finish();
+    assert_eq!(fixture.recipient_status(), "idle");
+    assert!(!marker.exists());
+}

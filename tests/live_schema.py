@@ -271,7 +271,8 @@ def timeout(fixture):
     if fixture.gated:
         # A gated command holds the lock, so the gate wait names it.
         assert b'PID %d (namedrop) holds the command lock' % old.pid in err, err
-        assert b'kill %d' % old.pid in err and b'retry the update' in err and b'popup' not in err, err
+        assert b'wait a moment' in err and b'retry the update' in err, err
+        assert b'kill' not in err and b'popup' not in err, err
     else:
         # A macOS release from before the gate never takes the lock; the drain
         # after the switch finds it still running and names its PID.
@@ -537,7 +538,9 @@ def stop_and_restart_guards(base):
         found = runtime.process(changing.pid)
         helper = {'pid': changing.pid, 'kind': 'status worker', 'executable': found[0], 'argv': found[1],
                   'environment': found[2]}
-        assert runtime.stop_helpers([helper]) == [helper]
+        assert runtime.stop_helpers([helper], []) == [helper]
+        # A SIGKILL takes a moment to show as an exit.
+        time.sleep(.5)
         assert changing.poll() is None, 'SIGKILL reached a process that was no longer the helper'
         assert runtime.process(changing.pid)[1] == ['sleep', '30']
     finally:
@@ -572,7 +575,7 @@ def stop_and_restart_guards(base):
         if len(calls) > 1:
             raise RuntimeError('inspection failed')
         return stopped
-    runtime.gate_helpers, runtime.stop_helpers = helpers, lambda found: found
+    runtime.gate_helpers, runtime.stop_helpers = helpers, lambda found, stopped: stopped.extend(found)
     runtime.restart_helpers = lambda rt, found: restarted.extend(found)
     try:
         runtime.command_gate(held, timeout=5, grace=.05).__enter__()
@@ -593,6 +596,42 @@ def stop_and_restart_guards(base):
     finally:
         subprocess.Popen = popen
 
+    # Ctrl-C partway through stopping: a helper already signalled still restarts.
+    two = [{'pid': 11, 'kind': 'status worker', 'argv': ['n'], 'environment': {}},
+           {'pid': 12, 'kind': 'status worker', 'argv': ['n'], 'environment': {}}]
+    saved = {name: getattr(runtime, name) for name in ('gate_helpers', 'signal_helper', 'restart_helpers')}
+    restarted.clear()
+    signalled = []
+    def signal_once(helper, number):
+        # SIGTERM has gone out when Ctrl-C arrives.
+        signalled.append(helper)
+        raise KeyboardInterrupt
+    runtime.gate_helpers, runtime.signal_helper = (lambda rt: two), signal_once
+    runtime.restart_helpers = lambda rt, found: restarted.extend(found)
+    holder = open(held / 'commands.lock', 'w')
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    try:
+        runtime.command_gate(held, timeout=5, grace=.05).__enter__()
+        raise AssertionError('took a held lock')
+    except KeyboardInterrupt:
+        pass
+    finally:
+        for name, value in saved.items():
+            setattr(runtime, name, value)
+        holder.close()
+    assert signalled == [two[0]] and two[0] in restarted, 'a helper signalled before Ctrl-C was not restarted'
+
+    # A wake that can't be queued still lets the worker restart.
+    started, wake, popen = [], runtime.queue_wake, subprocess.Popen
+    runtime.queue_wake = lambda helper: (_ for _ in ()).throw(OSError('queue unwritable'))
+    subprocess.Popen = lambda *a, **k: started.append(a)
+    try:
+        runtime.restart_helpers(held, [{'pid': 13, 'kind': 'status worker', 'argv': ['n', 'hook', 'agent-status-worker'],
+                                        'environment': {}}])
+    finally:
+        runtime.queue_wake, subprocess.Popen = wake, popen
+    assert started, 'a failed wake kept the status worker from restarting'
+
 
 def busy_gate_advice():
     """A blocked update names each holder by its subcommand words only: a flag's
@@ -603,10 +642,11 @@ def busy_gate_advice():
                   '--input-json', '{"source":"@lead secret words"}']) == 'namedrop reply'
     assert words(['/r/namedrop', '--input-json={"a":1}', 'send', 'Secret Text']) == 'namedrop send'
     assert words(['/r/namedrop', 'ui', 'run', 'tour']) == 'namedrop ui run tour'
-    holders = {'worker': [(41, 'namedrop hook agent-status-worker')],
-               'popup': [(42, 'namedrop ui run tour')],
-               'both': [(41, 'namedrop hook agent-status-worker'), (42, 'namedrop ui run tour')],
-               'other': [(43, 'namedrop reply')], 'none': []}
+    holders = {'worker': [(41, 'namedrop hook agent-status-worker', False)],
+               'working': [(44, 'namedrop hook agent-status-worker', True)],
+               'popup': [(42, 'namedrop ui run tour', True)],
+               'both': [(41, 'namedrop hook agent-status-worker', False), (42, 'namedrop ui run tour', True)],
+               'other': [(43, 'namedrop reply', True)], 'none': []}
     found = runtime.gate_holders
     try:
         messages = {}
@@ -615,10 +655,14 @@ def busy_gate_advice():
             messages[name] = runtime.busy_gate_message(Path('/unused'))
     finally:
         runtime.gate_holders = found
+    # Only a status worker from before 1.7.0 holds the lock between jobs, so
+    # only that one is worth stopping by hand.
     assert 'kill 41' in messages['worker'] and 'status worker' in messages['worker'] and 'popup' not in messages['worker']
+    assert 'kill' not in messages['working'] and 'PID 44' in messages['working'], messages['working']
+    assert 'wait' in messages['working'], messages['working']
     assert 'popup' in messages['popup'] and 'kill' not in messages['popup']
     assert 'popup' in messages['both'] and 'kill 41' in messages['both'] and 'kill 42' not in messages['both']
-    assert 'kill 43' in messages['other'] and 'PID 43 (namedrop reply)' in messages['other']
+    assert 'kill' not in messages['other'] and 'PID 43 (namedrop reply)' in messages['other'], messages['other']
     assert 'popup' in messages['none']
     assert all('retry the update' in message for message in messages.values())
 

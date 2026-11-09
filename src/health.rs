@@ -1012,6 +1012,7 @@ fn registered_plugin_root<E: HerdrCommandExecutor>(herdr: &E) -> Option<std::pat
 /// keeps failing on, and any event it had to set aside, is shown here.
 fn status_queue_issues(queue: &std::path::Path, now_ms: u64) -> Vec<HealthIssue> {
     const SHOWN_FOR_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+    crate::status_queue::forget_stale(queue, now_ms);
     let (failing, set_aside) = crate::status_queue::health(queue);
     let about = |failure: &crate::status_queue::Failure| {
         format!(
