@@ -1706,7 +1706,7 @@ fn codex_plugin_version_tracks_generated_hook_content() {
     };
     let first_version = version();
     assert!(
-        first_version.starts_with(&format!("{}+codex.", env!("CARGO_PKG_VERSION"))),
+        first_version.contains("+codex."),
         "generated plugin version has no Codex cachebuster: {first_version}"
     );
 
@@ -1735,6 +1735,39 @@ fn codex_plugin_version_tracks_generated_hook_content() {
         first_version,
         "changed hook content reused the stale Codex cache version"
     );
+}
+
+/// Codex refuses a running session's hooks once any byte of the plugin changes,
+/// so a release that changes nothing a session runs must not change a byte.
+#[test]
+fn no_package_file_names_the_release() {
+    for runtime in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+        let directory = TestDirectory::new();
+        let state = directory.path().join("plugin-state");
+        fs::create_dir(&state).unwrap();
+        let executable = directory.path().join("namedrop");
+        fs::write(&executable, "executable").unwrap();
+        let package =
+            install_integration_package(directory.home(), runtime, &executable, &state).unwrap();
+        let mut pending = vec![package];
+        let mut files = 0;
+        while let Some(path) = pending.pop() {
+            if path.is_dir() {
+                pending.extend(fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+                continue;
+            }
+            files += 1;
+            assert!(
+                !fs::read_to_string(&path)
+                    .unwrap()
+                    .contains(env!("CARGO_PKG_VERSION")),
+                "{} names release {}",
+                path.display(),
+                env!("CARGO_PKG_VERSION")
+            );
+        }
+        assert!(files > 8, "only {files} package files were read");
+    }
 }
 
 #[test]
@@ -3174,7 +3207,6 @@ fn assert_installed_package(home_directory: &Path, runtime: AgentRuntime) {
     .unwrap();
     assert_eq!(marker["owner"], "namedrop");
     assert_eq!(marker["protocol_version"], "collab/v1");
-    assert_eq!(marker["package_version"], env!("CARGO_PKG_VERSION"));
     let codex_manifest: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(directory.join(".codex-plugin/plugin.json")).unwrap(),
     )
@@ -3184,14 +3216,14 @@ fn assert_installed_package(home_directory: &Path, runtime: AgentRuntime) {
         codex_manifest["version"]
             .as_str()
             .unwrap()
-            .starts_with(&format!("{}+codex.", env!("CARGO_PKG_VERSION")))
+            .contains("+codex.")
     );
     let claude_manifest: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(directory.join(".claude-plugin/plugin.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(claude_manifest["name"], "namedrop");
-    assert_eq!(claude_manifest["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(claude_manifest["version"], codex_manifest["version"]);
     let hooks: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(directory.join("hooks/hooks.json")).unwrap())
             .unwrap();

@@ -28,6 +28,7 @@ const DESCRIPTOR_FILE: &str = "tool.json";
 const CODEX_MANIFEST_FILE: &str = ".codex-plugin/plugin.json";
 const CLAUDE_MANIFEST_FILE: &str = ".claude-plugin/plugin.json";
 const HOOKS_FILE: &str = "hooks/hooks.json";
+const REVISION_SLOT: &str = "<namedrop-package-revision>";
 const HOOK_SCRIPT_FILE: &str = "scripts/user-prompt-submit";
 const STOP_SCRIPT_FILE: &str = "scripts/stop";
 const SESSION_START_SCRIPT_FILE: &str = "scripts/session-start";
@@ -514,20 +515,12 @@ fn prepare_integration_package(
             ))
         })
         .collect::<Result<Vec<_>, String>>()?;
-    let mut cache_contents = vec![
-        runtime.as_str(),
-        &instructions,
-        package.tool_descriptor,
-        &hooks,
-    ];
-    cache_contents.extend(scripts.iter().map(|(_, content, _)| content.as_str()));
-    let codex_version = codex_cache_version(&cache_contents);
     let mut files = vec![
         (OWNERSHIP_MARKER_FILE, ownership_marker(), None),
         (INSTRUCTIONS_FILE, instructions, None),
         (DESCRIPTOR_FILE, package.tool_descriptor.to_owned(), None),
-        (CODEX_MANIFEST_FILE, codex_manifest(&codex_version), None),
-        (CLAUDE_MANIFEST_FILE, claude_manifest(), None),
+        (CODEX_MANIFEST_FILE, codex_manifest(REVISION_SLOT), None),
+        (CLAUDE_MANIFEST_FILE, claude_manifest(REVISION_SLOT), None),
         (HOOKS_FILE, hooks, None),
         (MARKETPLACE_FILE, marketplace_manifest(), None),
     ];
@@ -544,6 +537,15 @@ fn prepare_integration_package(
         ),
         Some(0o600),
     ));
+    let revision = package_revision(
+        &files
+            .iter()
+            .map(|(name, content, _)| (*name, content.as_str()))
+            .collect::<Vec<_>>(),
+    );
+    for (_, content, _) in &mut files {
+        *content = content.replace(REVISION_SLOT, &revision);
+    }
     verify_owned_plugin_targets(&directory, &files)?;
     let codex_policy = if runtime == AgentRuntime::Codex {
         Some(prepare_codex_policy(
@@ -918,7 +920,6 @@ fn ownership_marker() -> String {
         json!({
             "owner": PACKAGE_OWNER,
             "protocol_version": crate::INTEGRATION_PROTOCOL_VERSION,
-            "package_version": env!("CARGO_PKG_VERSION"),
         })
     )
 }
@@ -944,29 +945,30 @@ fn codex_manifest(version: &str) -> String {
     )
 }
 
-/// Codex snapshots installed plugins by manifest version. The generated wrapper
-/// contains the absolute executable and state paths, so a stable Cargo version
-/// would let Codex reuse an obsolete cached hook after Herdr refreshes it.
-/// Deriving build metadata from the actual generated files makes identical
-/// packages stable while any routing-relevant change gets a new cache key.
-fn codex_cache_version(contents: &[&str]) -> String {
+/// Codex snapshots installed plugins by manifest version, and refuses a running
+/// session's hooks once any byte of the plugin differs from what it approved. So
+/// the version comes from every generated file and from nothing else: any change
+/// gets a new cache key, and a release that changes none of them changes no byte.
+fn package_revision(files: &[(&str, &str)]) -> String {
     let mut digest = Sha256::new();
     digest.update(b"namedrop-codex-plugin-v1");
-    for content in contents {
-        digest.update((content.len() as u64).to_le_bytes());
-        digest.update(content.as_bytes());
+    for (name, content) in files {
+        for part in [*name, *content] {
+            digest.update((part.len() as u64).to_le_bytes());
+            digest.update(part.as_bytes());
+        }
     }
     let digest = crate::lower_hex(&digest.finalize());
-    format!("{}+codex.{}", env!("CARGO_PKG_VERSION"), &digest[..16])
+    format!("1.0.0+codex.{}", &digest[..16])
 }
 
-fn claude_manifest() -> String {
+fn claude_manifest(version: &str) -> String {
     format!(
         "{}\n",
         json!({
             "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
             "name": PACKAGE_OWNER,
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": version,
             "description": "Route @mention prompts through Namedrop.",
             "author": {"name": "Namedrop"},
             "skills": ["./"]
@@ -974,11 +976,6 @@ fn claude_manifest() -> String {
     )
 }
 
-/// Both hosts read this file. Each entry launches the wrapper from the plugin
-/// root the host exports, or from the installed path when neither is set.
-/// SessionStart carries no matcher, so it runs for every source the host
-/// reports: a new session, a resume, a clear, a compaction, a fork. Each of
-/// those rebuilds the context the policy was in.
 fn hooks_manifest(package_directory: &Path) -> Result<String, String> {
     let launch = |script: &str| -> Result<String, String> {
         let fallback = package_directory.join(script);
@@ -1494,6 +1491,69 @@ fn conflict(path: &Path, reason: &str) -> String {
 mod permission_tests {
     use super::*;
     use crate::StateNamespace;
+
+    /// Codex hashes every byte of the plugin, so a byte outside the revision could
+    /// strand a running session with no new version to show for it.
+    #[test]
+    fn the_package_revision_covers_every_byte_of_the_package() {
+        let root =
+            std::env::temp_dir().join(format!("namedrop-package-revision-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (home, state) = (root.join("home"), root.join("state"));
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        let config = AgentConfigDirectories::default();
+        let package = prepare_integration_package(
+            &home,
+            AgentRuntime::Codex,
+            Path::new("/test/namedrop"),
+            &state,
+            config,
+        )
+        .unwrap();
+        let (_, manifest, _) = package
+            .files
+            .iter()
+            .find(|(name, _, _)| *name == CODEX_MANIFEST_FILE)
+            .unwrap();
+        let manifest: Value = serde_json::from_str(manifest).unwrap();
+        let revision = manifest["version"].as_str().unwrap();
+        let unstamped: Vec<(&str, String)> = package
+            .files
+            .iter()
+            .map(|(name, content, _)| (*name, content.replace(revision, REVISION_SLOT)))
+            .collect();
+        let files = |changed: Option<usize>| -> Vec<(String, String)> {
+            unstamped
+                .iter()
+                .enumerate()
+                .map(|(index, (name, content))| {
+                    let mut content = content.clone();
+                    if changed == Some(index) {
+                        content.push('.');
+                    }
+                    ((*name).to_owned(), content)
+                })
+                .collect()
+        };
+        let digest = |files: &[(String, String)]| {
+            let files: Vec<(&str, &str)> = files
+                .iter()
+                .map(|(name, content)| (name.as_str(), content.as_str()))
+                .collect();
+            package_revision(&files)
+        };
+        assert_eq!(digest(&files(None)), revision);
+        for (index, (name, _)) in unstamped.iter().enumerate() {
+            assert_ne!(
+                digest(&files(Some(index))),
+                revision,
+                "{name} is outside the revision"
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn subagent_hook_removal_waits_for_last_space_and_preserves_user_changes() {
         let root = std::env::temp_dir().join(format!(

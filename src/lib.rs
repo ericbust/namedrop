@@ -18,6 +18,7 @@ mod groups;
 mod handoff;
 mod health;
 mod hook;
+mod hook_runs;
 mod install;
 mod installed_runtime;
 mod integration;
@@ -38,6 +39,7 @@ mod shown_roster;
 mod spaces;
 mod store;
 pub mod subagent;
+pub use hook_runs::record_hook_run;
 #[doc(hidden)]
 pub use shortcuts::install_shortcuts;
 pub use shown_roster::forget_shown_roster;

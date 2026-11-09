@@ -616,6 +616,9 @@ pub fn execute_queued(
         }
     }
     let mut result = execute_request(state, &request);
+    if let Err(error) = &result {
+        warn_refused_settle(state, &request, error);
+    }
     if let Ok(value) = &mut result {
         completed(
             request.operation.token(),
@@ -638,6 +641,35 @@ pub fn execute_queued(
         },
     )?;
     clear_pending(&pending, key)
+}
+
+/// The agent got `pending` back and may never retry, so a settle refused here
+/// has to warn the person. Any agent can queue any attempt's id, so only the
+/// attempt's own session raises this.
+fn warn_refused_settle(state: &Path, request: &Request, error: &str) {
+    let lost = match request.operation {
+        Operation::Reply => crate::store::LostSettle::QueuedReply,
+        Operation::Complete => crate::store::LostSettle::QueuedNoReply,
+        _ => return,
+    };
+    let Some(attempt) = request.input["attempt_id"].as_str() else {
+        return;
+    };
+    let attempt = crate::DeliveryAttemptId::new(attempt);
+    let by = crate::MutationAttribution::new(
+        crate::ActorKind::Plugin,
+        "namedrop",
+        SystemClock.now_unix_ms(),
+    );
+    let namespace = &request.caller.namespace;
+    let _ = StateStore::open(state).and_then(|mut store| {
+        store.transaction(|transaction| {
+            if !transaction.attempt_belongs_to(namespace, &attempt, &request.caller.session)? {
+                return Ok(());
+            }
+            transaction.flag_failed_settle(namespace, &attempt, lost, error, &by)
+        })
+    });
 }
 
 fn clear_pending(pending: &Dir, key: &str) -> Result<(), String> {

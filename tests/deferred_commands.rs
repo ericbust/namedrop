@@ -3,9 +3,10 @@
 mod cleanup;
 mod support;
 use namedrop::{
-    ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
-    LifecycleRuntime, MutationAttribution, PaneAddressId, PaneBindingId, ProcessIds,
-    StateNamespace, StateStore, SystemClock, complete_capability_profile,
+    ActorKind, AgentRuntime, AgentSessionId, Clock, DeliveryAttemptId, DeliveryId, DeliveryState,
+    HerdrCommandExecutor, HerdrCommandOutput, LeaseDraft, LifecycleRuntime, MessageDraft,
+    MessageId, MessageRecipientDraft, MutationAttribution, PaneAddressId, PaneBindingId,
+    ProcessIds, StateNamespace, StateStore, SystemClock, ThreadId, complete_capability_profile,
     execute_integration_operation,
 };
 use serde_json::{Value, json};
@@ -1512,4 +1513,171 @@ fn a_queued_explicit_settle_is_visible_until_its_receipt_lands() {
     let receipt = PathBuf::from(queued["data"]["receipt"].as_str().unwrap());
     wait_for(|| receipt.exists());
     assert!(!settle_queued("session-author", "attempt-queued"));
+}
+
+/// One outstanding attempt on `recipient`, sent by the other address.
+fn attempt_on(
+    fixture: &Fixture,
+    recipient: &str,
+    binding: &str,
+    session: &str,
+) -> DeliveryAttemptId {
+    let namespace = StateNamespace::for_space(&fixture.socket, "workspace-1");
+    let attribution = MutationAttribution::new(ActorKind::Human, "test", 1);
+    let attempt = DeliveryAttemptId::new("attempt-ask");
+    let author = if recipient == "author" {
+        "reviewer"
+    } else {
+        "author"
+    };
+    StateStore::open(fixture.directory.path())
+        .unwrap()
+        .transaction(|tx| {
+            if recipient != "author" {
+                tx.bind_pane(
+                    &namespace,
+                    &PaneBindingId::new(binding),
+                    &PaneAddressId::new(recipient),
+                    "pane-other",
+                    &attribution,
+                )?;
+                tx.observe_agent_session(
+                    &namespace,
+                    "observation-other",
+                    &PaneAddressId::new(recipient),
+                    &AgentSessionId::new(session),
+                    "idle",
+                    &attribution,
+                )?;
+            }
+            tx.create_thread(
+                &namespace,
+                &ThreadId::new("thread-ask"),
+                "An ask",
+                &attribution,
+            )?;
+            tx.append_message(
+                &namespace,
+                &MessageDraft {
+                    thread_id: ThreadId::new("thread-ask"),
+                    message_id: MessageId::new("message-ask"),
+                    in_reply_to: None,
+                    author_address_id: PaneAddressId::new(author),
+                    author_kind: ActorKind::Human,
+                    author_alias_snapshot: author.to_owned(),
+                    author_agent_session_snapshot: None,
+                    request_id: "request-ask".to_owned(),
+                    authored_source: format!("@{recipient} please answer"),
+                    body: "please answer".to_owned(),
+                    grammar_version: "mention-hook/v1".to_owned(),
+                    recipients: vec![MessageRecipientDraft {
+                        address_id: PaneAddressId::new(recipient),
+                        alias_snapshot: recipient.to_owned(),
+                        agent_session_snapshot: Some(AgentSessionId::new(session)),
+                        delivery_id: DeliveryId::new("delivery-ask"),
+                    }],
+                    context_references: Vec::new(),
+                },
+                &attribution,
+            )?;
+            tx.lease_mailbox_head(
+                &namespace,
+                &PaneAddressId::new(recipient),
+                &LeaseDraft {
+                    attempt_id: attempt.clone(),
+                    binding_id: PaneBindingId::new(binding),
+                    agent_session_id: AgentSessionId::new(session),
+                    retry_of_attempt_id: None,
+                    owner: "test".into(),
+                    acquired_at_ms: 2,
+                    expires_at_ms: u64::MAX / 2,
+                },
+                &attribution,
+            )?;
+            tx.transition_delivery_attempt(
+                &namespace,
+                &attempt,
+                DeliveryState::Submitted,
+                &attribution,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    attempt
+}
+
+fn open_warnings(fixture: &Fixture, attempt: &DeliveryAttemptId) -> Vec<String> {
+    rusqlite::Connection::open(fixture.directory.path().join("namedrop.sqlite3"))
+        .unwrap()
+        .prepare(
+            "SELECT summary FROM attention_items WHERE source_kind = 'agent_disposition'
+             AND source_id = ?1 AND resolved_at_ms IS NULL",
+        )
+        .unwrap()
+        .query_map([attempt.as_str()], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+fn reply_naming_a_ghost(attempt: &DeliveryAttemptId) -> Value {
+    json!({"attempt_id":attempt.as_str(),"author_kind":"agent_session","in_reply_to":"message-ask",
+           "request_id":"reply-refused","source":"@ghost pong"})
+}
+
+/// A sandboxed agent gets `pending` back and may never retry, so a reply the
+/// worker later refuses has to warn the person.
+#[test]
+fn a_queued_reply_the_worker_refuses_warns_the_person() {
+    let fixture = Fixture::new();
+    let attempt = attempt_on(&fixture, "author", "binding", "session-author");
+    let queued = response(fixture.sandbox_command(&["reply"], reply_naming_a_ghost(&attempt)));
+    assert_eq!(queued["data"]["state"], "pending", "{queued}");
+    let _worker = fixture.worker();
+    let receipt = PathBuf::from(queued["data"]["receipt"].as_str().unwrap());
+    wait_for(|| receipt.exists());
+    let warnings = open_warnings(&fixture, &attempt);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].contains("@ghost") && warnings[0].contains("queued reply"),
+        "{warnings:?}"
+    );
+    assert!(!warnings[0].contains("final message"), "{warnings:?}");
+}
+
+#[test]
+fn a_queued_no_reply_the_worker_refuses_warns_the_person() {
+    let fixture = Fixture::new();
+    let attempt = attempt_on(&fixture, "author", "binding", "session-author");
+    let queued = response(fixture.sandbox_command(
+        &["complete", "--no-reply"],
+        json!({"attempt_id":attempt.as_str()}),
+    ));
+    assert_eq!(queued["data"]["state"], "pending", "{queued}");
+    fs::write(
+        fixture.directory.path().join("panes.json"),
+        panes("session-replacement").to_string(),
+    )
+    .unwrap();
+    let _worker = fixture.worker();
+    let receipt = PathBuf::from(queued["data"]["receipt"].as_str().unwrap());
+    wait_for(|| receipt.exists());
+    let warnings = open_warnings(&fixture, &attempt);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("queued no-reply"), "{warnings:?}");
+    assert!(!warnings[0].contains("turn ended"), "{warnings:?}");
+}
+
+/// Refusing one agent's command must not open a warning on another's work.
+#[test]
+fn a_queued_reply_naming_another_agents_attempt_warns_nobody() {
+    let fixture = Fixture::new();
+    let attempt = attempt_on(&fixture, "reviewer", "binding-other", "session-other");
+    let queued = response(fixture.sandbox_command(&["reply"], reply_naming_a_ghost(&attempt)));
+    assert_eq!(queued["data"]["state"], "pending", "{queued}");
+    let _worker = fixture.worker();
+    let receipt = PathBuf::from(queued["data"]["receipt"].as_str().unwrap());
+    wait_for(|| receipt.exists());
+    let warnings = open_warnings(&fixture, &attempt);
+    assert!(warnings.is_empty(), "{warnings:?}");
 }

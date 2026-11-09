@@ -518,6 +518,32 @@ where
             "Start an agent in this space?",
         ));
     }
+    for address in &setup.addresses {
+        let pane = setup
+            .panes
+            .iter()
+            .find(|pane| address.pane_id.as_deref() == Some(pane.pane_id.as_str()));
+        if let Some(session) = pane
+            .filter(|pane| pane_agent_runtime(pane) == Some(crate::AgentRuntime::Codex))
+            .and_then(|pane| pane.agent_session_id.as_ref())
+            && crate::hook_runs::refused(runtime.state_directory, session.as_str())
+        {
+            let mut refused = issue(
+                "ND-SETUP-005",
+                HealthSeverity::Blocked,
+                &format!(
+                    "Codex is refusing the hooks of @{}'s session.",
+                    address.alias
+                ),
+                "The Namedrop plugin changed after this session started, and a running session doesn't pick up the change. An answer it gives as its final message won't reach anyone.",
+                HealthRepairKind::HumanDecision,
+                "Start a new Codex session in that pane and trust the Namedrop hooks at Hooks need review.",
+            );
+            refused.diagnostic =
+                serde_json::json!({"address_id":address.id,"agent_session_id":session});
+            issues.push(refused);
+        }
+    }
     for delivery in &held_deliveries {
         let (summary, explanation, prompt, input) = if let Some(attempt_id) = &delivery.attempt_id {
             (

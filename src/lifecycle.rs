@@ -917,6 +917,7 @@ where
                                 &event_namespace,
                                 &refreshed.panes,
                                 false,
+                                runtime.state_directory,
                                 &attribution,
                             )?;
                             Ok(())
@@ -1076,6 +1077,7 @@ where
                                 &source_namespace,
                                 &refreshed.panes,
                                 false,
+                                runtime.state_directory,
                                 &attribution,
                             )?;
                             Ok(())
@@ -1131,6 +1133,7 @@ where
                         &event_namespace,
                         &event_worktree.panes,
                         false,
+                        runtime.state_directory,
                         &attribution,
                     )?;
                     Ok(())
@@ -1291,6 +1294,7 @@ where
                 namespace,
                 &discovered.panes,
                 after_restart,
+                runtime.state_directory,
                 attribution,
             )?;
             Ok(())

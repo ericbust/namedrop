@@ -674,7 +674,11 @@ fn warn_settle_failed(state: &Path, claim: &Claim, failure: &str, now_ms: u64) {
             transaction.flag_failed_settle(
                 &claim.namespace,
                 &claim.attempt_id,
-                claim.answers(),
+                if claim.answers() {
+                    crate::store::LostSettle::FinalMessage
+                } else {
+                    crate::store::LostSettle::TurnEnd
+                },
                 failure,
                 &by,
             )
