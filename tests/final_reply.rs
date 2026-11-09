@@ -2793,8 +2793,10 @@ fn a_final_message_to_the_person_naming_an_unknown_agent_is_posted() {
     assert_eq!(space.claims()[0]["state"], json!({"done":"no_replied"}));
 }
 
+/// The recap is collaborator text typed into the pane, so a pointer whose
+/// recap was changed must not authenticate.
 #[test]
-fn an_envelope_carrying_a_recap_authenticates_and_a_changed_recap_does_not() {
+fn a_pointer_carrying_a_recap_authenticates_and_a_changed_recap_does_not() {
     let space = Space::new();
     space.send_as_person("ask", "@reviewer pick a word", None);
     let ask = space.herdr.envelope_for("pane-reviewer");
@@ -2806,7 +2808,7 @@ fn an_envelope_carrying_a_recap_authenticates_and_a_changed_recap_does_not() {
     );
     space.stop("session-reviewer", CLAUDE, "marmalade");
     space.send_as_person("what", "@lead what did @reviewer say?", None);
-    let mut envelope = space.herdr.envelope_for("pane-lead");
+    let envelope = space.herdr.envelope_for("pane-lead");
     assert!(
         envelope["control"]["untrusted_channel_recap"]
             .as_str()
@@ -2814,6 +2816,8 @@ fn an_envelope_carrying_a_recap_authenticates_and_a_changed_recap_does_not() {
             .contains("marmalade"),
         "{envelope}"
     );
+    let typed = typed_pointer(&space, "pane-lead");
+    assert!(typed.contains("marmalade"), "{typed}");
 
     let hook = |prompt: &str| {
         execute_user_prompt_submit_hook(
@@ -2822,15 +2826,16 @@ fn an_envelope_carrying_a_recap_authenticates_and_a_changed_recap_does_not() {
             .to_string(),
             &space.runtime("pane-lead"),
         )
-        .unwrap()["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap()
-            .to_owned()
+        .and_then(|output| {
+            output["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .unwrap_or_default()
     };
-    let exact = envelope.to_string();
-    envelope["control"]["untrusted_channel_recap"] = json!("person: something else");
-    assert!(!hook(&envelope.to_string()).contains("Namedrop commands"));
-    let authenticated = hook(&exact);
+    let changed = typed.replace("marmalade", "something else");
+    assert!(!hook(&changed).contains("Namedrop commands"));
+    let authenticated = hook(&typed);
     assert!(
         authenticated.contains("Namedrop commands"),
         "{authenticated}"
