@@ -398,17 +398,18 @@ def check_transcripts():
     claude = live.parse_claude(claude_lines("delivery-attempt-B"), "c", "c.jsonl")
     assert [live.markers(text) for text in claude.session_contexts] == [{"policy"}], claude.session_contexts
     assert len(claude.turns) == 3 and claude.models == {"claude-opus-5-5"}, claude
-    assert live.seen(claude, hop_of("delivery-attempt-B"), "verified") == (1, 1)
+    assert live.seen(claude, live.hop_key(hop_of("delivery-attempt-B")), "verified") == (1, 1)
     assert live.has_word("pong", live.last_answer(claude))
-    assert live.answered(claude, hop_of("delivery-attempt-B")) and not live.answered(claude, hop_of("delivery-attempt-Z"))
+    assert live.answered(claude, live.hop_key(hop_of("delivery-attempt-B"))) and not live.answered(claude, live.hop_key(hop_of("delivery-attempt-Z")))
     assert all(check.ok for check in live.judge_hooks("claude", claude)), live.judge_hooks("claude", claude)
     codex = live.parse_codex(codex_lines("delivery-attempt-A"), "x", "x.jsonl")
     assert len(codex.turns) == 2 and codex.models == {"gpt-6.1-sol"}, codex.turns
     pointer = "Namedrop message 0a1b2c3d from @lead. Its trusted details arrive as Namedrop hook context."
-    assert live.carries(pointer, hop_of("delivery-attempt-A", "0a1b2c3d"))
-    assert not live.carries(pointer, hop_of("delivery-attempt-A", "ffffffff"))
-    assert live.seen(codex, hop_of("delivery-attempt-A"), "commands") == (1, 1)
-    assert live.seen(codex, hop_of("delivery-attempt-A"), "verified") == (1, 0)
+    assert live.hop_key(hop_of("delivery-attempt-A", "0a1b2c3d")) in pointer
+    assert live.hop_key(hop_of("delivery-attempt-A", "ffffffff")) not in pointer
+    assert live.hop_key(hop_of("delivery-attempt-A")) == "delivery-attempt-A"
+    assert live.seen(codex, live.hop_key(hop_of("delivery-attempt-A")), "commands") == (1, 1)
+    assert live.seen(codex, live.hop_key(hop_of("delivery-attempt-A")), "verified") == (1, 0)
     assert [(turn.calls, live.settle_commands(turn)) for turn in codex.turns] == [(0, 0), (1, 0)]
     settled = live.parse_codex(codex_lines("delivery-attempt-A", settle=True), "x", "x.jsonl")
     assert [(turn.calls, live.settle_commands(turn)) for turn in settled.turns] == [(0, 0), (2, 1)]
