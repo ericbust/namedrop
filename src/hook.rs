@@ -506,7 +506,10 @@ where
         session,
         &turn,
         claim,
-        &crate::final_reply::notified_tasks(&input.prompt),
+        &crate::final_reply::notice_task(&input.prompt)
+            .map(str::to_owned)
+            .into_iter()
+            .collect::<Vec<_>>(),
         now_ms,
     );
     (

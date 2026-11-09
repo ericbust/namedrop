@@ -1,7 +1,7 @@
 use namedrop::{
     Clock, SystemClock,
     cli::RuntimeOptions,
-    final_reply::{BoundOperation, FinalText, HostTurn, StopFacts},
+    final_reply::{BoundOperation, FinalText, HostTurn, StopFacts, TurnTasks},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -155,12 +155,14 @@ pub fn run_worker(state: &Path) {
         .filter(|task| matches!(task.status.as_str(), "running" | "pending"))
         .map(|task| task.id.clone())
         .collect();
+    let turn = captured
+        .input
+        .turn_tasks(&running_tasks, captured.transcript_end);
     let stop = StopFacts {
         session: captured.input.session_id.clone(),
         turn: captured.input.turn(),
-        started_tasks: captured
-            .input
-            .started_tasks(&running_tasks, captured.transcript_end),
+        started_tasks: turn.started.unwrap_or_default(),
+        notified_tasks: turn.notified,
         running_tasks,
         text: captured
             .input
@@ -317,22 +319,22 @@ impl StopInput {
         }
     }
 
-    /// The ids of the running background tasks this turn started. Without a
-    /// prompt id every running task counts, as it did before turns were read.
-    fn started_tasks(&self, running: &[String], transcript_end: Option<u64>) -> Vec<String> {
-        match &self.prompt_id {
-            _ if running.is_empty() => Vec::new(),
-            Some(prompt_id) => self
-                .transcript_tail(transcript_end, TURN_SCAN_BYTES)
-                .map(|bytes| namedrop::final_reply::started_tasks(&bytes, prompt_id))
-                .unwrap_or_default(),
-            None => running.to_vec(),
-        }
+    /// What this turn's transcript says about its background work. When the
+    /// turn's start can't be read, every running task counts as started by
+    /// it, so a final message that may be a status is held as before.
+    fn turn_tasks(&self, running: &[String], transcript_end: Option<u64>) -> TurnTasks {
+        let read = self.prompt_id.as_deref().and_then(|prompt_id| {
+            let (bytes, whole) = self.transcript_tail(transcript_end, TURN_SCAN_BYTES)?;
+            Some(namedrop::final_reply::turn_tasks(&bytes, whole, prompt_id))
+        });
+        let mut turn = read.unwrap_or_default();
+        turn.started.get_or_insert_with(|| running.to_vec());
+        turn
     }
 
     /// Up to `limit` bytes of the transcript before `transcript_end`, from the
-    /// first whole line.
-    fn transcript_tail(&self, transcript_end: Option<u64>, limit: u64) -> Option<Vec<u8>> {
+    /// first whole line, and whether they start at the transcript's start.
+    fn transcript_tail(&self, transcript_end: Option<u64>, limit: u64) -> Option<(Vec<u8>, bool)> {
         let path = self.transcript_path.as_ref()?;
         if !path.is_absolute() {
             return None;
@@ -361,11 +363,11 @@ impl StopInput {
                 .map_or(bytes.len(), |at| at + 1);
             bytes.drain(..first);
         }
-        Some(bytes)
+        Some((bytes, start == 0))
     }
 
     fn transcript_text(&self, transcript_end: Option<u64>) -> Option<String> {
-        let bytes = self.transcript_tail(transcript_end, MAX_INPUT_BYTES)?;
+        let (bytes, _) = self.transcript_tail(transcript_end, MAX_INPUT_BYTES)?;
         let records = bytes
             .split(|byte| *byte == b'\n')
             .filter_map(|line| serde_json::from_slice::<Value>(line).ok());

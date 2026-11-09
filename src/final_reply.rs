@@ -234,52 +234,72 @@ pub(crate) fn claim_for(
         failure: None,
         awaits: Vec::new(),
         first_armed_at_ms: None,
-        wake: None,
     })
 }
 
-/// The tasks one Claude Code turn put in the background, from the tool results
-/// its transcript records under `prompt_id`: Bash's `backgroundTaskId`, a
-/// background Agent's `agentId`, a resumed one's `resumedAgentId` and
-/// Monitor's `taskId`.
-pub fn started_tasks(transcript: &[u8], prompt_id: &str) -> Vec<String> {
-    let mut started = Vec::new();
-    if prompt_id.is_empty() {
-        return started;
-    }
-    for line in transcript.split(|byte| *byte == b'\n') {
-        if !line
-            .windows(prompt_id.len())
-            .any(|window| window == prompt_id.as_bytes())
-        {
+/// What one Claude Code turn's transcript records say about its background
+/// work. A turn's records run from the first one that carries its
+/// `promptId` to the first of another turn, or the end of the transcript.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct TurnTasks {
+    /// The tasks the turn started, or `None` when its first record is not in
+    /// what was read, so a start may be missing.
+    pub started: Option<Vec<String>>,
+    /// The tasks whose notices reached the turn: as its own prompt, or queued
+    /// into it while it ran.
+    pub notified: Vec<String>,
+}
+
+/// Reads one turn from the end of a transcript. `whole` says the bytes start
+/// at the transcript's beginning.
+pub fn turn_tasks(transcript: &[u8], whole: bool, prompt_id: &str) -> TurnTasks {
+    let mut turn = TurnTasks::default();
+    let (mut started, mut found, mut earlier_turn) = (Vec::new(), false, whole);
+    for record in transcript
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+    {
+        let own = !prompt_id.is_empty() && record["promptId"] == prompt_id;
+        let other_turn = !own && record["promptId"].is_string();
+        if found && other_turn {
+            break;
+        }
+        if !own && !found {
+            earlier_turn |= other_turn;
             continue;
         }
-        let Ok(record) = serde_json::from_slice::<Value>(line) else {
-            continue;
+        found = true;
+        let notice = match (
+            record["type"].as_str(),
+            record["attachment"]["type"].as_str(),
+        ) {
+            (Some("user"), _) if own => record["message"]["content"].as_str(),
+            (Some("attachment"), Some("queued_command")) => record["attachment"]["prompt"].as_str(),
+            _ => None,
         };
-        if record["promptId"] != prompt_id {
-            continue;
-        }
-        let result = &record["toolUseResult"];
-        for key in ["backgroundTaskId", "agentId", "resumedAgentId", "taskId"] {
-            if let Some(id) = result[key].as_str() {
-                started.push(id.to_owned());
+        turn.notified
+            .extend(notice.and_then(notice_task).map(str::to_owned));
+        if own {
+            let result = &record["toolUseResult"];
+            for key in ["backgroundTaskId", "agentId", "resumedAgentId", "taskId"] {
+                started.extend(result[key].as_str().map(str::to_owned));
             }
         }
     }
-    started
+    turn.started = (found && earlier_turn).then_some(started);
+    turn
 }
 
-/// The tasks a Claude Code task notification says have ended or changed.
-pub(crate) fn notified_tasks(prompt: &str) -> Vec<&str> {
-    if !prompt.trim_start().starts_with("<task-notification>") {
-        return Vec::new();
-    }
-    prompt
-        .split("<task-id>")
-        .skip(1)
-        .filter_map(|rest| rest.split_once("</task-id>").map(|(id, _)| id.trim()))
-        .collect()
+/// The task a Claude Code task notice is about: the `task-id` element that
+/// opens it, never one quoted in its result.
+pub(crate) fn notice_task(text: &str) -> Option<&str> {
+    let (id, _) = text
+        .trim_start()
+        .strip_prefix("<task-notification>")?
+        .trim_start()
+        .strip_prefix("<task-id>")?
+        .split_once("</task-id>")?;
+    Some(id.trim()).filter(|id| !id.is_empty())
 }
 
 /// Where the bound operations of one delivery run: the envelope's own tool
@@ -315,21 +335,9 @@ pub(crate) struct Claim {
     /// The background tasks a held claim waits for.
     #[serde(default)]
     pub awaits: Vec<String>,
-    /// When a claim that a task's notice re-armed was first armed.
+    /// When a claim that a task's notice woke was first armed.
     #[serde(default)]
     pub first_armed_at_ms: Option<u64>,
-    /// A task's notice that reached the session before this claim's Stop
-    /// worker decided it.
-    #[serde(default)]
-    pub wake: Option<Wake>,
-}
-
-/// The turn a task's notice started, and the tasks it named.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct Wake {
-    pub turn: HostTurn,
-    pub at_ms: u64,
-    pub tasks: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -376,6 +384,8 @@ pub struct StopFacts {
     pub running_tasks: Vec<String>,
     /// The tasks this turn put in the background, from its transcript.
     pub started_tasks: Vec<String>,
+    /// The tasks whose notices reached this turn, from its transcript.
+    pub notified_tasks: Vec<String>,
     pub text: FinalText,
 }
 
@@ -637,6 +647,25 @@ impl Claims {
         })
     }
 
+    /// The held claim that notices of `tasks` reaching `turn` wake: the
+    /// oldest still outstanding that waits for one of them. A turn that has a
+    /// claim of its own wakes none, since its final message is that answer.
+    fn woken(&self, state: &Path, turn: &HostTurn, tasks: &[String]) -> Option<usize> {
+        if tasks.is_empty() || self.claims.iter().any(|claim| claim.turn == *turn) {
+            return None;
+        }
+        self.claims
+            .iter()
+            .enumerate()
+            .filter(|(_, claim)| {
+                claim.state == ClaimState::Left(LeaveReason::Held)
+                    && claim.waits_for_any(tasks)
+                    && outstanding(state, claim) != Some(false)
+            })
+            .min_by_key(|(_, claim)| claim.helpers_since_ms())
+            .map(|(index, _)| index)
+    }
+
     /// When a Stop of `turn` handed its claims to a worker, if one did.
     fn stopped_at(&self, turn: &HostTurn) -> Option<u64> {
         stopped_at(&self.directory, turn)
@@ -697,14 +726,13 @@ impl Claim {
         self.first_armed_at_ms.unwrap_or(self.armed_at_ms)
     }
 
-    /// Moves a held claim to the turn a notice of its work started, so that
+    /// Moves a held claim to the turn a notice of its work reached, so that
     /// turn's final message is the answer.
-    fn wake_on(&mut self, turn: HostTurn, at_ms: u64) -> ClaimState {
+    fn wake_on(&mut self, turn: HostTurn, at_ms: u64) {
         self.first_armed_at_ms.get_or_insert(self.armed_at_ms);
         self.turn = turn;
         self.armed_at_ms = at_ms;
-        self.wake = None;
-        ClaimState::Open
+        self.set(ClaimState::Open, at_ms);
     }
 
     fn waits_for_any(&self, tasks: &[impl AsRef<str>]) -> bool {
@@ -847,7 +875,7 @@ pub(crate) fn observe_prompt(
     session: &str,
     turn: &HostTurn,
     arm: Option<Claim>,
-    notified: &[&str],
+    notified: &[String],
     now_ms: u64,
 ) -> Observed {
     let directory = session_directory(state, socket, session);
@@ -871,35 +899,6 @@ pub(crate) fn observe_prompt(
             claim.move_on(state, next, now_ms);
         }
     }
-    // Work a held claim waits for woke the session: this turn's final message
-    // is the answer the hold kept back. A claim whose Stop worker has not
-    // decided yet keeps the notice for that worker.
-    if !notified.is_empty() {
-        let deciding: Vec<_> = claims
-            .claims
-            .iter()
-            .map(|claim| {
-                claim.state == ClaimState::Open && claims.stopped_at(&claim.turn).is_some()
-            })
-            .collect();
-        for (claim, deciding) in claims.claims.iter_mut().zip(deciding) {
-            if deciding {
-                let mut tasks = claim.wake.take().map(|wake| wake.tasks).unwrap_or_default();
-                tasks.extend(notified.iter().map(|id| (*id).to_owned()));
-                claim.wake = Some(Wake {
-                    turn: turn.clone(),
-                    at_ms: now_ms,
-                    tasks,
-                });
-            } else if claim.state == ClaimState::Left(LeaveReason::Held)
-                && claim.waits_for_any(notified)
-                && outstanding(state, claim) != Some(false)
-            {
-                let next = claim.wake_on(turn.clone(), now_ms);
-                claim.set(next, now_ms);
-            }
-        }
-    }
     // A claim whose Stop already ran belongs to that Stop's worker; only one
     // still waiting for its own turn's Stop keeps this delivery explicit.
     let open = claims
@@ -916,12 +915,18 @@ pub(crate) fn observe_prompt(
         }
         _ => false,
     };
+    // The claim this prompt's notice wakes answers at this turn's Stop.
+    let woken = (!armed)
+        .then(|| claims.woken(state, turn, notified))
+        .flatten();
     let mut left_open = Vec::new();
-    for claim in &mut claims.claims {
+    for (index, claim) in claims.claims.iter_mut().enumerate() {
         if !matches!(claim.state, ClaimState::Left(_)) {
             continue;
         }
-        if outstanding(state, claim) == Some(false) {
+        if Some(index) == woken {
+            claim.updated_at_ms = now_ms;
+        } else if outstanding(state, claim) == Some(false) {
             claim.set(ClaimState::Done(Done::Superseded), now_ms);
         } else if let Some(way_back) = claim.way_back() {
             left_open.push(way_back);
@@ -937,7 +942,11 @@ pub(crate) fn observe_prompt(
 pub fn has_live_claims(state: &Path, socket: &str, session: &str) -> bool {
     read_claims(&session_directory(state, socket, session))
         .iter()
-        .any(|claim| claim.state == ClaimState::Open)
+        .any(|claim| match claim.state {
+            ClaimState::Open => true,
+            ClaimState::Left(LeaveReason::Held) => !claim.awaits.is_empty(),
+            _ => false,
+        })
 }
 
 /// The bound operation the Stop runs for a claim: its token, its input, and
@@ -975,6 +984,11 @@ pub fn settle_at_stop(
         );
         return;
     };
+    if let Some(turn) = &stop.turn
+        && let Some(index) = claims.woken(state, turn, &stop.notified_tasks)
+    {
+        claims.claims[index].wake_on(turn.clone(), now_ms);
+    }
     // A claim of another turn armed after this Stop ended belongs to a turn
     // that started after it: a late worker leaves it to that turn.
     let moved: Vec<_> = claims
@@ -1009,12 +1023,7 @@ pub fn settle_at_stop(
             Verdict::Ignore => continue,
             Verdict::Leave(LeaveReason::Held) => {
                 claim.awaits = stop.awaited(claim);
-                match claim.wake.take() {
-                    Some(wake) if claim.waits_for_any(&wake.tasks) => {
-                        claim.wake_on(wake.turn, wake.at_ms)
-                    }
-                    _ => ClaimState::Left(LeaveReason::Held),
-                }
+                ClaimState::Left(LeaveReason::Held)
             }
             Verdict::Leave(reason) => ClaimState::Left(reason),
             Verdict::Superseded => ClaimState::Done(Done::Superseded),
