@@ -259,11 +259,39 @@ def check_tracked_judge():
     return "daily tracked judge: a missing continuation, a doubled or unshown report each fail"
 
 
+def check_hold_judges():
+    held = dco.Held("left:held", 0, 0, 0, 1)
+    assert dco.judge_hold("h", held).ok
+    assert not dco.judge_hold("h", held._replace(relays=1)).ok, "posted while held"
+    assert not dco.judge_hold("h", held._replace(dispositions=1)).ok
+    assert not dco.judge_hold("h", held._replace(posts=1)).ok
+    assert not dco.judge_hold("h", held._replace(helper_requests=0)).ok
+    won = dco.judge_hold("h", held._replace(claim="done:no_replied"))
+    assert not won.ok and "inconclusive" in won.detail, "a helper that won the race proves nothing"
+    assert "inconclusive" in dco.judge_hold("h", held._replace(claim="left:no_final_text")).detail
+    open_turn = live.Turn("p", ("Namedrop: delivery a1 from an earlier turn is still open; to answer it",), (), (), 1)
+    transcript = live.Transcript("claude", "s", "p", (), (live.Turn("p", (), (), (), 1), open_turn), frozenset())
+    assert dco.way_back_turns(transcript, "a1") == (open_turn,) and not dco.way_back_turns(transcript, "a2")
+    answer = du.parse_message({"message_id": "m2", "thread_id": "t", "in_reply_to": "m", "kind": "reply",
+                               "body": {"text": "amber1"}, "legs": []})
+    hop = live.Hop("m", "person", "claude", None, 1, 1, 0, 1, "a1", "settled", 0, "reply", "q")
+    ok = dco.judge_late_answer("h", "amber1", hop, (answer,), "t", (open_turn,), "agent_disposition", True)
+    assert all(check.ok for check in ok)
+    for changed in (dco.judge_late_answer("h", "amber1", hop, (), "t", (open_turn,), "", True),
+                    dco.judge_late_answer("h", "amber1", hop, (answer, answer), "t", (open_turn,), "", True),
+                    dco.judge_late_answer("h", "amber1", hop, (answer,), "other", (open_turn,), "", True),
+                    dco.judge_late_answer("h", "amber1", hop, (answer,), "t", (), "", True),
+                    dco.judge_late_answer("h", "amber1", hop._replace(attempts=2), (answer,), "t", (open_turn,), "", True),
+                    dco.judge_late_answer("h", "amber1", hop, (answer,), "t", (open_turn,), "agent_disposition", False)):
+        assert not all(check.ok for check in changed)
+    return "daily hold judges: a post during the hold, a lost way-back line or a doubled answer each fail"
+
+
 def check_lane_plan():
     lane = du.lane()
     keys = [step.key for step in lane.setup + lane.checks]
     assert keys[:4] == ["first-run", "names", "hooks", "channels"]
-    assert keys[4:] == ["answers", "recap", "warnings", "tracked"]
+    assert keys[4:] == ["answers", "recap", "warnings", "tracked", "held"]
     ran, results = [], []
 
     class Fake:
@@ -367,5 +395,5 @@ def checks(scratch):
             ("daily warning judge", check_warning_judge), ("daily answer judge", check_answer_judge),
             ("daily natural wording", check_natural_judge), ("daily recap judge", check_recap_judge), ("daily prompt key", lambda: check_prompt_key(scratch)),
             ("daily Channels client", check_client), ("daily tracked judge", check_tracked_judge),
-            ("daily step boundary", check_step_boundary), ("daily stretch judge", check_stretch_judge),
+            ("daily hold judges", check_hold_judges), ("daily step boundary", check_step_boundary), ("daily stretch judge", check_stretch_judge),
             ("daily interrupted judge", check_interrupted_judge), ("daily plan", check_lane_plan)]

@@ -228,7 +228,135 @@ def check_tracked(r):
                                                 ("new attention", new_items, 0)])]
 
 
+Held = namedtuple("Held", "claim dispositions relays posts helper_requests")
+"""What the store shows while the turn is held. posts: the holder's rows in the person's thread."""
+
+HOLD_WAIT = 150
+ANSWER_WAIT = 240
+HOLD_PROMPT = ("Ask the agent named {helper}, using a new `namedrop send` and not your reply line, to run "
+               "`sleep 30` in its shell and then reply with the single word {word}. End this turn with a "
+               "one-line waiting status; do not poll or wait. When it answers, tell me the word.")
+SCRIPTED_HOLD_PROMPT = (
+    "Run this shell command in the foreground and wait for it: python3 -c 'import time; time.sleep(15)'. Then "
+    "end this turn at once with a one-line waiting status. Don't wait or poll for anything else in this turn. "
+    "A helper's answer holding a word arrives in a later turn; when it does, tell me the word.")
+SCRIPTED_HELP = "@{helper} Run `sleep 60` in your shell, then reply with the single word {word}."
+TOOL_WAIT = 60
+
+
+def send_during_turn(r, agent, attempt, source):
+    """Send as the agent while its delivery's turn runs a tool. A real Codex declines to `send` from a
+    person's delivery, because `send` isn't in the envelope's permitted operations, so the store's
+    hold has to be reached this way to test what Codex does next."""
+    key = du.prompt_key(r.store, attempt)
+    started = r.settle(lambda: any(turn.commands for turn in live.delivery_turns(r.transcript(agent), key)),
+                       bool, TOOL_WAIT)
+    if not started:
+        raise StepFailed(Check(agent + " tool", False, "{} did not start its tool within {} s".format(agent, TOOL_WAIT)))
+    as_pane(r, agent, ("send",), {"request_id": str(uuid.uuid4()), "author_kind": "agent_session", "source": source})
+
+
+def held_snapshot(store, attempt, address, thread, helper_address, since):
+    claim = store.claims().get(attempt)
+    return Held(claim, du.disposition_count(store, attempt),
+                _rows(store, "SELECT count(*) FROM collaboration_messages WHERE session_socket_id = ? AND "
+                             "worktree_id = ? AND message_id = ?", "terminal-relay:" + attempt)[0][0],
+                _rows(store, "SELECT count(*) FROM collaboration_messages WHERE session_socket_id = ? AND "
+                             "worktree_id = ? AND thread_id = ? AND author_address_id = ?",
+                      thread, address)[0][0],
+                _rows(store, "SELECT count(*) FROM collaboration_messages m JOIN message_recipients t USING "
+                             "(session_socket_id, worktree_id, message_id) WHERE m.session_socket_id = ? AND "
+                             "m.worktree_id = ? AND m.author_address_id = ? AND t.address_id = ? AND "
+                             "m.created_at_ms >= ? AND m.in_reply_to IS NULL",
+                      address, helper_address, since)[0][0])
+
+
+def judge_hold(label, held):
+    """While the turn is held: a request went out, and the person's thread stays silent."""
+    if held.claim is not None and (held.claim.startswith("done:") or held.claim == "left:no_final_text"):
+        return Check(label + " hold", False, "{} hold: inconclusive, the turn was never held: claim {}, {} relay, "
+                     "{} helper requests".format(label, held.claim, held.relays, held.helper_requests))
+    return fields(label + " hold", [("claim", held.claim, "left:held"),
+                                    ("dispositions", held.dispositions, 0),
+                                    ("posted answer", held.relays, 0),
+                                    ("posts in the thread", held.posts, 0),
+                                    ("helper requests", held.helper_requests, 1)])
+
+
+def way_back_turns(transcript, attempt):
+    return tuple(turn for turn in transcript.turns
+                 if any("is still open" in text and attempt in text for text in turn.contexts))
+
+
+def judge_late_answer(label, word, hop, answers, thread, way_back, interim, resolved):
+    """interim is shown, not judged: whether a person sees a warning during a long hold is a
+    product question this lane reports."""
+    answer = answers[0] if answers else du.parse_message({})
+    return [fields(label + " answer", [("way-back prompts", len(way_back) > 0, True),
+                                       ("answers", len(answers), 1),
+                                       ("same thread", answer.thread_id == thread, True),
+                                       ("wire kind", answer.kind, "reply"),
+                                       ("word in the answer", word in answer.body, True),
+                                       ("attempts", hop.attempts, 1), ("retries", hop.retries, 0),
+                                       ("disposition", hop.disposition, "reply"),
+                                       ("warning open at the end", resolved is False, False)]),
+            Check(label + " warning", True, "{}: warning during the hold: {}".format(label, interim or "none"))]
+
+
+def run_hold(r, holder, helper, scripted, rng):
+    channels, word = r.channels, marker(rng)
+    label = "{} held on {}".format(holder, helper)
+    address, helper_address = channels.address(holder), channels.address(helper)
+    baseline = dc.baseline_of(channels.latest(), channels.peers())
+    mark, since = channels.mark(), live.now_ms()
+    prompt = SCRIPTED_HOLD_PROMPT if scripted else HOLD_PROMPT.format(helper=helper, word=word)
+    sent = channels.post("@{} {}".format(holder, prompt))
+    hop = r.settle(lambda: du.hop_for(r.store, sent.message_id), lambda found: found and found.attempt_id,
+                   TIMEOUTS.label, watch=()) or du.NO_HOP
+    attempt = hop.attempt_id
+    if scripted:
+        send_during_turn(r, holder, attempt, SCRIPTED_HELP.format(helper=helper, word=word))
+    r.settle(lambda: r.store.claims().get(attempt), lambda claim: claim not in (None, "open"), HOLD_WAIT)
+    held = held_snapshot(r.store, attempt, address, sent.thread_id, helper_address, since)
+    r.save("{}-hold.json".format(holder), {"word": word, "held": held._asdict(), "attempt": attempt})
+    hold = judge_hold(label, held)
+    if not hold.ok:
+        return [hold]
+    r.settle(lambda: dc.replies_to(channels.latest().messages, address, sent.message_id), bool, ANSWER_WAIT)
+    idle = [alias for alias in AGENTS if not r.wait_agent(alias, ("idle", "done"), TIMEOUTS.idle)]
+    dc.listen(r, dc.QUIET)
+    answers = dc.replies_to(channels.latest().messages, address, sent.message_id)
+    final = du.hop_for(r.store, sent.message_id) or du.NO_HOP
+    transcript = r.settle(lambda: r.transcript(holder), lambda found: way_back_turns(found, attempt),
+                          TIMEOUTS.idle, watch=())
+    frames = channels.frames_since(mark)
+    interim = sorted({row.source_kind for frame in frames for row in frame.attention if row.source_id == attempt})
+    open_now = any(row.source_id == attempt for row in channels.latest().attention)
+    r.save("{}-answer.json".format(holder), {"hop": final._asdict(), "answers": [row._asdict() for row in answers],
+                                             "interim": interim})
+    return [hold] + judge_late_answer(label, word, final, answers, sent.thread_id,
+                                      way_back_turns(transcript, attempt), ", ".join(interim),
+                                      not open_now) + dc.judge_stretch(
+        r, label, holder, mark, baseline, since, (HOLD_RED,)) + [
+        live.expect("still working", ", ".join(idle) or "none", "none")]
+
+
+def check_held(r):
+    """Check 5: a turn ends waiting on a helper, and its answer lands later in the same thread."""
+    rng = random.Random()
+    checks = []
+    for holder, helper, scripted in (("claude", "codex", False), ("codex", "claude", True)):
+        try:
+            checks += run_hold(r, holder, helper, scripted, rng)
+        except du.RECOVERABLE as error:
+            checks.append(Check(holder + " held", False, str(error)))
+            checks += du.quiesce(r)
+    return checks
+
+
 STEPS = (
     du.check_step("tracked", "tracked handoff", check_tracked,
                   "Tracked work ran from handoff through continuation and nudge to one shown report."),
+    du.check_step("held", "held turn", check_held,
+                  "A turn held on a helper posted nothing, then answered once in the same thread."),
 )
