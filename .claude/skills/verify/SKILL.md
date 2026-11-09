@@ -114,6 +114,12 @@ The harness covers the happy path. Probe around the change at the same surface:
   after. Other agent activity sends a stalled delivery and hides the stall, so it waits
   for both agents to be idle and prompts nothing else meanwhile. It leaves Claude's input
   box empty and exits 0 when both checks pass. It takes about 75 seconds when it passes.
+- When the change touches the Stop hook, final-message settling or how a message treats its
+  names (Namedrop 1.6.3 and later), run the final message probe on a profile kept with
+  `--keep`: `.claude/skills/verify/scripts/final-message-mention-probe.py test-link-<checkout name>`.
+  Each agent asks the other for a one-line answer that names an agent that isn't here, names
+  one that is, opens with a name, or opens with the asker's own name. It checks that each answer arrives as a reply to the asker
+  alone and that its claim ends `done:replied`. It takes about 5 minutes.
 - For anything the harness does not assert, pass `--keep` and drive the kept profile by
   hand with [references/manual-drive.md](references/manual-drive.md): pane reads, key
   presses, prompts, popups, Codex's log and pid file.

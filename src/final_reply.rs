@@ -231,6 +231,7 @@ pub(crate) fn claim_for(
         updated_at_ms: now_ms,
         reply_line: crate::integration::rendered_line(control, "reply"),
         no_reply_line: crate::integration::rendered_line(control, "complete.no-reply"),
+        failure: None,
     })
 }
 
@@ -261,6 +262,9 @@ pub(crate) struct Claim {
     pub reply_line: Option<String>,
     #[serde(default)]
     pub no_reply_line: Option<String>,
+    /// The error that stopped the settle, for the agent's later prompts.
+    #[serde(default)]
+    pub failure: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -292,8 +296,10 @@ pub(crate) enum LeaveReason {
     /// answer, so its final message may not be the answer; the agent settles
     /// the delivery in a later turn.
     Held,
-    /// The final message leads with Mentions other than the addressee.
-    AddressesOthers,
+    /// The bound operation failed or its worker died. Claims a release before
+    /// 1.6.3 left because the final message led with other Mentions read as
+    /// this, since one unknown variant makes `read_claims` drop the whole file.
+    #[serde(alias = "addresses_others")]
     OperationFailed,
 }
 
@@ -367,8 +373,8 @@ pub(crate) fn decide(claim: &Claim, stop: &StopFacts, settle: &SettleFacts) -> V
                 Armed::NoReply(_) => Verdict::Settle(Settlement::NoReply),
                 Armed::Reply { template, tracked } => {
                     match reply_input(template, *tracked, &stop.text) {
-                        Ok(input) => Verdict::Settle(Settlement::Reply(input)),
-                        Err(reason) => Verdict::Leave(reason),
+                        Some(input) => Verdict::Settle(Settlement::Reply(input)),
+                        None => Verdict::Leave(LeaveReason::NoFinalText),
                     }
                 }
             }
@@ -408,10 +414,9 @@ pub(crate) fn split_outcome_trailer(body: &str) -> (&str, TrackedOutcome) {
     }
 }
 
-/// The bound reply input that carries `text`. A leading Mention of the
-/// addressee is dropped by the reply's own grammar, so it is allowed; a
-/// leading Mention of anyone else would add a recipient, so it is refused.
-fn reply_input(template: &Value, tracked: bool, text: &FinalText) -> Result<Value, LeaveReason> {
+/// The bound reply input that carries `text`, or `None` when it has no text.
+/// However it opens, it reaches only the template's addressee.
+fn reply_input(template: &Value, tracked: bool, text: &FinalText) -> Option<Value> {
     let source = template["source"].as_str().unwrap_or_default();
     let (body, outcome) = if tracked {
         let (body, outcome) = split_outcome_trailer(&text.text);
@@ -421,21 +426,16 @@ fn reply_input(template: &Value, tracked: bool, text: &FinalText) -> Result<Valu
     };
     let body = body.trim();
     if body.is_empty() {
-        return Err(LeaveReason::NoFinalText);
+        return None;
     }
     let body = if text.truncated {
         format!("{body}\n\n{CUT_NOTICE}")
     } else {
         body.to_owned()
     };
-    let recipients = |source: &str| crate::parse_mentions(source).ok().map(|m| m.recipients);
-    let filled = source.replacen(crate::REPLY_BODY_PLACEHOLDER, &body, 1);
-    let expected = recipients(&source.replacen(crate::REPLY_BODY_PLACEHOLDER, "body", 1));
-    if expected.is_none() || recipients(&filled) != expected {
-        return Err(LeaveReason::AddressesOthers);
-    }
+    let body = crate::message::literal_leading_mentions(&body);
     let mut input = template.clone();
-    input["source"] = Value::String(filled);
+    input["source"] = Value::String(source.replacen(crate::REPLY_BODY_PLACEHOLDER, &body, 1));
     match outcome {
         Some(TrackedOutcome::Completed) => input["work_outcome"] = "completed".into(),
         Some(TrackedOutcome::NeedsContinuation) => {
@@ -447,7 +447,7 @@ fn reply_input(template: &Value, tracked: bool, text: &FinalText) -> Result<Valu
         }
         None => {}
     }
-    Ok(input)
+    Some(input)
 }
 
 /// How long a finished or abandoned claim is kept, for anyone checking what
@@ -462,6 +462,9 @@ const STOP_LOCK_WAIT: Duration = Duration::from_secs(2);
 /// worker's lock wait and deadline, with room to spare. A claim still open
 /// after that lost its worker.
 const STOPPED_GRACE_MS: u64 = 30_000;
+const WORKER_LOST: &str = "Namedrop's Stop worker ended before it settled this delivery";
+const LOCK_MISSED: &str = "the Stop could not read this session's claims within 2 seconds";
+const WORKER_TIMED_OUT: &str = "Namedrop's Stop worker ran out of its 10 seconds";
 
 /// The claims of one agent session, in one file only this module writes.
 struct Claims {
@@ -614,20 +617,96 @@ impl Claim {
         self.updated_at_ms = now_ms;
     }
 
+    /// Whether the final message was to answer the delivery, rather than
+    /// Namedrop closing it without a reply.
+    fn answers(&self) -> bool {
+        matches!(
+            self.plan,
+            Armed::Reply { .. } | Armed::NoReply(NoReplyCase::Relayed)
+        )
+    }
+
     /// The line that settles this claim's delivery the way the hook said it
     /// would: the reply when the final message was to answer, otherwise the
     /// no-reply.
     fn way_back(&self) -> Option<WayBack> {
-        let (line, answers) = match self.plan {
-            Armed::Reply { .. } | Armed::NoReply(NoReplyCase::Relayed) => (&self.reply_line, true),
-            Armed::NoReply(_) => (&self.no_reply_line, false),
+        let answers = self.answers();
+        let line = if answers {
+            &self.reply_line
+        } else {
+            &self.no_reply_line
         };
         Some(WayBack {
             attempt_id: self.attempt_id.clone(),
             line: line.clone()?,
             answers,
+            failure: self.failure.clone(),
         })
     }
+
+    /// Moves a claim its session left behind to `next`. One whose Stop worker
+    /// never finished is a failed settle like any other.
+    fn move_on(&mut self, state: &Path, next: ClaimState, now_ms: u64) {
+        let next = if next == ClaimState::Left(LeaveReason::OperationFailed) {
+            self.settle_failed(state, WORKER_LOST.to_owned(), now_ms)
+        } else {
+            next
+        };
+        self.set(next, now_ms);
+    }
+
+    /// Keeps the error that stopped the settle and warns the person.
+    fn settle_failed(&mut self, state: &Path, failure: String, now_ms: u64) -> ClaimState {
+        warn_settle_failed(state, self, &failure, now_ms);
+        self.failure = Some(failure);
+        ClaimState::Left(LeaveReason::OperationFailed)
+    }
+}
+
+/// The claim still saves, and still tells the agent why, if this write fails.
+fn warn_settle_failed(state: &Path, claim: &Claim, failure: &str, now_ms: u64) {
+    if !matches!(crate::StateStore::open_read_only(state), Ok(Some(_))) {
+        return;
+    }
+    let by = crate::MutationAttribution::new(crate::ActorKind::Plugin, "namedrop", now_ms);
+    let _ = crate::StateStore::open(state).and_then(|mut store| {
+        store.transaction(|transaction| {
+            transaction.flag_failed_settle(
+                &claim.namespace,
+                &claim.attempt_id,
+                claim.answers(),
+                failure,
+                &by,
+            )
+        })
+    });
+}
+
+/// Warns about the turn's claims when nothing can save them, reading without
+/// the lock. A settle that still commits clears the warning.
+fn warn_open_claims(
+    state: &Path,
+    socket: &str,
+    session: &str,
+    turn: Option<&HostTurn>,
+    reason: &str,
+    now_ms: u64,
+) {
+    read_claims(&session_directory(state, socket, session))
+        .iter()
+        .filter(|claim| claim.state == ClaimState::Open && Some(&claim.turn) == turn)
+        .for_each(|claim| warn_settle_failed(state, claim, reason, now_ms));
+}
+
+/// For the Stop worker's deadline, which ends it with no chance to save.
+pub fn warn_stop_timed_out(
+    state: &Path,
+    socket: &str,
+    session: &str,
+    turn: Option<&HostTurn>,
+    now_ms: u64,
+) {
+    warn_open_claims(state, socket, session, turn, WORKER_TIMED_OUT, now_ms);
 }
 
 /// How the agent settles a delivery whose claim ended without settling it.
@@ -638,6 +717,8 @@ pub(crate) struct WayBack {
     /// The line is the reply, with a body to write; otherwise it closes the
     /// delivery without one.
     pub answers: bool,
+    /// The error that stopped the Stop from settling it.
+    pub failure: Option<String>,
 }
 
 /// What one prompt found in its session's claims.
@@ -681,7 +762,7 @@ pub(crate) fn observe_prompt(
         .collect();
     for (claim, next) in claims.claims.iter_mut().zip(moved) {
         if let Some(next) = next {
-            claim.set(next, now_ms);
+            claim.move_on(state, next, now_ms);
         }
     }
     // A claim whose Stop already ran belongs to that Stop's worker; only one
@@ -737,8 +818,9 @@ pub struct BoundOperation {
 
 /// Decides every live claim of the stopping session and runs each settle
 /// through `run`, the same pipeline the CLI runs, so every guard of `reply`
-/// and `complete` applies. A failed settle leaves its delivery pending.
-/// `now_ms` is when the Stop ended, however late its worker runs.
+/// and `complete` applies. A failed settle leaves its delivery pending, keeps
+/// the error on the claim and warns the person. `now_ms` is when the Stop
+/// ended, however late its worker runs.
 pub fn settle_at_stop(
     state: &Path,
     socket: &str,
@@ -748,6 +830,14 @@ pub fn settle_at_stop(
 ) {
     let directory = session_directory(state, socket, &stop.session);
     let Some(mut claims) = Claims::lock(directory, STOP_LOCK_WAIT) else {
+        warn_open_claims(
+            state,
+            socket,
+            &stop.session,
+            stop.turn.as_ref(),
+            LOCK_MISSED,
+            now_ms,
+        );
         return;
     };
     // A claim of another turn armed after this Stop ended belongs to a turn
@@ -768,7 +858,7 @@ pub fn settle_at_stop(
     for (claim, moved) in claims.claims.iter_mut().zip(moved) {
         match moved {
             Some(Some(next)) => {
-                claim.set(next, now_ms);
+                claim.move_on(state, next, now_ms);
                 continue;
             }
             Some(None) => continue,
@@ -794,13 +884,13 @@ pub fn settle_at_stop(
                         ClaimState::Done(Done::NoReplied)
                     }
                     Ok(None) => ClaimState::Done(Done::Superseded),
-                    Err(_) => ClaimState::Left(LeaveReason::OperationFailed),
+                    Err(error) => claim.settle_failed(state, error.to_string(), now_ms),
                 }
             }
             Verdict::Settle(settlement) => match run(claim.bound(&settlement)) {
                 Ok(_) => ClaimState::Done(settlement.done()),
                 Err(_) if disposition(state, claim).is_some() => ClaimState::Done(Done::Superseded),
-                Err(_) => ClaimState::Left(LeaveReason::OperationFailed),
+                Err(error) => claim.settle_failed(state, error, now_ms),
             },
         };
         claim.set(next, now_ms);

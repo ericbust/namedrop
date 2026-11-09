@@ -11,7 +11,7 @@ use namedrop::{
     PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
     execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
     execute_user_prompt_submit_hook, expand_attempt_reply,
-    final_reply::{BoundOperation, FinalText, HostTurn, StopFacts, settle_at_stop},
+    final_reply::{BoundOperation, FinalText, HostTurn, StopFacts, mark_stopped, settle_at_stop},
     issue_registration_challenge, send_operator_message,
 };
 use serde_json::{Value, json};
@@ -65,6 +65,7 @@ impl Drop for TestDirectory {
 struct FakeHerdr {
     worktree: String,
     prompts: Mutex<Vec<(String, String)>>,
+    notifications: Mutex<Vec<String>>,
 }
 
 impl FakeHerdr {
@@ -113,6 +114,10 @@ impl HerdrCommandExecutor for FakeHerdr {
                 "{}".to_owned()
             }
             ["pane", "report-metadata", ..] => "{}".to_owned(),
+            ["notification", "show", _, "--body", body, ..] => {
+                self.notifications.lock().unwrap().push((*body).to_owned());
+                "{}".to_owned()
+            }
             _ => return Err(format!("unexpected Herdr command: {args:?}")),
         };
         Ok(HerdrCommandOutput { stdout })
@@ -190,6 +195,7 @@ impl Space {
         let herdr = FakeHerdr {
             worktree: directory.repo.display().to_string(),
             prompts: Mutex::new(Vec::new()),
+            notifications: Mutex::new(Vec::new()),
         };
         let space = Self {
             directory,
@@ -759,8 +765,9 @@ impl Space {
             &herdr,
             format!(
                 r#"#!/usr/bin/env python3
-import json, sys
+import json, sys, time
 from pathlib import Path
+if (Path(__file__).parent / 'herdr-slow').exists(): time.sleep(6)
 args = sys.argv[1:]
 if args[:1] == ['--socket']: args = args[2:]
 panes = {{'result': {{'panes': [
@@ -1631,19 +1638,14 @@ fn every_unsettled_ending_shows_the_way_back_on_later_prompts() {
     };
     const ANSWER: &str = "to answer it, run this line with your text in place of <reply body>";
     for (ending, state) in [
-        ("addresses_others", json!({"left":"addresses_others"})),
         ("no_final_text", json!({"left":"no_final_text"})),
         ("interrupted", json!({"left":"interrupted"})),
     ] {
         let space = Space::new();
         let ask = space.armed_ask();
         let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
-        match ending {
-            "addresses_others" => {
-                space.stop("session-reviewer", CLAUDE, "@qa can you check this first?");
-            }
-            "no_final_text" => space.stop("session-reviewer", CLAUDE, "  "),
-            _ => {}
+        if ending == "no_final_text" {
+            space.stop("session-reviewer", CLAUDE, "  ");
         }
         let typed = space.prompt(
             "pane-reviewer",
@@ -1926,4 +1928,574 @@ fn the_stop_workers_pipeline_spends_the_automatic_reply_limit() {
         space.answers("pane-lead").is_empty(),
         "the paused thread delivered the answer"
     );
+}
+
+impl Space {
+    /// `recipient` holds an armed claim for an ask from `sender`, on the turn
+    /// its host names. Returns the delivered envelope.
+    fn armed_ask_to(
+        &self,
+        (sender, recipient, session): (&str, &str, &str),
+        turn: (&str, &str),
+    ) -> Value {
+        dispatch::message(
+            "send",
+            json!({"request_id":"ask","source":format!("@{recipient} Reply with the single word pong."),
+                   "author_kind":"agent_session"}),
+            &self.runtime(&format!("pane-{sender}")),
+        )
+        .unwrap();
+        let ask = self.herdr.envelope_for(&format!("pane-{recipient}"));
+        self.prompt(
+            &format!("pane-{recipient}"),
+            session,
+            turn,
+            &ask.to_string(),
+        );
+        ask
+    }
+
+    fn armed_tracked_ask(&self) -> Value {
+        let coordination = namedrop::execute_handoff_operation(
+            "handoff.begin",
+            json!({"request_id":"begin","deliverable":"A reviewed answer"}),
+            &self.runtime("pane-lead"),
+        )
+        .unwrap()["coordination_id"]
+            .clone();
+        dispatch::message(
+            "send",
+            json!({"request_id":"ask","source":"@reviewer Reply with the single word pong.",
+                   "author_kind":"agent_session","coordination_id":coordination}),
+            &self.runtime("pane-lead"),
+        )
+        .unwrap();
+        let ask = self.herdr.envelope_for("pane-reviewer");
+        self.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            CLAUDE,
+            &ask.to_string(),
+        );
+        ask
+    }
+
+    fn last_message_recipients(&self) -> Vec<Vec<String>> {
+        self.rows(
+            "SELECT alias_snapshot FROM message_recipients WHERE message_id =
+             (SELECT message_id FROM collaboration_messages
+              ORDER BY created_at_ms DESC, rowid DESC LIMIT 1)",
+        )
+    }
+
+    fn references(&self) -> Vec<Vec<String>> {
+        self.rows("SELECT alias_snapshot FROM context_references")
+    }
+
+    fn unresolved_disposition_warnings(&self) -> Vec<Vec<String>> {
+        self.rows(
+            "SELECT summary FROM attention_items
+             WHERE source_kind = 'agent_disposition' AND resolved_at_ms IS NULL",
+        )
+    }
+
+    fn retired_name(&self, alias: &str) {
+        let attribution = MutationAttribution::new(ActorKind::Human, "test", 2);
+        let address = PaneAddressId::new(format!("address-{alias}"));
+        StateStore::open(&self.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.create_pane_address(
+                    &namespace(),
+                    &PaneAddressDraft {
+                        id: address.clone(),
+                        role_id: PaneRoleId::new(format!("role-{alias}")),
+                        role_name: alias.to_owned(),
+                        role_description: format!("Native collaborator addressed as @{alias}."),
+                        alias: alias.to_owned(),
+                    },
+                    &attribution,
+                )?;
+                transaction.retire_pane_address(&namespace(), &address, &attribution)
+            })
+            .unwrap();
+    }
+}
+
+/// Agents name each other in prose, and the delivery rules say a body Mention
+/// adds no recipient. An answer can't depend on who happens to be named in it,
+/// on either host.
+#[test]
+fn a_final_message_naming_an_agent_that_is_not_here_still_answers() {
+    for (who, turn) in [
+        (("lead", "reviewer", "session-reviewer"), CLAUDE),
+        (("reviewer", "lead", "session-lead"), CODEX),
+    ] {
+        for text in [
+            "The result, as relayed from @codex, is pong.",
+            "Ask @retired about the rest. The result is pong.",
+        ] {
+            let space = Space::new();
+            space.retired_name("retired");
+            let ask = space.armed_ask_to(who, turn);
+            let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+            space.stop(who.2, turn, text);
+            assert_eq!(
+                space.claims()[0]["state"],
+                json!({"done":"replied"}),
+                "{text}"
+            );
+            assert_eq!(space.dispositions(), [vec![attempt, "reply".to_owned()]]);
+            assert_eq!(space.bodies().last().unwrap(), text);
+            assert_eq!(space.last_message_recipients(), [vec![who.0.to_owned()]]);
+            assert!(space.references().is_empty(), "{text}");
+            assert!(space.unresolved_disposition_warnings().is_empty(), "{text}");
+        }
+    }
+}
+
+/// A name that does resolve means what it means in any reply: a context
+/// reference, never a recipient.
+#[test]
+fn a_final_message_and_a_reply_treat_a_real_name_the_same_way() {
+    let text = "Compare with @lead and @codex. The result is pong.";
+    let by_stop = Space::new();
+    by_stop.armed_ask();
+    by_stop.stop("session-reviewer", CLAUDE, text);
+    let by_command = Space::new();
+    let ask = by_command.armed_ask();
+    dispatch::message(
+        "reply",
+        bound_reply(&by_command, &ask, &format!("@lead {text}")),
+        &by_command.runtime("pane-reviewer"),
+    )
+    .unwrap();
+    for space in [&by_stop, &by_command] {
+        assert_eq!(space.bodies().last().unwrap(), text);
+        assert_eq!(space.last_message_recipients(), [vec!["lead".to_owned()]]);
+        assert_eq!(space.references(), [vec!["lead".to_owned()]]);
+    }
+}
+
+/// A reply the agent runs itself gets the same answer for the same text.
+#[test]
+fn an_explicit_reply_naming_an_agent_that_is_not_here_still_answers() {
+    for text in [
+        "The result, as relayed from @codex, is pong.",
+        "Ask @retired about the rest. The result is pong.",
+    ] {
+        let space = Space::new();
+        space.retired_name("retired");
+        let ask = space.armed_ask();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+        dispatch::message(
+            "reply",
+            bound_reply(&space, &ask, &format!("@lead {text}")),
+            &space.runtime("pane-reviewer"),
+        )
+        .unwrap();
+        assert_eq!(space.dispositions(), [vec![attempt, "reply".to_owned()]]);
+        assert_eq!(space.bodies().last().unwrap(), text);
+        assert_eq!(space.last_message_recipients(), [vec!["lead".to_owned()]]);
+        assert!(space.references().is_empty(), "{text}");
+    }
+}
+
+/// Only an agent's reply loosens: a person replying still names who they mean.
+#[test]
+fn a_person_replying_still_refuses_an_unknown_body_mention() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    let refused = dispatch::message(
+        "reply",
+        json!({"request_id":"person-reply","source":"@lead Compare with @codex.",
+               "in_reply_to":ask["control"]["message_id"],"author_kind":"human"}),
+        &space.runtime("pane-reviewer"),
+    )
+    .unwrap_err();
+    assert!(refused.contains("unknown Mention: @codex"), "{refused}");
+}
+
+/// A new send still names who it reaches, so a typo there is refused.
+#[test]
+fn a_send_still_refuses_an_unknown_body_mention() {
+    let space = Space::new();
+    let refused = dispatch::message(
+        "send",
+        json!({"request_id":"send","source":"@reviewer Compare with @codex.",
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap_err();
+    assert!(refused.contains("unknown Mention: @codex"), "{refused}");
+}
+
+/// A final message isn't a send, so opening with a name reaches nobody new.
+/// The answer still goes to the agent that asked.
+#[test]
+fn a_final_message_that_opens_with_a_name_still_answers_only_the_asker() {
+    for (text, shown) in [
+        ("@codex said pong", "\\@codex said pong"),
+        ("@reviewer said pong", "\\@reviewer said pong"),
+        (
+            "@lead @codex, @reviewer: pong",
+            "\\@lead \\@codex, \\@reviewer: pong",
+        ),
+        // Naming the asker can be the point of the sentence, so it stays.
+        ("@lead is wrong about pong", "\\@lead is wrong about pong"),
+        ("@lead", "\\@lead"),
+    ] {
+        let space = Space::new();
+        space.armed_ask();
+        space.stop("session-reviewer", CLAUDE, text);
+        assert_eq!(
+            space.claims()[0]["state"],
+            json!({"done":"replied"}),
+            "{text}"
+        );
+        assert_eq!(space.bodies().last().unwrap(), shown);
+        assert_eq!(space.last_message_recipients(), [vec!["lead".to_owned()]]);
+        assert!(space.references().is_empty(), "{text}");
+    }
+}
+
+/// A claim a release before this one left behind still shows its way back.
+#[test]
+fn a_claim_left_by_an_earlier_release_keeps_its_way_back() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    let mut claims: Value =
+        serde_json::from_slice(&fs::read(space.claims_file()).unwrap()).unwrap();
+    claims[0]["state"] = json!({"left":"addresses_others"});
+    fs::write(space.claims_file(), claims.to_string()).unwrap();
+    let typed = space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        ("prompt_id", "typed-turn"),
+        "Where were we?",
+    );
+    assert!(
+        typed.contains(&format!("delivery {attempt} from an earlier turn")),
+        "{typed}"
+    );
+}
+
+/// When a settle fails for any other reason nothing else would say why: the
+/// claim keeps the error, the person gets a warning naming it, the agent's next
+/// prompt shows it with the way back, and the agent's answer clears the warning.
+#[test]
+fn a_settle_that_fails_says_why_and_keeps_the_way_back() {
+    for generic_warning_first in [false, true] {
+        let space = Space::new();
+        let ask = space.armed_ask();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+        if generic_warning_first {
+            StateStore::open(&space.directory.state)
+                .unwrap()
+                .transaction(|transaction| {
+                    transaction.open_attention_item(
+                        &namespace(),
+                        &namedrop::AttentionItemDraft {
+                            id: namedrop::AttentionItemId::new(format!(
+                                "attention-agent-disposition-{attempt}"
+                            )),
+                            source_kind: namedrop::AttentionSourceKind::AgentDisposition,
+                            source_id: attempt.clone(),
+                            summary: "generic".to_owned(),
+                        },
+                        &MutationAttribution::new(ActorKind::Plugin, "test", 41),
+                    )
+                })
+                .unwrap();
+        }
+        let stop = stop_facts("session-reviewer", CLAUDE, "pong", false);
+        settle_at_stop(&space.directory.state, "socket-a", &stop, 42, &mut |_| {
+            Err("the router is out of cheese".to_owned())
+        });
+        let claim = &space.claims()[0];
+        assert_eq!(claim["state"], json!({"left":"operation_failed"}));
+        assert_eq!(claim["failure"], "the router is out of cheese");
+        let warnings = space.unresolved_disposition_warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0][0].contains("the router is out of cheese"),
+            "{warnings:?}"
+        );
+
+        let typed = space.prompt(
+            "pane-reviewer",
+            "session-reviewer",
+            ("prompt_id", "typed-turn"),
+            "Where were we?",
+        );
+        assert!(typed.contains("the router is out of cheese"), "{typed}");
+        assert!(
+            typed.contains(&format!(r#""attempt_id":"{attempt}""#)),
+            "{typed}"
+        );
+
+        dispatch::message(
+            "reply",
+            bound_reply(&space, &ask, "@lead pong"),
+            &space.runtime("pane-reviewer"),
+        )
+        .unwrap();
+        assert!(space.unresolved_disposition_warnings().is_empty());
+    }
+}
+
+/// Tracked work raises no warning of its own while its coordination is open,
+/// so a failed settle has to.
+#[test]
+fn a_tracked_settle_that_fails_warns_the_person_until_the_agent_answers() {
+    let space = Space::new();
+    let ask = space.armed_tracked_ask();
+    assert_eq!(space.claims()[0]["plan"]["reply"]["tracked"], true);
+    let stop = stop_facts("session-reviewer", CLAUDE, "pong", false);
+    settle_at_stop(&space.directory.state, "socket-a", &stop, 42, &mut |_| {
+        Err("the router is out of cheese".to_owned())
+    });
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0][0].contains("final message could not be sent")
+            && warnings[0][0].contains("the router is out of cheese"),
+        "{warnings:?}"
+    );
+    let mut reply = bound_reply(&space, &ask, "@lead pong");
+    reply["work_outcome"] = json!("completed");
+    dispatch::message("reply", reply, &space.runtime("pane-reviewer")).unwrap();
+    assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
+/// A tracked request raises no warning of its own while its coordination is
+/// open, so a Stop worker that never finished has to say so.
+#[test]
+fn a_tracked_claim_whose_stop_worker_was_lost_warns_the_person() {
+    let space = Space::new();
+    space.armed_tracked_ask();
+    let turn = HostTurn::from_ids(Some(CLAUDE.1), None).unwrap();
+    mark_stopped(
+        &space.directory.state,
+        "socket-a",
+        "session-reviewer",
+        &turn,
+        42,
+    );
+    let later = stop_facts("session-reviewer", ("prompt_id", "later"), "later", false);
+    settle_at_stop(
+        &space.directory.state,
+        "socket-a",
+        &later,
+        40_000,
+        &mut |_| panic!("nothing is left to run"),
+    );
+    let claim = &space.claims()[0];
+    assert_eq!(claim["state"], json!({"left":"operation_failed"}));
+    let failure = claim["failure"].as_str().unwrap();
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0][0].contains(failure), "{warnings:?}");
+}
+
+/// A Stop that can't take its session's claims leaves them open for the next
+/// prompt, which may never come.
+#[test]
+fn a_tracked_stop_that_misses_the_claims_lock_warns_the_person() {
+    let space = Space::new();
+    space.armed_tracked_ask();
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .open(space.claims_file().with_file_name("lock"))
+        .unwrap();
+    lock.try_lock().unwrap();
+    let stop = stop_facts("session-reviewer", CLAUDE, "pong", false);
+    settle_at_stop(&space.directory.state, "socket-a", &stop, 42, &mut |_| {
+        panic!("the claims are locked")
+    });
+    drop(lock);
+    assert_eq!(space.claims()[0]["state"], "open");
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0][0].contains("claims"), "{warnings:?}");
+}
+
+/// The worker's deadline ends it mid-settle, with no chance to save its claim.
+#[test]
+fn a_tracked_stop_worker_that_hits_its_deadline_warns_the_person() {
+    let space = Space::new();
+    space.armed_tracked_ask();
+    fs::write(space.directory.root.join("herdr-slow"), "").unwrap();
+    let running = space.start_installed_stop("session-reviewer", CLAUDE.1, "pong");
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(25);
+    while space.unresolved_disposition_warnings().is_empty() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    drop(running);
+    assert_eq!(space.claims()[0]["state"], "open");
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0][0].contains("10 seconds"), "{warnings:?}");
+}
+
+/// Nobody can answer a held or cancelled attempt and acknowledge refuses it,
+/// so a warning on one would never clear.
+#[test]
+fn a_settle_refused_for_a_closed_attempt_opens_no_warning() {
+    for cancelled in [false, true] {
+        let space = Space::new();
+        let ask = space.armed_ask();
+        let attempt =
+            namedrop::DeliveryAttemptId::new(ask["control"]["attempt_id"].as_str().unwrap());
+        let by = MutationAttribution::new(ActorKind::Human, "test", 41);
+        StateStore::open(&space.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.hold_delivery_attempt(&namespace(), &attempt, &by)?;
+                if cancelled {
+                    transaction.transition_delivery_attempt(
+                        &namespace(),
+                        &attempt,
+                        namedrop::DeliveryState::Cancelled,
+                        &by,
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        space.stop("session-reviewer", CLAUDE, "pong");
+        assert_eq!(
+            space.claims()[0]["state"],
+            json!({"left":"operation_failed"})
+        );
+        assert!(space.claims()[0]["failure"].is_string());
+        assert!(
+            space
+                .rows("SELECT summary FROM attention_items WHERE source_kind='agent_disposition'")
+                .is_empty(),
+            "cancelled {cancelled}"
+        );
+    }
+}
+
+/// A warning the person acknowledged stays closed.
+#[test]
+fn a_failed_settle_does_not_reopen_an_acknowledged_warning() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    let id = namedrop::DeliveryAttemptId::new(attempt.clone());
+    let by = MutationAttribution::new(ActorKind::Human, "test", 41);
+    StateStore::open(&space.directory.state)
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.open_attention_item(
+                &namespace(),
+                &namedrop::AttentionItemDraft {
+                    id: namedrop::AttentionItemId::new(format!(
+                        "attention-agent-disposition-{attempt}"
+                    )),
+                    source_kind: namedrop::AttentionSourceKind::AgentDisposition,
+                    source_id: attempt.clone(),
+                    summary: "generic".to_owned(),
+                },
+                &by,
+            )?;
+            transaction.observe_agent_session(
+                &namespace(),
+                "observation-replaced",
+                &PaneAddressId::new("address-reviewer"),
+                &AgentSessionId::new("session-replaced"),
+                "idle",
+                &by,
+            )?;
+            transaction.acknowledge_disposition_attention(&namespace(), &id, &by)
+        })
+        .unwrap();
+    let stop = stop_facts("session-reviewer", CLAUDE, "pong", false);
+    settle_at_stop(&space.directory.state, "socket-a", &stop, 42, &mut |_| {
+        Err("the router is out of cheese".to_owned())
+    });
+    assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
+/// The person reads the name, not the escape that keeps it from waking anyone.
+#[test]
+fn the_persons_notification_shows_a_leading_name_without_its_escape() {
+    let space = Space::new();
+    let context = execute_user_prompt_submit_hook(
+        &json!({"hook_event_name":"UserPromptSubmit","session_id":"session-lead",
+                "turn_id":"typed","prompt":"@reviewer Who said pong?"})
+        .to_string(),
+        &space.runtime("pane-lead"),
+    );
+    assert!(context.is_some());
+    dispatch::wake(&space.runtime("pane-lead"));
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    space.stop("session-reviewer", CLAUDE, "@ghost said pong");
+    assert_eq!(space.bodies().last().unwrap(), "\\@ghost said pong");
+    assert_eq!(
+        *space.herdr.notifications.lock().unwrap(),
+        ["@ghost said pong"]
+    );
+}
+
+/// A close the Stop could not make is not a message that failed to send.
+#[test]
+fn a_no_reply_the_stop_could_not_make_says_so() {
+    let space = Space::new();
+    space.armed_ask();
+    space.stop("session-reviewer", CLAUDE, "pong");
+    let answer = space.herdr.envelope_for("pane-lead");
+    space.prompt("pane-lead", "session-lead", CODEX, &answer.to_string());
+    let stop = stop_facts("session-lead", CODEX, "Thanks, noted.", false);
+    settle_at_stop(&space.directory.state, "socket-a", &stop, 42, &mut |_| {
+        Err("the router is out of cheese".to_owned())
+    });
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0][0].contains("could not close this delivery")
+            && warnings[0][0].contains("the router is out of cheese")
+            && !warnings[0][0].contains("could not be sent"),
+        "{warnings:?}"
+    );
+    let typed = space.prompt(
+        "pane-lead",
+        "session-lead",
+        ("turn_id", "typed-turn"),
+        "What did the reviewer say?",
+    );
+    assert!(
+        typed.contains("could not close a delivery")
+            && typed.contains("the router is out of cheese")
+            && typed.contains("to close it, run this line")
+            && !typed.contains("could not be sent"),
+        "{typed}"
+    );
+}
+
+/// The person's thread takes the final message verbatim, whatever it names.
+#[test]
+fn a_final_message_to_the_person_naming_an_unknown_agent_is_posted() {
+    let space = Space::new();
+    space.send_as_person("question", "@reviewer Option A or option B?", None);
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    let text = "@codex and @lead both say option B.";
+    space.stop("session-reviewer", CLAUDE, text);
+    assert_eq!(space.relayed()[0][3], text);
+    assert_eq!(space.claims()[0]["state"], json!({"done":"no_replied"}));
 }

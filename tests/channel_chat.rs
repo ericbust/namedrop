@@ -241,7 +241,7 @@ fn channel_body_unknown_terminal_self_operator_escaped_code_and_remote_mentions_
 }
 
 #[test]
-fn mention_threads_do_not_promote_and_keep_unknown_body_alias_refusal() {
+fn mention_threads_do_not_promote_and_keep_an_unknown_body_name_as_text() {
     let f = Fixture::new();
     f.register_all();
     let mut runtime = f.runtime("w1", "unused");
@@ -259,15 +259,16 @@ fn mention_threads_do_not_promote_and_keep_unknown_body_alias_refusal() {
     assert_eq!(reply["recipients"].as_array().unwrap().len(), 1);
     assert_eq!(reply["context_references"][0]["alias"], "lead");
     assert!(f.herdr.envelopes("pane-1-lead").is_empty());
-    let error = agent_reply(
+    let reply = agent_reply(
         &f,
         "unknown",
         &root,
         "pane-1-planner",
         "@operator Ask @ghost later.",
     )
-    .unwrap_err();
-    assert!(error.contains("ghost"), "{error}");
+    .unwrap();
+    assert_eq!(reply["recipients"].as_array().unwrap().len(), 1);
+    assert!(reply["context_references"].as_array().unwrap().is_empty());
 }
 
 #[test]

@@ -1673,8 +1673,19 @@ pub(crate) fn left_open_guidance(way_back: &crate::final_reply::WayBack) -> Stri
     } else {
         "to close it, run this line"
     };
+    let failed = way_back
+        .failure
+        .as_deref()
+        .map_or_else(String::new, |failure| {
+            let what = if way_back.answers {
+                "your final message could not be sent"
+            } else {
+                "Namedrop could not close a delivery when your turn ended"
+            };
+            format!("Namedrop: {what}, because of this error: {failure}\n")
+        });
     format!(
-        "Namedrop: delivery {} from an earlier turn is still open; {how}.\n{}",
+        "{failed}Namedrop: delivery {} from an earlier turn is still open; {how}.\n{}",
         way_back.attempt_id.as_str(),
         way_back.line
     )
