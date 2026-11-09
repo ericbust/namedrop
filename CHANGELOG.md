@@ -14,10 +14,16 @@ Each release is a section here, newest first. The GitHub release for a version u
 - After compaction, resume or clear, a session is told which deliveries it still owes and how to print them.
 - A coordination nudge with many assignments keeps its settling lines and says when some lines didn't fit. The rest stay available through `delivery inbox`.
 
+### Fixed
+
+- An update no longer waits on Namedrop's status worker. The worker held the command lock for as long as it ran, and one that kept retrying a status event could run for days, so the update gave up after 20 seconds and blamed a popup. It now holds the lock only while it handles an event, and after an update it hands its queue to the new version.
+- When an update can't take the command lock, it now names each process that holds it, by PID and Namedrop command, and says how to free it, instead of always pointing at a popup.
+
 ### Upgrade
 
 - This release raises the state schema to 8. The update migrates it live behind the command lock, so agent sessions and pending deliveries carry on. Keep the matching executable and a database backup together in case you roll back.
 - Close any open Namedrop popup, such as the tour, before you update. An open popup makes the migration wait, then ask you to retry.
+- A status worker from 1.6.5 or earlier can still hold the command lock when you update. The update then names it and shows the `kill` line to run. Stopping it loses nothing, because its events stay queued.
 - Codex sessions started before the update lose their hooks, so restart them. Until you do, such a session reads each delivery through the prompt's `delivery inbox` line and can answer with the reply line it prints, which takes about 3 model calls instead of 1. An answer it gives only as its final message is lost, and ND-DELIVERY-003 tells you so.
 
 ## [1.6.6] - 2026-11-09

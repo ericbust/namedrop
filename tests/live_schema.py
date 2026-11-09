@@ -262,7 +262,9 @@ def timeout(fixture):
     assert old.stdout.readline() == b'busy\n'
     migration = fixture.migration(timeout=.3)
     out, err = migration.communicate(timeout=8)
-    assert migration.returncode != 0 and b'Close any open Namedrop popup' in err and b'retry the update' in err, (out, err)
+    assert migration.returncode != 0, (out, err)
+    assert b'PID %d (namedrop) holds the command lock' % old.pid in err, err
+    assert b'kill %d' % old.pid in err and b'retry the update' in err and b'popup' not in err, err
     assert old.poll() is None, 'Updater stopped a running command'
     fixture.verify_rows(3)
     assert runtime.current(fixture.rt) == fixture.old
@@ -378,7 +380,37 @@ def run(base, name, actual, simulator, gated, case, *args):
         fixture.close()
 
 
+def busy_gate_advice():
+    """A blocked update names each holder by its subcommand words only: a flag's
+    value can hold a message, so it never reaches the person's screen."""
+    words = runtime.command_words
+    assert words(['/r/releases/abc/namedrop', 'hook', 'agent-status-worker']) == 'namedrop hook agent-status-worker'
+    assert words(['/r/namedrop', '--plugin-state', '/s', 'reply', '--herdr-socket', '/s.sock',
+                  '--input-json', '{"source":"@lead secret words"}']) == 'namedrop reply'
+    assert words(['/r/namedrop', '--input-json={"a":1}', 'send', 'Secret Text']) == 'namedrop send'
+    assert words(['/r/namedrop', 'ui', 'run', 'tour']) == 'namedrop ui run tour'
+    holders = {'worker': [(41, 'namedrop hook agent-status-worker')],
+               'popup': [(42, 'namedrop ui run tour')],
+               'both': [(41, 'namedrop hook agent-status-worker'), (42, 'namedrop ui run tour')],
+               'other': [(43, 'namedrop reply')], 'none': []}
+    found = runtime.gate_holders
+    try:
+        messages = {}
+        for name, listed in holders.items():
+            runtime.gate_holders = lambda path, listed=listed: listed
+            messages[name] = runtime.busy_gate_message(Path('/unused'))
+    finally:
+        runtime.gate_holders = found
+    assert 'kill 41' in messages['worker'] and 'status worker' in messages['worker'] and 'popup' not in messages['worker']
+    assert 'popup' in messages['popup'] and 'kill' not in messages['popup']
+    assert 'popup' in messages['both'] and 'kill 41' in messages['both'] and 'kill 42' not in messages['both']
+    assert 'kill 43' in messages['other'] and 'PID 43 (namedrop reply)' in messages['other']
+    assert 'popup' in messages['none']
+    assert all('retry the update' in message for message in messages.values())
+
+
 def main():
+    busy_gate_advice()
     actual = Path(os.environ['NAMEDROP_TEST_BINARY']).resolve()
     with tempfile.TemporaryDirectory(prefix='namedrop-live-schema-') as directory:
         base = Path(directory)

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import stat
@@ -101,6 +102,83 @@ def record_legacy(runtime, *, first=False, codex_ready=False, packages_ready=Fal
     write_owned(path, json.dumps(legacy) + '\n', 0o600)
 
 
+WORD = re.compile(r'[a-z][a-z0-9.-]{0,40}')
+
+
+def command_words(argv):
+    """What a Namedrop process is doing, from its executable name and leading
+    subcommand words. Flag values can hold message text, so they are skipped and
+    any word that is not a plain lowercase token ends the description."""
+    words = [os.path.basename(argv[0])] if argv else []
+    rest = iter(argv[1:])
+    for word in rest:
+        if word.startswith('--'):
+            if '=' not in word:
+                next(rest, None)
+            continue
+        if not WORD.fullmatch(word) or len(words) > 3:
+            break
+        words.append(word)
+    return ' '.join(words) or 'unknown'
+
+
+def gate_holders(path):
+    """PIDs other than this one with the command lock open, and what each is."""
+    target, me, pids = os.path.realpath(path), os.getpid(), set()
+    if sys.platform == 'darwin':
+        try:
+            listed = subprocess.run(['/usr/sbin/lsof', '-t', '--', target],
+                                    capture_output=True, text=True, timeout=5)
+            pids = {int(pid) for pid in listed.stdout.split() if pid.isdigit()}
+        except (OSError, subprocess.SubprocessError):
+            return []
+    else:
+        for entry in os.listdir('/proc'):
+            if not entry.isdigit():
+                continue
+            try:
+                if any(os.readlink(f'/proc/{entry}/fd/{fd}') == target
+                       for fd in os.listdir(f'/proc/{entry}/fd')):
+                    pids.add(int(entry))
+            except OSError:
+                continue
+    holders = []
+    for pid in sorted(pids - {me}):
+        try:
+            if sys.platform == 'darwin':
+                argv = subprocess.run(['/bin/ps', '-o', 'args=', '-p', str(pid)], capture_output=True,
+                                      text=True, timeout=5).stdout.split()
+            else:
+                argv = [os.fsdecode(arg) for arg in Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0') if arg]
+        except (OSError, subprocess.SubprocessError):
+            argv = []
+        if argv:
+            holders.append((pid, command_words(argv)))
+    return holders
+
+
+def busy_gate_message(path):
+    holders = gate_holders(path)
+    if not holders:
+        return ('Namedrop commands are still finishing. Close any open Namedrop popup, such as the tour, '
+                'and retry the update; agent sessions can stay open.')
+    named = ' '.join(f'PID {pid} ({what}) holds the command lock.' for pid, what in holders)
+    popups = [pid for pid, what in holders if ' ui ' in f' {what} ']
+    workers = [pid for pid, what in holders if pid not in popups and 'agent-status-worker' in what]
+    others = [pid for pid, _ in holders if pid not in popups + workers]
+    steps = []
+    if popups:
+        steps.append('close the open Namedrop popup, such as the tour')
+    if workers:
+        steps.append("stop Namedrop's status worker with `kill " + ' '.join(map(str, workers))
+                     + '`, which loses nothing because its events stay queued')
+    if others:
+        steps.append('wait for the other command to finish, or stop it with `kill '
+                     + ' '.join(map(str, others)) + '`')
+    return (f'Namedrop commands are still finishing. {named} To continue, ' + '; '.join(steps)
+            + '. Then retry the update; agent sessions can stay open.')
+
+
 def lock(runtime, name, timeout=None):
     descriptor = os.open(runtime / name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     stream = os.fdopen(descriptor, 'r+')
@@ -115,8 +193,7 @@ def lock(runtime, name, timeout=None):
                     fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
-                    require(time.monotonic() < deadline,
-                            'Namedrop commands are still finishing. Close any open Namedrop popup, such as the tour, and retry the update; agent sessions can stay open.')
+                    require(time.monotonic() < deadline, busy_gate_message(runtime / name))
                     time.sleep(.05)
     except BaseException:
         stream.close()
