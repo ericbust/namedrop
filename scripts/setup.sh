@@ -236,7 +236,10 @@ def show_report(payload):
             hook.get("status") not in ("setup_required", "setup_failed")
             for hook in data.get("agent_integration_hook_activation", {}).values())
     if live_update:
-        print("\n  Your current agents can keep working. If a running Codex session shows Hook failed, or Doctor names it, restart that session.")
+        if os.path.isdir(os.path.join(data.get("state_directory") or "", "hook-runs")):
+            print("\n  Your current agents can keep working. If a running Codex session shows Hook failed, or Doctor names it, restart that session.")
+        else:
+            print("\n  Your current agents can keep working, but restart any running Codex sessions once. This update changes their hooks, and Namedrop can't yet tell which sessions it affects.")
         commands = [instruction for hook in data.get("agent_integration_hook_activation", {}).values()
                     for instruction in hook.get("steps", []) if instruction.startswith("codex ")]
         if commands:
