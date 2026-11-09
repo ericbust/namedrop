@@ -366,10 +366,12 @@ def step_channels(r):
 
 
 def step_names(r):
-    """`step_names` reads each agent's readiness, which still says busy just after the warm-up. The
-    plain lane has Codex's server steps in between, and this lane goes straight there."""
-    idle = [alias for alias in live.AGENTS if not r.wait_agent(alias, ("idle", "done"), live.TIMEOUTS.idle)]
-    return live.step_names(r) + [live.expect("still working", ", ".join(idle) or "none", "none")]
+    """`step_names` reads each agent's readiness, which can still say busy for a moment after Herdr
+    shows the agent idle. The plain lane has Codex's server steps in between, and this lane goes
+    straight there."""
+    r.settle(r.addresses, lambda found: all((found.get(alias) or live.Address(*[None] * 5)).selection == "available now"
+                                            for alias in live.AGENTS), live.TIMEOUTS.idle, watch=())
+    return live.step_names(r)
 
 
 SETUP = (live.Step("first-run", "first run", "", live.step_first_run, ""),
