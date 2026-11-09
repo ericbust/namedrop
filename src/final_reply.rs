@@ -433,10 +433,7 @@ fn reply_input(template: &Value, tracked: bool, text: &FinalText) -> Option<Valu
     } else {
         body.to_owned()
     };
-    let addressees =
-        crate::parse_mentions(&source.replacen(crate::REPLY_BODY_PLACEHOLDER, "body", 1))
-            .map_or_else(|_| Vec::new(), |parsed| parsed.recipients.aliases);
-    let body = crate::message::literal_leading_mentions(&body, &addressees);
+    let body = crate::message::literal_leading_mentions(&body);
     let mut input = template.clone();
     input["source"] = Value::String(source.replacen(crate::REPLY_BODY_PLACEHOLDER, &body, 1));
     match outcome {
@@ -465,6 +462,9 @@ const STOP_LOCK_WAIT: Duration = Duration::from_secs(2);
 /// worker's lock wait and deadline, with room to spare. A claim still open
 /// after that lost its worker.
 const STOPPED_GRACE_MS: u64 = 30_000;
+const WORKER_LOST: &str = "Namedrop's Stop worker ended before it settled this delivery";
+const LOCK_MISSED: &str = "the Stop could not read this session's claims within 2 seconds";
+const WORKER_TIMED_OUT: &str = "Namedrop's Stop worker ran out of its 10 seconds";
 
 /// The claims of one agent session, in one file only this module writes.
 struct Claims {
@@ -644,6 +644,17 @@ impl Claim {
         })
     }
 
+    /// Moves a claim its session left behind to `next`. One whose Stop worker
+    /// never finished is a failed settle like any other.
+    fn move_on(&mut self, state: &Path, next: ClaimState, now_ms: u64) {
+        let next = if next == ClaimState::Left(LeaveReason::OperationFailed) {
+            self.settle_failed(state, WORKER_LOST.to_owned(), now_ms)
+        } else {
+            next
+        };
+        self.set(next, now_ms);
+    }
+
     /// Keeps the error that stopped the settle and warns the person.
     fn settle_failed(&mut self, state: &Path, failure: String, now_ms: u64) -> ClaimState {
         warn_settle_failed(state, self, &failure, now_ms);
@@ -654,6 +665,9 @@ impl Claim {
 
 /// The claim still saves, and still tells the agent why, if this write fails.
 fn warn_settle_failed(state: &Path, claim: &Claim, failure: &str, now_ms: u64) {
+    if !matches!(crate::StateStore::open_read_only(state), Ok(Some(_))) {
+        return;
+    }
     let by = crate::MutationAttribution::new(crate::ActorKind::Plugin, "namedrop", now_ms);
     let _ = crate::StateStore::open(state).and_then(|mut store| {
         store.transaction(|transaction| {
@@ -666,6 +680,33 @@ fn warn_settle_failed(state: &Path, claim: &Claim, failure: &str, now_ms: u64) {
             )
         })
     });
+}
+
+/// Warns about the turn's claims when nothing can save them, reading without
+/// the lock. A settle that still commits clears the warning.
+fn warn_open_claims(
+    state: &Path,
+    socket: &str,
+    session: &str,
+    turn: Option<&HostTurn>,
+    reason: &str,
+    now_ms: u64,
+) {
+    read_claims(&session_directory(state, socket, session))
+        .iter()
+        .filter(|claim| claim.state == ClaimState::Open && Some(&claim.turn) == turn)
+        .for_each(|claim| warn_settle_failed(state, claim, reason, now_ms));
+}
+
+/// For the Stop worker's deadline, which ends it with no chance to save.
+pub fn warn_stop_timed_out(
+    state: &Path,
+    socket: &str,
+    session: &str,
+    turn: Option<&HostTurn>,
+    now_ms: u64,
+) {
+    warn_open_claims(state, socket, session, turn, WORKER_TIMED_OUT, now_ms);
 }
 
 /// How the agent settles a delivery whose claim ended without settling it.
@@ -721,7 +762,7 @@ pub(crate) fn observe_prompt(
         .collect();
     for (claim, next) in claims.claims.iter_mut().zip(moved) {
         if let Some(next) = next {
-            claim.set(next, now_ms);
+            claim.move_on(state, next, now_ms);
         }
     }
     // A claim whose Stop already ran belongs to that Stop's worker; only one
@@ -789,6 +830,14 @@ pub fn settle_at_stop(
 ) {
     let directory = session_directory(state, socket, &stop.session);
     let Some(mut claims) = Claims::lock(directory, STOP_LOCK_WAIT) else {
+        warn_open_claims(
+            state,
+            socket,
+            &stop.session,
+            stop.turn.as_ref(),
+            LOCK_MISSED,
+            now_ms,
+        );
         return;
     };
     // A claim of another turn armed after this Stop ended belongs to a turn
@@ -809,7 +858,7 @@ pub fn settle_at_stop(
     for (claim, moved) in claims.claims.iter_mut().zip(moved) {
         match moved {
             Some(Some(next)) => {
-                claim.set(next, now_ms);
+                claim.move_on(state, next, now_ms);
                 continue;
             }
             Some(None) => continue,

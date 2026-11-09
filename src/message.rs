@@ -136,36 +136,39 @@ fn mention_run(source: &str, mut cursor: usize) -> Vec<(&str, std::ops::Range<us
     }
 }
 
-/// `body` as the text of a reply to `addressees`, adding no recipient. Each
-/// Mention it opens with gets the `\@name` escape, separators as written. One
-/// of an addressee is dropped, as the grammar drops any repeat in a run, unless
-/// the names are all there is to say.
-pub(crate) fn literal_leading_mentions(body: &str, addressees: &[String]) -> String {
-    let run = mention_run(body, 0);
-    let names_only = run
-        .last()
-        .is_some_and(|(_, token)| body[token.end..].trim().is_empty());
+/// `body` as the text of a reply, adding no recipient and losing no word: each
+/// Mention it opens with gets the `\@name` escape, even one of the addressee,
+/// because the grammar would drop that repeat and it may be what the sentence
+/// is about.
+pub(crate) fn literal_leading_mentions(body: &str) -> String {
     let mut literal = String::new();
     let mut copied = 0;
-    let mut escaped = false;
-    for (alias, token) in run {
-        let addressee = !names_only && addressees.iter().any(|name| name == alias);
-        if addressee && !escaped {
-            // Left in place: nothing has ended the run, so the grammar drops it.
-            continue;
-        }
+    for (_, token) in mention_run(body, 0) {
         literal.push_str(&body[copied..token.start]);
-        if addressee {
-            copied = skip_whitespace(body, token.end);
-        } else {
-            literal.push('\\');
-            literal.push_str(&body[token.clone()]);
-            copied = token.end;
-            escaped = true;
-        }
+        literal.push('\\');
+        copied = token.start;
     }
     literal.push_str(&body[copied..]);
     literal
+}
+
+/// What the person reads: `\@name` only marks a name that wakes nobody, and
+/// Channels hides the backslash too.
+fn read_by_person(body: &str) -> String {
+    let mut read = String::new();
+    let mut rest = body;
+    while let Some(at) = rest.find("\\@") {
+        let (before, escape) = rest.split_at(at);
+        read.push_str(before);
+        let name = &escape[1..];
+        if !name[1..].starts_with(|next: char| next.is_ascii_lowercase() || next.is_ascii_digit()) {
+            read.push('\\');
+        }
+        read.push('@');
+        rest = &name[1..];
+    }
+    read.push_str(rest);
+    read
 }
 
 struct LeadingLabels {
@@ -2094,7 +2097,8 @@ where
     E: crate::HerdrCommandExecutor,
 {
     let title = format!("@{} replied", relay.sender_alias);
-    let summary = relay.body.lines().next().unwrap_or_default().trim();
+    let body = read_by_person(&relay.body);
+    let summary = body.lines().next().unwrap_or_default().trim();
     let summary = summary.chars().take(160).collect::<String>();
     let token = format!("namedrop-relay=@{}: {summary}", relay.sender_alias);
     let notification = runtime.herdr.execute(&[
@@ -2102,7 +2106,7 @@ where
         "show",
         &title,
         "--body",
-        &relay.body,
+        &body,
         "--position",
         "bottom-right",
         "--sound",
@@ -2409,4 +2413,36 @@ fn workspace_label_before(text: &str, anchor: usize) -> Option<WorkspaceLabel> {
 
 fn is_mention_token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+}
+
+#[cfg(test)]
+mod reply_alias_tests {
+    use super::*;
+
+    #[test]
+    fn a_reply_keeps_a_name_as_text_only_when_the_name_is_the_problem() {
+        let directory =
+            std::env::temp_dir().join(format!("namedrop-reply-alias-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut store = crate::StateStore::open(&directory).unwrap();
+        let namespace = StateNamespace::for_space("socket", "space");
+        let names = vec!["ghost".to_owned()];
+        let unknown = store
+            .transaction(|transaction| resolve_reply_aliases(transaction, &namespace, &names))
+            .unwrap();
+        assert!(unknown.is_empty());
+        rusqlite::Connection::open(directory.join("namedrop.sqlite3"))
+            .unwrap()
+            .execute_batch("DROP TABLE alias_claims")
+            .unwrap();
+        let broken = store
+            .transaction(|transaction| resolve_reply_aliases(transaction, &namespace, &names))
+            .unwrap_err();
+        assert!(
+            broken.kind() != crate::StoreErrorKind::InvalidInput,
+            "{broken}"
+        );
+        drop(store);
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 }

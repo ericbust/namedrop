@@ -306,7 +306,7 @@ fn a_stop_settles_only_its_own_open_claim_and_explicit_settles_win() {
             &open,
             stop("prompt-1", "@claude @codex, pong"),
             none,
-            replied("@codex \\@claude pong"),
+            replied("@codex \\@claude \\@codex, pong"),
         ),
         (
             &open,

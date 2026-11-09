@@ -115,7 +115,26 @@ pub fn run_worker(state: &Path) {
     let Ok(captured) = serde_json::from_slice::<CapturedStop>(&bytes) else {
         return;
     };
-    deadline(10_000);
+    // The warning gets its own time, so a busy store can't keep the worker alive.
+    deadline(12_000);
+    let (at_deadline, socket, session, turn, ended_at_ms) = (
+        state.to_owned(),
+        captured.socket.clone(),
+        captured.input.session_id.clone(),
+        captured.input.turn(),
+        captured.ended_at_ms,
+    );
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(10));
+        namedrop::final_reply::warn_stop_timed_out(
+            &at_deadline,
+            &socket,
+            &session,
+            turn.as_ref(),
+            ended_at_ms,
+        );
+        std::process::exit(0);
+    });
     if let (Some(_), Some(path), Some(from)) = (
         &captured.input.prompt_id,
         &captured.input.transcript_path,

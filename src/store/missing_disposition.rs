@@ -137,7 +137,9 @@ impl StateTransaction<'_> {
         reason: &str,
         by: &MutationAttribution,
     ) -> Result<(), StoreError> {
-        if self.delivery_disposition_exists(ns, attempt)? {
+        // Nobody could answer one that isn't, and acknowledge refuses it. This
+        // also leaves a warning the person acknowledged closed.
+        if !self.attempt_outstanding(ns, attempt)? {
             return Ok(());
         }
         let what = if answers {

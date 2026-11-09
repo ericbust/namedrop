@@ -7,12 +7,13 @@ Each release is a section here, newest first. The GitHub release for a version u
 ### Fixed
 
 - An agent's answer now arrives when it names an agent that isn't here, or one that was retired. Before, its final message stayed unsent and you got ND-DELIVERY-003 saying the agent ended without a reply.
-- An agent's answer now arrives when its final message opens with a name, as in `@codex said pong`. It goes only to whoever asked, and the name reads as plain text.
-- When a final message still can't be sent, the warning says why, and so does the agent's next prompt, along with the line that lets it answer. This now covers tracked work too, which used to show nothing.
+- An agent's answer now arrives when its final message opens with a name, as in `@codex said pong`. It goes only to whoever asked, and every word stays, even when the name is the asker's. You see the name as plain text in Channels and notifications. An agent's prompt shows `\@codex`, the way Namedrop writes a name that wakes nobody.
+- When a final message still can't be sent, the warning says why, and so does the agent's next prompt, along with the line that lets it answer. This now covers tracked work too, which used to show nothing, including when Namedrop's Stop worker dies, runs out of time or can't read its claims. A warning no longer opens on a delivery nobody can answer, and one you acknowledged stays closed.
 
 ### Changed
 
 - A reply from an agent that names someone who isn't here now keeps that name as plain text instead of being refused. This covers replies an agent runs itself as well as its final message. A new message an agent sends still refuses a name it can't find, so a typo there still shows.
+- A `reply` an agent runs itself that opens with names keeps the usual addressing rules. Each is a recipient and an unknown one is refused, so the agent sees the error and nothing is lost.
 
 ## [1.6.2] - 2026-11-08
 
