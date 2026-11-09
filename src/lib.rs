@@ -38,6 +38,7 @@ mod runtime;
 mod shortcuts;
 mod shown_roster;
 mod spaces;
+pub mod status_queue;
 mod store;
 pub mod subagent;
 pub use hook_runs::record_hook_run;

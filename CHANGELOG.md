@@ -20,6 +20,8 @@ Each release is a section here, newest first. The GitHub release for a version u
 - An update now stops Namedrop's own background helpers that hold the command lock, such as a status worker from 1.6.5 waiting out retries, and starts them again on the new version once it finishes. Their queued work stays on disk, so nothing is lost and you don't have to do anything. It never stops an agent or any other process.
 - When something else holds the command lock, the update now names it by PID and Namedrop command and says how to free it, instead of always pointing at a popup.
 - On macOS, an update no longer fails with "Could not finish inspecting older Namedrop commands" on a busy machine. It now reads running processes directly instead of waiting on `ps`.
+- Namedrop's status worker no longer gets stuck on one event. A worker runs in the directory of the hook that started it, and once that directory was removed, for example a plugin checkout replaced by an update, every event failed the same way and was retried every few seconds for as long as the worker lived, with every later event waiting behind it. The worker no longer depends on where it started. An event that keeps failing for 10 minutes is now set aside so later events run, because a later event checks the same pane again.
+- Doctor now shows a status event the worker keeps failing on, with its error (ND-STATUS-001), and one it set aside in the last week (ND-STATUS-002). Before, the worker's errors were recorded nowhere.
 
 ### Upgrade
 

@@ -590,6 +590,38 @@ fn a_retrying_status_worker_lets_an_update_take_the_command_gate() {
     assert!(!marker.exists());
 }
 
+/// A worker starts in whatever directory its hook ran in, such as a plugin
+/// checkout or a worktree, and can outlive it. Every reconcile used to read the
+/// current directory first, so once it was removed each event failed the same
+/// way forever.
+#[test]
+fn a_status_worker_whose_starting_directory_is_removed_still_reconciles() {
+    let fixture = Fixture::new();
+    fixture.initialize();
+    fs::create_dir_all(fixture.state().join("runtime")).unwrap();
+    let gate = fs::File::create(fixture.state().join("runtime/commands.lock")).unwrap();
+    gate.lock().unwrap();
+    let started_in = fixture.root.join("removed-checkout");
+    fs::create_dir(&started_in).unwrap();
+    let marker = fixture.queue_status("after-checkout-removed");
+    let mut worker = Worker(
+        fixture
+            .command()
+            .args(["hook", "agent-status-worker"])
+            .current_dir(&started_in)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    thread::sleep(Duration::from_millis(300));
+    fs::remove_dir(&started_in).unwrap();
+    gate.unlock().unwrap();
+    worker.finish();
+    assert_eq!(fixture.recipient_status(), "idle");
+    assert!(!marker.exists());
+}
+
 /// The gate exists so state never changes under a migration: while an update
 /// holds it, the worker waits with the event still queued.
 #[test]
@@ -2023,4 +2055,57 @@ fn a_requeue_clears_the_pointer_and_a_re_dispatch_gets_a_new_one() {
     assert_eq!(nonce(&first), None, "the requeue kept the old pointer");
     let renewed = nonce(&retry).expect("the re-dispatch has a pointer");
     assert_ne!(renewed, leased);
+}
+
+/// The status worker runs detached with its output discarded, so Doctor is
+/// the only place the person can see an event it keeps failing on, or one it
+/// had to set aside.
+#[test]
+fn doctor_names_the_status_event_that_keeps_failing_and_the_one_set_aside() {
+    use namedrop::status_queue;
+    let fixture = Fixture::new();
+    fixture.initialize();
+    fixture.connect_recipient();
+    let issues = || {
+        let output = fixture.command().arg("doctor").output().unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        json["data"]["issues"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    };
+    let find = |issues: &[serde_json::Value], code: &str| {
+        issues.iter().find(|issue| issue["code"] == code).cloned()
+    };
+    assert!(find(&issues(), "ND-STATUS-001").is_none());
+
+    let queue = status_queue::directory(&fixture.state(), "test-socket", "workspace-1");
+    fs::create_dir_all(&queue).unwrap();
+    let marker = queue.join("pending-stuck");
+    let event = serde_json::json!({"type":"pane_agent_detected","pane_id":"pane-recipient","workspace_id":"workspace-1"});
+    fs::write(&marker, event.to_string()).unwrap();
+    let error = "No such file or directory (os error 2)";
+    status_queue::record_failure(&queue, &marker, &event, error, now_ms() - 5 * 60_000);
+    let failure = status_queue::record_failure(&queue, &marker, &event, error, now_ms());
+    let failing = find(&issues(), "ND-STATUS-001").expect("Doctor shows the failing event");
+    let text = failing["explanation"].as_str().unwrap();
+    assert!(
+        text.contains("pane_agent_detected for pane-recipient"),
+        "{text}"
+    );
+    assert!(
+        text.contains(error) && text.contains("2 times over 5 minutes"),
+        "{text}"
+    );
+
+    status_queue::set_aside(&queue, &marker, &failure, now_ms()).unwrap();
+    let after = issues();
+    assert!(find(&after, "ND-STATUS-001").is_none(), "{after:?}");
+    let aside = find(&after, "ND-STATUS-002").expect("Doctor shows the set-aside event");
+    let text = aside["explanation"].as_str().unwrap();
+    assert!(
+        text.contains(error) && text.contains("rejected-pending-stuck"),
+        "{text}"
+    );
+    assert!(queue.join("rejected-pending-stuck").exists() && !marker.exists());
 }

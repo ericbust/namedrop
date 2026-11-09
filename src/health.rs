@@ -305,6 +305,14 @@ where
     }) {
         issues.push(stale_runtime_issue(&stale));
     }
+    if let Some(workspace) = runtime.workspace_id {
+        let queue = crate::status_queue::directory(
+            runtime.state_directory,
+            runtime.session_socket_id,
+            workspace,
+        );
+        issues.extend(status_queue_issues(&queue, runtime.clock.now_unix_ms()));
+    }
     match crate::update_check::settings() {
         Err(error) => {
             let path = crate::update_check::settings_path().ok();
@@ -998,6 +1006,65 @@ fn registered_plugin_root<E: HerdrCommandExecutor>(herdr: &E) -> Option<std::pat
         .find(|plugin| plugin["plugin_id"] == "namedrop")?["plugin_root"]
         .as_str()?;
     Some(std::path::PathBuf::from(root)).filter(|root| root.is_absolute())
+}
+
+/// The status worker runs detached with its output discarded, so the event it
+/// keeps failing on, and any event it had to set aside, is shown here.
+fn status_queue_issues(queue: &std::path::Path, now_ms: u64) -> Vec<HealthIssue> {
+    const SHOWN_FOR_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+    let (failing, set_aside) = crate::status_queue::health(queue);
+    let about = |failure: &crate::status_queue::Failure| {
+        format!(
+            "{} for {}",
+            failure.event.as_deref().unwrap_or("a status event"),
+            failure.pane_id.as_deref().unwrap_or("an unknown pane")
+        )
+    };
+    let minutes = |from: u64, to: u64| to.saturating_sub(from) / 60_000;
+    let mut issues = Vec::new();
+    if let Some(failure) =
+        failing.filter(|f| f.last_failed_ms.saturating_sub(f.first_failed_ms) >= 60_000)
+    {
+        let mut failing = issue(
+            "ND-STATUS-001",
+            HealthSeverity::Notice,
+            "Namedrop keeps failing to handle a status event, and later ones wait behind it.",
+            &format!(
+                "The status worker has tried {} {} times over {} minutes. The last error was: {}. It sets the event aside after 10 minutes so later events can run.",
+                about(&failure),
+                failure.attempts,
+                minutes(failure.first_failed_ms, failure.last_failed_ms),
+                failure.error
+            ),
+            HealthRepairKind::HumanDecision,
+            "Nothing needs doing to recover. If this keeps appearing, report the error shown here.",
+        );
+        failing.diagnostic = serde_json::to_value(&failure).unwrap_or_default();
+        issues.push(failing);
+    }
+    if let Some(set_aside) =
+        set_aside.filter(|set| now_ms.saturating_sub(set.set_aside_ms) < SHOWN_FOR_MS)
+    {
+        let failure = &set_aside.failure;
+        let mut aside = issue(
+            "ND-STATUS-002",
+            HealthSeverity::Info,
+            "Namedrop set aside a status event it couldn't handle.",
+            &format!(
+                "{} failed {} times over {} minutes with: {}. It was moved to rejected-{} so later events could run. A later status event checks the same pane again, so nothing waits on it.",
+                about(failure),
+                failure.attempts,
+                minutes(failure.first_failed_ms, failure.last_failed_ms),
+                failure.error,
+                failure.marker
+            ),
+            HealthRepairKind::HumanDecision,
+            "Nothing needs doing. If this keeps appearing, report the error shown here.",
+        );
+        aside.diagnostic = serde_json::to_value(&set_aside).unwrap_or_default();
+        issues.push(aside);
+    }
+    issues
 }
 
 fn stale_runtime_issue(stale: &crate::installed_runtime::StaleRelease) -> HealthIssue {

@@ -15,7 +15,6 @@ use namedrop::{
     render_command_result_to_text, validate_message_input,
 };
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::{
     env, fs,
     io::{self, IsTerminal, Read, Write},
@@ -1186,10 +1185,7 @@ fn agent_status_reconciliation_directory() -> Result<PathBuf, String> {
 }
 
 fn reconciliation_directory(state_directory: &Path, socket_id: &str, space_id: &str) -> PathBuf {
-    let scope = namedrop::lower_hex(&Sha256::digest(format!("{socket_id}\0{space_id}")));
-    state_directory
-        .join("agent-status-reconciliation")
-        .join(scope)
+    namedrop::status_queue::directory(state_directory, socket_id, space_id)
 }
 
 fn create_reconciliation_directory(directory: &Path) -> Result<(), String> {
@@ -1262,6 +1258,11 @@ fn retryable_queue_scan(error: &io::Error) -> bool {
 }
 
 fn run_agent_status_worker() -> ExitCode {
+    // The hook that starts the worker runs in a pane's directory, which can be
+    // removed while the worker lives; every reconcile reads the current one.
+    if let Some(state) = env::var_os("HERDR_PLUGIN_STATE_DIR") {
+        let _ = env::set_current_dir(state);
+    }
     let directory = match agent_status_reconciliation_directory() {
         Ok(directory) => directory,
         Err(_) => return ExitCode::SUCCESS,
@@ -1371,10 +1372,30 @@ fn run_agent_status_worker_queue(
 fn run_agent_status_worker_queue_with_io(
     directory: &Path,
     lock: fs::File,
+    deadline_ms: Option<u64>,
+    scan: impl FnMut(&Path) -> io::Result<Vec<PathBuf>>,
+    read: impl FnMut(&Path) -> io::Result<Vec<u8>>,
+    reconcile: impl FnMut(serde_json::Value) -> Result<serde_json::Value, String>,
+) -> ExitCode {
+    run_agent_status_worker_queue_with_policy(
+        directory,
+        lock,
+        deadline_ms,
+        scan,
+        read,
+        reconcile,
+        namedrop::status_queue::GIVE_UP_AFTER,
+    )
+}
+
+fn run_agent_status_worker_queue_with_policy(
+    directory: &Path,
+    lock: fs::File,
     mut deadline_ms: Option<u64>,
     mut scan: impl FnMut(&Path) -> io::Result<Vec<PathBuf>>,
     mut read: impl FnMut(&Path) -> io::Result<Vec<u8>>,
     mut reconcile: impl FnMut(serde_json::Value) -> Result<serde_json::Value, String>,
+    give_up_after: Duration,
 ) -> ExitCode {
     let mut failures = 0_usize;
     let mut blocked = std::collections::HashSet::new();
@@ -1461,7 +1482,14 @@ fn run_agent_status_worker_queue_with_io(
                 input
             }
         };
-        match reconcile(input) {
+        let event = input.clone();
+        let outcome = reconcile(input);
+        if let ReconciliationWork::Marker(marker) = &work
+            && !matches!(&outcome, Err(error) if retryable_agent_status_reconciliation(error))
+        {
+            namedrop::status_queue::clear_failure(directory, marker);
+        }
+        match outcome {
             Ok(result) => match drain_report(&result) {
                 Ok(report) => {
                     if !report.awaits_retry()
@@ -1498,7 +1526,23 @@ fn run_agent_status_worker_queue_with_io(
                 let _ = work.remove_marker();
                 failures = 0;
             }
-            Err(_) => {
+            Err(error) => {
+                if let ReconciliationWork::Marker(marker) = &work {
+                    let now = SystemClock.now_unix_ms();
+                    let failure = namedrop::status_queue::record_failure(
+                        directory, marker, &event, &error, now,
+                    );
+                    // A later status event inspects the same current state, so
+                    // one that keeps failing must not hold every later one back.
+                    if namedrop::status_queue::should_set_aside(&failure, give_up_after)
+                        && namedrop::status_queue::set_aside(directory, marker, &failure, now)
+                            .is_ok()
+                    {
+                        let _ = prune_rejected_markers(directory);
+                        failures = 0;
+                        continue;
+                    }
+                }
                 if matches!(work, ReconciliationWork::Wake) {
                     deadline_ms = Some(SystemClock.now_unix_ms());
                 }
@@ -1976,6 +2020,59 @@ mod worker_shutdown_tests {
             }
             queue.lock();
         }
+    }
+
+    /// A status event that fails the same way forever, as with a worker whose
+    /// starting directory is gone, used to keep every later event waiting. It
+    /// is set aside after the give-up time, the queue moves on, and the error
+    /// stays where Doctor reads it.
+    #[test]
+    fn an_event_that_keeps_failing_is_set_aside_and_later_events_run() {
+        let queue = QueueFixture::new("keeps-failing");
+        let stuck = queue.0.join("pending-0-stuck");
+        let later = queue.0.join("pending-1-later");
+        fs::write(&stuck, br#"{"type":"pane_agent_detected","pane_id":"w5F:p1","workspace_id":"w5F","agent":"claude"}"#).unwrap();
+        fs::write(
+            &later,
+            br#"{"type":"pane_agent_status_changed","pane_id":"w5F:p2","workspace_id":"w5F"}"#,
+        )
+        .unwrap();
+        let mut handled = Vec::new();
+        assert_eq!(
+            run_agent_status_worker_queue_with_policy(
+                &queue.0,
+                queue.lock(),
+                None,
+                pending_agent_status_reconciliations,
+                |path| fs::read(path),
+                |input| {
+                    if input["pane_id"] == "w5F:p1" {
+                        Err("No such file or directory (os error 2)".to_owned())
+                    } else {
+                        handled.push(input["pane_id"].clone());
+                        Ok(serde_json::json!({"drain": namedrop::DrainReport::default()}))
+                    }
+                },
+                Duration::ZERO,
+            ),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(handled, vec![serde_json::json!("w5F:p2")]);
+        assert!(!stuck.exists() && queue.0.join("rejected-pending-0-stuck").exists());
+        let (failing, set_aside) = namedrop::status_queue::health(&queue.0);
+        assert!(failing.is_none(), "{failing:?}");
+        let set_aside = set_aside.expect("the set-aside event is recorded");
+        assert_eq!(
+            set_aside.failure.error,
+            "No such file or directory (os error 2)"
+        );
+        assert_eq!(
+            set_aside.failure.event.as_deref(),
+            Some("pane_agent_detected")
+        );
+        assert_eq!(set_aside.failure.pane_id.as_deref(), Some("w5F:p1"));
+        assert!(set_aside.failure.attempts >= 5);
+        queue.lock();
     }
 
     #[test]
