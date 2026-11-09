@@ -10,6 +10,7 @@ import threading
 import livetest as live
 import dailyuse as du
 import daily_channels as dc
+import daily_coordination as dco
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -234,11 +235,35 @@ def tracked_case(**changes):
     return dco.Tracked(**base)
 
 
+def check_tracked_judge():
+    report = live.Turn("ra", (), ("Report: amber1",), (), 1)
+    transcript = live.Transcript("claude", "s", "p", (), (report,), frozenset())
+    judged = dco.judge_tracked("t", tracked_case(), "amber1", (report,), transcript)
+    assert all(check.ok for check in judged), [check.detail for check in judged if not check.ok]
+    links = tracked_case().links
+    defects = {
+        "never continued": dict(links=links[:2]),
+        "no expected_revision": dict(links=links[:2] + (links[2]._replace(expected_revision=None), links[3])),
+        "still blocked": dict(assignments=(dco.Assignment("x", "codex", 2, "blocked"),)),
+        "two reports": dict(reports=tracked_case().reports * 2),
+        "report unsettled": dict(reports=(tracked_case().reports[0]._replace(state="queued"),)),
+        "replied to": dict(report_replies=("z",)),
+    }
+    for name, change in defects.items():
+        result = dco.judge_tracked("t", tracked_case(**change), "amber1", (report,), transcript)
+        assert not all(check.ok for check in result), name
+    assert not all(c.ok for c in dco.judge_tracked("t", tracked_case(), "amber1", (report, report), transcript)), "shown twice"
+    assert not all(c.ok for c in dco.judge_tracked("t", tracked_case(), "amber1", (), transcript)), "never shown"
+    assert not dco.judge_tracked("t", tracked_case(coordination=None), "amber1", (), transcript)[0].ok
+    assert dco.tracked_done(tracked_case()) and not dco.tracked_done(tracked_case(reports=()))
+    return "daily tracked judge: a missing continuation, a doubled or unshown report each fail"
+
+
 def check_lane_plan():
     lane = du.lane()
     keys = [step.key for step in lane.setup + lane.checks]
     assert keys[:4] == ["first-run", "names", "hooks", "channels"]
-    assert keys[4:] == ["answers", "recap", "warnings"]
+    assert keys[4:] == ["answers", "recap", "warnings", "tracked"]
     ran, results = [], []
 
     class Fake:
@@ -341,5 +366,6 @@ def checks(scratch):
     return [("daily frames", check_frames), ("daily quiet judge", check_quiet_judge),
             ("daily warning judge", check_warning_judge), ("daily answer judge", check_answer_judge),
             ("daily natural wording", check_natural_judge), ("daily recap judge", check_recap_judge), ("daily prompt key", lambda: check_prompt_key(scratch)),
-            ("daily Channels client", check_client), ("daily step boundary", check_step_boundary), ("daily stretch judge", check_stretch_judge),
+            ("daily Channels client", check_client), ("daily tracked judge", check_tracked_judge),
+            ("daily step boundary", check_step_boundary), ("daily stretch judge", check_stretch_judge),
             ("daily interrupted judge", check_interrupted_judge), ("daily plan", check_lane_plan)]

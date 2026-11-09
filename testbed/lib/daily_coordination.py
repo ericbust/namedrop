@@ -1,0 +1,234 @@
+"""Daily-use checks 4 and 5: tracked work from handoff to report, and a turn held on a helper."""
+
+from collections import namedtuple
+import json
+import random
+import uuid
+
+from livetest import AGENTS, Check, StepFailed, TIMEOUTS, fields
+import livetest as live
+import dailyuse as du
+import daily_channels as dc
+
+WORDS = ("amber", "cobalt", "fennel", "juniper", "saffron", "tundra", "walnut", "indigo")
+
+
+def marker(rng=random):
+    return "{}{}".format(rng.choice(WORDS), rng.randint(100, 999))
+
+
+Coordination = namedtuple("Coordination", "coordination_id outcome report report_message_id wake_message_id")
+Assignment = namedtuple("Assignment", "assignment_id recipient revision work_outcome")
+Link = namedtuple("Link", "message_id revision kind work_outcome expected_revision")
+Mail = namedtuple("Mail", "message_id grammar body state disposition attempt_id")
+Tracked = namedtuple("Tracked", "coordination assignments links nudges reports report_replies")
+"""One coordination's durable state. nudges and reports: Mail rows. report_replies: messages that
+answer the report, which nothing should."""
+
+
+def _rows(store, sql, *args):
+    return store._rows(sql, (store.socket_id, store.workspace) + args)
+
+
+def coordinations_since(store, since_ms):
+    return tuple(row[0] for row in _rows(
+        store, "SELECT coordination_id FROM coordinations WHERE session_socket_id = ? AND worktree_id = ? "
+               "AND created_at_ms >= ? ORDER BY created_at_ms", since_ms))
+
+
+MAIL_SQL = ("SELECT m.message_id, m.grammar_version, m.body, d.state, p.disposition_kind, a.attempt_id "
+            "FROM collaboration_messages m "
+            "LEFT JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, message_id) "
+            "LEFT JOIN delivery_attempts a USING (session_socket_id, worktree_id, delivery_id) "
+            "LEFT JOIN delivery_dispositions p USING (session_socket_id, worktree_id, attempt_id) "
+            "WHERE m.session_socket_id = ? AND m.worktree_id = ? AND ")
+
+
+def tracked_view(store, coordination_id):
+    head = _rows(store, "SELECT coordination_id, outcome, report, report_message_id, wake_message_id "
+                        "FROM coordinations WHERE session_socket_id = ? AND worktree_id = ? AND "
+                        "coordination_id = ?", coordination_id)
+    assignments = _rows(store, "SELECT assignment_id, recipient_address_id, revision, work_outcome "
+                               "FROM coordination_assignments WHERE session_socket_id = ? AND "
+                               "worktree_id = ? AND coordination_id = ? ORDER BY rowid", coordination_id)
+    links = _rows(store, "SELECT l.message_id, l.revision, l.kind, "
+                         "json_extract(l.input_json, '$.work_outcome'), "
+                         "json_extract(l.input_json, '$.expected_revision') "
+                         "FROM coordination_links l JOIN coordination_assignments a "
+                         "USING (session_socket_id, worktree_id, assignment_id) "
+                         "WHERE l.session_socket_id = ? AND l.worktree_id = ? AND a.coordination_id = ? "
+                         "ORDER BY l.rowid", coordination_id)
+    nudges = _rows(store, MAIL_SQL + "m.message_id LIKE ? AND m.grammar_version = 'coordination-nudge/v1'",
+                   "coordination-wake:{}:%".format(coordination_id))
+    reports = _rows(store, MAIL_SQL + "m.message_id = ?", "coordination-report:{}".format(coordination_id))
+    replies = _rows(store, "SELECT message_id FROM collaboration_messages WHERE session_socket_id = ? AND "
+                           "worktree_id = ? AND in_reply_to = ?",
+                    "coordination-report:{}".format(coordination_id))
+    return Tracked(Coordination(*head[0]) if head else None,
+                   tuple(Assignment(*row) for row in assignments), tuple(Link(*row) for row in links),
+                   tuple(Mail(*row) for row in nudges), tuple(Mail(*row) for row in reports),
+                   tuple(row[0] for row in replies))
+
+
+TRACKED_RED = ("coordination", "a tracked handoff's report reads as a red item until its delivery settles")
+HOLD_RED = ("agent_disposition", "a turn held past 30 s reads as an agent that didn't answer until its answer lands")
+
+
+def tracked_done(view):
+    """Resolved, and the report's delivery has reached a final state."""
+    return bool(view.coordination and view.coordination.outcome != "open" and view.reports and
+                all(mail.state in live.TERMINAL_STATES for mail in view.reports))
+
+
+def judge_tracked(label, view, word, report_turns, transcript):
+    """report_turns: the lead's transcript turns that carried the report."""
+    if view.coordination is None:
+        return [Check(label, False, "{}: the lead never began tracked work".format(label))]
+    links = [(link.kind, link.revision, link.work_outcome) for link in view.links]
+    wanted = [("request", 1, None), ("reply", 1, "needs_continuation"),
+              ("request", 2, None), ("reply", 2, "completed")]
+    expected = next((link.expected_revision for link in view.links
+                     if link.kind == "request" and link.revision == 2), None)
+    assignment = view.assignments[0] if view.assignments else Assignment(*[None] * 4)
+    final = report_turns[-1].answers[-1] if report_turns and report_turns[-1].answers else ""
+    earlier = sum(word in answer for turn in transcript.turns if turn not in report_turns
+                  for answer in turn.answers)
+    return [fields(label, [("outcome", view.coordination.outcome, "completed"),
+                           ("assignments", len(view.assignments), 1),
+                           ("assignment revision", assignment.revision, 2),
+                           ("work outcome", assignment.work_outcome, "completed"),
+                           ("links", links, wanted),
+                           ("continued with expected_revision", expected, 1),
+                           ("report in the coordination", word in (view.coordination.report or ""), True)]),
+            judge_report(label, view, word, report_turns, final),
+            Check(label + " marker", True, "{}: the marker appears in {} earlier lead answers".format(
+                label, earlier))]
+
+
+def judge_report(label, view, word, report_turns, final):
+    mail = view.reports[0] if view.reports else Mail(*[None] * 6)
+    return fields(label + " report", [("rows", len(view.reports), 1),
+                                      ("grammar", mail.grammar, "coordination-report/v1"),
+                                      ("delivery", mail.state, "settled"),
+                                      ("disposition", mail.disposition, "no_reply"),
+                                      ("replies to it", len(view.report_replies), 0),
+                                      ("shown in turns", len(report_turns), 1),
+                                      ("marker in the shown report", word in final, True)])
+
+
+def report_turns(r, alias, view):
+    """The lead's turns that carried the report, once the host wrote their closing line."""
+    attempt = view.reports[0].attempt_id if view.reports else None
+    if not attempt:
+        return ()
+    key = du.prompt_key(r.store, attempt)
+    transcript = r.settle(lambda: r.transcript(alias), lambda found: live.answered(found, key),
+                          TIMEOUTS.idle, watch=())
+    return tuple(live.delivery_turns(transcript, key))
+
+
+TRACKED_WAIT = 420
+TRACKED_PROMPT = (
+    "Use Namedrop tracked coordination for this: run handoff.begin, then a tracked send to @codex. "
+    "Deliverable: the word {word}. First assignment to @codex: say you have started, and end your "
+    "final message with the line `work_outcome: needs_continuation`. When @codex replies, continue "
+    "that same assignment with a tracked send that carries expected_revision: ask it for the word "
+    "{word}, ending its final message with the line `work_outcome: completed`. When it replies, run "
+    "handoff.resolve as completed with a report containing {word}, then show me that report once.")
+
+
+def run_tracked(r, rng):
+    word, since = marker(rng), live.now_ms()
+    r.prompt("claude", TRACKED_PROMPT.format(word=word), TIMEOUTS.warm_up)
+    found = r.settle(lambda: coordinations_since(r.store, since), bool, TIMEOUTS.idle)
+    if not found:
+        return [Check("tracked", False, "tracked: the lead began no coordination; it said: {}".format(
+            " ".join(live.last_answer(r.transcript("claude")).split())[:200]))]
+    view = r.settle(lambda: tracked_view(r.store, found[0]), tracked_done, TRACKED_WAIT)
+    r.save("tracked.json", {"word": word, "view": view._asdict()})
+    idle = [alias for alias in AGENTS if not r.wait_agent(alias, ("idle", "done"), TIMEOUTS.idle)]
+    turns = report_turns(r, "claude", view)
+    return judge_tracked("tracked", view, word, turns, r.transcript("claude")) + [
+        live.expect("still working", ", ".join(idle) or "none", "none")]
+
+
+NUDGE_BRIEF = (
+    "For the next tracked work you lead in this session: when the agent named codex replies, do not "
+    "read results and do not resolve; end that turn with the single word noted. Resolve only when "
+    "Namedrop sends you a coordination nudge, as completed, with a report containing {word}. Nothing "
+    "to do yet, just say ok.")
+NUDGE_ASSIGNMENT = "@codex Reply with the single word {word}. End your final message with the line `work_outcome: completed`."
+
+
+def as_pane(r, alias, operation, payload):
+    """Run a Namedrop operation as the agent in that pane. The lane reads SQLite instead of `handoff
+    results`, because a lead's read holds its nudge for 10 minutes."""
+    result = r.profile.namedrop("--herdr-pane", r.pane(alias), "--json", *operation,
+                                "--input-json", json.dumps(payload))
+    if result.returncode:
+        raise StepFailed(Check(" ".join(operation), False, "{} exited {}: {}".format(
+            " ".join(operation), result.returncode, result.stdout[-300:])))
+    return live.last_json(result.stdout).get("data") or {}
+
+
+def run_nudge(r, rng):
+    """The script begins the work, so the nudge's own turn is what the real lead is judged on."""
+    word = marker(rng)
+    r.prompt("claude", NUDGE_BRIEF.format(word=word), TIMEOUTS.warm_up)
+    begun = as_pane(r, "claude", ("handoff", "begin"),
+                    {"request_id": str(uuid.uuid4()), "deliverable": "The word {}.".format(word)})
+    coordination = begun["coordination_id"]
+    as_pane(r, "claude", ("send",), {"request_id": str(uuid.uuid4()), "author_kind": "agent_session",
+                                     "coordination_id": coordination,
+                                     "source": NUDGE_ASSIGNMENT.format(word=word)})
+    view = r.settle(lambda: tracked_view(r.store, coordination), tracked_done, TRACKED_WAIT)
+    r.save("nudge.json", {"word": word, "view": view._asdict()})
+    idle = [alias for alias in AGENTS if not r.wait_agent(alias, ("idle", "done"), TIMEOUTS.idle)]
+    turns = report_turns(r, "claude", view)
+    final = turns[-1].answers[-1] if turns and turns[-1].answers else ""
+    nudge = view.nudges[0] if view.nudges else Mail(*[None] * 6)
+    return [fields("nudge", [("nudges", len(view.nudges), 1),
+                             ("delivery", nudge.state, "settled"),
+                             ("disposition", nudge.disposition, None),
+                             ("outcome", view.coordination.outcome, "completed"),
+                             ("work outcome", view.assignments[0].work_outcome if view.assignments else None,
+                              "completed")]),
+            judge_report("nudge", view, word, turns, final),
+            live.expect("still working", ", ".join(idle) or "none", "none")]
+
+
+def nothing_stuck(r, items_before):
+    """Coordinations, mail and new attention still open after the tracked flows ended. Items from
+    an earlier failed check are that check's finding. A report's own flag clears a moment after its
+    delivery settles, so this waits for that."""
+    store = r.store
+    r.settle(lambda: set(du.open_items(store)) - set(items_before), lambda items: not items, TIMEOUTS.idle, watch=())
+    work = _rows(store, "SELECT count(*) FROM coordinations WHERE session_socket_id = ? AND worktree_id = ? "
+                        "AND outcome = 'open'")[0][0]
+    return work, store.backlog(), len(set(du.open_items(store)) - set(items_before))
+
+
+def check_tracked(r):
+    """Check 4: lead, worker, continuation, resolve, report, and a nudge."""
+    rng = random.Random()
+    checks, items_before = [], du.open_items(r.store)
+    baseline = dc.baseline_of(r.channels.latest(), r.channels.peers())
+    mark, since = r.channels.mark(), live.now_ms()
+    for run in (run_tracked, run_nudge):
+        try:
+            checks += run(r, rng)
+        except du.RECOVERABLE as error:
+            checks.append(Check(run.__name__, False, str(error)))
+            checks += du.quiesce(r)
+    open_work, backlog, new_items = nothing_stuck(r, items_before)
+    checks += dc.judge_stretch(r, "tracked", "claude", mark, baseline, since, (TRACKED_RED,))
+    return checks + [fields("tracked backlog", [("open coordinations", open_work, 0),
+                                                ("awaiting", backlog.awaiting, 0),
+                                                ("active", backlog.active_attempts, 0),
+                                                ("new attention", new_items, 0)])]
+
+
+STEPS = (
+    du.check_step("tracked", "tracked handoff", check_tracked,
+                  "Tracked work ran from handoff through continuation and nudge to one shown report."),
+)

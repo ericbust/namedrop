@@ -366,4 +366,5 @@ BUDGET = 40 * 60
 
 def lane():
     import daily_channels
-    return Lane("daily-use", SETUP, daily_channels.STEPS, BUDGET)
+    import daily_coordination
+    return Lane("daily-use", SETUP, daily_channels.STEPS + daily_coordination.STEPS, BUDGET)
