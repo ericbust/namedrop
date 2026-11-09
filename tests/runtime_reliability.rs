@@ -553,6 +553,90 @@ fn status_worker_recovers_after_the_host_connection_returns() {
     assert!(!marker.exists());
 }
 
+/// Activation takes the command gate exclusively and gives up after 20 seconds.
+/// A worker that keeps retrying a status event may live for days, so it must
+/// hold the gate only while it reconciles, never while it waits.
+#[test]
+fn a_retrying_status_worker_lets_an_update_take_the_command_gate() {
+    let fixture = Fixture::new();
+    fixture.initialize();
+    fs::create_dir_all(fixture.state().join("runtime")).unwrap();
+    fixture.set_herdr(&format!(
+        "if [ ! -f \"$NAMEDROP_TEST_FIXTURE/host-ready\" ]; then\n\
+           touch \"$NAMEDROP_TEST_FIXTURE/host-failed\"\n\
+           printf '%s\\n' '{{\"error\":{{\"code\":\"connection_refused\",\"message\":\"host restarting\"}}}}' >&2\n\
+           exit 1\nfi\n{HERDR_SCRIPT}"
+    ));
+    let marker = fixture.queue_status("host-unavailable");
+    let mut worker = fixture.worker();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !fixture.root.join("host-failed").exists() {
+        assert!(Instant::now() < deadline, "host failure was not reached");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let gate = fs::File::open(fixture.state().join("runtime/commands.lock")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while gate.try_lock().is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "a waiting status worker still holds the command gate"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    gate.unlock().unwrap();
+    fs::write(fixture.root.join("host-ready"), "ready").unwrap();
+    worker.finish();
+    assert_eq!(fixture.recipient_status(), "idle");
+    assert!(!marker.exists());
+}
+
+/// The gate exists so state never changes under a migration: while an update
+/// holds it, the worker waits with the event still queued.
+#[test]
+fn a_status_worker_reconciles_nothing_while_an_update_holds_the_gate() {
+    let fixture = Fixture::new();
+    fixture.initialize();
+    fs::create_dir_all(fixture.state().join("runtime")).unwrap();
+    let gate = fs::File::create(fixture.state().join("runtime/commands.lock")).unwrap();
+    gate.lock().unwrap();
+    let marker = fixture.queue_status("during-update");
+    let mut worker = fixture.worker();
+    thread::sleep(Duration::from_millis(1_500));
+    assert_eq!(fixture.recipient_status(), "working");
+    assert!(marker.exists());
+    gate.unlock().unwrap();
+    worker.finish();
+    assert_eq!(fixture.recipient_status(), "idle");
+    assert!(!marker.exists());
+}
+
+/// Once an update selects another runtime, a worker started by the old one
+/// hands its queue to the selected runtime instead of reconciling on old code.
+#[test]
+fn a_status_worker_from_a_replaced_runtime_hands_its_queue_to_the_selected_one() {
+    let fixture = Fixture::new();
+    fixture.initialize();
+    let runtime = fixture.state().join("runtime");
+    fs::create_dir_all(runtime.join("current")).unwrap();
+    let launcher = runtime.join("namedrop");
+    fs::write(
+        &launcher,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$NAMEDROP_TEST_FIXTURE/handed-over\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+    std::os::unix::fs::symlink(&launcher, runtime.join("current/namedrop")).unwrap();
+    let marker = fixture.queue_status("after-update");
+    let mut worker = fixture.worker();
+    worker.finish();
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("handed-over")).unwrap(),
+        "hook agent-status-worker\n"
+    );
+    assert_eq!(fixture.recipient_status(), "working");
+    assert!(marker.exists());
+}
+
 #[test]
 fn unreadable_event_is_quarantined_without_blocking_later_events() {
     let fixture = Fixture::new();

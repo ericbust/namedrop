@@ -187,6 +187,15 @@ fn main() -> ExitCode {
                 .map(Path::to_path_buf)
         })
         .or_else(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from));
+    // The status worker outlives the hook that starts it and takes the
+    // command gate itself, around each event it reconciles.
+    if cli.is_agent_status_worker_hook() {
+        if let Some(state) = selected_state.as_deref() {
+            let socket = env::var("HERDR_SOCKET_PATH").ok();
+            let _ = namedrop::reminder::ensure_clock(state, socket.as_deref());
+        }
+        return run_agent_status_worker();
+    }
     // A dashboard successor started mid-update waits a bounded time rather
     // than parking forever behind a stuck migration.
     let gate_wait = cli.is_dashboard_server().then_some(Duration::from_secs(60));
@@ -275,9 +284,6 @@ fn main() -> ExitCode {
     }
     if cli.is_agent_status_changed_hook() {
         return run_agent_status_changed_hook();
-    }
-    if cli.is_agent_status_worker_hook() {
-        return run_agent_status_worker();
     }
     if matches!(cli.operation(), "reconcile" | "event.pane-lifecycle")
         && let Some(state) = selected_state.as_deref()
@@ -1334,6 +1340,17 @@ fn run_agent_status_worker_queue(
         scan,
         |path| fs::read(path),
         |input| {
+            // The worker can wait out retries for days, so it holds the
+            // command gate only while it reconciles, and an update between
+            // units hands the queue to the runtime it selected.
+            let _gate = match env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from) {
+                Some(state) => {
+                    let gate = namedrop::runtime_command_guard(&state, None)?;
+                    namedrop::runtime_reexec_if_replaced(&state)?;
+                    gate
+                }
+                None => None,
+            };
             if input == serde_json::json!({"operation":"mailbox-wake"}) {
                 with_runtime_options(&RuntimeOptions::default(), |runtime| {
                     namedrop::drain_mailboxes(runtime).and_then(|report| {

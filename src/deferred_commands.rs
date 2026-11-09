@@ -436,19 +436,6 @@ fn launcher(state: &Path) -> Result<PathBuf, String> {
     }
 }
 
-fn reexec_if_updated(state: &Path) -> Result<(), String> {
-    if state.join("runtime/namedrop").is_file()
-        && fs::canonicalize(state.join("runtime/current/namedrop")).ok()
-            != env::current_exe().and_then(fs::canonicalize).ok()
-    {
-        return Err(Command::new(launcher(state)?)
-            .args(env::args_os().skip(1))
-            .exec()
-            .to_string());
-    }
-    Ok(())
-}
-
 /// Only a caller that can already connect to Herdr can ensure an outside owner.
 pub fn ensure_worker(state: &Path, socket: &str) -> Result<(), String> {
     UnixStream::connect(socket).map_err(|e| e.to_string())?;
@@ -479,7 +466,7 @@ fn worker_lock(directory: &Dir) -> Result<fs::File, String> {
 
 pub fn run_worker(state: &Path, socket: &str) -> Result<(), String> {
     UnixStream::connect(socket).map_err(|e| e.to_string())?;
-    reexec_if_updated(state)?;
+    crate::installed_runtime::reexec_if_replaced(state)?;
     let directory = directory(state, socket)?;
     let lock = worker_lock(&directory)?;
     if lock.try_lock().is_err() {
@@ -497,7 +484,7 @@ pub fn run_worker(state: &Path, socket: &str) -> Result<(), String> {
     let pending_directory = pending_directory(&directory)?;
     let mut last_probe = Instant::now();
     loop {
-        reexec_if_updated(state)?;
+        crate::installed_runtime::reexec_if_replaced(state)?;
         if last_probe.elapsed() >= Duration::from_secs(5) {
             if UnixStream::connect(socket).is_err() {
                 return Ok(());
@@ -576,7 +563,7 @@ pub fn execute_queued(
         return Err("invalid deferred operation id".into());
     }
     let _guard = crate::runtime_command_guard(state, None)?;
-    reexec_if_updated(state)?;
+    crate::installed_runtime::reexec_if_replaced(state)?;
     let directory = directory(state, socket)?;
     let pending = pending_directory(&directory)?;
     let lock = match directory.lock(&format!("{key}.lock")) {

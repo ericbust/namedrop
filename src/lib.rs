@@ -81,6 +81,7 @@ pub(crate) use install::{
 pub use installed_runtime::command_guard as runtime_command_guard;
 #[doc(hidden)]
 pub use installed_runtime::executable as runtime_executable;
+pub use installed_runtime::reexec_if_replaced as runtime_reexec_if_replaced;
 #[doc(hidden)]
 pub use installed_runtime::validate_update_manifest;
 pub use integration::{
