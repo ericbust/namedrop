@@ -723,6 +723,45 @@ fn activate_only_never_builds_or_links_and_must_match_the_supplied_workspace() {
     assert!(message.contains("'space with spaces'"), "{message}");
 }
 
+/// Doctor can't name a session until a hook has recorded a run, so the first
+/// update that records them asks for a restart outright.
+#[test]
+fn activation_asks_for_one_codex_restart_until_a_hook_has_recorded_a_run() {
+    let fixture = Fixture::new();
+    let checkout = fixture.checkout();
+    fixture.host();
+    let state = checkout.join("activation-state");
+    fs::create_dir_all(&state).unwrap();
+    let activate = |fixture: &Fixture| {
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&activation("space with spaces", true)).unwrap();
+        payload["data"]["runtime"] = serde_json::json!({"live_update": true});
+        payload["data"]["state_directory"] = serde_json::json!(state);
+        succeeded(
+            &fixture
+                .setup(&checkout, Some("activate"))
+                .env(
+                    "NAMEDROP_TEST_LOG_RESPONSE",
+                    action_log("activate", 0, &payload.to_string()),
+                )
+                .output()
+                .unwrap(),
+        )
+    };
+    let first = activate(&fixture);
+    assert!(
+        first.contains("Restart any running Codex sessions once"),
+        "{first}"
+    );
+    fs::create_dir(state.join("hook-runs")).unwrap();
+    let later = activate(&fixture);
+    assert!(
+        !later.contains("Restart any running Codex sessions once")
+            && later.contains("Doctor names it"),
+        "{later}"
+    );
+}
+
 #[test]
 fn activation_without_a_state_directory_or_readable_registration_is_not_reported_as_setup() {
     let fixture = Fixture::new();

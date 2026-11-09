@@ -239,7 +239,7 @@ def show_report(payload):
         if os.path.isdir(os.path.join(data.get("state_directory") or "", "hook-runs")):
             print("\n  Your current agents can keep working. If a running Codex session shows Hook failed, or Doctor names it, restart that session.")
         else:
-            print("\n  Your current agents can keep working, but restart any running Codex sessions once. This update changes their hooks, and Namedrop can't yet tell which sessions it affects.")
+            print("\n  Your current agents can keep working. Restart any running Codex sessions once: this update changes their hooks, and Namedrop can't yet tell which sessions it affects.")
         commands = [instruction for hook in data.get("agent_integration_hook_activation", {}).values()
                     for instruction in hook.get("steps", []) if instruction.startswith("codex ")]
         if commands:
