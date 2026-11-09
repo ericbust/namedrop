@@ -77,7 +77,7 @@ testbed/testbed test --link . --fresh --yes --daily-use
 
 It uses the same isolated profile, real Claude Code and Codex, report and evidence
 directories as `test`, with Codex always `--no-daemon`. A fresh run takes 25 to 30 minutes, about
-12 of them in session continuity, and has a 40-minute budget after the build. A failed setup step skips the rest. A
+10 of them in session continuity, and has a 40-minute budget after the build. A failed setup step skips the rest. A
 failed check doesn't stop the next one, because a run on a buggy build should report
 everything it finds, and exit 1 means at least one check failed. After a failed check, a
 `quiesced:` line says what the lane interrupted and closed before moving on. It reads
@@ -114,7 +114,7 @@ testbed/testbed test --link . --fresh --yes --upgrade-check
 It installs the newest `v*` release below the checkout's version from GitHub, or
 `--upgrade-from REF`, in a profile named
 `test-upgrade-link-<checkout name>`. It leaves a delivery open on both agents mid-tool, links
-and activates the build under test, about 10 minutes in all, and checks the version rose, the agents stayed up, the
+and activates the build under test, about 13 minutes in all, and checks the version rose, the agents stayed up, the
 open deliveries settle once and a fresh message works in the old sessions. The old sessions'
 model calls are reported and never fail it. A new Codex session then shows whether starting
 over recovers one the update stranded.
