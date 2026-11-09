@@ -391,7 +391,7 @@
           "attempt_id": {
             "type": "string",
             "minLength": 1,
-            "description": "Required for an agent-authored reply: the control.attempt_id being finished."
+            "description": "Required for an agent-authored reply: the attempt id being finished."
           },
           "request_context": {
             "type": "boolean",
@@ -619,7 +619,7 @@
           "attempt_id": {
             "type": "string",
             "minLength": 1,
-            "description": "The acknowledged control.attempt_id being finished without a reply."
+            "description": "The acknowledged attempt id being finished without a reply."
           }
         }
       },
