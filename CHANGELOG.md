@@ -17,13 +17,14 @@ Each release is a section here, newest first. The GitHub release for a version u
 ### Fixed
 
 - An update no longer waits on Namedrop's status worker. The worker held the command lock for as long as it ran, and one that kept retrying a status event could run for days, so the update gave up after 20 seconds and blamed a popup. It now holds the lock only while it handles an event, and after an update it hands its queue to the new version.
-- When an update can't take the command lock, it now names each process that holds it, by PID and Namedrop command, and says how to free it, instead of always pointing at a popup.
+- An update now stops Namedrop's own background helpers that hold the command lock, such as a status worker from 1.6.5 waiting out retries, and starts them again on the new version once it finishes. Their queued work stays on disk, so nothing is lost and you don't have to do anything. It never stops an agent or any other process.
+- When something else holds the command lock, the update now names it by PID and Namedrop command and says how to free it, instead of always pointing at a popup.
+- On macOS, an update no longer fails with "Could not finish inspecting older Namedrop commands" on a busy machine. It now reads running processes directly instead of waiting on `ps`.
 
 ### Upgrade
 
 - This release raises the state schema to 8. The update migrates it live behind the command lock, so agent sessions and pending deliveries carry on. Keep the matching executable and a database backup together in case you roll back.
 - Close any open Namedrop popup, such as the tour, before you update. An open popup makes the migration wait, then ask you to retry.
-- A status worker from 1.6.5 or earlier can still hold the command lock when you update. The update then names it and shows the `kill` line to run. Stopping it loses nothing, because its events stay queued.
 - Codex sessions started before the update lose their hooks, so restart them. Until you do, such a session reads each delivery through the prompt's `delivery inbox` line and can answer with the reply line it prints, which takes about 3 model calls instead of 1. An answer it gives only as its final message is lost, and ND-DELIVERY-003 tells you so.
 
 ## [1.6.6] - 2026-11-09

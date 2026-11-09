@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -140,6 +141,7 @@ class Fixture:
                 'limit=float(sys.argv[5]); lock=runtime.lock; '
                 'runtime.lock=lambda r,n,timeout=None: lock(r,n,None if timeout is None else min(timeout,limit)); '
                 'runtime.drain_legacy_commands.__defaults__=(limit,); '
+                'runtime.command_gate.__wrapped__.__defaults__=(limit, min(2, limit)); '
                 'runtime.switch_and_migrate(Path(sys.argv[2]),Path(sys.argv[3]),Path(sys.argv[4])); '
                 'print("migration completed")')
         return self.spawn([sys.executable, '-c', code, str(REPO / 'scripts'), str(self.rt),
@@ -271,6 +273,95 @@ def timeout(fixture):
     assert not (fixture.rt / 'migration.json').exists()
 
 
+FAKE_HERDR = """#!/bin/sh
+touch "$(dirname "$0")/herdr-called"
+printf '%s\\n' '{"error":{"code":"connection_refused","message":"host restarting"}}' >&2
+exit 1
+"""
+HELPERS = (['hook', 'agent-status-worker'], ['--deferred-worker', '{state}', 'socket'],
+           ['reminder-clock', '{state}', 'socket'])
+
+
+def start_helper(fixture, executable, args, environment):
+    helper = subprocess.Popen([str(executable), *[a.format(state=fixture.state) for a in args]],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              env=environment)
+    fixture.children.append(helper)
+    helper.stdin.write(b'holding the gate\n')
+    helper.stdin.flush()
+    assert helper.stdout.readline() == b'holding the gate\n'
+    return helper
+
+
+def helper_environment(fixture):
+    herdr = fixture.state.parent / 'herdr'
+    herdr.write_text(FAKE_HERDR)
+    herdr.chmod(0o700)
+    environment = {k: v for k, v in os.environ.items() if not k.startswith(('HERDR_', 'NAMEDROP_'))}
+    environment.update(HERDR_PLUGIN_STATE_DIR=str(fixture.state), HERDR_SOCKET_PATH='socket',
+                       HERDR_WORKSPACE_ID='w', HERDR_BIN_PATH=str(herdr))
+    return environment
+
+
+def stop_runtime_processes(fixture):
+    executables = runtime.retained_executables(fixture.rt)
+    for pid in runtime.all_pids():
+        found = runtime.process(pid)
+        if found and os.path.realpath(found[0]) in executables and pid not in {c.pid for c in fixture.children}:
+            os.kill(pid, signal.SIGKILL)
+
+
+def stuck_helpers(fixture):
+    """As on a Mac updating from 1.6.5: the release's status worker waits out
+    retries while holding the command gate, beside its deferred worker and
+    reminder clock. The update stops these helpers, migrates and starts them
+    again on the new runtime, with no step for the person and no queued work lost."""
+    environment = helper_environment(fixture)
+    queue = fixture.state / 'agent-status-reconciliation' / hashlib.sha256(b'socket\0w').hexdigest()
+    queue.mkdir(parents=True)
+    marker = queue / 'pending-1'
+    marker.write_text(json.dumps({'type': 'pane_agent_status_changed', 'pane_id': 'worker-pane',
+                                  'workspace_id': 'w', 'agent_status': 'idle'}))
+    helpers = [start_helper(fixture, fixture.rt / 'namedrop', args, environment) for args in HELPERS]
+    try:
+        migration = fixture.migration(timeout=10)
+        out, err = migration.communicate(timeout=40)
+        assert migration.returncode == 0 and b'migration completed' in out, (out, err)
+        assert b'Restarted Namedrop helpers after the update: status worker' in err, err
+        assert b'deferred worker' in err and b'reminder clock' in err, err
+        for helper in helpers:
+            assert helper.wait(timeout=5) == -signal.SIGTERM, helper.returncode
+        fixture.verify_rows(8)
+        assert runtime.current(fixture.rt) == fixture.new
+        # The restarted status worker runs the new runtime against the same queue.
+        wait_for(lambda: (fixture.state.parent / 'herdr-called').exists(),
+                 'The restarted status worker never read its queue')
+        assert marker.exists(), 'A queued status event was lost'
+        with runtime.command_gate(fixture.rt, timeout=5, grace=5):
+            pass
+    finally:
+        stop_runtime_processes(fixture)
+
+
+def foreign_holder(fixture):
+    """A process with a helper's arguments that is not one of this runtime's
+    executables is never stopped: the update waits, then names it."""
+    # The simulator locks the commands.lock three directories above itself, so
+    # this copy holds the real gate without being a retained release.
+    stranger = fixture.rt / 'foreign' / 'copy' / 'namedrop'
+    stranger.parent.mkdir(parents=True)
+    shutil.copyfile(fixture.rt / fixture.old / 'namedrop', stranger)
+    stranger.chmod(0o700)
+    holder = start_helper(fixture, stranger, HELPERS[0], helper_environment(fixture))
+    migration = fixture.migration(timeout=3)
+    out, err = migration.communicate(timeout=20)
+    assert migration.returncode != 0 and b'PID %d (namedrop hook agent-status-worker)' % holder.pid in err, (out, err)
+    assert holder.poll() is None, 'The update stopped a process that is not a Namedrop helper'
+    assert b'Restarted' not in err
+    fixture.verify_rows(3)
+    assert runtime.current(fixture.rt) == fixture.old
+
+
 def interrupted_publication(fixture):
     (fixture.rt / 'migration.json').write_text(json.dumps({'previous': str(fixture.old), 'target': str(fixture.new)}))
     # Interrupt the actual two-step pointer publication before replace.
@@ -380,6 +471,24 @@ def run(base, name, actual, simulator, gated, case, *args):
         fixture.close()
 
 
+def helper_identity():
+    """Activation stops only these exact helper commands of its own state."""
+    raw = (2).to_bytes(4, sys.byteorder) + b'/r/releases/abc/namedrop\0\0\0\0' \
+        + b'/r/current/namedrop\0hook\0HERDR_SOCKET_PATH=/s.sock\0A=b=c\0\0ptr_munge=\0'
+    argv, environment = runtime.parse_procargs2(raw)
+    assert argv == ['/r/current/namedrop', 'hook'], argv
+    assert environment == {'HERDR_SOCKET_PATH': '/s.sock', 'A': 'b=c'}, environment
+    kind = runtime.helper_kind
+    state = Path('/var/state')
+    assert kind(['n', 'hook', 'agent-status-worker'], state) == 'status worker'
+    assert kind(['n', '--deferred-worker', '/var/state', '/s.sock'], state) == 'deferred worker'
+    assert kind(['n', 'reminder-clock', '/var/state', '/s.sock'], state) == 'reminder clock'
+    for other in (['n', 'reminder-clock', '/other/state', '/s.sock'], ['n', 'hook', 'agent-status-changed'],
+                  ['n', 'hook', 'agent-status-worker', 'extra'], ['n', '--deferred-execute', '/var/state', 's', 'k'],
+                  ['n', 'ui', 'run', 'tour'], ['n', 'reply'], ['claude'], ['n']):
+        assert kind(other, state) is None, other
+
+
 def busy_gate_advice():
     """A blocked update names each holder by its subcommand words only: a flag's
     value can hold a message, so it never reaches the person's screen."""
@@ -411,6 +520,7 @@ def busy_gate_advice():
 
 def main():
     busy_gate_advice()
+    helper_identity()
     actual = Path(os.environ['NAMEDROP_TEST_BINARY']).resolve()
     with tempfile.TemporaryDirectory(prefix='namedrop-live-schema-') as directory:
         base = Path(directory)
@@ -436,6 +546,9 @@ def main():
                 run(base, f'{history}-{name}', actual, simulators[gated], gated, check, *args)
             case('success', gated_success if gated else legacy_success)
             case('timeout', timeout)
+            if gated:
+                case('stuck-helpers', stuck_helpers)
+                case('foreign-holder', foreign_holder)
             case('interrupted-publication', interrupted_publication)
             case('orphaned-migration', orphaned_migration)
             for committed in (False, True):

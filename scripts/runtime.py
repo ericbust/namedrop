@@ -1,7 +1,7 @@
 """Publish a compatible runtime without removing tools used by existing sessions."""
 
+import contextlib
 import ctypes
-import errno
 import fcntl
 import hashlib
 import json
@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import stat
 import sqlite3
 import subprocess
@@ -124,37 +125,30 @@ def command_words(argv):
 
 def gate_holders(path):
     """PIDs other than this one with the command lock open, and what each is."""
-    target, me, pids = os.path.realpath(path), os.getpid(), set()
+    target, me = os.path.realpath(path), os.getpid()
     if sys.platform == 'darwin':
+        # Only Namedrop's own executables take this lock, so only they are asked about.
         try:
-            listed = subprocess.run(['/usr/sbin/lsof', '-t', '--', target],
-                                    capture_output=True, text=True, timeout=5)
-            pids = {int(pid) for pid in listed.stdout.split() if pid.isdigit()}
-        except (OSError, subprocess.SubprocessError):
+            executables = retained_executables(Path(path).parent)
+            candidates = {pid: found for pid in all_pids() if pid != me
+                          for found in [process(pid)]
+                          if found and os.path.realpath(found[0]) in executables}
+            if not candidates:
+                return []
+            listed = subprocess.run(['/usr/sbin/lsof', '-a', '-t', '-p', ','.join(map(str, candidates)),
+                                     '--', target], capture_output=True, text=True, timeout=20)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
             return []
-    else:
-        for entry in os.listdir('/proc'):
-            if not entry.isdigit():
-                continue
-            try:
-                if any(os.readlink(f'/proc/{entry}/fd/{fd}') == target
-                       for fd in os.listdir(f'/proc/{entry}/fd')):
-                    pids.add(int(entry))
-            except OSError:
-                continue
+        holding = {int(pid) for pid in listed.stdout.split() if pid.isdigit()}
+        return [(pid, command_words(candidates[pid][1])) for pid in sorted(holding) if pid in candidates]
     holders = []
-    for pid in sorted(pids - {me}):
-        try:
-            if sys.platform == 'darwin':
-                argv = subprocess.run(['/bin/ps', '-o', 'args=', '-p', str(pid)], capture_output=True,
-                                      text=True, timeout=5).stdout.split()
-            else:
-                argv = [os.fsdecode(arg) for arg in Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0') if arg]
-        except (OSError, subprocess.SubprocessError):
-            argv = []
-        if argv:
-            holders.append((pid, command_words(argv)))
-    return holders
+    for entry in os.listdir('/proc'):
+        if not entry.isdigit() or int(entry) == me or not opens(int(entry), target):
+            continue
+        found = process(int(entry))
+        if found and found[1]:
+            holders.append((int(entry), command_words(found[1])))
+    return sorted(holders)
 
 
 def busy_gate_message(path):
@@ -201,6 +195,227 @@ def lock(runtime, name, timeout=None):
     return stream
 
 
+# macOS process inspection goes through libproc and sysctl, not ps or lsof
+# scans of every process, which can take seconds on a busy machine.
+CTL_KERN, KERN_ARGMAX, KERN_PROCARGS2 = 1, 8, 49
+
+
+def darwin_library():
+    library = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+    library.proc_listallpids.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    library.proc_listallpids.restype = ctypes.c_int
+    library.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    library.proc_pidpath.restype = ctypes.c_int
+    return library
+
+
+def darwin_pids(library):
+    count = library.proc_listallpids(None, 0)
+    if count <= 0:
+        raise RuntimeError('Could not list processes to finish the update. Retry it; no agent was stopped.')
+    buffer = (ctypes.c_int * (count + 256))()
+    count = library.proc_listallpids(buffer, ctypes.sizeof(buffer))
+    return [pid for pid in buffer[:max(count, 0)] if pid > 0]
+
+
+def darwin_path(library, pid):
+    executable = ctypes.create_string_buffer(4096)  # PROC_PIDPATHINFO_MAXSIZE
+    if library.proc_pidpath(pid, executable, len(executable)) <= 0:
+        return None
+    return os.fsdecode(executable.value)
+
+
+def parse_procargs2(data):
+    """argv and environment from macOS KERN_PROCARGS2: argc, the exec path,
+    padding, then argc NUL-ended arguments and NUL-ended environment strings
+    up to an empty one."""
+    argc = int.from_bytes(data[:4], sys.byteorder)
+    rest = data[4:]
+    rest = rest[rest.index(b'\0'):].lstrip(b'\0')
+    strings = rest.split(b'\0')
+    argv = [os.fsdecode(item) for item in strings[:argc]]
+    environment = {}
+    for item in strings[argc:]:
+        if not item:
+            break
+        name, _, value = os.fsdecode(item).partition('=')
+        environment[name] = value
+    return argv, environment
+
+
+def darwin_arguments(pid):
+    libc = ctypes.CDLL(None, use_errno=True)
+    argmax = ctypes.c_int(0)
+    size = ctypes.c_size_t(ctypes.sizeof(argmax))
+    if libc.sysctl((ctypes.c_int * 2)(CTL_KERN, KERN_ARGMAX), 2, ctypes.byref(argmax), ctypes.byref(size),
+                   None, ctypes.c_size_t(0)) != 0 or argmax.value <= 0:
+        return None
+    buffer = ctypes.create_string_buffer(argmax.value)
+    size = ctypes.c_size_t(argmax.value)
+    if libc.sysctl((ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, pid), 3, buffer, ctypes.byref(size),
+                   None, ctypes.c_size_t(0)) != 0:
+        return None
+    return parse_procargs2(buffer.raw[:size.value])
+
+
+def process(pid):
+    """(executable, argv, environment) of a process of this user, or None."""
+    try:
+        if sys.platform == 'darwin':
+            executable = darwin_path(darwin_library(), pid)
+            arguments = darwin_arguments(pid)
+            if executable is None or arguments is None:
+                return None
+            return (executable, *arguments)
+        executable = os.readlink(f'/proc/{pid}/exe')
+        argv = [os.fsdecode(a) for a in Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0') if a]
+        environment = {}
+        for item in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0'):
+            name, _, value = os.fsdecode(item).partition('=')
+            if name:
+                environment[name] = value
+        return executable, argv, environment
+    except OSError:
+        return None
+
+
+def all_pids():
+    if sys.platform == 'darwin':
+        return darwin_pids(darwin_library())
+    return [int(entry) for entry in os.listdir('/proc') if entry.isdigit()]
+
+
+def retained_executables(runtime):
+    return {str((release / 'namedrop').resolve()) for release in (runtime / 'releases').iterdir()
+            if release.is_dir() and not release.is_symlink() and (release / 'namedrop').is_file()}
+
+
+def helper_kind(argv, state):
+    """Which Namedrop background helper argv starts, or None. Each keeps its
+    work on disk and starts again on the next event, so activation may stop it."""
+    rest = argv[1:]
+    if rest == ['hook', 'agent-status-worker']:
+        return 'status worker'
+    ours = len(rest) == 3 and os.path.realpath(rest[1]) == os.path.realpath(state)
+    if ours and rest[0] == '--deferred-worker':
+        return 'deferred worker'
+    if ours and rest[0] == 'reminder-clock':
+        return 'reminder clock'
+    return None
+
+
+def opens(pid, path):
+    try:
+        return any(os.readlink(f'/proc/{pid}/fd/{fd}') == path for fd in os.listdir(f'/proc/{pid}/fd'))
+    except OSError:
+        return False
+
+
+def gate_helpers(runtime):
+    """Namedrop helpers of this runtime that have the command lock open: the
+    executable is one of its retained releases and the arguments are exactly a
+    helper's. Agents and every other process are never included."""
+    executables = retained_executables(runtime)
+    target = os.path.realpath(runtime / 'commands.lock')
+    helpers = []
+    for pid in all_pids():
+        if pid == os.getpid():
+            continue
+        found = process(pid)
+        if found is None or os.path.realpath(found[0]) not in executables:
+            continue
+        kind = helper_kind(found[1], runtime.parent)
+        if kind:
+            helpers.append({'pid': pid, 'kind': kind, 'executable': found[0],
+                            'argv': found[1], 'environment': found[2]})
+    if sys.platform != 'darwin':
+        return [helper for helper in helpers if opens(helper['pid'], target)]
+    if not helpers:
+        return []
+    try:
+        listed = subprocess.run(['/usr/sbin/lsof', '-a', '-t', '-p', ','.join(str(h['pid']) for h in helpers),
+                                 '--', target], capture_output=True, text=True, timeout=20)
+        holding = {int(pid) for pid in listed.stdout.split() if pid.isdigit()}
+    except (OSError, subprocess.SubprocessError):
+        # Every helper restarts after activation, so stopping one that did not
+        # hold the lock costs nothing.
+        return helpers
+    return [helper for helper in helpers if helper['pid'] in holding]
+
+
+def gone(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    try:
+        return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z'
+    except (OSError, IndexError):
+        return False
+
+
+def stop_helpers(helpers):
+    stopped = []
+    for helper in helpers:
+        found = process(helper['pid'])
+        # The PID must still be the same helper.
+        if found is None or found[0] != helper['executable'] or found[1] != helper['argv']:
+            continue
+        try:
+            os.kill(helper['pid'], signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        stopped.append(helper)
+    deadline = time.monotonic() + 3
+    while not all(gone(helper['pid']) for helper in stopped) and time.monotonic() < deadline:
+        time.sleep(.05)
+    for helper in stopped:
+        if not gone(helper['pid']):
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(helper['pid'], signal.SIGKILL)
+    return stopped
+
+
+def restart_helpers(runtime, helpers):
+    """Start each stopped helper again through the launcher, so it runs the
+    selected runtime with the arguments and environment it had."""
+    for helper in helpers:
+        subprocess.Popen([str(runtime / 'namedrop'), *helper['argv'][1:]], env=helper['environment'],
+                         cwd='/', stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+    if helpers:
+        print('Restarted Namedrop helpers after the update: '
+              + ', '.join(f"{helper['kind']} (was PID {helper['pid']})" for helper in helpers) + '.',
+              file=sys.stderr)
+
+
+@contextlib.contextmanager
+def command_gate(runtime, timeout=20, grace=2):
+    """The exclusive command gate. A command, popup or helper in the middle of
+    its work gets `grace` to finish. A Namedrop helper still holding the gate
+    then, such as a status worker from 1.6.5 waiting out retries, is stopped
+    and started again once the gate is released."""
+    deadline = time.monotonic() + timeout
+    stopped = []
+    while True:
+        try:
+            gate = lock(runtime, 'commands.lock', timeout=max(0.0, min(grace, deadline - time.monotonic())))
+            break
+        except RuntimeError:
+            found = gate_helpers(runtime) if time.monotonic() < deadline else []
+            if not found:
+                if time.monotonic() < deadline:
+                    continue
+                restart_helpers(runtime, stopped)
+                raise
+            stopped += stop_helpers(found)
+    try:
+        with gate:
+            yield gate
+    finally:
+        restart_helpers(runtime, stopped)
+
+
 def state_schema(runtime):
     path = runtime.parent / 'namedrop.sqlite3'
     with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=2) as db:
@@ -224,37 +439,14 @@ def drain_legacy_commands(runtime, timeout=20):
     require(sys.platform == 'darwin',
             'Found a runtime release without the command gate, which only older macOS releases have. '
             'Inspect the runtime directory; no agent was stopped.')
-    # ps preserves the launch path, which may include the now-switched current
-    # symlink. Ask macOS for the executable vnode path before classifying it.
-    process = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
-    process.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
-    process.proc_pidpath.restype = ctypes.c_int
-    candidates = paths | {str((runtime / 'current' / 'namedrop').resolve()),
-                          str((runtime / 'namedrop').resolve())}
+    # libproc reports each process's executable vnode path, not its arguments
+    # and not the launch path through the switched current symlink, and needs
+    # no subprocess, so a busy machine cannot time it out. No PID is killed.
+    library = darwin_library()
     deadline = time.monotonic() + timeout
     while True:
-        # macOS is the supported host. Wide comm reports executable paths, not
-        # user prompts/arguments. No PID is killed and no process-name matching.
-        try:
-            result = subprocess.run(['/bin/ps', '-axww', '-o', 'pid=,comm='],
-                                    capture_output=True, text=True,
-                                    timeout=max(.01, min(2, deadline - time.monotonic())), check=True)
-        except subprocess.TimeoutExpired as error:
-            raise RuntimeError('Could not finish inspecting older Namedrop commands. '
-                               'Retry the update shortly; no agent was stopped.') from error
-        running = []
-        for line in result.stdout.splitlines():
-            parts = line.split(maxsplit=1)
-            if len(parts) != 2 or not parts[1].startswith('/') or str(Path(parts[1]).resolve()) not in candidates:
-                continue
-            executable = ctypes.create_string_buffer(4096)  # PROC_PIDPATHINFO_MAXSIZE
-            if process.proc_pidpath(int(parts[0]), executable, len(executable)) <= 0:
-                if ctypes.get_errno() == errno.ESRCH:  # Finished between the two observations.
-                    continue
-                raise RuntimeError('Could not identify an existing Namedrop command. '
-                                   'Retry the update shortly; no agent was stopped.')
-            if os.fsdecode(executable.value) in paths:
-                running.append(parts[0])
+        running = [str(pid) for pid in darwin_pids(library)
+                   if pid != os.getpid() and darwin_path(library, pid) in paths]
         if not running:
             return
         require(time.monotonic() < deadline,
@@ -300,7 +492,7 @@ def recover_migration(runtime):
     """A normal activation retry repairs an interrupted switch without data rollback."""
     if not (runtime / 'migration.json').exists() and not (runtime / 'migration.json').is_symlink():
         return
-    with lock(runtime, 'commands.lock', timeout=20) as gate:
+    with command_gate(runtime) as gate:
         previous, target = migration_record(runtime)
         require(current(runtime) in (previous, target), 'Runtime changed during an unfinished migration.')
         schema = state_schema(runtime)
@@ -316,7 +508,7 @@ def recover_migration(runtime):
 
 
 def switch_and_migrate(runtime, previous, target):
-    with lock(runtime, 'commands.lock', timeout=20) as gate:
+    with command_gate(runtime) as gate:
         record = runtime / 'migration.json'
         require(not record.exists() and not record.is_symlink(), 'An unfinished migration needs recovery.')
         write_owned(record, json.dumps({'previous': str(previous), 'target': str(target)}) + '\n', 0o600)
