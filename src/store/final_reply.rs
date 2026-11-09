@@ -26,6 +26,28 @@ impl StateTransaction<'_> {
         }))
     }
 
+    pub(crate) fn attempt_belongs_to(
+        &self,
+        namespace: &StateNamespace,
+        attempt_id: &crate::DeliveryAttemptId,
+        session: &crate::AgentSessionId,
+    ) -> Result<bool, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT agent_session_id FROM delivery_attempts
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2 AND attempt_id = ?3",
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    attempt_id.as_str()
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .is_some_and(|owner| owner == session.as_str()))
+    }
+
     /// Whether the attempt is still in its own session's delivery inbox.
     pub(crate) fn attempt_outstanding(
         &self,

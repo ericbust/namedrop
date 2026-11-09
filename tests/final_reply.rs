@@ -2280,12 +2280,18 @@ impl Clock for AfterTheGrace {
 }
 
 impl Space {
-    /// A reviewer whose hooks have run under this package.
+    /// A reviewer whose host runs hooks from its own copy of this package.
     fn reviewer_on(host: &'static str) -> Self {
         let space = Self::new();
         *space.herdr.reviewer_host.lock().unwrap() = host;
         space.install_package("first");
+        fs::create_dir_all(space.cached_copy()).unwrap();
+        fs::write(space.cached_copy().join("plugin"), "first").unwrap();
         space
+    }
+
+    fn cached_copy(&self) -> std::path::PathBuf {
+        self.directory.home.join("codex-cache/first")
     }
 
     fn install_package(&self, executable: &str) {
@@ -2298,6 +2304,47 @@ impl Space {
             &self.directory.state,
         )
         .unwrap();
+    }
+
+    /// The installed package changes first, and the host's copy follows.
+    fn real_plugin_update(&self) {
+        self.install_package("second");
+        fs::remove_dir_all(self.cached_copy()).unwrap();
+    }
+
+    /// A hook as the host starts it, from the copy it holds.
+    fn hook_from_cached_copy(&self, session: &str) {
+        let mut hook = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
+            .args(["hook", "user-prompt-submit", "--state-directory"])
+            .arg(&self.directory.state)
+            .env_clear()
+            .env("HOME", &self.directory.home)
+            .env("PLUGIN_ROOT", self.cached_copy())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        hook.stdin
+            .take()
+            .unwrap()
+            .write_all(
+                json!({"hook_event_name":"UserPromptSubmit","session_id":session,"prompt":"hi"})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap();
+        hook.wait().unwrap();
+    }
+
+    fn typed_prompt(&self, pane: &str, session: &str) {
+        execute_user_prompt_submit_hook(
+            &json!({"hook_event_name":"UserPromptSubmit","session_id":session,
+                    "prompt_id":"later-turn","prompt":"Anything waiting for you?"})
+            .to_string(),
+            &self.runtime(pane),
+        );
     }
 
     fn observe_settled(&self) {
@@ -2336,8 +2383,9 @@ impl Space {
 #[test]
 fn a_session_codex_refuses_warns_at_settle_even_for_tracked_work() {
     let space = Space::reviewer_on("codex");
+    space.hook_from_cached_copy("session-reviewer");
     space.armed_tracked_ask();
-    space.install_package("second");
+    space.real_plugin_update();
     space.observe_settled();
     let warnings = space.unresolved_disposition_warnings();
     assert_eq!(warnings.len(), 1, "{warnings:?}");
@@ -2347,8 +2395,9 @@ fn a_session_codex_refuses_warns_at_settle_even_for_tracked_work() {
 #[test]
 fn an_untracked_warning_says_codex_refused_the_hooks() {
     let space = Space::reviewer_on("codex");
+    space.hook_from_cached_copy("session-reviewer");
     space.armed_ask();
-    space.install_package("second");
+    space.real_plugin_update();
     space.observe_settled();
     let warnings = space.unresolved_disposition_warnings();
     assert_eq!(warnings.len(), 1, "{warnings:?}");
@@ -2358,8 +2407,8 @@ fn an_untracked_warning_says_codex_refused_the_hooks() {
 #[test]
 fn a_session_whose_hooks_still_run_raises_nothing_new() {
     let space = Space::reviewer_on("codex");
+    space.hook_from_cached_copy("session-reviewer");
     space.armed_tracked_ask();
-    space.install_package("first");
     space.observe_settled();
     assert!(space.unresolved_disposition_warnings().is_empty());
 }
@@ -2367,8 +2416,9 @@ fn a_session_whose_hooks_still_run_raises_nothing_new() {
 #[test]
 fn only_codex_refuses_hooks_when_the_package_changes() {
     let space = Space::reviewer_on("claude");
+    space.hook_from_cached_copy("session-reviewer");
     space.armed_tracked_ask();
-    space.install_package("second");
+    space.real_plugin_update();
     space.observe_settled();
     assert!(space.unresolved_disposition_warnings().is_empty());
     assert!(space.refused_sessions_in_doctor().is_empty());
@@ -2382,21 +2432,77 @@ fn doctor_names_a_running_session_whose_hooks_are_refused() {
         space.refused_sessions_in_doctor().is_empty(),
         "a session that has run no hook yet may just be starting"
     );
+    space.hook_from_cached_copy("session-reviewer");
     space.armed_ask();
     assert!(space.refused_sessions_in_doctor().is_empty());
 
-    space.install_package("second");
+    space.real_plugin_update();
     let refused = space.refused_sessions_in_doctor();
     assert_eq!(refused.len(), 1, "{refused:?}");
     assert!(refused[0].contains("@reviewer"), "{refused:?}");
 
-    execute_user_prompt_submit_hook(
-        &json!({"hook_event_name":"UserPromptSubmit","session_id":"session-reviewer",
-                "prompt_id":"later-turn","prompt":"Anything waiting for you?"})
-        .to_string(),
-        &space.runtime("pane-reviewer"),
-    );
+    fs::create_dir_all(space.cached_copy()).unwrap();
+    space.hook_from_cached_copy("session-reviewer");
+    space.typed_prompt("pane-reviewer", "session-reviewer");
     assert!(space.refused_sessions_in_doctor().is_empty());
+}
+
+/// Hooks run from the host's copy, which lags the installed package. A prompt in
+/// that gap still runs the old copy.
+#[test]
+fn a_hook_between_the_package_update_and_the_cache_refresh_keeps_its_copy() {
+    let space = Space::reviewer_on("codex");
+    space.hook_from_cached_copy("session-reviewer");
+    space.install_package("second");
+    space.hook_from_cached_copy("session-reviewer");
+    space.armed_ask();
+    assert!(
+        space.refused_sessions_in_doctor().is_empty(),
+        "the session's copy is still there"
+    );
+
+    fs::remove_dir_all(space.cached_copy()).unwrap();
+    let refused = space.refused_sessions_in_doctor();
+    assert_eq!(refused.len(), 1, "{refused:?}");
+}
+
+#[test]
+fn a_cache_refresh_that_failed_refuses_nobody() {
+    let space = Space::reviewer_on("codex");
+    space.hook_from_cached_copy("session-reviewer");
+    space.armed_ask();
+    space.install_package("second");
+    assert!(space.refused_sessions_in_doctor().is_empty());
+}
+
+/// An old record is forgotten when any later session records its own, so a
+/// session in use has to keep its record fresh.
+#[test]
+fn a_session_in_use_keeps_its_record_past_the_age_limit() {
+    let space = Space::reviewer_on("codex");
+    space.hook_from_cached_copy("session-reviewer");
+    space.armed_ask();
+    let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 24 * 60 * 60);
+    for record in fs::read_dir(space.directory.state.join("hook-runs")).unwrap() {
+        fs::File::options()
+            .write(true)
+            .open(record.unwrap().path())
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+    }
+
+    space.hook_from_cached_copy("session-reviewer");
+    space.typed_prompt("pane-reviewer", "session-reviewer");
+    space.hook_from_cached_copy("session-another");
+    space.typed_prompt("pane-lead", "session-lead");
+
+    space.real_plugin_update();
+    let refused = space.refused_sessions_in_doctor();
+    assert!(
+        refused.iter().any(|summary| summary.contains("@reviewer")),
+        "{refused:?}"
+    );
 }
 
 /// A tracked request raises no warning of its own while its coordination is

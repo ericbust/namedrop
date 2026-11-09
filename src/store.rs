@@ -105,6 +105,7 @@ mod coordination_ownership;
 pub(crate) mod coordination_review;
 pub mod dashboard;
 mod missing_disposition;
+pub(crate) use missing_disposition::LostSettle;
 mod operator;
 pub(crate) use coordination::WakeReadiness;
 pub(crate) use coordination_bridge::TrackedMessage;

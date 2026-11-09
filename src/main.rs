@@ -1035,6 +1035,11 @@ fn run_context_hook(
         return ExitCode::SUCCESS;
     }
     namedrop::forget_shown_roster(&input, state_directory);
+    namedrop::record_hook_run(
+        &input,
+        state_directory,
+        env::var_os("PLUGIN_ROOT").as_deref().map(Path::new),
+    );
     let mut output = namedrop::execute_codex_app_server_hook(&input).or_else(|| {
         with_runtime_at(state_directory, |runtime| {
             let _ = namedrop::deferred_commands::ensure_worker(

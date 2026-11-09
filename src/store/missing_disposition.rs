@@ -95,6 +95,26 @@ impl Unanswered {
     }
 }
 
+/// How a settle got lost, which is what the warning has to say happened.
+#[derive(Clone, Copy)]
+pub(crate) enum LostSettle {
+    FinalMessage,
+    TurnEnd,
+    QueuedReply,
+    QueuedNoReply,
+}
+
+impl LostSettle {
+    fn what(self) -> &'static str {
+        match self {
+            Self::FinalMessage => "The agent's final message could not be sent as its answer",
+            Self::TurnEnd => "Namedrop could not close this delivery when the agent's turn ended",
+            Self::QueuedReply => "The agent's queued reply was refused",
+            Self::QueuedNoReply => "The agent's queued no-reply was refused",
+        }
+    }
+}
+
 impl StateTransaction<'_> {
     /// Opens ND-DELIVERY-003 for a settled attempt that is owed to a human
     /// now. A warning already raised, or closed by a disposition or a human
@@ -133,7 +153,7 @@ impl StateTransaction<'_> {
         &mut self,
         ns: &StateNamespace,
         attempt: &crate::DeliveryAttemptId,
-        answers: bool,
+        lost: LostSettle,
         reason: &str,
         by: &MutationAttribution,
     ) -> Result<(), StoreError> {
@@ -142,11 +162,6 @@ impl StateTransaction<'_> {
         if !self.attempt_outstanding(ns, attempt)? {
             return Ok(());
         }
-        let what = if answers {
-            "The agent's final message could not be sent as its answer"
-        } else {
-            "Namedrop could not close this delivery when the agent's turn ended"
-        };
         let reason = reason.trim().trim_end_matches('.');
         self.open_attention_item(
             ns,
@@ -154,7 +169,7 @@ impl StateTransaction<'_> {
                 id: item_id(attempt),
                 source_kind: crate::AttentionSourceKind::AgentDisposition,
                 source_id: attempt.as_str().to_owned(),
-                summary: format!("{what}. The reason given was: {reason}. Its exact session can still answer it from delivery.inbox. Once that agent is retired or its session was replaced, delivery acknowledge clears this warning."),
+                summary: format!("{}. The reason given was: {reason}. Its exact session can still answer it from delivery.inbox. Once that agent is retired or its session was replaced, delivery acknowledge clears this warning.", lost.what()),
             },
             by,
         )?;

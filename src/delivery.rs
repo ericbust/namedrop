@@ -1,4 +1,5 @@
 use crate::lifecycle::PaneLabel;
+use crate::store::LostSettle;
 use crate::{
     ActorKind, Clock, DeliveryAttemptId, DeliveryState, DiscoveredPane, DispatchCandidate,
     HerdrCommandExecutor, IdGenerator, InflightDeliveryAttempt, IntegrationToolInvocation,
@@ -187,7 +188,7 @@ pub(crate) fn reconcile_delivery_state(
     namespace: &StateNamespace,
     panes: &[DiscoveredPane],
     restart: bool,
-    hook_runs: crate::hook_runs::HookRuns<'_>,
+    state_directory: &std::path::Path,
     attribution: &MutationAttribution,
 ) -> Result<DeliveryReconciliationReport, StoreError> {
     let mut report = DeliveryReconciliationReport::default();
@@ -248,12 +249,12 @@ pub(crate) fn reconcile_delivery_state(
                 transaction.settle_observed_attempt(namespace, &attempt.attempt_id, attribution)?;
                 if pane.and_then(crate::integration::pane_agent_runtime)
                     == Some(crate::AgentRuntime::Codex)
-                    && hook_runs.refused(attempt.agent_session_id.as_str())
+                    && crate::hook_runs::refused(state_directory, attempt.agent_session_id.as_str())
                 {
                     transaction.flag_failed_settle(
                         namespace,
                         &attempt.attempt_id,
-                        true,
+                        LostSettle::FinalMessage,
                         crate::hook_runs::REFUSED_REASON,
                         attribution,
                     )?;
@@ -430,7 +431,7 @@ where
                 &namespace,
                 &first_discovery.panes,
                 false,
-                runtime.hook_runs(),
+                runtime.state_directory,
                 &MutationAttribution::new(ActorKind::Plugin, "namedrop-dispatch", now),
             )?;
             transaction.maintain_reminder_owners(&namespace, &first_discovery)?;

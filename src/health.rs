@@ -526,7 +526,7 @@ where
         if let Some(session) = pane
             .filter(|pane| pane_agent_runtime(pane) == Some(crate::AgentRuntime::Codex))
             .and_then(|pane| pane.agent_session_id.as_ref())
-            && runtime.hook_runs().refused(session.as_str())
+            && crate::hook_runs::refused(runtime.state_directory, session.as_str())
         {
             let mut refused = issue(
                 "ND-SETUP-005",

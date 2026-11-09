@@ -28,14 +28,7 @@ struct UserPromptSubmitInput {
 #[derive(Deserialize)]
 struct SessionStartInput {
     hook_event_name: String,
-    session_id: Option<String>,
     source: Option<String>,
-}
-
-fn record_hook_run<E, C, I>(session: Option<&str>, runtime: &LifecycleRuntime<'_, E, C, I>) {
-    if let Some(session) = session.filter(|session| !session.is_empty()) {
-        runtime.hook_runs().record(session);
-    }
 }
 
 /// Supplies the Namedrop selection policy once, when a native session starts
@@ -55,7 +48,6 @@ where
     if input.hook_event_name != "SessionStart" {
         return None;
     }
-    record_hook_run(input.session_id.as_deref(), runtime);
     crate::persona::session_policy(runtime).map(|policy| hook_output("SessionStart", &policy))
 }
 
@@ -110,7 +102,6 @@ where
     if input.hook_event_name != "UserPromptSubmit" {
         return None;
     }
-    record_hook_run(input.session_id.as_deref(), runtime);
     let reader = input
         .session_id
         .as_deref()
