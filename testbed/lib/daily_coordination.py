@@ -357,22 +357,22 @@ def check_held(r):
     return checks
 
 
-def report_uncoached(label, checks):
+def report_uncoached(label, checks, lost=()):
     """A held turn's answer with no instructions on how to give it: shown, not judged."""
-    lost = [check.detail for check in checks if not check.ok]
-    if lost:
-        return [Check(label, True, "{}: FINDING, the answer did not land: {}".format(label, lost[0][:200]))]
+    failed = [check.detail for check in checks if not check.ok]
+    if failed:
+        return [Check(label, True, "{}: FINDING, the answer did not land: {}".format(
+            label, "; ".join([failed[0][:200]] + [du.lost_text(row) for row in lost])))]
     return [Check(label, True, "{}: the answer landed through the way-back line".format(label))]
 
 
 def run_uncoached_hold(r, rng):
     label = "codex uncoached hold"
     checks = run_hold(r, "codex", "claude", True, rng, UNCOACHED_HOLD_PROMPT)
-    if not all(check.ok for check in checks):
-        attempts = [row[0] for row in du.open_attempts(r.store) if row[2] == "settled"]
-        for attempt in attempts:
-            du.close_no_reply(r, "codex", attempt)
-    return report_uncoached(label, checks)
+    lost = du.record_lost(r, du.read_warnings(r)) if not all(check.ok for check in checks) else []
+    for row in lost:
+        du.close_no_reply(r, row.alias, row.attempt)
+    return report_uncoached(label, checks, lost)
 
 
 STEPS = (

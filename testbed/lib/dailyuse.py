@@ -286,9 +286,61 @@ def open_items(store):
                        (store.socket_id, store.workspace))
 
 
+Reading = namedtuple("Reading", "items status codes")
+"""Attention and Doctor at one moment. items: open (source_kind, source_id) rows."""
+Lost = namedtuple("Lost", "alias attempt reading")
+"""A delivery that settled with no answer owed to a person, as it stood before cleanup closed it."""
+
+
+def owed_answers(store):
+    """(attempt, address) of each settled delivery with no disposition. A tracked request is left
+    out: Namedrop nudges its lead rather than raising an item, so it can't warn this way."""
+    return store._rows(
+        "SELECT a.attempt_id, a.address_id FROM delivery_attempts a "
+        "JOIN delivery_attempt_state s USING (session_socket_id, worktree_id, attempt_id) "
+        "JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, delivery_id) "
+        "LEFT JOIN delivery_dispositions p USING (session_socket_id, worktree_id, attempt_id) "
+        "WHERE a.session_socket_id = ? AND a.worktree_id = ? AND s.state = 'settled' "
+        "AND p.disposition_kind IS NULL AND NOT EXISTS (SELECT 1 FROM coordination_links l "
+        "WHERE l.session_socket_id = a.session_socket_id AND l.worktree_id = a.worktree_id "
+        "AND l.message_id = d.message_id AND l.kind = 'request')",
+        (store.socket_id, store.workspace))
+
+
+def warned(lost):
+    return ("agent_disposition", lost.attempt) in lost.reading.items
+
+
+def reading_text(reading):
+    return "Doctor {}, {}".format(reading.status, ", ".join(reading.codes) or "no codes")
+
+
+def lost_text(lost):
+    return "lost answer on {} ({}): {}; {}".format(
+        lost.alias, lost.attempt,
+        "warned, its agent_disposition item was open" if warned(lost) else "SILENT, no attention item for it",
+        reading_text(lost.reading))
+
+
+def read_warnings(r):
+    """Closing a delivery clears its item and Doctor's code, so this comes before any closing."""
+    doctor = r.doctor("before-closing-{}".format(live.now_ms()))
+    return Reading(tuple(open_items(r.store)), doctor.status, tuple(issue.code for issue in doctor.issues))
+
+
+def record_lost(r, reading):
+    """Namedrop raises the item in the transaction that settles the attempt, so an owed answer with
+    no item has none coming. r.lost lets the backlog say what cleanup closed before it read."""
+    aliases = {row.address_id: row.alias for row in r.channels.latest().participants}
+    found = [Lost(aliases[address], attempt, reading) for attempt, address in owed_answers(r.store)
+             if aliases.get(address) in live.AGENTS]
+    r.lost += found
+    return found
+
+
 def quiesce(r):
     """After a failed check: stop what still runs and close what it left open, so the next check
-    starts clean. A Check, never silent, and not ok so the report shows it under the failure."""
+    starts clean. Checks, never silent, and not ok so the report shows them under the failure."""
     notes = []
     panes = r.panes()
     for alias in live.AGENTS:
@@ -297,7 +349,12 @@ def quiesce(r):
             ended = r.wait_agent(alias, ("idle", "done"), live.TIMEOUTS.idle)
             notes.append("interrupted {} ({})".format(alias, "idle" if ended else "still working"))
     aliases = {row.address_id: row.alias for row in r.channels.latest().participants}
-    for attempt, address, state in open_attempts(r.store):
+    attempts, lost = open_attempts(r.store), []
+    if attempts:
+        reading = read_warnings(r)
+        lost = record_lost(r, reading)
+        notes.append("before closing: {} open items, {}".format(len(reading.items), reading_text(reading)))
+    for attempt, address, state in attempts:
         alias = aliases.get(address)
         if state == "held":
             # A held attempt blocks that mailbox, which would fail every later check.
@@ -311,7 +368,8 @@ def quiesce(r):
     if items:
         notes.append("{} attention items stay open: {}".format(len(items), ", ".join(
             "{} {}".format(*item) for item in items)))
-    return [live.Check("quiesce", False, "quiesced: " + "; ".join(notes))] if notes else []
+    return [live.Check("lost answer", False, lost_text(row)) for row in lost] + (
+        [live.Check("quiesce", False, "quiesced: " + "; ".join(notes))] if notes else [])
 
 
 def check_step(key, title, action, outcome="", restarts_channels=False):

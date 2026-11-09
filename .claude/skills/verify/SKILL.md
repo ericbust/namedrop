@@ -80,7 +80,10 @@ directories as `test`, with Codex always `--no-daemon`. A fresh run takes 25 to 
 10 of them in session continuity, and has a 40-minute budget after the build. A failed setup step skips the rest. A
 failed check doesn't stop the next one, because a run on a buggy build should report
 everything it finds, and exit 1 means at least one check failed. After a failed check, a
-`quiesced:` line says what the lane interrupted and closed before moving on. It reads
+`quiesced:` line says what the lane interrupted and closed before moving on. Closing clears
+a delivery's item and Doctor's code, so the lane reads both first. Each answer it finds lost
+gets a `lost answer` line that says `warned` or `SILENT`, and both fail the run. The final
+backlog repeats those lines, because its own reading comes after the cleanup. It reads
 Channels the way the page does: one person's session, the page's own routes, and one
 `/api/events` stream recorded for the whole run. Every check reads attention and the label
 over all its frames, because a person's next post clears a false item, and the rest of the

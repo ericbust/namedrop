@@ -395,7 +395,8 @@ def beta_space(r):
                  live.parse_doctor(result.returncode, result.stdout), r.channels.level_of_workspace(workspace))
 
 
-def judge_backlog(space, open_work, reminders, live_claims):
+def judge_backlog(space, open_work, reminders, live_claims, lost=()):
+    """lost: answers cleanup closed before this reading, whose warnings it no longer shows."""
     backlog = space.store.backlog()
     # Beta's frame may never have arrived, and only alpha's recording is held to the page's level.
     level = "calm" if space.label == "alpha" else frozenset({"calm", "no frame"})
@@ -409,7 +410,8 @@ def judge_backlog(space, open_work, reminders, live_claims):
                                               ("doctor exit", space.doctor.exit, 0),
                                               ("doctor status", space.doctor.status, "healthy"),
                                               ("doctor issues", ", ".join(issue.code for issue in space.doctor.issues)
-                                               or "none", "none")])]
+                                               or "none", "none")] + [
+        ("closed before this reading:", du.lost_text(row), None) for row in lost])]
 
 
 def counts(store):
@@ -433,7 +435,7 @@ def check_backlog(r):
     checks = []
     for space in spaces:
         work, reminders = counts(space.store)
-        checks += judge_backlog(space, work, reminders, live_claims)
+        checks += judge_backlog(space, work, reminders, live_claims, r.lost if space.label == "alpha" else ())
     panes = r.panes()
     return checks + [fields("agents", [(alias, panes[alias].status, frozenset({"idle", "done"}))
                                        for alias in AGENTS])] + dc.judge_known(r)

@@ -889,6 +889,7 @@ class Run:
         self.deadline = time.monotonic() + limit
         self.channels = None
         self.known = set()
+        self.lost = []
         self.store = Store(profile.dir / "state/herdr/plugins/namedrop/namedrop.sqlite3",
                            str(profile.socket), profile.state["workspace"])
 

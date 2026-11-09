@@ -5,6 +5,7 @@ import http.server
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
 import threading
 
 import livetest as live
@@ -394,6 +395,71 @@ class FakeRun:
         self.known = set()
 
 
+class LostRun:
+    """A run whose store is real, and whose Doctor reads open items the way the real one does."""
+    def __init__(self, path, rows):
+        self.lost, self.connection = [], sqlite3.connect(str(path), isolation_level=None)
+        self.store = live.Store(path, "s", "w")
+        self.channels = FakeChannels()
+        self.channels.latest = lambda: du.Frame(0, "needs_you", (), (), (du.Participant("addr-codex", "codex", "idle"),))
+        for table, columns in (("delivery_attempts", "attempt_id, delivery_id, address_id"),
+                               ("delivery_attempt_state", "attempt_id, state, active"),
+                               ("delivery_dispositions", "attempt_id, disposition_kind"),
+                               ("mailbox_deliveries", "delivery_id, message_id"),
+                               ("coordination_links", "message_id, kind"),
+                               ("attention_items", "source_kind, source_id, resolved_at_ms")):
+            self.connection.execute("CREATE TABLE {} (session_socket_id, worktree_id, {})".format(table, columns))
+        for table, row in rows:
+            self.connection.execute("INSERT INTO {} VALUES ('s', 'w', {})".format(table, ",".join("?" * len(row))), row)
+
+    def panes(self):
+        return {alias: live.Pane(*[None] * len(live.Pane._fields))._replace(status="idle") for alias in live.AGENTS}
+
+    def doctor(self, label):
+        count = self.connection.execute("SELECT count(*) FROM attention_items WHERE resolved_at_ms IS NULL").fetchone()[0]
+        issues = (live.Issue("ND-DELIVERY-003", "blocked", {}),) if count else ()
+        return live.Doctor(1 if count else 0, "attention" if count else "healthy", issues, 0)
+
+    def close(self, attempt):
+        self.connection.execute("INSERT INTO delivery_dispositions VALUES ('s', 'w', ?, 'no_reply')", (attempt,))
+        self.connection.execute("UPDATE attention_items SET resolved_at_ms = 1 WHERE source_id = ?", (attempt,))
+
+
+def attempt_rows(attempt, state="settled"):
+    return (("delivery_attempts", (attempt, "d-" + attempt, "addr-codex")),
+            ("delivery_attempt_state", (attempt, state, int(state != "settled"))),
+            ("mailbox_deliveries", ("d-" + attempt, "m-" + attempt)))
+
+
+def check_lost_answers(scratch):
+    item = ("attention_items", ("agent_disposition", "warns", None))
+    run = LostRun(scratch / "lost.sqlite3", attempt_rows("warns") + (item,) + attempt_rows("silent") + attempt_rows("answered") + (
+        ("delivery_dispositions", ("answered", "reply")),) + attempt_rows("tracked") + (
+        ("coordination_links", ("m-tracked", "request")),) + attempt_rows("running", "acknowledged"))
+    assert {row[0] for row in du.owed_answers(run.store)} == {"warns", "silent"}, "an answer, a tracked request and a running turn owe nothing here"
+    original = du.close_no_reply
+    du.close_no_reply = lambda r, alias, attempt: (r.close(attempt), subprocess.CompletedProcess((), 0))[1]
+    try:
+        checks = du.quiesce(run)
+    finally:
+        du.close_no_reply = original
+    assert not du.owed_answers(run.store) and not du.open_items(run.store), "cleanup closed everything, so only the recording can tell"
+    details = {check.detail for check in checks if check.what == "lost answer"}
+    warned = next(detail for detail in details if "(warns)" in detail)
+    silent = next(detail for detail in details if "(silent)" in detail)
+    assert "warned" in warned and "ND-DELIVERY-003" in warned and "SILENT" not in warned, "read before closing, not after"
+    assert "SILENT" in silent and "warned" not in silent, "another attempt's Doctor code doesn't warn for this one"
+    assert all(not check.ok for check in checks), "a lost answer fails the lane either way, and the report only prints failures"
+    assert any("before closing: 1 open items, Doctor attention, ND-DELIVERY-003" in check.detail for check in checks)
+    space = dcn.Space("alpha", type("Quiet", (), {"backlog": lambda self: live.Backlog(0, 0, 0)})(),
+                      live.Doctor(0, "healthy", (), 0), "calm")
+    after = dcn.judge_backlog(space, 0, 0, 0, run.lost)[0]
+    assert after.ok and "attention 0" in after.detail and "warned" in after.detail and "SILENT" in after.detail, "a clean backlog says what it no longer shows"
+    finding = dco.report_uncoached("u", [live.Check("b", False, "answers 0")], run.lost)[0]
+    assert finding.ok and "warned" in finding.detail and "SILENT" in finding.detail, "report-only, and it still says which"
+    return "daily lost answers: warned and silent read differently after cleanup closes them, and each fails"
+
+
 def check_step_boundary():
     channels = FakeChannels()
 
@@ -509,6 +575,6 @@ def checks(scratch):
             ("daily Channels client", check_client), ("daily tracked judge", check_tracked_judge),
             ("daily hold judges", check_hold_judges), ("daily uncoached hold", check_uncoached_report), ("daily continuity judges", check_continuity_judges),
             ("daily probe parsing", check_probe_parsing), ("daily backlog judge", check_backlog_judge),
-            ("daily step boundary", check_step_boundary), ("daily stretch judge", check_stretch_judge),
+            ("daily step boundary", check_step_boundary), ("daily lost answers", lambda: check_lost_answers(scratch)), ("daily stretch judge", check_stretch_judge),
             ("daily interrupted judge", check_interrupted_judge), ("daily reminder judge", check_reminder_judge),
             ("daily upgrade judges", check_upgrade_judges), ("daily plan", check_lane_plan)]
