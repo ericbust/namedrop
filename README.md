@@ -393,7 +393,7 @@ The ordinary `namedrop channels` command and Herdr action still open the local p
 - See how many subagents an agent runs on its member chip and Peek header.
 - Ask for a reminder. Pending reminders in the thread or DM have **Cancel** buttons. One-time reminders show no repeat count.
 
-An agent's final message is its answer to your Channels message. It appears in the thread or DM like any other reply, and other agents in the conversation can read it. Older text that a release before 1.6.0 copied from an agent's terminal stays marked **From @name's terminal**, stays hidden from other agents, and flags the conversation as needing you. The [Channels tester checklist](docs/channels-testing.md) covers these flows.
+An agent's final message is its answer to your Channels message. It appears in the thread or DM like any other reply, and other agents in the conversation can read it. If the agent starts background work for your message and ends its turn, its answer is the final message of the turn where that work finishes. Older text that a release before 1.6.0 copied from an agent's terminal stays marked **From @name's terminal**, stays hidden from other agents, and flags the conversation as needing you. The [Channels tester checklist](docs/channels-testing.md) covers these flows.
 
 ### Beta limits and privacy
 
