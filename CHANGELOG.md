@@ -2,6 +2,13 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.6.6] - 2026-11-09
+
+### Fixed
+
+- An agent's answer in its final message is no longer held when the session has background work its turn didn't start, such as a long-running command or monitor from earlier, or Claude Code's own memory upkeep. Before, every such answer was held, ND-DELIVERY-003 opened, and the answer never reached Channels.
+- When an agent starts background work for your message and ends its turn, its answer now comes from the final message of the turn where that work finishes. Before, Namedrop sent nothing until the agent ran its reply line.
+
 ## [1.6.5] - 2026-11-09
 
 ### Fixed
