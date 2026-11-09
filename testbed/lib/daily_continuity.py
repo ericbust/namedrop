@@ -216,7 +216,7 @@ def run_crash(r, agent):
                                    "cancel": result.stdout[-400:], "after": after._asdict(), "final": final._asdict()})
     label = agent + " crashed mid-turn"
     checks = dc.judge_stretch(r, label, agent, mark, baseline, since,
-                              (("delivery_attempt", "a crash mid-turn is real, and the person has to cancel it"),))
+                              (("delivery_attempt", None),))
     return checks + [judge_crash(label, state, final.attempts, len(answers), after, item_kind),
             fields(label + " resume", [("same session", resumed == session, True),
                                        ("cancel-held exit", result.returncode, 0),
@@ -351,6 +351,27 @@ def check_routes(r):
         return checks + [Check("reminders", False, str(error))] + du.quiesce(r)
 
 
+def new_session(r, agent):
+    stop_agent(r, agent)
+    r.profile.launch(agent, live.launch_command(agent, r.mode, os.environ))
+    r.settle_screens(agent)
+    r.warm_up(agent)
+    r.wait_agent(agent, ("idle", "done"), TIMEOUTS.idle)
+
+
+def check_natural(r):
+    """What natural wording costs a new session. Shown rather than judged, and last, so the habit
+    it can teach a session reaches no other check."""
+    checks = []
+    for agent in AGENTS:
+        try:
+            new_session(r, agent)
+            checks += dc.run_natural(r, agent)
+        except du.RECOVERABLE as error:
+            checks.append(Check(agent + " natural wording", False, str(error)))
+    return checks
+
+
 Space = namedtuple("Space", "label store doctor level")
 
 
@@ -416,5 +437,7 @@ STEPS = (
     du.check_step("continuity", "session continuity", check_continuity,
                   "A compacted session and an exited and resumed session each settled their open delivery once."),
     du.check_step("routes", "other routes", check_routes, "Cross-workspace mentions and reminders arrived and settled."),
+    du.check_step("natural", "natural wording", check_natural,
+                  "Natural wording reached each new session and came back once."),
     du.check_step("backlog", "backlog", check_backlog, ""),
 )

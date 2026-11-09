@@ -91,13 +91,14 @@ it doesn't render the page.
 
 | Step | What it asserts |
 | --- | --- |
-| channels answers | Composer post, thread reply and DM to each agent, each told to answer by final message: one delivery, one attempt, one answer in the right thread, 1 model call, 0 settle commands, no new attention, no "not sent through Namedrop" label. Before those, each new session's cost on natural wording is shown, not judged. |
+| channels answers | Composer post, thread reply and DM to each agent, each told to answer by final message: one delivery, one attempt, one answer in the right thread, 1 model call, 0 settle commands, no new attention, no "not sent through Namedrop" label. |
 | recap | An agent asked what the other answered gets it right. The answer is in its prompt and in no hook context. |
 | real warnings | An interrupted delivery raises `agent_disposition` and Doctor's `ND-DELIVERY-003`, through the same judge read the other way. Closing it clears it. |
 | tracked handoff | Lead, worker, `needs_continuation`, continuation with `expected_revision`, `completed`, `handoff.resolve`, one report shown once; then a nudge. |
 | held turn | A turn that ends waiting on a helper posts nothing, later prompts show the way back, and the answer lands in the same thread. Claude sends its own request. For Codex the lane sends it during the turn, because a real Codex declines to `send` from a person's delivery. |
 | session continuity | `/compact` with a held delivery, exit and resume, and a crash mid-turn, on each agent. The lane sends each hold's `@shell` request during the turn. |
 | other routes | `second-workspace.py` and `cross-workspace-probe.py`, and two reminders. |
+| natural wording | A new session of each agent gets a natural question. One answer and no new attention are judged. Its model calls and settle commands are shown, not judged, and it runs last because a session that has run its reply line keeps doing so. |
 | backlog | Both workspaces: nothing awaiting, no live claims, no open attention, coordinations or reminders, Doctor healthy. |
 
 A run on a different commit uses this kit against a detached worktree:

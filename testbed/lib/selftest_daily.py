@@ -349,7 +349,7 @@ def check_lane_plan():
     lane = du.lane()
     keys = [step.key for step in lane.setup + lane.checks]
     assert keys[:4] == ["first-run", "names", "hooks", "channels"]
-    assert keys[4:] == ["answers", "recap", "warnings", "tracked", "held", "continuity", "routes", "backlog"]
+    assert keys[4:] == ["answers", "recap", "warnings", "tracked", "held", "continuity", "routes", "natural", "backlog"]
     ran, results = [], []
 
     class Fake:
@@ -434,6 +434,10 @@ def check_stretch_judge():
     run.channels.frames_since = lambda mark: (good._replace(level="needs_you", attention=(item, other)),)
     assert not all(c.ok for c in dc.judge_stretch(run, "h", "claude", 0, empty_baseline(), 0, (why,))), "only that kind"
     assert "a hold" in dc.judge_known(run)[0].detail
+    real = ("agent_disposition", None)
+    run.known = set()
+    run.channels.frames_since = lambda mark: (good._replace(level="needs_you", attention=(item,)),)
+    assert dc.judge_stretch(run, "h", "claude", 0, empty_baseline(), 0, (real,))[0].ok and not run.known, "a real item isn't a false alarm"
     return "daily stretch judge: an allowance names one kind, any other still fails, the report names it"
 
 

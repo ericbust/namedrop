@@ -32,7 +32,8 @@ def _direct(channels, agent, address, prompt, parent):
 FINAL_MESSAGE = " Answer in your final message, not with a command."
 """With natural wording alone a real Claude runs the bound reply on every person's message, and Codex
 on some, so the answer never takes the final-message path whose bugs this lane exists to catch.
-check_natural reports what natural wording costs."""
+check_natural reports what natural wording costs, last of all, because a session that has run its
+reply line goes on doing so whatever a prompt asks."""
 
 SURFACES = (
     Surface("composer", _composer, PUBLIC, "In one sentence, why does the sky look blue?" + FINAL_MESSAGE),
@@ -114,12 +115,13 @@ def judge_quiet(label, agent, view):
 
 def judge_stretch(r, label, agent, mark, baseline, since, allowed=()):
     """check 1's reading over any other stretch of a run. allowed: (source_kind, why) a build under
-    test is known to raise here, which doesn't fail the check and is named in the report."""
+    test raises here, which doesn't fail the check. A why makes it a false alarm the report names;
+    None is a real item this stretch expects."""
     view = attention_view(r.channels.frames_since(mark), baseline, stored_attention(r.store, since), r.channels.peers())
     why = dict(allowed)
     known = [alarm for alarm in view.alarms if alarm.source_kind in why]
-    for alarm in known:
-        r.known.add("{}: {}".format(alarm.source_kind, why[alarm.source_kind]))
+    r.known.update("{}: {}".format(alarm.source_kind, why[alarm.source_kind]) for alarm in known
+                   if why[alarm.source_kind])
     quiet = view._replace(alarms=tuple(alarm for alarm in view.alarms if alarm.source_kind not in why),
                           needs_you=0 if known else view.needs_you)
     return judge_quiet(label, agent, quiet)
@@ -275,8 +277,6 @@ def check_answers(r):
     before = baseline_of(r.channels.latest(), r.channels.peers())
     mark = r.channels.mark()
     for agent in AGENTS:
-        # First, because a session's earlier answers teach it how to answer, and this measures a new one.
-        checks += run_natural(r, agent)
         parent = None
         for surface in SURFACES:
             label = "{} {}".format(agent, surface.key)
