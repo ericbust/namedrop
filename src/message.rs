@@ -1492,6 +1492,8 @@ where
         }
         let references = if direct_reply.is_some() || channel_reply || preparation == MessagePreparation::OperatorPlain {
             Vec::new()
+        } else if author_kind == ActorKind::AgentSession && in_reply_to.is_some() {
+            resolve_reply_aliases(transaction, &namespace, &reference_aliases)?
         } else {
             resolve_aliases(transaction, &namespace, &reference_aliases)?
         };
@@ -2174,6 +2176,24 @@ fn resolve_aliases(
     aliases
         .iter()
         .map(|alias| transaction.resolve_routing_alias(namespace, alias))
+        .collect()
+}
+
+/// An agent's reply already has its recipients and a body Mention adds none,
+/// so a name that isn't here stays text instead of costing the answer.
+fn resolve_reply_aliases(
+    transaction: &crate::StateTransaction<'_>,
+    namespace: &StateNamespace,
+    aliases: &[String],
+) -> Result<Vec<crate::RoutingAddressSnapshot>, crate::StoreError> {
+    aliases
+        .iter()
+        .filter_map(
+            |alias| match transaction.resolve_routing_alias(namespace, alias) {
+                Err(error) if error.kind() == crate::StoreErrorKind::InvalidInput => None,
+                resolved => Some(resolved),
+            },
+        )
         .collect()
 }
 

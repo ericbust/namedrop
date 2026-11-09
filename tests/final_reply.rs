@@ -2050,6 +2050,45 @@ fn a_final_message_and_a_reply_treat_a_real_name_the_same_way() {
     }
 }
 
+/// A reply the agent runs itself gets the same answer for the same text.
+#[test]
+fn an_explicit_reply_naming_an_agent_that_is_not_here_still_answers() {
+    for text in [
+        "The result, as relayed from @codex, is pong.",
+        "Ask @retired about the rest. The result is pong.",
+    ] {
+        let space = Space::new();
+        space.retired_name("retired");
+        let ask = space.armed_ask();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+        dispatch::message(
+            "reply",
+            bound_reply(&space, &ask, &format!("@lead {text}")),
+            &space.runtime("pane-reviewer"),
+        )
+        .unwrap();
+        assert_eq!(space.dispositions(), [vec![attempt, "reply".to_owned()]]);
+        assert_eq!(space.bodies().last().unwrap(), text);
+        assert_eq!(space.last_message_recipients(), [vec!["lead".to_owned()]]);
+        assert!(space.references().is_empty(), "{text}");
+    }
+}
+
+/// Only an agent's reply loosens: a person replying still names who they mean.
+#[test]
+fn a_person_replying_still_refuses_an_unknown_body_mention() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    let refused = dispatch::message(
+        "reply",
+        json!({"request_id":"person-reply","source":"@lead Compare with @codex.",
+               "in_reply_to":ask["control"]["message_id"],"author_kind":"human"}),
+        &space.runtime("pane-reviewer"),
+    )
+    .unwrap_err();
+    assert!(refused.contains("unknown Mention: @codex"), "{refused}");
+}
+
 /// A new send still names who it reaches, so a typo there is refused.
 #[test]
 fn a_send_still_refuses_an_unknown_body_mention() {
