@@ -13,6 +13,10 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 Text that a release before 1.6.0 copied from an agent's terminal keeps its label and its item, and stays hidden from other agents. Warnings about undelivered or unanswered messages work as before.
 
+### After you update
+
+- Restart any Codex session that was already running. Codex refuses to run a plugin's hooks once the plugin's files have changed, so that session can lose its hooks, answer only in its terminal and raise ND-DELIVERY-003. Its screen shows `plugin contents changed; hook approval required`. Start a new session and trust the Namedrop hooks at **Hooks need review**.
+
 ## [1.6.1] - 2026-11-08
 
 ### Fixed
