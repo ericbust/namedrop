@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import livetest as live
 import source as sources
+import selftest_daily
 import testbed
 
 REPO = "ericbust/namedrop"
@@ -767,6 +768,7 @@ def run(kit):
                   ("seeds", check_seeds),
                   ("pane exit", lambda: check_pane_exit(base)),
                   ("CHECKLIST prompts", lambda: check_checklist_prompts(kit))]
+        checks += selftest_daily.checks(base)
         for label, check in checks:
             try:
                 print("ok   self-test " + check(), flush=True)

@@ -838,13 +838,19 @@ def cmd_up(args):
 
 def cmd_test(args):
     import livetest
+    lane = None
+    if args.daily_use:
+        if args.codex == "plain":
+            fail("the daily-use lane runs Codex with --no-daemon; the plain lane owns --codex plain")
+        import dailyuse
+        lane = dailyuse.lane()
     profile, request = profile_for(args, prefix="test-")
     created = not profile.marker.exists()
     profile.create()
     if created:
         profile.state["purpose"] = "test"
         profile.save()
-    sys.exit(0 if livetest.run(profile, request, args.codex, args.keep) else 1)
+    sys.exit(0 if livetest.run(profile, request, args.codex, args.keep, lane) else 1)
 
 
 def cmd_status(args):
@@ -1037,6 +1043,8 @@ def main():
     test.add_argument("--codex", choices=("plain", "no-daemon"),
                       help="how Codex starts (default: plain on Namedrop 1.2.0 and later)")
     test.add_argument("--keep", action="store_true", help="keep the profile after a pass")
+    test.add_argument("--daily-use", action="store_true",
+                      help="run the scripted daily-use lane instead of CHECKLIST.md")
     command("attach", cmd_attach, "open the profile's Herdr from a plain terminal")
     command("status", cmd_status, "show the server, plugin, names and doctor")
     command("stop", cmd_stop, "stop the profile's server and keep its files")
