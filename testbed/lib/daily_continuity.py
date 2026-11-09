@@ -139,12 +139,17 @@ def resume_command(agent, mode, session, environ):
     return "{} --resume {}".format(base, session) if agent == "claude" else "{} resume {}".format(base, session)
 
 
+RESUME_TURN_WAIT = 300
+"""A resumed Codex can carry on the turn a crash killed, re-running its slow tool before it reads
+the warm-up prompt."""
+
+
 def resume_agent(r, agent, session):
     r.profile.launch(agent, resume_command(agent, r.mode, session, os.environ))
     r.settle_screens(agent)
     # Codex tells Herdr its session only at its first turn, and nothing is delivered before that.
     if agent == "codex":
-        r.prompt(agent, live.WARM_UP_PROMPT, TIMEOUTS.warm_up)
+        r.prompt(agent, live.WARM_UP_PROMPT, RESUME_TURN_WAIT)
     return r.settle(lambda: r.panes()[agent].session, bool, TIMEOUTS.label, watch=())
 
 
@@ -198,11 +203,11 @@ def run_crash(r, agent):
                      TIMEOUTS.idle, watch=())
     items = du.open_items(r.store)
     item_kind = next((kind for kind, source in items if source == hop.attempt_id), None)
-    resumed = resume_agent(r, agent, session)
     next_message = channels.post("@{} {}".format(agent, dc.NEXT_PROMPT))
     waiting = du.hop_for(r.store, next_message.message_id) or du.NO_HOP
-    result = r.profile.namedrop("delivery", "cancel-held", "--input-json",
-                                json.dumps({"attempt_id": hop.attempt_id, "confirmed": True}))
+    # Cancel first, so a resume that takes its time can't leave the mailbox blocked behind this.
+    result = du.cancel_held(r, hop.attempt_id)
+    resumed = resume_agent(r, agent, session)
     after = du.wait_closed(r, next_message.message_id)
     r.wait_agent(agent, ("idle", "done"), TIMEOUTS.idle)
     answers = dc.replies_to(channels.latest().messages, channels.address(agent), sent.message_id)

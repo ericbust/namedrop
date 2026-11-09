@@ -263,14 +263,20 @@ def close_no_reply(r, alias, attempt_id):
                               "--input-json", json.dumps({"attempt_id": attempt_id}))
 
 
+def cancel_held(r, attempt_id):
+    """A person's command, not an agent's, so it runs with no pane."""
+    return r.profile.namedrop("delivery", "cancel-held", "--input-json",
+                              json.dumps({"attempt_id": attempt_id, "confirmed": True}))
+
+
 def open_attempts(store):
-    """(attempt, address, state) of every attempt still running, or settled with no answer."""
+    """(attempt, address, state) of every attempt still running, held, or settled with no answer."""
     return store._rows(
         "SELECT a.attempt_id, a.address_id, s.state FROM delivery_attempts a "
         "JOIN delivery_attempt_state s USING (session_socket_id, worktree_id, attempt_id) "
         "LEFT JOIN delivery_dispositions p USING (session_socket_id, worktree_id, attempt_id) "
         "WHERE a.session_socket_id = ? AND a.worktree_id = ? AND "
-        "(s.active = 1 OR (s.state = 'settled' AND p.disposition_kind IS NULL))",
+        "(s.active = 1 OR s.state = 'held' OR (s.state = 'settled' AND p.disposition_kind IS NULL))",
         (store.socket_id, store.workspace))
 
 
@@ -293,7 +299,10 @@ def quiesce(r):
     aliases = {row.address_id: row.alias for row in r.channels.latest().participants}
     for attempt, address, state in open_attempts(r.store):
         alias = aliases.get(address)
-        if alias in live.AGENTS:
+        if state == "held":
+            # A held attempt blocks that mailbox, which would fail every later check.
+            notes.append("cancelled held {} on {} (exit {})".format(attempt, alias or address, cancel_held(r, attempt).returncode))
+        elif alias in live.AGENTS:
             result = close_no_reply(r, alias, attempt)
             notes.append("closed {} on {} from {} (exit {})".format(attempt, alias, state, result.returncode))
         else:
