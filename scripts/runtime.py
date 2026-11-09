@@ -429,7 +429,8 @@ def restart_helpers(runtime, helpers):
     can't be restarted is reported, never raised: the update itself is done,
     and the helper starts again on its next event."""
     restarted, failed = [], []
-    for helper in helpers:
+    # Process listing order differs between Linux and macOS; the report doesn't.
+    for helper in sorted(helpers, key=lambda helper: (helper['kind'], helper['pid'])):
         try:
             if helper['kind'] == 'status worker':
                 queue_wake(helper)
@@ -513,7 +514,7 @@ def drain_legacy_commands(runtime, timeout=20):
     library = darwin_library()
     deadline = time.monotonic() + timeout
     while True:
-        running = [str(pid) for pid in darwin_pids(library)
+        running = [str(pid) for pid in sorted(darwin_pids(library))
                    if pid != os.getpid() and darwin_path(library, pid) in paths]
         if not running:
             return
