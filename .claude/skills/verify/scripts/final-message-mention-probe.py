@@ -2,7 +2,8 @@
 """Check that a final message reaches its asker whatever names it holds, with real
 agents, on a profile kept by `testbed/testbed test --keep` (Namedrop 1.6.3 and later).
 
-Usage: final-message-mention-probe.py PROFILE_NAME   (e.g. test-link-<checkout name>)
+Usage: final-message-mention-probe.py PROFILE_NAME [HELPER CASE]   (e.g. test-link-<checkout name>)
+HELPER is claude or codex and CASE is relayed, real or opens, to run that one exchange.
 
 Each agent asks the other for a one-line answer that names an agent that isn't here, names
 one that is, or opens with a name. The answer must arrive as the helper's reply, go only
@@ -136,6 +137,8 @@ CASES = [
 ]
 for asker, helper in (('claude', 'codex'), ('codex', 'claude')):
     for label, slug, line, stored in CASES:
+        if sys.argv[2:] and sys.argv[2:] != [helper, slug]:
+            continue
         token = f'{slug}{helper}{stamp}'
         attempt, replies, recipients = exchange(
             asker, helper, token, line.format(token=token))
