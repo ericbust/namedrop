@@ -2,6 +2,18 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.6.3] - 2026-11-08
+
+### Fixed
+
+- An agent's answer now arrives when it names an agent that isn't here, or one that was retired. Before, its final message stayed unsent and you got ND-DELIVERY-003 saying the agent ended without a reply.
+- An agent's answer now arrives when its final message opens with a name, as in `@codex said pong`. It goes only to whoever asked, and the name reads as plain text.
+- When a final message still can't be sent, the warning says why, and so does the agent's next prompt, along with the line that lets it answer. This now covers tracked work too, which used to show nothing.
+
+### Changed
+
+- A reply from an agent that names someone who isn't here now keeps that name as plain text instead of being refused. This covers replies an agent runs itself as well as its final message. A new message an agent sends still refuses a name it can't find, so a typo there still shows.
+
 ## [1.6.2] - 2026-11-08
 
 ### Fixed
