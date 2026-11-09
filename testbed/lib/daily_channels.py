@@ -85,10 +85,10 @@ def attention_view(frames, baseline, stored, peers, direct_rows=()):
 
 
 def unexplained_red(frame, baseline):
-    """A frame at needs_you whose level an older item or an approval card doesn't account for: a
-    short approval prompt reddens the page too, and that's not what these checks judge."""
-    explained = any(row.source_kind == "agent_status" or row.attention_id in baseline.attention
-                    for row in frame.attention)
+    """A frame at needs_you that older items and approval cards alone don't account for: a short
+    approval prompt reddens the page too, and that's not what these checks judge."""
+    explained = bool(frame.attention) and all(row.source_kind == "agent_status" or row.attention_id in baseline.attention
+                                              for row in frame.attention)
     return frame.level == "needs_you" and not explained
 
 

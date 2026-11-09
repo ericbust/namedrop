@@ -75,6 +75,10 @@ def check_warning_judge():
     base = du.parse_frame(frame_fixture("channels-frame-1.6.2.json"))
     loud = base._replace(level="needs_you", attention=(item,))
     assert dc.judge_warning("w", "claude", "attempt-1", dc.attention_view((loud,), empty_baseline(), (), ())).ok
+    older = item._replace(attention_id="old", source_id="attempt-0")
+    known = dc.Baseline(frozenset({"old"}), frozenset(), {})
+    leftover = dc.attention_view((loud._replace(attention=(older, item)),), known, (), ())
+    assert dc.judge_warning("w", "claude", "attempt-1", leftover).ok, "an earlier failed check's item doesn't hide this one"
     silenced = dc.attention_view((base,), empty_baseline(), (), ())
     assert not dc.judge_warning("w", "claude", "attempt-1", silenced).ok, "a build that silences everything fails"
     stored_only = dc.attention_view((loud._replace(attention=()),), empty_baseline(),
