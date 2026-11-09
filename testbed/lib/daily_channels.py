@@ -401,9 +401,111 @@ def check_recap(r):
     return checks
 
 
+SLOW_COMMAND = "python3 -c 'import time; time.sleep(120)'"
+"""Not `sleep 120`: Claude Code's harness refuses a long standalone sleep, and left to choose it
+runs one in the background, which ends the turn instead of leaving a tool to interrupt."""
+SLOW_PROMPT = ("Run this shell command in the foreground, not in the background, and wait for it to "
+               "finish, then reply done: " + SLOW_COMMAND)
+NEXT_PROMPT = "What colour is grass? One short sentence, please."
+WARNING_WAIT = 90
+MID_TOOL_WAIT = 60
+
+
+def wait_slow_tool(r, agent, attempt):
+    """Return with the delivery's turn inside SLOW_COMMAND, or fail the scenario."""
+    key = du.prompt_key(r.store, attempt)
+
+    def commands():
+        return tuple(command for turn in live.delivery_turns(r.transcript(agent), key) for command in turn.commands)
+
+    found = r.settle(commands, bool, MID_TOOL_WAIT)
+    if not any("time.sleep(120)" in command for command in found):
+        raise StepFailed(Check(agent + " tool", False, "{} did not start the slow command within {} s: {}".format(
+            agent, MID_TOOL_WAIT, [command[:80] for command in found])))
+
+
+def judge_interrupted(label, activity, key, ended, stopped, legs, answers, opened_after, doctor_codes):
+    return fields(label, [("activity before the key", activity, "working"), ("idle after " + key, ended, True),
+                          ("attempt", "{}/{}".format(stopped.state, stopped.active), "settled/0"),
+                          ("disposition", stopped.disposition or "none", "none"),
+                          ("leg", legs, ("completed/settled",)), ("answers", answers, 0),
+                          ("doctor ND-DELIVERY-003", "ND-DELIVERY-003" in doctor_codes, True),
+                          ("item opened after the key", opened_after, None)])
+
+
+def item_open(frame, attempt_id):
+    return bool(frame) and any(row.source_id == attempt_id and row.source_kind == "agent_disposition"
+                               for row in frame.attention)
+
+
+def run_warning(r, agent):
+    channels = r.channels
+    address = channels.address(agent)
+    baseline = baseline_of(channels.latest(), channels.peers())
+    level_before = channels.latest().level
+    mark, since = channels.mark(), live.now_ms()
+    sent = channels.post("@{} {}".format(agent, SLOW_PROMPT))
+    hop = r.settle(lambda: du.hop_for(r.store, sent.message_id),
+                   lambda found: found and found.attempt_id, TIMEOUTS.label, watch=()) or du.NO_HOP
+    wait_slow_tool(r, agent, hop.attempt_id)
+    activity = r.settle(lambda: next(row.activity for row in channels.latest().participants if row.alias == agent),
+                        lambda value: value == "working", TIMEOUTS.label, watch=())
+    r.keys(agent, (du.INTERRUPT_KEY[agent],))
+    pressed = live.now_ms()
+    ended = r.wait_agent(agent, ("idle", "done"), TIMEOUTS.exit)
+    r.settle(channels.latest, lambda frame: item_open(frame, hop.attempt_id), WARNING_WAIT, watch=())
+    opened = next((row.opened_at_ms for frame in channels.frames_since(mark) for row in frame.attention
+                   if row.source_id == hop.attempt_id), None)
+    stopped = du.hop_for(r.store, sent.message_id) or du.NO_HOP
+    row = next((row for row in channels.latest().messages if row.message_id == sent.message_id), None)
+    answers = replies_to(channels.latest().messages, address, sent.message_id)
+    view = attention_view(channels.frames_since(mark), baseline, stored_attention(r.store, since), channels.peers())
+    label = agent + " interrupted"
+    doctor = r.doctor(agent + "-warning")
+    checks = [judge_interrupted(label, activity, du.INTERRUPT_KEY[agent], ended, stopped, row.legs if row else None,
+                                len(answers), "{:.1f} s".format((opened - pressed) / 1000) if opened else "never",
+                                {issue.code for issue in doctor.issues}),
+              judge_warning(label, agent, hop.attempt_id, view)]
+    if not item_open(channels.latest(), hop.attempt_id):
+        return checks
+    result = du.close_no_reply(r, agent, hop.attempt_id)
+    r.settle(channels.latest, lambda frame: not item_open(frame, hop.attempt_id), TIMEOUTS.label, watch=())
+    latest = channels.latest()
+    row = next((row for row in latest.messages if row.message_id == sent.message_id), None)
+    others = any(item.source_kind != "agent_status" for item in latest.attention)
+    checks.append(fields(agent + " closed", [
+        ("complete --no-reply exit", result.returncode, 0),
+        ("item open", item_open(latest, hop.attempt_id), False),
+        ("level", latest.level, "needs_you" if others else frozenset({"calm", "busy"})),
+        ("level before", level_before, None),
+        ("leg", row.legs if row else None, ("completed/no_reply",))]))
+    next_message = channels.post("@{} {}".format(agent, NEXT_PROMPT))
+    after = du.wait_closed(r, next_message.message_id)
+    r.wait_agent(agent, ("idle", "done"), TIMEOUTS.idle)
+    checks.append(fields(agent + " next message", [
+        ("state", "{}/{}".format(after.state, after.active), "settled/0"),
+        ("disposition", after.disposition, frozenset({"no_reply", "reply"})),
+        ("interrupted claim", r.store.claims().get(hop.attempt_id), "done:superseded")]))
+    return checks
+
+
+def check_warnings(r):
+    """Check 3: check 1's judges, inverted, so check 1 cannot pass by silencing everything."""
+    checks = []
+    for agent in AGENTS:
+        try:
+            checks += run_warning(r, agent)
+        except du.RECOVERABLE as error:
+            checks.append(Check(agent + " interrupted", False, str(error)))
+            checks += du.quiesce(r)
+    return checks
+
+
 STEPS = (
     du.check_step("answers", "channels answers", check_answers,
                   "A person's Channels questions to Claude and Codex came back as ordinary replies "
                   "with no false warning."),
     du.check_step("recap", "recap", check_recap, "Each agent read the other's answer in its recap."),
+    du.check_step("warnings", "real warnings", check_warnings,
+                  "An interrupted request raised the real warning and closing it cleared it."),
 )

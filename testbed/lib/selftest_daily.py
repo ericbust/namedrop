@@ -238,7 +238,7 @@ def check_lane_plan():
     lane = du.lane()
     keys = [step.key for step in lane.setup + lane.checks]
     assert keys[:4] == ["first-run", "names", "hooks", "channels"]
-    assert keys[4:] == ["answers", "recap"]
+    assert keys[4:] == ["answers", "recap", "warnings"]
     ran, results = [], []
 
     class Fake:
@@ -326,9 +326,20 @@ def check_stretch_judge():
     return "daily stretch judge: an allowance names one kind, any other still fails, the report names it"
 
 
+def check_interrupted_judge():
+    stopped = live.Hop("m", "person", "claude", None, 1, 1, 0, 1, "a", "settled", 0, None, "q")
+    good = lambda **changes: dict(dict(activity="working", key="esc", ended=True, stopped=stopped, legs=("completed/settled",),
+                                       answers=0, opened_after="24 s", doctor_codes={"ND-DELIVERY-003"}), **changes)
+    assert dc.judge_interrupted("i", **good()).ok
+    for change in (dict(activity="idle"), dict(ended=False), dict(stopped=stopped._replace(disposition="no_reply")),
+                   dict(answers=1), dict(doctor_codes=set()), dict(legs=("completed/no_reply",))):
+        assert not dc.judge_interrupted("i", **good(**change)).ok, change
+    return "daily interrupted judge: an answer, a disposition or a silent Doctor each fail"
+
+
 def checks(scratch):
     return [("daily frames", check_frames), ("daily quiet judge", check_quiet_judge),
             ("daily warning judge", check_warning_judge), ("daily answer judge", check_answer_judge),
             ("daily natural wording", check_natural_judge), ("daily recap judge", check_recap_judge), ("daily prompt key", lambda: check_prompt_key(scratch)),
             ("daily Channels client", check_client), ("daily step boundary", check_step_boundary), ("daily stretch judge", check_stretch_judge),
-            ("daily plan", check_lane_plan)]
+            ("daily interrupted judge", check_interrupted_judge), ("daily plan", check_lane_plan)]
