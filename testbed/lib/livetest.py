@@ -791,7 +791,7 @@ SELECT m.message_id, m.author_alias_snapshot,
   (SELECT count(*) FROM delivery_acknowledgements k JOIN delivery_attempts a USING (session_socket_id, worktree_id, attempt_id)
      JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, delivery_id)
      WHERE d.session_socket_id = m.session_socket_id AND d.worktree_id = m.worktree_id AND d.message_id = m.message_id),
-  f.attempt_id, s.state, s.active, p.disposition_kind, m.body, s.pointer_nonce
+  f.attempt_id, s.state, s.active, p.disposition_kind, m.body
 FROM collaboration_messages m
 LEFT JOIN delivery_attempts f ON f.attempt_id = (
   SELECT a.attempt_id FROM delivery_attempts a JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, delivery_id)
@@ -846,7 +846,19 @@ class Store:
             "created_at_ms >= ? ORDER BY created_at_ms", scope + (sender, since_ms))]
         if len(roots) != 1:
             return Exchange(len(roots), ())
-        return Exchange(1, tuple(Hop(*row) for row in self._rows(HOP_SQL, scope + scope + (roots[0],))))
+        return Exchange(1, tuple(self.with_pointer(Hop(*row))
+                                 for row in self._rows(HOP_SQL, scope + scope + (roots[0],))))
+
+    def with_pointer(self, hop):
+        """The hop with its first attempt's pointer id. A store from before 1.7.0 has no such
+        column, and a missing column reads as StoreBusy, so it is looked up first."""
+        columns = {row[1] for row in self._rows("PRAGMA table_info(delivery_attempt_state)")}
+        if "pointer_nonce" not in columns or not hop.attempt_id:
+            return hop
+        rows = self._rows("SELECT pointer_nonce FROM delivery_attempt_state WHERE session_socket_id = ? "
+                          "AND worktree_id = ? AND attempt_id = ?",
+                          (self.socket_id, self.workspace, hop.attempt_id))
+        return hop._replace(pointer_nonce=rows[0][0] if rows else None)
 
     def terminal_runs(self, since_ms):
         return tuple(TerminalRun(command, exit_code, output, completed is not None)

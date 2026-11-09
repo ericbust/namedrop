@@ -494,6 +494,10 @@ def round_trip(path, defect=None):
         db.execute("DELETE FROM delivery_acknowledgements WHERE attempt_id = 'a2'")
     elif defect == "active":
         db.execute("UPDATE delivery_attempt_state SET state = 'acknowledged', active = 1 WHERE attempt_id = 'a2'")
+    elif defect == "schema 7":
+        db.execute("ALTER TABLE delivery_attempt_state DROP COLUMN pointer_nonce")
+    elif defect == "pointer":
+        db.execute("UPDATE delivery_attempt_state SET pointer_nonce = '0a1b2c3d' WHERE attempt_id = 'a1'")
     db.commit()
     db.close()
     return live.Store(path, *SCOPE)
@@ -524,6 +528,9 @@ def check_exchange(scratch):
     assert failing("claim left") == ["request"]
     assert failing("claim open") == ["reply"]
     assert failing("body differs") == ["reply body"]
+    assert failing("schema 7") == [], "a store from before 1.7.0 has no pointer column"
+    pointed = round_trip(path, "pointer").exchange("claude", 900).hops
+    assert [live.hop_key(hop) for hop in pointed] == ["Namedrop message 0a1b2c3d from", "a2"], pointed
     settled = live.parse_codex(codex_lines("a1", settle=True), "x", "x.jsonl")
     assert failing(None, codex=settled) == ["codex saw the request"]
     rows, detail = live.calls_detail(exchange, claude, codex)
@@ -540,8 +547,8 @@ def check_exchange(scratch):
         raise AssertionError("an unreadable store must not read as an empty backlog")
     except live.StoreBusy:
         pass
-    return ("exchange: a clean round trip passes; a retry, second root, third hop, lost ack, left claim, "
-            "settle command or changed body fails its own check")
+    return ("exchange: a clean round trip passes, on a store with or without pointer ids; a retry, second "
+            "root, third hop, lost ack, left claim, settle command or changed body fails its own check")
 
 
 def check_judges():
