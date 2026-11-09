@@ -4,6 +4,7 @@ Gated predecessors (every Linux release, and macOS releases since the command
 gate) run on every platform. Historical ungated predecessors exist only on
 macOS, so their drain runs there; elsewhere they must be refused unchanged.
 """
+import fcntl
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 REPO = Path(__file__).resolve().parent.parent
@@ -46,8 +48,8 @@ fn main() {{
 '''
 
 
-def simulator(base, gated):
-    path = base / ('gated-command' if gated else 'legacy-command')
+def simulator(base, gated, name=None):
+    path = base / (name or ('gated-command' if gated else 'legacy-command'))
     # Compile an ordinary native process. Copied Apple system executables
     # can be killed by code-signing policy on another macOS release.
     subprocess.run(['rustc', '--edition', '2021', '--crate-name', path.name.replace('-', '_'),
@@ -318,38 +320,57 @@ def stop_runtime_processes(fixture):
             os.kill(pid, signal.SIGKILL)
 
 
-def stuck_helpers(fixture):
-    """As on a Mac updating from 1.6.5: the release's status worker waits out
-    retries while holding the command gate, beside its deferred worker and
-    reminder clock. The update stops these helpers, migrates and starts them
-    again on the new runtime, with no step for the person and no queued work lost."""
+def stuck_helpers(fixture, queued):
+    """As on a Mac updating from 1.6.5: that release's status worker waits out
+    retries while holding the command gate. The update stops it, migrates and
+    starts it again on the new runtime, with no step for the person. Its queued
+    event is kept. With no event queued, the restarted worker still runs once,
+    so a timed retry it kept only in memory is scheduled again."""
     environment = helper_environment(fixture)
     queue = fixture.state / 'agent-status-reconciliation' / hashlib.sha256(b'socket\0w').hexdigest()
-    queue.mkdir(parents=True)
     marker = queue / 'pending-1'
-    marker.write_text(json.dumps({'type': 'pane_agent_status_changed', 'pane_id': 'worker-pane',
-                                  'workspace_id': 'w', 'agent_status': 'idle'}))
-    helpers = [start_helper(fixture, fixture.rt / 'namedrop', args, environment) for args in HELPERS]
+    if queued:
+        queue.mkdir(parents=True)
+        marker.write_text(json.dumps({'type': 'pane_agent_status_changed', 'pane_id': 'worker-pane',
+                                      'workspace_id': 'w', 'agent_status': 'idle'}))
+    helper = start_helper(fixture, fixture.rt / 'namedrop', HELPERS[0], environment)
     try:
         migration = fixture.migration(timeout=10)
         out, err = migration.communicate(timeout=40)
         assert migration.returncode == 0 and b'migration completed' in out, (out, err)
-        restarted = [line for line in err.splitlines() if line.startswith(b'Restarted Namedrop helpers after the update: ')]
-        assert len(restarted) == 1, err
-        for kind in (b'status worker', b'deferred worker', b'reminder clock'):
-            assert kind + b' (was PID ' in restarted[0], err
-        for helper in helpers:
-            assert helper.wait(timeout=5) == -signal.SIGTERM, helper.returncode
+        assert b'Restarted Namedrop helpers after the update: status worker (was PID %d).' % helper.pid in err, err
+        assert helper.wait(timeout=5) == -signal.SIGTERM, helper.returncode
         fixture.verify_rows(8)
         assert runtime.current(fixture.rt) == fixture.new
         # The restarted status worker runs the new runtime against the same queue.
         wait_for(lambda: (fixture.state.parent / 'herdr-called').exists(),
-                 'The restarted status worker never read its queue')
-        assert marker.exists(), 'A queued status event was lost'
+                 'The restarted status worker never ran')
+        if queued:
+            assert marker.exists(), 'A queued status event was lost'
         with runtime.command_gate(fixture.rt, timeout=5, grace=5):
             pass
     finally:
         stop_runtime_processes(fixture)
+
+
+def fixed_helper_finishes(fixture, simulator):
+    """A helper from a release whose helpers hold the gate only while they work
+    is in the middle of a job, such as a paste into a pane. The update waits for
+    it and never stops it."""
+    fixed = fixture.release(simulator, dict(contracts(True)[0], helper_gate=1))
+    assert fixed != fixture.old
+    helper = start_helper(fixture, fixture.rt / fixed / 'namedrop', HELPERS[0], helper_environment(fixture))
+    finish_job = threading.Timer(3, lambda: helper.stdin.close())
+    finish_job.start()
+    try:
+        migration = fixture.migration(timeout=10)
+        out, err = migration.communicate(timeout=40)
+        assert migration.returncode == 0 and b'migration completed' in out, (out, err)
+        assert helper.wait(timeout=5) == 0, 'The update stopped a helper in the middle of its job'
+        assert b'Restarted' not in err, err
+        fixture.verify_rows(8)
+    finally:
+        finish_job.cancel()
 
 
 def foreign_holder(fixture):
@@ -489,13 +510,88 @@ def helper_identity():
     assert environment == {'HERDR_SOCKET_PATH': '/s.sock', 'A': 'b=c'}, environment
     kind = runtime.helper_kind
     state = Path('/var/state')
-    assert kind(['n', 'hook', 'agent-status-worker'], state) == 'status worker'
-    assert kind(['n', '--deferred-worker', '/var/state', '/s.sock'], state) == 'deferred worker'
-    assert kind(['n', 'reminder-clock', '/var/state', '/s.sock'], state) == 'reminder clock'
+    ours = {'HERDR_PLUGIN_STATE_DIR': '/var/state'}
+    assert kind(['n', 'hook', 'agent-status-worker'], ours, state) == 'status worker'
+    assert kind(['n', 'hook', 'agent-status-worker'], {'HERDR_PLUGIN_STATE_DIR': '/other'}, state) is None
+    assert kind(['n', 'hook', 'agent-status-worker'], {}, state) is None
+    assert kind(['n', '--deferred-worker', '/var/state', '/s.sock'], {}, state) == 'deferred worker'
+    assert kind(['n', 'reminder-clock', '/var/state', '/s.sock'], {}, state) == 'reminder clock'
     for other in (['n', 'reminder-clock', '/other/state', '/s.sock'], ['n', 'hook', 'agent-status-changed'],
                   ['n', 'hook', 'agent-status-worker', 'extra'], ['n', '--deferred-execute', '/var/state', 's', 'k'],
                   ['n', 'ui', 'run', 'tour'], ['n', 'reply'], ['claude'], ['n']):
-        assert kind(other, state) is None, other
+        assert kind(other, ours, state) is None, other
+
+
+def stop_and_restart_guards(base):
+    """Signals reach only the process that was identified, the busy message is
+    built once when the wait ends, and every stopped helper restarts whatever
+    fails on the way."""
+    # The helper ignores SIGTERM and becomes another program before the
+    # fallback: its PID no longer runs the helper, so no SIGKILL follows.
+    changing = subprocess.Popen([sys.executable, '-c', 'import os, signal, time\n'
+                                 'signal.signal(signal.SIGTERM, lambda *a: os.execv("/bin/sleep", ["sleep", "30"]))\n'
+                                 'print("ready", flush=True)\n'
+                                 'while True: time.sleep(1)'], stdout=subprocess.PIPE)
+    try:
+        assert changing.stdout.readline() == b'ready\n'
+        found = runtime.process(changing.pid)
+        helper = {'pid': changing.pid, 'kind': 'status worker', 'executable': found[0], 'argv': found[1],
+                  'environment': found[2]}
+        assert runtime.stop_helpers([helper]) == [helper]
+        assert changing.poll() is None, 'SIGKILL reached a process that was no longer the helper'
+        assert runtime.process(changing.pid)[1] == ['sleep', '30']
+    finally:
+        changing.kill()
+        changing.wait()
+
+    held = base / 'busy-gate'
+    (held / 'releases').mkdir(parents=True)
+    holder = open(held / 'commands.lock', 'w')
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    built, message = [], runtime.busy_gate_message
+    runtime.busy_gate_message = lambda path: built.append(path) or 'busy'
+    try:
+        for wait in (lambda: runtime.lock(held, 'commands.lock', timeout=.4),
+                     lambda: runtime.command_gate(held, timeout=.4, grace=.1).__enter__()):
+            built.clear()
+            try:
+                wait()
+                raise AssertionError('took a held lock')
+            except RuntimeError as error:
+                assert str(error) == 'busy'
+            assert len(built) == 1, f'the busy message was built {len(built)} times'
+    finally:
+        runtime.busy_gate_message = message
+
+    names = ('gate_helpers', 'stop_helpers', 'restart_helpers')
+    saved = {name: getattr(runtime, name) for name in names}
+    restarted, calls = [], []
+    stopped = [{'pid': 1, 'kind': 'status worker', 'argv': ['n'], 'environment': {}}]
+    def helpers(rt):
+        calls.append(rt)
+        if len(calls) > 1:
+            raise RuntimeError('inspection failed')
+        return stopped
+    runtime.gate_helpers, runtime.stop_helpers = helpers, lambda found: found
+    runtime.restart_helpers = lambda rt, found: restarted.extend(found)
+    try:
+        runtime.command_gate(held, timeout=5, grace=.05).__enter__()
+        raise AssertionError('took a held lock')
+    except RuntimeError as error:
+        assert str(error) == 'inspection failed'
+    finally:
+        for name, value in saved.items():
+            setattr(runtime, name, value)
+    assert restarted == stopped, 'a stopped helper was not restarted after an error'
+    holder.close()
+
+    popen = subprocess.Popen
+    subprocess.Popen = lambda *a, **k: (_ for _ in ()).throw(OSError('no launcher'))
+    try:
+        runtime.restart_helpers(held, [{'pid': 7, 'kind': 'deferred worker', 'argv': ['n', 'x'],
+                                        'environment': {}}])
+    finally:
+        subprocess.Popen = popen
 
 
 def busy_gate_advice():
@@ -534,6 +630,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix='namedrop-live-schema-') as directory:
         base = Path(directory)
         simulators = {gated: simulator(base, gated) for gated in (True, False)}
+        fixed_simulator = simulator(base, True, 'fixed-command')
+        stop_and_restart_guards(base)
         released_1_6_0 = {'runtime_protocol': 1, 'live_upgrade_epoch': 1, 'state_schema': 7,
                           'collaboration_protocol': 'collab/v1', 'command_gate': 1,
                           'live_migrate_from': [3, 4, 5, 6]}
@@ -556,7 +654,9 @@ def main():
             case('success', gated_success if gated else legacy_success)
             case('timeout', timeout)
             if gated:
-                case('stuck-helpers', stuck_helpers)
+                case('stuck-helpers', stuck_helpers, True)
+                case('stuck-helper-no-events', stuck_helpers, False)
+                case('fixed-helper', fixed_helper_finishes, fixed_simulator)
                 case('foreign-holder', foreign_holder)
             case('interrupted-publication', interrupted_publication)
             case('orphaned-migration', orphaned_migration)

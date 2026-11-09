@@ -139,7 +139,7 @@ def gate_holders(path):
         try:
             executables = retained_executables(Path(path).parent)
             candidates = [pid for pid in all_pids() if pid != me
-                          and (found := process(pid)) and os.path.realpath(found[0]) in executables]
+                          and process(pid, executables)]
         except (OSError, RuntimeError):
             candidates = []
         holding = listed(['-a', '-p', ','.join(map(str, candidates))]) if candidates else set()
@@ -195,7 +195,8 @@ def lock(runtime, name, timeout=None):
                     fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
-                    require(time.monotonic() < deadline, busy_gate_message(runtime / name))
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(busy_gate_message(runtime / name)) from None
                     time.sleep(.05)
     except BaseException:
         stream.close()
@@ -266,16 +267,20 @@ def darwin_arguments(pid):
     return parse_procargs2(buffer.raw[:size.value])
 
 
-def process(pid):
-    """(executable, argv, environment) of a process of this user, or None."""
+def process(pid, executables=None):
+    """(executable, argv, environment) of a process of this user, or None. With
+    `executables`, a process running anything else is skipped before its
+    arguments are read."""
     try:
         if sys.platform == 'darwin':
             executable = darwin_path(darwin_library(), pid)
-            arguments = darwin_arguments(pid)
-            if executable is None or arguments is None:
+            if executable is None or executables is not None and os.path.realpath(executable) not in executables:
                 return None
-            return (executable, *arguments)
+            arguments = darwin_arguments(pid)
+            return None if arguments is None else (executable, *arguments)
         executable = os.readlink(f'/proc/{pid}/exe')
+        if executables is not None and os.path.realpath(executable) not in executables:
+            return None
         argv = [os.fsdecode(a) for a in Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0') if a]
         environment = {}
         for item in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0'):
@@ -283,7 +288,7 @@ def process(pid):
             if name:
                 environment[name] = value
         return executable, argv, environment
-    except OSError:
+    except (OSError, ValueError, RuntimeError, IndexError):
         return None
 
 
@@ -294,20 +299,28 @@ def all_pids():
 
 
 def retained_executables(runtime):
-    return {str((release / 'namedrop').resolve()) for release in (runtime / 'releases').iterdir()
-            if release.is_dir() and not release.is_symlink() and (release / 'namedrop').is_file()}
+    """Each retained release's executable, mapped to whether its helpers hold
+    the command gate only while they work (`helper_gate`, from 1.7.0)."""
+    found = {}
+    for release in (runtime / 'releases').iterdir():
+        if release.is_dir() and not release.is_symlink() and (release / 'namedrop').is_file():
+            try:
+                per_job = json.loads((release / 'runtime.json').read_text()).get('helper_gate') == 1
+            except (OSError, ValueError, AttributeError):
+                per_job = False
+            found[str((release / 'namedrop').resolve())] = per_job
+    return found
 
 
-def helper_kind(argv, state):
-    """Which Namedrop background helper argv starts, or None. Each keeps its
-    work on disk and starts again on the next event, so activation may stop it."""
+def helper_kind(argv, environment, state):
+    """Which Namedrop background helper of `state` this is, or None."""
     rest = argv[1:]
-    if rest == ['hook', 'agent-status-worker']:
+    ours = lambda path: path is not None and os.path.realpath(path) == os.path.realpath(state)
+    if rest == ['hook', 'agent-status-worker'] and ours(environment.get('HERDR_PLUGIN_STATE_DIR')):
         return 'status worker'
-    ours = len(rest) == 3 and os.path.realpath(rest[1]) == os.path.realpath(state)
-    if ours and rest[0] == '--deferred-worker':
+    if len(rest) == 3 and ours(rest[1]) and rest[0] == '--deferred-worker':
         return 'deferred worker'
-    if ours and rest[0] == 'reminder-clock':
+    if len(rest) == 3 and ours(rest[1]) and rest[0] == 'reminder-clock':
         return 'reminder clock'
     return None
 
@@ -320,34 +333,37 @@ def opens(pid, path):
 
 
 def gate_helpers(runtime):
-    """Namedrop helpers of this runtime that have the command lock open: the
-    executable is one of its retained releases and the arguments are exactly a
-    helper's. Agents and every other process are never included."""
-    executables = retained_executables(runtime)
-    target = os.path.realpath(runtime / 'commands.lock')
-    helpers = []
-    for pid in all_pids():
-        if pid == os.getpid():
-            continue
-        found = process(pid)
-        if found is None or os.path.realpath(found[0]) not in executables:
-            continue
-        kind = helper_kind(found[1], runtime.parent)
-        if kind:
-            helpers.append({'pid': pid, 'kind': kind, 'executable': found[0],
-                            'argv': found[1], 'environment': found[2]})
+    """Helpers activation may stop: status workers of this state, run by a
+    retained release from before 1.7.0, that have the command lock open. Those
+    hold the gate for their whole life, waiting out retries included. Every
+    other helper holds it only while it works, so it is waited for, never
+    stopped, and agents and every other process are never included."""
+    try:
+        stoppable = {path for path, per_job in retained_executables(runtime).items() if not per_job}
+        if not stoppable:
+            return []
+        target = os.path.realpath(runtime / 'commands.lock')
+        helpers = []
+        for pid in all_pids():
+            if pid == os.getpid():
+                continue
+            found = process(pid, stoppable)
+            if found and helper_kind(found[1], found[2], runtime.parent) == 'status worker':
+                helpers.append({'pid': pid, 'kind': 'status worker', 'executable': found[0],
+                                'argv': found[1], 'environment': found[2]})
+    except (OSError, RuntimeError, ValueError):
+        return []
     if sys.platform != 'darwin':
         return [helper for helper in helpers if opens(helper['pid'], target)]
     if not helpers:
         return []
     try:
         listed = subprocess.run(['/usr/sbin/lsof', '-a', '-t', '-p', ','.join(str(h['pid']) for h in helpers),
-                                 '--', target], capture_output=True, text=True, timeout=20)
-        holding = {int(pid) for pid in listed.stdout.split() if pid.isdigit()}
+                                 '--', target], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
-        # Every helper restarts after activation, so stopping one that did not
-        # hold the lock costs nothing.
-        return helpers
+        # Without proof that it holds the lock, a helper is left alone.
+        return []
+    holding = {int(pid) for pid in listed.stdout.split() if pid.isdigit()}
     return [helper for helper in helpers if helper['pid'] in holding]
 
 
@@ -362,64 +378,108 @@ def gone(pid):
         return False
 
 
+def same_helper(helper):
+    """Whether the PID still runs this helper, not a process that reused it."""
+    found = process(helper['pid'])
+    return found is not None and found[0] == helper['executable'] and found[1] == helper['argv']
+
+
+def signal_helper(helper, number):
+    if not same_helper(helper):
+        return False
+    try:
+        os.kill(helper['pid'], number)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def stop_helpers(helpers):
-    stopped = []
-    for helper in helpers:
-        found = process(helper['pid'])
-        # The PID must still be the same helper.
-        if found is None or found[0] != helper['executable'] or found[1] != helper['argv']:
-            continue
-        try:
-            os.kill(helper['pid'], signal.SIGTERM)
-        except ProcessLookupError:
-            continue
-        stopped.append(helper)
+    stopped = [helper for helper in helpers if signal_helper(helper, signal.SIGTERM)]
     deadline = time.monotonic() + 3
     while not all(gone(helper['pid']) for helper in stopped) and time.monotonic() < deadline:
         time.sleep(.05)
     for helper in stopped:
         if not gone(helper['pid']):
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(helper['pid'], signal.SIGKILL)
+            signal_helper(helper, signal.SIGKILL)
     return stopped
+
+
+def queue_wake(helper):
+    """A status worker keeps its next timed retry only in memory, so its
+    replacement is given a wake, which drains and schedules that retry again."""
+    environment = helper['environment']
+    state, socket, workspace = (environment.get(key) for key in
+                                ('HERDR_PLUGIN_STATE_DIR', 'HERDR_SOCKET_PATH', 'HERDR_WORKSPACE_ID'))
+    if not (state and socket and workspace):
+        return
+    queue = (Path(state) / 'agent-status-reconciliation'
+             / hashlib.sha256(f'{socket}\0{workspace}'.encode()).hexdigest())
+    queue.mkdir(parents=True, exist_ok=True, mode=0o700)
+    name = f'activation-{time.time_ns()}'
+    queued = queue / f'queued-{name}'
+    queued.write_text(json.dumps({'operation': 'mailbox-wake'}))
+    queued.chmod(0o600)
+    queued.rename(queue / f'pending-{name}')
 
 
 def restart_helpers(runtime, helpers):
     """Start each stopped helper again through the launcher, so it runs the
-    selected runtime with the arguments and environment it had."""
+    selected runtime with the arguments and environment it had. A helper that
+    can't be restarted is reported, never raised: the update itself is done,
+    and the helper starts again on its next event."""
+    restarted, failed = [], []
     for helper in helpers:
-        subprocess.Popen([str(runtime / 'namedrop'), *helper['argv'][1:]], env=helper['environment'],
-                         cwd='/', stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
-    if helpers:
+        try:
+            if helper['kind'] == 'status worker':
+                queue_wake(helper)
+            subprocess.Popen([str(runtime / 'namedrop'), *helper['argv'][1:]], env=helper['environment'],
+                             cwd='/', stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+            restarted.append(helper)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            failed.append((helper, error))
+    if restarted:
         print('Restarted Namedrop helpers after the update: '
-              + ', '.join(f"{helper['kind']} (was PID {helper['pid']})" for helper in helpers) + '.',
+              + ', '.join(f"{helper['kind']} (was PID {helper['pid']})" for helper in restarted) + '.',
               file=sys.stderr)
+    for helper, error in failed:
+        print(f"Could not restart Namedrop's {helper['kind']} (was PID {helper['pid']}): {error}. "
+              'It starts again on its next event.', file=sys.stderr)
 
 
 @contextlib.contextmanager
 def command_gate(runtime, timeout=20, grace=2):
     """The exclusive command gate. A command, popup or helper in the middle of
-    its work gets `grace` to finish. A Namedrop helper still holding the gate
-    then, such as a status worker from 1.6.5 waiting out retries, is stopped
-    and started again once the gate is released."""
-    deadline = time.monotonic() + timeout
+    its work is waited for. A status worker from before 1.7.0 still holding the
+    gate after `grace` is stopped, because it holds the gate for its whole life,
+    and it starts again once the gate is released."""
+    descriptor = os.open(runtime / 'commands.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    stream = os.fdopen(descriptor, 'r+')
     stopped = []
-    while True:
-        try:
-            gate = lock(runtime, 'commands.lock', timeout=max(0.0, min(grace, deadline - time.monotonic())))
-            break
-        except RuntimeError:
-            found = gate_helpers(runtime) if time.monotonic() < deadline else []
-            if not found:
-                if time.monotonic() < deadline:
-                    continue
-                restart_helpers(runtime, stopped)
-                raise
-            stopped += stop_helpers(found)
     try:
-        with gate:
-            yield gate
+        require(stat.S_ISREG(os.fstat(descriptor).st_mode), 'Runtime lock must be a regular file.')
+        deadline = time.monotonic() + timeout
+        check_at = time.monotonic() + grace
+        while True:
+            try:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                now = time.monotonic()
+                if now >= deadline:
+                    raise RuntimeError(busy_gate_message(runtime / 'commands.lock')) from None
+                if now >= check_at:
+                    stopped += stop_helpers(gate_helpers(runtime))
+                    check_at = time.monotonic() + grace
+                time.sleep(.05)
+    except BaseException:
+        stream.close()
+        restart_helpers(runtime, stopped)
+        raise
+    try:
+        with stream:
+            yield stream
     finally:
         restart_helpers(runtime, stopped)
 
