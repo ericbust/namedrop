@@ -185,6 +185,7 @@ fn claim(plan: Armed, state: ClaimState) -> Claim {
         reply_line: Some("reply: namedrop reply --input-json '{}'".into()),
         no_reply_line: Some("complete.no-reply: namedrop complete --no-reply".into()),
         failure: None,
+        awaits: Vec::new(),
     }
 }
 
@@ -192,8 +193,18 @@ fn stop(prompt: &str, text: &str) -> StopFacts {
     StopFacts {
         session: "session".into(),
         turn: Some(turn(prompt)),
-        background_running: false,
+        running_tasks: Vec::new(),
+        started_tasks: Vec::new(),
         text: FinalText::bounded(text),
+    }
+}
+
+/// A Stop of `prompt` whose turn started `task`, still running.
+fn started(prompt: &str, task: &str, text: &str) -> StopFacts {
+    StopFacts {
+        running_tasks: vec![task.to_owned()],
+        started_tasks: vec![task.to_owned()],
+        ..stop(prompt, text)
     }
 }
 
@@ -214,10 +225,7 @@ fn replied(source: &str) -> Verdict {
 fn a_stop_settles_only_its_own_open_claim_and_explicit_settles_win() {
     let open = claim(reply_plan(), ClaimState::Open);
     let none = SettleFacts::default();
-    let background = StopFacts {
-        background_running: true,
-        ..stop("prompt-1", "Working on it.")
-    };
+    let background = started("prompt-1", "task-1", "Working on it.");
     let cases = [
         (
             &open,
@@ -383,10 +391,7 @@ fn a_stop_settles_only_its_own_open_claim_and_explicit_settles_win() {
             Verdict::Leave(LeaveReason::NoFinalText),
         ),
         (
-            StopFacts {
-                background_running: true,
-                ..stop("prompt-1", "Research is running.")
-            },
+            started("prompt-1", "task-1", "Research is running."),
             none,
             Verdict::Leave(LeaveReason::Held),
         ),
@@ -418,13 +423,7 @@ fn a_stop_settles_only_its_own_open_claim_and_explicit_settles_win() {
         let no_reply = claim(Armed::NoReply(case), ClaimState::Open);
         for (stop, settle) in [
             (stop("prompt-1", ""), none),
-            (
-                StopFacts {
-                    background_running: true,
-                    ..stop("prompt-1", "@claude still going")
-                },
-                none,
-            ),
+            (started("prompt-1", "task-1", "@claude still going"), none),
             (stop("prompt-1", "Asked @claude."), waiting),
         ] {
             assert_eq!(
@@ -590,7 +589,7 @@ impl Drop for StateDirectory {
 }
 
 fn observe(state: &StateDirectory, prompt: &str, arm: Option<Claim>) -> bool {
-    observe_prompt(&state.0, "socket", "session", &turn(prompt), arm, 10).armed
+    observe_prompt(&state.0, "socket", "session", &turn(prompt), arm, &[], 10).armed
 }
 
 fn armed(attempt: &str, prompt: &str, plan: Armed) -> Claim {
@@ -754,10 +753,11 @@ fn background_work_at_the_stop_leaves_a_reply_for_the_agent_to_settle() {
         Some(armed("attempt-1", "prompt-1", reply_plan())),
     );
     let log = std::cell::RefCell::new(Vec::new());
-    let background = StopFacts {
-        background_running: true,
-        ..stop("prompt-1", "Started the build; I will report when it ends.")
-    };
+    let background = started(
+        "prompt-1",
+        "task-1",
+        "Started the build; I will report when it ends.",
+    );
     settle(&state, &background, &mut ran(&log, Ok(json!({}))));
     assert_eq!(state.claims()[0].state, ClaimState::Left(LeaveReason::Held));
     observe(&state, "continuation", None);
@@ -768,7 +768,7 @@ fn background_work_at_the_stop_leaves_a_reply_for_the_agent_to_settle() {
     );
     assert!(log.into_inner().is_empty(), "a held reply was sent");
     assert_eq!(
-        observe_prompt(&state.0, "socket", "session", &turn("later"), None, 30).left_open,
+        observe_prompt(&state.0, "socket", "session", &turn("later"), None, &[], 30).left_open,
         [WayBack {
             attempt_id: crate::DeliveryAttemptId::new("attempt-1"),
             line: "reply: namedrop reply --input-json '{}'".to_owned(),
@@ -800,6 +800,7 @@ fn finished_claims_are_pruned_after_a_day() {
             "session",
             &turn("prompt-2"),
             None,
+            &[],
             now_ms,
         );
         state.claims().len()
@@ -869,6 +870,7 @@ fn a_prompt_queued_behind_a_stop_leaves_the_claim_to_that_stops_worker() {
         "session",
         &turn("prompt-2"),
         None,
+        &[],
         10 + STOPPED_GRACE_MS,
     );
     assert_eq!(
@@ -887,9 +889,17 @@ fn a_claim_left_open_stays_while_later_prompts_show_it() {
         Some(armed("attempt-1", "prompt-1", reply_plan())),
     );
     let shown = |prompt: &str, now_ms| {
-        observe_prompt(&state.0, "socket", "session", &turn(prompt), None, now_ms)
-            .left_open
-            .len()
+        observe_prompt(
+            &state.0,
+            "socket",
+            "session",
+            &turn(prompt),
+            None,
+            &[],
+            now_ms,
+        )
+        .left_open
+        .len()
     };
     assert_eq!(shown("prompt-2", 20), 1);
     assert_eq!(shown("prompt-3", 19 + KEEP_MS), 1);
@@ -916,6 +926,7 @@ fn a_late_stop_worker_leaves_the_next_turns_claim_alone() {
             "session",
             &turn(prompt),
             Some(arm),
+            &[],
             now_ms,
         )
         .armed
@@ -968,9 +979,149 @@ fn pruning_stop_markers_spares_one_still_being_written() {
     let stops = session_directory(&state.0, "socket", "session").join("stops");
     mark_stopped(&state.0, "socket", "session", &turn("prompt-3"), 30);
     fs::write(stops.join("in-flight.next"), "30").unwrap();
-    observe_prompt(&state.0, "socket", "session", &turn("prompt-4"), None, 30);
+    observe_prompt(
+        &state.0,
+        "socket",
+        "session",
+        &turn("prompt-4"),
+        None,
+        &[],
+        30,
+    );
     assert!(
         stops.join("in-flight.next").exists(),
         "a marker still being written was deleted"
     );
+}
+
+#[test]
+fn only_running_work_the_claims_own_turn_started_holds_its_answer() {
+    let none = SettleFacts::default();
+    let relayed = claim(Armed::NoReply(NoReplyCase::Relayed), ClaimState::Open);
+    let earlier_work = StopFacts {
+        running_tasks: vec!["monitor-from-yesterday".into(), "dream-1".into()],
+        ..stop("prompt-1", "Hi, doing well.")
+    };
+    assert_eq!(
+        decide(&relayed, &earlier_work, &none),
+        Verdict::Settle(Settlement::Relay("Hi, doing well.".into()))
+    );
+    assert_eq!(
+        decide(&claim(reply_plan(), ClaimState::Open), &earlier_work, &none),
+        replied("@codex Hi, doing well.")
+    );
+    let ended = StopFacts {
+        started_tasks: vec!["task-1".into()],
+        ..stop("prompt-1", "Done already.")
+    };
+    assert_eq!(
+        decide(&relayed, &ended, &none),
+        Verdict::Settle(Settlement::Relay("Done already.".into()))
+    );
+    let woken = Claim {
+        awaits: vec!["task-1".into(), "task-2".into()],
+        ..claim(Armed::NoReply(NoReplyCase::Relayed), ClaimState::Open)
+    };
+    let one_left = StopFacts {
+        running_tasks: vec!["task-2".into(), "monitor-from-yesterday".into()],
+        ..stop("prompt-1", "One of two finished.")
+    };
+    assert_eq!(
+        decide(&woken, &one_left, &none),
+        Verdict::Leave(LeaveReason::Held)
+    );
+    assert_eq!(
+        decide(&woken, &stop("prompt-1", "Both finished."), &none),
+        Verdict::Settle(Settlement::Relay("Both finished.".into()))
+    );
+}
+
+#[test]
+fn a_held_answer_settles_once_the_work_it_waits_for_wakes_the_session() {
+    let state = StateDirectory::new();
+    observe(
+        &state,
+        "prompt-1",
+        Some(armed("attempt-1", "prompt-1", reply_plan())),
+    );
+    let log = std::cell::RefCell::new(Vec::new());
+    settle(
+        &state,
+        &started("prompt-1", "build-1", "Started the build."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    let held = &state.claims()[0];
+    assert_eq!(held.state, ClaimState::Left(LeaveReason::Held));
+    assert_eq!(held.awaits, ["build-1"]);
+    let other = observe_prompt(
+        &state.0,
+        "socket",
+        "session",
+        &turn("monitor-event"),
+        None,
+        &["monitor-from-yesterday"],
+        30,
+    );
+    assert_eq!(
+        other.left_open.len(),
+        1,
+        "another task's notice hid the way back"
+    );
+    assert_eq!(state.claims()[0].state, ClaimState::Left(LeaveReason::Held));
+    let woken = observe_prompt(
+        &state.0,
+        "socket",
+        "session",
+        &turn("build-ended"),
+        None,
+        &["build-1"],
+        40,
+    );
+    assert!(
+        woken.left_open.is_empty(),
+        "a resumed claim still showed its way back"
+    );
+    let claim = &state.claims()[0];
+    assert_eq!(
+        (claim.state, &claim.turn, claim.armed_at_ms),
+        (ClaimState::Open, &turn("build-ended"), 40)
+    );
+    settle(
+        &state,
+        &stop("build-ended", "The build passed."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    let log = log.into_inner();
+    assert_eq!(log.len(), 1, "the woken claim did not settle once");
+    assert_eq!(log[0].operation, "reply");
+    assert_eq!(log[0].input["source"], "@codex The build passed.");
+    assert_eq!(state.claims()[0].state, ClaimState::Done(Done::Replied));
+}
+
+#[test]
+fn the_stop_reads_which_tasks_its_turn_started_and_which_tasks_a_notice_names() {
+    let transcript = [
+        json!({"type":"user","promptId":"earlier","toolUseResult":{"backgroundTaskId":"old-shell"}}),
+        json!({"type":"user","promptId":"turn","toolUseResult":{"stdout":"","backgroundTaskId":"shell-1"}}),
+        json!({"type":"user","promptId":"turn","toolUseResult":{"isAsync":true,"status":"async_launched","agentId":"agent-1"}}),
+        json!({"type":"user","promptId":"turn","toolUseResult":{"taskId":"monitor-1","timeoutMs":1800000}}),
+        json!({"type":"user","promptId":"turn","toolUseResult":{"stdout":"old-shell is still running"}}),
+        json!({"type":"assistant","promptId":"turn","message":{"content":[{"type":"text","text":"ok"}]}}),
+    ]
+    .iter()
+    .map(Value::to_string)
+    .collect::<Vec<_>>()
+    .join("\n");
+    assert_eq!(
+        started_tasks(transcript.as_bytes(), "turn"),
+        ["shell-1", "agent-1", "monitor-1"]
+    );
+    assert!(started_tasks(transcript.as_bytes(), "").is_empty());
+    assert_eq!(
+        notified_tasks(
+            "<task-notification>\n<task-id>shell-1</task-id>\n<status>completed</status>\n</task-notification>\n<task-notification><task-id>agent-1</task-id></task-notification>"
+        ),
+        ["shell-1", "agent-1"]
+    );
+    assert!(notified_tasks("Please check <task-id>shell-1</task-id>").is_empty());
 }

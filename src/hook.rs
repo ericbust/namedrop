@@ -506,6 +506,7 @@ where
         session,
         &turn,
         claim,
+        &crate::final_reply::notified_tasks(&input.prompt),
         now_ms,
     );
     (

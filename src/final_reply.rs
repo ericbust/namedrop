@@ -232,7 +232,51 @@ pub(crate) fn claim_for(
         reply_line: crate::integration::rendered_line(control, "reply"),
         no_reply_line: crate::integration::rendered_line(control, "complete.no-reply"),
         failure: None,
+        awaits: Vec::new(),
     })
+}
+
+/// The tasks one Claude Code turn put in the background, from the tool results
+/// its transcript records under `prompt_id`: Bash's `backgroundTaskId`, a
+/// background Agent's `agentId` and Monitor's `taskId`.
+pub fn started_tasks(transcript: &[u8], prompt_id: &str) -> Vec<String> {
+    let mut started = Vec::new();
+    if prompt_id.is_empty() {
+        return started;
+    }
+    for line in transcript.split(|byte| *byte == b'\n') {
+        if !line
+            .windows(prompt_id.len())
+            .any(|window| window == prompt_id.as_bytes())
+        {
+            continue;
+        }
+        let Ok(record) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        if record["promptId"] != prompt_id {
+            continue;
+        }
+        let result = &record["toolUseResult"];
+        for key in ["backgroundTaskId", "agentId", "taskId"] {
+            if let Some(id) = result[key].as_str() {
+                started.push(id.to_owned());
+            }
+        }
+    }
+    started
+}
+
+/// The tasks a Claude Code task notification says have ended or changed.
+pub(crate) fn notified_tasks(prompt: &str) -> Vec<&str> {
+    if !prompt.trim_start().starts_with("<task-notification>") {
+        return Vec::new();
+    }
+    prompt
+        .split("<task-id>")
+        .skip(1)
+        .filter_map(|rest| rest.split_once("</task-id>").map(|(id, _)| id.trim()))
+        .collect()
 }
 
 /// Where the bound operations of one delivery run: the envelope's own tool
@@ -265,6 +309,9 @@ pub(crate) struct Claim {
     /// The error that stopped the settle, for the agent's later prompts.
     #[serde(default)]
     pub failure: Option<String>,
+    /// The background tasks a held claim waits for.
+    #[serde(default)]
+    pub awaits: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -307,9 +354,24 @@ pub(crate) enum LeaveReason {
 pub struct StopFacts {
     pub session: String,
     pub turn: Option<HostTurn>,
-    /// Claude Code reported background work still running or pending.
-    pub background_running: bool,
+    /// The background tasks Claude Code listed as running or pending.
+    pub running_tasks: Vec<String>,
+    /// The tasks this turn put in the background, from its transcript.
+    pub started_tasks: Vec<String>,
     pub text: FinalText,
+}
+
+impl StopFacts {
+    /// The running work a claim's final message may be waiting for: what its
+    /// turn started, and what it was already held for. Work started earlier,
+    /// and Claude Code's own background tasks, never answer this delivery.
+    fn awaited(&self, claim: &Claim) -> Vec<String> {
+        self.running_tasks
+            .iter()
+            .filter(|id| self.started_tasks.contains(id) || claim.awaits.contains(id))
+            .cloned()
+            .collect()
+    }
 }
 
 /// What durable state says about the claim's attempt when the Stop decides.
@@ -361,7 +423,7 @@ pub(crate) fn decide(claim: &Claim, stop: &StopFacts, settle: &SettleFacts) -> V
             Verdict::Superseded
         }
         ClaimState::Open => {
-            let waiting = stop.background_running || settle.waiting;
+            let waiting = !stop.awaited(claim).is_empty() || settle.waiting;
             match &claim.plan {
                 Armed::NoReply(NoReplyCase::Relayed) | Armed::Reply { .. } if waiting => {
                     Verdict::Leave(LeaveReason::Held)
@@ -746,6 +808,7 @@ pub(crate) fn observe_prompt(
     session: &str,
     turn: &HostTurn,
     arm: Option<Claim>,
+    notified: &[&str],
     now_ms: u64,
 ) -> Observed {
     let directory = session_directory(state, socket, session);
@@ -767,6 +830,20 @@ pub(crate) fn observe_prompt(
     for (claim, next) in claims.claims.iter_mut().zip(moved) {
         if let Some(next) = next {
             claim.move_on(state, next, now_ms);
+        }
+    }
+    // Work a held claim waits for woke the session: this turn's final message
+    // is the answer the hold kept back.
+    for claim in &mut claims.claims {
+        if claim.state == ClaimState::Left(LeaveReason::Held)
+            && claim
+                .awaits
+                .iter()
+                .any(|id| notified.contains(&id.as_str()))
+        {
+            claim.turn = turn.clone();
+            claim.armed_at_ms = now_ms;
+            claim.set(ClaimState::Open, now_ms);
         }
     }
     // A claim whose Stop already ran belongs to that Stop's worker; only one
@@ -876,6 +953,10 @@ pub fn settle_at_stop(
         };
         let next = match decide(claim, stop, &facts) {
             Verdict::Ignore => continue,
+            Verdict::Leave(LeaveReason::Held) => {
+                claim.awaits = stop.awaited(claim);
+                ClaimState::Left(LeaveReason::Held)
+            }
             Verdict::Leave(reason) => ClaimState::Left(reason),
             Verdict::Superseded => ClaimState::Done(Done::Superseded),
             Verdict::Settle(Settlement::Relay(text)) => {

@@ -363,10 +363,17 @@ fn stop_facts(
         "prompt_id" => (Some(turn.1), None),
         _ => (None, Some(turn.1)),
     };
+    // Running work this turn started.
+    let tasks = if background_running {
+        vec!["background-1".to_owned()]
+    } else {
+        Vec::new()
+    };
     StopFacts {
         session: session.to_owned(),
         turn: HostTurn::from_ids(prompt_id, turn_id),
-        background_running,
+        running_tasks: tasks.clone(),
+        started_tasks: tasks,
         text: FinalText::bounded(text),
     }
 }
