@@ -2842,22 +2842,32 @@ impl Space {
     fn reviewer_prompt(&self, turn: &str, prompt: &str) -> Option<String> {
         let input = json!({"hook_event_name":"UserPromptSubmit","prompt":prompt,
                            "session_id":"session-reviewer","prompt_id":turn});
-        let runtime = LifecycleRuntime {
+        let output = execute_user_prompt_submit_hook(
+            &input.to_string(),
+            &self.real_runtime("pane-reviewer"),
+        )?;
+        output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .map(str::to_owned)
+    }
+
+    /// `runtime`, on the clock the installed Stop hook uses.
+    fn real_runtime<'a>(
+        &'a self,
+        pane: &'a str,
+    ) -> LifecycleRuntime<'a, FakeHerdr, namedrop::SystemClock, SequenceIds> {
+        LifecycleRuntime {
             state_directory: &self.directory.state,
             home_directory: Some(&self.directory.home),
             agent_config: namedrop::AgentConfigDirectories::default(),
             cwd: &self.directory.repo,
             workspace_id: None,
-            current_pane_id: Some("pane-reviewer"),
+            current_pane_id: Some(pane),
             session_socket_id: "socket-a",
             herdr: &self.herdr,
             clock: &namedrop::SystemClock,
             ids: &self.ids,
-        };
-        let output = execute_user_prompt_submit_hook(&input.to_string(), &runtime)?;
-        output["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .map(str::to_owned)
+        }
     }
 
     fn transcript(&self) -> PathBuf {
@@ -3085,4 +3095,52 @@ fn an_explicit_answer_to_another_message_in_the_thread_does_not_stand_in_for_thi
         .map(|row| row[3].clone())
         .collect();
     assert_eq!(bodies, ["I changed src/main.rs."]);
+}
+
+/// A delivery that arms no claim, here because the pane's input held a
+/// draft, still makes its turn about that delivery. A notice that reaches it
+/// never makes its final message the answer to a held one.
+#[test]
+fn a_turn_that_carries_an_explicit_delivery_wakes_no_held_one() {
+    let space = Space::new();
+    let first = space.held_on_first_task();
+    StateStore::open(&space.directory.state)
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.transition_delivery_attempt(
+                &namespace(),
+                &namedrop::DeliveryAttemptId::new(first["control"]["attempt_id"].as_str().unwrap()),
+                namedrop::DeliveryState::Settled,
+                &MutationAttribution::new(ActorKind::Plugin, "test", 42),
+            )
+        })
+        .unwrap();
+    dispatch::message(
+        "send",
+        json!({"request_id":"ask-2","source":"@reviewer Reply with the single word ping.",
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    let second = space.herdr.envelope_for("pane-reviewer");
+    assert_ne!(
+        second["control"]["attempt_id"],
+        first["control"]["attempt_id"]
+    );
+    let context = space
+        .reviewer_prompt("busy-turn", &format!("A draft I had not sent. {second}"))
+        .unwrap();
+    assert!(
+        context.contains("already in this pane's input"),
+        "{context}"
+    );
+    let busy = recorded_turn("prompt-busy", "busy-turn");
+    space.append_transcript(&busy);
+    space.reviewer_stop("busy-turn", "ping", &[], &space.transcript());
+    assert!(
+        space.answers("pane-lead").is_empty(),
+        "{:?}",
+        space.answers("pane-lead")
+    );
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
 }

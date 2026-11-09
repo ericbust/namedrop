@@ -500,16 +500,20 @@ where
         )
     });
     let plan = claim.as_ref().map(|claim| claim.plan.clone());
+    let notified: Vec<String> = crate::final_reply::notice_task(&input.prompt)
+        .map(str::to_owned)
+        .into_iter()
+        .collect();
     let observed = crate::final_reply::observe_prompt(
         runtime.state_directory,
         runtime.session_socket_id,
         session,
         &turn,
         claim,
-        &crate::final_reply::notice_task(&input.prompt)
-            .map(str::to_owned)
-            .into_iter()
-            .collect::<Vec<_>>(),
+        crate::final_reply::PromptFacts {
+            notified: &notified,
+            delivery: delivery.is_some(),
+        },
         now_ms,
     );
     (

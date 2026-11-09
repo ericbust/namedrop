@@ -238,8 +238,8 @@ pub(crate) fn claim_for(
 }
 
 /// What one Claude Code turn's transcript records say about its background
-/// work. A turn's records run from the first one that carries its
-/// `promptId` to the first of another turn, or the end of the transcript.
+/// work. A turn's records are those that carry its `promptId`, and those with
+/// none that follow one of them before another turn's record.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct TurnTasks {
     /// The tasks the turn started, or `None` when its first record is not in
@@ -255,17 +255,18 @@ pub struct TurnTasks {
 pub fn turn_tasks(transcript: &[u8], whole: bool, prompt_id: &str) -> TurnTasks {
     let mut turn = TurnTasks::default();
     let (mut started, mut found, mut earlier_turn) = (Vec::new(), false, whole);
+    // Records with no `promptId` belong to the turn whose record came last.
+    let mut in_turn = false;
     for record in transcript
         .split(|byte| *byte == b'\n')
         .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
     {
         let own = !prompt_id.is_empty() && record["promptId"] == prompt_id;
-        let other_turn = !own && record["promptId"].is_string();
-        if found && other_turn {
-            break;
+        if record["promptId"].is_string() {
+            in_turn = own;
+            earlier_turn |= !own && !found;
         }
-        if !own && !found {
-            earlier_turn |= other_turn;
+        if !in_turn {
             continue;
         }
         found = true;
@@ -556,6 +557,14 @@ const WORKER_LOST: &str = "Namedrop's Stop worker ended before it settled this d
 const LOCK_MISSED: &str = "the Stop could not read this session's claims within 2 seconds";
 const WORKER_TIMED_OUT: &str = "Namedrop's Stop worker ran out of its 10 seconds";
 
+/// What a session's prompt hook saw of one turn: when its first prompt came,
+/// and whether a prompt of it carried a delivery, armed or explicit.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct TurnSeen {
+    started_at_ms: u64,
+    delivery: bool,
+}
+
 /// The claims of one agent session, in one file only this module writes.
 struct Claims {
     directory: PathBuf,
@@ -648,10 +657,14 @@ impl Claims {
     }
 
     /// The held claim that notices of `tasks` reaching `turn` wake: the
-    /// oldest still outstanding that waits for one of them. A turn that has a
-    /// claim of its own wakes none, since its final message is that answer.
+    /// oldest still outstanding that waits for one of them. A turn that
+    /// carried a delivery of its own wakes none, since its final message is
+    /// about that delivery.
     fn woken(&self, state: &Path, turn: &HostTurn, tasks: &[String]) -> Option<usize> {
-        if tasks.is_empty() || self.claims.iter().any(|claim| claim.turn == *turn) {
+        if tasks.is_empty()
+            || self.claims.iter().any(|claim| claim.turn == *turn)
+            || self.turn_seen(turn).is_some_and(|seen| seen.delivery)
+        {
             return None;
         }
         self.claims
@@ -671,6 +684,46 @@ impl Claims {
         stopped_at(&self.directory, turn)
     }
 
+    fn turn_seen(&self, turn: &HostTurn) -> Option<TurnSeen> {
+        let mut bytes = Vec::new();
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(self.directory.join("turns").join(turn.as_str()))
+            .ok()?
+            .take(256)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    /// Records a prompt of `turn`: the first one's time, and a delivery.
+    fn see_turn(&self, turn: &HostTurn, delivery: bool, now_ms: u64) {
+        let seen = match self.turn_seen(turn) {
+            Some(seen) if seen.delivery || !delivery => return,
+            Some(seen) => TurnSeen { delivery, ..seen },
+            None => TurnSeen {
+                started_at_ms: now_ms,
+                delivery,
+            },
+        };
+        let directory = self.directory.join("turns");
+        let next = directory.join(format!("{}.next", turn.as_str()));
+        let written = fs::create_dir_all(&directory).and_then(|()| {
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&next)?
+                .write_all(&serde_json::to_vec(&seen)?)
+        });
+        if written.is_ok() {
+            let _ = fs::rename(next, directory.join(turn.as_str()));
+        }
+    }
+
     /// What a claim armed on another turn becomes when this session moves
     /// on: still open while its Stop's worker may settle it, otherwise left.
     fn moved_on(&self, claim: &Claim, now_ms: u64) -> Option<ClaimState> {
@@ -684,6 +737,24 @@ impl Claims {
     fn save(mut self, now_ms: u64) {
         self.claims
             .retain(|claim| claim.updated_at_ms.saturating_add(KEEP_MS) > now_ms);
+        if let Ok(entries) = fs::read_dir(self.directory.join("turns")) {
+            for entry in entries.flatten() {
+                let stale = match entry
+                    .file_name()
+                    .to_str()
+                    .map(|name| name.strip_suffix(".next"))
+                {
+                    Some(Some(_)) => false,
+                    Some(None) => self
+                        .turn_seen(&HostTurn(entry.file_name().to_string_lossy().into_owned()))
+                        .is_none_or(|seen| seen.started_at_ms.saturating_add(KEEP_MS) <= now_ms),
+                    None => true,
+                };
+                if stale {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
         if let Ok(entries) = fs::read_dir(self.directory.join("stops")) {
             for entry in entries.flatten() {
                 if entry
@@ -854,6 +925,15 @@ pub(crate) struct WayBack {
     pub failure: Option<String>,
 }
 
+/// What a prompt carried, beyond the delivery it may arm.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PromptFacts<'a> {
+    /// The tasks its Claude Code notice is about.
+    pub notified: &'a [String],
+    /// It authenticated a delivery for this session, armed or explicit.
+    pub delivery: bool,
+}
+
 /// What one prompt found in its session's claims.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct Observed {
@@ -875,9 +955,10 @@ pub(crate) fn observe_prompt(
     session: &str,
     turn: &HostTurn,
     arm: Option<Claim>,
-    notified: &[String],
+    prompt: PromptFacts<'_>,
     now_ms: u64,
 ) -> Observed {
+    let PromptFacts { notified, delivery } = prompt;
     let directory = session_directory(state, socket, session);
     if arm.is_none() && !directory.join("claims.json").exists() {
         return Observed::default();
@@ -885,6 +966,7 @@ pub(crate) fn observe_prompt(
     let Some(mut claims) = Claims::lock(directory, PROMPT_LOCK_WAIT) else {
         return Observed::default();
     };
+    claims.see_turn(turn, delivery || arm.is_some(), now_ms);
     let moved: Vec<_> = claims
         .claims
         .iter()
@@ -987,7 +1069,12 @@ pub fn settle_at_stop(
     if let Some(turn) = &stop.turn
         && let Some(index) = claims.woken(state, turn, &stop.notified_tasks)
     {
-        claims.claims[index].wake_on(turn.clone(), now_ms);
+        // The relay looks for an answer the agent already posted this turn
+        // from the turn's start.
+        let started_at_ms = claims
+            .turn_seen(turn)
+            .map_or(claims.claims[index].armed_at_ms, |seen| seen.started_at_ms);
+        claims.claims[index].wake_on(turn.clone(), started_at_ms);
     }
     // A claim of another turn armed after this Stop ended belongs to a turn
     // that started after it: a late worker leaves it to that turn.

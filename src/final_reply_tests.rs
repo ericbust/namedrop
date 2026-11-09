@@ -591,7 +591,19 @@ impl Drop for StateDirectory {
 }
 
 fn observe(state: &StateDirectory, prompt: &str, arm: Option<Claim>) -> bool {
-    observe_prompt(&state.0, "socket", "session", &turn(prompt), arm, &[], 10).armed
+    observe_prompt(
+        &state.0,
+        "socket",
+        "session",
+        &turn(prompt),
+        arm,
+        PromptFacts {
+            notified: &[],
+            delivery: false,
+        },
+        10,
+    )
+    .armed
 }
 
 fn armed(attempt: &str, prompt: &str, plan: Armed) -> Claim {
@@ -770,7 +782,19 @@ fn background_work_at_the_stop_leaves_a_reply_for_the_agent_to_settle() {
     );
     assert!(log.into_inner().is_empty(), "a held reply was sent");
     assert_eq!(
-        observe_prompt(&state.0, "socket", "session", &turn("later"), None, &[], 30).left_open,
+        observe_prompt(
+            &state.0,
+            "socket",
+            "session",
+            &turn("later"),
+            None,
+            PromptFacts {
+                notified: &[],
+                delivery: false
+            },
+            30
+        )
+        .left_open,
         [WayBack {
             attempt_id: crate::DeliveryAttemptId::new("attempt-1"),
             line: "reply: namedrop reply --input-json '{}'".to_owned(),
@@ -802,7 +826,10 @@ fn finished_claims_are_pruned_after_a_day() {
             "session",
             &turn("prompt-2"),
             None,
-            &[],
+            PromptFacts {
+                notified: &[],
+                delivery: false,
+            },
             now_ms,
         );
         state.claims().len()
@@ -872,7 +899,10 @@ fn a_prompt_queued_behind_a_stop_leaves_the_claim_to_that_stops_worker() {
         "session",
         &turn("prompt-2"),
         None,
-        &[],
+        PromptFacts {
+            notified: &[],
+            delivery: false,
+        },
         10 + STOPPED_GRACE_MS,
     );
     assert_eq!(
@@ -897,7 +927,10 @@ fn a_claim_left_open_stays_while_later_prompts_show_it() {
             "session",
             &turn(prompt),
             None,
-            &[],
+            PromptFacts {
+                notified: &[],
+                delivery: false,
+            },
             now_ms,
         )
         .left_open
@@ -928,7 +961,10 @@ fn a_late_stop_worker_leaves_the_next_turns_claim_alone() {
             "session",
             &turn(prompt),
             Some(arm),
-            &[],
+            PromptFacts {
+                notified: &[],
+                delivery: false,
+            },
             now_ms,
         )
         .armed
@@ -987,7 +1023,10 @@ fn pruning_stop_markers_spares_one_still_being_written() {
         "session",
         &turn("prompt-4"),
         None,
-        &[],
+        PromptFacts {
+            notified: &[],
+            delivery: false,
+        },
         30,
     );
     assert!(
@@ -1072,7 +1111,10 @@ fn a_held_answer_settles_at_the_stop_of_the_turn_its_works_notice_reached() {
         "session",
         &turn("monitor-event"),
         None,
-        &["monitor-from-yesterday".to_owned()],
+        PromptFacts {
+            notified: &["monitor-from-yesterday".to_owned()],
+            delivery: false,
+        },
         30,
     );
     assert_eq!(
@@ -1086,7 +1128,10 @@ fn a_held_answer_settles_at_the_stop_of_the_turn_its_works_notice_reached() {
         "session",
         &turn("build-ended"),
         None,
-        &["build-1".to_owned()],
+        PromptFacts {
+            notified: &["build-1".to_owned()],
+            delivery: false,
+        },
         40,
     );
     assert!(
@@ -1110,6 +1155,10 @@ fn a_held_answer_settles_at_the_stop_of_the_turn_its_works_notice_reached() {
             Some(1)
         ),
         "a helper asked before the wake no longer kept the answer back"
+    );
+    assert_eq!(
+        claim.armed_at_ms, 40,
+        "the relay would look for an answer posted this turn from the Stop on, not from the turn's start"
     );
 }
 
@@ -1250,5 +1299,38 @@ fn a_notice_is_about_the_task_its_opening_id_names() {
     assert_eq!(
         notice_task("<task-notification>\n<summary><task-id>task-first</task-id></summary>"),
         None
+    );
+}
+
+#[test]
+fn a_turn_split_by_another_turns_records_keeps_its_second_half() {
+    let lines: Vec<&str> = RECORDED.lines().collect();
+    let wait: Vec<usize> = (0..lines.len())
+        .filter(|&index| lines[index].contains(r#""promptId":"prompt-wait""#))
+        .collect();
+    let busy: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| {
+            line.contains(r#""promptId":"prompt-busy""#) || line.contains("queued_command")
+        })
+        .collect();
+    // The wait turn's prompt, then the busy turn's records with its queued
+    // notice, then the rest of the wait turn: its start, and a queued notice.
+    let queued = lines
+        .iter()
+        .find(|line| line.contains("queued_command"))
+        .unwrap();
+    let mut split = lines[..=wait[0]].to_vec();
+    split.extend(&busy);
+    split.extend(&lines[wait[0] + 1..=wait[wait.len() - 1]]);
+    let second_half = queued.replace("task-first", "task-third");
+    split.push(&second_half);
+    let read = turn_tasks(split.join("\n").as_bytes(), true, "prompt-wait");
+    assert_eq!(read.started, Some(vec!["task-second".to_owned()]));
+    assert_eq!(
+        read.notified,
+        ["task-third"],
+        "the other turn's notice counted, or ours was lost"
     );
 }
