@@ -4,8 +4,10 @@ Gated predecessors (every Linux release, and macOS releases since the command
 gate) run on every platform. Historical ungated predecessors exist only on
 macOS, so their drain runs there; elsewhere they must be refused unchanged.
 """
+import contextlib
 import fcntl
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -361,7 +363,12 @@ def fixed_helper_finishes(fixture, simulator):
     fixed = fixture.release(simulator, dict(contracts(True)[0], helper_gate=1))
     assert fixed != fixture.old
     helper = start_helper(fixture, fixture.rt / fixed / 'namedrop', HELPERS[0], helper_environment(fixture))
-    finish_job = threading.Timer(3, lambda: helper.stdin.close())
+    def end_job():
+        # Closed stdin ends the simulated job; communicate() in teardown must
+        # not flush it again, which Python before 3.14 does.
+        helper.stdin.close()
+        helper.stdin = None
+    finish_job = threading.Timer(3, end_job)
     finish_job.start()
     try:
         migration = fixture.migration(timeout=10)
@@ -588,13 +595,16 @@ def stop_and_restart_guards(base):
     assert restarted == stopped, 'a stopped helper was not restarted after an error'
     holder.close()
 
-    popen = subprocess.Popen
+    # A fake helper whose restart fails: a warning, never an exception.
+    popen, warned = subprocess.Popen, io.StringIO()
     subprocess.Popen = lambda *a, **k: (_ for _ in ()).throw(OSError('no launcher'))
     try:
-        runtime.restart_helpers(held, [{'pid': 7, 'kind': 'deferred worker', 'argv': ['n', 'x'],
-                                        'environment': {}}])
+        with contextlib.redirect_stderr(warned):
+            runtime.restart_helpers(held, [{'pid': 7, 'kind': 'deferred worker', 'argv': ['n', 'x'],
+                                            'environment': {}}])
     finally:
         subprocess.Popen = popen
+    assert "Could not restart Namedrop's deferred worker (was PID 7): no launcher" in warned.getvalue()
 
     # Ctrl-C partway through stopping: a helper already signalled still restarts.
     two = [{'pid': 11, 'kind': 'status worker', 'argv': ['n'], 'environment': {}},
@@ -622,14 +632,16 @@ def stop_and_restart_guards(base):
     assert signalled == [two[0]] and two[0] in restarted, 'a helper signalled before Ctrl-C was not restarted'
 
     # A wake that can't be queued still lets the worker restart.
-    started, wake, popen = [], runtime.queue_wake, subprocess.Popen
+    started, wake, popen, warned = [], runtime.queue_wake, subprocess.Popen, io.StringIO()
     runtime.queue_wake = lambda helper: (_ for _ in ()).throw(OSError('queue unwritable'))
     subprocess.Popen = lambda *a, **k: started.append(a)
     try:
-        runtime.restart_helpers(held, [{'pid': 13, 'kind': 'status worker', 'argv': ['n', 'hook', 'agent-status-worker'],
-                                        'environment': {}}])
+        with contextlib.redirect_stderr(warned):
+            runtime.restart_helpers(held, [{'pid': 13, 'kind': 'status worker', 'argv': ['n', 'hook', 'agent-status-worker'],
+                                            'environment': {}}])
     finally:
         runtime.queue_wake, subprocess.Popen = wake, popen
+    assert 'Could not queue a wake' in warned.getvalue()
     assert started, 'a failed wake kept the status worker from restarting'
 
 
