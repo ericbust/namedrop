@@ -184,6 +184,7 @@ fn claim(plan: Armed, state: ClaimState) -> Claim {
         updated_at_ms: 1,
         reply_line: Some("reply: namedrop reply --input-json '{}'".into()),
         no_reply_line: Some("complete.no-reply: namedrop complete --no-reply".into()),
+        failure: None,
     }
 }
 
@@ -723,6 +724,28 @@ fn the_stop_runs_the_bound_operation_once_and_records_how_the_claim_ended() {
 }
 
 #[test]
+fn a_failed_settle_keeps_its_error_when_the_warning_cannot_be_written() {
+    for plan in [reply_plan(), Armed::NoReply(NoReplyCase::Relayed)] {
+        let state = StateDirectory::new();
+        observe(
+            &state,
+            "prompt-1",
+            Some(armed("attempt-1", "prompt-1", plan)),
+        );
+        std::fs::write(state.0.join("namedrop.sqlite3"), "not a database").unwrap();
+        let log = std::cell::RefCell::new(Vec::new());
+        settle(
+            &state,
+            &stop("prompt-1", "pong"),
+            &mut ran(&log, Err("refused".into())),
+        );
+        let claim = &state.claims()[0];
+        assert_eq!(claim.state, ClaimState::Left(LeaveReason::OperationFailed));
+        assert!(claim.failure.is_some());
+    }
+}
+
+#[test]
 fn background_work_at_the_stop_leaves_a_reply_for_the_agent_to_settle() {
     let state = StateDirectory::new();
     observe(
@@ -750,6 +773,7 @@ fn background_work_at_the_stop_leaves_a_reply_for_the_agent_to_settle() {
             attempt_id: crate::DeliveryAttemptId::new("attempt-1"),
             line: "reply: namedrop reply --input-json '{}'".to_owned(),
             answers: true,
+            failure: None,
         }]
     );
     assert_eq!(state.claims()[0].state, ClaimState::Left(LeaveReason::Held));

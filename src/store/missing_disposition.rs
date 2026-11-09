@@ -125,6 +125,40 @@ impl StateTransaction<'_> {
         Ok(())
     }
 
+    /// Opens ND-DELIVERY-003 for a Stop that could not settle its delivery, or
+    /// rewords the warning a settled observation already raised, because this
+    /// reason is the one that helps. It covers tracked attempts too, which
+    /// `unanswered` stays silent about while their coordination is open.
+    pub(crate) fn flag_failed_settle(
+        &mut self,
+        ns: &StateNamespace,
+        attempt: &crate::DeliveryAttemptId,
+        answers: bool,
+        reason: &str,
+        by: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        if self.delivery_disposition_exists(ns, attempt)? {
+            return Ok(());
+        }
+        let what = if answers {
+            "The agent's final message could not be sent as its answer"
+        } else {
+            "Namedrop could not close this delivery when the agent's turn ended"
+        };
+        let reason = reason.trim().trim_end_matches('.');
+        self.open_attention_item(
+            ns,
+            &AttentionItemDraft {
+                id: item_id(attempt),
+                source_kind: crate::AttentionSourceKind::AgentDisposition,
+                source_id: attempt.as_str().to_owned(),
+                summary: format!("{what}. The reason given was: {reason}. Its exact session can still answer it from delivery.inbox. Once that agent is retired or its session was replaced, delivery acknowledge clears this warning."),
+            },
+            by,
+        )?;
+        Ok(())
+    }
+
     pub(super) fn reconcile_missing_dispositions(
         &mut self,
         ns: &StateNamespace,

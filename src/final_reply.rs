@@ -231,6 +231,7 @@ pub(crate) fn claim_for(
         updated_at_ms: now_ms,
         reply_line: crate::integration::rendered_line(control, "reply"),
         no_reply_line: crate::integration::rendered_line(control, "complete.no-reply"),
+        failure: None,
     })
 }
 
@@ -261,6 +262,9 @@ pub(crate) struct Claim {
     pub reply_line: Option<String>,
     #[serde(default)]
     pub no_reply_line: Option<String>,
+    /// The error that stopped the settle, for the agent's later prompts.
+    #[serde(default)]
+    pub failure: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -613,20 +617,55 @@ impl Claim {
         self.updated_at_ms = now_ms;
     }
 
+    /// Whether the final message was to answer the delivery, rather than
+    /// Namedrop closing it without a reply.
+    fn answers(&self) -> bool {
+        matches!(
+            self.plan,
+            Armed::Reply { .. } | Armed::NoReply(NoReplyCase::Relayed)
+        )
+    }
+
     /// The line that settles this claim's delivery the way the hook said it
     /// would: the reply when the final message was to answer, otherwise the
     /// no-reply.
     fn way_back(&self) -> Option<WayBack> {
-        let (line, answers) = match self.plan {
-            Armed::Reply { .. } | Armed::NoReply(NoReplyCase::Relayed) => (&self.reply_line, true),
-            Armed::NoReply(_) => (&self.no_reply_line, false),
+        let answers = self.answers();
+        let line = if answers {
+            &self.reply_line
+        } else {
+            &self.no_reply_line
         };
         Some(WayBack {
             attempt_id: self.attempt_id.clone(),
             line: line.clone()?,
             answers,
+            failure: self.failure.clone(),
         })
     }
+
+    /// Keeps the error that stopped the settle and warns the person.
+    fn settle_failed(&mut self, state: &Path, failure: String, now_ms: u64) -> ClaimState {
+        warn_settle_failed(state, self, &failure, now_ms);
+        self.failure = Some(failure);
+        ClaimState::Left(LeaveReason::OperationFailed)
+    }
+}
+
+/// The claim still saves, and still tells the agent why, if this write fails.
+fn warn_settle_failed(state: &Path, claim: &Claim, failure: &str, now_ms: u64) {
+    let by = crate::MutationAttribution::new(crate::ActorKind::Plugin, "namedrop", now_ms);
+    let _ = crate::StateStore::open(state).and_then(|mut store| {
+        store.transaction(|transaction| {
+            transaction.flag_failed_settle(
+                &claim.namespace,
+                &claim.attempt_id,
+                claim.answers(),
+                failure,
+                &by,
+            )
+        })
+    });
 }
 
 /// How the agent settles a delivery whose claim ended without settling it.
@@ -637,6 +676,8 @@ pub(crate) struct WayBack {
     /// The line is the reply, with a body to write; otherwise it closes the
     /// delivery without one.
     pub answers: bool,
+    /// The error that stopped the Stop from settling it.
+    pub failure: Option<String>,
 }
 
 /// What one prompt found in its session's claims.
@@ -736,8 +777,9 @@ pub struct BoundOperation {
 
 /// Decides every live claim of the stopping session and runs each settle
 /// through `run`, the same pipeline the CLI runs, so every guard of `reply`
-/// and `complete` applies. A failed settle leaves its delivery pending.
-/// `now_ms` is when the Stop ended, however late its worker runs.
+/// and `complete` applies. A failed settle leaves its delivery pending, keeps
+/// the error on the claim and warns the person. `now_ms` is when the Stop
+/// ended, however late its worker runs.
 pub fn settle_at_stop(
     state: &Path,
     socket: &str,
@@ -793,13 +835,13 @@ pub fn settle_at_stop(
                         ClaimState::Done(Done::NoReplied)
                     }
                     Ok(None) => ClaimState::Done(Done::Superseded),
-                    Err(_) => ClaimState::Left(LeaveReason::OperationFailed),
+                    Err(error) => claim.settle_failed(state, error.to_string(), now_ms),
                 }
             }
             Verdict::Settle(settlement) => match run(claim.bound(&settlement)) {
                 Ok(_) => ClaimState::Done(settlement.done()),
                 Err(_) if disposition(state, claim).is_some() => ClaimState::Done(Done::Superseded),
-                Err(_) => ClaimState::Left(LeaveReason::OperationFailed),
+                Err(error) => claim.settle_failed(state, error, now_ms),
             },
         };
         claim.set(next, now_ms);

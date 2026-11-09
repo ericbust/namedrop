@@ -2210,6 +2210,81 @@ fn a_settle_that_fails_says_why_and_keeps_the_way_back() {
     }
 }
 
+/// Tracked work raises no warning of its own while its coordination is open,
+/// so a failed settle has to.
+#[test]
+fn a_tracked_settle_that_fails_warns_the_person() {
+    let space = Space::new();
+    let coordination = namedrop::execute_handoff_operation(
+        "handoff.begin",
+        json!({"request_id":"begin","deliverable":"A reviewed answer"}),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap()["coordination_id"]
+        .clone();
+    dispatch::message(
+        "send",
+        json!({"request_id":"ask","source":"@reviewer Reply with the single word pong.",
+               "author_kind":"agent_session","coordination_id":coordination}),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    assert_eq!(space.claims()[0]["plan"]["reply"]["tracked"], true);
+    let stop = stop_facts("session-reviewer", CLAUDE, "pong", false);
+    settle_at_stop(&space.directory.state, "socket-a", &stop, 42, &mut |_| {
+        Err("the router is out of cheese".to_owned())
+    });
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0][0].contains("final message could not be sent")
+            && warnings[0][0].contains("the router is out of cheese"),
+        "{warnings:?}"
+    );
+}
+
+/// A close the Stop could not make is not a message that failed to send.
+#[test]
+fn a_no_reply_the_stop_could_not_make_says_so() {
+    let space = Space::new();
+    space.armed_ask();
+    space.stop("session-reviewer", CLAUDE, "pong");
+    let answer = space.herdr.envelope_for("pane-lead");
+    space.prompt("pane-lead", "session-lead", CODEX, &answer.to_string());
+    let stop = stop_facts("session-lead", CODEX, "Thanks, noted.", false);
+    settle_at_stop(&space.directory.state, "socket-a", &stop, 42, &mut |_| {
+        Err("the router is out of cheese".to_owned())
+    });
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0][0].contains("could not close this delivery")
+            && warnings[0][0].contains("the router is out of cheese")
+            && !warnings[0][0].contains("could not be sent"),
+        "{warnings:?}"
+    );
+    let typed = space.prompt(
+        "pane-lead",
+        "session-lead",
+        ("turn_id", "typed-turn"),
+        "What did the reviewer say?",
+    );
+    assert!(
+        typed.contains("could not close a delivery")
+            && typed.contains("the router is out of cheese")
+            && typed.contains("to close it, run this line")
+            && !typed.contains("could not be sent"),
+        "{typed}"
+    );
+}
+
 /// The person's thread takes the final message verbatim, whatever it names.
 #[test]
 fn a_final_message_to_the_person_naming_an_unknown_agent_is_posted() {
