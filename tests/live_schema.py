@@ -78,6 +78,7 @@ class Fixture:
         self.state = base / 'state'
         self.rt = self.state / 'runtime'
         self.rt.mkdir(parents=True)
+        self.gated = gated
         old, declared = contracts(gated)
         self.old = self.release(simulator, old)
         self.new = self.release(actual, declared)
@@ -265,8 +266,14 @@ def timeout(fixture):
     migration = fixture.migration(timeout=.3)
     out, err = migration.communicate(timeout=8)
     assert migration.returncode != 0, (out, err)
-    assert b'PID %d (namedrop) holds the command lock' % old.pid in err, err
-    assert b'kill %d' % old.pid in err and b'retry the update' in err and b'popup' not in err, err
+    if fixture.gated:
+        # A gated command holds the lock, so the gate wait names it.
+        assert b'PID %d (namedrop) holds the command lock' % old.pid in err, err
+        assert b'kill %d' % old.pid in err and b'retry the update' in err and b'popup' not in err, err
+    else:
+        # A macOS release from before the gate never takes the lock; the drain
+        # after the switch finds it still running and names its PID.
+        assert b'Older Namedrop commands are still finishing (PIDs %d)' % old.pid in err, err
     assert old.poll() is None, 'Updater stopped a running command'
     fixture.verify_rows(3)
     assert runtime.current(fixture.rt) == fixture.old

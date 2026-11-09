@@ -127,20 +127,28 @@ def gate_holders(path):
     """PIDs other than this one with the command lock open, and what each is."""
     target, me = os.path.realpath(path), os.getpid()
     if sys.platform == 'darwin':
-        # Only Namedrop's own executables take this lock, so only they are asked about.
+        # Namedrop's own executables are asked about first, cheaply. Only when
+        # none holds the lock does lsof scan every process; this is the error path.
+        def listed(arguments):
+            try:
+                found = subprocess.run(['/usr/sbin/lsof', '-t', *arguments, '--', target],
+                                       capture_output=True, text=True, timeout=20)
+            except (OSError, subprocess.SubprocessError):
+                return set()
+            return {int(pid) for pid in found.stdout.split() if pid.isdigit()} - {me}
         try:
             executables = retained_executables(Path(path).parent)
-            candidates = {pid: found for pid in all_pids() if pid != me
-                          for found in [process(pid)]
-                          if found and os.path.realpath(found[0]) in executables}
-            if not candidates:
-                return []
-            listed = subprocess.run(['/usr/sbin/lsof', '-a', '-t', '-p', ','.join(map(str, candidates)),
-                                     '--', target], capture_output=True, text=True, timeout=20)
-        except (OSError, RuntimeError, subprocess.SubprocessError):
-            return []
-        holding = {int(pid) for pid in listed.stdout.split() if pid.isdigit()}
-        return [(pid, command_words(candidates[pid][1])) for pid in sorted(holding) if pid in candidates]
+            candidates = [pid for pid in all_pids() if pid != me
+                          and (found := process(pid)) and os.path.realpath(found[0]) in executables]
+        except (OSError, RuntimeError):
+            candidates = []
+        holding = listed(['-a', '-p', ','.join(map(str, candidates))]) if candidates else set()
+        holding = holding or listed([])
+        holders = []
+        for pid in sorted(holding):
+            found = process(pid)
+            holders.append((pid, command_words(found[1]) if found and found[1] else 'unknown'))
+        return holders
     holders = []
     for entry in os.listdir('/proc'):
         if not entry.isdigit() or int(entry) == me or not opens(int(entry), target):
