@@ -880,12 +880,16 @@ class Run:
     through Profile.run, Profile.herdr and Profile.namedrop, so the testbed's isolation holds.
     Pane ids are read from profile.state["panes"], their single owner."""
 
-    def __init__(self, profile, mode, evidence):
+    def __init__(self, profile, mode, evidence, limit=TIMEOUTS.run):
         self.profile = profile
         self.mode = mode
         self.evidence = evidence
         self.step_dir = evidence
-        self.deadline = time.monotonic() + TIMEOUTS.run
+        self.limit = limit
+        self.deadline = time.monotonic() + limit
+        self.channels = None
+        self.known = set()
+        self.lost = []
         self.store = Store(profile.dir / "state/herdr/plugins/namedrop/namedrop.sqlite3",
                            str(profile.socket), profile.state["workspace"])
 
@@ -898,7 +902,7 @@ class Run:
         left = self.deadline - time.monotonic()
         if left <= 0:
             raise StepFailed(Check("run time", False, "the run used up its {} after the "
-                                   "build".format(duration(TIMEOUTS.run))))
+                                   "build".format(duration(self.limit))))
         return min(seconds, left)
 
     def pane(self, alias):
@@ -1357,24 +1361,35 @@ def models_seen(r):
     return models
 
 
-def run(profile, request, codex, keep):
+def drive(r, setup, checks, results):
+    """Run steps after results. A failed setup step, or the build before it, skips everything
+    after it; a failed check doesn't stop the next check."""
+    gate = len(results) + len(setup)
+    for number, step in enumerate(setup + checks, len(results) + 1):
+        if all(result.status == "ok" for result in results[:gate]):
+            results.append(r.execute(step, number))
+        else:
+            results.append(StepResult(step, None, 0))
+
+
+def run(profile, request, codex, keep, lane=None):
     """Build, drive every step, report. True on a pass. A pass deletes a profile `test`
-    created unless keep; a failure keeps the profile and its server for ./testbed attach."""
+    created unless keep; a failure keeps the profile and its server for ./testbed attach.
+    A lane replaces the steps: a failed setup step skips the rest, and its checks run even after
+    an earlier check failed. It always runs Codex with --no-daemon."""
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     evidence = profile.dir / "logs" / ("test-" + stamp)
     with profile.locked():
         evidence.mkdir(parents=True)
-        build, mode, feats = step_build(profile, request, codex)
+        installed = lane.install if lane and lane.install else request
+        build, mode, feats = step_build(profile, installed, "no-daemon" if lane else codex)
         results = [build]
         r = None
         if mode is not None:
-            r = Run(profile, mode, evidence)
+            r = Run(profile, mode, evidence, lane.budget if lane else TIMEOUTS.run)
+            r.request, r.feats = request, feats
             try:
-                for number, step in enumerate(plan(mode), 2):
-                    if results[-1].status != "ok":
-                        results.append(StepResult(step, None, 0))
-                    else:
-                        results.append(r.execute(step, number))
+                drive(r, *((lane.setup, lane.checks) if lane else (plan(mode), ())), results)
             except KeyboardInterrupt:
                 results.append(StepResult(Step("interrupted", "interrupted", "", None, ""),
                                           (Check("run", False, "interrupted with Ctrl-C"),), 0))

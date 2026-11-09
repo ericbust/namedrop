@@ -31,6 +31,7 @@ AGENTS = ("claude", "codex")
 REQUIRED_TOOLS = ("herdr", "git", "cargo")
 OPTIONAL_TOOLS = ("node", "rustc", "cc")
 TOOLS = REQUIRED_TOOLS + AGENTS + OPTIONAL_TOOLS + ("python3",)
+VERSION_MANAGERS = frozenset(("mise",))
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SHELL_PS1 = "[testbed {}] \\w $ "
 
@@ -116,11 +117,24 @@ def env_command(env, command):
     return ["env", "-i"] + [key + "=" + value for key, value in sorted(env.items())] + list(command)
 
 
-def host_tools(herdr_bin=None):
+def real_tool(name, search_path):
+    """The file a tool name should run from PATH, or None. mise's wrappers and shims are symlinks
+    to mise itself, which in a profile's clean environment hangs instead of starting the tool. An
+    agent CLI prefers a file of its own name, but a native or npm install resolves to a file like
+    versions/2.1.310 or cli.js, so another name is still accepted when nothing better is on PATH."""
+    found = [Path(hit).resolve() for hit in
+             (shutil.which(name, path=entry) for entry in search_path.split(os.pathsep) if entry) if hit]
+    found = [path for path in found if path.name not in VERSION_MANAGERS]
+    exact = [path for path in found if path.name == name] if name in AGENTS else []
+    return str((exact or found)[0]) if found else None
+
+
+def host_tools(herdr_bin=None, search_path=None):
     """Resolve host launchers to real files so profile runs bypass version-manager shims."""
+    search_path = os.environ.get("PATH", "") if search_path is None else search_path
     tools = {}
     for name in TOOLS:
-        located = sys.executable if name == "python3" else shutil.which(name)
+        located = sys.executable if name == "python3" else real_tool(name, search_path)
         if name == "herdr" and herdr_bin:
             located = herdr_bin
             if not os.access(located, os.X_OK):
@@ -824,13 +838,28 @@ def cmd_up(args):
 
 def cmd_test(args):
     import livetest
-    profile, request = profile_for(args, prefix="test-")
+    lane = None
+    if (args.daily_use or args.upgrade_check) and args.codex == "plain":
+        fail("the daily-use and upgrade lanes run Codex with --no-daemon; the plain lane owns --codex plain")
+    if args.upgrade_from and not args.upgrade_check:
+        fail("--upgrade-from needs --upgrade-check")
+    if args.upgrade_check:
+        if not args.link:
+            fail("--upgrade-check needs --link: the build under test is activated over the previous release")
+        import daily_upgrade
+        lane = daily_upgrade.lane(args.upgrade_from, args.repo, args.link)
+    elif args.daily_use:
+        import dailyuse
+        lane = dailyuse.lane()
+    profile, request = profile_for(args, prefix="test-upgrade-" if args.upgrade_check else "test-")
+    if args.upgrade_check and profile.marker.exists():
+        fail("an upgrade check needs a new profile, because its build replaces the release; pass --fresh")
     created = not profile.marker.exists()
     profile.create()
     if created:
         profile.state["purpose"] = "test"
         profile.save()
-    sys.exit(0 if livetest.run(profile, request, args.codex, args.keep) else 1)
+    sys.exit(0 if livetest.run(profile, request, args.codex, args.keep, lane) else 1)
 
 
 def cmd_status(args):
@@ -1023,6 +1052,13 @@ def main():
     test.add_argument("--codex", choices=("plain", "no-daemon"),
                       help="how Codex starts (default: plain on Namedrop 1.2.0 and later)")
     test.add_argument("--keep", action="store_true", help="keep the profile after a pass")
+    lanes = test.add_mutually_exclusive_group()
+    lanes.add_argument("--daily-use", action="store_true",
+                       help="run the scripted daily-use lane instead of CHECKLIST.md")
+    lanes.add_argument("--upgrade-check", action="store_true",
+                       help="activate --link over the previous release with deliveries open")
+    test.add_argument("--upgrade-from", metavar="REF",
+                      help="the release --upgrade-check starts from (default: the newest v* tag below --link)")
     command("attach", cmd_attach, "open the profile's Herdr from a plain terminal")
     command("status", cmd_status, "show the server, plugin, names and doctor")
     command("stop", cmd_stop, "stop the profile's server and keep its files")

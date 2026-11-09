@@ -65,6 +65,63 @@ delivery turn, a reply body equal to the target's final answer, and no live clai
 show the update notice (Namedrop 1.3.0 and later): a `--link` install never checks for
 updates. Use the update notice probe under **Push on it** for that.
 
+## Daily-use lane
+
+The checklist run proves one ping and pong. Run this lane as well when a change touches
+delivery, the hooks, final-message settling, Channels, handoffs, sessions or anything a
+person meets during a working day:
+
+```sh
+testbed/testbed test --link . --fresh --yes --daily-use
+```
+
+It uses the same isolated profile, real Claude Code and Codex, report and evidence
+directories as `test`, with Codex always `--no-daemon`. A fresh run takes 25 to 30 minutes, about
+10 of them in session continuity, and has a 40-minute budget after the build. A failed setup step skips the rest. A
+failed check doesn't stop the next one, because a run on a buggy build should report
+everything it finds, and exit 1 means at least one check failed. After a failed check, a
+`quiesced:` line says what the lane interrupted and closed before moving on. Closing clears
+a delivery's item and Doctor's code, so the lane reads both first. Each answer it finds lost
+gets a `lost answer` line that says `warned` or `SILENT`, and both fail the run. The final
+backlog repeats those lines, because its own reading comes after the cleanup. It reads
+Channels the way the page does: one person's session, the page's own routes, and one
+`/api/events` stream recorded for the whole run. Every check reads attention and the label
+over all its frames, because a person's next post clears a false item, and the rest of the
+run's stretches fail on any item a check doesn't name. Two false alarms the code raises today
+are named that way and printed at the end as `known false alarms`, so a passing reader still
+sees them. The lane reads what the page derives its banner, "Needs you" rows and label from;
+it doesn't render the page.
+
+| Step | What it asserts |
+| --- | --- |
+| channels answers | Composer post, thread reply and DM to each agent, each told to answer by final message: one delivery, one attempt, one answer in the right thread, 1 model call, 0 settle commands, no new attention, no "not sent through Namedrop" label. |
+| recap | An agent asked what the other answered gets it right. The answer is in its prompt and in no hook context. |
+| real warnings | An interrupted delivery raises `agent_disposition` and Doctor's `ND-DELIVERY-003`, through the same judge read the other way. Closing it clears it. |
+| tracked handoff | Lead, worker, `needs_continuation`, continuation with `expected_revision`, `completed`, `handoff.resolve`, one report shown once; then a nudge. |
+| held turn | A turn that ends waiting on a helper posts nothing, later prompts show the way back, and the answer lands in the same thread. Claude sends its own request. For Codex the lane sends it during the turn, because a real Codex declines to `send` from a person's delivery. Each hold prompt that the lane scripts tells the agent to use the reply line Namedrop shows. |
+| session continuity | `/compact` with a held delivery, exit and resume, and a crash mid-turn, on each agent. The lane sends each hold's `@shell` request during the turn. |
+| other routes | `second-workspace.py` and `cross-workspace-probe.py`, and two reminders. |
+| natural wording | A new session of each agent gets a natural question. One answer and no new attention are judged. Its model calls and settle commands are shown, not judged, and it runs last because a session that has run its reply line keeps doing so. A new Codex then takes a hold with no instructions on how to answer. The report says whether its answer landed, as a `FINDING` line if it didn't, without failing the lane. |
+| backlog | Both workspaces: nothing awaiting, no live claims, no open attention, coordinations or reminders, Doctor healthy. |
+
+A run on a different commit uses this kit against a detached worktree:
+`git worktree add --detach <path> <commit>`, then `--link <path>`. The lane handles the whole
+envelope prompts of 1.6.x and the pointer prompts of 1.7.0.
+
+### Upgrade check
+
+```sh
+testbed/testbed test --link . --fresh --yes --upgrade-check
+```
+
+It installs the newest `v*` release below the checkout's version from GitHub, or
+`--upgrade-from REF`, in a profile named
+`test-upgrade-link-<checkout name>`. It leaves a delivery open on both agents mid-tool, links
+and activates the build under test, about 13 minutes in all, and checks the version rose, the agents stayed up, the
+open deliveries settle once and a fresh message works in the old sessions. The old sessions'
+model calls are reported and never fail it. A new Codex session then shows whether starting
+over recovers one the update stranded.
+
 ## Read the result
 
 - Exit 0 is a pass. The report ends with `PASS n/n in …. Report: <path>.txt` and the
@@ -138,9 +195,9 @@ Namedrop run through the profile's `env -i` line as the manual drive notes show:
   then `group list` and `group remove`, all with `--herdr-pane` set to the shell pane.
 - Pause (`src/controls.rs`): `space pause --input-json '{}'` adds `ND-SPACE-001` to Doctor;
   `space resume` clears it.
-- Cross-workspace mentions, tracked handoffs across workspaces, remote terminal commands
-  and the dashboard (this branch only): the model-free native recipes in
-  [native/README.md](native/README.md). For real agents, run
+- Tracked handoffs across workspaces, remote terminal commands and the dashboard (this branch
+  only): the model-free native recipes in [native/README.md](native/README.md). The daily-use
+  lane runs the cross-workspace scripts below; to run them on their own, for real agents, run
   `.claude/skills/verify/scripts/second-workspace.py test-link-<checkout name>` on a profile
   kept with `--keep`, then `.claude/skills/verify/scripts/cross-workspace-probe.py` with the
   same profile. The first adds a workspace labelled `beta` on its own repository with a
@@ -153,18 +210,14 @@ Namedrop run through the profile's `env -i` line as the manual drive notes show:
   comes back; `#all @codex` from Claude brings both workspaces' `@codex` replies back to
   Claude. Every delivery must settle. It empties Claude's input box at the end, takes
   about 2.5 minutes and exits 0 when all six checks pass.
-- Final message as the reply (`src/final_reply.rs`, `src/stop_hook.rs`): the checklist
-  covers only a plain ask and its answer. Drive these on a kept profile: a Stop that another
-  Stop hook blocks (settles at the turn's second Stop, with the real final text); a turn that
-  ends waiting on a helper or background work (posts nothing, later prompts show the
-  "is still open" line, and its reply lands in the same thread); and a person's Channels
-  message answered by the final message (one post stored as `terminal-relay/v1` that shows
-  as an ordinary reply with no attention item, using the Channels browser app below).
-- No route written yet: tracked handoffs inside one workspace and the 30-second settle
-  (`src/handoff.rs`, `src/coordination.rs`, `ND-DELIVERY-003`, `ND-COORDINATION-001`), popups other than
-  Doctor's (`src/naming_ui.rs`, `src/agent_status_ui.rs`), the tour (`src/tour.rs`), shared
-  checkouts (`ND-INSPECT-001`), rename and personas. The native recipes for them, last
-  reconciled at 1.0.2, are in git: `git show 1b1d32a:.agents/skills/verify/features/README.md`.
+- Final message as the reply (`src/final_reply.rs`, `src/stop_hook.rs`): the daily-use lane
+  covers a person's message answered by the final message and a turn held on a helper. Drive
+  this one on a kept profile: a Stop that another Stop hook blocks (settles at the turn's
+  second Stop, with the real final text).
+- No route written yet: an ignored nudge and `ND-COORDINATION-001`, popups other than Doctor's (`src/naming_ui.rs`,
+  `src/agent_status_ui.rs`), the tour (`src/tour.rs`), shared checkouts (`ND-INSPECT-001`), rename
+  and personas. The native recipes for them, last reconciled at 1.0.2, are in git:
+  `git show 1b1d32a:.agents/skills/verify/features/README.md`.
 
 ## Report
 

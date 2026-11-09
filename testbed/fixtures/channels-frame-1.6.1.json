@@ -1,0 +1,149 @@
+{
+ "wire": 1,
+ "generated_at_ms": 1794186929465,
+ "health": {
+  "level": "needs_you",
+  "items": 1
+ },
+ "space": {
+  "key": "717e4cb3a8fd09bd1dab",
+  "workspace_id": "w1",
+  "label": {
+   "text": "testbed test-link-nd-eebd07c",
+   "truncated": false
+  },
+  "repo": {
+   "id": "326a8e5b362dea42",
+   "name": "repo"
+  },
+  "display_name": "testbed test-link-nd-eebd07c",
+  "addressable_label": "testbed-test-link-nd-eebd07c",
+  "not_addressable_reason": null,
+  "state": "active"
+ },
+ "participants": [
+  {
+   "address_id": "human",
+   "alias": "you",
+   "kind": {
+    "type": "human"
+   },
+   "role": null,
+   "persona": null,
+   "pane_label": null,
+   "activity": "idle",
+   "recently_closed": false,
+   "mailbox": [],
+   "waiting_on": [],
+   "subagents": []
+  },
+  {
+   "address_id": "pane-address-1794186844210210625-891730-1",
+   "alias": "@claude",
+   "kind": {
+    "type": "agent",
+    "runtime": "claude-code"
+   },
+   "role": null,
+   "persona": null,
+   "pane_label": null,
+   "activity": "idle",
+   "recently_closed": false,
+   "mailbox": [],
+   "waiting_on": [],
+   "subagents": []
+  },
+  {
+   "address_id": "pane-address-1794186844431422695-891895-1",
+   "alias": "@codex",
+   "kind": {
+    "type": "agent",
+    "runtime": "codex"
+   },
+   "role": null,
+   "persona": null,
+   "pane_label": null,
+   "activity": "idle",
+   "recently_closed": false,
+   "mailbox": [],
+   "waiting_on": [],
+   "subagents": []
+  },
+  {
+   "address_id": "pane-address-1794186844006187861-891528-1",
+   "alias": "@shell",
+   "kind": {
+    "type": "terminal"
+   },
+   "role": null,
+   "persona": null,
+   "pane_label": null,
+   "activity": "idle",
+   "recently_closed": false,
+   "mailbox": [],
+   "waiting_on": [],
+   "subagents": []
+  }
+ ],
+ "attention": [
+  {
+   "attention_id": "terminal-relay:delivery-attempt-1794186903376822575-897953-3",
+   "source_id": "terminal-relay:delivery-attempt-1794186903376822575-897953-3",
+   "coordination_id": null,
+   "conversation": {
+    "thread_id": "thread-1794186893722077513-897953-1",
+    "message_id": "terminal-relay:delivery-attempt-1794186903376822575-897953-3"
+   },
+   "response": {
+    "kind": "reply",
+    "thread_id": "thread-1794186893722077513-897953-1",
+    "message_id": "terminal-relay:delivery-attempt-1794186903376822575-897953-3",
+    "address_id": "pane-address-1794186844431422695-891895-1"
+   },
+   "source_kind": "terminal_relay",
+   "summary": {
+    "text": "@codex answered in their terminal and may need your reply.",
+    "truncated": false
+   },
+   "opened_at_ms": 1794186924241,
+   "subject_alias": "codex",
+   "message_id": "terminal-relay:delivery-attempt-1794186903376822575-897953-3"
+  }
+ ],
+ "messages": [
+  {
+   "message_id": "message-1794186902829642269-897953-1",
+   "thread_id": "thread-1794186893722077513-897953-1",
+   "in_reply_to": "terminal-relay:delivery-attempt-1794186894269411847-897953-4",
+   "at_ms": 1794186902829,
+   "author": "human",
+   "kind": "reply",
+   "body": {
+    "text": "Without using any tools, add one sentence saying why sunsets look red.",
+    "truncated": false
+   },
+   "legs": [
+    {
+     "to": "pane-address-1794186844431422695-891895-1",
+     "stage": {
+      "stage": "completed",
+      "kind": "no_reply"
+     }
+    }
+   ]
+  },
+  {
+   "message_id": "terminal-relay:delivery-attempt-1794186903376822575-897953-3",
+   "thread_id": "thread-1794186893722077513-897953-1",
+   "in_reply_to": "message-1794186902829642269-897953-1",
+   "at_ms": 1794186924241,
+   "author": "pane-address-1794186844431422695-891895-1",
+   "kind": "terminal_relay",
+   "body": {
+    "text": "Sunsets look red because sunlight passes through more atmosphere, scattering away much of its blue light before it reaches your eyes.",
+    "truncated": false
+   },
+   "legs": []
+  }
+ ]
+}

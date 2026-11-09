@@ -10,6 +10,7 @@ whatever already exists and starts only what is missing.
 """
 
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -17,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-profile = Path.home() / '.namedrop-testbed/profiles' / sys.argv[1]
+profile = Path(os.environ.get('TESTBED_HOME', Path.home() / '.namedrop-testbed')) / 'profiles' / sys.argv[1]
 env_line = re.search(r'env -i (.*) /bin/bash --noprofile', (profile / 'env.sh').read_text()).group(1)
 base_env = ['env', '-i', *shlex.split(env_line)]
 saved = json.loads((profile / 'state.json').read_text())

@@ -10,6 +10,7 @@ go idle, and judges the rows Namedrop wrote. Exit 0 when every check passes.
 
 import glob
 import json
+import os
 import random
 import re
 import shlex
@@ -27,7 +28,7 @@ def check(what, ok, detail=''):
     print(f"{'ok  ' if ok else 'FAIL'}  {what}{': ' + detail if detail else ''}", flush=True)
 
 
-profile = Path.home() / '.namedrop-testbed/profiles' / sys.argv[1]
+profile = Path(os.environ.get('TESTBED_HOME', Path.home() / '.namedrop-testbed')) / 'profiles' / sys.argv[1]
 env_line = re.search(r'env -i (.*) /bin/bash --noprofile', (profile / 'env.sh').read_text()).group(1)
 base_env = ['env', '-i', *shlex.split(env_line)]
 database = profile / 'state/herdr/plugins/namedrop/namedrop.sqlite3'

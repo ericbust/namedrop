@@ -1,0 +1,124 @@
+{
+ "wire": 1,
+ "generated_at_ms": 1794187281523,
+ "health": {
+  "level": "calm"
+ },
+ "space": {
+  "key": "feb4c6fa055126f44b54",
+  "workspace_id": "w1",
+  "label": {
+   "text": "testbed test-link-nd-f0f83cf",
+   "truncated": false
+  },
+  "repo": {
+   "id": "ea1f7d185128b1af",
+   "name": "repo"
+  },
+  "display_name": "testbed test-link-nd-f0f83cf",
+  "addressable_label": "testbed-test-link-nd-f0f83cf",
+  "not_addressable_reason": null,
+  "state": "active"
+ },
+ "participants": [
+  {
+   "address_id": "human",
+   "alias": "you",
+   "kind": {
+    "type": "human"
+   },
+   "role": null,
+   "persona": null,
+   "pane_label": null,
+   "activity": "idle",
+   "recently_closed": false,
+   "mailbox": [],
+   "waiting_on": [],
+   "subagents": []
+  },
+  {
+   "address_id": "pane-address-1794186844340335222-891818-1",
+   "alias": "@claude",
+   "kind": {
+    "type": "agent",
+    "runtime": "claude-code"
+   },
+   "role": null,
+   "persona": null,
+   "pane_label": null,
+   "activity": "idle",
+   "recently_closed": false,
+   "mailbox": [],
+   "waiting_on": [],
+   "subagents": []
+  },
+  {
+   "address_id": "pane-address-1794186844530187639-891989-1",
+   "alias": "@codex",
+   "kind": {
+    "type": "agent",
+    "runtime": "codex"
+   },
+   "role": null,
+   "persona": null,
+   "pane_label": null,
+   "activity": "idle",
+   "recently_closed": false,
+   "mailbox": [],
+   "waiting_on": [],
+   "subagents": []
+  },
+  {
+   "address_id": "pane-address-1794186844118237883-891635-1",
+   "alias": "@shell",
+   "kind": {
+    "type": "terminal"
+   },
+   "role": null,
+   "persona": null,
+   "pane_label": null,
+   "activity": "idle",
+   "recently_closed": false,
+   "mailbox": [],
+   "waiting_on": [],
+   "subagents": []
+  }
+ ],
+ "attention": [],
+ "messages": [
+  {
+   "message_id": "message-1794187279706878834-897976-1",
+   "thread_id": "thread-1794187266983316542-897976-1",
+   "in_reply_to": "message-1794187277906682350-987495-1",
+   "at_ms": 1794187279706,
+   "author": "human",
+   "kind": "reply",
+   "body": {
+    "text": "What did codex answer? Reply with only that.",
+    "truncated": false
+   },
+   "legs": [
+    {
+     "to": "pane-address-1794186844340335222-891818-1",
+     "stage": {
+      "stage": "completed",
+      "kind": "no_reply"
+     }
+    }
+   ]
+  },
+  {
+   "message_id": "terminal-relay:delivery-attempt-1794187280247995789-897976-3",
+   "thread_id": "thread-1794187266983316542-897976-1",
+   "in_reply_to": "message-1794187279706878834-897976-1",
+   "at_ms": 1794187281144,
+   "author": "pane-address-1794186844340335222-891818-1",
+   "kind": "reply",
+   "body": {
+    "text": "NTZDLRK",
+    "truncated": false
+   },
+   "legs": []
+  }
+ ]
+}
