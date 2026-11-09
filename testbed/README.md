@@ -48,6 +48,8 @@ minutes. The first build takes most of that.
 | `--fresh --yes` | Rebuild from nothing, with no typed confirmation |
 | `--codex plain` or `--codex no-daemon` | How Codex starts. The default is `plain` on Namedrop 1.2.0 and later, and `no-daemon` before that |
 | `--keep` | Keep the profile after a pass |
+| `--daily-use` | Run the daily-use lane instead of CHECKLIST.md |
+| `--upgrade-check`, optionally with `--upgrade-from REF` | Activate `--link` over the previous release with deliveries open |
 
 A pass prints the compatibility line to paste into `docs/compatibility.md`
 and deletes the profile. The report itself stays in
@@ -64,6 +66,29 @@ approves an agent's tool prompt: a pane that waits on one for 30 seconds
 fails the step. With `--codex plain`, the run also checks Namedrop's
 shared app-server warning (`ND-SESSION-003`), runs the two commands that
 Doctor gives as the fix, and checks that the warning clears.
+
+### Daily-use lane
+
+```sh
+./testbed test --link . --fresh --yes --daily-use
+```
+
+The lane tests what a person's day runs through: Channels posts, thread replies
+and DMs to each agent, recaps, warnings, tracked handoffs and nudges, a turn held
+on a helper, compaction, exit and resume, a crash, a second workspace, reminders,
+and an empty backlog at the end. Each check runs even after an earlier one
+failed, so a run on a buggy build reports everything it finds. The exit code is
+0 only when every check passed. `--upgrade-check` is a separate run of a
+person's update with agents working. The
+[verify skill](../.claude/skills/verify/SKILL.md#daily-use-lane) lists what each
+step asserts.
+
+To judge another commit, point this kit at a detached worktree of it:
+
+```sh
+git worktree add --detach ../nd-old <commit>
+./testbed test --link ../nd-old --fresh --yes --daily-use
+```
 
 ## Test a branch
 
