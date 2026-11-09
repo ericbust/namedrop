@@ -365,8 +365,15 @@ def step_channels(r):
                                       "claude codex shell")])]
 
 
+def step_names(r):
+    """`step_names` reads each agent's readiness, which still says busy just after the warm-up. The
+    plain lane has Codex's server steps in between, and this lane goes straight there."""
+    idle = [alias for alias in live.AGENTS if not r.wait_agent(alias, ("idle", "done"), live.TIMEOUTS.idle)]
+    return live.step_names(r) + [live.expect("still working", ", ".join(idle) or "none", "none")]
+
+
 SETUP = (live.Step("first-run", "first run", "", live.step_first_run, ""),
-         live.Step("names", "names", "", live.step_names, ""),
+         live.Step("names", "names", "", step_names, ""),
          live.Step("hooks", "hooks", "", live.step_hooks, ""),
          live.Step("channels", "channels", "", step_channels, ""))
 

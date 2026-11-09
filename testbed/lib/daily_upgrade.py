@@ -243,7 +243,7 @@ def step_clean(r):
 
 SETUP = (live.Step("tour", "tour", "", step_skip_tour, ""),
          live.Step("first-run", "first run", "", live.step_first_run, ""),
-         live.Step("names", "names", "", live.step_names, ""),
+         live.Step("names", "names", "", du.step_names, ""),
          live.Step("hooks", "hooks", "", live.step_hooks, ""),
          live.Step("channels", "channels", "", du.step_channels, ""),
          live.Step("build-target", "build under test", "", step_build_target, ""))
