@@ -97,7 +97,10 @@ export type Attention = {
   threadId: string | null;
   actions: readonly ThreadAction[];
   handoff?: HandoffWarning | null;
+  // Why the held answer an unanswered-request item is about can never arrive.
+  answerLost?: AnswerLost | null;
 };
+export type AnswerLost = "retired" | "replaced" | "ended" | "unknown";
 export type TerminalRun = {
   terminal: AddressId;
   command: SafeText;
@@ -138,7 +141,9 @@ export type DeliveryStage =
         | "cancelled"
         | "unknown";
     }
-  | { stage: "working"; ackedAt: number }
+  // `answerHeld`: the agent's turn ended, and Namedrop holds its answer
+  // until its background work or helper finishes.
+  | { stage: "working"; ackedAt: number; answerHeld: boolean }
   | { stage: "replied"; replyId: string }
   | { stage: "completed"; kind: string };
 // A member alias as `Member.alias` holds it: one "@", then the name.
@@ -162,6 +167,8 @@ export type Message = {
   at: number;
   author: AddressId | "human";
   kind: MessageKind;
+  // The agent's words from a turn that ended with its answer still held.
+  progressNote: boolean;
   body: SafeText;
   legs: readonly { to: AddressId; stage: DeliveryStage }[];
   routing: Routing | null;

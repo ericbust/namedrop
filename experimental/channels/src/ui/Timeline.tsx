@@ -10,7 +10,7 @@ import {
 import { composerCopy, emptyChannelCopy, notActivatedCopy } from "../copy.ts";
 import { idle } from "../delivery.ts";
 import type { Channel, Directory, Outgoing, SpaceKey } from "../model.ts";
-import { answered, chatOf } from "../route.ts";
+import { answered, chatOf, everyoneReplied } from "../route.ts";
 import {
   exitFor,
   GROUP_WINDOW,
@@ -282,9 +282,7 @@ export function Timeline({
               thread.room === null
                 ? latestReply !== null &&
                   recipients.length > 0 &&
-                  recipients.every((id) =>
-                    thread.replies.some((reply) => reply.author === id),
-                  )
+                  everyoneReplied(thread, recipients)
                 : answered(thread.room, recipients, message.at, directory);
             return (
               <Fragment key={message.id}>

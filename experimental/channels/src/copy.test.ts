@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   attentionCopy,
+  attentionKind,
   avatarHue,
   composerCopy,
   composerPlaceholder,
@@ -61,8 +62,15 @@ test("receipt copy covers every stage and completed kind in plain words", () => 
     [{ stage: "queued" }, "Queued", "clock", "muted", undefined],
     [{ stage: "delivered" }, "Delivered", "check", "muted", undefined],
     [
-      { stage: "working", ackedAt: 1 },
+      { stage: "working", ackedAt: 1, answerHeld: false },
       "Working on it",
+      "working",
+      "working",
+      undefined,
+    ],
+    [
+      { stage: "working", ackedAt: 1, answerHeld: true },
+      "Still working. Its answer will follow.",
       "working",
       "working",
       undefined,
@@ -857,4 +865,86 @@ test("handoff copy names the deliverable, the lead and the recorded reason for e
     "@lead finished it, but its report is missing or wasn't delivered.",
     "Ask @lead to review it.",
   ]);
+});
+
+test("an unanswered-request card whose held answer can't arrive says why in plain words, and its cause wins over the pane and absence hints", () => {
+  const cases: [
+    NonNullable<Attention["answerLost"]>,
+    string,
+    string,
+    string,
+    string,
+  ][] = [
+    [
+      "retired",
+      "@codex can't answer this anymore",
+      "It was removed before its work finished. Ask another agent if you still need an answer.",
+      "Can't answer this anymore",
+      "The agent was removed before its work finished. Ask another agent if you still need an answer.",
+    ],
+    [
+      "replaced",
+      "@codex can't answer this anymore",
+      "A new session took its place before its work finished. Ask again if you still need an answer.",
+      "Can't answer this anymore",
+      "A new session took the agent's place before its work finished. Ask again if you still need an answer.",
+    ],
+    [
+      "ended",
+      "@codex stopped before answering",
+      "Its session ended before its work finished. If you resume that session, its answer can still arrive.",
+      "Stopped before answering",
+      "The agent's session ended before its work finished. If you resume that session, its answer can still arrive.",
+    ],
+    [
+      "unknown",
+      "@codex can't answer this anymore",
+      "Its session is gone. Ask again if you still need an answer.",
+      "Can't answer this anymore",
+      "The agent's session is gone. Ask again if you still need an answer.",
+    ],
+  ];
+  const pane = { kind: "pane", addressId: "a" as AddressId } as const;
+  for (const [answerLost, title, hint, plainTitle, plainHint] of cases) {
+    const card = (extra: Partial<Attention>) =>
+      attention("agent_disposition", "Summary", { answerLost, ...extra });
+    assert.deepEqual(attentionCopy(card({ subjectAlias: "@codex" })), {
+      title,
+      hint,
+      hintTitle: null,
+      details: "Summary",
+    });
+    assert.deepEqual(attentionCopy(card({})), {
+      title: plainTitle,
+      hint: plainHint,
+      hintTitle: null,
+      details: "Summary",
+    });
+    assert.equal(
+      attentionCopy(
+        card({ subjectAlias: "@codex", response: pane }),
+        agent("@codex", "w1:codex"),
+        { kind: "closed", alias: "@codex" },
+      ).hint,
+      hint,
+    );
+    assert.equal(attentionKind(card({ subjectAlias: "@codex" })), plainTitle);
+    for (const words of [title, hint, plainTitle, plainHint])
+      assert.doesNotMatch(words, /ND-|delivery|namedrop |didn't answer/i);
+  }
+  assert.deepEqual(
+    attentionCopy(
+      attention("agent_disposition", "Summary", {
+        subjectAlias: "@codex",
+        answerLost: null,
+      }),
+    ),
+    {
+      title: "@codex didn't answer a request",
+      hint: "It ended its turn without replying.",
+      hintTitle: null,
+      details: "Summary",
+    },
+    "an ordinary unanswered request keeps its words",
+  );
 });

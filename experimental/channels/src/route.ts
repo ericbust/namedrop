@@ -66,6 +66,17 @@ export function answered(
   );
 }
 
+// True when each of `ids` replied in a thread that is not a room. A progress
+// note says its author is still working, so it is no reply.
+export function everyoneReplied(
+  thread: Pick<ThreadGroup, "replies">,
+  ids: readonly AddressId[],
+): boolean {
+  return ids.every((id) =>
+    thread.replies.some((reply) => reply.author === id && !reply.progressNote),
+  );
+}
+
 function line(
   icon: RouteLine["icon"],
   parts: readonly RoutePart[],

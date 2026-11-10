@@ -168,3 +168,29 @@ test("attention wire reads the thread a reply-limit item names and the actions i
   assert.deepEqual(parse({ thread_id: 42, actions: "continue" }), [null, []]);
   assert.deepEqual(parse({ thread_id: "  ", actions: {} }), [null, []]);
 });
+
+test("attention wire reads why a held answer was lost on an unanswered-request item, and nothing else carries it", () => {
+  const parse = (source_kind: string, answer_lost: unknown) => {
+    const value = structuredClone(fixture);
+    value.frame.attention = [
+      {
+        source_kind,
+        summary: { text: "Lost", truncated: false },
+        opened_at_ms: 10,
+        answer_lost,
+      },
+    ];
+    const event = parseEvent("space", JSON.stringify(value));
+    assert.ok(event?.type === "space");
+    const [item] = event.channel.attention;
+    assert.ok(item !== undefined, String(answer_lost));
+    return item.answerLost;
+  };
+  for (const cause of ["retired", "replaced", "ended"])
+    assert.equal(parse("agent_disposition", cause), cause);
+  assert.equal(parse("agent_disposition", "exploded"), "unknown");
+  assert.equal(parse("agent_disposition", 7), "unknown");
+  assert.equal(parse("agent_disposition", undefined), null);
+  assert.equal(parse("agent_disposition", null), null);
+  assert.equal(parse("delivery_attempt", "retired"), null);
+});

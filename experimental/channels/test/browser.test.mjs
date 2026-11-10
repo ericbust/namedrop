@@ -2076,6 +2076,11 @@ test("UI-2 fix1: every delivery stage shows its visible receipt label", async (t
     [{ stage: "queued" }, "Queued", null],
     [{ stage: "delivered" }, "Delivered", null],
     [{ stage: "working", acked_at_ms: 100 }, "Working on it", null],
+    [
+      { stage: "working", acked_at_ms: 100, answer_held: true },
+      "Still working. Its answer will follow.",
+      null,
+    ],
     [{ stage: "replied", reply_id: "reply" }, "Replied", null],
     [{ stage: "completed", kind: "settled" }, "Ended without an answer", null],
     [{ stage: "completed", kind: "no_reply" }, "Done, no reply needed", null],

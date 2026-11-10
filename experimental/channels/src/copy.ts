@@ -5,6 +5,7 @@ import { threadControls } from "./control.ts";
 import type { Delivery } from "./delivery.ts";
 import type {
   Activity,
+  AnswerLost,
   Attention,
   AttentionResponse,
   ChannelSnapshot,
@@ -55,6 +56,13 @@ export type ReceiptCopy = {
   title?: string;
 };
 const done: ReceiptCopy = { label: "Done", icon: "done", tone: "muted" };
+// What a held answer's receipt and the agent's note from that turn both say.
+export const stillWorking = "Still working. Its answer will follow.";
+const answerHeld: ReceiptCopy = {
+  label: stillWorking,
+  icon: "working",
+  tone: "working",
+};
 const stageCopy = {
   queued: { label: "Queued", icon: "clock", tone: "muted" },
   delivered: { label: "Delivered", icon: "check", tone: "muted" },
@@ -107,6 +115,7 @@ export function receiptCopy(
   paused = false,
 ): ReceiptCopy {
   if (paused && stage.stage === "queued") return stageCopy.held;
+  if (stage.stage === "working" && stage.answerHeld) return answerHeld;
   if (stage.stage !== "completed") return stageCopy[stage.stage];
   if (stage.kind === "settled") return settledCopy(recipient);
   return completedCopy.get(stage.kind) ?? { ...done, title: stage.kind };
@@ -171,6 +180,50 @@ const attentionTable: Record<Attention["source"], AttentionRow> = {
   },
   unknown: { ...needsYou, hint: "Open Details for the full message." },
 };
+// An unanswered-request item whose held answer can never arrive, by cause.
+// `what` follows the agent's name; the hints say why and what to do.
+const lostAnswer: Record<
+  AnswerLost,
+  { what: string; hint: string; namedHint: string }
+> = {
+  retired: {
+    what: "can't answer this anymore",
+    hint: "The agent was removed before its work finished. Ask another agent if you still need an answer.",
+    namedHint:
+      "It was removed before its work finished. Ask another agent if you still need an answer.",
+  },
+  replaced: {
+    what: "can't answer this anymore",
+    hint: "A new session took the agent's place before its work finished. Ask again if you still need an answer.",
+    namedHint:
+      "A new session took its place before its work finished. Ask again if you still need an answer.",
+  },
+  ended: {
+    what: "stopped before answering",
+    hint: "The agent's session ended before its work finished. If you resume that session, its answer can still arrive.",
+    namedHint:
+      "Its session ended before its work finished. If you resume that session, its answer can still arrive.",
+  },
+  unknown: {
+    what: "can't answer this anymore",
+    hint: "The agent's session is gone. Ask again if you still need an answer.",
+    namedHint: "Its session is gone. Ask again if you still need an answer.",
+  },
+};
+function lostAnswerRow(cause: AnswerLost): AttentionRow {
+  const { what, hint, namedHint } = lostAnswer[cause];
+  return {
+    title: `${what.charAt(0).toUpperCase()}${what.slice(1)}`,
+    named: (alias) => `${alias} ${what}`,
+    hint,
+    namedHint,
+  };
+}
+function attentionRow(item: Attention): AttentionRow {
+  return item.answerLost
+    ? lostAnswerRow(item.answerLost)
+    : attentionTable[item.source];
+}
 export const responseCopy = {
   reply: (name: string) => `Reply to ${name}`,
   message: (name: string) => `Message ${name}`,
@@ -260,7 +313,7 @@ export const threadControlCopy = {
   Record<string, unknown>;
 // What an item is about, in the Needs-you table's words, for a row that already names the agent.
 export function attentionKind(item: Attention): string {
-  return attentionTable[item.source].title;
+  return attentionRow(item).title;
 }
 // With `absent`, the card's press can't reach the agent, so the hint says why.
 export function attentionCopy(
@@ -269,9 +322,11 @@ export function attentionCopy(
   absent: Absence | null = null,
 ): AttentionCopy {
   const { text, truncated } = item.summary;
-  const row = attentionTable[item.source];
-  const response =
-    absent === null
+  const row = attentionRow(item);
+  // A lost answer's own hint says why it can't arrive and what to do instead.
+  const response = item.answerLost
+    ? null
+    : absent === null
       ? responseHint(item, responder)
       : { hint: absenceCopy(absent), hintTitle: null };
   const hintTitle = response?.hintTitle ?? null;
@@ -507,6 +562,7 @@ export const disabledChannelCopy = {
     "Namedrop can't mention this workspace by its label. Check that the label is unique and isn't “all”, and that Namedrop is active there.",
 } satisfies Record<DisabledReason, string>;
 
+export const noRepliesCopy = "No replies yet";
 export function repliesCopy(count: number): string {
   return `${count} ${count === 1 ? "reply" : "replies"}`;
 }
