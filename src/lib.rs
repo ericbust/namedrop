@@ -58,7 +58,8 @@ pub(crate) const INTEGRATION_PACKAGE_ATTENTION_SOURCE_PREFIX: &str = "integratio
 pub use context::{execute_context_operation, execute_human_context_operation};
 pub use controls::execute_control_operation;
 pub use delivery::{
-    DrainReport, GraceDeadline, drain_mailboxes, drain_receipt, drain_reports, spaces_to_wake,
+    DrainReport, GraceDeadline, drain_mailboxes, drain_receipt, drain_reports,
+    mail_waits_for_session, spaces_to_wake,
 };
 pub(crate) use delivery::{publish_status_metadata, reconcile_delivery_state};
 pub use domain::*;

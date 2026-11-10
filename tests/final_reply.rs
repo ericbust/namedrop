@@ -817,12 +817,15 @@ from pathlib import Path
 if (Path(__file__).parent / 'herdr-slow').exists(): time.sleep(6)
 args = sys.argv[1:]
 if args[:1] == ['--socket']: args = args[2:]
+here = Path(__file__).parent
+reviewer = here / 'reviewer-status'
 panes = {{'result': {{'panes': [
     {{'pane_id':'pane-lead','terminal_id':'t1','tab_id':'tab-1','workspace_id':'workspace-1','agent':'codex','agent_session':{{'value':'session-lead'}},'agent_status':'idle'}},
-    {{'pane_id':'pane-reviewer','terminal_id':'t2','tab_id':'tab-2','workspace_id':'workspace-1','agent':'claude','agent_session':{{'value':'session-reviewer'}},'agent_status':'idle'}}]}}}}
+    {{'pane_id':'pane-reviewer','terminal_id':'t2','tab_id':'tab-2','workspace_id':'workspace-1','agent':'claude','agent_session':{{'value':'session-reviewer'}},'agent_status':reviewer.read_text() if reviewer.exists() else 'idle'}}]}}}}
 if args[:2] == ['workspace','list']: print(json.dumps({{'result':{{'workspaces':[{{'workspace_id':'workspace-1'}}]}}}}))
 elif args[:2] == ['worktree','list']: print(json.dumps({{'result':{{'worktrees':[{{'path':{repo:?},'open_workspace_id':'workspace-1'}}]}}}}))
 elif args[:2] == ['pane','list']: print(json.dumps(panes))
+elif args[:3] == ['pane','read','pane-reviewer'] and (here / 'reviewer-screen').exists(): print((here / 'reviewer-screen').read_text(), end='')
 else:
     if args[:2] == ['agent','prompt']:
         with (Path(__file__).parent / 'herdr-prompts').open('a') as log: log.write(json.dumps(args[2:]) + '\n')
@@ -880,10 +883,15 @@ else:
     }
 
     fn start_installed_stop_with(&self, payload: Value) -> RunningStop {
+        self.start_installed_stop_in(self.command(), payload)
+    }
+
+    /// The Stop hook run from `command`, which a test may give the pane's
+    /// workspace as Herdr does.
+    fn start_installed_stop_in(&self, mut command: Command, payload: Value) -> RunningStop {
         use std::os::{fd::AsRawFd, unix::process::CommandExt};
         let (done, lifetime) = std::os::unix::net::UnixStream::pair().unwrap();
         let lifetime_fd = lifetime.as_raw_fd();
-        let mut command = self.command();
         // The hook and its detached worker inherit this descriptor, so its
         // end of file means both have exited.
         unsafe {
@@ -4355,4 +4363,74 @@ fn a_rebuilt_context_is_told_which_deliveries_are_still_open_and_how_to_read_the
     )
     .unwrap();
     assert!(!session_start(&space, "pane-reviewer", "compact").contains(&attempt));
+}
+
+/// A Claude Code turn that ends while its background agents run leaves Herdr
+/// reading the pane as working and sends no status change. The Stop itself
+/// starts the drain, which types the queued mail into the empty prompt box.
+#[test]
+fn a_claude_stop_with_background_agents_running_takes_mail_queued_during_the_turn() {
+    let space = Space::new();
+    fs::write(space.directory.root.join("reviewer-status"), "working").unwrap();
+    fs::write(
+        space.directory.root.join("reviewer-screen"),
+        include_str!("fixtures/between-turns/claude-2.1.322-waiting-empty.ansi"),
+    )
+    .unwrap();
+    let stop = || {
+        let mut command = space.command();
+        command.env("HERDR_WORKSPACE_ID", "workspace-1");
+        space
+            .start_installed_stop_in(
+                command,
+                json!({"hook_event_name":"Stop","session_id":"session-reviewer",
+                       "prompt_id":"reviewer-turn","last_assistant_message":"Started the helper.",
+                       "background_tasks":[{"id":"helper","status":"running"}]}),
+            )
+            .wait();
+    };
+    // A Stop with nothing queued starts no drain.
+    stop();
+    assert!(!space.directory.root.join("herdr-prompts").exists());
+    // The person starts the next turn, and mail is queued while it runs.
+    namedrop::turn_phase::record(
+        &space.directory.state,
+        "socket-a",
+        "session-reviewer",
+        namedrop::turn_phase::TurnEdge::Prompt,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+    );
+    // Sent through the binary, so the mail's age is on the clock its drains read.
+    let sent = space
+        .command()
+        .arg("--plugin-state")
+        .arg(&space.directory.state)
+        .args([
+            "send",
+            "--herdr-socket",
+            "socket-a",
+            "--herdr-workspace",
+            "workspace-1",
+        ])
+        .args(["--herdr-pane", "pane-lead", "--input-json"])
+        .arg(json!({"request_id":"ask","source":"@reviewer Is the helper done?"}).to_string())
+        .output()
+        .unwrap();
+    assert!(sent.status.success(), "{sent:?}");
+    assert!(space.prompted_by_binary("pane-reviewer").is_empty());
+
+    stop();
+    // The send's own mailbox worker may still hold the space's queue and run
+    // the wake the Stop queued after the Stop has returned.
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while space.prompted_by_binary("pane-reviewer").is_empty() && std::time::Instant::now() < until
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let typed = space.prompted_by_binary("pane-reviewer");
+    assert_eq!(typed.len(), 1, "{typed:?}");
+    assert_eq!(typed[0]["untrusted_body"], "Is the helper done?");
 }

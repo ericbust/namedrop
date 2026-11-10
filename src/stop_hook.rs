@@ -185,6 +185,9 @@ pub fn run_worker(state: &Path) {
     if captured.settles {
         settle_stop(state, &captured);
     }
+    if captured.input.is_claude() {
+        wake_waiting_mail(state, &captured);
+    }
 }
 
 fn settle_stop(state: &Path, captured: &CapturedStop) {
@@ -218,6 +221,18 @@ fn settle_stop(state: &Path, captured: &CapturedStop) {
         captured.ended_at_ms,
         &mut settle,
     );
+}
+
+/// Herdr sends no status change when a session ends its turn with background
+/// agents still running, so the Stop starts the drain that mail for it waits on.
+fn wake_waiting_mail(state: &Path, captured: &CapturedStop) {
+    let Ok(space) = env::var("HERDR_WORKSPACE_ID") else {
+        return;
+    };
+    if namedrop::mail_waits_for_session(state, &captured.socket, &space, &captured.input.session_id)
+    {
+        let _ = crate::schedule_mailbox_workers(state, &captured.socket, &space, false);
+    }
 }
 
 /// Whether another Stop hook blocked this Stop, so Claude Code continues the

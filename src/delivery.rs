@@ -160,6 +160,36 @@ pub fn spaces_to_wake(
     spaces
 }
 
+/// Whether mail queued in `space` waits for the Agent Session `session`.
+pub fn mail_waits_for_session(
+    state: &std::path::Path,
+    socket: &str,
+    space: &str,
+    session: &str,
+) -> bool {
+    let namespace = StateNamespace::for_space(socket, space);
+    StateStore::open_read_only(state)
+        .ok()
+        .flatten()
+        .and_then(|mut store| {
+            store
+                .transaction(|transaction| {
+                    let queued = transaction.queued_mailbox_addresses(&namespace)?;
+                    Ok(transaction
+                        .list_pane_addresses(&namespace)?
+                        .into_iter()
+                        .any(|address| {
+                            queued.contains(&address.id)
+                                && address
+                                    .agent_session_id
+                                    .is_some_and(|id| id.as_str() == session)
+                        }))
+                })
+                .ok()
+        })
+        .unwrap_or(false)
+}
+
 pub fn drain_receipt<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> Value
 where
     E: HerdrCommandExecutor,
