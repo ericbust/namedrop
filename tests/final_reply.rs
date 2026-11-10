@@ -2882,8 +2882,10 @@ fn recorded_turn(name: &str, as_turn: &str) -> Vec<Value> {
 impl Space {
     /// The reviewer's prompt hook on the clock the installed Stop hook uses,
     /// so a claim it touches keeps a time the Stop compares truly. The prompt
-    /// may carry no delivery, and then the hook may add nothing.
+    /// may carry no delivery, and then the hook may add nothing. A delivery is
+    /// submitted as the pointer typed for it.
     fn reviewer_prompt(&self, turn: &str, prompt: &str) -> Option<String> {
+        let prompt = self.as_typed(prompt);
         let input = json!({"hook_event_name":"UserPromptSubmit","prompt":prompt,
                            "session_id":"session-reviewer","prompt_id":turn,
                            "transcript_path":self.transcript()});
@@ -3202,7 +3204,13 @@ fn a_turn_that_carries_an_explicit_delivery_wakes_no_held_one() {
         first["control"]["attempt_id"]
     );
     let context = space
-        .reviewer_prompt("busy-turn", &format!("A draft I had not sent. {second}"))
+        .reviewer_prompt(
+            "busy-turn",
+            &format!(
+                "A draft I had not sent. {}",
+                space.as_typed(&second.to_string())
+            ),
+        )
         .unwrap();
     assert!(
         context.contains("already in this pane's input"),
@@ -3483,7 +3491,22 @@ fn an_armed_pointer_details_omit_the_rule_its_guidance_replaces() {
 #[test]
 fn a_held_pointer_turn_leaves_the_delivery_open_and_shows_the_way_back() {
     let space = Space::new();
-    let ask = space.armed_ask();
+    let ask = space.ask_without_prompting();
+    let armed = space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    assert!(
+        armed.contains(
+            "If it ends while background work you started this turn runs, Namedrop holds your \
+             final message, and your final message in the turn that work's notice starts is the \
+             reply. If the notice arrives during another turn, or another delivery reaches the \
+             turn it starts, answer with the line Namedrop shows."
+        ),
+        "{armed}"
+    );
     let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
     space.stop_with("session-reviewer", CLAUDE, "Still running the tests.", true);
     assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
@@ -3497,7 +3520,8 @@ fn a_held_pointer_turn_leaves_the_delivery_open_and_shows_the_way_back() {
     );
     assert!(
         later.contains(&format!(
-            "Namedrop: delivery {attempt} from an earlier turn is still open; to answer it"
+            "Namedrop: delivery {attempt} from an earlier turn is still open; it waits on \
+             background task background-1; to answer it"
         )),
         "{later}"
     );
