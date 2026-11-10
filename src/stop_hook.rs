@@ -21,9 +21,9 @@ const NOTICE_SCAN_BUDGET: Duration = Duration::from_millis(100);
 /// How much of the transcript's end the Stop reads for the tasks its turn
 /// started.
 const TURN_SCAN_BYTES: u64 = 8 * 1024 * 1024;
-/// How long the worker waits for Claude Code to record how every Stop hook
-/// of this Stop ended. It writes that record as soon as the last hook exits.
-const STOP_OUTCOME_WAIT: Duration = Duration::from_secs(3);
+/// How long a worker waits for Claude Code to record how every hook of a Stop
+/// or a prompt ended. It writes that record as soon as the last hook exits.
+const HOOK_OUTCOME_WAIT: Duration = Duration::from_secs(3);
 
 #[derive(Deserialize, Serialize)]
 struct StopInput {
@@ -54,7 +54,7 @@ struct CapturedStop {
     settles: bool,
 }
 
-fn deadline(milliseconds: u64) {
+pub(crate) fn deadline(milliseconds: u64) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(milliseconds));
         std::process::exit(0);
@@ -167,7 +167,7 @@ pub fn run_worker(state: &Path) {
         &captured.input.prompt_id,
         &captured.input.transcript_path,
         captured.transcript_end,
-    ) && another_hook_blocked(path, from)
+    ) && hook_outcome(path, from, stop_outcome) == Some(StopOutcome::Continued)
     {
         return;
     }
@@ -186,7 +186,7 @@ pub fn run_worker(state: &Path) {
         settle_stop(state, &captured);
     }
     if captured.input.is_claude() {
-        wake_waiting_mail(state, &captured);
+        wake_waiting_mail(state, &captured.socket, &captured.input.session_id);
     }
 }
 
@@ -224,60 +224,75 @@ fn settle_stop(state: &Path, captured: &CapturedStop) {
 }
 
 /// Herdr sends no status change when a session ends its turn with background
-/// agents still running, so the Stop starts the drain that mail for it waits on.
-fn wake_waiting_mail(state: &Path, captured: &CapturedStop) {
+/// agents still running, or when a hook blocks a prompt then, so the hook's
+/// worker starts the drain that mail for the session waits on.
+pub(crate) fn wake_waiting_mail(state: &Path, socket: &str, session: &str) {
     let Ok(space) = env::var("HERDR_WORKSPACE_ID") else {
         return;
     };
-    if namedrop::mail_waits_for_session(state, &captured.socket, &space, &captured.input.session_id)
-    {
-        let _ = crate::schedule_mailbox_workers(state, &captured.socket, &space, false);
+    if namedrop::mail_waits_for_session(state, socket, &space, session) {
+        let _ = crate::schedule_mailbox_workers(state, socket, &space, false);
     }
 }
 
-/// Whether another Stop hook blocked this Stop, so Claude Code continues the
-/// turn and the text this Stop carries is not its final message. Claude Code
-/// records how the Stop's hooks ended after the transcript's end at the
-/// Stop: a "Stop hook feedback" prompt when one blocked, then a
-/// `stop_hook_summary`. The turn's next Stop settles the claim instead.
-/// With no summary in time it settles as it would without the check.
-fn another_hook_blocked(path: &Path, from: u64) -> bool {
-    let until = Instant::now() + STOP_OUTCOME_WAIT;
+/// How a Stop's hooks ended. Claude Code records it after the transcript's
+/// end at the Stop: a "Stop hook feedback" prompt when one blocked, then a
+/// `stop_hook_summary`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StopOutcome {
+    Ended,
+    /// Another Stop hook blocked this Stop, so Claude Code continues the turn
+    /// and the text this Stop carries is not its final message. The turn's
+    /// next Stop settles the claim instead.
+    Continued,
+}
+
+fn stop_outcome(record: &Value) -> Option<StopOutcome> {
+    if record["type"] == "user"
+        && record["isMeta"] == true
+        && record["message"]["content"]
+            .as_str()
+            .is_some_and(|content| content.starts_with("Stop hook feedback:"))
+    {
+        return Some(StopOutcome::Continued);
+    }
+    (record["type"] == "system" && record["subtype"] == "stop_hook_summary")
+        .then_some(StopOutcome::Ended)
+}
+
+/// The first outcome `outcome` reads in the transcript's records after `from`,
+/// or `None` when Claude Code records none in time or the transcript can't be
+/// read.
+pub(crate) fn hook_outcome<T>(
+    path: &Path,
+    from: u64,
+    outcome: impl Fn(&Value) -> Option<T>,
+) -> Option<T> {
+    let until = Instant::now() + HOOK_OUTCOME_WAIT;
     loop {
         let mut bytes = Vec::new();
-        let read = fs::OpenOptions::new()
+        fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(path)
             .and_then(|mut file| {
                 file.seek(SeekFrom::Start(from))?;
                 file.take(MAX_INPUT_BYTES).read_to_end(&mut bytes)
-            });
-        if read.is_err() {
-            return false;
-        }
+            })
+            .ok()?;
         let complete = bytes
             .iter()
             .rposition(|byte| *byte == b'\n')
             .map_or(&[][..], |end| &bytes[..end]);
-        for record in complete
+        if let Some(found) = complete
             .split(|byte| *byte == b'\n')
             .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+            .find_map(|record| outcome(&record))
         {
-            if record["type"] == "user"
-                && record["isMeta"] == true
-                && record["message"]["content"]
-                    .as_str()
-                    .is_some_and(|content| content.starts_with("Stop hook feedback:"))
-            {
-                return true;
-            }
-            if record["type"] == "system" && record["subtype"] == "stop_hook_summary" {
-                return false;
-            }
+            return Some(found);
         }
         if Instant::now() >= until {
-            return false;
+            return None;
         }
         std::thread::sleep(Duration::from_millis(25));
     }

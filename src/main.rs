@@ -2,6 +2,7 @@ use clap::{Parser, error::ErrorKind};
 mod agent_status_ui;
 mod naming_ui;
 mod popup_input;
+mod prompt_hook;
 mod stop_hook;
 use namedrop::{
     Clock, CommandResult, HerdrCommandExecutor, LifecycleRuntime, ProcessHerdr, ProcessIds,
@@ -164,6 +165,10 @@ fn main() -> ExitCode {
     if let Some(state_directory) = cli.stop_worker_state_directory() {
         let _ = namedrop::reminder::ensure_clock(state_directory, None);
         stop_hook::run_worker(state_directory);
+        return ExitCode::SUCCESS;
+    }
+    if let Some(state_directory) = cli.prompt_worker_state_directory() {
+        prompt_hook::run_worker(state_directory);
         return ExitCode::SUCCESS;
     }
     if let Some((terminal, rows, cols)) = cli.dashboard_observer() {
@@ -1055,6 +1060,7 @@ fn run_context_hook(
     if io::stdin().read_to_string(&mut input).is_err() {
         return ExitCode::SUCCESS;
     }
+    let prompted = prompt_hook::record(state_directory, &input);
     namedrop::forget_shown_roster(&input, state_directory);
     namedrop::record_hook_run(
         &input,
@@ -1081,6 +1087,11 @@ fn run_context_hook(
             SystemClock.now_unix_ms(),
             output,
         );
+    }
+    if let (Some(prompted), Some(output)) = (&prompted, &output)
+        && output["decision"] == "block"
+    {
+        prompted.blocked(state_directory);
     }
     if let Some(output) = output {
         let _ = serde_json::to_writer(io::stdout().lock(), &output);

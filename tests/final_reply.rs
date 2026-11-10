@@ -1814,6 +1814,8 @@ fn a_leading_mention_prompt_keeps_the_way_back() {
 fn a_stop_another_hook_blocked_settles_at_the_turns_next_stop() {
     let space = Space::new();
     space.armed_ask();
+    // The installed prompt hook records the turn's start.
+    space.reviewer_edge(namedrop::turn_phase::TurnEdge::Prompt, now_ms());
     let transcript = space.directory.root.join("transcript.jsonl");
     let append = |records: &[Value]| {
         let mut file = fs::OpenOptions::new()

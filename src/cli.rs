@@ -158,6 +158,15 @@ impl Cli {
         }
     }
 
+    pub fn prompt_worker_state_directory(&self) -> Option<&Path> {
+        match &self.command {
+            Command::Hook {
+                command: HookCommand::PromptWorker(args),
+            } => Some(&args.state_directory),
+            _ => None,
+        }
+    }
+
     pub fn mailbox_wake_hook_state_directory(&self) -> Option<&Path> {
         match &self.command {
             Command::Hook {
@@ -741,6 +750,8 @@ enum HookCommand {
     StopWorker(HookArgs),
     SessionStart(HookArgs),
     UserPromptSubmit(HookArgs),
+    #[command(hide = true)]
+    PromptWorker(HookArgs),
     Subagent(SubagentHookArgs),
 }
 
@@ -754,6 +765,7 @@ impl HookCommand {
             Self::StopWorker(_) => "hook.stop-worker",
             Self::SessionStart(_) => "hook.session-start",
             Self::UserPromptSubmit(_) => "hook.user-prompt-submit",
+            Self::PromptWorker(_) => "hook.prompt-worker",
             Self::Subagent(_) => "hook.subagent",
         }
     }
