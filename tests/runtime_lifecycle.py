@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / 'scripts'))
@@ -25,20 +26,24 @@ def tree(path):
     return found
 
 
+def activated(rt, root):
+    assert runtime.activate(root, ['activate']) == 0
+    return runtime.current(rt).name
+
+
+def retained(rt):
+    return {entry.name for entry in (rt / 'releases').iterdir() if runtime.RELEASE.fullmatch(entry.name)
+            and entry.is_dir() and not entry.is_symlink()}
+
+
 def check_pruning(base, release):
     state = base / 'prune-state'
     state.mkdir()
     os.environ['HERDR_PLUGIN_STATE_DIR'] = str(state)
     rt = state / 'runtime'
     releases = rt / 'releases'
-    def activate(root):
-        assert runtime.activate(root, ['activate']) == 0
-        return runtime.current(rt).name
-    def retained():
-        return {entry.name for entry in releases.iterdir() if runtime.RELEASE.fullmatch(entry.name)
-                and entry.is_dir() and not entry.is_symlink()}
 
-    activate(release('prune-one'))
+    activated(rt, release('prune-one'))
     outside = base / 'prune-outside'
     (outside / 'release').mkdir(parents=True)
     (outside / 'release/namedrop').write_text('outside')
@@ -60,12 +65,12 @@ def check_pruning(base, release):
     unrelated_before, outside_before = unrelated(), tree(outside)
     assert len(unrelated_before) == 9
 
-    two = activate(release('prune-two'))
+    two = activated(rt, release('prune-two'))
     three_root = release('prune-three')
-    three = activate(three_root)
-    assert retained() == {two, three}, 'activation keeps only the current and previous releases'
+    three = activated(rt, three_root)
+    assert retained(rt) == {two, three}, 'activation keeps only the current and previous releases'
     assert json.loads((rt / 'activation.json').read_text()) == {'revision': three, 'previous': two}
-    assert activate(three_root) == three and retained() == {two, three}, 'reactivation keeps the earlier previous'
+    assert activated(rt, three_root) == three and retained(rt) == {two, three}, 'reactivation keeps the earlier previous'
     assert json.loads((rt / 'activation.json').read_text()) == {'revision': three, 'previous': two}
 
     sleep = Path(shutil.which('sleep')).resolve()
@@ -75,9 +80,9 @@ def check_pruning(base, release):
     shutil.copy(releases / three / 'runtime.json', releases / held / 'runtime.json')
     sleeper = subprocess.Popen(['sleep', '120'], executable=releases / held / 'namedrop')
     try:
-        four = activate(release('prune-four'))
-        five = activate(release('prune-five'))
-        assert retained() == {four, five, held}, 'a release a running process uses is kept'
+        four = activated(rt, release('prune-four'))
+        five = activated(rt, release('prune-five'))
+        assert retained(rt) == {four, five, held}, 'a release a running process uses is kept'
     finally:
         sleeper.kill()
         sleeper.wait()
@@ -87,8 +92,8 @@ def check_pruning(base, release):
     runtime.all_pids = unlisted
     try:
         six_root = release('prune-six')
-        six = activate(six_root)
-        assert retained() == {four, five, six, held}, 'without a process list nothing is removed'
+        six = activated(rt, six_root)
+        assert retained(rt) == {four, five, six, held}, 'without a process list nothing is removed'
     finally:
         runtime.all_pids = listing
     class FailingLibproc:
@@ -106,16 +111,16 @@ def check_pruning(base, release):
         runtime.prune_releases(rt, {six})
         raise AssertionError('a failed macOS process listing allowed a prune')
     except RuntimeError:
-        assert retained() == {four, five, six, held}, 'a failed macOS process listing removes nothing'
+        assert retained(rt) == {four, five, six, held}, 'a failed macOS process listing removes nothing'
     finally:
         sys.platform, runtime.darwin_library = platform, library
-    assert activate(six_root) == six and retained() == {five, six}, 'a release is removed once no process runs from it'
+    assert activated(rt, six_root) == six and retained(rt) == {five, six}, 'a release is removed once no process runs from it'
 
     (rt / '.pruning').rmdir()
     (rt / '.pruning').symlink_to(outside)
     seven_root = release('prune-seven')
-    seven = activate(seven_root)
-    assert retained() == {five, six, seven}, 'a prune that cannot use its own directory removes nothing'
+    seven = activated(rt, seven_root)
+    assert retained(rt) == {five, six, seven}, 'a prune that cannot use its own directory removes nothing'
     (rt / '.pruning').unlink()
 
     real_rmtree = shutil.rmtree
@@ -129,27 +134,81 @@ def check_pruning(base, release):
         pass
     finally:
         runtime.shutil.rmtree = real_rmtree
-    assert retained() == {six, seven}
+    assert retained(rt) == {six, seven}
     assert all((releases / name / 'namedrop').is_file() and (releases / name / 'runtime.json').is_file()
-               for name in retained()), 'an interrupted prune leaves only whole releases'
+               for name in retained(rt)), 'an interrupted prune leaves only whole releases'
     assert (rt / '.pruning' / five).is_dir()
     partial = rt / '.pruning' / ('c' * 64)
     (partial / 'nested').mkdir(parents=True)
     (partial / 'runtime.json').write_text('{}')
     (rt / '.pruning' / 'link').symlink_to(outside)
-    assert activate(seven_root) == seven
-    assert retained() == {six, seven} and not any((rt / '.pruning').iterdir()), 'the next prune clears what was left'
+    assert activated(rt, seven_root) == seven
+    assert retained(rt) == {six, seven} and not any((rt / '.pruning').iterdir()), 'the next prune clears what was left'
     settled = tree(rt)
-    assert activate(seven_root) == seven and tree(rt) == settled, 'pruning again changes nothing'
+    assert activated(rt, seven_root) == seven and tree(rt) == settled, 'pruning again changes nothing'
     assert unrelated() == unrelated_before, 'nothing but old releases is touched'
     assert tree(outside) == outside_before, 'symbolic link targets are untouched'
 
     (rt / 'migration.json').write_text('{}')
     try:
         runtime.prune_releases(rt, {seven})
-        assert retained() == {six, seven}, 'an unfinished migration prunes nothing'
+        assert retained(rt) == {six, seven}, 'an unfinished migration prunes nothing'
     finally:
         (rt / 'migration.json').unlink()
+
+
+def check_in_use(base, release):
+    real = base / 'in-use-real'
+    real.mkdir()
+    state = base / 'in-use-state'
+    state.symlink_to(real)
+    os.environ['HERDR_PLUGIN_STATE_DIR'] = str(state)
+    rt = state / 'runtime'
+    releases = rt / 'releases'
+    activated(rt, release('in-use-a'))
+    b = activated(rt, release('in-use-b'))
+    sleep = Path(shutil.which('sleep')).resolve()
+    held, linked = (hashlib.sha256(name).hexdigest() for name in (b'held', b'linked'))
+    for name in (held, linked):
+        (releases / name).mkdir()
+        shutil.copy(sleep, releases / name / 'namedrop')
+        shutil.copy(releases / b / 'runtime.json', releases / name / 'runtime.json')
+    os.link(releases / linked / 'namedrop', base / 'linked-sleep')
+    sleepers = [subprocess.Popen(['sleep', '120'], executable=releases / held / 'namedrop'),
+                subprocess.Popen(['sleep', '120'], executable=base / 'linked-sleep'),
+                subprocess.Popen(['sleep', '120'], executable=sleep)]
+    try:
+        c = activated(rt, release('in-use-c'))
+        assert retained(rt) == {b, c, held, linked}, \
+            'a release a process runs is kept, through a linked state directory or a hard link'
+        if sys.platform.startswith('linux'):
+            real_readlink, real_stat = os.readlink, os.stat
+            def nested(path, *args, **kwargs):
+                return 'pid:[4026533400]' if path == '/proc/self/ns/pid' else real_readlink(path, *args, **kwargs)
+            def unreadable(pid):
+                def refuse(path, *args, **kwargs):
+                    if path == f'/proc/{pid}/exe':
+                        raise PermissionError(13, 'Permission denied', path)
+                    return real_stat(path, *args, **kwargs)
+                return mock.patch.object(os, 'stat', refuse)
+            for view, why in ((mock.patch.object(os, 'readlink', nested), 'a nested PID namespace'),
+                              (unreadable(sleepers[0].pid), 'a Namedrop process it cannot inspect')):
+                with view:
+                    try:
+                        runtime.prune_releases(rt, {c})
+                        raise AssertionError(f'a prune ran despite {why}')
+                    except RuntimeError:
+                        pass
+                assert retained(rt) == {b, c, held, linked}, f'{why} removes nothing'
+            with unreadable(sleepers[2].pid):
+                runtime.prune_releases(rt, {c})
+            assert retained(rt) == {c, held, linked}, 'another process it cannot inspect does not stop a prune'
+    finally:
+        for sleeper in sleepers:
+            sleeper.kill()
+            sleeper.wait()
+    d = activated(rt, release('in-use-d'))
+    assert retained(rt) == {c, d}, 'a release is removed once no process runs from it'
 
 
 def main():
@@ -331,6 +390,7 @@ else:
                 worker.kill()
                 worker.wait()
         check_pruning(base, release)
+        check_in_use(base, release)
     print('runtime lifecycle checks passed')
 
 

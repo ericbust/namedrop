@@ -667,21 +667,60 @@ def recorded_previous(runtime, digest):
     return name if isinstance(name, str) and RELEASE.fullmatch(name) else None
 
 
+# PROC_PID_INIT_INO: only the initial PID namespace sees every process.
+INIT_PID_NAMESPACE = 'pid:[4026531836]'
+
+
 def running_executables():
-    """The resolved executable of every process this user can inspect. A
-    process that exits or can't be read is skipped; failing to list processes
-    raises."""
+    """(st_dev, st_ino) of the executable of every process that could run a
+    release. A process that exits is skipped; raises when processes can't be
+    listed, when a PID namespace hides some, or when a Namedrop process of this
+    user can't be inspected."""
+    found = set()
     if sys.platform == 'darwin':
         library = darwin_library()
-        def path(pid):
-            return darwin_path(library, pid)
-    else:
-        def path(pid):
+        # libproc has no path for some processes; those are skipped.
+        for path in filter(None, (darwin_path(library, pid) for pid in darwin_pids(library))):
+            with contextlib.suppress(OSError):
+                info = os.stat(path)
+                found.add((info.st_dev, info.st_ino))
+        return found
+    try:
+        namespace = os.readlink('/proc/self/ns/pid')
+    except FileNotFoundError:
+        namespace = INIT_PID_NAMESPACE  # a kernel without PID namespaces
+    require(namespace == INIT_PID_NAMESPACE, 'This process runs in a PID namespace that hides other processes.')
+    for pid in all_pids():
+        try:
+            info = os.stat(f'/proc/{pid}/exe')
+        except FileNotFoundError:
+            continue  # exited, a zombie, or a kernel thread
+        except OSError:
+            # A user can't inspect its own processes that hold extra capabilities
+            # or another group, such as systemd --user. A process started from a
+            # release is named namedrop, so only one with that name could be one.
             try:
-                return os.readlink(f'/proc/{pid}/exe')
-            except OSError:
-                return None
-    return {os.path.realpath(found) for found in map(path, all_pids()) if found}
+                ours = (os.stat(f'/proc/{pid}').st_uid == os.getuid()
+                        and Path(f'/proc/{pid}/comm').read_text() == 'namedrop\n')
+            except FileNotFoundError:
+                continue
+            require(not ours, f'Could not inspect Namedrop process {pid}.')
+            continue
+        found.add((info.st_dev, info.st_ino))
+    return found
+
+
+def releases_on_disk(runtime):
+    """Each release by name, with the lstat of its executable or None when it
+    has none. Only lowercase 64-hex directories in releases/ count."""
+    found = {}
+    for entry in (runtime / 'releases').iterdir():
+        if RELEASE.fullmatch(entry.name) and stat.S_ISDIR(entry.lstat().st_mode):
+            try:
+                found[entry.name] = (entry / 'namedrop').lstat()
+            except FileNotFoundError:
+                found[entry.name] = None
+    return found
 
 
 def prune_releases(runtime, keep):
@@ -700,14 +739,12 @@ def prune_releases(runtime, keep):
         else:
             entry.unlink()
     releases = runtime / 'releases'
-    candidates = {entry.name: os.path.realpath(entry / 'namedrop') for entry in releases.iterdir()
-                  if RELEASE.fullmatch(entry.name) and entry.name not in keep
-                  and stat.S_ISDIR(entry.lstat().st_mode)}
+    candidates = {name: info for name, info in releases_on_disk(runtime).items() if name not in keep}
     if not candidates:
         return
     running = running_executables()
-    for name, executable in sorted(candidates.items()):
-        if executable not in running:
+    for name, info in sorted(candidates.items()):
+        if info is None or (info.st_dev, info.st_ino) not in running:
             os.rename(releases / name, trash / name)
             shutil.rmtree(trash / name)
 
