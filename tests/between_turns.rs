@@ -1,0 +1,329 @@
+//! Mail for a Claude Code session that finished its turn while its background
+//! agents run on. Herdr reads that screen as working; the session's own turn
+//! edges say a prompt typed now starts its next turn.
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
+use namedrop::{
+    ActorKind, AgentRuntime, AgentSessionId, Clock, DeliveryId, HerdrCommandExecutor,
+    HerdrCommandOutput, IdGenerator, LifecycleRuntime, MessageDraft, MessageId,
+    MessageRecipientDraft, MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId,
+    PaneRoleId, PromptFailureKind, StateNamespace, StateStore, ThreadId,
+    complete_capability_profile, drain_mailboxes, execute_integration_operation,
+    issue_registration_challenge,
+    turn_phase::{TurnEdge, record},
+};
+use serde_json::json;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+};
+
+static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+
+/// The end of Claude Code 2.1.322's screen, as Herdr renders it, after its
+/// turn ended with one background agent still running.
+const EMPTY_BOX: &str = include_str!("fixtures/between-turns/claude-2.1.322-waiting-empty.ansi");
+/// A screen of the same session with a draft the person has not sent.
+const DRAFT_BOX: &str = include_str!("fixtures/between-turns/claude-2.1.322-waiting-draft.ansi");
+
+const SESSION: &str = "session-1";
+const QUEUED_AT_MS: u64 = 1_000;
+
+struct Recipient {
+    host: &'static str,
+    status: Mutex<String>,
+    screen: Mutex<Option<String>>,
+    screen_reads: AtomicU64,
+    prompts: Mutex<Vec<String>>,
+}
+
+impl HerdrCommandExecutor for Recipient {
+    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+        let stdout = match args {
+            ["workspace", "list"] => {
+                r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#.to_owned()
+            }
+            ["worktree", "list", "--cwd", "/repo", "--json"] | ["worktree", "list", "--json"] => {
+                r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
+                    .to_owned()
+            }
+            ["pane", "list", "--workspace", "workspace-1"] => json!({"result": {"panes": [{
+                "pane_id": "pane-recipient",
+                "terminal_id": "terminal-recipient",
+                "tab_id": "tab-1",
+                "workspace_id": "workspace-1",
+                "agent": self.host,
+                "agent_session": {"value": SESSION},
+                "agent_status": self.status.lock().unwrap().clone(),
+            }]}})
+            .to_string(),
+            [
+                "pane",
+                "read",
+                "pane-recipient",
+                "--source",
+                "recent",
+                "--lines",
+                _,
+                "--format",
+                "ansi",
+            ] => {
+                self.screen_reads.fetch_add(1, Ordering::Relaxed);
+                self.screen
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .ok_or("the pane could not be read")?
+            }
+            ["agent", "prompt", "pane-recipient", prompt] => {
+                self.prompts.lock().unwrap().push((*prompt).to_owned());
+                "{}".to_owned()
+            }
+            ["pane", "report-metadata", ..] => "{}".to_owned(),
+            _ => return Err(format!("unexpected Herdr command: {args:?}")),
+        };
+        Ok(HerdrCommandOutput { stdout })
+    }
+
+    fn classify_prompt_failure(&self, _: &str) -> PromptFailureKind {
+        PromptFailureKind::AmbiguousInvocation
+    }
+}
+
+#[derive(Default)]
+struct TestClock(AtomicU64);
+
+impl Clock for TestClock {
+    fn now_unix_ms(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn wait_ms(&self, _: u64) {}
+}
+
+struct SequenceIds(AtomicU64);
+
+impl IdGenerator for SequenceIds {
+    fn next_id(&self, kind: &str) -> String {
+        format!("{kind}-{}", self.0.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+struct Fixture {
+    root: PathBuf,
+    home: PathBuf,
+    herdr: Recipient,
+    clock: TestClock,
+    ids: SequenceIds,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        cleanup::remove_fixture(&self.root).unwrap();
+    }
+}
+
+fn address(id: &str, alias: &str) -> PaneAddressDraft {
+    PaneAddressDraft {
+        id: PaneAddressId::new(id),
+        role_id: PaneRoleId::new(format!("role-{id}")),
+        role_name: alias.to_owned(),
+        role_description: format!("{alias} test role"),
+        alias: alias.to_owned(),
+    }
+}
+
+impl Fixture {
+    /// @recipient, a `host` agent Herdr reads as `status`, with one message
+    /// from the person queued for it.
+    fn new(host: AgentRuntime, status: &str) -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "namedrop-between-turns-{}-{}",
+            std::process::id(),
+            NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(root.join("home")).unwrap();
+        let fixture = Self {
+            herdr: Recipient {
+                host: match host {
+                    AgentRuntime::ClaudeCode => "claude",
+                    AgentRuntime::Codex => "codex",
+                },
+                status: Mutex::new(status.to_owned()),
+                screen: Mutex::new(Some(EMPTY_BOX.to_owned())),
+                screen_reads: AtomicU64::new(0),
+                prompts: Mutex::new(Vec::new()),
+            },
+            clock: TestClock::default(),
+            ids: SequenceIds(AtomicU64::new(1)),
+            home: root.join("home"),
+            root,
+        };
+        let namespace = StateNamespace::for_space("socket-a", "workspace-1");
+        let attribution = MutationAttribution::new(ActorKind::Plugin, "test", 10);
+        let author = address("address-author", "author");
+        let recipient = address("address-recipient", "recipient");
+        let thread_id = ThreadId::new("thread-1");
+        StateStore::open(fixture.state())
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.activate_worktree(&namespace, &attribution)?;
+                transaction.create_pane_address(&namespace, &author, &attribution)?;
+                transaction.create_pane_address(&namespace, &recipient, &attribution)?;
+                transaction.bind_pane(
+                    &namespace,
+                    &PaneBindingId::new("binding-recipient"),
+                    &recipient.id,
+                    "pane-recipient",
+                    &attribution,
+                )?;
+                transaction.observe_agent_session(
+                    &namespace,
+                    "observation-recipient",
+                    &recipient.id,
+                    &AgentSessionId::new(SESSION),
+                    status,
+                    &attribution,
+                )?;
+                transaction.create_thread(&namespace, &thread_id, "Test thread", &attribution)?;
+                transaction.complete_reconciliation(&namespace)?;
+                Ok(())
+            })
+            .unwrap();
+        let challenge =
+            issue_registration_challenge(&recipient.id, host, &fixture.runtime()).unwrap();
+        execute_integration_operation(
+            "register",
+            json!({"runtime": host, "protocol_version": "collab/v1", "nonce": challenge.nonce,
+                   "capabilities": complete_capability_profile()}),
+            &fixture.runtime(),
+        )
+        .unwrap();
+        StateStore::open(fixture.state())
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.append_message(
+                    &namespace,
+                    &MessageDraft {
+                        thread_id,
+                        message_id: MessageId::new("message-1"),
+                        in_reply_to: None,
+                        author_address_id: author.id,
+                        author_kind: ActorKind::Human,
+                        author_alias_snapshot: "author".to_owned(),
+                        author_agent_session_snapshot: None,
+                        request_id: "request-1".to_owned(),
+                        authored_source: "@recipient Are the tests green?".to_owned(),
+                        body: "Are the tests green?".to_owned(),
+                        grammar_version: "mention/v1".to_owned(),
+                        recipients: vec![MessageRecipientDraft {
+                            address_id: recipient.id,
+                            alias_snapshot: "recipient".to_owned(),
+                            agent_session_snapshot: Some(AgentSessionId::new(SESSION)),
+                            delivery_id: DeliveryId::new("delivery-1"),
+                        }],
+                        context_references: Vec::new(),
+                    },
+                    &MutationAttribution::new(ActorKind::Human, "test", QUEUED_AT_MS),
+                )
+            })
+            .unwrap();
+        fixture.clock.0.store(QUEUED_AT_MS, Ordering::Relaxed);
+        fixture
+    }
+
+    fn state(&self) -> &Path {
+        &self.root
+    }
+
+    fn runtime(&self) -> LifecycleRuntime<'_, Recipient, TestClock, SequenceIds> {
+        LifecycleRuntime {
+            state_directory: self.state(),
+            home_directory: Some(&self.home),
+            agent_config: namedrop::AgentConfigDirectories::default(),
+            cwd: Path::new("/repo"),
+            workspace_id: None,
+            current_pane_id: Some("pane-recipient"),
+            session_socket_id: "socket-a",
+            herdr: &self.herdr,
+            clock: &self.clock,
+            ids: &self.ids,
+        }
+    }
+
+    fn edge(&self, edge: TurnEdge, at_ms: u64) {
+        record(self.state(), "socket-a", SESSION, edge, at_ms);
+    }
+
+    fn screen(&self, screen: Option<&str>) {
+        *self.herdr.screen.lock().unwrap() = screen.map(str::to_owned);
+    }
+
+    /// The bodies one drain typed into the pane.
+    fn drain(&self) -> Vec<String> {
+        drain_mailboxes(&self.runtime()).unwrap();
+        std::mem::take(&mut *self.herdr.prompts.lock().unwrap())
+    }
+}
+
+#[test]
+fn a_claude_session_that_ended_its_turn_takes_mail_while_its_background_agents_run() {
+    let fixture = Fixture::new(AgentRuntime::ClaudeCode, "working");
+    fixture.edge(TurnEdge::Prompt, 2_000);
+    fixture.edge(TurnEdge::Stop, 3_000);
+    let typed = fixture.drain();
+    assert_eq!(typed.len(), 1, "{typed:?}");
+    assert!(typed[0].contains("Are the tests green?"), "{typed:?}");
+}
+
+#[test]
+fn a_turn_still_running_gets_nothing_until_it_ends() {
+    let fixture = Fixture::new(AgentRuntime::ClaudeCode, "working");
+    fixture.edge(TurnEdge::Stop, 2_000);
+    // A task notice, the person, or an earlier delivery started a turn.
+    fixture.edge(TurnEdge::Prompt, 3_000);
+    assert_eq!(fixture.drain(), Vec::<String>::new());
+    // A session whose hooks never recorded an edge is read as Herdr reads it.
+    let unrecorded = Fixture::new(AgentRuntime::ClaudeCode, "working");
+    assert_eq!(unrecorded.drain(), Vec::<String>::new());
+    assert_eq!(unrecorded.herdr.screen_reads.load(Ordering::Relaxed), 0);
+    // The same turn's Stop takes the mail.
+    fixture.edge(TurnEdge::Stop, 4_000);
+    assert_eq!(fixture.drain().len(), 1);
+}
+
+#[test]
+fn a_session_waiting_on_a_question_gets_nothing_even_after_its_stop() {
+    for status in ["blocked", "unknown"] {
+        let fixture = Fixture::new(AgentRuntime::ClaudeCode, status);
+        fixture.edge(TurnEdge::Stop, 2_000);
+        assert_eq!(fixture.drain(), Vec::<String>::new(), "{status}");
+    }
+}
+
+#[test]
+fn a_draft_or_an_unreadable_prompt_box_keeps_the_mail_queued() {
+    let fixture = Fixture::new(AgentRuntime::ClaudeCode, "working");
+    fixture.edge(TurnEdge::Stop, 2_000);
+    for screen in [Some(DRAFT_BOX), Some("no prompt box drawn here\n"), None] {
+        fixture.screen(screen);
+        assert_eq!(fixture.drain(), Vec::<String>::new(), "{screen:?}");
+    }
+    fixture.screen(Some(EMPTY_BOX));
+    assert_eq!(fixture.drain().len(), 1);
+}
+
+#[test]
+fn codex_mail_still_waits_for_herdr_to_read_the_session_idle() {
+    let fixture = Fixture::new(AgentRuntime::Codex, "working");
+    fixture.edge(TurnEdge::Stop, 2_000);
+    assert_eq!(fixture.drain(), Vec::<String>::new());
+    assert_eq!(fixture.herdr.screen_reads.load(Ordering::Relaxed), 0);
+    *fixture.herdr.status.lock().unwrap() = "idle".to_owned();
+    assert_eq!(fixture.drain().len(), 1);
+}

@@ -485,7 +485,7 @@ where
         let Some(first) = first else {
             continue;
         };
-        if !live_candidate_matches(&first, &first_discovery)
+        if !live_candidate_matches(runtime, &first, &first_discovery)
             || (first.pane_type == crate::PaneType::Terminal
                 && !crate::terminal::shell_is_available(runtime.herdr, &first.pane_id))
         {
@@ -518,7 +518,7 @@ where
             continue;
         };
         if first != second
-            || !live_candidate_matches(&second, &second_discovery)
+            || !live_candidate_matches(runtime, &second, &second_discovery)
             || (second.pane_type == crate::PaneType::Terminal
                 && (first_discovery
                     .panes
@@ -800,7 +800,7 @@ where
                     continue;
                 };
                 if candidate.pane_type == crate::PaneType::Terminal
-                    && live_candidate_matches(&candidate, &first_discovery)
+                    && live_candidate_matches(runtime, &candidate, &first_discovery)
                     && tx.coordination_wake_message_readiness(
                         &namespace,
                         &candidate.message_id,
@@ -834,22 +834,324 @@ where
     }
 }
 
-fn live_candidate_matches(
+/// Whether a typed prompt reaches the candidate's session now: a terminal at
+/// its shell, or an agent session open for a prompt with nothing in its way.
+fn live_candidate_matches<E, C, I>(
+    runtime: &LifecycleRuntime<'_, E, C, I>,
     candidate: &DispatchCandidate,
     discovered: &crate::DiscoveredWorktree,
-) -> bool {
-    discovered.panes.iter().any(|pane| {
-        pane.pane_id == candidate.pane_id
-            && if candidate.pane_type == crate::PaneType::Terminal {
-                pane.agent.is_none() && pane.agent_session_id.is_none()
-            } else {
-                pane.agent_session_id.as_ref() == Some(&candidate.agent_session_id)
-                    && pane
-                        .agent_status
-                        .as_deref()
-                        .is_some_and(|status| matches!(status, "idle" | "done"))
+) -> bool
+where
+    E: HerdrCommandExecutor,
+{
+    let Some(pane) = discovered
+        .panes
+        .iter()
+        .find(|pane| pane.pane_id == candidate.pane_id)
+    else {
+        return false;
+    };
+    if candidate.pane_type == crate::PaneType::Terminal {
+        return pane.agent.is_none() && pane.agent_session_id.is_none();
+    }
+    pane.agent_session_id.as_ref() == Some(&candidate.agent_session_id)
+        && agent_wait(runtime, pane).is_none()
+}
+
+/// How an agent pane takes a prompt, from Herdr's status and, for Claude Code,
+/// the turn edges its hooks recorded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Opening {
+    /// Herdr reports the session idle or done.
+    Settled,
+    /// Herdr reports a Claude Code session working, but its last turn ended
+    /// and no prompt came since: background agents it started run on. A prompt
+    /// typed now starts the next turn, unless the person's draft is in the box.
+    BetweenTurns,
+    /// A turn runs, a question waits, or the status is unknown.
+    Closed,
+}
+
+fn opening(
+    pane: &DiscoveredPane,
+    phase: impl FnOnce() -> Option<crate::turn_phase::TurnPhase>,
+) -> Opening {
+    match pane.agent_status.as_deref() {
+        Some("idle" | "done") => Opening::Settled,
+        Some("working")
+            if crate::integration::pane_agent_runtime(pane)
+                == Some(crate::AgentRuntime::ClaudeCode)
+                && matches!(phase(), Some(crate::turn_phase::TurnPhase::Stopped { .. })) =>
+        {
+            Opening::BetweenTurns
+        }
+        _ => Opening::Closed,
+    }
+}
+
+/// Why an agent pane's mail waits, or `None` when a prompt may be typed now.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum AgentWait {
+    /// Herdr's status for the pane, which is not idle or done.
+    Status(Option<String>),
+    /// The session is between turns, and its prompt box holds text Namedrop
+    /// would type after, or could not be read.
+    PromptBox(PromptBox),
+}
+
+pub(crate) fn agent_wait<E, C, I>(
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+    pane: &DiscoveredPane,
+) -> Option<AgentWait>
+where
+    E: HerdrCommandExecutor,
+{
+    let phase = || {
+        pane.agent_session_id.as_ref().and_then(|session| {
+            crate::turn_phase::read(
+                runtime.state_directory,
+                runtime.session_socket_id,
+                session.as_str(),
+            )
+        })
+    };
+    match opening(pane, phase) {
+        Opening::Settled => None,
+        Opening::BetweenTurns => match read_prompt_box(runtime.herdr, &pane.pane_id) {
+            PromptBox::Empty => None,
+            held => Some(AgentWait::PromptBox(held)),
+        },
+        Opening::Closed => Some(AgentWait::Status(pane.agent_status.clone())),
+    }
+}
+
+/// What a Claude Code pane's prompt box holds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PromptBox {
+    Empty,
+    /// Text the person typed and has not sent.
+    Draft,
+    /// The screen shows no prompt box Namedrop recognizes.
+    Unseen,
+}
+
+/// Enough of the screen's end for the box and whatever Claude Code draws under it.
+const PROMPT_BOX_LINES: &str = "60";
+
+fn read_prompt_box(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> PromptBox {
+    herdr
+        .execute(&[
+            "pane",
+            "read",
+            pane_id,
+            "--source",
+            "recent",
+            "--lines",
+            PROMPT_BOX_LINES,
+            "--format",
+            "ansi",
+        ])
+        .map_or(PromptBox::Unseen, |output| prompt_box(&output.stdout))
+}
+
+/// Claude Code draws its prompt box as a `❯` line under a rule, with any
+/// further lines of the draft down to the rule that closes it. Earlier
+/// prompts in the transcript also start with `❯`, so the box is the last one.
+/// It draws its own placeholder and the suggested next prompt faint, so only
+/// text drawn at normal intensity is the person's. The cursor is drawn in
+/// reverse video, over the first letter of a faint suggestion.
+fn prompt_box(screen: &str) -> PromptBox {
+    let lines = cells(screen);
+    let starts_with = |line: &[Cell], character: char| {
+        line.first().is_some_and(|cell| cell.character == character)
+    };
+    let rule = |line: &Vec<Cell>| starts_with(line, '\u{2500}');
+    let Some(open) = (1..lines.len())
+        .rev()
+        .find(|&index| starts_with(&lines[index], '\u{276f}') && rule(&lines[index - 1]))
+    else {
+        return PromptBox::Unseen;
+    };
+    let Some(close) = lines[open + 1..].iter().position(rule) else {
+        return PromptBox::Unseen;
+    };
+    let held: Vec<&Cell> = lines[open..=open + close]
+        .iter()
+        .flatten()
+        .skip(1)
+        .collect();
+    let hinted = held.iter().any(|cell| cell.faint);
+    let typed = held
+        .iter()
+        .any(|cell| !cell.character.is_whitespace() && !cell.faint && !(cell.cursor && hinted));
+    if typed {
+        PromptBox::Draft
+    } else {
+        PromptBox::Empty
+    }
+}
+
+/// One character on screen, with the attributes that tell the person's text
+/// from what Claude Code draws around it.
+#[derive(Clone, Copy, Debug)]
+struct Cell {
+    character: char,
+    faint: bool,
+    cursor: bool,
+}
+
+/// The screen's lines from Herdr's ANSI rendering. Control sequences other
+/// than the faint and reverse-video attributes are dropped.
+fn cells(screen: &str) -> Vec<Vec<Cell>> {
+    let mut lines = vec![Vec::new()];
+    let (mut faint, mut cursor) = (false, false);
+    let mut characters = screen.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\n' => lines.push(Vec::new()),
+            '\u{1b}' if characters.peek() == Some(&'[') => {
+                characters.next();
+                let mut parameters = String::new();
+                for next in characters.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&next) {
+                        if next == 'm' {
+                            apply_sgr(&parameters, &mut faint, &mut cursor);
+                        }
+                        break;
+                    }
+                    parameters.push(next);
+                }
             }
-    })
+            '\u{1b}' if characters.peek() == Some(&']') => {
+                // An operating system command ends at BEL or at the string terminator.
+                while let Some(next) = characters.next() {
+                    if next == '\u{7}'
+                        || (next == '\u{1b}' && characters.next_if_eq(&'\\').is_some())
+                    {
+                        break;
+                    }
+                }
+            }
+            '\u{1b}' => {
+                characters.next();
+            }
+            control if control.is_control() => {}
+            character => lines
+                .last_mut()
+                .expect("lines starts with one line")
+                .push(Cell {
+                    character,
+                    faint,
+                    cursor,
+                }),
+        }
+    }
+    lines
+}
+
+fn apply_sgr(parameters: &str, faint: &mut bool, cursor: &mut bool) {
+    let codes: Vec<u16> = parameters
+        .split(';')
+        .map(|code| code.parse().unwrap_or(0))
+        .collect();
+    let mut index = 0;
+    while let Some(code) = codes.get(index) {
+        match code {
+            0 => (*faint, *cursor) = (false, false),
+            2 => *faint = true,
+            22 => *faint = false,
+            7 => *cursor = true,
+            27 => *cursor = false,
+            // An extended color's own numbers are not attributes.
+            38 | 48 | 58 => {
+                index += match codes.get(index + 1) {
+                    Some(5) => 2,
+                    Some(2) => 4,
+                    _ => 0,
+                };
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+}
+
+#[cfg(test)]
+mod prompt_box_tests {
+    use super::*;
+
+    const WAITING_EMPTY: &str =
+        include_str!("../tests/fixtures/between-turns/claude-2.1.322-waiting-empty.ansi");
+    const DRAFT: &str =
+        include_str!("../tests/fixtures/between-turns/claude-2.1.322-waiting-draft.ansi");
+
+    /// The box line of `WAITING_EMPTY` swapped for `line`, as Claude Code
+    /// 2.1.322 drew it in the same box.
+    fn with_box_line(line: &str) -> String {
+        WAITING_EMPTY
+            .lines()
+            .map(|drawn| {
+                if drawn.starts_with('\u{276f}') {
+                    line
+                } else {
+                    drawn
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn only_text_the_person_typed_counts_as_a_draft() {
+        assert_eq!(prompt_box(WAITING_EMPTY), PromptBox::Empty);
+        assert_eq!(prompt_box(DRAFT), PromptBox::Draft);
+        // The suggested next prompt and the first-run placeholder are faint,
+        // with the cursor on their first letter.
+        for hint in [
+            "\u{276f}\u{a0}\u{1b}[0m\u{1b}[7mm\u{1b}[0m\u{1b}[2my unsent draft\u{1b}[0m\r",
+            "\u{276f}\u{a0}\u{1b}[0m\u{1b}[7mT\u{1b}[0m\u{1b}[2mry \"write a test for <filepath>\"\u{1b}[0m\r",
+        ] {
+            assert_eq!(
+                prompt_box(&with_box_line(hint)),
+                PromptBox::Empty,
+                "{hint:?}"
+            );
+        }
+        for typed in [
+            // The cursor moved back into the draft.
+            "\u{276f}\u{a0}my unsent dr\u{1b}[0m\u{1b}[7ma\u{1b}[0mft\r",
+            "\u{276f}\u{a0}\u{1b}[0m\u{1b}[7mx\u{1b}[0m\r",
+            // A gray color's numbers are not the faint attribute.
+            "\u{276f}\u{a0}\u{1b}[38;2;2;2;2mtyped\u{1b}[0m",
+        ] {
+            assert_eq!(
+                prompt_box(&with_box_line(typed)),
+                PromptBox::Draft,
+                "{typed:?}"
+            );
+        }
+        let second_line =
+            WAITING_EMPTY.replacen("\u{276f}\u{a0}", "\u{276f}\u{a0}\n  and a second line", 1);
+        assert_eq!(prompt_box(&second_line), PromptBox::Draft);
+    }
+
+    #[test]
+    fn a_screen_without_the_box_is_not_read_as_empty() {
+        for screen in [
+            "",
+            "plain shell output\n$ ",
+            "\u{276f} an earlier prompt\n\nanswer\n",
+        ] {
+            assert_eq!(prompt_box(screen), PromptBox::Unseen, "{screen:?}");
+        }
+        let unclosed: String = WAITING_EMPTY
+            .lines()
+            .take_while(|line| !line.starts_with('\u{276f}'))
+            .chain(["\u{276f}\u{a0}"])
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(prompt_box(&unclosed), PromptBox::Unseen);
+    }
 }
 
 #[cfg(test)]
