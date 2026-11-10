@@ -1,0 +1,15 @@
+{"hook_event_name":"UserPromptSubmit","prompt":"Reply with the single word ok.","prompt_id":"69a4c159-5fbf-4d76-bc6d-da66933f81fb"}
+{"type":"last-prompt"}
+{"type":"mode"}
+{"type":"permission-mode"}
+{"type":"session-owner"}
+{"type":"atis-latch"}
+{"type":"file-history-snapshot"}
+{"type":"user","parentUuid":"83ebe6ae-1cd3-42be-ae78-c66ef12ba902","uuid":"1746e567-32b3-419c-b99e-560d22bd387d","promptId":"69a4c159-5fbf-4d76-bc6d-da66933f81fb","message":{"role":"user","content":"Reply with the single word ok."},"timestamp":"2026-11-10T19:42:46.898Z","version":"2.1.322"}
+{"type":"api-request","timestamp":"2026-11-10T19:42:47.017Z","version":"2.1.322"}
+{"type":"last-prompt"}
+{"type":"mode"}
+{"type":"permission-mode"}
+{"type":"session-owner"}
+{"type":"atis-latch"}
+{"type":"ai-title"}
