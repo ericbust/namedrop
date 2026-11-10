@@ -95,7 +95,7 @@ def check_pruning(base, release):
         six = activated(rt, six_root)
         assert retained(rt) == {four, five, six, held}, 'without a process list nothing is removed'
         class ListingLibproc:
-            """libproc that lists processes but has no path for any."""
+            """libproc whose own listing works, so only all_pids can stop the prune."""
             def proc_listallpids(self, buffer, size):
                 if buffer is not None:
                     buffer[0] = 1
@@ -106,9 +106,9 @@ def check_pruning(base, release):
         sys.platform, runtime.darwin_library = 'darwin', ListingLibproc
         try:
             runtime.prune_releases(rt, {six})
-            raise AssertionError('macOS pruned without a process list')
+            raise AssertionError('the macOS branch did not list processes through all_pids')
         except RuntimeError:
-            assert retained(rt) == {four, five, six, held}, 'without a process list macOS removes nothing'
+            assert retained(rt) == {four, five, six, held}, 'macOS removes nothing when all_pids fails'
         finally:
             sys.platform, runtime.darwin_library = platform, library
     finally:
@@ -202,6 +202,10 @@ def check_in_use(base, release):
             real_readlink, real_stat = os.readlink, os.stat
             def nested(path, *args, **kwargs):
                 return 'pid:[4026533400]' if path == '/proc/self/ns/pid' else real_readlink(path, *args, **kwargs)
+            def unnamed(path, *args, **kwargs):
+                if path == '/proc/self/ns/pid':
+                    raise FileNotFoundError(2, 'No such file or directory', path)
+                return real_readlink(path, *args, **kwargs)
             def unreadable(pid):
                 def refuse(path, *args, **kwargs):
                     if path == f'/proc/{pid}/exe':
@@ -209,6 +213,7 @@ def check_in_use(base, release):
                     return real_stat(path, *args, **kwargs)
                 return mock.patch.object(os, 'stat', refuse)
             for view, why in ((mock.patch.object(os, 'readlink', nested), 'a nested PID namespace'),
+                              (mock.patch.object(os, 'readlink', unnamed), 'a /proc without this process'),
                               (unreadable(sleepers[0].pid), 'a Namedrop process it cannot inspect')):
                 with view:
                     try:

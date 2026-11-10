@@ -692,10 +692,12 @@ def running_executables():
                 info = os.stat(path)
                 found.add((info.st_dev, info.st_ino))
         return found
+    # Only a /proc that shows this process in the initial PID namespace lists
+    # every process. A /proc from another namespace has no /proc/self.
     try:
         namespace = os.readlink('/proc/self/ns/pid')
-    except FileNotFoundError:
-        namespace = INIT_PID_NAMESPACE  # a kernel without PID namespaces
+    except OSError:
+        namespace = None
     require(namespace == INIT_PID_NAMESPACE, 'This process runs in a PID namespace that hides other processes.')
     for pid in all_pids():
         try:
