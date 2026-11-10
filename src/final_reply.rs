@@ -287,45 +287,68 @@ pub fn turn_tasks(transcript: &[u8], whole: bool, prompt_id: &str) -> TurnTasks 
 
 /// Whether the transcript at `path` shows that `prompt`, a notice, opened turn
 /// `prompt_id`: reading back from its end, the first record that names a turn
-/// names an earlier one, with none of this turn's but the notice's own after
-/// it. It is false when the transcript can't show it.
+/// names an earlier one, with none of this turn's after it but the notice's
+/// own and the meta companion Claude Code may write before it. It is false
+/// when the transcript can't show it. It reads a small tail first, and more
+/// only while no record names a turn.
 pub fn notice_opens_turn(path: &Path, prompt_id: &str, prompt: &str) -> bool {
-    const LIMIT: u64 = 8 * 1024 * 1024;
-    let read = || -> Option<Vec<u8>> {
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path)
-            .ok()?;
-        let metadata = file.metadata().ok()?;
-        if !metadata.is_file() {
-            return None;
-        }
-        let start = metadata.len().saturating_sub(LIMIT);
-        file.seek(std::io::SeekFrom::Start(start)).ok()?;
-        let mut bytes = Vec::new();
-        file.take(LIMIT).read_to_end(&mut bytes).ok()?;
-        Some(bytes)
+    let Some(task) = notice_task(prompt).filter(|_| !prompt_id.is_empty()) else {
+        return false;
     };
-    let Some(bytes) = read().filter(|_| !prompt_id.is_empty()) else {
+    let Ok(mut file) = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    else {
+        return false;
+    };
+    let Some(end) = file
+        .metadata()
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len())
+    else {
         return false;
     };
     let any_key = memchr::memmem::Finder::new(br#""promptId":""#);
-    for line in bytes.rsplit(|byte| *byte == b'\n') {
-        if any_key.find(line).is_none() {
-            continue;
-        }
-        let Ok(record) = serde_json::from_slice::<Value>(line) else {
-            continue;
-        };
-        let Some(id) = record["promptId"].as_str() else {
-            continue;
-        };
-        if id != prompt_id {
-            return true;
-        }
-        if !(record["type"] == "user" && record["message"]["content"] == prompt) {
+    let mut bytes = Vec::new();
+    for limit in [64 * 1024, 1024 * 1024, 8 * 1024 * 1024] {
+        let start = end.saturating_sub(limit);
+        bytes.clear();
+        if file.seek(std::io::SeekFrom::Start(start)).is_err()
+            || (&mut file)
+                .take(end - start)
+                .read_to_end(&mut bytes)
+                .is_err()
+        {
             return false;
+        }
+        let mut lines = bytes.rsplit(|byte| *byte == b'\n').collect::<Vec<_>>();
+        if start != 0 {
+            // The first line may be cut.
+            lines.pop();
+        }
+        for line in lines {
+            if any_key.find(line).is_none() {
+                continue;
+            }
+            let Ok(record) = serde_json::from_slice::<Value>(line) else {
+                continue;
+            };
+            let Some(id) = record["promptId"].as_str() else {
+                continue;
+            };
+            if id != prompt_id {
+                return true;
+            }
+            let own_notice = record["type"] == "user"
+                && record["message"]["content"].as_str().and_then(notice_task) == Some(task);
+            if !(own_notice || record["isMeta"] == true && record["turnCompanion"] == true) {
+                return false;
+            }
+        }
+        if start == 0 {
+            break;
         }
     }
     false
@@ -1147,6 +1170,13 @@ pub(crate) fn observe_prompt(
     left_open.sort_by_key(|way_back| !way_back.finished);
     claims.save(now_ms);
     Observed { armed, left_open }
+}
+
+/// Whether the session has any claims at all, read without the lock.
+pub(crate) fn has_claims(state: &Path, socket: &str, session: &str) -> bool {
+    session_directory(state, socket, session)
+        .join("claims.json")
+        .exists()
 }
 
 /// Whether a Stop of `turn` has anything to settle: an open claim, or a held

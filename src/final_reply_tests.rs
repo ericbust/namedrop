@@ -1532,3 +1532,57 @@ fn only_a_notice_that_opens_its_turn_counts_as_opening_it() {
         &notice
     ));
 }
+
+#[test]
+fn a_notice_opens_its_turn_past_its_meta_companion_and_whatever_its_bytes() {
+    let state = StateDirectory::new();
+    let lines: Vec<&str> = RECORDED.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.contains(r#""promptId":"prompt-notice""#))
+        .unwrap();
+    let notice: Value = serde_json::from_str(lines[at]).unwrap();
+    let text = notice["message"]["content"].as_str().unwrap();
+    // The shape Claude Code 2.1.316 to 2.1.319 writes before some notices
+    // after a compaction: a meta companion record carrying the notice's id.
+    let companion = json!({"promptId":"prompt-notice","type":"user","isMeta":true,
+        "turnCompanion":true,"queueSkipAttachments":true,"message":{"role":"user",
+        "content":"<system-reminder>\n<tools-used-before-summary>Edit, Monitor</tools-used-before-summary>\n</system-reminder>\n"}});
+    let path = state.0.join("transcript.jsonl");
+    let mut records: Vec<String> = lines[..at].iter().map(|line| (*line).to_owned()).collect();
+    records.push(companion.to_string());
+    records.push(lines[at].to_owned());
+    fs::write(&path, records.join("\n")).unwrap();
+    assert!(
+        notice_opens_turn(&path, "prompt-notice", text),
+        "the meta companion read as another prompt of the turn"
+    );
+    assert!(
+        notice_opens_turn(&path, "prompt-notice", &format!("{text}\n")),
+        "a prompt that differs from its record only in bytes read as another prompt"
+    );
+    // A record of this turn before the notice that isn't the notice is proof
+    // against it.
+    let other = text.replace("task-second", "task-other");
+    assert!(!notice_opens_turn(&path, "prompt-notice", &other));
+}
+
+#[test]
+fn the_opening_proof_widens_past_a_tail_with_no_turn_record() {
+    let state = StateDirectory::new();
+    let lines: Vec<&str> = RECORDED.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.contains(r#""promptId":"prompt-notice""#))
+        .unwrap();
+    let notice: Value = serde_json::from_str(lines[at]).unwrap();
+    let text = notice["message"]["content"].as_str().unwrap();
+    // A long assistant record with no promptId after the earlier turn's.
+    let long = json!({"type":"assistant","message":{"role":"assistant",
+        "content":[{"type":"text","text":"x".repeat(200 * 1024)}]}});
+    let path = state.0.join("transcript.jsonl");
+    let mut records: Vec<String> = lines[..at].iter().map(|line| (*line).to_owned()).collect();
+    records.push(long.to_string());
+    fs::write(&path, records.join("\n")).unwrap();
+    assert!(notice_opens_turn(&path, "prompt-notice", text));
+}

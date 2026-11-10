@@ -513,6 +513,11 @@ where
         claim,
         crate::final_reply::PromptFacts {
             opens_turn: !notified.is_empty()
+                && crate::final_reply::has_claims(
+                    runtime.state_directory,
+                    runtime.session_socket_id,
+                    session,
+                )
                 && input
                     .transcript_path
                     .as_deref()
