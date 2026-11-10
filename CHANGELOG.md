@@ -2,6 +2,33 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.7.0] - 2026-11-09
+
+### Changed
+
+- A delivery now types a short pointer into the pane instead of its whole envelope: `Namedrop message <id> from <sender>`, a line to run if no details arrive, and the message as one JSON string. The prompt hook supplies the rest. In the real-agent test, each delivery added 39–46% fewer context tokens than in 1.6.5, about 320 to 700 fewer. Live Peek shows the short prompt.
+- Your own posts read `from the person` in that header, not by an internal name.
+- A pointer is good for one dispatch. Its id is random, a re-dispatch gets a new one, and the hook adds details only the first time it sees it and only when the whole prompt matches. A whole envelope authenticates only for a delivery from before this upgrade, so pasting what `delivery inbox` prints does not re-open one.
+- The roster gives way to keep hook context under the 10,000 characters Claude Code keeps whole. A delivery's details and commands always come through. The note about other workspaces is dropped first, then the roster rows, and anything dropped comes again on a later turn. Details and commands that are themselves over the limit still go to Claude Code's preview and file.
+- `delivery inbox` works from inside the Codex sandbox without an approval, so a Codex session whose hook didn't run can read a delivery's details directly. It also says when a delivery is held because Namedrop couldn't confirm it reached the pane.
+- After compaction, resume or clear, a session is told which deliveries it still owes and how to print them.
+- A coordination nudge with many assignments keeps its settling lines and says when some lines didn't fit. The rest stay available through `delivery inbox`.
+
+### Fixed
+
+- An update no longer waits on Namedrop's status worker. The worker held the command lock for as long as it ran, and one that kept retrying a status event could run for days, so the update gave up after 20 seconds and blamed a popup. It now holds the lock only while it handles an event, and after an update it hands its queue to the new version.
+- An update now stops a status worker from 1.6.5 or earlier that holds the command lock, because that worker held it for as long as it ran, retries included, and starts it again on the new version with a wake, so a retry it was waiting on still happens. Its queued work stays on disk, so nothing is lost and you don't have to do anything. Helpers of this version hold the lock only while they work, so the update waits for them instead. It never stops an agent or any other process.
+- When something else holds the command lock, the update now names it by PID and Namedrop command and says how to free it, instead of always pointing at a popup.
+- On macOS, an update no longer fails with "Could not finish inspecting older Namedrop commands" on a busy machine. It now reads running processes directly instead of waiting on `ps`.
+- Namedrop's status worker no longer gets stuck on one event. A worker runs in the directory of the hook that started it, and once that directory was removed, for example a plugin checkout replaced by an update, every event failed the same way and was retried every few seconds for as long as the worker lived, with every later event waiting behind it. The worker no longer depends on where it started. An event that keeps failing through 10 minutes of retrying, not counting time the machine slept, is now set aside so later events run, because a later event checks the same pane again, and the mailboxes drain once more afterwards. A wake that carries a delivery's retry is never set aside.
+- Doctor now shows a status event the worker is still failing on, with its error (ND-STATUS-001), and one it set aside in the last week (ND-STATUS-002). Before, the worker's errors were recorded nowhere.
+
+### Upgrade
+
+- This release raises the state schema to 8. The update migrates it live behind the command lock, so agent sessions and pending deliveries carry on. Keep the matching executable and a database backup together in case you roll back.
+- Close any open Namedrop popup, such as the tour, before you update. An open popup makes the migration wait, then ask you to retry.
+- Codex sessions started before the update lose their hooks, so restart them. Until you do, such a session reads each delivery through the prompt's `delivery inbox` line and can answer with the reply line it prints, which takes about 3 model calls instead of 1. An answer it gives only as its final message is lost, and ND-DELIVERY-003 tells you so.
+
 ## [1.6.6] - 2026-11-09
 
 ### Fixed

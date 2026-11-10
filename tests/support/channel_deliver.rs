@@ -275,7 +275,7 @@ fn delivery_reports_current_aliases_and_deduplicates_only_addresses() {
             fs::read_to_string(f.root.join("http-herdr-invocations.jsonl")).unwrap_or_default();
         if invoked.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok())
             .any(|call| call["args"][1] == "prompt" && call["args"][2] == "pane-1-lead"
-                && serde_json::from_str::<Value>(call["args"][3].as_str().unwrap()).unwrap()["control"]["message_id"] == root["message_id"]) {
+                && crate::delivered::envelope_of(call["args"][3].as_str().unwrap())["control"]["message_id"] == root["message_id"]) {
             break;
         }
         assert!(
@@ -479,16 +479,20 @@ impl Drop for PromptGate {
     }
 }
 
-fn prompted_envelope(f: &Fixture) -> Value {
+fn prompted_text(f: &Fixture) -> String {
     fs::read_to_string(f.root.join("http-herdr-invocations.jsonl"))
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .find_map(|call| {
             (call["args"][0] == "agent" && call["args"][1] == "prompt")
-                .then(|| serde_json::from_str(call["args"][3].as_str().unwrap()).unwrap())
+                .then(|| call["args"][3].as_str().unwrap().to_owned())
         })
         .unwrap()
+}
+
+fn prompted_envelope(f: &Fixture) -> Value {
+    crate::delivered::envelope_of(&prompted_text(f))
 }
 
 #[test]
@@ -520,6 +524,9 @@ fn delivery_answers_with_eof_before_drain_and_keeps_original_operator_envelope()
         );
         assert_eq!(envelope["control"]["reply_mode"], "channel");
         assert_eq!(envelope["untrusted_body"], source);
+        let typed = prompted_text(&f);
+        assert!(typed.contains(" from the person. "), "{typed}");
+        assert!(!typed.contains("operator"), "{typed}");
         assert!(
             envelope["trusted_instruction"]
                 .as_str()

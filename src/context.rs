@@ -1179,7 +1179,7 @@ fn absent_context_reference(
     StoreError::invalid_input(format!(
         "Collaboration Message {message_id} does not list Pane Address {reference} in its \
          context_references. Only the Pane Address ids listed in that message's \
-         context_references, delivered as control.context_references in its Delivery Envelope, are \
+         context_references, shown in its delivery's details or printed by `delivery inbox`, are \
          valid reference_address_id values, and the message's sender is not implicitly a Context \
          Reference."
     ))

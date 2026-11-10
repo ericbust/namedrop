@@ -60,7 +60,7 @@ def prepare(state, experimental):
                     json.dumps(fact, separators=(',', ':')))
 
 
-def migrate(binary, state, home, schema=7):
+def migrate(binary, state, home, schema=8):
     runtime = state / 'runtime'
     runtime.mkdir(exist_ok=True)
     selected = runtime / 'current'
@@ -87,7 +87,7 @@ def migrate(binary, state, home, schema=7):
 
 def verify(state, before, files):
     with sqlite3.connect(state / 'namedrop.sqlite3') as database:
-        assert database.execute('PRAGMA user_version').fetchone() == (7,)
+        assert database.execute('PRAGMA user_version').fetchone() == (8,)
         after = snapshot(database)
         assert set(after) == set(before) | {'reminders', 'reminder_fires'}
         for table, original in before.items():
@@ -123,7 +123,7 @@ def run(binary, root):
             verify(state, before, files)
         evidence[history] = {
             'baseline_schema': 6,
-            'migrated_schema': 7,
+            'migrated_schema': 8,
             'cli_opens': 2,
             'original_tables': {
                 table: {'rows': len(value['rows']), 'sha256': hashlib.sha256(

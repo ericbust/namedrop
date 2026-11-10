@@ -34,7 +34,7 @@ const AUTOMATIC_NO_REPLY_PREFIXES: [&str; 2] =
 pub(crate) fn final_reply_no_reply_id(attempt_id: &crate::DeliveryAttemptId) -> String {
     format!("{}{}", AUTOMATIC_NO_REPLY_PREFIXES[1], attempt_id.as_str())
 }
-pub(crate) const SCHEMA_VERSION: u32 = 7;
+pub(crate) const SCHEMA_VERSION: u32 = 8;
 
 const RECONCILIATION_INDEX_REPAIRS: &[SchemaGap] = &[
     SchemaGap {
@@ -94,6 +94,8 @@ enum MessageAppendMode {
 mod bridge;
 pub(crate) mod channel_routing;
 mod deferred_commands;
+mod delivery_pointer;
+pub(crate) use delivery_pointer::DeliveryPointer;
 pub(crate) mod direct_messages;
 mod final_reply;
 mod reminders;
@@ -5283,9 +5285,13 @@ impl StateTransaction<'_> {
             ],
         )?;
         self.transaction.execute(
-            "INSERT INTO delivery_attempt_state (
-                session_socket_id, worktree_id, attempt_id, address_id, state, active
-             ) VALUES (?1, ?2, ?3, ?4, 'dispatching', 1)",
+            &format!(
+                "INSERT INTO delivery_attempt_state (
+                    session_socket_id, worktree_id, attempt_id, address_id, state, active,
+                    pointer_nonce
+                 ) VALUES (?1, ?2, ?3, ?4, 'dispatching', 1, {})",
+                delivery_pointer::NEW_NONCE_SQL
+            ),
             params![
                 namespace.session_socket_id,
                 namespace.space_id.as_str(),
@@ -5368,7 +5374,8 @@ impl StateTransaction<'_> {
         })
     }
 
-    pub(crate) fn delivery_envelope(
+    #[doc(hidden)]
+    pub fn delivery_envelope(
         &self,
         namespace: &StateNamespace,
         attempt_id: &crate::DeliveryAttemptId,
@@ -6050,7 +6057,8 @@ impl StateTransaction<'_> {
             ));
         }
         self.transaction.execute(
-            "UPDATE delivery_attempt_state SET state = 'failed', active = 0
+            "UPDATE delivery_attempt_state
+             SET state = 'failed', active = 0, pointer_nonce = NULL
              WHERE session_socket_id = ?1 AND worktree_id = ?2 AND attempt_id = ?3",
             params![
                 namespace.session_socket_id,
@@ -7870,6 +7878,9 @@ fn initialize_schema(
             transaction.execute_batch(schema)?;
         }
     }
+    if version < 8 {
+        delivery_pointer::add_columns(&transaction)?;
+    }
     if version >= 6 {
         for gap in pre_release_schema_6_gaps(&transaction)? {
             transaction.execute_batch(gap.ddl)?;
@@ -9094,7 +9105,7 @@ mod tests {
             SCHEMA_VERSION
         );
         assert!(reconciliation_index_gaps(&fresh).unwrap().is_empty());
-        for version in 1..=6 {
+        for version in 1..=7 {
             let mut connection = Connection::open_in_memory().unwrap();
             connection.execute_batch(SCHEMA).unwrap();
             for (introduced, ddl) in [

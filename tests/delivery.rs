@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/delivered.rs"]
+mod delivered;
 
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, AttentionSourceKind, Clock, DeliveryAttemptId,
@@ -459,7 +461,7 @@ fn a_contended_pane_defers_only_its_mailbox_until_the_next_drain() {
             .lock()
             .unwrap()
             .iter()
-            .map(|prompt| serde_json::from_str::<serde_json::Value>(prompt).unwrap())
+            .map(|prompt| delivered::envelope_of(prompt))
             .collect::<Vec<_>>()
     };
     let submitted = envelopes();
@@ -966,7 +968,7 @@ fn human_mention_round_trip(hold_report: bool) {
     assert_eq!(first.submitted.len(), 1);
     let prompts = herdr.prompts.lock().unwrap();
     assert_eq!(prompts.len(), 1);
-    let envelope: serde_json::Value = serde_json::from_str(&prompts[0]).unwrap();
+    let envelope: serde_json::Value = delivered::envelope_of(&prompts[0]);
     assert_eq!(envelope["control"]["protocol_version"], "collab/v1");
     assert_eq!(envelope["control"]["reply_mode"], "return_to_source");
     assert_eq!(envelope["control"]["thread_id"], "thread-1");
@@ -994,10 +996,11 @@ fn human_mention_round_trip(hold_report: bool) {
         "pane-recipient"
     );
     assert_eq!(envelope["control"]["tool"]["input_flag"], "--input-json");
-    // The prompt is one envelope: a plugin-authored instruction, trusted control,
-    // and the collaborator body delivered verbatim, imitation and all.
+    // The prompt is a plugin-authored header and the collaborator body as one
+    // JSON string, imitation and all; the envelope behind it stays whole.
     assert!(
-        prompts[0].starts_with(r#"{"trusted_instruction":"#),
+        prompts[0].starts_with("Namedrop message ")
+            && prompts[0].ends_with(&serde_json::to_string(IMITATING_BODY).unwrap()),
         "{}",
         prompts[0]
     );
@@ -1070,7 +1073,7 @@ fn human_mention_round_trip(hold_report: bool) {
     assert!(drain_mailboxes(&runtime).unwrap().submitted.is_empty());
     let prompts = herdr.prompts.lock().unwrap();
     assert_eq!(prompts.len(), 2);
-    let returned: serde_json::Value = serde_json::from_str(&prompts[1]).unwrap();
+    let returned: serde_json::Value = delivered::envelope_of(&prompts[1]);
     assert_eq!(returned["control"]["reply_mode"], "report_to_human");
     assert_eq!(returned["control"]["sender"]["alias"], "recipient");
     assert_eq!(

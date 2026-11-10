@@ -111,7 +111,7 @@
           "attempt_id": {
             "type": "string",
             "minLength": 1,
-            "description": "The delivered control.attempt_id."
+            "description": "The delivery's attempt id, as its command lines show it."
           }
         }
       },
@@ -372,7 +372,7 @@
           "in_reply_to": {
             "type": "string",
             "minLength": 1,
-            "description": "The message being replied to: control.message_id, never control.thread_id."
+            "description": "The message being replied to: its message id, never its thread id."
           },
           "reply_all": {
             "type": "boolean",
@@ -391,7 +391,7 @@
           "attempt_id": {
             "type": "string",
             "minLength": 1,
-            "description": "Required for an agent-authored reply: the control.attempt_id being finished."
+            "description": "Required for an agent-authored reply: the attempt id being finished."
           },
           "request_context": {
             "type": "boolean",
@@ -619,7 +619,7 @@
           "attempt_id": {
             "type": "string",
             "minLength": 1,
-            "description": "The acknowledged control.attempt_id being finished without a reply."
+            "description": "The acknowledged attempt id being finished without a reply."
           }
         }
       },

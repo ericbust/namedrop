@@ -983,9 +983,15 @@ fn production_onboarding_challenges_registers_and_drains_queued_work() {
         2,
         "a previously registered exact Agent Session was challenged again"
     );
-    assert_eq!(
-        execute_integration_operation("delivery.inbox", serde_json::json!({}), &base).unwrap(),
-        serde_json::json!({"envelopes": []})
+    let inbox =
+        execute_integration_operation("delivery.inbox", serde_json::json!({}), &base).unwrap();
+    assert_eq!(inbox["envelopes"], serde_json::json!([]));
+    assert!(
+        inbox["held"]["guidance"]
+            .as_str()
+            .unwrap()
+            .contains("could not confirm"),
+        "{inbox}"
     );
 }
 

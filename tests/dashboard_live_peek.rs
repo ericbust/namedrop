@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/delivered.rs"]
+mod delivered;
 
 #[path = "support/xws.rs"]
 mod xws;

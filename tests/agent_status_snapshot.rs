@@ -7,6 +7,8 @@
 
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/delivered.rs"]
+mod delivered;
 
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
@@ -313,7 +315,7 @@ impl FakeHerdr {
             .rev()
             .find(|(pane, _)| pane == pane_id)
             .unwrap_or_else(|| panic!("nothing was dispatched to {pane_id}"));
-        serde_json::from_str(envelope).unwrap()
+        delivered::envelope_of(envelope)
     }
 }
 
@@ -582,7 +584,7 @@ fn origin_is_bound_and_peers_are_named_from_namedrop_state() {
         .unwrap()
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 7, "exercise the installed runtime schema");
+    assert_eq!(version, 8, "exercise the installed runtime schema");
     let before_read = std::fs::read(&database_path).unwrap();
 
     let snapshot = collect(
@@ -961,12 +963,12 @@ fn unreadable_namedrop_state_is_unavailable_evidence_not_zero_dependencies() {
 
     // State written by a newer Namedrop is reported, never migrated or guessed.
     let database = rusqlite::Connection::open(directory.state.join("namedrop.sqlite3")).unwrap();
-    database.pragma_update(None, "user_version", 8).unwrap();
+    database.pragma_update(None, "user_version", 9).unwrap();
     drop(database);
     let newer = collect(&lead, "terminal-lead", Some("session-lead"), None, &open).unwrap();
     assert_eq!(newer["handoffs_available"], false);
     assert!(
-        warnings(&newer).contains("schema 8"),
+        warnings(&newer).contains("schema 9"),
         "{}",
         warnings(&newer)
     );
@@ -976,7 +978,7 @@ fn unreadable_namedrop_state_is_unavailable_evidence_not_zero_dependencies() {
         .unwrap()
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 8, "active state must not be migrated by a read");
+    assert_eq!(version, 9, "active state must not be migrated by a read");
 }
 
 #[test]

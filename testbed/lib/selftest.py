@@ -358,6 +358,12 @@ def developer(text):
         "type": "message", "role": "developer", "content": [{"type": "input_text", "text": text}]}}
 
 
+def hop_of(attempt, nonce=None):
+    """A hop that only the transcript matching reads."""
+    fields = dict.fromkeys(live.Hop._fields)
+    return live.Hop(**dict(fields, attempt_id=attempt, pointer_nonce=nonce))
+
+
 SETTLE_LINE = ("'/s/runtime/namedrop' --plugin-state '/s' reply --herdr-socket '/tmp/nd.sock' "
                "--input-json '{\"attempt_id\":\"a1\"}'")
 
@@ -392,14 +398,18 @@ def check_transcripts():
     claude = live.parse_claude(claude_lines("delivery-attempt-B"), "c", "c.jsonl")
     assert [live.markers(text) for text in claude.session_contexts] == [{"policy"}], claude.session_contexts
     assert len(claude.turns) == 3 and claude.models == {"claude-opus-5-5"}, claude
-    assert live.seen(claude, "delivery-attempt-B", "verified") == (1, 1)
+    assert live.seen(claude, live.hop_key(hop_of("delivery-attempt-B")), "verified") == (1, 1)
     assert live.has_word("pong", live.last_answer(claude))
-    assert live.answered(claude, "delivery-attempt-B") and not live.answered(claude, "delivery-attempt-Z")
+    assert live.answered(claude, live.hop_key(hop_of("delivery-attempt-B"))) and not live.answered(claude, live.hop_key(hop_of("delivery-attempt-Z")))
     assert all(check.ok for check in live.judge_hooks("claude", claude)), live.judge_hooks("claude", claude)
     codex = live.parse_codex(codex_lines("delivery-attempt-A"), "x", "x.jsonl")
     assert len(codex.turns) == 2 and codex.models == {"gpt-6.1-sol"}, codex.turns
-    assert live.seen(codex, "delivery-attempt-A", "commands") == (1, 1)
-    assert live.seen(codex, "delivery-attempt-A", "verified") == (1, 0)
+    pointer = "Namedrop message 0a1b2c3d from @lead. Its trusted details arrive as Namedrop hook context."
+    assert live.hop_key(hop_of("delivery-attempt-A", "0a1b2c3d")) in pointer
+    assert live.hop_key(hop_of("delivery-attempt-A", "ffffffff")) not in pointer
+    assert live.hop_key(hop_of("delivery-attempt-A")) == "delivery-attempt-A"
+    assert live.seen(codex, live.hop_key(hop_of("delivery-attempt-A")), "commands") == (1, 1)
+    assert live.seen(codex, live.hop_key(hop_of("delivery-attempt-A")), "verified") == (1, 0)
     assert [(turn.calls, live.settle_commands(turn)) for turn in codex.turns] == [(0, 0), (1, 0)]
     settled = live.parse_codex(codex_lines("delivery-attempt-A", settle=True), "x", "x.jsonl")
     assert [(turn.calls, live.settle_commands(turn)) for turn in settled.turns] == [(0, 0), (2, 1)]
@@ -431,7 +441,7 @@ CREATE TABLE mailbox_deliveries (session_socket_id, worktree_id, delivery_id, me
 CREATE TABLE delivery_attempts (session_socket_id, worktree_id, attempt_id, delivery_id,
   retry_of_attempt_id, created_at_ms);
 CREATE TABLE delivery_acknowledgements (session_socket_id, worktree_id, acknowledgement_id, attempt_id);
-CREATE TABLE delivery_attempt_state (session_socket_id, worktree_id, attempt_id, state, active);
+CREATE TABLE delivery_attempt_state (session_socket_id, worktree_id, attempt_id, state, active, pointer_nonce);
 CREATE TABLE delivery_dispositions (session_socket_id, worktree_id, disposition_id, attempt_id, disposition_kind);
 CREATE TABLE attention_items (session_socket_id, worktree_id, attention_item_id, resolved_at_ms);
 CREATE TABLE terminal_executions (session_socket_id, worktree_id, attempt_id, command,
@@ -448,7 +458,7 @@ def hop_rows(db, number, author, recipient, parent, disposition, at, scope=SCOPE
     db.execute("INSERT INTO mailbox_deliveries VALUES (?,?,?,?,'settled',?)", scope + (delivery, message, at))
     db.execute("INSERT INTO delivery_attempts VALUES (?,?,?,?,NULL,?)", scope + (attempt, delivery, at + 1))
     db.execute("INSERT INTO delivery_acknowledgements VALUES (?,?,?,?)", scope + ("ack-" + attempt, attempt))
-    db.execute("INSERT INTO delivery_attempt_state VALUES (?,?,?,'settled',0)", scope + (attempt,))
+    db.execute("INSERT INTO delivery_attempt_state VALUES (?,?,?,'settled',0,NULL)", scope + (attempt,))
     db.execute("INSERT INTO delivery_dispositions VALUES (?,?,?,?,?)", scope + ("p" + attempt, attempt, disposition))
 
 
@@ -484,6 +494,10 @@ def round_trip(path, defect=None):
         db.execute("DELETE FROM delivery_acknowledgements WHERE attempt_id = 'a2'")
     elif defect == "active":
         db.execute("UPDATE delivery_attempt_state SET state = 'acknowledged', active = 1 WHERE attempt_id = 'a2'")
+    elif defect == "schema 7":
+        db.execute("ALTER TABLE delivery_attempt_state DROP COLUMN pointer_nonce")
+    elif defect == "pointer":
+        db.execute("UPDATE delivery_attempt_state SET pointer_nonce = '0a1b2c3d' WHERE attempt_id = 'a1'")
     db.commit()
     db.close()
     return live.Store(path, *SCOPE)
@@ -514,6 +528,9 @@ def check_exchange(scratch):
     assert failing("claim left") == ["request"]
     assert failing("claim open") == ["reply"]
     assert failing("body differs") == ["reply body"]
+    assert failing("schema 7") == [], "a store from before 1.7.0 has no pointer column"
+    pointed = round_trip(path, "pointer").exchange("claude", 900).hops
+    assert [live.hop_key(hop) for hop in pointed] == ["Namedrop message 0a1b2c3d from", "a2"], pointed
     settled = live.parse_codex(codex_lines("a1", settle=True), "x", "x.jsonl")
     assert failing(None, codex=settled) == ["codex saw the request"]
     rows, detail = live.calls_detail(exchange, claude, codex)
@@ -530,8 +547,8 @@ def check_exchange(scratch):
         raise AssertionError("an unreadable store must not read as an empty backlog")
     except live.StoreBusy:
         pass
-    return ("exchange: a clean round trip passes; a retry, second root, third hop, lost ack, left claim, "
-            "settle command or changed body fails its own check")
+    return ("exchange: a clean round trip passes, on a store with or without pointer ids; a retry, second "
+            "root, third hop, lost ack, left claim, settle command or changed body fails its own check")
 
 
 def check_judges():

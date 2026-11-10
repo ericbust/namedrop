@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/delivered.rs"]
+mod delivered;
 
 #[path = "support/xws.rs"]
 mod xws;
@@ -2066,8 +2068,7 @@ else:
         assert!(prompts(&f).is_empty());
         drop(lock);
         wait_for_submitted(&f, 1);
-        let envelope: Value =
-            serde_json::from_str(prompts(&f)[0]["args"][3].as_str().unwrap()).unwrap();
+        let envelope: Value = delivered::envelope_of(prompts(&f)[0]["args"][3].as_str().unwrap());
         namedrop::execute_integration_operation(
             "complete",
             json!({"attempt_id":envelope["control"]["attempt_id"]}),
@@ -2113,8 +2114,7 @@ else:
         assert!(prompts(&f).is_empty());
         drop(lock);
         wait_for_submitted(&f, 1);
-        let envelope: Value =
-            serde_json::from_str(prompts(&f)[0]["args"][3].as_str().unwrap()).unwrap();
+        let envelope: Value = delivered::envelope_of(prompts(&f)[0]["args"][3].as_str().unwrap());
         namedrop::execute_integration_operation(
             "complete",
             json!({"attempt_id":envelope["control"]["attempt_id"]}),
@@ -2171,7 +2171,7 @@ else:
 
         wait_for_submitted(&f, 1);
         let calls = prompts(&f);
-        let envelope: Value = serde_json::from_str(calls[0]["args"][3].as_str().unwrap()).unwrap();
+        let envelope: Value = delivered::envelope_of(calls[0]["args"][3].as_str().unwrap());
         f.reply_to("w1", "pane-1-planner", &envelope, "@operator done");
         let scope = namedrop::lower_hex(&Sha256::digest("socket-a\0w1"));
         let worker_directory = f.state.join("agent-status-reconciliation").join(scope);
@@ -2508,8 +2508,7 @@ else:
         assert_eq!(prompts.len(), 1);
         assert_eq!(prompts[0]["args"][2], pane);
         assert_eq!(prompts[0]["socket"], "socket-a");
-        let envelope: Value =
-            serde_json::from_str(prompts[0]["args"][3].as_str().unwrap()).unwrap();
+        let envelope: Value = delivered::envelope_of(prompts[0]["args"][3].as_str().unwrap());
         assert_eq!(
             &envelope["control"]["message_id"],
             if workspace == "w1" {
@@ -2646,8 +2645,7 @@ else:
             .filter(|call| call["args"][0] == "agent")
             .collect();
         assert_eq!(prompts.len(), 1);
-        let envelope: Value =
-            serde_json::from_str(prompts[0]["args"][3].as_str().unwrap()).unwrap();
+        let envelope: Value = delivered::envelope_of(prompts[0]["args"][3].as_str().unwrap());
         assert_eq!(envelope["control"]["message_id"], receipts[0]["message_id"]);
     }
 

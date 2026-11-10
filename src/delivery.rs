@@ -655,7 +655,9 @@ where
                         transaction
                             .delivery_envelope(&namespace, &leased.attempt_id, tool)
                             .and_then(|envelope| {
-                                serde_json::to_string(&envelope)
+                                let pointer =
+                                    transaction.delivery_pointer(&namespace, &leased.attempt_id)?;
+                                crate::pointer::typed_prompt(&envelope, pointer.as_ref())
                                     .map(|prompt| (leased, Some(prompt)))
                                     .map_err(|error| {
                                         crate::StoreError::invalid_input(error.to_string())

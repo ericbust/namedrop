@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/delivered.rs"]
+mod delivered;
 
 use namedrop::{
     AgentRuntime, StateNamespace, StateStore, diagnose_collaboration, execute_control_operation,

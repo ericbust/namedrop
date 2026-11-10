@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/delivered.rs"]
+mod delivered;
 #[path = "support/dispatch.rs"]
 mod dispatch;
 
@@ -25,6 +27,7 @@ struct Fixture {
     statuses: Mutex<BTreeMap<String, String>>,
     sessions: Mutex<BTreeMap<String, String>>,
     prompts: Mutex<Vec<(String, Value)>>,
+    typed: Mutex<Vec<String>>,
     fail_next_nudge: Mutex<bool>,
     pane_lists: AtomicU64,
     lead_working_after: AtomicU64,
@@ -54,6 +57,7 @@ impl Fixture {
             ])),
             sessions: Mutex::new(BTreeMap::new()),
             prompts: Mutex::new(Vec::new()),
+            typed: Mutex::new(Vec::new()),
             fail_next_nudge: Mutex::new(false),
             pane_lists: AtomicU64::new(0),
             lead_working_after: AtomicU64::new(u64::MAX),
@@ -181,9 +185,12 @@ impl Fixture {
     }
     fn check_rendered_actions(&self, envelope: &Value) {
         use std::os::unix::fs::PermissionsExt;
+        let prompt = {
+            let typed = self.typed.lock().unwrap();
+            delivered::as_typed(typed.iter().map(String::as_str), &envelope.to_string())
+        };
         let hook = execute_user_prompt_submit_hook(
-            &json!({"hook_event_name":"UserPromptSubmit", "prompt":envelope.to_string()})
-                .to_string(),
+            &json!({"hook_event_name":"UserPromptSubmit", "prompt":prompt}).to_string(),
             &self.runtime("lead"),
         )
         .unwrap();
@@ -555,7 +562,7 @@ impl HerdrCommandExecutor for Fixture {
                 json!({"result":{"panes":(statuses.keys().map(String::as_str).map(|name|json!({"pane_id":name,"agent":"codex","terminal_id":format!("terminal-{name}"),"tab_id":"synthetic-tab","workspace_id":"synthetic-workspace","agent_session":{"value":sessions.get(name).cloned().unwrap_or_else(||format!("session-{name}"))},"agent_status":if (name=="lead" && count>=self.lead_working_after.load(Ordering::Relaxed)) || (name=="worker" && count>=self.worker_working_after.load(Ordering::Relaxed)) {"working"} else {statuses.get(name).map(String::as_str).unwrap_or("unknown")}})).collect::<Vec<_>>())}})
             }
             ["agent", "prompt", pane, prompt] => {
-                let envelope: Value = serde_json::from_str(prompt).unwrap();
+                let envelope: Value = delivered::envelope_of(prompt);
                 if envelope["untrusted_body"]
                     .as_str()
                     .unwrap_or("")
@@ -564,6 +571,7 @@ impl HerdrCommandExecutor for Fixture {
                 {
                     return Err("synthetic-preinvocation".into());
                 }
+                self.typed.lock().unwrap().push((*prompt).to_owned());
                 self.prompts
                     .lock()
                     .unwrap()
@@ -4346,4 +4354,43 @@ fn a_tracked_send_tells_the_lead_its_answer_arrives_as_a_delivery_and_an_ordinar
     );
     let ordinary = compact(ordinary);
     assert!(ordinary.get("next").is_none(), "{ordinary}");
+}
+
+#[test]
+fn a_many_assignment_nudge_keeps_its_hook_under_the_cap_and_says_what_it_left_out() {
+    let f = Fixture::new();
+    let id = f.begin();
+    for part in 0..8 {
+        let sent = f.send(&id, &format!("part-{part}"), "worker");
+        f.reply(
+            &sent,
+            "worker",
+            &format!("part-result-{part}"),
+            "completed",
+            None,
+        );
+    }
+    f.status("lead", "idle");
+    f.settle_lead_inputs();
+    let nudge = f.nudge_prompts().pop().expect("a lead callback");
+    let prompt = {
+        let typed = f.typed.lock().unwrap();
+        delivered::as_typed(typed.iter().map(String::as_str), &nudge.to_string())
+    };
+    let hook = execute_user_prompt_submit_hook(
+        &json!({"hook_event_name":"UserPromptSubmit", "prompt":prompt}).to_string(),
+        &f.runtime("lead"),
+    )
+    .unwrap();
+    let context = hook["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.encode_utf16().count() < 10_000, "{}", context.len());
+    assert!(
+        context.contains("more bound lines did not fit"),
+        "{context}"
+    );
+    assert!(context.contains("\ncomplete.no-reply: "), "{context}");
+    assert!(context.contains("\nhandoff.resolve: "), "{context}");
+    assert!(context.contains("\nsend: "), "{context}");
 }

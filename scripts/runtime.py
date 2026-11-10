@@ -1,14 +1,16 @@
 """Publish a compatible runtime without removing tools used by existing sessions."""
 
+import contextlib
 import ctypes
-import errno
 import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
+import signal
 import stat
 import sqlite3
 import subprocess
@@ -101,6 +103,94 @@ def record_legacy(runtime, *, first=False, codex_ready=False, packages_ready=Fal
     write_owned(path, json.dumps(legacy) + '\n', 0o600)
 
 
+WORD = re.compile(r'[a-z][a-z0-9.-]{0,40}')
+
+
+def command_words(argv):
+    """What a Namedrop process is doing, from its executable name and leading
+    subcommand words. Flag values can hold message text, so they are skipped and
+    any word that is not a plain lowercase token ends the description."""
+    words = [os.path.basename(argv[0])] if argv else []
+    rest = iter(argv[1:])
+    for word in rest:
+        if word.startswith('--'):
+            if '=' not in word:
+                next(rest, None)
+            continue
+        if not WORD.fullmatch(word) or len(words) > 3:
+            break
+        words.append(word)
+    return ' '.join(words) or 'unknown'
+
+
+def gate_holders(path):
+    """PIDs other than this one with the command lock open, and what each is."""
+    target, me = os.path.realpath(path), os.getpid()
+    if sys.platform == 'darwin':
+        # Namedrop's own executables are asked about first, cheaply. Only when
+        # none holds the lock does lsof scan every process; this is the error path.
+        def listed(arguments):
+            try:
+                found = subprocess.run(['/usr/sbin/lsof', '-t', *arguments, '--', target],
+                                       capture_output=True, text=True, timeout=20)
+            except (OSError, subprocess.SubprocessError):
+                return set()
+            return {int(pid) for pid in found.stdout.split() if pid.isdigit()} - {me}
+        try:
+            executables = retained_executables(Path(path).parent)
+            candidates = [pid for pid in all_pids() if pid != me
+                          and process(pid, executables)]
+        except (OSError, RuntimeError):
+            executables, candidates = {}, []
+        holding = listed(['-a', '-p', ','.join(map(str, candidates))]) if candidates else set()
+        holding = holding or listed([])
+        holders = []
+        for pid in sorted(holding):
+            found = process(pid)
+            holders.append((pid, command_words(found[1]) if found and found[1] else 'unknown',
+                            executables.get(os.path.realpath(found[0])) if found else None))
+        return holders
+    try:
+        executables = retained_executables(Path(path).parent)
+    except OSError:
+        executables = {}
+    holders = []
+    for entry in os.listdir('/proc'):
+        if not entry.isdigit() or int(entry) == me or not opens(int(entry), target):
+            continue
+        found = process(int(entry))
+        if found and found[1]:
+            holders.append((int(entry), command_words(found[1]), executables.get(os.path.realpath(found[0]))))
+    return sorted(holders)
+
+
+def busy_gate_message(path):
+    """Each holder is (PID, Namedrop subcommand, whether its release holds the
+    gate only per job: True, False before 1.7.0, None when not a release)."""
+    holders = gate_holders(path)
+    if not holders:
+        return ('Namedrop commands are still finishing. Close any open Namedrop popup, such as the tour, '
+                'and retry the update; agent sessions can stay open.')
+    named = ' '.join(f'PID {pid} ({what}) holds the command lock.' for pid, what, _ in holders)
+    popups = [pid for pid, what, _ in holders if ' ui ' in f' {what} ']
+    # A status worker from before 1.7.0 holds the lock between jobs too; any
+    # other holder is in the middle of a job, such as a delivery, so it is
+    # waited for rather than stopped.
+    old_workers = [pid for pid, what, per_job in holders
+                   if pid not in popups and 'agent-status-worker' in what and per_job is False]
+    working = [pid for pid, _, _ in holders if pid not in popups + old_workers]
+    steps = []
+    if popups:
+        steps.append('close the open Namedrop popup, such as the tour')
+    if old_workers:
+        steps.append("stop the status worker from the earlier version with `kill "
+                     + ' '.join(map(str, old_workers)) + '`, which loses nothing because its events stay queued')
+    if working:
+        steps.append('wait a moment for the command that is still working to finish')
+    return (f'Namedrop commands are still finishing. {named} To continue, ' + '; '.join(steps)
+            + '. Then retry the update; agent sessions can stay open.')
+
+
 def lock(runtime, name, timeout=None):
     descriptor = os.open(runtime / name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     stream = os.fdopen(descriptor, 'r+')
@@ -115,13 +205,306 @@ def lock(runtime, name, timeout=None):
                     fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
-                    require(time.monotonic() < deadline,
-                            'Namedrop commands are still finishing. Retry the update shortly; agent sessions can stay open.')
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(busy_gate_message(runtime / name)) from None
                     time.sleep(.05)
     except BaseException:
         stream.close()
         raise
     return stream
+
+
+# macOS process inspection goes through libproc and sysctl, not ps or lsof
+# scans of every process, which can take seconds on a busy machine.
+CTL_KERN, KERN_ARGMAX, KERN_PROCARGS2 = 1, 8, 49
+
+
+def darwin_library():
+    library = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+    library.proc_listallpids.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    library.proc_listallpids.restype = ctypes.c_int
+    library.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    library.proc_pidpath.restype = ctypes.c_int
+    return library
+
+
+def darwin_pids(library):
+    count = library.proc_listallpids(None, 0)
+    if count <= 0:
+        raise RuntimeError('Could not list processes to finish the update. Retry it; no agent was stopped.')
+    buffer = (ctypes.c_int * (count + 256))()
+    count = library.proc_listallpids(buffer, ctypes.sizeof(buffer))
+    return [pid for pid in buffer[:max(count, 0)] if pid > 0]
+
+
+def darwin_path(library, pid):
+    executable = ctypes.create_string_buffer(4096)  # PROC_PIDPATHINFO_MAXSIZE
+    if library.proc_pidpath(pid, executable, len(executable)) <= 0:
+        return None
+    return os.fsdecode(executable.value)
+
+
+def parse_procargs2(data):
+    """argv and environment from macOS KERN_PROCARGS2: argc, the exec path,
+    padding, then argc NUL-ended arguments and NUL-ended environment strings
+    up to an empty one."""
+    argc = int.from_bytes(data[:4], sys.byteorder)
+    rest = data[4:]
+    rest = rest[rest.index(b'\0'):].lstrip(b'\0')
+    strings = rest.split(b'\0')
+    argv = [os.fsdecode(item) for item in strings[:argc]]
+    environment = {}
+    for item in strings[argc:]:
+        if not item:
+            break
+        name, _, value = os.fsdecode(item).partition('=')
+        environment[name] = value
+    return argv, environment
+
+
+def darwin_arguments(pid):
+    libc = ctypes.CDLL(None, use_errno=True)
+    argmax = ctypes.c_int(0)
+    size = ctypes.c_size_t(ctypes.sizeof(argmax))
+    if libc.sysctl((ctypes.c_int * 2)(CTL_KERN, KERN_ARGMAX), 2, ctypes.byref(argmax), ctypes.byref(size),
+                   None, ctypes.c_size_t(0)) != 0 or argmax.value <= 0:
+        return None
+    buffer = ctypes.create_string_buffer(argmax.value)
+    size = ctypes.c_size_t(argmax.value)
+    if libc.sysctl((ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, pid), 3, buffer, ctypes.byref(size),
+                   None, ctypes.c_size_t(0)) != 0:
+        return None
+    return parse_procargs2(buffer.raw[:size.value])
+
+
+def process(pid, executables=None):
+    """(executable, argv, environment) of a process of this user, or None. With
+    `executables`, a process running anything else is skipped before its
+    arguments are read."""
+    try:
+        if sys.platform == 'darwin':
+            executable = darwin_path(darwin_library(), pid)
+            if executable is None or executables is not None and os.path.realpath(executable) not in executables:
+                return None
+            arguments = darwin_arguments(pid)
+            return None if arguments is None else (executable, *arguments)
+        executable = os.readlink(f'/proc/{pid}/exe')
+        if executables is not None and os.path.realpath(executable) not in executables:
+            return None
+        argv = [os.fsdecode(a) for a in Path(f'/proc/{pid}/cmdline').read_bytes().split(b'\0') if a]
+        environment = {}
+        for item in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0'):
+            name, _, value = os.fsdecode(item).partition('=')
+            if name:
+                environment[name] = value
+        return executable, argv, environment
+    except (OSError, ValueError, RuntimeError, IndexError):
+        return None
+
+
+def all_pids():
+    if sys.platform == 'darwin':
+        return darwin_pids(darwin_library())
+    return [int(entry) for entry in os.listdir('/proc') if entry.isdigit()]
+
+
+def retained_executables(runtime):
+    """Each retained release's executable, mapped to whether its helpers hold
+    the command gate only while they work (`helper_gate`, from 1.7.0)."""
+    found = {}
+    for release in (runtime / 'releases').iterdir():
+        if release.is_dir() and not release.is_symlink() and (release / 'namedrop').is_file():
+            try:
+                per_job = json.loads((release / 'runtime.json').read_text()).get('helper_gate') == 1
+            except (OSError, ValueError, AttributeError):
+                per_job = False
+            found[str((release / 'namedrop').resolve())] = per_job
+    return found
+
+
+def helper_kind(argv, environment, state):
+    """Which Namedrop background helper of `state` this is, or None."""
+    rest = argv[1:]
+    ours = lambda path: path is not None and os.path.realpath(path) == os.path.realpath(state)
+    if rest == ['hook', 'agent-status-worker'] and ours(environment.get('HERDR_PLUGIN_STATE_DIR')):
+        return 'status worker'
+    if len(rest) == 3 and ours(rest[1]) and rest[0] == '--deferred-worker':
+        return 'deferred worker'
+    if len(rest) == 3 and ours(rest[1]) and rest[0] == 'reminder-clock':
+        return 'reminder clock'
+    return None
+
+
+def opens(pid, path):
+    try:
+        return any(os.readlink(f'/proc/{pid}/fd/{fd}') == path for fd in os.listdir(f'/proc/{pid}/fd'))
+    except OSError:
+        return False
+
+
+def gate_helpers(runtime):
+    """Helpers activation may stop: status workers of this state, run by a
+    retained release from before 1.7.0, that have the command lock open. Those
+    hold the gate for their whole life, waiting out retries included. Every
+    other helper holds it only while it works, so it is waited for, never
+    stopped, and agents and every other process are never included."""
+    try:
+        stoppable = {path for path, per_job in retained_executables(runtime).items() if not per_job}
+        if not stoppable:
+            return []
+        target = os.path.realpath(runtime / 'commands.lock')
+        helpers = []
+        for pid in all_pids():
+            if pid == os.getpid():
+                continue
+            found = process(pid, stoppable)
+            if found and helper_kind(found[1], found[2], runtime.parent) == 'status worker':
+                helpers.append({'pid': pid, 'kind': 'status worker', 'executable': found[0],
+                                'argv': found[1], 'environment': found[2]})
+    except (OSError, RuntimeError, ValueError):
+        return []
+    if sys.platform != 'darwin':
+        return [helper for helper in helpers if opens(helper['pid'], target)]
+    if not helpers:
+        return []
+    try:
+        listed = subprocess.run(['/usr/sbin/lsof', '-a', '-t', '-p', ','.join(str(h['pid']) for h in helpers),
+                                 '--', target], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        # Without proof that it holds the lock, a helper is left alone.
+        return []
+    holding = {int(pid) for pid in listed.stdout.split() if pid.isdigit()}
+    return [helper for helper in helpers if helper['pid'] in holding]
+
+
+def gone(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    try:
+        return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z'
+    except (OSError, IndexError):
+        return False
+
+
+def same_helper(helper):
+    """Whether the PID still runs this helper, not a process that reused it."""
+    found = process(helper['pid'])
+    return found is not None and found[0] == helper['executable'] and found[1] == helper['argv']
+
+
+def signal_helper(helper, number):
+    if not same_helper(helper):
+        return False
+    try:
+        os.kill(helper['pid'], number)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def stop_helpers(helpers, stopped):
+    """Signals each helper, recording it in `stopped` first, so an interrupt
+    partway through still restarts every helper already signalled."""
+    signalled = []
+    for helper in helpers:
+        stopped.append(helper)
+        if signal_helper(helper, signal.SIGTERM):
+            signalled.append(helper)
+        else:
+            stopped.remove(helper)
+    deadline = time.monotonic() + 3
+    while not all(gone(helper['pid']) for helper in signalled) and time.monotonic() < deadline:
+        time.sleep(.05)
+    for helper in signalled:
+        if not gone(helper['pid']):
+            signal_helper(helper, signal.SIGKILL)
+    return signalled
+
+
+def queue_wake(helper):
+    """A status worker keeps its next timed retry only in memory, so its
+    replacement is given a wake, which drains and schedules that retry again."""
+    environment = helper['environment']
+    state, socket, workspace = (environment.get(key) for key in
+                                ('HERDR_PLUGIN_STATE_DIR', 'HERDR_SOCKET_PATH', 'HERDR_WORKSPACE_ID'))
+    if not (state and socket and workspace):
+        return
+    queue = (Path(state) / 'agent-status-reconciliation'
+             / hashlib.sha256(f'{socket}\0{workspace}'.encode()).hexdigest())
+    queue.mkdir(parents=True, exist_ok=True, mode=0o700)
+    name = f'activation-{time.time_ns()}'
+    queued = queue / f'queued-{name}'
+    queued.write_text(json.dumps({'operation': 'mailbox-wake'}))
+    queued.chmod(0o600)
+    queued.rename(queue / f'pending-{name}')
+
+
+def restart_helpers(runtime, helpers):
+    """Start each stopped helper again through the launcher, so it runs the
+    selected runtime with the arguments and environment it had. A helper that
+    can't be restarted is reported, never raised: the update itself is done,
+    and the helper starts again on its next event."""
+    restarted, failed = [], []
+    # Process listing order differs between Linux and macOS; the report doesn't.
+    for helper in sorted(helpers, key=lambda helper: (helper['kind'], helper['pid'])):
+        if helper['kind'] == 'status worker':
+            try:
+                queue_wake(helper)
+            except (OSError, ValueError) as error:
+                print(f"Could not queue a wake for Namedrop's status worker (was PID {helper['pid']}): {error}. "
+                      'A timed retry it was waiting on runs at its next event.', file=sys.stderr)
+        try:
+            subprocess.Popen([str(runtime / 'namedrop'), *helper['argv'][1:]], env=helper['environment'],
+                             cwd='/', stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+            restarted.append(helper)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            failed.append((helper, error))
+    if restarted:
+        print('Restarted Namedrop helpers after the update: '
+              + ', '.join(f"{helper['kind']} (was PID {helper['pid']})" for helper in restarted) + '.',
+              file=sys.stderr)
+    for helper, error in failed:
+        print(f"Could not restart Namedrop's {helper['kind']} (was PID {helper['pid']}): {error}. "
+              'It starts again on its next event.', file=sys.stderr)
+
+
+@contextlib.contextmanager
+def command_gate(runtime, timeout=20, grace=2):
+    """The exclusive command gate. A command, popup or helper in the middle of
+    its work is waited for. A status worker from before 1.7.0 still holding the
+    gate after `grace` is stopped, because it holds the gate for its whole life,
+    and it starts again once the gate is released."""
+    descriptor = os.open(runtime / 'commands.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    stream = os.fdopen(descriptor, 'r+')
+    stopped = []
+    try:
+        require(stat.S_ISREG(os.fstat(descriptor).st_mode), 'Runtime lock must be a regular file.')
+        deadline = time.monotonic() + timeout
+        check_at = time.monotonic() + grace
+        while True:
+            try:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                now = time.monotonic()
+                if now >= deadline:
+                    raise RuntimeError(busy_gate_message(runtime / 'commands.lock')) from None
+                if now >= check_at:
+                    stop_helpers(gate_helpers(runtime), stopped)
+                    check_at = time.monotonic() + grace
+                time.sleep(.05)
+    except BaseException:
+        stream.close()
+        restart_helpers(runtime, stopped)
+        raise
+    try:
+        with stream:
+            yield stream
+    finally:
+        restart_helpers(runtime, stopped)
 
 
 def state_schema(runtime):
@@ -147,37 +530,14 @@ def drain_legacy_commands(runtime, timeout=20):
     require(sys.platform == 'darwin',
             'Found a runtime release without the command gate, which only older macOS releases have. '
             'Inspect the runtime directory; no agent was stopped.')
-    # ps preserves the launch path, which may include the now-switched current
-    # symlink. Ask macOS for the executable vnode path before classifying it.
-    process = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
-    process.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
-    process.proc_pidpath.restype = ctypes.c_int
-    candidates = paths | {str((runtime / 'current' / 'namedrop').resolve()),
-                          str((runtime / 'namedrop').resolve())}
+    # libproc reports each process's executable vnode path, not its arguments
+    # and not the launch path through the switched current symlink, and needs
+    # no subprocess, so a busy machine cannot time it out. No PID is killed.
+    library = darwin_library()
     deadline = time.monotonic() + timeout
     while True:
-        # macOS is the supported host. Wide comm reports executable paths, not
-        # user prompts/arguments. No PID is killed and no process-name matching.
-        try:
-            result = subprocess.run(['/bin/ps', '-axww', '-o', 'pid=,comm='],
-                                    capture_output=True, text=True,
-                                    timeout=max(.01, min(2, deadline - time.monotonic())), check=True)
-        except subprocess.TimeoutExpired as error:
-            raise RuntimeError('Could not finish inspecting older Namedrop commands. '
-                               'Retry the update shortly; no agent was stopped.') from error
-        running = []
-        for line in result.stdout.splitlines():
-            parts = line.split(maxsplit=1)
-            if len(parts) != 2 or not parts[1].startswith('/') or str(Path(parts[1]).resolve()) not in candidates:
-                continue
-            executable = ctypes.create_string_buffer(4096)  # PROC_PIDPATHINFO_MAXSIZE
-            if process.proc_pidpath(int(parts[0]), executable, len(executable)) <= 0:
-                if ctypes.get_errno() == errno.ESRCH:  # Finished between the two observations.
-                    continue
-                raise RuntimeError('Could not identify an existing Namedrop command. '
-                                   'Retry the update shortly; no agent was stopped.')
-            if os.fsdecode(executable.value) in paths:
-                running.append(parts[0])
+        running = [str(pid) for pid in sorted(darwin_pids(library))
+                   if pid != os.getpid() and darwin_path(library, pid) in paths]
         if not running:
             return
         require(time.monotonic() < deadline,
@@ -223,7 +583,7 @@ def recover_migration(runtime):
     """A normal activation retry repairs an interrupted switch without data rollback."""
     if not (runtime / 'migration.json').exists() and not (runtime / 'migration.json').is_symlink():
         return
-    with lock(runtime, 'commands.lock', timeout=20) as gate:
+    with command_gate(runtime) as gate:
         previous, target = migration_record(runtime)
         require(current(runtime) in (previous, target), 'Runtime changed during an unfinished migration.')
         schema = state_schema(runtime)
@@ -239,7 +599,7 @@ def recover_migration(runtime):
 
 
 def switch_and_migrate(runtime, previous, target):
-    with lock(runtime, 'commands.lock', timeout=20) as gate:
+    with command_gate(runtime) as gate:
         record = runtime / 'migration.json'
         require(not record.exists() and not record.is_symlink(), 'An unfinished migration needs recovery.')
         write_owned(record, json.dumps({'previous': str(previous), 'target': str(target)}) + '\n', 0o600)

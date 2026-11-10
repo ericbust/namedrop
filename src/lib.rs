@@ -28,6 +28,7 @@ mod lifecycle;
 pub mod linux_sandbox;
 mod message;
 mod pane_effects;
+mod pointer;
 #[doc(hidden)]
 pub mod reminder;
 pub use reminder::execute_reminder_operation;
@@ -37,6 +38,7 @@ mod runtime;
 mod shortcuts;
 mod shown_roster;
 mod spaces;
+pub mod status_queue;
 mod store;
 pub mod subagent;
 pub use hook_runs::record_hook_run;
@@ -80,6 +82,7 @@ pub(crate) use install::{
 pub use installed_runtime::command_guard as runtime_command_guard;
 #[doc(hidden)]
 pub use installed_runtime::executable as runtime_executable;
+pub use installed_runtime::reexec_if_replaced as runtime_reexec_if_replaced;
 #[doc(hidden)]
 pub use installed_runtime::validate_update_manifest;
 pub use integration::{

@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/delivered.rs"]
+mod delivered;
 #[path = "support/dispatch.rs"]
 mod dispatch;
 
@@ -106,7 +108,7 @@ impl FakeHerdr {
             .rev()
             .find(|(pane, _)| pane == pane_id)
             .unwrap_or_else(|| panic!("no envelope was dispatched to {pane_id}"));
-        serde_json::from_str(envelope).unwrap()
+        delivered::envelope_of(envelope)
     }
 }
 

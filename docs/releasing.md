@@ -80,7 +80,7 @@ CI runs formatting, Clippy, the tests, crate packaging and archive building on G
 
 ## Live-update compatibility
 
-`runtime.json` is a promise about compatibility. Keep `state_schema` and `collaboration_protocol` matching the store and the protocol. Increase `live_upgrade_epoch` whenever old in-flight commands, cached instructions, hook behavior or permission rules can't safely run alongside the new runtime. Only list a schema in `live_migrate_from` if its migration runs behind the command gate (`command_gate: 1`). Keep the v1 stable launcher, and route host startup, actions and events through `scripts/run.sh`; changing that launcher protocol needs a migration.
+`runtime.json` is a promise about compatibility. Keep `state_schema` and `collaboration_protocol` matching the store and the protocol. Increase `live_upgrade_epoch` whenever old in-flight commands, cached instructions, hook behavior or permission rules can't safely run alongside the new runtime. Only list a schema in `live_migrate_from` if its migration runs behind the command gate (`command_gate: 1`). Keep `helper_gate: 1` while every background helper holds the command gate only around each job. An update stops a status worker only from a release without it. Keep the v1 stable launcher, and route host startup, actions and events through `scripts/run.sh`; changing that launcher protocol needs a migration.
 
 Run `cargo test --locked --test seamless_updates` and `cargo test --locked --test update`, which runs `tests/update_lifecycle.py`. The first one runs `tests/live_schema.py`, which tests upgrades from releases that use the command gate on every platform, from older releases without it on macOS only, and on Linux checks that a release without the gate is refused and left unchanged.
 

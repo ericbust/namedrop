@@ -371,7 +371,7 @@ fn coordination_migration_and_reopen() {
             .unwrap()
             .schema_version()
             .unwrap(),
-        7
+        8
     );
     let after = f.snapshot();
     // Migration is additive: every legacy row keeps its rows and its existing

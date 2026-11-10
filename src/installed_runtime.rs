@@ -68,6 +68,26 @@ pub fn command_guard(
     Ok(Some(guard))
 }
 
+/// A long-lived process that holds the command gate calls this right after
+/// taking it: once an update has selected another runtime, it runs the
+/// selected one with its own arguments instead of touching migrated state.
+/// It returns only when this process is the selected runtime, or with the
+/// reason the selected one could not start.
+pub fn reexec_if_replaced(state: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    let launcher = state.join("runtime/namedrop");
+    if launcher.is_file()
+        && fs::canonicalize(state.join("runtime/current/namedrop")).ok()
+            != std::env::current_exe().and_then(fs::canonicalize).ok()
+    {
+        return Err(std::process::Command::new(launcher)
+            .args(std::env::args_os().skip(1))
+            .exec()
+            .to_string());
+    }
+    Ok(())
+}
+
 pub(crate) fn directory() -> Result<Option<PathBuf>, String> {
     let executable = std::env::current_exe()
         .and_then(fs::canonicalize)

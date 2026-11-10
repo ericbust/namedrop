@@ -792,7 +792,7 @@ fn real_schema_six_fixture_migrates_live_without_relabeling() {
     assert!(connection.prepare("SELECT * FROM reminders").is_err());
     drop(connection);
     let mut store = StateStore::open(&state).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 7);
+    assert_eq!(store.schema_version().unwrap(), 8);
     store
         .transaction(|tx| {
             assert!(tx.worktree_state(&ns())?.unwrap().activated);
