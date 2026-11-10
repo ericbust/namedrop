@@ -206,26 +206,28 @@ impl Space {
             herdr,
             ids: SequenceIds(AtomicU64::new(1)),
         };
-        for (address, host, pane) in [
-            ("address-lead", AgentRuntime::Codex, "pane-lead"),
-            (
-                "address-reviewer",
-                AgentRuntime::ClaudeCode,
-                "pane-reviewer",
-            ),
-        ] {
-            let runtime = space.runtime(pane);
-            let challenge =
-                issue_registration_challenge(&PaneAddressId::new(address), host, &runtime).unwrap();
-            execute_integration_operation(
-                "register",
-                json!({"runtime":host,"protocol_version":"collab/v1","nonce":challenge.nonce,
-                       "capabilities":complete_capability_profile()}),
-                &runtime,
-            )
-            .unwrap();
-        }
+        space.register("address-lead", AgentRuntime::Codex, "pane-lead");
+        space.register(
+            "address-reviewer",
+            AgentRuntime::ClaudeCode,
+            "pane-reviewer",
+        );
         space
+    }
+
+    /// The pane's current session completes the registration challenge, as
+    /// onboarding has it do once the session is idle.
+    fn register(&self, address: &str, host: AgentRuntime, pane: &str) {
+        let runtime = self.runtime(pane);
+        let challenge =
+            issue_registration_challenge(&PaneAddressId::new(address), host, &runtime).unwrap();
+        execute_integration_operation(
+            "register",
+            json!({"runtime":host,"protocol_version":"collab/v1","nonce":challenge.nonce,
+                   "capabilities":complete_capability_profile()}),
+            &runtime,
+        )
+        .unwrap();
     }
 
     fn runtime<'a>(
@@ -3330,6 +3332,21 @@ impl Space {
             .unwrap();
     }
 
+    /// Reconcile no longer finding the reviewer's pane, as when the person
+    /// closes it.
+    fn close_reviewer_pane(&self) {
+        StateStore::open(&self.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.unbind_pane(
+                    &namespace(),
+                    &PaneAddressId::new("address-reviewer"),
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 43),
+                )
+            })
+            .unwrap();
+    }
+
     fn retire_reviewer(&self) {
         StateStore::open(&self.directory.state)
             .unwrap()
@@ -3487,6 +3504,110 @@ fn a_held_answer_whose_session_is_gone_warns_once_until_acknowledged() {
         );
         assert_eq!(space.disposition_warnings_ever().len(), 1, "{case}");
     }
+}
+
+/// Closing the pane ends the session that holds the answer, so the person is
+/// told, can acknowledge it, and is not told again.
+#[test]
+fn a_held_answer_whose_pane_is_closed_warns_once_until_acknowledged() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    assert!(space.disposition_warnings_ever().is_empty());
+    space.close_reviewer_pane();
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "closing the pane warned nothing");
+    assert!(
+        warnings[0][0].contains("held its answer")
+            && warnings[0][0].contains("its session has ended"),
+        "{warnings:?}"
+    );
+    space
+        .acknowledge(&ask)
+        .expect("a closed pane leaves nobody to answer");
+    assert!(space.unresolved_disposition_warnings().is_empty());
+    space.observe_settled();
+    assert!(
+        space.unresolved_disposition_warnings().is_empty(),
+        "an acknowledged warning came back: {:?}",
+        space.unresolved_disposition_warnings()
+    );
+    assert_eq!(space.disposition_warnings_ever().len(), 1);
+}
+
+/// A pane that shows no session for a moment, as while Herdr restarts, and
+/// then the same session again, can still answer: the warning goes away and
+/// the held answer arrives.
+#[test]
+fn a_held_answer_whose_session_comes_back_stops_warning_and_still_arrives() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    space.settle_attempt(&ask);
+    space.observe_reviewer_session("");
+    assert_eq!(space.unresolved_disposition_warnings().len(), 1);
+    space.observe_reviewer_session("session-reviewer");
+    assert!(
+        space.unresolved_disposition_warnings().is_empty(),
+        "the session came back and is still warned about: {:?}",
+        space.unresolved_disposition_warnings()
+    );
+    space.register(
+        "address-reviewer",
+        AgentRuntime::ClaudeCode,
+        "pane-reviewer",
+    );
+    let inbox =
+        execute_integration_operation("delivery.inbox", json!({}), &space.runtime("pane-reviewer"))
+            .unwrap();
+    assert_eq!(
+        inbox["envelopes"][0]["control"]["attempt_id"], attempt,
+        "the held delivery left the session's inbox"
+    );
+    space.woken_by_first_task("It printed first-done.");
+    assert_eq!(space.answers("pane-lead"), ["It printed first-done."]);
+    assert!(
+        space.unresolved_disposition_warnings().is_empty(),
+        "{:?}",
+        space.unresolved_disposition_warnings()
+    );
+}
+
+/// A session that ended and was then replaced on its name can't be resumed,
+/// so the warning says it was replaced.
+#[test]
+fn a_held_answer_whose_ended_session_is_replaced_says_so() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    space.observe_reviewer_session("");
+    space.observe_reviewer_session("session-replaced");
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0][0].contains("a new session is registered on its name")
+            && !warnings[0][0].contains("has ended"),
+        "{warnings:?}"
+    );
+}
+
+/// Channels shows a held answer as still being worked on only until the
+/// person is told it can never arrive.
+#[test]
+fn a_held_leg_stops_working_once_its_answer_is_lost() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    assert_eq!(space.reviewer_leg(), "working");
+    space.observe_reviewer_session("");
+    assert_eq!(space.unresolved_disposition_warnings().len(), 1);
+    assert_eq!(
+        space.reviewer_leg(),
+        "completed",
+        "Channels says the agent is still working on an answer it warned is lost"
+    );
+    space.acknowledge(&ask).unwrap();
+    assert_eq!(space.reviewer_leg(), "completed");
 }
 
 /// A held delivery whose woken turn ends with no final message went
