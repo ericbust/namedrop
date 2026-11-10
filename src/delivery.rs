@@ -1130,17 +1130,29 @@ fn starts_with(line: &[Cell], character: char) -> bool {
 }
 
 /// Claude Code draws its box as a `❯` line under a rule, with any further
-/// lines of the draft down to the rule that closes it. In shell mode the box
-/// starts with `!` instead.
+/// lines of the draft, indented, down to the rule that closes it. In shell
+/// mode the box starts with `!` instead.
 fn claude_code_box(lines: &[Vec<Cell>]) -> Option<Found<'_>> {
     let rule = |line: &Vec<Cell>| starts_with(line, '\u{2500}');
     let shell_mode = |line: &[Cell]| {
         starts_with(line, '!') && line.get(1).is_some_and(|cell| cell.character == '\u{a0}')
     };
-    let open = (1..lines.len()).rev().find(|&index| {
+    let Some(open) = (1..lines.len()).rev().find(|&index| {
         (starts_with(&lines[index], '\u{276f}') || shell_mode(&lines[index]))
             && rule(&lines[index - 1])
-    })?;
+    }) else {
+        // A draft taller than the pane pushes the box's top off the screen,
+        // which then starts inside the box: every line above the first rule
+        // is a line of the draft.
+        let close = lines.iter().position(rule)?;
+        let blank = |line: &Vec<Cell>| line.iter().all(|cell| cell.character.is_whitespace());
+        let drafted =
+            |line: &Vec<Cell>| line.len() > 2 && line[..2].iter().all(|cell| cell.character == ' ');
+        let inside = &lines[..close];
+        return (inside.iter().any(drafted)
+            && inside.iter().all(|line| drafted(line) || blank(line)))
+        .then(|| Found::Box(inside.iter().flatten().collect()));
+    };
     if shell_mode(&lines[open]) {
         return Some(Found::ShellMode);
     }
@@ -1280,6 +1292,27 @@ mod prompt_box_tests {
         include_str!("../tests/fixtures/between-turns/codex-0.167.0-idle-empty.ansi");
     const CODEX_DRAFT: &str =
         include_str!("../tests/fixtures/between-turns/codex-0.167.0-idle-draft.ansi");
+    /// Claude Code 2.1.322 and Codex 0.167.0 with a long bracketed paste
+    /// folded into a placeholder.
+    const PASTE: &str =
+        include_str!("../tests/fixtures/between-turns/claude-2.1.322-paste-placeholder.ansi");
+    const CODEX_PASTE: &str =
+        include_str!("../tests/fixtures/between-turns/codex-0.167.0-paste-placeholder.ansi");
+    /// Claude Code 2.1.322 with an 80-line draft: the box shows its last
+    /// lines, the first of them on the `❯` line.
+    const TALL_DRAFT: &str =
+        include_str!("../tests/fixtures/between-turns/claude-2.1.322-tall-draft.ansi");
+
+    /// `screen` from the line after its box's `❯` line, as a pane too short for
+    /// the box shows it.
+    fn below_the_box_top(screen: &str) -> String {
+        screen
+            .lines()
+            .skip_while(|line| !line.starts_with('\u{276f}'))
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     /// The box line of `WAITING_EMPTY` swapped for `line`, as Claude Code
     /// 2.1.322 drew it in the same box.
@@ -1329,6 +1362,35 @@ mod prompt_box_tests {
         let second_line =
             WAITING_EMPTY.replacen("\u{276f}\u{a0}", "\u{276f}\u{a0}\n  and a second line", 1);
         assert_eq!(prompt_box(&second_line, CLAUDE), PromptBox::Draft);
+    }
+
+    #[test]
+    fn a_pasted_text_placeholder_is_a_draft() {
+        assert_eq!(prompt_box(PASTE, CLAUDE), PromptBox::Draft);
+        assert_eq!(
+            prompt_box(CODEX_PASTE, crate::AgentRuntime::Codex),
+            PromptBox::Draft
+        );
+    }
+
+    #[test]
+    fn a_draft_taller_than_the_screen_is_a_draft() {
+        assert_eq!(prompt_box(TALL_DRAFT, CLAUDE), PromptBox::Draft);
+        // In a pane shorter than the box, its top is off the screen.
+        let below_the_top = below_the_box_top(TALL_DRAFT);
+        assert!(
+            below_the_top.starts_with("  tall line 67"),
+            "{below_the_top}"
+        );
+        assert_eq!(prompt_box(&below_the_top, CLAUDE), PromptBox::Draft);
+        // Other screens that start above a rule are not a draft.
+        for screen in [
+            "\u{2500}\u{2500}\n  Select model\n",
+            "\n\u{2500}\u{2500}\n",
+            "\u{25cf} answer\n  more of it\n\u{2500}\u{2500}\n",
+        ] {
+            assert_eq!(prompt_box(screen, CLAUDE), PromptBox::Unseen, "{screen:?}");
+        }
     }
 
     #[test]

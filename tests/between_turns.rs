@@ -447,6 +447,26 @@ fn an_idle_claude_session_with_a_draft_gets_nothing_typed_into_it() {
 }
 
 #[test]
+fn an_idle_claude_session_whose_draft_fills_the_pane_gets_nothing_typed_into_it() {
+    // An 80-line draft, as Claude Code 2.1.322 draws it, in a pane too short
+    // for the box: the screen starts inside the box, below its `❯` line.
+    let tall = include_str!("fixtures/between-turns/claude-2.1.322-tall-draft.ansi");
+    let below_the_top: String = tall
+        .lines()
+        .skip_while(|line| !line.starts_with('\u{276f}'))
+        .skip(1)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for screen in [tall.to_owned(), below_the_top] {
+        let fixture = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+        fixture.screen(Some(&screen));
+        let (report, typed) = fixture.drain_report();
+        assert_eq!(typed, Vec::<String>::new(), "{screen}");
+        assert_eq!(report.draft_held.len(), 1, "{report:?}");
+    }
+}
+
+#[test]
 fn an_idle_claude_session_with_an_empty_box_takes_the_mail() {
     // The box as Claude Code leaves it after a turn: the suggested next
     // prompt drawn faint, with the cursor on its first letter.
