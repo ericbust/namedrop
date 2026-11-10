@@ -1,4 +1,5 @@
 use super::*;
+use crate::final_reply::AnswerClaim;
 
 pub(super) const ITEM_ID_PREFIX: &str = "attention-agent-disposition-";
 
@@ -16,9 +17,8 @@ struct MissingDispositionFacts {
     recipient_retired: bool,
     recipient_session_now: RecipientSession,
     tracked: Option<TrackedRequest>,
-    /// The recipient's session holds its answer while its background work
-    /// runs.
-    held: bool,
+    /// What the recipient session's final-reply claim says about its answer.
+    claim: AnswerClaim,
 }
 
 pub(super) enum RecipientSession {
@@ -53,8 +53,10 @@ impl RecipientSession {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum SessionGone {
+/// Why a session can never answer again, as Channels names it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionGone {
     Retired,
     Replaced,
     Ended,
@@ -97,13 +99,15 @@ fn unanswered(facts: &MissingDispositionFacts) -> Option<Unanswered> {
         if facts.judged_elsewhere {
             return None;
         }
-        if !facts.held {
-            return Some(Unanswered::Untracked);
-        }
-        return facts
+        let gone = facts
             .recipient_session_now
-            .gone(&facts.recipient_session, facts.recipient_retired)
-            .map(Unanswered::HeldAnswerLost);
+            .gone(&facts.recipient_session, facts.recipient_retired);
+        return match facts.claim {
+            AnswerClaim::Neither => Some(Unanswered::Untracked),
+            // Its Stop has not decided yet, and judges it again when it does.
+            AnswerClaim::Deciding => gone.map(|_| Unanswered::Untracked),
+            AnswerClaim::Held => gone.map(Unanswered::HeldAnswerLost),
+        };
     };
     if !tracked.is_current_request {
         return None;
@@ -132,9 +136,9 @@ impl Unanswered {
             Self::RecipientRetired => "The agent that received this tracked request was retired before it answered. Nothing can answer it now. Review it, then delivery acknowledge clears this warning.".to_owned(),
             Self::RecipientSessionReplaced => "The agent session that received this tracked request is gone and a new session is registered on its name. The new session cannot answer for it. Review it, then delivery acknowledge clears this warning.".to_owned(),
             Self::CoordinationResolved { outcome } => format!("This tracked request was still unanswered when its coordination was resolved {outcome}. The worker's exact session can still answer it from delivery.inbox. Once that agent is retired or its session was replaced, delivery acknowledge clears this warning."),
-            Self::HeldAnswerLost(SessionGone::Retired) => "The agent held its answer to this message while its background work ran, and was retired before that work ended. Nothing can answer it now. Review it, then delivery acknowledge clears this warning.".to_owned(),
-            Self::HeldAnswerLost(SessionGone::Replaced) => "The agent held its answer to this message while its background work ran, and its session is gone: a new session is registered on its name and cannot answer for it. Review it, then delivery acknowledge clears this warning.".to_owned(),
-            Self::HeldAnswerLost(SessionGone::Ended) => "The agent held its answer to this message while its background work ran, and its session has ended. If that session is resumed it can still answer from delivery.inbox. Otherwise review it, then delivery acknowledge clears this warning.".to_owned(),
+            Self::HeldAnswerLost(SessionGone::Retired) => "The agent was retired before it finished working on this message, so its answer can't arrive. Ask again if you still need one. After you review it, delivery acknowledge clears this warning.".to_owned(),
+            Self::HeldAnswerLost(SessionGone::Replaced) => "A new session took the agent's name before the old one finished working on this message, so its answer can't arrive. Ask again if you still need one. After you review it, delivery acknowledge clears this warning.".to_owned(),
+            Self::HeldAnswerLost(SessionGone::Ended) => "The agent's session ended before it finished working on this message, because its pane was closed or the agent exited. If you resume that session, its answer can still arrive. Otherwise ask again if you still need one. After you review it, delivery acknowledge clears this warning.".to_owned(),
         }
     }
 }
@@ -231,11 +235,11 @@ impl StateTransaction<'_> {
         Ok(())
     }
 
-    /// Brings ND-DELIVERY-003 in line with a final-reply claim that just
-    /// ended unsettled. A held answer withdraws the warning a settle raised
-    /// before the Stop held it, and is judged afresh, so a session already
-    /// gone still warns. Any other ending is judged as at settle.
-    pub(crate) fn judge_left_claim(
+    /// Brings ND-DELIVERY-003 in line with a final-reply claim its Stop or a
+    /// later prompt just decided. A held answer withdraws any warning raised
+    /// before, and is judged afresh, so a session already gone still warns.
+    /// Any other ending is judged as at settle.
+    pub(crate) fn judge_decided_claim(
         &mut self,
         ns: &StateNamespace,
         attempt: &crate::DeliveryAttemptId,
@@ -258,19 +262,109 @@ impl StateTransaction<'_> {
     }
 
     /// Judges a settled attempt again. A held answer's open warning is
-    /// withdrawn first, since why its session can't answer, or whether it
-    /// can, may have changed. A warning the person acknowledged, or one on
-    /// an answer not held, stays as it is.
+    /// withdrawn first, unless it already says what is true now, since why
+    /// its session can't answer, or whether it can, may have changed. A
+    /// warning the person acknowledged, or one on an answer not held, stays
+    /// as it is.
     fn judge_afresh(
         &mut self,
         ns: &StateNamespace,
         attempt: &crate::DeliveryAttemptId,
         by: &MutationAttribution,
     ) -> Result<(), StoreError> {
-        if self.missing_disposition_facts(ns, attempt)?.held {
+        let facts = self.missing_disposition_facts(ns, attempt)?;
+        if facts.claim == AnswerClaim::Held {
+            if self.open_warning(ns, attempt)? == unanswered(&facts).map(|reason| reason.summary())
+            {
+                return Ok(());
+            }
             self.withdraw_open_warning(ns, attempt, by)?;
         }
         self.flag_missing_disposition(ns, attempt, by)
+    }
+
+    /// Judges afresh every open ND-DELIVERY-003 warning in every space, so
+    /// one an earlier release raised on a held answer is withdrawn while its
+    /// session can still answer, and says why when it can't.
+    pub(crate) fn judge_open_disposition_warnings(
+        &mut self,
+        by: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        let open = {
+            let mut statement = self.transaction.prepare(
+                "SELECT i.session_socket_id, i.worktree_id, i.source_id
+                 FROM attention_items i
+                 WHERE i.source_kind = ?1 AND i.resolved_at_ms IS NULL
+                   AND EXISTS (SELECT 1 FROM delivery_attempt_state s
+                       WHERE s.session_socket_id = i.session_socket_id
+                         AND s.worktree_id = i.worktree_id
+                         AND s.attempt_id = i.source_id AND s.state = 'settled')",
+            )?;
+            statement
+                .query_map(
+                    params![crate::AttentionSourceKind::AgentDisposition.as_str()],
+                    |row| {
+                        Ok((
+                            StateNamespace::for_space(
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                            ),
+                            crate::DeliveryAttemptId::new(row.get::<_, String>(2)?),
+                        ))
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (ns, attempt) in open {
+            self.judge_afresh(&ns, &attempt, by)?;
+        }
+        Ok(())
+    }
+
+    /// Why a held answer to `attempt` can never arrive, as its warning says.
+    pub(super) fn held_answer_lost(
+        &self,
+        ns: &StateNamespace,
+        attempt: &crate::DeliveryAttemptId,
+    ) -> Result<Option<SessionGone>, StoreError> {
+        let exists: bool = self.transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM delivery_attempts
+             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND attempt_id = ?3)",
+            params![ns.session_socket_id, ns.space_id.as_str(), attempt.as_str()],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(None);
+        }
+        Ok(
+            match unanswered(&self.missing_disposition_facts(ns, attempt)?) {
+                Some(Unanswered::HeldAnswerLost(gone)) => Some(gone),
+                _ => None,
+            },
+        )
+    }
+
+    /// The summary of the attempt's open warning, if it has one.
+    fn open_warning(
+        &self,
+        ns: &StateNamespace,
+        attempt: &crate::DeliveryAttemptId,
+    ) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT summary FROM attention_items
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2
+                   AND source_kind = ?3 AND source_id = ?4 AND resolved_at_ms IS NULL",
+                params![
+                    ns.session_socket_id,
+                    ns.space_id.as_str(),
+                    crate::AttentionSourceKind::AgentDisposition.as_str(),
+                    attempt.as_str()
+                ],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
 
     /// Deletes the open warning rather than resolving it: a resolved one
@@ -480,9 +574,9 @@ impl StateTransaction<'_> {
                 || self
                     .tracked_message(ns, &message)?
                     .is_some_and(|found| found.home != *ns));
-        let held = crate::final_reply::answer_held(self.state_directory, ns, &session, attempt);
+        let claim = crate::final_reply::answer_claim(self.state_directory, ns, &session, attempt);
         Ok(MissingDispositionFacts {
-            held,
+            claim,
             disposed: self.delivery_disposition_exists(ns, attempt)?,
             judged_elsewhere,
             recipient_session: session,
@@ -569,14 +663,14 @@ mod tests {
             recipient_retired: false,
             recipient_session_now: RecipientSession::Observed(session("session-worker")),
             tracked,
-            held: false,
+            claim: AnswerClaim::Neither,
         }
     }
 
     #[test]
     fn a_held_answer_is_owed_only_once_its_session_is_gone() {
         let mut held = facts(None);
-        held.held = true;
+        held.claim = AnswerClaim::Held;
         assert_eq!(unanswered(&held), None, "the answer may still arrive");
         held.recipient_session_now = RecipientSession::Unknown;
         assert_eq!(
@@ -604,10 +698,29 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_its_stop_has_not_decided_is_owed_only_once_its_session_is_gone() {
+        let mut deciding = facts(None);
+        deciding.claim = AnswerClaim::Deciding;
+        assert_eq!(unanswered(&deciding), None, "its Stop may still answer");
+        deciding.recipient_session_now = RecipientSession::Unknown;
+        assert_eq!(unanswered(&deciding), None);
+        for now in [
+            RecipientSession::Ended,
+            RecipientSession::Observed(session("session-worker-2")),
+        ] {
+            deciding.recipient_session_now = now;
+            assert_eq!(unanswered(&deciding), Some(Unanswered::Untracked));
+        }
+        deciding.recipient_session_now = RecipientSession::Observed(session("session-worker"));
+        deciding.recipient_retired = true;
+        assert_eq!(unanswered(&deciding), Some(Unanswered::Untracked));
+    }
+
+    #[test]
     fn an_ended_session_changes_nothing_for_tracked_work() {
         let mut ended = facts(Some(awaited()));
         ended.recipient_session_now = RecipientSession::Ended;
-        ended.held = true;
+        ended.claim = AnswerClaim::Held;
         assert_eq!(unanswered(&ended), None);
     }
 

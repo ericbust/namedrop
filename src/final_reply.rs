@@ -706,25 +706,40 @@ fn read_claims(directory: &Path) -> Vec<Claim> {
     serde_json::from_slice(&bytes).unwrap_or_default()
 }
 
-/// Whether `session` left its answer to `attempt` held while its background
-/// work runs. It reads without the lock.
-pub(crate) fn answer_held(
+/// What a session's claim says about its answer to one attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AnswerClaim {
+    /// The claim waits for its turn's Stop to decide whether the final
+    /// message answers.
+    Deciding,
+    /// The Stop held the answer while background work or a helper runs.
+    Held,
+    /// No claim, or one the Stop settled or left unanswered.
+    Neither,
+}
+
+/// What `session`'s claim says about its answer to `attempt`. It reads
+/// without the lock.
+pub(crate) fn answer_claim(
     state: &Path,
     namespace: &crate::StateNamespace,
     session: &crate::AgentSessionId,
     attempt: &crate::DeliveryAttemptId,
-) -> bool {
-    read_claims(&session_directory(
+) -> AnswerClaim {
+    let claims = read_claims(&session_directory(
         state,
         &namespace.session_socket_id,
         session.as_str(),
-    ))
-    .iter()
-    .any(|claim| {
-        claim.attempt_id == *attempt
-            && claim.namespace == *namespace
-            && claim.state == ClaimState::Left(LeaveReason::Held)
-    })
+    ));
+    let state = claims
+        .iter()
+        .find(|claim| claim.attempt_id == *attempt && claim.namespace == *namespace)
+        .map(|claim| claim.state);
+    match state {
+        Some(ClaimState::Open) => AnswerClaim::Deciding,
+        Some(ClaimState::Left(LeaveReason::Held)) => AnswerClaim::Held,
+        _ => AnswerClaim::Neither,
+    }
 }
 
 impl Claims {
@@ -757,16 +772,17 @@ impl Claims {
         })
     }
 
-    /// The claims this call left unsettled, other than by a failed settle,
-    /// which warns on its own.
-    fn newly_left(&self) -> Vec<(crate::StateNamespace, crate::DeliveryAttemptId)> {
+    /// The claims this call decided, other than by a failed settle, which
+    /// warns on its own. While a claim waits for its Stop the settle raises
+    /// nothing for its attempt, so every way out of that is judged here.
+    fn newly_decided(&self) -> Vec<(crate::StateNamespace, crate::DeliveryAttemptId)> {
         self.claims
             .iter()
             .filter(|claim| {
-                matches!(claim.state, ClaimState::Left(reason) if reason != LeaveReason::OperationFailed)
-                    && !self
-                        .read
-                        .contains(&(claim.attempt_id.clone(), claim.state))
+                !matches!(
+                    claim.state,
+                    ClaimState::Open | ClaimState::Left(LeaveReason::OperationFailed)
+                ) && !self.read.contains(&(claim.attempt_id.clone(), claim.state))
             })
             .map(|claim| (claim.namespace.clone(), claim.attempt_id.clone()))
             .collect()
@@ -906,7 +922,7 @@ impl Claims {
     }
 
     /// Saves the claims and releases the lock. Returns the claims this call
-    /// left unsettled, once the file says so.
+    /// decided, once the file says so.
     fn save(mut self, now_ms: u64) -> Vec<(crate::StateNamespace, crate::DeliveryAttemptId)> {
         self.claims
             .retain(|claim| claim.updated_at_ms.saturating_add(KEEP_MS) > now_ms);
@@ -942,29 +958,29 @@ impl Claims {
                 file.sync_all()
             });
         if written.is_ok() && fs::rename(next, self.directory.join("claims.json")).is_ok() {
-            self.newly_left()
+            self.newly_decided()
         } else {
             Vec::new()
         }
     }
 }
 
-/// Brings the ND-DELIVERY-003 warning of each claim a call left unsettled in
-/// line with the claims it saved. The idle settle may judge the delivery
-/// before or after the Stop, from another process.
-fn judge_left(
+/// Brings the ND-DELIVERY-003 warning of each claim a call decided in line
+/// with the claims it saved. The idle settle may judge the delivery before or
+/// after the Stop, from another process.
+fn judge_decided(
     state: &Path,
-    left: &[(crate::StateNamespace, crate::DeliveryAttemptId)],
+    decided: &[(crate::StateNamespace, crate::DeliveryAttemptId)],
     now_ms: u64,
 ) {
-    if left.is_empty() || !matches!(crate::StateStore::open_read_only(state), Ok(Some(_))) {
+    if decided.is_empty() || !matches!(crate::StateStore::open_read_only(state), Ok(Some(_))) {
         return;
     }
     let by = crate::MutationAttribution::new(crate::ActorKind::Plugin, "namedrop", now_ms);
     let _ = crate::StateStore::open(state).and_then(|mut store| {
         store.transaction(|transaction| {
-            left.iter().try_for_each(|(namespace, attempt)| {
-                transaction.judge_left_claim(namespace, attempt, &by)
+            decided.iter().try_for_each(|(namespace, attempt)| {
+                transaction.judge_decided_claim(namespace, attempt, &by)
             })
         })
     });
@@ -1236,7 +1252,7 @@ pub(crate) fn observe_prompt(
     }
     // The delivery whose work this notice finished is listed first.
     left_open.sort_by_key(|way_back| !way_back.finished);
-    judge_left(state, &claims.save(now_ms), now_ms);
+    judge_decided(state, &claims.save(now_ms), now_ms);
     Observed { armed, left_open }
 }
 
@@ -1430,6 +1446,11 @@ pub fn settle_at_stop(
             Verdict::Ignore => continue,
             Verdict::Leave(LeaveReason::Held) => {
                 claim.awaits = stop.awaited(claim);
+                // The person sees what the agent said at once. A failed note
+                // leaves the answer held all the same.
+                if claim.plan == Armed::NoReply(NoReplyCase::Relayed) {
+                    let _ = progress_note(state, &stop.session, claim, &stop.text.text, now_ms);
+                }
                 ClaimState::Left(LeaveReason::Held)
             }
             Verdict::Leave(reason) => ClaimState::Left(reason),
@@ -1455,7 +1476,7 @@ pub fn settle_at_stop(
         };
         claim.set(next, now_ms);
     }
-    judge_left(state, &claims.save(now_ms), now_ms);
+    judge_decided(state, &claims.save(now_ms), now_ms);
 }
 
 impl Claim {
@@ -1561,6 +1582,33 @@ fn relay(
     })
 }
 
+/// Posts a held Relayed claim's final message as a note that the agent is
+/// still working, leaving its delivery open.
+fn progress_note(
+    state: &Path,
+    session: &str,
+    claim: &Claim,
+    text: &str,
+    now_ms: u64,
+) -> Result<Option<crate::MessageId>, crate::StoreError> {
+    crate::StateStore::open(state)?.transaction(|transaction| {
+        transaction.post_progress_note(
+            &claim.namespace,
+            &crate::TerminalRelayEnd {
+                agent_session_id: crate::AgentSessionId::new(session),
+                attempt_id: claim.attempt_id.clone(),
+                turn_started_at_ms: claim.armed_at_ms,
+                ended_at_ms: now_ms,
+                text: text.to_owned(),
+            },
+            &claim.turn,
+            &crate::MutationAttribution::new(crate::ActorKind::Plugin, "namedrop", now_ms),
+        )
+    })
+}
+
 #[cfg(test)]
 #[path = "final_reply_tests.rs"]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::hold_answer;

@@ -29,9 +29,10 @@ the source to install instead of the requested one, which then stays the build u
 Frame = namedtuple("Frame", "at_ms level attention messages participants")
 AttentionRow = namedtuple("AttentionRow", "attention_id source_kind source_id subject_alias "
                                           "opened_at_ms summary")
-WireMessage = namedtuple("WireMessage", "message_id thread_id in_reply_to author kind body legs channel")
+WireMessage = namedtuple("WireMessage", "message_id thread_id in_reply_to author kind body legs channel progress_note")
 """legs: one "stage" or "stage/kind" per recipient, as in "completed/no_reply". channel: the
-routing state of a plain post, or None."""
+routing state of a plain post, or None. progress_note: the agent's words from a turn whose answer
+is still held, never the answer."""
 Participant = namedtuple("Participant", "address_id alias activity")
 """alias without the wire's leading @."""
 
@@ -54,7 +55,8 @@ def _stage(leg):
 def parse_message(wire):
     return WireMessage(wire.get("message_id"), wire.get("thread_id"), wire.get("in_reply_to"),
                        wire.get("author"), wire.get("kind"), _body(wire.get("body")),
-                       tuple(_stage(leg) for leg in wire.get("legs") or ()), wire.get("channel"))
+                       tuple(_stage(leg) for leg in wire.get("legs") or ()), wire.get("channel"),
+                       bool(wire.get("progress_note")))
 
 
 def parse_attention(wire):

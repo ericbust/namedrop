@@ -109,8 +109,8 @@ pub struct LegRow {
     pub acknowledged_at_ms: Option<i64>,
     pub disposition_kind: Option<String>,
     pub disposition_id: Option<String>,
-    /// Settled while its agent holds the answer for background work, and
-    /// the person was not warned that the answer can't arrive.
+    /// Settled while its agent holds the answer for background work or a
+    /// helper, and the person was not warned that the answer can't arrive.
     pub held: bool,
 }
 
@@ -167,6 +167,9 @@ pub struct AttentionRow {
     pub item: crate::AttentionItemRecord,
     pub subject_alias: Option<String>,
     pub message_id: Option<String>,
+    /// Why the held answer this ND-DELIVERY-003 warning is about can never
+    /// arrive.
+    pub answer_lost: Option<super::SessionGone>,
 }
 
 pub struct SpaceRow {
@@ -710,12 +713,12 @@ impl StateTransaction<'_> {
             && disposition_kind.is_none()
             && !warned
             && attempt.zip(session).is_some_and(|(attempt, session)| {
-                crate::final_reply::answer_held(
+                crate::final_reply::answer_claim(
                     self.state_directory,
                     namespace,
                     &crate::AgentSessionId::new(session),
                     &crate::DeliveryAttemptId::new(attempt),
-                )
+                ) == crate::final_reply::AnswerClaim::Held
             });
         Ok(LegRow {
             message_id: row.get(0)?,
@@ -1192,6 +1195,7 @@ impl StateTransaction<'_> {
                     item,
                     subject_alias,
                     message_id: row.get(8)?,
+                    answer_lost: None,
                 })
             },
         )?;
@@ -1233,6 +1237,7 @@ impl StateTransaction<'_> {
                         },
                         subject_alias: Some(row.get(6)?),
                         message_id: Some(message_id),
+                        answer_lost: None,
                     },
                     idle || body.trim_end().ends_with('?'),
                 ))
@@ -1243,6 +1248,14 @@ impl StateTransaction<'_> {
             .filter(|(_, high)| *high)
             .map(|(item, _)| item.item.id.clone())
             .collect();
+        for item in &mut attention {
+            if item.item.source_kind == crate::AttentionSourceKind::AgentDisposition {
+                item.answer_lost = self.held_answer_lost(
+                    namespace,
+                    &crate::DeliveryAttemptId::new(&item.item.source_id),
+                )?;
+            }
+        }
         attention.extend(relays.into_iter().map(|(item, _)| item));
         attention.sort_unstable_by(|left, right| {
             (

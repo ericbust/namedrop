@@ -107,7 +107,7 @@ mod coordination_ownership;
 pub(crate) mod coordination_review;
 pub mod dashboard;
 mod missing_disposition;
-pub(crate) use missing_disposition::LostSettle;
+pub(crate) use missing_disposition::{LostSettle, SessionGone};
 mod operator;
 pub(crate) use coordination::WakeReadiness;
 pub(crate) use coordination_bridge::TrackedMessage;
@@ -116,8 +116,9 @@ mod groups;
 mod handoff;
 mod terminal;
 mod terminal_relay;
+pub(crate) use terminal_relay::is_progress_note;
 #[cfg(test)]
-pub(crate) use terminal_relay::tests::seed_flagged_relay;
+pub(crate) use terminal_relay::tests::{seed_flagged_relay, seed_unanswered};
 
 pub struct StateStore {
     connection: Connection,

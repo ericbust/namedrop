@@ -71,7 +71,7 @@ def tracked_view(store, coordination_id):
 
 
 TRACKED_RED = ("coordination", "a tracked handoff's report reads as a red item until its delivery settles")
-HOLD_RED = ("agent_disposition", "an idle settle that beats the Stop holding the answer shows an agent that didn't answer until that Stop withdraws it")
+HOLD_RED = ("agent_disposition", "a held answer warns that it can't arrive while its session has ended, until that session comes back")
 
 
 def tracked_done(view):
@@ -228,8 +228,9 @@ def check_tracked(r):
                                                 ("new attention", new_items, 0)])]
 
 
-Held = namedtuple("Held", "claim dispositions relays posts helper_requests")
-"""What the store shows while the turn is held. posts: the holder's rows in the person's thread."""
+Held = namedtuple("Held", "claim dispositions relays posts helper_requests notes")
+"""What the store shows while the turn is held. posts: the holder's rows in the person's thread,
+other than notes: the progress notes its held turns posted there."""
 
 HOLD_WAIT = 150
 ANSWER_WAIT = 240
@@ -266,17 +267,23 @@ def held_snapshot(store, attempt, address, thread, helper_address, since):
                 _rows(store, "SELECT count(*) FROM collaboration_messages WHERE session_socket_id = ? AND "
                              "worktree_id = ? AND message_id = ?", "terminal-relay:" + attempt)[0][0],
                 _rows(store, "SELECT count(*) FROM collaboration_messages WHERE session_socket_id = ? AND "
-                             "worktree_id = ? AND thread_id = ? AND author_address_id = ?",
+                             "worktree_id = ? AND thread_id = ? AND author_address_id = ? AND "
+                             "message_id NOT LIKE 'progress-note:%'",
                       thread, address)[0][0],
                 _rows(store, "SELECT count(*) FROM collaboration_messages m JOIN message_recipients t USING "
                              "(session_socket_id, worktree_id, message_id) WHERE m.session_socket_id = ? AND "
                              "m.worktree_id = ? AND m.author_address_id = ? AND t.address_id = ? AND "
                              "m.created_at_ms >= ? AND m.in_reply_to IS NULL",
-                      address, helper_address, since)[0][0])
+                      address, helper_address, since)[0][0],
+                _rows(store, "SELECT count(*) FROM collaboration_messages WHERE session_socket_id = ? AND "
+                             "worktree_id = ? AND thread_id = ? AND author_address_id = ? AND "
+                             "message_id LIKE 'progress-note:%'",
+                      thread, address)[0][0])
 
 
 def judge_hold(label, held):
-    """While the turn is held: a request went out, and the person's thread stays silent."""
+    """While the turn is held: a request went out, and the person's thread shows the agent's words
+    as a progress note and no answer."""
     if held.claim is not None and (held.claim.startswith("done:") or held.claim == "left:no_final_text"):
         return Check(label + " hold", False, "{} hold: inconclusive, the turn was never held: claim {}, {} relay, "
                      "{} helper requests".format(label, held.claim, held.relays, held.helper_requests))
@@ -284,6 +291,7 @@ def judge_hold(label, held):
                                     ("dispositions", held.dispositions, 0),
                                     ("posted answer", held.relays, 0),
                                     ("posts in the thread", held.posts, 0),
+                                    ("progress notes", held.notes > 0, True),
                                     ("helper requests", held.helper_requests, 1)])
 
 

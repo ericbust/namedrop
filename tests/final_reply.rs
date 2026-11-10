@@ -360,10 +360,12 @@ impl Space {
         sent
     }
 
+    /// Every final message posted as the answer to the person's message.
     fn relayed(&self) -> Vec<Vec<String>> {
         self.rows(
             "SELECT message_id, thread_id, in_reply_to, body FROM collaboration_messages
-             WHERE grammar_version='terminal-relay/v1' ORDER BY created_at_ms, rowid",
+             WHERE grammar_version='terminal-relay/v1' AND message_id LIKE 'terminal-relay:%'
+             ORDER BY created_at_ms, rowid",
         )
     }
 
@@ -3430,7 +3432,10 @@ fn a_held_answer_raises_no_warning_whichever_comes_first() {
     let ask = space.armed_ask();
     let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
     space.settle_attempt(&ask);
-    assert_eq!(space.unresolved_disposition_warnings().len(), 1);
+    assert!(
+        space.disposition_warnings_ever().is_empty(),
+        "the settle warned before the Stop decided"
+    );
     space.append_transcript(&recorded_turn("prompt-start", CLAUDE.1));
     space.reviewer_stop(CLAUDE.1, "STARTED", &["task-first"], &space.transcript());
     assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
@@ -3457,17 +3462,17 @@ fn a_held_answer_whose_session_is_gone_warns_once_until_acknowledged() {
         (
             "replaced",
             |space| space.observe_reviewer_session("session-replaced"),
-            "a new session is registered on its name",
+            "A new session took the agent's name",
         ),
         (
             "retired",
             Space::retire_reviewer,
-            "was retired before that work ended",
+            "The agent was retired before it finished",
         ),
         (
             "ended",
             |space| space.observe_reviewer_session(""),
-            "its session has ended",
+            "The agent's session ended before it finished",
         ),
     ];
     for (case, gone, says) in cases {
@@ -3483,7 +3488,7 @@ fn a_held_answer_whose_session_is_gone_warns_once_until_acknowledged() {
         let warnings = space.unresolved_disposition_warnings();
         assert_eq!(warnings.len(), 1, "{case}: {warnings:?}");
         assert!(
-            warnings[0][0].contains("held its answer") && warnings[0][0].contains(says),
+            warnings[0][0].contains("answer can") && warnings[0][0].contains(says),
             "{case}: {warnings:?}"
         );
         assert!(
@@ -3518,8 +3523,8 @@ fn a_held_answer_whose_pane_is_closed_warns_once_until_acknowledged() {
     let warnings = space.unresolved_disposition_warnings();
     assert_eq!(warnings.len(), 1, "closing the pane warned nothing");
     assert!(
-        warnings[0][0].contains("held its answer")
-            && warnings[0][0].contains("its session has ended"),
+        warnings[0][0].contains("The agent's session ended")
+            && warnings[0][0].contains("its pane was closed"),
         "{warnings:?}"
     );
     space
@@ -3585,8 +3590,8 @@ fn a_held_answer_whose_ended_session_is_replaced_says_so() {
     let warnings = space.unresolved_disposition_warnings();
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(
-        warnings[0][0].contains("a new session is registered on its name")
-            && !warnings[0][0].contains("has ended"),
+        warnings[0][0].contains("A new session took the agent's name")
+            && !warnings[0][0].contains("session ended"),
         "{warnings:?}"
     );
 }
@@ -3643,6 +3648,352 @@ fn a_held_answer_that_arrives_later_never_warns() {
         "{:?}",
         space.disposition_warnings_ever()
     );
+}
+
+/// The idle settle can run a moment before the Stop decides. While the Stop
+/// has not decided, the agent going idle is no reason to warn: the Stop
+/// warns if its turn ends with no answer, and a session that is gone can't
+/// answer at all.
+#[test]
+fn an_answer_its_stop_has_not_decided_raises_no_warning_until_it_must() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    space.settle_attempt(&ask);
+    assert!(
+        space.disposition_warnings_ever().is_empty(),
+        "the settle warned before the Stop decided: {:?}",
+        space.disposition_warnings_ever()
+    );
+    space.append_transcript(&recorded_turn("prompt-start", CLAUDE.1));
+    space.reviewer_stop(CLAUDE.1, "STARTED", &["task-first"], &space.transcript());
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    assert!(
+        space.disposition_warnings_ever().is_empty(),
+        "{:?}",
+        space.disposition_warnings_ever()
+    );
+
+    let space = Space::new();
+    let ask = space.armed_ask();
+    space.settle_attempt(&ask);
+    space.stop("session-reviewer", CLAUDE, "");
+    assert_eq!(space.claims()[0]["state"], json!({"left":"no_final_text"}));
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "a turn with no answer warned nothing");
+    assert!(
+        warnings[0][0].contains("ended its turn without a reply"),
+        "{warnings:?}"
+    );
+
+    type Gone = fn(&Space);
+    let gone: [Gone; 3] = [
+        |space| space.observe_reviewer_session("session-replaced"),
+        |space| space.observe_reviewer_session(""),
+        Space::close_reviewer_pane,
+    ];
+    for (case, gone) in gone.into_iter().enumerate() {
+        let space = Space::new();
+        let ask = space.armed_ask();
+        space.settle_attempt(&ask);
+        gone(&space);
+        let warnings = space.unresolved_disposition_warnings();
+        assert_eq!(warnings.len(), 1, "case {case}: {warnings:?}");
+        assert!(
+            warnings[0][0].contains("ended its turn without a reply"),
+            "case {case}: {warnings:?}"
+        );
+    }
+}
+
+impl Space {
+    /// Every progress note, as (id, thread, in reply to, body).
+    fn notes(&self) -> Vec<Vec<String>> {
+        self.rows(
+            "SELECT message_id, thread_id, in_reply_to, body FROM collaboration_messages
+             WHERE message_id LIKE 'progress-note:%' ORDER BY created_at_ms, rowid",
+        )
+    }
+
+    fn snapshot(&self) -> Value {
+        let rows = StateStore::open(&self.directory.state)
+            .unwrap()
+            .dashboard_rows(&namespace())
+            .unwrap();
+        serde_json::to_value(namedrop::dashboard::snapshot::build(
+            &rows,
+            Some("namedrop/dashboard"),
+            1,
+        ))
+        .unwrap()
+    }
+
+    fn wire_message(&self, id: &str) -> Value {
+        self.snapshot()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["message_id"] == id)
+            .unwrap_or_else(|| panic!("{id} is not on the wire"))
+            .clone()
+    }
+
+    /// The reviewer's Stop of `turn`, in-process, whose prompt was the
+    /// notice of `notified`, with `running` started by it and still running.
+    fn notice_stop(&self, turn: &str, notified: &str, running: &[&str], text: &str) {
+        let running: Vec<String> = running.iter().map(|task| (*task).to_owned()).collect();
+        let stop = StopFacts {
+            session: "session-reviewer".to_owned(),
+            turn: HostTurn::from_ids(Some(turn), None),
+            running_tasks: running.clone(),
+            started_tasks: running,
+            notified_tasks: vec![notified.to_owned()],
+            read_turn: true,
+            text: FinalText::bounded(text),
+        };
+        settle_at_stop(&self.directory.state, "socket-a", &stop, 42, &mut |bound| {
+            self.run(bound)
+        });
+    }
+}
+
+/// While its answer to the person's message is held, the person sees the
+/// agent's final message at once, in the thread, marked as a note that it
+/// is still working. The note leaves the message open and wakes nobody, and
+/// the real answer still comes and closes it.
+#[test]
+fn a_held_answer_to_the_person_shows_the_agents_words_at_once_as_a_note() {
+    let space = Space::new();
+    let question = space.send_as_person("question", "@reviewer Run the build and report.", None);
+    let thread = question["thread_id"].as_str().unwrap().to_owned();
+    let question_id = question["message_id"].as_str().unwrap().to_owned();
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    space.stop_with("session-reviewer", CLAUDE, "The build is running.", true);
+    space.stop_with("session-reviewer", CLAUDE, "The build is running.", true);
+
+    let notes = space.notes();
+    assert_eq!(
+        notes.len(),
+        1,
+        "a retried Stop posted the note again: {notes:?}"
+    );
+    assert!(
+        notes[0][0].starts_with(&format!("progress-note:{attempt}:")),
+        "{notes:?}"
+    );
+    assert_eq!(
+        notes[0][1..],
+        [
+            thread.clone(),
+            question_id.clone(),
+            "The build is running.".to_owned()
+        ]
+    );
+    let note = space.wire_message(&notes[0][0]);
+    assert_eq!(note["progress_note"], true, "{note}");
+    assert_eq!(note["kind"], "reply");
+    assert_eq!(note["author"], "address-reviewer");
+    assert_eq!(note["legs"], json!([]));
+    assert!(
+        space
+            .wire_message(&question_id)
+            .get("progress_note")
+            .is_none()
+    );
+
+    assert!(
+        space.dispositions().is_empty(),
+        "the note closed the message"
+    );
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    let inbox =
+        execute_integration_operation("delivery.inbox", json!({}), &space.runtime("pane-reviewer"))
+            .unwrap();
+    assert_eq!(inbox["envelopes"][0]["control"]["attempt_id"], attempt);
+    assert!(space.unresolved_disposition_warnings().is_empty());
+    assert_eq!(space.snapshot()["attention"], json!([]));
+    assert_eq!(
+        space.rows(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM message_recipients
+             WHERE message_id LIKE 'progress-note:%'"
+        ),
+        [["0"]],
+        "a note was addressed to someone"
+    );
+    assert!(space.answers("pane-lead").is_empty());
+    assert_eq!(space.answers("pane-reviewer").len(), 1);
+
+    space.notice_stop(
+        "notice-turn-1",
+        "background-1",
+        &["background-2"],
+        "Tests next.",
+    );
+    let notes = space.notes();
+    assert_eq!(notes.len(), 2, "a second hold posted no note: {notes:?}");
+    assert_eq!(notes[1][3], "Tests next.");
+    assert!(space.dispositions().is_empty());
+
+    space.notice_stop("notice-turn-2", "background-2", &[], "The build passed.");
+    let relay = format!("terminal-relay:{attempt}");
+    assert_eq!(
+        space.relayed().last().unwrap(),
+        &[
+            relay.clone(),
+            thread,
+            question_id.clone(),
+            "The build passed.".to_owned()
+        ],
+        "an earlier note stood in for the answer"
+    );
+    assert_eq!(space.dispositions(), [vec![attempt, "no_reply".to_owned()]]);
+    assert_eq!(space.claims()[0]["state"], json!({"done":"no_replied"}));
+    assert_eq!(
+        space.wire_message(&question_id)["legs"][0]["stage"],
+        json!({"stage":"replied","reply_id":relay})
+    );
+    assert!(space.wire_message(&relay).get("progress_note").is_none());
+}
+
+/// A turn that ends waiting on a helper shows the person its final message
+/// as a note too. Naming the helper in it sends the helper nothing.
+#[test]
+fn a_hold_on_a_helper_shows_the_person_a_note_that_reaches_no_agent() {
+    let space = Space::new();
+    let question = space.send_as_person(
+        "question",
+        "@reviewer Is option B safe? Ask the lead.",
+        None,
+    );
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    dispatch::message(
+        "send",
+        json!({"request_id":"helper","source":"@lead Is option B safe?",
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-reviewer"),
+    )
+    .unwrap();
+    space.stop(
+        "session-reviewer",
+        CLAUDE,
+        "I asked @lead and will answer when it replies.",
+    );
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    let notes = space.notes();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes[0][2], question["message_id"].as_str().unwrap());
+    assert_eq!(
+        notes[0][3],
+        "I asked @lead and will answer when it replies."
+    );
+    assert_eq!(space.wire_message(&notes[0][0])["progress_note"], true);
+    assert_eq!(
+        space.answers("pane-lead"),
+        ["Is option B safe?"],
+        "the note reached the helper it names"
+    );
+    assert!(space.dispositions().is_empty());
+    assert!(space.unresolved_disposition_warnings().is_empty());
+
+    let answered = dispatch::message(
+        "reply",
+        bound_reply(
+            &space,
+            &ask,
+            "@operator Yes: the lead says option B is safe.",
+        ),
+        &space.runtime("pane-reviewer"),
+    )
+    .unwrap();
+    assert_eq!(answered["disposition"], "reply");
+    assert_eq!(space.dispositions(), [vec![attempt, "reply".to_owned()]]);
+}
+
+/// A held answer to another agent posts nothing in the thread, to save that
+/// agent the tokens.
+#[test]
+fn a_held_answer_to_an_agent_posts_no_note() {
+    let space = Space::new();
+    space.held_on_first_task();
+    assert!(space.notes().is_empty(), "{:?}", space.notes());
+    assert!(space.relayed().is_empty());
+}
+
+/// Channels tells a held answer from ordinary work, and a warning about a
+/// held answer that can never arrive from an ordinary unanswered one, with
+/// its cause.
+#[test]
+fn the_wire_marks_a_held_leg_and_says_why_a_held_answer_was_lost() {
+    let space = Space::new();
+    space.armed_ask();
+    let stage = |space: &Space| {
+        space.snapshot()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["legs"].as_array().unwrap().clone())
+            .rfind(|leg| leg["to"] == "address-reviewer")
+            .unwrap()["stage"]
+            .clone()
+    };
+    let working = stage(&space);
+    assert_eq!(working["stage"], "working");
+    assert!(working.get("answer_held").is_none(), "{working}");
+
+    type Gone = (&'static str, fn(&Space));
+    let cases: [Gone; 3] = [
+        ("replaced", |space| {
+            space.observe_reviewer_session("session-replaced")
+        }),
+        ("retired", Space::retire_reviewer),
+        ("ended", Space::close_reviewer_pane),
+    ];
+    for (cause, gone) in cases {
+        let space = Space::new();
+        let ask = space.held_on_first_task();
+        space.settle_attempt(&ask);
+        let held = stage(&space);
+        assert_eq!(
+            (&held["stage"], &held["answer_held"]),
+            (&json!("working"), &json!(true)),
+            "{held}"
+        );
+        gone(&space);
+        let attention = space.snapshot()["attention"].clone();
+        let card = attention
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|card| card["source_kind"] == "agent_disposition")
+            .unwrap_or_else(|| panic!("{cause}: {attention}"));
+        assert_eq!(card["answer_lost"], cause, "{card}");
+    }
+
+    let space = Space::new();
+    let ask = space.armed_ask();
+    space.stop("session-reviewer", CLAUDE, "");
+    space.settle_attempt(&ask);
+    let attention = space.snapshot()["attention"].clone();
+    let card = attention
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|card| card["source_kind"] == "agent_disposition")
+        .unwrap_or_else(|| panic!("{attention}"));
+    assert!(card.get("answer_lost").is_none(), "{card}");
 }
 
 /// The recorded busy turn's typed prompt and the notice Claude Code queued

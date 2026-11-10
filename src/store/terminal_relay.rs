@@ -3,6 +3,16 @@ use super::*;
 const GRAMMAR: &str = "terminal-relay/v1";
 const ANSWER_GRAMMAR: &str = "final-message/v1";
 const RELAY_ID_PREFIX: &str = "terminal-relay:";
+/// A held answer's progress note is stored as `terminal-relay/v1`, so it
+/// reads as the agent's words and never as the answer the relay looks for.
+const NOTE_ID_PREFIX: &str = "progress-note:";
+
+/// Whether a message row that reads as `final-message/v1` is a progress
+/// note, or a copy of one mirrored from another space.
+pub(crate) fn is_progress_note(message_id: &str) -> bool {
+    message_id.starts_with(NOTE_ID_PREFIX)
+        || message_id.starts_with("bridge:") && message_id.contains(&format!(":{NOTE_ID_PREFIX}"))
+}
 
 /// SQL for the grammar a message row reads as, with `message` as its table
 /// alias.
@@ -92,6 +102,14 @@ struct RelayAttempt {
     thread_id: String,
 }
 
+/// Where a turn's final message goes back to the person: the attempt, the
+/// message of theirs it answers, and the text to post, trimmed and bounded.
+struct RelayTarget {
+    attempt: RelayAttempt,
+    source: MessageId,
+    text: String,
+}
+
 impl StateTransaction<'_> {
     /// Whether the person sent the message an attempt delivers, so its final
     /// message goes back to them in the thread.
@@ -146,6 +164,121 @@ impl StateTransaction<'_> {
         attribution: &MutationAttribution,
     ) -> Result<Option<MessageId>, StoreError> {
         let ns = namespace_params(namespace);
+        let Some(target) = self.relay_target(namespace, ending)? else {
+            return Ok(None);
+        };
+        let attempt = &target.attempt;
+        let ended_at = to_i64(ending.ended_at_ms)?;
+        let at = MutationAttribution::new(
+            attribution.actor_kind,
+            &attribution.actor_id,
+            ending.ended_at_ms,
+        );
+        let message_id = MessageId::new(format!("{RELAY_ID_PREFIX}{}", ending.attempt_id.as_str()));
+        let replied = self.transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM collaboration_messages
+               WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?8)
+             OR EXISTS(SELECT 1 FROM collaboration_messages reply
+               WHERE reply.session_socket_id=?1 AND reply.worktree_id=?2 AND reply.thread_id=?3
+                 AND reply.author_address_id=?4 AND reply.author_kind='agent_session'
+                 AND reply.grammar_version NOT IN ('terminal-relay/v1','reminder/v1')
+                 AND (reply.in_reply_to IS NULL OR reply.in_reply_to=?9)
+                 AND reply.created_at_ms >= ?5 AND reply.created_at_ms <= ?6)
+             OR EXISTS(SELECT 1 FROM delivery_dispositions
+               WHERE session_socket_id=?1 AND worktree_id=?2 AND attempt_id=?7 AND disposition_kind='reply')",
+            params![ns[0], ns[1], attempt.thread_id, attempt.address_id,
+                to_i64(ending.turn_started_at_ms)?, ended_at, ending.attempt_id.as_str(),
+                message_id.as_str(), attempt.message_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if replied {
+            return Ok(None);
+        }
+        self.post_in_thread(namespace, &target, &message_id, ending, &at)?;
+        self.ensure_delivery_attempt_acknowledged(
+            namespace,
+            &ending.attempt_id,
+            &ending.agent_session_id,
+            &at,
+        )?;
+        if !self.delivery_disposition_exists(namespace, &ending.attempt_id)? {
+            self.record_no_reply_disposition(
+                namespace,
+                &ending.attempt_id,
+                &format!(
+                    "{}{}",
+                    AUTOMATIC_NO_REPLY_PREFIXES[0],
+                    ending.attempt_id.as_str()
+                ),
+                &ending.agent_session_id,
+                &at,
+            )?;
+        }
+        self.mirror_terminal_relay(namespace, &target.source, &message_id, &at)?;
+        Ok(Some(message_id))
+    }
+
+    /// Posts the final message of a turn that ended with its answer to one
+    /// attempt from the person held, in that attempt's thread and in reply to
+    /// their message, as a note that the agent is still working. Like the
+    /// relay it has no recipients, so it wakes no agent. It leaves the attempt
+    /// open and raises nothing. It posts nothing when this turn already
+    /// posted its note, or the agent already wrote in the thread during it.
+    pub fn post_progress_note(
+        &mut self,
+        namespace: &StateNamespace,
+        ending: &crate::TerminalRelayEnd,
+        turn: &crate::final_reply::HostTurn,
+        attribution: &MutationAttribution,
+    ) -> Result<Option<MessageId>, StoreError> {
+        let ns = namespace_params(namespace);
+        let Some(target) = self.relay_target(namespace, ending)? else {
+            return Ok(None);
+        };
+        let attempt = &target.attempt;
+        let at = MutationAttribution::new(
+            attribution.actor_kind,
+            &attribution.actor_id,
+            ending.ended_at_ms,
+        );
+        let message_id = MessageId::new(format!(
+            "{NOTE_ID_PREFIX}{}:{}",
+            ending.attempt_id.as_str(),
+            turn.as_str()
+        ));
+        let posted = self.transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM collaboration_messages
+               WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?7)
+             OR EXISTS(SELECT 1 FROM collaboration_messages said
+               WHERE said.session_socket_id=?1 AND said.worktree_id=?2 AND said.thread_id=?3
+                 AND said.author_address_id=?4 AND said.author_kind='agent_session'
+                 AND said.grammar_version NOT IN ('terminal-relay/v1','reminder/v1')
+                 AND said.created_at_ms >= ?5 AND said.created_at_ms <= ?6)",
+            params![
+                ns[0],
+                ns[1],
+                attempt.thread_id,
+                attempt.address_id,
+                to_i64(ending.turn_started_at_ms)?,
+                to_i64(ending.ended_at_ms)?,
+                message_id.as_str()
+            ],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if posted {
+            return Ok(None);
+        }
+        self.post_in_thread(namespace, &target, &message_id, ending, &at)?;
+        self.mirror_terminal_relay(namespace, &target.source, &message_id, &at)?;
+        Ok(Some(message_id))
+    }
+
+    fn relay_target(
+        &self,
+        namespace: &StateNamespace,
+        ending: &crate::TerminalRelayEnd,
+    ) -> Result<Option<RelayTarget>, StoreError> {
+        let ns = namespace_params(namespace);
         let attempt = self
             .transaction
             .query_row(
@@ -187,37 +320,31 @@ impl StateTransaction<'_> {
         let Some(attempt) = attempt.filter(|_| !text.is_empty()) else {
             return Ok(None);
         };
-        let Some(source) =
-            self.terminal_relay_source(namespace, &MessageId::new(&attempt.message_id))?
-        else {
-            return Ok(None);
-        };
-        let ended_at = to_i64(ending.ended_at_ms)?;
-        let at = MutationAttribution::new(
-            attribution.actor_kind,
-            &attribution.actor_id,
-            ending.ended_at_ms,
-        );
-        let message_id = MessageId::new(format!("{RELAY_ID_PREFIX}{}", ending.attempt_id.as_str()));
-        let replied = self.transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM collaboration_messages
-               WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?8)
-             OR EXISTS(SELECT 1 FROM collaboration_messages reply
-               WHERE reply.session_socket_id=?1 AND reply.worktree_id=?2 AND reply.thread_id=?3
-                 AND reply.author_address_id=?4 AND reply.author_kind='agent_session'
-                 AND reply.grammar_version NOT IN ('terminal-relay/v1','reminder/v1')
-                 AND (reply.in_reply_to IS NULL OR reply.in_reply_to=?9)
-                 AND reply.created_at_ms >= ?5 AND reply.created_at_ms <= ?6)
-             OR EXISTS(SELECT 1 FROM delivery_dispositions
-               WHERE session_socket_id=?1 AND worktree_id=?2 AND attempt_id=?7 AND disposition_kind='reply')",
-            params![ns[0], ns[1], attempt.thread_id, attempt.address_id,
-                to_i64(ending.turn_started_at_ms)?, ended_at, ending.attempt_id.as_str(),
-                message_id.as_str(), attempt.message_id],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if replied {
-            return Ok(None);
-        }
+        Ok(self
+            .terminal_relay_source(namespace, &MessageId::new(&attempt.message_id))?
+            .map(|source| RelayTarget {
+                attempt,
+                source,
+                text,
+            }))
+    }
+
+    /// Writes the agent's post in the attempt's thread, in reply to the
+    /// person's message.
+    fn post_in_thread(
+        &mut self,
+        namespace: &StateNamespace,
+        target: &RelayTarget,
+        message_id: &MessageId,
+        ending: &crate::TerminalRelayEnd,
+        at: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        let ns = namespace_params(namespace);
+        let RelayTarget {
+            attempt,
+            source,
+            text,
+        } = target;
         let order = self.next_order(namespace, "thread_message", &attempt.thread_id)?;
         self.transaction.execute(
             "INSERT INTO collaboration_messages (
@@ -237,7 +364,7 @@ impl StateTransaction<'_> {
                 ending.agent_session_id.as_str(),
                 text,
                 GRAMMAR,
-                ended_at
+                to_i64(ending.ended_at_ms)?
             ],
         )?;
         self.append_transition(
@@ -245,29 +372,8 @@ impl StateTransaction<'_> {
             TransitionEntityKind::CollaborationMessage,
             message_id.as_str(),
             TransitionKind::Created,
-            &at,
-        )?;
-        self.ensure_delivery_attempt_acknowledged(
-            namespace,
-            &ending.attempt_id,
-            &ending.agent_session_id,
-            &at,
-        )?;
-        if !self.delivery_disposition_exists(namespace, &ending.attempt_id)? {
-            self.record_no_reply_disposition(
-                namespace,
-                &ending.attempt_id,
-                &format!(
-                    "{}{}",
-                    AUTOMATIC_NO_REPLY_PREFIXES[0],
-                    ending.attempt_id.as_str()
-                ),
-                &ending.agent_session_id,
-                &at,
-            )?;
-        }
-        self.mirror_terminal_relay(namespace, &source, &message_id, &at)?;
-        Ok(Some(message_id))
+            at,
+        )
     }
 
     /// Clears the flags 1.6.0 and 1.6.1 opened on final-message answers, in
@@ -485,6 +591,34 @@ pub(super) mod tests {
                     &at(20),
                 )
                 .map(|_| ())
+            })
+            .unwrap();
+    }
+
+    /// A channel question from the person whose attempt settled without an
+    /// answer, with the ND-DELIVERY-003 warning that raised, acknowledged if
+    /// `acknowledged`.
+    pub(crate) fn seed_unanswered(store: &mut StateStore, ns: &StateNamespace, acknowledged: bool) {
+        seed(store, ns, "channel/v1", true);
+        store
+            .transaction(|tx| {
+                let attempt = DeliveryAttemptId::new("attempt");
+                tx.ensure_delivery_attempt_acknowledged(
+                    ns,
+                    &attempt,
+                    &AgentSessionId::new("session"),
+                    &at(12),
+                )?;
+                tx.transition_delivery_attempt(ns, &attempt, DeliveryState::Settled, &at(13))?;
+                if acknowledged {
+                    tx.resolve_attention_source(
+                        ns,
+                        crate::AttentionSourceKind::AgentDisposition,
+                        "attempt",
+                        &at(14),
+                    )?;
+                }
+                Ok(())
             })
             .unwrap();
     }
