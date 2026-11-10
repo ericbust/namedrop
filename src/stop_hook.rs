@@ -180,6 +180,7 @@ pub fn run_worker(state: &Path) {
         // started by it, so a final message that may be a status is held.
         started_tasks: turn.started.unwrap_or_else(|| running_tasks.clone()),
         notified_tasks: turn.notified,
+        paused_tasks: turn.paused,
         running_tasks,
         text: captured
             .input
