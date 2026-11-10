@@ -228,15 +228,22 @@ def check_activation_record(base, release):
     assert activated(rt, r_root) == r and retained(rt) == {p, r}, 'reactivation after a failure keeps the real previous'
 
     y = activated(rt, release('record-y'))
-    newest = hashlib.sha256(b'newest').hexdigest()
-    (rt / 'releases' / newest).mkdir()
-    shutil.copy(rt / 'releases' / y / 'runtime.json', rt / 'releases' / newest / 'runtime.json')
-    (rt / 'releases' / newest / 'namedrop').write_text('newest')
-    later = (rt / 'releases' / y / 'namedrop').stat().st_mtime + 100
-    os.utime(rt / 'releases' / newest / 'namedrop', (later, later))
+    def unrecorded(name, mtime):
+        (rt / 'releases' / name).mkdir()
+        shutil.copy(rt / 'releases' / y / 'runtime.json', rt / 'releases' / name / 'runtime.json')
+        (rt / 'releases' / name / 'namedrop').write_text(name)
+        os.utime(rt / 'releases' / name / 'namedrop', (mtime, mtime))
+    newest, later = hashlib.sha256(b'newest').hexdigest(), (rt / 'releases' / y / 'namedrop').stat().st_mtime + 100
+    unrecorded(newest, later)
     runtime.switch(rt, Path('releases') / r)
     assert activated(rt, r_root) == r and retained(rt) == {r, y}, \
         'when current moved without a record, the release the record selected is the previous'
+
+    unrecorded('f' * 64, 1)
+    unrecorded(newest, later)
+    record.write_text(json.dumps({'revision': r}))
+    assert activated(rt, r_root) == r and retained(rt) == {r, newest}, \
+        'with a record from before 1.7.2, reactivation keeps the newest other release'
 
 
 def main():

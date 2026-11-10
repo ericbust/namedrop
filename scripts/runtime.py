@@ -655,8 +655,9 @@ def restore(runtime, previous, incoming):
 
 
 def recorded_previous(runtime, selected):
-    """The release selected before `selected`, as activation.json records it,
-    or None."""
+    """The release selected before `selected`, as activation.json records it.
+    Without a usable record, such as one from before 1.7.2, the newest other
+    release."""
     try:
         record = json.loads((runtime / 'activation.json').read_text())
     except (OSError, ValueError):
@@ -666,9 +667,11 @@ def recorded_previous(runtime, selected):
         # A record that selected another release is from an activation that
         # then moved current without writing one, so that release came before.
         name = record.get('previous') if record['selected'] == selected else record['selected']
-    if isinstance(name, str) and name != selected and name in releases_on_disk(runtime):
+    on_disk = releases_on_disk(runtime)
+    if isinstance(name, str) and name != selected and name in on_disk:
         return name
-    return None
+    others = [(info.st_mtime, name) for name, info in on_disk.items() if name != selected and info is not None]
+    return max(others)[1] if others else None
 
 
 # PROC_PID_INIT_INO: only the initial PID namespace sees every process.
