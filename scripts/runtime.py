@@ -232,11 +232,12 @@ def darwin_library():
 
 def darwin_pids(library):
     count = library.proc_listallpids(None, 0)
+    if count > 0:
+        buffer = (ctypes.c_int * (count + 256))()
+        count = library.proc_listallpids(buffer, ctypes.sizeof(buffer))
     if count <= 0:
         raise RuntimeError('Could not list processes to finish the update. Retry it; no agent was stopped.')
-    buffer = (ctypes.c_int * (count + 256))()
-    count = library.proc_listallpids(buffer, ctypes.sizeof(buffer))
-    return [pid for pid in buffer[:max(count, 0)] if pid > 0]
+    return [pid for pid in buffer[:count] if pid > 0]
 
 
 def darwin_path(library, pid):

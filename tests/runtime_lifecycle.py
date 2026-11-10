@@ -91,6 +91,24 @@ def check_pruning(base, release):
         assert retained() == {four, five, six, held}, 'without a process list nothing is removed'
     finally:
         runtime.all_pids = listing
+    class FailingLibproc:
+        """libproc that counts processes, then fails to list them."""
+        def proc_listallpids(self, buffer, size):
+            return 3 if buffer is None else -1
+    try:
+        runtime.darwin_pids(FailingLibproc())
+        raise AssertionError('a failed macOS process listing returned PIDs')
+    except RuntimeError:
+        pass
+    platform, library = sys.platform, runtime.darwin_library
+    sys.platform, runtime.darwin_library = 'darwin', FailingLibproc
+    try:
+        runtime.prune_releases(rt, {six})
+        raise AssertionError('a failed macOS process listing allowed a prune')
+    except RuntimeError:
+        assert retained() == {four, five, six, held}, 'a failed macOS process listing removes nothing'
+    finally:
+        sys.platform, runtime.darwin_library = platform, library
     assert activate(six_root) == six and retained() == {five, six}, 'a release is removed once no process runs from it'
 
     (rt / '.pruning').rmdir()
