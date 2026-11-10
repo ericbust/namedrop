@@ -3308,6 +3308,191 @@ impl Space {
     }
 }
 
+impl Space {
+    /// Every ND-DELIVERY-003 warning ever raised, open or closed.
+    fn disposition_warnings_ever(&self) -> Vec<Vec<String>> {
+        self.rows("SELECT summary FROM attention_items WHERE source_kind = 'agent_disposition'")
+    }
+
+    fn observe_reviewer_session(&self, session: &str) {
+        StateStore::open(&self.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.observe_agent_session(
+                    &namespace(),
+                    &format!("observation-reviewer-{session}"),
+                    &PaneAddressId::new("address-reviewer"),
+                    &AgentSessionId::new(session),
+                    if session.is_empty() { "empty" } else { "idle" },
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 43),
+                )
+            })
+            .unwrap();
+    }
+
+    fn retire_reviewer(&self) {
+        StateStore::open(&self.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.retire_pane_address(
+                    &namespace(),
+                    &PaneAddressId::new("address-reviewer"),
+                    &MutationAttribution::new(ActorKind::Human, "test", 43),
+                )
+            })
+            .unwrap();
+    }
+
+    /// `delivery acknowledge` as the person runs it.
+    fn acknowledge(&self, ask: &Value) -> Result<Value, String> {
+        namedrop::execute_control_operation(
+            "delivery.acknowledge",
+            json!({"attempt_id":ask["control"]["attempt_id"],"confirmed":true}),
+            &self.runtime("pane-lead"),
+        )
+    }
+
+    /// The notice of `task-first` opens a turn whose Stop ends with `text`.
+    fn woken_by_first_task(&self, text: &str) {
+        let notice = recorded_turn("prompt-notice", "notice-turn");
+        let prompt = notice[0]["message"]["content"]
+            .as_str()
+            .unwrap()
+            .replace("task-second", "task-first");
+        self.reviewer_prompt("notice-turn", &prompt);
+        let missing = self.directory.root.join("no-transcript.jsonl");
+        self.reviewer_stop("notice-turn", text, &[], &missing);
+    }
+}
+
+/// Namedrop holds the answer while the agent's background work runs. The
+/// agent going idle meanwhile is no reason to tell the person it didn't
+/// answer, whichever of the Stop and the idle settle comes first.
+#[test]
+fn a_held_answer_raises_no_warning_whichever_comes_first() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    assert!(
+        space.disposition_warnings_ever().is_empty(),
+        "a settle after the Stop held the answer warned: {:?}",
+        space.disposition_warnings_ever()
+    );
+
+    let space = Space::new();
+    let ask = space.armed_ask();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    space.settle_attempt(&ask);
+    assert_eq!(space.unresolved_disposition_warnings().len(), 1);
+    space.append_transcript(&recorded_turn("prompt-start", CLAUDE.1));
+    space.reviewer_stop(CLAUDE.1, "STARTED", &["task-first"], &space.transcript());
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    assert!(
+        space.disposition_warnings_ever().is_empty(),
+        "the Stop that held the answer left the settle's warning: {:?}",
+        space.disposition_warnings_ever()
+    );
+    let inbox =
+        execute_integration_operation("delivery.inbox", json!({}), &space.runtime("pane-reviewer"))
+            .unwrap();
+    assert_eq!(
+        inbox["envelopes"][0]["control"]["attempt_id"], attempt,
+        "withdrawing the warning took the held delivery out of the inbox"
+    );
+}
+
+/// A held answer whose session is gone can never arrive, so the person is
+/// told why, can acknowledge it, and is not told again.
+#[test]
+fn a_held_answer_whose_session_is_gone_warns_once_until_acknowledged() {
+    type Case = (&'static str, fn(&Space), &'static str);
+    let cases: [Case; 3] = [
+        (
+            "replaced",
+            |space| space.observe_reviewer_session("session-replaced"),
+            "a new session is registered on its name",
+        ),
+        (
+            "retired",
+            Space::retire_reviewer,
+            "was retired before that work ended",
+        ),
+        (
+            "ended",
+            |space| space.observe_reviewer_session(""),
+            "its session has ended",
+        ),
+    ];
+    for (case, gone, says) in cases {
+        let space = Space::new();
+        let ask = space.held_on_first_task();
+        space.settle_attempt(&ask);
+        assert!(
+            space.disposition_warnings_ever().is_empty(),
+            "{case}: warned while the answer was held: {:?}",
+            space.disposition_warnings_ever()
+        );
+        gone(&space);
+        let warnings = space.unresolved_disposition_warnings();
+        assert_eq!(warnings.len(), 1, "{case}: {warnings:?}");
+        assert!(
+            warnings[0][0].contains("held its answer") && warnings[0][0].contains(says),
+            "{case}: {warnings:?}"
+        );
+        assert!(
+            warnings[0][0].contains("delivery acknowledge clears this warning"),
+            "{case}: {warnings:?}"
+        );
+
+        space.acknowledge(&ask).unwrap();
+        assert!(space.unresolved_disposition_warnings().is_empty(), "{case}");
+        if case != "retired" {
+            space.observe_reviewer_session("session-later");
+        }
+        space.observe_settled();
+        assert!(
+            space.unresolved_disposition_warnings().is_empty(),
+            "{case}: an acknowledged warning came back: {:?}",
+            space.unresolved_disposition_warnings()
+        );
+        assert_eq!(space.disposition_warnings_ever().len(), 1, "{case}");
+    }
+}
+
+/// A held delivery whose woken turn ends with no final message went
+/// unanswered like any other.
+#[test]
+fn a_held_answer_whose_woken_turn_says_nothing_warns_as_unanswered() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    assert!(space.disposition_warnings_ever().is_empty());
+    space.woken_by_first_task("");
+    assert_eq!(space.claims()[0]["state"], json!({"left":"no_final_text"}));
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0][0].contains("ended its turn without a reply"),
+        "{warnings:?}"
+    );
+}
+
+/// The held answer arrives when the work ends, and the person was never told
+/// it was missing.
+#[test]
+fn a_held_answer_that_arrives_later_never_warns() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    space.woken_by_first_task("It printed first-done.");
+    assert_eq!(space.answers("pane-lead"), ["It printed first-done."]);
+    assert!(
+        space.disposition_warnings_ever().is_empty(),
+        "{:?}",
+        space.disposition_warnings_ever()
+    );
+}
+
 /// The recorded busy turn's typed prompt and the notice Claude Code queued
 /// into it, about `task`.
 fn typed_turn_and_queued_notice(task: &str) -> (Vec<Value>, String, String) {
