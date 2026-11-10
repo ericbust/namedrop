@@ -899,7 +899,8 @@ else:
 
     /// The Stop hook run from `command`, which a test may give the pane's
     /// workspace as Herdr does.
-    fn start_installed_stop_in(&self, command: Command, payload: Value) -> RunningHook {
+    fn start_installed_stop_in(&self, mut command: Command, payload: Value) -> RunningHook {
+        command.env("NAMEDROP_HERDR_TIMEOUT_MS", "250");
         self.start_installed_hook_in(command, "stop", payload)
     }
 
@@ -927,7 +928,6 @@ else:
             });
         }
         let mut child = command
-            .env("NAMEDROP_HERDR_TIMEOUT_MS", "250")
             .args(["hook", hook, "--state-directory"])
             .arg(&self.directory.state)
             .stdin(Stdio::piped())
@@ -4400,17 +4400,28 @@ fn a_claude_stop_with_background_agents_running_takes_mail_queued_during_the_tur
         include_str!("fixtures/between-turns/claude-2.1.322-waiting-empty.ansi"),
     )
     .unwrap();
+    let summary: Value = serde_json::from_str(
+        include_str!("fixtures/final-reply/claude-2.1.319-blocked-stop.jsonl")
+            .lines()
+            .nth(2)
+            .unwrap(),
+    )
+    .unwrap();
+    space.append_transcript(&[]);
     let stop = || {
         let mut command = space.command();
         command.env("HERDR_WORKSPACE_ID", "workspace-1");
-        space
-            .start_installed_stop_in(
-                command,
-                json!({"hook_event_name":"Stop","session_id":"session-reviewer",
-                       "prompt_id":"reviewer-turn","last_assistant_message":"Started the helper.",
-                       "background_tasks":[{"id":"helper","status":"running"}]}),
-            )
-            .wait();
+        let mut stop = space.start_installed_stop_in(
+            command,
+            json!({"hook_event_name":"Stop","session_id":"session-reviewer",
+                   "prompt_id":"reviewer-turn","last_assistant_message":"Started the helper.",
+                   "transcript_path":space.transcript(),
+                   "background_tasks":[{"id":"helper","status":"running"}]}),
+        );
+        stop.output();
+        // Claude Code records that its Stop hooks let the turn end.
+        space.append_transcript(std::slice::from_ref(&summary));
+        stop.wait();
     };
     // A Stop with nothing queued starts no drain.
     stop();
@@ -4515,6 +4526,7 @@ fn a_mention_namedrop_sends_keeps_the_session_between_turns() {
     let mut hook = space.start_reviewer_prompt_in(command, "@lead Is the build green?");
     let output: Value = serde_json::from_str(&hook.output()).unwrap();
     assert_eq!(output["decision"], "block", "{output}");
+    // The hook knows its own block; it needs no record of it in the transcript.
     hook.wait();
     assert!(
         between_turns(space.reviewer_phase()),

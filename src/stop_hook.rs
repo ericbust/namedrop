@@ -163,17 +163,23 @@ pub fn run_worker(state: &Path) {
             std::process::exit(0);
         });
     }
-    if let (Some(_), Some(path), Some(from)) = (
+    let outcome = match (
         &captured.input.prompt_id,
         &captured.input.transcript_path,
         captured.transcript_end,
-    ) && hook_outcome(path, from, stop_outcome) == Some(StopOutcome::Continued)
-    {
+    ) {
+        (Some(_), Some(path), Some(from)) => hook_outcome(path, from, stop_outcome),
+        _ => None,
+    };
+    if outcome == Some(StopOutcome::Continued) {
         return;
     }
     // Only now is the turn known to be over: a Stop another hook blocked
-    // continues it.
-    if captured.input.is_claude() {
+    // continues it. A hook slower than the wait may still block, so with no
+    // outcome the turn counts as running, and its mail waits on Herdr's status
+    // or the turn's next Stop.
+    let ended = captured.input.is_claude() && outcome == Some(StopOutcome::Ended);
+    if ended {
         namedrop::turn_phase::record(
             state,
             &captured.socket,
@@ -185,7 +191,7 @@ pub fn run_worker(state: &Path) {
     if captured.settles {
         settle_stop(state, &captured);
     }
-    if captured.input.is_claude() {
+    if ended {
         wake_waiting_mail(state, &captured.socket, &captured.input.session_id);
     }
 }
@@ -361,7 +367,7 @@ fn stop_identity_prefix(bytes: &[u8]) -> Option<StopInput> {
         let item = value(bytes, &mut offset)?;
         if matches!(
             key.as_str(),
-            "hook_event_name" | "session_id" | "prompt_id" | "turn_id"
+            "hook_event_name" | "session_id" | "prompt_id" | "turn_id" | "transcript_path"
         ) {
             fields.insert(key, item);
         }
@@ -529,6 +535,8 @@ mod tests {
             assert_eq!(bounded.session_id, original.session_id);
             assert_eq!(bounded.prompt_id, original.prompt_id);
             assert_eq!(bounded.turn_id, original.turn_id);
+            // Kept so the worker can still learn whether the turn ended.
+            assert_eq!(bounded.transcript_path, original.transcript_path);
             assert_eq!(bounded.final_text(None).text, "");
         }
     }
