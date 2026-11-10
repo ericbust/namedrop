@@ -198,6 +198,7 @@ fn stop(prompt: &str, text: &str) -> StopFacts {
         running_tasks: Vec::new(),
         started_tasks: Vec::new(),
         notified_tasks: Vec::new(),
+        read_turn: true,
         text: FinalText::bounded(text),
     }
 }
@@ -1228,9 +1229,9 @@ fn the_stop_reads_its_own_turn_of_a_recorded_transcript() {
         read("prompt-busy"),
         TurnTasks {
             started: Some(Vec::new()),
-            notified: tasks(&["task-first"])
+            notified: Vec::new()
         },
-        "the notice Claude Code queued into the running turn was missed"
+        "a notice Claude Code queued into a turn about something else counted"
     );
     assert_eq!(
         read("prompt-wait"),
@@ -1312,7 +1313,7 @@ fn a_notice_is_about_the_task_its_opening_id_names() {
 }
 
 #[test]
-fn a_turn_split_by_another_turns_records_keeps_its_second_half() {
+fn a_turn_split_by_another_turns_records_keeps_its_second_half_and_no_queued_notice() {
     let lines: Vec<&str> = RECORDED.lines().collect();
     let wait: Vec<usize> = (0..lines.len())
         .filter(|&index| lines[index].contains(r#""promptId":"prompt-wait""#))
@@ -1337,10 +1338,10 @@ fn a_turn_split_by_another_turns_records_keeps_its_second_half() {
     split.push(&second_half);
     let read = turn_tasks(split.join("\n").as_bytes(), true, "prompt-wait");
     assert_eq!(read.started, Some(vec!["task-second".to_owned()]));
-    assert_eq!(
-        read.notified,
-        ["task-third"],
-        "the other turn's notice counted, or ours was lost"
+    assert!(
+        read.notified.is_empty(),
+        "a queued notice counted: {:?}",
+        read.notified
     );
 }
 

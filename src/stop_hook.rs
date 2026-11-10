@@ -171,13 +171,14 @@ pub fn run_worker(state: &Path) {
         .filter(|task| matches!(task.status.as_str(), "running" | "pending"))
         .map(|task| task.id.clone())
         .collect();
-    let turn = captured
-        .input
-        .turn_tasks(&running_tasks, captured.transcript_end);
+    let turn = captured.input.turn_tasks(captured.transcript_end);
     let stop = StopFacts {
         session: captured.input.session_id.clone(),
         turn: captured.input.turn(),
-        started_tasks: turn.started.unwrap_or_default(),
+        read_turn: turn.started.is_some(),
+        // When the turn's start can't be read, every running task counts as
+        // started by it, so a final message that may be a status is held.
+        started_tasks: turn.started.unwrap_or_else(|| running_tasks.clone()),
         notified_tasks: turn.notified,
         running_tasks,
         text: captured
@@ -335,17 +336,14 @@ impl StopInput {
         }
     }
 
-    /// What this turn's transcript says about its background work. When the
-    /// turn's start can't be read, every running task counts as started by
-    /// it, so a final message that may be a status is held as before.
-    fn turn_tasks(&self, running: &[String], transcript_end: Option<u64>) -> TurnTasks {
+    /// What this turn's transcript says about its background work, with no
+    /// started tasks when the turn's start can't be read.
+    fn turn_tasks(&self, transcript_end: Option<u64>) -> TurnTasks {
         let read = self.prompt_id.as_deref().and_then(|prompt_id| {
             let (bytes, whole) = self.transcript_tail(transcript_end, TURN_SCAN_BYTES)?;
             Some(namedrop::final_reply::turn_tasks(&bytes, whole, prompt_id))
         });
-        let mut turn = read.unwrap_or_default();
-        turn.started.get_or_insert_with(|| running.to_vec());
-        turn
+        read.unwrap_or_default()
     }
 
     /// Up to `limit` bytes of the transcript before `transcript_end`, from the

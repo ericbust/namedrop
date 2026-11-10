@@ -239,15 +239,14 @@ pub(crate) fn claim_for(
 }
 
 /// What one Claude Code turn's transcript records say about its background
-/// work. A turn's records are those that carry its `promptId`, and those with
-/// none that follow one of them before another turn's record.
+/// work: those that carry its `promptId`.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct TurnTasks {
     /// The tasks the turn started, or `None` when its first record is not in
     /// what was read, so a start may be missing.
     pub started: Option<Vec<String>>,
-    /// The tasks whose notices reached the turn: as its own prompt, or queued
-    /// into it while it ran.
+    /// The task whose notice is the turn's own prompt. A notice Claude Code
+    /// queued into a turn about something else never counts.
     pub notified: Vec<String>,
 }
 
@@ -256,53 +255,30 @@ pub struct TurnTasks {
 pub fn turn_tasks(transcript: &[u8], whole: bool, prompt_id: &str) -> TurnTasks {
     let mut turn = TurnTasks::default();
     let (mut started, mut found, mut earlier_turn) = (Vec::new(), false, whole);
-    // Records with no `promptId` belong to the turn whose record came last.
-    let mut in_turn = false;
     let own_key = format!(r#""promptId":"{prompt_id}""#);
     let (own_key, any_key) = (
         memchr::memmem::Finder::new(own_key.as_bytes()),
         memchr::memmem::Finder::new(br#""promptId":""#),
     );
-    let queued = memchr::memmem::Finder::new(br#""queued_command""#);
     for line in transcript.split(|byte| *byte == b'\n') {
-        // Only this turn's own records and the queued notices inside it are
-        // parsed; any other line only says whose turn follows.
-        let carries_id = any_key.find(line).is_some();
-        let maybe_own = !prompt_id.is_empty() && own_key.find(line).is_some();
-        if !maybe_own && !(in_turn && queued.find(line).is_some()) {
-            if carries_id {
-                in_turn = false;
-                earlier_turn |= !found;
-            }
-            continue;
-        }
-        let Ok(record) = serde_json::from_slice::<Value>(line) else {
+        // Only this turn's own records are parsed; another turn's only says
+        // that one came before it.
+        let record = (!prompt_id.is_empty() && own_key.find(line).is_some())
+            .then(|| serde_json::from_slice::<Value>(line).ok())
+            .flatten()
+            .filter(|record| record["promptId"] == prompt_id);
+        let Some(record) = record else {
+            earlier_turn |= !found && any_key.find(line).is_some();
             continue;
         };
-        let own = !prompt_id.is_empty() && record["promptId"] == prompt_id;
-        if record["promptId"].is_string() {
-            in_turn = own;
-            earlier_turn |= !own && !found;
-        }
-        if !in_turn {
-            continue;
-        }
         found = true;
-        let notice = match (
-            record["type"].as_str(),
-            record["attachment"]["type"].as_str(),
-        ) {
-            (Some("user"), _) if own => record["message"]["content"].as_str(),
-            (Some("attachment"), Some("queued_command")) => record["attachment"]["prompt"].as_str(),
-            _ => None,
-        };
-        turn.notified
-            .extend(notice.and_then(notice_task).map(str::to_owned));
-        if own {
-            let result = &record["toolUseResult"];
-            for key in ["backgroundTaskId", "agentId", "resumedAgentId", "taskId"] {
-                started.extend(result[key].as_str().map(str::to_owned));
-            }
+        if record["type"] == "user" {
+            let notice = record["message"]["content"].as_str().and_then(notice_task);
+            turn.notified.extend(notice.map(str::to_owned));
+        }
+        let result = &record["toolUseResult"];
+        for key in ["backgroundTaskId", "agentId", "resumedAgentId", "taskId"] {
+            started.extend(result[key].as_str().map(str::to_owned));
         }
     }
     turn.started = (found && earlier_turn).then_some(started);
@@ -408,8 +384,11 @@ pub struct StopFacts {
     pub running_tasks: Vec<String>,
     /// The tasks this turn put in the background, from its transcript.
     pub started_tasks: Vec<String>,
-    /// The tasks whose notices reached this turn, from its transcript.
+    /// The task whose notice is this turn's own prompt, from its transcript.
     pub notified_tasks: Vec<String>,
+    /// The transcript showed where this turn began, so its tasks and notice
+    /// are known.
+    pub read_turn: bool,
     pub text: FinalText,
 }
 
@@ -774,9 +753,12 @@ impl Claims {
     }
 
     /// Records a prompt of `turn`: the first one's time, and a delivery.
-    fn see_turn(&self, turn: &HostTurn, delivery: bool, now_ms: u64) {
-        let seen = match self.turn_seen(turn) {
-            Some(seen) if seen.delivery || !delivery => return,
+    /// Whether this prompt opened the turn.
+    fn see_turn(&self, turn: &HostTurn, delivery: bool, now_ms: u64) -> bool {
+        let earlier = self.turn_seen(turn);
+        let opened = earlier.is_none();
+        let seen = match earlier {
+            Some(seen) if seen.delivery || !delivery => return false,
             Some(seen) => TurnSeen { delivery, ..seen },
             None => TurnSeen {
                 started_at_ms: now_ms,
@@ -798,6 +780,7 @@ impl Claims {
         if written.is_ok() {
             let _ = fs::rename(next, directory.join(turn.as_str()));
         }
+        opened
     }
 
     /// What a claim armed on another turn becomes when this session moves
@@ -1025,7 +1008,7 @@ pub(crate) fn observe_prompt(
     let Some(mut claims) = Claims::lock(directory, PROMPT_LOCK_WAIT) else {
         return Observed::default();
     };
-    claims.see_turn(turn, delivery || arm.is_some(), now_ms);
+    let opened = claims.see_turn(turn, delivery || arm.is_some(), now_ms);
     let moved: Vec<_> = claims
         .claims
         .iter()
@@ -1056,13 +1039,15 @@ pub(crate) fn observe_prompt(
         }
         _ => false,
     };
-    // The claim this prompt's notice wakes answers at this turn's Stop. A
-    // turn promises one claim; a later notice in it shows its claim's way back.
+    // A notice that opens its turn promises its claim that turn's final
+    // message. One queued into a turn about something else, a prompt the
+    // person typed included, promises nothing, so its claim's way back shows.
     let promised = claims
         .claims
         .iter()
         .any(|claim| claim.promised_turn.as_ref() == Some(turn));
-    if !armed
+    if opened
+        && !armed
         && !promised
         && let Some(index) = claims.woken(state, turn, notified)
     {
@@ -1205,10 +1190,18 @@ pub fn settle_at_stop(
     };
     if let Some(turn) = &stop.turn {
         // A claim this turn's prompt promised comes first: the agent was shown
-        // no other way to answer it.
-        let woken = claims
-            .promised(state, turn)
-            .or_else(|| claims.woken(state, turn, &stop.notified_tasks));
+        // no other way to answer it. A read of the turn's own prompt that
+        // names none of its tasks overrules the promise, and its way back
+        // shows at the next prompt.
+        let woken = match claims.promised(state, turn) {
+            Some(index)
+                if !stop.read_turn || claims.claims[index].waits_for_any(&stop.notified_tasks) =>
+            {
+                Some(index)
+            }
+            Some(_) => None,
+            None => claims.woken(state, turn, &stop.notified_tasks),
+        };
         if let Some(index) = woken {
             // The relay looks for an answer the agent already posted this
             // turn from the turn's start.

@@ -375,6 +375,7 @@ fn stop_facts(
         running_tasks: tasks.clone(),
         started_tasks: tasks,
         notified_tasks: Vec::new(),
+        read_turn: true,
         text: FinalText::bounded(text),
     }
 }
@@ -408,7 +409,7 @@ fn an_ask_and_its_answer_settle_from_final_messages_with_no_settle_command() {
     );
     assert!(
         context.contains(
-            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice reaches is the reply, unless that turn answers another delivery. For no reply, run this line first."
+            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, answer with the line Namedrop shows. For no reply, run this line first."
         ),
         "{context}"
     );
@@ -1017,7 +1018,7 @@ fn a_message_from_the_person_is_answered_in_its_thread_by_the_final_message() {
     );
     assert!(
         context.ends_with(
-            "\n\nNamedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice reaches is the reply, unless that turn answers another delivery."
+            "\n\nNamedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, answer with the line Namedrop shows."
         ),
         "{context}"
     );
@@ -2910,17 +2911,46 @@ impl Space {
     }
 }
 
-/// Claude Code queues a task's notice into a turn that is already running.
-/// That turn's Stop wakes the delivery held on the task, so its final message
-/// is the answer, whether or not a prompt hook ran for the notice.
+/// Claude Code queues a task's notice into a turn the person typed, which is
+/// about something else. That turn's final message answers the person, never
+/// the held delivery: the notice's prompt shows the delivery's reply line, and
+/// a missed notice leaves it for the next prompt to show.
 #[test]
-fn a_notice_queued_into_a_running_turn_wakes_the_held_delivery() {
+fn a_notice_queued_into_a_typed_turn_shows_the_held_deliverys_line_instead() {
     let space = Space::new();
-    space.held_on_first_task();
-    space.append_transcript(&recorded_turn("prompt-busy", "busy-turn"));
+    let first = space.held_on_first_task();
+    let attempt = first["control"]["attempt_id"].as_str().unwrap().to_owned();
+    let way_back = format!("Namedrop: delivery {attempt} from an earlier turn is still open");
+    let busy = recorded_turn("prompt-busy", "busy-turn");
+    let typed = busy[0]["message"]["content"].as_str().unwrap();
+    let queued = busy
+        .iter()
+        .find(|record| record["attachment"]["type"] == "queued_command")
+        .unwrap()["attachment"]["prompt"]
+        .as_str()
+        .unwrap();
+    space.reviewer_prompt("busy-turn", typed);
+    // Claude Code 2.1.319 runs the prompt hook for the queued notice, with the
+    // running turn's id.
+    let context = space
+        .reviewer_prompt("busy-turn", queued)
+        .unwrap_or_default();
+    assert!(
+        context.contains(&way_back),
+        "the queued notice hid the way back: {context}"
+    );
+    space.append_transcript(&busy);
     space.reviewer_stop("busy-turn", "SLEPT", &[], &space.transcript());
-    assert_eq!(space.answers("pane-lead"), ["SLEPT"]);
-    assert_eq!(space.claims()[0]["state"], json!({"done":"replied"}));
+    assert!(
+        space.answers("pane-lead").is_empty(),
+        "the typed turn's final message answered the held delivery: {:?}",
+        space.answers("pane-lead")
+    );
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    let next = space
+        .reviewer_prompt("next-turn", "Anything else?")
+        .unwrap_or_default();
+    assert!(next.contains(&way_back), "{next}");
 }
 
 /// A turn that answers a delivery of its own never also answers one held on a
