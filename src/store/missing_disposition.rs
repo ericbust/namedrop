@@ -504,6 +504,15 @@ impl StateTransaction<'_> {
         .find(|gone| Unanswered::HeldAnswerLost(*gone).summary() == open))
     }
 
+    /// Whether `attempt` has a warning the person has not cleared.
+    pub(crate) fn disposition_warning_open(
+        &self,
+        ns: &StateNamespace,
+        attempt: &crate::DeliveryAttemptId,
+    ) -> Result<bool, StoreError> {
+        Ok(self.open_warning(ns, attempt)?.is_some())
+    }
+
     /// The summary of the attempt's open warning, if it has one.
     fn open_warning(
         &self,

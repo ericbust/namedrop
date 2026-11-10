@@ -650,7 +650,10 @@ confirm sends `POST /w/<key>/attempts/<attempt>/dismiss` with
 that drops the item; the message's receipt then reads "Ended without an
 answer". A refusal reads "Couldn't dismiss it. Try again.", for 404 "This
 request is no longer in this workspace.", and for 409 "The agent can still
-answer this, so it stays."
+answer this, so it stays." The server answers 410 when the request has no
+warning anymore, because it was dismissed already or its answer came, which
+reads "This was already cleared. The card goes away on the next update." The
+next frame no longer has the item, so the card goes then.
 
 When the item names a message (`message_id`) that is loaded in the timeline, a **Show message** text button
 starts the action row. It scrolls the message to the middle of the timeline, tints it

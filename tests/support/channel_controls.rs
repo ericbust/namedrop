@@ -1054,6 +1054,11 @@ fn dismiss_path(attempt: &str) -> String {
 /// The person's request to lead, settled with no answer, so it is warned
 /// about. Its attempt.
 fn unanswered_request(f: &Fixture) -> String {
+    unanswered_ask(f).1
+}
+
+/// The person's request to lead and its attempt, settled with no answer.
+fn unanswered_ask(f: &Fixture) -> (Value, String) {
     let asked = person_says(f, "w1", "dismiss-ask", "@lead Check the build.");
     let attempt = reply_attempt(f, &asked, "pane-1-lead", "dismiss-ask");
     StateStore::open(&f.state)
@@ -1067,7 +1072,7 @@ fn unanswered_request(f: &Fixture) -> String {
             )
         })
         .unwrap();
-    attempt
+    (asked, attempt)
 }
 
 fn open_disposition_warnings(f: &Fixture) -> i64 {
@@ -1118,7 +1123,12 @@ fn browser_dismiss_clears_a_warning_nobody_can_answer_and_only_then() {
         "a dismiss recorded a disposition"
     );
     let replay = server.post(&path, r#"{"confirmed":true}"#, &[]);
-    assert_eq!(replay.status, 200, "{}", replay.body);
+    assert_eq!(replay.status, 410, "{}", replay.body);
+    assert!(
+        replay.body.contains("no warning to dismiss"),
+        "{}",
+        replay.body
+    );
 
     assert_eq!(
         server
@@ -1129,6 +1139,33 @@ fn browser_dismiss_clears_a_warning_nobody_can_answer_and_only_then() {
             )
             .status,
         404
+    );
+}
+
+/// A card whose warning went because the answer came has nothing left to
+/// dismiss, which the browser is told apart from an agent that can still
+/// answer.
+#[test]
+fn browser_dismiss_of_an_answered_request_says_nothing_is_left() {
+    let f = fixture();
+    let (asked, attempt) = unanswered_ask(&f);
+    assert_eq!(open_disposition_warnings(&f), 1);
+    agent_reply(
+        &f,
+        "dismiss-answer",
+        &asked,
+        "pane-1-lead",
+        "@operator The build passes.",
+    )
+    .unwrap();
+    assert_eq!(open_disposition_warnings(&f), 0);
+    let server = Server::start(&f, "not json", false);
+    let answered = server.post(&dismiss_path(&attempt), r#"{"confirmed":true}"#, &[]);
+    assert_eq!(answered.status, 410, "{}", answered.body);
+    assert!(
+        answered.body.contains("no warning to dismiss"),
+        "{}",
+        answered.body
     );
 }
 

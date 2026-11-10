@@ -1592,6 +1592,15 @@ fn serve_connection(
                 Err(super::acknowledge::Error::NotFound) => {
                     respond_status(&mut writer, Status::NotFound)
                 }
+                Err(super::acknowledge::Error::NothingToDismiss) => respond(
+                    &mut writer,
+                    "410 Gone",
+                    "application/json",
+                    "",
+                    serde_json::json!({"error": "This request has no warning to dismiss anymore."})
+                        .to_string()
+                        .as_bytes(),
+                ),
                 Err(super::acknowledge::Error::Refused(message)) => respond(
                     &mut writer,
                     "409 Conflict",

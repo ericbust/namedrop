@@ -608,7 +608,7 @@ namedrop doctor
 
 This saves your acknowledgement and clears only that warning. The delivery, its history and the thread don't change, no disposition is invented and nothing is resent. It's refused while the recipient isn't retired and its exact session is still the one on its name, because that session can still record the disposition itself. It's outside agents' automatic permissions, and an agent should only run it when you ask. Doctor's **Ask agent to help** doesn't count as asking.
 
-In Channels, a card saying an agent can't answer a request anymore, or stopped before answering, has a **Dismiss** button. It asks once, then does the same as `delivery acknowledge`, as you. The card goes away and your message reads "Ended without an answer".
+In Channels, a card saying an agent can't answer a request anymore, or stopped before answering, has a **Dismiss** button. It asks once, then does the same as `delivery acknowledge`, as you. The card goes away and your message reads "Ended without an answer". If the warning was already cleared, because it was dismissed already or the answer came, the card says so and goes away on the next update.
 
 ### Adopt a handoff after a lead restart
 

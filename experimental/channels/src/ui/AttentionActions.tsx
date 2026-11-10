@@ -49,6 +49,7 @@ function failureCopy(action: ControlAction, status: number): string {
   if (action === "dismiss") {
     if (status === 404) return threadControlCopy.requestGone;
     if (status === 409) return threadControlCopy.stillAnswerable;
+    if (status === 410) return threadControlCopy.nothingToDismiss;
   } else if (status === 404) return threadControlCopy.gone;
   return threadControlCopy[action].failed;
 }

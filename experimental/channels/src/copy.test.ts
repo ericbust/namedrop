@@ -247,6 +247,8 @@ test("a reply-limit item the browser can continue or stop says why the agents pa
     gone: "This thread is no longer in this workspace.",
     requestGone: "This request is no longer in this workspace.",
     stillAnswerable: "The agent can still answer this, so it stays.",
+    nothingToDismiss:
+      "This was already cleared. The card goes away on the next update.",
   });
 });
 

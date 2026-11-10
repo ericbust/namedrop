@@ -14,6 +14,9 @@ pub(super) struct DismissPost {
 
 pub(super) enum Error {
     NotFound,
+    /// The request has no warning any more: it was dismissed already, or its
+    /// answer came or can come again.
+    NothingToDismiss,
     /// The warning can't be dismissed now, with the reason to show.
     Refused(String),
     Unavailable,
@@ -44,25 +47,31 @@ pub(super) fn dismiss(
         .ok_or(Error::NotFound)?;
     let attempt = DeliveryAttemptId::new(attempt);
     let by = MutationAttribution::new(ActorKind::Human, "local-human", now);
-    let changed = store
-        .transaction(|tx| tx.acknowledge_disposition_attention(&namespace, &attempt, &by))
-        .map_err(|error| match error.kind() {
-            StoreErrorKind::InvalidInput
-                if error.message() == "delivery attempt does not exist in this workspace" =>
-            {
-                Error::NotFound
-            }
-            StoreErrorKind::InvalidInput => Error::Refused(refusal(error.message())),
-            _ => Error::Unavailable,
-        })?;
-    Ok(json!({"attempt_id": attempt, "acknowledged": true, "changed": changed}))
-}
-
-/// The person's words for why the store refused, which speaks to agents.
-fn refusal(message: &str) -> String {
-    if message.starts_with("the recipient address is not retired") {
-        "The agent can still answer this request, so there's nothing to dismiss.".to_owned()
-    } else {
-        "There's no warning to dismiss on this request.".to_owned()
-    }
+    store
+        .transaction(|tx| {
+            Ok(
+                match tx.acknowledge_disposition_attention(&namespace, &attempt, &by) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(Error::NothingToDismiss),
+                    Err(error) if error.kind() != StoreErrorKind::InvalidInput => {
+                        return Err(error);
+                    }
+                    Err(error)
+                        if error.message()
+                            == "delivery attempt does not exist in this workspace" =>
+                    {
+                        Err(Error::NotFound)
+                    }
+                    Err(_) if !tx.disposition_warning_open(&namespace, &attempt)? => {
+                        Err(Error::NothingToDismiss)
+                    }
+                    Err(_) => Err(Error::Refused(
+                        "The agent can still answer this request, so there's nothing to dismiss."
+                            .to_owned(),
+                    )),
+                },
+            )
+        })
+        .map_err(|_| Error::Unavailable)??;
+    Ok(json!({"attempt_id": attempt, "acknowledged": true}))
 }

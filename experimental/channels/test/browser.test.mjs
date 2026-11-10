@@ -7529,6 +7529,33 @@ test("a refused Dismiss says the agent can still answer and the button comes bac
     .waitFor();
 });
 
+test("a Dismiss with nothing left to dismiss says it was already cleared, and the card goes on the next update", async (t) => {
+  const value = lostAnswer();
+  const ui = await open(t, (client) => replay(client, [value]), undefined, {
+    onControl: () => ({ status: 410 }),
+  });
+  await ui.live();
+  const item = ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .locator(".attention-item");
+  await item
+    .getByRole("button", { name: threadControlCopy.dismiss.label, exact: true })
+    .click();
+  await item
+    .getByRole("button", {
+      name: threadControlCopy.confirmDismiss,
+      exact: true,
+    })
+    .click();
+  const alert = item.getByRole("alert");
+  await alert.waitFor();
+  assert.equal(await alert.textContent(), threadControlCopy.nothingToDismiss);
+  value.frame.attention = [];
+  value.frame.health = { level: "calm" };
+  ui.connections[0].send("space", value);
+  await item.waitFor({ state: "detached" });
+});
+
 test("CH-fix-2 item 3: Stop thread asks once inline, Cancel and Escape take it back, and only the confirm posts stop", async (t) => {
   const ui = await open(t, (client) => replay(client, [replyLimit()]));
   await ui.live();
