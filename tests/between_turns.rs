@@ -5,12 +5,12 @@
 mod cleanup;
 
 use namedrop::{
-    ActorKind, AgentRuntime, AgentSessionId, Clock, DeliveryId, HerdrCommandExecutor,
-    HerdrCommandOutput, IdGenerator, LifecycleRuntime, MessageDraft, MessageId,
-    MessageRecipientDraft, MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId,
-    PaneRoleId, PromptFailureKind, StateNamespace, StateStore, ThreadId,
-    complete_capability_profile, drain_mailboxes, execute_integration_operation,
-    issue_registration_challenge,
+    ActorKind, AgentRuntime, AgentSessionId, Clock, DeliveryId, HealthSeverity,
+    HerdrCommandExecutor, HerdrCommandOutput, IdGenerator, LifecycleRuntime, MessageDraft,
+    MessageId, MessageRecipientDraft, MutationAttribution, PaneAddressDraft, PaneAddressId,
+    PaneBindingId, PaneRoleId, PromptFailureKind, StateNamespace, StateStore, ThreadId,
+    complete_capability_profile, diagnose_collaboration, drain_mailboxes,
+    execute_integration_operation, issue_registration_challenge,
     turn_phase::{TurnEdge, record},
 };
 use serde_json::json;
@@ -269,6 +269,14 @@ impl Fixture {
         drain_mailboxes(&self.runtime()).unwrap();
         std::mem::take(&mut *self.herdr.prompts.lock().unwrap())
     }
+
+    fn long_wait(&self) -> Option<namedrop::HealthIssue> {
+        self.clock.0.store(QUEUED_AT_MS + 61_000, Ordering::Relaxed);
+        diagnose_collaboration(&self.runtime())
+            .issues
+            .into_iter()
+            .find(|issue| issue.code == "ND-DELIVERY-005")
+    }
 }
 
 #[test]
@@ -326,4 +334,40 @@ fn codex_mail_still_waits_for_herdr_to_read_the_session_idle() {
     assert_eq!(fixture.herdr.screen_reads.load(Ordering::Relaxed), 0);
     *fixture.herdr.status.lock().unwrap() = "idle".to_owned();
     assert_eq!(fixture.drain().len(), 1);
+}
+
+#[test]
+fn doctor_says_why_mail_has_waited_over_a_minute() {
+    let fixture = Fixture::new(AgentRuntime::ClaudeCode, "working");
+    fixture
+        .clock
+        .0
+        .store(QUEUED_AT_MS + 59_000, Ordering::Relaxed);
+    assert!(
+        diagnose_collaboration(&fixture.runtime())
+            .issues
+            .iter()
+            .all(|issue| issue.code != "ND-DELIVERY-005")
+    );
+
+    let running = fixture.long_wait().expect("a turn that runs on is shown");
+    assert_eq!(
+        running.summary,
+        "A message to @recipient has waited 1 minute."
+    );
+    assert_eq!(running.severity, HealthSeverity::Info);
+    assert!(running.explanation.contains("working"), "{running:?}");
+    assert_eq!(running.diagnostic["held_by"], "status");
+    assert_eq!(running.diagnostic["delivery_id"], "delivery-1");
+
+    fixture.edge(TurnEdge::Stop, 2_000);
+    fixture.screen(Some(DRAFT_BOX));
+    let draft = fixture.long_wait().expect("a draft in the way is shown");
+    assert_eq!(draft.severity, HealthSeverity::Notice);
+    assert!(draft.explanation.contains("draft"), "{draft:?}");
+    assert_eq!(draft.diagnostic["held_by"], "draft");
+    assert_eq!(draft.diagnostic["agent_status"], "working");
+
+    fixture.screen(Some(EMPTY_BOX));
+    assert_eq!(fixture.long_wait(), None);
 }

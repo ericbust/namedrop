@@ -126,6 +126,7 @@ where
         setup,
         waiting_messages,
         held_deliveries,
+        queued_heads,
         space_id,
         worktree,
     } = match load_health_snapshot(runtime) {
@@ -600,6 +601,7 @@ where
         );
         issues.insert(0, held);
     }
+    issues.extend(long_waits(runtime, &setup, &queued_heads));
     for item in &setup.attention_items {
         // A live inspection replaces only the corresponding stale saved item.
         if item.source_kind == AttentionSourceKind::IntegrationRegistration
@@ -845,7 +847,118 @@ struct HealthSnapshot {
     setup: CollaborationSetup,
     waiting_messages: u64,
     held_deliveries: Vec<crate::store::HeldDelivery>,
+    queued_heads: Vec<(crate::PaneAddressId, crate::DeliveryId, u64)>,
     space_id: String,
+}
+
+/// How long a queued message may wait for its agent before Doctor says why.
+const LONG_WAIT_MS: u64 = 60_000;
+
+/// Each agent mailbox whose next message has waited past `LONG_WAIT_MS`
+/// because delivery's own check refuses the pane right now, with what it saw.
+fn long_waits<E, C, I>(
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+    setup: &CollaborationSetup,
+    queued_heads: &[(crate::PaneAddressId, crate::DeliveryId, u64)],
+) -> Vec<HealthIssue>
+where
+    E: HerdrCommandExecutor,
+    C: Clock,
+{
+    use crate::delivery::{AgentWait, PromptBox};
+    let now_ms = runtime.clock.now_unix_ms();
+    let mut issues = Vec::new();
+    for (address_id, delivery_id, queued_at_ms) in queued_heads {
+        let waited_ms = now_ms.saturating_sub(*queued_at_ms);
+        if waited_ms < LONG_WAIT_MS {
+            continue;
+        }
+        let Some(address) = setup.addresses.iter().find(|address| {
+            &address.id == address_id && address.pane_type == crate::PaneType::Agent
+        }) else {
+            continue;
+        };
+        // A session other than the registered one is Doctor's disconnected issue.
+        let Some(pane) = setup.panes.iter().find(|pane| {
+            address.pane_id.as_deref() == Some(pane.pane_id.as_str())
+                && pane.agent_session_id.is_some()
+                && pane.agent_session_id == address.agent_session_id
+        }) else {
+            continue;
+        };
+        let Some(wait) = crate::delivery::agent_wait(runtime, pane) else {
+            continue;
+        };
+        let alias = &address.alias;
+        let (severity, explanation, kind, prompt) = match &wait {
+            AgentWait::Status(Some(status)) if status == "blocked" => (
+                HealthSeverity::Notice,
+                format!(
+                    "Herdr reports @{alias} waiting on a question or permission prompt. The message goes in once it is answered."
+                ),
+                HealthRepairKind::HumanDecision,
+                format!("Answer @{alias}'s prompt."),
+            ),
+            AgentWait::Status(Some(status)) if status == "working" => (
+                HealthSeverity::Info,
+                format!("Herdr reports @{alias} working. The message goes in when its turn ends."),
+                HealthRepairKind::ProductAction,
+                format!("Wait for @{alias}'s turn to end."),
+            ),
+            AgentWait::Status(status) => (
+                HealthSeverity::Info,
+                format!(
+                    "Herdr reports @{alias} {}. The message goes in once Herdr reports it idle.",
+                    status.as_deref().unwrap_or("with no status")
+                ),
+                HealthRepairKind::ProductAction,
+                format!("Wait for @{alias} to be ready."),
+            ),
+            AgentWait::PromptBox(PromptBox::Draft) => (
+                HealthSeverity::Notice,
+                format!(
+                    "@{alias} finished its turn, but its prompt box holds a draft, and Namedrop doesn't type into a draft while background agents run."
+                ),
+                HealthRepairKind::HumanDecision,
+                format!("Send or clear the draft in @{alias}'s prompt box."),
+            ),
+            AgentWait::PromptBox(PromptBox::Unseen | PromptBox::Empty) => (
+                HealthSeverity::Info,
+                format!(
+                    "@{alias} finished its turn, but Namedrop could not read its prompt box, so the message waits until Herdr reports it idle."
+                ),
+                HealthRepairKind::ProductAction,
+                format!("Wait for @{alias} to be ready."),
+            ),
+        };
+        let minutes = waited_ms / 60_000;
+        let mut waiting = issue(
+            "ND-DELIVERY-005",
+            severity,
+            &format!(
+                "A message to @{alias} has waited {minutes} minute{}.",
+                if minutes == 1 { "" } else { "s" }
+            ),
+            &explanation,
+            kind,
+            &prompt,
+        );
+        waiting.diagnostic = serde_json::json!({
+            "address_id": address_id,
+            "delivery_id": delivery_id,
+            "pane_id": pane.pane_id,
+            "agent_status": pane.agent_status,
+            "held_by": match wait {
+                AgentWait::Status(_) => "status",
+                AgentWait::PromptBox(PromptBox::Draft) => "draft",
+                AgentWait::PromptBox(_) => "prompt_box_unseen",
+            },
+            "queued_at_ms": queued_at_ms,
+            "waited_ms": waited_ms,
+        });
+        issues.push(waiting);
+    }
+    issues
 }
 
 fn load_health_snapshot<E, C, I>(
@@ -874,6 +987,7 @@ where
             },
             waiting_messages: 0,
             held_deliveries: Vec::new(),
+            queued_heads: Vec::new(),
             space_id: discovered.workspace_id,
             worktree: discovered
                 .worktree_attached
@@ -891,10 +1005,14 @@ where
     let held_deliveries = store
         .transaction(|transaction| transaction.held_deliveries(&namespace))
         .map_err(|error| error.to_string())?;
+    let queued_heads = store
+        .transaction(|transaction| transaction.queued_mailbox_heads(&namespace))
+        .map_err(|error| error.to_string())?;
     Ok(HealthSnapshot {
         setup,
         waiting_messages: waiting,
         held_deliveries,
+        queued_heads,
         space_id: discovered.workspace_id,
         worktree: discovered
             .worktree_attached
