@@ -28,6 +28,9 @@ exec "$namedrop_runtime/current/namedrop" "$@"
 '''
 
 
+RELEASE = re.compile(r'[0-9a-f]{64}')
+
+
 def contract(root):
     value = json.loads((root / 'runtime.json').read_text())
     require(isinstance(value, dict) and type(value.get('runtime_protocol')) is int and value['runtime_protocol'] == 1
@@ -67,8 +70,7 @@ def current(runtime):
         require(not link.exists(), 'Runtime current pointer is not a symbolic link.')
         return None
     target = Path(os.readlink(link))
-    require(len(target.parts) == 2 and target.parts[0] == 'releases'
-            and len(target.parts[1]) == 64 and all(c in '0123456789abcdef' for c in target.parts[1]),
+    require(len(target.parts) == 2 and target.parts[0] == 'releases' and RELEASE.fullmatch(target.parts[1]),
             'Runtime current pointer has an invalid target.')
     release = runtime / target
     require(not (runtime/'releases').is_symlink() and not release.is_symlink() and release.is_dir(), 'The active runtime is missing.')
@@ -567,9 +569,7 @@ def migration_record(runtime):
             'Invalid runtime migration record.')
     for name in ('previous', 'target'):
         target = Path(value[name])
-        require(len(target.parts) == 2 and target.parts[0] == 'releases'
-                and len(target.parts[1]) == 64
-                and all(c in '0123456789abcdef' for c in target.parts[1]),
+        require(len(target.parts) == 2 and target.parts[0] == 'releases' and RELEASE.fullmatch(target.parts[1]),
                 'Invalid runtime migration target.')
         release = runtime / target
         require(not release.is_symlink() and not (release / 'namedrop').is_symlink()
