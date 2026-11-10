@@ -653,6 +653,64 @@ def restore(runtime, previous, incoming):
     switch(runtime, previous)
 
 
+def recorded_previous(runtime, digest):
+    """The release before `digest` when activation selects `digest` again: the
+    one activation.json recorded for it, or the release it recorded last."""
+    try:
+        record = json.loads((runtime / 'activation.json').read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    name = record.get('previous') if record.get('revision') == digest else record.get('revision')
+    return name if isinstance(name, str) and RELEASE.fullmatch(name) else None
+
+
+def running_executables():
+    """The resolved executable of every process this user can inspect. A
+    process that exits or can't be read is skipped; failing to list processes
+    raises."""
+    if sys.platform == 'darwin':
+        library = darwin_library()
+        def path(pid):
+            return darwin_path(library, pid)
+    else:
+        def path(pid):
+            try:
+                return os.readlink(f'/proc/{pid}/exe')
+            except OSError:
+                return None
+    return {os.path.realpath(found) for found in map(path, all_pids()) if found}
+
+
+def prune_releases(runtime, keep):
+    """Delete every release outside `keep` that no process runs from. Only
+    lowercase 64-hex directories in releases/ count as releases. Each leaves
+    releases/ in one rename into .pruning/ before it is removed, so an
+    interrupted prune never leaves part of a release there, and the next prune
+    removes whatever .pruning/ still holds."""
+    if (runtime / 'migration.json').exists() or (runtime / 'migration.json').is_symlink():
+        return
+    trash = runtime / '.pruning'
+    owned_directory(trash)
+    for entry in trash.iterdir():
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+    releases = runtime / 'releases'
+    candidates = {entry.name: os.path.realpath(entry / 'namedrop') for entry in releases.iterdir()
+                  if RELEASE.fullmatch(entry.name) and entry.name not in keep
+                  and stat.S_ISDIR(entry.lstat().st_mode)}
+    if not candidates:
+        return
+    running = running_executables()
+    for name, executable in sorted(candidates.items()):
+        if executable not in running:
+            os.rename(releases / name, trash / name)
+            shutil.rmtree(trash / name)
+
+
 def activate_codex_plugin(payload, refresh):
     """Register the local package during explicit setup, then verify via activation.
 
@@ -724,6 +782,10 @@ def activate(root, args):
         digest = hashlib.sha256(contents).hexdigest()
         target = Path('releases') / digest
         release = runtime / target
+        if previous == target:
+            before = recorded_previous(runtime, digest)
+        else:
+            before = previous.name if previous is not None else None
         if release.exists():
             require(not release.is_symlink() and not (release/'namedrop').is_symlink()
                     and not (release/'runtime.json').is_symlink() and contract(release) == incoming
@@ -798,10 +860,15 @@ def activate(root, args):
             payload['data']['runtime'] = {'launcher': str(launcher), 'revision': digest,
                                          'live_update': live,
                                          'codex_migration_pending': not json.loads((runtime/'legacy-sessions.json').read_text())['codex_ready']}
-            write_owned(runtime / 'activation.json', json.dumps({'revision': digest}) + '\n', 0o600)
+            write_owned(runtime / 'activation.json', json.dumps({'revision': digest, 'previous': before}) + '\n', 0o600)
             result.stdout = json.dumps(payload) + '\n'
         print(result.stdout, end='')
         print(result.stderr, end='', file=sys.stderr)
+        if result.returncode == 0:
+            try:
+                prune_releases(runtime, {digest, before})
+            except Exception as error:
+                print(f'Could not remove older Namedrop releases: {error}. The next update tries again.', file=sys.stderr)
         return result.returncode
 
 
