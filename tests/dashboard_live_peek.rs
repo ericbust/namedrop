@@ -2,6 +2,8 @@
 mod cleanup;
 #[path = "support/delivered.rs"]
 mod delivered;
+#[path = "support/executable.rs"]
+mod executable;
 
 #[path = "support/xws.rs"]
 mod xws;
@@ -14,7 +16,7 @@ use std::{
     net::TcpStream,
     os::{
         fd::{AsRawFd, FromRawFd},
-        unix::{fs::PermissionsExt, process::CommandExt},
+        unix::process::CommandExt,
     },
     process::{Child, Command, Stdio},
     thread,
@@ -282,7 +284,7 @@ impl Server {
         // The dashboard gives Herdr metadata reads 150 to 500 ms. Python start-up
         // under load outlasts that, so stored replies are answered by bash builtins.
         let shim = f.root.join("herdr");
-        fs::write(
+        executable::write_executable(
             &shim,
             r#"#!/bin/bash
 root=${0%/*}
@@ -298,8 +300,7 @@ if [ -f "$response" ] && [[ $config != *native_identity_gate* ]]; then
 fi
 exec /usr/bin/python3 "$root/herdr.py" "$@"
 "#,
-        )
-        .unwrap();
+        );
         fs::write(f.root.join("herdr.py"), r#"import base64,json,os,subprocess,sys,time
 root=os.path.dirname(__file__);args=sys.argv[1:]
 def store(responses):
@@ -378,7 +379,6 @@ if os.path.isfile(response):
 elif args[:2]==['worktree','list']:sys.stderr.write('{"error":{"code":"not_git_worktree"}}');sys.exit(1)
 else:sys.exit(1)
 "#).unwrap();
-        fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_namedrop"))
             .arg("--plugin-state")
             .arg(&f.state)
