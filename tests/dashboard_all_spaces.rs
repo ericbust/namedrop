@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
 mod support;
 
@@ -11,7 +13,6 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpStream,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
@@ -56,7 +57,7 @@ impl Server {
     fn start_listing(root: &Path, workspaces: &[Value]) -> Self {
         Self::write_listing(root, workspaces);
         let herdr = root.join("herdr");
-        fs::write(
+        executable::write_executable(
             &herdr,
             r#"#!/bin/sh
 [ "$1 $2" = "workspace list" ] || exit 1
@@ -87,9 +88,7 @@ else
     cat "$ND_TEST_SNAPSHOT"
 fi
 "#,
-        )
-        .unwrap();
-        fs::set_permissions(&herdr, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let child = Command::new(env!("CARGO_BIN_EXE_namedrop"))
             .arg("--plugin-state")
             .arg(root.join("state"))

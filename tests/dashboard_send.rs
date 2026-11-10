@@ -2,6 +2,8 @@
 mod cleanup;
 #[path = "support/delivered.rs"]
 mod delivered;
+#[path = "support/executable.rs"]
+mod executable;
 
 #[path = "support/xws.rs"]
 mod xws;
@@ -1340,7 +1342,7 @@ mod http {
             let responses_file = f.root.join("http-herdr-responses.json");
             fs::write(&responses_file, serde_json::to_vec(&responses).unwrap()).unwrap();
             let shim = f.root.join("http-herdr");
-            fs::write(
+            executable::write_executable(
                 &shim,
                 r#"#!/usr/bin/python3
 import json, os, subprocess, sys, time
@@ -1400,9 +1402,7 @@ else:
     sys.stderr.write('unexpected Herdr invocation: ' + key)
     sys.exit(1)
 "#,
-            )
-            .unwrap();
-            fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
+            );
             let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
             command
                 .arg("--plugin-state")

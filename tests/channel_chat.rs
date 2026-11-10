@@ -2,6 +2,8 @@
 mod cleanup;
 #[path = "support/delivered.rs"]
 mod delivered;
+#[path = "support/executable.rs"]
+mod executable;
 
 #[path = "support/channel_controls.rs"]
 mod channel_controls;
@@ -1160,9 +1162,9 @@ fn a_named_recap_keeps_the_channel_recap_limits() {
     let attempt = reply_attempt(&f, &asked, "pane-1-planner", "round-0");
     relay_ending(&f, "w1", "pane-1-planner", &attempt, "answer-0");
     for round in 1..=8 {
+        f.advance(10);
         let request = format!("round-{round}");
         let posted = person_replies(
-        f.advance(10);
             &f,
             "w1",
             &request,
@@ -1457,11 +1459,11 @@ fn claude_registered_elsewhere_routes_to_an_unregistered_unbound_local_member() 
 #[test]
 fn implicit_followups_reach_all_agent_authors_and_recipients_without_a_model() {
     let f = fixture();
-    let server = Server::start(&f, "not json", false);
-    let root = f.agent_send(
     // The planner never acknowledges the root. The server sends the planner
     // anything after it only once the root's acknowledgement grace is over.
     f.rewind(31_000);
+    let server = Server::start(&f, "not json", false);
+    let root = f.agent_send(
         "w1",
         "pane-1-lead",
         "agent-root",

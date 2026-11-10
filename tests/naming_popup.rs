@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
@@ -7,7 +9,6 @@ use serde_json::Value;
 use std::{
     fs,
     io::{Read, Write},
-    os::unix::fs::PermissionsExt,
     process::{Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -50,7 +51,9 @@ impl Fixture {
         ));
         fs::create_dir(&root).unwrap();
         let host = root.join("herdr");
-        fs::write(&host, r#"#!/bin/sh
+        executable::write_executable(
+            &host,
+            r#"#!/bin/sh
 if [ "$1 $2" = "worktree list" ]; then
   printf '%s\n' '{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"w1"}]}}'
 elif [ "$1 $2" = "pane list" ]; then
@@ -89,14 +92,13 @@ elif [ "$1 $2" = "plugin pane" ]; then
   printf '%s\n' "$@" > "$TEST_ARGS"
   printf '%s\n' '{"result":{"pane_id":"popup"}}'
 else printf '%s\n' '{}'; fi
-"#).unwrap();
-        fs::set_permissions(host, fs::Permissions::from_mode(0o700)).unwrap();
+"#,
+        );
         // Both supported hosts are replaced, so no test in this suite can
         // reach a real provider even if one is installed on the machine.
         for name in ["claude", "codex"] {
             let script = root.join(name);
-            fs::write(&script, FAKE_HOST).unwrap();
-            fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+            executable::write_executable(&script, FAKE_HOST);
         }
         Self(root)
     }

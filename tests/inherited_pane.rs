@@ -1,12 +1,13 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
 use namedrop::{HerdrCommandExecutor, HerdrCommandOutput, verify_inherited_pane};
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -71,7 +72,7 @@ impl Fixture {
         ));
         fs::create_dir_all(root.join("home")).unwrap();
         let host = root.join("herdr");
-        fs::write(
+        executable::write_executable(
             &host,
             format!(
                 r#"#!/bin/sh
@@ -88,9 +89,7 @@ esac
 "#,
                 root = root.display()
             ),
-        )
-        .unwrap();
-        fs::set_permissions(host, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         Self(root)
     }
     /// The test process is the parent of every binary it runs, so its pid is
@@ -122,18 +121,16 @@ esac
         fs::create_dir_all(checkout.join("scripts")).unwrap();
         fs::create_dir_all(checkout.join("bin")).unwrap();
         for script in ["run.sh", "runtime.py", "update.py"] {
-            fs::copy(
+            executable::copy_executable(
                 repo.join("scripts").join(script),
                 checkout.join("scripts").join(script),
-            )
-            .unwrap();
+            );
         }
         fs::copy(repo.join("runtime.json"), checkout.join("runtime.json")).unwrap();
-        fs::copy(
+        executable::copy_executable(
             env!("CARGO_BIN_EXE_namedrop"),
             checkout.join("bin/namedrop"),
-        )
-        .unwrap();
+        );
         fs::create_dir_all(self.0.join("path")).unwrap();
         std::os::unix::fs::symlink(self.0.join("herdr"), self.0.join("path/herdr")).unwrap();
         fs::create_dir_all(self.0.join("state")).unwrap();

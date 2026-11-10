@@ -1,3 +1,4 @@
+use super::executable;
 use super::xws::{self, Fixture};
 use namedrop::dashboard::snapshot::SpaceKey;
 use namedrop::{HerdrCommandExecutor, IdGenerator, ProcessIds, StateNamespace, StateStore};
@@ -6,7 +7,6 @@ use std::{
     fs,
     io::{Read, Write},
     net::{Shutdown, TcpStream},
-    os::unix::fs::PermissionsExt,
     path::Path,
     process::{Child, Command, Stdio},
     thread,
@@ -24,13 +24,6 @@ pub(super) struct Server {
 pub(super) struct Response {
     pub(super) status: u16,
     pub(super) body: String,
-}
-
-fn publish_executable(path: &Path, contents: &str) -> std::io::Result<()> {
-    let staging = path.with_extension(ProcessIds::default().next_id("publish"));
-    fs::write(&staging, contents)?;
-    fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))?;
-    fs::rename(staging, path)
 }
 
 fn wait_for_start_claim(state: &Path, deadline: Instant) -> Result<(), String> {
@@ -162,7 +155,7 @@ impl Server {
         let responses_file = f.root.join("http-herdr-responses.json");
         fs::write(&responses_file, serde_json::to_vec(&responses).unwrap()).unwrap();
         let shim = f.root.join("http-herdr");
-        publish_executable(
+        executable::write_executable(
             &shim,
             r#"#!/usr/bin/python3
 import json, os, sys, time
@@ -210,8 +203,7 @@ else:
     sys.stderr.write('unexpected Herdr invocation: ' + key)
     sys.exit(1)
 "#,
-        )
-        .unwrap();
+        );
         let stderr_path = f.root.join(format!(
             "dashboard-server-{}.stderr",
             ProcessIds::default().next_id("startup")
@@ -235,7 +227,7 @@ else:
             .stderr(stderr);
         let router = f.root.join("fake-router");
         fs::write(f.root.join("router-response.json"), response).unwrap();
-        publish_executable(
+        executable::write_executable(
             &router,
             r#"#!/usr/bin/python3
 import json, os, sys, time
@@ -259,8 +251,7 @@ else:
     else:
         print(output)
 "#,
-        )
-        .unwrap();
+        );
         command
             .env("NAMEDROP_AGENT_STATUS_CLAUDE_BIN", &router)
             .env(
@@ -792,36 +783,19 @@ fn startup_diagnostics_distinguish_timeout_from_the_cleanup_signal_and_reap_chil
 fn fixture_executable_can_be_replaced_while_its_previous_version_runs() {
     let f = Fixture::new();
     let executable = f.root.join("running-shim");
-    fs::copy("/bin/sleep", &executable).unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut command = Command::new(&executable);
-    command.arg("30");
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut previous = loop {
-        match command.spawn() {
-            Err(error)
-                if error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < deadline =>
-            {
-                thread::sleep(Duration::from_millis(20));
-            }
-            result => break result.unwrap(),
-        }
-    };
-    let published = publish_executable(&executable, "#!/bin/sh\nprintf 'replacement-version\\n'\n");
-    let replacement = published
-        .as_ref()
-        .ok()
-        .map(|_| Command::new(&executable).output());
+    executable::copy_executable("/bin/sleep", &executable);
+    let mut previous = Command::new(&executable).arg("30").spawn().unwrap();
+    executable::write_executable(&executable, "#!/bin/sh\nprintf 'replacement-version\\n'\n");
+    let replacement = Command::new(&executable).output();
     let previous_running = previous.try_wait().unwrap().is_none();
     let _ = previous.kill();
     previous.wait().unwrap();
 
-    published.expect("publishing a replacement while the previous executable runs");
     assert!(
         previous_running,
         "previous executable must still be running"
     );
-    let replacement = replacement.unwrap().unwrap();
+    let replacement = replacement.unwrap();
     assert!(replacement.status.success());
     assert_eq!(replacement.stdout, b"replacement-version\n");
 }
