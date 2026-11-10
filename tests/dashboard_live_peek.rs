@@ -860,11 +860,12 @@ fn cached_tty_rechecks_startup_resize_without_rediscovery_or_retained_descriptor
     let server = Server::start(&f);
     let source = SourcePty::new(200, 80);
     set_process_info(&f, json!({"tty":source.path}));
-    configure(&f, json!({"delay_rows":{"80":0.3},"quiet":true}));
+    configure(&f, json!({"gate":"resized","quiet":true}));
     thread::scope(|scope| {
         scope.spawn(|| {
             wait_for(|| !invocations(&f).is_empty());
             source.resize(240, 80);
+            fs::write(f.root.join("resized"), "").unwrap();
         });
         let mut live = server.live(&path("socket-a", "w1", "lead"));
         let reset = live.record().unwrap();
