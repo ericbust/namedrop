@@ -21,9 +21,9 @@ const NOTICE_SCAN_BUDGET: Duration = Duration::from_millis(100);
 /// How much of the transcript's end the Stop reads for the tasks its turn
 /// started.
 const TURN_SCAN_BYTES: u64 = 8 * 1024 * 1024;
-/// How long a worker waits for Claude Code to record how every hook of a Stop
-/// or a prompt ended. It writes that record as soon as the last hook exits.
-pub(crate) const HOOK_OUTCOME_WAIT: Duration = Duration::from_secs(3);
+/// How long the worker waits for Claude Code to record how every Stop hook
+/// of this Stop ended. It writes that record as soon as the last hook exits.
+const STOP_OUTCOME_WAIT: Duration = Duration::from_secs(3);
 
 #[derive(Deserialize, Serialize)]
 struct StopInput {
@@ -54,7 +54,7 @@ struct CapturedStop {
     settles: bool,
 }
 
-pub(crate) fn deadline(milliseconds: u64) {
+fn deadline(milliseconds: u64) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(milliseconds));
         std::process::exit(0);
@@ -168,7 +168,7 @@ pub fn run_worker(state: &Path) {
         &captured.input.transcript_path,
         captured.transcript_end,
     ) {
-        (Some(_), Some(path), Some(from)) => hook_outcome(path, from, stop_outcome),
+        (Some(_), Some(path), Some(from)) => stop_hook_outcome(path, from),
         _ => None,
     };
     if outcome == Some(StopOutcome::Continued) {
@@ -230,9 +230,9 @@ fn settle_stop(state: &Path, captured: &CapturedStop) {
 }
 
 /// Herdr sends no status change when a session ends its turn with background
-/// agents still running, or when a hook blocks a prompt then, so the hook's
-/// worker starts the drain that mail for the session waits on.
-pub(crate) fn wake_waiting_mail(state: &Path, socket: &str, session: &str) {
+/// agents still running, so the Stop's worker starts the drain that mail for
+/// the session waits on.
+fn wake_waiting_mail(state: &Path, socket: &str, session: &str) {
     let Ok(space) = env::var("HERDR_WORKSPACE_ID") else {
         return;
     };
@@ -266,17 +266,30 @@ fn stop_outcome(record: &Value) -> Option<StopOutcome> {
         .then_some(StopOutcome::Ended)
 }
 
-/// The first outcome `outcome` reads in the transcript's records after `from`,
-/// or `None` when Claude Code records none in time or the transcript can't be
-/// read.
-pub(crate) fn hook_outcome<T>(
-    path: &Path,
-    from: u64,
-    outcome: impl Fn(&Value) -> Option<T>,
-) -> Option<T> {
-    let until = Instant::now() + HOOK_OUTCOME_WAIT;
+/// The first outcome Claude Code records after `from`, or `None` when it
+/// records none in time or the transcript can't be read.
+fn stop_hook_outcome(path: &Path, from: u64) -> Option<StopOutcome> {
+    let until = Instant::now() + STOP_OUTCOME_WAIT;
     loop {
-        if let Some(found) = records_after(path, from)?.iter().find_map(&outcome) {
+        let mut bytes = Vec::new();
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .and_then(|mut file| {
+                file.seek(SeekFrom::Start(from))?;
+                file.take(MAX_INPUT_BYTES).read_to_end(&mut bytes)
+            })
+            .ok()?;
+        let complete = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(&[][..], |end| &bytes[..end]);
+        if let Some(found) = complete
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+            .find_map(|record| stop_outcome(&record))
+        {
             return Some(found);
         }
         if Instant::now() >= until {
@@ -284,31 +297,6 @@ pub(crate) fn hook_outcome<T>(
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-}
-
-/// The complete records in the transcript after `from`, or `None` when the
-/// transcript can't be read.
-pub(crate) fn records_after(path: &Path, from: u64) -> Option<Vec<Value>> {
-    let mut bytes = Vec::new();
-    fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .and_then(|mut file| {
-            file.seek(SeekFrom::Start(from))?;
-            file.take(MAX_INPUT_BYTES).read_to_end(&mut bytes)
-        })
-        .ok()?;
-    let complete = bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(&[][..], |end| &bytes[..end]);
-    Some(
-        complete
-            .split(|byte| *byte == b'\n')
-            .filter_map(|line| serde_json::from_slice(line).ok())
-            .collect(),
-    )
 }
 
 fn settle(bound: BoundOperation) -> Result<Value, String> {

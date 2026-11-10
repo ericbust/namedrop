@@ -167,10 +167,6 @@ fn main() -> ExitCode {
         stop_hook::run_worker(state_directory);
         return ExitCode::SUCCESS;
     }
-    if let Some(state_directory) = cli.prompt_worker_state_directory() {
-        prompt_hook::run_worker(state_directory);
-        return ExitCode::SUCCESS;
-    }
     if let Some((terminal, rows, cols)) = cli.dashboard_observer() {
         return namedrop::dashboard::run_observer_guard(terminal, rows, cols);
     }

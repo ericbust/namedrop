@@ -4469,12 +4469,6 @@ fn a_claude_stop_with_background_agents_running_takes_mail_queued_during_the_tur
     assert_eq!(typed[0]["untrusted_body"], "Is the helper done?");
 }
 
-/// How Claude Code 2.1.322 records a prompt's end in the transcript: blocked
-/// by another plugin's hook, blocked by Namedrop's own, and a prompt that
-/// started its turn.
-const PROMPT_OUTCOMES: &str =
-    include_str!("fixtures/between-turns/claude-2.1.322-prompt-outcomes.jsonl");
-
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -4535,213 +4529,41 @@ fn a_mention_namedrop_sends_keeps_the_session_between_turns() {
     );
 }
 
-/// Another plugin's prompt hook blocked the prompt. Claude Code records the
-/// block in the transcript and starts no turn, so the session stays between
-/// turns; a prompt that starts its turn still ends that.
+/// Another plugin's prompt hook blocked or stopped the prompt, and Claude Code
+/// recorded that in the transcript. Namedrop reads no block from the
+/// transcript, so the prompt counts as a started turn: mail waits for the
+/// turn's next Stop or for the background agents, never typed into a turn
+/// that may be running.
 #[test]
-fn a_prompt_another_hook_blocks_keeps_the_session_between_turns() {
-    let space = Space::new();
-    space.reviewer_edge(namedrop::turn_phase::TurnEdge::Stop, now_ms() - 1_000);
-    let outcomes: Vec<Value> = PROMPT_OUTCOMES
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    let (blocked, started) = (&outcomes[0], &outcomes[2]);
-    space.append_transcript(std::slice::from_ref(started));
-
-    let mut hook =
-        space.start_reviewer_prompt_in(space.command(), "BLOCKME reply with the word no.");
-    hook.output();
-    // Claude Code writes how the prompt's hooks ended once they have all run.
-    space.append_transcript(std::slice::from_ref(blocked));
-    hook.wait();
-    assert!(
-        between_turns(space.reviewer_phase()),
-        "{:?}",
-        space.reviewer_phase()
-    );
-
-    let prompt_id = format!("started-{}", now_ms());
-    let mut hook = space.start_installed_hook_in(
-        space.command(),
-        "user-prompt-submit",
-        json!({"hook_event_name":"UserPromptSubmit","session_id":"session-reviewer",
-               "prompt_id":prompt_id,"prompt":"Run the tests.",
-               "transcript_path":space.transcript()}),
-    );
-    hook.output();
-    let mut record = started.clone();
-    record["promptId"] = json!(prompt_id);
-    space.append_transcript(&[record]);
-    hook.wait();
-    assert!(
-        matches!(
-            space.reviewer_phase(),
-            Some(namedrop::turn_phase::TurnPhase::Prompted { .. })
-        ),
-        "{:?}",
-        space.reviewer_phase()
-    );
-}
-
-/// A blocked mention is followed at once by a queued task notice, and Claude
-/// Code records the mention's block only after the notice's hook has run. The
-/// block names the mention, not the notice, so the notice's turn still runs,
-/// even when another slow hook of the notice keeps its record out of the
-/// transcript until after the worker stops waiting.
-#[test]
-fn a_block_of_an_earlier_prompt_leaves_the_next_prompts_turn_running() {
-    let space = Space::new();
-    space.reviewer_edge(namedrop::turn_phase::TurnEdge::Stop, now_ms() - 1_000);
-    let outcomes: Vec<Value> = PROMPT_OUTCOMES
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    let (mention_blocked, started) = (&outcomes[1], &outcomes[2]);
-    space.append_transcript(&[]);
-    let notice = "<task-notification>The helper finished.</task-notification>";
-    let mut hook = space.start_installed_hook_in(
-        space.command(),
-        "user-prompt-submit",
-        json!({"hook_event_name":"UserPromptSubmit","session_id":"session-reviewer",
-               "prompt_id":"notice","prompt":notice,"transcript_path":space.transcript()}),
-    );
-    hook.output();
-    let mut notice_started = started.clone();
-    notice_started["promptId"] = json!("notice");
-    notice_started["message"]["content"] = json!(notice);
-    space.append_transcript(std::slice::from_ref(mention_blocked));
-    hook.wait();
-    space.append_transcript(&[notice_started]);
-    assert!(
-        matches!(
-            space.reviewer_phase(),
-            Some(namedrop::turn_phase::TurnPhase::Prompted { .. })
-        ),
-        "{:?}",
-        space.reviewer_phase()
-    );
-}
-
-/// A block whose text is the same as the prompt's counts only while the
-/// prompt's own record stays out of the transcript: the record shows its turn
-/// started.
-#[test]
-fn a_block_with_the_same_text_leaves_a_prompt_whose_turn_started_running() {
-    let space = Space::new();
-    space.reviewer_edge(namedrop::turn_phase::TurnEdge::Stop, now_ms() - 1_000);
-    let outcomes: Vec<Value> = PROMPT_OUTCOMES
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    let (blocked, started) = (&outcomes[0], &outcomes[2]);
-    space.append_transcript(&[]);
-    let prompt = "BLOCKME reply with the word no.";
-    let mut hook = space.start_installed_hook_in(
-        space.command(),
-        "user-prompt-submit",
-        json!({"hook_event_name":"UserPromptSubmit","session_id":"session-reviewer",
-               "prompt_id":"second","prompt":prompt,"transcript_path":space.transcript()}),
-    );
-    hook.output();
-    let mut second_started = started.clone();
-    second_started["promptId"] = json!("second");
-    second_started["message"]["content"] = json!(prompt);
-    space.append_transcript(std::slice::from_ref(blocked));
-    std::thread::sleep(std::time::Duration::from_millis(1_000));
-    space.append_transcript(&[second_started]);
-    hook.wait();
-    assert!(
-        matches!(
-            space.reviewer_phase(),
-            Some(namedrop::turn_phase::TurnPhase::Prompted { .. })
-        ),
-        "{:?}",
-        space.reviewer_phase()
-    );
-}
-
-/// Every way Claude Code 2.1.322 was seen to end a prompt, as its hook input
-/// and the records it wrote after the hook ran. A prompt a hook blocked or
-/// stopped starts no turn, so the session stays between turns. A prompt
-/// interrupted before its reply leaves nothing that tells it from a running
-/// turn, so its turn counts as started.
-#[test]
-fn each_recorded_prompt_end_leaves_the_session_where_its_turn_does() {
-    let cases = [
-        (
-            "started",
-            include_str!("fixtures/between-turns/claude-2.1.322-prompt-started.jsonl"),
-            false,
-        ),
-        (
-            "blocked",
-            include_str!("fixtures/between-turns/claude-2.1.322-prompt-blocked.jsonl"),
-            true,
-        ),
-        (
-            "blocked-pasted",
-            include_str!("fixtures/between-turns/claude-2.1.322-prompt-blocked-pasted.jsonl"),
-            true,
-        ),
-        (
-            "blocked-exit-2",
-            include_str!("fixtures/between-turns/claude-2.1.322-prompt-blocked-exit-2.jsonl"),
-            true,
-        ),
-        (
-            "stopped",
-            include_str!("fixtures/between-turns/claude-2.1.322-prompt-stopped.jsonl"),
-            true,
-        ),
-        (
-            "interrupted-before-reply",
-            include_str!(
-                "fixtures/between-turns/claude-2.1.322-prompt-interrupted-before-reply.jsonl"
+fn a_prompt_another_hook_blocks_or_stops_counts_as_a_started_turn() {
+    for fixture in [
+        include_str!("fixtures/between-turns/claude-2.1.322-prompt-blocked.jsonl"),
+        include_str!("fixtures/between-turns/claude-2.1.322-prompt-stopped.jsonl"),
+    ] {
+        let mut lines = fixture
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap());
+        let mut input = lines.next().unwrap();
+        let records: Vec<Value> = lines.collect();
+        let space = Space::new();
+        space.reviewer_edge(namedrop::turn_phase::TurnEdge::Stop, now_ms() - 1_000);
+        space.append_transcript(&[]);
+        input["session_id"] = json!("session-reviewer");
+        input["transcript_path"] = json!(space.transcript());
+        let mut hook = space.start_installed_hook_in(space.command(), "user-prompt-submit", input);
+        hook.output();
+        // Claude Code writes how the prompt's hooks ended once they have all run.
+        space.append_transcript(&records);
+        hook.wait();
+        assert!(
+            matches!(
+                space.reviewer_phase(),
+                Some(namedrop::turn_phase::TurnPhase::Prompted { .. })
             ),
-            false,
-        ),
-        (
-            "interrupted-in-hook",
-            include_str!("fixtures/between-turns/claude-2.1.322-prompt-interrupted-in-hook.jsonl"),
-            false,
-        ),
-    ];
-    let phases: Vec<_> = std::thread::scope(|scope| {
-        let runs: Vec<_> = cases
-            .iter()
-            .map(|(name, fixture, _)| {
-                scope.spawn(move || {
-                    let mut lines = fixture
-                        .lines()
-                        .map(|line| serde_json::from_str::<Value>(line).unwrap());
-                    let mut input = lines.next().unwrap();
-                    let records: Vec<Value> = lines.collect();
-                    let space = Space::new();
-                    space.reviewer_edge(namedrop::turn_phase::TurnEdge::Stop, now_ms() - 1_000);
-                    space.append_transcript(&[]);
-                    input["session_id"] = json!("session-reviewer");
-                    input["transcript_path"] = json!(space.transcript());
-                    let mut hook =
-                        space.start_installed_hook_in(space.command(), "user-prompt-submit", input);
-                    hook.output();
-                    space.append_transcript(&records);
-                    hook.wait();
-                    (*name, space.reviewer_phase())
-                })
-            })
-            .collect();
-        runs.into_iter().map(|run| run.join().unwrap()).collect()
-    });
-    let expected: Vec<_> = cases
-        .iter()
-        .map(|(name, _, between)| (*name, *between))
-        .collect();
-    let read: Vec<_> = phases
-        .iter()
-        .map(|(name, phase)| (*name, between_turns(*phase)))
-        .collect();
-    assert_eq!(read, expected, "{phases:?}");
+            "{:?}",
+            space.reviewer_phase()
+        );
+    }
 }
 
 /// The prompt hook records the turn's start before it asks Herdr anything, so

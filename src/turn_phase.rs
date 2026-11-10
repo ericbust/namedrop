@@ -4,9 +4,9 @@
 //!
 //! Each edge has its own file, written only by the hook that sees it, and
 //! each file only moves forward in time, so a late writer never overwrites a
-//! newer edge: the newer time wins. A prompt a hook blocked started no turn,
-//! so its prompt record also keeps the prompt it followed, which counts again
-//! once the block is recorded.
+//! newer edge: the newer time wins. A prompt Namedrop's own hook blocked
+//! started no turn, so its prompt record also keeps the prompt it followed,
+//! which counts again once the block is recorded.
 
 use sha2::{Digest, Sha256};
 use std::{
@@ -29,7 +29,7 @@ pub enum TurnPhase {
 pub enum TurnEdge {
     Prompt,
     Stop,
-    /// A prompt hook blocked or stopped the prompt recorded at this time, so
+    /// Namedrop's own prompt hook blocked the prompt recorded at this time, so
     /// it started no turn. Recorded with that prompt's time.
     Blocked,
 }
