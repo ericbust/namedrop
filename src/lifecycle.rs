@@ -877,30 +877,31 @@ where
                         runtime.herdr,
                     )?;
                     let event_namespace = event_worktree.namespace(runtime.session_socket_id);
+                    store
+                        .transaction(|transaction| {
+                            transaction.end_moves_into(
+                                runtime.session_socket_id,
+                                &pane_id,
+                                &attribution,
+                            )
+                        })
+                        .map_err(|error| error.to_string())?;
                     require_activated(&mut store, &event_namespace)?;
                     let removed_address_id = store
                         .transaction(|transaction| {
-                            // Reconcile may have unbound the pane before this
-                            // event came, which then retires the address the
-                            // pane was last bound to.
-                            let address = match transaction
+                            let binding = transaction
                                 .active_pane_bindings(&event_namespace)?
                                 .into_iter()
-                                .find(|binding| binding.pane_id == pane_id)
-                            {
-                                Some(binding) => Some(binding.address_id),
-                                None => {
-                                    transaction.address_last_bound_to(&event_namespace, &pane_id)?
-                                }
-                            };
-                            if let Some(address) = &address {
+                                .find(|binding| binding.pane_id == pane_id);
+                            if let Some(binding) = binding {
                                 transaction.cancel_and_remove_pane_address(
                                     &event_namespace,
-                                    address,
+                                    &binding.address_id,
                                     &attribution,
                                 )?;
+                                return Ok(Some(binding.address_id));
                             }
-                            Ok(address)
+                            Ok(None)
                         })
                         .map_err(|error| error.to_string())?;
                     let event_runtime = LifecycleRuntime {
@@ -2299,7 +2300,11 @@ fn apply_pane_move(
         .into_iter()
         .find(|binding| binding.pane_id == previous_pane_id);
     let Some(binding) = binding else {
-        return Ok(());
+        return transaction.follow_moved_pane(
+            &namespace.session_socket_id,
+            previous_pane_id,
+            replacement_pane_id,
+        );
     };
     if destination_space_id == namespace.space_id.as_str() {
         transaction.move_pane_binding(
@@ -2315,7 +2320,7 @@ fn apply_pane_move(
             replacement_tab_id,
         )
     } else {
-        transaction.unbind_pane(namespace, &binding.address_id, attribution)
+        transaction.unbind_moved_pane(namespace, &binding, replacement_pane_id, attribution)
     }
 }
 

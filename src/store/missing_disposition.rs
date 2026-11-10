@@ -10,6 +10,13 @@ pub(super) const ITEM_ID_PREFIX: &str = "attention-agent-disposition-";
 /// for it and still short next to waiting for ever.
 pub(crate) const UNBOUND_GRACE_MS: u64 = 10 * 60 * 1_000;
 
+/// How long past `UNBOUND_GRACE_MS` a drain still judges an address that
+/// lost its pane. The grace schedules a wake that drains at its end, and a
+/// drain that fails there retries within a minute, so this covers a few
+/// failed tries. Channels judges the addresses a drain missed, as on a
+/// machine that slept through the window, when it starts.
+const UNBOUND_JUDGE_WINDOW_MS: u64 = 5 * 60 * 1_000;
+
 fn item_id(attempt: &crate::DeliveryAttemptId) -> crate::AttentionItemId {
     crate::AttentionItemId::new(format!("{ITEM_ID_PREFIX}{}", attempt.as_str()))
 }
@@ -30,11 +37,12 @@ struct MissingDispositionFacts {
 
 pub(super) enum RecipientSession {
     /// The address is not routable, has had no pane for less than
-    /// `UNBOUND_GRACE_MS`, or its pane's session is not seen yet.
+    /// `UNBOUND_GRACE_MS`, its pane moved to another workspace and is still
+    /// there, or its pane's session is not seen yet.
     Unknown,
     /// The address's pane is bound and has no session now, as when its agent
-    /// exited, or it has had no pane for `UNBOUND_GRACE_MS`. A pane that
-    /// closed retires its address instead.
+    /// exited, or it has had no pane for `UNBOUND_GRACE_MS`. A bound pane
+    /// that closed retires its address instead.
     Ended,
     Observed(crate::AgentSessionId),
 }
@@ -298,32 +306,95 @@ impl StateTransaction<'_> {
         })
     }
 
-    /// Judges the held answers of every address that has lost its pane with
-    /// no close event to retire it, and says when to look again at those
-    /// still inside `UNBOUND_GRACE_MS`. It looks only at settled attempts
-    /// with no disposition, no warning and no coordination, on addresses
-    /// that had a pane and have none now. No attempt is made for an address
-    /// without a pane, so that set is fixed when the pane goes, and each held
-    /// answer in it leaves at its first drain past the grace.
+    /// Judges the held answers of the addresses whose last pane went, with no
+    /// close event to retire them, at most `UNBOUND_GRACE_MS` plus
+    /// `UNBOUND_JUDGE_WINDOW_MS` ago, and says when to look again at those
+    /// still inside the grace. It looks only at settled attempts with no
+    /// disposition, no warning and no coordination, on addresses that are no
+    /// envoy and whose pane did not move to another workspace. It reads no
+    /// claim inside the grace. In the window each drain reads the claim of
+    /// every attempt still unflagged, so no claim is read past the window,
+    /// and a drain never looks at an address whose pane went before it.
     pub(crate) fn judge_unbound_attempts(
         &mut self,
         ns: &StateNamespace,
         by: &MutationAttribution,
     ) -> Result<Vec<(crate::DeliveryAttemptId, u64)>, StoreError> {
+        let since = by
+            .occurred_at_ms
+            .saturating_sub(UNBOUND_GRACE_MS + UNBOUND_JUDGE_WINDOW_MS);
+        self.judge_unbound_since(ns, since, by)
+    }
+
+    /// Judges the held answers of every address in every space whose pane
+    /// went, however long ago, for a machine that slept through the window
+    /// `judge_unbound_attempts` looks at.
+    pub(crate) fn judge_all_unbound_attempts(
+        &mut self,
+        by: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        let spaces = {
+            let mut statement = self.transaction.prepare(
+                "SELECT DISTINCT session_socket_id, worktree_id FROM pane_bindings
+                 WHERE active = 0 AND unbound_at_ms IS NOT NULL
+                 ORDER BY session_socket_id, worktree_id",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok(StateNamespace::for_space(
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for ns in spaces {
+            self.judge_unbound_since(&ns, 0, by)?;
+        }
+        Ok(())
+    }
+
+    fn judge_unbound_since(
+        &mut self,
+        ns: &StateNamespace,
+        since_ms: u64,
+        by: &MutationAttribution,
+    ) -> Result<Vec<(crate::DeliveryAttemptId, u64)>, StoreError> {
         let unbound = {
             let mut statement = self.transaction.prepare(
-                "SELECT a.attempt_id, MAX(b.unbound_at_ms)
-                 FROM delivery_attempts a
+                "WITH gone AS (
+                     SELECT b.address_id, b.unbound_at_ms
+                     FROM pane_bindings b
+                     WHERE b.session_socket_id = ?1 AND b.worktree_id = ?2
+                       AND b.active = 0 AND b.unbound_at_ms >= ?4
+                       AND b.rowid = (
+                           SELECT MAX(l.rowid) FROM pane_bindings l
+                           WHERE l.session_socket_id = b.session_socket_id
+                             AND l.worktree_id = b.worktree_id
+                             AND l.address_id = b.address_id
+                       )
+                       AND NOT EXISTS (
+                           SELECT 1 FROM space_envoys e
+                           WHERE e.session_socket_id = b.session_socket_id
+                             AND e.worktree_id = b.worktree_id
+                             AND e.address_id = b.address_id
+                       )
+                 )
+                 SELECT a.attempt_id, gone.unbound_at_ms
+                 FROM gone
+                 JOIN pane_addresses p
+                   ON p.session_socket_id = ?1 AND p.worktree_id = ?2
+                  AND p.address_id = gone.address_id
+                 JOIN delivery_attempts a
+                   ON a.session_socket_id = ?1 AND a.worktree_id = ?2
+                  AND a.address_id = gone.address_id
                  JOIN delivery_attempt_state s USING (
                      session_socket_id, worktree_id, attempt_id, address_id
                  )
-                 JOIN pane_addresses p USING (session_socket_id, worktree_id, address_id)
-                 JOIN pane_bindings b USING (session_socket_id, worktree_id, address_id)
                  JOIN mailbox_deliveries d USING (
                      session_socket_id, worktree_id, delivery_id, address_id
                  )
-                 WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2
-                   AND s.state = 'settled' AND p.retired = 0
+                 WHERE s.state = 'settled' AND p.retired = 0
                    AND NOT EXISTS (
                        SELECT 1 FROM delivery_dispositions x
                        WHERE x.session_socket_id = a.session_socket_id
@@ -347,13 +418,16 @@ impl StateTransaction<'_> {
                          AND g.recipient_address_id = a.address_id
                          AND g.recipient_session_id = a.agent_session_id
                    )
-                 GROUP BY a.attempt_id
-                 HAVING MAX(b.active) = 0
-                 ORDER BY MIN(a.created_at_ms), a.attempt_id",
+                 ORDER BY a.created_at_ms, a.attempt_id",
             )?;
             statement
                 .query_map(
-                    params![ns.session_socket_id, ns.space_id.as_str(), ITEM_ID_PREFIX],
+                    params![
+                        ns.session_socket_id,
+                        ns.space_id.as_str(),
+                        ITEM_ID_PREFIX,
+                        i64::try_from(since_ms).unwrap_or(i64::MAX)
+                    ],
                     |row| {
                         Ok((
                             crate::DeliveryAttemptId::new(row.get::<_, String>(0)?),
@@ -687,18 +761,24 @@ impl StateTransaction<'_> {
         })
     }
 
-    /// When the address's last pane was unbound, if it ever had one.
+    /// When the address's last pane was unbound, if it ever had one and that
+    /// pane did not move to another workspace, where its session lives on.
     fn unbound_since(
         &self,
         ns: &StateNamespace,
         address: &PaneAddressId,
     ) -> Result<Option<u64>, StoreError> {
-        let at: Option<i64> = self.transaction.query_row(
-            "SELECT MAX(unbound_at_ms) FROM pane_bindings
-             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND address_id = ?3",
-            params![ns.session_socket_id, ns.space_id.as_str(), address.as_str()],
-            |row| row.get(0),
-        )?;
+        let at: Option<i64> = self
+            .transaction
+            .query_row(
+                "SELECT unbound_at_ms FROM pane_bindings
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2 AND address_id = ?3
+                 ORDER BY rowid DESC LIMIT 1",
+                params![ns.session_socket_id, ns.space_id.as_str(), address.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
         Ok(at.and_then(|at| u64::try_from(at).ok()))
     }
 

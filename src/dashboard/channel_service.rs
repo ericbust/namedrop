@@ -156,6 +156,7 @@ fn recover(state: &Path) -> Result<(), String> {
                 );
                 tx.resolve_answer_attention(&by)?;
                 tx.judge_open_disposition_warnings(&by)?;
+                tx.judge_all_unbound_attempts(&by)?;
                 tx.fail_abandoned_channels(now)
             })
         })
@@ -473,6 +474,37 @@ mod tests {
         successor.shutdown().unwrap();
         assert_eq!(facts(), before, "a second run changes nothing");
         assert_eq!(disposition_warnings(&root, &replaced), lost);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A drain judges an address that lost its pane only for a few minutes
+    /// past the grace. Starting Channels judges one whose pane went long
+    /// before, as on a machine that slept through those minutes.
+    #[test]
+    fn starting_flags_a_held_answer_whose_pane_went_long_ago() {
+        let root = state_root("held-long-unbound");
+        let mut store = StateStore::open(&root).unwrap();
+        let ns = StateNamespace::for_space("socket", "gone");
+        crate::final_reply::hold_answer(&root, &ns, "session", "attempt");
+        crate::store::seed_unanswered(&mut store, &ns, false);
+        store
+            .transaction(|tx| {
+                tx.unbind_pane(
+                    &ns,
+                    &crate::PaneAddressId::new("agent"),
+                    &crate::MutationAttribution::new(crate::ActorKind::Plugin, "test", 20),
+                )
+            })
+            .unwrap();
+        assert_eq!(disposition_warnings(&root, &ns), []);
+
+        let mut service = ChannelService::start(&root).unwrap();
+        service.shutdown().unwrap();
+
+        let lost = disposition_warnings(&root, &ns);
+        assert_eq!(lost.len(), 1, "{lost:?}");
+        assert!(lost[0].0.contains("pane has been gone"), "{lost:?}");
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }

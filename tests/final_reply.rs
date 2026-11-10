@@ -69,6 +69,8 @@ struct FakeHerdr {
     reviewer_host: Mutex<&'static str>,
     /// Herdr no longer lists the reviewer's pane, as after it was closed.
     reviewer_gone: AtomicBool,
+    /// Herdr lists the reviewer's session in `pane-elsewhere` of workspace-2.
+    reviewer_elsewhere: AtomicBool,
     prompts: Mutex<Vec<(String, String)>>,
     notifications: Mutex<Vec<String>>,
 }
@@ -115,6 +117,21 @@ impl HerdrCommandExecutor for FakeHerdr {
                          "agent":*self.reviewer_host.lock().unwrap(),"agent_session":{"value":"session-reviewer"},"agent_status":"idle"}
                     ));
                 }
+                json!({"result": {"panes": panes}}).to_string()
+            }
+            ["worktree", "list", "--workspace", "workspace-2", "--json"] => json!({
+                "result": {"worktrees": [{"path": format!("{}-2", self.worktree), "open_workspace_id": "workspace-2"}]}
+            })
+            .to_string(),
+            ["pane", "list", "--workspace", "workspace-2"] => {
+                let panes = if self.reviewer_elsewhere.load(Ordering::Relaxed) {
+                    vec![json!(
+                        {"pane_id":"pane-elsewhere","terminal_id":"t2","tab_id":"tab-9","workspace_id":"workspace-2",
+                         "agent":"claude","agent_session":{"value":"session-reviewer"},"agent_status":"working"}
+                    )]
+                } else {
+                    Vec::new()
+                };
                 json!({"result": {"panes": panes}}).to_string()
             }
             ["agent", "prompt", pane_id, envelope] => {
@@ -206,6 +223,7 @@ impl Space {
         let herdr = FakeHerdr {
             reviewer_host: Mutex::new("claude"),
             reviewer_gone: AtomicBool::new(false),
+            reviewer_elsewhere: AtomicBool::new(false),
             worktree: directory.repo.display().to_string(),
             prompts: Mutex::new(Vec::new()),
             notifications: Mutex::new(Vec::new()),
@@ -4154,6 +4172,67 @@ impl Space {
         .unwrap();
     }
 
+    fn activate_workspace_2(&self) {
+        let workspace_2 = StateNamespace::for_space("socket-a", "workspace-2");
+        let mut store = StateStore::open(&self.directory.state).unwrap();
+        store
+            .transaction(|transaction| {
+                transaction.activate_worktree(
+                    &workspace_2,
+                    &MutationAttribution::new(ActorKind::Human, "test", 1),
+                )
+            })
+            .unwrap();
+        store
+            .transaction(|transaction| transaction.complete_reconciliation(&workspace_2))
+            .unwrap();
+    }
+
+    /// Herdr's event that the reviewer's pane moved to workspace-2 as
+    /// `pane-elsewhere`, handled at `now_ms`.
+    fn reviewer_pane_moved_at(&self, now_ms: u64) {
+        self.reviewer_pane_gone(true);
+        self.herdr.reviewer_elsewhere.store(true, Ordering::Relaxed);
+        namedrop::execute_lifecycle_operation(
+            "event.pane-lifecycle",
+            json!({"type":"pane_moved","previous_pane_id":"pane-reviewer",
+                   "previous_workspace_id":"workspace-1","previous_tab_id":"tab-2",
+                   "pane":{"pane_id":"pane-elsewhere","workspace_id":"workspace-2",
+                           "terminal_id":"t2","tab_id":"tab-9","focused":false,
+                           "agent_status":"working","revision":1}}),
+            &self.runtime_at(&At(now_ms)),
+        )
+        .unwrap();
+    }
+
+    /// Herdr's event that `pane-elsewhere` closed, handled at `now_ms`.
+    fn moved_pane_closed_at(&self, now_ms: u64) {
+        self.herdr
+            .reviewer_elsewhere
+            .store(false, Ordering::Relaxed);
+        namedrop::execute_lifecycle_operation(
+            "event.pane-lifecycle",
+            json!({"type":"pane_closed","pane_id":"pane-elsewhere","workspace_id":"workspace-2"}),
+            &self.runtime_at(&At(now_ms)),
+        )
+        .unwrap();
+    }
+
+    /// Reconcile of workspace-2 at `now_ms`, as `observe_at` is of
+    /// workspace-1.
+    fn observe_workspace_2_at(&self, now_ms: u64) -> Option<u64> {
+        let clock = At(now_ms);
+        let runtime = LifecycleRuntime {
+            workspace_id: Some("workspace-2"),
+            ..self.runtime_at(&clock)
+        };
+        let reconciled =
+            namedrop::execute_lifecycle_operation("reconcile", json!({}), &runtime).unwrap();
+        serde_json::from_value::<namedrop::DrainReport>(reconciled["drain"].clone())
+            .unwrap()
+            .next_due_ms()
+    }
+
     /// Whether Herdr lists the reviewer's pane.
     fn reviewer_pane_gone(&self, gone: bool) {
         self.herdr.reviewer_gone.store(gone, Ordering::Relaxed);
@@ -4192,34 +4271,121 @@ impl Space {
 /// How long an address may have no pane before its session counts as ended.
 const UNBOUND_GRACE_MS: u64 = 10 * 60 * 1_000;
 
-/// Reconcile unbinds a pane it no longer finds, and Herdr's close event for
-/// that pane comes after. The close still retires the name, so the held
-/// answer is flagged as lost and the person can clear it.
+/// A name the person unbound on purpose outlives the close of the pane it
+/// had: the close finds no name on that pane, so it retires nothing,
+/// releases no alias and cancels none of the name's mail.
 #[test]
-fn a_pane_closed_after_reconcile_unbound_it_loses_its_held_answer() {
+fn closing_the_pane_of_a_name_unbound_on_purpose_keeps_the_name_and_its_mail() {
     let space = Space::new();
     let ask = space.held_on_first_task();
     space.settle_attempt(&ask);
-    space.reviewer_pane_gone(true);
-    space.observe_at(IDLE);
+    namedrop::execute_lifecycle_operation(
+        "address.unbind",
+        json!({"address_id":"address-reviewer"}),
+        &space.runtime_at(&At(IDLE)),
+    )
+    .unwrap();
+    dispatch::message(
+        "send",
+        json!({"request_id":"queued","source":"@reviewer One more thing.",
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    let mail = || {
+        space.rows(
+            "SELECT delivery_id, state FROM mailbox_deliveries
+             WHERE address_id = 'address-reviewer' ORDER BY delivery_id",
+        )
+    };
+    let before = mail();
     assert!(
-        !space.reviewer_bound(),
-        "reconcile kept the missing pane bound"
+        before.iter().any(|row| row[1] == "queued"),
+        "the unbound name queued nothing: {before:?}"
     );
-    assert!(!space.disposition_warning_ever_opened());
 
     space.reviewer_pane_closed_at(IDLE + 1);
+    assert_eq!(
+        space.rows(
+            "SELECT CAST(retired AS TEXT) FROM pane_addresses WHERE address_id = 'address-reviewer'"
+        ),
+        [["0"]],
+        "the close retired a name it had no pane of"
+    );
+    assert_eq!(
+        space.rows(
+            "SELECT alias FROM alias_claims
+             WHERE address_id = 'address-reviewer' AND claim_state = 'active'"
+        ),
+        [["reviewer"]]
+    );
+    assert_eq!(mail(), before, "the close changed the name's mail");
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    assert!(!space.disposition_warning_ever_opened());
+}
+
+/// A pane moved to another workspace takes its session along, which can
+/// still answer, so no grace runs out on it however long it stays there,
+/// whichever workspace drains. Once that pane closes there, the grace runs
+/// from the close and the held answer is flagged at its end.
+#[test]
+fn a_pane_moved_to_another_workspace_loses_its_held_answer_only_once_it_closes() {
+    let space = Space::new();
+    space.activate_workspace_2();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    space.reviewer_pane_moved_at(IDLE);
+    assert!(!space.reviewer_bound());
+    let long_after = IDLE + 3 * UNBOUND_GRACE_MS;
+    assert_eq!(space.observe_at(IDLE + UNBOUND_GRACE_MS), None);
+    assert_eq!(space.observe_workspace_2_at(IDLE + UNBOUND_GRACE_MS), None);
+    assert_eq!(space.observe_at(long_after), None);
+    assert_eq!(space.observe_workspace_2_at(long_after), None);
+    assert!(
+        !space.disposition_warning_ever_opened(),
+        "{:?}",
+        space.disposition_warnings_ever()
+    );
+    assert_eq!(space.reviewer_leg(), "working");
+
+    let closed = long_after + 1;
+    space.moved_pane_closed_at(closed);
+    let lost_at = closed + UNBOUND_GRACE_MS;
+    assert_eq!(space.observe_at(closed), Some(lost_at));
+    assert!(!space.disposition_warning_ever_opened());
+    assert_eq!(space.observe_at(lost_at), None);
     let warnings = space.unresolved_disposition_warnings();
     assert_eq!(
         warnings.len(),
         1,
-        "the closed pane's held answer stays held"
+        "a moved pane gone for good left it working"
     );
-    assert!(warnings[0][0].contains("pane was closed"), "{warnings:?}");
-    assert_eq!(space.lost_answer_card()["answer_lost"], "retired");
+    assert!(
+        warnings[0][0].contains("pane has been gone"),
+        "{warnings:?}"
+    );
     assert_eq!(space.reviewer_leg(), "completed");
-    space.acknowledge(&ask).unwrap();
-    assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
+/// Past `UNBOUND_GRACE_MS` and the few minutes after it that cover a late
+/// wake, a drain no longer looks at an address that lost its pane, so its
+/// work stays the same however old the database grows. Starting Channels
+/// judges what it missed.
+#[test]
+fn a_drain_long_after_a_pane_went_does_not_look_at_its_attempts() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    space.reviewer_pane_gone(true);
+    assert_eq!(space.observe_at(IDLE), Some(IDLE + UNBOUND_GRACE_MS));
+    let day = 24 * 60 * 60 * 1_000;
+    assert_eq!(space.observe_at(IDLE + day), None);
+    assert!(
+        !space.disposition_warning_ever_opened(),
+        "a drain a day later still judged the pane: {:?}",
+        space.disposition_warnings_ever()
+    );
+    assert_eq!(space.reviewer_leg(), "working");
 }
 
 /// A pane that goes away with no close event, as when Herdr restarts and the

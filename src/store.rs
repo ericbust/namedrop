@@ -890,43 +890,6 @@ impl StateTransaction<'_> {
             .map_err(StoreError::from)
     }
 
-    /// The address `pane_id` was last bound to, when that binding has ended,
-    /// the address was not bound to any pane since and is not retired.
-    pub fn address_last_bound_to(
-        &self,
-        namespace: &StateNamespace,
-        pane_id: &str,
-    ) -> Result<Option<PaneAddressId>, StoreError> {
-        Ok(self
-            .transaction
-            .query_row(
-                "WITH last AS (
-                     SELECT address_id, rowid AS seq FROM pane_bindings
-                     WHERE session_socket_id = ?1 AND worktree_id = ?2 AND pane_id = ?3
-                     ORDER BY rowid DESC LIMIT 1
-                 )
-                 SELECT last.address_id FROM last
-                 JOIN pane_addresses p
-                   ON p.session_socket_id = ?1 AND p.worktree_id = ?2
-                  AND p.address_id = last.address_id
-                 WHERE p.retired = 0
-                   AND NOT EXISTS (
-                       SELECT 1 FROM pane_bindings later
-                       WHERE later.session_socket_id = ?1 AND later.worktree_id = ?2
-                         AND later.address_id = last.address_id
-                         AND (later.rowid > last.seq OR later.active = 1)
-                   )",
-                params![
-                    namespace.session_socket_id,
-                    namespace.space_id.as_str(),
-                    pane_id
-                ],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .map(PaneAddressId::new))
-    }
-
     pub(crate) fn routing_author_for_pane(
         &self,
         namespace: &StateNamespace,
@@ -1304,6 +1267,71 @@ impl StateTransaction<'_> {
         if self.release_pane_binding(namespace, address_id, attribution)? {
             self.judge_address_attempts(namespace, address_id, attribution)?;
         }
+        Ok(())
+    }
+
+    /// Unbinds `binding`, whose pane moved to another workspace as
+    /// `destination_pane_id`. Its session lives on there, so the ended
+    /// binding keeps the pane's new id and no `unbound_at_ms`: no clock runs
+    /// on it until that pane goes away, which `end_moves_into` records.
+    pub(crate) fn unbind_moved_pane(
+        &mut self,
+        namespace: &StateNamespace,
+        binding: &crate::PaneBindingRecord,
+        destination_pane_id: &str,
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        if !self.release_pane_binding(namespace, &binding.address_id, attribution)? {
+            return Ok(());
+        }
+        self.transaction.execute(
+            "UPDATE pane_bindings SET pane_id = ?4, unbound_at_ms = NULL
+             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND binding_id = ?3",
+            params![
+                namespace.session_socket_id,
+                namespace.space_id.as_str(),
+                binding.id.as_str(),
+                destination_pane_id
+            ],
+        )?;
+        self.judge_address_attempts(namespace, &binding.address_id, attribution)
+    }
+
+    /// Keeps the record of a pane that moved out of its workspace on that
+    /// pane as it moves again.
+    pub(crate) fn follow_moved_pane(
+        &mut self,
+        session_socket_id: &str,
+        previous_pane_id: &str,
+        replacement_pane_id: &str,
+    ) -> Result<(), StoreError> {
+        self.transaction.execute(
+            "UPDATE pane_bindings SET pane_id = ?3
+             WHERE session_socket_id = ?1 AND pane_id = ?2
+               AND active = 0 AND unbound_at_ms IS NULL",
+            params![session_socket_id, previous_pane_id, replacement_pane_id],
+        )?;
+        Ok(())
+    }
+
+    /// Starts the unbound clock of every address whose pane moved out of its
+    /// workspace and has now closed or exited as `pane_id`.
+    pub(crate) fn end_moves_into(
+        &mut self,
+        session_socket_id: &str,
+        pane_id: &str,
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        self.transaction.execute(
+            "UPDATE pane_bindings SET unbound_at_ms = ?3
+             WHERE session_socket_id = ?1 AND pane_id = ?2
+               AND active = 0 AND unbound_at_ms IS NULL",
+            params![
+                session_socket_id,
+                pane_id,
+                to_i64(attribution.occurred_at_ms)?
+            ],
+        )?;
         Ok(())
     }
 
