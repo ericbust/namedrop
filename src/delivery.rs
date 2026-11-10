@@ -515,7 +515,8 @@ where
         let Some(first) = first else {
             continue;
         };
-        if !live_candidate_matches(runtime, &first, &first_discovery)
+        let reach = candidate_reach(runtime, &first, &first_discovery);
+        if reach != Reach::Now
             || (first.pane_type == crate::PaneType::Terminal
                 && !crate::terminal::shell_is_available(runtime.herdr, &first.pane_id))
         {
@@ -547,8 +548,11 @@ where
         let Some(second) = second else {
             continue;
         };
-        if first != second
-            || !live_candidate_matches(runtime, &second, &second_discovery)
+        if first != second {
+            continue;
+        }
+        let reach = candidate_reach(runtime, &second, &second_discovery);
+        if reach != Reach::Now
             || (second.pane_type == crate::PaneType::Terminal
                 && (first_discovery
                     .panes
@@ -830,7 +834,7 @@ where
                     continue;
                 };
                 if candidate.pane_type == crate::PaneType::Terminal
-                    && live_candidate_matches(runtime, &candidate, &first_discovery)
+                    && candidate_reach(runtime, &candidate, &first_discovery) == Reach::Now
                     && tx.coordination_wake_message_readiness(
                         &namespace,
                         &candidate.message_id,
@@ -864,13 +868,23 @@ where
     }
 }
 
-/// Whether a typed prompt reaches the candidate's session now: a terminal at
-/// its shell, or an agent session open for a prompt with nothing in its way.
-fn live_candidate_matches<E, C, I>(
+/// Whether a typed prompt reaches the candidate's session now.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Reach {
+    /// A terminal at its shell, or an agent session open for a prompt with
+    /// nothing in its way.
+    Now,
+    /// The pane is gone, or holds another session or program.
+    Gone,
+    /// The candidate's agent session is in the pane, and the prompt waits.
+    Waits(AgentWait),
+}
+
+fn candidate_reach<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
     candidate: &DispatchCandidate,
     discovered: &crate::DiscoveredWorktree,
-) -> bool
+) -> Reach
 where
     E: HerdrCommandExecutor,
 {
@@ -879,13 +893,20 @@ where
         .iter()
         .find(|pane| pane.pane_id == candidate.pane_id)
     else {
-        return false;
+        return Reach::Gone;
     };
-    if candidate.pane_type == crate::PaneType::Terminal {
-        return pane.agent.is_none() && pane.agent_session_id.is_none();
+    let present = if candidate.pane_type == crate::PaneType::Terminal {
+        pane.agent.is_none() && pane.agent_session_id.is_none()
+    } else {
+        pane.agent_session_id.as_ref() == Some(&candidate.agent_session_id)
+    };
+    if !present {
+        return Reach::Gone;
     }
-    pane.agent_session_id.as_ref() == Some(&candidate.agent_session_id)
-        && agent_wait(runtime, pane).is_none()
+    if candidate.pane_type == crate::PaneType::Terminal {
+        return Reach::Now;
+    }
+    agent_wait(runtime, pane).map_or(Reach::Now, Reach::Waits)
 }
 
 /// How an agent pane takes a prompt, from Herdr's status and, for Claude Code,
@@ -896,7 +917,7 @@ enum Opening {
     Settled,
     /// Herdr reports a Claude Code session working, but its last turn ended
     /// and no prompt came since: background agents it started run on. A prompt
-    /// typed now starts the next turn, unless the person's draft is in the box.
+    /// typed now starts the next turn.
     BetweenTurns,
     /// A turn runs, a question waits, or the status is unknown.
     Closed,
@@ -919,16 +940,20 @@ fn opening(
     }
 }
 
-/// Why an agent pane's mail waits, or `None` when a prompt may be typed now.
+/// Why an agent pane's mail waits.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum AgentWait {
     /// Herdr's status for the pane, which is not idle or done.
     Status(Option<String>),
-    /// The session is between turns, and its prompt box holds text Namedrop
-    /// would type after, or could not be read.
-    PromptBox(PromptBox),
+    /// The agent's prompt box holds a draft the person hasn't sent. Herdr
+    /// types at the cursor, so a prompt typed now would be sent inside it.
+    Draft,
+    /// Herdr reports the session working between turns, and Namedrop found no
+    /// prompt box to see that it is empty.
+    PromptBoxUnseen,
 }
 
+/// Why an agent pane's mail waits, or `None` when a prompt may be typed now.
 pub(crate) fn agent_wait<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
     pane: &DiscoveredPane,
@@ -945,30 +970,41 @@ where
             )
         })
     };
-    match opening(pane, phase) {
-        Opening::Settled => None,
-        Opening::BetweenTurns => match read_prompt_box(runtime.herdr, &pane.pane_id) {
-            PromptBox::Empty => None,
-            held => Some(AgentWait::PromptBox(held)),
-        },
-        Opening::Closed => Some(AgentWait::Status(pane.agent_status.clone())),
+    let opening = opening(pane, phase);
+    if opening == Opening::Closed {
+        return Some(AgentWait::Status(pane.agent_status.clone()));
+    }
+    let agent = crate::integration::pane_agent_runtime(pane)?;
+    match read_prompt_box(runtime.herdr, &pane.pane_id, agent) {
+        PromptBox::Empty => None,
+        PromptBox::Draft => Some(AgentWait::Draft),
+        // Herdr's idle is the proof a prompt may go in, as it was before
+        // Namedrop read the box, so a screen it doesn't recognize never
+        // strands the mail. Between turns the empty box is the only proof.
+        PromptBox::Unseen if opening == Opening::Settled => None,
+        PromptBox::Unseen => Some(AgentWait::PromptBoxUnseen),
     }
 }
 
-/// What a Claude Code pane's prompt box holds.
+/// What an agent pane's prompt box holds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PromptBox {
+enum PromptBox {
     Empty,
-    /// Text the person typed and has not sent.
+    /// Text the person typed and has not sent, or a box they switched to shell
+    /// mode.
     Draft,
     /// The screen shows no prompt box Namedrop recognizes.
     Unseen,
 }
 
-/// Enough of the screen's end for the box and whatever Claude Code draws under it.
+/// Enough of the screen's end for the box and whatever the agent draws under it.
 const PROMPT_BOX_LINES: &str = "60";
 
-fn read_prompt_box(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> PromptBox {
+fn read_prompt_box(
+    herdr: &impl HerdrCommandExecutor,
+    pane_id: &str,
+    agent: crate::AgentRuntime,
+) -> PromptBox {
     herdr
         .execute(&[
             "pane",
@@ -981,35 +1017,27 @@ fn read_prompt_box(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> PromptBo
             "--format",
             "ansi",
         ])
-        .map_or(PromptBox::Unseen, |output| prompt_box(&output.stdout))
+        .map_or(PromptBox::Unseen, |output| {
+            prompt_box(&output.stdout, agent)
+        })
 }
 
-/// Claude Code draws its prompt box as a `❯` line under a rule, with any
-/// further lines of the draft down to the rule that closes it. Earlier
-/// prompts in the transcript also start with `❯`, so the box is the last one.
-/// It draws its own placeholder and the suggested next prompt faint, so only
-/// text drawn at normal intensity is the person's. The cursor is drawn in
-/// reverse video, over the first letter of a faint suggestion.
-fn prompt_box(screen: &str) -> PromptBox {
+/// Both agents draw their placeholder, and Claude Code its suggested next
+/// prompt, faint, so only text drawn at normal intensity is the person's.
+/// Claude Code draws the cursor in reverse video, over the first letter of a
+/// faint suggestion. Earlier prompts in the transcript start with the same
+/// glyph as the box, so the box is the last one.
+fn prompt_box(screen: &str, agent: crate::AgentRuntime) -> PromptBox {
     let lines = cells(screen);
-    let starts_with = |line: &[Cell], character: char| {
-        line.first().is_some_and(|cell| cell.character == character)
+    let found = match agent {
+        crate::AgentRuntime::ClaudeCode => claude_code_box(&lines),
+        crate::AgentRuntime::Codex => codex_box(&lines),
     };
-    let rule = |line: &Vec<Cell>| starts_with(line, '\u{2500}');
-    let Some(open) = (1..lines.len())
-        .rev()
-        .find(|&index| starts_with(&lines[index], '\u{276f}') && rule(&lines[index - 1]))
-    else {
-        return PromptBox::Unseen;
+    let held = match found {
+        None => return PromptBox::Unseen,
+        Some(Found::ShellMode) => return PromptBox::Draft,
+        Some(Found::Box(held)) => held,
     };
-    let Some(close) = lines[open + 1..].iter().position(rule) else {
-        return PromptBox::Unseen;
-    };
-    let held: Vec<&Cell> = lines[open..=open + close]
-        .iter()
-        .flatten()
-        .skip(1)
-        .collect();
     let hinted = held.iter().any(|cell| cell.faint);
     let typed = held
         .iter()
@@ -1019,6 +1047,66 @@ fn prompt_box(screen: &str) -> PromptBox {
     } else {
         PromptBox::Empty
     }
+}
+
+/// The prompt box found on screen.
+enum Found<'a> {
+    /// The person typed `!`, so whatever is typed next runs as a shell command.
+    ShellMode,
+    /// The box's cells after its prompt glyph.
+    Box(Vec<&'a Cell>),
+}
+
+fn starts_with(line: &[Cell], character: char) -> bool {
+    line.first().is_some_and(|cell| cell.character == character)
+}
+
+/// Claude Code draws its box as a `❯` line under a rule, with any further
+/// lines of the draft down to the rule that closes it. In shell mode the box
+/// starts with `!` instead.
+fn claude_code_box(lines: &[Vec<Cell>]) -> Option<Found<'_>> {
+    let rule = |line: &Vec<Cell>| starts_with(line, '\u{2500}');
+    let shell_mode = |line: &[Cell]| {
+        starts_with(line, '!') && line.get(1).is_some_and(|cell| cell.character == '\u{a0}')
+    };
+    let open = (1..lines.len()).rev().find(|&index| {
+        (starts_with(&lines[index], '\u{276f}') || shell_mode(&lines[index]))
+            && rule(&lines[index - 1])
+    })?;
+    if shell_mode(&lines[open]) {
+        return Some(Found::ShellMode);
+    }
+    let close = lines[open + 1..].iter().position(rule)?;
+    Some(Found::Box(
+        lines[open..=open + close]
+            .iter()
+            .flatten()
+            .skip(1)
+            .collect(),
+    ))
+}
+
+/// Codex draws its box as a `›` line, with any further lines of the draft
+/// down to a blank line. In shell mode the box is a lone `!`.
+fn codex_box(lines: &[Vec<Cell>]) -> Option<Found<'_>> {
+    let opens = |line: &[Cell], glyph: char| {
+        starts_with(line, glyph) && line.get(1).is_none_or(|cell| cell.character == ' ')
+    };
+    let open = (0..lines.len())
+        .rev()
+        .find(|&index| opens(&lines[index], '\u{203a}') || opens(&lines[index], '!'))?;
+    if starts_with(&lines[open], '!') {
+        return Some(Found::ShellMode);
+    }
+    let blank = |line: &Vec<Cell>| line.iter().all(|cell| cell.character.is_whitespace());
+    let close = lines[open + 1..].iter().position(blank)?;
+    Some(Found::Box(
+        lines[open..=open + close]
+            .iter()
+            .flatten()
+            .skip(1)
+            .collect(),
+    ))
 }
 
 /// One character on screen, with the attributes that tell the person's text
@@ -1110,10 +1198,20 @@ fn apply_sgr(parameters: &str, faint: &mut bool, cursor: &mut bool) {
 mod prompt_box_tests {
     use super::*;
 
+    const CLAUDE: crate::AgentRuntime = crate::AgentRuntime::ClaudeCode;
+
     const WAITING_EMPTY: &str =
         include_str!("../tests/fixtures/between-turns/claude-2.1.322-waiting-empty.ansi");
     const DRAFT: &str =
         include_str!("../tests/fixtures/between-turns/claude-2.1.322-waiting-draft.ansi");
+    const SHELL_MODE: &str =
+        include_str!("../tests/fixtures/between-turns/claude-2.1.322-idle-shell-mode.ansi");
+    const MODEL_PICKER: &str =
+        include_str!("../tests/fixtures/between-turns/claude-2.1.322-idle-model-picker.ansi");
+    const CODEX_EMPTY: &str =
+        include_str!("../tests/fixtures/between-turns/codex-0.167.0-idle-empty.ansi");
+    const CODEX_DRAFT: &str =
+        include_str!("../tests/fixtures/between-turns/codex-0.167.0-idle-draft.ansi");
 
     /// The box line of `WAITING_EMPTY` swapped for `line`, as Claude Code
     /// 2.1.322 drew it in the same box.
@@ -1133,8 +1231,8 @@ mod prompt_box_tests {
 
     #[test]
     fn only_text_the_person_typed_counts_as_a_draft() {
-        assert_eq!(prompt_box(WAITING_EMPTY), PromptBox::Empty);
-        assert_eq!(prompt_box(DRAFT), PromptBox::Draft);
+        assert_eq!(prompt_box(WAITING_EMPTY, CLAUDE), PromptBox::Empty);
+        assert_eq!(prompt_box(DRAFT, CLAUDE), PromptBox::Draft);
         // The suggested next prompt and the first-run placeholder are faint,
         // with the cursor on their first letter.
         for hint in [
@@ -1142,7 +1240,7 @@ mod prompt_box_tests {
             "\u{276f}\u{a0}\u{1b}[0m\u{1b}[7mT\u{1b}[0m\u{1b}[2mry \"write a test for <filepath>\"\u{1b}[0m\r",
         ] {
             assert_eq!(
-                prompt_box(&with_box_line(hint)),
+                prompt_box(&with_box_line(hint), CLAUDE),
                 PromptBox::Empty,
                 "{hint:?}"
             );
@@ -1155,14 +1253,48 @@ mod prompt_box_tests {
             "\u{276f}\u{a0}\u{1b}[38;2;2;2;2mtyped\u{1b}[0m",
         ] {
             assert_eq!(
-                prompt_box(&with_box_line(typed)),
+                prompt_box(&with_box_line(typed), CLAUDE),
                 PromptBox::Draft,
                 "{typed:?}"
             );
         }
         let second_line =
             WAITING_EMPTY.replacen("\u{276f}\u{a0}", "\u{276f}\u{a0}\n  and a second line", 1);
-        assert_eq!(prompt_box(&second_line), PromptBox::Draft);
+        assert_eq!(prompt_box(&second_line, CLAUDE), PromptBox::Draft);
+    }
+
+    #[test]
+    fn a_codex_box_holds_a_draft_only_when_the_person_typed_in_it() {
+        let codex = crate::AgentRuntime::Codex;
+        assert_eq!(prompt_box(CODEX_EMPTY, codex), PromptBox::Empty);
+        assert_eq!(prompt_box(CODEX_DRAFT, codex), PromptBox::Draft);
+        let second_line = CODEX_EMPTY.replacen(
+            "\u{1b}[2mAsk Codex to do anything\u{1b}[0m\r",
+            "first line\r\n  second line\r",
+            1,
+        );
+        assert_eq!(prompt_box(&second_line, codex), PromptBox::Draft);
+        // Codex shows shell mode as a lone `!` where the box was.
+        let shell_mode = CODEX_EMPTY.replacen(
+            "\u{1b}[1m\u{203a} \u{1b}[0m\u{1b}[2mAsk Codex to do anything",
+            "\u{1b}[1m\u{1b}[38;5;9m!",
+            1,
+        );
+        assert_ne!(shell_mode, CODEX_EMPTY);
+        assert_eq!(prompt_box(&shell_mode, codex), PromptBox::Draft);
+        // Each agent's box is found only in its own drawing.
+        assert_eq!(prompt_box(WAITING_EMPTY, codex), PromptBox::Unseen);
+        assert_eq!(prompt_box(CODEX_EMPTY, CLAUDE), PromptBox::Unseen);
+    }
+
+    #[test]
+    fn a_box_in_shell_mode_is_the_persons_even_when_empty() {
+        assert_eq!(prompt_box(SHELL_MODE, CLAUDE), PromptBox::Draft);
+        let command = SHELL_MODE.replacen("!\u{a0}", "!\u{a0}git status", 1);
+        assert_eq!(prompt_box(&command, CLAUDE), PromptBox::Draft);
+        // A shell command earlier in the transcript is not the box.
+        let earlier = format!("\u{2500}\u{2500}\n!\u{a0}git status\n{WAITING_EMPTY}");
+        assert_eq!(prompt_box(&earlier, CLAUDE), PromptBox::Empty);
     }
 
     #[test]
@@ -1171,8 +1303,9 @@ mod prompt_box_tests {
             "",
             "plain shell output\n$ ",
             "\u{276f} an earlier prompt\n\nanswer\n",
+            MODEL_PICKER,
         ] {
-            assert_eq!(prompt_box(screen), PromptBox::Unseen, "{screen:?}");
+            assert_eq!(prompt_box(screen, CLAUDE), PromptBox::Unseen, "{screen:?}");
         }
         let unclosed: String = WAITING_EMPTY
             .lines()
@@ -1180,7 +1313,7 @@ mod prompt_box_tests {
             .chain(["\u{276f}\u{a0}"])
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(prompt_box(&unclosed), PromptBox::Unseen);
+        assert_eq!(prompt_box(&unclosed, CLAUDE), PromptBox::Unseen);
     }
 }
 

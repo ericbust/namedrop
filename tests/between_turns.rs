@@ -1,4 +1,5 @@
-//! Mail for a Claude Code session that finished its turn while its background
+//! Mail for an agent session whose prompt box the person may be typing in, and
+//! for a Claude Code session that finished its turn while its background
 //! agents run on. Herdr reads that screen as working; the session's own turn
 //! edges say a prompt typed now starts its next turn.
 #[path = "support/cleanup.rs"]
@@ -30,6 +31,14 @@ static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 const EMPTY_BOX: &str = include_str!("fixtures/between-turns/claude-2.1.322-waiting-empty.ansi");
 /// A screen of the same session with a draft the person has not sent.
 const DRAFT_BOX: &str = include_str!("fixtures/between-turns/claude-2.1.322-waiting-draft.ansi");
+/// Claude Code with the person in shell mode, which they enter by typing `!`.
+const SHELL_MODE: &str = include_str!("fixtures/between-turns/claude-2.1.322-idle-shell-mode.ansi");
+/// Claude Code with its model picker open: no prompt box on screen.
+const MODEL_PICKER: &str =
+    include_str!("fixtures/between-turns/claude-2.1.322-idle-model-picker.ansi");
+/// The end of Codex 0.167.0's screen, idle, with its box empty and with a draft.
+const CODEX_EMPTY: &str = include_str!("fixtures/between-turns/codex-0.167.0-idle-empty.ansi");
+const CODEX_DRAFT: &str = include_str!("fixtures/between-turns/codex-0.167.0-idle-draft.ansi");
 
 const SESSION: &str = "session-1";
 const QUEUED_AT_MS: u64 = 1_000;
@@ -48,18 +57,20 @@ impl HerdrCommandExecutor for Recipient {
             ["workspace", "list"] => {
                 r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#.to_owned()
             }
-            ["worktree", "list", "--cwd", "/repo", "--json"] | ["worktree", "list", "--json"] => {
+            ["worktree", "list", "--cwd", "/repo", "--json"]
+            | ["worktree", "list", "--json"]
+            | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
                 r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
                     .to_owned()
             }
             ["pane", "list", "--workspace", "workspace-1"] => json!({"result": {"panes": [{
-                "pane_id": "pane-recipient",
-                "terminal_id": "terminal-recipient",
-                "tab_id": "tab-1",
-                "workspace_id": "workspace-1",
-                "agent": self.host,
-                "agent_session": {"value": SESSION},
-                "agent_status": self.status.lock().unwrap().clone(),
+            "pane_id": "pane-recipient",
+            "terminal_id": "terminal-recipient",
+            "tab_id": "tab-1",
+            "workspace_id": "workspace-1",
+            "agent": self.host,
+            "agent_session": {"value": SESSION},
+            "agent_status": self.status.lock().unwrap().clone(),
             }]}})
             .to_string(),
             [
@@ -155,7 +166,13 @@ impl Fixture {
                     AgentRuntime::Codex => "codex",
                 },
                 status: Mutex::new(status.to_owned()),
-                screen: Mutex::new(Some(EMPTY_BOX.to_owned())),
+                screen: Mutex::new(Some(
+                    match host {
+                        AgentRuntime::ClaudeCode => EMPTY_BOX,
+                        AgentRuntime::Codex => CODEX_EMPTY,
+                    }
+                    .to_owned(),
+                )),
                 screen_reads: AtomicU64::new(0),
                 prompts: Mutex::new(Vec::new()),
             },
@@ -267,7 +284,15 @@ impl Fixture {
     /// The bodies one drain typed into the pane.
     fn drain(&self) -> Vec<String> {
         drain_mailboxes(&self.runtime()).unwrap();
+        self.typed()
+    }
+
+    fn typed(&self) -> Vec<String> {
         std::mem::take(&mut *self.herdr.prompts.lock().unwrap())
+    }
+
+    fn set_status(&self, status: &str) {
+        *self.herdr.status.lock().unwrap() = status.to_owned();
     }
 
     fn long_wait(&self) -> Option<namedrop::HealthIssue> {
@@ -370,4 +395,64 @@ fn doctor_says_why_mail_has_waited_over_a_minute() {
 
     fixture.screen(Some(EMPTY_BOX));
     assert_eq!(fixture.long_wait(), None);
+
+    fixture.set_status("idle");
+    fixture.screen(Some(DRAFT_BOX));
+    let idle_draft = fixture
+        .long_wait()
+        .expect("a draft in an idle box is shown");
+    assert_eq!(idle_draft.diagnostic["held_by"], "draft");
+    assert_eq!(idle_draft.diagnostic["agent_status"], "idle");
+    fixture.screen(Some(MODEL_PICKER));
+    assert_eq!(fixture.long_wait(), None);
+}
+
+#[test]
+fn an_idle_claude_session_with_a_draft_gets_nothing_typed_into_it() {
+    let fixture = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+    for screen in [DRAFT_BOX, SHELL_MODE] {
+        fixture.screen(Some(screen));
+        assert_eq!(fixture.drain(), Vec::<String>::new(), "{screen}");
+    }
+    let done = Fixture::new(AgentRuntime::ClaudeCode, "done");
+    done.screen(Some(DRAFT_BOX));
+    assert_eq!(done.drain(), Vec::<String>::new());
+}
+
+#[test]
+fn an_idle_claude_session_with_an_empty_box_takes_the_mail() {
+    // The box as Claude Code leaves it after a turn: the suggested next
+    // prompt drawn faint, with the cursor on its first letter.
+    let suggested = EMPTY_BOX.replace(
+        "\u{276f}\u{a0}\u{1b}[0m\u{1b}[7m \u{1b}[0m",
+        "\u{276f}\u{a0}\u{1b}[0m\u{1b}[7mr\u{1b}[0m\u{1b}[2mun the tests\u{1b}[0m",
+    );
+    assert_ne!(suggested, EMPTY_BOX);
+    for screen in [EMPTY_BOX.to_owned(), suggested] {
+        let fixture = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+        fixture.screen(Some(&screen));
+        let typed = fixture.drain();
+        assert_eq!(typed.len(), 1, "{screen}");
+        assert!(typed[0].contains("Are the tests green?"), "{typed:?}");
+    }
+}
+
+#[test]
+fn an_idle_claude_session_whose_box_namedrop_does_not_recognize_still_takes_the_mail() {
+    // Herdr's idle is the proof, as before Namedrop read the box, so a screen
+    // it can't read never strands the mail.
+    for screen in [Some(MODEL_PICKER), Some("no prompt box drawn here\n"), None] {
+        let fixture = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+        fixture.screen(screen);
+        assert_eq!(fixture.drain().len(), 1, "{screen:?}");
+    }
+}
+
+#[test]
+fn an_idle_codex_session_with_a_draft_gets_nothing_typed_into_it() {
+    let fixture = Fixture::new(AgentRuntime::Codex, "idle");
+    fixture.screen(Some(CODEX_DRAFT));
+    assert_eq!(fixture.drain(), Vec::<String>::new());
+    fixture.screen(Some(CODEX_EMPTY));
+    assert_eq!(fixture.drain().len(), 1);
 }

@@ -865,7 +865,7 @@ where
     E: HerdrCommandExecutor,
     C: Clock,
 {
-    use crate::delivery::{AgentWait, PromptBox};
+    use crate::delivery::AgentWait;
     let now_ms = runtime.clock.now_unix_ms();
     let mut issues = Vec::new();
     for (address_id, delivery_id, queued_at_ms) in queued_heads {
@@ -914,18 +914,18 @@ where
                 HealthRepairKind::ProductAction,
                 format!("Wait for @{alias} to be ready."),
             ),
-            AgentWait::PromptBox(PromptBox::Draft) => (
+            AgentWait::Draft => (
                 HealthSeverity::Notice,
                 format!(
-                    "@{alias} finished its turn, but its prompt box holds a draft, and Namedrop doesn't type into a draft while background agents run."
+                    "@{alias}'s prompt box holds a draft you haven't sent, and Namedrop never types into your draft."
                 ),
                 HealthRepairKind::HumanDecision,
                 format!("Send or clear the draft in @{alias}'s prompt box."),
             ),
-            AgentWait::PromptBox(PromptBox::Unseen | PromptBox::Empty) => (
+            AgentWait::PromptBoxUnseen => (
                 HealthSeverity::Info,
                 format!(
-                    "@{alias} finished its turn, but Namedrop could not read its prompt box, so the message waits until Herdr reports it idle."
+                    "@{alias} finished its turn while its background agents run on, but Namedrop could not find its prompt box to check that it is empty, so the message waits until Herdr reports @{alias} idle."
                 ),
                 HealthRepairKind::ProductAction,
                 format!("Wait for @{alias} to be ready."),
@@ -950,8 +950,8 @@ where
             "agent_status": pane.agent_status,
             "held_by": match wait {
                 AgentWait::Status(_) => "status",
-                AgentWait::PromptBox(PromptBox::Draft) => "draft",
-                AgentWait::PromptBox(_) => "prompt_box_unseen",
+                AgentWait::Draft => "draft",
+                AgentWait::PromptBoxUnseen => "prompt_box_unseen",
             },
             "queued_at_ms": queued_at_ms,
             "waited_ms": waited_ms,
