@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
 use namedrop::{AgentRuntime, install_integration_package, operation_catalog};
 use std::{
@@ -172,15 +174,12 @@ fn direct_cli_input_file_and_state_binding_cannot_be_overridden() {
 
 #[test]
 fn cli_context_targets_the_bound_host_instead_of_inherited_environment() {
-    use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
     let herdr = f.0.join("herdr");
-    fs::write(
+    executable::write_executable(
         &herdr,
         "#!/bin/sh\nprintf '%s\\n' \"socket=$HERDR_SOCKET_PATH args=$*\" >&2\nexit 1\n",
-    )
-    .unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     for timeout in ["", "1000"] {
         let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
             .args([

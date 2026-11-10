@@ -4,6 +4,8 @@ mod cleanup;
 mod delivered;
 #[path = "support/dispatch.rs"]
 mod dispatch;
+#[path = "support/executable.rs"]
+mod executable;
 
 use namedrop::*;
 use serde_json::{Value, json};
@@ -184,7 +186,6 @@ impl Fixture {
             .unwrap();
     }
     fn check_rendered_actions(&self, envelope: &Value) {
-        use std::os::unix::fs::PermissionsExt;
         let prompt = {
             let typed = self.typed.lock().unwrap();
             delivered::as_typed(typed.iter().map(String::as_str), &envelope.to_string())
@@ -198,8 +199,7 @@ impl Fixture {
             .as_str()
             .unwrap();
         let echo = self.home.join("echo-argv");
-        fs::write(&echo, "#!/bin/sh\nprintf '%s\n' \"$@\"\n").unwrap();
-        fs::set_permissions(&echo, fs::Permissions::from_mode(0o700)).unwrap();
+        executable::write_executable(&echo, "#!/bin/sh\nprintf '%s\n' \"$@\"\n");
         // These stay in control.tool without a rendered line, and so does a
         // line that waits on one of them for a value. A context reference
         // gives context.inspect its line.

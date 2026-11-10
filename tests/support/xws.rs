@@ -272,6 +272,15 @@ pub fn address_id(workspace: &str, alias: &str) -> String {
 }
 
 pub struct TestClock(pub AtomicU64);
+impl TestClock {
+    /// Starts at the real time and moves only when a test advances it. The
+    /// dashboard and the workers it starts read the real clock over the same
+    /// state, and they hold as expired anything stamped a day before their
+    /// own time.
+    fn starting_now() -> Self {
+        Self(AtomicU64::new(namedrop::SystemClock.now_unix_ms()))
+    }
+}
 impl Clock for TestClock {
     fn now_unix_ms(&self) -> u64 {
         self.0.load(Ordering::Relaxed)
@@ -329,7 +338,7 @@ impl Fixture {
             herdr: FakeHerdr::new(&repo),
             root,
             ids: SequenceIds(AtomicU64::new(1)),
-            clock: TestClock(AtomicU64::new(42)),
+            clock: TestClock::starting_now(),
         };
         let attribution = MutationAttribution::new(ActorKind::Human, "test", 1);
         for (workspace, _, agents) in SPACES.into_iter().take(activated) {
@@ -660,8 +669,18 @@ impl Fixture {
         )
     }
 
+    pub fn now(&self) -> u64 {
+        self.clock.now_unix_ms()
+    }
+
     pub fn advance(&self, ms: u64) {
         self.clock.0.fetch_add(ms, Ordering::Relaxed);
+    }
+
+    /// Moves the clock back, so what the fixture stamps next is already `ms`
+    /// old to a dashboard reading the real clock.
+    pub fn rewind(&self, ms: u64) {
+        self.clock.0.fetch_sub(ms, Ordering::Relaxed);
     }
 
     pub fn status(&self, pane: &str, status: &str) {
@@ -724,44 +743,42 @@ fn fixture_workers(state: &std::path::Path) -> Vec<i32> {
         .collect()
 }
 
-impl Fixture {
-    fn stop_workers(&self) {
-        use std::{
-            thread,
-            time::{Duration, Instant},
-        };
-        let queue = self.state.join("agent-status-reconciliation");
-        let mut known: BTreeSet<_> = fixture_workers(&self.state).into_iter().collect();
-        let _ = fs::remove_dir_all(&queue);
-        let deadline = Instant::now() + Duration::from_secs(15);
-        let stop_deadline = deadline + Duration::from_secs(5);
-        loop {
-            let workers = fixture_workers(&self.state);
-            known.extend(&workers);
-            for pid in &known {
-                unsafe { libc::waitpid(*pid, std::ptr::null_mut(), libc::WNOHANG) };
-            }
-            if workers.is_empty() {
-                return;
-            }
-            assert!(
-                Instant::now() < stop_deadline,
-                "fixture workers did not stop: {workers:?}"
-            );
-            if Instant::now() >= deadline {
-                for pid in &workers {
-                    unsafe { libc::kill(*pid, libc::SIGKILL) };
-                }
-            }
-            let _ = fs::remove_dir_all(&queue);
-            thread::sleep(Duration::from_millis(10));
+pub fn stop_workers(state: &std::path::Path) {
+    use std::{
+        thread,
+        time::{Duration, Instant},
+    };
+    let queue = state.join("agent-status-reconciliation");
+    let mut known: BTreeSet<_> = fixture_workers(state).into_iter().collect();
+    let _ = fs::remove_dir_all(&queue);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let stop_deadline = deadline + Duration::from_secs(5);
+    loop {
+        let workers = fixture_workers(state);
+        known.extend(&workers);
+        for pid in &known {
+            unsafe { libc::waitpid(*pid, std::ptr::null_mut(), libc::WNOHANG) };
         }
+        if workers.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < stop_deadline,
+            "fixture workers did not stop: {workers:?}"
+        );
+        if Instant::now() >= deadline {
+            for pid in &workers {
+                unsafe { libc::kill(*pid, libc::SIGKILL) };
+            }
+        }
+        let _ = fs::remove_dir_all(&queue);
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        self.stop_workers();
+        stop_workers(&self.state);
         let _ = cleanup::remove_fixture(&self.root);
     }
 }

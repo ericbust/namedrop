@@ -2,6 +2,8 @@
 mod cleanup;
 #[path = "support/delivered.rs"]
 mod delivered;
+#[path = "support/executable.rs"]
+mod executable;
 
 #[path = "support/channel_controls.rs"]
 mod channel_controls;
@@ -329,7 +331,9 @@ fn arm_attempt(f: &Fixture, space: &str, attempt: &str) {
 }
 
 fn relay_ending(f: &Fixture, space: &str, pane: &str, attempt: &str, text: &str) -> String {
-    let at = namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test-relay", 50);
+    let ended_at_ms = f.now() + 8;
+    let at =
+        namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test-relay", ended_at_ms);
     StateStore::open(&f.state)
         .unwrap()
         .transaction(|tx| {
@@ -339,7 +343,7 @@ fn relay_ending(f: &Fixture, space: &str, pane: &str, attempt: &str, text: &str)
                     agent_session_id: namedrop::AgentSessionId::new(xws::session(pane)),
                     attempt_id: namedrop::DeliveryAttemptId::new(attempt),
                     turn_started_at_ms: 0,
-                    ended_at_ms: 50,
+                    ended_at_ms,
                     text: text.to_owned(),
                 },
                 &at,
@@ -463,7 +467,7 @@ fn a_mirrored_answer_whose_origin_space_was_purged_no_longer_reads_as_replied() 
     assert_eq!(leg_stage(&f, "w1", ask_id)["stage"], "replied");
 
     let origin = StateNamespace::for_space("socket-a", "w2");
-    let at = namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test", 60);
+    let at = namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test", f.now() + 18);
     let mut store = StateStore::open(&f.state).unwrap();
     store
         .transaction(|tx| tx.deactivate_worktree(&origin, &at))
@@ -1154,11 +1158,11 @@ fn a_named_recap_skips_an_agents_older_mention_root() {
 fn a_named_recap_keeps_the_channel_recap_limits() {
     let f = Fixture::new();
     f.register_all();
-    f.advance(1_000);
     let asked = person_says(&f, "w1", "round-0", "@planner round-0");
     let attempt = reply_attempt(&f, &asked, "pane-1-planner", "round-0");
     relay_ending(&f, "w1", "pane-1-planner", &attempt, "answer-0");
     for round in 1..=8 {
+        f.advance(10);
         let request = format!("round-{round}");
         let posted = person_replies(
             &f,
@@ -1455,6 +1459,9 @@ fn claude_registered_elsewhere_routes_to_an_unregistered_unbound_local_member() 
 #[test]
 fn implicit_followups_reach_all_agent_authors_and_recipients_without_a_model() {
     let f = fixture();
+    // The planner never acknowledges the root. The server sends the planner
+    // anything after it only once the root's acknowledgement grace is over.
+    f.rewind(31_000);
     let server = Server::start(&f, "not json", false);
     let root = f.agent_send(
         "w1",
@@ -2017,7 +2024,7 @@ fn withdraw(f: &Fixture, space: &str, message: &Value, pane: &str, request: &str
             "SELECT delivery_id FROM delivery_attempts WHERE attempt_id = '{attempt}'"
         ))
         .unwrap();
-    let at = namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test", 60);
+    let at = namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test", f.now() + 18);
     let namespace = StateNamespace::for_space("socket-a", space);
     StateStore::open(&f.state)
         .unwrap()
@@ -2193,7 +2200,7 @@ fn fired_reminder(f: &Fixture, space: &str, parent: &Value, author: &str) {
             parent["message_id"].to_string().replace('"', "'")
         ))
         .unwrap();
-    let at = namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test", 60);
+    let at = namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test", f.now() + 18);
     StateStore::open(&f.state)
         .unwrap()
         .transaction(|tx| {

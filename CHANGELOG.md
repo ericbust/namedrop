@@ -16,11 +16,25 @@ Each release is a section here, newest first. The GitHub release for a version u
 - Agents no longer read progress notes. The recap in a later delivery, a thread's context snapshot and the channel router leave them out, which also saves tokens. The real answer still reaches them.
 - A "didn't answer" warning that an earlier version raised on an answer that is still held is cleared when Channels starts. If that answer can no longer arrive, the warning is reworded to say why.
 - `delivery acknowledge` now also clears the warning for a delivery whose agent exited in its pane, or whose pane has been gone for 10 minutes. Before, it was refused until a new session appeared on that name.
+
+## [1.7.5] - 2026-11-10
+
+### Fixed
+
+- A reminder's clock no longer quits when Doctor checks on it at the moment it starts. Before, the reminder then waited with no clock until your next Namedrop command, so it could arrive late.
+
+## [1.7.4] - 2026-11-10
+
+### Fixed
+
+- Updates no longer pile up old copies of Namedrop. Each activation kept every version it had installed, under `runtime/releases/` in the state directory, so a machine that updated often collected dozens. After a successful activation, Namedrop now deletes all but the active version, the one before it, and any version a running Namedrop process still uses. Updating to 1.7.4 removes the old copies that nothing uses.
+
 ## [1.7.3] - 2026-11-10
 
 ### Fixed
 
 - An agent's waiting line is no longer sent as its answer when its subagent stops with background work of its own still running. Claude Code reports that stop in a notice it marks as possibly interim, and Namedrop took the notice for the subagent finishing, so the next final message closed your message and the real report had no way back. The answer now stays held through such a notice and comes from the final message of the turn that carries the subagent's final report.
+
 ## [1.7.1] - 2026-11-10
 
 ### Fixed

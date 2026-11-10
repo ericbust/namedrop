@@ -1,6 +1,8 @@
 #![cfg(target_os = "linux")]
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 mod support;
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, DeliveryAttemptId, DeliveryId, DeliveryState,
@@ -139,7 +141,9 @@ impl Fixture {
         )
         .unwrap();
         let herdr = directory.path().join("herdr");
-        fs::write(&herdr, r#"#!/usr/bin/env python3
+        executable::write_executable(
+            &herdr,
+            r#"#!/usr/bin/env python3
 import json, sys
 from pathlib import Path
 root = Path(__file__).parent
@@ -155,8 +159,8 @@ if args[:2] == ['worktree','list']: print(json.dumps({'result':{'worktrees':[{'p
 elif args[:2] == ['workspace','list']: print(json.dumps({'result':{'workspaces':[{'workspace_id':'workspace-1'}]}}))
 elif args[:2] == ['pane','list']: print((root / 'panes.json').read_text())
 else: print('{}')
-"#).unwrap();
-        fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+"#,
+        );
         Self {
             directory,
             socket,

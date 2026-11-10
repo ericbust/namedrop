@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
 use namedrop::{AgentRuntime, install_integration_package};
 #[path = "support/update_profile.rs"]
@@ -8,7 +10,6 @@ use serde_json::{Value, json};
 use std::{
     fs,
     io::Write,
-    os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
@@ -329,7 +330,7 @@ fn only_background_triggers_launch_the_worker_and_events_do_not_wait_for_it() {
     let release = f.root.join("release");
     let done = f.root.join("done");
     let python = bin.join("python3");
-    fs::write(
+    executable::write_executable(
         &python,
         format!(
             "#!/bin/sh\n: > '{}'\nwhile [ ! -f '{}' ]; do sleep 0.01; done\n: > '{}'\n",
@@ -337,9 +338,7 @@ fn only_background_triggers_launch_the_worker_and_events_do_not_wait_for_it() {
             release.display(),
             done.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(python, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
     for args in [
         vec!["doctor"],
@@ -502,15 +501,13 @@ fn both_wrappers_forward_only_composed_notices_and_reject_hostile_versions() {
             ),
         ] {
             let text = value.to_string();
-            fs::write(
+            executable::write_executable(
                 &executable,
                 format!(
                     "#!/bin/sh\nprintf '%s' '{}'\n",
                     text.replace('\'', "'\"'\"'")
                 ),
-            )
-            .unwrap();
-            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+            );
             let output = Command::new(package.join("scripts/session-start"))
                 .output()
                 .unwrap();

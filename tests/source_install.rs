@@ -4,6 +4,8 @@
 //! Every fixture path contains a space so quoting is exercised throughout.
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
@@ -80,8 +82,7 @@ impl Fixture {
 
     fn stub(&self, name: &str, body: &str) -> PathBuf {
         let path = self.tools.join(name);
-        fs::write(&path, body).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        executable::write_executable(&path, body);
         path
     }
 
@@ -104,11 +105,10 @@ impl Fixture {
             "run.sh",
             "runtime.py",
         ] {
-            fs::copy(
+            executable::copy_executable(
                 repository.join("scripts").join(script),
                 checkout.join("scripts").join(script),
-            )
-            .unwrap();
+            );
         }
         // The scripts resolve their own root with `pwd -P`, so compare against
         // the same fully resolved path rather than the temporary-directory link.
@@ -127,11 +127,10 @@ impl Fixture {
         )
         .unwrap();
         for script in ["build.sh", "setup.sh"] {
-            fs::copy(
+            executable::copy_executable(
                 repository.join("scripts").join(script),
                 checkout.join("scripts").join(script),
-            )
-            .unwrap();
+            );
         }
         fs::canonicalize(checkout).unwrap()
     }

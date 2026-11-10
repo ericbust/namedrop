@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
 const INDEX_HTML: &[u8] = include_bytes!("../src/dashboard/channels/index.html");
 
@@ -11,6 +13,7 @@ fn assert_legacy_embedded_page(body: &[u8]) {
 
 mod support;
 
+use executable::{copy_executable, write_executable};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -26,30 +29,6 @@ use std::{
 };
 use support::TestDirectory;
 
-// A concurrent spawn can inherit a writable fixture fd until exec, even with CLOEXEC.
-// Keep those fds in waited child processes so published executables are never busy.
-fn write_executable(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
-    let mut child = Command::new("/bin/sh")
-        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "write-executable"])
-        .arg(path.as_ref())
-        .stdin(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    child.stdin.take().unwrap().write_all(contents.as_ref())?;
-    let output = child.wait_with_output()?;
-    assert!(output.status.success(), "{output:?}");
-    Ok(())
-}
-
-fn copy_executable(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> std::io::Result<()> {
-    let output = Command::new("cp")
-        .arg(source.as_ref())
-        .arg(destination.as_ref())
-        .output()?;
-    assert!(output.status.success(), "{output:?}");
-    Ok(())
-}
-
 struct Dashboard {
     directory: TestDirectory,
 }
@@ -61,8 +40,7 @@ impl Dashboard {
         write_executable(
             &herdr,
             "#!/bin/sh\nprintf '{\"result\":{\"workspace\":{\"label\":\"test\"}}}'\n",
-        )
-        .unwrap();
+        );
         Self { directory }
     }
 
@@ -612,8 +590,7 @@ fn upgrade_handoff_keeps_directory_port_and_browser_session() {
     copy_executable(
         env!("CARGO_BIN_EXE_namedrop"),
         runtime.join("release/namedrop"),
-    )
-    .unwrap();
+    );
     symlink("release", runtime.join("current")).unwrap();
     symlink("current/namedrop", runtime.join("namedrop")).unwrap();
     let successor = eventually(|| {
@@ -709,10 +686,13 @@ fn fix_forward_index_file_aliases_require_the_session_cookie() {
 
 fn selected_startup_fixture(dashboard: &Dashboard, startup: &str) {
     let runtime = dashboard.state().join("runtime");
-    write_executable(runtime.join("release/namedrop"), format!(
-        "#!/bin/sh\ncase \"$*\" in *--help*) ;; *dashboard-server*) {startup};; esac\nexec '{}' \"$@\"\n",
-        env!("CARGO_BIN_EXE_namedrop")
-    )).unwrap();
+    write_executable(
+        runtime.join("release/namedrop"),
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *--help*) ;; *dashboard-server*) {startup};; esac\nexec '{}' \"$@\"\n",
+            env!("CARGO_BIN_EXE_namedrop")
+        ),
+    );
     symlink("release", runtime.join("current")).unwrap();
     write_executable(
         runtime.join("namedrop"),
@@ -721,8 +701,7 @@ fn selected_startup_fixture(dashboard: &Dashboard, startup: &str) {
             runtime.join("namedrop").display(),
             env!("CARGO_BIN_EXE_namedrop")
         ),
-    )
-    .unwrap();
+    );
 }
 
 #[test]
@@ -900,7 +879,7 @@ fn fix_two_handoff_to_a_release_without_claim_support_stays_running() {
         let _events = fix_two_subscribe(&dashboard, &opened);
         let runtime = dashboard.state().join("runtime");
         fs::create_dir_all(runtime.join("release")).unwrap();
-        copy_executable(&old, runtime.join("release/namedrop")).unwrap();
+        copy_executable(&old, runtime.join("release/namedrop"));
         symlink("release", runtime.join("current")).unwrap();
         symlink("current/namedrop", runtime.join("namedrop")).unwrap();
         let successor = eventually(|| {
@@ -981,13 +960,11 @@ fn fix_two_handoff_resolves_and_probes_the_release_after_acquiring_the_runtime_g
     write_executable(
         runtime.join("before-update/namedrop"),
         format!("#!/bin/sh\ntouch '{}'\nexit 1\n", premature_probe.display()),
-    )
-    .unwrap();
+    );
     copy_executable(
         env!("CARGO_BIN_EXE_namedrop"),
         runtime.join("release/namedrop"),
-    )
-    .unwrap();
+    );
     symlink("before-update", runtime.join("current")).unwrap();
     symlink("current/namedrop", runtime.join("namedrop")).unwrap();
     let mut line = String::new();
@@ -1030,9 +1007,13 @@ fn fix_two_probe_failure_does_not_fall_back_to_a_legacy_spawn() {
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("release")).unwrap();
     let spawned = dashboard.root().join("unexpected-legacy-spawn");
-    write_executable(runtime.join("release/namedrop"), format!(
-        "#!/bin/sh\ncase \"$*\" in *--help*) echo 'could not acquire --inherit-claim' >&2; exit 69;; esac\ntouch '{}'\nexit 1\n", spawned.display()
-    )).unwrap();
+    write_executable(
+        runtime.join("release/namedrop"),
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *--help*) echo 'could not acquire --inherit-claim' >&2; exit 69;; esac\ntouch '{}'\nexit 1\n",
+            spawned.display()
+        ),
+    );
     symlink("release", runtime.join("current")).unwrap();
     symlink("current/namedrop", runtime.join("namedrop")).unwrap();
     eventually(|| {
@@ -1060,7 +1041,10 @@ fn fix_three_legacy_stub(dashboard: &Dashboard, fail_start: bool) -> PathBuf {
             .unwrap(),
     )
     .unwrap();
-    write_executable(&executable, format!(r#"#!/usr/bin/env python3
+    write_executable(
+        &executable,
+        format!(
+            r#"#!/usr/bin/env python3
 import json,os,sys
 from pathlib import Path
 for argument in sys.argv[1:]:
@@ -1079,7 +1063,10 @@ if {fail_start}:
 state=Path(sys.argv[sys.argv.index('--plugin-state')+1])
 (state/'runtime/namedrop').unlink(missing_ok=True)
 os.execv({target},[{target}]+sys.argv[1:])
-"#, fail_start=if fail_start {"True"} else {"False"})).unwrap();
+"#,
+            fail_start = if fail_start { "True" } else { "False" }
+        ),
+    );
     executable
 }
 
@@ -1155,8 +1142,7 @@ fn fix_three_inherited_successor_can_release_its_claim_for_a_legacy_rollback() {
     copy_executable(
         env!("CARGO_BIN_EXE_namedrop"),
         runtime.join("current-release/namedrop"),
-    )
-    .unwrap();
+    );
     symlink("current-release", runtime.join("current")).unwrap();
     symlink("current/namedrop", runtime.join("namedrop")).unwrap();
     let inherited = eventually(|| {
@@ -1227,7 +1213,7 @@ fn fix_three_real_pre_nd2_rollback_drops_custom_ui() {
     let _events = fix_two_subscribe(&dashboard, &opened);
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("pre-nd2")).unwrap();
-    copy_executable(old, runtime.join("pre-nd2/namedrop")).unwrap();
+    copy_executable(old, runtime.join("pre-nd2/namedrop"));
     symlink("pre-nd2", runtime.join("current")).unwrap();
     symlink("current/namedrop", runtime.join("namedrop")).unwrap();
     let successor = eventually(|| {
@@ -1286,8 +1272,7 @@ else:
 os.execv({target},[{target}]+sys.argv[1:])
 "#
         ),
-    )
-    .unwrap();
+    );
     let packages = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -1354,12 +1339,16 @@ fn fix_three_current_successor_stays_pinned_when_its_probe_changes_current() {
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("new")).unwrap();
     fix_three_legacy_stub(&dashboard, false);
-    copy_executable(env!("CARGO_BIN_EXE_namedrop"), runtime.join("new/real")).unwrap();
+    copy_executable(env!("CARGO_BIN_EXE_namedrop"), runtime.join("new/real"));
     let started = dashboard.root().join("pinned-wrapper-started");
-    write_executable(runtime.join("new/namedrop"), format!(
-        "#!/bin/sh\ncase \"$*\" in *--help*) ln -s legacy '{r}/next' && mv -T '{r}/next' '{r}/current';; *) touch '{}' ;; esac\nexec '{r}/new/real' \"$@\"\n",
-        started.display(), r=runtime.display()
-    )).unwrap();
+    write_executable(
+        runtime.join("new/namedrop"),
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *--help*) ln -s legacy '{r}/next' && mv -T '{r}/next' '{r}/current';; *) touch '{}' ;; esac\nexec '{r}/new/real' \"$@\"\n",
+            started.display(),
+            r = runtime.display()
+        ),
+    );
     symlink("new", runtime.join("current")).unwrap();
     symlink("current/namedrop", runtime.join("namedrop")).unwrap();
     let successor = eventually(|| {
@@ -1665,8 +1654,7 @@ fn fix_four_current_handoff_keeps_server_log_lines_prefixed() {
     copy_executable(
         env!("CARGO_BIN_EXE_namedrop"),
         runtime.join("release/namedrop"),
-    )
-    .unwrap();
+    );
     symlink("release", runtime.join("current")).unwrap();
     symlink("current/namedrop", runtime.join("namedrop")).unwrap();
     let serving = format!("dashboard: serving 127.0.0.1:{}", first["port"]);
@@ -1814,7 +1802,7 @@ fn fix_four_b_custom_ui_waits_then_refuses_an_embedded_legacy_successor() {
     let legacy = if let Some(old) = &old {
         fs::create_dir_all(runtime.join("legacy")).unwrap();
         let legacy = runtime.join("legacy/namedrop");
-        copy_executable(old, &legacy).unwrap();
+        copy_executable(old, &legacy);
         legacy
     } else {
         fix_three_legacy_stub(&dashboard, false)
@@ -1822,10 +1810,15 @@ fn fix_four_b_custom_ui_waits_then_refuses_an_embedded_legacy_successor() {
     fs::create_dir_all(runtime.join("release")).unwrap();
     let delayed = dashboard.root().join("successor-delayed");
     let resumed = dashboard.root().join("successor-resumed");
-    write_executable(runtime.join("release/namedrop"), format!(
-        "#!/bin/sh\ncase \"$*\" in *--help*) ;; *dashboard-server*) touch '{}'; sleep 2; touch '{}';; esac\nexec '{}' \"$@\"\n",
-        delayed.display(), resumed.display(), legacy.display()
-    )).unwrap();
+    write_executable(
+        runtime.join("release/namedrop"),
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *--help*) ;; *dashboard-server*) touch '{}'; sleep 2; touch '{}';; esac\nexec '{}' \"$@\"\n",
+            delayed.display(),
+            resumed.display(),
+            legacy.display()
+        ),
+    );
     write_executable(
         runtime.join("caller-launcher"),
         format!(
@@ -1833,8 +1826,7 @@ fn fix_four_b_custom_ui_waits_then_refuses_an_embedded_legacy_successor() {
             runtime.join("namedrop").display(),
             env!("CARGO_BIN_EXE_namedrop")
         ),
-    )
-    .unwrap();
+    );
     symlink("release", runtime.join("current")).unwrap();
     fs::rename(runtime.join("caller-launcher"), runtime.join("namedrop")).unwrap();
     eventually(|| delayed.exists().then_some(())).expect("legacy successor startup is delayed");

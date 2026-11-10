@@ -2,6 +2,8 @@
 
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
 #[path = "support/delivered.rs"]
 mod delivered;
@@ -10,7 +12,6 @@ mod xws;
 
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -30,15 +31,13 @@ fn dropping_a_fixture_stops_its_mailbox_and_status_workers() {
     use sha2::{Digest, Sha256};
     let f = xws::Fixture::new();
     let host = f.root.join("failing-herdr");
-    fs::write(
+    executable::write_executable(
         &host,
         format!(
             "#!/bin/sh\nprintf '%s\\n' \"$PPID\" >> '{}/worker-pids'\nexit 1\n",
             f.root.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&host, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let mut workers = Vec::new();
     for (operation, space) in [("mailbox-wake", "w1"), ("agent-status-worker", "w2")] {
         let scope = namedrop::lower_hex(&Sha256::digest(format!("socket-a\0{space}")));

@@ -1783,7 +1783,11 @@ fn a_terminal_mention_keeps_its_request_link_beyond_the_frame_window() {
                         }],
                         context_references: Vec::new(),
                     },
-                    &MutationAttribution::new(ActorKind::Plugin, "test", 100 + number),
+                    &MutationAttribution::new(
+                        ActorKind::Plugin,
+                        "test",
+                        fixture.now() + 58 + number,
+                    ),
                 )
             })
             .unwrap();

@@ -6,6 +6,8 @@ mod cleanup;
 mod delivered;
 #[path = "support/dispatch.rs"]
 mod dispatch;
+#[path = "support/executable.rs"]
+mod executable;
 
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
@@ -20,7 +22,6 @@ use serde_json::{Value, json};
 use std::{
     fs,
     io::Write,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -839,7 +840,7 @@ impl Space {
     /// handed, for the binary's own processes.
     fn herdr_script(&self) -> PathBuf {
         let herdr = self.directory.root.join("herdr");
-        fs::write(
+        executable::write_executable(
             &herdr,
             format!(
                 r#"#!/usr/bin/env python3
@@ -861,9 +862,7 @@ else:
 "#,
                 repo = self.directory.repo.display().to_string()
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         herdr
     }
 

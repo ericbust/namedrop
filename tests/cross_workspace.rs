@@ -2,6 +2,8 @@
 mod cleanup;
 #[path = "support/delivered.rs"]
 mod delivered;
+#[path = "support/executable.rs"]
+mod executable;
 
 use namedrop::{
     AgentRuntime, StateNamespace, StateStore, diagnose_collaboration, execute_control_operation,
@@ -2143,19 +2145,13 @@ fn the_installed_wrappers_pass_the_workspace_picker_through_unchanged() {
     let output_file = fixture.root.join("picker.json");
     fs::write(&output_file, &picker).unwrap();
     let executable = fixture.root.join("hook-result");
-    fs::write(
+    executable::write_executable(
         &executable,
         format!(
             "#!/bin/sh\ncase \"$1 $2\" in\n  'hook user-prompt-submit') cat '{}' ;;\nesac\n",
             output_file.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(
-        &executable,
-        std::os::unix::fs::PermissionsExt::from_mode(0o700),
-    )
-    .unwrap();
+    );
     for host in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
         let package = install_integration_package(
             &fixture.root.join("home"),

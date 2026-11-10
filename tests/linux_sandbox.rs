@@ -2,6 +2,8 @@
 //! Actual kernel enforcement, with no model/provider calls or recorder wrapper.
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
 use namedrop::linux_sandbox;
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
@@ -229,7 +231,7 @@ fn real_policy_allows_worker_auth_and_transport_but_denies_other_reads_and_exec(
         assert_eq!(fs::read_to_string(path).unwrap(), "ok");
     }
     let other = root.join("bin/other");
-    fs::copy(&binary, &other).unwrap();
+    executable::copy_executable(&binary, &other);
     for path in [
         Path::new("/bin/sh"),
         Path::new("/usr/bin/env"),
@@ -278,7 +280,7 @@ fn real_policy_allows_worker_auth_and_transport_but_denies_other_reads_and_exec(
         .join(triple)
         .join("bin/codex");
     fs::create_dir_all(native.parent().unwrap()).unwrap();
-    fs::copy(&binary, &native).unwrap();
+    executable::copy_executable(&binary, &native);
     assert_eq!(
         linux_sandbox::native_codex(&wrapper).unwrap(),
         native.canonicalize().unwrap()

@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
@@ -7,14 +9,13 @@ use serde_json::Value;
 use std::{
     fs,
     io::{Read, Write},
-    os::unix::fs::PermissionsExt,
     process::{Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
 };
 
 /// Stands in for the host CLI a persona suggestion runs. It records exactly
 /// what reached the model, answers with a numbered description so a superseded
-/// answer is told apart from the one that replaced it, and can be made slow or
+/// answer is told apart from the one that replaced it, and can be held open or
 /// made to fail. Nothing here contacts a provider.
 const FAKE_HOST: &str = r#"#!/bin/sh
 dir="$(dirname "$0")"
@@ -26,12 +27,14 @@ printf '%s' "$count" > "$dir/calls"
   printf 'HERDR_PANE_ID<%s>\n' "${HERDR_PANE_ID-unset}"
   printf 'STDIN<%s>\n' "$payload"
 } >> "$dir/worker-input"
+printf '%s' "$$" > "$dir/pid-$count"
 : > "$dir/started-$count"
 # Live pane detection, so a test can time an origin change to land after the
 # persona step rather than before the popup opens.
 if [ -n "$TEST_ORIGIN_CHANGE" ]; then : > "$TEST_DETECTED"; fi
-delay="$(cat "$dir/delay-$count" 2>/dev/null || echo 0)"
-if [ "$delay" != 0 ]; then sleep "$delay"; fi
+# A held call never answers: it stays in flight until its worker is stopped,
+# however slow the machine is.
+if [ -f "$dir/hold-$count" ]; then exec sleep 3600; fi
 if [ -f "$dir/fail" ]; then printf 'the provider is unavailable\n' >&2; exit 3; fi
 : > "$dir/finished-$count"
 printf '{"description":"Suggested persona %s"}\n' "$count"
@@ -48,7 +51,9 @@ impl Fixture {
         ));
         fs::create_dir(&root).unwrap();
         let host = root.join("herdr");
-        fs::write(&host, r#"#!/bin/sh
+        executable::write_executable(
+            &host,
+            r#"#!/bin/sh
 if [ "$1 $2" = "worktree list" ]; then
   printf '%s\n' '{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"w1"}]}}'
 elif [ "$1 $2" = "pane list" ]; then
@@ -87,14 +92,13 @@ elif [ "$1 $2" = "plugin pane" ]; then
   printf '%s\n' "$@" > "$TEST_ARGS"
   printf '%s\n' '{"result":{"pane_id":"popup"}}'
 else printf '%s\n' '{}'; fi
-"#).unwrap();
-        fs::set_permissions(host, fs::Permissions::from_mode(0o700)).unwrap();
+"#,
+        );
         // Both supported hosts are replaced, so no test in this suite can
         // reach a real provider even if one is installed on the machine.
         for name in ["claude", "codex"] {
             let script = root.join(name);
-            fs::write(&script, FAKE_HOST).unwrap();
-            fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+            executable::write_executable(&script, FAKE_HOST);
         }
         Self(root)
     }
@@ -1266,10 +1270,11 @@ fn the_persona_editor_stays_live_while_a_suggestion_runs_in_a_real_terminal() {
     let f = Fixture::new();
     assert!(f.run_on_claude("reviewer\n\nA\n").status.success());
     assert_eq!(f.persona(), "Suggested persona 1");
-    // The suggestion the editor opens with is slow, its replacement is not,
-    // and the one after that is slow again so a save can outrun it.
-    fs::write(f.0.join("delay-2"), "8").unwrap();
-    fs::write(f.0.join("delay-4"), "8").unwrap();
+    // The suggestion the editor opens with never answers, its replacement
+    // does, and the one after that never answers either, so it is still in
+    // flight at the save.
+    fs::write(f.0.join("hold-2"), "").unwrap();
+    fs::write(f.0.join("hold-4"), "").unwrap();
     let command = f.command();
     let out = Command::new("/usr/bin/python3")
         .envs(command.get_envs().filter_map(|(key, value)| value.map(|v| (key, v))))
@@ -1344,21 +1349,21 @@ finally:
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    // The superseded worker was started and then reaped: it never ran to the
-    // end, and no later call was left behind either.
-    assert!(f.0.join("started-2").exists(), "the slow worker never ran");
-    assert!(
-        !f.0.join("finished-2").exists(),
-        "the superseded worker was left running"
-    );
+    // Both held workers were started and then stopped: superseding stopped
+    // the second, and the save stopped the fourth. The save returned while
+    // that one could not answer, so it did not wait for it.
+    for call in [2, 4] {
+        let pid: libc::pid_t = fs::read_to_string(f.0.join(format!("pid-{call}")))
+            .unwrap_or_else(|_| panic!("worker {call} never ran"))
+            .parse()
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "worker {call} was left running"
+        );
+    }
     assert!(f.0.join("finished-3").exists(), "the replacement never ran");
-    // The save did not wait for the suggestion that was still running, and
-    // leaving the editor reaped it.
-    assert!(f.0.join("started-4").exists());
-    assert!(
-        !f.0.join("finished-4").exists(),
-        "saving waited for the suggestion in flight"
-    );
     assert_eq!(f.calls(), 4);
     assert_eq!(f.persona(), "Suggested persona 1 Handles migrations.");
 }
