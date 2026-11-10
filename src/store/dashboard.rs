@@ -782,12 +782,12 @@ impl StateTransaction<'_> {
             }
             None => (namespace.clone(), attempt.to_owned()),
         };
-        Ok(crate::final_reply::answer_claim(
+        Ok(crate::final_reply::answer_held(
             self.state_directory,
             &namespace,
             &crate::AgentSessionId::new(session),
             &crate::DeliveryAttemptId::new(attempt),
-        ) == crate::final_reply::AnswerClaim::Held)
+        ))
     }
 
     pub(crate) fn dashboard_rows(

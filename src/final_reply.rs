@@ -837,40 +837,96 @@ fn read_claims(directory: &Path) -> Vec<Claim> {
     serde_json::from_slice(&bytes).unwrap_or_default()
 }
 
+/// How long after its pane was seen idle a turn's Stop hook may still arrive.
+/// The idle status and the Stop race by milliseconds; a turn interrupted with
+/// Esc, or ended by an API error, has no Stop at all.
+pub(crate) const STOP_ARRIVAL_GRACE_MS: u64 = 5_000;
+
 /// What a session's claim says about its answer to one attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AnswerClaim {
-    /// The claim waits for its turn's Stop to decide whether the final
-    /// message answers.
-    Deciding,
+    /// A Stop may still decide whether the final message answers, until
+    /// `until_ms`.
+    Deciding { until_ms: u64 },
     /// The Stop held the answer while background work or a helper runs.
     Held,
-    /// No claim, or one the Stop settled or left unanswered.
+    /// No claim, one the Stop settled or left unanswered, or one whose Stop
+    /// never came or whose worker was lost.
     Neither,
 }
 
-/// What `session`'s claim says about its answer to `attempt`. It reads
-/// without the lock.
-pub(crate) fn answer_claim(
+/// `session`'s claim on `attempt`, read without the lock.
+fn find_claim(
     state: &Path,
     namespace: &crate::StateNamespace,
     session: &crate::AgentSessionId,
     attempt: &crate::DeliveryAttemptId,
-) -> AnswerClaim {
-    let claims = read_claims(&session_directory(
+) -> (PathBuf, Option<Claim>) {
+    let directory = session_directory(state, &namespace.session_socket_id, session.as_str());
+    let claim = read_claims(&directory)
+        .into_iter()
+        .find(|claim| claim.attempt_id == *attempt && claim.namespace == *namespace);
+    (directory, claim)
+}
+
+/// What `session`'s claim says at `now_ms` about its answer to `attempt`,
+/// whose pane was seen idle at `idle_since_ms`. An open claim is decided by
+/// its Stop's worker within `STOPPED_GRACE_MS` of the Stop, or by a Stop
+/// that arrives within `STOP_ARRIVAL_GRACE_MS` of the pane going idle.
+pub(crate) fn answer_claim<E>(
+    state: &Path,
+    namespace: &crate::StateNamespace,
+    session: &crate::AgentSessionId,
+    attempt: &crate::DeliveryAttemptId,
+    idle_since_ms: impl FnOnce() -> Result<u64, E>,
+    now_ms: u64,
+) -> Result<AnswerClaim, E> {
+    let (directory, claim) = find_claim(state, namespace, session, attempt);
+    Ok(match claim.map(|claim| (claim.state, claim.turn)) {
+        Some((ClaimState::Open, turn)) => {
+            let until_ms = match stopped_at(&directory, &turn) {
+                Some(at) => at.saturating_add(STOPPED_GRACE_MS),
+                None => idle_since_ms()?.saturating_add(STOP_ARRIVAL_GRACE_MS),
+            };
+            if now_ms < until_ms {
+                AnswerClaim::Deciding { until_ms }
+            } else {
+                AnswerClaim::Neither
+            }
+        }
+        Some((ClaimState::Left(LeaveReason::Held), _)) => AnswerClaim::Held,
+        _ => AnswerClaim::Neither,
+    })
+}
+
+/// Whether `session`'s claim holds its answer to `attempt`.
+pub(crate) fn answer_held(
+    state: &Path,
+    namespace: &crate::StateNamespace,
+    session: &crate::AgentSessionId,
+    attempt: &crate::DeliveryAttemptId,
+) -> bool {
+    find_claim(state, namespace, session, attempt)
+        .1
+        .is_some_and(|claim| claim.state == ClaimState::Left(LeaveReason::Held))
+}
+
+/// The attempts in `namespace` whose claims of `session` still wait for a
+/// Stop to decide them.
+pub(crate) fn open_claims(
+    state: &Path,
+    namespace: &crate::StateNamespace,
+    session: &crate::AgentSessionId,
+) -> Vec<crate::DeliveryAttemptId> {
+    read_claims(&session_directory(
         state,
         &namespace.session_socket_id,
         session.as_str(),
-    ));
-    let state = claims
-        .iter()
-        .find(|claim| claim.attempt_id == *attempt && claim.namespace == *namespace)
-        .map(|claim| claim.state);
-    match state {
-        Some(ClaimState::Open) => AnswerClaim::Deciding,
-        Some(ClaimState::Left(LeaveReason::Held)) => AnswerClaim::Held,
-        _ => AnswerClaim::Neither,
-    }
+    ))
+    .into_iter()
+    .filter(|claim| claim.state == ClaimState::Open && claim.namespace == *namespace)
+    .map(|claim| claim.attempt_id)
+    .collect()
 }
 
 impl Claims {
@@ -1107,8 +1163,8 @@ const JUDGE_PAUSE: Duration = Duration::from_millis(100);
 /// Brings the ND-DELIVERY-003 warning of each claim a call decided in line
 /// with the claims it saved. The idle settle may judge the delivery before or
 /// after the Stop, from another process, and raises nothing while the Stop
-/// has not decided, so this is the only judge of a turn that ended with no
-/// answer. It tries again while the store refuses it, for at most `budget`.
+/// may still decide, so this judges a turn that ended with no answer at
+/// once. It tries again while the store refuses it, for at most `budget`.
 /// Still not covered: a Stop worker killed at its deadline between saving
 /// the claims and judging them, and a store busy past the budget. Those are
 /// judged again only when the session changes.

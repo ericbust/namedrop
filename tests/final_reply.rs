@@ -2339,10 +2339,14 @@ fn a_tracked_settle_that_fails_warns_the_person_until_the_agent_answers() {
     assert!(space.unresolved_disposition_warnings().is_empty());
 }
 
-struct AfterTheGrace;
-impl Clock for AfterTheGrace {
+/// When the reviewer's pane is first seen idle past the acknowledgement grace
+/// of a delivery dispatched at 42.
+const IDLE: u64 = 42 + 60_000;
+
+struct At(u64);
+impl Clock for At {
     fn now_unix_ms(&self) -> u64 {
-        42 + 60_000
+        self.0
     }
     fn wait_ms(&self, _: u64) {}
 }
@@ -2416,12 +2420,18 @@ impl Space {
     }
 
     fn observe_settled(&self) {
+        self.observe_at(IDLE);
+    }
+
+    /// Reconcile at `now_ms`, with every pane idle. The drain report's
+    /// earliest due time, when it must run again with no other event.
+    fn observe_at(&self, now_ms: u64) -> Option<u64> {
         let runtime = self.runtime("pane-lead");
-        namedrop::execute_lifecycle_operation(
+        let reconciled = namedrop::execute_lifecycle_operation(
             "reconcile",
             json!({}),
             &LifecycleRuntime {
-                clock: &AfterTheGrace,
+                clock: &At(now_ms),
                 herdr: runtime.herdr,
                 ids: runtime.ids,
                 state_directory: runtime.state_directory,
@@ -2434,6 +2444,9 @@ impl Space {
             },
         )
         .unwrap();
+        serde_json::from_value::<namedrop::DrainReport>(reconciled["drain"].clone())
+            .unwrap()
+            .next_due_ms()
     }
 
     fn refused_sessions_in_doctor(&self) -> Vec<String> {
@@ -3656,13 +3669,28 @@ impl Space {
             .unwrap();
     }
 
-    /// Reconcile no longer finding the reviewer's pane, as when the person
-    /// closes it.
-    fn close_reviewer_pane(&self) {
+    /// Reconcile no longer finding the reviewer's pane for a moment, as while
+    /// Herdr restarts.
+    fn close_reviewer_pane_for_a_moment(&self) {
         StateStore::open(&self.directory.state)
             .unwrap()
             .transaction(|transaction| {
                 transaction.unbind_pane(
+                    &namespace(),
+                    &PaneAddressId::new("address-reviewer"),
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 43),
+                )
+            })
+            .unwrap();
+    }
+
+    /// The person closing the reviewer's pane, as Herdr's pane closed event
+    /// handles it.
+    fn close_reviewer_pane(&self) {
+        StateStore::open(&self.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.cancel_and_remove_pane_address(
                     &namespace(),
                     &PaneAddressId::new("address-reviewer"),
                     &MutationAttribution::new(ActorKind::Plugin, "test", 43),
@@ -3789,7 +3817,7 @@ fn a_held_answer_whose_session_is_gone_warns_once_until_acknowledged() {
         (
             "retired",
             Space::retire_reviewer,
-            "The agent was retired before it finished",
+            "or the agent was removed, before it finished",
         ),
         (
             "ended",
@@ -3842,8 +3870,7 @@ fn a_held_answer_whose_pane_is_closed_warns_once_until_acknowledged() {
     let warnings = space.unresolved_disposition_warnings();
     assert_eq!(warnings.len(), 1, "closing the pane warned nothing");
     assert!(
-        warnings[0][0].contains("The agent's session ended")
-            && warnings[0][0].contains("its pane was closed"),
+        warnings[0][0].contains("The agent's pane was closed"),
         "{warnings:?}"
     );
     space
@@ -4051,6 +4078,187 @@ fn a_stop_still_warns_when_the_store_is_busy_past_its_first_try() {
         warnings[0][0].contains("ended its turn without a reply"),
         "{warnings:?}"
     );
+}
+
+/// How long Namedrop waits, after the pane is seen idle, for a Stop hook
+/// that races the idle status.
+const STOP_ARRIVAL_GRACE_MS: u64 = 5_000;
+/// How long a Stop's worker may take to decide its claim.
+const STOPPED_GRACE_MS: u64 = 30_000;
+
+impl Space {
+    /// Whether an ND-DELIVERY-003 warning was ever opened, including one
+    /// withdrawn since.
+    fn disposition_warning_ever_opened(&self) -> bool {
+        !self
+            .rows(
+                "SELECT entity_id FROM transition_facts
+                 WHERE entity_kind = 'attention_item' AND transition_kind = 'opened'
+                   AND entity_id LIKE 'attention-agent-disposition-%'",
+            )
+            .is_empty()
+    }
+
+    fn rebind_reviewer_pane(&self) {
+        StateStore::open(&self.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.rebind_pane(
+                    &namespace(),
+                    &PaneBindingId::new("binding-reviewer-again"),
+                    &PaneAddressId::new("address-reviewer"),
+                    "pane-reviewer",
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 44),
+                )
+            })
+            .unwrap();
+        self.observe_reviewer_session("session-reviewer");
+    }
+}
+
+/// A turn interrupted with Esc, or ended by an API error, fires no Stop. Once
+/// its pane has sat idle past the Stop's grace, the person is told the
+/// request went unanswered, with no later prompt needed.
+#[test]
+fn a_turn_that_ends_with_no_stop_warns_while_its_pane_sits_idle() {
+    let space = Space::new();
+    space.armed_ask();
+    let due = space.observe_at(IDLE);
+    assert!(
+        space.disposition_warnings_ever().is_empty(),
+        "warned before a racing Stop could arrive"
+    );
+    assert_eq!(
+        due,
+        Some(IDLE + STOP_ARRIVAL_GRACE_MS),
+        "nothing wakes the drain to judge the turn again"
+    );
+    assert_eq!(space.observe_at(IDLE + STOP_ARRIVAL_GRACE_MS - 1), due);
+    assert!(space.disposition_warnings_ever().is_empty());
+    assert_eq!(space.observe_at(IDLE + STOP_ARRIVAL_GRACE_MS), None);
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "an unanswered request warned nothing");
+    assert!(
+        warnings[0][0].contains("ended its turn without a reply"),
+        "{warnings:?}"
+    );
+    assert_eq!(space.reviewer_leg(), "completed");
+}
+
+/// A Stop that arrives inside the grace and holds the answer leaves the
+/// person nothing to act on.
+#[test]
+fn a_stop_inside_the_grace_that_holds_the_answer_warns_nothing() {
+    let space = Space::new();
+    space.armed_ask();
+    space.observe_at(IDLE);
+    space.append_transcript(&recorded_turn("prompt-start", CLAUDE.1));
+    space.reviewer_stop(CLAUDE.1, "STARTED", &["task-first"], &space.transcript());
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    assert_eq!(space.observe_at(IDLE + STOP_ARRIVAL_GRACE_MS), None);
+    assert_eq!(space.observe_at(IDLE + STOPPED_GRACE_MS), None);
+    assert!(
+        !space.disposition_warning_ever_opened(),
+        "{:?}",
+        space.disposition_warnings_ever()
+    );
+    assert_eq!(space.reviewer_leg(), "working");
+}
+
+/// A Stop that ran but whose worker never decided is given the worker's
+/// grace, then judged like a turn with no Stop.
+#[test]
+fn a_stop_whose_worker_never_finishes_warns_after_the_workers_grace() {
+    let space = Space::new();
+    space.armed_ask();
+    mark_stopped(
+        &space.directory.state,
+        "socket-a",
+        "session-reviewer",
+        &HostTurn::from_ids(Some(CLAUDE.1), None).unwrap(),
+        IDLE,
+    );
+    assert_eq!(space.observe_at(IDLE), Some(IDLE + STOPPED_GRACE_MS));
+    space.observe_at(IDLE + STOP_ARRIVAL_GRACE_MS);
+    assert!(
+        space.disposition_warnings_ever().is_empty(),
+        "warned while the Stop's worker still had the claim"
+    );
+    assert_eq!(space.observe_at(IDLE + STOPPED_GRACE_MS), None);
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "a lost worker warned nothing");
+    assert!(
+        warnings[0][0].contains("ended its turn without a reply"),
+        "{warnings:?}"
+    );
+}
+
+/// A Stop that comes after the grace still decides: holding the answer
+/// withdraws the warning, and answering closes it.
+#[test]
+fn a_late_stop_clears_the_warning_the_grace_raised() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    space.observe_at(IDLE);
+    space.observe_at(IDLE + STOP_ARRIVAL_GRACE_MS);
+    assert_eq!(space.unresolved_disposition_warnings().len(), 1);
+    space.append_transcript(&recorded_turn("prompt-start", CLAUDE.1));
+    space.reviewer_stop(CLAUDE.1, "STARTED", &["task-first"], &space.transcript());
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    assert!(
+        space.unresolved_disposition_warnings().is_empty(),
+        "the held answer is still warned about: {:?}",
+        space.unresolved_disposition_warnings()
+    );
+    let inbox =
+        execute_integration_operation("delivery.inbox", json!({}), &space.runtime("pane-reviewer"))
+            .unwrap();
+    assert_eq!(inbox["envelopes"][0]["control"]["attempt_id"], attempt);
+
+    let space = Space::new();
+    space.armed_ask();
+    space.observe_at(IDLE);
+    space.observe_at(IDLE + STOP_ARRIVAL_GRACE_MS);
+    assert_eq!(space.unresolved_disposition_warnings().len(), 1);
+    space.stop("session-reviewer", CLAUDE, "It is done.");
+    assert_eq!(space.answers("pane-lead"), ["It is done."]);
+    assert!(
+        space.unresolved_disposition_warnings().is_empty(),
+        "the answered request is still warned about: {:?}",
+        space.unresolved_disposition_warnings()
+    );
+}
+
+/// Reconcile may unbind a live pane and bind it again a moment later. The
+/// same session is still there, so nothing is ever raised for its held
+/// answer or for one its Stop has not decided.
+#[test]
+fn unbinding_and_rebinding_the_same_session_never_warns() {
+    for held in [true, false] {
+        let space = Space::new();
+        let ask = if held {
+            space.held_on_first_task()
+        } else {
+            space.armed_ask()
+        };
+        space.settle_attempt(&ask);
+        space.close_reviewer_pane_for_a_moment();
+        space.rebind_reviewer_pane();
+        if held {
+            space.observe_at(IDLE + STOPPED_GRACE_MS);
+        }
+        assert!(
+            !space.disposition_warning_ever_opened(),
+            "held {held}: {:?}",
+            space.disposition_warnings_ever()
+        );
+        assert_eq!(
+            space.reviewer_leg(),
+            if held { "working" } else { "completed" },
+            "held {held}"
+        );
+    }
 }
 
 impl Space {
@@ -4304,12 +4512,13 @@ fn the_wire_marks_a_held_leg_and_says_why_a_held_answer_was_lost() {
     assert!(working.get("answer_held").is_none(), "{working}");
 
     type Gone = (&'static str, fn(&Space));
-    let cases: [Gone; 3] = [
+    let cases: [Gone; 4] = [
         ("replaced", |space| {
             space.observe_reviewer_session("session-replaced")
         }),
         ("retired", Space::retire_reviewer),
-        ("ended", Space::close_reviewer_pane),
+        ("retired", Space::close_reviewer_pane),
+        ("ended", |space| space.observe_reviewer_session("")),
     ];
     for (cause, gone) in cases {
         let space = Space::new();

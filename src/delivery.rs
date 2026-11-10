@@ -38,7 +38,8 @@ pub struct DrainReport {
 }
 
 /// An idle submitted or acknowledged attempt still inside the acknowledgement
-/// grace. The drain observes it again at `due_at_ms`.
+/// grace, or a settled one whose turn's Stop may still decide its answer. The
+/// drain observes it again at `due_at_ms`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GraceDeadline {
     pub attempt_id: DeliveryAttemptId,
@@ -266,6 +267,21 @@ pub(crate) fn reconcile_delivery_state(
                 due_at_ms,
             }),
             Observation::Unchanged => {}
+        }
+    }
+    for session in panes
+        .iter()
+        .filter_map(|pane| pane.agent_session_id.as_ref())
+    {
+        for attempt in crate::final_reply::open_claims(state_directory, namespace, session) {
+            if let Some(due_at_ms) =
+                transaction.judge_awaiting_stop(namespace, &attempt, attribution)?
+            {
+                report.pending_grace.push(GraceDeadline {
+                    attempt_id: attempt,
+                    due_at_ms,
+                });
+            }
         }
     }
     Ok(report)
