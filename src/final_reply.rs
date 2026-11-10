@@ -285,6 +285,52 @@ pub fn turn_tasks(transcript: &[u8], whole: bool, prompt_id: &str) -> TurnTasks 
     turn
 }
 
+/// Whether the transcript at `path` shows that `prompt`, a notice, opened turn
+/// `prompt_id`: reading back from its end, the first record that names a turn
+/// names an earlier one, with none of this turn's but the notice's own after
+/// it. It is false when the transcript can't show it.
+pub fn notice_opens_turn(path: &Path, prompt_id: &str, prompt: &str) -> bool {
+    const LIMIT: u64 = 8 * 1024 * 1024;
+    let read = || -> Option<Vec<u8>> {
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .ok()?;
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        let start = metadata.len().saturating_sub(LIMIT);
+        file.seek(std::io::SeekFrom::Start(start)).ok()?;
+        let mut bytes = Vec::new();
+        file.take(LIMIT).read_to_end(&mut bytes).ok()?;
+        Some(bytes)
+    };
+    let Some(bytes) = read().filter(|_| !prompt_id.is_empty()) else {
+        return false;
+    };
+    let any_key = memchr::memmem::Finder::new(br#""promptId":""#);
+    for line in bytes.rsplit(|byte| *byte == b'\n') {
+        if any_key.find(line).is_none() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        let Some(id) = record["promptId"].as_str() else {
+            continue;
+        };
+        if id != prompt_id {
+            return true;
+        }
+        if !(record["type"] == "user" && record["message"]["content"] == prompt) {
+            return false;
+        }
+    }
+    false
+}
+
 /// The task a Claude Code task notice is about: the `task-id` element that
 /// opens it, never one quoted in its result.
 pub(crate) fn notice_task(text: &str) -> Option<&str> {
@@ -753,10 +799,10 @@ impl Claims {
     }
 
     /// Records a prompt of `turn`: the first one's time, and a delivery.
-    /// Whether this prompt opened the turn.
+    /// Whether no earlier prompt of the turn was recorded.
     fn see_turn(&self, turn: &HostTurn, delivery: bool, now_ms: u64) -> bool {
         let earlier = self.turn_seen(turn);
-        let opened = earlier.is_none();
+        let first = earlier.is_none();
         let seen = match earlier {
             Some(seen) if seen.delivery || !delivery => return false,
             Some(seen) => TurnSeen { delivery, ..seen },
@@ -780,7 +826,7 @@ impl Claims {
         if written.is_ok() {
             let _ = fs::rename(next, directory.join(turn.as_str()));
         }
-        opened
+        first
     }
 
     /// What a claim armed on another turn becomes when this session moves
@@ -883,6 +929,12 @@ impl Claim {
             line: line.clone()?,
             answers,
             failure: self.failure.clone(),
+            waits_on: if self.state == ClaimState::Left(LeaveReason::Held) {
+                self.awaits.clone()
+            } else {
+                Vec::new()
+            },
+            finished: false,
         })
     }
 
@@ -965,6 +1017,10 @@ pub(crate) struct WayBack {
     pub answers: bool,
     /// The error that stopped the Stop from settling it.
     pub failure: Option<String>,
+    /// The background tasks a held delivery waits on.
+    pub waits_on: Vec<String>,
+    /// This prompt is a notice that one of them ended.
+    pub finished: bool,
 }
 
 /// What a prompt carried, beyond the delivery it may arm.
@@ -974,6 +1030,9 @@ pub(crate) struct PromptFacts<'a> {
     pub notified: &'a [String],
     /// It authenticated a delivery for this session, armed or explicit.
     pub delivery: bool,
+    /// The transcript shows this prompt opened its turn: no record of the
+    /// turn but the prompt's own comes after an earlier turn's.
+    pub opens_turn: bool,
 }
 
 /// What one prompt found in its session's claims.
@@ -1000,7 +1059,11 @@ pub(crate) fn observe_prompt(
     prompt: PromptFacts<'_>,
     now_ms: u64,
 ) -> Observed {
-    let PromptFacts { notified, delivery } = prompt;
+    let PromptFacts {
+        notified,
+        delivery,
+        opens_turn,
+    } = prompt;
     let directory = session_directory(state, socket, session);
     if arm.is_none() && !directory.join("claims.json").exists() {
         return Observed::default();
@@ -1008,7 +1071,16 @@ pub(crate) fn observe_prompt(
     let Some(mut claims) = Claims::lock(directory, PROMPT_LOCK_WAIT) else {
         return Observed::default();
     };
-    let opened = claims.see_turn(turn, delivery || arm.is_some(), now_ms);
+    let first = claims.see_turn(turn, delivery || arm.is_some(), now_ms);
+    // A delivery in this turn makes it about that delivery: a promise this
+    // turn's notice made is off, so the held claim's way back shows.
+    if delivery || arm.is_some() {
+        for claim in &mut claims.claims {
+            if claim.promised_turn.as_ref() == Some(turn) {
+                claim.promised_turn = None;
+            }
+        }
+    }
     let moved: Vec<_> = claims
         .claims
         .iter()
@@ -1046,7 +1118,10 @@ pub(crate) fn observe_prompt(
         .claims
         .iter()
         .any(|claim| claim.promised_turn.as_ref() == Some(turn));
-    if opened
+    // A promise needs the transcript's proof that this notice opened its
+    // turn, and no earlier prompt of the turn on record.
+    if opens_turn
+        && first
         && !armed
         && !promised
         && let Some(index) = claims.woken(state, turn, notified)
@@ -1062,11 +1137,14 @@ pub(crate) fn observe_prompt(
             claim.updated_at_ms = now_ms;
         } else if outstanding(state, claim) == Some(false) {
             claim.set(ClaimState::Done(Done::Superseded), now_ms);
-        } else if let Some(way_back) = claim.way_back() {
+        } else if let Some(mut way_back) = claim.way_back() {
+            way_back.finished = claim.waits_for_any(notified);
             left_open.push(way_back);
             claim.updated_at_ms = now_ms;
         }
     }
+    // The delivery whose work this notice finished is listed first.
+    left_open.sort_by_key(|way_back| !way_back.finished);
     claims.save(now_ms);
     Observed { armed, left_open }
 }

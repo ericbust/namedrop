@@ -7,7 +7,7 @@ Each release is a section here, newest first. The GitHub release for a version u
 ### Fixed
 
 - An agent's answer in its final message is no longer held when the session has background work its turn didn't start, such as a long-running command or monitor from earlier, or Claude Code's own memory upkeep. Before, every such answer was held, ND-DELIVERY-003 opened, and the answer never reached Channels.
-- When an agent starts background work for your message and ends its turn, its answer now comes from its final message in the turn that work's notice starts. If the notice arrives while the agent works on something else, the agent is shown the line to answer your message, and that other turn's final message is never sent as the answer. Before, Namedrop sent nothing until the agent ran its reply line.
+- When an agent starts background work for your message and ends its turn, its answer now comes from its final message in the turn that work's notice starts. If the notice arrives while the agent works on something else, or another message reaches the turn it starts, the agent is shown the line to answer your message, naming the work it waits on, and the final message of a turn about something else is never sent as the answer. Before, Namedrop sent nothing until the agent ran its reply line.
 - An agent's answer to one of your messages no longer stops its final-message answer to another of your messages in the same conversation. Before, when the agent answered an earlier message during a later one's turn, the later answer was dropped.
 
 ## [1.6.5] - 2026-11-09

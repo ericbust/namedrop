@@ -409,7 +409,7 @@ fn an_ask_and_its_answer_settle_from_final_messages_with_no_settle_command() {
     );
     assert!(
         context.contains(
-            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, answer with the line Namedrop shows. For no reply, run this line first."
+            "Namedrop commands: your final message is your reply to @lead. Namedrop sends it when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, or another delivery reaches the turn it starts, answer with the line Namedrop shows. For no reply, run this line first."
         ),
         "{context}"
     );
@@ -1018,7 +1018,7 @@ fn a_message_from_the_person_is_answered_in_its_thread_by_the_final_message() {
     );
     assert!(
         context.ends_with(
-            "\n\nNamedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, answer with the line Namedrop shows."
+            "\n\nNamedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line. If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, or another delivery reaches the turn it starts, answer with the line Namedrop shows."
         ),
         "{context}"
     );
@@ -2842,7 +2842,8 @@ impl Space {
     /// may carry no delivery, and then the hook may add nothing.
     fn reviewer_prompt(&self, turn: &str, prompt: &str) -> Option<String> {
         let input = json!({"hook_event_name":"UserPromptSubmit","prompt":prompt,
-                           "session_id":"session-reviewer","prompt_id":turn});
+                           "session_id":"session-reviewer","prompt_id":turn,
+                           "transcript_path":self.transcript()});
         let output = execute_user_prompt_submit_hook(
             &input.to_string(),
             &self.real_runtime("pane-reviewer"),
@@ -3217,4 +3218,155 @@ fn a_stop_no_held_delivery_can_wake_on_starts_no_worker() {
     assert_eq!(saved(), before, "the Stop handed its turn to a worker");
     assert!(space.answers("pane-lead").is_empty());
     assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+}
+
+impl Space {
+    /// The reviewer's attempt `ask` settled with no disposition, as the agent
+    /// going idle does, so its mailbox moves on.
+    fn settle_attempt(&self, ask: &Value) {
+        StateStore::open(&self.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.transition_delivery_attempt(
+                    &namespace(),
+                    &namedrop::DeliveryAttemptId::new(
+                        ask["control"]["attempt_id"].as_str().unwrap(),
+                    ),
+                    namedrop::DeliveryState::Settled,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 42),
+                )
+            })
+            .unwrap();
+    }
+
+    fn second_ask(&self, first: &Value) -> Value {
+        self.settle_attempt(first);
+        dispatch::message(
+            "send",
+            json!({"request_id":"ask-2","source":"@reviewer Reply with the single word ping.",
+                   "author_kind":"agent_session"}),
+            &self.runtime("pane-lead"),
+        )
+        .unwrap();
+        let second = self.herdr.envelope_for("pane-reviewer");
+        assert_ne!(
+            second["control"]["attempt_id"],
+            first["control"]["attempt_id"]
+        );
+        second
+    }
+}
+
+/// The recorded busy turn's typed prompt and the notice Claude Code queued
+/// into it, about `task`.
+fn typed_turn_and_queued_notice(task: &str) -> (Vec<Value>, String, String) {
+    let busy = recorded_turn("prompt-busy", "busy-turn");
+    let typed = busy[0]["message"]["content"].as_str().unwrap().to_owned();
+    let queued = busy
+        .iter()
+        .find(|record| record["attachment"]["type"] == "queued_command")
+        .unwrap()["attachment"]["prompt"]
+        .as_str()
+        .unwrap()
+        .replace("task-first", task);
+    (busy, typed, queued)
+}
+
+/// With two deliveries held on different tasks, a notice shows both lines,
+/// each naming its task, and the one the notice finished first.
+#[test]
+fn a_queued_notice_lists_the_delivery_it_finished_first_and_names_each_task() {
+    let space = Space::new();
+    let first = space.held_on_first_task();
+    let second = space.second_ask(&first);
+    space.reviewer_prompt("wait-turn", &second.to_string());
+    space.append_transcript(&recorded_turn("prompt-wait", "wait-turn"));
+    space.reviewer_stop(
+        "wait-turn",
+        "Started.",
+        &["task-first", "task-second"],
+        &space.transcript(),
+    );
+    let (busy, typed, queued) = typed_turn_and_queued_notice("task-second");
+    space.reviewer_prompt("busy-turn", &typed);
+    space.append_transcript(&busy);
+    let context = space
+        .reviewer_prompt("busy-turn", &queued)
+        .unwrap_or_default();
+    let line = |ask: &Value| {
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+        let head = format!("Namedrop: delivery {attempt} from an earlier turn is still open");
+        let at = context
+            .find(&head)
+            .unwrap_or_else(|| panic!("no line for {attempt}: {context}"));
+        (at, context[at..].lines().next().unwrap().to_owned())
+    };
+    let ((first_at, first_line), (second_at, second_line)) = (line(&first), line(&second));
+    assert!(
+        second_at < first_at,
+        "the finished delivery's line came second: {context}"
+    );
+    assert!(
+        second_line.contains("background task task-second, which this notice says ended"),
+        "{second_line}"
+    );
+    assert!(
+        first_line.contains("background task task-first;"),
+        "{first_line}"
+    );
+}
+
+/// A delivery that arrives in a turn a held delivery's notice opened cancels
+/// that turn's promise, so its prompt shows the held delivery's line.
+#[test]
+fn a_delivery_in_a_turn_a_notice_opened_shows_the_held_deliverys_line() {
+    let space = Space::new();
+    let first = space.held_on_first_task();
+    let attempt = first["control"]["attempt_id"].as_str().unwrap().to_owned();
+    let way_back = format!("Namedrop: delivery {attempt} from an earlier turn is still open");
+    let notice = recorded_turn("prompt-notice", "notice-turn");
+    let text = notice[0]["message"]["content"]
+        .as_str()
+        .unwrap()
+        .replace("task-second", "task-first");
+    let promised = space
+        .reviewer_prompt("notice-turn", &text)
+        .unwrap_or_default();
+    assert!(!promised.contains(&way_back), "{promised}");
+    let second = space.second_ask(&first);
+    let context = space
+        .reviewer_prompt("notice-turn", &second.to_string())
+        .unwrap();
+    assert!(
+        context.contains(&way_back),
+        "the delivery's prompt hid the held line: {context}"
+    );
+}
+
+/// A turn whose first prompt the hook never recorded is still not opened by
+/// the notice queued into it: the transcript shows the turn began earlier, so
+/// the notice promises nothing and its prompt shows the held line.
+#[test]
+fn a_queued_notice_in_a_turn_whose_first_prompt_went_unrecorded_promises_nothing() {
+    let space = Space::new();
+    let first = space.held_on_first_task();
+    let attempt = first["control"]["attempt_id"].as_str().unwrap().to_owned();
+    let (busy, _, queued) = typed_turn_and_queued_notice("task-first");
+    space.append_transcript(&busy);
+    let context = space
+        .reviewer_prompt("busy-turn", &queued)
+        .unwrap_or_default();
+    assert!(
+        context.contains(&format!(
+            "Namedrop: delivery {attempt} from an earlier turn is still open"
+        )),
+        "{context}"
+    );
+    let missing = space.directory.root.join("no-transcript.jsonl");
+    space.reviewer_stop("busy-turn", "SLEPT", &[], &missing);
+    assert!(
+        space.answers("pane-lead").is_empty(),
+        "{:?}",
+        space.answers("pane-lead")
+    );
 }

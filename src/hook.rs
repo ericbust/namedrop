@@ -23,6 +23,7 @@ struct UserPromptSubmitInput {
     session_id: Option<String>,
     prompt_id: Option<String>,
     turn_id: Option<String>,
+    transcript_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -511,6 +512,15 @@ where
         &turn,
         claim,
         crate::final_reply::PromptFacts {
+            opens_turn: !notified.is_empty()
+                && input
+                    .transcript_path
+                    .as_deref()
+                    .zip(input.prompt_id.as_deref())
+                    .filter(|(path, _)| path.is_absolute())
+                    .is_some_and(|(path, prompt_id)| {
+                        crate::final_reply::notice_opens_turn(path, prompt_id, &input.prompt)
+                    }),
             notified: &notified,
             delivery: delivery.is_some(),
         },

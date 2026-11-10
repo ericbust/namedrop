@@ -602,6 +602,7 @@ fn observe(state: &StateDirectory, prompt: &str, arm: Option<Claim>) -> bool {
         PromptFacts {
             notified: &[],
             delivery: false,
+            opens_turn: false,
         },
         10,
     )
@@ -800,7 +801,8 @@ fn background_work_at_the_stop_leaves_a_reply_for_the_agent_to_settle() {
             None,
             PromptFacts {
                 notified: &[],
-                delivery: false
+                delivery: false,
+                opens_turn: false,
             },
             30
         )
@@ -810,6 +812,8 @@ fn background_work_at_the_stop_leaves_a_reply_for_the_agent_to_settle() {
             line: "reply: namedrop reply --input-json '{}'".to_owned(),
             answers: true,
             failure: None,
+            waits_on: vec!["task-1".to_owned()],
+            finished: false,
         }]
     );
     assert_eq!(state.claims()[0].state, ClaimState::Left(LeaveReason::Held));
@@ -839,6 +843,7 @@ fn finished_claims_are_pruned_after_a_day() {
             PromptFacts {
                 notified: &[],
                 delivery: false,
+                opens_turn: false,
             },
             now_ms,
         );
@@ -912,6 +917,7 @@ fn a_prompt_queued_behind_a_stop_leaves_the_claim_to_that_stops_worker() {
         PromptFacts {
             notified: &[],
             delivery: false,
+            opens_turn: false,
         },
         10 + STOPPED_GRACE_MS,
     );
@@ -940,6 +946,7 @@ fn a_claim_left_open_stays_while_later_prompts_show_it() {
             PromptFacts {
                 notified: &[],
                 delivery: false,
+                opens_turn: false,
             },
             now_ms,
         )
@@ -974,6 +981,7 @@ fn a_late_stop_worker_leaves_the_next_turns_claim_alone() {
             PromptFacts {
                 notified: &[],
                 delivery: false,
+                opens_turn: false,
             },
             now_ms,
         )
@@ -1036,6 +1044,7 @@ fn pruning_stop_markers_spares_one_still_being_written() {
         PromptFacts {
             notified: &[],
             delivery: false,
+            opens_turn: false,
         },
         30,
     );
@@ -1124,6 +1133,7 @@ fn a_held_answer_settles_at_the_stop_of_the_turn_its_works_notice_reached() {
         PromptFacts {
             notified: &["monitor-from-yesterday".to_owned()],
             delivery: false,
+            opens_turn: false,
         },
         30,
     );
@@ -1141,6 +1151,7 @@ fn a_held_answer_settles_at_the_stop_of_the_turn_its_works_notice_reached() {
         PromptFacts {
             notified: &["build-1".to_owned()],
             delivery: false,
+            opens_turn: true,
         },
         40,
     );
@@ -1463,4 +1474,61 @@ fn the_stop_hook_finds_a_held_tasks_notice_or_says_it_cannot_tell() {
         ),
         None
     );
+}
+
+#[test]
+fn only_a_notice_that_opens_its_turn_counts_as_opening_it() {
+    let state = StateDirectory::new();
+    let lines: Vec<&str> = RECORDED.lines().collect();
+    let upto = |prompt: &str, inclusive: bool| {
+        let at = lines
+            .iter()
+            .position(|line| line.contains(&format!(r#""promptId":"{prompt}""#)))
+            .unwrap();
+        let path = state.0.join(format!("{prompt}-{inclusive}.jsonl"));
+        fs::write(&path, lines[..at + usize::from(inclusive)].join("\n")).unwrap();
+        path
+    };
+    let record = |prompt: &str| -> Value {
+        lines
+            .iter()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|record| record["promptId"] == prompt)
+            .unwrap()
+    };
+    let notice = record("prompt-notice")["message"]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Before Claude Code writes the notice's own record, and after.
+    assert!(notice_opens_turn(
+        &upto("prompt-notice", false),
+        "prompt-notice",
+        &notice
+    ));
+    assert!(notice_opens_turn(
+        &upto("prompt-notice", true),
+        "prompt-notice",
+        &notice
+    ));
+    // The busy turn's queued notice comes after that turn's own records.
+    let busy_end = lines
+        .iter()
+        .position(|line| line.contains("queued_command"))
+        .unwrap();
+    let busy = state.0.join("busy.jsonl");
+    fs::write(&busy, lines[..busy_end].join("\n")).unwrap();
+    let queued: Value = serde_json::from_str(lines[busy_end]).unwrap();
+    let queued = queued["attachment"]["prompt"].as_str().unwrap();
+    assert!(!notice_opens_turn(&busy, "prompt-busy", queued));
+    assert!(!notice_opens_turn(
+        &state.0.join("missing"),
+        "prompt-notice",
+        &notice
+    ));
+    assert!(!notice_opens_turn(
+        &upto("prompt-notice", true),
+        "",
+        &notice
+    ));
 }

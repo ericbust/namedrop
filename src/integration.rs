@@ -1684,8 +1684,18 @@ pub(crate) fn left_open_guidance(way_back: &crate::final_reply::WayBack) -> Stri
             };
             format!("Namedrop: {what}, because of this error: {failure}\n")
         });
+    let waits = match way_back.waits_on.as_slice() {
+        [] => String::new(),
+        [task] => format!("; it waits on background task {task}"),
+        tasks => format!("; it waits on background tasks {}", tasks.join(", ")),
+    };
+    let ended = if way_back.finished {
+        ", which this notice says ended"
+    } else {
+        ""
+    };
     format!(
-        "{failed}Namedrop: delivery {} from an earlier turn is still open; {how}.\n{}",
+        "{failed}Namedrop: delivery {} from an earlier turn is still open{waits}{ended}; {how}.\n{}",
         way_back.attempt_id.as_str(),
         way_back.line
     )
@@ -1760,7 +1770,7 @@ fn rendered_lines(control: &Value) -> Option<(Vec<RenderedLine<'_>>, Vec<&str>)>
 const FINAL_REPLY_DONE: &str =
     "Namedrop sends it when your turn ends, so run no settle command and write no status line.";
 const FINAL_REPLY_OUTCOME: &str = "End it with one line: work_outcome: completed, work_outcome: needs_continuation, or work_outcome: blocked: <reason>. Without one it is needs_continuation.";
-const FINAL_REPLY_WAITING: &str = "If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, answer with the line Namedrop shows.";
+const FINAL_REPLY_WAITING: &str = "If your turn ends while you wait on a helper, Namedrop sends nothing and you reply later. If it ends while background work you started this turn runs, Namedrop holds your final message, and your final message in the turn that work's notice starts is the reply. If the notice arrives during another turn, or another delivery reaches the turn it starts, answer with the line Namedrop shows.";
 const REPORT_TO_HUMAN_GUIDANCE: &str = "Namedrop commands: none. Namedrop closes this without a reply when your turn ends; show it to the person once in your final message.";
 const RESULT_SET_GUIDANCE: &str = "Namedrop commands: none. Namedrop closes this without a reply when your turn ends; your final message is the response the envelope asks for.";
 const RELAYED_GUIDANCE: &str = "Namedrop commands: your final message goes to the person when your turn ends, so run no settle command and write no status line.";
