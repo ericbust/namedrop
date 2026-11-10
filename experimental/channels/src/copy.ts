@@ -9,6 +9,7 @@ import type {
   Attention,
   AttentionResponse,
   ChannelSnapshot,
+  ControlAction,
   DeliveryStage,
   HandoffWarning,
   Health,
@@ -18,7 +19,6 @@ import type {
   Participant,
   ScreenFailure,
   SendFailure,
-  ThreadAction,
 } from "./model.ts";
 import type { PeekNotice } from "./peek.ts";
 import type { RouteState, RouteTip, SendForm } from "./route.ts";
@@ -187,9 +187,9 @@ const lostAnswer: Record<
 > = {
   retired: {
     what: "can't answer this anymore",
-    hint: "The agent was removed before its work finished. Ask another agent if you still need an answer.",
+    hint: "The agent's pane was closed or the agent was removed before its work finished. Ask again if you still need an answer.",
     namedHint:
-      "It was removed before its work finished. Ask another agent if you still need an answer.",
+      "Its pane was closed or it was removed before its work finished. Ask again if you still need an answer.",
   },
   replaced: {
     what: "can't answer this anymore",
@@ -300,13 +300,23 @@ export const threadControlCopy = {
     title: "Ends agent replies in this thread. You can't undo this.",
     failed: "Couldn't stop the thread. Try again.",
   },
+  dismiss: {
+    label: "Dismiss",
+    pending: "Dismissing…",
+    title: "Removes this card. The request stays in the thread as ended.",
+    failed: "Couldn't dismiss it. Try again.",
+  },
   confirm: "Stop this thread for good?",
   confirmStop: "Stop",
+  confirmDismissQuestion: "Dismiss this? Its answer can't arrive.",
+  confirmDismiss: "Dismiss",
   cancel: "Cancel",
   gone: "This thread is no longer in this workspace.",
+  requestGone: "This request is no longer in this workspace.",
+  stillAnswerable: "The agent can still answer this, so it stays.",
   status: (code: number) => `HTTP ${code}`,
 } satisfies Record<
-  ThreadAction,
+  ControlAction,
   { label: string; pending: string; title: string; failed: string }
 > &
   Record<string, unknown>;

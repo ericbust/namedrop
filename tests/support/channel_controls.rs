@@ -1045,3 +1045,126 @@ fn failed_interrupt_reports_committed_stop_with_an_unconfirmed_warning() {
             .contains("ambiguous interrupt transport failure")
     );
 }
+
+fn dismiss_path(attempt: &str) -> String {
+    let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+    format!("/w/{}/attempts/{attempt}/dismiss", key.as_str())
+}
+
+/// The person's request to lead, settled with no answer, so it is warned
+/// about. Its attempt.
+fn unanswered_request(f: &Fixture) -> String {
+    let asked = person_says(f, "w1", "dismiss-ask", "@lead Check the build.");
+    let attempt = reply_attempt(f, &asked, "pane-1-lead", "dismiss-ask");
+    StateStore::open(&f.state)
+        .unwrap()
+        .transaction(|tx| {
+            tx.transition_delivery_attempt(
+                &StateNamespace::for_space("socket-a", "w1"),
+                &namedrop::DeliveryAttemptId::new(&attempt),
+                namedrop::DeliveryState::Settled,
+                &namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test", 43),
+            )
+        })
+        .unwrap();
+    attempt
+}
+
+fn open_disposition_warnings(f: &Fixture) -> i64 {
+    f.count(
+        "SELECT count(*) FROM attention_items
+         WHERE source_kind = 'agent_disposition' AND resolved_at_ms IS NULL",
+    )
+}
+
+#[test]
+fn browser_dismiss_clears_a_warning_nobody_can_answer_and_only_then() {
+    let f = fixture();
+    let attempt = unanswered_request(&f);
+    assert_eq!(open_disposition_warnings(&f), 1);
+    let server = Server::start(&f, "not json", false);
+    let path = dismiss_path(&attempt);
+
+    let unconfirmed = server.post(&path, "{}", &[]);
+    assert_eq!(unconfirmed.status, 409, "{}", unconfirmed.body);
+    let live = server.post(&path, r#"{"confirmed":true}"#, &[]);
+    assert_eq!(live.status, 409, "{}", live.body);
+    assert!(
+        live.body.contains("can still answer"),
+        "a live session's warning was dismissed: {}",
+        live.body
+    );
+    assert_eq!(open_disposition_warnings(&f), 1);
+
+    cancel_and_remove(&f, "w1", "lead");
+    let dismissed = server.post(&path, r#"{"confirmed":true}"#, &[]);
+    assert_eq!(dismissed.status, 200, "{}", dismissed.body);
+    let receipt: Value = serde_json::from_str(&dismissed.body).unwrap();
+    assert_eq!(receipt["attempt_id"], attempt.as_str());
+    assert_eq!(receipt["acknowledged"], true);
+    assert_eq!(open_disposition_warnings(&f), 0);
+    assert_eq!(
+        f.count(
+            "SELECT count(*) FROM transition_facts
+             WHERE entity_kind = 'attention_item' AND transition_kind = 'acknowledged'
+               AND actor_kind = 'human'"
+        ),
+        1,
+        "the dismiss was not recorded as the person's"
+    );
+    assert_eq!(
+        f.count("SELECT count(*) FROM delivery_dispositions"),
+        0,
+        "a dismiss recorded a disposition"
+    );
+    let replay = server.post(&path, r#"{"confirmed":true}"#, &[]);
+    assert_eq!(replay.status, 200, "{}", replay.body);
+
+    assert_eq!(
+        server
+            .post(
+                &dismiss_path("no-such-attempt"),
+                r#"{"confirmed":true}"#,
+                &[]
+            )
+            .status,
+        404
+    );
+}
+
+#[test]
+fn browser_dismiss_enforces_message_post_auth_and_workspace_scope() {
+    let f = fixture();
+    let attempt = unanswered_request(&f);
+    cancel_and_remove(&f, "w1", "lead");
+    let server = Server::start(&f, "not json", false);
+    let path = dismiss_path(&attempt);
+    let body = r#"{"confirmed":true}"#;
+    assert_eq!(server.request("POST", &path, &[], body).status, 401);
+    assert_eq!(
+        server
+            .request("POST", &path, &[("Cookie", &server.cookie)], body)
+            .status,
+        403
+    );
+    for headers in [
+        vec![("Host", "evil.example")],
+        vec![("Origin", "https://evil.example")],
+        vec![("Sec-Fetch-Site", "cross-site")],
+    ] {
+        assert_eq!(server.post(&path, body, &headers).status, 403);
+    }
+    let other = SpaceKey::of(&StateNamespace::for_space("socket-a", "w2"));
+    assert_eq!(
+        server
+            .post(
+                &format!("/w/{}/attempts/{attempt}/dismiss", other.as_str()),
+                body,
+                &[]
+            )
+            .status,
+        404,
+        "another workspace dismissed this one's warning"
+    );
+    assert_eq!(open_disposition_warnings(&f), 1);
+}

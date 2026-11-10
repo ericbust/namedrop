@@ -624,15 +624,29 @@ An `agent_disposition` item with `answer_lost` is about a held answer that can
 never arrive. Its title and hint replace the unanswered ones, and its hint wins
 over the pane and absence hints:
 
-| `answer_lost`   | Title                              | Hint when the item names its agent                                                                   |
-| --------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `retired`       | "@codex can't answer this anymore" | It was removed before its work finished. Ask another agent if you still need an answer.              |
-| `replaced`      | "@codex can't answer this anymore" | A new session took its place before its work finished. Ask again if you still need an answer.        |
-| `ended`         | "@codex stopped before answering"  | Its session ended before its work finished. If that session comes back, the agent can still answer.  |
-| any other value | "@codex can't answer this anymore" | Its session is gone. Ask again if you still need an answer.                                          |
+| `answer_lost`   | Title                              | Hint when the item names its agent                                                                     |
+| --------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `retired`       | "@codex can't answer this anymore" | Its pane was closed or it was removed before its work finished. Ask again if you still need an answer. |
+| `replaced`      | "@codex can't answer this anymore" | A new session took its place before its work finished. Ask again if you still need an answer.          |
+| `ended`         | "@codex stopped before answering"  | Its session ended before its work finished. If that session comes back, the agent can still answer.    |
+| any other value | "@codex can't answer this anymore" | Its session is gone. Ask again if you still need an answer.                                            |
 
 Without a named agent the title is "Can't answer this anymore" or "Stopped before
 answering", which All activity also uses, and the hint says "The agent".
+
+**Dismiss.** Only an item with `answer_lost` and its attempt (`source_id`)
+shows a "Dismiss" text button after its response button, with the tooltip
+"Removes this card. The request stays in the thread as ended." The server
+allows a dismiss exactly then, since nobody can answer the request. It asks
+once, inline, like Stop thread: "Dismiss this? Its answer can't arrive.",
+then a "Dismiss" text button in `--failed-text` and "Cancel". Only the
+confirm sends `POST /w/<key>/attempts/<attempt>/dismiss` with
+`{"confirmed": true}`, which acknowledges the warning as the person, like
+`delivery acknowledge`. A press reads "Dismissing…" and waits on the frame
+that drops the item; the message's receipt then reads "Ended without an
+answer". A refusal reads "Couldn't dismiss it. Try again.", for 404 "This
+request is no longer in this workspace.", and for 409 "The agent can still
+answer this, so it stays."
 
 When the item names a message (`message_id`) that is loaded in the timeline, a **Show message** text button
 starts the action row. It scrolls the message to the middle of the timeline, tints it

@@ -681,6 +681,10 @@ enum Route {
         thread_id: String,
         action: super::thread_controls::Action,
     },
+    Dismiss {
+        key: SpaceKey,
+        attempt_id: String,
+    },
     Skills {
         key: SpaceKey,
         address_id: String,
@@ -888,6 +892,14 @@ fn route(
                     return Err(Status::NotFound);
                 }
                 return Ok(Route::Deliver { key, message_id });
+            }
+            if let [key, "attempts", attempt, "dismiss"] = segments.as_slice() {
+                let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
+                let attempt_id = decode_asset_path(attempt).ok_or(Status::NotFound)?;
+                if attempt_id.is_empty() || attempt_id.contains('/') {
+                    return Err(Status::NotFound);
+                }
+                return Ok(Route::Dismiss { key, attempt_id });
             }
             if let [key, "coordinations", "review"] = segments.as_slice() {
                 let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
@@ -1548,6 +1560,47 @@ fn serve_connection(
                         "",
                         serde_json::json!({"error": message}).to_string().as_bytes(),
                     )
+                }
+            }
+        }
+        Ok(Route::Dismiss { key, attempt_id }) => {
+            let post: super::acknowledge::DismissPost = match read_json_body(&mut reader, &request)
+            {
+                Ok(post) => post,
+                Err(status) => return respond_status(&mut writer, status),
+            };
+            let admitted = match front.admit_mutation() {
+                Ok(guard) => guard,
+                Err(status) => return respond_status(&mut writer, status),
+            };
+            let result = super::acknowledge::dismiss(
+                front.files.state(),
+                &key,
+                &attempt_id,
+                &post,
+                crate::Clock::now_unix_ms(&crate::SystemClock),
+            );
+            drop(admitted);
+            match result {
+                Ok(receipt) => respond(
+                    &mut writer,
+                    "200 OK",
+                    "application/json",
+                    "",
+                    receipt.to_string().as_bytes(),
+                ),
+                Err(super::acknowledge::Error::NotFound) => {
+                    respond_status(&mut writer, Status::NotFound)
+                }
+                Err(super::acknowledge::Error::Refused(message)) => respond(
+                    &mut writer,
+                    "409 Conflict",
+                    "application/json",
+                    "",
+                    serde_json::json!({"error": message}).to_string().as_bytes(),
+                ),
+                Err(super::acknowledge::Error::Unavailable) => {
+                    respond_status(&mut writer, Status::Unavailable)
                 }
             }
         }

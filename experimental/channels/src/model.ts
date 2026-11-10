@@ -46,6 +46,12 @@ export type MessageContext = {
   messages: readonly Message[];
 };
 export type ThreadAction = "continue" | "stop";
+// What a card's button asks the server to do: a thread action, or dismissing
+// the warning that a request's answer can never arrive.
+export type ControlAction = ThreadAction | "dismiss";
+export type ControlTarget =
+  | { kind: "thread"; threadId: string; action: ThreadAction }
+  | { kind: "attempt"; attemptId: string; action: "dismiss" };
 export type WarningCause =
   | "blocked"
   | "cancelled"

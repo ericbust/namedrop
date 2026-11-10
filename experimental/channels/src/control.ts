@@ -1,15 +1,21 @@
-import type { Attention, ThreadAction } from "./model.ts";
+import type { Attention, ControlAction, ThreadAction } from "./model.ts";
 
+// The actions that ask once before they post, because they can't be undone.
+export type ConfirmedAction = Extract<ControlAction, "stop" | "dismiss">;
 export type ThreadControl =
   | { kind: "idle" }
-  | { kind: "confirmingStop" }
-  | { kind: "pending"; action: ThreadAction }
-  | { kind: "failed"; action: ThreadAction; status: number };
+  | { kind: "confirming"; action: ConfirmedAction }
+  | { kind: "pending"; action: ControlAction }
+  | { kind: "failed"; action: ControlAction; status: number };
 export type ThreadControlEvent =
-  | { type: "start"; action: ThreadAction }
-  | { type: "ask-stop" }
+  | { type: "start"; action: ControlAction }
+  | { type: "ask"; action: ConfirmedAction }
   | { type: "cancel" }
   | { type: "failed"; status: number };
+
+function confirmed(action: ControlAction): action is ConfirmedAction {
+  return action === "stop" || action === "dismiss";
+}
 
 export function threadControl(
   state: ThreadControl,
@@ -17,18 +23,17 @@ export function threadControl(
 ): ThreadControl {
   switch (event.type) {
     case "start": {
-      const ready =
-        event.action === "stop"
-          ? state.kind === "confirmingStop"
-          : state.kind === "idle" || state.kind === "failed";
+      const ready = confirmed(event.action)
+        ? state.kind === "confirming" && state.action === event.action
+        : state.kind === "idle" || state.kind === "failed";
       return ready ? { kind: "pending", action: event.action } : state;
     }
-    case "ask-stop":
+    case "ask":
       return state.kind === "idle" || state.kind === "failed"
-        ? { kind: "confirmingStop" }
+        ? { kind: "confirming", action: event.action }
         : state;
     case "cancel":
-      return state.kind === "confirmingStop" ? { kind: "idle" } : state;
+      return state.kind === "confirming" ? { kind: "idle" } : state;
     case "failed":
       return state.kind === "pending"
         ? { kind: "failed", action: state.action, status: event.status }
@@ -48,4 +53,16 @@ export function threadControls(
   return item.threadId === null || item.actions.length === 0
     ? null
     : { threadId: item.threadId, actions: item.actions };
+}
+
+// The attempt whose warning the person can dismiss: only one whose held
+// answer can never arrive, which is when the server allows it.
+export function dismissal(
+  item: Pick<Attention, "source" | "sourceId" | "answerLost">,
+): string | null {
+  return item.source === "agent_disposition" &&
+    item.answerLost != null &&
+    item.sourceId != null
+    ? item.sourceId
+    : null;
 }

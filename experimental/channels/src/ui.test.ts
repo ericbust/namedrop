@@ -631,6 +631,61 @@ test("attention actions show historical evidence and safe responses for every so
   assert.doesNotMatch(local, /Namedrop setup|Namedrop Doctor/);
 });
 
+test("a lost answer's card offers Dismiss, and a card whose agent can still answer does not", async () => {
+  const { AttentionActions } = await load<
+    typeof import("./ui/AttentionActions.tsx")
+  >("/src/ui/AttentionActions.tsx");
+  const { PeekContext } = await load<typeof import("./ui/PeekContext.tsx")>(
+    "/src/ui/PeekContext.tsx",
+  );
+  const value = JSON.parse((await fixtures())[0] ?? "null");
+  const responsible = value.frame.participants[0].address_id;
+  const shown = (answer_lost: string | null) => {
+    value.frame.attention = [
+      {
+        attention_id: "lost",
+        source_kind: "agent_disposition",
+        source_id: "attempt-1",
+        answer_lost,
+        summary: { text: "Lost", truncated: false },
+        opened_at_ms: 1,
+        conversation: { thread_id: "t", message_id: "m" },
+        response: {
+          kind: "reply",
+          thread_id: "t",
+          message_id: "m",
+          address_id: responsible,
+        },
+      },
+    ];
+    const { channel } = space(value);
+    const item = channel.attention[0];
+    assert.ok(item);
+    return buttons(
+      renderToStaticMarkup(
+        createElement(
+          PeekContext,
+          { value: { scope: channel.key, open() {} } },
+          createElement(AttentionActions, {
+            item,
+            channel,
+            absent: null,
+            onFocus() {},
+            onControl,
+          }),
+        ),
+      ),
+    );
+  };
+  for (const cause of ["retired", "replaced", "ended"])
+    assert.deepEqual(
+      shown(cause),
+      ["Show message", "Reply to @codex", "Dismiss"],
+      cause,
+    );
+  assert.deepEqual(shown(null), ["Show message", "Reply to @codex"]);
+});
+
 test("a Needs-you item keeps Show message, its response and Details on one action row, and its hint says where to answer", async () => {
   const { NeedsYou } = await load<typeof import("./ui/NeedsYou.tsx")>(
     "/src/ui/NeedsYou.tsx",
