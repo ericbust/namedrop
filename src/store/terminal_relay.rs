@@ -704,6 +704,58 @@ pub(super) mod tests {
         relay_attempt(store, ns, "attempt", "session", time, text)
     }
 
+    fn note(
+        store: &mut StateStore,
+        ns: &StateNamespace,
+        turn: &str,
+        time: u64,
+    ) -> Option<MessageId> {
+        store
+            .transaction(|tx| {
+                tx.post_progress_note(
+                    ns,
+                    &TerminalRelayEnd {
+                        agent_session_id: AgentSessionId::new("session"),
+                        attempt_id: DeliveryAttemptId::new("attempt"),
+                        turn_started_at_ms: 10,
+                        ended_at_ms: time,
+                        text: "Still building.".to_owned(),
+                    },
+                    &crate::final_reply::HostTurn::from_ids(Some(turn), None).unwrap(),
+                    &at(time),
+                )
+            })
+            .unwrap()
+    }
+
+    /// A Stop whose worker posted the note and died before it saved its
+    /// claim posts it again on the retry: the note shows once per turn, and
+    /// never stands in for the answer.
+    #[test]
+    fn a_progress_note_shows_once_per_turn_and_leaves_the_attempt_open() {
+        let (mut store, ns) = fixture("channel/v1", true);
+        let first = note(&mut store, &ns, "turn-1", 20).expect("the note is posted");
+        assert_eq!(note(&mut store, &ns, "turn-1", 21), None);
+        let second = note(&mut store, &ns, "turn-2", 22).expect("a later turn posts its own");
+        assert_ne!(first, second);
+        store
+            .transaction(|tx| {
+                let attempt = DeliveryAttemptId::new("attempt");
+                assert_eq!(
+                    tx.delivery_attempt_state(&ns, &attempt)?,
+                    DeliveryState::Submitted
+                );
+                assert!(!tx.delivery_disposition_exists(&ns, &attempt)?);
+                assert!(tx.unresolved_attention_items(&ns)?.is_empty());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            relay(&mut store, &ns, 22, "Built."),
+            Some(MessageId::new("terminal-relay:attempt"))
+        );
+    }
+
     #[test]
     fn relays_operator_channel_and_direct_deliveries_without_recipient_mail() {
         for grammar in ["channel/v1", "mention/v1"] {
