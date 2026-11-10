@@ -138,7 +138,7 @@ impl Unanswered {
             Self::CoordinationResolved { outcome } => format!("This tracked request was still unanswered when its coordination was resolved {outcome}. The worker's exact session can still answer it from delivery.inbox. Once that agent is retired or its session was replaced, delivery acknowledge clears this warning."),
             Self::HeldAnswerLost(SessionGone::Retired) => "The agent was retired before it finished working on this message, so its answer can't arrive. Ask again if you still need one. After you review it, delivery acknowledge clears this warning.".to_owned(),
             Self::HeldAnswerLost(SessionGone::Replaced) => "A new session took the agent's name before the old one finished working on this message, so its answer can't arrive. Ask again if you still need one. After you review it, delivery acknowledge clears this warning.".to_owned(),
-            Self::HeldAnswerLost(SessionGone::Ended) => "The agent's session ended before it finished working on this message, because its pane was closed or the agent exited. If you resume that session, its answer can still arrive. Otherwise ask again if you still need one. After you review it, delivery acknowledge clears this warning.".to_owned(),
+            Self::HeldAnswerLost(SessionGone::Ended) => "The agent's session ended before it finished working on this message, because its pane was closed or the agent exited. If that session comes back, the agent can still answer. Otherwise ask again if you still need one. After you review it, delivery acknowledge clears this warning.".to_owned(),
         }
     }
 

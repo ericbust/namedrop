@@ -3794,7 +3794,7 @@ fn a_held_answer_whose_session_is_gone_warns_once_until_acknowledged() {
         (
             "ended",
             |space| space.observe_reviewer_session(""),
-            "The agent's session ended before it finished",
+            "If that session comes back, the agent can still answer.",
         ),
     ];
     for (case, gone, says) in cases {
@@ -3809,10 +3809,7 @@ fn a_held_answer_whose_session_is_gone_warns_once_until_acknowledged() {
         gone(&space);
         let warnings = space.unresolved_disposition_warnings();
         assert_eq!(warnings.len(), 1, "{case}: {warnings:?}");
-        assert!(
-            warnings[0][0].contains("answer can") && warnings[0][0].contains(says),
-            "{case}: {warnings:?}"
-        );
+        assert!(warnings[0][0].contains(says), "{case}: {warnings:?}");
         assert!(
             warnings[0][0].contains("delivery acknowledge clears this warning"),
             "{case}: {warnings:?}"
