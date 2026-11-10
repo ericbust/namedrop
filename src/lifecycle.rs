@@ -880,19 +880,27 @@ where
                     require_activated(&mut store, &event_namespace)?;
                     let removed_address_id = store
                         .transaction(|transaction| {
-                            let binding = transaction
+                            // Reconcile may have unbound the pane before this
+                            // event came, which then retires the address the
+                            // pane was last bound to.
+                            let address = match transaction
                                 .active_pane_bindings(&event_namespace)?
                                 .into_iter()
-                                .find(|binding| binding.pane_id == pane_id);
-                            if let Some(binding) = binding {
+                                .find(|binding| binding.pane_id == pane_id)
+                            {
+                                Some(binding) => Some(binding.address_id),
+                                None => {
+                                    transaction.address_last_bound_to(&event_namespace, &pane_id)?
+                                }
+                            };
+                            if let Some(address) = &address {
                                 transaction.cancel_and_remove_pane_address(
                                     &event_namespace,
-                                    &binding.address_id,
+                                    address,
                                     &attribution,
                                 )?;
-                                return Ok(Some(binding.address_id));
                             }
-                            Ok(None)
+                            Ok(address)
                         })
                         .map_err(|error| error.to_string())?;
                     let event_runtime = LifecycleRuntime {

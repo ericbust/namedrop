@@ -890,6 +890,43 @@ impl StateTransaction<'_> {
             .map_err(StoreError::from)
     }
 
+    /// The address `pane_id` was last bound to, when that binding has ended,
+    /// the address was not bound to any pane since and is not retired.
+    pub fn address_last_bound_to(
+        &self,
+        namespace: &StateNamespace,
+        pane_id: &str,
+    ) -> Result<Option<PaneAddressId>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "WITH last AS (
+                     SELECT address_id, rowid AS seq FROM pane_bindings
+                     WHERE session_socket_id = ?1 AND worktree_id = ?2 AND pane_id = ?3
+                     ORDER BY rowid DESC LIMIT 1
+                 )
+                 SELECT last.address_id FROM last
+                 JOIN pane_addresses p
+                   ON p.session_socket_id = ?1 AND p.worktree_id = ?2
+                  AND p.address_id = last.address_id
+                 WHERE p.retired = 0
+                   AND NOT EXISTS (
+                       SELECT 1 FROM pane_bindings later
+                       WHERE later.session_socket_id = ?1 AND later.worktree_id = ?2
+                         AND later.address_id = last.address_id
+                         AND (later.rowid > last.seq OR later.active = 1)
+                   )",
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    pane_id
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(PaneAddressId::new))
+    }
+
     pub(crate) fn routing_author_for_pane(
         &self,
         namespace: &StateNamespace,
@@ -6790,7 +6827,7 @@ impl StateTransaction<'_> {
         let principal = self.principal(namespace, &address)?;
         let retired = retired || self.address_retired(&principal.ns, &principal.address_id)?;
         if self
-            .recipient_session_now(&principal.ns, &principal.address_id)?
+            .recipient_session_now(&principal.ns, &principal.address_id, by.occurred_at_ms)?
             .gone(&pinned_session, retired)
             .is_none()
         {

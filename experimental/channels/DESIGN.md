@@ -631,6 +631,10 @@ over the pane and absence hints:
 | `ended`         | "@codex stopped before answering"  | Its session ended before its work finished. If that session comes back, the agent can still answer.    |
 | any other value | "@codex can't answer this anymore" | Its session is gone. Ask again if you still need an answer.                                            |
 
+`ended` also covers a pane that has been gone for 10 minutes with no close event,
+as when Herdr restarted and the agent was not resumed. Until then the message
+reads as still working.
+
 Without a named agent the title is "Can't answer this anymore" or "Stopped before
 answering", which All activity also uses, and the hint says "The agent".
 

@@ -25,7 +25,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -67,6 +67,8 @@ impl Drop for TestDirectory {
 struct FakeHerdr {
     worktree: String,
     reviewer_host: Mutex<&'static str>,
+    /// Herdr no longer lists the reviewer's pane, as after it was closed.
+    reviewer_gone: AtomicBool,
     prompts: Mutex<Vec<(String, String)>>,
     notifications: Mutex<Vec<String>>,
 }
@@ -102,13 +104,19 @@ impl HerdrCommandExecutor for FakeHerdr {
                 "result": {"worktrees": [{"path": self.worktree, "open_workspace_id": "workspace-1"}]}
             })
             .to_string(),
-            ["pane", "list", "--workspace", "workspace-1"] => json!({"result": {"panes": [
-                {"pane_id":"pane-lead","terminal_id":"t1","tab_id":"tab-1","workspace_id":"workspace-1",
-                 "agent":"codex","agent_session":{"value":"session-lead"},"agent_status":"idle"},
-                {"pane_id":"pane-reviewer","terminal_id":"t2","tab_id":"tab-2","workspace_id":"workspace-1",
-                 "agent":*self.reviewer_host.lock().unwrap(),"agent_session":{"value":"session-reviewer"},"agent_status":"idle"}
-            ]}})
-            .to_string(),
+            ["pane", "list", "--workspace", "workspace-1"] => {
+                let mut panes = vec![json!(
+                    {"pane_id":"pane-lead","terminal_id":"t1","tab_id":"tab-1","workspace_id":"workspace-1",
+                     "agent":"codex","agent_session":{"value":"session-lead"},"agent_status":"idle"}
+                )];
+                if !self.reviewer_gone.load(Ordering::Relaxed) {
+                    panes.push(json!(
+                        {"pane_id":"pane-reviewer","terminal_id":"t2","tab_id":"tab-2","workspace_id":"workspace-1",
+                         "agent":*self.reviewer_host.lock().unwrap(),"agent_session":{"value":"session-reviewer"},"agent_status":"idle"}
+                    ));
+                }
+                json!({"result": {"panes": panes}}).to_string()
+            }
             ["agent", "prompt", pane_id, envelope] => {
                 self.prompts
                     .lock()
@@ -197,6 +205,7 @@ impl Space {
             .unwrap();
         let herdr = FakeHerdr {
             reviewer_host: Mutex::new("claude"),
+            reviewer_gone: AtomicBool::new(false),
             worktree: directory.repo.display().to_string(),
             prompts: Mutex::new(Vec::new()),
             notifications: Mutex::new(Vec::new()),
@@ -2425,23 +2434,28 @@ impl Space {
 
     /// Reconcile at `now_ms`, with every pane idle. The drain report's
     /// earliest due time, when it must run again with no other event.
-    fn observe_at(&self, now_ms: u64) -> Option<u64> {
+    /// The lead pane's runtime with `clock`.
+    fn runtime_at<'a>(&'a self, clock: &'a At) -> LifecycleRuntime<'a, FakeHerdr, At, SequenceIds> {
         let runtime = self.runtime("pane-lead");
+        LifecycleRuntime {
+            clock,
+            herdr: runtime.herdr,
+            ids: runtime.ids,
+            state_directory: runtime.state_directory,
+            home_directory: runtime.home_directory,
+            agent_config: runtime.agent_config,
+            cwd: runtime.cwd,
+            workspace_id: runtime.workspace_id,
+            current_pane_id: runtime.current_pane_id,
+            session_socket_id: runtime.session_socket_id,
+        }
+    }
+
+    fn observe_at(&self, now_ms: u64) -> Option<u64> {
         let reconciled = namedrop::execute_lifecycle_operation(
             "reconcile",
             json!({}),
-            &LifecycleRuntime {
-                clock: &At(now_ms),
-                herdr: runtime.herdr,
-                ids: runtime.ids,
-                state_directory: runtime.state_directory,
-                home_directory: runtime.home_directory,
-                agent_config: runtime.agent_config,
-                cwd: runtime.cwd,
-                workspace_id: runtime.workspace_id,
-                current_pane_id: runtime.current_pane_id,
-                session_socket_id: runtime.session_socket_id,
-            },
+            &self.runtime_at(&At(now_ms)),
         )
         .unwrap();
         serde_json::from_value::<namedrop::DrainReport>(reconciled["drain"].clone())
@@ -4100,6 +4114,13 @@ impl Space {
     }
 
     fn rebind_reviewer_pane(&self) {
+        self.rebind_reviewer_pane_at(43);
+    }
+
+    /// The reviewer's pane bound to its name again at `now_ms`, and its same
+    /// session seen there.
+    fn rebind_reviewer_pane_at(&self, now_ms: u64) {
+        let at = MutationAttribution::new(ActorKind::Plugin, "test", now_ms);
         StateStore::open(&self.directory.state)
             .unwrap()
             .transaction(|transaction| {
@@ -4108,12 +4129,179 @@ impl Space {
                     &PaneBindingId::new("binding-reviewer-again"),
                     &PaneAddressId::new("address-reviewer"),
                     "pane-reviewer",
-                    &MutationAttribution::new(ActorKind::Plugin, "test", 43),
+                    &at,
+                )?;
+                transaction.observe_agent_session(
+                    &namespace(),
+                    &format!("observation-reviewer-again-{now_ms}"),
+                    &PaneAddressId::new("address-reviewer"),
+                    &AgentSessionId::new("session-reviewer"),
+                    "idle",
+                    &at,
                 )
             })
             .unwrap();
-        self.observe_reviewer_session("session-reviewer");
     }
+
+    /// Herdr's event that the reviewer's pane closed, handled at `now_ms`.
+    fn reviewer_pane_closed_at(&self, now_ms: u64) {
+        self.reviewer_pane_gone(true);
+        namedrop::execute_lifecycle_operation(
+            "event.pane-lifecycle",
+            json!({"type":"pane_closed","pane_id":"pane-reviewer","workspace_id":"workspace-1"}),
+            &self.runtime_at(&At(now_ms)),
+        )
+        .unwrap();
+    }
+
+    /// Whether Herdr lists the reviewer's pane.
+    fn reviewer_pane_gone(&self, gone: bool) {
+        self.herdr.reviewer_gone.store(gone, Ordering::Relaxed);
+    }
+
+    fn reviewer_bound(&self) -> bool {
+        !self
+            .rows(
+                "SELECT binding_id FROM pane_bindings
+                 WHERE address_id = 'address-reviewer' AND active = 1",
+            )
+            .is_empty()
+    }
+
+    /// `delivery acknowledge` as the person runs it at `now_ms`.
+    fn acknowledge_at(&self, ask: &Value, now_ms: u64) -> Result<Value, String> {
+        namedrop::execute_control_operation(
+            "delivery.acknowledge",
+            json!({"attempt_id":ask["control"]["attempt_id"],"confirmed":true}),
+            &self.runtime_at(&At(now_ms)),
+        )
+    }
+
+    fn lost_answer_card(&self) -> Value {
+        let attention = self.snapshot()["attention"].clone();
+        attention
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|card| card["source_kind"] == "agent_disposition")
+            .unwrap_or_else(|| panic!("{attention}"))
+            .clone()
+    }
+}
+
+/// How long an address may have no pane before its session counts as ended.
+const UNBOUND_GRACE_MS: u64 = 10 * 60 * 1_000;
+
+/// Reconcile unbinds a pane it no longer finds, and Herdr's close event for
+/// that pane comes after. The close still retires the name, so the held
+/// answer is flagged as lost and the person can clear it.
+#[test]
+fn a_pane_closed_after_reconcile_unbound_it_loses_its_held_answer() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    space.reviewer_pane_gone(true);
+    space.observe_at(IDLE);
+    assert!(
+        !space.reviewer_bound(),
+        "reconcile kept the missing pane bound"
+    );
+    assert!(!space.disposition_warning_ever_opened());
+
+    space.reviewer_pane_closed_at(IDLE + 1);
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "the closed pane's held answer stays held"
+    );
+    assert!(warnings[0][0].contains("pane was closed"), "{warnings:?}");
+    assert_eq!(space.lost_answer_card()["answer_lost"], "retired");
+    assert_eq!(space.reviewer_leg(), "completed");
+    space.acknowledge(&ask).unwrap();
+    assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
+/// A pane that goes away with no close event, as when Herdr restarts and the
+/// agent is never resumed, leaves its held answer working only for the
+/// grace. Then the next drain, which the grace itself schedules, flags it,
+/// and the person can dismiss it.
+#[test]
+fn a_pane_that_never_comes_back_loses_its_held_answer_after_the_grace() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    space.reviewer_pane_gone(true);
+    let lost_at = IDLE + UNBOUND_GRACE_MS;
+    assert_eq!(
+        space.observe_at(IDLE),
+        Some(lost_at),
+        "nothing wakes the drain to judge the held answer again"
+    );
+    assert!(!space.reviewer_bound());
+    assert_eq!(space.observe_at(lost_at - 1), Some(lost_at));
+    assert!(!space.disposition_warning_ever_opened());
+    assert!(space.herdr.notifications.lock().unwrap().is_empty());
+    assert_eq!(space.reviewer_leg(), "working");
+    assert!(
+        space.acknowledge_at(&ask, lost_at - 1).is_err(),
+        "a warning nobody raised was acknowledged"
+    );
+
+    assert_eq!(space.observe_at(lost_at), None);
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "a pane gone for good left it working");
+    assert!(
+        warnings[0][0].contains("pane has been gone"),
+        "{warnings:?}"
+    );
+    assert_eq!(space.lost_answer_card()["answer_lost"], "ended");
+    assert_eq!(space.reviewer_leg(), "completed");
+    space.acknowledge_at(&ask, lost_at).unwrap();
+    assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
+/// The warning a pane gone past the grace raised goes once the same session
+/// is bound and seen again, and its answer is held again.
+#[test]
+fn a_held_answer_lost_to_the_grace_comes_back_with_its_session() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    space.reviewer_pane_gone(true);
+    space.observe_at(IDLE);
+    space.observe_at(IDLE + UNBOUND_GRACE_MS);
+    assert_eq!(space.unresolved_disposition_warnings().len(), 1);
+    space.reviewer_pane_gone(false);
+    space.rebind_reviewer_pane_at(IDLE + UNBOUND_GRACE_MS + 1);
+    assert!(
+        space.unresolved_disposition_warnings().is_empty(),
+        "{:?}",
+        space.unresolved_disposition_warnings()
+    );
+    assert_eq!(space.reviewer_leg(), "working");
+}
+
+/// A pane reconcile unbinds and that is bound again inside the grace, with
+/// its same session, never raises anything, even once the grace is over.
+#[test]
+fn a_pane_bound_again_inside_the_grace_never_warns() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    space.reviewer_pane_gone(true);
+    space.observe_at(IDLE);
+    assert!(!space.reviewer_bound());
+    space.reviewer_pane_gone(false);
+    space.rebind_reviewer_pane_at(IDLE + UNBOUND_GRACE_MS - 1);
+    assert_eq!(space.observe_at(IDLE + UNBOUND_GRACE_MS), None);
+    assert!(
+        !space.disposition_warning_ever_opened(),
+        "{:?}",
+        space.disposition_warnings_ever()
+    );
+    assert!(space.herdr.notifications.lock().unwrap().is_empty());
+    assert_eq!(space.reviewer_leg(), "working");
 }
 
 /// A turn interrupted with Esc, or ended by an API error, fires no Stop. Once

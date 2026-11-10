@@ -38,8 +38,9 @@ pub struct DrainReport {
 }
 
 /// An idle submitted or acknowledged attempt still inside the acknowledgement
-/// grace, or a settled one whose turn's Stop may still decide its answer. The
-/// drain observes it again at `due_at_ms`.
+/// grace, a settled one whose turn's Stop may still decide its answer, or one
+/// whose address lost its pane less than `UNBOUND_GRACE_MS` ago. The drain
+/// observes it again at `due_at_ms`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GraceDeadline {
     pub attempt_id: DeliveryAttemptId,
@@ -283,6 +284,12 @@ pub(crate) fn reconcile_delivery_state(
                 });
             }
         }
+    }
+    for (attempt_id, due_at_ms) in transaction.judge_unbound_attempts(namespace, attribution)? {
+        report.pending_grace.push(GraceDeadline {
+            attempt_id,
+            due_at_ms,
+        });
     }
     Ok(report)
 }

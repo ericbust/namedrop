@@ -3,6 +3,13 @@ use crate::final_reply::AnswerClaim;
 
 pub(super) const ITEM_ID_PREFIX: &str = "attention-agent-disposition-";
 
+/// How long an address may have no pane before its session counts as ended.
+/// Nothing binds a pane again on its own once reconcile has unbound it: the
+/// person or the agent names the pane again, after Herdr restarts and the
+/// agent is resumed. That takes minutes, not seconds, so this is long enough
+/// for it and still short next to waiting for ever.
+pub(crate) const UNBOUND_GRACE_MS: u64 = 10 * 60 * 1_000;
+
 fn item_id(attempt: &crate::DeliveryAttemptId) -> crate::AttentionItemId {
     crate::AttentionItemId::new(format!("{ITEM_ID_PREFIX}{}", attempt.as_str()))
 }
@@ -22,12 +29,12 @@ struct MissingDispositionFacts {
 }
 
 pub(super) enum RecipientSession {
-    /// The address is not routable, has no pane bound, or its pane's session
-    /// is not seen yet.
+    /// The address is not routable, has had no pane for less than
+    /// `UNBOUND_GRACE_MS`, or its pane's session is not seen yet.
     Unknown,
-    /// The address's pane is bound and has no session now: its agent exited
-    /// and left the empty session. A pane that closed retires its address,
-    /// while one only unbound for a moment, as reconcile may do, is Unknown.
+    /// The address's pane is bound and has no session now, as when its agent
+    /// exited, or it has had no pane for `UNBOUND_GRACE_MS`. A pane that
+    /// closed retires its address instead.
     Ended,
     Observed(crate::AgentSessionId),
 }
@@ -140,7 +147,7 @@ impl Unanswered {
             Self::CoordinationResolved { outcome } => format!("This tracked request was still unanswered when its coordination was resolved {outcome}. The worker's exact session can still answer it from delivery.inbox. Once that agent is retired or its session was replaced, delivery acknowledge clears this warning."),
             Self::HeldAnswerLost(SessionGone::Retired) => "The agent's pane was closed, or the agent was removed, before it finished working on this message, so its answer can't arrive. Ask again if you still need one. After you review it, delivery acknowledge clears this warning.".to_owned(),
             Self::HeldAnswerLost(SessionGone::Replaced) => "A new session took the agent's name before the old one finished working on this message, so its answer can't arrive. Ask again if you still need one. After you review it, delivery acknowledge clears this warning.".to_owned(),
-            Self::HeldAnswerLost(SessionGone::Ended) => "The agent's session ended before it finished working on this message, because the agent exited in its pane. If that session comes back, the agent can still answer. Otherwise ask again if you still need one. After you review it, delivery acknowledge clears this warning.".to_owned(),
+            Self::HeldAnswerLost(SessionGone::Ended) => "The agent's session ended before it finished working on this message, because the agent exited in its pane or its pane has been gone for 10 minutes. If that session comes back, the agent can still answer. Otherwise ask again if you still need one. After you review it, delivery acknowledge clears this warning.".to_owned(),
         }
     }
 
@@ -291,6 +298,90 @@ impl StateTransaction<'_> {
         })
     }
 
+    /// Judges the held answers of every address that has lost its pane with
+    /// no close event to retire it, and says when to look again at those
+    /// still inside `UNBOUND_GRACE_MS`. It looks only at settled attempts
+    /// with no disposition, no warning and no coordination, on addresses
+    /// that had a pane and have none now. No attempt is made for an address
+    /// without a pane, so that set is fixed when the pane goes, and each held
+    /// answer in it leaves at its first drain past the grace.
+    pub(crate) fn judge_unbound_attempts(
+        &mut self,
+        ns: &StateNamespace,
+        by: &MutationAttribution,
+    ) -> Result<Vec<(crate::DeliveryAttemptId, u64)>, StoreError> {
+        let unbound = {
+            let mut statement = self.transaction.prepare(
+                "SELECT a.attempt_id, MAX(b.unbound_at_ms)
+                 FROM delivery_attempts a
+                 JOIN delivery_attempt_state s USING (
+                     session_socket_id, worktree_id, attempt_id, address_id
+                 )
+                 JOIN pane_addresses p USING (session_socket_id, worktree_id, address_id)
+                 JOIN pane_bindings b USING (session_socket_id, worktree_id, address_id)
+                 JOIN mailbox_deliveries d USING (
+                     session_socket_id, worktree_id, delivery_id, address_id
+                 )
+                 WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2
+                   AND s.state = 'settled' AND p.retired = 0
+                   AND NOT EXISTS (
+                       SELECT 1 FROM delivery_dispositions x
+                       WHERE x.session_socket_id = a.session_socket_id
+                         AND x.worktree_id = a.worktree_id
+                         AND x.attempt_id = a.attempt_id
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM attention_items i
+                       WHERE i.session_socket_id = a.session_socket_id
+                         AND i.worktree_id = a.worktree_id
+                         AND i.attention_item_id = ?3 || a.attempt_id
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM coordination_links l
+                       JOIN coordination_assignments g USING (
+                           session_socket_id, worktree_id, assignment_id
+                       )
+                       WHERE l.session_socket_id = a.session_socket_id
+                         AND l.worktree_id = a.worktree_id
+                         AND l.message_id = d.message_id AND l.kind = 'request'
+                         AND g.recipient_address_id = a.address_id
+                         AND g.recipient_session_id = a.agent_session_id
+                   )
+                 GROUP BY a.attempt_id
+                 HAVING MAX(b.active) = 0
+                 ORDER BY MIN(a.created_at_ms), a.attempt_id",
+            )?;
+            statement
+                .query_map(
+                    params![ns.session_socket_id, ns.space_id.as_str(), ITEM_ID_PREFIX],
+                    |row| {
+                        Ok((
+                            crate::DeliveryAttemptId::new(row.get::<_, String>(0)?),
+                            row.get::<_, Option<i64>>(1)?,
+                        ))
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let mut pending = Vec::new();
+        for (attempt, unbound_at) in unbound {
+            let until = unbound_at
+                .and_then(|at| u64::try_from(at).ok())
+                .unwrap_or(0)
+                .saturating_add(UNBOUND_GRACE_MS);
+            if by.occurred_at_ms < until {
+                pending.push((attempt, until));
+            } else if self
+                .missing_disposition_facts(ns, &attempt, by.occurred_at_ms)?
+                .claim
+                != AnswerClaim::Neither
+            {
+                self.flag_missing_disposition(ns, &attempt, by)?;
+            }
+        }
+        Ok(pending)
+    }
+
     fn attempt_settled(
         &self,
         ns: &StateNamespace,
@@ -394,28 +485,23 @@ impl StateTransaction<'_> {
         Ok(())
     }
 
-    /// Why a held answer to `attempt` can never arrive, as its warning says.
+    /// Why a held answer to `attempt` can never arrive, as its open warning
+    /// says.
     pub(super) fn held_answer_lost(
         &self,
         ns: &StateNamespace,
         attempt: &crate::DeliveryAttemptId,
     ) -> Result<Option<SessionGone>, StoreError> {
-        let exists: bool = self.transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM delivery_attempts
-             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND attempt_id = ?3)",
-            params![ns.session_socket_id, ns.space_id.as_str(), attempt.as_str()],
-            |row| row.get(0),
-        )?;
-        if !exists {
+        let Some(open) = self.open_warning(ns, attempt)? else {
             return Ok(None);
-        }
-        // Only a held claim loses its answer, and no time changes that.
-        Ok(
-            match unanswered(&self.missing_disposition_facts(ns, attempt, 0)?) {
-                Some(Unanswered::HeldAnswerLost(gone)) => Some(gone),
-                _ => None,
-            },
-        )
+        };
+        Ok([
+            SessionGone::Retired,
+            SessionGone::Replaced,
+            SessionGone::Ended,
+        ]
+        .into_iter()
+        .find(|gone| Unanswered::HeldAnswerLost(*gone).summary() == open))
     }
 
     /// The summary of the attempt's open warning, if it has one.
@@ -573,19 +659,38 @@ impl StateTransaction<'_> {
         &self,
         ns: &StateNamespace,
         address: &PaneAddressId,
+        now_ms: u64,
     ) -> Result<RecipientSession, StoreError> {
         let Some(routing) = self.optional_routing_address_by_id(ns, address)? else {
             return Ok(RecipientSession::Unknown);
         };
-        Ok(match routing.agent_session_id {
-            Some(session) => RecipientSession::Observed(session),
-            None if routing.pane_binding_id.is_some()
-                && self.latest_session_observation(ns, address)?.as_deref() == Some("") =>
-            {
-                RecipientSession::Ended
-            }
-            None => RecipientSession::Unknown,
+        let ended = match (routing.agent_session_id, routing.pane_binding_id) {
+            (Some(session), _) => return Ok(RecipientSession::Observed(session)),
+            (None, Some(_)) => self.latest_session_observation(ns, address)?.as_deref() == Some(""),
+            (None, None) => self
+                .unbound_since(ns, address)?
+                .is_some_and(|since| now_ms >= since.saturating_add(UNBOUND_GRACE_MS)),
+        };
+        Ok(if ended {
+            RecipientSession::Ended
+        } else {
+            RecipientSession::Unknown
         })
+    }
+
+    /// When the address's last pane was unbound, if it ever had one.
+    fn unbound_since(
+        &self,
+        ns: &StateNamespace,
+        address: &PaneAddressId,
+    ) -> Result<Option<u64>, StoreError> {
+        let at: Option<i64> = self.transaction.query_row(
+            "SELECT MAX(unbound_at_ms) FROM pane_bindings
+             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND address_id = ?3",
+            params![ns.session_socket_id, ns.space_id.as_str(), address.as_str()],
+            |row| row.get(0),
+        )?;
+        Ok(at.and_then(|at| u64::try_from(at).ok()))
     }
 
     fn missing_disposition_facts(
@@ -664,8 +769,11 @@ impl StateTransaction<'_> {
             recipient_session: session,
             recipient_retired: retired
                 || self.address_retired(&principal.ns, &principal.address_id)?,
-            recipient_session_now: self
-                .recipient_session_now(&principal.ns, &principal.address_id)?,
+            recipient_session_now: self.recipient_session_now(
+                &principal.ns,
+                &principal.address_id,
+                now_ms,
+            )?,
             tracked,
         })
     }
