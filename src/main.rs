@@ -1359,6 +1359,16 @@ impl DraftRecheck {
     }
 }
 
+/// The current Unix time in milliseconds, rounded up. The worker waits until
+/// the truncated clock reaches a due time, so a delay counted from the
+/// truncated time could end up to a millisecond before it has passed.
+fn unix_ms_rounded_up() -> u64 {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    u64::try_from(elapsed.as_nanos().div_ceil(1_000_000)).unwrap_or(u64::MAX)
+}
+
 fn permanently_unreadable_marker(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -1602,8 +1612,7 @@ fn run_agent_status_worker_queue_with_policy(
                         ReconciliationWork::DraftRecheck(recheck) => Some(recheck.rechecks),
                         _ => drafts.as_ref().map(|recheck| recheck.rechecks),
                     };
-                    drafts =
-                        DraftRecheck::after(report.draft_held, previous, SystemClock.now_unix_ms());
+                    drafts = DraftRecheck::after(report.draft_held, previous, unix_ms_rounded_up());
                     if work.remove_marker().is_err() {
                         wait_for_reconciliation_retry(&mut failures, false);
                     }
@@ -1892,6 +1901,20 @@ mod worker_shutdown_tests {
         }
         assert_eq!(delays, [2_000, 3_000, 5_000, 8_000, 10_000, 10_000, 10_000]);
         assert!(DraftRecheck::after(Vec::new(), previous, 1_000).is_none());
+    }
+
+    #[test]
+    fn a_draft_recheck_is_never_due_before_its_delay_has_passed() {
+        for _ in 0..1_000 {
+            let before = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+            let recheck =
+                DraftRecheck::after(vec![draft_hold()], None, unix_ms_rounded_up()).unwrap();
+            assert!(
+                Duration::from_millis(recheck.due_ms) >= before + Duration::from_millis(2_000),
+                "due {} ms, but 2 s from {before:?} is later",
+                recheck.due_ms
+            );
+        }
     }
 
     #[test]
