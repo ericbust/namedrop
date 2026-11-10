@@ -637,20 +637,22 @@ fn a_session_holds_one_live_claim_and_later_prompts_end_the_ones_that_lost_their
         "a second live claim was armed in one session"
     );
     assert_eq!(state.claims().len(), 1);
-    assert!(stop_has_work(&state.0, "socket", "session", None, || None));
+    assert!(stop_has_work(&state.0, "socket", "session", None, |_| None));
     assert!(!stop_has_work(
         &state.0,
         "socket",
         "other-session",
         None,
-        || None
+        |_| None
     ));
     assert!(!observe(&state, "prompt-2", None));
     assert_eq!(
         state.claims()[0].state,
         ClaimState::Left(LeaveReason::Interrupted)
     );
-    assert!(!stop_has_work(&state.0, "socket", "session", None, || None));
+    assert!(!stop_has_work(&state.0, "socket", "session", None, |_| {
+        None
+    }));
     assert!(observe(
         &state,
         "prompt-3",
@@ -996,7 +998,7 @@ fn a_late_stop_worker_leaves_the_next_turns_claim_alone() {
         [ClaimState::Done(Done::Replied), ClaimState::Open],
         "a late worker ended the next turn's claim"
     );
-    assert!(stop_has_work(&state.0, "socket", "session", None, || None));
+    assert!(stop_has_work(&state.0, "socket", "session", None, |_| None));
     settle_at_stop(
         &state.0,
         "socket",
@@ -1109,7 +1111,7 @@ fn a_held_answer_settles_at_the_stop_of_the_turn_its_works_notice_reached() {
     assert_eq!(held.state, ClaimState::Left(LeaveReason::Held));
     assert_eq!(held.awaits, ["build-1"]);
     assert!(
-        stop_has_work(&state.0, "socket", "session", None, || None),
+        stop_has_work(&state.0, "socket", "session", None, |_| None),
         "a Stop of the session would start no worker to wake it"
     );
     let other = observe_prompt(
@@ -1339,5 +1341,125 @@ fn a_turn_split_by_another_turns_records_keeps_its_second_half() {
         read.notified,
         ["task-third"],
         "the other turn's notice counted, or ours was lost"
+    );
+}
+
+#[test]
+fn a_wake_with_no_record_of_its_turn_looks_for_an_earlier_answer_from_the_stop_only() {
+    let state = StateDirectory::new();
+    observe(
+        &state,
+        "prompt-1",
+        Some(armed("attempt-1", "prompt-1", reply_plan())),
+    );
+    let log = std::cell::RefCell::new(Vec::new());
+    settle(
+        &state,
+        &started("prompt-1", "build-1", "Started the build."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    // No prompt hook recorded the notice turn, as when it missed the lock.
+    settle(
+        &state,
+        &notified("build-ended", "build-1", "The build passed."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    let claim = &state.claims()[0];
+    assert_eq!(claim.state, ClaimState::Done(Done::Replied));
+    assert_eq!(
+        claim.armed_at_ms, 20,
+        "the relay would take any post since the first turn as this answer"
+    );
+}
+
+#[test]
+fn only_a_few_recent_turns_are_recorded_and_none_once_nothing_is_live() {
+    let state = StateDirectory::new();
+    observe(
+        &state,
+        "prompt-1",
+        Some(armed("attempt-1", "prompt-1", reply_plan())),
+    );
+    let log = std::cell::RefCell::new(Vec::new());
+    settle(
+        &state,
+        &started("prompt-1", "build-1", "Started the build."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    let turns = || {
+        fs::read_dir(session_directory(&state.0, "socket", "session").join("turns"))
+            .map_or(0, |entries| entries.count())
+    };
+    for index in 0..20 {
+        observe_prompt(
+            &state.0,
+            "socket",
+            "session",
+            &turn(&format!("typed-{index}")),
+            None,
+            PromptFacts::default(),
+            30 + index,
+        );
+    }
+    assert!(turns() <= RECENT_TURNS, "{} turn records kept", turns());
+    settle(
+        &state,
+        &notified("build-ended", "build-1", "The build passed."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    observe_prompt(
+        &state.0,
+        "socket",
+        "session",
+        &turn("after"),
+        None,
+        PromptFacts::default(),
+        60,
+    );
+    assert_eq!(turns(), 0, "turn records outlived every live claim");
+}
+
+#[test]
+fn the_stop_hook_finds_a_held_tasks_notice_or_says_it_cannot_tell() {
+    let state = StateDirectory::new();
+    let path = state.0.join("transcript.jsonl");
+    let tasks = vec!["task-first".to_owned()];
+    let notice = RECORDED
+        .lines()
+        .find(|line| line.contains("queued_command"))
+        .unwrap();
+    // The notice straddles the first chunk boundary from the end.
+    let mut bytes = vec![b' '; 3 * 1024 * 1024];
+    let at = bytes.len() - 1024 * 1024 - notice.len() / 2;
+    bytes[at..at + notice.len()].copy_from_slice(notice.as_bytes());
+    fs::write(&path, &bytes).unwrap();
+    let scan = |limit, budget| names_notice(&path, &tasks, limit, budget);
+    assert_eq!(scan(8 << 20, Duration::from_secs(5)), Some(true));
+    assert_eq!(
+        scan((1024 * 1024 - notice.len()) as u64, Duration::from_secs(5)),
+        Some(false)
+    );
+    assert_eq!(
+        names_notice(
+            &path,
+            &["task-other".to_owned()],
+            8 << 20,
+            Duration::from_secs(5)
+        ),
+        Some(false)
+    );
+    assert_eq!(
+        scan(8 << 20, Duration::ZERO),
+        None,
+        "a scan out of time claimed an answer"
+    );
+    assert_eq!(
+        names_notice(
+            &state.0.join("missing"),
+            &tasks,
+            8 << 20,
+            Duration::from_secs(5)
+        ),
+        None
     );
 }

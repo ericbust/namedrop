@@ -10,7 +10,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::{Read, Write},
+    io::{Read, Seek, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     thread,
@@ -576,6 +576,8 @@ const STOP_LOCK_WAIT: Duration = Duration::from_secs(2);
 /// worker's lock wait and deadline, with room to spare. A claim still open
 /// after that lost its worker.
 const STOPPED_GRACE_MS: u64 = 30_000;
+/// How many of a session's latest turns keep a record while a claim is live.
+const RECENT_TURNS: usize = 8;
 const WORKER_LOST: &str = "Namedrop's Stop worker ended before it settled this delivery";
 const LOCK_MISSED: &str = "the Stop could not read this session's claims within 2 seconds";
 const WORKER_TIMED_OUT: &str = "Namedrop's Stop worker ran out of its 10 seconds";
@@ -724,6 +726,40 @@ impl Claims {
         stopped_at(&self.directory, turn)
     }
 
+    /// Keeps the records of the session's latest turns only while a claim
+    /// may still wake or settle on one of them.
+    fn prune_turns(&self, now_ms: u64) {
+        let Ok(entries) = fs::read_dir(self.directory.join("turns")) else {
+            return;
+        };
+        let live = self.claims.iter().any(|claim| match claim.state {
+            ClaimState::Open => true,
+            ClaimState::Left(LeaveReason::Held) => !claim.awaits.is_empty(),
+            _ => false,
+        });
+        let mut kept = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let seen = (!name.ends_with(".next"))
+                .then(|| self.turn_seen(&HostTurn(name)))
+                .flatten();
+            match seen {
+                Some(seen) if live && seen.started_at_ms.saturating_add(KEEP_MS) > now_ms => {
+                    kept.push((seen.started_at_ms, entry.path()));
+                }
+                // A record being written is its prompt hook's own.
+                None if live && entry.file_name().to_string_lossy().ends_with(".next") => {}
+                _ => {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+        kept.sort_by_key(|(started_at_ms, _)| std::cmp::Reverse(*started_at_ms));
+        for (_, path) in kept.into_iter().skip(RECENT_TURNS) {
+            let _ = fs::remove_file(path);
+        }
+    }
+
     fn turn_seen(&self, turn: &HostTurn) -> Option<TurnSeen> {
         let mut bytes = Vec::new();
         fs::OpenOptions::new()
@@ -777,24 +813,7 @@ impl Claims {
     fn save(mut self, now_ms: u64) {
         self.claims
             .retain(|claim| claim.updated_at_ms.saturating_add(KEEP_MS) > now_ms);
-        if let Ok(entries) = fs::read_dir(self.directory.join("turns")) {
-            for entry in entries.flatten() {
-                let stale = match entry
-                    .file_name()
-                    .to_str()
-                    .map(|name| name.strip_suffix(".next"))
-                {
-                    Some(Some(_)) => false,
-                    Some(None) => self
-                        .turn_seen(&HostTurn(entry.file_name().to_string_lossy().into_owned()))
-                        .is_none_or(|seen| seen.started_at_ms.saturating_add(KEEP_MS) <= now_ms),
-                    None => true,
-                };
-                if stale {
-                    let _ = fs::remove_file(entry.path());
-                }
-            }
-        }
+        self.prune_turns(now_ms);
         if let Ok(entries) = fs::read_dir(self.directory.join("stops")) {
             for entry in entries.flatten() {
                 if entry
@@ -1068,15 +1087,16 @@ pub(crate) fn observe_prompt(
 }
 
 /// Whether a Stop of `turn` has anything to settle: an open claim, or a held
-/// one this turn's prompt promised or whose work's notice `tail`, the end of
-/// the transcript, names. It reads without the lock, so a Stop with nothing to
-/// settle starts no worker.
+/// one this turn's prompt promised or whose work's notice the transcript
+/// names, as `names_notice` says for the held tasks. When it can't tell, the
+/// worker starts. It reads without the lock, so a Stop with nothing to settle
+/// starts no worker.
 pub fn stop_has_work(
     state: &Path,
     socket: &str,
     session: &str,
     turn: Option<&HostTurn>,
-    tail: impl FnOnce() -> Option<Vec<u8>>,
+    names_notice: impl FnOnce(&[String]) -> Option<bool>,
 ) -> bool {
     let claims = read_claims(&session_directory(state, socket, session));
     let held: Vec<&Claim> = claims
@@ -1095,14 +1115,57 @@ pub fn stop_has_work(
     if held.is_empty() {
         return false;
     }
-    // A held claim the Stop can't tell apart from one it may wake keeps the
-    // worker, so an unreadable transcript never skips a wake.
-    let Some(tail) = tail() else {
-        return true;
-    };
-    held.iter().flat_map(|claim| &claim.awaits).any(|id| {
-        memchr::memmem::find(&tail, format!("<task-id>{id}</task-id>").as_bytes()).is_some()
-    })
+    let tasks: Vec<String> = held
+        .iter()
+        .flat_map(|claim| claim.awaits.iter().cloned())
+        .collect();
+    names_notice(&tasks).unwrap_or(true)
+}
+
+/// Whether the last `limit` bytes of the transcript at `path` name a notice of
+/// one of `tasks`. It reads back from the end a chunk at a time, and is `None`
+/// when it can't read the file or can't finish within `budget`.
+pub fn names_notice(path: &Path, tasks: &[String], limit: u64, budget: Duration) -> Option<bool> {
+    const CHUNK: u64 = 1024 * 1024;
+    let started = Instant::now();
+    let needles: Vec<String> = tasks
+        .iter()
+        .map(|id| format!("<task-id>{id}</task-id>"))
+        .collect();
+    let finders: Vec<_> = needles
+        .iter()
+        .map(|needle| memchr::memmem::Finder::new(needle.as_bytes()))
+        .collect();
+    let overlap = needles.iter().map(String::len).max().unwrap_or(0) as u64;
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let end = metadata.len();
+    let floor = end.saturating_sub(limit);
+    let (mut high, mut bytes) = (end, Vec::new());
+    while high > floor {
+        if started.elapsed() >= budget {
+            return None;
+        }
+        let low = high.saturating_sub(CHUNK).max(floor);
+        // Each chunk reaches into the one after it, so a notice across the
+        // boundary is still found.
+        let until = high.saturating_add(overlap).min(end);
+        bytes.clear();
+        file.seek(std::io::SeekFrom::Start(low)).ok()?;
+        (&mut file).take(until - low).read_to_end(&mut bytes).ok()?;
+        if finders.iter().any(|finder| finder.find(&bytes).is_some()) {
+            return Some(true);
+        }
+        high = low;
+    }
+    Some(false)
 }
 
 /// The bound operation the Stop runs for a claim: its token, its input, and
@@ -1149,9 +1212,11 @@ pub fn settle_at_stop(
         if let Some(index) = woken {
             // The relay looks for an answer the agent already posted this
             // turn from the turn's start.
+            // With no record of the turn, from this Stop only: a duplicate
+            // answer is the safer failure than one taken for answered.
             let started_at_ms = claims
                 .turn_seen(turn)
-                .map_or(claims.claims[index].armed_at_ms, |seen| seen.started_at_ms);
+                .map_or(now_ms, |seen| seen.started_at_ms);
             claims.claims[index].wake_on(turn.clone(), started_at_ms);
         }
         // A promise this Stop didn't keep ends here, so later prompts show

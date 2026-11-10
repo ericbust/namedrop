@@ -15,6 +15,9 @@ use std::{
 };
 
 const MAX_INPUT_BYTES: u64 = 1024 * 1024;
+/// How long the Stop hook may look for a held task's notice before it hands
+/// the Stop to a worker anyway, well inside its own 250 ms.
+const NOTICE_SCAN_BUDGET: Duration = Duration::from_millis(100);
 /// How much of the transcript's end the Stop reads for the tasks its turn
 /// started.
 const TURN_SCAN_BYTES: u64 = 8 * 1024 * 1024;
@@ -67,17 +70,19 @@ pub fn run(state: &Path) {
     let Ok(socket) = env::var("HERDR_SOCKET_PATH") else {
         return;
     };
-    let tail = || {
-        input
-            .transcript_tail(None, TURN_SCAN_BYTES)
-            .map(|(bytes, _)| bytes)
+    let names_notice = |tasks: &[String]| {
+        let path = input
+            .transcript_path
+            .as_ref()
+            .filter(|path| path.is_absolute())?;
+        namedrop::final_reply::names_notice(path, tasks, TURN_SCAN_BYTES, NOTICE_SCAN_BUDGET)
     };
     if !namedrop::final_reply::stop_has_work(
         state,
         &socket,
         &input.session_id,
         input.turn().as_ref(),
-        tail,
+        names_notice,
     ) {
         return;
     }
