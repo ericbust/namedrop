@@ -408,6 +408,8 @@ fn stop_facts(
         running_tasks: tasks.clone(),
         started_tasks: tasks,
         notified_tasks: Vec::new(),
+        paused_tasks: Vec::new(),
+        ended_tasks: Vec::new(),
         read_turn: true,
         text: FinalText::bounded(text),
     }
@@ -840,8 +842,13 @@ else:
 
     /// The binary as a host runs it, against the script Herdr.
     fn command(&self) -> Command {
+        self.hosted(env!("CARGO_BIN_EXE_namedrop"))
+    }
+
+    /// `program` in the environment a host gives the binary.
+    fn hosted(&self, program: &str) -> Command {
         let root = &self.directory.root;
-        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = Command::new(program);
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -2853,8 +2860,16 @@ fn a_pointer_carrying_a_recap_authenticates_and_a_changed_recap_does_not() {
 /// `prompt-busy` gets that task's notice queued into it, `prompt-wait` puts
 /// `task-second` in the background and `prompt-notice` is that task's notice.
 fn recorded_turns() -> Vec<(String, Vec<Value>)> {
+    turns_of(include_str!(
+        "fixtures/final-reply/claude-2.1.319-background-turns.jsonl"
+    ))
+}
+
+/// The records of each turn in a recorded Claude Code session, keyed by the
+/// turn's `promptId`.
+fn turns_of(session: &str) -> Vec<(String, Vec<Value>)> {
     let mut turns: Vec<(String, Vec<Value>)> = vec![(String::new(), Vec::new())];
-    for line in include_str!("fixtures/final-reply/claude-2.1.319-background-turns.jsonl").lines() {
+    for line in session.lines() {
         let record: Value = serde_json::from_str(line).unwrap();
         if let Some(prompt) = record["promptId"].as_str()
             && turns.last().unwrap().0 != prompt
@@ -2868,7 +2883,11 @@ fn recorded_turns() -> Vec<(String, Vec<Value>)> {
 
 /// One recorded turn's records, as the turn `as_turn`.
 fn recorded_turn(name: &str, as_turn: &str) -> Vec<Value> {
-    let (_, records) = recorded_turns()
+    turn_of(recorded_turns(), name, as_turn)
+}
+
+fn turn_of(turns: Vec<(String, Vec<Value>)>, name: &str, as_turn: &str) -> Vec<Value> {
+    let (_, records) = turns
         .into_iter()
         .find(|(prompt, _)| prompt == name)
         .unwrap();
@@ -3055,6 +3074,309 @@ fn a_turn_with_its_own_delivery_leaves_the_held_one_held() {
         .map(|claim| claim["state"].clone())
         .collect();
     assert_eq!(states, [json!({"left":"held"}), json!({"done":"replied"})]);
+}
+
+/// A recorded Claude Code 2.1.322 session whose subagent stops while a
+/// background shell of its own still runs. `prompt-agent` starts the subagent
+/// `agent-first`, `prompt-interim` is the notice that it waits on its own
+/// work, `prompt-hand-back` is its final report, and `prompt-finished` is its
+/// last notice, which Claude Code wrote to the transcript only.
+const SUBAGENT_SESSION: &str =
+    include_str!("fixtures/final-reply/claude-2.1.322-subagent-hand-back.jsonl");
+
+/// One turn of the subagent session up to its end, without what Claude Code
+/// queued after it.
+fn subagent_turn(name: &str, as_turn: &str) -> Vec<Value> {
+    let mut records = turn_of(turns_of(SUBAGENT_SESSION), name, as_turn);
+    if let Some(end) = records
+        .iter()
+        .position(|record| record["subtype"] == "turn_duration")
+    {
+        records.truncate(end + 1);
+    }
+    records
+}
+
+/// `records` or a prompt, as subagent `agent`'s instead of `agent-first`'s.
+fn as_agent<T: serde::Serialize + serde::de::DeserializeOwned>(value: &T, agent: &str) -> T {
+    let text = serde_json::to_string(value)
+        .unwrap()
+        .replace("agent-first", agent);
+    serde_json::from_str(&text).unwrap()
+}
+
+/// The prompt Claude Code ran the prompt hook with, as its queue logged it:
+/// the first one queued in the subagent session that contains `mark`.
+fn subagent_prompt(mark: &str) -> String {
+    SUBAGENT_SESSION
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|record| record["operation"] == "enqueue")
+        .filter_map(|record| record["content"].as_str().map(str::to_owned))
+        .find(|content| content.contains(mark))
+        .unwrap()
+}
+
+impl Space {
+    /// The reviewer's delivery turn that ends while the subagent it started,
+    /// `agent-first`, still runs. Then Claude Code's notice that the subagent
+    /// stopped with a shell of its own running opens a turn, and that turn
+    /// ends with a status line while the shell still runs.
+    fn held_through_an_interim_notice(&self) -> String {
+        let ask = self.armed_ask();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+        self.append_transcript(&subagent_turn("prompt-agent", CLAUDE.1));
+        self.reviewer_stop(
+            CLAUDE.1,
+            "I started the subagent.",
+            &["agent-first"],
+            &self.transcript(),
+        );
+        assert_eq!(self.claims()[0]["state"], json!({"left":"held"}));
+        let way_back = format!(
+            "Namedrop: delivery {attempt} from an earlier turn is still open; it waits on background task agent-first; to answer it"
+        );
+        let context = self
+            .reviewer_prompt(
+                "interim-turn",
+                &subagent_prompt("is waiting on its own background work"),
+            )
+            .unwrap_or_default();
+        assert!(
+            context.contains(&way_back),
+            "the interim notice hid the way back, or said the task ended: {context}"
+        );
+        self.append_transcript(&subagent_turn("prompt-interim", "interim-turn"));
+        self.reviewer_stop(
+            "interim-turn",
+            "The subagent is still waiting for its command.",
+            &["shell-own"],
+            &self.transcript(),
+        );
+        assert!(
+            self.answers("pane-lead").is_empty(),
+            "the status line of the turn an interim notice opened answered the delivery: {:?}",
+            self.answers("pane-lead")
+        );
+        assert!(self.dispositions().is_empty(), "{:?}", self.dispositions());
+        assert_eq!(self.claims()[0]["state"], json!({"left":"held"}));
+        way_back
+    }
+}
+
+/// Claude Code tells a session that its subagent stopped while background work
+/// of the subagent's own still runs, in a notice it marks as possibly interim.
+/// The subagent has not finished, so the delivery held on it stays held. Its
+/// final report comes as a hand-back, and that turn's final message answers
+/// the delivery, once.
+#[test]
+fn a_notice_that_a_subagent_only_paused_keeps_the_delivery_held_until_its_hand_back() {
+    let space = Space::new();
+    space.held_through_an_interim_notice();
+    let context = space
+        .reviewer_prompt("hand-back-turn", &subagent_prompt("[Subagent hand-back]"))
+        .unwrap_or_default();
+    assert!(
+        !context.contains("from an earlier turn is still open"),
+        "the turn that answers the delivery also showed its way back: {context}"
+    );
+    space.append_transcript(&subagent_turn("prompt-hand-back", "hand-back-turn"));
+    space.reviewer_stop(
+        "hand-back-turn",
+        "The command printed sub-ok.",
+        &[],
+        &space.transcript(),
+    );
+    assert_eq!(space.answers("pane-lead"), ["The command printed sub-ok."]);
+    assert_eq!(space.claims()[0]["state"], json!({"done":"replied"}));
+
+    // A later notice of the same subagent, in a turn of its own, answers nothing.
+    let finished = subagent_turn("prompt-finished", "finished-turn");
+    space.reviewer_prompt(
+        "finished-turn",
+        finished[1]["message"]["content"].as_str().unwrap(),
+    );
+    space.append_transcript(&finished);
+    space.reviewer_stop(
+        "finished-turn",
+        "Nothing more to add.",
+        &[],
+        &space.transcript(),
+    );
+    assert_eq!(space.answers("pane-lead"), ["The command printed sub-ok."]);
+}
+
+/// A subagent can pause while its session still writes the final message of
+/// the turn that started it. No prompt has carried the notice yet, and Claude
+/// Code's Stop no longer lists the subagent, only its shell. The notice is in
+/// the transcript's queue log, so the answer is held all the same.
+#[test]
+fn a_subagent_that_pauses_before_its_turns_stop_holds_the_answer() {
+    let space = Space::new();
+    space.armed_ask();
+    space.append_transcript(&subagent_turn("prompt-agent", CLAUDE.1));
+    let queued = SUBAGENT_SESSION
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|record| {
+            record["operation"] == "enqueue"
+                && record["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("is waiting on its own"))
+        })
+        .unwrap();
+    space.append_transcript(&[queued]);
+    space.reviewer_stop(
+        CLAUDE.1,
+        "I started the subagent and will report when it finishes.",
+        &["shell-own"],
+        &space.transcript(),
+    );
+    assert!(
+        space.answers("pane-lead").is_empty(),
+        "{:?}",
+        space.answers("pane-lead")
+    );
+    let claim = &space.claims()[0];
+    assert_eq!(claim["state"], json!({"left":"held"}));
+    assert_eq!(claim["awaits"], json!(["agent-first"]));
+
+    space.reviewer_prompt("hand-back-turn", &subagent_prompt("[Subagent hand-back]"));
+    space.append_transcript(&subagent_turn("prompt-hand-back", "hand-back-turn"));
+    space.reviewer_stop(
+        "hand-back-turn",
+        "The command printed sub-ok.",
+        &[],
+        &space.transcript(),
+    );
+    assert_eq!(space.answers("pane-lead"), ["The command printed sub-ok."]);
+}
+
+/// With two subagents, one paused and one that hands back, the hand-back's
+/// turn does not answer: the paused subagent has not reported, though Claude
+/// Code lists neither as running. The paused one's hand-back answers, once.
+#[test]
+fn a_paused_subagent_holds_the_answer_while_another_subagent_hands_back() {
+    let space = Space::new();
+    space.armed_ask();
+    let mut started = subagent_turn("prompt-agent", CLAUDE.1);
+    let launch = started
+        .iter()
+        .position(|record| record["toolUseResult"]["agentId"] == "agent-first")
+        .unwrap();
+    started.insert(launch + 1, as_agent(&started[launch], "agent-second"));
+    space.append_transcript(&started);
+    space.reviewer_stop(
+        CLAUDE.1,
+        "I started two subagents.",
+        &["agent-first", "agent-second"],
+        &space.transcript(),
+    );
+    assert_eq!(
+        space.claims()[0]["awaits"],
+        json!(["agent-first", "agent-second"])
+    );
+
+    space.reviewer_prompt(
+        "interim-turn",
+        &subagent_prompt("is waiting on its own background work"),
+    );
+    space.append_transcript(&subagent_turn("prompt-interim", "interim-turn"));
+    space.reviewer_stop(
+        "interim-turn",
+        "One subagent is waiting on its command.",
+        &["agent-second", "shell-own"],
+        &space.transcript(),
+    );
+
+    let hand_back = subagent_prompt("[Subagent hand-back]");
+    space.reviewer_prompt("second-turn", &as_agent(&hand_back, "agent-second"));
+    space.append_transcript(&as_agent(
+        &subagent_turn("prompt-hand-back", "second-turn"),
+        "agent-second",
+    ));
+    space.reviewer_stop(
+        "second-turn",
+        "One subagent reported; the other is still waiting.",
+        &["shell-own"],
+        &space.transcript(),
+    );
+    assert!(
+        space.answers("pane-lead").is_empty(),
+        "a status line answered while a paused subagent had not reported: {:?}",
+        space.answers("pane-lead")
+    );
+    let claim = &space.claims()[0];
+    assert_eq!(claim["state"], json!({"left":"held"}));
+    assert_eq!(claim["awaits"], json!(["agent-first"]));
+
+    space.reviewer_prompt("first-turn", &hand_back);
+    space.append_transcript(&subagent_turn("prompt-hand-back", "first-turn"));
+    space.reviewer_stop("first-turn", "Both reported.", &[], &space.transcript());
+    assert_eq!(space.answers("pane-lead"), ["Both reported."]);
+    assert_eq!(space.claims()[0]["state"], json!({"done":"replied"}));
+}
+
+/// The interim notice says the same task notifies again. When that notice
+/// carries no interim mark and opens a turn, as a task's notice does when its
+/// report is not handed back, that turn's final message answers the delivery,
+/// once.
+#[test]
+fn the_same_tasks_notice_without_the_interim_mark_answers_the_held_delivery_once() {
+    let space = Space::new();
+    let way_back = space.held_through_an_interim_notice();
+    // A second interim notice changes nothing.
+    let again = space
+        .reviewer_prompt(
+            "interim-again-turn",
+            &subagent_prompt("is waiting on its own background work"),
+        )
+        .unwrap_or_default();
+    assert!(again.contains(&way_back), "{again}");
+    space.append_transcript(&subagent_turn("prompt-interim", "interim-again-turn"));
+    space.reviewer_stop(
+        "interim-again-turn",
+        "Still waiting.",
+        &["shell-own"],
+        &space.transcript(),
+    );
+    assert!(
+        space.answers("pane-lead").is_empty(),
+        "{:?}",
+        space.answers("pane-lead")
+    );
+
+    let finished = subagent_turn("prompt-finished", "finished-turn");
+    let notice = finished[1]["message"]["content"].as_str().unwrap();
+    assert!(notice.contains("<task-id>agent-first</task-id>") && notice.contains("finished"));
+    let context = space
+        .reviewer_prompt("finished-turn", notice)
+        .unwrap_or_default();
+    assert!(
+        !context.contains("from an earlier turn is still open"),
+        "the turn that answers the delivery also showed its way back: {context}"
+    );
+    space.append_transcript(&finished);
+    space.reviewer_stop(
+        "finished-turn",
+        "The subagent finished: it printed sub-ok.",
+        &[],
+        &space.transcript(),
+    );
+    assert_eq!(
+        space.answers("pane-lead"),
+        ["The subagent finished: it printed sub-ok."]
+    );
+    assert_eq!(space.claims()[0]["state"], json!({"done":"replied"}));
+    let later = space
+        .reviewer_prompt("next-turn", "Anything else?")
+        .unwrap_or_default();
+    assert!(
+        !later.contains("from an earlier turn is still open"),
+        "{later}"
+    );
+    space.reviewer_stop("next-turn", "No.", &[], &space.transcript());
+    assert_eq!(space.answers("pane-lead").len(), 1);
 }
 
 /// A notice is about the task its opening `task-id` names. One quoted in its
@@ -3747,6 +4069,8 @@ impl Space {
             running_tasks: running.clone(),
             started_tasks: running,
             notified_tasks: vec![notified.to_owned()],
+            paused_tasks: Vec::new(),
+            ended_tasks: Vec::new(),
             read_turn: true,
             text: FinalText::bounded(text),
         };
@@ -4082,6 +4406,57 @@ fn a_delivery_in_a_turn_a_notice_opened_shows_the_held_deliverys_line() {
     );
 }
 
+/// A draft ahead of that delivery keeps it explicit, so it arms no claim. The
+/// turn is still about the delivery: its prompt shows the held delivery's
+/// line, and the turn's final message never answers the held one.
+#[test]
+fn a_draft_and_a_delivery_in_a_turn_a_notice_opened_show_the_held_deliverys_line() {
+    let space = Space::new();
+    let first = space.held_on_first_task();
+    let attempt = first["control"]["attempt_id"].as_str().unwrap().to_owned();
+    let way_back = format!("Namedrop: delivery {attempt} from an earlier turn is still open");
+    let notice = recorded_turn("prompt-notice", "notice-turn");
+    let text = notice[0]["message"]["content"]
+        .as_str()
+        .unwrap()
+        .replace("task-second", "task-first");
+    let promised = space
+        .reviewer_prompt("notice-turn", &text)
+        .unwrap_or_default();
+    assert!(!promised.contains(&way_back), "{promised}");
+    let second = space.second_ask(&first);
+    let context = space
+        .reviewer_prompt(
+            "notice-turn",
+            &format!(
+                "A draft I had not sent. {}",
+                space.as_typed(&second.to_string())
+            ),
+        )
+        .unwrap();
+    assert!(
+        context.contains("already in this pane's input"),
+        "{context}"
+    );
+    assert_eq!(
+        space.claims().len(),
+        1,
+        "the drafted delivery armed a claim"
+    );
+    assert!(
+        context.contains(&way_back),
+        "the drafted delivery's prompt hid the held line: {context}"
+    );
+    space.append_transcript(&notice);
+    space.reviewer_stop("notice-turn", "ping", &[], &space.transcript());
+    assert!(
+        space.answers("pane-lead").is_empty(),
+        "the turn's final message answered the held delivery: {:?}",
+        space.answers("pane-lead")
+    );
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+}
+
 /// A turn whose first prompt the hook never recorded is still not opened by
 /// the notice queued into it: the transcript shows the turn began earlier, so
 /// the notice promises nothing and its prompt shows the held line.
@@ -4108,6 +4483,165 @@ fn a_queued_notice_in_a_turn_whose_first_prompt_went_unrecorded_promises_nothing
         "{:?}",
         space.answers("pane-lead")
     );
+}
+
+impl Space {
+    /// The attempts of `count` asks the reviewer's turns ended without
+    /// answering, oldest first. Each is settled as the agent going idle does,
+    /// so the next ask arrives.
+    fn asks_left_open(&self, count: usize) -> Vec<String> {
+        (0..count)
+            .map(|index| {
+                dispatch::message(
+                    "send",
+                    json!({"request_id":format!("left-{index}"),
+                           "source":"@reviewer Reply with the single word pong.",
+                           "author_kind":"agent_session"}),
+                    &self.runtime("pane-lead"),
+                )
+                .unwrap();
+                let ask = self.herdr.envelope_for("pane-reviewer");
+                let turn = format!("left-turn-{index}");
+                let turn = ("prompt_id", turn.as_str());
+                self.prompt("pane-reviewer", "session-reviewer", turn, &ask.to_string());
+                self.stop("session-reviewer", turn, "  ");
+                self.settle_attempt(&ask);
+                ask["control"]["attempt_id"].as_str().unwrap().to_owned()
+            })
+            .collect()
+    }
+
+    /// The attempts a `delivery inbox` line from a prompt prints, run through
+    /// a shell as the agent runs it. The line names this test process as its
+    /// executable, so the built binary stands in for that one word.
+    fn run_printed_inbox(&self, line: &str) -> Vec<String> {
+        let own = std::env::current_exe().and_then(fs::canonicalize).unwrap();
+        let rest = line
+            .strip_prefix(&format!("'{}' ", own.display()))
+            .unwrap_or_else(|| panic!("the line does not start with its executable: {line}"));
+        let output = self
+            .hosted("sh")
+            .args(["-c", &format!(r#""$0" {rest}"#)])
+            .arg(env!("CARGO_BIN_EXE_namedrop"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{line}: {output:?}");
+        let printed: Value = serde_json::from_slice(&output.stdout).unwrap();
+        printed["data"]["envelopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|envelope| {
+                envelope["control"]["attempt_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+}
+
+/// The line `context` gives for printing the deliveries it shows no line for:
+/// the one under the sentence that counts them.
+fn printed_inbox_line(context: &str) -> &str {
+    context
+        .lines()
+        .skip_while(|line| !line.contains(" still open, with no line here."))
+        .nth(1)
+        .unwrap_or_else(|| panic!("no line prints the rest: {context}"))
+}
+
+/// The attempts `context` shows a settling line for, in its order.
+fn left_open_shown(context: &str) -> Vec<&str> {
+    context
+        .lines()
+        .filter_map(|line| {
+            let (attempt, _) = line
+                .strip_prefix("Namedrop: delivery ")?
+                .split_once(" from an earlier turn is still open")?;
+            Some(attempt)
+        })
+        .collect()
+}
+
+/// Claude Code keeps hook context whole only under 10,000 UTF-16 units. Every
+/// delivery left open has a line of some 500, so a prompt shows the oldest
+/// few, counts the rest and gives the line that prints them. A delivery's own
+/// settling lines always come through.
+#[test]
+fn many_deliveries_left_open_stay_within_what_the_host_keeps_whole() {
+    let space = Space::new();
+    let left = space.asks_left_open(24);
+    let distinct: std::collections::BTreeSet<_> = left.iter().collect();
+    assert_eq!(distinct.len(), 24, "{left:?}");
+    let whole = |context: &str| {
+        let size = context.encode_utf16().count();
+        assert!(size < 10_000, "{size} units: {context}");
+        assert_eq!(left_open_shown(context), left[..3], "{context}");
+        assert!(
+            context.contains(
+                "Namedrop: 21 more deliveries from earlier turns are still open, with no line here."
+            ),
+            "{context}"
+        );
+        let printed = space.run_printed_inbox(printed_inbox_line(context));
+        for attempt in &left[3..] {
+            assert!(printed.contains(attempt), "{attempt} is not in {printed:?}");
+        }
+    };
+
+    whole(&space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        ("prompt_id", "typed-turn"),
+        "Where were we?",
+    ));
+    dispatch::message(
+        "send",
+        json!({"request_id":"ask-new","source":"@reviewer Reply with the single word ping.",
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+    assert!(!left.iter().any(|left| left == attempt), "{attempt}");
+    let context = space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        ("prompt_id", "delivery-turn"),
+        &format!(
+            "A draft I had not sent. {}",
+            space.as_typed(&ask.to_string())
+        ),
+    );
+    whole(&context);
+    for token in ["reply", "complete.no-reply"] {
+        let line = context
+            .lines()
+            .find(|line| line.starts_with(&format!("{token}: ")))
+            .unwrap_or_else(|| panic!("the delivery's {token} line is gone: {context}"));
+        assert!(
+            line.contains(&format!(r#""attempt_id":"{attempt}""#)),
+            "{line}"
+        );
+    }
+}
+
+/// A session that resumed in another pane is given the line for the pane its
+/// prompt came from. The pane its deliveries reached no longer holds it.
+#[test]
+fn the_line_that_prints_the_rest_names_the_pane_the_prompt_came_from() {
+    let space = Space::new();
+    space.asks_left_open(4);
+    let context = space.prompt(
+        "pane-moved",
+        "session-reviewer",
+        ("prompt_id", "typed-turn"),
+        "Where were we?",
+    );
+    let inbox = printed_inbox_line(&context);
+    assert!(inbox.contains(" --herdr-pane 'pane-moved' "), "{inbox}");
 }
 
 /// The pointer the pane holds for its latest delivery.

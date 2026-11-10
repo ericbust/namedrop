@@ -1880,9 +1880,67 @@ pub(crate) fn rendered_line(control: &Value, token: &str) -> Option<String> {
         .map(|line| line.text)
 }
 
-/// What a later prompt says about a delivery a claim left open: one
-/// sentence and the bound line that settles it.
-pub(crate) fn left_open_guidance(way_back: &crate::final_reply::WayBack) -> String {
+/// How many deliveries left open get their settling line in one prompt. Each
+/// line is some 500 characters, so more of them would crowd the context a host
+/// keeps whole.
+const LEFT_OPEN_SHOWN: usize = 3;
+
+/// What a later prompt says about the deliveries claims left open: the
+/// settling line of the first few, then how many more there are, how many of
+/// those a settle failed for, and the line that prints them. `inbox` gives
+/// that line for the pane the prompt came from, which a resumed session may
+/// have changed since its deliveries arrived.
+pub(crate) fn left_open_guidance(
+    left_open: &[crate::final_reply::WayBack],
+    inbox: impl FnOnce() -> Option<String>,
+) -> Vec<String> {
+    let (shown, rest) = left_open.split_at(left_open.len().min(LEFT_OPEN_SHOWN));
+    let mut guidance: Vec<String> = shown.iter().map(way_back_guidance).collect();
+    if rest.is_empty() {
+        return guidance;
+    }
+    let (count, are) = match rest.len() {
+        1 => ("1 more delivery".to_owned(), "is"),
+        more => (format!("{more} more deliveries"), "are"),
+    };
+    let failed = match rest.iter().filter(|rest| rest.failure.is_some()).count() {
+        0 => String::new(),
+        failed => format!(
+            " Namedrop could not send your final message, or close the delivery, for {failed} of them."
+        ),
+    };
+    let print = match inbox() {
+        Some(inbox) => format!("run this line.\n{inbox}"),
+        None => "run `delivery inbox`.".to_owned(),
+    };
+    guidance.push(format!(
+        "Namedrop: {count} from earlier turns {are} still open, with no line here.{failed} To print each one with the lines that settle it, {print}"
+    ));
+    guidance
+}
+
+/// The line that prints every delivery the session in this pane still owes.
+pub(crate) fn inbox_line<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> Option<String>
+where
+    E: crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
+    let tool = IntegrationToolInvocation::new(
+        collaboration_executable().ok()?,
+        tool_environment(
+            runtime.state_directory,
+            runtime.session_socket_id,
+            &integration_discovery(runtime).ok()?.workspace_id,
+            runtime.current_pane_id?,
+        ),
+    );
+    inbox_command_line(&json!({ "tool": tool }))
+}
+
+/// One sentence about a delivery a claim left open, and the bound line that
+/// settles it.
+fn way_back_guidance(way_back: &crate::final_reply::WayBack) -> String {
     let how = if way_back.answers {
         "to answer it, run this line with your text in place of <reply body>"
     } else {

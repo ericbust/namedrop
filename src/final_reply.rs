@@ -233,6 +233,7 @@ pub(crate) fn claim_for(
         no_reply_line: crate::integration::rendered_line(control, "complete.no-reply"),
         failure: None,
         awaits: Vec::new(),
+        paused: Vec::new(),
         first_armed_at_ms: None,
         promised_turn: None,
     })
@@ -245,9 +246,16 @@ pub struct TurnTasks {
     /// The tasks the turn started, or `None` when its first record is not in
     /// what was read, so a start may be missing.
     pub started: Option<Vec<String>>,
-    /// The task whose notice is the turn's own prompt. A notice Claude Code
+    /// The task the turn's own prompt says ended. A notice Claude Code
     /// queued into a turn about something else never counts.
     pub notified: Vec<String>,
+    /// The subagents whose latest notice in what was read, in any turn, says
+    /// they only paused. Claude Code's queue logs every notice and hand-back
+    /// as it arrives, also one that reaches no prompt before this Stop.
+    pub paused: Vec<String>,
+    /// The tasks whose latest notice or hand-back in what was read, in any
+    /// turn, says they ended.
+    pub ended: Vec<String>,
 }
 
 /// Reads one turn from the end of a transcript. `whole` says the bytes start
@@ -256,11 +264,31 @@ pub fn turn_tasks(transcript: &[u8], whole: bool, prompt_id: &str) -> TurnTasks 
     let mut turn = TurnTasks::default();
     let (mut started, mut found, mut earlier_turn) = (Vec::new(), false, whole);
     let own_key = format!(r#""promptId":"{prompt_id}""#);
-    let (own_key, any_key) = (
+    let (own_key, any_key, queue_key) = (
         memchr::memmem::Finder::new(own_key.as_bytes()),
         memchr::memmem::Finder::new(br#""promptId":""#),
+        memchr::memmem::Finder::new(br#""type":"queue-operation""#),
     );
     for line in transcript.split(|byte| *byte == b'\n') {
+        if queue_key.find(line).is_some() {
+            let queued = serde_json::from_slice::<Value>(line).ok();
+            let queued = queued
+                .as_ref()
+                .filter(|record| record["type"] == "queue-operation")
+                .filter(|record| record["operation"] == "enqueue")
+                .and_then(|record| record["content"].as_str())
+                .and_then(task_news);
+            let (latest, earlier, task) = match queued {
+                Some(TaskNews::Paused(task)) => (&mut turn.paused, &mut turn.ended, task),
+                Some(TaskNews::Ended(task)) => (&mut turn.ended, &mut turn.paused, task),
+                None => continue,
+            };
+            earlier.retain(|id| id != task);
+            if !latest.iter().any(|id| id == task) {
+                latest.push(task.to_owned());
+            }
+            continue;
+        }
         // Only this turn's own records are parsed; another turn's only says
         // that one came before it.
         let record = (!prompt_id.is_empty() && own_key.find(line).is_some())
@@ -272,10 +300,8 @@ pub fn turn_tasks(transcript: &[u8], whole: bool, prompt_id: &str) -> TurnTasks 
             continue;
         };
         found = true;
-        if record["type"] == "user" {
-            let notice = record["message"]["content"].as_str().and_then(notice_task);
-            turn.notified.extend(notice.map(str::to_owned));
-        }
+        turn.notified
+            .extend(record_ended_task(&record).map(str::to_owned));
         let result = &record["toolUseResult"];
         for key in ["backgroundTaskId", "agentId", "resumedAgentId", "taskId"] {
             started.extend(result[key].as_str().map(str::to_owned));
@@ -285,14 +311,15 @@ pub fn turn_tasks(transcript: &[u8], whole: bool, prompt_id: &str) -> TurnTasks 
     turn
 }
 
-/// Whether the transcript at `path` shows that `prompt`, a notice, opened turn
-/// `prompt_id`: reading back from its end, the first record that names a turn
-/// names an earlier one, with none of this turn's after it but the notice's
-/// own and the meta companion Claude Code may write before it. It is false
-/// when the transcript can't show it. It reads a small tail first, and more
-/// only while no record names a turn.
+/// Whether the transcript at `path` shows that `prompt`, which says a task
+/// ended, opened turn `prompt_id`: reading back from its end, the first record
+/// that names a turn names an earlier one, with none of this turn's after it
+/// but the prompt's own and the meta companion Claude Code may write before
+/// it. It is false when the transcript can't show it. It reads a small tail
+/// first, and more only while no record names a turn.
 pub fn notice_opens_turn(path: &Path, prompt_id: &str, prompt: &str) -> bool {
-    let Some(task) = notice_task(prompt).filter(|_| !prompt_id.is_empty()) else {
+    let ended = task_news(prompt).and_then(TaskNews::ended);
+    let Some(task) = ended.filter(|_| !prompt_id.is_empty()) else {
         return false;
     };
     let Ok(mut file) = fs::OpenOptions::new()
@@ -341,9 +368,8 @@ pub fn notice_opens_turn(path: &Path, prompt_id: &str, prompt: &str) -> bool {
             if id != prompt_id {
                 return true;
             }
-            let own_notice = record["type"] == "user"
-                && record["message"]["content"].as_str().and_then(notice_task) == Some(task);
-            if !(own_notice || record["isMeta"] == true && record["turnCompanion"] == true) {
+            let own_prompt = record_ended_task(&record) == Some(task);
+            if !(own_prompt || record["isMeta"] == true && record["turnCompanion"] == true) {
                 return false;
             }
         }
@@ -364,6 +390,92 @@ pub(crate) fn notice_task(text: &str) -> Option<&str> {
         .strip_prefix("<task-id>")?
         .split_once("</task-id>")?;
     Some(id.trim()).filter(|id| !id.is_empty())
+}
+
+/// How Claude Code 2.1.310 to 2.1.322 marks the notice of a subagent that
+/// stopped while background work of its own still ran: the summary's ending
+/// and the note's opening. The notice's status is `completed` all the same,
+/// and no field of its prompt or transcript record carries the mark.
+const WAITING_SUMMARY: &str = " is waiting on its own background work</summary>";
+const WAITING_NOTE: &str =
+    "<note>This agent stopped with background work of its own still running.";
+
+/// Whether a task notice says its subagent only paused: the task goes on, and
+/// the same task reports again. Only what Claude Code wrote ahead of the
+/// subagent's result counts, never the result's own words. The result
+/// element starts a line; the summary quotes the subagent's description, which
+/// may name one.
+fn notice_is_interim(notice: &str) -> bool {
+    let ahead = notice
+        .split_once("\n<result>")
+        .map_or(notice, |(ahead, _)| ahead);
+    ahead.contains(WAITING_SUMMARY) || ahead.contains(WAITING_NOTE)
+}
+
+/// How Claude Code 2.1.322 frames a subagent's final report in the prompt
+/// that hands it back to the session that started the subagent: the frame's
+/// first line opens with these words, and every line of the report after it
+/// is indented.
+const HAND_BACK: &str = "[Subagent hand-back] The text below is the final report of a subagent this session delegated to.";
+
+/// The subagent whose final report a prompt hands back: the sender its frame
+/// opens with, never one the report quotes. Only the exact frame counts. A
+/// message another session sent on its own has no such first line, and its
+/// lines are not indented. This reads text, so a sender that copies the whole
+/// frame passes: the Stop goes by the mark in the transcript record instead.
+fn hand_back_task(prompt: &str) -> Option<&str> {
+    let (id, frame) = prompt
+        .trim_start()
+        .strip_prefix("<agent-message from=\"")?
+        .split_once("\">\n")?;
+    let (first, report) = frame.split_once('\n')?;
+    let report = report.trim_end().strip_suffix("</agent-message>")?;
+    let framed = first.starts_with(HAND_BACK) && report.lines().all(|line| line.starts_with("  "));
+    (framed && !id.is_empty()).then_some(id)
+}
+
+/// What a Claude Code prompt says about one background task.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TaskNews<'a> {
+    /// It ended: the prompt is its task notice, or hands back a subagent's
+    /// final report in Claude Code's own frame.
+    Ended(&'a str),
+    /// A subagent stopped while background work of its own still ran. It has
+    /// not finished and reports again, though Claude Code no longer lists it
+    /// as running.
+    Paused(&'a str),
+}
+
+impl<'a> TaskNews<'a> {
+    pub(crate) fn ended(self) -> Option<&'a str> {
+        match self {
+            Self::Ended(task) => Some(task),
+            Self::Paused(_) => None,
+        }
+    }
+}
+
+pub(crate) fn task_news(prompt: &str) -> Option<TaskNews<'_>> {
+    match notice_task(prompt) {
+        Some(task) if notice_is_interim(prompt) => Some(TaskNews::Paused(task)),
+        Some(task) => Some(TaskNews::Ended(task)),
+        None => hand_back_task(prompt).map(TaskNews::Ended),
+    }
+}
+
+/// The task a transcript record's prompt says ended. A hand-back counts by
+/// the mark Claude Code puts in its record's `origin`, never by its text, so
+/// a prompt the person typed is never one.
+fn record_ended_task(record: &Value) -> Option<&str> {
+    if record["type"] != "user" {
+        return None;
+    }
+    let origin = &record["origin"];
+    if origin["kind"] == "peer" && origin["handback"] == true {
+        return origin["senderTaskId"].as_str().filter(|id| !id.is_empty());
+    }
+    let notice = record["message"]["content"].as_str()?;
+    notice_task(notice).filter(|_| !notice_is_interim(notice))
 }
 
 /// Where the bound operations of one delivery run: the envelope's own tool
@@ -399,6 +511,11 @@ pub(crate) struct Claim {
     /// The background tasks a held claim waits for.
     #[serde(default)]
     pub awaits: Vec<String>,
+    /// The subagents Claude Code said stopped with background work of their
+    /// own running. One this claim waits for counts as running until a prompt
+    /// says it ended.
+    #[serde(default)]
+    pub paused: Vec<String>,
     /// When a claim that a task's notice woke was first armed.
     #[serde(default)]
     pub first_armed_at_ms: Option<u64>,
@@ -453,8 +570,12 @@ pub struct StopFacts {
     pub running_tasks: Vec<String>,
     /// The tasks this turn put in the background, from its transcript.
     pub started_tasks: Vec<String>,
-    /// The task whose notice is this turn's own prompt, from its transcript.
+    /// The task this turn's own prompt says ended, from its transcript.
     pub notified_tasks: Vec<String>,
+    /// The subagents the transcript says only paused and have not ended.
+    pub paused_tasks: Vec<String>,
+    /// The tasks the transcript says ended, in any turn.
+    pub ended_tasks: Vec<String>,
     /// The transcript showed where this turn began, so its tasks and notice
     /// are known.
     pub read_turn: bool,
@@ -465,12 +586,22 @@ impl StopFacts {
     /// The running work a claim's final message may be waiting for: what its
     /// turn started, and what it was already held for. Work started earlier,
     /// and Claude Code's own background tasks, never answer this delivery.
+    /// A paused subagent is running work Claude Code no longer lists, until
+    /// this turn's own prompt says it ended.
     fn awaited(&self, claim: &Claim) -> Vec<String> {
-        self.running_tasks
+        let paused = claim
+            .paused
             .iter()
-            .filter(|id| self.started_tasks.contains(id) || claim.awaits.contains(id))
-            .cloned()
-            .collect()
+            .filter(|id| !self.notified_tasks.contains(id));
+        let mut awaited: Vec<String> = Vec::new();
+        for id in self.running_tasks.iter().chain(paused) {
+            if (self.started_tasks.contains(id) || claim.awaits.contains(id))
+                && !awaited.contains(id)
+            {
+                awaited.push(id.clone());
+            }
+        }
+        awaited
     }
 }
 
@@ -1001,6 +1132,15 @@ impl Claim {
         self.set(ClaimState::Open, at_ms);
     }
 
+    /// Records that Claude Code said subagent `task` only paused. Whether
+    /// the claim waits for it is the Stop's to say: an open or woken claim's
+    /// turn may have started it.
+    fn note_paused(&mut self, task: &str) {
+        if !self.paused.iter().any(|id| id == task) {
+            self.paused.push(task.to_owned());
+        }
+    }
+
     fn waits_for_any(&self, tasks: &[impl AsRef<str>]) -> bool {
         tasks
             .iter()
@@ -1133,8 +1273,8 @@ pub(crate) struct WayBack {
 /// What a prompt carried, beyond the delivery it may arm.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct PromptFacts<'a> {
-    /// The tasks its Claude Code notice is about.
-    pub notified: &'a [String],
+    /// What it says about a background task.
+    pub news: Option<TaskNews<'a>>,
     /// It authenticated a delivery for this session, armed or explicit.
     pub delivery: bool,
     /// The transcript shows this prompt opened its turn: no record of the
@@ -1167,10 +1307,16 @@ pub(crate) fn observe_prompt(
     now_ms: u64,
 ) -> Observed {
     let PromptFacts {
-        notified,
+        news,
         delivery,
         opens_turn,
     } = prompt;
+    let notified: Vec<String> = news
+        .and_then(TaskNews::ended)
+        .map(str::to_owned)
+        .into_iter()
+        .collect();
+    let notified = notified.as_slice();
     let directory = session_directory(state, socket, session);
     if arm.is_none() && !directory.join("claims.json").exists() {
         return Observed::default();
@@ -1234,6 +1380,13 @@ pub(crate) fn observe_prompt(
         && let Some(index) = claims.woken(state, turn, notified)
     {
         claims.claims[index].promised_turn = Some(turn.clone());
+    }
+    for claim in &mut claims.claims {
+        match news {
+            Some(TaskNews::Paused(task)) => claim.note_paused(task),
+            Some(TaskNews::Ended(task)) => claim.paused.retain(|id| id != task),
+            None => {}
+        }
     }
     let mut left_open = Vec::new();
     for claim in &mut claims.claims {
@@ -1300,14 +1453,20 @@ pub fn stop_has_work(
 }
 
 /// Whether the last `limit` bytes of the transcript at `path` name a notice of
-/// one of `tasks`. It reads back from the end a chunk at a time, and is `None`
-/// when it can't read the file or can't finish within `budget`.
+/// one of `tasks`, or the record of its hand-back. It reads back from the end
+/// a chunk at a time, and is `None` when it can't read the file or can't
+/// finish within `budget`.
 pub fn names_notice(path: &Path, tasks: &[String], limit: u64, budget: Duration) -> Option<bool> {
     const CHUNK: u64 = 1024 * 1024;
     let started = Instant::now();
     let needles: Vec<String> = tasks
         .iter()
-        .map(|id| format!("<task-id>{id}</task-id>"))
+        .flat_map(|id| {
+            [
+                format!("<task-id>{id}</task-id>"),
+                format!(r#""senderTaskId":"{id}""#),
+            ]
+        })
         .collect();
     let finders: Vec<_> = needles
         .iter()
@@ -1380,6 +1539,14 @@ pub fn settle_at_stop(
         );
         return;
     };
+    // The prompt hook records a pause and its end too, unless it missed the
+    // lock or the notice reached no prompt before this Stop.
+    for claim in &mut claims.claims {
+        claim.paused.retain(|id| !stop.ended_tasks.contains(id));
+        for task in &stop.paused_tasks {
+            claim.note_paused(task);
+        }
+    }
     if let Some(turn) = &stop.turn {
         // A claim this turn's prompt promised comes first: the agent was shown
         // no other way to answer it. A read of the turn's own prompt that

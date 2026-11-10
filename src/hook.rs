@@ -537,10 +537,7 @@ where
         crate::final_reply::claim_for(delivery, session, delivery.leftover, &turn, now_ms)
     });
     let plan = claim.as_ref().map(|claim| claim.plan.clone());
-    let notified: Vec<String> = crate::final_reply::notice_task(&input.prompt)
-        .map(str::to_owned)
-        .into_iter()
-        .collect();
+    let news = crate::final_reply::task_news(&input.prompt);
     let observed = crate::final_reply::observe_prompt(
         runtime.state_directory,
         runtime.session_socket_id,
@@ -548,7 +545,7 @@ where
         &turn,
         claim,
         crate::final_reply::PromptFacts {
-            opens_turn: !notified.is_empty()
+            opens_turn: news.is_some_and(|news| news.ended().is_some())
                 && crate::final_reply::has_claims(
                     runtime.state_directory,
                     runtime.session_socket_id,
@@ -562,18 +559,16 @@ where
                     .is_some_and(|(path, prompt_id)| {
                         crate::final_reply::notice_opens_turn(path, prompt_id, &input.prompt)
                     }),
-            notified: &notified,
+            news,
             delivery: delivery.is_some(),
         },
         now_ms,
     );
     (
         observed.armed.then_some(plan).flatten(),
-        observed
-            .left_open
-            .iter()
-            .map(crate::integration::left_open_guidance)
-            .collect(),
+        crate::integration::left_open_guidance(&observed.left_open, || {
+            crate::integration::inbox_line(runtime)
+        }),
     )
 }
 

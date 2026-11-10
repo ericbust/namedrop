@@ -443,6 +443,66 @@ fn a_many_assignment_nudge_stays_in_room_and_says_what_it_left_out() {
     assert!(tiny.contains("\ncomplete.no-reply: "), "{tiny}");
 }
 
+fn left_open(count: usize) -> Vec<crate::final_reply::WayBack> {
+    (0..count)
+        .map(|index| crate::final_reply::WayBack {
+            attempt_id: crate::DeliveryAttemptId::new(format!("attempt-{index}")),
+            line: format!("reply: namedrop reply {index}"),
+            answers: true,
+            failure: None,
+            waits_on: Vec::new(),
+            finished: false,
+        })
+        .collect()
+}
+
+#[test]
+fn deliveries_left_open_past_the_third_are_counted_with_the_line_that_prints_them() {
+    let all = left_open_guidance(&left_open(3), || panic!("nothing is left to print"));
+    assert_eq!(all.len(), 3, "{all:?}");
+    assert!(all.iter().all(|text| text.contains("\nreply: ")), "{all:?}");
+
+    let capped = left_open_guidance(&left_open(4), || Some("the inbox line".to_owned()));
+    assert_eq!(capped[..3], all[..], "{capped:?}");
+    assert_eq!(
+        capped[3..],
+        [
+            "Namedrop: 1 more delivery from earlier turns is still open, with no line here. To print each one with the lines that settle it, run this line.\nthe inbox line"
+        ]
+    );
+
+    let unlocated = left_open_guidance(&left_open(5), || None);
+    assert_eq!(
+        unlocated[3..],
+        [
+            "Namedrop: 2 more deliveries from earlier turns are still open, with no line here. To print each one with the lines that settle it, run `delivery inbox`."
+        ]
+    );
+}
+
+/// A delivery with no line of its own still has its failed settle reported:
+/// the agent may believe that answer was sent.
+#[test]
+fn a_failed_settle_past_the_third_delivery_is_still_reported() {
+    let mut left_open = left_open(6);
+    for failed in [1, 4, 5] {
+        left_open[failed].failure = Some("the reply was refused".to_owned());
+    }
+    let guidance = left_open_guidance(&left_open, || None);
+    assert!(
+        guidance[1].starts_with(
+            "Namedrop: your final message could not be sent, because of this error: the reply was refused\n"
+        ),
+        "{guidance:?}"
+    );
+    assert_eq!(
+        guidance[3..],
+        [
+            "Namedrop: 3 more deliveries from earlier turns are still open, with no line here. Namedrop could not send your final message, or close the delivery, for 2 of them. To print each one with the lines that settle it, run `delivery inbox`."
+        ]
+    );
+}
+
 fn draft_control(
     reply_mode: crate::DeliveryReplyMode,
     context_references: Vec<DeliveryAddress>,
