@@ -4027,6 +4027,35 @@ fn an_answer_its_stop_has_not_decided_raises_no_warning_until_it_must() {
     }
 }
 
+/// Only the Stop's judgement warns for a turn that ended with no answer, so
+/// a store that stays busy past one try must not lose that warning.
+#[test]
+fn a_stop_still_warns_when_the_store_is_busy_past_its_first_try() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    space.settle_attempt(&ask);
+    let (locked, lock_taken) = std::sync::mpsc::channel();
+    let database = space.directory.state.join("namedrop.sqlite3");
+    let busy = std::thread::spawn(move || {
+        let connection = rusqlite::Connection::open(database).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        locked.send(()).unwrap();
+        // Past the store's own 2 second wait for a lock.
+        std::thread::sleep(std::time::Duration::from_millis(2_500));
+        connection.execute_batch("COMMIT").unwrap();
+    });
+    lock_taken.recv().unwrap();
+    space.stop("session-reviewer", CLAUDE, "");
+    busy.join().unwrap();
+    assert_eq!(space.claims()[0]["state"], json!({"left":"no_final_text"}));
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "a busy store lost the warning");
+    assert!(
+        warnings[0][0].contains("ended its turn without a reply"),
+        "{warnings:?}"
+    );
+}
+
 impl Space {
     /// Every progress note, as (id, thread, in reply to, body).
     fn notes(&self) -> Vec<Vec<String>> {

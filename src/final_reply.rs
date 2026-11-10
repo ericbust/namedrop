@@ -1096,25 +1096,48 @@ impl Claims {
     }
 }
 
+/// How long the Stop worker keeps trying to judge, after its own lock wait
+/// and inside its 10 second deadline.
+const STOP_JUDGE_BUDGET: Duration = Duration::from_secs(4);
+/// The prompt hook's share, well inside the host's 10 second hook timeout.
+const PROMPT_JUDGE_BUDGET: Duration = Duration::from_secs(2);
+const JUDGE_TRY_WAIT: Duration = Duration::from_millis(500);
+const JUDGE_PAUSE: Duration = Duration::from_millis(100);
+
 /// Brings the ND-DELIVERY-003 warning of each claim a call decided in line
 /// with the claims it saved. The idle settle may judge the delivery before or
-/// after the Stop, from another process.
+/// after the Stop, from another process, and raises nothing while the Stop
+/// has not decided, so this is the only judge of a turn that ended with no
+/// answer. It tries again while the store refuses it, for at most `budget`.
+/// Still not covered: a Stop worker killed at its deadline between saving
+/// the claims and judging them, and a store busy past the budget. Those are
+/// judged again only when the session changes.
 fn judge_decided(
     state: &Path,
     decided: &[(crate::StateNamespace, crate::DeliveryAttemptId)],
     now_ms: u64,
+    budget: Duration,
 ) {
     if decided.is_empty() || !matches!(crate::StateStore::open_read_only(state), Ok(Some(_))) {
         return;
     }
     let by = crate::MutationAttribution::new(crate::ActorKind::Plugin, "namedrop", now_ms);
-    let _ = crate::StateStore::open(state).and_then(|mut store| {
-        store.transaction(|transaction| {
-            decided.iter().try_for_each(|(namespace, attempt)| {
-                transaction.judge_decided_claim(namespace, attempt, &by)
+    let deadline = Instant::now() + budget;
+    loop {
+        let wait = deadline.saturating_duration_since(Instant::now());
+        let judged = crate::StateStore::open(state).and_then(|mut store| {
+            store.set_busy_timeout(wait.min(JUDGE_TRY_WAIT))?;
+            store.transaction(|transaction| {
+                decided.iter().try_for_each(|(namespace, attempt)| {
+                    transaction.judge_decided_claim(namespace, attempt, &by)
+                })
             })
-        })
-    });
+        });
+        if judged.is_ok() || deadline.saturating_duration_since(Instant::now()) <= JUDGE_PAUSE {
+            return;
+        }
+        thread::sleep(JUDGE_PAUSE);
+    }
 }
 
 impl Claim {
@@ -1405,7 +1428,7 @@ pub(crate) fn observe_prompt(
     }
     // The delivery whose work this notice finished is listed first.
     left_open.sort_by_key(|way_back| !way_back.finished);
-    judge_decided(state, &claims.save(now_ms), now_ms);
+    judge_decided(state, &claims.save(now_ms), now_ms, PROMPT_JUDGE_BUDGET);
     Observed { armed, left_open }
 }
 
@@ -1643,7 +1666,7 @@ pub fn settle_at_stop(
         };
         claim.set(next, now_ms);
     }
-    judge_decided(state, &claims.save(now_ms), now_ms);
+    judge_decided(state, &claims.save(now_ms), now_ms, STOP_JUDGE_BUDGET);
 }
 
 impl Claim {
