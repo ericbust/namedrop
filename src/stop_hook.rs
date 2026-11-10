@@ -1,7 +1,7 @@
 use namedrop::{
     Clock, SystemClock,
     cli::RuntimeOptions,
-    final_reply::{BoundOperation, FinalText, HostTurn, StopFacts},
+    final_reply::{BoundOperation, FinalText, HostTurn, StopFacts, TurnTasks},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,6 +15,12 @@ use std::{
 };
 
 const MAX_INPUT_BYTES: u64 = 1024 * 1024;
+/// How long the Stop hook may look for a held task's notice before it hands
+/// the Stop to a worker anyway, well inside its own 250 ms.
+const NOTICE_SCAN_BUDGET: Duration = Duration::from_millis(100);
+/// How much of the transcript's end the Stop reads for the tasks its turn
+/// started.
+const TURN_SCAN_BYTES: u64 = 8 * 1024 * 1024;
 /// How long the worker waits for Claude Code to record how every Stop hook
 /// of this Stop ended. It writes that record as soon as the last hook exits.
 const STOP_OUTCOME_WAIT: Duration = Duration::from_secs(3);
@@ -33,6 +39,8 @@ struct StopInput {
 
 #[derive(Deserialize, Serialize)]
 struct BackgroundTask {
+    #[serde(default)]
+    id: String,
     status: String,
 }
 
@@ -62,7 +70,20 @@ pub fn run(state: &Path) {
     let Ok(socket) = env::var("HERDR_SOCKET_PATH") else {
         return;
     };
-    if !namedrop::final_reply::has_live_claims(state, &socket, &input.session_id) {
+    let names_notice = |tasks: &[String]| {
+        let path = input
+            .transcript_path
+            .as_ref()
+            .filter(|path| path.is_absolute())?;
+        namedrop::final_reply::names_notice(path, tasks, TURN_SCAN_BYTES, NOTICE_SCAN_BUDGET)
+    };
+    if !namedrop::final_reply::stop_has_work(
+        state,
+        &socket,
+        &input.session_id,
+        input.turn().as_ref(),
+        names_notice,
+    ) {
         return;
     }
     let transcript_end = input.transcript_path.as_ref().and_then(|path| {
@@ -143,14 +164,23 @@ pub fn run_worker(state: &Path) {
     {
         return;
     }
+    let running_tasks: Vec<String> = captured
+        .input
+        .background_tasks
+        .iter()
+        .filter(|task| matches!(task.status.as_str(), "running" | "pending"))
+        .map(|task| task.id.clone())
+        .collect();
+    let turn = captured.input.turn_tasks(captured.transcript_end);
     let stop = StopFacts {
         session: captured.input.session_id.clone(),
         turn: captured.input.turn(),
-        background_running: captured
-            .input
-            .background_tasks
-            .iter()
-            .any(|task| matches!(task.status.as_str(), "running" | "pending")),
+        read_turn: turn.started.is_some(),
+        // When the turn's start can't be read, every running task counts as
+        // started by it, so a final message that may be a status is held.
+        started_tasks: turn.started.unwrap_or_else(|| running_tasks.clone()),
+        notified_tasks: turn.notified,
+        running_tasks,
         text: captured
             .input
             .final_text(Some(captured.transcript_end.unwrap_or(0))),
@@ -306,7 +336,19 @@ impl StopInput {
         }
     }
 
-    fn transcript_text(&self, transcript_end: Option<u64>) -> Option<String> {
+    /// What this turn's transcript says about its background work, with no
+    /// started tasks when the turn's start can't be read.
+    fn turn_tasks(&self, transcript_end: Option<u64>) -> TurnTasks {
+        let read = self.prompt_id.as_deref().and_then(|prompt_id| {
+            let (bytes, whole) = self.transcript_tail(transcript_end, TURN_SCAN_BYTES)?;
+            Some(namedrop::final_reply::turn_tasks(&bytes, whole, prompt_id))
+        });
+        read.unwrap_or_default()
+    }
+
+    /// Up to `limit` bytes of the transcript before `transcript_end`, from the
+    /// first whole line, and whether they start at the transcript's start.
+    fn transcript_tail(&self, transcript_end: Option<u64>, limit: u64) -> Option<(Vec<u8>, bool)> {
         let path = self.transcript_path.as_ref()?;
         if !path.is_absolute() {
             return None;
@@ -324,15 +366,25 @@ impl StopInput {
         if end > metadata.len() {
             return None;
         }
-        let start = end.saturating_sub(MAX_INPUT_BYTES);
+        let start = end.saturating_sub(limit);
         file.seek(SeekFrom::Start(start)).ok()?;
         let mut bytes = Vec::new();
         file.take(end - start).read_to_end(&mut bytes).ok()?;
-        let mut lines = bytes.split(|byte| *byte == b'\n');
         if start != 0 {
-            lines.next();
+            let first = bytes
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(bytes.len(), |at| at + 1);
+            bytes.drain(..first);
         }
-        let records = lines.filter_map(|line| serde_json::from_slice::<Value>(line).ok());
+        Some((bytes, start == 0))
+    }
+
+    fn transcript_text(&self, transcript_end: Option<u64>) -> Option<String> {
+        let (bytes, _) = self.transcript_tail(transcript_end, MAX_INPUT_BYTES)?;
+        let records = bytes
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| serde_json::from_slice::<Value>(line).ok());
         let mut text = None;
         for record in records {
             if record["type"] == "user" {

@@ -185,6 +185,9 @@ fn claim(plan: Armed, state: ClaimState) -> Claim {
         reply_line: Some("reply: namedrop reply --input-json '{}'".into()),
         no_reply_line: Some("complete.no-reply: namedrop complete --no-reply".into()),
         failure: None,
+        awaits: Vec::new(),
+        first_armed_at_ms: None,
+        promised_turn: None,
     }
 }
 
@@ -192,8 +195,20 @@ fn stop(prompt: &str, text: &str) -> StopFacts {
     StopFacts {
         session: "session".into(),
         turn: Some(turn(prompt)),
-        background_running: false,
+        running_tasks: Vec::new(),
+        started_tasks: Vec::new(),
+        notified_tasks: Vec::new(),
+        read_turn: true,
         text: FinalText::bounded(text),
+    }
+}
+
+/// A Stop of `prompt` whose turn started `task`, still running.
+fn started(prompt: &str, task: &str, text: &str) -> StopFacts {
+    StopFacts {
+        running_tasks: vec![task.to_owned()],
+        started_tasks: vec![task.to_owned()],
+        ..stop(prompt, text)
     }
 }
 
@@ -214,10 +229,7 @@ fn replied(source: &str) -> Verdict {
 fn a_stop_settles_only_its_own_open_claim_and_explicit_settles_win() {
     let open = claim(reply_plan(), ClaimState::Open);
     let none = SettleFacts::default();
-    let background = StopFacts {
-        background_running: true,
-        ..stop("prompt-1", "Working on it.")
-    };
+    let background = started("prompt-1", "task-1", "Working on it.");
     let cases = [
         (
             &open,
@@ -383,10 +395,7 @@ fn a_stop_settles_only_its_own_open_claim_and_explicit_settles_win() {
             Verdict::Leave(LeaveReason::NoFinalText),
         ),
         (
-            StopFacts {
-                background_running: true,
-                ..stop("prompt-1", "Research is running.")
-            },
+            started("prompt-1", "task-1", "Research is running."),
             none,
             Verdict::Leave(LeaveReason::Held),
         ),
@@ -418,13 +427,7 @@ fn a_stop_settles_only_its_own_open_claim_and_explicit_settles_win() {
         let no_reply = claim(Armed::NoReply(case), ClaimState::Open);
         for (stop, settle) in [
             (stop("prompt-1", ""), none),
-            (
-                StopFacts {
-                    background_running: true,
-                    ..stop("prompt-1", "@claude still going")
-                },
-                none,
-            ),
+            (started("prompt-1", "task-1", "@claude still going"), none),
             (stop("prompt-1", "Asked @claude."), waiting),
         ] {
             assert_eq!(
@@ -590,7 +593,20 @@ impl Drop for StateDirectory {
 }
 
 fn observe(state: &StateDirectory, prompt: &str, arm: Option<Claim>) -> bool {
-    observe_prompt(&state.0, "socket", "session", &turn(prompt), arm, 10).armed
+    observe_prompt(
+        &state.0,
+        "socket",
+        "session",
+        &turn(prompt),
+        arm,
+        PromptFacts {
+            notified: &[],
+            delivery: false,
+            opens_turn: false,
+        },
+        10,
+    )
+    .armed
 }
 
 fn armed(attempt: &str, prompt: &str, plan: Armed) -> Claim {
@@ -623,14 +639,22 @@ fn a_session_holds_one_live_claim_and_later_prompts_end_the_ones_that_lost_their
         "a second live claim was armed in one session"
     );
     assert_eq!(state.claims().len(), 1);
-    assert!(has_live_claims(&state.0, "socket", "session"));
-    assert!(!has_live_claims(&state.0, "socket", "other-session"));
+    assert!(stop_has_work(&state.0, "socket", "session", None, |_| None));
+    assert!(!stop_has_work(
+        &state.0,
+        "socket",
+        "other-session",
+        None,
+        |_| None
+    ));
     assert!(!observe(&state, "prompt-2", None));
     assert_eq!(
         state.claims()[0].state,
         ClaimState::Left(LeaveReason::Interrupted)
     );
-    assert!(!has_live_claims(&state.0, "socket", "session"));
+    assert!(!stop_has_work(&state.0, "socket", "session", None, |_| {
+        None
+    }));
     assert!(observe(
         &state,
         "prompt-3",
@@ -754,10 +778,11 @@ fn background_work_at_the_stop_leaves_a_reply_for_the_agent_to_settle() {
         Some(armed("attempt-1", "prompt-1", reply_plan())),
     );
     let log = std::cell::RefCell::new(Vec::new());
-    let background = StopFacts {
-        background_running: true,
-        ..stop("prompt-1", "Started the build; I will report when it ends.")
-    };
+    let background = started(
+        "prompt-1",
+        "task-1",
+        "Started the build; I will report when it ends.",
+    );
     settle(&state, &background, &mut ran(&log, Ok(json!({}))));
     assert_eq!(state.claims()[0].state, ClaimState::Left(LeaveReason::Held));
     observe(&state, "continuation", None);
@@ -768,12 +793,27 @@ fn background_work_at_the_stop_leaves_a_reply_for_the_agent_to_settle() {
     );
     assert!(log.into_inner().is_empty(), "a held reply was sent");
     assert_eq!(
-        observe_prompt(&state.0, "socket", "session", &turn("later"), None, 30).left_open,
+        observe_prompt(
+            &state.0,
+            "socket",
+            "session",
+            &turn("later"),
+            None,
+            PromptFacts {
+                notified: &[],
+                delivery: false,
+                opens_turn: false,
+            },
+            30
+        )
+        .left_open,
         [WayBack {
             attempt_id: crate::DeliveryAttemptId::new("attempt-1"),
             line: "reply: namedrop reply --input-json '{}'".to_owned(),
             answers: true,
             failure: None,
+            waits_on: vec!["task-1".to_owned()],
+            finished: false,
         }]
     );
     assert_eq!(state.claims()[0].state, ClaimState::Left(LeaveReason::Held));
@@ -800,6 +840,11 @@ fn finished_claims_are_pruned_after_a_day() {
             "session",
             &turn("prompt-2"),
             None,
+            PromptFacts {
+                notified: &[],
+                delivery: false,
+                opens_turn: false,
+            },
             now_ms,
         );
         state.claims().len()
@@ -869,6 +914,11 @@ fn a_prompt_queued_behind_a_stop_leaves_the_claim_to_that_stops_worker() {
         "session",
         &turn("prompt-2"),
         None,
+        PromptFacts {
+            notified: &[],
+            delivery: false,
+            opens_turn: false,
+        },
         10 + STOPPED_GRACE_MS,
     );
     assert_eq!(
@@ -887,9 +937,21 @@ fn a_claim_left_open_stays_while_later_prompts_show_it() {
         Some(armed("attempt-1", "prompt-1", reply_plan())),
     );
     let shown = |prompt: &str, now_ms| {
-        observe_prompt(&state.0, "socket", "session", &turn(prompt), None, now_ms)
-            .left_open
-            .len()
+        observe_prompt(
+            &state.0,
+            "socket",
+            "session",
+            &turn(prompt),
+            None,
+            PromptFacts {
+                notified: &[],
+                delivery: false,
+                opens_turn: false,
+            },
+            now_ms,
+        )
+        .left_open
+        .len()
     };
     assert_eq!(shown("prompt-2", 20), 1);
     assert_eq!(shown("prompt-3", 19 + KEEP_MS), 1);
@@ -916,6 +978,11 @@ fn a_late_stop_worker_leaves_the_next_turns_claim_alone() {
             "session",
             &turn(prompt),
             Some(arm),
+            PromptFacts {
+                notified: &[],
+                delivery: false,
+                opens_turn: false,
+            },
             now_ms,
         )
         .armed
@@ -940,7 +1007,7 @@ fn a_late_stop_worker_leaves_the_next_turns_claim_alone() {
         [ClaimState::Done(Done::Replied), ClaimState::Open],
         "a late worker ended the next turn's claim"
     );
-    assert!(has_live_claims(&state.0, "socket", "session"));
+    assert!(stop_has_work(&state.0, "socket", "session", None, |_| None));
     settle_at_stop(
         &state.0,
         "socket",
@@ -968,9 +1035,554 @@ fn pruning_stop_markers_spares_one_still_being_written() {
     let stops = session_directory(&state.0, "socket", "session").join("stops");
     mark_stopped(&state.0, "socket", "session", &turn("prompt-3"), 30);
     fs::write(stops.join("in-flight.next"), "30").unwrap();
-    observe_prompt(&state.0, "socket", "session", &turn("prompt-4"), None, 30);
+    observe_prompt(
+        &state.0,
+        "socket",
+        "session",
+        &turn("prompt-4"),
+        None,
+        PromptFacts {
+            notified: &[],
+            delivery: false,
+            opens_turn: false,
+        },
+        30,
+    );
     assert!(
         stops.join("in-flight.next").exists(),
         "a marker still being written was deleted"
     );
+}
+
+#[test]
+fn only_running_work_the_claims_own_turn_started_holds_its_answer() {
+    let none = SettleFacts::default();
+    let relayed = claim(Armed::NoReply(NoReplyCase::Relayed), ClaimState::Open);
+    let earlier_work = StopFacts {
+        running_tasks: vec!["monitor-from-yesterday".into(), "dream-1".into()],
+        ..stop("prompt-1", "Hi, doing well.")
+    };
+    assert_eq!(
+        decide(&relayed, &earlier_work, &none),
+        Verdict::Settle(Settlement::Relay("Hi, doing well.".into()))
+    );
+    assert_eq!(
+        decide(&claim(reply_plan(), ClaimState::Open), &earlier_work, &none),
+        replied("@codex Hi, doing well.")
+    );
+    let ended = StopFacts {
+        started_tasks: vec!["task-1".into()],
+        ..stop("prompt-1", "Done already.")
+    };
+    assert_eq!(
+        decide(&relayed, &ended, &none),
+        Verdict::Settle(Settlement::Relay("Done already.".into()))
+    );
+    let woken = Claim {
+        awaits: vec!["task-1".into(), "task-2".into()],
+        ..claim(Armed::NoReply(NoReplyCase::Relayed), ClaimState::Open)
+    };
+    let one_left = StopFacts {
+        running_tasks: vec!["task-2".into(), "monitor-from-yesterday".into()],
+        ..stop("prompt-1", "One of two finished.")
+    };
+    assert_eq!(
+        decide(&woken, &one_left, &none),
+        Verdict::Leave(LeaveReason::Held)
+    );
+    assert_eq!(
+        decide(&woken, &stop("prompt-1", "Both finished."), &none),
+        Verdict::Settle(Settlement::Relay("Both finished.".into()))
+    );
+}
+
+fn notified(prompt: &str, task: &str, text: &str) -> StopFacts {
+    StopFacts {
+        notified_tasks: vec![task.to_owned()],
+        ..stop(prompt, text)
+    }
+}
+
+#[test]
+fn a_held_answer_settles_at_the_stop_of_the_turn_its_works_notice_reached() {
+    let state = StateDirectory::new();
+    observe(
+        &state,
+        "prompt-1",
+        Some(armed("attempt-1", "prompt-1", reply_plan())),
+    );
+    let log = std::cell::RefCell::new(Vec::new());
+    settle(
+        &state,
+        &started("prompt-1", "build-1", "Started the build."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    let held = &state.claims()[0];
+    assert_eq!(held.state, ClaimState::Left(LeaveReason::Held));
+    assert_eq!(held.awaits, ["build-1"]);
+    assert!(
+        stop_has_work(&state.0, "socket", "session", None, |_| None),
+        "a Stop of the session would start no worker to wake it"
+    );
+    let other = observe_prompt(
+        &state.0,
+        "socket",
+        "session",
+        &turn("monitor-event"),
+        None,
+        PromptFacts {
+            notified: &["monitor-from-yesterday".to_owned()],
+            delivery: false,
+            opens_turn: false,
+        },
+        30,
+    );
+    assert_eq!(
+        other.left_open.len(),
+        1,
+        "another task's notice hid the way back"
+    );
+    let woken = observe_prompt(
+        &state.0,
+        "socket",
+        "session",
+        &turn("build-ended"),
+        None,
+        PromptFacts {
+            notified: &["build-1".to_owned()],
+            delivery: false,
+            opens_turn: true,
+        },
+        40,
+    );
+    assert!(
+        woken.left_open.is_empty(),
+        "the turn that answers the delivery also showed its way back"
+    );
+    settle(
+        &state,
+        &notified("build-ended", "build-1", "The build passed."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    let log = log.into_inner();
+    assert_eq!(log.len(), 1, "the woken claim did not settle once");
+    assert_eq!(log[0].input["source"], "@codex The build passed.");
+    let claim = &state.claims()[0];
+    assert_eq!(
+        (claim.state, &claim.turn, claim.first_armed_at_ms),
+        (
+            ClaimState::Done(Done::Replied),
+            &turn("build-ended"),
+            Some(1)
+        ),
+        "a helper asked before the wake no longer kept the answer back"
+    );
+    assert_eq!(
+        claim.armed_at_ms, 40,
+        "the relay would look for an answer posted this turn from the Stop on, not from the turn's start"
+    );
+}
+
+#[test]
+fn one_notice_wakes_only_the_oldest_claim_held_on_its_task() {
+    let state = StateDirectory::new();
+    let log = std::cell::RefCell::new(Vec::new());
+    for (attempt, prompt, armed_at_ms) in
+        [("attempt-1", "prompt-1", 1), ("attempt-2", "prompt-2", 5)]
+    {
+        observe(
+            &state,
+            prompt,
+            Some(Claim {
+                armed_at_ms,
+                ..armed(attempt, prompt, reply_plan())
+            }),
+        );
+        settle(
+            &state,
+            &started(prompt, "agent-1", "Asked the agent."),
+            &mut ran(&log, Ok(json!({}))),
+        );
+    }
+    settle(
+        &state,
+        &notified("agent-done", "agent-1", "The agent reported."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    let log = log.into_inner();
+    assert_eq!(log.len(), 1, "one final message went to two deliveries");
+    assert_eq!(log[0].input["attempt_id"], "attempt-1");
+    let states: Vec<_> = state.claims().iter().map(|claim| claim.state).collect();
+    assert_eq!(
+        states,
+        [
+            ClaimState::Done(Done::Replied),
+            ClaimState::Left(LeaveReason::Held)
+        ]
+    );
+}
+
+const RECORDED: &str =
+    include_str!("../tests/fixtures/final-reply/claude-2.1.319-background-turns.jsonl");
+
+#[test]
+fn the_stop_reads_its_own_turn_of_a_recorded_transcript() {
+    let read = |prompt: &str| turn_tasks(RECORDED.as_bytes(), true, prompt);
+    let tasks = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+    assert_eq!(
+        read("prompt-start"),
+        TurnTasks {
+            started: Some(tasks(&["task-first"])),
+            notified: Vec::new()
+        }
+    );
+    assert_eq!(
+        read("prompt-busy"),
+        TurnTasks {
+            started: Some(Vec::new()),
+            notified: Vec::new()
+        },
+        "a notice Claude Code queued into a turn about something else counted"
+    );
+    assert_eq!(
+        read("prompt-wait"),
+        TurnTasks {
+            started: Some(tasks(&["task-second"])),
+            notified: Vec::new()
+        },
+        "the queue's own log of a later notice counted"
+    );
+    assert_eq!(
+        read("prompt-notice"),
+        TurnTasks {
+            started: Some(Vec::new()),
+            notified: tasks(&["task-second"])
+        }
+    );
+    assert_eq!(read("prompt-unknown").started, None);
+
+    // A tail that starts inside the turn may have lost one of its starts.
+    let lines: Vec<&str> = RECORDED.lines().collect();
+    let first = lines
+        .iter()
+        .position(|line| line.contains(r#""promptId":"prompt-wait""#))
+        .unwrap();
+    let from_inside = lines[first + 1..].join("\n");
+    assert_eq!(
+        turn_tasks(from_inside.as_bytes(), false, "prompt-wait").started,
+        None
+    );
+    let from_before = lines[first - 1..].join("\n");
+    assert_eq!(
+        turn_tasks(from_before.as_bytes(), false, "prompt-wait").started,
+        None,
+        "a tail with no earlier turn's record cannot show where this turn began"
+    );
+    let with_earlier = lines[first - 8..].join("\n");
+    assert!(
+        lines[first - 8..first]
+            .iter()
+            .any(|line| line.contains(r#""promptId":"prompt-busy""#))
+    );
+    assert_eq!(
+        turn_tasks(with_earlier.as_bytes(), false, "prompt-wait").started,
+        Some(tasks(&["task-second"]))
+    );
+
+    // From a real SendMessage that resumed a finished agent.
+    let resumed = json!({"type":"user","promptId":"prompt-resume","toolUseResult":
+        {"success":true,"message":"Resuming agent a56e6ad","resumedAgentId":"agent-resumed"}});
+    assert_eq!(
+        turn_tasks(resumed.to_string().as_bytes(), true, "prompt-resume").started,
+        Some(tasks(&["agent-resumed"]))
+    );
+}
+
+#[test]
+fn a_notice_is_about_the_task_its_opening_id_names() {
+    let recorded = RECORDED
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|record| record["promptId"] == "prompt-notice")
+        .unwrap();
+    let text = recorded["message"]["content"].as_str().unwrap();
+    assert_eq!(notice_task(text), Some("task-second"));
+    let quoting = text.replace(
+        "</task-notification>",
+        "<result>It waited on <task-id>task-first</task-id>.</result>\n</task-notification>",
+    );
+    assert_eq!(notice_task(&quoting), Some("task-second"));
+    assert_eq!(notice_task(&format!("\n{text}")), Some("task-second"));
+    assert_eq!(
+        notice_task("Please check <task-id>task-first</task-id>"),
+        None
+    );
+    assert_eq!(
+        notice_task("<task-notification>\n<summary><task-id>task-first</task-id></summary>"),
+        None
+    );
+}
+
+#[test]
+fn a_turn_split_by_another_turns_records_keeps_its_second_half_and_no_queued_notice() {
+    let lines: Vec<&str> = RECORDED.lines().collect();
+    let wait: Vec<usize> = (0..lines.len())
+        .filter(|&index| lines[index].contains(r#""promptId":"prompt-wait""#))
+        .collect();
+    let busy: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| {
+            line.contains(r#""promptId":"prompt-busy""#) || line.contains("queued_command")
+        })
+        .collect();
+    // The wait turn's prompt, then the busy turn's records with its queued
+    // notice, then the rest of the wait turn: its start, and a queued notice.
+    let queued = lines
+        .iter()
+        .find(|line| line.contains("queued_command"))
+        .unwrap();
+    let mut split = lines[..=wait[0]].to_vec();
+    split.extend(&busy);
+    split.extend(&lines[wait[0] + 1..=wait[wait.len() - 1]]);
+    let second_half = queued.replace("task-first", "task-third");
+    split.push(&second_half);
+    let read = turn_tasks(split.join("\n").as_bytes(), true, "prompt-wait");
+    assert_eq!(read.started, Some(vec!["task-second".to_owned()]));
+    assert!(
+        read.notified.is_empty(),
+        "a queued notice counted: {:?}",
+        read.notified
+    );
+}
+
+#[test]
+fn a_wake_with_no_record_of_its_turn_looks_for_an_earlier_answer_from_the_stop_only() {
+    let state = StateDirectory::new();
+    observe(
+        &state,
+        "prompt-1",
+        Some(armed("attempt-1", "prompt-1", reply_plan())),
+    );
+    let log = std::cell::RefCell::new(Vec::new());
+    settle(
+        &state,
+        &started("prompt-1", "build-1", "Started the build."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    // No prompt hook recorded the notice turn, as when it missed the lock.
+    settle(
+        &state,
+        &notified("build-ended", "build-1", "The build passed."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    let claim = &state.claims()[0];
+    assert_eq!(claim.state, ClaimState::Done(Done::Replied));
+    assert_eq!(
+        claim.armed_at_ms, 20,
+        "the relay would take any post since the first turn as this answer"
+    );
+}
+
+#[test]
+fn only_a_few_recent_turns_are_recorded_and_none_once_nothing_is_live() {
+    let state = StateDirectory::new();
+    observe(
+        &state,
+        "prompt-1",
+        Some(armed("attempt-1", "prompt-1", reply_plan())),
+    );
+    let log = std::cell::RefCell::new(Vec::new());
+    settle(
+        &state,
+        &started("prompt-1", "build-1", "Started the build."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    let turns = || {
+        fs::read_dir(session_directory(&state.0, "socket", "session").join("turns"))
+            .map_or(0, |entries| entries.count())
+    };
+    for index in 0..20 {
+        observe_prompt(
+            &state.0,
+            "socket",
+            "session",
+            &turn(&format!("typed-{index}")),
+            None,
+            PromptFacts::default(),
+            30 + index,
+        );
+    }
+    assert!(turns() <= RECENT_TURNS, "{} turn records kept", turns());
+    settle(
+        &state,
+        &notified("build-ended", "build-1", "The build passed."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    observe_prompt(
+        &state.0,
+        "socket",
+        "session",
+        &turn("after"),
+        None,
+        PromptFacts::default(),
+        60,
+    );
+    assert_eq!(turns(), 0, "turn records outlived every live claim");
+}
+
+#[test]
+fn the_stop_hook_finds_a_held_tasks_notice_or_says_it_cannot_tell() {
+    let state = StateDirectory::new();
+    let path = state.0.join("transcript.jsonl");
+    let tasks = vec!["task-first".to_owned()];
+    let notice = RECORDED
+        .lines()
+        .find(|line| line.contains("queued_command"))
+        .unwrap();
+    // The notice straddles the first chunk boundary from the end.
+    let mut bytes = vec![b' '; 3 * 1024 * 1024];
+    let at = bytes.len() - 1024 * 1024 - notice.len() / 2;
+    bytes[at..at + notice.len()].copy_from_slice(notice.as_bytes());
+    fs::write(&path, &bytes).unwrap();
+    let scan = |limit, budget| names_notice(&path, &tasks, limit, budget);
+    assert_eq!(scan(8 << 20, Duration::from_secs(5)), Some(true));
+    assert_eq!(
+        scan((1024 * 1024 - notice.len()) as u64, Duration::from_secs(5)),
+        Some(false)
+    );
+    assert_eq!(
+        names_notice(
+            &path,
+            &["task-other".to_owned()],
+            8 << 20,
+            Duration::from_secs(5)
+        ),
+        Some(false)
+    );
+    assert_eq!(
+        scan(8 << 20, Duration::ZERO),
+        None,
+        "a scan out of time claimed an answer"
+    );
+    assert_eq!(
+        names_notice(
+            &state.0.join("missing"),
+            &tasks,
+            8 << 20,
+            Duration::from_secs(5)
+        ),
+        None
+    );
+}
+
+#[test]
+fn only_a_notice_that_opens_its_turn_counts_as_opening_it() {
+    let state = StateDirectory::new();
+    let lines: Vec<&str> = RECORDED.lines().collect();
+    let upto = |prompt: &str, inclusive: bool| {
+        let at = lines
+            .iter()
+            .position(|line| line.contains(&format!(r#""promptId":"{prompt}""#)))
+            .unwrap();
+        let path = state.0.join(format!("{prompt}-{inclusive}.jsonl"));
+        fs::write(&path, lines[..at + usize::from(inclusive)].join("\n")).unwrap();
+        path
+    };
+    let record = |prompt: &str| -> Value {
+        lines
+            .iter()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|record| record["promptId"] == prompt)
+            .unwrap()
+    };
+    let notice = record("prompt-notice")["message"]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Before Claude Code writes the notice's own record, and after.
+    assert!(notice_opens_turn(
+        &upto("prompt-notice", false),
+        "prompt-notice",
+        &notice
+    ));
+    assert!(notice_opens_turn(
+        &upto("prompt-notice", true),
+        "prompt-notice",
+        &notice
+    ));
+    // The busy turn's queued notice comes after that turn's own records.
+    let busy_end = lines
+        .iter()
+        .position(|line| line.contains("queued_command"))
+        .unwrap();
+    let busy = state.0.join("busy.jsonl");
+    fs::write(&busy, lines[..busy_end].join("\n")).unwrap();
+    let queued: Value = serde_json::from_str(lines[busy_end]).unwrap();
+    let queued = queued["attachment"]["prompt"].as_str().unwrap();
+    assert!(!notice_opens_turn(&busy, "prompt-busy", queued));
+    assert!(!notice_opens_turn(
+        &state.0.join("missing"),
+        "prompt-notice",
+        &notice
+    ));
+    assert!(!notice_opens_turn(
+        &upto("prompt-notice", true),
+        "",
+        &notice
+    ));
+}
+
+#[test]
+fn a_notice_opens_its_turn_past_its_meta_companion_and_whatever_its_bytes() {
+    let state = StateDirectory::new();
+    let lines: Vec<&str> = RECORDED.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.contains(r#""promptId":"prompt-notice""#))
+        .unwrap();
+    let notice: Value = serde_json::from_str(lines[at]).unwrap();
+    let text = notice["message"]["content"].as_str().unwrap();
+    // The shape Claude Code 2.1.316 to 2.1.319 writes before some notices
+    // after a compaction: a meta companion record carrying the notice's id.
+    let companion = json!({"promptId":"prompt-notice","type":"user","isMeta":true,
+        "turnCompanion":true,"queueSkipAttachments":true,"message":{"role":"user",
+        "content":"<system-reminder>\n<tools-used-before-summary>Edit, Monitor</tools-used-before-summary>\n</system-reminder>\n"}});
+    let path = state.0.join("transcript.jsonl");
+    let mut records: Vec<String> = lines[..at].iter().map(|line| (*line).to_owned()).collect();
+    records.push(companion.to_string());
+    records.push(lines[at].to_owned());
+    fs::write(&path, records.join("\n")).unwrap();
+    assert!(
+        notice_opens_turn(&path, "prompt-notice", text),
+        "the meta companion read as another prompt of the turn"
+    );
+    assert!(
+        notice_opens_turn(&path, "prompt-notice", &format!("{text}\n")),
+        "a prompt that differs from its record only in bytes read as another prompt"
+    );
+    // A record of this turn before the notice that isn't the notice is proof
+    // against it.
+    let other = text.replace("task-second", "task-other");
+    assert!(!notice_opens_turn(&path, "prompt-notice", &other));
+}
+
+#[test]
+fn the_opening_proof_widens_past_a_tail_with_no_turn_record() {
+    let state = StateDirectory::new();
+    let lines: Vec<&str> = RECORDED.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.contains(r#""promptId":"prompt-notice""#))
+        .unwrap();
+    let notice: Value = serde_json::from_str(lines[at]).unwrap();
+    let text = notice["message"]["content"].as_str().unwrap();
+    // A long assistant record with no promptId after the earlier turn's.
+    let long = json!({"type":"assistant","message":{"role":"assistant",
+        "content":[{"type":"text","text":"x".repeat(200 * 1024)}]}});
+    let path = state.0.join("transcript.jsonl");
+    let mut records: Vec<String> = lines[..at].iter().map(|line| (*line).to_owned()).collect();
+    records.push(long.to_string());
+    fs::write(&path, records.join("\n")).unwrap();
+    assert!(notice_opens_turn(&path, "prompt-notice", text));
 }

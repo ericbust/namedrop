@@ -23,6 +23,7 @@ struct UserPromptSubmitInput {
     session_id: Option<String>,
     prompt_id: Option<String>,
     turn_id: Option<String>,
+    transcript_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -500,12 +501,34 @@ where
         )
     });
     let plan = claim.as_ref().map(|claim| claim.plan.clone());
+    let notified: Vec<String> = crate::final_reply::notice_task(&input.prompt)
+        .map(str::to_owned)
+        .into_iter()
+        .collect();
     let observed = crate::final_reply::observe_prompt(
         runtime.state_directory,
         runtime.session_socket_id,
         session,
         &turn,
         claim,
+        crate::final_reply::PromptFacts {
+            opens_turn: !notified.is_empty()
+                && crate::final_reply::has_claims(
+                    runtime.state_directory,
+                    runtime.session_socket_id,
+                    session,
+                )
+                && input
+                    .transcript_path
+                    .as_deref()
+                    .zip(input.prompt_id.as_deref())
+                    .filter(|(path, _)| path.is_absolute())
+                    .is_some_and(|(path, prompt_id)| {
+                        crate::final_reply::notice_opens_turn(path, prompt_id, &input.prompt)
+                    }),
+            notified: &notified,
+            delivery: delivery.is_some(),
+        },
         now_ms,
     );
     (
