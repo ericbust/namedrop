@@ -687,7 +687,7 @@ def running_executables():
     if sys.platform == 'darwin':
         library = darwin_library()
         # libproc has no path for some processes; those are skipped.
-        for path in filter(None, (darwin_path(library, pid) for pid in darwin_pids(library))):
+        for path in filter(None, (darwin_path(library, pid) for pid in all_pids())):
             with contextlib.suppress(OSError):
                 info = os.stat(path)
                 found.add((info.st_dev, info.st_ino))

@@ -94,6 +94,23 @@ def check_pruning(base, release):
         six_root = release('prune-six')
         six = activated(rt, six_root)
         assert retained(rt) == {four, five, six, held}, 'without a process list nothing is removed'
+        class ListingLibproc:
+            """libproc that lists processes but has no path for any."""
+            def proc_listallpids(self, buffer, size):
+                if buffer is not None:
+                    buffer[0] = 1
+                return 1
+            def proc_pidpath(self, pid, buffer, size):
+                return 0
+        platform, library = sys.platform, runtime.darwin_library
+        sys.platform, runtime.darwin_library = 'darwin', ListingLibproc
+        try:
+            runtime.prune_releases(rt, {six})
+            raise AssertionError('macOS pruned without a process list')
+        except RuntimeError:
+            assert retained(rt) == {four, five, six, held}, 'without a process list macOS removes nothing'
+        finally:
+            sys.platform, runtime.darwin_library = platform, library
     finally:
         runtime.all_pids = listing
     class FailingLibproc:
