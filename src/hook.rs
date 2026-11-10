@@ -569,7 +569,9 @@ where
     );
     (
         observed.armed.then_some(plan).flatten(),
-        crate::integration::left_open_guidance(&observed.left_open),
+        crate::integration::left_open_guidance(&observed.left_open, || {
+            crate::integration::inbox_line(runtime)
+        }),
     )
 }
 

@@ -836,8 +836,13 @@ else:
 
     /// The binary as a host runs it, against the script Herdr.
     fn command(&self) -> Command {
+        self.hosted(env!("CARGO_BIN_EXE_namedrop"))
+    }
+
+    /// `program` in the environment a host gives the binary.
+    fn hosted(&self, program: &str) -> Command {
         let root = &self.directory.root;
-        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = Command::new(program);
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -3498,6 +3503,45 @@ impl Space {
             })
             .collect()
     }
+
+    /// The attempts a `delivery inbox` line from a prompt prints, run through
+    /// a shell as the agent runs it. The line names this test process as its
+    /// executable, so the built binary stands in for that one word.
+    fn run_printed_inbox(&self, line: &str) -> Vec<String> {
+        let own = std::env::current_exe().and_then(fs::canonicalize).unwrap();
+        let rest = line
+            .strip_prefix(&format!("'{}' ", own.display()))
+            .unwrap_or_else(|| panic!("the line does not start with its executable: {line}"));
+        let output = self
+            .hosted("sh")
+            .args(["-c", &format!(r#""$0" {rest}"#)])
+            .arg(env!("CARGO_BIN_EXE_namedrop"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{line}: {output:?}");
+        let printed: Value = serde_json::from_slice(&output.stdout).unwrap();
+        printed["data"]["envelopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|envelope| {
+                envelope["control"]["attempt_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+}
+
+/// The line `context` gives for printing the deliveries it shows no line for:
+/// the one under the sentence that counts them.
+fn printed_inbox_line(context: &str) -> &str {
+    context
+        .lines()
+        .skip_while(|line| !line.contains(" still open, with no line here."))
+        .nth(1)
+        .unwrap_or_else(|| panic!("no line prints the rest: {context}"))
 }
 
 /// The attempts `context` shows a settling line for, in its order.
@@ -3533,11 +3577,10 @@ fn many_deliveries_left_open_stay_within_what_the_host_keeps_whole() {
             ),
             "{context}"
         );
-        let inbox = context
-            .lines()
-            .find(|line| line.contains(" delivery inbox --herdr-socket "))
-            .unwrap_or_else(|| panic!("no line prints the rest: {context}"));
-        assert!(inbox.contains("--herdr-pane 'pane-reviewer'"), "{inbox}");
+        let printed = space.run_printed_inbox(printed_inbox_line(context));
+        for attempt in &left[3..] {
+            assert!(printed.contains(attempt), "{attempt} is not in {printed:?}");
+        }
     };
 
     whole(&space.prompt(
@@ -3546,20 +3589,6 @@ fn many_deliveries_left_open_stay_within_what_the_host_keeps_whole() {
         ("prompt_id", "typed-turn"),
         "Where were we?",
     ));
-    let printed: Vec<String> = space
-        .inbox("pane-reviewer")
-        .iter()
-        .map(|envelope| {
-            envelope["control"]["attempt_id"]
-                .as_str()
-                .unwrap()
-                .to_owned()
-        })
-        .collect();
-    for attempt in &left[3..] {
-        assert!(printed.contains(attempt), "{attempt} is not in {printed:?}");
-    }
-
     dispatch::message(
         "send",
         json!({"request_id":"ask-new","source":"@reviewer Reply with the single word ping.",
@@ -3590,6 +3619,22 @@ fn many_deliveries_left_open_stay_within_what_the_host_keeps_whole() {
             "{line}"
         );
     }
+}
+
+/// A session that resumed in another pane is given the line for the pane its
+/// prompt came from. The pane its deliveries reached no longer holds it.
+#[test]
+fn the_line_that_prints_the_rest_names_the_pane_the_prompt_came_from() {
+    let space = Space::new();
+    space.asks_left_open(4);
+    let context = space.prompt(
+        "pane-moved",
+        "session-reviewer",
+        ("prompt_id", "typed-turn"),
+        "Where were we?",
+    );
+    let inbox = printed_inbox_line(&context);
+    assert!(inbox.contains(" --herdr-pane 'pane-moved' "), "{inbox}");
 }
 
 /// The pointer the pane holds for its latest delivery.
