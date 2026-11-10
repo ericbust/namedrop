@@ -836,8 +836,13 @@ else:
 
     /// The binary as a host runs it, against the script Herdr.
     fn command(&self) -> Command {
+        self.hosted(env!("CARGO_BIN_EXE_namedrop"))
+    }
+
+    /// `program` in the environment a host gives the binary.
+    fn hosted(&self, program: &str) -> Command {
         let root = &self.directory.root;
-        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = Command::new(program);
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -3394,6 +3399,57 @@ fn a_delivery_in_a_turn_a_notice_opened_shows_the_held_deliverys_line() {
     );
 }
 
+/// A draft ahead of that delivery keeps it explicit, so it arms no claim. The
+/// turn is still about the delivery: its prompt shows the held delivery's
+/// line, and the turn's final message never answers the held one.
+#[test]
+fn a_draft_and_a_delivery_in_a_turn_a_notice_opened_show_the_held_deliverys_line() {
+    let space = Space::new();
+    let first = space.held_on_first_task();
+    let attempt = first["control"]["attempt_id"].as_str().unwrap().to_owned();
+    let way_back = format!("Namedrop: delivery {attempt} from an earlier turn is still open");
+    let notice = recorded_turn("prompt-notice", "notice-turn");
+    let text = notice[0]["message"]["content"]
+        .as_str()
+        .unwrap()
+        .replace("task-second", "task-first");
+    let promised = space
+        .reviewer_prompt("notice-turn", &text)
+        .unwrap_or_default();
+    assert!(!promised.contains(&way_back), "{promised}");
+    let second = space.second_ask(&first);
+    let context = space
+        .reviewer_prompt(
+            "notice-turn",
+            &format!(
+                "A draft I had not sent. {}",
+                space.as_typed(&second.to_string())
+            ),
+        )
+        .unwrap();
+    assert!(
+        context.contains("already in this pane's input"),
+        "{context}"
+    );
+    assert_eq!(
+        space.claims().len(),
+        1,
+        "the drafted delivery armed a claim"
+    );
+    assert!(
+        context.contains(&way_back),
+        "the drafted delivery's prompt hid the held line: {context}"
+    );
+    space.append_transcript(&notice);
+    space.reviewer_stop("notice-turn", "ping", &[], &space.transcript());
+    assert!(
+        space.answers("pane-lead").is_empty(),
+        "the turn's final message answered the held delivery: {:?}",
+        space.answers("pane-lead")
+    );
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+}
+
 /// A turn whose first prompt the hook never recorded is still not opened by
 /// the notice queued into it: the transcript shows the turn began earlier, so
 /// the notice promises nothing and its prompt shows the held line.
@@ -3420,6 +3476,165 @@ fn a_queued_notice_in_a_turn_whose_first_prompt_went_unrecorded_promises_nothing
         "{:?}",
         space.answers("pane-lead")
     );
+}
+
+impl Space {
+    /// The attempts of `count` asks the reviewer's turns ended without
+    /// answering, oldest first. Each is settled as the agent going idle does,
+    /// so the next ask arrives.
+    fn asks_left_open(&self, count: usize) -> Vec<String> {
+        (0..count)
+            .map(|index| {
+                dispatch::message(
+                    "send",
+                    json!({"request_id":format!("left-{index}"),
+                           "source":"@reviewer Reply with the single word pong.",
+                           "author_kind":"agent_session"}),
+                    &self.runtime("pane-lead"),
+                )
+                .unwrap();
+                let ask = self.herdr.envelope_for("pane-reviewer");
+                let turn = format!("left-turn-{index}");
+                let turn = ("prompt_id", turn.as_str());
+                self.prompt("pane-reviewer", "session-reviewer", turn, &ask.to_string());
+                self.stop("session-reviewer", turn, "  ");
+                self.settle_attempt(&ask);
+                ask["control"]["attempt_id"].as_str().unwrap().to_owned()
+            })
+            .collect()
+    }
+
+    /// The attempts a `delivery inbox` line from a prompt prints, run through
+    /// a shell as the agent runs it. The line names this test process as its
+    /// executable, so the built binary stands in for that one word.
+    fn run_printed_inbox(&self, line: &str) -> Vec<String> {
+        let own = std::env::current_exe().and_then(fs::canonicalize).unwrap();
+        let rest = line
+            .strip_prefix(&format!("'{}' ", own.display()))
+            .unwrap_or_else(|| panic!("the line does not start with its executable: {line}"));
+        let output = self
+            .hosted("sh")
+            .args(["-c", &format!(r#""$0" {rest}"#)])
+            .arg(env!("CARGO_BIN_EXE_namedrop"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{line}: {output:?}");
+        let printed: Value = serde_json::from_slice(&output.stdout).unwrap();
+        printed["data"]["envelopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|envelope| {
+                envelope["control"]["attempt_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    }
+}
+
+/// The line `context` gives for printing the deliveries it shows no line for:
+/// the one under the sentence that counts them.
+fn printed_inbox_line(context: &str) -> &str {
+    context
+        .lines()
+        .skip_while(|line| !line.contains(" still open, with no line here."))
+        .nth(1)
+        .unwrap_or_else(|| panic!("no line prints the rest: {context}"))
+}
+
+/// The attempts `context` shows a settling line for, in its order.
+fn left_open_shown(context: &str) -> Vec<&str> {
+    context
+        .lines()
+        .filter_map(|line| {
+            let (attempt, _) = line
+                .strip_prefix("Namedrop: delivery ")?
+                .split_once(" from an earlier turn is still open")?;
+            Some(attempt)
+        })
+        .collect()
+}
+
+/// Claude Code keeps hook context whole only under 10,000 UTF-16 units. Every
+/// delivery left open has a line of some 500, so a prompt shows the oldest
+/// few, counts the rest and gives the line that prints them. A delivery's own
+/// settling lines always come through.
+#[test]
+fn many_deliveries_left_open_stay_within_what_the_host_keeps_whole() {
+    let space = Space::new();
+    let left = space.asks_left_open(24);
+    let distinct: std::collections::BTreeSet<_> = left.iter().collect();
+    assert_eq!(distinct.len(), 24, "{left:?}");
+    let whole = |context: &str| {
+        let size = context.encode_utf16().count();
+        assert!(size < 10_000, "{size} units: {context}");
+        assert_eq!(left_open_shown(context), left[..3], "{context}");
+        assert!(
+            context.contains(
+                "Namedrop: 21 more deliveries from earlier turns are still open, with no line here."
+            ),
+            "{context}"
+        );
+        let printed = space.run_printed_inbox(printed_inbox_line(context));
+        for attempt in &left[3..] {
+            assert!(printed.contains(attempt), "{attempt} is not in {printed:?}");
+        }
+    };
+
+    whole(&space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        ("prompt_id", "typed-turn"),
+        "Where were we?",
+    ));
+    dispatch::message(
+        "send",
+        json!({"request_id":"ask-new","source":"@reviewer Reply with the single word ping.",
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+    assert!(!left.iter().any(|left| left == attempt), "{attempt}");
+    let context = space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        ("prompt_id", "delivery-turn"),
+        &format!(
+            "A draft I had not sent. {}",
+            space.as_typed(&ask.to_string())
+        ),
+    );
+    whole(&context);
+    for token in ["reply", "complete.no-reply"] {
+        let line = context
+            .lines()
+            .find(|line| line.starts_with(&format!("{token}: ")))
+            .unwrap_or_else(|| panic!("the delivery's {token} line is gone: {context}"));
+        assert!(
+            line.contains(&format!(r#""attempt_id":"{attempt}""#)),
+            "{line}"
+        );
+    }
+}
+
+/// A session that resumed in another pane is given the line for the pane its
+/// prompt came from. The pane its deliveries reached no longer holds it.
+#[test]
+fn the_line_that_prints_the_rest_names_the_pane_the_prompt_came_from() {
+    let space = Space::new();
+    space.asks_left_open(4);
+    let context = space.prompt(
+        "pane-moved",
+        "session-reviewer",
+        ("prompt_id", "typed-turn"),
+        "Where were we?",
+    );
+    let inbox = printed_inbox_line(&context);
+    assert!(inbox.contains(" --herdr-pane 'pane-moved' "), "{inbox}");
 }
 
 /// The pointer the pane holds for its latest delivery.
