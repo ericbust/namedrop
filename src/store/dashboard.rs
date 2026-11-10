@@ -109,7 +109,8 @@ pub struct LegRow {
     pub acknowledged_at_ms: Option<i64>,
     pub disposition_kind: Option<String>,
     pub disposition_id: Option<String>,
-    /// Settled while its agent holds the answer for background work.
+    /// Settled while its agent holds the answer for background work, and
+    /// the person was not warned that the answer can't arrive.
     pub held: bool,
 }
 
@@ -208,6 +209,18 @@ const LATEST_ATTEMPT: &str = "a.rowid = (
      WHERE latest.session_socket_id = d.session_socket_id
        AND latest.worktree_id = d.worktree_id AND latest.delivery_id = d.delivery_id
      ORDER BY latest.created_at_ms DESC, latest.rowid DESC LIMIT 1)";
+
+/// Whether ND-DELIVERY-003 was ever raised for the leg's latest attempt,
+/// open or acknowledged.
+fn leg_warned_sql() -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM attention_items i
+                 WHERE i.session_socket_id = a.session_socket_id
+                   AND i.worktree_id = a.worktree_id
+                   AND i.attention_item_id = '{}' || a.attempt_id)",
+        super::missing_disposition::ITEM_ID_PREFIX
+    )
+}
 
 pub(crate) struct SubagentParentBinding {
     pub socket: String,
@@ -486,7 +499,7 @@ impl StateTransaction<'_> {
                    AND d.message_id IN (SELECT message_id FROM page_recipients)
              )
              SELECT r.message_id, r.address_id, d.state, ack.acknowledged_at_ms,
-                    {LEG_DISPOSITION_SQL}, a.attempt_id, a.agent_session_id
+                    {LEG_DISPOSITION_SQL}, a.attempt_id, a.agent_session_id, {warned}
              FROM page_recipients r
              LEFT JOIN page_deliveries d USING (session_socket_id, worktree_id, message_id, address_id)
              LEFT JOIN delivery_attempts a ON {LATEST_ATTEMPT}
@@ -495,6 +508,7 @@ impl StateTransaction<'_> {
              {answers}
              ORDER BY r.message_id, r.recipient_order",
             answers = leg_answer_joins_sql(),
+            warned = leg_warned_sql(),
         );
         let values = std::iter::once(ns[0].to_owned())
             .chain(std::iter::once(ns[1].to_owned()))
@@ -676,7 +690,9 @@ impl StateTransaction<'_> {
     }
 
     /// One leg from a row that selects its message, address, delivery state,
-    /// acknowledgement, disposition, then its latest attempt and session.
+    /// acknowledgement, disposition, then its latest attempt, its session and
+    /// whether it was warned about. A held answer shows as worked on until
+    /// the person is warned it can't arrive.
     fn leg_row(
         &self,
         namespace: &StateNamespace,
@@ -689,8 +705,10 @@ impl StateTransaction<'_> {
         let disposition_kind: Option<String> = row.get(4)?;
         let attempt = row.get::<_, Option<String>>(6)?;
         let session = row.get::<_, Option<String>>(7)?;
+        let warned: bool = row.get(8)?;
         let held = state == Some(DeliveryState::Settled)
             && disposition_kind.is_none()
+            && !warned
             && attempt.zip(session).is_some_and(|(attempt, session)| {
                 crate::final_reply::answer_held(
                     self.state_directory,
@@ -748,7 +766,7 @@ impl StateTransaction<'_> {
         let legs = self.rows(
             &format!(
                 "SELECT r.message_id, r.address_id, d.state, ack.acknowledged_at_ms,
-                        {LEG_DISPOSITION_SQL}, a.attempt_id, a.agent_session_id
+                        {LEG_DISPOSITION_SQL}, a.attempt_id, a.agent_session_id, {warned}
                  FROM message_recipients r
                  LEFT JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, message_id, address_id)
                  LEFT JOIN delivery_attempts a ON {LATEST_ATTEMPT}
@@ -759,6 +777,7 @@ impl StateTransaction<'_> {
                    AND r.message_id IN ({WINDOW_MESSAGE_IDS})
                  ORDER BY r.message_id, r.recipient_order",
                 answers = leg_answer_joins_sql(),
+                warned = leg_warned_sql(),
             ),
             windowed,
             |row| self.leg_row(namespace, row),

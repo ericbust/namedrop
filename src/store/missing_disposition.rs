@@ -1,6 +1,6 @@
 use super::*;
 
-const ITEM_ID_PREFIX: &str = "attention-agent-disposition-";
+pub(super) const ITEM_ID_PREFIX: &str = "attention-agent-disposition-";
 
 fn item_id(attempt: &crate::DeliveryAttemptId) -> crate::AttentionItemId {
     crate::AttentionItemId::new(format!("{ITEM_ID_PREFIX}{}", attempt.as_str()))
@@ -22,10 +22,10 @@ struct MissingDispositionFacts {
 }
 
 pub(super) enum RecipientSession {
-    /// The address is not routable.
+    /// The address is not routable, or its pane's session is not seen yet.
     Unknown,
-    /// The address is routable and its pane has no session now: the empty
-    /// session an agent's exit leaves.
+    /// The address is routable and its pane has no session now: its pane was
+    /// closed, or its agent exited and left the empty session.
     Ended,
     Observed(crate::AgentSessionId),
 }
@@ -254,6 +254,19 @@ impl StateTransaction<'_> {
         if !settled {
             return Ok(());
         }
+        self.judge_afresh(ns, attempt, by)
+    }
+
+    /// Judges a settled attempt again. A held answer's open warning is
+    /// withdrawn first, since why its session can't answer, or whether it
+    /// can, may have changed. A warning the person acknowledged, or one on
+    /// an answer not held, stays as it is.
+    fn judge_afresh(
+        &mut self,
+        ns: &StateNamespace,
+        attempt: &crate::DeliveryAttemptId,
+        by: &MutationAttribution,
+    ) -> Result<(), StoreError> {
         if self.missing_disposition_facts(ns, attempt)?.held {
             self.withdraw_open_warning(ns, attempt, by)?;
         }
@@ -292,10 +305,11 @@ impl StateTransaction<'_> {
         )
     }
 
-    /// Judges the settled attempts of `address` that nothing judged yet, once
-    /// its session changed or it was retired: an answer held for one of them
-    /// can no longer arrive.
-    pub(super) fn judge_unjudged_attempts(
+    /// Judges again the settled attempts of `address` the person has not
+    /// acknowledged, once its session changed, its pane closed or it was
+    /// retired: an answer held for one of them may no longer arrive, or may
+    /// again.
+    pub(super) fn judge_address_attempts(
         &mut self,
         ns: &StateNamespace,
         address: &PaneAddressId,
@@ -321,6 +335,7 @@ impl StateTransaction<'_> {
                        WHERE i.session_socket_id = a.session_socket_id
                          AND i.worktree_id = a.worktree_id
                          AND i.attention_item_id = ?4 || a.attempt_id
+                         AND i.resolved_at_ms IS NOT NULL
                    )
                  ORDER BY a.created_at_ms, a.rowid",
             )?;
@@ -337,7 +352,7 @@ impl StateTransaction<'_> {
                 .collect::<Result<Vec<_>, _>>()?
         };
         for attempt in attempts {
-            self.flag_missing_disposition(ns, &attempt, by)?;
+            self.judge_afresh(ns, &attempt, by)?;
         }
         Ok(())
     }
@@ -396,7 +411,9 @@ impl StateTransaction<'_> {
         };
         Ok(match routing.agent_session_id {
             Some(session) => RecipientSession::Observed(session),
-            None if self.latest_session_observation(ns, address)?.as_deref() == Some("") => {
+            None if routing.pane_binding_id.is_none()
+                || self.latest_session_observation(ns, address)?.as_deref() == Some("") =>
+            {
                 RecipientSession::Ended
             }
             None => RecipientSession::Unknown,

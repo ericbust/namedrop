@@ -1252,8 +1252,9 @@ impl StateTransaction<'_> {
         if pane_owner.as_deref() == Some(address_id.as_str()) {
             return Ok(());
         }
-        self.unbind_pane(namespace, address_id, attribution)?;
-        self.bind_pane(namespace, binding_id, address_id, pane_id, attribution)
+        self.release_pane_binding(namespace, address_id, attribution)?;
+        self.bind_pane(namespace, binding_id, address_id, pane_id, attribution)?;
+        self.judge_address_attempts(namespace, address_id, attribution)
     }
 
     pub fn unbind_pane(
@@ -1262,6 +1263,21 @@ impl StateTransaction<'_> {
         address_id: &PaneAddressId,
         attribution: &MutationAttribution,
     ) -> Result<(), StoreError> {
+        if self.release_pane_binding(namespace, address_id, attribution)? {
+            self.judge_address_attempts(namespace, address_id, attribution)?;
+        }
+        Ok(())
+    }
+
+    /// Ends the address's active binding, if it has one, and says whether it
+    /// did. The caller judges its attempts again once it has finished
+    /// changing the address.
+    fn release_pane_binding(
+        &mut self,
+        namespace: &StateNamespace,
+        address_id: &PaneAddressId,
+        attribution: &MutationAttribution,
+    ) -> Result<bool, StoreError> {
         operator::refuse_pane_mutation(address_id)?;
         let changed = self.transaction.execute(
             "UPDATE pane_bindings
@@ -1287,7 +1303,7 @@ impl StateTransaction<'_> {
                 attribution,
             )?;
         }
-        Ok(())
+        Ok(changed == 1)
     }
 
     pub fn observe_agent_session(
@@ -1358,7 +1374,7 @@ impl StateTransaction<'_> {
             attribution,
         )?;
         if changed {
-            self.judge_unjudged_attempts(namespace, address_id, attribution)?;
+            self.judge_address_attempts(namespace, address_id, attribution)?;
         }
         Ok(())
     }
@@ -2250,7 +2266,7 @@ impl StateTransaction<'_> {
                 "Pane Address retirement requires every queued delivery to be terminal or cancelled",
             ));
         }
-        self.unbind_pane(namespace, address_id, attribution)?;
+        self.release_pane_binding(namespace, address_id, attribution)?;
         let changed = self.transaction.execute(
             "UPDATE pane_addresses
              SET retired = 1, collaboration_disabled = 1
@@ -2274,7 +2290,7 @@ impl StateTransaction<'_> {
             TransitionKind::Retired,
             attribution,
         )?;
-        self.judge_unjudged_attempts(namespace, address_id, attribution)
+        self.judge_address_attempts(namespace, address_id, attribution)
     }
 
     /// Remove one Pane Address as a single human action: retirement performs
