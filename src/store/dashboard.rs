@@ -705,30 +705,89 @@ impl StateTransaction<'_> {
             .get::<_, Option<String>>(2)?
             .map(parse_delivery_state)
             .transpose()?;
+        let address_id: String = row.get(1)?;
         let disposition_kind: Option<String> = row.get(4)?;
         let attempt = row.get::<_, Option<String>>(6)?;
         let session = row.get::<_, Option<String>>(7)?;
         let warned: bool = row.get(8)?;
-        let held = state == Some(DeliveryState::Settled)
-            && disposition_kind.is_none()
-            && !warned
-            && attempt.zip(session).is_some_and(|(attempt, session)| {
-                crate::final_reply::answer_claim(
-                    self.state_directory,
-                    namespace,
-                    &crate::AgentSessionId::new(session),
-                    &crate::DeliveryAttemptId::new(attempt),
-                ) == crate::final_reply::AnswerClaim::Held
-            });
+        let held = match attempt.zip(session) {
+            Some((attempt, session))
+                if state == Some(DeliveryState::Settled)
+                    && disposition_kind.is_none()
+                    && !warned =>
+            {
+                self.answer_held(namespace, &address_id, &attempt, &session)?
+            }
+            _ => false,
+        };
         Ok(LegRow {
             message_id: row.get(0)?,
-            address_id: row.get(1)?,
+            address_id,
             state,
             acknowledged_at_ms: row.get(3)?,
             disposition_kind,
             disposition_id: row.get(5)?,
             held,
         })
+    }
+
+    /// Whether `session` holds its answer to `attempt`. An envoy's latest
+    /// attempt reflects its agent's attempt in the agent's own workspace,
+    /// where that claim, and any warning that it can't arrive, live.
+    fn answer_held(
+        &self,
+        namespace: &StateNamespace,
+        address: &str,
+        attempt: &str,
+        session: &str,
+    ) -> rusqlite::Result<bool> {
+        let agent_space: Option<String> = self
+            .transaction
+            .query_row(
+                "SELECT origin_space_id FROM space_envoys
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2 AND address_id = ?3",
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    address
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let reflected = agent_space.and_then(|space| {
+            let space = crate::SpaceId::new(space);
+            let attempt = attempt.strip_prefix(&super::bridge::bridged_id(&space, ""))?;
+            Some((
+                StateNamespace::new(namespace.session_socket_id.clone(), space),
+                attempt.to_owned(),
+            ))
+        });
+        let (namespace, attempt) = match reflected {
+            Some((agent, attempt)) => {
+                let warned: bool = self.transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM attention_items
+                     WHERE session_socket_id = ?1 AND worktree_id = ?2
+                       AND attention_item_id = ?3)",
+                    params![
+                        agent.session_socket_id,
+                        agent.space_id.as_str(),
+                        format!("{}{attempt}", super::missing_disposition::ITEM_ID_PREFIX)
+                    ],
+                    |row| row.get(0),
+                )?;
+                if warned {
+                    return Ok(false);
+                }
+                (agent, attempt)
+            }
+            None => (namespace.clone(), attempt.to_owned()),
+        };
+        Ok(crate::final_reply::answer_claim(
+            self.state_directory,
+            &namespace,
+            &crate::AgentSessionId::new(session),
+            &crate::DeliveryAttemptId::new(attempt),
+        ) == crate::final_reply::AnswerClaim::Held)
     }
 
     pub(crate) fn dashboard_rows(

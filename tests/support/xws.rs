@@ -643,6 +643,23 @@ impl Fixture {
         )
     }
 
+    /// A delivery typed into `pane` as the prompt of Codex turn `turn`.
+    pub fn delivered_in_turn(
+        &self,
+        workspace: &str,
+        pane: &str,
+        turn: &str,
+        envelope: &Value,
+    ) -> Option<Value> {
+        let prompt = self.as_typed(&envelope.to_string());
+        execute_user_prompt_submit_hook(
+            &json!({"hook_event_name":"UserPromptSubmit","prompt":prompt,
+                    "session_id":session(pane),"turn_id":turn})
+            .to_string(),
+            &self.runtime(workspace, pane),
+        )
+    }
+
     pub fn advance(&self, ms: u64) {
         self.clock.0.fetch_add(ms, Ordering::Relaxed);
     }
