@@ -1848,11 +1848,30 @@ fn a_stop_another_hook_blocked_settles_at_the_turns_next_stop() {
         space.dispositions()
     );
     assert_eq!(space.claims()[0]["state"], json!("open"));
+    let phase =
+        || namedrop::turn_phase::read(&space.directory.state, "socket-a", "session-reviewer");
+    // The turn goes on, so delivery must not take it for one between turns.
+    assert!(
+        matches!(
+            phase(),
+            Some(namedrop::turn_phase::TurnPhase::Prompted { .. })
+        ),
+        "{:?}",
+        phase()
+    );
 
     append(&[assistant("pong")]);
     let second = stop("pong", true);
     append(std::slice::from_ref(summary));
     second.wait();
+    assert!(
+        matches!(
+            phase(),
+            Some(namedrop::turn_phase::TurnPhase::Stopped { .. })
+        ),
+        "{:?}",
+        phase()
+    );
     assert_eq!(space.dispositions()[0][1], "reply");
     assert_eq!(space.answers("pane-lead"), ["pong"]);
     assert_eq!(space.claims()[0]["state"], json!({"done":"replied"}));

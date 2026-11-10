@@ -50,6 +50,8 @@ struct CapturedStop {
     socket: String,
     ended_at_ms: u64,
     transcript_end: Option<u64>,
+    /// Whether the session holds a claim this Stop may settle.
+    settles: bool,
 }
 
 fn deadline(milliseconds: u64) {
@@ -60,7 +62,8 @@ fn deadline(milliseconds: u64) {
 }
 
 /// Hands a Stop to the detached worker when the session holds a claim the
-/// prompt hook armed. A Stop with none has nothing to settle.
+/// prompt hook armed, and every Claude Code Stop, whose worker records the
+/// turn's end for delivery.
 pub fn run(state: &Path) {
     deadline(250);
     let ended_at_ms = SystemClock.now_unix_ms();
@@ -77,13 +80,14 @@ pub fn run(state: &Path) {
             .filter(|path| path.is_absolute())?;
         namedrop::final_reply::names_notice(path, tasks, TURN_SCAN_BYTES, NOTICE_SCAN_BUDGET)
     };
-    if !namedrop::final_reply::stop_has_work(
+    let settles = namedrop::final_reply::stop_has_work(
         state,
         &socket,
         &input.session_id,
         input.turn().as_ref(),
         names_notice,
-    ) {
+    );
+    if !settles && !input.is_claude() {
         return;
     }
     let transcript_end = input.transcript_path.as_ref().and_then(|path| {
@@ -93,7 +97,7 @@ pub fn run(state: &Path) {
         let metadata = fs::symlink_metadata(path).ok()?;
         metadata.is_file().then_some(metadata.len())
     });
-    if let Some(turn) = input.turn() {
+    if settles && let Some(turn) = input.turn() {
         namedrop::final_reply::mark_stopped(state, &socket, &input.session_id, &turn, ended_at_ms);
     }
     let captured = CapturedStop {
@@ -101,6 +105,7 @@ pub fn run(state: &Path) {
         socket,
         ended_at_ms,
         transcript_end,
+        settles,
     };
     let Ok(executable) = env::current_exe() else {
         return;
@@ -138,24 +143,26 @@ pub fn run_worker(state: &Path) {
     };
     // The warning gets its own time, so a busy store can't keep the worker alive.
     deadline(12_000);
-    let (at_deadline, socket, session, turn, ended_at_ms) = (
-        state.to_owned(),
-        captured.socket.clone(),
-        captured.input.session_id.clone(),
-        captured.input.turn(),
-        captured.ended_at_ms,
-    );
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(10));
-        namedrop::final_reply::warn_stop_timed_out(
-            &at_deadline,
-            &socket,
-            &session,
-            turn.as_ref(),
-            ended_at_ms,
+    if captured.settles {
+        let (at_deadline, socket, session, turn, ended_at_ms) = (
+            state.to_owned(),
+            captured.socket.clone(),
+            captured.input.session_id.clone(),
+            captured.input.turn(),
+            captured.ended_at_ms,
         );
-        std::process::exit(0);
-    });
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(10));
+            namedrop::final_reply::warn_stop_timed_out(
+                &at_deadline,
+                &socket,
+                &session,
+                turn.as_ref(),
+                ended_at_ms,
+            );
+            std::process::exit(0);
+        });
+    }
     if let (Some(_), Some(path), Some(from)) = (
         &captured.input.prompt_id,
         &captured.input.transcript_path,
@@ -164,6 +171,23 @@ pub fn run_worker(state: &Path) {
     {
         return;
     }
+    // Only now is the turn known to be over: a Stop another hook blocked
+    // continues it.
+    if captured.input.is_claude() {
+        namedrop::turn_phase::record(
+            state,
+            &captured.socket,
+            &captured.input.session_id,
+            namedrop::turn_phase::TurnEdge::Stop,
+            captured.ended_at_ms,
+        );
+    }
+    if captured.settles {
+        settle_stop(state, &captured);
+    }
+}
+
+fn settle_stop(state: &Path, captured: &CapturedStop) {
     let running_tasks: Vec<String> = captured
         .input
         .background_tasks
@@ -327,6 +351,11 @@ fn stop_identity_prefix(bytes: &[u8]) -> Option<StopInput> {
 }
 
 impl StopInput {
+    /// A Claude Code Stop carries a prompt id and no turn id.
+    fn is_claude(&self) -> bool {
+        self.prompt_id.is_some() && self.turn_id.is_none()
+    }
+
     fn turn(&self) -> Option<HostTurn> {
         HostTurn::from_ids(self.prompt_id.as_deref(), self.turn_id.as_deref())
     }

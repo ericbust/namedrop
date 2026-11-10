@@ -48,6 +48,7 @@ pub use shown_roster::forget_shown_roster;
 mod terminal;
 pub mod tour;
 mod transcript_usage;
+pub mod turn_phase;
 #[doc(hidden)]
 pub mod update_check;
 pub use terminal::{default_pane_type, detect_pane_type, execute_terminal, verify_inherited_pane};

@@ -119,6 +119,21 @@ where
     if input.hook_event_name != "UserPromptSubmit" {
         return None;
     }
+    // A Claude Code prompt carries a prompt id and no turn id. Recorded first,
+    // so delivery stops treating the session as between turns as early as it can.
+    if let (Some(session), Some(_), None) = (
+        input.session_id.as_deref().filter(|id| !id.is_empty()),
+        &input.prompt_id,
+        &input.turn_id,
+    ) {
+        crate::turn_phase::record(
+            runtime.state_directory,
+            runtime.session_socket_id,
+            session,
+            crate::turn_phase::TurnEdge::Prompt,
+            runtime.clock.now_unix_ms(),
+        );
+    }
     let reader = input
         .session_id
         .as_deref()
