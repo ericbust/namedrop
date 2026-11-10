@@ -777,16 +777,27 @@ fn a_delivery_that_shows_another_line_keeps_todays_commands() {
     );
 }
 
-/// One installed Stop hook the host started, and the descriptor whose end of
-/// file means the hook and any worker it detached have exited.
-struct RunningStop {
+/// One installed hook the host started, and the descriptor whose end of file
+/// means the hook and any worker it detached have exited.
+struct RunningHook {
     child: std::process::Child,
     done: std::os::unix::net::UnixStream,
 }
 
-impl RunningStop {
-    fn wait(mut self) {
+impl RunningHook {
+    /// What the hook printed, once the hook itself has exited. A worker it
+    /// detached may still run.
+    fn output(&mut self) -> String {
+        let mut output = String::new();
+        if let Some(mut stdout) = self.child.stdout.take() {
+            std::io::Read::read_to_string(&mut stdout, &mut output).unwrap();
+        }
         assert!(self.child.wait().unwrap().success());
+        output
+    }
+
+    fn wait(mut self) {
+        self.output();
         // macOS refuses a socket option with EINVAL once the peer has closed, and
         // then the read below returns end of file at once.
         if let Err(error) = self
@@ -798,7 +809,7 @@ impl RunningStop {
         assert_eq!(
             std::io::Read::read(&mut self.done, &mut [0]).unwrap(),
             0,
-            "the Stop worker outlived its deadline"
+            "the hook's worker outlived its deadline"
         );
     }
 }
@@ -877,18 +888,28 @@ else:
         self.start_installed_stop(session, prompt_id, text).wait();
     }
 
-    fn start_installed_stop(&self, session: &str, prompt_id: &str, text: &str) -> RunningStop {
+    fn start_installed_stop(&self, session: &str, prompt_id: &str, text: &str) -> RunningHook {
         self.start_installed_stop_with(json!({"hook_event_name":"Stop","session_id":session,
             "prompt_id":prompt_id,"last_assistant_message":text,"background_tasks":[]}))
     }
 
-    fn start_installed_stop_with(&self, payload: Value) -> RunningStop {
+    fn start_installed_stop_with(&self, payload: Value) -> RunningHook {
         self.start_installed_stop_in(self.command(), payload)
     }
 
     /// The Stop hook run from `command`, which a test may give the pane's
     /// workspace as Herdr does.
-    fn start_installed_stop_in(&self, mut command: Command, payload: Value) -> RunningStop {
+    fn start_installed_stop_in(&self, command: Command, payload: Value) -> RunningHook {
+        self.start_installed_hook_in(command, "stop", payload)
+    }
+
+    /// The installed `hook` run from `command` with the host's `payload`.
+    fn start_installed_hook_in(
+        &self,
+        mut command: Command,
+        hook: &str,
+        payload: Value,
+    ) -> RunningHook {
         use std::os::{fd::AsRawFd, unix::process::CommandExt};
         let (done, lifetime) = std::os::unix::net::UnixStream::pair().unwrap();
         let lifetime_fd = lifetime.as_raw_fd();
@@ -907,10 +928,10 @@ else:
         }
         let mut child = command
             .env("NAMEDROP_HERDR_TIMEOUT_MS", "250")
-            .args(["hook", "stop", "--state-directory"])
+            .args(["hook", hook, "--state-directory"])
             .arg(&self.directory.state)
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
@@ -921,7 +942,7 @@ else:
             .unwrap()
             .write_all(payload.to_string().as_bytes())
             .unwrap();
-        RunningStop { child, done }
+        RunningHook { child, done }
     }
 }
 
@@ -4433,4 +4454,173 @@ fn a_claude_stop_with_background_agents_running_takes_mail_queued_during_the_tur
     let typed = space.prompted_by_binary("pane-reviewer");
     assert_eq!(typed.len(), 1, "{typed:?}");
     assert_eq!(typed[0]["untrusted_body"], "Is the helper done?");
+}
+
+/// How Claude Code 2.1.322 records a prompt's end in the transcript: blocked
+/// by another plugin's hook, blocked by Namedrop's own, and a prompt that
+/// started its turn.
+const PROMPT_OUTCOMES: &str =
+    include_str!("fixtures/between-turns/claude-2.1.322-prompt-outcomes.jsonl");
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+impl Space {
+    fn reviewer_phase(&self) -> Option<namedrop::turn_phase::TurnPhase> {
+        namedrop::turn_phase::read(&self.directory.state, "socket-a", "session-reviewer")
+    }
+
+    fn reviewer_edge(&self, edge: namedrop::turn_phase::TurnEdge, at_ms: u64) {
+        namedrop::turn_phase::record(
+            &self.directory.state,
+            "socket-a",
+            "session-reviewer",
+            edge,
+            at_ms,
+        );
+    }
+
+    /// The installed prompt hook as Claude Code runs it in the reviewer's pane.
+    fn start_reviewer_prompt_in(&self, command: Command, prompt: &str) -> RunningHook {
+        self.append_transcript(&[]);
+        self.start_installed_hook_in(
+            command,
+            "user-prompt-submit",
+            json!({"hook_event_name":"UserPromptSubmit","session_id":"session-reviewer",
+                   "prompt_id":format!("prompt-{}", now_ms()),"prompt":prompt,
+                   "transcript_path":self.transcript()}),
+        )
+    }
+}
+
+fn between_turns(phase: Option<namedrop::turn_phase::TurnPhase>) -> bool {
+    matches!(phase, Some(namedrop::turn_phase::TurnPhase::Stopped { .. }))
+}
+
+/// A leading mention Namedrop sends is blocked as a prompt and starts no turn,
+/// so a session between turns, its background agents still running, keeps
+/// taking mail.
+#[test]
+fn a_mention_namedrop_sends_keeps_the_session_between_turns() {
+    let space = Space::new();
+    space.reviewer_edge(namedrop::turn_phase::TurnEdge::Stop, now_ms() - 1_000);
+    let mut command = space.command();
+    command.env("CLAUDE_CODE_SESSION_ID", "session-reviewer");
+    let mut hook = space.start_reviewer_prompt_in(command, "@lead Is the build green?");
+    let output: Value = serde_json::from_str(&hook.output()).unwrap();
+    assert_eq!(output["decision"], "block", "{output}");
+    hook.wait();
+    assert!(
+        between_turns(space.reviewer_phase()),
+        "{:?}",
+        space.reviewer_phase()
+    );
+}
+
+/// Another plugin's prompt hook blocked the prompt. Claude Code records the
+/// block in the transcript and starts no turn, so the session stays between
+/// turns; a prompt that starts its turn still ends that.
+#[test]
+fn a_prompt_another_hook_blocks_keeps_the_session_between_turns() {
+    let space = Space::new();
+    space.reviewer_edge(namedrop::turn_phase::TurnEdge::Stop, now_ms() - 1_000);
+    let outcomes: Vec<Value> = PROMPT_OUTCOMES
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let (blocked, started) = (&outcomes[0], &outcomes[2]);
+    space.append_transcript(std::slice::from_ref(started));
+
+    let mut hook = space.start_reviewer_prompt_in(space.command(), "Reply with the word no.");
+    hook.output();
+    // Claude Code writes how the prompt's hooks ended once they have all run.
+    space.append_transcript(std::slice::from_ref(blocked));
+    hook.wait();
+    assert!(
+        between_turns(space.reviewer_phase()),
+        "{:?}",
+        space.reviewer_phase()
+    );
+
+    let prompt_id = format!("started-{}", now_ms());
+    let mut hook = space.start_installed_hook_in(
+        space.command(),
+        "user-prompt-submit",
+        json!({"hook_event_name":"UserPromptSubmit","session_id":"session-reviewer",
+               "prompt_id":prompt_id,"prompt":"Run the tests.",
+               "transcript_path":space.transcript()}),
+    );
+    hook.output();
+    let mut record = started.clone();
+    record["promptId"] = json!(prompt_id);
+    space.append_transcript(&[record]);
+    hook.wait();
+    assert!(
+        matches!(
+            space.reviewer_phase(),
+            Some(namedrop::turn_phase::TurnPhase::Prompted { .. })
+        ),
+        "{:?}",
+        space.reviewer_phase()
+    );
+}
+
+/// The prompt hook records the turn's start before it asks Herdr anything, so
+/// a Herdr that cannot confirm the pane never leaves the last Stop newest and
+/// delivery never types into the running turn.
+#[test]
+fn a_prompt_whose_hook_cannot_check_its_pane_still_starts_the_turn() {
+    let space = Space::new();
+    space.reviewer_edge(namedrop::turn_phase::TurnEdge::Stop, now_ms() - 1_000);
+    let mut command = space.command();
+    // Herdr answers the pane check with no shell, so the pane is unverified.
+    command.env("HERDR_PANE_ID", "pane-reviewer");
+    space
+        .start_reviewer_prompt_in(command, "Run the tests.")
+        .wait();
+    assert!(
+        matches!(
+            space.reviewer_phase(),
+            Some(namedrop::turn_phase::TurnPhase::Prompted { .. })
+        ),
+        "{:?}",
+        space.reviewer_phase()
+    );
+}
+
+/// Claude Code records how its Stop hooks ended only once the slowest has
+/// run, and a slow one may still block and continue the turn. A Stop whose
+/// outcome is not known when the worker stops waiting leaves the turn running.
+#[test]
+fn a_stop_whose_other_hooks_outlast_the_wait_leaves_the_turn_running() {
+    let space = Space::new();
+    space.reviewer_edge(namedrop::turn_phase::TurnEdge::Prompt, now_ms() - 1_000);
+    let recorded: Vec<Value> =
+        include_str!("fixtures/final-reply/claude-2.1.319-blocked-stop.jsonl")
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+    space.append_transcript(&[]);
+    let mut stop = space.start_installed_stop_with(json!({"hook_event_name":"Stop",
+        "session_id":"session-reviewer","prompt_id":"reviewer-turn",
+        "transcript_path":space.transcript(),"last_assistant_message":"Started the helper.",
+        "background_tasks":[{"id":"helper","status":"running"}]}));
+    stop.output();
+    // Every hook but the slow one has run; the worker gives up waiting.
+    stop.wait();
+    assert!(
+        matches!(
+            space.reviewer_phase(),
+            Some(namedrop::turn_phase::TurnPhase::Prompted { .. })
+        ),
+        "{:?}",
+        space.reviewer_phase()
+    );
+    // The slow hook blocks, and the turn goes on.
+    space.append_transcript(&recorded[..2]);
+    assert!(!between_turns(space.reviewer_phase()));
 }
