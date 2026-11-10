@@ -2,6 +2,12 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.7.1] - 2026-11-10
+
+### Fixed
+
+- An agent that still owes answers to many messages from earlier turns is now shown the answer line for three of them, oldest first, then how many more are open and the `delivery inbox` line that prints them. Before, each one added its own line of about 500 characters to every turn, so around 20 of them pushed hook context past the 10,000 characters Claude Code keeps whole.
+
 ## [1.7.0] - 2026-11-09
 
 ### Changed
