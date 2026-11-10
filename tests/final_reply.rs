@@ -4419,6 +4419,61 @@ fn a_held_answer_to_the_person_shows_the_agents_words_at_once_as_a_note() {
     assert!(space.wire_message(&relay).get("progress_note").is_none());
 }
 
+/// A progress note is for the person. What an agent reads of the thread,
+/// the recap in a later delivery and the thread's context snapshot, leaves
+/// it out, and the real answer is there once it comes.
+#[test]
+fn agents_never_read_a_progress_note_and_do_read_the_answer() {
+    let space = Space::new();
+    let question = space.send_as_person("question", "@reviewer Run the build and report.", None);
+    let thread = question["thread_id"].as_str().unwrap().to_owned();
+    let question_id = question["message_id"].as_str().unwrap().to_owned();
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    space.stop_with(
+        "session-reviewer",
+        CLAUDE,
+        "Decision: wait for NOTE_SENTINEL.",
+        true,
+    );
+    assert_eq!(space.notes().len(), 1);
+
+    space.send_as_person(
+        "follow-up",
+        "@lead Anything @reviewer missed?",
+        Some(&question_id),
+    );
+    let recap =
+        space.herdr.envelope_for("pane-lead")["control"]["untrusted_channel_recap"].to_string();
+    assert!(recap.contains("Run the build and report."), "{recap}");
+    assert!(
+        !recap.contains("NOTE_SENTINEL"),
+        "the recap shows the note: {recap}"
+    );
+    let snapshots = space.rows(&format!(
+        "SELECT payload_json FROM thread_context_snapshots
+         WHERE thread_id = '{thread}' AND participant_address_id = 'address-lead'"
+    ));
+    assert_eq!(snapshots.len(), 1, "the lead got no thread snapshot");
+    assert!(
+        !snapshots[0][0].contains("NOTE_SENTINEL"),
+        "the thread snapshot shows the note: {snapshots:?}"
+    );
+
+    space.notice_stop("notice-turn", "background-1", &[], "ANSWER_SENTINEL");
+    assert_eq!(space.relayed().len(), 1);
+    space.send_as_person("again", "@lead Did @reviewer finish?", Some(&question_id));
+    let recap =
+        space.herdr.envelope_for("pane-lead")["control"]["untrusted_channel_recap"].to_string();
+    assert!(recap.contains("ANSWER_SENTINEL"), "{recap}");
+    assert!(!recap.contains("NOTE_SENTINEL"), "{recap}");
+}
+
 /// A turn that ends waiting on a helper shows the person its final message
 /// as a note too. Naming the helper in it sends the helper nothing.
 #[test]

@@ -14,6 +14,16 @@ pub(crate) fn is_progress_note(message_id: &str) -> bool {
         || message_id.starts_with("bridge:") && message_id.contains(&format!(":{NOTE_ID_PREFIX}"))
 }
 
+/// SQL true when the row `message` is a progress note, as `is_progress_note`
+/// says. Agents never read one: the person sees it, and the answer follows.
+pub(super) fn progress_note_sql(message: &str) -> String {
+    format!(
+        "({message}.message_id LIKE '{NOTE_ID_PREFIX}%'
+          OR ({message}.message_id LIKE 'bridge:%'
+              AND {message}.message_id LIKE '%:{NOTE_ID_PREFIX}%'))"
+    )
+}
+
 /// SQL for the grammar a message row reads as, with `message` as its table
 /// alias.
 ///

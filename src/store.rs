@@ -2674,6 +2674,7 @@ impl StateTransaction<'_> {
                  FROM collaboration_messages m
                  WHERE m.session_socket_id = ?1 AND m.worktree_id = ?2 AND m.message_id <> ?3
                    AND {} NOT IN ('terminal-relay/v1', 'terminal-result/v1', 'reminder/v1')
+                   AND NOT {}
                    AND (NOT EXISTS(SELECT 1 FROM mailbox_deliveries d
                             WHERE d.session_socket_id = m.session_socket_id AND d.worktree_id = m.worktree_id
                               AND d.message_id = m.message_id)
@@ -2696,7 +2697,8 @@ impl StateTransaction<'_> {
              ORDER BY (is_named AND nth <= 3) DESC, CASE WHEN is_named AND nth <= 3 THEN nth ELSE 0 END,
                       at DESC, turn DESC
              LIMIT 6",
-            terminal_relay::effective_grammar_sql("m")
+            terminal_relay::effective_grammar_sql("m"),
+            terminal_relay::progress_note_sql("m")
         ))?;
         let mut lines = statement
             .query_map(
@@ -4045,9 +4047,10 @@ impl StateTransaction<'_> {
             let mut statement = self.transaction.prepare(&format!(
                 "SELECT body FROM collaboration_messages m
                  WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3
-                   AND {} <> 'terminal-relay/v1'
+                   AND {} <> 'terminal-relay/v1' AND NOT {}
                  ORDER BY thread_order DESC LIMIT 20",
-                terminal_relay::effective_grammar_sql("m")
+                terminal_relay::effective_grammar_sql("m"),
+                terminal_relay::progress_note_sql("m")
             ))?;
             statement
                 .query_map(
