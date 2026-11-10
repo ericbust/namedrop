@@ -56,10 +56,9 @@ export type ReceiptCopy = {
   title?: string;
 };
 const done: ReceiptCopy = { label: "Done", icon: "done", tone: "muted" };
-// What a held answer's receipt and the agent's note from that turn both say.
-export const stillWorking = "Still working. Its answer will follow.";
+// What a held answer's receipt says, only while the answer is held.
 const answerHeld: ReceiptCopy = {
-  label: stillWorking,
+  label: "Still working. Its answer will follow.",
   icon: "working",
   tone: "working",
 };
@@ -200,9 +199,9 @@ const lostAnswer: Record<
   },
   ended: {
     what: "stopped before answering",
-    hint: "The agent's session ended before its work finished. If you resume that session, its answer can still arrive.",
+    hint: "The agent's session ended before its work finished. If that session comes back, the agent can still answer.",
     namedHint:
-      "Its session ended before its work finished. If you resume that session, its answer can still arrive.",
+      "Its session ended before its work finished. If that session comes back, the agent can still answer.",
   },
   unknown: {
     what: "can't answer this anymore",
@@ -563,6 +562,9 @@ export const disabledChannelCopy = {
 } satisfies Record<DisabledReason, string>;
 
 export const noRepliesCopy = "No replies yet";
+// A progress note's tag. It stays true after the answer arrives, or after
+// the person is told it never will.
+export const progressNoteCopy = "Progress update. Not the final answer.";
 export function repliesCopy(count: number): string {
   return `${count} ${count === 1 ? "reply" : "replies"}`;
 }

@@ -542,10 +542,13 @@ helper it asked still runs, and Namedrop holds its answer until then. That is
 ordinary work, so the receipt stays in the working tone and nothing goes to
 Needs you. When the person sent the message, the agent's words from that turn
 arrive in the thread as a progress note (`progress_note`). The note shows
-"Still working. Its answer will follow." above its body, in the
-terminal-provenance style, with the body in `--text-muted`. It is not a reply:
+"Progress update. Not the final answer." above its body, in the
+terminal-provenance style, with the body in `--text-muted`. The note stays
+after the answer arrives or is lost, so its label promises nothing; only the
+receipt, while `answer_held`, says the answer will follow. It is not a reply:
 reply counts, the receipt-hiding rule, and a request's answered check skip it,
-and a thread preview whose only message is a note reads "No replies yet".
+and a thread preview whose only message is a note reads "No replies yet" with
+the note's author and time.
 
 ### Report card
 
@@ -625,7 +628,7 @@ over the pane and absence hints:
 | --------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------- |
 | `retired`       | "@codex can't answer this anymore" | It was removed before its work finished. Ask another agent if you still need an answer.              |
 | `replaced`      | "@codex can't answer this anymore" | A new session took its place before its work finished. Ask again if you still need an answer.        |
-| `ended`         | "@codex stopped before answering"  | Its session ended before its work finished. If you resume that session, its answer can still arrive. |
+| `ended`         | "@codex stopped before answering"  | Its session ended before its work finished. If that session comes back, the agent can still answer.  |
 | any other value | "@codex can't answer this anymore" | Its session is gone. Ask again if you still need an answer.                                          |
 
 Without a named agent the title is "Can't answer this anymore" or "Stopped before

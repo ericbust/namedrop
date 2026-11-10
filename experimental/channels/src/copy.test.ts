@@ -892,9 +892,9 @@ test("an unanswered-request card whose held answer can't arrive says why in plai
     [
       "ended",
       "@codex stopped before answering",
-      "Its session ended before its work finished. If you resume that session, its answer can still arrive.",
+      "Its session ended before its work finished. If that session comes back, the agent can still answer.",
       "Stopped before answering",
-      "The agent's session ended before its work finished. If you resume that session, its answer can still arrive.",
+      "The agent's session ended before its work finished. If that session comes back, the agent can still answer.",
     ],
     [
       "unknown",

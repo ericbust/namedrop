@@ -4,8 +4,8 @@ pub(super) fn get(path: &str) -> Option<&'static [u8]> {
         "/assets/index-CVriXlim.css" => {
             Some(include_bytes!("channels/assets/index-CVriXlim.css").as_slice())
         }
-        "/assets/index-Ds2426rv.js" => {
-            Some(include_bytes!("channels/assets/index-Ds2426rv.js").as_slice())
+        "/assets/index-DcC-Hm77.js" => {
+            Some(include_bytes!("channels/assets/index-DcC-Hm77.js").as_slice())
         }
         "/index.html" => Some(include_bytes!("channels/index.html").as_slice()),
         _ => None,

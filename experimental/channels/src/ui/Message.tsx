@@ -14,12 +14,12 @@ import {
   type ParticipantCopy,
   participantCopy,
   pendingCopy,
+  progressNoteCopy,
   receiptCopy,
   repliesCopy,
   replyInThreadCopy,
   routeCopy,
   SHOWN_RECIPIENTS,
-  stillWorking,
 } from "../copy.ts";
 import type {
   AddressId,
@@ -621,7 +621,7 @@ function ReplyPreview({
       : reply.body.text;
     const at = time ? ` at ${time.label}` : "";
     label = reply.progressNote
-      ? `${replies}. Update from ${name}${at}. ${stillWorking} Open thread`
+      ? `${replies}. Update from ${name}${at}. Open thread`
       : `${replies}${count === 1 ? "" : ", latest"} from ${name}${at}. Open thread`;
     content = (
       <>
@@ -644,7 +644,7 @@ function ReplyPreview({
             </span>
           )}
           {reply.progressNote && (
-            <span className="progress-note">{stillWorking}</span>
+            <span className="progress-note">{progressNoteCopy}</span>
           )}
           {result && text === "" ? (
             <span className="rp-body no-output">No output</span>
@@ -805,7 +805,7 @@ export const Message = memo(
             </p>
           )}
           {message.progressNote && (
-            <p className="progress-note">{stillWorking}</p>
+            <p className="progress-note">{progressNoteCopy}</p>
           )}
           {message.kind === "result_set" ? (
             <div className="report">

@@ -1041,75 +1041,106 @@ test("a reminder renders quietly without receipts or a reply action", async () =
   assert.doesNotMatch(markup, /class="(?:receipt|msg-head|msg-actions)/);
 });
 
-test("a progress note is labelled as an update while the agent works, and its thread preview counts no reply", async () => {
+test("a progress note's label promises nothing, and only a held receipt says the answer will follow", async () => {
   const { Message } = await load<typeof import("./ui/Message.tsx")>(
     "/src/ui/Message.tsx",
   );
   const fixture = JSON.parse((await fixtures())[3] ?? "null");
   const [question] = fixture.frame.messages;
   const codex = question.legs[0].to;
-  fixture.frame.messages = [
-    {
-      ...question,
-      legs: [
-        {
-          to: codex,
-          stage: { stage: "working", acked_at_ms: 1, answer_held: true },
-        },
-      ],
-    },
-    {
-      ...question,
-      message_id: "note",
-      in_reply_to: question.message_id,
-      at_ms: question.at_ms + 1,
-      author: codex,
-      kind: "reply",
-      progress_note: true,
-      body: { text: "The build is running.", truncated: false },
-      legs: [],
-    },
-  ];
-  const { channel } = space(fixture);
-  const directory = { members: channel.members, homes: new Map() };
-  const [ask, note] = [...channel.messages.values()];
-  assert.ok(ask && note);
-  const label = "Still working. Its answer will follow.";
-  const row = renderToStaticMarkup(
-    createElement(Message, { message: note, directory, recipients: [] }),
+  const note = {
+    ...question,
+    message_id: "note",
+    in_reply_to: question.message_id,
+    at_ms: question.at_ms + 1,
+    author: codex,
+    kind: "reply",
+    progress_note: true,
+    body: { text: "The build is running.", truncated: false },
+    legs: [],
+  };
+  const answer = {
+    ...note,
+    message_id: "answer",
+    at_ms: question.at_ms + 2,
+    progress_note: false,
+    body: { text: "The build passed.", truncated: false },
+  };
+  const label = "Progress update. Not the final answer.";
+  const promise = /Its answer will follow/;
+  function render(stage: unknown, answered: boolean) {
+    fixture.frame.messages = [
+      { ...question, legs: [{ to: codex, stage }] },
+      note,
+      ...(answered ? [answer] : []),
+    ];
+    const { channel } = space(fixture);
+    const directory = { members: channel.members, homes: new Map() };
+    const [ask, noted, latest] = [...channel.messages.values()];
+    assert.ok(ask && noted);
+    const row = renderToStaticMarkup(
+      createElement(Message, { message: noted, directory, recipients: [] }),
+    );
+    const grouped = renderToStaticMarkup(
+      createElement(Message, {
+        message: noted,
+        directory,
+        recipients: [],
+        grouped: true,
+        showRecipients: false,
+      }),
+    );
+    const parent = renderToStaticMarkup(
+      createElement(Message, {
+        message: ask,
+        directory,
+        recipients: [codex],
+        latestReply: latest ?? noted,
+        replyCount: answered ? 1 : 0,
+        onThread: () => {},
+      }),
+    );
+    const receipt = parent.match(/<li data-stage=[^>]*>.*?<\/li>/s)?.[0];
+    const preview = parent.match(
+      /<button[^>]*class="reply-preview[^"]*"[^>]*>.*?<\/button>/s,
+    )?.[0];
+    assert.ok(receipt && preview, parent);
+    return { row, grouped, receipt, preview };
+  }
+
+  const held = render(
+    { stage: "working", acked_at_ms: 1, answer_held: true },
+    false,
   );
-  assert.match(row, /data-progress-note=""/);
-  assert.match(row, new RegExp(`class="progress-note">${label}<`));
-  const grouped = renderToStaticMarkup(
-    createElement(Message, {
-      message: note,
-      directory,
-      recipients: [],
-      grouped: true,
-      showRecipients: false,
-    }),
+  assert.match(held.row, /data-progress-note=""/);
+  assert.match(held.row, new RegExp(`class="progress-note">${label}<`));
+  assert.ok(
+    held.grouped.includes(label),
+    "the label shows on a grouped row too",
   );
-  assert.ok(grouped.includes(label), "the label shows on a grouped row too");
-  const parent = renderToStaticMarkup(
-    createElement(Message, {
-      message: ask,
-      directory,
-      recipients: [codex],
-      latestReply: note,
-      replyCount: 0,
-      onThread: () => {},
-    }),
-  );
+  assert.doesNotMatch(held.row, promise);
+  assert.match(held.receipt, /data-tone="working"/);
+  assert.match(held.receipt, /Still working\. Its answer will follow\./);
   assert.match(
-    parent,
-    /<li data-stage="working" data-tone="working">(?:(?!<\/li>).)*Still working\. Its answer will follow\.<\/li>/s,
+    held.preview,
+    /aria-label="No replies yet\. Update from @codex at [^"]+\. Open thread"/,
   );
-  const preview = parent.match(
-    /<button[^>]*class="reply-preview[^"]*"[^>]*>.*?<\/button>/s,
-  )?.[0];
-  assert.ok(preview, parent);
-  assert.match(preview, /aria-label="No replies yet\. Update from @codex/);
-  assert.ok(preview.includes(`>${label}<`), preview);
-  assert.match(preview, /class="rp-count">No replies yet</);
-  assert.doesNotMatch(preview, /1 reply/);
+  assert.ok(held.preview.includes(`>${label}<`), held.preview);
+  assert.match(held.preview, /class="rp-count">No replies yet</);
+  assert.doesNotMatch(held.preview, promise);
+  assert.doesNotMatch(held.preview, /1 reply/);
+
+  const lost = render({ stage: "completed", kind: "settled" }, false);
+  assert.match(lost.row, new RegExp(`class="progress-note">${label}<`));
+  assert.ok(lost.preview.includes(`>${label}<`), lost.preview);
+  for (const markup of [lost.row, lost.receipt, lost.preview]) {
+    assert.doesNotMatch(markup, promise);
+  }
+
+  const answered = render({ stage: "replied", reply_id: "answer" }, true);
+  assert.match(answered.row, new RegExp(`class="progress-note">${label}<`));
+  for (const markup of [answered.row, answered.receipt, answered.preview]) {
+    assert.doesNotMatch(markup, promise);
+  }
+  assert.match(answered.preview, /aria-label="1 reply from @codex/);
 });
