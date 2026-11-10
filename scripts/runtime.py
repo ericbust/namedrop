@@ -28,6 +28,9 @@ exec "$namedrop_runtime/current/namedrop" "$@"
 '''
 
 
+RELEASE = re.compile(r'[0-9a-f]{64}')
+
+
 def contract(root):
     value = json.loads((root / 'runtime.json').read_text())
     require(isinstance(value, dict) and type(value.get('runtime_protocol')) is int and value['runtime_protocol'] == 1
@@ -67,8 +70,7 @@ def current(runtime):
         require(not link.exists(), 'Runtime current pointer is not a symbolic link.')
         return None
     target = Path(os.readlink(link))
-    require(len(target.parts) == 2 and target.parts[0] == 'releases'
-            and len(target.parts[1]) == 64 and all(c in '0123456789abcdef' for c in target.parts[1]),
+    require(len(target.parts) == 2 and target.parts[0] == 'releases' and RELEASE.fullmatch(target.parts[1]),
             'Runtime current pointer has an invalid target.')
     release = runtime / target
     require(not (runtime/'releases').is_symlink() and not release.is_symlink() and release.is_dir(), 'The active runtime is missing.')
@@ -230,11 +232,12 @@ def darwin_library():
 
 def darwin_pids(library):
     count = library.proc_listallpids(None, 0)
+    if count > 0:
+        buffer = (ctypes.c_int * (count + 256))()
+        count = library.proc_listallpids(buffer, ctypes.sizeof(buffer))
     if count <= 0:
         raise RuntimeError('Could not list processes to finish the update. Retry it; no agent was stopped.')
-    buffer = (ctypes.c_int * (count + 256))()
-    count = library.proc_listallpids(buffer, ctypes.sizeof(buffer))
-    return [pid for pid in buffer[:max(count, 0)] if pid > 0]
+    return [pid for pid in buffer[:count] if pid > 0]
 
 
 def darwin_path(library, pid):
@@ -567,9 +570,7 @@ def migration_record(runtime):
             'Invalid runtime migration record.')
     for name in ('previous', 'target'):
         target = Path(value[name])
-        require(len(target.parts) == 2 and target.parts[0] == 'releases'
-                and len(target.parts[1]) == 64
-                and all(c in '0123456789abcdef' for c in target.parts[1]),
+        require(len(target.parts) == 2 and target.parts[0] == 'releases' and RELEASE.fullmatch(target.parts[1]),
                 'Invalid runtime migration target.')
         release = runtime / target
         require(not release.is_symlink() and not (release / 'namedrop').is_symlink()
@@ -653,6 +654,110 @@ def restore(runtime, previous, incoming):
     switch(runtime, previous)
 
 
+def recorded_previous(runtime, selected):
+    """The release selected before `selected`, as activation.json records it.
+    Without a usable record, such as one from before 1.7.4, the newest other
+    release."""
+    try:
+        record = json.loads((runtime / 'activation.json').read_text())
+    except (OSError, ValueError):
+        record = None
+    name = None
+    if isinstance(record, dict) and 'selected' in record:
+        # A record that selected another release is from an activation that
+        # then moved current without writing one, so that release came before.
+        name = record.get('previous') if record['selected'] == selected else record['selected']
+    on_disk = releases_on_disk(runtime)
+    if isinstance(name, str) and name != selected and name in on_disk:
+        return name
+    others = [(info.st_mtime, name) for name, info in on_disk.items() if name != selected and info is not None]
+    return max(others)[1] if others else None
+
+
+# PROC_PID_INIT_INO: only the initial PID namespace sees every process.
+INIT_PID_NAMESPACE = 'pid:[4026531836]'
+
+
+def running_executables():
+    """(st_dev, st_ino) of the executable of every process that could run a
+    release. A process that exits is skipped; raises when processes can't be
+    listed, when a PID namespace hides some, or when a Namedrop process of this
+    user can't be inspected."""
+    found = set()
+    if sys.platform == 'darwin':
+        library = darwin_library()
+        # libproc has no path for some processes; those are skipped.
+        for path in filter(None, (darwin_path(library, pid) for pid in all_pids())):
+            with contextlib.suppress(OSError):
+                info = os.stat(path)
+                found.add((info.st_dev, info.st_ino))
+        return found
+    # Only a /proc that shows this process in the initial PID namespace lists
+    # every process. A /proc from another namespace has no /proc/self.
+    try:
+        namespace = os.readlink('/proc/self/ns/pid')
+    except OSError:
+        namespace = None
+    require(namespace == INIT_PID_NAMESPACE, 'This process runs in a PID namespace that hides other processes.')
+    for pid in all_pids():
+        try:
+            info = os.stat(f'/proc/{pid}/exe')
+        except FileNotFoundError:
+            continue  # exited, a zombie, or a kernel thread
+        except OSError:
+            # A user can't inspect its own processes that hold extra capabilities
+            # or another group, such as systemd --user. A process started from a
+            # release is named namedrop, so only one with that name could be one.
+            try:
+                ours = (os.stat(f'/proc/{pid}').st_uid == os.getuid()
+                        and Path(f'/proc/{pid}/comm').read_text() == 'namedrop\n')
+            except FileNotFoundError:
+                continue
+            require(not ours, f'Could not inspect Namedrop process {pid}.')
+            continue
+        found.add((info.st_dev, info.st_ino))
+    return found
+
+
+def releases_on_disk(runtime):
+    """Each release by name, with the lstat of its executable or None when it
+    has none. Only lowercase 64-hex directories in releases/ count."""
+    found = {}
+    for entry in (runtime / 'releases').iterdir():
+        if RELEASE.fullmatch(entry.name) and stat.S_ISDIR(entry.lstat().st_mode):
+            try:
+                found[entry.name] = (entry / 'namedrop').lstat()
+            except FileNotFoundError:
+                found[entry.name] = None
+    return found
+
+
+def prune_releases(runtime, keep):
+    """Delete every release outside `keep` that no process runs from. Only
+    lowercase 64-hex directories in releases/ count as releases. Each leaves
+    releases/ in one rename into .pruning/ before it is removed, so an
+    interrupted prune never leaves part of a release there, and the next prune
+    removes whatever .pruning/ still holds."""
+    if (runtime / 'migration.json').exists() or (runtime / 'migration.json').is_symlink():
+        return
+    trash = runtime / '.pruning'
+    owned_directory(trash)
+    for entry in trash.iterdir():
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+    releases = runtime / 'releases'
+    candidates = {name: info for name, info in releases_on_disk(runtime).items() if name not in keep}
+    if not candidates:
+        return
+    running = running_executables()
+    for name, info in sorted(candidates.items()):
+        if info is None or (info.st_dev, info.st_ino) not in running:
+            os.rename(releases / name, trash / name)
+            shutil.rmtree(trash / name)
+
+
 def activate_codex_plugin(payload, refresh):
     """Register the local package during explicit setup, then verify via activation.
 
@@ -708,6 +813,8 @@ def activate(root, args):
     with lock(runtime, 'activation.lock'):
         recover_migration(runtime)
         previous = current(runtime)
+        old = previous.name if previous is not None else None
+        old_previous = recorded_previous(runtime, old) if old is not None else None
         incoming = contract(root)
         live = previous is not None and live_compatible(contract(runtime / previous), incoming)
         if previous is not None:
@@ -724,6 +831,7 @@ def activate(root, args):
         digest = hashlib.sha256(contents).hexdigest()
         target = Path('releases') / digest
         release = runtime / target
+        before = old_previous if old == digest else old
         if release.exists():
             require(not release.is_symlink() and not (release/'namedrop').is_symlink()
                     and not (release/'runtime.json').is_symlink() and contract(release) == incoming
@@ -798,10 +906,19 @@ def activate(root, args):
             payload['data']['runtime'] = {'launcher': str(launcher), 'revision': digest,
                                          'live_update': live,
                                          'codex_migration_pending': not json.loads((runtime/'legacy-sessions.json').read_text())['codex_ready']}
-            write_owned(runtime / 'activation.json', json.dumps({'revision': digest}) + '\n', 0o600)
+            selected = current(runtime)
+            selected = selected.name if selected is not None else None
+            record = {'revision': digest, 'selected': selected,
+                      'previous': before if selected == digest else old_previous if selected == old else None}
+            write_owned(runtime / 'activation.json', json.dumps(record) + '\n', 0o600)
             result.stdout = json.dumps(payload) + '\n'
         print(result.stdout, end='')
         print(result.stderr, end='', file=sys.stderr)
+        if result.returncode == 0:
+            try:
+                prune_releases(runtime, {digest, before})
+            except Exception as error:
+                print(f'Could not remove older Namedrop releases: {str(error).rstrip(".")}. The next update tries again.', file=sys.stderr)
         return result.returncode
 
 
