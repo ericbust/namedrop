@@ -2854,8 +2854,16 @@ fn a_pointer_carrying_a_recap_authenticates_and_a_changed_recap_does_not() {
 /// `prompt-busy` gets that task's notice queued into it, `prompt-wait` puts
 /// `task-second` in the background and `prompt-notice` is that task's notice.
 fn recorded_turns() -> Vec<(String, Vec<Value>)> {
+    turns_of(include_str!(
+        "fixtures/final-reply/claude-2.1.319-background-turns.jsonl"
+    ))
+}
+
+/// The records of each turn in a recorded Claude Code session, keyed by the
+/// turn's `promptId`.
+fn turns_of(session: &str) -> Vec<(String, Vec<Value>)> {
     let mut turns: Vec<(String, Vec<Value>)> = vec![(String::new(), Vec::new())];
-    for line in include_str!("fixtures/final-reply/claude-2.1.319-background-turns.jsonl").lines() {
+    for line in session.lines() {
         let record: Value = serde_json::from_str(line).unwrap();
         if let Some(prompt) = record["promptId"].as_str()
             && turns.last().unwrap().0 != prompt
@@ -2869,7 +2877,11 @@ fn recorded_turns() -> Vec<(String, Vec<Value>)> {
 
 /// One recorded turn's records, as the turn `as_turn`.
 fn recorded_turn(name: &str, as_turn: &str) -> Vec<Value> {
-    let (_, records) = recorded_turns()
+    turn_of(recorded_turns(), name, as_turn)
+}
+
+fn turn_of(turns: Vec<(String, Vec<Value>)>, name: &str, as_turn: &str) -> Vec<Value> {
+    let (_, records) = turns
         .into_iter()
         .find(|(prompt, _)| prompt == name)
         .unwrap();
@@ -3056,6 +3068,309 @@ fn a_turn_with_its_own_delivery_leaves_the_held_one_held() {
         .map(|claim| claim["state"].clone())
         .collect();
     assert_eq!(states, [json!({"left":"held"}), json!({"done":"replied"})]);
+}
+
+/// A recorded Claude Code 2.1.322 session whose subagent stops while a
+/// background shell of its own still runs. `prompt-agent` starts the subagent
+/// `agent-first`, `prompt-interim` is the notice that it waits on its own
+/// work, `prompt-hand-back` is its final report, and `prompt-finished` is its
+/// last notice, which Claude Code wrote to the transcript only.
+const SUBAGENT_SESSION: &str =
+    include_str!("fixtures/final-reply/claude-2.1.322-subagent-hand-back.jsonl");
+
+/// One turn of the subagent session up to its end, without what Claude Code
+/// queued after it.
+fn subagent_turn(name: &str, as_turn: &str) -> Vec<Value> {
+    let mut records = turn_of(turns_of(SUBAGENT_SESSION), name, as_turn);
+    if let Some(end) = records
+        .iter()
+        .position(|record| record["subtype"] == "turn_duration")
+    {
+        records.truncate(end + 1);
+    }
+    records
+}
+
+/// `records` or a prompt, as subagent `agent`'s instead of `agent-first`'s.
+fn as_agent<T: serde::Serialize + serde::de::DeserializeOwned>(value: &T, agent: &str) -> T {
+    let text = serde_json::to_string(value)
+        .unwrap()
+        .replace("agent-first", agent);
+    serde_json::from_str(&text).unwrap()
+}
+
+/// The prompt Claude Code ran the prompt hook with, as its queue logged it:
+/// the first one queued in the subagent session that contains `mark`.
+fn subagent_prompt(mark: &str) -> String {
+    SUBAGENT_SESSION
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|record| record["operation"] == "enqueue")
+        .filter_map(|record| record["content"].as_str().map(str::to_owned))
+        .find(|content| content.contains(mark))
+        .unwrap()
+}
+
+impl Space {
+    /// The reviewer's delivery turn that ends while the subagent it started,
+    /// `agent-first`, still runs. Then Claude Code's notice that the subagent
+    /// stopped with a shell of its own running opens a turn, and that turn
+    /// ends with a status line while the shell still runs.
+    fn held_through_an_interim_notice(&self) -> String {
+        let ask = self.armed_ask();
+        let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+        self.append_transcript(&subagent_turn("prompt-agent", CLAUDE.1));
+        self.reviewer_stop(
+            CLAUDE.1,
+            "I started the subagent.",
+            &["agent-first"],
+            &self.transcript(),
+        );
+        assert_eq!(self.claims()[0]["state"], json!({"left":"held"}));
+        let way_back = format!(
+            "Namedrop: delivery {attempt} from an earlier turn is still open; it waits on background task agent-first; to answer it"
+        );
+        let context = self
+            .reviewer_prompt(
+                "interim-turn",
+                &subagent_prompt("is waiting on its own background work"),
+            )
+            .unwrap_or_default();
+        assert!(
+            context.contains(&way_back),
+            "the interim notice hid the way back, or said the task ended: {context}"
+        );
+        self.append_transcript(&subagent_turn("prompt-interim", "interim-turn"));
+        self.reviewer_stop(
+            "interim-turn",
+            "The subagent is still waiting for its command.",
+            &["shell-own"],
+            &self.transcript(),
+        );
+        assert!(
+            self.answers("pane-lead").is_empty(),
+            "the status line of the turn an interim notice opened answered the delivery: {:?}",
+            self.answers("pane-lead")
+        );
+        assert!(self.dispositions().is_empty(), "{:?}", self.dispositions());
+        assert_eq!(self.claims()[0]["state"], json!({"left":"held"}));
+        way_back
+    }
+}
+
+/// Claude Code tells a session that its subagent stopped while background work
+/// of the subagent's own still runs, in a notice it marks as possibly interim.
+/// The subagent has not finished, so the delivery held on it stays held. Its
+/// final report comes as a hand-back, and that turn's final message answers
+/// the delivery, once.
+#[test]
+fn a_notice_that_a_subagent_only_paused_keeps_the_delivery_held_until_its_hand_back() {
+    let space = Space::new();
+    space.held_through_an_interim_notice();
+    let context = space
+        .reviewer_prompt("hand-back-turn", &subagent_prompt("[Subagent hand-back]"))
+        .unwrap_or_default();
+    assert!(
+        !context.contains("from an earlier turn is still open"),
+        "the turn that answers the delivery also showed its way back: {context}"
+    );
+    space.append_transcript(&subagent_turn("prompt-hand-back", "hand-back-turn"));
+    space.reviewer_stop(
+        "hand-back-turn",
+        "The command printed sub-ok.",
+        &[],
+        &space.transcript(),
+    );
+    assert_eq!(space.answers("pane-lead"), ["The command printed sub-ok."]);
+    assert_eq!(space.claims()[0]["state"], json!({"done":"replied"}));
+
+    // A later notice of the same subagent, in a turn of its own, answers nothing.
+    let finished = subagent_turn("prompt-finished", "finished-turn");
+    space.reviewer_prompt(
+        "finished-turn",
+        finished[1]["message"]["content"].as_str().unwrap(),
+    );
+    space.append_transcript(&finished);
+    space.reviewer_stop(
+        "finished-turn",
+        "Nothing more to add.",
+        &[],
+        &space.transcript(),
+    );
+    assert_eq!(space.answers("pane-lead"), ["The command printed sub-ok."]);
+}
+
+/// A subagent can pause while its session still writes the final message of
+/// the turn that started it. No prompt has carried the notice yet, and Claude
+/// Code's Stop no longer lists the subagent, only its shell. The notice is in
+/// the transcript's queue log, so the answer is held all the same.
+#[test]
+fn a_subagent_that_pauses_before_its_turns_stop_holds_the_answer() {
+    let space = Space::new();
+    space.armed_ask();
+    space.append_transcript(&subagent_turn("prompt-agent", CLAUDE.1));
+    let queued = SUBAGENT_SESSION
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|record| {
+            record["operation"] == "enqueue"
+                && record["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("is waiting on its own"))
+        })
+        .unwrap();
+    space.append_transcript(&[queued]);
+    space.reviewer_stop(
+        CLAUDE.1,
+        "I started the subagent and will report when it finishes.",
+        &["shell-own"],
+        &space.transcript(),
+    );
+    assert!(
+        space.answers("pane-lead").is_empty(),
+        "{:?}",
+        space.answers("pane-lead")
+    );
+    let claim = &space.claims()[0];
+    assert_eq!(claim["state"], json!({"left":"held"}));
+    assert_eq!(claim["awaits"], json!(["agent-first"]));
+
+    space.reviewer_prompt("hand-back-turn", &subagent_prompt("[Subagent hand-back]"));
+    space.append_transcript(&subagent_turn("prompt-hand-back", "hand-back-turn"));
+    space.reviewer_stop(
+        "hand-back-turn",
+        "The command printed sub-ok.",
+        &[],
+        &space.transcript(),
+    );
+    assert_eq!(space.answers("pane-lead"), ["The command printed sub-ok."]);
+}
+
+/// With two subagents, one paused and one that hands back, the hand-back's
+/// turn does not answer: the paused subagent has not reported, though Claude
+/// Code lists neither as running. The paused one's hand-back answers, once.
+#[test]
+fn a_paused_subagent_holds_the_answer_while_another_subagent_hands_back() {
+    let space = Space::new();
+    space.armed_ask();
+    let mut started = subagent_turn("prompt-agent", CLAUDE.1);
+    let launch = started
+        .iter()
+        .position(|record| record["toolUseResult"]["agentId"] == "agent-first")
+        .unwrap();
+    started.insert(launch + 1, as_agent(&started[launch], "agent-second"));
+    space.append_transcript(&started);
+    space.reviewer_stop(
+        CLAUDE.1,
+        "I started two subagents.",
+        &["agent-first", "agent-second"],
+        &space.transcript(),
+    );
+    assert_eq!(
+        space.claims()[0]["awaits"],
+        json!(["agent-first", "agent-second"])
+    );
+
+    space.reviewer_prompt(
+        "interim-turn",
+        &subagent_prompt("is waiting on its own background work"),
+    );
+    space.append_transcript(&subagent_turn("prompt-interim", "interim-turn"));
+    space.reviewer_stop(
+        "interim-turn",
+        "One subagent is waiting on its command.",
+        &["agent-second", "shell-own"],
+        &space.transcript(),
+    );
+
+    let hand_back = subagent_prompt("[Subagent hand-back]");
+    space.reviewer_prompt("second-turn", &as_agent(&hand_back, "agent-second"));
+    space.append_transcript(&as_agent(
+        &subagent_turn("prompt-hand-back", "second-turn"),
+        "agent-second",
+    ));
+    space.reviewer_stop(
+        "second-turn",
+        "One subagent reported; the other is still waiting.",
+        &["shell-own"],
+        &space.transcript(),
+    );
+    assert!(
+        space.answers("pane-lead").is_empty(),
+        "a status line answered while a paused subagent had not reported: {:?}",
+        space.answers("pane-lead")
+    );
+    let claim = &space.claims()[0];
+    assert_eq!(claim["state"], json!({"left":"held"}));
+    assert_eq!(claim["awaits"], json!(["agent-first"]));
+
+    space.reviewer_prompt("first-turn", &hand_back);
+    space.append_transcript(&subagent_turn("prompt-hand-back", "first-turn"));
+    space.reviewer_stop("first-turn", "Both reported.", &[], &space.transcript());
+    assert_eq!(space.answers("pane-lead"), ["Both reported."]);
+    assert_eq!(space.claims()[0]["state"], json!({"done":"replied"}));
+}
+
+/// The interim notice says the same task notifies again. When that notice
+/// carries no interim mark and opens a turn, as a task's notice does when its
+/// report is not handed back, that turn's final message answers the delivery,
+/// once.
+#[test]
+fn the_same_tasks_notice_without_the_interim_mark_answers_the_held_delivery_once() {
+    let space = Space::new();
+    let way_back = space.held_through_an_interim_notice();
+    // A second interim notice changes nothing.
+    let again = space
+        .reviewer_prompt(
+            "interim-again-turn",
+            &subagent_prompt("is waiting on its own background work"),
+        )
+        .unwrap_or_default();
+    assert!(again.contains(&way_back), "{again}");
+    space.append_transcript(&subagent_turn("prompt-interim", "interim-again-turn"));
+    space.reviewer_stop(
+        "interim-again-turn",
+        "Still waiting.",
+        &["shell-own"],
+        &space.transcript(),
+    );
+    assert!(
+        space.answers("pane-lead").is_empty(),
+        "{:?}",
+        space.answers("pane-lead")
+    );
+
+    let finished = subagent_turn("prompt-finished", "finished-turn");
+    let notice = finished[1]["message"]["content"].as_str().unwrap();
+    assert!(notice.contains("<task-id>agent-first</task-id>") && notice.contains("finished"));
+    let context = space
+        .reviewer_prompt("finished-turn", notice)
+        .unwrap_or_default();
+    assert!(
+        !context.contains("from an earlier turn is still open"),
+        "the turn that answers the delivery also showed its way back: {context}"
+    );
+    space.append_transcript(&finished);
+    space.reviewer_stop(
+        "finished-turn",
+        "The subagent finished: it printed sub-ok.",
+        &[],
+        &space.transcript(),
+    );
+    assert_eq!(
+        space.answers("pane-lead"),
+        ["The subagent finished: it printed sub-ok."]
+    );
+    assert_eq!(space.claims()[0]["state"], json!({"done":"replied"}));
+    let later = space
+        .reviewer_prompt("next-turn", "Anything else?")
+        .unwrap_or_default();
+    assert!(
+        !later.contains("from an earlier turn is still open"),
+        "{later}"
+    );
+    space.reviewer_stop("next-turn", "No.", &[], &space.transcript());
+    assert_eq!(space.answers("pane-lead").len(), 1);
 }
 
 /// A notice is about the task its opening `task-id` names. One quoted in its
