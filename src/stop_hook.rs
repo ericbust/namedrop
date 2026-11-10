@@ -181,6 +181,7 @@ pub fn run_worker(state: &Path) {
         started_tasks: turn.started.unwrap_or_else(|| running_tasks.clone()),
         notified_tasks: turn.notified,
         paused_tasks: turn.paused,
+        ended_tasks: turn.ended,
         running_tasks,
         text: captured
             .input

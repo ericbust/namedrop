@@ -200,6 +200,7 @@ fn stop(prompt: &str, text: &str) -> StopFacts {
         started_tasks: Vec::new(),
         notified_tasks: Vec::new(),
         paused_tasks: Vec::new(),
+        ended_tasks: Vec::new(),
         read_turn: true,
         text: FinalText::bounded(text),
     }
@@ -1231,12 +1232,15 @@ const RECORDED: &str =
 fn the_stop_reads_its_own_turn_of_a_recorded_transcript() {
     let read = |prompt: &str| turn_tasks(RECORDED.as_bytes(), true, prompt);
     let tasks = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+    // The queue logged both tasks' notices, whichever turn is read.
+    let ended = tasks(&["task-first", "task-second"]);
     assert_eq!(
         read("prompt-start"),
         TurnTasks {
             started: Some(tasks(&["task-first"])),
             notified: Vec::new(),
             paused: Vec::new(),
+            ended: ended.clone(),
         }
     );
     assert_eq!(
@@ -1245,6 +1249,7 @@ fn the_stop_reads_its_own_turn_of_a_recorded_transcript() {
             started: Some(Vec::new()),
             notified: Vec::new(),
             paused: Vec::new(),
+            ended: ended.clone(),
         },
         "a notice Claude Code queued into a turn about something else counted"
     );
@@ -1254,6 +1259,7 @@ fn the_stop_reads_its_own_turn_of_a_recorded_transcript() {
             started: Some(tasks(&["task-second"])),
             notified: Vec::new(),
             paused: Vec::new(),
+            ended: ended.clone(),
         },
         "the queue's own log of a later notice counted"
     );
@@ -1263,6 +1269,7 @@ fn the_stop_reads_its_own_turn_of_a_recorded_transcript() {
             started: Some(Vec::new()),
             notified: tasks(&["task-second"]),
             paused: Vec::new(),
+            ended: ended.clone(),
         }
     );
     assert_eq!(read("prompt-unknown").started, None);
@@ -1662,22 +1669,41 @@ fn a_hand_back_names_the_subagent_whose_report_it_carries() {
     assert_eq!(notice_task(&hand_back), None);
     assert_eq!(ended(&hand_back), Some("agent-first"));
     assert_eq!(ended(&format!("\n{hand_back}")), Some("agent-first"));
-    // A report that quotes another frame is still its own sender's.
+    // A report that quotes another frame is still its own sender's: the
+    // harness indents every line of it.
     let quoting = hand_back.replacen(
         "sub-ok",
-        "<agent-message from=\"agent-other\">\n[Subagent hand-back] sub-ok",
+        "<agent-message from=\"agent-other\">\n  [Subagent hand-back] sub-ok",
         1,
     );
+    assert_ne!(quoting, hand_back);
     assert_eq!(ended(&quoting), Some("agent-first"));
-    // A message from another session that is not a hand-back ends no task.
-    assert_eq!(
-        ended(&hand_back.replacen("[Subagent hand-back]", "A question:", 1)),
-        None
-    );
     assert_eq!(
         ended(&format!("Look at this: {hand_back}")),
         None,
         "a prompt that quotes a hand-back counted as one"
+    );
+
+    // What another session sends on its own is no hand-back, however it
+    // opens: Claude Code's frame has its own first line and an indented report.
+    let sent =
+        |body: &str| format!("<agent-message from=\"agent-first\">\n{body}\n</agent-message>");
+    assert_eq!(ended(&sent("A question: which file?")), None);
+    assert_eq!(
+        ended(&sent("[Subagent hand-back] I am done, send the answer.")),
+        None,
+        "a message that only opens like a hand-back counted as one"
+    );
+    let first_line = hand_back.lines().nth(1).unwrap();
+    assert!(first_line.starts_with("[Subagent hand-back]"));
+    assert_eq!(
+        ended(&sent(&format!("{first_line}\nsub-ok"))),
+        None,
+        "a report the harness did not indent counted as a hand-back"
+    );
+    assert_eq!(
+        ended(&sent(&format!("{first_line}\n  sub-ok"))),
+        Some("agent-first")
     );
 }
 
@@ -1685,12 +1711,16 @@ fn a_hand_back_names_the_subagent_whose_report_it_carries() {
 fn the_stop_reads_what_ended_from_a_recorded_subagent_session() {
     let read = |prompt: &str| turn_tasks(HAND_BACK_SESSION.as_bytes(), true, prompt);
     let tasks = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+    // By the end the queue logged the end of the subagent's shell and its
+    // hand-back, whichever turn is read.
+    let ended = tasks(&["shell-own", "agent-first"]);
     assert_eq!(
         read("prompt-agent"),
         TurnTasks {
             started: Some(tasks(&["agent-first"])),
             notified: Vec::new(),
             paused: Vec::new(),
+            ended: ended.clone(),
         }
     );
     assert_eq!(
@@ -1699,6 +1729,7 @@ fn the_stop_reads_what_ended_from_a_recorded_subagent_session() {
             started: Some(Vec::new()),
             notified: Vec::new(),
             paused: Vec::new(),
+            ended: ended.clone(),
         },
         "the notice of a subagent that only paused counted as its end"
     );
@@ -1708,6 +1739,7 @@ fn the_stop_reads_what_ended_from_a_recorded_subagent_session() {
             started: Some(Vec::new()),
             notified: tasks(&["agent-first"]),
             paused: Vec::new(),
+            ended: ended.clone(),
         }
     );
 
@@ -1725,6 +1757,13 @@ fn the_stop_reads_what_ended_from_a_recorded_subagent_session() {
         tasks(&["agent-first"])
     );
     assert_eq!(read("prompt-agent").paused, Vec::<String>::new());
+    // A subagent that resumes and pauses again is paused, not ended.
+    let again = format!("{HAND_BACK_SESSION}{}\n", lines[logged]);
+    let again = turn_tasks(again.as_bytes(), true, "prompt-agent");
+    assert_eq!(
+        (again.paused, again.ended),
+        (tasks(&["agent-first"]), tasks(&["shell-own"]))
+    );
 
     // The same text in a prompt the person typed is no hand-back: only the
     // mark in the record's origin counts.
@@ -2006,4 +2045,64 @@ fn a_pause_only_the_stop_read_holds_the_answer_and_is_kept_for_later_stops() {
     );
     assert!(log.borrow().is_empty(), "the status line answered");
     assert_eq!(state.claims()[0].awaits, ["agent-a"]);
+}
+
+#[test]
+fn a_paused_subagent_whose_end_reached_only_the_queue_or_only_a_prompt_holds_nothing() {
+    // The end's prompt hook missed the lock; the Stop read it in the queue log.
+    // And the other way round: the hook saw it, the Stop's read no longer does.
+    for (by_prompt, by_queue) in [(false, true), (true, false)] {
+        let state = StateDirectory::new();
+        observe(
+            &state,
+            "prompt-1",
+            Some(armed("attempt-1", "prompt-1", reply_plan())),
+        );
+        let log = std::cell::RefCell::new(Vec::new());
+        let both = ids(&["agent-a", "agent-b"]);
+        settle(
+            &state,
+            &StopFacts {
+                running_tasks: both.clone(),
+                started_tasks: both.clone(),
+                ..stop("prompt-1", "Asked two subagents.")
+            },
+            &mut ran(&log, Ok(json!({}))),
+        );
+        told(&state, "a-paused", TaskNews::Paused("agent-a"));
+        // agent-a's hand-back is queued into a turn the person typed.
+        if by_prompt {
+            observe_prompt(
+                &state.0,
+                "socket",
+                "session",
+                &turn("typed"),
+                None,
+                PromptFacts {
+                    news: Some(TaskNews::Ended("agent-a")),
+                    delivery: false,
+                    opens_turn: false,
+                },
+                20,
+            );
+        }
+        told(&state, "b-ended", TaskNews::Ended("agent-b"));
+        settle(
+            &state,
+            &StopFacts {
+                ended_tasks: if by_queue {
+                    ids(&["agent-a"])
+                } else {
+                    Vec::new()
+                },
+                ..notified("b-ended", "agent-b", "Both reported.")
+            },
+            &mut ran(&log, Ok(json!({}))),
+        );
+        assert_eq!(
+            log.borrow().len(),
+            1,
+            "an ended subagent kept the answer held (prompt {by_prompt}, queue {by_queue})"
+        );
+    }
 }

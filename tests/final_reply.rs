@@ -405,6 +405,7 @@ fn stop_facts(
         started_tasks: tasks,
         notified_tasks: Vec::new(),
         paused_tasks: Vec::new(),
+        ended_tasks: Vec::new(),
         read_turn: true,
         text: FinalText::bounded(text),
     }

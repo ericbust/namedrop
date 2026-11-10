@@ -253,6 +253,9 @@ pub struct TurnTasks {
     /// they only paused. Claude Code's queue logs every notice and hand-back
     /// as it arrives, also one that reaches no prompt before this Stop.
     pub paused: Vec<String>,
+    /// The tasks whose latest notice or hand-back in what was read, in any
+    /// turn, says they ended.
+    pub ended: Vec<String>,
 }
 
 /// Reads one turn from the end of a transcript. `whole` says the bytes start
@@ -275,14 +278,14 @@ pub fn turn_tasks(transcript: &[u8], whole: bool, prompt_id: &str) -> TurnTasks 
                 .filter(|record| record["operation"] == "enqueue")
                 .and_then(|record| record["content"].as_str())
                 .and_then(task_news);
-            match queued {
-                Some(TaskNews::Paused(task)) => {
-                    if !turn.paused.iter().any(|id| id == task) {
-                        turn.paused.push(task.to_owned());
-                    }
-                }
-                Some(TaskNews::Ended(task)) => turn.paused.retain(|id| id != task),
-                None => {}
+            let (latest, earlier, task) = match queued {
+                Some(TaskNews::Paused(task)) => (&mut turn.paused, &mut turn.ended, task),
+                Some(TaskNews::Ended(task)) => (&mut turn.ended, &mut turn.paused, task),
+                None => continue,
+            };
+            earlier.retain(|id| id != task);
+            if !latest.iter().any(|id| id == task) {
+                latest.push(task.to_owned());
             }
             continue;
         }
@@ -409,25 +412,33 @@ fn notice_is_interim(notice: &str) -> bool {
     ahead.contains(WAITING_SUMMARY) || ahead.contains(WAITING_NOTE)
 }
 
-/// How the frame of a subagent's final report begins, in the prompt that
-/// hands it back to the session that started the subagent.
-const HAND_BACK: &str = "[Subagent hand-back]";
+/// How Claude Code 2.1.322 frames a subagent's final report in the prompt
+/// that hands it back to the session that started the subagent: the frame's
+/// first line opens with these words, and every line of the report after it
+/// is indented.
+const HAND_BACK: &str = "[Subagent hand-back] The text below is the final report of a subagent this session delegated to.";
 
 /// The subagent whose final report a prompt hands back: the sender its frame
-/// opens with, never one the report quotes.
+/// opens with, never one the report quotes. Only the exact frame counts. A
+/// message another session sent on its own has no such first line, and its
+/// lines are not indented. This reads text, so a sender that copies the whole
+/// frame passes: the Stop goes by the mark in the transcript record instead.
 fn hand_back_task(prompt: &str) -> Option<&str> {
-    let (id, report) = prompt
+    let (id, frame) = prompt
         .trim_start()
         .strip_prefix("<agent-message from=\"")?
-        .split_once("\">")?;
-    (!id.is_empty() && report.trim_start().starts_with(HAND_BACK)).then_some(id)
+        .split_once("\">\n")?;
+    let (first, report) = frame.split_once('\n')?;
+    let report = report.trim_end().strip_suffix("</agent-message>")?;
+    let framed = first.starts_with(HAND_BACK) && report.lines().all(|line| line.starts_with("  "));
+    (framed && !id.is_empty()).then_some(id)
 }
 
 /// What a Claude Code prompt says about one background task.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TaskNews<'a> {
     /// It ended: the prompt is its task notice, or hands back a subagent's
-    /// final report.
+    /// final report in Claude Code's own frame.
     Ended(&'a str),
     /// A subagent stopped while background work of its own still ran. It has
     /// not finished and reports again, though Claude Code no longer lists it
@@ -563,6 +574,8 @@ pub struct StopFacts {
     pub notified_tasks: Vec<String>,
     /// The subagents the transcript says only paused and have not ended.
     pub paused_tasks: Vec<String>,
+    /// The tasks the transcript says ended, in any turn.
+    pub ended_tasks: Vec<String>,
     /// The transcript showed where this turn began, so its tasks and notice
     /// are known.
     pub read_turn: bool,
@@ -579,7 +592,6 @@ impl StopFacts {
         let paused = claim
             .paused
             .iter()
-            .chain(&self.paused_tasks)
             .filter(|id| !self.notified_tasks.contains(id));
         let mut awaited: Vec<String> = Vec::new();
         for id in self.running_tasks.iter().chain(paused) {
@@ -1036,15 +1048,11 @@ impl Claim {
         self.set(ClaimState::Open, at_ms);
     }
 
-    /// Records that Claude Code said subagent `task` only paused, on a claim
-    /// that may wait for it: an open or woken claim's turn may have started
-    /// it, which only that turn's Stop knows.
+    /// Records that Claude Code said subagent `task` only paused. Whether
+    /// the claim waits for it is the Stop's to say: an open or woken claim's
+    /// turn may have started it.
     fn note_paused(&mut self, task: &str) {
-        let live = matches!(
-            self.state,
-            ClaimState::Open | ClaimState::Left(LeaveReason::Held)
-        );
-        if live && !self.paused.iter().any(|id| id == task) {
+        if !self.paused.iter().any(|id| id == task) {
             self.paused.push(task.to_owned());
         }
     }
@@ -1447,9 +1455,10 @@ pub fn settle_at_stop(
         );
         return;
     };
-    // The prompt hook records a pause too, unless it missed the lock or the
-    // notice reached no prompt before this Stop.
+    // The prompt hook records a pause and its end too, unless it missed the
+    // lock or the notice reached no prompt before this Stop.
     for claim in &mut claims.claims {
+        claim.paused.retain(|id| !stop.ended_tasks.contains(id));
         for task in &stop.paused_tasks {
             claim.note_paused(task);
         }
@@ -1520,7 +1529,6 @@ pub fn settle_at_stop(
             Verdict::Ignore => continue,
             Verdict::Leave(LeaveReason::Held) => {
                 claim.awaits = stop.awaited(claim);
-                claim.paused.retain(|id| claim.awaits.contains(id));
                 ClaimState::Left(LeaveReason::Held)
             }
             Verdict::Leave(reason) => ClaimState::Left(reason),
