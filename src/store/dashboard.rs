@@ -109,6 +109,8 @@ pub struct LegRow {
     pub acknowledged_at_ms: Option<i64>,
     pub disposition_kind: Option<String>,
     pub disposition_id: Option<String>,
+    /// Settled while its agent holds the answer for background work.
+    pub held: bool,
 }
 
 pub struct MailboxRow {
@@ -484,7 +486,7 @@ impl StateTransaction<'_> {
                    AND d.message_id IN (SELECT message_id FROM page_recipients)
              )
              SELECT r.message_id, r.address_id, d.state, ack.acknowledged_at_ms,
-                    {LEG_DISPOSITION_SQL}
+                    {LEG_DISPOSITION_SQL}, a.attempt_id, a.agent_session_id
              FROM page_recipients r
              LEFT JOIN page_deliveries d USING (session_socket_id, worktree_id, message_id, address_id)
              LEFT JOIN delivery_attempts a ON {LATEST_ATTEMPT}
@@ -498,17 +500,7 @@ impl StateTransaction<'_> {
             .chain(std::iter::once(ns[1].to_owned()))
             .chain(messages.iter().map(|message| message.message_id.clone()));
         let mut legs = self.rows(&sql, rusqlite::params_from_iter(values), |row| {
-            Ok(LegRow {
-                message_id: row.get(0)?,
-                address_id: row.get(1)?,
-                state: row
-                    .get::<_, Option<String>>(2)?
-                    .map(parse_delivery_state)
-                    .transpose()?,
-                acknowledged_at_ms: row.get(3)?,
-                disposition_kind: row.get(4)?,
-                disposition_id: row.get(5)?,
-            })
+            self.leg_row(namespace, row)
         })?;
         self.normalize_operator_legs(namespace, &mut legs)?;
         Ok(legs)
@@ -683,6 +675,41 @@ impl StateTransaction<'_> {
         Ok(())
     }
 
+    /// One leg from a row that selects its message, address, delivery state,
+    /// acknowledgement, disposition, then its latest attempt and session.
+    fn leg_row(
+        &self,
+        namespace: &StateNamespace,
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<LegRow> {
+        let state = row
+            .get::<_, Option<String>>(2)?
+            .map(parse_delivery_state)
+            .transpose()?;
+        let disposition_kind: Option<String> = row.get(4)?;
+        let attempt = row.get::<_, Option<String>>(6)?;
+        let session = row.get::<_, Option<String>>(7)?;
+        let held = state == Some(DeliveryState::Settled)
+            && disposition_kind.is_none()
+            && attempt.zip(session).is_some_and(|(attempt, session)| {
+                crate::final_reply::answer_held(
+                    self.state_directory,
+                    namespace,
+                    &crate::AgentSessionId::new(session),
+                    &crate::DeliveryAttemptId::new(attempt),
+                )
+            });
+        Ok(LegRow {
+            message_id: row.get(0)?,
+            address_id: row.get(1)?,
+            state,
+            acknowledged_at_ms: row.get(3)?,
+            disposition_kind,
+            disposition_id: row.get(5)?,
+            held,
+        })
+    }
+
     pub(crate) fn dashboard_rows(
         &self,
         namespace: &StateNamespace,
@@ -721,7 +748,7 @@ impl StateTransaction<'_> {
         let legs = self.rows(
             &format!(
                 "SELECT r.message_id, r.address_id, d.state, ack.acknowledged_at_ms,
-                        {LEG_DISPOSITION_SQL}
+                        {LEG_DISPOSITION_SQL}, a.attempt_id, a.agent_session_id
                  FROM message_recipients r
                  LEFT JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, message_id, address_id)
                  LEFT JOIN delivery_attempts a ON {LATEST_ATTEMPT}
@@ -734,19 +761,7 @@ impl StateTransaction<'_> {
                 answers = leg_answer_joins_sql(),
             ),
             windowed,
-            |row| {
-                Ok(LegRow {
-                    message_id: row.get(0)?,
-                    address_id: row.get(1)?,
-                    state: row
-                        .get::<_, Option<String>>(2)?
-                        .map(parse_delivery_state)
-                        .transpose()?,
-                    acknowledged_at_ms: row.get(3)?,
-                    disposition_kind: row.get(4)?,
-                    disposition_id: row.get(5)?,
-                })
-            },
+            |row| self.leg_row(namespace, row),
         )?;
         let mailbox = self.rows(
             &format!(

@@ -642,6 +642,8 @@ struct TurnSeen {
 struct Claims {
     directory: PathBuf,
     claims: Vec<Claim>,
+    /// Each claim's state when this call read the file.
+    read: Vec<(crate::DeliveryAttemptId, ClaimState)>,
     _lock: fs::File,
 }
 
@@ -704,6 +706,27 @@ fn read_claims(directory: &Path) -> Vec<Claim> {
     serde_json::from_slice(&bytes).unwrap_or_default()
 }
 
+/// Whether `session` left its answer to `attempt` held while its background
+/// work runs. It reads without the lock.
+pub(crate) fn answer_held(
+    state: &Path,
+    namespace: &crate::StateNamespace,
+    session: &crate::AgentSessionId,
+    attempt: &crate::DeliveryAttemptId,
+) -> bool {
+    read_claims(&session_directory(
+        state,
+        &namespace.session_socket_id,
+        session.as_str(),
+    ))
+    .iter()
+    .any(|claim| {
+        claim.attempt_id == *attempt
+            && claim.namespace == *namespace
+            && claim.state == ClaimState::Left(LeaveReason::Held)
+    })
+}
+
 impl Claims {
     fn lock(directory: PathBuf, wait: Duration) -> Option<Self> {
         fs::create_dir_all(&directory).ok()?;
@@ -722,11 +745,31 @@ impl Claims {
             }
             thread::sleep(Duration::from_millis(10));
         }
+        let claims = read_claims(&directory);
         Some(Self {
-            claims: read_claims(&directory),
+            read: claims
+                .iter()
+                .map(|claim| (claim.attempt_id.clone(), claim.state))
+                .collect(),
+            claims,
             directory,
             _lock: lock,
         })
+    }
+
+    /// The claims this call left unsettled, other than by a failed settle,
+    /// which warns on its own.
+    fn newly_left(&self) -> Vec<(crate::StateNamespace, crate::DeliveryAttemptId)> {
+        self.claims
+            .iter()
+            .filter(|claim| {
+                matches!(claim.state, ClaimState::Left(reason) if reason != LeaveReason::OperationFailed)
+                    && !self
+                        .read
+                        .contains(&(claim.attempt_id.clone(), claim.state))
+            })
+            .map(|claim| (claim.namespace.clone(), claim.attempt_id.clone()))
+            .collect()
     }
 
     /// The held claim that notices of `tasks` reaching `turn` wake: the
@@ -862,7 +905,9 @@ impl Claims {
         }
     }
 
-    fn save(mut self, now_ms: u64) {
+    /// Saves the claims and releases the lock. Returns the claims this call
+    /// left unsettled, once the file says so.
+    fn save(mut self, now_ms: u64) -> Vec<(crate::StateNamespace, crate::DeliveryAttemptId)> {
         self.claims
             .retain(|claim| claim.updated_at_ms.saturating_add(KEEP_MS) > now_ms);
         self.prune_turns(now_ms);
@@ -896,10 +941,33 @@ impl Claims {
                 file.write_all(&serde_json::to_vec_pretty(&self.claims)?)?;
                 file.sync_all()
             });
-        if written.is_ok() {
-            let _ = fs::rename(next, self.directory.join("claims.json"));
+        if written.is_ok() && fs::rename(next, self.directory.join("claims.json")).is_ok() {
+            self.newly_left()
+        } else {
+            Vec::new()
         }
     }
+}
+
+/// Brings the ND-DELIVERY-003 warning of each claim a call left unsettled in
+/// line with the claims it saved. The idle settle may judge the delivery
+/// before or after the Stop, from another process.
+fn judge_left(
+    state: &Path,
+    left: &[(crate::StateNamespace, crate::DeliveryAttemptId)],
+    now_ms: u64,
+) {
+    if left.is_empty() || !matches!(crate::StateStore::open_read_only(state), Ok(Some(_))) {
+        return;
+    }
+    let by = crate::MutationAttribution::new(crate::ActorKind::Plugin, "namedrop", now_ms);
+    let _ = crate::StateStore::open(state).and_then(|mut store| {
+        store.transaction(|transaction| {
+            left.iter().try_for_each(|(namespace, attempt)| {
+                transaction.judge_left_claim(namespace, attempt, &by)
+            })
+        })
+    });
 }
 
 impl Claim {
@@ -1168,7 +1236,7 @@ pub(crate) fn observe_prompt(
     }
     // The delivery whose work this notice finished is listed first.
     left_open.sort_by_key(|way_back| !way_back.finished);
-    claims.save(now_ms);
+    judge_left(state, &claims.save(now_ms), now_ms);
     Observed { armed, left_open }
 }
 
@@ -1387,7 +1455,7 @@ pub fn settle_at_stop(
         };
         claim.set(next, now_ms);
     }
-    claims.save(now_ms);
+    judge_left(state, &claims.save(now_ms), now_ms);
 }
 
 impl Claim {

@@ -71,7 +71,7 @@ def tracked_view(store, coordination_id):
 
 
 TRACKED_RED = ("coordination", "a tracked handoff's report reads as a red item until its delivery settles")
-HOLD_RED = ("agent_disposition", "a turn held past 30 s reads as an agent that didn't answer until its answer lands")
+HOLD_RED = ("agent_disposition", "an idle settle that beats the Stop holding the answer shows an agent that didn't answer until that Stop withdraws it")
 
 
 def tracked_done(view):

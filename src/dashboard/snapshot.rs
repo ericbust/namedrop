@@ -723,6 +723,9 @@ impl LegStage {
             DeliveryState::Acknowledged => Self::Working {
                 acked_at_ms: leg.acknowledged_at_ms.unwrap_or_default(),
             },
+            DeliveryState::Settled if leg.held => Self::Working {
+                acked_at_ms: leg.acknowledged_at_ms.unwrap_or_default(),
+            },
             DeliveryState::Settled => Self::Completed {
                 kind: "settled".to_owned(),
             },

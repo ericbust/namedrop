@@ -3352,6 +3352,31 @@ impl Space {
         )
     }
 
+    /// The stage Channels draws on the reviewer's arrow of the latest message
+    /// sent to it.
+    fn reviewer_leg(&self) -> String {
+        let rows = StateStore::open(&self.directory.state)
+            .unwrap()
+            .dashboard_rows(&namespace())
+            .unwrap();
+        let snapshot = serde_json::to_value(namedrop::dashboard::snapshot::build(
+            &rows,
+            Some("namedrop/dashboard"),
+            1,
+        ))
+        .unwrap();
+        snapshot["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["legs"].as_array().unwrap())
+            .rfind(|leg| leg["to"] == "address-reviewer")
+            .unwrap()["stage"]["stage"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
     /// The notice of `task-first` opens a turn whose Stop ends with `text`.
     fn woken_by_first_task(&self, text: &str) {
         let notice = recorded_turn("prompt-notice", "notice-turn");
@@ -3377,6 +3402,11 @@ fn a_held_answer_raises_no_warning_whichever_comes_first() {
         space.disposition_warnings_ever().is_empty(),
         "a settle after the Stop held the answer warned: {:?}",
         space.disposition_warnings_ever()
+    );
+    assert_eq!(
+        space.reviewer_leg(),
+        "working",
+        "Channels says the held answer ended"
     );
 
     let space = Space::new();
@@ -3469,6 +3499,7 @@ fn a_held_answer_whose_woken_turn_says_nothing_warns_as_unanswered() {
     assert!(space.disposition_warnings_ever().is_empty());
     space.woken_by_first_task("");
     assert_eq!(space.claims()[0]["state"], json!({"left":"no_final_text"}));
+    assert_eq!(space.reviewer_leg(), "completed");
     let warnings = space.unresolved_disposition_warnings();
     assert_eq!(warnings.len(), 1, "{warnings:?}");
     assert!(

@@ -292,7 +292,10 @@ impl StateStore {
         if !self.read_only {
             crate::work_counters::write_begin();
         }
-        let mut state_transaction = StateTransaction { transaction };
+        let mut state_transaction = StateTransaction {
+            transaction,
+            state_directory: &self.state_directory,
+        };
         let value = operation(&mut state_transaction)?;
         state_transaction.transaction.commit()?;
         Ok(value)
@@ -317,7 +320,10 @@ impl StateStore {
         let summary = purge_summary(&transaction, namespace)?;
         validate_purge(&summary, namespace, typed_space_id)?;
         {
-            let mut state = StateTransaction { transaction };
+            let mut state = StateTransaction {
+                transaction,
+                state_directory: &self.state_directory,
+            };
             state.cancel_purged_copies(namespace, attribution)?;
             delete_namespace_rows(&state.transaction, "main", namespace)?;
             state.transaction.commit()?;
@@ -340,6 +346,9 @@ impl StateStore {
 
 pub struct StateTransaction<'connection> {
     transaction: Transaction<'connection>,
+    /// Where the hooks keep what lives outside the database, such as the
+    /// final-reply claims.
+    state_directory: &'connection Path,
 }
 
 impl StateTransaction<'_> {
@@ -1318,6 +1327,10 @@ impl StateTransaction<'_> {
             attribution,
         )?;
         self.expire_context_grants(namespace, address_id, Some(agent_session_id))?;
+        let changed = self
+            .latest_session_observation(namespace, address_id)?
+            .as_deref()
+            != Some(agent_session_id.as_str());
         self.transaction.execute(
             "INSERT INTO agent_session_observations (
                 session_socket_id, worktree_id, observation_id, address_id,
@@ -1343,7 +1356,11 @@ impl StateTransaction<'_> {
                 TransitionKind::Occupied
             },
             attribution,
-        )
+        )?;
+        if changed {
+            self.judge_unjudged_attempts(namespace, address_id, attribution)?;
+        }
+        Ok(())
     }
 
     fn expire_context_grants(
@@ -2256,7 +2273,8 @@ impl StateTransaction<'_> {
             address_id.as_str(),
             TransitionKind::Retired,
             attribution,
-        )
+        )?;
+        self.judge_unjudged_attempts(namespace, address_id, attribution)
     }
 
     /// Remove one Pane Address as a single human action: retirement performs
@@ -6751,13 +6769,13 @@ impl StateTransaction<'_> {
             })?;
         let principal = self.principal(namespace, &address)?;
         let retired = retired || self.address_retired(&principal.ns, &principal.address_id)?;
-        if !retired
-            && !self
-                .recipient_session_now(&principal.ns, &principal.address_id)?
-                .replaced(&pinned_session)
+        if self
+            .recipient_session_now(&principal.ns, &principal.address_id)?
+            .gone(&pinned_session, retired)
+            .is_none()
         {
             return Err(StoreError::invalid_input(
-                "the recipient address is not retired and its session is unchanged; only its exact Agent Session can record this attempt's disposition",
+                "the recipient address is not retired and its session is unchanged and has not ended; only its exact Agent Session can record this attempt's disposition",
             ));
         }
         let acknowledged: bool = self.transaction.query_row(
