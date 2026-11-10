@@ -2,6 +2,12 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.7.5] - 2026-11-10
+
+### Fixed
+
+- A reminder's clock no longer quits when Doctor checks on it at the moment it starts. Before, the reminder then waited with no clock until your next Namedrop command, so it could arrive late.
+
 ## [1.7.4] - 2026-11-10
 
 ### Fixed
