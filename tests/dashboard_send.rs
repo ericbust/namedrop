@@ -2406,10 +2406,6 @@ else:
         }
 
         let f = Fixture::new();
-        f.clock.0.store(
-            namedrop::Clock::now_unix_ms(&namedrop::SystemClock),
-            Ordering::Relaxed,
-        );
         f.add_terminal("w1", "local", "pane-local");
         f.add_terminal("w2", "remote", "pane-remote");
         f.sql("UPDATE pane_addresses SET remote_commands_terminal_id='t-pane-remote' WHERE address_id='address-w2-remote'");
