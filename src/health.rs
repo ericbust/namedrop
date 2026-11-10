@@ -917,7 +917,7 @@ where
             AgentWait::Draft(_) => (
                 HealthSeverity::Notice,
                 format!(
-                    "@{alias}'s prompt box holds a draft you haven't sent, and Namedrop never types into your draft."
+                    "@{alias}'s prompt box holds a draft you haven't sent, and Namedrop never types into your draft. The message goes in within about 10 seconds after you send or clear the draft."
                 ),
                 HealthRepairKind::HumanDecision,
                 format!("Send or clear the draft in @{alias}'s prompt box."),
