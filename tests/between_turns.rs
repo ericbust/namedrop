@@ -6,12 +6,12 @@
 mod cleanup;
 
 use namedrop::{
-    ActorKind, AgentRuntime, AgentSessionId, Clock, DeliveryId, HealthSeverity,
+    ActorKind, AgentRuntime, AgentSessionId, Clock, DeliveryId, DrainReport, HealthSeverity,
     HerdrCommandExecutor, HerdrCommandOutput, IdGenerator, LifecycleRuntime, MessageDraft,
     MessageId, MessageRecipientDraft, MutationAttribution, PaneAddressDraft, PaneAddressId,
     PaneBindingId, PaneRoleId, PromptFailureKind, StateNamespace, StateStore, ThreadId,
     complete_capability_profile, diagnose_collaboration, drain_mailboxes,
-    execute_integration_operation, issue_registration_challenge,
+    execute_integration_operation, issue_registration_challenge, recheck_drafts,
     turn_phase::{TurnEdge, record},
 };
 use serde_json::json;
@@ -48,6 +48,7 @@ struct Recipient {
     status: Mutex<String>,
     screen: Mutex<Option<String>>,
     screen_reads: AtomicU64,
+    pane_lists: AtomicU64,
     prompts: Mutex<Vec<String>>,
 }
 
@@ -63,16 +64,19 @@ impl HerdrCommandExecutor for Recipient {
                 r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
                     .to_owned()
             }
-            ["pane", "list", "--workspace", "workspace-1"] => json!({"result": {"panes": [{
-            "pane_id": "pane-recipient",
-            "terminal_id": "terminal-recipient",
-            "tab_id": "tab-1",
-            "workspace_id": "workspace-1",
-            "agent": self.host,
-            "agent_session": {"value": SESSION},
-            "agent_status": self.status.lock().unwrap().clone(),
-            }]}})
-            .to_string(),
+            ["pane", "list", "--workspace", "workspace-1"] => {
+                self.pane_lists.fetch_add(1, Ordering::Relaxed);
+                json!({"result": {"panes": [{
+                "pane_id": "pane-recipient",
+                "terminal_id": "terminal-recipient",
+                "tab_id": "tab-1",
+                "workspace_id": "workspace-1",
+                "agent": self.host,
+                "agent_session": {"value": SESSION},
+                "agent_status": self.status.lock().unwrap().clone(),
+                }]}})
+                .to_string()
+            }
             [
                 "pane",
                 "read",
@@ -174,6 +178,7 @@ impl Fixture {
                     .to_owned(),
                 )),
                 screen_reads: AtomicU64::new(0),
+                pane_lists: AtomicU64::new(0),
                 prompts: Mutex::new(Vec::new()),
             },
             clock: TestClock::default(),
@@ -283,8 +288,27 @@ impl Fixture {
 
     /// The bodies one drain typed into the pane.
     fn drain(&self) -> Vec<String> {
-        drain_mailboxes(&self.runtime()).unwrap();
-        self.typed()
+        self.drain_report().1
+    }
+
+    /// One drain's report, and the bodies it typed into the pane.
+    fn drain_report(&self) -> (DrainReport, Vec<String>) {
+        let report = drain_mailboxes(&self.runtime()).unwrap();
+        (report, self.typed())
+    }
+
+    /// The mailbox worker's recheck of the boxes `held` names, and the bodies
+    /// it typed into the pane.
+    fn recheck(&self, held: &DrainReport) -> (DrainReport, Vec<String>) {
+        let report = recheck_drafts(
+            &LifecycleRuntime {
+                workspace_id: Some("workspace-1"),
+                ..self.runtime()
+            },
+            held.draft_held.clone(),
+        )
+        .unwrap();
+        (report, self.typed())
     }
 
     fn typed(&self) -> Vec<String> {
@@ -412,7 +436,10 @@ fn an_idle_claude_session_with_a_draft_gets_nothing_typed_into_it() {
     let fixture = Fixture::new(AgentRuntime::ClaudeCode, "idle");
     for screen in [DRAFT_BOX, SHELL_MODE] {
         fixture.screen(Some(screen));
-        assert_eq!(fixture.drain(), Vec::<String>::new(), "{screen}");
+        let (report, typed) = fixture.drain_report();
+        assert_eq!(typed, Vec::<String>::new(), "{screen}");
+        assert_eq!(report.draft_held.len(), 1, "{report:?}");
+        assert_eq!(report.draft_held[0].pane_id, "pane-recipient");
     }
     let done = Fixture::new(AgentRuntime::ClaudeCode, "done");
     done.screen(Some(DRAFT_BOX));
@@ -431,9 +458,10 @@ fn an_idle_claude_session_with_an_empty_box_takes_the_mail() {
     for screen in [EMPTY_BOX.to_owned(), suggested] {
         let fixture = Fixture::new(AgentRuntime::ClaudeCode, "idle");
         fixture.screen(Some(&screen));
-        let typed = fixture.drain();
+        let (report, typed) = fixture.drain_report();
         assert_eq!(typed.len(), 1, "{screen}");
         assert!(typed[0].contains("Are the tests green?"), "{typed:?}");
+        assert!(report.draft_held.is_empty(), "{report:?}");
     }
 }
 
@@ -444,7 +472,9 @@ fn an_idle_claude_session_whose_box_namedrop_does_not_recognize_still_takes_the_
     for screen in [Some(MODEL_PICKER), Some("no prompt box drawn here\n"), None] {
         let fixture = Fixture::new(AgentRuntime::ClaudeCode, "idle");
         fixture.screen(screen);
-        assert_eq!(fixture.drain().len(), 1, "{screen:?}");
+        let (report, typed) = fixture.drain_report();
+        assert_eq!(typed.len(), 1, "{screen:?}");
+        assert!(report.draft_held.is_empty(), "{report:?}");
     }
 }
 
@@ -452,7 +482,99 @@ fn an_idle_claude_session_whose_box_namedrop_does_not_recognize_still_takes_the_
 fn an_idle_codex_session_with_a_draft_gets_nothing_typed_into_it() {
     let fixture = Fixture::new(AgentRuntime::Codex, "idle");
     fixture.screen(Some(CODEX_DRAFT));
-    assert_eq!(fixture.drain(), Vec::<String>::new());
+    let (held, typed) = fixture.drain_report();
+    assert_eq!(typed, Vec::<String>::new());
+    assert_eq!(held.draft_held.len(), 1, "{held:?}");
     fixture.screen(Some(CODEX_EMPTY));
-    assert_eq!(fixture.drain().len(), 1);
+    let (_, typed) = fixture.recheck(&held);
+    assert_eq!(typed.len(), 1, "{typed:?}");
+}
+
+#[test]
+fn draft_held_mail_goes_in_once_the_box_empties_with_no_stop_or_status_event() {
+    for (status, edges) in [("idle", false), ("working", true)] {
+        let fixture = Fixture::new(AgentRuntime::ClaudeCode, status);
+        if edges {
+            fixture.edge(TurnEdge::Prompt, 2_000);
+            fixture.edge(TurnEdge::Stop, 3_000);
+        }
+        fixture.screen(Some(DRAFT_BOX));
+        let (mut held, typed) = fixture.drain_report();
+        assert_eq!(typed, Vec::<String>::new(), "{status}");
+        assert_eq!(held.draft_held.len(), 1, "{status}: {held:?}");
+
+        // While the draft stays, a recheck reads the box and nothing else.
+        for _ in 0..3 {
+            let (reads, lists) = (
+                fixture.herdr.screen_reads.load(Ordering::Relaxed),
+                fixture.herdr.pane_lists.load(Ordering::Relaxed),
+            );
+            let typed;
+            (held, typed) = fixture.recheck(&held);
+            assert_eq!(typed, Vec::<String>::new(), "{status}");
+            assert_eq!(held.draft_held.len(), 1, "{status}: {held:?}");
+            assert_eq!(
+                fixture.herdr.screen_reads.load(Ordering::Relaxed),
+                reads + 1
+            );
+            assert_eq!(fixture.herdr.pane_lists.load(Ordering::Relaxed), lists);
+        }
+
+        // The person clears the draft; Herdr's status does not change.
+        fixture.screen(Some(EMPTY_BOX));
+        let (delivered, typed) = fixture.recheck(&held);
+        assert_eq!(typed.len(), 1, "{status}: {typed:?}");
+        assert!(typed[0].contains("Are the tests green?"), "{typed:?}");
+        assert!(delivered.draft_held.is_empty(), "{status}: {delivered:?}");
+    }
+}
+
+#[test]
+fn the_recheck_stops_once_no_draft_holds_mail() {
+    // The person sends the draft: its turn starts, so the mail waits on the
+    // turn, which Herdr's events and the Stop cover.
+    let sent = Fixture::new(AgentRuntime::ClaudeCode, "working");
+    sent.edge(TurnEdge::Stop, 2_000);
+    sent.screen(Some(DRAFT_BOX));
+    let (held, _) = sent.drain_report();
+    assert_eq!(held.draft_held.len(), 1);
+    sent.edge(TurnEdge::Prompt, 3_000);
+    sent.screen(Some(EMPTY_BOX));
+    let (report, typed) = sent.recheck(&held);
+    assert_eq!(typed, Vec::<String>::new());
+    assert!(report.draft_held.is_empty(), "{report:?}");
+
+    // The mailbox empties while the draft stays: the box is not read again.
+    let cancelled = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+    cancelled.screen(Some(DRAFT_BOX));
+    let (held, _) = cancelled.drain_report();
+    assert_eq!(held.draft_held.len(), 1);
+    StateStore::open(cancelled.state())
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.cancel_sender_delivery(
+                &StateNamespace::for_space("socket-a", "workspace-1"),
+                &PaneAddressId::new("address-author"),
+                &DeliveryId::new("delivery-1"),
+                &MutationAttribution::new(ActorKind::Human, "test", QUEUED_AT_MS),
+            )
+        })
+        .unwrap();
+    let reads = cancelled.herdr.screen_reads.load(Ordering::Relaxed);
+    let (report, typed) = cancelled.recheck(&held);
+    assert_eq!(typed, Vec::<String>::new());
+    assert!(report.draft_held.is_empty(), "{report:?}");
+    assert_eq!(cancelled.herdr.screen_reads.load(Ordering::Relaxed), reads);
+
+    // Delivered mail leaves nothing to recheck.
+    let delivered = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+    delivered.screen(Some(DRAFT_BOX));
+    let (held, _) = delivered.drain_report();
+    delivered.screen(Some(EMPTY_BOX));
+    let (report, typed) = delivered.recheck(&held);
+    assert_eq!(typed.len(), 1);
+    assert!(report.draft_held.is_empty(), "{report:?}");
+    delivered.set_status("working");
+    let (report, _) = delivered.drain_report();
+    assert!(report.draft_held.is_empty(), "{report:?}");
 }

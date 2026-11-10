@@ -35,6 +35,19 @@ pub struct DrainReport {
     /// becomes due. The drain runs again then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_in_due_ms: Option<u64>,
+    /// Mailboxes whose next message waits on a draft the person hasn't sent in
+    /// their agent's prompt box. The mailbox worker reads those boxes again
+    /// until they empty, since Herdr sends no event when a box changes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub draft_held: Vec<DraftHold>,
+}
+
+/// A mailbox held by the draft in its pane's prompt box.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DraftHold {
+    pub address_id: crate::PaneAddressId,
+    pub pane_id: String,
+    pub agent: crate::AgentRuntime,
 }
 
 /// An idle submitted or acknowledged attempt still inside the acknowledgement
@@ -61,6 +74,7 @@ impl Default for DrainReport {
             expired: Vec::new(),
             pending_grace: Vec::new(),
             check_in_due_ms: None,
+            draft_held: Vec::new(),
         }
     }
 }
@@ -75,6 +89,7 @@ impl DrainReport {
             || self.retry_without_event
             || self.awaits_terminal()
             || self.next_due_ms().is_some()
+            || !self.draft_held.is_empty()
     }
 
     pub fn awaits_terminal(&self) -> bool {
@@ -520,6 +535,7 @@ where
             || (first.pane_type == crate::PaneType::Terminal
                 && !crate::terminal::shell_is_available(runtime.herdr, &first.pane_id))
         {
+            report.note_draft(&reach, &address_id, &first.pane_id);
             continue;
         }
 
@@ -566,6 +582,7 @@ where
                         .map(|p| &p.terminal_id)
                     || !crate::terminal::shell_is_available(runtime.herdr, &second.pane_id)))
         {
+            report.note_draft(&reach, &address_id, &second.pane_id);
             continue;
         }
 
@@ -909,6 +926,18 @@ where
     agent_wait(runtime, pane).map_or(Reach::Now, Reach::Waits)
 }
 
+impl DrainReport {
+    fn note_draft(&mut self, reach: &Reach, address_id: &crate::PaneAddressId, pane_id: &str) {
+        if let Reach::Waits(AgentWait::Draft(agent)) = reach {
+            self.draft_held.push(DraftHold {
+                address_id: address_id.clone(),
+                pane_id: pane_id.to_owned(),
+                agent: *agent,
+            });
+        }
+    }
+}
+
 /// How an agent pane takes a prompt, from Herdr's status and, for Claude Code,
 /// the turn edges its hooks recorded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -947,7 +976,7 @@ pub(crate) enum AgentWait {
     Status(Option<String>),
     /// The agent's prompt box holds a draft the person hasn't sent. Herdr
     /// types at the cursor, so a prompt typed now would be sent inside it.
-    Draft,
+    Draft(crate::AgentRuntime),
     /// Herdr reports the session working between turns, and Namedrop found no
     /// prompt box to see that it is empty.
     PromptBoxUnseen,
@@ -977,13 +1006,52 @@ where
     let agent = crate::integration::pane_agent_runtime(pane)?;
     match read_prompt_box(runtime.herdr, &pane.pane_id, agent) {
         PromptBox::Empty => None,
-        PromptBox::Draft => Some(AgentWait::Draft),
+        PromptBox::Draft => Some(AgentWait::Draft(agent)),
         // Herdr's idle is the proof a prompt may go in, as it was before
         // Namedrop read the box, so a screen it doesn't recognize never
         // strands the mail. Between turns the empty box is the only proof.
         PromptBox::Unseen if opening == Opening::Settled => None,
         PromptBox::Unseen => Some(AgentWait::PromptBoxUnseen),
     }
+}
+
+/// Reads the prompt boxes again whose drafts held mail, one pane read each,
+/// and drains the space once one of them no longer holds a draft. Until then
+/// it reports the holds whose mail still waits.
+pub fn recheck_drafts<E, C, I>(
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+    held: Vec<DraftHold>,
+) -> Result<DrainReport, String>
+where
+    E: HerdrCommandExecutor,
+    C: Clock,
+    I: IdGenerator,
+{
+    let Some(space) = runtime.workspace_id else {
+        return drain_mailboxes(runtime);
+    };
+    let namespace = StateNamespace::for_space(runtime.session_socket_id, space);
+    let waiting = match StateStore::open_read_only(runtime.state_directory) {
+        Ok(Some(mut store)) => store
+            .transaction(|transaction| transaction.queued_mailbox_addresses(&namespace))
+            .map_err(|error| error.to_string())?,
+        Ok(None) => Vec::new(),
+        Err(error) => return Err(error.to_string()),
+    };
+    let held: Vec<DraftHold> = held
+        .into_iter()
+        .filter(|hold| waiting.contains(&hold.address_id))
+        .collect();
+    if held
+        .iter()
+        .all(|hold| read_prompt_box(runtime.herdr, &hold.pane_id, hold.agent) == PromptBox::Draft)
+    {
+        return Ok(DrainReport {
+            draft_held: held,
+            ..DrainReport::default()
+        });
+    }
+    drain_mailboxes(runtime)
 }
 
 /// What an agent pane's prompt box holds.

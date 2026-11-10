@@ -914,7 +914,7 @@ where
                 HealthRepairKind::ProductAction,
                 format!("Wait for @{alias} to be ready."),
             ),
-            AgentWait::Draft => (
+            AgentWait::Draft(_) => (
                 HealthSeverity::Notice,
                 format!(
                     "@{alias}'s prompt box holds a draft you haven't sent, and Namedrop never types into your draft."
@@ -950,7 +950,7 @@ where
             "agent_status": pane.agent_status,
             "held_by": match wait {
                 AgentWait::Status(_) => "status",
-                AgentWait::Draft => "draft",
+                AgentWait::Draft(_) => "draft",
                 AgentWait::PromptBoxUnseen => "prompt_box_unseen",
             },
             "queued_at_ms": queued_at_ms,

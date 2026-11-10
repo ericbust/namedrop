@@ -658,6 +658,22 @@ mod drain_report_tests {
     }
 
     #[test]
+    fn a_draft_hold_starts_a_worker_without_a_failure_retry() {
+        let held = DrainReport {
+            draft_held: vec![namedrop::DraftHold {
+                address_id: namedrop::PaneAddressId::new("address-1"),
+                pane_id: "pane-1".to_owned(),
+                agent: namedrop::AgentRuntime::Codex,
+            }],
+            ..DrainReport::default()
+        };
+        let result = json!({"drain": held});
+        assert_eq!(drain_report(&result).unwrap().draft_held, held.draft_held);
+        assert!(needs_mailbox_watcher(&result));
+        assert!(!held.awaits_retry());
+    }
+
+    #[test]
     fn an_operation_result_carries_the_drain_report_it_serialized() {
         let grace = DrainReport {
             pending_grace: vec![GraceDeadline {
@@ -1289,14 +1305,46 @@ fn run_agent_status_worker() -> ExitCode {
 enum ReconciliationWork {
     Marker(PathBuf),
     Wake,
+    DraftRecheck(DraftRecheck),
 }
 
 impl ReconciliationWork {
     fn remove_marker(&self) -> io::Result<()> {
         match self {
             Self::Marker(marker) => fs::remove_file(marker),
-            Self::Wake => Ok(()),
+            Self::Wake | Self::DraftRecheck(_) => Ok(()),
         }
+    }
+}
+
+/// Prompt boxes whose drafts hold mail, and when the worker reads them again.
+/// Herdr sends no event when a prompt box changes, so this is how mail goes in
+/// soon after the person sends or clears a draft.
+struct DraftRecheck {
+    held: Vec<namedrop::DraftHold>,
+    due_ms: u64,
+    /// How many reports in a row found a draft in the way.
+    rechecks: usize,
+}
+
+/// The wait before the next read of a draft-held box, by `DraftRecheck::rechecks`.
+/// A draft that stays a while costs one pane read every 10 seconds.
+const DRAFT_RECHECK_DELAYS_MS: [u64; 5] = [2_000, 3_000, 5_000, 8_000, 10_000];
+
+impl DraftRecheck {
+    /// The recheck after a report that found `held`, following `previous`
+    /// rechecks in a row, or `None` once no draft holds mail.
+    fn after(held: Vec<namedrop::DraftHold>, previous: Option<usize>, now_ms: u64) -> Option<Self> {
+        if held.is_empty() {
+            return None;
+        }
+        let rechecks = previous.map_or(0, |count| count + 1);
+        let delay = DRAFT_RECHECK_DELAYS_MS[rechecks.min(DRAFT_RECHECK_DELAYS_MS.len() - 1)];
+        Some(Self {
+            held,
+            due_ms: now_ms.saturating_add(delay),
+            rechecks,
+        })
     }
 }
 
@@ -1360,6 +1408,14 @@ fn run_agent_status_worker_queue(
                         serde_json::to_value(report).map_err(|error| error.to_string())
                     })
                 })
+            } else if input["operation"] == "draft-recheck" {
+                let held = serde_json::from_value(input["held"].clone())
+                    .map_err(|error| format!("invalid operation input: {error}"))?;
+                with_runtime_options(&RuntimeOptions::default(), |runtime| {
+                    namedrop::recheck_drafts(runtime, held).and_then(|report| {
+                        serde_json::to_value(report).map_err(|error| error.to_string())
+                    })
+                })
             } else {
                 run_lifecycle(
                     "event.agent-status-changed",
@@ -1402,6 +1458,7 @@ fn run_agent_status_worker_queue_with_policy(
     let mut failures = 0_usize;
     let mut blocked = std::collections::HashSet::new();
     let mut read_failures = std::collections::HashMap::<PathBuf, usize>::new();
+    let mut drafts: Option<DraftRecheck> = None;
     let _ = prune_rejected_markers(directory);
     loop {
         let mut scan_available = |directory: &Path| {
@@ -1419,13 +1476,22 @@ fn run_agent_status_worker_queue_with_policy(
         };
         let work = if let Some(marker) = pending.into_iter().next() {
             ReconciliationWork::Marker(marker)
-        } else if let Some(due) = deadline_ms {
-            if SystemClock.now_unix_ms() < due {
+        } else if let Some(due) = deadline_ms
+            .into_iter()
+            .chain(drafts.as_ref().map(|recheck| recheck.due_ms))
+            .min()
+        {
+            let now = SystemClock.now_unix_ms();
+            if now < due {
                 wait_for_marker_or_deadline(directory, due, &mut scan_available);
                 continue;
             }
-            deadline_ms = None;
-            ReconciliationWork::Wake
+            if deadline_ms.is_some_and(|deadline| deadline <= now) {
+                deadline_ms = None;
+                ReconciliationWork::Wake
+            } else {
+                ReconciliationWork::DraftRecheck(drafts.take().expect("the recheck is due"))
+            }
         } else {
             let _ = lock.unlock();
             // Recheck after unlocking so a producer that lost try_lock cannot strand work.
@@ -1443,6 +1509,9 @@ fn run_agent_status_worker_queue_with_policy(
         };
         let input = match &work {
             ReconciliationWork::Wake => serde_json::json!({"operation":"mailbox-wake"}),
+            ReconciliationWork::DraftRecheck(recheck) => {
+                serde_json::json!({"operation": "draft-recheck", "held": recheck.held})
+            }
             ReconciliationWork::Marker(marker) => {
                 let bytes = match read(marker) {
                     Ok(bytes) => {
@@ -1518,6 +1587,12 @@ fn run_agent_status_worker_queue_with_policy(
                         .chain(retry_due_ms)
                         .chain(report.next_due_ms())
                         .min();
+                    let previous = match &work {
+                        ReconciliationWork::DraftRecheck(recheck) => Some(recheck.rechecks),
+                        _ => drafts.as_ref().map(|recheck| recheck.rechecks),
+                    };
+                    drafts =
+                        DraftRecheck::after(report.draft_held, previous, SystemClock.now_unix_ms());
                     if work.remove_marker().is_err() {
                         wait_for_reconciliation_retry(&mut failures, false);
                     }
@@ -1561,8 +1636,15 @@ fn run_agent_status_worker_queue_with_policy(
                         }
                     }
                 }
-                if matches!(work, ReconciliationWork::Wake) {
-                    deadline_ms = Some(SystemClock.now_unix_ms());
+                match work {
+                    ReconciliationWork::Wake => deadline_ms = Some(SystemClock.now_unix_ms()),
+                    ReconciliationWork::DraftRecheck(recheck) => {
+                        drafts = Some(DraftRecheck {
+                            due_ms: SystemClock.now_unix_ms(),
+                            ..recheck
+                        });
+                    }
+                    ReconciliationWork::Marker(_) => {}
                 }
                 wait_for_reconciliation_retry(&mut failures, false);
             }
@@ -1778,6 +1860,68 @@ mod worker_shutdown_tests {
             assert_eq!(drains, if mode == "complete" { 1 } else { 2 });
             queue.lock();
         }
+    }
+
+    fn draft_hold() -> namedrop::DraftHold {
+        namedrop::DraftHold {
+            address_id: namedrop::PaneAddressId::new("address-1"),
+            pane_id: "pane-1".to_owned(),
+            agent: namedrop::AgentRuntime::ClaudeCode,
+        }
+    }
+
+    #[test]
+    fn a_draft_is_read_again_sooner_at_first_and_every_10_seconds_while_it_stays() {
+        let mut previous = None;
+        let mut delays = Vec::new();
+        for _ in 0..7 {
+            let recheck = DraftRecheck::after(vec![draft_hold()], previous, 1_000).unwrap();
+            delays.push(recheck.due_ms - 1_000);
+            previous = Some(recheck.rechecks);
+        }
+        assert_eq!(delays, [2_000, 3_000, 5_000, 8_000, 10_000, 10_000, 10_000]);
+        assert!(DraftRecheck::after(Vec::new(), previous, 1_000).is_none());
+    }
+
+    #[test]
+    fn the_worker_reads_a_held_draft_again_and_stops_once_nothing_holds() {
+        let queue = QueueFixture::new("draft-recheck");
+        let lock = queue.lock();
+        let mut inputs = Vec::new();
+        let started = std::time::Instant::now();
+        let result = run_agent_status_worker_queue_with_io(
+            &queue.0,
+            lock,
+            Some(0),
+            pending_agent_status_reconciliations,
+            |_| panic!("no marker was queued"),
+            |input| {
+                inputs.push((started.elapsed(), input));
+                assert!(inputs.len() <= 2, "the worker kept rechecking");
+                let report = namedrop::DrainReport {
+                    draft_held: if inputs.len() == 1 {
+                        vec![draft_hold()]
+                    } else {
+                        Vec::new()
+                    },
+                    ..Default::default()
+                };
+                Ok(serde_json::to_value(report).unwrap())
+            },
+        );
+        assert_eq!(result, ExitCode::SUCCESS);
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].1, serde_json::json!({"operation":"mailbox-wake"}));
+        assert_eq!(
+            inputs[1].1,
+            serde_json::json!({"operation":"draft-recheck","held":[draft_hold()]})
+        );
+        let waited = inputs[1].0 - inputs[0].0;
+        assert!(
+            (Duration::from_millis(2_000)..Duration::from_millis(3_000)).contains(&waited),
+            "{waited:?}"
+        );
+        queue.lock();
     }
 
     #[test]
