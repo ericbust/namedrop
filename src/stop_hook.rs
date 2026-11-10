@@ -23,7 +23,7 @@ const NOTICE_SCAN_BUDGET: Duration = Duration::from_millis(100);
 const TURN_SCAN_BYTES: u64 = 8 * 1024 * 1024;
 /// How long a worker waits for Claude Code to record how every hook of a Stop
 /// or a prompt ended. It writes that record as soon as the last hook exits.
-const HOOK_OUTCOME_WAIT: Duration = Duration::from_secs(3);
+pub(crate) const HOOK_OUTCOME_WAIT: Duration = Duration::from_secs(3);
 
 #[derive(Deserialize, Serialize)]
 struct StopInput {
@@ -276,25 +276,7 @@ pub(crate) fn hook_outcome<T>(
 ) -> Option<T> {
     let until = Instant::now() + HOOK_OUTCOME_WAIT;
     loop {
-        let mut bytes = Vec::new();
-        fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(path)
-            .and_then(|mut file| {
-                file.seek(SeekFrom::Start(from))?;
-                file.take(MAX_INPUT_BYTES).read_to_end(&mut bytes)
-            })
-            .ok()?;
-        let complete = bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(&[][..], |end| &bytes[..end]);
-        if let Some(found) = complete
-            .split(|byte| *byte == b'\n')
-            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
-            .find_map(|record| outcome(&record))
-        {
+        if let Some(found) = records_after(path, from)?.iter().find_map(&outcome) {
             return Some(found);
         }
         if Instant::now() >= until {
@@ -302,6 +284,31 @@ pub(crate) fn hook_outcome<T>(
         }
         std::thread::sleep(Duration::from_millis(25));
     }
+}
+
+/// The complete records in the transcript after `from`, or `None` when the
+/// transcript can't be read.
+pub(crate) fn records_after(path: &Path, from: u64) -> Option<Vec<Value>> {
+    let mut bytes = Vec::new();
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .and_then(|mut file| {
+            file.seek(SeekFrom::Start(from))?;
+            file.take(MAX_INPUT_BYTES).read_to_end(&mut bytes)
+        })
+        .ok()?;
+    let complete = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(&[][..], |end| &bytes[..end]);
+    Some(
+        complete
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| serde_json::from_slice(line).ok())
+            .collect(),
+    )
 }
 
 fn settle(bound: BoundOperation) -> Result<Value, String> {

@@ -29,8 +29,8 @@ pub enum TurnPhase {
 pub enum TurnEdge {
     Prompt,
     Stop,
-    /// A prompt hook blocked the prompt recorded at this time, so it started
-    /// no turn. Recorded with that prompt's time.
+    /// A prompt hook blocked or stopped the prompt recorded at this time, so
+    /// it started no turn. Recorded with that prompt's time.
     Blocked,
 }
 
