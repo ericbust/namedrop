@@ -654,17 +654,21 @@ def restore(runtime, previous, incoming):
     switch(runtime, previous)
 
 
-def recorded_previous(runtime, digest):
-    """The release before `digest` when activation selects `digest` again: the
-    one activation.json recorded for it, or the release it recorded last."""
+def recorded_previous(runtime, selected):
+    """The release selected before `selected`, as activation.json records it,
+    or None."""
     try:
         record = json.loads((runtime / 'activation.json').read_text())
     except (OSError, ValueError):
-        return None
-    if not isinstance(record, dict):
-        return None
-    name = record.get('previous') if record.get('revision') == digest else record.get('revision')
-    return name if isinstance(name, str) and RELEASE.fullmatch(name) else None
+        record = None
+    name = None
+    if isinstance(record, dict) and 'selected' in record:
+        # A record that selected another release is from an activation that
+        # then moved current without writing one, so that release came before.
+        name = record.get('previous') if record['selected'] == selected else record['selected']
+    if isinstance(name, str) and name != selected and name in releases_on_disk(runtime):
+        return name
+    return None
 
 
 # PROC_PID_INIT_INO: only the initial PID namespace sees every process.
@@ -804,6 +808,8 @@ def activate(root, args):
     with lock(runtime, 'activation.lock'):
         recover_migration(runtime)
         previous = current(runtime)
+        old = previous.name if previous is not None else None
+        old_previous = recorded_previous(runtime, old) if old is not None else None
         incoming = contract(root)
         live = previous is not None and live_compatible(contract(runtime / previous), incoming)
         if previous is not None:
@@ -820,10 +826,7 @@ def activate(root, args):
         digest = hashlib.sha256(contents).hexdigest()
         target = Path('releases') / digest
         release = runtime / target
-        if previous == target:
-            before = recorded_previous(runtime, digest)
-        else:
-            before = previous.name if previous is not None else None
+        before = old_previous if old == digest else old
         if release.exists():
             require(not release.is_symlink() and not (release/'namedrop').is_symlink()
                     and not (release/'runtime.json').is_symlink() and contract(release) == incoming
@@ -898,7 +901,11 @@ def activate(root, args):
             payload['data']['runtime'] = {'launcher': str(launcher), 'revision': digest,
                                          'live_update': live,
                                          'codex_migration_pending': not json.loads((runtime/'legacy-sessions.json').read_text())['codex_ready']}
-            write_owned(runtime / 'activation.json', json.dumps({'revision': digest, 'previous': before}) + '\n', 0o600)
+            selected = current(runtime)
+            selected = selected.name if selected is not None else None
+            record = {'revision': digest, 'selected': selected,
+                      'previous': before if selected == digest else old_previous if selected == old else None}
+            write_owned(runtime / 'activation.json', json.dumps(record) + '\n', 0o600)
             result.stdout = json.dumps(payload) + '\n'
         print(result.stdout, end='')
         print(result.stderr, end='', file=sys.stderr)

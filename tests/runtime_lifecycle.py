@@ -69,9 +69,9 @@ def check_pruning(base, release):
     three_root = release('prune-three')
     three = activated(rt, three_root)
     assert retained(rt) == {two, three}, 'activation keeps only the current and previous releases'
-    assert json.loads((rt / 'activation.json').read_text()) == {'revision': three, 'previous': two}
+    assert json.loads((rt / 'activation.json').read_text()) == {'revision': three, 'selected': three, 'previous': two}
     assert activated(rt, three_root) == three and retained(rt) == {two, three}, 'reactivation keeps the earlier previous'
-    assert json.loads((rt / 'activation.json').read_text()) == {'revision': three, 'previous': two}
+    assert json.loads((rt / 'activation.json').read_text()) == {'revision': three, 'selected': three, 'previous': two}
 
     sleep = Path(shutil.which('sleep')).resolve()
     held = hashlib.sha256(sleep.read_bytes()).hexdigest()
@@ -209,6 +209,34 @@ def check_in_use(base, release):
             sleeper.wait()
     d = activated(rt, release('in-use-d'))
     assert retained(rt) == {c, d}, 'a release is removed once no process runs from it'
+
+
+def check_activation_record(base, release):
+    state = base / 'record-state'
+    state.mkdir()
+    os.environ['HERDR_PLUGIN_STATE_DIR'] = str(state)
+    rt = state / 'runtime'
+    record = rt / 'activation.json'
+    p = activated(rt, release('record-p'))
+    r_root = release('record-r')
+    r = activated(rt, r_root)
+    with mock.patch.object(runtime, 'activate_codex_plugin', lambda payload, refresh: (payload, 1)):
+        assert runtime.activate(release('record-x'), ['activate']) == 1 and runtime.current(rt).name == r
+    x, = retained(rt) - {p, r}
+    assert json.loads(record.read_text()) == {'revision': x, 'selected': r, 'previous': p}, \
+        'a failed Codex setup records the release that stays selected'
+    assert activated(rt, r_root) == r and retained(rt) == {p, r}, 'reactivation after a failure keeps the real previous'
+
+    y = activated(rt, release('record-y'))
+    newest = hashlib.sha256(b'newest').hexdigest()
+    (rt / 'releases' / newest).mkdir()
+    shutil.copy(rt / 'releases' / y / 'runtime.json', rt / 'releases' / newest / 'runtime.json')
+    (rt / 'releases' / newest / 'namedrop').write_text('newest')
+    later = (rt / 'releases' / y / 'namedrop').stat().st_mtime + 100
+    os.utime(rt / 'releases' / newest / 'namedrop', (later, later))
+    runtime.switch(rt, Path('releases') / r)
+    assert activated(rt, r_root) == r and retained(rt) == {r, y}, \
+        'when current moved without a record, the release the record selected is the previous'
 
 
 def main():
@@ -391,6 +419,7 @@ else:
                 worker.wait()
         check_pruning(base, release)
         check_in_use(base, release)
+        check_activation_record(base, release)
     print('runtime lifecycle checks passed')
 
 
