@@ -2,6 +2,15 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.7.4] - 2026-11-10
+
+### Fixed
+
+- Channels no longer says an agent didn't answer your message while Namedrop is holding its answer for background work the agent started. Before, the agent going idle raised "@name didn't answer a request" about 30 seconds after its turn ended, even though its answer arrived once the work finished. The message's arrow now shows the agent still working.
+- A held answer that can never arrive now warns you, and says why: the agent was retired, a new session took its name, or its session ended. Review it, then `delivery acknowledge` clears the warning. An ended session can still answer if you resume it.
+- If the turn that should carry a held answer ends without one, you get the ordinary warning that the agent didn't answer.
+- `delivery acknowledge` now also clears the warning for a delivery whose agent session has ended. Before, it was refused until a new session appeared on that name.
+
 ## [1.7.0] - 2026-11-09
 
 ### Changed
