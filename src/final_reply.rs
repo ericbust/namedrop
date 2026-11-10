@@ -950,6 +950,7 @@ impl Claim {
         Some(WayBack {
             attempt_id: self.attempt_id.clone(),
             line: line.clone()?,
+            location: self.location.clone(),
             answers,
             failure: self.failure.clone(),
             waits_on: if self.state == ClaimState::Left(LeaveReason::Held) {
@@ -1035,6 +1036,8 @@ pub fn warn_stop_timed_out(
 pub(crate) struct WayBack {
     pub attempt_id: crate::DeliveryAttemptId,
     pub line: String,
+    /// Where that line runs.
+    pub location: Location,
     /// The line is the reply, with a body to write; otherwise it closes the
     /// delivery without one.
     pub answers: bool,

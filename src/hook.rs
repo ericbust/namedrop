@@ -569,11 +569,7 @@ where
     );
     (
         observed.armed.then_some(plan).flatten(),
-        observed
-            .left_open
-            .iter()
-            .map(crate::integration::left_open_guidance)
-            .collect(),
+        crate::integration::left_open_guidance(&observed.left_open),
     )
 }
 

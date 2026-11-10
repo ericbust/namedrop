@@ -443,6 +443,52 @@ fn a_many_assignment_nudge_stays_in_room_and_says_what_it_left_out() {
     assert!(tiny.contains("\ncomplete.no-reply: "), "{tiny}");
 }
 
+fn left_open(count: usize) -> Vec<crate::final_reply::WayBack> {
+    (0..count)
+        .map(|index| crate::final_reply::WayBack {
+            attempt_id: crate::DeliveryAttemptId::new(format!("attempt-{index}")),
+            line: format!(
+                "reply: namedrop reply --input-json '{{\"attempt_id\":\"attempt-{index}\"}}'"
+            ),
+            location: crate::final_reply::Location {
+                state: "/state".into(),
+                socket: "/socket".into(),
+                workspace: "w1".into(),
+                pane: "w1:p1".into(),
+            },
+            answers: true,
+            failure: None,
+            waits_on: Vec::new(),
+            finished: false,
+        })
+        .collect()
+}
+
+#[test]
+fn deliveries_left_open_past_the_third_are_counted_with_the_line_that_prints_them() {
+    let all = left_open_guidance(&left_open(3));
+    assert_eq!(all.len(), 3, "{all:?}");
+    assert!(all.iter().all(|text| text.contains("\nreply: ")), "{all:?}");
+
+    let capped = left_open_guidance(&left_open(4));
+    assert_eq!(capped[..3], all[..], "{capped:?}");
+    let [.., more] = capped.as_slice() else {
+        panic!("{capped:?}")
+    };
+    let (sentence, inbox) = more.split_once('\n').unwrap();
+    assert_eq!(
+        sentence,
+        "Namedrop: 1 more delivery from earlier turns is still open, with no line here. To print each one with the lines that settle it, run this line."
+    );
+    assert!(
+        inbox.ends_with(
+            " --plugin-state '/state' delivery inbox --herdr-socket '/socket' --herdr-workspace 'w1' --herdr-pane 'w1:p1' --input-json '{}'"
+        ),
+        "{inbox}"
+    );
+    assert_eq!(capped.len(), 4, "{capped:?}");
+}
+
 fn draft_control(
     reply_mode: crate::DeliveryReplyMode,
     context_references: Vec<DeliveryAddress>,

@@ -3426,7 +3426,11 @@ fn a_draft_and_a_delivery_in_a_turn_a_notice_opened_show_the_held_deliverys_line
         context.contains("already in this pane's input"),
         "{context}"
     );
-    assert_eq!(space.claims().len(), 1, "the drafted delivery armed a claim");
+    assert_eq!(
+        space.claims().len(),
+        1,
+        "the drafted delivery armed a claim"
+    );
     assert!(
         context.contains(&way_back),
         "the drafted delivery's prompt hid the held line: {context}"
@@ -3467,6 +3471,125 @@ fn a_queued_notice_in_a_turn_whose_first_prompt_went_unrecorded_promises_nothing
         "{:?}",
         space.answers("pane-lead")
     );
+}
+
+impl Space {
+    /// The attempts of `count` asks the reviewer's turns ended without
+    /// answering, oldest first. Each is settled as the agent going idle does,
+    /// so the next ask arrives.
+    fn asks_left_open(&self, count: usize) -> Vec<String> {
+        (0..count)
+            .map(|index| {
+                dispatch::message(
+                    "send",
+                    json!({"request_id":format!("left-{index}"),
+                           "source":"@reviewer Reply with the single word pong.",
+                           "author_kind":"agent_session"}),
+                    &self.runtime("pane-lead"),
+                )
+                .unwrap();
+                let ask = self.herdr.envelope_for("pane-reviewer");
+                let turn = format!("left-turn-{index}");
+                let turn = ("prompt_id", turn.as_str());
+                self.prompt("pane-reviewer", "session-reviewer", turn, &ask.to_string());
+                self.stop("session-reviewer", turn, "  ");
+                self.settle_attempt(&ask);
+                ask["control"]["attempt_id"].as_str().unwrap().to_owned()
+            })
+            .collect()
+    }
+}
+
+/// The attempts `context` shows a settling line for, in its order.
+fn left_open_shown(context: &str) -> Vec<&str> {
+    context
+        .lines()
+        .filter_map(|line| {
+            let (attempt, _) = line
+                .strip_prefix("Namedrop: delivery ")?
+                .split_once(" from an earlier turn is still open")?;
+            Some(attempt)
+        })
+        .collect()
+}
+
+/// Claude Code keeps hook context whole only under 10,000 UTF-16 units. Every
+/// delivery left open has a line of some 500, so a prompt shows the oldest
+/// few, counts the rest and gives the line that prints them. A delivery's own
+/// settling lines always come through.
+#[test]
+fn many_deliveries_left_open_stay_within_what_the_host_keeps_whole() {
+    let space = Space::new();
+    let left = space.asks_left_open(24);
+    let distinct: std::collections::BTreeSet<_> = left.iter().collect();
+    assert_eq!(distinct.len(), 24, "{left:?}");
+    let whole = |context: &str| {
+        let size = context.encode_utf16().count();
+        assert!(size < 10_000, "{size} units: {context}");
+        assert_eq!(left_open_shown(context), left[..3], "{context}");
+        assert!(
+            context.contains(
+                "Namedrop: 21 more deliveries from earlier turns are still open, with no line here."
+            ),
+            "{context}"
+        );
+        let inbox = context
+            .lines()
+            .find(|line| line.contains(" delivery inbox --herdr-socket "))
+            .unwrap_or_else(|| panic!("no line prints the rest: {context}"));
+        assert!(inbox.contains("--herdr-pane 'pane-reviewer'"), "{inbox}");
+    };
+
+    whole(&space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        ("prompt_id", "typed-turn"),
+        "Where were we?",
+    ));
+    let printed: Vec<String> = space
+        .inbox("pane-reviewer")
+        .iter()
+        .map(|envelope| {
+            envelope["control"]["attempt_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    for attempt in &left[3..] {
+        assert!(printed.contains(attempt), "{attempt} is not in {printed:?}");
+    }
+
+    dispatch::message(
+        "send",
+        json!({"request_id":"ask-new","source":"@reviewer Reply with the single word ping.",
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap();
+    assert!(!left.iter().any(|left| left == attempt), "{attempt}");
+    let context = space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        ("prompt_id", "delivery-turn"),
+        &format!(
+            "A draft I had not sent. {}",
+            space.as_typed(&ask.to_string())
+        ),
+    );
+    whole(&context);
+    for token in ["reply", "complete.no-reply"] {
+        let line = context
+            .lines()
+            .find(|line| line.starts_with(&format!("{token}: ")))
+            .unwrap_or_else(|| panic!("the delivery's {token} line is gone: {context}"));
+        assert!(
+            line.contains(&format!(r#""attempt_id":"{attempt}""#)),
+            "{line}"
+        );
+    }
 }
 
 /// The pointer the pane holds for its latest delivery.

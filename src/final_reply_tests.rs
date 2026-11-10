@@ -810,6 +810,7 @@ fn background_work_at_the_stop_leaves_a_reply_for_the_agent_to_settle() {
         [WayBack {
             attempt_id: crate::DeliveryAttemptId::new("attempt-1"),
             line: "reply: namedrop reply --input-json '{}'".to_owned(),
+            location: claim(reply_plan(), ClaimState::Open).location,
             answers: true,
             failure: None,
             waits_on: vec!["task-1".to_owned()],
