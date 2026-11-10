@@ -186,6 +186,7 @@ fn claim(plan: Armed, state: ClaimState) -> Claim {
         no_reply_line: Some("complete.no-reply: namedrop complete --no-reply".into()),
         failure: None,
         awaits: Vec::new(),
+        paused: Vec::new(),
         first_armed_at_ms: None,
         promised_turn: None,
     }
@@ -198,6 +199,8 @@ fn stop(prompt: &str, text: &str) -> StopFacts {
         running_tasks: Vec::new(),
         started_tasks: Vec::new(),
         notified_tasks: Vec::new(),
+        paused_tasks: Vec::new(),
+        ended_tasks: Vec::new(),
         read_turn: true,
         text: FinalText::bounded(text),
     }
@@ -600,7 +603,7 @@ fn observe(state: &StateDirectory, prompt: &str, arm: Option<Claim>) -> bool {
         &turn(prompt),
         arm,
         PromptFacts {
-            notified: &[],
+            news: None,
             delivery: false,
             opens_turn: false,
         },
@@ -800,7 +803,7 @@ fn background_work_at_the_stop_leaves_a_reply_for_the_agent_to_settle() {
             &turn("later"),
             None,
             PromptFacts {
-                notified: &[],
+                news: None,
                 delivery: false,
                 opens_turn: false,
             },
@@ -841,7 +844,7 @@ fn finished_claims_are_pruned_after_a_day() {
             &turn("prompt-2"),
             None,
             PromptFacts {
-                notified: &[],
+                news: None,
                 delivery: false,
                 opens_turn: false,
             },
@@ -915,7 +918,7 @@ fn a_prompt_queued_behind_a_stop_leaves_the_claim_to_that_stops_worker() {
         &turn("prompt-2"),
         None,
         PromptFacts {
-            notified: &[],
+            news: None,
             delivery: false,
             opens_turn: false,
         },
@@ -944,7 +947,7 @@ fn a_claim_left_open_stays_while_later_prompts_show_it() {
             &turn(prompt),
             None,
             PromptFacts {
-                notified: &[],
+                news: None,
                 delivery: false,
                 opens_turn: false,
             },
@@ -979,7 +982,7 @@ fn a_late_stop_worker_leaves_the_next_turns_claim_alone() {
             &turn(prompt),
             Some(arm),
             PromptFacts {
-                notified: &[],
+                news: None,
                 delivery: false,
                 opens_turn: false,
             },
@@ -1042,7 +1045,7 @@ fn pruning_stop_markers_spares_one_still_being_written() {
         &turn("prompt-4"),
         None,
         PromptFacts {
-            notified: &[],
+            news: None,
             delivery: false,
             opens_turn: false,
         },
@@ -1131,7 +1134,7 @@ fn a_held_answer_settles_at_the_stop_of_the_turn_its_works_notice_reached() {
         &turn("monitor-event"),
         None,
         PromptFacts {
-            notified: &["monitor-from-yesterday".to_owned()],
+            news: Some(TaskNews::Ended("monitor-from-yesterday")),
             delivery: false,
             opens_turn: false,
         },
@@ -1149,7 +1152,7 @@ fn a_held_answer_settles_at_the_stop_of_the_turn_its_works_notice_reached() {
         &turn("build-ended"),
         None,
         PromptFacts {
-            notified: &["build-1".to_owned()],
+            news: Some(TaskNews::Ended("build-1")),
             delivery: false,
             opens_turn: true,
         },
@@ -1229,18 +1232,24 @@ const RECORDED: &str =
 fn the_stop_reads_its_own_turn_of_a_recorded_transcript() {
     let read = |prompt: &str| turn_tasks(RECORDED.as_bytes(), true, prompt);
     let tasks = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+    // The queue logged both tasks' notices, whichever turn is read.
+    let ended = tasks(&["task-first", "task-second"]);
     assert_eq!(
         read("prompt-start"),
         TurnTasks {
             started: Some(tasks(&["task-first"])),
-            notified: Vec::new()
+            notified: Vec::new(),
+            paused: Vec::new(),
+            ended: ended.clone(),
         }
     );
     assert_eq!(
         read("prompt-busy"),
         TurnTasks {
             started: Some(Vec::new()),
-            notified: Vec::new()
+            notified: Vec::new(),
+            paused: Vec::new(),
+            ended: ended.clone(),
         },
         "a notice Claude Code queued into a turn about something else counted"
     );
@@ -1248,7 +1257,9 @@ fn the_stop_reads_its_own_turn_of_a_recorded_transcript() {
         read("prompt-wait"),
         TurnTasks {
             started: Some(tasks(&["task-second"])),
-            notified: Vec::new()
+            notified: Vec::new(),
+            paused: Vec::new(),
+            ended: ended.clone(),
         },
         "the queue's own log of a later notice counted"
     );
@@ -1256,7 +1267,9 @@ fn the_stop_reads_its_own_turn_of_a_recorded_transcript() {
         read("prompt-notice"),
         TurnTasks {
             started: Some(Vec::new()),
-            notified: tasks(&["task-second"])
+            notified: tasks(&["task-second"]),
+            paused: Vec::new(),
+            ended: ended.clone(),
         }
     );
     assert_eq!(read("prompt-unknown").started, None);
@@ -1585,4 +1598,511 @@ fn the_opening_proof_widens_past_a_tail_with_no_turn_record() {
     records.push(long.to_string());
     fs::write(&path, records.join("\n")).unwrap();
     assert!(notice_opens_turn(&path, "prompt-notice", text));
+}
+
+const HAND_BACK_SESSION: &str =
+    include_str!("../tests/fixtures/final-reply/claude-2.1.322-subagent-hand-back.jsonl");
+
+/// The task a prompt says ended.
+fn ended(prompt: &str) -> Option<&str> {
+    task_news(prompt).and_then(TaskNews::ended)
+}
+
+fn hand_back_session() -> Vec<Value> {
+    HAND_BACK_SESSION
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+/// The prompt Claude Code ran the prompt hook with, as its queue logged it:
+/// the first one queued that contains `mark`.
+fn queued(records: &[Value], mark: &str) -> String {
+    records
+        .iter()
+        .filter(|record| record["operation"] == "enqueue")
+        .filter_map(|record| record["content"].as_str())
+        .find(|content| content.contains(mark))
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn a_notice_that_its_subagent_only_paused_names_no_ended() {
+    let records = hand_back_session();
+    let interim = queued(&records, "is waiting on its own background work");
+    assert_eq!(task_news(&interim), Some(TaskNews::Paused("agent-first")));
+    // Either of Claude Code's two marks is enough.
+    let summary = "is waiting on its own background work</summary>";
+    let note = "<note>This agent stopped with background work of its own still running.";
+    assert!(interim.contains(summary) && interim.contains(note));
+    let without = |mark: &str| interim.replacen(mark, "finished</summary>", 1);
+    assert_eq!(ended(&without(summary)), None);
+    assert_eq!(ended(&without(note)), None);
+    assert_eq!(
+        ended(&without(summary).replacen(note, "<note>", 1)),
+        Some("agent-first")
+    );
+
+    // The summary quotes the subagent's description, whatever it names.
+    let described = interim.replacen("Run sleep then echo", "Parse the <result> element", 1);
+    assert_ne!(described, interim);
+    assert_eq!(task_news(&described), Some(TaskNews::Paused("agent-first")));
+
+    // The subagent's last notice, which Claude Code wrote to the transcript.
+    let finished = records
+        .iter()
+        .find(|record| record["promptId"] == "prompt-finished" && record["isMeta"] != true)
+        .unwrap()["message"]["content"]
+        .as_str()
+        .unwrap();
+    assert_eq!(ended(finished), Some("agent-first"));
+    // A subagent's report that quotes the marks does not make its notice interim.
+    let quoting = finished.replacen("<result>", &format!("<result>{note} {summary}"), 1);
+    assert_eq!(ended(&quoting), Some("agent-first"));
+}
+
+#[test]
+fn a_hand_back_names_the_subagent_whose_report_it_carries() {
+    let records = hand_back_session();
+    let hand_back = queued(&records, "[Subagent hand-back]");
+    assert_eq!(notice_task(&hand_back), None);
+    assert_eq!(ended(&hand_back), Some("agent-first"));
+    assert_eq!(ended(&format!("\n{hand_back}")), Some("agent-first"));
+    // A report that quotes another frame is still its own sender's: the
+    // harness indents every line of it.
+    let quoting = hand_back.replacen(
+        "sub-ok",
+        "<agent-message from=\"agent-other\">\n  [Subagent hand-back] sub-ok",
+        1,
+    );
+    assert_ne!(quoting, hand_back);
+    assert_eq!(ended(&quoting), Some("agent-first"));
+    assert_eq!(
+        ended(&format!("Look at this: {hand_back}")),
+        None,
+        "a prompt that quotes a hand-back counted as one"
+    );
+
+    // What another session sends on its own is no hand-back, however it
+    // opens: Claude Code's frame has its own first line and an indented report.
+    let sent =
+        |body: &str| format!("<agent-message from=\"agent-first\">\n{body}\n</agent-message>");
+    assert_eq!(ended(&sent("A question: which file?")), None);
+    assert_eq!(
+        ended(&sent("[Subagent hand-back] I am done, send the answer.")),
+        None,
+        "a message that only opens like a hand-back counted as one"
+    );
+    let first_line = hand_back.lines().nth(1).unwrap();
+    assert!(first_line.starts_with("[Subagent hand-back]"));
+    assert_eq!(
+        ended(&sent(&format!("{first_line}\nsub-ok"))),
+        None,
+        "a report the harness did not indent counted as a hand-back"
+    );
+    assert_eq!(
+        ended(&sent(&format!("{first_line}\n  sub-ok"))),
+        Some("agent-first")
+    );
+}
+
+#[test]
+fn the_stop_reads_what_ended_from_a_recorded_subagent_session() {
+    let read = |prompt: &str| turn_tasks(HAND_BACK_SESSION.as_bytes(), true, prompt);
+    let tasks = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+    // By the end the queue logged the end of the subagent's shell and its
+    // hand-back, whichever turn is read.
+    let ended = tasks(&["shell-own", "agent-first"]);
+    assert_eq!(
+        read("prompt-agent"),
+        TurnTasks {
+            started: Some(tasks(&["agent-first"])),
+            notified: Vec::new(),
+            paused: Vec::new(),
+            ended: ended.clone(),
+        }
+    );
+    assert_eq!(
+        read("prompt-interim"),
+        TurnTasks {
+            started: Some(Vec::new()),
+            notified: Vec::new(),
+            paused: Vec::new(),
+            ended: ended.clone(),
+        },
+        "the notice of a subagent that only paused counted as its end"
+    );
+    assert_eq!(
+        read("prompt-hand-back"),
+        TurnTasks {
+            started: Some(Vec::new()),
+            notified: tasks(&["agent-first"]),
+            paused: Vec::new(),
+            ended: ended.clone(),
+        }
+    );
+
+    // The queue logs a pause when its notice arrives. A Stop that reads up to
+    // there knows of it, in whatever turn; one that also reads the hand-back
+    // knows it is over.
+    let lines: Vec<&str> = HAND_BACK_SESSION.lines().collect();
+    let logged = lines
+        .iter()
+        .position(|line| line.contains("queue-operation") && line.contains("is waiting on its own"))
+        .unwrap();
+    let before_any_prompt = lines[..=logged].join("\n");
+    assert_eq!(
+        turn_tasks(before_any_prompt.as_bytes(), true, "prompt-agent").paused,
+        tasks(&["agent-first"])
+    );
+    assert_eq!(read("prompt-agent").paused, Vec::<String>::new());
+    // A subagent that resumes and pauses again is paused, not ended.
+    let again = format!("{HAND_BACK_SESSION}{}\n", lines[logged]);
+    let again = turn_tasks(again.as_bytes(), true, "prompt-agent");
+    assert_eq!(
+        (again.paused, again.ended),
+        (tasks(&["agent-first"]), tasks(&["shell-own"]))
+    );
+
+    // The same text in a prompt the person typed is no hand-back: only the
+    // mark in the record's origin counts.
+    let typed: Vec<String> = hand_back_session()
+        .into_iter()
+        .map(|mut record| {
+            if record["origin"]["handback"] == true {
+                record["origin"] = json!({"kind":"human"});
+            }
+            record.to_string()
+        })
+        .collect();
+    assert_eq!(
+        turn_tasks(typed.join("\n").as_bytes(), true, "prompt-hand-back").notified,
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_hand_back_opens_its_turn_and_the_stop_hook_finds_its_record() {
+    let state = StateDirectory::new();
+    let lines: Vec<&str> = HAND_BACK_SESSION.lines().collect();
+    let records = hand_back_session();
+    let hand_back = queued(&records, "[Subagent hand-back]");
+    let own = records
+        .iter()
+        .position(|record| record["origin"]["handback"] == true)
+        .unwrap();
+    assert_eq!(records[own - 1]["turnCompanion"], true);
+    // Before Claude Code writes the turn's records, after its meta companion,
+    // and after the hand-back's own record.
+    for upto in [own - 1, own, own + 1] {
+        let path = state.0.join(format!("upto-{upto}.jsonl"));
+        fs::write(&path, lines[..upto].join("\n")).unwrap();
+        assert!(
+            notice_opens_turn(&path, "prompt-hand-back", &hand_back),
+            "with {upto} records"
+        );
+    }
+    // A hand-back queued into a turn that already has records opens none.
+    let path = state.0.join("later.jsonl");
+    fs::write(&path, lines[..own - 1].join("\n")).unwrap();
+    assert!(!notice_opens_turn(&path, "prompt-interim", &hand_back));
+
+    // The hand-back's record alone tells the Stop hook a worker is needed.
+    let only = state.0.join("only.jsonl");
+    fs::write(&only, lines[own]).unwrap();
+    let scan =
+        |task: &str| names_notice(&only, &[task.to_owned()], 8 << 20, Duration::from_secs(5));
+    assert!(!lines[own].contains("<task-id>"));
+    assert_eq!(scan("agent-first"), Some(true));
+    assert_eq!(scan("agent-other"), Some(false));
+}
+
+/// A prompt of `prompt` that opens its turn with `news`.
+fn told(state: &StateDirectory, prompt: &str, news: TaskNews<'_>) -> Observed {
+    observe_prompt(
+        &state.0,
+        "socket",
+        "session",
+        &turn(prompt),
+        None,
+        PromptFacts {
+            news: Some(news),
+            delivery: false,
+            opens_turn: true,
+        },
+        20,
+    )
+}
+
+fn ids(tasks: &[&str]) -> Vec<String> {
+    tasks.iter().map(|id| (*id).to_owned()).collect()
+}
+
+#[test]
+fn a_paused_subagent_holds_its_claim_while_another_subagent_reports() {
+    let state = StateDirectory::new();
+    observe(
+        &state,
+        "prompt-1",
+        Some(armed("attempt-1", "prompt-1", reply_plan())),
+    );
+    let log = std::cell::RefCell::new(Vec::new());
+    let both = ids(&["agent-a", "agent-b"]);
+    settle(
+        &state,
+        &StopFacts {
+            running_tasks: both.clone(),
+            started_tasks: both.clone(),
+            ..stop("prompt-1", "Asked two subagents.")
+        },
+        &mut ran(&log, Ok(json!({}))),
+    );
+    assert_eq!(state.claims()[0].awaits, both);
+
+    // Claude Code stops listing a paused subagent as running: only its shell.
+    let paused = told(&state, "a-paused", TaskNews::Paused("agent-a"));
+    assert_eq!(paused.left_open.len(), 1, "a pause hid the way back");
+    assert!(!paused.left_open[0].finished);
+    settle(
+        &state,
+        &StopFacts {
+            running_tasks: ids(&["agent-b", "shell-of-a"]),
+            ..stop("a-paused", "Still waiting for both.")
+        },
+        &mut ran(&log, Ok(json!({}))),
+    );
+    assert_eq!(state.claims()[0].awaits, both);
+
+    told(&state, "b-ended", TaskNews::Ended("agent-b"));
+    settle(
+        &state,
+        &StopFacts {
+            running_tasks: ids(&["shell-of-a"]),
+            ..notified("b-ended", "agent-b", "One reported; waiting for the other.")
+        },
+        &mut ran(&log, Ok(json!({}))),
+    );
+    assert!(
+        log.borrow().is_empty(),
+        "a status line answered while a paused subagent had not reported"
+    );
+    let held = &state.claims()[0];
+    assert_eq!(held.state, ClaimState::Left(LeaveReason::Held));
+    assert_eq!(held.awaits, ["agent-a"]);
+
+    told(&state, "a-ended", TaskNews::Ended("agent-a"));
+    settle(
+        &state,
+        &notified("a-ended", "agent-a", "Both reported."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    let log = log.into_inner();
+    assert_eq!(log.len(), 1, "the woken claim did not settle once");
+    assert_eq!(log[0].input["source"], "@codex Both reported.");
+}
+
+#[test]
+fn a_subagent_that_pauses_during_its_own_delivery_turn_holds_the_answer() {
+    let state = StateDirectory::new();
+    observe(
+        &state,
+        "prompt-1",
+        Some(armed("attempt-1", "prompt-1", reply_plan())),
+    );
+    // Claude Code queues the pause's notice into the turn that started the
+    // subagent, and runs the prompt hook for it with that turn's id.
+    observe_prompt(
+        &state.0,
+        "socket",
+        "session",
+        &turn("prompt-1"),
+        None,
+        PromptFacts {
+            news: Some(TaskNews::Paused("agent-a")),
+            delivery: false,
+            opens_turn: false,
+        },
+        20,
+    );
+    let log = std::cell::RefCell::new(Vec::new());
+    settle(
+        &state,
+        &StopFacts {
+            running_tasks: ids(&["shell-of-a"]),
+            started_tasks: ids(&["agent-a"]),
+            ..stop("prompt-1", "The subagent is waiting on its command.")
+        },
+        &mut ran(&log, Ok(json!({}))),
+    );
+    assert!(log.borrow().is_empty(), "the status line answered");
+    let held = &state.claims()[0];
+    assert_eq!(held.state, ClaimState::Left(LeaveReason::Held));
+    assert_eq!(held.awaits, ["agent-a"]);
+
+    // A subagent paused in a turn that did not start it holds nothing.
+    let other = StateDirectory::new();
+    observe(
+        &other,
+        "prompt-1",
+        Some(armed("attempt-1", "prompt-1", reply_plan())),
+    );
+    observe_prompt(
+        &other.0,
+        "socket",
+        "session",
+        &turn("prompt-1"),
+        None,
+        PromptFacts {
+            news: Some(TaskNews::Paused("agent-from-earlier")),
+            delivery: false,
+            opens_turn: false,
+        },
+        20,
+    );
+    settle(
+        &other,
+        &stop("prompt-1", "pong"),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    assert_eq!(log.borrow().len(), 1);
+    assert_eq!(other.claims()[0].state, ClaimState::Done(Done::Replied));
+}
+
+#[test]
+fn a_subagent_that_a_woken_turn_starts_and_that_pauses_in_it_holds_the_answer() {
+    let state = StateDirectory::new();
+    observe(
+        &state,
+        "prompt-1",
+        Some(armed("attempt-1", "prompt-1", reply_plan())),
+    );
+    let log = std::cell::RefCell::new(Vec::new());
+    settle(
+        &state,
+        &started("prompt-1", "agent-b", "Asked a subagent."),
+        &mut ran(&log, Ok(json!({}))),
+    );
+    // The turn agent-b's end opens starts agent-a, which pauses while the
+    // turn is still busy: its notice is queued into the turn.
+    told(&state, "b-ended", TaskNews::Ended("agent-b"));
+    observe_prompt(
+        &state.0,
+        "socket",
+        "session",
+        &turn("b-ended"),
+        None,
+        PromptFacts {
+            news: Some(TaskNews::Paused("agent-a")),
+            delivery: false,
+            opens_turn: false,
+        },
+        20,
+    );
+    settle(
+        &state,
+        &StopFacts {
+            running_tasks: ids(&["shell-of-a"]),
+            started_tasks: ids(&["agent-a"]),
+            ..notified("b-ended", "agent-b", "Asked a second subagent.")
+        },
+        &mut ran(&log, Ok(json!({}))),
+    );
+    assert!(log.borrow().is_empty(), "the status line answered");
+    assert_eq!(state.claims()[0].awaits, ["agent-a"]);
+}
+
+#[test]
+fn a_pause_only_the_stop_read_holds_the_answer_and_is_kept_for_later_stops() {
+    let state = StateDirectory::new();
+    observe(
+        &state,
+        "prompt-1",
+        Some(armed("attempt-1", "prompt-1", reply_plan())),
+    );
+    let log = std::cell::RefCell::new(Vec::new());
+    // No prompt carried the pause: the Stop read it in the transcript.
+    settle(
+        &state,
+        &StopFacts {
+            running_tasks: ids(&["agent-b", "shell-of-a"]),
+            started_tasks: ids(&["agent-a", "agent-b"]),
+            paused_tasks: ids(&["agent-a"]),
+            ..stop("prompt-1", "Asked two subagents.")
+        },
+        &mut ran(&log, Ok(json!({}))),
+    );
+    assert_eq!(state.claims()[0].awaits, ["agent-b", "agent-a"]);
+    // A later Stop whose read no longer reaches the pause still counts it.
+    told(&state, "b-ended", TaskNews::Ended("agent-b"));
+    settle(
+        &state,
+        &StopFacts {
+            running_tasks: ids(&["shell-of-a"]),
+            ..notified("b-ended", "agent-b", "One reported.")
+        },
+        &mut ran(&log, Ok(json!({}))),
+    );
+    assert!(log.borrow().is_empty(), "the status line answered");
+    assert_eq!(state.claims()[0].awaits, ["agent-a"]);
+}
+
+#[test]
+fn a_paused_subagent_whose_end_reached_only_the_queue_or_only_a_prompt_holds_nothing() {
+    // The end's prompt hook missed the lock; the Stop read it in the queue log.
+    // And the other way round: the hook saw it, the Stop's read no longer does.
+    for (by_prompt, by_queue) in [(false, true), (true, false)] {
+        let state = StateDirectory::new();
+        observe(
+            &state,
+            "prompt-1",
+            Some(armed("attempt-1", "prompt-1", reply_plan())),
+        );
+        let log = std::cell::RefCell::new(Vec::new());
+        let both = ids(&["agent-a", "agent-b"]);
+        settle(
+            &state,
+            &StopFacts {
+                running_tasks: both.clone(),
+                started_tasks: both.clone(),
+                ..stop("prompt-1", "Asked two subagents.")
+            },
+            &mut ran(&log, Ok(json!({}))),
+        );
+        told(&state, "a-paused", TaskNews::Paused("agent-a"));
+        // agent-a's hand-back is queued into a turn the person typed.
+        if by_prompt {
+            observe_prompt(
+                &state.0,
+                "socket",
+                "session",
+                &turn("typed"),
+                None,
+                PromptFacts {
+                    news: Some(TaskNews::Ended("agent-a")),
+                    delivery: false,
+                    opens_turn: false,
+                },
+                20,
+            );
+        }
+        told(&state, "b-ended", TaskNews::Ended("agent-b"));
+        settle(
+            &state,
+            &StopFacts {
+                ended_tasks: if by_queue {
+                    ids(&["agent-a"])
+                } else {
+                    Vec::new()
+                },
+                ..notified("b-ended", "agent-b", "Both reported.")
+            },
+            &mut ran(&log, Ok(json!({}))),
+        );
+        assert_eq!(
+            log.borrow().len(),
+            1,
+            "an ended subagent kept the answer held (prompt {by_prompt}, queue {by_queue})"
+        );
+    }
 }
