@@ -916,7 +916,7 @@ def activate(root, args):
             try:
                 prune_releases(runtime, {digest, before})
             except Exception as error:
-                print(f'Could not remove older Namedrop releases: {error}. The next update tries again.', file=sys.stderr)
+                print(f'Could not remove older Namedrop releases: {str(error).rstrip(".")}. The next update tries again.', file=sys.stderr)
         return result.returncode
 
 
