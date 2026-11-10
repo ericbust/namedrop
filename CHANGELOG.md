@@ -6,10 +6,10 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 ### Fixed
 
-- Channels no longer says an agent didn't answer your message while Namedrop is holding its answer for background work the agent started. Before, the agent going idle raised "@name didn't answer a request" about 30 seconds after its turn ended, even though its answer arrived once the work finished. The message's arrow now shows the agent still working.
-- A held answer that can never arrive now warns you, and says why: the agent was retired, a new session took its name, or its session ended. Review it, then `delivery acknowledge` clears the warning. An ended session can still answer if you resume it.
+- Channels no longer says an agent didn't answer your message while Namedrop is holding its answer for background work the agent started. Before, the agent going idle raised "@name didn't answer a request" about 30 seconds after its turn ended, even though its answer arrived once the work finished. The message's arrow now shows the agent still working, until Namedrop warns you the answer can't arrive.
+- A held answer that can never arrive now warns you, and says why: the agent was retired, a new session took its name, or its session ended because you closed its pane or the agent exited. Review it, then `delivery acknowledge` clears the warning. If that same session comes back, for example when you resume it, the warning goes away and its answer can still arrive. If a new session takes the name instead, the warning says so.
 - If the turn that should carry a held answer ends without one, you get the ordinary warning that the agent didn't answer.
-- `delivery acknowledge` now also clears the warning for a delivery whose agent session has ended. Before, it was refused until a new session appeared on that name.
+- `delivery acknowledge` now also clears the warning for a delivery whose agent session has ended, including after you closed its pane. Before, it was refused until a new session appeared on that name.
 
 ## [1.7.0] - 2026-11-09
 
