@@ -15,6 +15,7 @@ use std::{
 
 pub(super) struct Server {
     child: Child,
+    state: std::path::PathBuf,
     port: u16,
     pub(super) cookie: String,
     csrf: String,
@@ -294,6 +295,7 @@ else:
         let session = fs::read_to_string(f.state.join("dashboard/session")).unwrap();
         let mut server = Self {
             child,
+            state: f.state.clone(),
             port,
             cookie: format!("namedrop_dashboard_{port}={session}"),
             csrf: String::new(),
@@ -375,6 +377,10 @@ impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // Mailbox workers the dashboard started outlive it. Left running, they
+        // race the test's in-process drains, and their real clock holds as
+        // expired any delivery stamped by the fixture's test clock.
+        xws::stop_workers(&self.state);
     }
 }
 
