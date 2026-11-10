@@ -656,7 +656,7 @@ def restore(runtime, previous, incoming):
 
 def recorded_previous(runtime, selected):
     """The release selected before `selected`, as activation.json records it.
-    Without a usable record, such as one from before 1.7.2, the newest other
+    Without a usable record, such as one from before 1.7.4, the newest other
     release."""
     try:
         record = json.loads((runtime / 'activation.json').read_text())

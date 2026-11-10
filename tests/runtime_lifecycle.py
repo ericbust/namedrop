@@ -260,7 +260,7 @@ def check_activation_record(base, release):
     unrecorded(newest, later)
     record.write_text(json.dumps({'revision': r}))
     assert activated(rt, r_root) == r and retained(rt) == {r, newest}, \
-        'with a record from before 1.7.2, reactivation keeps the newest other release'
+        'with a record from before 1.7.4, reactivation keeps the newest other release'
 
 
 def main():
