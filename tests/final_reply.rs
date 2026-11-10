@@ -4108,7 +4108,7 @@ impl Space {
                     &PaneBindingId::new("binding-reviewer-again"),
                     &PaneAddressId::new("address-reviewer"),
                     "pane-reviewer",
-                    &MutationAttribution::new(ActorKind::Plugin, "test", 44),
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 43),
                 )
             })
             .unwrap();
@@ -4190,6 +4190,30 @@ fn a_stop_whose_worker_never_finishes_warns_after_the_workers_grace() {
     assert!(
         warnings[0][0].contains("ended its turn without a reply"),
         "{warnings:?}"
+    );
+}
+
+/// A warning that an exited agent can't answer stays while its pane is only
+/// unbound, since nothing says the session came back, and goes once the
+/// same session is seen again.
+#[test]
+fn an_unbound_pane_neither_raises_nor_withdraws_a_lost_answer() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    space.observe_reviewer_session("");
+    assert_eq!(space.unresolved_disposition_warnings().len(), 1);
+    space.close_reviewer_pane_for_a_moment();
+    assert_eq!(
+        space.unresolved_disposition_warnings().len(),
+        1,
+        "unbinding the pane withdrew the warning"
+    );
+    space.rebind_reviewer_pane();
+    assert!(
+        space.unresolved_disposition_warnings().is_empty(),
+        "{:?}",
+        space.unresolved_disposition_warnings()
     );
 }
 

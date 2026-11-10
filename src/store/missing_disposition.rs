@@ -266,8 +266,8 @@ impl StateTransaction<'_> {
         self.judge_afresh(ns, attempt, by)
     }
 
-    /// Judges a settled attempt whose claim waited for its Stop when it was
-    /// last judged, and says until when it still waits, if it does. A turn
+    /// Judges a settled attempt whose claim is still open, and says until
+    /// when its Stop may still decide it, if it may. A turn
     /// interrupted with Esc or ended by an API error has no Stop, so once the
     /// wait is over its attempt is judged like any other.
     pub(crate) fn judge_awaiting_stop(
