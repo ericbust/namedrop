@@ -1,7 +1,9 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
-use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
+use std::{fs, path::PathBuf, process::Command};
 
 struct Fixture(PathBuf);
 impl Fixture {
@@ -12,7 +14,7 @@ impl Fixture {
         ));
         fs::create_dir_all(root.join("home")).unwrap();
         let host = root.join("herdr");
-        fs::write(&host, r#"#!/bin/sh
+        executable::write_executable(&host, r#"#!/bin/sh
 case "$1 $2" in
   'worktree list') printf '%s\n' '{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"w1"}]}}';;
   'pane list') printf '%s\n' '{"result":{"panes":[{"pane_id":"p1","terminal_id":"t1","tab_id":"tab1","workspace_id":"w1","agent_status":"unknown"}]}}';;
@@ -22,8 +24,7 @@ case "$1 $2" in
   'pane report-metadata'|'tab rename') printf '%s\n' '{}';;
   *) printf 'unexpected Herdr call: %s\n' "$*" >&2; exit 1;;
 esac
-"#.replace("SHELL_PID", &std::process::id().to_string())).unwrap();
-        fs::set_permissions(host, fs::Permissions::from_mode(0o700)).unwrap();
+"#.replace("SHELL_PID", &std::process::id().to_string()));
         Self(root)
     }
     fn home(&self) -> PathBuf {
@@ -54,16 +55,6 @@ esac
             .arg("--plugin-state")
             .arg(self.0.join("state"))
             .args(["activate", "--input-json", "{\"confirmed\":true}"]);
-        // A test that just copied `binary` can exec it while another test's fork still
-        // holds the copy's write descriptor until its own exec, which fails with ETXTBSY.
-        for _ in 0..100 {
-            match command.output() {
-                Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
-                    std::thread::sleep(std::time::Duration::from_millis(20))
-                }
-                result => return result.unwrap(),
-            }
-        }
         command.output().unwrap()
     }
     fn cli(&self, args: &[&str]) -> std::process::Output {
@@ -143,7 +134,7 @@ fn activation_makes_the_readme_command_work_in_a_fresh_shell_and_refreshes_its_p
     assert!(f.0.join("state/namedrop.sqlite3").is_file());
 
     let next = f.0.join("replacement binary");
-    fs::copy(binary, &next).unwrap();
+    executable::copy_executable(binary, &next);
     success(f.activate(&next));
     assert!(
         fs::read_to_string(&wrapper)

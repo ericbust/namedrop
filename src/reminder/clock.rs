@@ -101,6 +101,9 @@ pub fn pending_count(state: &Path) -> u64 {
     pending(state, 0, false).map_or(0, |p| p.count)
 }
 
+/// Whether a clock holds the lock. The probe asks for it shared, which only a
+/// clock's exclusive hold refuses, so a clock that starts during a probe can
+/// tell the probe from another clock.
 pub fn clock_running(state: &Path) -> bool {
     let Ok(file) = fs::OpenOptions::new()
         .read(true)
@@ -109,7 +112,24 @@ pub fn clock_running(state: &Path) -> bool {
     else {
         return false;
     };
-    file.try_lock().is_err()
+    file.try_lock_shared().is_err()
+}
+
+/// Takes the clock's lock, or says another clock has it. Only a clock holds
+/// it exclusively. A probe holds it shared for an instant, and a clock sent
+/// away by one would leave pending reminders with no clock until the next
+/// command, so this waits the probe out.
+fn claim_clock(lock: &fs::File) -> bool {
+    loop {
+        if lock.try_lock().is_ok() {
+            return true;
+        }
+        if lock.try_lock_shared().is_err() {
+            return false;
+        }
+        let _ = lock.unlock();
+        thread::sleep(Duration::from_millis(1));
+    }
 }
 
 pub fn ensure_clock(state: &Path, socket: Option<&str>) -> Result<(), String> {
@@ -160,7 +180,7 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(state.join("reminder-clock.lock"))
         .map_err(|e| e.to_string())?;
-    if lock.try_lock().is_err() {
+    if !claim_clock(&lock) {
         return Ok(());
     }
     let mut catch_up = CatchUp::default();
@@ -332,6 +352,43 @@ mod tests {
         assert_eq!(wait_ms(&plan, 20_000), 100);
         plan.next_due_at_ms = Some(100_000);
         assert_eq!(wait_ms(&plan, 0), 30_000);
+    }
+
+    #[test]
+    fn a_clock_outlasts_a_probe_and_yields_only_to_another_clock() {
+        let root = std::env::temp_dir().join(ProcessIds::default().next_id("test-reminder-claim"));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("reminder-clock.lock");
+        let open = || {
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .unwrap()
+        };
+        let (probe, clock, later) = (open(), open(), open());
+
+        probe.try_lock_shared().unwrap();
+        assert!(!clock_running(&root), "a probe looked like a clock");
+        let (left_early, claimed) = thread::scope(|scope| {
+            let claim = scope.spawn(|| claim_clock(&clock));
+            let patience = std::time::Instant::now() + Duration::from_millis(100);
+            while !claim.is_finished() && std::time::Instant::now() < patience {
+                thread::sleep(Duration::from_millis(5));
+            }
+            let left_early = claim.is_finished();
+            probe.unlock().unwrap();
+            (left_early, claim.join().unwrap())
+        });
+        assert!(!left_early, "a probe sent the clock away");
+        assert!(claimed);
+
+        assert!(clock_running(&root));
+        assert!(!claim_clock(&later), "two clocks hold the lock");
+        drop((probe, clock, later));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

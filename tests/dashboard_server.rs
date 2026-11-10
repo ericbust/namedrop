@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
 mod support;
 
@@ -567,17 +569,14 @@ fn the_server_stops_once_its_last_tab_closes() {
 }
 
 fn fake_herdr(root: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let herdr = root.join("herdr");
-    fs::write(
+    executable::write_executable(
         &herdr,
         "#!/bin/sh\n[ \"$1 $2\" = \"workspace get\" ] || exit 1\n\
          printf '{\"result\":{\"workspace\":{\"label\":\"label-%s\",\
          \"worktree\":{\"checkout_path\":\"/fake/trees/%s\",\"repo_key\":\"/fake/home/proj/.git\",\
          \"repo_name\":\"proj\",\"repo_root\":\"/fake/home/proj\"}}}}' \"$3\" \"$3\"\n",
-    )
-    .unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     herdr
 }
 

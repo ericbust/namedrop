@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
 #[path = "support/bash_rules.rs"]
 mod bash_rules;
@@ -3847,13 +3849,9 @@ fn a_symbolic_link_inside_an_owned_plugin_is_refused_without_following_it() {
 fn installed_hook_wrapper_emits_only_the_confirmed_block_result() {
     let directory = TestDirectory::new();
     let executable = directory.path().join("hook-result");
+    // A background mailbox wake may still be executing the previous fake.
     let install_fake = |body: &str| {
-        // A background mailbox wake may still be executing the previous fake.
-        // Replace its inode instead of rewriting an executable in use (ETXTBSY on Linux).
-        let staged = directory.path().join("hook-result-next");
-        fs::write(&staged, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(&staged, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::rename(&staged, &executable).unwrap();
+        executable::write_executable(&executable, format!("#!/bin/sh\n{body}\n"));
     };
     install_fake(r#"printf '%s' '{"decision":"block","reason":"Collaboration message sent."}'"#);
     let package = install_integration_package(
@@ -3901,12 +3899,10 @@ fn only_the_claude_hook_wrapper_forwards_authenticated_delivery_context() {
         }
     })
     .to_string();
-    fs::write(
+    executable::write_executable(
         &executable,
         format!("#!/bin/sh\nprintf '%s' '{}'\n", delivery_output),
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    );
 
     let claude = install_integration_package(
         directory.home(),
@@ -3943,15 +3939,13 @@ fn installed_hook_wrapper_wakes_mailbox_delivery_without_delaying_the_hook_resul
     let directory = TestDirectory::new();
     let executable = directory.path().join("hook-result");
     let command_log = directory.path().join("hook-commands");
-    fs::write(
+    executable::write_executable(
         &executable,
         format!(
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1 $2\" in\n  'hook user-prompt-submit') printf '%s' '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ;;\n  'hook mailbox-wake') sleep 1 ;;\nesac\n",
             command_log.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let package = install_integration_package(
         directory.home(),
         AgentRuntime::Codex,
@@ -4028,15 +4022,13 @@ fn both_installed_hooks_forward_only_known_safe_failed_handoff_guidance() {
         .unwrap();
         for (guidance, forward) in cases {
             let output=serde_json::json!({"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":guidance}}).to_string();
-            fs::write(
+            executable::write_executable(
                 &executable,
                 format!(
                     "#!/bin/sh\nprintf '%s' '{}'\n",
                     output.replace('\'', "'\"'\"'")
                 ),
-            )
-            .unwrap();
-            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+            );
             let result = Command::new(package.join("scripts/user-prompt-submit"))
                 .output()
                 .unwrap();
@@ -4054,12 +4046,10 @@ fn both_installed_hooks_forward_only_known_safe_failed_handoff_guidance() {
 fn installed_hook_manifest_launches_from_the_codex_plugin_root() {
     let directory = TestDirectory::new();
     let executable = directory.path().join("hook-result");
-    fs::write(
+    executable::write_executable(
         &executable,
         "#!/bin/sh\nprintf '%s' '{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}'\n",
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let package = install_integration_package(
         directory.home(),
         AgentRuntime::Codex,
@@ -4112,14 +4102,12 @@ fn installed_subagent_wrapper_swallows_all_output_and_failures() {
     let directory = TestDirectory::new();
     let executable = directory.path().join("hook-result");
     for code in [0, 23] {
-        fs::write(
+        executable::write_executable(
             &executable,
             format!(
                 "#!/bin/sh\nprintf 'untrusted context'\nprintf 'untrusted error' >&2\nexit {code}\n"
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
             let package = install_integration_package(
                 directory.home(),
@@ -4779,8 +4767,7 @@ fn installed_packages_quote_an_executable_and_state_path_containing_spaces() {
     )
     .unwrap();
     let block = r#"{"decision":"block","reason":"Collaboration message sent."}"#;
-    fs::write(&executable, format!("#!/bin/sh\nprintf '%s' '{block}'\n")).unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    executable::write_executable(&executable, format!("#!/bin/sh\nprintf '%s' '{block}'\n"));
     let quoted = |path: &Path| format!("'{}'", path.display());
 
     for agent_runtime in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {

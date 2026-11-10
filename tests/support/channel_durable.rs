@@ -395,7 +395,7 @@ fn restart_fails_only_dispatching_and_routes_queued_without_mutating_fingerprint
 fn hard_crash_kills_router_descendants_before_successor_can_route() {
     let f = fixture();
     let server = Server::start(&f, "delayed", false);
-    fs::write(
+    executable::write_executable(
         f.root.join("fake-router"),
         r#"#!/usr/bin/python3
 import json, os, subprocess, sys, time
@@ -409,8 +409,7 @@ os.replace(pids_path + '.tmp',pids_path)
 while True:
     time.sleep(.01)
 "#,
-    )
-    .unwrap();
+    );
     assert_eq!(
         support::raw_post(&server, "orphan", "Could @planner inspect?", None).0,
         200

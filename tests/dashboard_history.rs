@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
 mod support;
 
@@ -15,7 +17,6 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpStream,
-    os::unix::fs::PermissionsExt,
     path::Path,
     process::{Child, Command, Stdio},
     thread,
@@ -719,7 +720,7 @@ fn direct_message_http_routes_keep_private_history_out_of_channel_reads() {
     let key = SpaceKey::of(&ns);
     let herdr = directory.path().join("fake-herdr");
     let live_panes = directory.path().join("live-panes.json");
-    fs::write(
+    executable::write_executable(
         &herdr,
         r#"#!/usr/bin/env python3
 import pathlib, sys
@@ -736,9 +737,7 @@ elif sys.argv[1:3] == ["workspace", "list"]:
 else:
     print('{}')
 "#,
-    )
-    .unwrap();
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     fs::write(
         &live_panes,
         serde_json::json!({"result":{"panes":[{

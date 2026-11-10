@@ -2,6 +2,8 @@
 mod cleanup;
 #[path = "support/delivered.rs"]
 mod delivered;
+#[path = "support/executable.rs"]
+mod executable;
 
 #[path = "support/xws.rs"]
 mod xws;
@@ -12,7 +14,6 @@ use std::{
     fs,
     io::{Read, Write},
     net::{Shutdown, TcpStream},
-    os::unix::fs::PermissionsExt,
     path::Path,
     process::{Child, Command, Stdio},
     sync::{Barrier, mpsc},
@@ -89,7 +90,9 @@ impl Server {
         .unwrap();
         configure(f, json!({"stdout": "ready\n"}));
         let shim = f.root.join("herdr");
-        fs::write(&shim, r#"#!/usr/bin/python3
+        executable::write_executable(
+            &shim,
+            r#"#!/usr/bin/python3
 import json, os, subprocess, sys, tempfile, time
 root = os.path.dirname(__file__)
 args = sys.argv[1:]
@@ -134,8 +137,8 @@ elif args[:2] == ['worktree', 'list']:
 else:
     sys.stderr.write('unexpected Herdr invocation')
     sys.exit(1)
-"#).unwrap();
-        fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
+"#,
+        );
         let mut child = Command::new(env!("CARGO_BIN_EXE_namedrop"))
             .arg("--plugin-state")
             .arg(&f.state)

@@ -1,6 +1,6 @@
 use super::*;
 use std::collections::BTreeMap;
-use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+use std::{fs, process::Command};
 
 #[path = "../tests/support/bash_rules.rs"]
 mod bash_rules;
@@ -71,12 +71,10 @@ fn delivery_guidance_quotes_shell_sensitive_arguments_and_preserves_safe_tokens(
         std::env::temp_dir().join(format!("namedrop-quoted-guidance-{}", std::process::id()));
     fs::create_dir_all(&root).unwrap();
     let executable = root.join("fake runtime");
-    fs::write(
+    crate::executable::write_executable(
         &executable,
         "#!/usr/bin/env python3\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n",
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let marker = root.join("should-not-exist");
     let argv = vec![
         "send".to_owned(),

@@ -7,6 +7,8 @@ mod cleanup;
 mod delivered;
 #[path = "support/dispatch.rs"]
 mod dispatch;
+#[path = "support/executable.rs"]
+mod executable;
 
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
@@ -21,7 +23,6 @@ use namedrop::{
 use serde_json::{Value, json};
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
@@ -313,15 +314,13 @@ fn forwarded(directory: &TestDirectory, host: AgentRuntime, output: &Value) -> S
     let executable = directory.root.join("hook-result");
     let package =
         install_integration_package(&directory.home, host, &executable, &directory.state).unwrap();
-    fs::write(
+    executable::write_executable(
         &executable,
         format!(
             "#!/bin/sh\nprintf '%s' '{}'\n",
             output.to_string().replace('\'', "'\"'\"'")
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let result = Command::new(package.join("scripts/user-prompt-submit"))
         .output()
         .unwrap();
@@ -929,15 +928,13 @@ fn an_incoming_task_reaches_both_hosts_with_the_roster_and_only_claude_with_the_
                 host == AgentRuntime::ClaudeCode,
             ),
         ] {
-            fs::write(
+            executable::write_executable(
                 &executable,
                 format!(
                     "#!/bin/sh\nprintf '%s' '{}'\n",
                     output.replace('\'', "'\"'\"'")
                 ),
-            )
-            .unwrap();
-            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+            );
             let result = Command::new(installed.join("scripts/user-prompt-submit"))
                 .output()
                 .unwrap();
@@ -1264,8 +1261,7 @@ fn the_rendered_line_survives_a_hostile_installed_path() {
     let installed = directory.root.join("it's odd").join("name drop");
     fs::create_dir_all(&installed).unwrap();
     let echo = installed.join("namedrop");
-    fs::write(&echo, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
-    fs::set_permissions(&echo, fs::Permissions::from_mode(0o700)).unwrap();
+    executable::write_executable(&echo, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
     let quoted_echo = format!("'{}'", echo.display().to_string().replace('\'', "'\"'\"'"));
     let rendered_executable = line.split_once(" --plugin-state ").unwrap().0;
     let swapped = line.replacen(rendered_executable, &quoted_echo, 1);
@@ -1424,15 +1420,13 @@ fn a_leading_mention_that_misses_keeps_its_guidance_and_gains_the_roster() {
         let package =
             install_integration_package(&installation.home, host, &executable, &installation.state)
                 .unwrap();
-        fs::write(
+        executable::write_executable(
             &executable,
             format!(
                 "#!/bin/sh\nprintf '%s' '{}'\n",
                 serialized.replace('\'', "'\"'\"'")
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let result = Command::new(package.join("scripts/user-prompt-submit"))
             .output()
             .unwrap();
@@ -1754,15 +1748,13 @@ fn both_installed_wrappers_forward_a_roster_and_only_claude_forwards_the_attesta
             (&attestation, forwards_attestation),
             (&unknown, false),
         ] {
-            fs::write(
+            executable::write_executable(
                 &executable,
                 format!(
                     "#!/bin/sh\nprintf '%s' '{}'\n",
                     output.replace('\'', "'\"'\"'")
                 ),
-            )
-            .unwrap();
-            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+            );
             let result = Command::new(package.join("scripts/user-prompt-submit"))
                 .output()
                 .unwrap();
@@ -1780,15 +1772,13 @@ fn both_installed_wrappers_forward_a_roster_and_only_claude_forwards_the_attesta
         // The session-start wrapper forwards the policy and nothing else: not a
         // roster, whose event differs, and not an unknown context.
         for (output, forward) in [(&policy, true), (&roster, false), (&unknown, false)] {
-            fs::write(
+            executable::write_executable(
                 &executable,
                 format!(
                     "#!/bin/sh\nprintf '%s' '{}'\n",
                     output.replace('\'', "'\"'\"'")
                 ),
-            )
-            .unwrap();
-            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+            );
             let result = Command::new(package.join("scripts/session-start"))
                 .output()
                 .unwrap();
@@ -1858,15 +1848,13 @@ fn only_the_codex_session_start_wrapper_forwards_the_shared_app_server_notice_ex
         let package =
             install_integration_package(&directory.home, runtime, &executable, &directory.state)
                 .unwrap();
-        fs::write(
+        executable::write_executable(
             &executable,
             format!(
                 "#!/bin/sh\nprintf '%s' '{}'\n",
                 output.replace('\'', "'\"'\"'")
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let result = Command::new(package.join("scripts/session-start"))
             .output()
             .unwrap();

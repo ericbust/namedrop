@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
 use namedrop::{
     ActorKind, AgentSessionId, DeliveryAttemptId, DeliveryId, DeliveryState, LeaseDraft,
@@ -156,8 +158,7 @@ impl Fixture {
 
     fn set_herdr(&self, body: &str) {
         let path = self.root.join("herdr");
-        fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        executable::write_executable(&path, format!("#!/bin/sh\n{body}"));
     }
 
     fn initialize(&self) {
@@ -651,12 +652,10 @@ fn a_status_worker_from_a_replaced_runtime_hands_its_queue_to_the_selected_one()
     let runtime = fixture.state().join("runtime");
     fs::create_dir_all(runtime.join("current")).unwrap();
     let launcher = runtime.join("namedrop");
-    fs::write(
+    executable::write_executable(
         &launcher,
         "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$NAMEDROP_TEST_FIXTURE/handed-over\"\n",
-    )
-    .unwrap();
-    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     std::os::unix::fs::symlink(&launcher, runtime.join("current/namedrop")).unwrap();
     let marker = fixture.queue_status("after-update");
     let mut worker = fixture.worker();

@@ -3,10 +3,6 @@ use namedrop::HerdrCommandExecutor;
 use namedrop::dashboard::snapshot::SpaceKey;
 
 fn held_thread(f: &Fixture) -> Value {
-    f.clock.0.store(
-        namedrop::Clock::now_unix_ms(&namedrop::SystemClock),
-        std::sync::atomic::Ordering::Relaxed,
-    );
     let mut parent = plain_root(f, "controls-root", "Please collaborate.");
     for index in 0..10 {
         let (pane, mention) = if index % 2 == 0 {
