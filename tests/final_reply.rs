@@ -3394,6 +3394,53 @@ fn a_delivery_in_a_turn_a_notice_opened_shows_the_held_deliverys_line() {
     );
 }
 
+/// A draft ahead of that delivery keeps it explicit, so it arms no claim. The
+/// turn is still about the delivery: its prompt shows the held delivery's
+/// line, and the turn's final message never answers the held one.
+#[test]
+fn a_draft_and_a_delivery_in_a_turn_a_notice_opened_show_the_held_deliverys_line() {
+    let space = Space::new();
+    let first = space.held_on_first_task();
+    let attempt = first["control"]["attempt_id"].as_str().unwrap().to_owned();
+    let way_back = format!("Namedrop: delivery {attempt} from an earlier turn is still open");
+    let notice = recorded_turn("prompt-notice", "notice-turn");
+    let text = notice[0]["message"]["content"]
+        .as_str()
+        .unwrap()
+        .replace("task-second", "task-first");
+    let promised = space
+        .reviewer_prompt("notice-turn", &text)
+        .unwrap_or_default();
+    assert!(!promised.contains(&way_back), "{promised}");
+    let second = space.second_ask(&first);
+    let context = space
+        .reviewer_prompt(
+            "notice-turn",
+            &format!(
+                "A draft I had not sent. {}",
+                space.as_typed(&second.to_string())
+            ),
+        )
+        .unwrap();
+    assert!(
+        context.contains("already in this pane's input"),
+        "{context}"
+    );
+    assert_eq!(space.claims().len(), 1, "the drafted delivery armed a claim");
+    assert!(
+        context.contains(&way_back),
+        "the drafted delivery's prompt hid the held line: {context}"
+    );
+    space.append_transcript(&notice);
+    space.reviewer_stop("notice-turn", "ping", &[], &space.transcript());
+    assert!(
+        space.answers("pane-lead").is_empty(),
+        "the turn's final message answered the held delivery: {:?}",
+        space.answers("pane-lead")
+    );
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+}
+
 /// A turn whose first prompt the hook never recorded is still not opened by
 /// the notice queued into it: the transcript shows the turn began earlier, so
 /// the notice promises nothing and its prompt shows the held line.
