@@ -241,6 +241,17 @@ fn geometry_invocations(f: &Fixture) -> Vec<Value> {
         .collect()
 }
 
+/// Probe starts are at least a second apart, so `since.elapsed()` admits at
+/// most one more probe than its whole seconds.
+fn assert_throttled_probes(f: &Fixture, since: Instant, at_least: usize) {
+    let probes = geometry_invocations(f).len();
+    let allowed = 1 + since.elapsed().as_secs() as usize;
+    assert!(
+        (at_least..=allowed).contains(&probes),
+        "{probes} TTY probes, expected {at_least} to {allowed}"
+    );
+}
+
 fn path(socket: &str, workspace: &str, alias: &str) -> String {
     format!(
         "/w/{}/participants/{}/live",
@@ -891,10 +902,11 @@ fn failed_tty_discovery_throttles_startup_but_rechecks_metadata_rows() {
         &f,
         json!({"mutate_metadata":metadata_with_rows(&f, json!(80)),"quiet":true}),
     );
+    let started = Instant::now();
     let mut live = server.live(&path("socket-a", "w1", "lead"));
     let reset = live.record().unwrap();
     assert_eq!(reset["rows"], 80);
-    assert_eq!(geometry_invocations(&f).len(), 1);
+    assert_throttled_probes(&f, started, 1);
     assert_eq!(invocations(&f).len(), 2);
     let source = SourcePty::new(200, 70);
     set_process_info(&f, json!({"tty":source.path}));
@@ -903,8 +915,7 @@ fn failed_tty_discovery_throttles_startup_but_rechecks_metadata_rows() {
     assert_eq!(resized["cols"], 200);
     assert_eq!(resized["rows"], 70);
     assert_eq!(resized["continuity"], reset["continuity"]);
-    let calls = geometry_invocations(&f);
-    assert_eq!(calls.len(), 2);
+    assert_throttled_probes(&f, started, 2);
 }
 
 #[test]
