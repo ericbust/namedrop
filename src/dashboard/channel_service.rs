@@ -477,6 +477,80 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// A warning that the agent's send failed is no judgement of whether it
+    /// answered, so neither starting Channels nor a session change withdraws
+    /// or rewords it.
+    #[test]
+    fn a_failed_send_warning_on_a_held_answer_outlives_a_start_and_a_session_change() {
+        let root = state_root("held-failed-send");
+        let mut store = StateStore::open(&root).unwrap();
+        let [failed, judged] =
+            ["failed", "judged"].map(|space| StateNamespace::for_space("socket", space));
+        let by = crate::MutationAttribution::new(crate::ActorKind::Plugin, "test", 20);
+        for ns in [&failed, &judged] {
+            crate::store::seed_unanswered(&mut store, ns, false);
+            crate::final_reply::hold_answer(&root, ns, "session", "attempt");
+        }
+        store
+            .transaction(|tx| {
+                tx.flag_failed_settle(
+                    &failed,
+                    &crate::DeliveryAttemptId::new("attempt"),
+                    crate::store::LostSettle::QueuedReply,
+                    "the store was busy",
+                    &by,
+                )
+            })
+            .unwrap();
+        let refused = disposition_warnings(&root, &failed);
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(
+            refused[0].0.contains("queued reply was refused"),
+            "{refused:?}"
+        );
+
+        let mut service = ChannelService::start(&root).unwrap();
+        service.shutdown().unwrap();
+        assert_eq!(
+            disposition_warnings(&root, &judged),
+            [],
+            "a judgement's warning on an answer that can still arrive stayed"
+        );
+        assert_eq!(
+            disposition_warnings(&root, &failed),
+            refused,
+            "starting Channels changed the warning that a send failed"
+        );
+
+        store
+            .transaction(|tx| {
+                for ns in [&failed, &judged] {
+                    tx.observe_agent_session(
+                        ns,
+                        "observation-new",
+                        &crate::PaneAddressId::new("agent"),
+                        &crate::AgentSessionId::new("session-new"),
+                        "idle",
+                        &by,
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            disposition_warnings(&root, &failed),
+            refused,
+            "a session change changed the warning that a send failed"
+        );
+        let lost = disposition_warnings(&root, &judged);
+        assert!(
+            lost.len() == 1 && lost[0].0.contains("A new session took the agent's name"),
+            "{lost:?}"
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn a_store_migrated_from_schema_six_keeps_its_scraped_flag_and_clears_an_answers() {
         let root = state_root("schema6-backlog");

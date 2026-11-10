@@ -141,6 +141,19 @@ impl Unanswered {
             Self::HeldAnswerLost(SessionGone::Ended) => "The agent's session ended before it finished working on this message, because its pane was closed or the agent exited. If you resume that session, its answer can still arrive. Otherwise ask again if you still need one. After you review it, delivery acknowledge clears this warning.".to_owned(),
         }
     }
+
+    /// Whether a judgement of an untracked attempt wrote `summary`, as
+    /// opposed to a Stop whose send failed.
+    fn judged(summary: &str) -> bool {
+        [
+            Self::Untracked,
+            Self::HeldAnswerLost(SessionGone::Retired),
+            Self::HeldAnswerLost(SessionGone::Replaced),
+            Self::HeldAnswerLost(SessionGone::Ended),
+        ]
+        .iter()
+        .any(|reason| reason.summary() == summary)
+    }
 }
 
 /// How a settle got lost, which is what the warning has to say happened.
@@ -261,11 +274,11 @@ impl StateTransaction<'_> {
         self.judge_afresh(ns, attempt, by)
     }
 
-    /// Judges a settled attempt again. A held answer's open warning is
-    /// withdrawn first, unless it already says what is true now, since why
-    /// its session can't answer, or whether it can, may have changed. A
-    /// warning the person acknowledged, or one on an answer not held, stays
-    /// as it is.
+    /// Judges a settled attempt again. A held answer's open warning that a
+    /// judgement raised is withdrawn first, unless it already says what is
+    /// true now, since why its session can't answer, or whether it can, may
+    /// have changed. A warning that a send failed, one the person
+    /// acknowledged, or one on an answer not held, stays as it is.
     fn judge_afresh(
         &mut self,
         ns: &StateNamespace,
@@ -273,11 +286,11 @@ impl StateTransaction<'_> {
         by: &MutationAttribution,
     ) -> Result<(), StoreError> {
         let facts = self.missing_disposition_facts(ns, attempt)?;
-        if facts.claim == AnswerClaim::Held {
-            if self.open_warning(ns, attempt)? == unanswered(&facts).map(|reason| reason.summary())
-            {
-                return Ok(());
-            }
+        if facts.claim == AnswerClaim::Held
+            && let Some(open) = self.open_warning(ns, attempt)?
+            && Unanswered::judged(&open)
+            && unanswered(&facts).map(|reason| reason.summary()) != Some(open)
+        {
             self.withdraw_open_warning(ns, attempt, by)?;
         }
         self.flag_missing_disposition(ns, attempt, by)
