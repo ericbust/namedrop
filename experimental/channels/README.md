@@ -342,6 +342,18 @@ Typing `/` or `$` offers skills for the addressed agent. Selecting one inserts
 `/name` for Claude Code or `$name` for Codex. Their skill lists stay separate.
 Skill suggestions also work in **Type to agent**.
 
+A paste, a drop or the image button attaches up to 4 images of up to 10 MB each.
+A paste that also carries text stays a text paste. The composer uploads each image
+at once with `POST /api/images`, raw bytes and the `X-Namedrop-Csrf` header, and
+the answer is `{name, line}`. The line is `Image: ` and the stored file's absolute
+path. A draft keeps its images as such lines at the end of its text, after a blank
+line, so a kept or refused draft keeps them and the post's `source` already carries
+them. `splitImages()` and `withImages()` in `src/images.ts` hold that form. The
+box shows only the typed text, and a chip per image from `GET /api/images/<name>`.
+A frame's message row lists its images in `images` and leaves their lines out of
+`body`. A message with images needs words too, so Send stays off until there are
+some.
+
 ## Direct messages and reminders
 
 **Direct messages** lists Namedrop agents across workspaces, with a channel label
