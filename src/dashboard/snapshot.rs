@@ -633,6 +633,10 @@ pub struct MessageRow {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub progress_note: bool,
     pub body: SafeText,
+    /// File names of the images the message's last lines name. The body
+    /// leaves those lines out.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
     pub legs: Vec<DeliveryLeg>,
 }
 
@@ -1143,6 +1147,7 @@ fn health(state: SpaceState, attention: usize, in_flight: usize, working: usize)
 }
 
 pub(crate) fn message(row: &rows::MessageRow, legs: &[rows::LegRow]) -> MessageRow {
+    let (text, images) = super::images::split(&row.body);
     MessageRow {
         channel: row.channel_to.as_ref().map(|to| ChannelRouting {
             durable: row.channel_state.is_some(),
@@ -1169,8 +1174,12 @@ pub(crate) fn message(row: &rows::MessageRow, legs: &[rows::LegRow]) -> MessageR
         kind: MessageKind::of(&row.grammar_version, row.in_reply_to.is_some()),
         progress_note: row.grammar_version == "final-message/v1"
             && crate::store::is_progress_note(&row.message_id),
+        images: images
+            .iter()
+            .map(|image| image.as_str().to_owned())
+            .collect(),
         body: SafeText::from_untrusted(
-            &row.body,
+            text,
             if matches!(
                 row.grammar_version.as_str(),
                 "terminal-relay/v1" | "final-message/v1"
@@ -1199,7 +1208,7 @@ fn threads(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<ThreadChip> {
         .filter_map(|m| rows.threads.iter().find(|t| t.thread_id == m.thread_id))
         .map(|t| ThreadChip {
             thread_id: t.thread_id.clone(),
-            title: SafeText::from_untrusted(&t.title, SHORT_CHARS),
+            title: SafeText::from_untrusted(super::images::split(&t.title).0, SHORT_CHARS),
             message_count: t.message_count,
         })
         .collect()
@@ -1365,7 +1374,10 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow], now_ms: i64) -> V
                     delivery_id: entry.delivery_id.clone(),
                     message_id: entry.message_id.clone(),
                     from: at(&entry.author_address_id, entry.author_is_human),
-                    preview: SafeText::from_untrusted(&entry.body, PREVIEW_CHARS),
+                    preview: SafeText::from_untrusted(
+                        super::images::split(&entry.body).0,
+                        PREVIEW_CHARS,
+                    ),
                     state: entry.state,
                     since_ms: entry.since_ms,
                     attempts: entry.attempts,

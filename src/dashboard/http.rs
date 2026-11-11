@@ -42,10 +42,23 @@ const PING_EVERY: Duration = Duration::from_secs(15);
 const MAX_CONNECTIONS: usize = 64;
 // Followers occupy HTTP handlers too. Keep 48 connection slots for other routes.
 const MAX_SCREEN_REQUESTS: usize = 16;
-const SECURITY_HEADERS: &str = "Content-Security-Policy: default-src 'none'; script-src 'self'; \
+macro_rules! protection_headers {
+    () => {
+        "Content-Security-Policy: default-src 'none'; script-src 'self'; \
 style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; \
 base-uri 'none'; form-action 'none'\r\nX-Frame-Options: DENY\r\n\
-X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCache-Control: no-store\r\n";
+X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n"
+    };
+}
+const SECURITY_HEADERS: &str = concat!(protection_headers!(), "Cache-Control: no-store\r\n");
+/// An image's name is the digest of its bytes, so the browser may keep it
+/// for as long as the server does.
+const IMAGE_HEADERS: &str = concat!(
+    protection_headers!(),
+    "Cache-Control: private, max-age=2592000, immutable\r\n"
+);
+/// The composer sends a message's images together.
+const MAX_IMAGE_UPLOADS: usize = super::images::MAX_PER_MESSAGE;
 
 pub(crate) struct Front {
     pub port: u16,
@@ -59,6 +72,7 @@ pub(crate) struct Front {
     pub mutations: Arc<Mutex<()>>,
     pub channel_wake: super::channel_service::ChannelWake,
     pub control_effects: super::thread_controls::ControlEffects,
+    pub image_uploads: AtomicUsize,
 }
 
 impl Front {
@@ -437,6 +451,7 @@ enum Status {
     MethodNotAllowed,
     Unavailable,
     PayloadTooLarge,
+    UnsupportedMedia,
     TooManyRequests,
 }
 
@@ -445,6 +460,7 @@ impl Status {
         match self {
             Self::NoContent => "204 No Content",
             Self::PayloadTooLarge => "413 Payload Too Large",
+            Self::UnsupportedMedia => "415 Unsupported Media Type",
             Self::TooManyRequests => "429 Too Many Requests",
             Self::BadRequest => "400 Bad Request",
             Self::Unauthorized => "401 Unauthorized",
@@ -463,6 +479,7 @@ impl Status {
                 "This browser isn't signed in to Channels. Your agents and messages are fine.\n\nOn the machine running Channels, run `namedrop channels` in a workspace and open the link it prints. Away from that machine? Run `namedrop channels --tailscale --no-open` there over SSH and open the HTTPS link on this device.\n"
             }
             Self::PayloadTooLarge => "Request body is too large.\n",
+            Self::UnsupportedMedia => "Not a PNG, JPEG, GIF or WebP image.\n",
             Self::TooManyRequests => "Too many input requests.\n",
             Self::BadRequest => "Bad request.\n",
             Self::Forbidden => "Forbidden.\n",
@@ -659,6 +676,8 @@ enum Route {
     },
     Page,
     Session,
+    ImageUpload,
+    Image(super::images::Name),
     Send(SpaceKey),
     DirectMessages,
     DirectHistory {
@@ -793,6 +812,24 @@ fn route(
         )
     {
         return Err(Status::MethodNotAllowed);
+    }
+    if path == "/api/images" {
+        if request.method != "POST" {
+            return Err(Status::MethodNotAllowed);
+        }
+        authenticate_session(request, port, session)?;
+        authenticate_mutation(request, session, &origin)?;
+        return Ok(Route::ImageUpload);
+    }
+    if let Some(name) = path.strip_prefix("/api/images/") {
+        if request.method != "GET" {
+            return Err(Status::MethodNotAllowed);
+        }
+        authenticate_session(request, port, session)?;
+        authenticate_provenance(request, &origin)?;
+        return super::images::Name::parse(name)
+            .map(Route::Image)
+            .ok_or(Status::NotFound);
     }
     if path == "/api/direct-messages" && request.method == "GET" {
         authenticate_session(request, port, session)?;
@@ -1168,6 +1205,7 @@ impl OperatorPost {
             || post.source.trim().is_empty()
             || post.source.len() > BODY_LIMIT
             || post.in_reply_to.as_deref().is_some_and(|id| !valid_id(id))
+            || too_many_images(&post.source)
         {
             return Err(Status::BadRequest);
         }
@@ -1210,6 +1248,10 @@ impl DeliverPost {
         }
         Ok(post)
     }
+}
+
+fn too_many_images(source: &str) -> bool {
+    super::images::split(source).1.len() > super::images::MAX_PER_MESSAGE
 }
 
 fn read_json_body<T: serde::de::DeserializeOwned>(
@@ -1333,6 +1375,8 @@ fn serve_connection(
                 .to_string()
                 .as_bytes(),
         ),
+        Ok(Route::ImageUpload) => upload_image(&mut reader, &mut writer, front, &request),
+        Ok(Route::Image(name)) => serve_image(&mut writer, front, &name),
         Ok(Route::DirectMessages) => {
             let result = (|| {
                 let mut guard = history_store.lock().map_err(|_| Status::Unavailable)?;
@@ -1488,6 +1532,7 @@ fn serve_connection(
                 || post.request_id.chars().any(char::is_control)
                 || post.source.trim().is_empty()
                 || post.source.len() > BODY_LIMIT
+                || too_many_images(&post.source)
             {
                 return respond_status(&mut writer, Status::BadRequest);
             }
@@ -1929,7 +1974,13 @@ fn serve_connection(
             })();
             match result {
                 Ok(body) => {
-                    let mut safe = snapshot::SafeText::from_untrusted(&body.text, BODY_LIMIT);
+                    // The row already lists the images; a cut body has lost their lines.
+                    let text = if body.cut {
+                        body.text.as_str()
+                    } else {
+                        super::images::split(&body.text).0
+                    };
+                    let mut safe = snapshot::SafeText::from_untrusted(text, BODY_LIMIT);
                     safe.truncated |= body.cut;
                     let body = serde_json::to_vec(&serde_json::json!({
                         "message_id": message_id,
@@ -2283,6 +2334,87 @@ pub(super) fn wake_mailboxes_after_send(
         });
     }
     Ok(())
+}
+
+struct ImageUpload<'a>(&'a AtomicUsize);
+
+impl Drop for ImageUpload<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Stores the posted bytes when they are one of the four image types, and
+/// answers with the line a message carries for the image.
+fn upload_image(
+    reader: &mut impl Read,
+    writer: &mut TcpStream,
+    front: &Front,
+    request: &Request,
+) -> io::Result<()> {
+    let length = match request
+        .header("content-length")
+        .filter(|length| !length.is_empty() && length.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        Some(length) => length.parse::<usize>().unwrap_or(usize::MAX),
+        None => return respond_status(writer, Status::BadRequest),
+    };
+    if length > super::images::MAX_BYTES {
+        return respond_status(writer, Status::PayloadTooLarge);
+    }
+    if front.image_uploads.fetch_add(1, Ordering::AcqRel) >= MAX_IMAGE_UPLOADS {
+        front.image_uploads.fetch_sub(1, Ordering::AcqRel);
+        return respond_status(writer, Status::TooManyRequests);
+    }
+    let _upload = ImageUpload(&front.image_uploads);
+    let mut bytes = vec![0; length];
+    if reader.read_exact(&mut bytes).is_err() {
+        return respond_status(writer, Status::BadRequest);
+    }
+    let state = front.files.state();
+    let now = std::time::SystemTime::now();
+    match super::images::save(state, &bytes, now) {
+        Ok(name) => {
+            super::images::prune(state, now);
+            respond(
+                writer,
+                "200 OK",
+                "application/json",
+                "",
+                serde_json::json!({
+                    "name": name.as_str(),
+                    "line": super::images::line(state, &name),
+                })
+                .to_string()
+                .as_bytes(),
+            )
+        }
+        Err(super::images::SaveError::NotAnImage) => {
+            respond_status(writer, Status::UnsupportedMedia)
+        }
+        Err(super::images::SaveError::Io(error)) => {
+            eprintln!("Could not store an image: {error}");
+            respond_status(writer, Status::Unavailable)
+        }
+    }
+}
+
+fn serve_image(
+    writer: &mut TcpStream,
+    front: &Front,
+    name: &super::images::Name,
+) -> io::Result<()> {
+    writer.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let Some((file, length)) = super::images::open(front.files.state(), name) else {
+        return respond_status(writer, Status::NotFound);
+    };
+    write!(
+        writer,
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {length}\r\n{IMAGE_HEADERS}Connection: close\r\n\r\n",
+        name.kind().content_type(),
+    )?;
+    io::copy(&mut file.take(length), writer)?;
+    writer.flush()
 }
 
 fn serve_asset(
@@ -2984,6 +3116,7 @@ mod tailnet_route_tests {
             "/api/events",
             "/api/spaces",
             "/api/direct-messages",
+            "/api/images/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png",
             "/w/0123456789abcdef0123",
             "/w/0123456789abcdef0123/events",
             "/w/0123456789abcdef0123/participants/agent/live",
@@ -3072,46 +3205,48 @@ mod tailnet_route_tests {
                 None,
             ),
         ] {
-            let mut request = request(&host, login, Some(&origin));
-            request.method = "POST".into();
-            request.path = "/w/0123456789abcdef0123/messages".into();
-            assert!(matches!(
-                route(&request, 1234, &token, &session, false, policy),
-                Err(Status::Unauthorized)
-            ));
-            request.headers.push((
-                "cookie".into(),
-                format!("{}={}", cookie_name(1234), session.as_str()),
-            ));
-            assert!(matches!(
-                route(&request, 1234, &token, &session, false, policy),
-                Err(Status::Forbidden)
-            ));
-            request
-                .headers
-                .push(("x-namedrop-csrf".into(), csrf_token(&session)));
-            assert!(matches!(
-                route(&request, 1234, &token, &session, false, policy),
-                Ok(Route::Send(_))
-            ));
-            request
-                .headers
-                .push(("sec-fetch-site".into(), "same-site".into()));
-            assert!(matches!(
-                route(&request, 1234, &token, &session, false, policy),
-                Err(Status::Forbidden)
-            ));
-            request.headers.pop();
-            request
-                .headers
-                .iter_mut()
-                .find(|(name, _)| name == "origin")
-                .unwrap()
-                .1 = "https://evil.example".into();
-            assert!(matches!(
-                route(&request, 1234, &token, &session, false, policy),
-                Err(Status::Forbidden)
-            ));
+            for path in ["/w/0123456789abcdef0123/messages", "/api/images"] {
+                let mut request = request(&host, login, Some(&origin));
+                request.method = "POST".into();
+                request.path = path.into();
+                assert!(matches!(
+                    route(&request, 1234, &token, &session, false, policy),
+                    Err(Status::Unauthorized)
+                ));
+                request.headers.push((
+                    "cookie".into(),
+                    format!("{}={}", cookie_name(1234), session.as_str()),
+                ));
+                assert!(matches!(
+                    route(&request, 1234, &token, &session, false, policy),
+                    Err(Status::Forbidden)
+                ));
+                request
+                    .headers
+                    .push(("x-namedrop-csrf".into(), csrf_token(&session)));
+                assert!(matches!(
+                    route(&request, 1234, &token, &session, false, policy),
+                    Ok(Route::Send(_) | Route::ImageUpload)
+                ));
+                request
+                    .headers
+                    .push(("sec-fetch-site".into(), "same-site".into()));
+                assert!(matches!(
+                    route(&request, 1234, &token, &session, false, policy),
+                    Err(Status::Forbidden)
+                ));
+                request.headers.pop();
+                request
+                    .headers
+                    .iter_mut()
+                    .find(|(name, _)| name == "origin")
+                    .unwrap()
+                    .1 = "https://evil.example".into();
+                assert!(matches!(
+                    route(&request, 1234, &token, &session, false, policy),
+                    Err(Status::Forbidden)
+                ));
+            }
         }
         std::fs::remove_dir_all(state).unwrap();
     }

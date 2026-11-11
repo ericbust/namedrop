@@ -1,7 +1,10 @@
 import {
   type ChangeEvent,
+  type ClipboardEvent,
+  type DragEvent,
   type KeyboardEvent,
   type ReactNode,
+  useContext,
   useEffect,
   useId,
   useLayoutEffect,
@@ -23,6 +26,16 @@ import {
   skillToken,
 } from "../complete.ts";
 import { composerCopy, recipientsLabel, sendErrorCopy } from "../copy.ts";
+import {
+  type AttachedImage,
+  IMAGE_TYPES,
+  type ImageRefusal,
+  imageFiles,
+  imageUrl,
+  refusalOf,
+  splitImages,
+  withImages,
+} from "../images.ts";
 import type {
   ComposerId,
   Draft,
@@ -33,6 +46,7 @@ import type {
 import { draftKey, inFlight } from "../store.ts";
 import { CompletionList, optionId } from "./CompletionList.tsx";
 import { Icon } from "./Icons.tsx";
+import { ImageUploadContext } from "./ImageUploadContext.ts";
 import { measure } from "./measure.ts";
 import { useSkills } from "./useSkills.ts";
 
@@ -74,13 +88,32 @@ export function Composer({
   const fitted = useRef<string | null>(null);
   const typedAt = useRef<number | null>(null);
   const listId = useId();
+  const upload = useContext(ImageUploadContext);
+  const [uploads, setUploads] = useState<readonly number[]>([]);
+  const [refused, setRefused] = useState<ImageRefusal | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const picker = useRef<HTMLInputElement>(null);
+  const uploadId = useRef(0);
+  const inFlightUploads = useRef(0);
 
-  const draft = drafts.get(draftKey(composer));
-  const text = draft?.text ?? "";
+  const at = draftKey(composer);
+  const draft = drafts.get(at);
+  // A draft's text ends with a line for each image attached to it.
+  const { text, images } = useMemo(
+    () => splitImages(draft?.text ?? ""),
+    [draft?.text],
+  );
+  // What an upload that finishes later adds its image to.
+  const shown = useRef({ at, text, images, onEdit });
+  useLayoutEffect(() => {
+    shown.current = { at, text, images, onEdit };
+  });
   const failure = draft?.failure ?? null;
   const sending = inFlight(outbox, composer);
   const leading = leadingMentions(sentText(text));
-  const source = postSource(text, rule);
+  const words = postSource(text, rule);
+  const source = words === null ? null : withImages(words, images);
+  const attaching = uploads.length > 0;
   const missingRecipient =
     rule.kind === "thread" && rule.to.length === 0 && leading.length === 0;
   const pickRecipient =
@@ -144,11 +177,78 @@ export function Composer({
     measure("namedrop:keystroke-to-popup", start);
   });
 
-  function edit(next: string, at: number) {
-    onEdit(next);
-    setCaret(at);
+  function edit(next: string, caretAt: number) {
+    onEdit(withImages(next, images));
+    setCaret(caretAt);
     setDismissed(false);
     setGuarded(false);
+    setRefused(null);
+  }
+  function attach(files: readonly File[]) {
+    if (upload === null || closed !== null || sending) return;
+    setRefused(null);
+    let attached = images.length + inFlightUploads.current;
+    for (const file of files) {
+      const refusal = refusalOf(file, attached);
+      if (refusal !== null) {
+        setRefused(refusal);
+        continue;
+      }
+      attached += 1;
+      inFlightUploads.current += 1;
+      uploadId.current += 1;
+      const id = uploadId.current;
+      setUploads((all) => [...all, id]);
+      void upload(file).then((result) => {
+        inFlightUploads.current -= 1;
+        setUploads((all) => all.filter((other) => other !== id));
+        const now = shown.current;
+        // The person moved to another conversation while it uploaded.
+        if (now.at !== at) return;
+        if (result.kind === "refused") {
+          setRefused(result.why);
+          return;
+        }
+        if (now.images.some((image) => image.name === result.image.name))
+          return;
+        const added = [...now.images, result.image];
+        shown.current = { ...now, images: added };
+        now.onEdit(withImages(now.text, added));
+      });
+    }
+  }
+  function remove(image: AttachedImage) {
+    onEdit(
+      withImages(
+        text,
+        images.filter((other) => other !== image),
+      ),
+    );
+    setRefused(null);
+    box.current?.focus();
+  }
+  function onPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    if (upload === null) return;
+    const files = imageFiles(event.clipboardData, "paste");
+    if (files.length === 0) return;
+    event.preventDefault();
+    attach(files);
+  }
+  function carriesFiles(event: DragEvent<HTMLDivElement>): boolean {
+    return upload !== null && event.dataTransfer.types.includes("Files");
+  }
+  function onDragOver(event: DragEvent<HTMLDivElement>) {
+    if (!carriesFiles(event)) return;
+    event.preventDefault();
+    setDragging(true);
+  }
+  function onDrop(event: DragEvent<HTMLDivElement>) {
+    if (!carriesFiles(event)) return;
+    event.preventDefault();
+    setDragging(false);
+    const files = imageFiles(event.dataTransfer, "drop");
+    if (files.length === 0) setRefused("type");
+    else attach(files);
   }
   function choose(index: number) {
     const candidate = candidates[index];
@@ -159,7 +259,7 @@ export function Composer({
     edit(next.text, next.caret);
   }
   function submit(startedAt: number) {
-    if (sending) return;
+    if (sending || attaching) return;
     if (source === null) {
       setGuarded(true);
       return;
@@ -200,9 +300,50 @@ export function Composer({
     edit(event.target.value, event.target.selectionStart);
   }
 
+  const attachments = images.length > 0 || attaching;
   return (
-    <div className="composer">
-      <div className="composer-box">
+    // biome-ignore lint/a11y/noStaticElementInteractions: a drop target; the attach button does the same from the keyboard.
+    <div
+      className={dragging ? "composer dragging" : "composer"}
+      onDragEnter={onDragOver}
+      onDragOver={onDragOver}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null))
+          setDragging(false);
+      }}
+      onDrop={onDrop}
+    >
+      <div className={attachments ? "composer-box has-images" : "composer-box"}>
+        {attachments && (
+          <ul className="composer-images" aria-label="Attached images">
+            {images.map((image, index) => (
+              <li key={image.name} className="image-chip">
+                <img
+                  src={imageUrl(image.name)}
+                  alt={composerCopy.attachedImage(index + 1)}
+                />
+                <button
+                  type="button"
+                  className="image-remove"
+                  aria-label={composerCopy.removeImage(index + 1)}
+                  disabled={sending}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => remove(image)}
+                >
+                  <Icon name="x" className="icon-12" />
+                </button>
+              </li>
+            ))}
+            {uploads.map((id) => (
+              <li
+                key={id}
+                className="image-chip uploading"
+                role="status"
+                aria-label={composerCopy.uploadingImage}
+              />
+            ))}
+          </ul>
+        )}
         {open && completion !== null && (
           <CompletionList
             completion={completion}
@@ -234,6 +375,7 @@ export function Composer({
           disabled={closed !== null}
           onChange={onChange}
           onKeyDown={onKeyDown}
+          onPaste={onPaste}
           onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
           onFocus={(event) => {
             setFocused(true);
@@ -241,11 +383,37 @@ export function Composer({
           }}
           onBlur={() => setFocused(false)}
         />
+        {upload !== null && (
+          <>
+            <input
+              ref={picker}
+              type="file"
+              hidden
+              multiple
+              accept={IMAGE_TYPES.join(",")}
+              onChange={(event) => {
+                attach([...(event.target.files ?? [])]);
+                event.target.value = "";
+              }}
+            />
+            <button
+              type="button"
+              className="attach"
+              aria-label={composerCopy.attachImage}
+              title={composerCopy.attachImage}
+              disabled={closed !== null || sending}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => picker.current?.click()}
+            >
+              <Icon name="image" />
+            </button>
+          </>
+        )}
         <button
           type="button"
           className="send"
           aria-label={composerCopy.send}
-          disabled={closed !== null || sending || source === null}
+          disabled={closed !== null || sending || attaching || source === null}
           onMouseDown={(event) => event.preventDefault()}
           onClick={(event) => submit(event.timeStamp)}
         >
@@ -262,6 +430,16 @@ export function Composer({
           </p>
         ) : sending ? (
           <p>{composerCopy.sending}</p>
+        ) : refused !== null ? (
+          <p className="composer-guard" role="status">
+            {composerCopy.imageRefused[refused]}
+          </p>
+        ) : dragging ? (
+          <p>{composerCopy.dropImages}</p>
+        ) : attaching ? (
+          <p>{composerCopy.uploadingImage}</p>
+        ) : images.length > 0 && sentText(text) === "" ? (
+          <p className="composer-guard">{composerCopy.needsWords}</p>
         ) : notice !== null ? (
           notice
         ) : pickRecipient ? (

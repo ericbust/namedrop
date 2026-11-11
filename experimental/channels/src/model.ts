@@ -176,6 +176,8 @@ export type Message = {
   // The agent's words from a turn that ended with its answer still held.
   progressNote: boolean;
   body: SafeText;
+  // File names of the images the message carries, which the body leaves out.
+  images: readonly string[];
   legs: readonly { to: AddressId; stage: DeliveryStage }[];
   routing: Routing | null;
   woke: readonly Alias[];

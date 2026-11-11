@@ -155,6 +155,22 @@ The URL has the form `http://127.0.0.1:<port>/w/<key>`, where the key is a hash 
 
 The first `namedrop channels` call starts one background server for your state directory. Later calls from any workspace reuse it and report `"server": "running"`. The server listens on 127.0.0.1 only. By default, it rejects requests whose `Host` is not that address or `localhost`, and pages without the session cookie return 401. The tailnet option below permits one recorded HTTPS host with an owner identity check. The server keeps two secrets with mode 0600. `<state>/dashboard/token` is shared only by the CLI and the server, and never reaches a browser. `<state>/dashboard/session` is the browser cookie. It survives an upgrade handoff, so open tabs reconnect, and rotates when the server stops for idleness, so a tab left open never presents a live cookie to whatever binds the port next. Delete either file to rotate it. Every page sends a strict Content-Security-Policy, and the page inserts collaborator text as text, never as markup.
 
+### Images in a message
+
+Paste an image into a Channels message box, drop it on the box, or pick it with the image button beside Send. The box shows a thumbnail for each image, with a button to remove it. A message takes up to 4 images of up to 10 MB each, in PNG, JPEG, GIF or WebP, and it needs some words too. This works in channels, threads and direct messages, and over the tailnet link.
+
+Channels uploads each image when you attach it, with `POST /api/images`. The route needs the session cookie and the session's CSRF token, like posting. The server reads the type from the first bytes of the file and refuses other files with 415, whatever their name or declared type. A file over 10 MB gets 413. An accepted image is written to `<state>/channel-images/<sha256>.<type>` with mode 0600, in a directory with mode 0700. The same bytes stored again reuse the file.
+
+The message then ends with one line per image:
+
+```text
+Image: /home/you/.local/state/herdr/plugins/namedrop/channel-images/<sha256>.png
+```
+
+That line is all the agent gets for the image. It opens the file with its ordinary file tools, so no image data is typed into its pane. The page hides these lines and shows the thumbnails, which it reads from `GET /api/images/<sha256>.<type>`. That route needs the session cookie and serves only files of that exact name from the directory. A symlink there is not followed.
+
+An image is deleted once 30 days have passed since it was last attached. Channels checks when it starts and each time it stores an image. A message whose image is gone shows "Image no longer stored", and its path line then points at no file. To remove images sooner, delete files from `<state>/channel-images/`.
+
 ### Open Channels from your tailnet
 
 On the Channels machine, sign in to Tailscale as your own user and enable HTTPS for your tailnet. In a workspace shell tab, run:

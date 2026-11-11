@@ -1507,6 +1507,63 @@ else:
             self.raw(&request)
         }
 
+        /// A request and a response whose bodies are bytes, as an image is.
+        fn bytes(
+            &self,
+            method: &str,
+            path: &str,
+            headers: &[(&str, &str)],
+            body: &[u8],
+        ) -> (u16, String, Vec<u8>) {
+            let mut request = format!(
+                "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n",
+                self.port
+            );
+            for (key, value) in headers {
+                request.push_str(&format!("{key}: {value}\r\n"));
+            }
+            if method == "POST"
+                && !headers
+                    .iter()
+                    .any(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+            {
+                request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+            }
+            request.push_str("\r\n");
+            let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+            stream.shutdown(Shutdown::Write).unwrap();
+            let mut raw = Vec::new();
+            stream.read_to_end(&mut raw).unwrap();
+            let split = raw
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .unwrap();
+            let head = String::from_utf8(raw[..split].to_vec()).unwrap();
+            (
+                head.split(' ').nth(1).unwrap().parse().unwrap(),
+                head,
+                raw[split + 4..].to_vec(),
+            )
+        }
+
+        fn upload(&self, image: &[u8]) -> (u16, String) {
+            let (status, _, body) = self.bytes(
+                "POST",
+                "/api/images",
+                &[
+                    ("Cookie", self.cookie.as_str()),
+                    ("X-Namedrop-Csrf", self.csrf.as_str()),
+                ],
+                image,
+            );
+            (status, String::from_utf8(body).unwrap())
+        }
+
         fn post(&self, path: &str, body: &str, extra: &[(&str, &str)]) -> Response {
             let mut headers = vec![
                 ("Cookie", self.cookie.as_str()),
@@ -2836,6 +2893,227 @@ else:
             404
         );
         assert_eq!(f.message_rows(), before);
+    }
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\xff\xfe\x80 pixels";
+
+    #[test]
+    fn an_image_sent_from_channels_reaches_the_agent_as_a_path_and_the_thread_as_an_image() {
+        use sha2::{Digest, Sha256};
+        let f = Fixture::new();
+        f.register_all();
+        let server = Server::start(&f, None);
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+
+        let (status, answer) = server.upload(PNG);
+        assert_eq!(status, 200, "{answer}");
+        let answer: Value = serde_json::from_str(&answer).unwrap();
+        let name = answer["name"].as_str().unwrap();
+        assert_eq!(
+            name,
+            format!("{}.png", namedrop::lower_hex(&Sha256::digest(PNG)))
+        );
+        let stored = f.state.join("channel-images").join(name);
+        assert_eq!(fs::read(&stored).unwrap(), PNG);
+        assert_eq!(
+            fs::metadata(&stored).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let line = answer["line"].as_str().unwrap();
+        assert_eq!(line, format!("Image: {}", stored.display()));
+
+        let (status, head, body) = server.bytes(
+            "GET",
+            &format!("/api/images/{name}"),
+            &[
+                ("Cookie", &server.cookie),
+                ("Sec-Fetch-Site", "same-origin"),
+            ],
+            b"",
+        );
+        assert_eq!(status, 200, "{head}");
+        assert_eq!(body, PNG);
+        for header in [
+            "Content-Type: image/png",
+            "X-Content-Type-Options: nosniff",
+            "Cache-Control: private, max-age=2592000, immutable",
+            "Content-Security-Policy: default-src 'none'",
+        ] {
+            assert!(head.contains(header), "{header}: {head}");
+        }
+        assert!(!head.contains("no-store"), "{head}");
+
+        let source = format!("@planner what does this show?\n\n{line}");
+        let sent = server.post(
+            &format!("/w/{}/messages", key.as_str()),
+            &json!({"request_id":"with-image", "source":source}).to_string(),
+            &[],
+        );
+        assert_eq!(sent.status, 200, "{}", sent.body);
+        let sent: Value = serde_json::from_str(&sent.body).unwrap();
+        wait_for_submitted(&f, 1);
+        let prompt = prompts(&f)[0]["args"].to_string();
+        assert!(prompt.contains(stored.to_str().unwrap()), "{prompt}");
+        assert!(!prompt.contains("base64"), "{prompt}");
+
+        let history = server.request(
+            "GET",
+            &format!("/w/{}/messages", key.as_str()),
+            &[("Cookie", &server.cookie)],
+            "",
+        );
+        assert_eq!(history.status, 200, "{}", history.body);
+        let history: Value = serde_json::from_str(&history.body).unwrap();
+        let message = history
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["message_id"] == sent["message_id"])
+            .unwrap();
+        assert_eq!(message["images"], json!([name]));
+        assert_eq!(message["body"]["text"], "what does this show?");
+        let full = server.request(
+            "GET",
+            &format!(
+                "/w/{}/messages/{}/body",
+                key.as_str(),
+                sent["message_id"].as_str().unwrap()
+            ),
+            &[
+                ("Cookie", &server.cookie),
+                ("X-Namedrop-Csrf", &server.csrf),
+            ],
+            "",
+        );
+        assert_eq!(full.status, 200, "{}", full.body);
+        let full: Value = serde_json::from_str(&full.body).unwrap();
+        assert_eq!(full["body"]["text"], "what does this show?");
+
+        let plain = server.post(
+            &format!("/w/{}/messages", key.as_str()),
+            &json!({"request_id":"text-only", "source":"@planner no image here"}).to_string(),
+            &[],
+        );
+        assert_eq!(plain.status, 200, "{}", plain.body);
+        let plain: Value = serde_json::from_str(&plain.body).unwrap();
+        let history = server.request(
+            "GET",
+            &format!("/w/{}/messages", key.as_str()),
+            &[("Cookie", &server.cookie)],
+            "",
+        );
+        let history: Value = serde_json::from_str(&history.body).unwrap();
+        let message = history
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["message_id"] == plain["message_id"])
+            .unwrap();
+        assert!(message.get("images").is_none(), "{message}");
+        assert_eq!(message["body"]["text"], "no image here");
+
+        let five = format!("@planner too many\n\n{}", [line; 5].join("\n"));
+        let before = f.message_rows();
+        assert_eq!(
+            server
+                .post(
+                    &format!("/w/{}/messages", key.as_str()),
+                    &json!({"request_id":"five-images", "source":five}).to_string(),
+                    &[],
+                )
+                .status,
+            400
+        );
+        assert_eq!(f.message_rows(), before);
+    }
+
+    #[test]
+    fn image_routes_refuse_other_files_other_sites_and_other_names() {
+        let f = Fixture::new();
+        f.register_all();
+        let server = Server::start(&f, None);
+        let signed = [
+            ("Cookie", server.cookie.as_str()),
+            ("X-Namedrop-Csrf", server.csrf.as_str()),
+        ];
+        let stored = || {
+            fs::read_dir(f.state.join("channel-images"))
+                .map(|entries| entries.count())
+                .unwrap_or(0)
+        };
+
+        for (bytes, expected) in [
+            (b"just text".as_slice(), 415),
+            (
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>",
+                415,
+            ),
+            (b"MZ\x90\0 not an image whatever its name says", 415),
+            (b"", 415),
+        ] {
+            assert_eq!(server.upload(bytes).0, expected, "{bytes:?}");
+        }
+        let too_large = (10 * 1024 * 1024 + 1).to_string();
+        let mut oversized = signed.to_vec();
+        oversized.push(("Content-Length", &too_large));
+        assert_eq!(server.bytes("POST", "/api/images", &oversized, b"").0, 413);
+        for (headers, expected) in [
+            (vec![("X-Namedrop-Csrf", server.csrf.as_str())], 401),
+            (vec![("Cookie", server.cookie.as_str())], 403),
+            (
+                [signed.as_slice(), &[("Origin", "https://attacker.example")]].concat(),
+                403,
+            ),
+            (
+                [signed.as_slice(), &[("Sec-Fetch-Site", "cross-site")]].concat(),
+                403,
+            ),
+            (
+                [signed.as_slice(), &[("Sec-Fetch-Site", "same-site")]].concat(),
+                403,
+            ),
+        ] {
+            assert_eq!(
+                server.bytes("POST", "/api/images", &headers, PNG).0,
+                expected,
+                "{headers:?}"
+            );
+        }
+        assert_eq!(server.bytes("GET", "/api/images", &signed, b"").0, 405);
+        assert_eq!(stored(), 0);
+
+        let (status, answer) = server.upload(PNG);
+        assert_eq!(status, 200, "{answer}");
+        let answer: Value = serde_json::from_str(&answer).unwrap();
+        let name = answer["name"].as_str().unwrap();
+        let path = format!("/api/images/{name}");
+        let cookie = [("Cookie", server.cookie.as_str())];
+        assert_eq!(server.bytes("GET", &path, &cookie, b"").0, 200);
+        assert_eq!(server.bytes("GET", &path, &[], b"").0, 401);
+        assert_eq!(
+            server
+                .bytes(
+                    "GET",
+                    &path,
+                    &[cookie[0], ("Sec-Fetch-Site", "cross-site")],
+                    b""
+                )
+                .0,
+            403
+        );
+        assert_eq!(server.bytes("POST", &path, &signed, b"").0, 405);
+        let missing = format!("/api/images/{}.png", "0".repeat(64));
+        for other in [
+            missing.as_str(),
+            "/api/images/../dashboard/session",
+            "/api/images/..%2Fdashboard%2Fsession",
+            "/api/images/session",
+            &format!("/api/images/{}", name.replace(".png", ".gif")),
+            &format!("/api/images/{}", name.to_uppercase()),
+            &format!("/api/images/{name}/"),
+        ] {
+            assert_eq!(server.bytes("GET", other, &cookie, b"").0, 404, "{other}");
+        }
     }
 
     #[test]

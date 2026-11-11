@@ -231,6 +231,7 @@ function post(legs: readonly string[], to: readonly Alias[] = []): Message {
     threadId: "p1",
     inReplyTo: null,
     progressNote: false,
+    images: [],
     at: 1,
     author: "human",
     kind: "mention",

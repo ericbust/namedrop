@@ -844,6 +844,7 @@ test("focused tracked evidence exposes the channel response path without a rejec
           threadId: "tracked",
           inReplyTo: null,
           progressNote: false,
+          images: [],
           at: 1,
           author: "human",
           kind: "mention",

@@ -2543,6 +2543,103 @@ code.inline {
   color: var(--on-accent);
   cursor: wait;
 }
+/* The chips take a row of their own above the text. */
+.composer-box.has-images {
+  flex-wrap: wrap;
+}
+.composer.dragging .composer-box {
+  border-color: var(--accent);
+  border-style: dashed;
+}
+.composer-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  flex: 0 0 100%;
+  margin: 0;
+  padding: var(--space-1) 0 var(--space-2);
+  list-style: none;
+}
+.image-chip {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+}
+.image-chip img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+}
+.image-chip.uploading {
+  animation: breathe 1.2s var(--ease-out) infinite;
+}
+.image-remove {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--bg);
+  color: var(--text);
+}
+.image-remove:not(:disabled):hover {
+  background: var(--bg-hover);
+}
+.attach {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  transition:
+    background-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+.attach:not(:disabled):hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.attach:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.msg-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+.msg-images a {
+  display: block;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+}
+.msg-images img {
+  display: block;
+  width: auto;
+  max-width: min(240px, 100%);
+  height: 120px;
+  object-fit: cover;
+}
+.msg-image-gone {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
 .composer-status {
   min-height: 16px;
   margin-top: var(--space-1);
@@ -2815,6 +2912,7 @@ code.inline {
 }
 @media (prefers-reduced-motion: reduce) {
   .presence[data-activity="working"],
+  .image-chip.uploading,
   .arrive,
   .slot,
   .attention,

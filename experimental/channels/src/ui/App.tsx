@@ -1050,7 +1050,11 @@ export function App() {
   const updatedAt = lastUpdate.current;
   return (
     <PeekContext value={peekAccess}>
-      <MessageContexts deliveries={deliveryAccess} actions={messageActions}>
+      <MessageContexts
+        deliveries={deliveryAccess}
+        actions={messageActions}
+        uploadImage={poster.uploadImage}
+      >
         <div
           style={panels.style}
           className={`app-shell${pane === null ? "" : ` has-slot has-${pane}`}${drawerOpen ? " drawer-open" : ""}`}

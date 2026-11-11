@@ -1,3 +1,4 @@
+import type { ImageUpload } from "./images.ts";
 import type {
   AddressId,
   Alias,
@@ -13,6 +14,7 @@ import { type ReminderConversation, reminderPath } from "./reminders.ts";
 import {
   parseDeliverAnswer,
   parseFullBody,
+  parseImageUpload,
   parseReceipt,
   parseRefusal,
   parseReminders,
@@ -158,6 +160,44 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
           : null;
       } catch {
         return null;
+      }
+    },
+    // Stores one image for a message to name. The server reads the type from
+    // the bytes, so the body goes up as it is.
+    async uploadImage(file: Blob): Promise<ImageUpload> {
+      const send = (csrf: string | null) =>
+        fetcher("/api/images", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            "Content-Type": "application/octet-stream",
+            ...(csrf === null ? {} : { "X-Namedrop-Csrf": csrf }),
+          },
+          body: file,
+        });
+      try {
+        const used = token();
+        let response = await send(await used);
+        if (response.status === 403) {
+          if (session === used) session = null;
+          response = await send(await token());
+        }
+        if (response.ok)
+          return {
+            kind: "stored",
+            image: parseImageUpload(await response.json()),
+          };
+        return {
+          kind: "refused",
+          why:
+            response.status === 415
+              ? "type"
+              : response.status === 413
+                ? "size"
+                : "failed",
+        };
+      } catch {
+        return { kind: "refused", why: "failed" };
       }
     },
     async post(post: Post): Promise<PostResult> {
