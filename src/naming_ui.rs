@@ -3,9 +3,10 @@ use super::popup_input::InputMode;
 use super::*;
 use crate::agent_status_ui::{Tone, sanitize, tint, wrap};
 use namedrop::{
-    DiscoveredPane, HealthStatus, MAX_PERSONA_CHARS, PaneAddressRecord, PaneType,
+    DiscoveredPane, HealthStatus, MAX_PERSONA_CHARS, PaneAddressRecord, PaneType, SpaceId,
     cli::UiMode,
     discover_worktree_for_workspace,
+    mux::{PaneFacts, PaneId, PopupScreen},
     tour::{self, PageAction, Presentation},
 };
 use std::{
@@ -67,53 +68,19 @@ pub(super) fn launch(options: &RuntimeOptions, mode: UiMode) -> Result<serde_jso
         }
         // The popup carries the Agent Session it was opened for, so asking for
         // help later cannot reach a replacement session in the same pane.
-        let session = origin
-            .agent_session_id()
-            .map(|id| id.as_str().to_owned())
-            .unwrap_or_default();
-        let terminal = origin.terminal_id;
-        let args = [
-            "plugin".to_owned(),
-            "pane".to_owned(),
-            "open".to_owned(),
-            "--plugin".to_owned(),
-            "namedrop".to_owned(),
-            "--entrypoint".to_owned(),
-            match mode {
-                UiMode::Name => "naming",
-                UiMode::Manage => "management",
-                UiMode::Doctor => "doctor",
-                UiMode::Status => "agent-status",
-                UiMode::Tour => tour::ENTRYPOINT,
-            }
-            .to_owned(),
-            "--placement".to_owned(),
-            "popup".to_owned(),
-            "--width".to_owned(),
-            if mode == UiMode::Status { "84" } else { "72" }.to_owned(),
-            "--height".to_owned(),
-            if mode == UiMode::Name { "20" } else { "24" }.to_owned(),
-            "--env".to_owned(),
-            format!("NAMEDROP_TARGET_WORKSPACE={workspace}"),
-            "--env".to_owned(),
-            format!("NAMEDROP_TARGET_PANE={pane}"),
-            "--env".to_owned(),
-            format!("NAMEDROP_TARGET_TERMINAL={terminal}"),
-            "--env".to_owned(),
-            format!("NAMEDROP_TARGET_SESSION={session}"),
-            "--env".to_owned(),
-            format!(
-                "HERDR_PLUGIN_STATE_DIR={}",
-                runtime.state_directory.display()
-            ),
-            "--env".to_owned(),
-            format!("HERDR_SOCKET_PATH={}", runtime.session_socket_id),
-            "--focus".to_owned(),
-        ];
-        let output = runtime
-            .mux
-            .execute(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
-        serde_json::from_str(&output.stdout).map_err(|e| e.to_string())
+        let screen = match mode {
+            UiMode::Name => PopupScreen::Name,
+            UiMode::Manage => PopupScreen::Manage,
+            UiMode::Doctor => PopupScreen::Doctor,
+            UiMode::Status => PopupScreen::Status,
+            UiMode::Tour => PopupScreen::Tour,
+        };
+        let target = PaneFacts {
+            id: PaneId::new(pane),
+            space: SpaceId::new(workspace),
+            ..origin.facts()
+        };
+        namedrop::open_popup(runtime, screen, target).map_err(|error| error.to_string())
     })
 }
 

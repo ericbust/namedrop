@@ -1,9 +1,8 @@
 use crate::{
     ActorKind, AgentSessionId, Clock, ContextGrantDraft, ContextGrantId, ContextGrantRecord,
-    ContextGrantState, ContextSnapshotId, EvidenceKind, EvidencePointer, HerdrCommandExecutor,
-    IdGenerator, LifecycleRuntime, MessageId, MutationAttribution, PaneAddressId, StateNamespace,
-    StateStore, StoreError, StoreErrorKind, ThreadId, discover_worktree,
-    discover_worktree_for_workspace,
+    ContextGrantState, ContextSnapshotId, EvidenceKind, EvidencePointer, IdGenerator,
+    LifecycleRuntime, MessageId, MutationAttribution, PaneAddressId, StateNamespace, StateStore,
+    StoreError, StoreErrorKind, ThreadId, discover_worktree, discover_worktree_for_workspace,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -258,7 +257,7 @@ pub fn execute_context_operation<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -271,7 +270,7 @@ pub fn execute_human_context_operation<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -285,7 +284,7 @@ fn execute_context_operation_as<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -316,7 +315,7 @@ fn create_human_grant<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -365,7 +364,7 @@ fn revoke_human_grant<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -396,7 +395,7 @@ fn publish_snapshot<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -680,7 +679,7 @@ pub(crate) fn record_snapshot_activation_failure<M, C, I>(
     error: &str,
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -717,7 +716,7 @@ fn inspect_context<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -868,7 +867,7 @@ fn read_context<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {

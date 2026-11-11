@@ -52,7 +52,7 @@ pub fn execute_control_operation<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {

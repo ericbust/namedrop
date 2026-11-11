@@ -274,7 +274,7 @@ pub(crate) fn cycle_with<E, C, I>(
     catch_up: &mut CatchUp,
 ) -> Result<bool, String>
 where
-    E: crate::mux::Mux + crate::HerdrCommandExecutor,
+    E: crate::mux::Mux,
     C: Clock,
     I: crate::IdGenerator,
 {

@@ -832,7 +832,7 @@ pub(crate) fn refresh_user_integration_packages<M, C, I>(
     discovered: &DiscoveredWorktree,
 ) -> Result<IntegrationPackageInstallation, String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {

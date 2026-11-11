@@ -128,11 +128,15 @@ impl<T: Transport> MuxRead for HerdrMux<T> {
 
 impl<T: Transport> MuxAct for HerdrMux<T> {
     fn apply(&self, effect: &Effect) -> Result<Applied, MuxError> {
+        let mut reply = String::new();
         for command in wire::effect_commands(effect, &self.endpoint.key) {
             let args: Vec<_> = command.iter().map(String::as_str).collect();
-            wire::run(&self.transport, &args)?;
+            reply = wire::run(&self.transport, &args)?;
         }
-        Ok(Applied::Done)
+        match effect {
+            Effect::OpenPopup(_) => wire::parse(&reply).map(Applied::Opened),
+            _ => Ok(Applied::Done),
+        }
     }
 }
 
@@ -169,6 +173,22 @@ fn bridge<E: HerdrCommandExecutor + Sync>(executor: &E) -> HerdrMux<Legacy<'_, E
     HerdrMux {
         transport: Legacy(executor),
         endpoint: LEGACY_ENDPOINT.clone(),
+    }
+}
+
+/// A legacy executor that knows the Herdr session it speaks to, so a popup's
+/// `HERDR_SOCKET_PATH` names that session instead of the bridge's empty key.
+/// Deleted with the bridge, when a connector fixes the endpoint instead.
+pub fn at_socket<'a, E: HerdrCommandExecutor + Sync>(
+    executor: &'a E,
+    socket: &str,
+) -> impl MuxAct + 'a {
+    HerdrMux {
+        transport: Legacy(executor),
+        endpoint: Endpoint {
+            kind: MuxKind::Herdr,
+            key: socket.to_owned(),
+        },
     }
 }
 

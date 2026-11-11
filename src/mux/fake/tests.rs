@@ -1,5 +1,8 @@
 use super::*;
-use crate::mux::{Admit, Badge, Budget, Gone, Incarnation, PromptRequest, StateTexts, Style, Wrap};
+use crate::mux::{
+    Admit, Badge, Budget, Gone, Incarnation, PopupScreen, PopupSpec, PromptRequest, StateTexts,
+    Style, Wrap,
+};
 
 fn author_and_reviewer() -> FakeMux {
     FakeMux::world()
@@ -376,6 +379,29 @@ fn applied_effects_are_logged_and_visible_to_later_reads() {
         .clone();
     assert_eq!(author.title.as_deref(), Some("@author"));
     assert_eq!(author.idle_label.as_deref(), Some("@author ready"));
+}
+
+#[test]
+fn an_opened_popup_names_its_target_and_is_logged() {
+    let mux = author_and_reviewer();
+    let target = mux
+        .lock()
+        .pane(&PaneId::new("pane-author"))
+        .unwrap()
+        .facts
+        .clone();
+    let popup = Effect::OpenPopup(PopupSpec {
+        screen: PopupScreen::Doctor,
+        target,
+        state_dir: "/state".into(),
+    });
+    assert_eq!(
+        mux.apply(&popup),
+        Ok(Applied::Opened(
+            serde_json::json!({"opened_for": "pane-author"})
+        ))
+    );
+    assert_eq!(mux.effects(), [popup]);
 }
 
 #[test]

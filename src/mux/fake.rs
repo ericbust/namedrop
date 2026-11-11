@@ -456,6 +456,7 @@ impl MuxAct for FakeMux {
     fn apply(&self, effect: &Effect) -> Result<Applied, MuxError> {
         let mut world = self.lock();
         world.take_failure(Op::Apply)?;
+        let mut applied = Applied::Done;
         match effect {
             Effect::Identify { pane, alias, texts } => {
                 let pane = world
@@ -472,10 +473,14 @@ impl MuxAct for FakeMux {
             Effect::RenameTab { tab, label } => {
                 world.tab_labels.insert(tab.clone(), label.clone());
             }
-            Effect::Notify { .. } | Effect::OpenPopup(_) | Effect::ReloadKeybindings => {}
+            Effect::OpenPopup(popup) => {
+                applied =
+                    Applied::Opened(serde_json::json!({"opened_for": popup.target.id.as_str()}));
+            }
+            Effect::Notify { .. } | Effect::ReloadKeybindings => {}
         }
         world.effects.push(effect.clone());
-        Ok(Applied::Done)
+        Ok(applied)
     }
 }
 

@@ -54,7 +54,7 @@ pub fn execute_handoff_operation<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -197,7 +197,7 @@ fn record_reads<M, C, I>(
 
 fn preview<M, C, I>(input: Value, runtime: &LifecycleRuntime<'_, M, C, I>) -> Result<Value, String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -259,7 +259,7 @@ fn acknowledge_granted<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {

@@ -97,11 +97,7 @@ pub(crate) struct AdoptInput {
     pub coordination_id: CoordinationId,
 }
 
-pub(crate) fn execute<
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
-    C: crate::Clock,
-    I: crate::IdGenerator,
->(
+pub(crate) fn execute<M: crate::mux::Mux, C: crate::Clock, I: crate::IdGenerator>(
     operation: &str,
     input: Value,
     runtime: &LifecycleRuntime<'_, M, C, I>,
@@ -191,11 +187,7 @@ pub(crate) fn execute<
 /// Validate and persist alongside append_message, in the same transaction. No
 /// transport acknowledgement changes work state; only these explicit actions do.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn track_message<
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
-    C: crate::Clock,
-    I: crate::IdGenerator,
->(
+pub(crate) fn track_message<M: crate::mux::Mux, C: crate::Clock, I: crate::IdGenerator>(
     tx: &mut StateTransaction<'_>,
     ns: &StateNamespace,
     draft: &MessageDraft,

@@ -759,7 +759,7 @@ fn validate_live_caller<E: crate::mux::MuxRead>(
     Ok(discovered)
 }
 
-fn recover_committed<M: crate::mux::Mux + crate::HerdrCommandExecutor, C: Clock, I: IdGenerator>(
+fn recover_committed<M: crate::mux::Mux, C: Clock, I: IdGenerator>(
     request: &Request,
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Option<Value>, String> {
