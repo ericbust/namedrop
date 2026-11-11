@@ -73,7 +73,7 @@ pub(crate) struct HerdrWorkspaces<'a, E> {
     listed: std::cell::OnceCell<Vec<crate::lifecycle::ListedWorkspace>>,
 }
 
-impl<'a, E: crate::HerdrCommandExecutor> HerdrWorkspaces<'a, E> {
+impl<'a, E: crate::mux::MuxRead> HerdrWorkspaces<'a, E> {
     pub(crate) fn new(herdr: &'a E) -> Self {
         Self {
             herdr,
@@ -137,7 +137,7 @@ impl SpaceEntry {
 }
 
 impl SpaceDirectory {
-    pub(crate) fn load<E: crate::HerdrCommandExecutor>(
+    pub(crate) fn load<E: crate::mux::MuxRead>(
         store: &mut crate::StateStore,
         workspaces: &HerdrWorkspaces<'_, E>,
         socket: &str,
@@ -325,7 +325,7 @@ impl LiveSpaces {
 
     /// Reads each listed workspace once. An empty list issues no Herdr
     /// command, so work that stays in one workspace reads exactly what it did.
-    pub(crate) fn load<E: crate::HerdrCommandExecutor>(
+    pub(crate) fn load<E: crate::mux::MuxRead>(
         herdr: &E,
         here: crate::DiscoveredWorktree,
         spaces: &[SpaceId],
@@ -465,7 +465,7 @@ impl RoutePlan {
     }
 }
 
-pub(crate) fn route<E: crate::HerdrCommandExecutor>(
+pub(crate) fn route<E: crate::mux::MuxRead>(
     store: &mut crate::StateStore,
     workspaces: &HerdrWorkspaces<'_, E>,
     namespace: &StateNamespace,

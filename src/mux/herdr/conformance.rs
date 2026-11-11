@@ -23,6 +23,15 @@ fn herdr_error(code: &str) -> String {
     json!({"error": {"code": code}}).to_string()
 }
 
+/// The two implementations word a failure differently, so they agree on
+/// whether it is gone and what is gone.
+fn gone<T>(result: Result<T, MuxError>) -> Result<T, Option<Gone>> {
+    result.map_err(|error| match error {
+        MuxError::Gone(what, _) => Some(what),
+        _ => None,
+    })
+}
+
 fn agent_word(kind: &AgentKind) -> Option<String> {
     match kind {
         AgentKind::Known(AgentRuntime::ClaudeCode) => Some("claude".into()),
@@ -415,12 +424,12 @@ fn a_survey_carries_the_agent_identity_status_and_idle_label() {
 fn a_missing_space_is_gone_and_an_unheld_checkout_is_unavailable() {
     let missing = SpaceId::new("workspace-9");
     assert_eq!(
-        agree(world, |mux, _| survey(
+        agree(world, |mux, _| gone(survey(
             mux,
             Scope::Space(&missing),
             Depth::Panes
-        )),
-        Err(MuxError::Gone(Gone::Space))
+        ))),
+        Err(Some(Gone::Space))
     );
     let unheld = agree(world, |mux, _| {
         matches!(
@@ -442,7 +451,7 @@ fn reads_of_screens_processes_tabs_and_the_integration_root_agree() {
         (
             mux.screen(&PaneId::new("pane-author"), request),
             mux.process(&PaneId::new("pane-author")),
-            mux.process(&PaneId::new("pane-gone")),
+            gone(mux.process(&PaneId::new("pane-gone"))),
             mux.tab_label(&TabId::new("workspace-1:tab-1")),
             mux.tab_label(&TabId::new("workspace-1:tab-2")),
             mux.integration_root(),
@@ -455,7 +464,7 @@ fn reads_of_screens_processes_tabs_and_the_integration_root_agree() {
             text: "two\nthree".into()
         })
     );
-    assert_eq!(gone, Err(MuxError::Gone(Gone::Pane)));
+    assert_eq!(gone, Err(Some(Gone::Pane)));
     assert_eq!(label, Ok(Some("@author".into())));
     assert_eq!(unlabeled, Ok(None));
     assert_eq!(root, Ok(Some("/plugins/namedrop".into())));
@@ -554,7 +563,8 @@ fn effects_change_what_later_reads_report() {
                 badges: vec![Badge::Awaiting(1)],
             }),
             mux.apply(&Effect::ReloadKeybindings),
-        ];
+        ]
+        .map(gone);
         let reviewer = mux
             .survey(Scope::Space(&SpaceId::new("workspace-1")), Depth::Panes)
             .map(|survey| survey.spaces[0].panes[1].clone());
@@ -564,7 +574,7 @@ fn effects_change_what_later_reads_report() {
             mux.tab_label(&TabId::new("workspace-1:tab-2")),
         )
     });
-    assert_eq!(after.0[2], Err(MuxError::Gone(Gone::Pane)));
+    assert_eq!(after.0[2], Err(Some(Gone::Pane)));
     assert_eq!(
         after.1,
         Ok((Some("@lead".into()), Some("@lead ready".into())))

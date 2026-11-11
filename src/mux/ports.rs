@@ -12,14 +12,27 @@ pub enum Gone {
     Pane,
 }
 
+/// Each variant keeps the multiplexer's own words, which `Display` prints
+/// unchanged, so a caller that reports the error says what it said before.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MuxError {
-    Gone(Gone),
-    Timeout,
-    TooLarge,
+    Gone(Gone, String),
+    Timeout(String),
+    TooLarge(String),
     Unavailable(String),
     /// The multiplexer answered something the adapter cannot parse.
     Protocol(String),
+}
+
+impl std::fmt::Display for MuxError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Self::Gone(_, text)
+        | Self::Timeout(text)
+        | Self::TooLarge(text)
+        | Self::Unavailable(text)
+        | Self::Protocol(text)) = self;
+        formatter.write_str(text)
+    }
 }
 
 /// Reads only, so a function bounded on `MuxRead` cannot type into a pane.

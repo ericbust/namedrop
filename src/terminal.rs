@@ -192,7 +192,7 @@ fn parse_process_info(stdout: &str) -> Option<ProcessInfo> {
 /// instead of falling back. When Herdr does not answer, nothing was learned
 /// about the pane, so its own error is the reason given.
 pub fn verify_inherited_pane(
-    herdr: &impl HerdrCommandExecutor,
+    herdr: &(impl crate::mux::MuxRead + HerdrCommandExecutor),
     pane_id: &str,
     agent_session_ids: &[&str],
 ) -> Result<(), String> {

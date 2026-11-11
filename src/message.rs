@@ -49,7 +49,7 @@ impl ParsedMessage {
     }
 }
 
-pub(crate) fn body_reference_aliases<E: crate::HerdrCommandExecutor>(
+pub(crate) fn body_reference_aliases<E: crate::mux::MuxRead>(
     parsed: &ParsedMessage,
     workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
 ) -> Vec<String> {
@@ -1141,7 +1141,7 @@ where
     crate::spaces::names_in_scope(scope, &directory).map_err(SendError::Refused)
 }
 
-fn names_workspaces<E: crate::HerdrCommandExecutor>(
+fn names_workspaces<E: crate::mux::MuxRead>(
     scope: &SpaceScope,
     workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
 ) -> bool {

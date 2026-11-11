@@ -89,6 +89,10 @@ pub(crate) struct World {
     prompts_stay_settled: bool,
 }
 
+fn gone(what: super::Gone, id: &str) -> MuxError {
+    MuxError::Gone(what, format!("{id} is gone"))
+}
+
 impl World {
     pub(crate) fn pane(&self, pane: &PaneId) -> Option<&FakePane> {
         self.spaces
@@ -174,7 +178,7 @@ impl World {
                     .spaces
                     .iter()
                     .find(|space| &space.id == id)
-                    .ok_or(MuxError::Gone(super::Gone::Space))?;
+                    .ok_or_else(|| gone(super::Gone::Space, id.as_str()))?;
                 vec![if panes {
                     Self::checkout_view(space, true)
                 } else {
@@ -413,7 +417,7 @@ impl MuxRead for FakeMux {
         world.take_failure(Op::Screen)?;
         let screen = &world
             .pane(pane)
-            .ok_or(MuxError::Gone(super::Gone::Pane))?
+            .ok_or_else(|| gone(super::Gone::Pane, pane.as_str()))?
             .screen;
         let lines: Vec<_> = screen.lines().collect();
         let text = lines[lines.len().saturating_sub(request.lines)..].join("\n");
@@ -426,7 +430,7 @@ impl MuxRead for FakeMux {
         world
             .pane(pane)
             .map(|pane| pane.process.clone())
-            .ok_or(MuxError::Gone(super::Gone::Pane))
+            .ok_or_else(|| gone(super::Gone::Pane, pane.as_str()))
     }
 
     fn tab_label(&self, tab: &TabId) -> Result<Option<String>, MuxError> {
@@ -450,12 +454,14 @@ impl MuxAct for FakeMux {
             Effect::Identify { pane, alias, texts } => {
                 let pane = world
                     .pane_mut(pane)
-                    .ok_or(MuxError::Gone(super::Gone::Pane))?;
+                    .ok_or_else(|| gone(super::Gone::Pane, pane.as_str()))?;
                 pane.facts.title = Some(format!("@{alias}"));
                 pane.facts.idle_label = Some(texts.ready.clone());
             }
             Effect::Badges { pane, .. } => {
-                world.pane(pane).ok_or(MuxError::Gone(super::Gone::Pane))?;
+                world
+                    .pane(pane)
+                    .ok_or_else(|| gone(super::Gone::Pane, pane.as_str()))?;
             }
             Effect::RenameTab { tab, label } => {
                 world.tab_labels.insert(tab.clone(), label.clone());

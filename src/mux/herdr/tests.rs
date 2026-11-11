@@ -167,7 +167,7 @@ fn a_closed_space_is_gone_without_listing_its_panes() {
     let mux = herdr(|_| Err(error("workspace_not_found")));
     assert_eq!(
         mux.survey(Scope::Space(&space("w1")), Depth::Panes),
-        Err(MuxError::Gone(Gone::Space))
+        Err(MuxError::Gone(Gone::Space, error("workspace_not_found")))
     );
     assert_eq!(calls(&mux), ["worktree list --workspace w1 --json"]);
 }
@@ -376,14 +376,17 @@ fn reads_run_one_command_each() {
 #[test]
 fn transport_failures_map_to_port_errors() {
     for (failure, expected) in [
-        (error("pane_not_found"), MuxError::Gone(Gone::Pane)),
+        (
+            error("pane_not_found"),
+            MuxError::Gone(Gone::Pane, error("pane_not_found")),
+        ),
         (
             "Herdr command timed out after 10000 ms".to_owned(),
-            MuxError::Timeout,
+            MuxError::Timeout("Herdr command timed out after 10000 ms".to_owned()),
         ),
         (
             "Herdr read exceeded its output limit".to_owned(),
-            MuxError::TooLarge,
+            MuxError::TooLarge("Herdr read exceeded its output limit".to_owned()),
         ),
         (
             error("server_busy"),

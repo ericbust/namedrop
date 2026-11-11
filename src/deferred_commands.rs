@@ -737,7 +737,7 @@ fn execute_request(state: &Path, request: &Request) -> Result<Value, String> {
     }
 }
 
-fn validate_live_caller<E: crate::HerdrCommandExecutor>(
+fn validate_live_caller<E: crate::mux::MuxRead>(
     state: &Path,
     caller: &Caller,
     herdr: &E,

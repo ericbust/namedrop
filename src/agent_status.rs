@@ -101,7 +101,7 @@ pub fn collect_agent_status<M, C, I>(
 ) -> Result<Value, String>
 where
     M: crate::mux::Mux + HerdrCommandExecutor,
-    C: Clock,
+    C: Clock + Sync,
     I: IdGenerator,
 {
     let observed_at_ms = runtime.clock.now_unix_ms();
@@ -191,7 +191,7 @@ fn discover<M, C, I>(
 ) -> Result<DiscoveredWorktree, String>
 where
     M: crate::mux::Mux + HerdrCommandExecutor,
-    C: Clock,
+    C: Clock + Sync,
     I: IdGenerator,
 {
     match runtime.workspace_id {

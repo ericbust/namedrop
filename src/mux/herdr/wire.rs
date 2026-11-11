@@ -25,10 +25,10 @@ pub(super) fn error_code(error: &str) -> Option<String> {
 
 pub(super) fn mux_error(error: String) -> MuxError {
     match error_code(&error).as_deref() {
-        Some("workspace_not_found") => MuxError::Gone(Gone::Space),
-        Some("pane_not_found") => MuxError::Gone(Gone::Pane),
-        _ if error.starts_with("Herdr command timed out") => MuxError::Timeout,
-        _ if error == "Herdr read exceeded its output limit" => MuxError::TooLarge,
+        Some("workspace_not_found") => MuxError::Gone(Gone::Space, error),
+        Some("pane_not_found") => MuxError::Gone(Gone::Pane, error),
+        _ if error.starts_with("Herdr command timed out") => MuxError::Timeout(error),
+        _ if error == "Herdr read exceeded its output limit" => MuxError::TooLarge(error),
         _ => MuxError::Unavailable(error),
     }
 }
@@ -446,7 +446,7 @@ fn spaces_owning_checkout(
         }
         let listing = match worktree_list_for_workspace(transport, &workspace.workspace_id) {
             Ok(listing) => listing,
-            Err(MuxError::Gone(Gone::Space)) => None,
+            Err(MuxError::Gone(Gone::Space, _)) => None,
             Err(error) => return Err(error),
         };
         let Some(result) = listing else {
