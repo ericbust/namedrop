@@ -17,10 +17,13 @@ use executable::{copy_executable, write_executable};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
-    fs,
+    fs::{self, File},
     io::{BufRead, BufReader, Read, Write},
     net::TcpStream,
-    os::unix::fs::{PermissionsExt, symlink},
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::fs::{PermissionsExt, symlink},
+    },
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::{Arc, Barrier},
@@ -563,6 +566,42 @@ fn concurrent_first_opens_choose_one_ui_and_reject_the_other() {
         fs::read(winner.join("index.html")).unwrap()
     );
     assert_eq!(dashboard.open(Some(winner))["server"], "running");
+}
+
+#[test]
+fn the_started_server_keeps_no_descriptor_its_caller_leaked() {
+    use std::os::unix::process::CommandExt;
+    let dashboard = Dashboard::new();
+    let mut fds = [0; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    let (reader, writer) = unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) };
+    for fd in fds {
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+            0
+        );
+    }
+    let leaked = writer.as_raw_fd();
+    let mut command = dashboard.command(None);
+    unsafe {
+        command.pre_exec(move || match libc::fcntl(leaked, libc::F_SETFD, 0) {
+            0 => Ok(()),
+            _ => Err(std::io::Error::last_os_error()),
+        });
+    }
+    let output = command.output().unwrap();
+    drop(writer);
+    assert_eq!(data(output)["server"], "started");
+    assert_eq!(
+        unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) },
+        0
+    );
+    let mut byte = [0; 1];
+    assert_eq!(
+        (&reader).read(&mut byte).map_err(|error| error.kind()),
+        Ok(0),
+        "the server still holds a pipe its caller leaked, so a reader of that pipe waits until the server exits"
+    );
 }
 
 #[test]
