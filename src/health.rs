@@ -779,7 +779,7 @@ where
     }
 }
 
-fn invoking_pane_is_served<M: crate::mux::Mux + HerdrCommandExecutor, C, I>(
+fn invoking_pane_is_served<M: crate::mux::Mux, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
     space_id: &str,
     pane_id: &str,
@@ -804,7 +804,7 @@ fn live_agent_session<M, C, I>(
     pane_id: &str,
 ) -> Result<AgentSessionId, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -974,7 +974,7 @@ fn load_health_snapshot<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<HealthSnapshot, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -1117,22 +1117,19 @@ fn health_issue_for_attention(source: AttentionSourceKind) -> HealthIssue {
     }
 }
 
-fn registered_plugin_root<E: HerdrCommandExecutor>(herdr: &E) -> Option<std::path::PathBuf> {
-    let output = herdr
-        .execute_bounded(
-            &["plugin", "list", "--plugin", "namedrop", "--json"],
-            std::time::Duration::from_secs(2),
-            &std::sync::atomic::AtomicBool::new(false),
-            64 * 1024,
-        )
-        .ok()?;
-    let list: serde_json::Value = serde_json::from_str(&output.stdout).ok()?;
-    let root = list["result"]["plugins"]
-        .as_array()?
-        .iter()
-        .find(|plugin| plugin["plugin_id"] == "namedrop")?["plugin_root"]
-        .as_str()?;
-    Some(std::path::PathBuf::from(root)).filter(|root| root.is_absolute())
+fn registered_plugin_root<E: HerdrCommandExecutor + Sync>(herdr: &E) -> Option<std::path::PathBuf> {
+    use crate::mux::MuxRead;
+    let not_cancelled = std::sync::atomic::AtomicBool::new(false);
+    let budget = || {
+        Ok(crate::mux::Budget {
+            timeout: std::time::Duration::from_secs(2),
+            max_output_bytes: 64 * 1024,
+        })
+    };
+    crate::mux::herdr::bounded(herdr, &not_cancelled, budget)
+        .integration_root()
+        .ok()
+        .flatten()
 }
 
 /// The status worker runs detached with its output discarded, so the event it

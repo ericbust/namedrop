@@ -7,8 +7,7 @@
 //! stripped of terminal control sequences before they are ever printed.
 use super::popup_input::InputMode;
 use namedrop::{
-    HerdrCommandExecutor, HerdrCommandOutput, LifecycleRuntime, cli::RuntimeOptions,
-    discover_worktree_for_workspace,
+    HerdrCommandExecutor, LifecycleRuntime, cli::RuntimeOptions, discover_worktree_for_workspace,
 };
 use serde_json::Value;
 use std::{
@@ -147,31 +146,10 @@ pub(crate) enum Identity {
     Unconfirmed(String),
 }
 
-/// Forwards `discover_worktree_for_workspace`'s ordinary reads through bounded
-/// ones. That call makes up to two Herdr requests on the default ten-second
-/// timeout; here they share one short deadline and the pass's cancellation
-/// flag, so closing the popup ends the recheck instead of waiting it out.
-struct BoundedReads<'a, E> {
-    inner: &'a E,
-    deadline: Instant,
-    cancelled: &'a AtomicBool,
-}
-
-impl<E: HerdrCommandExecutor> HerdrCommandExecutor for BoundedReads<'_, E> {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err("confirming the invoking pane ran out of time".to_owned());
-        }
-        self.inner
-            .execute_bounded(args, remaining, self.cancelled, MAX_IDENTITY_OUTPUT_BYTES)
-    }
-}
-
 /// Rereads the pane the popup was opened for. A different physical terminal or
 /// a different agent session means the popup is now looking at someone else's
 /// work, so results collected for the original identity must be discarded.
-pub(crate) fn latest_identity<M: namedrop::mux::Mux + HerdrCommandExecutor, C, I>(
+pub(crate) fn latest_identity<M: HerdrCommandExecutor + Sync, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
     workspace: &str,
     pane: &str,
@@ -179,11 +157,20 @@ pub(crate) fn latest_identity<M: namedrop::mux::Mux + HerdrCommandExecutor, C, I
     session: Option<&str>,
     cancelled: &AtomicBool,
 ) -> Identity {
-    let reads = BoundedReads {
-        inner: runtime.mux,
-        deadline: Instant::now() + IDENTITY_BUDGET,
-        cancelled,
-    };
+    // Discovery makes up to two Herdr requests on the default ten-second
+    // timeout. Here they share one short deadline and the pass's cancellation
+    // flag, so closing the popup ends the recheck instead of waiting it out.
+    let deadline = Instant::now() + IDENTITY_BUDGET;
+    let reads = namedrop::mux::herdr::bounded(runtime.mux, cancelled, || {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("confirming the invoking pane ran out of time".to_owned());
+        }
+        Ok(namedrop::mux::Budget {
+            timeout: remaining,
+            max_output_bytes: MAX_IDENTITY_OUTPUT_BYTES,
+        })
+    });
     let panes = match discover_worktree_for_workspace(&reads, workspace) {
         Ok(worktree) => worktree.panes,
         Err(error) => {

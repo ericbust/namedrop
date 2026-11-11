@@ -3,9 +3,7 @@
 //! here only reads: config.toml, the server's pid file and the process table.
 
 use crate::integration::pane_agent_runtime;
-use crate::{
-    AgentConfigDirectories, AgentRuntime, DiscoveredPane, HerdrCommandExecutor, LifecycleRuntime,
-};
+use crate::{AgentConfigDirectories, AgentRuntime, DiscoveredPane, LifecycleRuntime};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -184,7 +182,7 @@ impl ServedPanes {
 /// A Codex pane counts as served unless its foreground processes prove it runs
 /// in-process. When Herdr does not answer, it counts as served, because a
 /// server is running.
-pub(crate) fn served_codex_panes<M: crate::mux::Mux + HerdrCommandExecutor, C, I>(
+pub(crate) fn served_codex_panes<M: crate::mux::MuxRead, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
     panes: &[DiscoveredPane],
 ) -> Option<ServedPanes> {
@@ -213,9 +211,9 @@ pub(crate) fn runs_inside_server() -> bool {
 
 const IN_PROCESS_FLAGS: [&str; 2] = ["--no-daemon", "--dangerously-bypass-hook-trust"];
 
-fn pane_runs_in_process(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> bool {
+fn pane_runs_in_process(mux: &impl crate::mux::MuxRead, pane_id: &str) -> bool {
     // No answer from Herdr proves nothing, so the pane stays served.
-    let Some(pids) = crate::terminal::foreground_process_ids(herdr, pane_id) else {
+    let Some(pids) = crate::terminal::foreground_process_ids(mux, pane_id) else {
         return false;
     };
     pids.into_iter()
@@ -248,7 +246,7 @@ fn is_server_binary(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::HerdrCommandOutput;
+    use crate::{HerdrCommandExecutor, HerdrCommandOutput};
     use std::{
         collections::BTreeMap,
         os::unix::process::CommandExt,

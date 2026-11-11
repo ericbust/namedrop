@@ -1,6 +1,6 @@
 use crate::integration::{onboard_settled_integrations, pane_agent_runtime};
 use crate::mux::{
-    AgentKind, Depth, Gone, MuxError, MuxRead, PaneFacts, Scope, SessionClaim, Survey,
+    AgentKind, Depth, Gone, MuxError, MuxRead, PaneFacts, Scope, SessionClaim, Survey, TabId,
 };
 use crate::{
     ActorKind, AgentSessionId, AttentionItemRecord, Clock, HerdrCommandExecutor, IdGenerator,
@@ -1338,7 +1338,7 @@ fn apply_managed_tab_label(
     tab_id: &str,
     address_id: &PaneAddressId,
     desired_label: &str,
-    herdr: &impl HerdrCommandExecutor,
+    herdr: &(impl MuxRead + HerdrCommandExecutor),
 ) -> Value {
     let warning = || {
         json!({
@@ -1427,14 +1427,8 @@ fn tab_label_owner<'a>(
     candidates.next().is_none().then_some(owner)
 }
 
-fn current_tab_label(herdr: &impl HerdrCommandExecutor, tab_id: &str) -> Option<String> {
-    let output = herdr.execute(&["tab", "get", tab_id]).ok()?;
-    let value: Value = serde_json::from_str(&output.stdout).ok()?;
-    value
-        .pointer("/result/label")
-        .or_else(|| value.pointer("/result/tab/label"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
+fn current_tab_label(mux: &impl MuxRead, tab_id: &str) -> Option<String> {
+    mux.tab_label(&TabId::new(tab_id)).ok().flatten()
 }
 
 fn reconcile_managed_tab_labels<M, C, I>(
@@ -1743,7 +1737,7 @@ fn every_workspace_addresses<M, C, I>(
     store: &mut StateStore,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {

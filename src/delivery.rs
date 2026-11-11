@@ -914,7 +914,7 @@ fn discover<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<crate::DiscoveredWorktree, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
 {
     match runtime.workspace_id {
         Some(workspace_id) => crate::lifecycle::discover_reminder_workspace(
@@ -1122,7 +1122,7 @@ pub(crate) fn agent_wait<M, C, I>(
     pane: &DiscoveredPane,
 ) -> Option<AgentWait>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
 {
     let phase = || {
@@ -1210,7 +1210,7 @@ enum PromptBox {
 }
 
 /// Enough of the screen's end for the box and whatever the agent draws under it.
-const PROMPT_BOX_LINES: &str = "60";
+const PROMPT_BOX_LINES: usize = 60;
 
 fn read_prompt_box<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
@@ -1219,7 +1219,7 @@ fn read_prompt_box<M, C, I>(
     session: Option<&str>,
 ) -> PromptBox
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::MuxRead,
     C: Clock,
 {
     let Some(screen) = read_screen(runtime, pane_id) else {
@@ -1253,23 +1253,18 @@ where
 /// could not be read.
 fn read_screen<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>, pane_id: &str) -> Option<String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::MuxRead,
 {
+    let request = crate::mux::ScreenRequest {
+        lines: PROMPT_BOX_LINES,
+        wrap: crate::mux::Wrap::AsDrawn,
+        style: crate::mux::Style::Ansi,
+    };
     runtime
         .mux
-        .execute(&[
-            "pane",
-            "read",
-            pane_id,
-            "--source",
-            "recent",
-            "--lines",
-            PROMPT_BOX_LINES,
-            "--format",
-            "ansi",
-        ])
+        .screen(&crate::mux::PaneId::new(pane_id), request)
         .ok()
-        .map(|output| output.stdout)
+        .map(|screen| screen.text)
 }
 
 /// The person's text in a Claude Code box whose first row is on screen,
