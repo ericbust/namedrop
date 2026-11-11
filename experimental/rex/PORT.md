@@ -165,6 +165,19 @@ Record each accepted deviation here, with its source, before the next commit sta
 - **`PaneInput` has no constructor yet.** An unused constructor fails `-D warnings`. Commit 8 adds it with the `compile_fail` doctest.
 - **Deferred to the commits that use them:** `resolve_session`, the `Survey` lookup helpers, and `MuxEvent::space`.
 
+**Commit 2** (`test(mux): add FakeMux and its world builder`). Each model change below is something today's Herdr discovery reports that the commit 1 types could not hold, so commit 5 could not rebuild `DiscoveredWorktree` without it.
+
+- **`AgentKind::Unreported`.** Herdr can report a session with no agent kind. That pane is not free, so `agent` must be `Some`, and its kind needs a value.
+- **`PaneFacts.idle_label`.** `DiscoveredPane.idle_state_label` (Herdr's `state_labels.idle`) decides whether a pane's identity metadata is republished.
+- **`Checkout.repo_key` and `Checkout.repo_name`.** `workspace_labels` and the dashboard read them from the checkout Herdr stamps on a space.
+- **`SpaceView.worktree: Option<WorktreeId>`.** The stored key, the checkout path or `herdr-space:<id>`, is chosen by the adapter so the synthetic key stays in `mux/herdr/`. It is `None` when a survey does not resolve it. `Scope` documents which facts each scope and depth read, because `Scope::All` with `Depth::Panes` is one `pane list` that names no labels or checkouts.
+- **`PopupSpec.target` is a `PaneFacts`.** The Herdr popup command passes the target's space, terminal, and session, which a bare `PaneId` cannot supply without another `pane list`.
+- **Reaching the fake from `tests/`.** `mux::fake` is a `#[doc(hidden)] pub mod`, always compiled, as `namedrop::mux::fake::FakeMux`. No feature flag.
+- **Testing delivery before `PaneInput` exists.** `FakeMux::deliver` forwards to a crate-private `send(pane, kind)`, and the tests drive `send`. Commit 8 can test `deliver` itself.
+- **The fake reads what Herdr reads.** A survey reports only the facts Herdr's commands for that scope and depth return. A checkout listing names no space label, number, or repository name, and a space listing names no checkout label or branch. A test then sees the same partial facts from either implementation, and the commit 3 conformance suite checks it.
+- **Native gate.** By default the fake gates like Herdr: it declines a busy, blocked, or absent agent before typing, honors `Admit::BetweenTurns`, and checks no identity. `FakeMux::emulated()` runs `gate::emulate_prompt` instead. A prompted agent starts working unless `prompts_stay_settled()` is set.
+- **Deferred:** the queued `MuxEvent`s that the design mentions. No port method consumes events until step 5.
+
 ## Open questions and risks
 
 - Is a dashboard key that reports busy during a delivery acceptable, or should it wait a short fixed time? Commit 12 decides.

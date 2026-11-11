@@ -3,6 +3,8 @@
 
 mod effect;
 mod event;
+#[doc(hidden)]
+pub mod fake;
 pub mod gate;
 mod input;
 mod model;
