@@ -600,9 +600,12 @@ where
             candidate_reach(runtime, &second, &second_discovery),
             &effects,
         ) {
-            (Reach::Waits(AgentWait::SentPrompt), Ok(effects)) => {
-                clear_sent_prompt(runtime, effects, &second.pane_id)
-            }
+            (Reach::Waits(AgentWait::SentPrompt), Ok(effects)) => clear_sent_prompt(
+                runtime,
+                effects,
+                &second.pane_id,
+                second.agent_session_id.as_str(),
+            ),
             // The dispatch below reports why the pane's lock failed.
             (Reach::Waits(AgentWait::SentPrompt), Err(_)) => Reach::Now,
             (reach, _) => reach,
@@ -975,39 +978,57 @@ const CLEAR_BATCHES: usize = 8;
 const CLEAR_REDRAW_MS: u64 = 150;
 
 /// Clears a Claude Code prompt box that holds only the prompt Namedrop's hook
-/// sent as a message. The mail goes in only once the box reads empty. A box
-/// the keys leave as it was holds the mail: the session may not take the
-/// keys as Claude Code 2.1.322 does, or has not drawn the box again yet.
+/// sent as a message. The mail goes in only once the box reads empty.
+///
+/// The box is read before each batch of keys. Keys are pressed only while it
+/// holds the sent prompt or what the last batch left of it, so text the
+/// person starts typing meanwhile is never deleted. A box the keys leave as
+/// it was also holds the mail: the session may not take the keys as Claude
+/// Code 2.1.322 does, or has not drawn the box again yet.
 fn clear_sent_prompt<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
     effects: &crate::pane_effects::PaneEffects,
     pane_id: &str,
+    session: &str,
 ) -> Reach
 where
     E: HerdrCommandExecutor,
     C: Clock,
 {
     let agent = crate::AgentRuntime::ClaudeCode;
-    let typed = |screen: &str| typed_text(screen, agent).map_or(0, |typed| typed.len());
-    let mut left = read_screen(runtime, pane_id).map_or(usize::MAX, |screen| typed(&screen));
-    for _ in 0..CLEAR_BATCHES {
-        if effects
-            .delete_claude_code_input(runtime.herdr, CLEAR_PRESSES)
-            .is_err()
-        {
-            break;
-        }
-        runtime.clock.wait_ms(CLEAR_REDRAW_MS);
+    let held = Reach::Waits(AgentWait::SentPrompt);
+    let Some(sent) =
+        crate::turn_phase::restored(runtime.state_directory, runtime.session_socket_id, session)
+    else {
+        return held;
+    };
+    let mut left: Option<usize> = None;
+    for batch in 0..=CLEAR_BATCHES {
         let Some(screen) = read_screen(runtime, pane_id) else {
-            break;
+            return held;
         };
         match prompt_box(&screen, agent) {
             PromptBox::Empty => return Reach::Now,
-            PromptBox::Draft if typed(&screen) < left => left = typed(&screen),
-            _ => break,
+            PromptBox::Draft => {}
+            _ => return held,
         }
+        let typed = typed_text(&screen, agent).unwrap_or_default();
+        let still_sent = match left {
+            None => is_restored(&typed, &sent),
+            Some(left) => typed.len() < left && is_rest_of(&typed, &sent),
+        };
+        if !still_sent
+            || batch == CLEAR_BATCHES
+            || effects
+                .delete_claude_code_input(runtime.herdr, CLEAR_PRESSES)
+                .is_err()
+        {
+            return held;
+        }
+        left = Some(typed.len());
+        runtime.clock.wait_ms(CLEAR_REDRAW_MS);
     }
-    Reach::Waits(AgentWait::SentPrompt)
+    held
 }
 
 impl DrainReport {
@@ -1246,6 +1267,14 @@ const RESTORED_TAIL_MIN_CHARS: usize = 16;
 fn is_restored(typed: &str, restored: &str) -> bool {
     typed == restored
         || (typed.chars().count() >= RESTORED_TAIL_MIN_CHARS && restored.ends_with(typed))
+}
+
+/// Whether the box's text, without whitespace, is what deleting from the end
+/// of the blocked prompt leaves: its start, or in a box too short for it, the
+/// last lines of its start.
+fn is_rest_of(typed: &str, restored: &str) -> bool {
+    restored.starts_with(typed)
+        || (typed.chars().count() >= RESTORED_TAIL_MIN_CHARS && restored.contains(typed))
 }
 
 /// The person's text in the box, without whitespace, or `None` in shell mode

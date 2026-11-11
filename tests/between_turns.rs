@@ -55,6 +55,9 @@ struct Recipient {
     /// Whether the delete key empties the box, as it does in Claude Code
     /// 2.1.322.
     delete_empties: std::sync::atomic::AtomicBool,
+    /// The screens the next batches of the delete key leave, first first.
+    /// Once they are used up, `delete_empties` decides.
+    after_delete: Mutex<std::collections::VecDeque<String>>,
 }
 
 impl HerdrCommandExecutor for Recipient {
@@ -105,10 +108,12 @@ impl HerdrCommandExecutor for Recipient {
                     .lock()
                     .unwrap()
                     .push(keys.iter().map(|key| (*key).to_owned()).collect());
-                if keys.iter().all(|key| *key == "ctrl+u")
-                    && self.delete_empties.load(Ordering::Relaxed)
-                {
-                    *self.screen.lock().unwrap() = Some(EMPTY_BOX.to_owned());
+                if keys.iter().all(|key| *key == "ctrl+u") {
+                    if let Some(next) = self.after_delete.lock().unwrap().pop_front() {
+                        *self.screen.lock().unwrap() = Some(next);
+                    } else if self.delete_empties.load(Ordering::Relaxed) {
+                        *self.screen.lock().unwrap() = Some(EMPTY_BOX.to_owned());
+                    }
                 }
                 "{}".to_owned()
             }
@@ -199,6 +204,7 @@ impl Fixture {
                 prompts: Mutex::new(Vec::new()),
                 keys: Mutex::new(Vec::new()),
                 delete_empties: std::sync::atomic::AtomicBool::new(true),
+                after_delete: Mutex::new(std::collections::VecDeque::new()),
             },
             clock: TestClock::default(),
             ids: SequenceIds(AtomicU64::new(1)),
@@ -588,7 +594,18 @@ impl Fixture {
 
 /// One batch of the key that deletes a line of Claude Code's prompt box.
 fn delete_batch() -> Vec<Vec<String>> {
-    vec![vec!["ctrl+u".to_owned(); 32]]
+    delete_batches(1)
+}
+
+fn delete_batches(batches: usize) -> Vec<Vec<String>> {
+    vec![vec!["ctrl+u".to_owned(); 32]; batches]
+}
+
+/// `DRAFT_BOX` with `text` in its box.
+fn box_holding(text: &str) -> String {
+    let drawn = DRAFT_BOX.replace(DRAFT_TEXT, text);
+    assert_ne!(drawn, DRAFT_BOX);
+    drawn
 }
 
 fn no_keys() -> Vec<Vec<String>> {
@@ -677,6 +694,58 @@ fn held_mail_goes_in_once_the_draft_was_sent_as_a_mention() {
     assert_eq!(fixture.keys(), delete_batch());
     assert_eq!(typed.len(), 1, "{typed:?}");
     assert!(delivered.draft_held.is_empty(), "{delivered:?}");
+}
+
+/// A long mention takes more than one batch. The box is read before each, and
+/// the keys go on only while it holds what is left of the mention.
+#[test]
+fn a_mention_is_deleted_batch_by_batch_while_the_box_holds_only_what_is_left_of_it() {
+    let fixture = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+    fixture.sent_mention(4_000, DRAFT_TEXT);
+    fixture.screen(Some(DRAFT_BOX));
+    *fixture.herdr.after_delete.lock().unwrap() = [
+        box_holding("draft for scenario c"),
+        box_holding("draft for"),
+    ]
+    .into();
+    let (report, typed) = fixture.drain_report();
+    assert_eq!(fixture.keys(), delete_batches(3));
+    assert_eq!(typed.len(), 1, "{typed:?}");
+    assert!(report.draft_held.is_empty(), "{report:?}");
+}
+
+/// The person starts typing while the mention is being deleted. Their text is
+/// not part of the mention, so no further key is pressed and the mail waits
+/// behind what is now their draft.
+#[test]
+fn text_the_person_types_while_the_mention_is_deleted_stops_the_keys() {
+    for theirs in [
+        // Behind what is left of the mention.
+        "draft for scenario c and my new words",
+        // In place of it.
+        "my new words",
+        // The keys left more than they found.
+        "draft for scenario c, keep me and my new words",
+    ] {
+        let fixture = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+        fixture.sent_mention(4_000, DRAFT_TEXT);
+        fixture.screen(Some(DRAFT_BOX));
+        *fixture.herdr.after_delete.lock().unwrap() =
+            [box_holding("draft for scenario c"), box_holding(theirs)].into();
+        let (held, typed) = fixture.drain_report();
+        assert_eq!(
+            (fixture.keys(), typed),
+            (delete_batches(2), Vec::new()),
+            "{theirs:?}"
+        );
+        assert_eq!(held.draft_held.len(), 1, "{theirs:?}: {held:?}");
+        // The recheck presses nothing either, and Doctor calls it a draft.
+        let (held, typed) = fixture.recheck(&held);
+        assert_eq!((fixture.keys(), typed), (no_keys(), Vec::new()));
+        assert_eq!(held.draft_held.len(), 1, "{theirs:?}: {held:?}");
+        let issue = fixture.long_wait().expect("Doctor explains the wait");
+        assert_eq!(issue.diagnostic["held_by"], "draft", "{theirs:?}");
+    }
 }
 
 /// The keys leave the mention where it is, as in a session that takes them
