@@ -2,7 +2,9 @@ mod agent_status;
 mod agent_status_model;
 pub mod cli;
 pub use agent_status::collect_agent_status;
-pub use agent_status_model::{suggest_agent_persona, summarize_agent_status};
+pub use agent_status_model::{
+    AGENT_SESSION_MARKERS, runs_in_agent_session, suggest_agent_persona, summarize_agent_status,
+};
 mod codex_app_server;
 mod context;
 mod controls;

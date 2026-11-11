@@ -2640,8 +2640,13 @@ fn retryable_agent_status_reconciliation(error: &str) -> bool {
     )
 }
 
-/// The width of the terminal `output` writes to, or `None` when it is not one.
-fn terminal_columns(output: &impl std::os::fd::AsRawFd) -> Option<usize> {
+/// The width of the terminal a person reads `output` on. `None` when it is
+/// not a terminal or reports no width, and when an agent's shell runs this
+/// command: that shell can be a pseudo-terminal with a width.
+fn reader_columns(output: &impl std::os::fd::AsRawFd) -> Option<usize> {
+    if namedrop::runs_in_agent_session() {
+        return None;
+    }
     let mut size = std::mem::MaybeUninit::<libc::winsize>::uninit();
     // SAFETY: TIOCGWINSZ only reads this open descriptor, and fills the
     // winsize allocation when it succeeds.
@@ -2656,7 +2661,7 @@ fn terminal_columns(output: &impl std::os::fd::AsRawFd) -> Option<usize> {
 
 fn write_result(result: &CommandResult, exit_code: u8, format: ResultFormat) -> ExitCode {
     if format == ResultFormat::Human {
-        let text = render_command_result_to_text_within(result, terminal_columns(&io::stdout()));
+        let text = render_command_result_to_text_within(result, reader_columns(&io::stdout()));
         let written = if exit_code == 0 {
             writeln!(io::stdout().lock(), "{text}")
         } else {

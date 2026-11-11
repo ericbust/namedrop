@@ -27,11 +27,11 @@ impl Tailnet {
             std::env::temp_dir().join(format!("namedrop-tailnet-code-{}", std::process::id()));
         fs::create_dir(&root).unwrap();
         executable::write_executable(
-            &root.join("herdr"),
+            root.join("herdr"),
             "#!/bin/sh\nprintf '{\"result\":{\"workspace\":{\"label\":\"test\"}}}'\n",
         );
         executable::write_executable(
-            &root.join("tailscale"),
+            root.join("tailscale"),
             include_str!("support/fake_tailscale.py"),
         );
         fs::write(
@@ -61,7 +61,14 @@ impl Tailnet {
     /// What `channels --no-open` prints for the tailnet link or the local
     /// one, in `format` (`--json`, `--human`, or the output's own default),
     /// to a terminal `columns` wide when there is one and to a pipe otherwise.
-    fn channels(&self, tailscale: bool, format: Option<&str>, columns: Option<u16>) -> String {
+    /// `agent` is a variable an agent's session sets for the commands it runs.
+    fn channels(
+        &self,
+        tailscale: bool,
+        format: Option<&str>,
+        columns: Option<u16>,
+        agent: Option<&str>,
+    ) -> String {
         let mut command = match columns {
             Some(columns) => {
                 let mut command = Command::new("/usr/bin/python3");
@@ -73,6 +80,11 @@ impl Tailnet {
             }
             None => Command::new(env!("CARGO_BIN_EXE_namedrop")),
         };
+        // The test itself may be run by an agent.
+        for marker in namedrop::AGENT_SESSION_MARKERS {
+            command.env_remove(marker);
+        }
+        command.envs(agent.map(|marker| (marker, "1")));
         let path = std::env::var("PATH").unwrap();
         let output = command
             .args(format)
@@ -144,7 +156,7 @@ fn channels_prints_a_code_to_scan_for_a_person_and_the_same_json_for_a_program()
 
     // Explicit JSON, and the default for output that is not a terminal.
     for format in [Some("--json"), None] {
-        let text = tailnet.channels(true, format, None);
+        let text = tailnet.channels(true, format, None, None);
         assert!(
             text.is_ascii() && draws_no_code(&text),
             "{format:?}: {text:?}"
@@ -172,18 +184,31 @@ fn channels_prints_a_code_to_scan_for_a_person_and_the_same_json_for_a_program()
         );
     }
 
-    assert_scans_as_the_link_under_it(&tailnet.channels(true, Some("--human"), None));
-    assert_scans_as_the_link_under_it(&tailnet.channels(true, None, Some(100)));
+    assert_scans_as_the_link_under_it(&tailnet.channels(true, None, Some(100), None));
 
-    let narrow = tailnet.channels(true, None, Some(40));
-    assert!(draws_no_code(&narrow), "{narrow:?}");
-    printed_link(&narrow);
-    assert!(
-        narrow.contains("This terminal is too narrow for a QR code to scan. Widen it to "),
-        "{narrow}"
+    // Each of these readers gets the link and no code: a file or pipe asked
+    // for readable text, a terminal that reports no width, a terminal too
+    // narrow, and an agent whose shell is a pseudo-terminal.
+    let link_only = [
+        tailnet.channels(true, Some("--human"), None, None),
+        tailnet.channels(true, None, Some(0), None),
+        tailnet.channels(true, None, Some(40), None),
+        tailnet.channels(true, None, Some(100), Some("CLAUDECODE")),
+        tailnet.channels(true, None, Some(100), Some("CODEX_THREAD_ID")),
+    ];
+    for shown in &link_only {
+        assert!(draws_no_code(shown), "{shown:?}");
+        printed_link(shown);
+    }
+    let asks_for_width = |shown: &String| {
+        shown.contains("This terminal is too narrow for a QR code to scan. Widen it to ")
+    };
+    assert_eq!(
+        link_only.iter().map(asks_for_width).collect::<Vec<_>>(),
+        [false, false, true, false, false]
     );
 
-    let local = tailnet.channels(false, None, Some(100));
+    let local = tailnet.channels(false, None, Some(100), None);
     assert!(
         draws_no_code(&local) && local.contains("  http://127.0.0.1:"),
         "{local:?}"

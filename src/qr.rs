@@ -36,16 +36,20 @@ mod tests {
     const LINK: &str =
         "https://device.tail123.ts.net/w/0123456789abcdef0123?n=0123456789abcdef0123456789abcdef";
 
+    fn long_host() -> String {
+        format!(
+            "https://{}.tail-scale-name.ts.net:8443/w/0123456789abcdef0123?n=0123456789abcdef0123456789abcdef",
+            "a".repeat(63)
+        )
+    }
+
     fn drawn(link: &str) -> String {
         terminal_code(link).unwrap().rows.join("\n")
     }
 
     #[test]
     fn a_scanner_reads_the_exact_link_on_dark_and_light_themes() {
-        let long_host = format!(
-            "https://{}.tail-scale-name.ts.net:8443/w/0123456789abcdef0123?n=0123456789abcdef0123456789abcdef",
-            "a".repeat(63)
-        );
+        let long_host = long_host();
         for link in [LINK, "https://a.ts.net/w/0?n=1", &long_host] {
             for theme in [Theme::Dark, Theme::Light] {
                 assert_eq!(
@@ -68,9 +72,18 @@ mod tests {
 
     #[test]
     fn a_tailnet_link_fits_an_ordinary_terminal() {
-        let code = terminal_code(LINK).unwrap();
-        assert!(code.rows.len() <= 30, "{} rows", code.rows.len());
-        assert!(code.columns <= 60, "{} columns", code.columns);
+        // Digits pack tighter than letters, so a link with none is the
+        // largest code its length gives.
+        let widest = |origin: &str| {
+            terminal_code(&format!(
+                "{origin}/w/{}?n={}",
+                "f".repeat(20),
+                "f".repeat(32)
+            ))
+            .unwrap()
+        };
+        let code = widest("https://device.tail123.ts.net");
+        assert_eq!((code.columns, code.rows.len()), (49, 25));
         for row in &code.rows {
             let cells = row
                 .strip_prefix(BLACK_ON_WHITE)
@@ -79,6 +92,12 @@ mod tests {
             assert_eq!(cells.chars().count(), code.columns);
             assert!(cells.chars().all(|cell| " ▀▄█".contains(cell)), "{cells}");
         }
+        // A machine name of 63 characters, on a port other than 443.
+        let longest = widest(&format!(
+            "https://{}.tail-scale-name.ts.net:8443",
+            "a".repeat(63)
+        ));
+        assert_eq!((longest.columns, longest.rows.len()), (61, 31));
     }
 
     #[test]

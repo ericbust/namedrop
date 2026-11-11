@@ -10,8 +10,9 @@ pub fn render_command_result_to_text(result: &CommandResult) -> String {
     render_command_result_to_text_within(result, None)
 }
 
-/// The same text for a terminal `columns` cells wide. `None` is a reader with
-/// no width, such as a file. Only what cannot wrap depends on the width.
+/// The same text for a person reading a terminal `columns` cells wide. `None`
+/// is any other reader: a file, a pipe, an agent, or a terminal that reports
+/// no width. What cannot wrap is drawn only for a width it fits.
 pub fn render_command_result_to_text_within(
     result: &CommandResult,
     columns: Option<usize>,
@@ -74,9 +75,10 @@ pub fn render_command_result_to_text_within(
             ));
             // A link the browser on this machine already used is spent, and
             // the local link works on this machine only, so neither is drawn.
-            let code = (data["tailscale"] == true && data["opened"] != true)
-                .then(|| data["url"].as_str().and_then(qr::terminal_code))
-                .flatten();
+            // A wrapped code cannot be scanned, so it needs a width it fits.
+            let code = columns
+                .filter(|_| data["tailscale"] == true && data["opened"] != true)
+                .and_then(|_| data["url"].as_str().and_then(qr::terminal_code));
             let too_narrow_for = code.as_ref().and_then(|code| {
                 let needed = QR_INDENT.len() + code.columns;
                 columns
@@ -850,7 +852,8 @@ mod tests {
     #[test]
     fn a_tailnet_link_is_drawn_as_a_code_above_the_link_itself() {
         use crate::scan::{Theme, scan};
-        let rendered = render_command_result_to_text(&channels(TAILNET_LINK, true, false));
+        let rendered =
+            render_command_result_to_text_within(&channels(TAILNET_LINK, true, false), Some(80));
         assert_eq!(scan(&rendered, Theme::Dark).as_deref(), Some(TAILNET_LINK));
         assert_eq!(scan(&rendered, Theme::Light).as_deref(), Some(TAILNET_LINK));
         let lines: Vec<&str> = rendered.lines().collect();
@@ -867,22 +870,28 @@ mod tests {
     }
 
     #[test]
-    fn only_an_unopened_tailnet_link_is_drawn_and_never_in_a_view_for_agents() {
+    fn only_an_unopened_tailnet_link_is_drawn_and_only_for_a_known_width() {
         let plain = |rendered: &str| !rendered.contains('\u{1b}') && !rendered.contains('█');
         let local =
             "http://127.0.0.1:4000/w/0123456789abcdef0123?n=0123456789abcdef0123456789abcdef";
         assert_eq!(
-            render_command_result_to_text(&channels(local, false, false)),
+            render_command_result_to_text_within(&channels(local, false, false), Some(200)),
             format!(
                 "Namedrop dashboard for workspace w1 is live:\n  {local}\nOpen that URL in a browser on this machine within 10 minutes; it works once. The server stops on its own 10 minutes after the last tab closes."
             )
         );
-        assert!(plain(&render_command_result_to_text(&channels(
-            TAILNET_LINK,
-            true,
-            true
-        ))));
+        assert!(plain(&render_command_result_to_text_within(
+            &channels(TAILNET_LINK, true, true),
+            Some(200)
+        )));
         let tailnet = channels(TAILNET_LINK, true, false);
+        // A file, a pipe, an agent, or a terminal that reports no width.
+        assert_eq!(
+            render_command_result_to_text(&tailnet),
+            format!(
+                "Namedrop dashboard for workspace w1 is live:\n  {TAILNET_LINK}\nOpen that URL on a device signed in to your Tailscale account within 10 minutes; it works once. The server stops 10 minutes after the last tab closes."
+            )
+        );
         let full = serde_json::to_string(&tailnet).unwrap();
         let agent = agent_result_view(&serde_json::to_value(&tailnet).unwrap()).to_string();
         assert!(plain(&full) && plain(&agent), "{full}\n{agent}");
@@ -893,7 +902,7 @@ mod tests {
         let tailnet = channels(TAILNET_LINK, true, false);
         let width = crate::qr::terminal_code(TAILNET_LINK).unwrap().columns + QR_INDENT.len();
         let fitting = render_command_result_to_text_within(&tailnet, Some(width));
-        assert_eq!(fitting, render_command_result_to_text(&tailnet));
+        assert!(fitting.contains('\u{1b}'), "{fitting}");
         assert_eq!(
             render_command_result_to_text_within(&tailnet, Some(width - 1)),
             format!(
