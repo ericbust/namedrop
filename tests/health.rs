@@ -808,7 +808,7 @@ fn doctor_reports_unsupported_codex_without_preparing_its_home() {
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        herdr: &host,
+        mux: &host,
         clock: &Time,
         ids: &f.ids,
     };

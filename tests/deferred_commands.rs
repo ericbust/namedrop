@@ -133,7 +133,7 @@ impl Fixture {
         execute_integration_operation("register", json!({"runtime":"codex","protocol_version":"collab/v1","nonce":"nonce","capabilities":complete_capability_profile()}), &LifecycleRuntime {
             state_directory:directory.path(), home_directory:None, agent_config:Default::default(),
             cwd:Path::new("/repo"), workspace_id:Some("workspace-1"), current_pane_id:Some("pane-author"),
-            session_socket_id:&socket, herdr:&NativeHerdr, clock:&SystemClock, ids:&ProcessIds::default(),
+            session_socket_id:&socket, mux:&NativeHerdr, clock:&SystemClock, ids:&ProcessIds::default(),
         }).unwrap();
         fs::write(
             directory.path().join("panes.json"),
@@ -508,7 +508,7 @@ fn committed_untracked_send_cannot_gain_coordination_when_first_queued() {
             workspace_id: Some("workspace-1"),
             current_pane_id: Some("pane-author"),
             session_socket_id: &fixture.socket,
-            herdr: &NativeHerdr,
+            mux: &NativeHerdr,
             clock: &SystemClock,
             ids: &ProcessIds::default(),
         },
@@ -1350,7 +1350,7 @@ fn assert_reminder_clock_discovery_failure(error: &str) {
         "event.agent-status-changed",
         json!({"type":"pane_agent_status_changed","pane_id":"pane-author","workspace_id":"workspace-1","agent_status":"working"}),
         &LifecycleRuntime {
-            state_directory:f.directory.path(),home_directory:Some(f.directory.home()),agent_config:Default::default(),cwd:Path::new("/repo"),workspace_id:Some("workspace-1"),current_pane_id:None,session_socket_id:&f.socket,herdr:&ScriptHerdr(&f.herdr),clock:&SystemClock,ids:&ProcessIds::default(),
+            state_directory:f.directory.path(),home_directory:Some(f.directory.home()),agent_config:Default::default(),cwd:Path::new("/repo"),workspace_id:Some("workspace-1"),current_pane_id:None,session_socket_id:&f.socket,mux:&ScriptHerdr(&f.herdr),clock:&SystemClock,ids:&ProcessIds::default(),
         },
     ).unwrap_err();
     assert_eq!(failure, error_payload);
