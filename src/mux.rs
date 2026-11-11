@@ -6,6 +6,7 @@ mod event;
 #[doc(hidden)]
 pub mod fake;
 pub mod gate;
+pub mod herdr;
 mod input;
 mod model;
 mod ports;

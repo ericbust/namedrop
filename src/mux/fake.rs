@@ -97,7 +97,7 @@ impl World {
             .find(|candidate| &candidate.facts.id == pane)
     }
 
-    fn pane_mut(&mut self, pane: &PaneId) -> Option<&mut FakePane> {
+    pub(crate) fn pane_mut(&mut self, pane: &PaneId) -> Option<&mut FakePane> {
         self.spaces
             .iter_mut()
             .flat_map(|space| &mut space.panes)
@@ -111,7 +111,12 @@ impl World {
         }
     }
 
-    fn set_state(&mut self, pane: &PaneId, state: AgentState) {
+    #[cfg(test)]
+    pub(crate) fn record_sent(&mut self, sent: Sent) {
+        self.sent.push(sent);
+    }
+
+    pub(crate) fn set_state(&mut self, pane: &PaneId, state: AgentState) {
         if let Some(found) = self.pane_mut(pane) {
             found.facts.state = Some(state.clone());
             self.changes.entry(pane.clone()).or_default().push(state);
