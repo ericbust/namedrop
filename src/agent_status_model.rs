@@ -790,6 +790,32 @@ struct WorkerCapture {
     failure: WorkerFailure,
 }
 
+/// Variables an agent's session sets for the commands it runs, observed in
+/// live Claude Code and Codex panes.
+pub const AGENT_SESSION_MARKERS: [&str; 13] = [
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CODEX_SESSION_ID",
+    "CODEX_THREAD_ID",
+    "AI_AGENT",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_PID",
+    "CLAUDECODE",
+    "CLAUDE_EFFORT",
+];
+
+/// Whether an agent's shell runs this process, so what it prints is read by
+/// the agent even when its output is a pseudo-terminal.
+pub fn runs_in_agent_session() -> bool {
+    AGENT_SESSION_MARKERS
+        .iter()
+        .any(|marker| env::var_os(marker).is_some_and(|value| !value.is_empty()))
+}
+
 fn capture_worker(
     host: &str,
     prompt: &WorkerPrompt,
@@ -817,23 +843,9 @@ fn capture_worker(
                 command.env_remove(key);
             }
         }
-        for key in [
-            // The invoking agent's own session markers, observed in a live pane.
-            // Left in place they would mark the worker as that agent's child.
-            "CLAUDE_CODE_SESSION_ID",
-            "CLAUDE_CODE_CHILD_SESSION",
-            "CLAUDE_CODE_SESSION_ATTENDED",
-            "CLAUDE_CODE_ENTRYPOINT",
-            "CODEX_SESSION_ID",
-            "CODEX_THREAD_ID",
-            "AI_AGENT",
-            "CLAUDE_CODE_MESSAGING_SOCKET",
-            "CLAUDE_CODE_MESSAGING_TOKEN",
-            "CLAUDE_CODE_EXECPATH",
-            "CLAUDE_PID",
-            "CLAUDECODE",
-            "CLAUDE_EFFORT",
-        ] {
+        // Left in place, the invoking agent's markers would mark the worker
+        // as that agent's child.
+        for key in AGENT_SESSION_MARKERS {
             command.env_remove(key);
         }
 

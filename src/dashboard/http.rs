@@ -1314,7 +1314,7 @@ fn serve_connection(
             Status::Unauthorized.line(),
             "text/plain; charset=utf-8",
             "",
-            b"This browser isn't signed in to Channels. Your agents and messages are fine.\n\nTo sign in, run this on the machine running Channels, then open the new HTTPS link on this device:\n\n    namedrop channels --tailscale --no-open\n\nNo terminal nearby? Connect to that machine over SSH from this device, or open Channels in a browser that's still signed in and ask an agent to run the command and send you the link. Otherwise, sign in when you're next at that machine.\n",
+            b"This browser isn't signed in to Channels. Your agents and messages are fine.\n\nTo sign in, run this on the machine running Channels, then scan the QR code it draws with this device, or open the new HTTPS link here:\n\n    namedrop channels --tailscale --no-open\n\nNo terminal nearby? Connect to that machine over SSH from this device, or open Channels in a browser that's still signed in and ask an agent to run the command and send you the link. Otherwise, sign in when you're next at that machine.\n",
         ),
         Err(status) => respond_status(&mut writer, status),
         Ok(Route::Redeem { location, .. }) => {

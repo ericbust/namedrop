@@ -2,6 +2,12 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.7.9] - 2026-11-11
+
+### Added
+
+- `namedrop channels --tailscale --no-open` now draws the one-time tailnet link as a QR code in your terminal, with the link under it. Scan the code with your phone to open Channels there, with no link to copy. The code is black on white, so it scans on dark and light terminal themes. It appears only when you run the command yourself in a terminal: output to a file or a pipe, JSON output, and an agent running the command get the link alone. A terminal too narrow for the code gets the link and the width to use.
+
 ## [1.7.8] - 2026-11-10
 
 ### Fixed
