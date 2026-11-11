@@ -3,16 +3,19 @@ mod cleanup;
 
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
+#[path = "support/sync_cell.rs"]
+mod sync_cell;
 #[path = "support/update_profile.rs"]
 mod update_profile;
+
 use namedrop::*;
 use serde_json::json;
 use std::{
-    cell::{Cell, RefCell},
     fs,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
+use sync_cell::{Cell, RefCell};
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
@@ -151,7 +154,7 @@ impl Fixture {
             workspace_id: None,
             current_pane_id: Some("pane-1"),
             session_socket_id: "socket-a",
-            herdr: &self.host,
+            mux: &self.host,
             clock: &Time,
             ids: &self.ids,
         }
@@ -857,7 +860,7 @@ fn doctor_keeps_secret_shaped_paths_and_setup_commands_exact() {
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        herdr: &host,
+        mux: &host,
         clock: &Time,
         ids: &f.ids,
     };
@@ -911,7 +914,7 @@ fn doctor_unavailable_preserves_the_underlying_cause() {
     }
     let f = Fixture::new();
     let runtime = LifecycleRuntime {
-        herdr: &Broken,
+        mux: &Broken,
         state_directory: &f.root,
         home_directory: Some(&f.home),
         agent_config: namedrop::AgentConfigDirectories::default(),
@@ -1386,7 +1389,7 @@ impl Fixture {
             workspace_id: Some("workspace-1"),
             current_pane_id: Some("pane-2"),
             session_socket_id: "socket-a",
-            herdr: host,
+            mux: host,
             clock: &Time,
             ids: &self.ids,
         }

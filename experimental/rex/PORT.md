@@ -188,6 +188,11 @@ Record each accepted deviation here, with its source, before the next commit sta
 - **`ProcessHerdr` is not copied.** It reaches the port through the bridge, so the process code is not duplicated. Commit 16 moves it into `mux/herdr/` as the private transport.
 - **Not yet in the adapter:** `status server` (the socket fallback) and `terminal session observe` (live peek). Both move with their callers.
 
+**Commit 4** (`refactor(mux): rename LifecycleRuntime.herdr to mux`).
+
+- **The bound is `M: Mux + HerdrCommandExecutor`.** Callers that still build Herdr arguments call `execute` through the second bound. Each later commit drops `+ HerdrCommandExecutor` where its caller no longer needs it, and commit 16 deletes the rest.
+- **Test fakes that held a `Cell` or `RefCell` hold `tests/support/sync_cell.rs` instead,** a `Mutex` with the same methods, so they are `Sync` and pass through the bridge. Their assertions are unchanged.
+
 ## Open questions and risks
 
 - Is a dashboard key that reports busy during a delivery acceptable, or should it wait a short fixed time? Commit 12 decides.

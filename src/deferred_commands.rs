@@ -687,7 +687,7 @@ fn execute_request(state: &Path, request: &Request) -> Result<Value, String> {
         workspace_id: Some(request.caller.namespace.space_id.as_str()),
         current_pane_id: Some(&request.caller.pane),
         session_socket_id: &request.caller.namespace.session_socket_id,
-        herdr: &herdr,
+        mux: &herdr,
         clock: &SystemClock,
         ids: &ProcessIds::default(),
     };
@@ -759,9 +759,9 @@ fn validate_live_caller<E: crate::HerdrCommandExecutor>(
     Ok(discovered)
 }
 
-fn recover_committed<E: crate::HerdrCommandExecutor, C: Clock, I: IdGenerator>(
+fn recover_committed<M: crate::mux::Mux + crate::HerdrCommandExecutor, C: Clock, I: IdGenerator>(
     request: &Request,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Option<Value>, String> {
     match request.operation {
         Operation::Send | Operation::Reply => crate::message::recover_deferred_message(

@@ -97,14 +97,18 @@ pub(crate) struct AdoptInput {
     pub coordination_id: CoordinationId,
 }
 
-pub(crate) fn execute<E: crate::HerdrCommandExecutor, C: crate::Clock, I: crate::IdGenerator>(
+pub(crate) fn execute<
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String> {
     let discovered = match runtime.workspace_id {
-        Some(id) => crate::discover_worktree_for_workspace(runtime.herdr, id)?,
-        None => crate::discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(id) => crate::discover_worktree_for_workspace(runtime.mux, id)?,
+        None => crate::discover_worktree(runtime.mux, runtime.cwd)?,
     };
     let ns = discovered.namespace(runtime.session_socket_id);
     let pane = runtime
@@ -188,7 +192,7 @@ pub(crate) fn execute<E: crate::HerdrCommandExecutor, C: crate::Clock, I: crate:
 /// transport acknowledgement changes work state; only these explicit actions do.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn track_message<
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 >(
@@ -198,7 +202,7 @@ pub(crate) fn track_message<
     input: &TrackingInput,
     attempt: Option<&crate::DeliveryAttemptId>,
     live: &crate::spaces::LiveSpaces,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<(), StoreError> {
     let tracked = draft
         .in_reply_to

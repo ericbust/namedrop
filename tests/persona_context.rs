@@ -246,7 +246,7 @@ fn runtime<'a>(
         workspace_id: None,
         current_pane_id: Some(pane_id),
         session_socket_id: "socket-a",
-        herdr,
+        mux: herdr,
         clock: &FixedClock,
         ids,
     }
@@ -277,7 +277,7 @@ fn hook(
     prompt: &str,
     runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
 ) -> Option<Value> {
-    let prompt = as_typed(runtime.herdr, prompt);
+    let prompt = as_typed(runtime.mux, prompt);
     execute_user_prompt_submit_hook(
         &json!({"hook_event_name":"UserPromptSubmit","prompt":prompt}).to_string(),
         runtime,
@@ -290,7 +290,7 @@ fn hook_as(
     prompt: &str,
     runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
 ) -> Option<Value> {
-    let prompt = as_typed(runtime.herdr, prompt);
+    let prompt = as_typed(runtime.mux, prompt);
     execute_user_prompt_submit_hook(
         &json!({"hook_event_name":"UserPromptSubmit","prompt":prompt,"session_id":session})
             .to_string(),
@@ -2302,7 +2302,7 @@ fn a_roster_that_could_not_be_read_is_never_said_to_be_gone() {
         workspace_id: lead.workspace_id,
         current_pane_id: lead.current_pane_id,
         session_socket_id: lead.session_socket_id,
-        herdr: &UnreadableHerdr,
+        mux: &UnreadableHerdr,
         clock: &FixedClock,
         ids: &ids,
     };

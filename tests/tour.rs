@@ -364,7 +364,7 @@ fn runtime<'a>(
         workspace_id: Some("workspace-1"),
         current_pane_id: None,
         session_socket_id: "/run/herdr.sock",
-        herdr,
+        mux: herdr,
         clock: &FixedClock,
         ids,
     }

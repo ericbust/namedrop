@@ -164,11 +164,11 @@ pub(crate) struct Unread;
 /// activation. A hook is a convenience at a session or prompt boundary, so
 /// anything unavailable — the state directory, Herdr, the space — leaves the
 /// turn untouched rather than interrupting the person with a diagnostic.
-fn activated_space<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn activated_space<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Option<ActivatedSpace>, Unread>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -183,8 +183,8 @@ where
         return Ok(None);
     };
     let discovered = match runtime.workspace_id {
-        Some(workspace_id) => crate::discover_worktree_for_workspace(runtime.herdr, workspace_id),
-        None => crate::discover_worktree(runtime.herdr, runtime.cwd),
+        Some(workspace_id) => crate::discover_worktree_for_workspace(runtime.mux, workspace_id),
+        None => crate::discover_worktree(runtime.mux, runtime.cwd),
     }
     .map_err(|_| Unread)?;
     let setup = crate::lifecycle::load_collaboration_setup_from_store(
@@ -211,9 +211,9 @@ where
 /// The policy a session reads once, or `None` where no roster will ever follow
 /// it. It is gated on activation rather than on a named agent, because naming
 /// happens after activation and often after the session has started.
-pub(crate) fn session_policy<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> Option<String>
+pub(crate) fn session_policy<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>) -> Option<String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -228,11 +228,11 @@ where
 /// space state, no activation, or no named agent at all. A lone agent still
 /// gets its own row: its persona is its default role guidance whether or not a
 /// peer exists.
-pub(crate) fn workspace_context<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn workspace_context<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Option<WorkspaceContext>, Unread>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {

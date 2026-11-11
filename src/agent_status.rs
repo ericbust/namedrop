@@ -93,20 +93,20 @@ const REQUESTS_UNKNOWN: &str =
 /// `origin`, `observed_at_ms`, `panes`, `waits`, `handoffs_available`,
 /// `warnings` and `omitted_panes`. `waits` rows also carry the recipient
 /// `alias` so the panel can name a recipient whose pane is gone.
-pub fn collect_agent_status<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn collect_agent_status<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     expected_terminal: &str,
     expected_session: Option<&str>,
     cancelled: &AtomicBool,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
     let observed_at_ms = runtime.clock.now_unix_ms();
     let reads = Deadline {
-        herdr: runtime.herdr,
+        herdr: runtime.mux,
         clock: runtime.clock,
         deadline_ms: observed_at_ms.saturating_add(COLLECTION_BUDGET_MS),
         cancelled,
@@ -185,12 +185,12 @@ where
     }))
 }
 
-fn discover<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
-    reads: &Deadline<'_, E, C>,
+fn discover<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    reads: &Deadline<'_, M, C>,
 ) -> Result<DiscoveredWorktree, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -328,15 +328,15 @@ fn visible_panes<'a>(
 /// bound to panes, and the origin's outstanding requests. Either half can be
 /// unavailable on its own, and an unavailable half is reported rather than
 /// rendered as emptiness.
-fn read_state<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn read_state<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     discovered: &DiscoveredWorktree,
     origin: &DiscoveredPane,
-    reads: &Deadline<'_, E, C>,
+    reads: &Deadline<'_, M, C>,
     warnings: &mut Vec<String>,
 ) -> (Vec<PaneAddressRecord>, Option<Vec<Value>>)
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {

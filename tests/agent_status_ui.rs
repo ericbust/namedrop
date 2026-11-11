@@ -1356,7 +1356,7 @@ fn check(herdr: &FakeHerdr, session: Option<&str>, cancelled: &AtomicBool) -> Id
         workspace_id: Some("w44"),
         current_pane_id: Some("p1"),
         session_socket_id: "socket",
-        herdr,
+        mux: herdr,
         clock: &FakeClock,
         ids: &FakeIds,
     };

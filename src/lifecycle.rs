@@ -43,7 +43,7 @@ pub struct DiscoveredPane {
 }
 
 #[derive(Clone, Copy)]
-pub struct LifecycleRuntime<'a, E, C, I> {
+pub struct LifecycleRuntime<'a, M, C, I> {
     pub state_directory: &'a Path,
     /// The user directory holding the shared Agent Integration package targets
     /// every Worktree on this machine installs into. `None` when no user home
@@ -55,7 +55,7 @@ pub struct LifecycleRuntime<'a, E, C, I> {
     pub workspace_id: Option<&'a str>,
     pub current_pane_id: Option<&'a str>,
     pub session_socket_id: &'a str,
-    pub herdr: &'a E,
+    pub mux: &'a M,
     pub clock: &'a C,
     pub ids: &'a I,
 }
@@ -227,13 +227,13 @@ struct PaneEventInfo {
     tokens: std::collections::BTreeMap<String, String>,
 }
 
-pub fn execute_lifecycle_operation<E, C, I>(
+pub fn execute_lifecycle_operation<M, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -241,9 +241,9 @@ where
         Some(workspace_id) => discover_reminder_workspace(
             runtime.state_directory,
             &StateNamespace::for_space(runtime.session_socket_id, workspace_id),
-            runtime.herdr,
+            runtime.mux,
         )?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     if discovered.worktree_attached && matches!(operation, "activate" | "name") {
         crate::install::codex_sandbox::check_worktree(
@@ -441,7 +441,7 @@ where
                     &pane.tab_id,
                     &address_id,
                     &format!("@{alias}"),
-                    runtime.herdr,
+                    runtime.mux,
                 )
             } else {
                 json!({"status": "unchanged", "reason": "tab_has_multiple_agents"})
@@ -543,7 +543,7 @@ where
                 false,
             )?;
             let shortcuts =
-                crate::shortcuts::activate_shortcuts(runtime.home_directory, runtime.herdr);
+                crate::shortcuts::activate_shortcuts(runtime.home_directory, runtime.mux);
             // After the shortcuts, so the tour's reopen shortcut already works
             // when the popup mentions it. It reports instead of failing.
             let tour = crate::tour::show_for_first_agent(runtime, &discovered, None);
@@ -847,7 +847,7 @@ where
                     if let Ok(event_worktree) = discover_reminder_workspace(
                         runtime.state_directory,
                         &StateNamespace::for_space(runtime.session_socket_id, &pane.workspace_id),
-                        runtime.herdr,
+                        runtime.mux,
                     ) {
                         let event_namespace = event_worktree.namespace(runtime.session_socket_id);
                         let event_runtime = LifecycleRuntime {
@@ -874,7 +874,7 @@ where
                     let event_worktree = discover_reminder_workspace(
                         runtime.state_directory,
                         &StateNamespace::for_space(runtime.session_socket_id, &workspace_id),
-                        runtime.herdr,
+                        runtime.mux,
                     )?;
                     let event_namespace = event_worktree.namespace(runtime.session_socket_id);
                     store
@@ -911,7 +911,7 @@ where
                     let refreshed = discover_reminder_workspace(
                         runtime.state_directory,
                         &StateNamespace::for_space(runtime.session_socket_id, &workspace_id),
-                        runtime.herdr,
+                        runtime.mux,
                     )?;
                     let _ = reconcile_managed_tab_labels(
                         &mut store,
@@ -947,7 +947,7 @@ where
                     let event_worktree = discover_reminder_workspace(
                         runtime.state_directory,
                         &StateNamespace::for_space(runtime.session_socket_id, &workspace_id),
-                        runtime.herdr,
+                        runtime.mux,
                     )?;
                     let event_namespace = event_worktree.namespace(runtime.session_socket_id);
                     require_activated(&mut store, &event_namespace)?;
@@ -988,7 +988,7 @@ where
                     let refreshed = discover_reminder_workspace(
                         runtime.state_directory,
                         &StateNamespace::for_space(runtime.session_socket_id, &workspace_id),
-                        runtime.herdr,
+                        runtime.mux,
                     )?;
                     let _ = reconcile_managed_tab_labels(
                         &mut store,
@@ -1030,14 +1030,14 @@ where
                             runtime.session_socket_id,
                             &previous_workspace_id,
                         ),
-                        runtime.herdr,
+                        runtime.mux,
                     )?;
                     let source_namespace = source.namespace(runtime.session_socket_id);
                     require_activated(&mut store, &source_namespace)?;
                     let destination = discover_reminder_workspace(
                         runtime.state_directory,
                         &StateNamespace::for_space(runtime.session_socket_id, &pane.workspace_id),
-                        runtime.herdr,
+                        runtime.mux,
                     )?;
                     store
                         .transaction(|transaction| {
@@ -1071,7 +1071,7 @@ where
                             runtime.session_socket_id,
                             &previous_workspace_id,
                         ),
-                        runtime.herdr,
+                        runtime.mux,
                     )?;
                     let _ = reconcile_managed_tab_labels(
                         &mut store,
@@ -1115,7 +1115,7 @@ where
             let event_worktree = discover_reminder_workspace(
                 runtime.state_directory,
                 &StateNamespace::for_space(runtime.session_socket_id, &event.workspace_id),
-                runtime.herdr,
+                runtime.mux,
             )?;
             let event_namespace = event_worktree.namespace(runtime.session_socket_id);
             require_activated(&mut store, &event_namespace)?;
@@ -1227,14 +1227,14 @@ impl PaneLabel {
     }
 }
 
-pub(crate) fn publish_pane_address_metadata<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn publish_pane_address_metadata<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     pane_id: &str,
     alias: &str,
     label: PaneLabel,
 ) -> Result<(), String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
 {
     let title = format!("@{alias}");
     let hint = label.hint(alias);
@@ -1242,7 +1242,7 @@ where
     let working = format!("@{alias} working");
     let blocked = format!("@{alias} needs attention");
     let unknown = hint.unwrap_or_else(|| format!("@{alias} status unknown"));
-    runtime.herdr.execute(&[
+    runtime.mux.execute(&[
         "pane",
         "report-metadata",
         pane_id,
@@ -1270,16 +1270,16 @@ struct WorktreeReconciliation {
     installation: crate::IntegrationPackageInstallation,
 }
 
-fn reconcile_worktree<E, C, I>(
+fn reconcile_worktree<M, C, I>(
     store: &mut StateStore,
     namespace: &StateNamespace,
     discovered: &DiscoveredWorktree,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     attribution: &MutationAttribution,
     after_restart: bool,
 ) -> Result<WorktreeReconciliation, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -1428,14 +1428,14 @@ fn current_tab_label(herdr: &impl HerdrCommandExecutor, tab_id: &str) -> Option<
         .map(str::to_owned)
 }
 
-fn reconcile_managed_tab_labels<E, C, I>(
+fn reconcile_managed_tab_labels<M, C, I>(
     store: &mut StateStore,
     namespace: &StateNamespace,
     discovered: &DiscoveredWorktree,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<(), String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -1485,7 +1485,7 @@ where
         } else {
             None
         };
-        let Some(current) = current_tab_label(runtime.herdr, &label.tab_id) else {
+        let Some(current) = current_tab_label(runtime.mux, &label.tab_id) else {
             continue;
         };
         if let Some(pending) = label.pending_label.clone() {
@@ -1499,7 +1499,7 @@ where
                     continue;
                 }
                 if runtime
-                    .herdr
+                    .mux
                     .execute(&["tab", "rename", &label.tab_id, &pending])
                     .is_err()
                 {
@@ -1551,7 +1551,7 @@ where
             .transaction(|transaction| transaction.put_managed_tab_label(namespace, &label))
             .map_err(|error| error.to_string())?;
         if runtime
-            .herdr
+            .mux
             .execute(&["tab", "rename", &label.tab_id, &replacement])
             .is_err()
         {
@@ -1728,17 +1728,17 @@ enum AllWorkspaces {
     All,
 }
 
-fn every_workspace_addresses<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn every_workspace_addresses<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     here: &str,
     store: &mut StateStore,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
-    let spaces: Vec<(crate::SpaceId, crate::WorkspaceLabel)> = workspace_labels(runtime.herdr)?
+    let spaces: Vec<(crate::SpaceId, crate::WorkspaceLabel)> = workspace_labels(runtime.mux)?
         .into_iter()
         .map(|workspace| {
             (
@@ -1763,7 +1763,7 @@ where
             Some(label),
             spaces.iter().map(|(other, label)| (other, Some(label))),
         );
-        let discovered = discover_worktree_for_workspace(runtime.herdr, space.as_str())?;
+        let discovered = discover_worktree_for_workspace(runtime.mux, space.as_str())?;
         let groups = store
             .transaction(|transaction| transaction.list_mention_groups(&namespace))
             .map_err(|error| error.to_string())?;

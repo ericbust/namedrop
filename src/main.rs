@@ -714,7 +714,7 @@ fn current_space(
 ) -> Result<String, String> {
     match runtime.workspace_id {
         Some(id) => Ok(id.to_owned()),
-        None => Ok(namedrop::discover_worktree(runtime.herdr, runtime.cwd)?.workspace_id),
+        None => Ok(namedrop::discover_worktree(runtime.mux, runtime.cwd)?.workspace_id),
     }
 }
 
@@ -1037,7 +1037,7 @@ fn with_runtime_options<T>(
         workspace_id: workspace_id.as_deref(),
         current_pane_id: pane_id.as_deref(),
         session_socket_id: &socket_id,
-        herdr: &herdr,
+        mux: &herdr,
         clock: &clock,
         ids: &ids,
     })

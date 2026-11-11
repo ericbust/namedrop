@@ -274,7 +274,7 @@ pub(crate) fn cycle_with<E, C, I>(
     catch_up: &mut CatchUp,
 ) -> Result<bool, String>
 where
-    E: crate::HerdrCommandExecutor,
+    E: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: Clock,
     I: crate::IdGenerator,
 {
@@ -321,7 +321,7 @@ where
             workspace_id: Some(ns.space_id.as_str()),
             current_pane_id: None,
             session_socket_id: &ns.session_socket_id,
-            herdr: &herdr,
+            mux: &herdr,
             clock,
             ids,
         };

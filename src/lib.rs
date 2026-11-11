@@ -280,4 +280,7 @@ mod executable;
 #[path = "../tests/support/scan.rs"]
 mod scan;
 #[cfg(test)]
+#[path = "../tests/support/sync_cell.rs"]
+mod sync_cell;
+#[cfg(test)]
 mod work_counters;

@@ -11,8 +11,8 @@ use std::{
     thread,
 };
 
-pub(crate) fn runner_command<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn runner_command<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     workspace: &str,
     pane: &str,
     attempt: &DeliveryAttemptId,
@@ -39,13 +39,13 @@ pub(crate) fn runner_command<E, C, I>(
 
 /// Runs inside the target terminal. The atomic claim rejects replay and binds
 /// execution to the physical terminal, not a potentially recycled pane label.
-pub fn execute_terminal<E: HerdrCommandExecutor, C: Clock, I: IdGenerator>(
+pub fn execute_terminal<M: crate::mux::Mux + HerdrCommandExecutor, C: Clock, I: IdGenerator>(
     attempt: &str,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<i32, String> {
     let discovered = match runtime.workspace_id {
-        Some(id) => discover_worktree_for_workspace(runtime.herdr, id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(id) => discover_worktree_for_workspace(runtime.mux, id)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     let ns = discovered.namespace(runtime.session_socket_id);
     let pane = discovered
@@ -56,7 +56,7 @@ pub fn execute_terminal<E: HerdrCommandExecutor, C: Clock, I: IdGenerator>(
     if pane.agent.is_some() || pane.agent_session_id.is_some() {
         return Err("terminal pane now contains an agent; command was not executed".to_owned());
     }
-    if !process_info(runtime.herdr, &pane.pane_id).is_some_and(|p| {
+    if !process_info(runtime.mux, &pane.pane_id).is_some_and(|p| {
         p.foreground_processes
             .iter()
             .any(|p| p.pid == std::process::id())
@@ -390,12 +390,12 @@ fn parent_pid(pid: u32) -> Option<u32> {
 }
 
 /// Detection never infers a terminal merely from a missing native session ID.
-pub fn detect_pane_type<E: HerdrCommandExecutor, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn detect_pane_type<M: crate::mux::Mux + HerdrCommandExecutor, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Option<PaneType>, String> {
     let discovered = match runtime.workspace_id {
-        Some(id) => discover_worktree_for_workspace(runtime.herdr, id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(id) => discover_worktree_for_workspace(runtime.mux, id)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     let pane = discovered
         .panes
@@ -405,7 +405,7 @@ pub fn detect_pane_type<E: HerdrCommandExecutor, C, I>(
     if pane.agent.is_some() || pane.agent_session_id.is_some() {
         return Ok(Some(PaneType::Agent));
     }
-    Ok(process_info(runtime.herdr, &pane.pane_id)
+    Ok(process_info(runtime.mux, &pane.pane_id)
         .is_some_and(|p| {
             p.shell_pid > 0
                 && (p.shell_pid == p.foreground_process_group_id
@@ -418,12 +418,12 @@ pub fn detect_pane_type<E: HerdrCommandExecutor, C, I>(
 
 /// Both naming surfaces retain a saved type before considering live detection.
 /// Opening/cancelling a prompt must not create or migrate persisted state.
-pub fn default_pane_type<E: HerdrCommandExecutor, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn default_pane_type<M: crate::mux::Mux + HerdrCommandExecutor, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Option<PaneType>, String> {
     let discovered = match runtime.workspace_id {
-        Some(id) => discover_worktree_for_workspace(runtime.herdr, id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(id) => discover_worktree_for_workspace(runtime.mux, id)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     if let Some(mut store) =
         StateStore::open_read_only(runtime.state_directory).map_err(|e| e.to_string())?

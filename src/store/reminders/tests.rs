@@ -1,9 +1,9 @@
 use super::*;
+use crate::sync_cell::Cell;
 use crate::{
     AgentRuntime, DeliveryAttemptId, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator,
     PaneBindingId, ProcessIds,
 };
-use std::cell::Cell;
 
 struct Fixture {
     state: PathBuf,
@@ -516,7 +516,7 @@ fn assert_fresh_reminder_reply(grammar: &str, nested: bool) {
         workspace_id: Some("test-space"),
         current_pane_id: Some("pane"),
         session_socket_id: "test-socket",
-        herdr: &f,
+        mux: &f,
         clock: &crate::SystemClock,
         ids: &ProcessIds::default(),
     };
@@ -855,7 +855,7 @@ fn reminder_reply_keeps_historical_alias_refusal() {
         workspace_id: Some("test-space"),
         current_pane_id: Some("pane"),
         session_socket_id: "test-socket",
-        herdr: &f,
+        mux: &f,
         clock: &crate::SystemClock,
         ids: &ProcessIds::default(),
     };
@@ -931,7 +931,7 @@ fn reminder_fixed_delay_starts_after_a_slow_successful_prompt() {
         workspace_id: Some("test-space"),
         current_pane_id: None,
         session_socket_id: "test-socket",
-        herdr: &f,
+        mux: &f,
         clock: &f,
         ids: &ProcessIds::default(),
     };
@@ -1208,7 +1208,7 @@ fn reminder_busy_clock_work_measurement() {
         workspace_id: Some("test-space"),
         current_pane_id: Some("pane"),
         session_socket_id: "test-socket",
-        herdr: &f,
+        mux: &f,
         clock: &f,
         ids: &ids,
     };
@@ -1366,7 +1366,7 @@ fn reminder_terminal_mailbox_cleanup_remains_hook_visible() {
         workspace_id: Some("test-space"),
         current_pane_id: None,
         session_socket_id: "test-socket",
-        herdr: &f,
+        mux: &f,
         clock: &f,
         ids: &ProcessIds::default(),
     };
@@ -1461,7 +1461,7 @@ fn reminder_dispatch_failure_finalizes_in_the_same_drain_but_ambiguity_waits() {
             workspace_id: Some("test-space"),
             current_pane_id: None,
             session_socket_id: "test-socket",
-            herdr: &f,
+            mux: &f,
             clock: &f,
             ids: &ProcessIds::default(),
         };
@@ -1700,7 +1700,7 @@ fn reminder_operator_wakes_keep_dm_and_channel_reply_routes() {
             workspace_id: Some("test-space"),
             current_pane_id: Some("pane"),
             session_socket_id: "test-socket",
-            herdr: &f,
+            mux: &f,
             clock: &crate::SystemClock,
             ids: &ids,
         };

@@ -85,7 +85,7 @@ impl Fixture {
             workspace_id: Some(WORKSPACE),
             current_pane_id: Some(pane),
             session_socket_id: self.socket,
-            herdr: &self.herdr,
+            mux: &self.herdr,
             clock: &self.clock,
             ids: &self.ids,
         }

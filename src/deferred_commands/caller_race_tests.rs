@@ -1,8 +1,8 @@
 use super::*;
+use crate::sync_cell::Cell;
 use crate::{
     ActorKind, AgentRuntime, HerdrCommandExecutor, HerdrCommandOutput, MutationAttribution,
 };
-use std::cell::Cell;
 
 struct Fixture {
     state: PathBuf,
@@ -67,7 +67,7 @@ impl Fixture {
             workspace_id: Some("workspace-1"),
             current_pane_id: Some("pane-author"),
             session_socket_id: "socket",
-            herdr: self,
+            mux: self,
             clock: &SystemClock,
             ids: &self.ids,
         }

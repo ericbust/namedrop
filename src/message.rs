@@ -619,32 +619,32 @@ pub fn validate_message_input(operation: &str, input: Value) -> Result<(), Strin
     Ok(())
 }
 
-pub fn execute_message_operation<E, C, I>(
+pub fn execute_message_operation<M, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
     execute_message_operation_with_caller(operation, input, runtime, None)
 }
 
-pub(crate) fn execute_message_operation_with_caller<E, C, I>(
+pub(crate) fn execute_message_operation_with_caller<M, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     caller: Option<&crate::deferred_commands::Caller>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
     let input = parse_operation_input(operation, input)?;
-    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
+    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.mux);
     if operation == "send"
         && let Some(scope) = scope_without_mention(&input.source)
     {
@@ -657,14 +657,14 @@ where
         .map_err(|error| error.to_string())
 }
 
-pub fn send_operator_message<E, C, I>(
+pub fn send_operator_message<M, C, I>(
     request_id: &str,
     source: &str,
     in_reply_to: Option<&MessageId>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, OperatorSendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -672,14 +672,14 @@ where
         .map(|(receipt, ())| receipt)
 }
 
-pub fn send_operator_direct_message<E, C, I>(
+pub fn send_operator_direct_message<M, C, I>(
     request_id: &str,
     source: &str,
     peer: &crate::PaneAddressId,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, OperatorSendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -687,15 +687,15 @@ where
         .map(|(receipt, ())| receipt)
 }
 
-pub(crate) fn send_operator_direct_message_observing_commit<E, C, I, R>(
+pub(crate) fn send_operator_direct_message_observing_commit<M, C, I, R>(
     request_id: &str,
     source: &str,
     peer: &crate::PaneAddressId,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     observe_commit: impl FnOnce(&Value) -> R,
 ) -> Result<(Value, R), OperatorSendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -720,7 +720,7 @@ where
                 .into_iter()
                 .find(|binding| &binding.address_id == peer);
             let available = binding.is_some_and(|binding| {
-                discover_worktree_for_workspace(runtime.herdr, workspace).is_ok_and(|live| {
+                discover_worktree_for_workspace(runtime.mux, workspace).is_ok_and(|live| {
                     live.panes
                         .iter()
                         .any(|pane| pane.pane_id == binding.pane_id)
@@ -741,16 +741,16 @@ where
     Ok((receipt, observed))
 }
 
-pub(crate) fn send_operator_message_observing_commit<E, C, I, R>(
+pub(crate) fn send_operator_message_observing_commit<M, C, I, R>(
     request_id: &str,
     source: &str,
     in_reply_to: Option<&MessageId>,
     review_operator: Option<&crate::store::coordination_review::OperatorSession>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     observe_commit: impl FnOnce(&Value) -> R,
 ) -> Result<(Value, R), OperatorSendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -780,7 +780,7 @@ where
     })
     .map_err(SendError::Input)?;
     input.review_operator = review_operator.cloned();
-    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
+    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.mux);
     dispatch_prepared_message(
         input,
         Author::Operator,
@@ -815,15 +815,15 @@ fn capitalized_leading_alias(source: &str) -> Option<&str> {
     None
 }
 
-pub(crate) fn send_operator_channel_message_observing_commit<E, C, I, R>(
+pub(crate) fn send_operator_channel_message_observing_commit<M, C, I, R>(
     request_id: &str,
     source: &str,
     in_reply_to: Option<&MessageId>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     observe_commit: impl FnOnce(&Value) -> R,
 ) -> Result<(Value, R), OperatorSendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -856,7 +856,7 @@ where
         preparation: MessagePreparation::OperatorPlain,
         review_operator: None,
     };
-    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
+    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.mux);
     dispatch_prepared_message(
         input,
         Author::Operator,
@@ -867,7 +867,7 @@ where
     .map_err(OperatorSendError::from)
 }
 
-fn pane_author<'a, E, C, I>(runtime: &LifecycleRuntime<'a, E, C, I>) -> Result<Author<'a>, String> {
+fn pane_author<'a, M, C, I>(runtime: &LifecycleRuntime<'a, M, C, I>) -> Result<Author<'a>, String> {
     runtime
         .current_pane_id
         .map(Author::Pane)
@@ -876,15 +876,15 @@ fn pane_author<'a, E, C, I>(runtime: &LifecycleRuntime<'a, E, C, I>) -> Result<A
 
 /// The dashboard answers inside `observe_commit`, so these drains run after
 /// its response, on the server's own thread.
-fn dispatch_prepared_message<E, C, I, R>(
+fn dispatch_prepared_message<M, C, I, R>(
     input: PreparedMessageOperation,
     author: Author<'_>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
-    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, M>,
     observe_commit: impl FnOnce(&Value) -> R,
 ) -> Result<(Value, R), SendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -913,16 +913,16 @@ where
     Ok((response, observed))
 }
 
-pub(crate) fn recover_deferred_message<E, C, I>(
+pub(crate) fn recover_deferred_message<M, C, I>(
     operation: &str,
     input: Value,
     namespace: &StateNamespace,
     address: &crate::PaneAddressId,
     session: &crate::AgentSessionId,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Option<Value>, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1012,12 +1012,12 @@ pub(crate) enum PromptMentionOutcome {
 /// Commits the verbatim leading-Mention shorthand used by native prompt hooks.
 /// `None` when the prompt's `#` run names no Herdr workspace: it never
 /// addressed anyone, so it stays the person's own prompt.
-pub(crate) fn persist_prompt_mention_operation<E, C, I>(
+pub(crate) fn persist_prompt_mention_operation<M, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Option<PromptMentionOutcome>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1048,12 +1048,12 @@ where
     })
 }
 
-fn persist_prompt_mention<E, C, I>(
+fn persist_prompt_mention<M, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Vec<crate::store::ForwardedCopy>, SendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1065,7 +1065,7 @@ where
             "a prompt Mention cannot carry a context block".to_owned(),
         ));
     }
-    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
+    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.mux);
     if let Some(scope) = workspace_prompt_scope(&input.source) {
         return Err(workspace_prompt_refusal(scope, runtime, &workspaces));
     }
@@ -1093,13 +1093,13 @@ where
 
 /// A `#` run naming no one is either prose, which stays the person's own
 /// text, or a workspace prompt, refused with the names in its scope.
-fn workspace_prompt_refusal<E, C, I>(
+fn workspace_prompt_refusal<M, C, I>(
     scope: SpaceScope,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
-    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, M>,
 ) -> SendError
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1109,13 +1109,13 @@ where
     }
 }
 
-fn names_in_prompt_scope<E, C, I>(
+fn names_in_prompt_scope<M, C, I>(
     scope: &SpaceScope,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
-    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, M>,
 ) -> Result<Vec<ScopedName>, SendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1123,8 +1123,8 @@ where
         return Err(SendError::NotAMention);
     }
     let discovered = match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace_id) => discover_worktree_for_workspace(runtime.mux, workspace_id)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     let namespace = discovered.namespace(runtime.session_socket_id);
     let mut store = StateStore::open(runtime.state_directory)?;
@@ -1248,15 +1248,15 @@ impl std::fmt::Display for SendError {
 
 type PersistedMessage = (Value, Vec<crate::store::ForwardedCopy>);
 
-fn persist_prepared_message_operation<E, C, I>(
+fn persist_prepared_message_operation<M, C, I>(
     input: PreparedMessageOperation,
     author_source: Author<'_>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
-    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, M>,
     caller: Option<&crate::deferred_commands::Caller>,
 ) -> Result<PersistedMessage, SendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1302,8 +1302,8 @@ where
         ));
     }
     let discovered = match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace_id) => discover_worktree_for_workspace(runtime.mux, workspace_id)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     let namespace = discovered.namespace(runtime.session_socket_id);
     let mut store = StateStore::open(runtime.state_directory)?;
@@ -1419,7 +1419,7 @@ where
     {
         let spaces =
             store.transaction(|transaction| routing.remote_spaces(transaction, &namespace))?;
-        crate::spaces::LiveSpaces::load(runtime.herdr, discovered.clone(), &spaces)
+        crate::spaces::LiveSpaces::load(runtime.mux, discovered.clone(), &spaces)
     } else {
         crate::spaces::LiveSpaces::here(discovered.clone())
     };
@@ -1962,12 +1962,12 @@ impl Replay<'_> {
     }
 }
 
-fn sending_author<E, C, I>(
+fn sending_author<M, C, I>(
     transaction: &mut crate::StateTransaction<'_>,
     namespace: &StateNamespace,
     author_source: Author<'_>,
     request: &Replay<'_>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<(crate::RoutingAddressSnapshot, MutationAttribution), crate::StoreError>
 where
     C: crate::Clock,
@@ -2020,15 +2020,15 @@ where
     Ok((author, attribution))
 }
 
-fn present_committed<E, C, I>(
+fn present_committed<M, C, I>(
     committed: Committed,
     store: &mut StateStore,
     namespace: &StateNamespace,
     disposition_attempt_id: &Option<crate::DeliveryAttemptId>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<PersistedMessage, SendError>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
 {
     let Committed {
         channel,
@@ -2089,19 +2089,19 @@ where
     Ok((response, forwarded))
 }
 
-fn present_relay_result<E, C, I>(
+fn present_relay_result<M, C, I>(
     relay: &RelayPresentation,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Value
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
 {
     let title = format!("@{} replied", relay.sender_alias);
     let body = read_by_person(&relay.body);
     let summary = body.lines().next().unwrap_or_default().trim();
     let summary = summary.chars().take(160).collect::<String>();
     let token = format!("namedrop-relay=@{}: {summary}", relay.sender_alias);
-    let notification = runtime.herdr.execute(&[
+    let notification = runtime.mux.execute(&[
         "notification",
         "show",
         &title,
@@ -2112,7 +2112,7 @@ where
         "--sound",
         "done",
     ]);
-    let metadata = runtime.herdr.execute(&[
+    let metadata = runtime.mux.execute(&[
         "pane",
         "report-metadata",
         &relay.pane_id,

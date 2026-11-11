@@ -17,19 +17,19 @@ struct RemoveInput {
 
 /// Group mutations are user-requested management, like address management.
 /// Only the read-only list is part of the registered collaboration profile.
-pub fn execute_group_operation<E, C, I>(
+pub fn execute_group_operation<M, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
     let discovered = match runtime.workspace_id {
-        Some(workspace) => discover_worktree_for_workspace(runtime.herdr, workspace)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace) => discover_worktree_for_workspace(runtime.mux, workspace)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     let namespace = discovered.namespace(runtime.session_socket_id);
     let mut store = if operation == "group.list" {

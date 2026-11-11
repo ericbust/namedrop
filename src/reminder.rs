@@ -279,30 +279,30 @@ fn timestamp_ms(value: &str) -> Result<u64, String> {
 }
 
 pub fn execute_reminder_operation<
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 >(
     operation: &str,
     input: Value,
-    runtime: &crate::LifecycleRuntime<'_, E, C, I>,
+    runtime: &crate::LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String> {
     execute_with_caller(operation, input, runtime, None)
 }
 
 pub(crate) fn execute_with_caller<
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 >(
     operation: &str,
     input: Value,
-    runtime: &crate::LifecycleRuntime<'_, E, C, I>,
+    runtime: &crate::LifecycleRuntime<'_, M, C, I>,
     caller: Option<&crate::deferred_commands::Caller>,
 ) -> Result<Value, String> {
     let discovered = match runtime.workspace_id {
-        Some(w) => crate::discover_worktree_for_workspace(runtime.herdr, w)?,
-        None => crate::discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(w) => crate::discover_worktree_for_workspace(runtime.mux, w)?,
+        None => crate::discover_worktree(runtime.mux, runtime.cwd)?,
     };
     let ns = discovered.namespace(runtime.session_socket_id);
     let pane = runtime

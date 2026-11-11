@@ -171,8 +171,8 @@ impl<E: HerdrCommandExecutor> HerdrCommandExecutor for BoundedReads<'_, E> {
 /// Rereads the pane the popup was opened for. A different physical terminal or
 /// a different agent session means the popup is now looking at someone else's
 /// work, so results collected for the original identity must be discarded.
-pub(crate) fn latest_identity<E: HerdrCommandExecutor, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn latest_identity<M: namedrop::mux::Mux + HerdrCommandExecutor, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     workspace: &str,
     pane: &str,
     terminal: &str,
@@ -180,7 +180,7 @@ pub(crate) fn latest_identity<E: HerdrCommandExecutor, C, I>(
     cancelled: &AtomicBool,
 ) -> Identity {
     let reads = BoundedReads {
-        inner: runtime.herdr,
+        inner: runtime.mux,
         deadline: Instant::now() + IDENTITY_BUDGET,
         cancelled,
     };

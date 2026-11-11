@@ -46,19 +46,19 @@ struct AcknowledgeDeliveryInput {
     confirmed: bool,
 }
 
-pub fn execute_control_operation<E, C, I>(
+pub fn execute_control_operation<M, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
     let discovered = match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace_id) => discover_worktree_for_workspace(runtime.mux, workspace_id)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     let namespace = discovered.namespace(runtime.session_socket_id);
     let attribution =
@@ -212,7 +212,7 @@ where
                 runtime.state_directory,
                 &namespace,
                 &stopped.active_responses,
-                runtime.herdr,
+                runtime.mux,
                 runtime.workspace_id.is_none().then_some(runtime.cwd),
             );
             let mut value = serde_json::to_value(stopped).map_err(|error| error.to_string())?;
