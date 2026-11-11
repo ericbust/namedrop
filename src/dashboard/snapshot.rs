@@ -628,6 +628,10 @@ pub struct MessageRow {
     /// A participant's `address_id`, or `"human"`.
     pub author: String,
     pub kind: MessageKind,
+    /// The agent's final message from a turn that ended with its answer to
+    /// the person still held: it says the agent is still working.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub progress_note: bool,
     pub body: SafeText,
     pub legs: Vec<DeliveryLeg>,
 }
@@ -694,9 +698,19 @@ pub struct DeliveryLeg {
 pub enum LegStage {
     Queued,
     Delivered,
-    Working { acked_at_ms: i64 },
-    Replied { reply_id: String },
-    Completed { kind: String },
+    Working {
+        acked_at_ms: i64,
+        /// The turn ended and Namedrop holds the answer until the agent's
+        /// background work or helper finishes.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        answer_held: bool,
+    },
+    Replied {
+        reply_id: String,
+    },
+    Completed {
+        kind: String,
+    },
     Held,
     Failed,
     Cancelled,
@@ -722,6 +736,11 @@ impl LegStage {
             DeliveryState::Submitted => Self::Delivered,
             DeliveryState::Acknowledged => Self::Working {
                 acked_at_ms: leg.acknowledged_at_ms.unwrap_or_default(),
+                answer_held: false,
+            },
+            DeliveryState::Settled if leg.held => Self::Working {
+                acked_at_ms: leg.acknowledged_at_ms.unwrap_or_default(),
+                answer_held: true,
             },
             DeliveryState::Settled => Self::Completed {
                 kind: "settled".to_owned(),
@@ -787,6 +806,10 @@ pub struct AttentionCard {
     pub message_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coordination: Option<CoordinationDetail>,
+    /// Why the held answer an `agent_disposition` card is about can never
+    /// arrive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_lost: Option<crate::store::SessionGone>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -968,6 +991,7 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
             coordination: (item.item.source_kind == crate::AttentionSourceKind::Coordination)
                 .then(|| coordination_detail(rows, &item.item.source_id, now_ms))
                 .flatten(),
+            answer_lost: item.answer_lost,
         })
         .collect();
     attention.extend(rows.addresses.iter().filter_map(|address| {
@@ -997,6 +1021,7 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
             subject_alias: Some(address.alias.clone()),
             message_id: address.blocked_message_id.clone(),
             coordination: None,
+            answer_lost: None,
         })
     }));
     DashboardSnapshot {
@@ -1142,6 +1167,8 @@ pub(crate) fn message(row: &rows::MessageRow, legs: &[rows::LegRow]) -> MessageR
             row.author_address_id.clone()
         },
         kind: MessageKind::of(&row.grammar_version, row.in_reply_to.is_some()),
+        progress_note: row.grammar_version == "final-message/v1"
+            && crate::store::is_progress_note(&row.message_id),
         body: SafeText::from_untrusted(
             &row.body,
             if matches!(

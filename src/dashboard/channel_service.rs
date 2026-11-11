@@ -149,11 +149,14 @@ fn recover(state: &Path) -> Result<(), String> {
                 // Updating restarts this server with no action from the person,
                 // and activation only runs when they ask for it, so old flags
                 // clear here, before Channels shows its first frame.
-                tx.resolve_answer_attention(&crate::MutationAttribution::new(
+                let by = crate::MutationAttribution::new(
                     crate::ActorKind::Plugin,
                     "namedrop-channels",
                     now,
-                ))?;
+                );
+                tx.resolve_answer_attention(&by)?;
+                tx.judge_open_disposition_warnings(&by)?;
+                tx.judge_all_unbound_attempts(&by)?;
                 tx.fail_abandoned_channels(now)
             })
         })
@@ -382,6 +385,200 @@ mod tests {
         let mut successor = ChannelService::start(&root).unwrap();
         successor.shutdown().unwrap();
         assert_eq!(facts(), before, "a second run changes nothing");
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Every ND-DELIVERY-003 warning in `ns` as (summary, acknowledged).
+    fn disposition_warnings(root: &Path, ns: &StateNamespace) -> Vec<(String, bool)> {
+        rusqlite::Connection::open(root.join("namedrop.sqlite3"))
+            .unwrap()
+            .prepare(
+                "SELECT summary, resolved_at_ms IS NOT NULL FROM attention_items
+                 WHERE worktree_id = ?1 AND source_kind = 'agent_disposition'",
+            )
+            .unwrap()
+            .query_map([ns.space_id.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// An earlier release warned that an agent didn't answer while its
+    /// answer was held. Starting Channels withdraws that warning while the
+    /// session can still answer, and says why when it can't.
+    #[test]
+    fn starting_judges_old_warnings_on_held_answers_again_and_keeps_the_rest() {
+        let root = state_root("held-warnings");
+        let mut store = StateStore::open(&root).unwrap();
+        let [live, replaced, acknowledged, not_held] =
+            ["live", "replaced", "acknowledged", "not-held"]
+                .map(|space| StateNamespace::for_space("socket", space));
+        for ns in [&live, &replaced, &acknowledged, &not_held] {
+            crate::store::seed_unanswered(&mut store, ns, ns == &acknowledged);
+        }
+        store
+            .transaction(|tx| {
+                tx.observe_agent_session(
+                    &replaced,
+                    "observation-replaced",
+                    &crate::PaneAddressId::new("agent"),
+                    &crate::AgentSessionId::new("session-new"),
+                    "idle",
+                    &crate::MutationAttribution::new(crate::ActorKind::Plugin, "test", 20),
+                )
+            })
+            .unwrap();
+        let unanswered = disposition_warnings(&root, &not_held);
+        assert_eq!(unanswered.len(), 1);
+        assert!(
+            unanswered[0].0.contains("ended its turn without a reply"),
+            "{unanswered:?}"
+        );
+        for ns in [&live, &replaced, &acknowledged] {
+            assert_eq!(disposition_warnings(&root, ns).len(), 1);
+            crate::final_reply::hold_answer(&root, ns, "session", "attempt");
+        }
+        let acknowledged_before = disposition_warnings(&root, &acknowledged);
+
+        let mut service = ChannelService::start(&root).unwrap();
+        service.shutdown().unwrap();
+
+        assert_eq!(
+            disposition_warnings(&root, &live),
+            [],
+            "a warning on an answer that can still arrive stayed"
+        );
+        let lost = disposition_warnings(&root, &replaced);
+        assert_eq!(lost.len(), 1, "{lost:?}");
+        assert!(
+            lost[0].0.contains("A new session took the agent's name") && !lost[0].1,
+            "{lost:?}"
+        );
+        assert_eq!(
+            disposition_warnings(&root, &acknowledged),
+            acknowledged_before
+        );
+        assert_eq!(disposition_warnings(&root, &not_held), unanswered);
+
+        let facts = || -> i64 {
+            rusqlite::Connection::open(root.join("namedrop.sqlite3"))
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM transition_facts", [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        };
+        let before = facts();
+        let mut successor = ChannelService::start(&root).unwrap();
+        successor.shutdown().unwrap();
+        assert_eq!(facts(), before, "a second run changes nothing");
+        assert_eq!(disposition_warnings(&root, &replaced), lost);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A drain judges an address that lost its pane only for a few minutes
+    /// past the grace. Starting Channels judges one whose pane went long
+    /// before, as on a machine that slept through those minutes.
+    #[test]
+    fn starting_flags_a_held_answer_whose_pane_went_long_ago() {
+        let root = state_root("held-long-unbound");
+        let mut store = StateStore::open(&root).unwrap();
+        let ns = StateNamespace::for_space("socket", "gone");
+        crate::final_reply::hold_answer(&root, &ns, "session", "attempt");
+        crate::store::seed_unanswered(&mut store, &ns, false);
+        store
+            .transaction(|tx| {
+                tx.unbind_pane(
+                    &ns,
+                    &crate::PaneAddressId::new("agent"),
+                    &crate::MutationAttribution::new(crate::ActorKind::Plugin, "test", 20),
+                )
+            })
+            .unwrap();
+        assert_eq!(disposition_warnings(&root, &ns), []);
+
+        let mut service = ChannelService::start(&root).unwrap();
+        service.shutdown().unwrap();
+
+        let lost = disposition_warnings(&root, &ns);
+        assert_eq!(lost.len(), 1, "{lost:?}");
+        assert!(lost[0].0.contains("pane has been gone"), "{lost:?}");
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A warning that the agent's send failed is no judgement of whether it
+    /// answered, so neither starting Channels nor a session change withdraws
+    /// or rewords it.
+    #[test]
+    fn a_failed_send_warning_on_a_held_answer_outlives_a_start_and_a_session_change() {
+        let root = state_root("held-failed-send");
+        let mut store = StateStore::open(&root).unwrap();
+        let [failed, judged] =
+            ["failed", "judged"].map(|space| StateNamespace::for_space("socket", space));
+        let by = crate::MutationAttribution::new(crate::ActorKind::Plugin, "test", 20);
+        for ns in [&failed, &judged] {
+            crate::store::seed_unanswered(&mut store, ns, false);
+            crate::final_reply::hold_answer(&root, ns, "session", "attempt");
+        }
+        store
+            .transaction(|tx| {
+                tx.flag_failed_settle(
+                    &failed,
+                    &crate::DeliveryAttemptId::new("attempt"),
+                    crate::store::LostSettle::QueuedReply,
+                    "the store was busy",
+                    &by,
+                )
+            })
+            .unwrap();
+        let refused = disposition_warnings(&root, &failed);
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(
+            refused[0].0.contains("queued reply was refused"),
+            "{refused:?}"
+        );
+
+        let mut service = ChannelService::start(&root).unwrap();
+        service.shutdown().unwrap();
+        assert_eq!(
+            disposition_warnings(&root, &judged),
+            [],
+            "a judgement's warning on an answer that can still arrive stayed"
+        );
+        assert_eq!(
+            disposition_warnings(&root, &failed),
+            refused,
+            "starting Channels changed the warning that a send failed"
+        );
+
+        store
+            .transaction(|tx| {
+                for ns in [&failed, &judged] {
+                    tx.observe_agent_session(
+                        ns,
+                        "observation-new",
+                        &crate::PaneAddressId::new("agent"),
+                        &crate::AgentSessionId::new("session-new"),
+                        "idle",
+                        &by,
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            disposition_warnings(&root, &failed),
+            refused,
+            "a session change changed the warning that a send failed"
+        );
+        let lost = disposition_warnings(&root, &judged);
+        assert!(
+            lost.len() == 1 && lost[0].0.contains("A new session took the agent's name"),
+            "{lost:?}"
+        );
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }

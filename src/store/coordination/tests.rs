@@ -61,6 +61,7 @@ fn acknowledgement_predicate_matches_previous_outcomes_and_transport() {
     connection.execute("UPDATE mailbox_deliveries SET state='queued' WHERE session_socket_id!='socket' OR worktree_id!='space'", []).unwrap();
     let transaction = StateTransaction {
         transaction: connection.transaction().unwrap(),
+        state_directory: Path::new("unused"),
     };
     let ns = StateNamespace::for_space("socket", "space");
     let states = [
@@ -154,6 +155,7 @@ fn acknowledgement_uses_the_remote_delivery_progress() {
         INSERT INTO bridged_messages VALUES ('socket','remote','m2','space','m2','space','remote');").unwrap();
     let transaction = StateTransaction {
         transaction: connection.transaction().unwrap(),
+        state_directory: Path::new("unused"),
     };
     let ns = StateNamespace::for_space("socket", "space");
     for (state, expected) in [
@@ -188,6 +190,7 @@ fn reconciliation_stays_below_busy_timeout_at_real_state_scale() {
     let mut connection = fixture(190, 50_000);
     let mut transaction = StateTransaction {
         transaction: connection.transaction().unwrap(),
+        state_directory: Path::new("unused"),
     };
     let ns = StateNamespace::for_space("socket", "space");
     let live = crate::spaces::LiveSpaces::here(crate::DiscoveredWorktree {

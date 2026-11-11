@@ -13,6 +13,7 @@ import type {
 } from "./model.ts";
 import { peekTarget, peekTargetOf } from "./peek.ts";
 import {
+  answerCount,
   bootState,
   channelSuffix,
   connectionStatus,
@@ -1413,7 +1414,7 @@ test("UI-2: every real delivery stage retains its payload and invalid known payl
     [
       { stage: "queued" },
       { stage: "delivered" },
-      { stage: "working", ackedAt: 12 },
+      { stage: "working", ackedAt: 12, answerHeld: false },
       { stage: "replied", replyId: "reply" },
       { stage: "completed", kind: "settled" },
       { stage: "held" },
@@ -3647,4 +3648,75 @@ test("reminder rows do not become the latest reply or count as their owner's res
   assert.ok(request?.kind === "message");
   assert.equal(request.latestReply?.id, "answer");
   assert.equal(request.replyCount, 1);
+});
+
+test("a progress note shows as the latest message in its thread but is not counted as a reply, and does not mark its author as having answered", () => {
+  const value = snapshot();
+  const ask = row("ask", 1000, {
+    author: "human",
+    to: ["agent-2"],
+    thread: "ask",
+  });
+  const note = {
+    ...row("note", 2000, {
+      author: "agent-2",
+      kind: "reply",
+      thread: "ask",
+      inReplyTo: "ask",
+    }),
+    progress_note: true,
+  };
+  const answer = row("answer", 3000, {
+    author: "agent-2",
+    kind: "reply",
+    thread: "ask",
+    inReplyTo: "ask",
+  });
+  const request = (rows: unknown[]) => {
+    const channel = activeChannel(
+      apply(initialState(), {
+        ...value,
+        frame: {
+          ...value.frame,
+          messages: rows,
+          threads: [
+            {
+              thread_id: "ask",
+              title: { text: "ask", truncated: false },
+              message_count: rows.length,
+            },
+          ],
+        },
+      }),
+    );
+    const item = timelineView(channel).find(
+      (item) => item.kind === "message" && item.message.id === "ask",
+    );
+    assert.ok(item?.kind === "message");
+    return item;
+  };
+  const noted = request([ask, note]);
+  assert.equal(noted.latestReply?.id, "note");
+  assert.equal(noted.replyCount, 0);
+  assert.equal(answerCount(noted.thread.replies), 0);
+  const answered = request([ask, note, answer]);
+  assert.equal(answered.latestReply?.id, "answer");
+  assert.equal(answered.replyCount, 1);
+  assert.equal(answerCount(answered.thread.replies), 1);
+
+  const channel = activeChannel(
+    apply(initialState(), {
+      ...value,
+      frame: {
+        ...value.frame,
+        messages: [{ ...ask, channel: { state: "routed", to: [] } }, note],
+      },
+    }),
+  );
+  const group = threadGroups(channel).get("ask");
+  assert.ok(group);
+  assert.equal(
+    roomOf(group, channel.members)?.wrote.get("agent-2" as AddressId),
+    undefined,
+  );
 });

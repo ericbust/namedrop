@@ -380,7 +380,11 @@ async function open(
           : { error: outcome.error ?? "Refused." },
       );
     }
-    if (/^\/w\/[^/]+\/threads\/[^/]+\/(continue|stop)$/.test(url.pathname))
+    if (
+      /^\/w\/[^/]+\/(threads\/[^/]+\/(continue|stop)|attempts\/[^/]+\/dismiss)$/.test(
+        url.pathname,
+      )
+    )
       return posts.control(req, res, onControl, url.pathname);
     if (
       req.method === "POST" &&
@@ -2076,6 +2080,11 @@ test("UI-2 fix1: every delivery stage shows its visible receipt label", async (t
     [{ stage: "queued" }, "Queued", null],
     [{ stage: "delivered" }, "Delivered", null],
     [{ stage: "working", acked_at_ms: 100 }, "Working on it", null],
+    [
+      { stage: "working", acked_at_ms: 100, answer_held: true },
+      "Still working. Its answer will follow.",
+      null,
+    ],
     [{ stage: "replied", reply_id: "reply" }, "Replied", null],
     [{ stage: "completed", kind: "settled" }, "Ended without an answer", null],
     [{ stage: "completed", kind: "no_reply" }, "Done, no reply needed", null],
@@ -7419,6 +7428,133 @@ for (const action of ["continue", "stop"])
     );
     assert.equal(JSON.parse(ui.posts.attempts[0].raw).source, "still here");
   });
+
+function lostAnswer() {
+  const value = team(1, "alpha");
+  value.frame.health = { level: "needs_you", items: 1 };
+  const ask = message("ask", "@codex run the build", {
+    at_ms: 1,
+    legs: [{ to: "codex", stage: { stage: "completed", kind: "settled" } }],
+  });
+  value.frame.messages = [ask];
+  value.frame.attention = [
+    {
+      attention_id: "attention-agent-disposition-attempt-1",
+      source_kind: "agent_disposition",
+      source_id: "attempt-1",
+      answer_lost: "ended",
+      summary: { text: "The agent's session ended.", truncated: false },
+      opened_at_ms: Date.now() - 60_000,
+      subject_alias: "codex",
+      message_id: "ask",
+      conversation: { thread_id: "ask", message_id: "ask" },
+    },
+  ];
+  return value;
+}
+
+test("a lost answer's Dismiss asks once, posts the confirmation, and the card goes while the request reads as ended", async (t) => {
+  const value = lostAnswer();
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const item = ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .locator(".attention-item");
+  const dismiss = item.getByRole("button", {
+    name: threadControlCopy.dismiss.label,
+    exact: true,
+  });
+  await dismiss.click();
+  const confirm = item.getByRole("button", {
+    name: threadControlCopy.confirmDismiss,
+    exact: true,
+  });
+  await confirm.waitFor();
+  assert.equal(
+    await item.locator(".attention-confirm").textContent(),
+    threadControlCopy.confirmDismissQuestion,
+  );
+  assert.equal(await focusedText(ui), threadControlCopy.confirmDismiss);
+  assert.equal(ui.posts.controls.length, 0, "the first click sends nothing");
+  await ui.page.keyboard.press("Escape");
+  await dismiss.waitFor();
+  assert.equal(await focusedText(ui), threadControlCopy.dismiss.label);
+  assert.equal(ui.posts.controls.length, 0);
+  await dismiss.click();
+  await confirm.click();
+  await until(() => ui.posts.controls.length === 1, "the dismiss POST");
+  assert.equal(
+    ui.posts.controls[0].path,
+    `/w/${key(1)}/attempts/attempt-1/dismiss`,
+  );
+  assert.equal(ui.posts.controls[0].csrf, "csrf-1");
+  assert.deepEqual(JSON.parse(ui.posts.controls[0].body), { confirmed: true });
+  value.frame.attention = [];
+  value.frame.health = { level: "calm" };
+  ui.connections[0].send("space", value);
+  await item.waitFor({ state: "detached" });
+  assert.equal(
+    await ui.page.locator('[data-message-id="ask"] .receipt li').textContent(),
+    "Ended without an answer",
+  );
+});
+
+test("a refused Dismiss says the agent can still answer and the button comes back", async (t) => {
+  const ui = await open(
+    t,
+    (client) => replay(client, [lostAnswer()]),
+    undefined,
+    {
+      onControl: () => ({ status: 409 }),
+    },
+  );
+  await ui.live();
+  const item = ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .locator(".attention-item");
+  await item
+    .getByRole("button", { name: threadControlCopy.dismiss.label, exact: true })
+    .click();
+  await item
+    .getByRole("button", {
+      name: threadControlCopy.confirmDismiss,
+      exact: true,
+    })
+    .click();
+  const alert = item.getByRole("alert");
+  await alert.waitFor();
+  assert.equal(await alert.textContent(), threadControlCopy.stillAnswerable);
+  await item
+    .getByRole("button", { name: threadControlCopy.dismiss.label, exact: true })
+    .waitFor();
+});
+
+test("a Dismiss with nothing left to dismiss says it was already cleared, and the card goes on the next update", async (t) => {
+  const value = lostAnswer();
+  const ui = await open(t, (client) => replay(client, [value]), undefined, {
+    onControl: () => ({ status: 410 }),
+  });
+  await ui.live();
+  const item = ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .locator(".attention-item");
+  await item
+    .getByRole("button", { name: threadControlCopy.dismiss.label, exact: true })
+    .click();
+  await item
+    .getByRole("button", {
+      name: threadControlCopy.confirmDismiss,
+      exact: true,
+    })
+    .click();
+  const alert = item.getByRole("alert");
+  await alert.waitFor();
+  assert.equal(await alert.textContent(), threadControlCopy.nothingToDismiss);
+  value.frame.attention = [];
+  value.frame.health = { level: "calm" };
+  ui.connections[0].send("space", value);
+  await item.waitFor({ state: "detached" });
+});
 
 test("CH-fix-2 item 3: Stop thread asks once inline, Cancel and Escape take it back, and only the confirm posts stop", async (t) => {
   const ui = await open(t, (client) => replay(client, [replyLimit()]));

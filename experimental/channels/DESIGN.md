@@ -514,20 +514,21 @@ else, raw HTML included, shows as the literal text.
 
 ### Receipt copy
 
-| Wire stage                                 | Shown as                | Icon               | Tone                       |
-| ------------------------------------------ | ----------------------- | ------------------ | -------------------------- |
-| `queued`                                   | Queued                  | clock              | muted                      |
-| `delivered`                                | Delivered               | check              | muted                      |
-| `working`                                  | Working on it           | half-filled circle | `--working` icon           |
-| `replied`                                  | Replied                 | reply arrow        | muted, links to the thread |
-| `completed`, kind `settled`, to an agent   | Ended without an answer | dashed circle      | muted                      |
-| `completed`, kind `settled`, to a terminal | Done                    | check-circle       | muted                      |
-| `completed`, kind `no_reply`               | Done, no reply needed   | check-circle       | muted                      |
-| `completed`, any other kind                | Done                    | check-circle       | muted, raw kind in `title` |
-| `held`                                     | Held while paused       | pause              | `--held-text`              |
-| `failed`                                   | Not delivered           | alert              | `--failed-text`            |
-| `cancelled`                                | Cancelled               | slash-circle       | muted                      |
-| `unknown`                                  | Status unknown          | dashed circle      | muted                      |
+| Wire stage                                 | Shown as                               | Icon               | Tone                       |
+| ------------------------------------------ | -------------------------------------- | ------------------ | -------------------------- |
+| `queued`                                   | Queued                                 | clock              | muted                      |
+| `delivered`                                | Delivered                              | check              | muted                      |
+| `working`                                  | Working on it                          | half-filled circle | `--working` icon           |
+| `working` with `answer_held`               | Still working. Its answer will follow. | half-filled circle | `--working` icon           |
+| `replied`                                  | Replied                                | reply arrow        | muted, links to the thread |
+| `completed`, kind `settled`, to an agent   | Ended without an answer                | dashed circle      | muted                      |
+| `completed`, kind `settled`, to a terminal | Done                                   | check-circle       | muted                      |
+| `completed`, kind `no_reply`               | Done, no reply needed                  | check-circle       | muted                      |
+| `completed`, any other kind                | Done                                   | check-circle       | muted, raw kind in `title` |
+| `held`                                     | Held while paused                      | pause              | `--held-text`              |
+| `failed`                                   | Not delivered                          | alert              | `--failed-text`            |
+| `cancelled`                                | Cancelled                              | slash-circle       | muted                      |
+| `unknown`                                  | Status unknown                         | dashed circle      | muted                      |
 
 `settled` means the recipient's turn ended without closing the request. For an
 agent that is an interruption or a forgotten answer, which Needs-you reports as
@@ -535,6 +536,19 @@ agent that is an interruption or a forgotten answer, which Needs-you reports as
 command finished. An agent in another workspace, or an id the page cannot
 place, counts as an agent; the operator and a member of a kind the page does
 not know read Done.
+
+`answer_held` means the agent's turn ended while its background work or a
+helper it asked still runs, and Namedrop holds its answer until then. That is
+ordinary work, so the receipt stays in the working tone and nothing goes to
+Needs you. When the person sent the message, the agent's words from that turn
+arrive in the thread as a progress note (`progress_note`). The note shows
+"Progress update. Not the final answer." above its body, in the
+terminal-provenance style, with the body in `--text-muted`. The note stays
+after the answer arrives or is lost, so its label promises nothing; only the
+receipt, while `answer_held`, says the answer will follow. It is not a reply:
+reply counts, the receipt-hiding rule, and a request's answered check skip it,
+and a thread preview whose only message is a note reads "No replies yet" with
+the note's author and time.
 
 ### Report card
 
@@ -604,8 +618,44 @@ All activity names the item "Shared context failed".
 
 When the item names its agent (`subject_alias`), the title names it too. For an
 unanswered request that reads "@codex didn't answer a request", with the hint
-"It ended its turn without replying." When the item names a message
-(`message_id`) that is loaded in the timeline, a **Show message** text button
+"It ended its turn without replying."
+
+An `agent_disposition` item with `answer_lost` is about a held answer that can
+never arrive. Its title and hint replace the unanswered ones, and its hint wins
+over the pane and absence hints:
+
+| `answer_lost`   | Title                              | Hint when the item names its agent                                                                     |
+| --------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `retired`       | "@codex can't answer this anymore" | Its pane was closed or it was removed before its work finished. Ask again if you still need an answer. |
+| `replaced`      | "@codex can't answer this anymore" | A new session took its place before its work finished. Ask again if you still need an answer.          |
+| `ended`         | "@codex stopped before answering"  | Its session ended before its work finished. If that session comes back, the agent can still answer.    |
+| any other value | "@codex can't answer this anymore" | Its session is gone. Ask again if you still need an answer.                                            |
+
+`ended` also covers a pane that has been gone for 10 minutes with no close event,
+as when Herdr restarted and the agent was not resumed. Until then the message
+reads as still working.
+
+Without a named agent the title is "Can't answer this anymore" or "Stopped before
+answering", which All activity also uses, and the hint says "The agent".
+
+**Dismiss.** Only an item with `answer_lost` and its attempt (`source_id`)
+shows a "Dismiss" text button after its response button, with the tooltip
+"Removes this card. The request stays in the thread as ended." The server
+allows a dismiss exactly then, since nobody can answer the request. It asks
+once, inline, like Stop thread: "Dismiss this? Its answer can't arrive.",
+then a "Dismiss" text button in `--failed-text` and "Cancel". Only the
+confirm sends `POST /w/<key>/attempts/<attempt>/dismiss` with
+`{"confirmed": true}`, which acknowledges the warning as the person, like
+`delivery acknowledge`. A press reads "Dismissing…" and waits on the frame
+that drops the item; the message's receipt then reads "Ended without an
+answer". A refusal reads "Couldn't dismiss it. Try again.", for 404 "This
+request is no longer in this workspace.", and for 409 "The agent can still
+answer this, so it stays." The server answers 410 when the request has no
+warning anymore, because it was dismissed already or its answer came, which
+reads "This was already cleared. The card goes away on the next update." The
+next frame no longer has the item, so the card goes then.
+
+When the item names a message (`message_id`) that is loaded in the timeline, a **Show message** text button
 starts the action row. It scrolls the message to the middle of the timeline, tints it
 with `--bg-selected` for 1.5 seconds, and opens its thread. When that message is
 not loaded, the button is absent. A conversation the item opens in the thread
@@ -1045,7 +1095,8 @@ Names in it are peek buttons at 12px 600 in `--text`.
   state alone for one recipient, as in "@claude · build question · Working on
   it", and "@claude Working on it · @codex Delivered" for several. They hide once
   every named member has written in the thread at or after the message, so a
-  follow-up keeps an honest "Working on it".
+  follow-up keeps an honest "Working on it". A progress note doesn't count as
+  writing.
 - A post with replies ends its route line with "1 reply" or "3 replies", a text
   button in 12px 600 `--accent-text` that opens the thread pane. Its accessible
   name is "3 replies. Open thread". A post with no line shows the count alone.

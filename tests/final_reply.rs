@@ -26,7 +26,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -68,6 +68,10 @@ impl Drop for TestDirectory {
 struct FakeHerdr {
     worktree: String,
     reviewer_host: Mutex<&'static str>,
+    /// Herdr no longer lists the reviewer's pane, as after it was closed.
+    reviewer_gone: AtomicBool,
+    /// Herdr lists the reviewer's session in `pane-elsewhere` of workspace-2.
+    reviewer_elsewhere: AtomicBool,
     prompts: Mutex<Vec<(String, String)>>,
     notifications: Mutex<Vec<String>>,
 }
@@ -103,13 +107,34 @@ impl HerdrCommandExecutor for FakeHerdr {
                 "result": {"worktrees": [{"path": self.worktree, "open_workspace_id": "workspace-1"}]}
             })
             .to_string(),
-            ["pane", "list", "--workspace", "workspace-1"] => json!({"result": {"panes": [
-                {"pane_id":"pane-lead","terminal_id":"t1","tab_id":"tab-1","workspace_id":"workspace-1",
-                 "agent":"codex","agent_session":{"value":"session-lead"},"agent_status":"idle"},
-                {"pane_id":"pane-reviewer","terminal_id":"t2","tab_id":"tab-2","workspace_id":"workspace-1",
-                 "agent":*self.reviewer_host.lock().unwrap(),"agent_session":{"value":"session-reviewer"},"agent_status":"idle"}
-            ]}})
+            ["pane", "list", "--workspace", "workspace-1"] => {
+                let mut panes = vec![json!(
+                    {"pane_id":"pane-lead","terminal_id":"t1","tab_id":"tab-1","workspace_id":"workspace-1",
+                     "agent":"codex","agent_session":{"value":"session-lead"},"agent_status":"idle"}
+                )];
+                if !self.reviewer_gone.load(Ordering::Relaxed) {
+                    panes.push(json!(
+                        {"pane_id":"pane-reviewer","terminal_id":"t2","tab_id":"tab-2","workspace_id":"workspace-1",
+                         "agent":*self.reviewer_host.lock().unwrap(),"agent_session":{"value":"session-reviewer"},"agent_status":"idle"}
+                    ));
+                }
+                json!({"result": {"panes": panes}}).to_string()
+            }
+            ["worktree", "list", "--workspace", "workspace-2", "--json"] => json!({
+                "result": {"worktrees": [{"path": format!("{}-2", self.worktree), "open_workspace_id": "workspace-2"}]}
+            })
             .to_string(),
+            ["pane", "list", "--workspace", "workspace-2"] => {
+                let panes = if self.reviewer_elsewhere.load(Ordering::Relaxed) {
+                    vec![json!(
+                        {"pane_id":"pane-elsewhere","terminal_id":"t2","tab_id":"tab-9","workspace_id":"workspace-2",
+                         "agent":"claude","agent_session":{"value":"session-reviewer"},"agent_status":"working"}
+                    )]
+                } else {
+                    Vec::new()
+                };
+                json!({"result": {"panes": panes}}).to_string()
+            }
             ["agent", "prompt", pane_id, envelope] => {
                 self.prompts
                     .lock()
@@ -198,6 +223,8 @@ impl Space {
             .unwrap();
         let herdr = FakeHerdr {
             reviewer_host: Mutex::new("claude"),
+            reviewer_gone: AtomicBool::new(false),
+            reviewer_elsewhere: AtomicBool::new(false),
             worktree: directory.repo.display().to_string(),
             prompts: Mutex::new(Vec::new()),
             notifications: Mutex::new(Vec::new()),
@@ -207,26 +234,28 @@ impl Space {
             herdr,
             ids: SequenceIds(AtomicU64::new(1)),
         };
-        for (address, host, pane) in [
-            ("address-lead", AgentRuntime::Codex, "pane-lead"),
-            (
-                "address-reviewer",
-                AgentRuntime::ClaudeCode,
-                "pane-reviewer",
-            ),
-        ] {
-            let runtime = space.runtime(pane);
-            let challenge =
-                issue_registration_challenge(&PaneAddressId::new(address), host, &runtime).unwrap();
-            execute_integration_operation(
-                "register",
-                json!({"runtime":host,"protocol_version":"collab/v1","nonce":challenge.nonce,
-                       "capabilities":complete_capability_profile()}),
-                &runtime,
-            )
-            .unwrap();
-        }
+        space.register("address-lead", AgentRuntime::Codex, "pane-lead");
+        space.register(
+            "address-reviewer",
+            AgentRuntime::ClaudeCode,
+            "pane-reviewer",
+        );
         space
+    }
+
+    /// The pane's current session completes the registration challenge, as
+    /// onboarding has it do once the session is idle.
+    fn register(&self, address: &str, host: AgentRuntime, pane: &str) {
+        let runtime = self.runtime(pane);
+        let challenge =
+            issue_registration_challenge(&PaneAddressId::new(address), host, &runtime).unwrap();
+        execute_integration_operation(
+            "register",
+            json!({"runtime":host,"protocol_version":"collab/v1","nonce":challenge.nonce,
+                   "capabilities":complete_capability_profile()}),
+            &runtime,
+        )
+        .unwrap();
     }
 
     fn runtime<'a>(
@@ -359,10 +388,12 @@ impl Space {
         sent
     }
 
+    /// Every final message posted as the answer to the person's message.
     fn relayed(&self) -> Vec<Vec<String>> {
         self.rows(
             "SELECT message_id, thread_id, in_reply_to, body FROM collaboration_messages
-             WHERE grammar_version='terminal-relay/v1' ORDER BY created_at_ms, rowid",
+             WHERE grammar_version='terminal-relay/v1' AND message_id LIKE 'terminal-relay:%'
+             ORDER BY created_at_ms, rowid",
         )
     }
 
@@ -2334,10 +2365,14 @@ fn a_tracked_settle_that_fails_warns_the_person_until_the_agent_answers() {
     assert!(space.unresolved_disposition_warnings().is_empty());
 }
 
-struct AfterTheGrace;
-impl Clock for AfterTheGrace {
+/// When the reviewer's pane is first seen idle past the acknowledgement grace
+/// of a delivery dispatched at 42.
+const IDLE: u64 = 42 + 60_000;
+
+struct At(u64);
+impl Clock for At {
     fn now_unix_ms(&self) -> u64 {
-        42 + 60_000
+        self.0
     }
     fn wait_ms(&self, _: u64) {}
 }
@@ -2411,24 +2446,38 @@ impl Space {
     }
 
     fn observe_settled(&self) {
+        self.observe_at(IDLE);
+    }
+
+    /// Reconcile at `now_ms`, with every pane idle. The drain report's
+    /// earliest due time, when it must run again with no other event.
+    /// The lead pane's runtime with `clock`.
+    fn runtime_at<'a>(&'a self, clock: &'a At) -> LifecycleRuntime<'a, FakeHerdr, At, SequenceIds> {
         let runtime = self.runtime("pane-lead");
-        namedrop::execute_lifecycle_operation(
+        LifecycleRuntime {
+            clock,
+            herdr: runtime.herdr,
+            ids: runtime.ids,
+            state_directory: runtime.state_directory,
+            home_directory: runtime.home_directory,
+            agent_config: runtime.agent_config,
+            cwd: runtime.cwd,
+            workspace_id: runtime.workspace_id,
+            current_pane_id: runtime.current_pane_id,
+            session_socket_id: runtime.session_socket_id,
+        }
+    }
+
+    fn observe_at(&self, now_ms: u64) -> Option<u64> {
+        let reconciled = namedrop::execute_lifecycle_operation(
             "reconcile",
             json!({}),
-            &LifecycleRuntime {
-                clock: &AfterTheGrace,
-                herdr: runtime.herdr,
-                ids: runtime.ids,
-                state_directory: runtime.state_directory,
-                home_directory: runtime.home_directory,
-                agent_config: runtime.agent_config,
-                cwd: runtime.cwd,
-                workspace_id: runtime.workspace_id,
-                current_pane_id: runtime.current_pane_id,
-                session_socket_id: runtime.session_socket_id,
-            },
+            &self.runtime_at(&At(now_ms)),
         )
         .unwrap();
+        serde_json::from_value::<namedrop::DrainReport>(reconciled["drain"].clone())
+            .unwrap()
+            .next_due_ms()
     }
 
     fn refused_sessions_in_doctor(&self) -> Vec<String> {
@@ -3627,6 +3676,1315 @@ impl Space {
         );
         second
     }
+}
+
+impl Space {
+    /// Every ND-DELIVERY-003 warning ever raised, open or closed.
+    fn disposition_warnings_ever(&self) -> Vec<Vec<String>> {
+        self.rows("SELECT summary FROM attention_items WHERE source_kind = 'agent_disposition'")
+    }
+
+    fn observe_reviewer_session(&self, session: &str) {
+        StateStore::open(&self.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.observe_agent_session(
+                    &namespace(),
+                    &format!("observation-reviewer-{session}"),
+                    &PaneAddressId::new("address-reviewer"),
+                    &AgentSessionId::new(session),
+                    if session.is_empty() { "empty" } else { "idle" },
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 43),
+                )
+            })
+            .unwrap();
+    }
+
+    /// Reconcile no longer finding the reviewer's pane for a moment, as while
+    /// Herdr restarts.
+    fn close_reviewer_pane_for_a_moment(&self) {
+        StateStore::open(&self.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.unbind_pane(
+                    &namespace(),
+                    &PaneAddressId::new("address-reviewer"),
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 43),
+                )
+            })
+            .unwrap();
+    }
+
+    /// The person closing the reviewer's pane, as Herdr's pane closed event
+    /// handles it.
+    fn close_reviewer_pane(&self) {
+        StateStore::open(&self.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.cancel_and_remove_pane_address(
+                    &namespace(),
+                    &PaneAddressId::new("address-reviewer"),
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 43),
+                )
+            })
+            .unwrap();
+    }
+
+    fn retire_reviewer(&self) {
+        StateStore::open(&self.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.retire_pane_address(
+                    &namespace(),
+                    &PaneAddressId::new("address-reviewer"),
+                    &MutationAttribution::new(ActorKind::Human, "test", 43),
+                )
+            })
+            .unwrap();
+    }
+
+    /// `delivery acknowledge` as the person runs it.
+    fn acknowledge(&self, ask: &Value) -> Result<Value, String> {
+        namedrop::execute_control_operation(
+            "delivery.acknowledge",
+            json!({"attempt_id":ask["control"]["attempt_id"],"confirmed":true}),
+            &self.runtime("pane-lead"),
+        )
+    }
+
+    /// The stage Channels draws on the reviewer's arrow of the latest message
+    /// sent to it.
+    fn reviewer_leg(&self) -> String {
+        let rows = StateStore::open(&self.directory.state)
+            .unwrap()
+            .dashboard_rows(&namespace())
+            .unwrap();
+        let snapshot = serde_json::to_value(namedrop::dashboard::snapshot::build(
+            &rows,
+            Some("namedrop/dashboard"),
+            1,
+        ))
+        .unwrap();
+        snapshot["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["legs"].as_array().unwrap())
+            .rfind(|leg| leg["to"] == "address-reviewer")
+            .unwrap()["stage"]["stage"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// The notice of `task-first` opens a turn whose Stop ends with `text`.
+    fn woken_by_first_task(&self, text: &str) {
+        let notice = recorded_turn("prompt-notice", "notice-turn");
+        let prompt = notice[0]["message"]["content"]
+            .as_str()
+            .unwrap()
+            .replace("task-second", "task-first");
+        self.reviewer_prompt("notice-turn", &prompt);
+        let missing = self.directory.root.join("no-transcript.jsonl");
+        self.reviewer_stop("notice-turn", text, &[], &missing);
+    }
+}
+
+/// Namedrop holds the answer while the agent's background work runs. The
+/// agent going idle meanwhile is no reason to tell the person it didn't
+/// answer, whichever of the Stop and the idle settle comes first.
+#[test]
+fn a_held_answer_raises_no_warning_whichever_comes_first() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    assert!(
+        space.disposition_warnings_ever().is_empty(),
+        "a settle after the Stop held the answer warned: {:?}",
+        space.disposition_warnings_ever()
+    );
+    assert_eq!(
+        space.reviewer_leg(),
+        "working",
+        "Channels says the held answer ended"
+    );
+
+    let space = Space::new();
+    let ask = space.armed_ask();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    space.settle_attempt(&ask);
+    assert!(
+        space.disposition_warnings_ever().is_empty(),
+        "the settle warned before the Stop decided"
+    );
+    space.append_transcript(&recorded_turn("prompt-start", CLAUDE.1));
+    space.reviewer_stop(CLAUDE.1, "STARTED", &["task-first"], &space.transcript());
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    assert!(
+        space.disposition_warnings_ever().is_empty(),
+        "the Stop that held the answer left the settle's warning: {:?}",
+        space.disposition_warnings_ever()
+    );
+    let inbox =
+        execute_integration_operation("delivery.inbox", json!({}), &space.runtime("pane-reviewer"))
+            .unwrap();
+    assert_eq!(
+        inbox["envelopes"][0]["control"]["attempt_id"], attempt,
+        "withdrawing the warning took the held delivery out of the inbox"
+    );
+}
+
+/// A held answer whose session is gone can never arrive, so the person is
+/// told why, can acknowledge it, and is not told again.
+#[test]
+fn a_held_answer_whose_session_is_gone_warns_once_until_acknowledged() {
+    type Case = (&'static str, fn(&Space), &'static str);
+    let cases: [Case; 3] = [
+        (
+            "replaced",
+            |space| space.observe_reviewer_session("session-replaced"),
+            "A new session took the agent's name",
+        ),
+        (
+            "retired",
+            Space::retire_reviewer,
+            "or the agent was removed, before it finished",
+        ),
+        (
+            "ended",
+            |space| space.observe_reviewer_session(""),
+            "If that session comes back, the agent can still answer.",
+        ),
+    ];
+    for (case, gone, says) in cases {
+        let space = Space::new();
+        let ask = space.held_on_first_task();
+        space.settle_attempt(&ask);
+        assert!(
+            space.disposition_warnings_ever().is_empty(),
+            "{case}: warned while the answer was held: {:?}",
+            space.disposition_warnings_ever()
+        );
+        gone(&space);
+        let warnings = space.unresolved_disposition_warnings();
+        assert_eq!(warnings.len(), 1, "{case}: {warnings:?}");
+        assert!(warnings[0][0].contains(says), "{case}: {warnings:?}");
+        assert!(
+            warnings[0][0].contains("delivery acknowledge clears this warning"),
+            "{case}: {warnings:?}"
+        );
+
+        space.acknowledge(&ask).unwrap();
+        assert!(space.unresolved_disposition_warnings().is_empty(), "{case}");
+        if case != "retired" {
+            space.observe_reviewer_session("session-later");
+        }
+        space.observe_settled();
+        assert!(
+            space.unresolved_disposition_warnings().is_empty(),
+            "{case}: an acknowledged warning came back: {:?}",
+            space.unresolved_disposition_warnings()
+        );
+        assert_eq!(space.disposition_warnings_ever().len(), 1, "{case}");
+    }
+}
+
+/// Closing the pane ends the session that holds the answer, so the person is
+/// told, can acknowledge it, and is not told again.
+#[test]
+fn a_held_answer_whose_pane_is_closed_warns_once_until_acknowledged() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    assert!(space.disposition_warnings_ever().is_empty());
+    space.close_reviewer_pane();
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "closing the pane warned nothing");
+    assert!(
+        warnings[0][0].contains("The agent's pane was closed"),
+        "{warnings:?}"
+    );
+    space
+        .acknowledge(&ask)
+        .expect("a closed pane leaves nobody to answer");
+    assert!(space.unresolved_disposition_warnings().is_empty());
+    space.observe_settled();
+    assert!(
+        space.unresolved_disposition_warnings().is_empty(),
+        "an acknowledged warning came back: {:?}",
+        space.unresolved_disposition_warnings()
+    );
+    assert_eq!(space.disposition_warnings_ever().len(), 1);
+}
+
+/// A pane that shows no session for a moment, as while Herdr restarts, and
+/// then the same session again, can still answer: the warning goes away and
+/// the held answer arrives.
+#[test]
+fn a_held_answer_whose_session_comes_back_stops_warning_and_still_arrives() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    space.settle_attempt(&ask);
+    space.observe_reviewer_session("");
+    assert_eq!(space.unresolved_disposition_warnings().len(), 1);
+    space.observe_reviewer_session("session-reviewer");
+    assert!(
+        space.unresolved_disposition_warnings().is_empty(),
+        "the session came back and is still warned about: {:?}",
+        space.unresolved_disposition_warnings()
+    );
+    space.register(
+        "address-reviewer",
+        AgentRuntime::ClaudeCode,
+        "pane-reviewer",
+    );
+    let inbox =
+        execute_integration_operation("delivery.inbox", json!({}), &space.runtime("pane-reviewer"))
+            .unwrap();
+    assert_eq!(
+        inbox["envelopes"][0]["control"]["attempt_id"], attempt,
+        "the held delivery left the session's inbox"
+    );
+    space.woken_by_first_task("It printed first-done.");
+    assert_eq!(space.answers("pane-lead"), ["It printed first-done."]);
+    assert!(
+        space.unresolved_disposition_warnings().is_empty(),
+        "{:?}",
+        space.unresolved_disposition_warnings()
+    );
+}
+
+/// A session that ended and was then replaced on its name can't be resumed,
+/// so the warning says it was replaced.
+#[test]
+fn a_held_answer_whose_ended_session_is_replaced_says_so() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    space.observe_reviewer_session("");
+    space.observe_reviewer_session("session-replaced");
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0][0].contains("A new session took the agent's name")
+            && !warnings[0][0].contains("session ended"),
+        "{warnings:?}"
+    );
+}
+
+/// Channels shows a held answer as still being worked on only until the
+/// person is told it can never arrive.
+#[test]
+fn a_held_leg_stops_working_once_its_answer_is_lost() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    assert_eq!(space.reviewer_leg(), "working");
+    space.observe_reviewer_session("");
+    assert_eq!(space.unresolved_disposition_warnings().len(), 1);
+    assert_eq!(
+        space.reviewer_leg(),
+        "completed",
+        "Channels says the agent is still working on an answer it warned is lost"
+    );
+    space.acknowledge(&ask).unwrap();
+    assert_eq!(space.reviewer_leg(), "completed");
+}
+
+/// A held delivery whose woken turn ends with no final message went
+/// unanswered like any other.
+#[test]
+fn a_held_answer_whose_woken_turn_says_nothing_warns_as_unanswered() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    assert!(space.disposition_warnings_ever().is_empty());
+    space.woken_by_first_task("");
+    assert_eq!(space.claims()[0]["state"], json!({"left":"no_final_text"}));
+    assert_eq!(space.reviewer_leg(), "completed");
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0][0].contains("ended its turn without a reply"),
+        "{warnings:?}"
+    );
+}
+
+/// The held answer arrives when the work ends, and the person was never told
+/// it was missing.
+#[test]
+fn a_held_answer_that_arrives_later_never_warns() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    space.woken_by_first_task("It printed first-done.");
+    assert_eq!(space.answers("pane-lead"), ["It printed first-done."]);
+    assert!(
+        space.disposition_warnings_ever().is_empty(),
+        "{:?}",
+        space.disposition_warnings_ever()
+    );
+}
+
+/// The idle settle can run a moment before the Stop decides. While the Stop
+/// has not decided, the agent going idle is no reason to warn: the Stop
+/// warns if its turn ends with no answer, and a session that is gone can't
+/// answer at all.
+#[test]
+fn an_answer_its_stop_has_not_decided_raises_no_warning_until_it_must() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    space.settle_attempt(&ask);
+    assert!(
+        space.disposition_warnings_ever().is_empty(),
+        "the settle warned before the Stop decided: {:?}",
+        space.disposition_warnings_ever()
+    );
+    space.append_transcript(&recorded_turn("prompt-start", CLAUDE.1));
+    space.reviewer_stop(CLAUDE.1, "STARTED", &["task-first"], &space.transcript());
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    assert!(
+        space.disposition_warnings_ever().is_empty(),
+        "{:?}",
+        space.disposition_warnings_ever()
+    );
+
+    let space = Space::new();
+    let ask = space.armed_ask();
+    space.settle_attempt(&ask);
+    space.stop("session-reviewer", CLAUDE, "");
+    assert_eq!(space.claims()[0]["state"], json!({"left":"no_final_text"}));
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "a turn with no answer warned nothing");
+    assert!(
+        warnings[0][0].contains("ended its turn without a reply"),
+        "{warnings:?}"
+    );
+
+    type Gone = fn(&Space);
+    let gone: [Gone; 3] = [
+        |space| space.observe_reviewer_session("session-replaced"),
+        |space| space.observe_reviewer_session(""),
+        Space::close_reviewer_pane,
+    ];
+    for (case, gone) in gone.into_iter().enumerate() {
+        let space = Space::new();
+        let ask = space.armed_ask();
+        space.settle_attempt(&ask);
+        gone(&space);
+        let warnings = space.unresolved_disposition_warnings();
+        assert_eq!(warnings.len(), 1, "case {case}: {warnings:?}");
+        assert!(
+            warnings[0][0].contains("ended its turn without a reply"),
+            "case {case}: {warnings:?}"
+        );
+    }
+}
+
+/// Only the Stop's judgement warns for a turn that ended with no answer, so
+/// a store that stays busy past one try must not lose that warning.
+#[test]
+fn a_stop_still_warns_when_the_store_is_busy_past_its_first_try() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    space.settle_attempt(&ask);
+    let (locked, lock_taken) = std::sync::mpsc::channel();
+    let database = space.directory.state.join("namedrop.sqlite3");
+    let busy = std::thread::spawn(move || {
+        let connection = rusqlite::Connection::open(database).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        locked.send(()).unwrap();
+        // Past the store's own 2 second wait for a lock.
+        std::thread::sleep(std::time::Duration::from_millis(2_500));
+        connection.execute_batch("COMMIT").unwrap();
+    });
+    lock_taken.recv().unwrap();
+    space.stop("session-reviewer", CLAUDE, "");
+    busy.join().unwrap();
+    assert_eq!(space.claims()[0]["state"], json!({"left":"no_final_text"}));
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "a busy store lost the warning");
+    assert!(
+        warnings[0][0].contains("ended its turn without a reply"),
+        "{warnings:?}"
+    );
+}
+
+/// How long Namedrop waits, after the pane is seen idle, for a Stop hook
+/// that races the idle status.
+const STOP_ARRIVAL_GRACE_MS: u64 = 5_000;
+/// How long a Stop's worker may take to decide its claim.
+const STOPPED_GRACE_MS: u64 = 30_000;
+
+impl Space {
+    /// Whether an ND-DELIVERY-003 warning was ever opened, including one
+    /// withdrawn since.
+    fn disposition_warning_ever_opened(&self) -> bool {
+        !self
+            .rows(
+                "SELECT entity_id FROM transition_facts
+                 WHERE entity_kind = 'attention_item' AND transition_kind = 'opened'
+                   AND entity_id LIKE 'attention-agent-disposition-%'",
+            )
+            .is_empty()
+    }
+
+    fn rebind_reviewer_pane(&self) {
+        self.rebind_reviewer_pane_at(43);
+    }
+
+    /// The reviewer's pane bound to its name again at `now_ms`, and its same
+    /// session seen there.
+    fn rebind_reviewer_pane_at(&self, now_ms: u64) {
+        let at = MutationAttribution::new(ActorKind::Plugin, "test", now_ms);
+        StateStore::open(&self.directory.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.rebind_pane(
+                    &namespace(),
+                    &PaneBindingId::new("binding-reviewer-again"),
+                    &PaneAddressId::new("address-reviewer"),
+                    "pane-reviewer",
+                    &at,
+                )?;
+                transaction.observe_agent_session(
+                    &namespace(),
+                    &format!("observation-reviewer-again-{now_ms}"),
+                    &PaneAddressId::new("address-reviewer"),
+                    &AgentSessionId::new("session-reviewer"),
+                    "idle",
+                    &at,
+                )
+            })
+            .unwrap();
+    }
+
+    /// Herdr's event that the reviewer's pane closed, handled at `now_ms`.
+    fn reviewer_pane_closed_at(&self, now_ms: u64) {
+        self.reviewer_pane_gone(true);
+        namedrop::execute_lifecycle_operation(
+            "event.pane-lifecycle",
+            json!({"type":"pane_closed","pane_id":"pane-reviewer","workspace_id":"workspace-1"}),
+            &self.runtime_at(&At(now_ms)),
+        )
+        .unwrap();
+    }
+
+    fn activate_workspace_2(&self) {
+        let workspace_2 = StateNamespace::for_space("socket-a", "workspace-2");
+        let mut store = StateStore::open(&self.directory.state).unwrap();
+        store
+            .transaction(|transaction| {
+                transaction.activate_worktree(
+                    &workspace_2,
+                    &MutationAttribution::new(ActorKind::Human, "test", 1),
+                )
+            })
+            .unwrap();
+        store
+            .transaction(|transaction| transaction.complete_reconciliation(&workspace_2))
+            .unwrap();
+    }
+
+    /// Herdr's event that the reviewer's pane moved to workspace-2 as
+    /// `pane-elsewhere`, handled at `now_ms`.
+    fn reviewer_pane_moved_at(&self, now_ms: u64) {
+        self.reviewer_pane_gone(true);
+        self.herdr.reviewer_elsewhere.store(true, Ordering::Relaxed);
+        namedrop::execute_lifecycle_operation(
+            "event.pane-lifecycle",
+            json!({"type":"pane_moved","previous_pane_id":"pane-reviewer",
+                   "previous_workspace_id":"workspace-1","previous_tab_id":"tab-2",
+                   "pane":{"pane_id":"pane-elsewhere","workspace_id":"workspace-2",
+                           "terminal_id":"t2","tab_id":"tab-9","focused":false,
+                           "agent_status":"working","revision":1}}),
+            &self.runtime_at(&At(now_ms)),
+        )
+        .unwrap();
+    }
+
+    /// Herdr's event that `pane-elsewhere` closed, handled at `now_ms`.
+    fn moved_pane_closed_at(&self, now_ms: u64) {
+        self.herdr
+            .reviewer_elsewhere
+            .store(false, Ordering::Relaxed);
+        namedrop::execute_lifecycle_operation(
+            "event.pane-lifecycle",
+            json!({"type":"pane_closed","pane_id":"pane-elsewhere","workspace_id":"workspace-2"}),
+            &self.runtime_at(&At(now_ms)),
+        )
+        .unwrap();
+    }
+
+    /// Reconcile of workspace-2 at `now_ms`, as `observe_at` is of
+    /// workspace-1.
+    fn observe_workspace_2_at(&self, now_ms: u64) -> Option<u64> {
+        let clock = At(now_ms);
+        let runtime = LifecycleRuntime {
+            workspace_id: Some("workspace-2"),
+            ..self.runtime_at(&clock)
+        };
+        let reconciled =
+            namedrop::execute_lifecycle_operation("reconcile", json!({}), &runtime).unwrap();
+        serde_json::from_value::<namedrop::DrainReport>(reconciled["drain"].clone())
+            .unwrap()
+            .next_due_ms()
+    }
+
+    /// Whether Herdr lists the reviewer's pane.
+    fn reviewer_pane_gone(&self, gone: bool) {
+        self.herdr.reviewer_gone.store(gone, Ordering::Relaxed);
+    }
+
+    fn reviewer_bound(&self) -> bool {
+        !self
+            .rows(
+                "SELECT binding_id FROM pane_bindings
+                 WHERE address_id = 'address-reviewer' AND active = 1",
+            )
+            .is_empty()
+    }
+
+    /// `delivery acknowledge` as the person runs it at `now_ms`.
+    fn acknowledge_at(&self, ask: &Value, now_ms: u64) -> Result<Value, String> {
+        namedrop::execute_control_operation(
+            "delivery.acknowledge",
+            json!({"attempt_id":ask["control"]["attempt_id"],"confirmed":true}),
+            &self.runtime_at(&At(now_ms)),
+        )
+    }
+
+    fn lost_answer_card(&self) -> Value {
+        let attention = self.snapshot()["attention"].clone();
+        attention
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|card| card["source_kind"] == "agent_disposition")
+            .unwrap_or_else(|| panic!("{attention}"))
+            .clone()
+    }
+}
+
+/// How long an address may have no pane before its session counts as ended.
+const UNBOUND_GRACE_MS: u64 = 10 * 60 * 1_000;
+
+/// A name the person unbound on purpose outlives the close of the pane it
+/// had: the close finds no name on that pane, so it retires nothing,
+/// releases no alias and cancels none of the name's mail.
+#[test]
+fn closing_the_pane_of_a_name_unbound_on_purpose_keeps_the_name_and_its_mail() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    namedrop::execute_lifecycle_operation(
+        "address.unbind",
+        json!({"address_id":"address-reviewer"}),
+        &space.runtime_at(&At(IDLE)),
+    )
+    .unwrap();
+    dispatch::message(
+        "send",
+        json!({"request_id":"queued","source":"@reviewer One more thing.",
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    let mail = || {
+        space.rows(
+            "SELECT delivery_id, state FROM mailbox_deliveries
+             WHERE address_id = 'address-reviewer' ORDER BY delivery_id",
+        )
+    };
+    let before = mail();
+    assert!(
+        before.iter().any(|row| row[1] == "queued"),
+        "the unbound name queued nothing: {before:?}"
+    );
+
+    space.reviewer_pane_closed_at(IDLE + 1);
+    assert_eq!(
+        space.rows(
+            "SELECT CAST(retired AS TEXT) FROM pane_addresses WHERE address_id = 'address-reviewer'"
+        ),
+        [["0"]],
+        "the close retired a name it had no pane of"
+    );
+    assert_eq!(
+        space.rows(
+            "SELECT alias FROM alias_claims
+             WHERE address_id = 'address-reviewer' AND claim_state = 'active'"
+        ),
+        [["reviewer"]]
+    );
+    assert_eq!(mail(), before, "the close changed the name's mail");
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    assert!(!space.disposition_warning_ever_opened());
+}
+
+/// A pane moved to another workspace takes its session along, which can
+/// still answer, so no grace runs out on it however long it stays there,
+/// whichever workspace drains. Once that pane closes there, the grace runs
+/// from the close and the held answer is flagged at its end.
+#[test]
+fn a_pane_moved_to_another_workspace_loses_its_held_answer_only_once_it_closes() {
+    let space = Space::new();
+    space.activate_workspace_2();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    space.reviewer_pane_moved_at(IDLE);
+    assert!(!space.reviewer_bound());
+    let long_after = IDLE + 3 * UNBOUND_GRACE_MS;
+    assert_eq!(space.observe_at(IDLE + UNBOUND_GRACE_MS), None);
+    assert_eq!(space.observe_workspace_2_at(IDLE + UNBOUND_GRACE_MS), None);
+    assert_eq!(space.observe_at(long_after), None);
+    assert_eq!(space.observe_workspace_2_at(long_after), None);
+    assert!(
+        !space.disposition_warning_ever_opened(),
+        "{:?}",
+        space.disposition_warnings_ever()
+    );
+    assert_eq!(space.reviewer_leg(), "working");
+
+    let closed = long_after + 1;
+    space.moved_pane_closed_at(closed);
+    let lost_at = closed + UNBOUND_GRACE_MS;
+    assert_eq!(space.observe_at(closed), Some(lost_at));
+    assert!(!space.disposition_warning_ever_opened());
+    assert_eq!(space.observe_at(lost_at), None);
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "a moved pane gone for good left it working"
+    );
+    assert!(
+        warnings[0][0].contains("pane has been gone"),
+        "{warnings:?}"
+    );
+    assert_eq!(space.reviewer_leg(), "completed");
+}
+
+/// Past `UNBOUND_GRACE_MS` and the few minutes after it that cover a late
+/// wake, a drain no longer looks at an address that lost its pane, so its
+/// work stays the same however old the database grows. Starting Channels
+/// judges what it missed.
+#[test]
+fn a_drain_long_after_a_pane_went_does_not_look_at_its_attempts() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    space.reviewer_pane_gone(true);
+    assert_eq!(space.observe_at(IDLE), Some(IDLE + UNBOUND_GRACE_MS));
+    let day = 24 * 60 * 60 * 1_000;
+    assert_eq!(space.observe_at(IDLE + day), None);
+    assert!(
+        !space.disposition_warning_ever_opened(),
+        "a drain a day later still judged the pane: {:?}",
+        space.disposition_warnings_ever()
+    );
+    assert_eq!(space.reviewer_leg(), "working");
+}
+
+/// A pane that goes away with no close event, as when Herdr restarts and the
+/// agent is never resumed, leaves its held answer working only for the
+/// grace. Then the next drain, which the grace itself schedules, flags it,
+/// and the person can dismiss it.
+#[test]
+fn a_pane_that_never_comes_back_loses_its_held_answer_after_the_grace() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    space.reviewer_pane_gone(true);
+    let lost_at = IDLE + UNBOUND_GRACE_MS;
+    assert_eq!(
+        space.observe_at(IDLE),
+        Some(lost_at),
+        "nothing wakes the drain to judge the held answer again"
+    );
+    assert!(!space.reviewer_bound());
+    assert_eq!(space.observe_at(lost_at - 1), Some(lost_at));
+    assert!(!space.disposition_warning_ever_opened());
+    assert!(space.herdr.notifications.lock().unwrap().is_empty());
+    assert_eq!(space.reviewer_leg(), "working");
+    assert!(
+        space.acknowledge_at(&ask, lost_at - 1).is_err(),
+        "a warning nobody raised was acknowledged"
+    );
+
+    assert_eq!(space.observe_at(lost_at), None);
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "a pane gone for good left it working");
+    assert!(
+        warnings[0][0].contains("pane has been gone"),
+        "{warnings:?}"
+    );
+    assert_eq!(space.lost_answer_card()["answer_lost"], "ended");
+    assert_eq!(space.reviewer_leg(), "completed");
+    space.acknowledge_at(&ask, lost_at).unwrap();
+    assert!(space.unresolved_disposition_warnings().is_empty());
+}
+
+/// The warning a pane gone past the grace raised goes once the same session
+/// is bound and seen again, and its answer is held again.
+#[test]
+fn a_held_answer_lost_to_the_grace_comes_back_with_its_session() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    space.reviewer_pane_gone(true);
+    space.observe_at(IDLE);
+    space.observe_at(IDLE + UNBOUND_GRACE_MS);
+    assert_eq!(space.unresolved_disposition_warnings().len(), 1);
+    space.reviewer_pane_gone(false);
+    space.rebind_reviewer_pane_at(IDLE + UNBOUND_GRACE_MS + 1);
+    assert!(
+        space.unresolved_disposition_warnings().is_empty(),
+        "{:?}",
+        space.unresolved_disposition_warnings()
+    );
+    assert_eq!(space.reviewer_leg(), "working");
+}
+
+/// A pane reconcile unbinds and that is bound again inside the grace, with
+/// its same session, never raises anything, even once the grace is over.
+#[test]
+fn a_pane_bound_again_inside_the_grace_never_warns() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    space.reviewer_pane_gone(true);
+    space.observe_at(IDLE);
+    assert!(!space.reviewer_bound());
+    space.reviewer_pane_gone(false);
+    space.rebind_reviewer_pane_at(IDLE + UNBOUND_GRACE_MS - 1);
+    assert_eq!(space.observe_at(IDLE + UNBOUND_GRACE_MS), None);
+    assert!(
+        !space.disposition_warning_ever_opened(),
+        "{:?}",
+        space.disposition_warnings_ever()
+    );
+    assert!(space.herdr.notifications.lock().unwrap().is_empty());
+    assert_eq!(space.reviewer_leg(), "working");
+}
+
+/// A turn interrupted with Esc, or ended by an API error, fires no Stop. Once
+/// its pane has sat idle past the Stop's grace, the person is told the
+/// request went unanswered, with no later prompt needed.
+#[test]
+fn a_turn_that_ends_with_no_stop_warns_while_its_pane_sits_idle() {
+    let space = Space::new();
+    space.armed_ask();
+    let due = space.observe_at(IDLE);
+    assert!(
+        space.disposition_warnings_ever().is_empty(),
+        "warned before a racing Stop could arrive"
+    );
+    assert_eq!(
+        due,
+        Some(IDLE + STOP_ARRIVAL_GRACE_MS),
+        "nothing wakes the drain to judge the turn again"
+    );
+    assert_eq!(space.observe_at(IDLE + STOP_ARRIVAL_GRACE_MS - 1), due);
+    assert!(space.disposition_warnings_ever().is_empty());
+    assert_eq!(space.observe_at(IDLE + STOP_ARRIVAL_GRACE_MS), None);
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "an unanswered request warned nothing");
+    assert!(
+        warnings[0][0].contains("ended its turn without a reply"),
+        "{warnings:?}"
+    );
+    assert_eq!(space.reviewer_leg(), "completed");
+}
+
+/// A Stop that arrives inside the grace and holds the answer leaves the
+/// person nothing to act on.
+#[test]
+fn a_stop_inside_the_grace_that_holds_the_answer_warns_nothing() {
+    let space = Space::new();
+    space.armed_ask();
+    space.observe_at(IDLE);
+    space.append_transcript(&recorded_turn("prompt-start", CLAUDE.1));
+    space.reviewer_stop(CLAUDE.1, "STARTED", &["task-first"], &space.transcript());
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    assert_eq!(space.observe_at(IDLE + STOP_ARRIVAL_GRACE_MS), None);
+    assert_eq!(space.observe_at(IDLE + STOPPED_GRACE_MS), None);
+    assert!(
+        !space.disposition_warning_ever_opened(),
+        "{:?}",
+        space.disposition_warnings_ever()
+    );
+    assert_eq!(space.reviewer_leg(), "working");
+}
+
+/// A Stop that ran but whose worker never decided is given the worker's
+/// grace, then judged like a turn with no Stop.
+#[test]
+fn a_stop_whose_worker_never_finishes_warns_after_the_workers_grace() {
+    let space = Space::new();
+    space.armed_ask();
+    mark_stopped(
+        &space.directory.state,
+        "socket-a",
+        "session-reviewer",
+        &HostTurn::from_ids(Some(CLAUDE.1), None).unwrap(),
+        IDLE,
+    );
+    assert_eq!(space.observe_at(IDLE), Some(IDLE + STOPPED_GRACE_MS));
+    space.observe_at(IDLE + STOP_ARRIVAL_GRACE_MS);
+    assert!(
+        space.disposition_warnings_ever().is_empty(),
+        "warned while the Stop's worker still had the claim"
+    );
+    assert_eq!(space.observe_at(IDLE + STOPPED_GRACE_MS), None);
+    let warnings = space.unresolved_disposition_warnings();
+    assert_eq!(warnings.len(), 1, "a lost worker warned nothing");
+    assert!(
+        warnings[0][0].contains("ended its turn without a reply"),
+        "{warnings:?}"
+    );
+}
+
+/// A warning that an exited agent can't answer stays while its pane is only
+/// unbound, since nothing says the session came back, and goes once the
+/// same session is seen again.
+#[test]
+fn an_unbound_pane_neither_raises_nor_withdraws_a_lost_answer() {
+    let space = Space::new();
+    let ask = space.held_on_first_task();
+    space.settle_attempt(&ask);
+    space.observe_reviewer_session("");
+    assert_eq!(space.unresolved_disposition_warnings().len(), 1);
+    space.close_reviewer_pane_for_a_moment();
+    assert_eq!(
+        space.unresolved_disposition_warnings().len(),
+        1,
+        "unbinding the pane withdrew the warning"
+    );
+    space.rebind_reviewer_pane();
+    assert!(
+        space.unresolved_disposition_warnings().is_empty(),
+        "{:?}",
+        space.unresolved_disposition_warnings()
+    );
+}
+
+/// A Stop that comes after the grace still decides: holding the answer
+/// withdraws the warning, and answering closes it.
+#[test]
+fn a_late_stop_clears_the_warning_the_grace_raised() {
+    let space = Space::new();
+    let ask = space.armed_ask();
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    space.observe_at(IDLE);
+    space.observe_at(IDLE + STOP_ARRIVAL_GRACE_MS);
+    assert_eq!(space.unresolved_disposition_warnings().len(), 1);
+    space.append_transcript(&recorded_turn("prompt-start", CLAUDE.1));
+    space.reviewer_stop(CLAUDE.1, "STARTED", &["task-first"], &space.transcript());
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    assert!(
+        space.unresolved_disposition_warnings().is_empty(),
+        "the held answer is still warned about: {:?}",
+        space.unresolved_disposition_warnings()
+    );
+    let inbox =
+        execute_integration_operation("delivery.inbox", json!({}), &space.runtime("pane-reviewer"))
+            .unwrap();
+    assert_eq!(inbox["envelopes"][0]["control"]["attempt_id"], attempt);
+
+    let space = Space::new();
+    space.armed_ask();
+    space.observe_at(IDLE);
+    space.observe_at(IDLE + STOP_ARRIVAL_GRACE_MS);
+    assert_eq!(space.unresolved_disposition_warnings().len(), 1);
+    space.stop("session-reviewer", CLAUDE, "It is done.");
+    assert_eq!(space.answers("pane-lead"), ["It is done."]);
+    assert!(
+        space.unresolved_disposition_warnings().is_empty(),
+        "the answered request is still warned about: {:?}",
+        space.unresolved_disposition_warnings()
+    );
+}
+
+/// Reconcile may unbind a live pane and bind it again a moment later. The
+/// same session is still there, so nothing is ever raised for its held
+/// answer or for one its Stop has not decided.
+#[test]
+fn unbinding_and_rebinding_the_same_session_never_warns() {
+    for held in [true, false] {
+        let space = Space::new();
+        let ask = if held {
+            space.held_on_first_task()
+        } else {
+            space.armed_ask()
+        };
+        space.settle_attempt(&ask);
+        space.close_reviewer_pane_for_a_moment();
+        space.rebind_reviewer_pane();
+        if held {
+            space.observe_at(IDLE + STOPPED_GRACE_MS);
+        }
+        assert!(
+            !space.disposition_warning_ever_opened(),
+            "held {held}: {:?}",
+            space.disposition_warnings_ever()
+        );
+        assert_eq!(
+            space.reviewer_leg(),
+            if held { "working" } else { "completed" },
+            "held {held}"
+        );
+    }
+}
+
+impl Space {
+    /// Every progress note, as (id, thread, in reply to, body).
+    fn notes(&self) -> Vec<Vec<String>> {
+        self.rows(
+            "SELECT message_id, thread_id, in_reply_to, body FROM collaboration_messages
+             WHERE message_id LIKE 'progress-note:%' ORDER BY created_at_ms, rowid",
+        )
+    }
+
+    fn snapshot(&self) -> Value {
+        let rows = StateStore::open(&self.directory.state)
+            .unwrap()
+            .dashboard_rows(&namespace())
+            .unwrap();
+        serde_json::to_value(namedrop::dashboard::snapshot::build(
+            &rows,
+            Some("namedrop/dashboard"),
+            1,
+        ))
+        .unwrap()
+    }
+
+    fn wire_message(&self, id: &str) -> Value {
+        self.snapshot()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["message_id"] == id)
+            .unwrap_or_else(|| panic!("{id} is not on the wire"))
+            .clone()
+    }
+
+    /// The reviewer's Stop of `turn`, in-process, whose prompt was the
+    /// notice of `notified`, with `running` started by it and still running.
+    fn notice_stop(&self, turn: &str, notified: &str, running: &[&str], text: &str) {
+        let running: Vec<String> = running.iter().map(|task| (*task).to_owned()).collect();
+        let stop = StopFacts {
+            session: "session-reviewer".to_owned(),
+            turn: HostTurn::from_ids(Some(turn), None),
+            running_tasks: running.clone(),
+            started_tasks: running,
+            notified_tasks: vec![notified.to_owned()],
+            paused_tasks: Vec::new(),
+            ended_tasks: Vec::new(),
+            read_turn: true,
+            text: FinalText::bounded(text),
+        };
+        settle_at_stop(&self.directory.state, "socket-a", &stop, 42, &mut |bound| {
+            self.run(bound)
+        });
+    }
+}
+
+/// While its answer to the person's message is held, the person sees the
+/// agent's final message at once, in the thread, marked as a note that it
+/// is still working. The note leaves the message open and wakes nobody, and
+/// the real answer still comes and closes it.
+#[test]
+fn a_held_answer_to_the_person_shows_the_agents_words_at_once_as_a_note() {
+    let space = Space::new();
+    let question = space.send_as_person("question", "@reviewer Run the build and report.", None);
+    let thread = question["thread_id"].as_str().unwrap().to_owned();
+    let question_id = question["message_id"].as_str().unwrap().to_owned();
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    space.stop_with("session-reviewer", CLAUDE, "The build is running.", true);
+    space.stop_with("session-reviewer", CLAUDE, "The build is running.", true);
+
+    let notes = space.notes();
+    assert_eq!(
+        notes.len(),
+        1,
+        "a retried Stop posted the note again: {notes:?}"
+    );
+    assert!(
+        notes[0][0].starts_with(&format!("progress-note:{attempt}:")),
+        "{notes:?}"
+    );
+    assert_eq!(
+        notes[0][1..],
+        [
+            thread.clone(),
+            question_id.clone(),
+            "The build is running.".to_owned()
+        ]
+    );
+    let note = space.wire_message(&notes[0][0]);
+    assert_eq!(note["progress_note"], true, "{note}");
+    assert_eq!(note["kind"], "reply");
+    assert_eq!(note["author"], "address-reviewer");
+    assert_eq!(note["legs"], json!([]));
+    assert!(
+        space
+            .wire_message(&question_id)
+            .get("progress_note")
+            .is_none()
+    );
+
+    assert!(
+        space.dispositions().is_empty(),
+        "the note closed the message"
+    );
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    let inbox =
+        execute_integration_operation("delivery.inbox", json!({}), &space.runtime("pane-reviewer"))
+            .unwrap();
+    assert_eq!(inbox["envelopes"][0]["control"]["attempt_id"], attempt);
+    assert!(space.unresolved_disposition_warnings().is_empty());
+    assert_eq!(space.snapshot()["attention"], json!([]));
+    assert_eq!(
+        space.rows(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM message_recipients
+             WHERE message_id LIKE 'progress-note:%'"
+        ),
+        [["0"]],
+        "a note was addressed to someone"
+    );
+    assert!(space.answers("pane-lead").is_empty());
+    assert_eq!(space.answers("pane-reviewer").len(), 1);
+
+    space.notice_stop(
+        "notice-turn-1",
+        "background-1",
+        &["background-2"],
+        "Tests next.",
+    );
+    let notes = space.notes();
+    assert_eq!(notes.len(), 2, "a second hold posted no note: {notes:?}");
+    assert_eq!(notes[1][3], "Tests next.");
+    assert!(space.dispositions().is_empty());
+
+    space.notice_stop("notice-turn-2", "background-2", &[], "The build passed.");
+    let relay = format!("terminal-relay:{attempt}");
+    assert_eq!(
+        space.relayed().last().unwrap(),
+        &[
+            relay.clone(),
+            thread,
+            question_id.clone(),
+            "The build passed.".to_owned()
+        ],
+        "an earlier note stood in for the answer"
+    );
+    assert_eq!(space.dispositions(), [vec![attempt, "no_reply".to_owned()]]);
+    assert_eq!(space.claims()[0]["state"], json!({"done":"no_replied"}));
+    assert_eq!(
+        space.wire_message(&question_id)["legs"][0]["stage"],
+        json!({"stage":"replied","reply_id":relay})
+    );
+    assert!(space.wire_message(&relay).get("progress_note").is_none());
+}
+
+/// A progress note is for the person. What an agent reads of the thread,
+/// the recap in a later delivery and the thread's context snapshot, leaves
+/// it out, and the real answer is there once it comes.
+#[test]
+fn agents_never_read_a_progress_note_and_do_read_the_answer() {
+    let space = Space::new();
+    let question = space.send_as_person("question", "@reviewer Run the build and report.", None);
+    let thread = question["thread_id"].as_str().unwrap().to_owned();
+    let question_id = question["message_id"].as_str().unwrap().to_owned();
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    space.stop_with(
+        "session-reviewer",
+        CLAUDE,
+        "Decision: wait for NOTE_SENTINEL.",
+        true,
+    );
+    assert_eq!(space.notes().len(), 1);
+
+    space.send_as_person(
+        "follow-up",
+        "@lead Anything @reviewer missed?",
+        Some(&question_id),
+    );
+    let recap =
+        space.herdr.envelope_for("pane-lead")["control"]["untrusted_channel_recap"].to_string();
+    assert!(recap.contains("Run the build and report."), "{recap}");
+    assert!(
+        !recap.contains("NOTE_SENTINEL"),
+        "the recap shows the note: {recap}"
+    );
+    let snapshots = space.rows(&format!(
+        "SELECT payload_json FROM thread_context_snapshots
+         WHERE thread_id = '{thread}' AND participant_address_id = 'address-lead'"
+    ));
+    assert_eq!(snapshots.len(), 1, "the lead got no thread snapshot");
+    assert!(
+        !snapshots[0][0].contains("NOTE_SENTINEL"),
+        "the thread snapshot shows the note: {snapshots:?}"
+    );
+
+    space.notice_stop("notice-turn", "background-1", &[], "ANSWER_SENTINEL");
+    assert_eq!(space.relayed().len(), 1);
+    space.send_as_person("again", "@lead Did @reviewer finish?", Some(&question_id));
+    let recap =
+        space.herdr.envelope_for("pane-lead")["control"]["untrusted_channel_recap"].to_string();
+    assert!(recap.contains("ANSWER_SENTINEL"), "{recap}");
+    assert!(!recap.contains("NOTE_SENTINEL"), "{recap}");
+}
+
+/// A turn that ends waiting on a helper shows the person its final message
+/// as a note too. Naming the helper in it sends the helper nothing.
+#[test]
+fn a_hold_on_a_helper_shows_the_person_a_note_that_reaches_no_agent() {
+    let space = Space::new();
+    let question = space.send_as_person(
+        "question",
+        "@reviewer Is option B safe? Ask the lead.",
+        None,
+    );
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    dispatch::message(
+        "send",
+        json!({"request_id":"helper","source":"@lead Is option B safe?",
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-reviewer"),
+    )
+    .unwrap();
+    space.stop(
+        "session-reviewer",
+        CLAUDE,
+        "I asked @lead and will answer when it replies.",
+    );
+    assert_eq!(space.claims()[0]["state"], json!({"left":"held"}));
+    let notes = space.notes();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes[0][2], question["message_id"].as_str().unwrap());
+    assert_eq!(
+        notes[0][3],
+        "I asked @lead and will answer when it replies."
+    );
+    assert_eq!(space.wire_message(&notes[0][0])["progress_note"], true);
+    assert_eq!(
+        space.answers("pane-lead"),
+        ["Is option B safe?"],
+        "the note reached the helper it names"
+    );
+    assert!(space.dispositions().is_empty());
+    assert!(space.unresolved_disposition_warnings().is_empty());
+
+    let answered = dispatch::message(
+        "reply",
+        bound_reply(
+            &space,
+            &ask,
+            "@operator Yes: the lead says option B is safe.",
+        ),
+        &space.runtime("pane-reviewer"),
+    )
+    .unwrap();
+    assert_eq!(answered["disposition"], "reply");
+    assert_eq!(space.dispositions(), [vec![attempt, "reply".to_owned()]]);
+}
+
+/// A held answer to another agent posts nothing in the thread, to save that
+/// agent the tokens.
+#[test]
+fn a_held_answer_to_an_agent_posts_no_note() {
+    let space = Space::new();
+    space.held_on_first_task();
+    assert!(space.notes().is_empty(), "{:?}", space.notes());
+    assert!(space.relayed().is_empty());
+}
+
+/// Channels tells a held answer from ordinary work, and a warning about a
+/// held answer that can never arrive from an ordinary unanswered one, with
+/// its cause.
+#[test]
+fn the_wire_marks_a_held_leg_and_says_why_a_held_answer_was_lost() {
+    let space = Space::new();
+    space.armed_ask();
+    let stage = |space: &Space| {
+        space.snapshot()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["legs"].as_array().unwrap().clone())
+            .rfind(|leg| leg["to"] == "address-reviewer")
+            .unwrap()["stage"]
+            .clone()
+    };
+    let working = stage(&space);
+    assert_eq!(working["stage"], "working");
+    assert!(working.get("answer_held").is_none(), "{working}");
+
+    type Gone = (&'static str, fn(&Space));
+    let cases: [Gone; 4] = [
+        ("replaced", |space| {
+            space.observe_reviewer_session("session-replaced")
+        }),
+        ("retired", Space::retire_reviewer),
+        ("retired", Space::close_reviewer_pane),
+        ("ended", |space| space.observe_reviewer_session("")),
+    ];
+    for (cause, gone) in cases {
+        let space = Space::new();
+        let ask = space.held_on_first_task();
+        space.settle_attempt(&ask);
+        let held = stage(&space);
+        assert_eq!(
+            (&held["stage"], &held["answer_held"]),
+            (&json!("working"), &json!(true)),
+            "{held}"
+        );
+        gone(&space);
+        let attention = space.snapshot()["attention"].clone();
+        let card = attention
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|card| card["source_kind"] == "agent_disposition")
+            .unwrap_or_else(|| panic!("{cause}: {attention}"));
+        assert_eq!(card["answer_lost"], cause, "{card}");
+    }
+
+    let space = Space::new();
+    let ask = space.armed_ask();
+    space.stop("session-reviewer", CLAUDE, "");
+    space.settle_attempt(&ask);
+    let attention = space.snapshot()["attention"].clone();
+    let card = attention
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|card| card["source_kind"] == "agent_disposition")
+        .unwrap_or_else(|| panic!("{attention}"));
+    assert!(card.get("answer_lost").is_none(), "{card}");
 }
 
 /// The recorded busy turn's typed prompt and the notice Claude Code queued

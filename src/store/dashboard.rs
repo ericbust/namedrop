@@ -109,6 +109,9 @@ pub struct LegRow {
     pub acknowledged_at_ms: Option<i64>,
     pub disposition_kind: Option<String>,
     pub disposition_id: Option<String>,
+    /// Settled while its agent holds the answer for background work or a
+    /// helper, and the person was not warned that the answer can't arrive.
+    pub held: bool,
 }
 
 pub struct MailboxRow {
@@ -164,6 +167,9 @@ pub struct AttentionRow {
     pub item: crate::AttentionItemRecord,
     pub subject_alias: Option<String>,
     pub message_id: Option<String>,
+    /// Why the held answer this ND-DELIVERY-003 warning is about can never
+    /// arrive.
+    pub answer_lost: Option<super::SessionGone>,
 }
 
 pub struct SpaceRow {
@@ -206,6 +212,18 @@ const LATEST_ATTEMPT: &str = "a.rowid = (
      WHERE latest.session_socket_id = d.session_socket_id
        AND latest.worktree_id = d.worktree_id AND latest.delivery_id = d.delivery_id
      ORDER BY latest.created_at_ms DESC, latest.rowid DESC LIMIT 1)";
+
+/// Whether ND-DELIVERY-003 was ever raised for the leg's latest attempt,
+/// open or acknowledged.
+fn leg_warned_sql() -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM attention_items i
+                 WHERE i.session_socket_id = a.session_socket_id
+                   AND i.worktree_id = a.worktree_id
+                   AND i.attention_item_id = '{}' || a.attempt_id)",
+        super::missing_disposition::ITEM_ID_PREFIX
+    )
+}
 
 pub(crate) struct SubagentParentBinding {
     pub socket: String,
@@ -484,7 +502,7 @@ impl StateTransaction<'_> {
                    AND d.message_id IN (SELECT message_id FROM page_recipients)
              )
              SELECT r.message_id, r.address_id, d.state, ack.acknowledged_at_ms,
-                    {LEG_DISPOSITION_SQL}
+                    {LEG_DISPOSITION_SQL}, a.attempt_id, a.agent_session_id, {warned}
              FROM page_recipients r
              LEFT JOIN page_deliveries d USING (session_socket_id, worktree_id, message_id, address_id)
              LEFT JOIN delivery_attempts a ON {LATEST_ATTEMPT}
@@ -493,22 +511,13 @@ impl StateTransaction<'_> {
              {answers}
              ORDER BY r.message_id, r.recipient_order",
             answers = leg_answer_joins_sql(),
+            warned = leg_warned_sql(),
         );
         let values = std::iter::once(ns[0].to_owned())
             .chain(std::iter::once(ns[1].to_owned()))
             .chain(messages.iter().map(|message| message.message_id.clone()));
         let mut legs = self.rows(&sql, rusqlite::params_from_iter(values), |row| {
-            Ok(LegRow {
-                message_id: row.get(0)?,
-                address_id: row.get(1)?,
-                state: row
-                    .get::<_, Option<String>>(2)?
-                    .map(parse_delivery_state)
-                    .transpose()?,
-                acknowledged_at_ms: row.get(3)?,
-                disposition_kind: row.get(4)?,
-                disposition_id: row.get(5)?,
-            })
+            self.leg_row(namespace, row)
         })?;
         self.normalize_operator_legs(namespace, &mut legs)?;
         Ok(legs)
@@ -683,6 +692,104 @@ impl StateTransaction<'_> {
         Ok(())
     }
 
+    /// One leg from a row that selects its message, address, delivery state,
+    /// acknowledgement, disposition, then its latest attempt, its session and
+    /// whether it was warned about. A held answer shows as worked on until
+    /// the person is warned it can't arrive.
+    fn leg_row(
+        &self,
+        namespace: &StateNamespace,
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<LegRow> {
+        let state = row
+            .get::<_, Option<String>>(2)?
+            .map(parse_delivery_state)
+            .transpose()?;
+        let address_id: String = row.get(1)?;
+        let disposition_kind: Option<String> = row.get(4)?;
+        let attempt = row.get::<_, Option<String>>(6)?;
+        let session = row.get::<_, Option<String>>(7)?;
+        let warned: bool = row.get(8)?;
+        let held = match attempt.zip(session) {
+            Some((attempt, session))
+                if state == Some(DeliveryState::Settled)
+                    && disposition_kind.is_none()
+                    && !warned =>
+            {
+                self.answer_held(namespace, &address_id, &attempt, &session)?
+            }
+            _ => false,
+        };
+        Ok(LegRow {
+            message_id: row.get(0)?,
+            address_id,
+            state,
+            acknowledged_at_ms: row.get(3)?,
+            disposition_kind,
+            disposition_id: row.get(5)?,
+            held,
+        })
+    }
+
+    /// Whether `session` holds its answer to `attempt`. An envoy's latest
+    /// attempt reflects its agent's attempt in the agent's own workspace,
+    /// where that claim, and any warning that it can't arrive, live.
+    fn answer_held(
+        &self,
+        namespace: &StateNamespace,
+        address: &str,
+        attempt: &str,
+        session: &str,
+    ) -> rusqlite::Result<bool> {
+        let agent_space: Option<String> = self
+            .transaction
+            .query_row(
+                "SELECT origin_space_id FROM space_envoys
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2 AND address_id = ?3",
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    address
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let reflected = agent_space.and_then(|space| {
+            let space = crate::SpaceId::new(space);
+            let attempt = attempt.strip_prefix(&super::bridge::bridged_id(&space, ""))?;
+            Some((
+                StateNamespace::new(namespace.session_socket_id.clone(), space),
+                attempt.to_owned(),
+            ))
+        });
+        let (namespace, attempt) = match reflected {
+            Some((agent, attempt)) => {
+                let warned: bool = self.transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM attention_items
+                     WHERE session_socket_id = ?1 AND worktree_id = ?2
+                       AND attention_item_id = ?3)",
+                    params![
+                        agent.session_socket_id,
+                        agent.space_id.as_str(),
+                        format!("{}{attempt}", super::missing_disposition::ITEM_ID_PREFIX)
+                    ],
+                    |row| row.get(0),
+                )?;
+                if warned {
+                    return Ok(false);
+                }
+                (agent, attempt)
+            }
+            None => (namespace.clone(), attempt.to_owned()),
+        };
+        Ok(crate::final_reply::answer_held(
+            self.state_directory,
+            &namespace,
+            &crate::AgentSessionId::new(session),
+            &crate::DeliveryAttemptId::new(attempt),
+        ))
+    }
+
     pub(crate) fn dashboard_rows(
         &self,
         namespace: &StateNamespace,
@@ -721,7 +828,7 @@ impl StateTransaction<'_> {
         let legs = self.rows(
             &format!(
                 "SELECT r.message_id, r.address_id, d.state, ack.acknowledged_at_ms,
-                        {LEG_DISPOSITION_SQL}
+                        {LEG_DISPOSITION_SQL}, a.attempt_id, a.agent_session_id, {warned}
                  FROM message_recipients r
                  LEFT JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, message_id, address_id)
                  LEFT JOIN delivery_attempts a ON {LATEST_ATTEMPT}
@@ -732,21 +839,10 @@ impl StateTransaction<'_> {
                    AND r.message_id IN ({WINDOW_MESSAGE_IDS})
                  ORDER BY r.message_id, r.recipient_order",
                 answers = leg_answer_joins_sql(),
+                warned = leg_warned_sql(),
             ),
             windowed,
-            |row| {
-                Ok(LegRow {
-                    message_id: row.get(0)?,
-                    address_id: row.get(1)?,
-                    state: row
-                        .get::<_, Option<String>>(2)?
-                        .map(parse_delivery_state)
-                        .transpose()?,
-                    acknowledged_at_ms: row.get(3)?,
-                    disposition_kind: row.get(4)?,
-                    disposition_id: row.get(5)?,
-                })
-            },
+            |row| self.leg_row(namespace, row),
         )?;
         let mailbox = self.rows(
             &format!(
@@ -1158,6 +1254,7 @@ impl StateTransaction<'_> {
                     item,
                     subject_alias,
                     message_id: row.get(8)?,
+                    answer_lost: None,
                 })
             },
         )?;
@@ -1199,6 +1296,7 @@ impl StateTransaction<'_> {
                         },
                         subject_alias: Some(row.get(6)?),
                         message_id: Some(message_id),
+                        answer_lost: None,
                     },
                     idle || body.trim_end().ends_with('?'),
                 ))
@@ -1209,6 +1307,14 @@ impl StateTransaction<'_> {
             .filter(|(_, high)| *high)
             .map(|(item, _)| item.item.id.clone())
             .collect();
+        for item in &mut attention {
+            if item.item.source_kind == crate::AttentionSourceKind::AgentDisposition {
+                item.answer_lost = self.held_answer_lost(
+                    namespace,
+                    &crate::DeliveryAttemptId::new(&item.item.source_id),
+                )?;
+            }
+        }
         attention.extend(relays.into_iter().map(|(item, _)| item));
         attention.sort_unstable_by(|left, right| {
             (

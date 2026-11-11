@@ -5,6 +5,7 @@ import type { AddressId, Alias, Directory } from "./model.ts";
 import {
   chatOf,
   chatPeople,
+  everyoneReplied,
   type RouteLine,
   routeLine,
   sameChat,
@@ -112,6 +113,7 @@ function room(...rows: Row[]) {
   });
   const directory: Directory = { members: channel.members, homes: new Map() };
   return {
+    channel,
     directory,
     line(id = "post", pressed: Pressed = {}): RouteLine | null {
       const message = channel.messages.get(id);
@@ -146,7 +148,11 @@ const refused: Delivery = {
   message: "@claude is not an agent in this workspace.",
 };
 const ids = (...names: string[]) => names as AddressId[];
-const working = { stage: "working", ackedAt: 1 } as const;
+const working = {
+  stage: "working",
+  ackedAt: 1,
+  answerHeld: false,
+} as const;
 const routed = (
   reason: unknown = "build question",
   router: unknown = "claude-haiku",
@@ -628,5 +634,45 @@ test("route line: Send anyway offers the agents the server says the post names, 
       { kind: "mentioned", aliases: ["@claude"] },
       { kind: "send", aliases: ["@claude"], form: "anyway" },
     ],
+  );
+});
+test("route line: a progress note leaves the receipt, which shows the held answer, until the agent answers", () => {
+  const held = { stage: "working", acked_at_ms: 1, answer_held: true };
+  const ask = post("can @claude look?", routed(), [], {
+    legs: [{ to: "claude", stage: held }],
+  });
+  const note = reply("note", "claude", 1_500, { progress_note: true });
+  const receipts = (...rows: Row[]) =>
+    room(ask, ...rows)
+      .line()
+      ?.parts.filter((part) => part.kind === "receipt");
+  assert.deepEqual(receipts(note), [
+    {
+      kind: "receipt",
+      id: "claude",
+      named: false,
+      stage: { stage: "working", ackedAt: 1, answerHeld: true },
+    },
+  ]);
+  assert.deepEqual(receipts(note, reply("answer", "claude", 2_000)), []);
+});
+test("a request outside a room counts as answered once every recipient replied, and a progress note is not a reply", () => {
+  const ask = post("@claude @codex look", null, ["claude", "codex"]);
+  const replied = (...rows: Row[]) => {
+    const groups = threadGroups({
+      ...room(ask, ...rows).channel,
+      runs: [["post", ...rows.map((row) => String(row.message_id))]],
+    });
+    const thread = groups.get("post");
+    assert.ok(thread);
+    return everyoneReplied(thread, ids("claude", "codex"));
+  };
+  const note = (id: string, author: string) =>
+    reply(id, author, 1_500, { progress_note: true });
+  assert.equal(replied(reply("a", "claude", 1_500)), false);
+  assert.equal(replied(reply("a", "claude", 1_500), note("n", "codex")), false);
+  assert.equal(
+    replied(reply("a", "claude", 1_500), reply("b", "codex", 1_600)),
+    true,
   );
 });

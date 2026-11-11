@@ -192,6 +192,25 @@ fn claim(plan: Armed, state: ClaimState) -> Claim {
     }
 }
 
+/// Leaves `session`'s answer to `attempt` held, as its Stop does when its
+/// background work still runs, judging nothing.
+pub(crate) fn hold_answer(
+    state: &Path,
+    namespace: &crate::StateNamespace,
+    session: &str,
+    attempt: &str,
+) {
+    let directory = session_directory(state, &namespace.session_socket_id, session);
+    let mut claims = Claims::lock(directory, STOP_LOCK_WAIT).unwrap();
+    claims.claims.push(Claim {
+        attempt_id: crate::DeliveryAttemptId::new(attempt),
+        namespace: namespace.clone(),
+        awaits: vec!["task".to_owned()],
+        ..claim(reply_plan(), ClaimState::Left(LeaveReason::Held))
+    });
+    claims.save(1);
+}
+
 fn stop(prompt: &str, text: &str) -> StopFacts {
     StopFacts {
         session: "session".into(),

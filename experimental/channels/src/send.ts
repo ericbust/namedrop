@@ -1,13 +1,13 @@
 import type {
   AddressId,
   Alias,
+  ControlTarget,
   DeliverAnswer,
   DeliverFailure,
   DeliverResult,
   SafeText,
   SendFailure,
   SpaceKey,
-  ThreadAction,
 } from "./model.ts";
 import { type ReminderConversation, reminderPath } from "./reminders.ts";
 import {
@@ -193,14 +193,16 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
     },
     async control(
       key: SpaceKey,
-      threadId: string,
-      action: ThreadAction,
+      target: ControlTarget,
       signal: AbortSignal,
     ): Promise<ControlResult> {
       try {
+        // A dismiss is posted only after the person confirmed it.
         const response = await postWithTokenRetry(
-          `/w/${key}/threads/${encodeURIComponent(threadId)}/${action}`,
-          {},
+          target.kind === "thread"
+            ? `/w/${key}/threads/${encodeURIComponent(target.threadId)}/${target.action}`
+            : `/w/${key}/attempts/${encodeURIComponent(target.attemptId)}/dismiss`,
+          target.kind === "thread" ? {} : { confirmed: true },
           signal,
         );
         return response.ok

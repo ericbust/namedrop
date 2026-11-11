@@ -9,11 +9,14 @@ import {
 import { flushSync } from "react-dom";
 import {
   bodyCopy,
+  noRepliesCopy,
   overflowCopy,
   type ParticipantCopy,
   participantCopy,
   pendingCopy,
+  progressNoteCopy,
   receiptCopy,
+  repliesCopy,
   replyInThreadCopy,
   routeCopy,
   SHOWN_RECIPIENTS,
@@ -111,6 +114,9 @@ function previewLimit(text: string, length = PREVIEW): number {
 type Variant = "text" | "plain" | "command" | "output";
 function terminalProvenance(name: string): string {
   return `From ${name}'s terminal (not sent through Namedrop)`;
+}
+function hasPreview(replyCount: number, latestReply: MessageRow | null) {
+  return replyCount > 0 || latestReply?.progressNote === true;
 }
 function Body({
   text: shortText,
@@ -534,7 +540,7 @@ function SystemRow({
         {failed && message.kind !== "reminder" && (
           <Receipts message={message} directory={directory} paused={paused} />
         )}
-        {onThread && replyCount > 0 && (
+        {onThread && hasPreview(replyCount, latestReply ?? null) && (
           <ReplyPreview
             message={message}
             directory={directory}
@@ -599,7 +605,7 @@ function ReplyPreview({
   paneId: string | undefined;
   expanded: boolean;
 }) {
-  const replies = `${count} ${count === 1 ? "reply" : "replies"}`;
+  const replies = count > 0 ? repliesCopy(count) : noRepliesCopy;
   let label = `${replies}. Open thread`;
   let content: ReactNode = null;
   if (reply !== null) {
@@ -613,7 +619,10 @@ function ReplyPreview({
     const text = result
       ? (result.stdout || result.stderr).split("\n", 2).join("\n")
       : reply.body.text;
-    label = `${replies}${count === 1 ? "" : ", latest"} from ${name}${time ? ` at ${time.label}` : ""}. Open thread`;
+    const at = time ? ` at ${time.label}` : "";
+    label = reply.progressNote
+      ? `${replies}. Update from ${name}${at}. Open thread`
+      : `${replies}${count === 1 ? "" : ", latest"} from ${name}${at}. Open thread`;
     content = (
       <>
         <Avatar alias={name} type={type} small />
@@ -633,6 +642,9 @@ function ReplyPreview({
             <span className="terminal-provenance">
               {terminalProvenance(name)}
             </span>
+          )}
+          {reply.progressNote && (
+            <span className="progress-note">{progressNoteCopy}</span>
           )}
           {result && text === "" ? (
             <span className="rp-body no-output">No output</span>
@@ -732,6 +744,7 @@ export const Message = memo(
         className={`msg ${grouped ? "grouped" : "group-start"}${arrive ? " arrive" : ""}${located ? " located" : ""}`}
         data-message-id={message.id}
         data-kind={message.kind}
+        data-progress-note={message.progressNote ? "" : undefined}
       >
         {grouped ? (
           <time className="msg-gutter" dateTime={time?.iso} title={time?.full}>
@@ -791,6 +804,9 @@ export const Message = memo(
               {terminalProvenance(author.name)}
             </p>
           )}
+          {message.progressNote && (
+            <p className="progress-note">{progressNoteCopy}</p>
+          )}
           {message.kind === "result_set" ? (
             <div className="report">
               <h2 className="report-title">
@@ -834,7 +850,7 @@ export const Message = memo(
                   paused={paused}
                 />
               )}
-          {onThread && replyCount > 0 && (
+          {onThread && hasPreview(replyCount, latestReply) && (
             <ReplyPreview
               message={message}
               directory={directory}

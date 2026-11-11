@@ -15,6 +15,8 @@ import {
   responderOf,
 } from "../attention.ts";
 import {
+  type ConfirmedAction,
+  dismissal,
   type ThreadControl,
   type ThreadControlEvent,
   threadControl,
@@ -24,8 +26,9 @@ import { responseCopy, threadControlCopy } from "../copy.ts";
 import type {
   Attention,
   ChannelSnapshot,
+  ControlAction,
+  ControlTarget,
   SpaceKey,
-  ThreadAction,
 } from "../model.ts";
 import { peekTarget } from "../peek.ts";
 import type { ControlResult } from "../send.ts";
@@ -38,11 +41,18 @@ export type FocusAttention = (
 ) => void;
 export type ControlThread = (
   key: SpaceKey,
-  threadId: string,
-  action: ThreadAction,
+  target: ControlTarget,
   signal: AbortSignal,
 ) => Promise<ControlResult>;
 const idle: ThreadControl = { kind: "idle" };
+function failureCopy(action: ControlAction, status: number): string {
+  if (action === "dismiss") {
+    if (status === 404) return threadControlCopy.requestGone;
+    if (status === 409) return threadControlCopy.stillAnswerable;
+    if (status === 410) return threadControlCopy.nothingToDismiss;
+  } else if (status === 404) return threadControlCopy.gone;
+  return threadControlCopy[action].failed;
+}
 // A label wider than the whole row ends in an ellipsis, so its tooltip carries it whole.
 function useWholeLabels(row: RefObject<HTMLElement | null>) {
   useEffect(() => {
@@ -111,9 +121,14 @@ export function AttentionActions({
         : { kind: "loaded", target };
   const peek = member === null ? null : peekTarget(channel.key, member);
   const controls = threadControls(item);
+  const dismissable = dismissal(item);
   const [control, setControl] = useState(idle);
   const busy = control.kind === "pending";
-  const stopButton = useRef<HTMLButtonElement>(null);
+  const askButtons = {
+    stop: useRef<HTMLButtonElement>(null),
+    dismiss: useRef<HTMLButtonElement>(null),
+  } satisfies Record<ConfirmedAction, RefObject<HTMLButtonElement | null>>;
+  const asked = useRef<ConfirmedAction>("stop");
   const confirmButton = useRef<HTMLButtonElement>(null);
   const shown = useRef(control.kind);
   const press = useRef<AbortController | null>(null);
@@ -124,38 +139,86 @@ export function AttentionActions({
     const before = shown.current;
     shown.current = control.kind;
     if (before === control.kind) return;
-    if (control.kind === "confirmingStop") confirmButton.current?.focus();
+    if (control.kind === "confirming") confirmButton.current?.focus();
     else if (
       control.kind !== "pending" &&
-      (before === "confirmingStop" || document.activeElement === document.body)
+      (before === "confirming" || document.activeElement === document.body)
     )
-      stopButton.current?.focus();
+      askButtons[asked.current].current?.focus();
   });
   function act(event: ThreadControlEvent) {
     const next = threadControl(control, event);
     if (next === control) return;
+    if (next.kind === "confirming") asked.current = next.action;
     setControl(next);
-    if (next.kind !== "pending" || controls === null) return;
+    if (next.kind !== "pending") return;
+    const target: ControlTarget | null =
+      next.action === "dismiss"
+        ? dismissable === null
+          ? null
+          : { kind: "attempt", attemptId: dismissable, action: "dismiss" }
+        : controls === null
+          ? null
+          : {
+              kind: "thread",
+              threadId: controls.threadId,
+              action: next.action,
+            };
+    if (target === null) return;
     press.current?.abort();
     press.current = new AbortController();
     const { signal } = press.current;
-    void onControl(channel.key, controls.threadId, next.action, signal).then(
-      (result) => {
-        if (result.kind === "failed" && !signal.aborted)
-          setControl((now) =>
-            threadControl(now, { type: "failed", status: result.status }),
-          );
-      },
-    );
+    void onControl(channel.key, target, signal).then((result) => {
+      if (result.kind === "failed" && !signal.aborted)
+        setControl((now) =>
+          threadControl(now, { type: "failed", status: result.status }),
+        );
+    });
   }
   const cancelOnEscape = (event: KeyboardEvent) => {
     if (event.key !== "Escape") return;
     event.preventDefault();
     act({ type: "cancel" });
   };
-  const confirming =
-    control.kind === "confirmingStop" ||
-    (control.kind === "pending" && control.action === "stop");
+  const confirming: ConfirmedAction | null =
+    control.kind === "confirming"
+      ? control.action
+      : control.kind === "pending" &&
+          (control.action === "stop" || control.action === "dismiss")
+        ? control.action
+        : null;
+  const confirmRow = (action: ConfirmedAction) => (
+    <>
+      <span className="attention-confirm">
+        {action === "stop"
+          ? threadControlCopy.confirm
+          : threadControlCopy.confirmDismissQuestion}
+      </span>
+      <button
+        ref={confirmButton}
+        type="button"
+        className="text-button confirm-stop"
+        aria-disabled={busy}
+        onClick={() => act({ type: "start", action })}
+        onKeyDown={cancelOnEscape}
+      >
+        {busy
+          ? threadControlCopy[action].pending
+          : action === "stop"
+            ? threadControlCopy.confirmStop
+            : threadControlCopy.confirmDismiss}
+      </button>
+      <button
+        type="button"
+        className="text-button"
+        aria-disabled={busy}
+        onClick={() => act({ type: "cancel" })}
+        onKeyDown={cancelOnEscape}
+      >
+        {threadControlCopy.cancel}
+      </button>
+    </>
+  );
   return (
     <>
       <div className="attention-actions" ref={row}>
@@ -173,33 +236,8 @@ export function AttentionActions({
           </button>
         )}
         {controls !== null &&
-          (confirming ? (
-            <>
-              <span className="attention-confirm">
-                {threadControlCopy.confirm}
-              </span>
-              <button
-                ref={confirmButton}
-                type="button"
-                className="text-button confirm-stop"
-                aria-disabled={busy}
-                onClick={() => act({ type: "start", action: "stop" })}
-                onKeyDown={cancelOnEscape}
-              >
-                {busy
-                  ? threadControlCopy.stop.pending
-                  : threadControlCopy.confirmStop}
-              </button>
-              <button
-                type="button"
-                className="text-button"
-                aria-disabled={busy}
-                onClick={() => act({ type: "cancel" })}
-                onKeyDown={cancelOnEscape}
-              >
-                {threadControlCopy.cancel}
-              </button>
-            </>
+          (confirming === "stop" ? (
+            confirmRow("stop")
           ) : (
             <>
               {controls.actions.includes("continue") && (
@@ -217,12 +255,12 @@ export function AttentionActions({
               )}
               {controls.actions.includes("stop") && (
                 <button
-                  ref={stopButton}
+                  ref={askButtons.stop}
                   type="button"
                   className="text-button"
                   title={threadControlCopy.stop.title}
                   aria-disabled={busy}
-                  onClick={() => act({ type: "ask-stop" })}
+                  onClick={() => act({ type: "ask", action: "stop" })}
                 >
                   {threadControlCopy.stop.label}
                 </button>
@@ -269,6 +307,21 @@ export function AttentionActions({
             {responseCopy.pane(member.alias)}
           </PeekControl>
         )}
+        {dismissable !== null &&
+          (confirming === "dismiss" ? (
+            confirmRow("dismiss")
+          ) : (
+            <button
+              ref={askButtons.dismiss}
+              type="button"
+              className="text-button"
+              title={threadControlCopy.dismiss.title}
+              aria-disabled={busy}
+              onClick={() => act({ type: "ask", action: "dismiss" })}
+            >
+              {threadControlCopy.dismiss.label}
+            </button>
+          ))}
         {children}
       </div>
       {control.kind === "failed" && (
@@ -281,9 +334,7 @@ export function AttentionActions({
               : undefined
           }
         >
-          {control.status === 404
-            ? threadControlCopy.gone
-            : threadControlCopy[control.action].failed}
+          {failureCopy(control.action, control.status)}
         </p>
       )}
     </>

@@ -113,6 +113,7 @@ function sameMessage(a: Message, b: Message): boolean {
       a.at === b.at &&
       a.author === b.author &&
       a.kind === b.kind &&
+      a.progressNote === b.progressNote &&
       a.body.text === b.body.text &&
       a.body.truncated === b.body.truncated &&
       a.legs.length === b.legs.length &&
@@ -969,7 +970,8 @@ export function connectionStatus(
   return state.sync.kind;
 }
 
-// The latest time each author wrote anything in a thread.
+// The latest time each author wrote anything in a thread. A progress note
+// says its author is still working, so it doesn't count.
 export type Wrote = ReadonlyMap<AddressId | "human", number>;
 // When each member first wrote or was sent a message in a thread: the time it
 // joined the conversation.
@@ -996,7 +998,7 @@ function wroteIn(group: Pick<ThreadGroup, "parents" | "replies">): Wrote {
   const wrote = new Map<AddressId | "human", number>();
   for (const messages of [group.parents, group.replies])
     for (const message of messages) {
-      if (message.kind === "reminder") continue;
+      if (message.kind === "reminder" || message.progressNote) continue;
       const { author, at } = message;
       wrote.set(author, Math.max(at, wrote.get(author) ?? at));
     }
@@ -1063,6 +1065,10 @@ export function threadGroups(
   for (const group of groups.values())
     group.room = roomOf(group, channel.members);
   return groups;
+}
+export function answerCount(replies: readonly Message[]): number {
+  return replies.filter((row) => row.kind !== "reminder" && !row.progressNote)
+    .length;
 }
 export type MessageRow = {
   kind: "message" | "orphan";
@@ -1143,7 +1149,7 @@ export function timelineView(
         !isSystem(previous);
       const channelChat = room?.kind === "channel";
       const replies = thread.replies.filter((row) => row.kind !== "reminder");
-      const reminderCount = thread.replies.length - replies.length;
+      const answers = answerCount(thread.replies);
       rows.push({
         kind: reply ? "orphan" : "message",
         message,
@@ -1160,10 +1166,10 @@ export function timelineView(
         replyCount: reply
           ? 0
           : Math.max(
-              replies.length,
+              answers,
               thread.knownCount -
                 Math.max(1, thread.parents.length) -
-                reminderCount,
+                (thread.replies.length - answers),
             ),
       });
       previous = reply ? null : message;
