@@ -19,6 +19,7 @@ import type { CompletionContext } from "../complete.ts";
 import {
   absenceCopy,
   answerInPane,
+  noRepliesCopy,
   repliesCopy,
   replyInThreadCopy,
   replyLabel,
@@ -37,6 +38,7 @@ import type {
 } from "../model.ts";
 import { chatOf } from "../route.ts";
 import {
+  answerCount,
   draftKey,
   exitFor,
   type RunIndex,
@@ -200,7 +202,7 @@ export function ThreadPane({
       body.current.scrollTop = body.current.scrollHeight;
   }, [pending]);
   useEscape(pane, onClose);
-  const count = thread.replies.filter((row) => row.kind !== "reminder").length;
+  const count = answerCount(thread.replies);
   const unloaded =
     thread.knownCount > thread.parents.length + thread.replies.length;
   return (
@@ -263,7 +265,7 @@ export function ThreadPane({
             />
           ))}
           <p className="divider">
-            {count === 0 && !unloaded ? "No replies yet" : repliesCopy(count)}
+            {count === 0 && !unloaded ? noRepliesCopy : repliesCopy(count)}
             {unloaded ? " · earlier replies not loaded" : ""}
           </p>
           {thread.replies.map((message) => (

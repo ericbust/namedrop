@@ -2,6 +2,8 @@
 mod cleanup;
 #[path = "support/delivered.rs"]
 mod delivered;
+#[path = "support/executable.rs"]
+mod executable;
 
 use namedrop::{
     AgentRuntime, StateNamespace, StateStore, diagnose_collaboration, execute_control_operation,
@@ -2143,19 +2145,13 @@ fn the_installed_wrappers_pass_the_workspace_picker_through_unchanged() {
     let output_file = fixture.root.join("picker.json");
     fs::write(&output_file, &picker).unwrap();
     let executable = fixture.root.join("hook-result");
-    fs::write(
+    executable::write_executable(
         &executable,
         format!(
             "#!/bin/sh\ncase \"$1 $2\" in\n  'hook user-prompt-submit') cat '{}' ;;\nesac\n",
             output_file.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(
-        &executable,
-        std::os::unix::fs::PermissionsExt::from_mode(0o700),
-    )
-    .unwrap();
+    );
     for host in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
         let package = install_integration_package(
             &fixture.root.join("home"),
@@ -3153,5 +3149,103 @@ fn a_result_for_an_author_that_became_a_terminal_is_saved_without_wedging_the_sh
         ),
         ["settled"],
         "the result is kept in the author's workspace and never typed into its shell"
+    );
+}
+
+/// Where a cross-workspace ask was made, an answer the agent holds for its
+/// background work reads as worked on, as it does in the agent's own
+/// workspace, rather than as ended without an answer.
+#[test]
+fn a_held_answer_to_a_cross_workspace_ask_shows_as_worked_on_where_it_was_asked() {
+    use namedrop::final_reply::{FinalText, HostTurn, StopFacts, settle_at_stop};
+    let fixture = Fixture::new();
+    fixture.register_all();
+    let sent = fixture.agent_send(
+        "w1",
+        "pane-1-lead",
+        "build-1",
+        "#ws2 @tester Run the build.",
+    );
+    fixture.drain("w2");
+    let delivered = fixture.herdr.last_envelope("pane-2-tester");
+    fixture.delivered_in_turn("w2", "pane-2-tester", "tester-turn", &delivered);
+    let running = vec!["build".to_owned()];
+    let stop = StopFacts {
+        session: session("pane-2-tester"),
+        turn: HostTurn::from_ids(None, Some("tester-turn")),
+        running_tasks: running.clone(),
+        started_tasks: running,
+        notified_tasks: Vec::new(),
+        paused_tasks: Vec::new(),
+        ended_tasks: Vec::new(),
+        read_turn: true,
+        text: FinalText::bounded("The build is running."),
+    };
+    settle_at_stop(&fixture.state, "socket-a", &stop, 50, &mut |_| {
+        Err("nothing settles while the answer is held".to_owned())
+    });
+    StateStore::open(&fixture.state)
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.transition_delivery_attempt(
+                &StateNamespace::for_space("socket-a", "w2"),
+                &namedrop::DeliveryAttemptId::new(
+                    delivered["control"]["attempt_id"].as_str().unwrap(),
+                ),
+                namedrop::DeliveryState::Settled,
+                &namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test", 60),
+            )
+        })
+        .unwrap();
+
+    let stage = |workspace: &str, message: &Value| {
+        let rows = StateStore::open(&fixture.state)
+            .unwrap()
+            .dashboard_rows(&StateNamespace::for_space("socket-a", workspace))
+            .unwrap();
+        let snapshot = serde_json::to_value(namedrop::dashboard::snapshot::build(
+            &rows,
+            Some("namedrop/dashboard"),
+            1,
+        ))
+        .unwrap();
+        snapshot["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["message_id"] == *message)
+            .unwrap_or_else(|| panic!("{message} is not in {workspace}: {snapshot}"))["legs"][0]
+            ["stage"]
+            .clone()
+    };
+    let held = |stage: Value| (stage["stage"].clone(), stage["answer_held"].clone());
+    assert_eq!(
+        held(stage("w2", &delivered["control"]["message_id"])),
+        (json!("working"), json!(true)),
+        "the agent's own workspace holds the answer"
+    );
+    assert_eq!(
+        held(stage("w1", &sent["message_id"])),
+        (json!("working"), json!(true)),
+        "the asking workspace says the ask ended without an answer"
+    );
+
+    StateStore::open(&fixture.state)
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.observe_agent_session(
+                &StateNamespace::for_space("socket-a", "w2"),
+                "observation-tester-gone",
+                &namedrop::PaneAddressId::new(address_id("w2", "tester")),
+                &namedrop::AgentSessionId::new(""),
+                "empty",
+                &namedrop::MutationAttribution::new(namedrop::ActorKind::Plugin, "test", 70),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        stage("w1", &sent["message_id"])["stage"],
+        "completed",
+        "the asking workspace still says the agent works on an answer that can't arrive"
     );
 }

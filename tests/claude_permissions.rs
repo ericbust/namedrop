@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
 use namedrop::*;
 use serde_json::{Value, json};
@@ -39,7 +41,9 @@ impl Fixture {
         fs::create_dir_all(home.join(".claude")).unwrap();
         let claude = home.join(".claude");
         let herdr = root.join("herdr");
-        fs::write(&herdr, r#"#!/usr/bin/env python3
+        executable::write_executable(
+            &herdr,
+            r#"#!/usr/bin/env python3
 import json, os, sys
 args=sys.argv[1:]
 w=os.environ['TEST_WORKSPACE']
@@ -51,9 +55,8 @@ elif args[:2]==['pane','list']:
         result['panes'].append({'pane_id':'pane-2','terminal_id':'terminal-2','tab_id':'tab-1','workspace_id':w,'agent':'claude','agent_session':{'value':'session-2'},'agent_status':'idle'})
 else: result={}
 print(json.dumps({'result':result}))
-"#).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&herdr, fs::Permissions::from_mode(0o700)).unwrap();
+"#,
+        );
         Self {
             root,
             home,

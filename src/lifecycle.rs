@@ -877,6 +877,15 @@ where
                         runtime.herdr,
                     )?;
                     let event_namespace = event_worktree.namespace(runtime.session_socket_id);
+                    store
+                        .transaction(|transaction| {
+                            transaction.end_moves_into(
+                                runtime.session_socket_id,
+                                &pane_id,
+                                &attribution,
+                            )
+                        })
+                        .map_err(|error| error.to_string())?;
                     require_activated(&mut store, &event_namespace)?;
                     let removed_address_id = store
                         .transaction(|transaction| {
@@ -2291,7 +2300,11 @@ fn apply_pane_move(
         .into_iter()
         .find(|binding| binding.pane_id == previous_pane_id);
     let Some(binding) = binding else {
-        return Ok(());
+        return transaction.follow_moved_pane(
+            &namespace.session_socket_id,
+            previous_pane_id,
+            replacement_pane_id,
+        );
     };
     if destination_space_id == namespace.space_id.as_str() {
         transaction.move_pane_binding(
@@ -2307,7 +2320,7 @@ fn apply_pane_move(
             replacement_tab_id,
         )
     } else {
-        transaction.unbind_pane(namespace, &binding.address_id, attribution)
+        transaction.unbind_moved_pane(namespace, &binding, replacement_pane_id, attribution)
     }
 }
 

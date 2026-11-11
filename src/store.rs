@@ -107,7 +107,7 @@ mod coordination_ownership;
 pub(crate) mod coordination_review;
 pub mod dashboard;
 mod missing_disposition;
-pub(crate) use missing_disposition::LostSettle;
+pub(crate) use missing_disposition::{LostSettle, SessionGone};
 mod operator;
 pub(crate) use coordination::WakeReadiness;
 pub(crate) use coordination_bridge::TrackedMessage;
@@ -116,8 +116,9 @@ mod groups;
 mod handoff;
 mod terminal;
 mod terminal_relay;
+pub(crate) use terminal_relay::is_progress_note;
 #[cfg(test)]
-pub(crate) use terminal_relay::tests::seed_flagged_relay;
+pub(crate) use terminal_relay::tests::{seed_flagged_relay, seed_unanswered};
 
 pub struct StateStore {
     connection: Connection,
@@ -292,7 +293,10 @@ impl StateStore {
         if !self.read_only {
             crate::work_counters::write_begin();
         }
-        let mut state_transaction = StateTransaction { transaction };
+        let mut state_transaction = StateTransaction {
+            transaction,
+            state_directory: &self.state_directory,
+        };
         let value = operation(&mut state_transaction)?;
         state_transaction.transaction.commit()?;
         Ok(value)
@@ -317,7 +321,10 @@ impl StateStore {
         let summary = purge_summary(&transaction, namespace)?;
         validate_purge(&summary, namespace, typed_space_id)?;
         {
-            let mut state = StateTransaction { transaction };
+            let mut state = StateTransaction {
+                transaction,
+                state_directory: &self.state_directory,
+            };
             state.cancel_purged_copies(namespace, attribution)?;
             delete_namespace_rows(&state.transaction, "main", namespace)?;
             state.transaction.commit()?;
@@ -340,6 +347,9 @@ impl StateStore {
 
 pub struct StateTransaction<'connection> {
     transaction: Transaction<'connection>,
+    /// Where the hooks keep what lives outside the database, such as the
+    /// final-reply claims.
+    state_directory: &'connection Path,
 }
 
 impl StateTransaction<'_> {
@@ -1243,8 +1253,9 @@ impl StateTransaction<'_> {
         if pane_owner.as_deref() == Some(address_id.as_str()) {
             return Ok(());
         }
-        self.unbind_pane(namespace, address_id, attribution)?;
-        self.bind_pane(namespace, binding_id, address_id, pane_id, attribution)
+        self.release_pane_binding(namespace, address_id, attribution)?;
+        self.bind_pane(namespace, binding_id, address_id, pane_id, attribution)?;
+        self.judge_address_attempts(namespace, address_id, attribution)
     }
 
     pub fn unbind_pane(
@@ -1253,6 +1264,86 @@ impl StateTransaction<'_> {
         address_id: &PaneAddressId,
         attribution: &MutationAttribution,
     ) -> Result<(), StoreError> {
+        if self.release_pane_binding(namespace, address_id, attribution)? {
+            self.judge_address_attempts(namespace, address_id, attribution)?;
+        }
+        Ok(())
+    }
+
+    /// Unbinds `binding`, whose pane moved to another workspace as
+    /// `destination_pane_id`. Its session lives on there, so the ended
+    /// binding keeps the pane's new id and no `unbound_at_ms`: no clock runs
+    /// on it until that pane goes away, which `end_moves_into` records.
+    pub(crate) fn unbind_moved_pane(
+        &mut self,
+        namespace: &StateNamespace,
+        binding: &crate::PaneBindingRecord,
+        destination_pane_id: &str,
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        if !self.release_pane_binding(namespace, &binding.address_id, attribution)? {
+            return Ok(());
+        }
+        self.transaction.execute(
+            "UPDATE pane_bindings SET pane_id = ?4, unbound_at_ms = NULL
+             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND binding_id = ?3",
+            params![
+                namespace.session_socket_id,
+                namespace.space_id.as_str(),
+                binding.id.as_str(),
+                destination_pane_id
+            ],
+        )?;
+        self.judge_address_attempts(namespace, &binding.address_id, attribution)
+    }
+
+    /// Keeps the record of a pane that moved out of its workspace on that
+    /// pane as it moves again.
+    pub(crate) fn follow_moved_pane(
+        &mut self,
+        session_socket_id: &str,
+        previous_pane_id: &str,
+        replacement_pane_id: &str,
+    ) -> Result<(), StoreError> {
+        self.transaction.execute(
+            "UPDATE pane_bindings SET pane_id = ?3
+             WHERE session_socket_id = ?1 AND pane_id = ?2
+               AND active = 0 AND unbound_at_ms IS NULL",
+            params![session_socket_id, previous_pane_id, replacement_pane_id],
+        )?;
+        Ok(())
+    }
+
+    /// Starts the unbound clock of every address whose pane moved out of its
+    /// workspace and has now closed or exited as `pane_id`.
+    pub(crate) fn end_moves_into(
+        &mut self,
+        session_socket_id: &str,
+        pane_id: &str,
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        self.transaction.execute(
+            "UPDATE pane_bindings SET unbound_at_ms = ?3
+             WHERE session_socket_id = ?1 AND pane_id = ?2
+               AND active = 0 AND unbound_at_ms IS NULL",
+            params![
+                session_socket_id,
+                pane_id,
+                to_i64(attribution.occurred_at_ms)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Ends the address's active binding, if it has one, and says whether it
+    /// did. The caller judges its attempts again once it has finished
+    /// changing the address.
+    fn release_pane_binding(
+        &mut self,
+        namespace: &StateNamespace,
+        address_id: &PaneAddressId,
+        attribution: &MutationAttribution,
+    ) -> Result<bool, StoreError> {
         operator::refuse_pane_mutation(address_id)?;
         let changed = self.transaction.execute(
             "UPDATE pane_bindings
@@ -1278,7 +1369,7 @@ impl StateTransaction<'_> {
                 attribution,
             )?;
         }
-        Ok(())
+        Ok(changed == 1)
     }
 
     pub fn observe_agent_session(
@@ -1318,6 +1409,10 @@ impl StateTransaction<'_> {
             attribution,
         )?;
         self.expire_context_grants(namespace, address_id, Some(agent_session_id))?;
+        let changed = self
+            .latest_session_observation(namespace, address_id)?
+            .as_deref()
+            != Some(agent_session_id.as_str());
         self.transaction.execute(
             "INSERT INTO agent_session_observations (
                 session_socket_id, worktree_id, observation_id, address_id,
@@ -1343,7 +1438,11 @@ impl StateTransaction<'_> {
                 TransitionKind::Occupied
             },
             attribution,
-        )
+        )?;
+        if changed {
+            self.judge_address_attempts(namespace, address_id, attribution)?;
+        }
+        Ok(())
     }
 
     fn expire_context_grants(
@@ -2233,7 +2332,7 @@ impl StateTransaction<'_> {
                 "Pane Address retirement requires every queued delivery to be terminal or cancelled",
             ));
         }
-        self.unbind_pane(namespace, address_id, attribution)?;
+        self.release_pane_binding(namespace, address_id, attribution)?;
         let changed = self.transaction.execute(
             "UPDATE pane_addresses
              SET retired = 1, collaboration_disabled = 1
@@ -2256,7 +2355,8 @@ impl StateTransaction<'_> {
             address_id.as_str(),
             TransitionKind::Retired,
             attribution,
-        )
+        )?;
+        self.judge_address_attempts(namespace, address_id, attribution)
     }
 
     /// Remove one Pane Address as a single human action: retirement performs
@@ -2639,6 +2739,7 @@ impl StateTransaction<'_> {
                  FROM collaboration_messages m
                  WHERE m.session_socket_id = ?1 AND m.worktree_id = ?2 AND m.message_id <> ?3
                    AND {} NOT IN ('terminal-relay/v1', 'terminal-result/v1', 'reminder/v1')
+                   AND NOT {}
                    AND (NOT EXISTS(SELECT 1 FROM mailbox_deliveries d
                             WHERE d.session_socket_id = m.session_socket_id AND d.worktree_id = m.worktree_id
                               AND d.message_id = m.message_id)
@@ -2661,7 +2762,8 @@ impl StateTransaction<'_> {
              ORDER BY (is_named AND nth <= 3) DESC, CASE WHEN is_named AND nth <= 3 THEN nth ELSE 0 END,
                       at DESC, turn DESC
              LIMIT 6",
-            terminal_relay::effective_grammar_sql("m")
+            terminal_relay::effective_grammar_sql("m"),
+            terminal_relay::progress_note_sql("m")
         ))?;
         let mut lines = statement
             .query_map(
@@ -4010,9 +4112,10 @@ impl StateTransaction<'_> {
             let mut statement = self.transaction.prepare(&format!(
                 "SELECT body FROM collaboration_messages m
                  WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3
-                   AND {} <> 'terminal-relay/v1'
+                   AND {} <> 'terminal-relay/v1' AND NOT {}
                  ORDER BY thread_order DESC LIMIT 20",
-                terminal_relay::effective_grammar_sql("m")
+                terminal_relay::effective_grammar_sql("m"),
+                terminal_relay::progress_note_sql("m")
             ))?;
             statement
                 .query_map(
@@ -6770,13 +6873,13 @@ impl StateTransaction<'_> {
             })?;
         let principal = self.principal(namespace, &address)?;
         let retired = retired || self.address_retired(&principal.ns, &principal.address_id)?;
-        if !retired
-            && !self
-                .recipient_session_now(&principal.ns, &principal.address_id)?
-                .replaced(&pinned_session)
+        if self
+            .recipient_session_now(&principal.ns, &principal.address_id, by.occurred_at_ms)?
+            .gone(&pinned_session, retired)
+            .is_none()
         {
             return Err(StoreError::invalid_input(
-                "the recipient address is not retired and its session is unchanged; only its exact Agent Session can record this attempt's disposition",
+                "the recipient address is not retired and its session is unchanged and has not ended; only its exact Agent Session can record this attempt's disposition",
             ));
         }
         let acknowledged: bool = self.transaction.query_row(

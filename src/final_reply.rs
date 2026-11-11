@@ -773,6 +773,8 @@ struct TurnSeen {
 struct Claims {
     directory: PathBuf,
     claims: Vec<Claim>,
+    /// Each claim's state when this call read the file.
+    read: Vec<(crate::DeliveryAttemptId, ClaimState)>,
     _lock: fs::File,
 }
 
@@ -835,6 +837,98 @@ fn read_claims(directory: &Path) -> Vec<Claim> {
     serde_json::from_slice(&bytes).unwrap_or_default()
 }
 
+/// How long after its pane was seen idle a turn's Stop hook may still arrive.
+/// The idle status and the Stop race by milliseconds; a turn interrupted with
+/// Esc, or ended by an API error, has no Stop at all.
+pub(crate) const STOP_ARRIVAL_GRACE_MS: u64 = 5_000;
+
+/// What a session's claim says about its answer to one attempt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AnswerClaim {
+    /// A Stop may still decide whether the final message answers, until
+    /// `until_ms`.
+    Deciding { until_ms: u64 },
+    /// The Stop held the answer while background work or a helper runs.
+    Held,
+    /// No claim, one the Stop settled or left unanswered, or one whose Stop
+    /// never came or whose worker was lost.
+    Neither,
+}
+
+/// `session`'s claim on `attempt`, read without the lock.
+fn find_claim(
+    state: &Path,
+    namespace: &crate::StateNamespace,
+    session: &crate::AgentSessionId,
+    attempt: &crate::DeliveryAttemptId,
+) -> (PathBuf, Option<Claim>) {
+    let directory = session_directory(state, &namespace.session_socket_id, session.as_str());
+    let claim = read_claims(&directory)
+        .into_iter()
+        .find(|claim| claim.attempt_id == *attempt && claim.namespace == *namespace);
+    (directory, claim)
+}
+
+/// What `session`'s claim says at `now_ms` about its answer to `attempt`,
+/// whose pane was seen idle at `idle_since_ms`. An open claim is decided by
+/// its Stop's worker within `STOPPED_GRACE_MS` of the Stop, or by a Stop
+/// that arrives within `STOP_ARRIVAL_GRACE_MS` of the pane going idle.
+pub(crate) fn answer_claim<E>(
+    state: &Path,
+    namespace: &crate::StateNamespace,
+    session: &crate::AgentSessionId,
+    attempt: &crate::DeliveryAttemptId,
+    idle_since_ms: impl FnOnce() -> Result<u64, E>,
+    now_ms: u64,
+) -> Result<AnswerClaim, E> {
+    let (directory, claim) = find_claim(state, namespace, session, attempt);
+    Ok(match claim.map(|claim| (claim.state, claim.turn)) {
+        Some((ClaimState::Open, turn)) => {
+            let until_ms = match stopped_at(&directory, &turn) {
+                Some(at) => at.saturating_add(STOPPED_GRACE_MS),
+                None => idle_since_ms()?.saturating_add(STOP_ARRIVAL_GRACE_MS),
+            };
+            if now_ms < until_ms {
+                AnswerClaim::Deciding { until_ms }
+            } else {
+                AnswerClaim::Neither
+            }
+        }
+        Some((ClaimState::Left(LeaveReason::Held), _)) => AnswerClaim::Held,
+        _ => AnswerClaim::Neither,
+    })
+}
+
+/// Whether `session`'s claim holds its answer to `attempt`.
+pub(crate) fn answer_held(
+    state: &Path,
+    namespace: &crate::StateNamespace,
+    session: &crate::AgentSessionId,
+    attempt: &crate::DeliveryAttemptId,
+) -> bool {
+    find_claim(state, namespace, session, attempt)
+        .1
+        .is_some_and(|claim| claim.state == ClaimState::Left(LeaveReason::Held))
+}
+
+/// The attempts in `namespace` whose claims of `session` still wait for a
+/// Stop to decide them.
+pub(crate) fn open_claims(
+    state: &Path,
+    namespace: &crate::StateNamespace,
+    session: &crate::AgentSessionId,
+) -> Vec<crate::DeliveryAttemptId> {
+    read_claims(&session_directory(
+        state,
+        &namespace.session_socket_id,
+        session.as_str(),
+    ))
+    .into_iter()
+    .filter(|claim| claim.state == ClaimState::Open && claim.namespace == *namespace)
+    .map(|claim| claim.attempt_id)
+    .collect()
+}
+
 impl Claims {
     fn lock(directory: PathBuf, wait: Duration) -> Option<Self> {
         fs::create_dir_all(&directory).ok()?;
@@ -853,11 +947,32 @@ impl Claims {
             }
             thread::sleep(Duration::from_millis(10));
         }
+        let claims = read_claims(&directory);
         Some(Self {
-            claims: read_claims(&directory),
+            read: claims
+                .iter()
+                .map(|claim| (claim.attempt_id.clone(), claim.state))
+                .collect(),
+            claims,
             directory,
             _lock: lock,
         })
+    }
+
+    /// The claims this call decided, other than by a failed settle, which
+    /// warns on its own. While a claim waits for its Stop the settle raises
+    /// nothing for its attempt, so every way out of that is judged here.
+    fn newly_decided(&self) -> Vec<(crate::StateNamespace, crate::DeliveryAttemptId)> {
+        self.claims
+            .iter()
+            .filter(|claim| {
+                !matches!(
+                    claim.state,
+                    ClaimState::Open | ClaimState::Left(LeaveReason::OperationFailed)
+                ) && !self.read.contains(&(claim.attempt_id.clone(), claim.state))
+            })
+            .map(|claim| (claim.namespace.clone(), claim.attempt_id.clone()))
+            .collect()
     }
 
     /// The held claim that notices of `tasks` reaching `turn` wake: the
@@ -993,7 +1108,9 @@ impl Claims {
         }
     }
 
-    fn save(mut self, now_ms: u64) {
+    /// Saves the claims and releases the lock. Returns the claims this call
+    /// decided, once the file says so.
+    fn save(mut self, now_ms: u64) -> Vec<(crate::StateNamespace, crate::DeliveryAttemptId)> {
         self.claims
             .retain(|claim| claim.updated_at_ms.saturating_add(KEEP_MS) > now_ms);
         self.prune_turns(now_ms);
@@ -1027,9 +1144,55 @@ impl Claims {
                 file.write_all(&serde_json::to_vec_pretty(&self.claims)?)?;
                 file.sync_all()
             });
-        if written.is_ok() {
-            let _ = fs::rename(next, self.directory.join("claims.json"));
+        if written.is_ok() && fs::rename(next, self.directory.join("claims.json")).is_ok() {
+            self.newly_decided()
+        } else {
+            Vec::new()
         }
+    }
+}
+
+/// How long the Stop worker keeps trying to judge, after its own lock wait
+/// and inside its 10 second deadline.
+const STOP_JUDGE_BUDGET: Duration = Duration::from_secs(4);
+/// The prompt hook's share, well inside the host's 10 second hook timeout.
+const PROMPT_JUDGE_BUDGET: Duration = Duration::from_secs(2);
+const JUDGE_TRY_WAIT: Duration = Duration::from_millis(500);
+const JUDGE_PAUSE: Duration = Duration::from_millis(100);
+
+/// Brings the ND-DELIVERY-003 warning of each claim a call decided in line
+/// with the claims it saved. The idle settle may judge the delivery before or
+/// after the Stop, from another process, and raises nothing while the Stop
+/// may still decide, so this judges a turn that ended with no answer at
+/// once. It tries again while the store refuses it, for at most `budget`.
+/// Still not covered: a Stop worker killed at its deadline between saving
+/// the claims and judging them, and a store busy past the budget. Those are
+/// judged again only when the session changes.
+fn judge_decided(
+    state: &Path,
+    decided: &[(crate::StateNamespace, crate::DeliveryAttemptId)],
+    now_ms: u64,
+    budget: Duration,
+) {
+    if decided.is_empty() || !matches!(crate::StateStore::open_read_only(state), Ok(Some(_))) {
+        return;
+    }
+    let by = crate::MutationAttribution::new(crate::ActorKind::Plugin, "namedrop", now_ms);
+    let deadline = Instant::now() + budget;
+    loop {
+        let wait = deadline.saturating_duration_since(Instant::now());
+        let judged = crate::StateStore::open(state).and_then(|mut store| {
+            store.set_busy_timeout(wait.min(JUDGE_TRY_WAIT))?;
+            store.transaction(|transaction| {
+                decided.iter().try_for_each(|(namespace, attempt)| {
+                    transaction.judge_decided_claim(namespace, attempt, &by)
+                })
+            })
+        });
+        if judged.is_ok() || deadline.saturating_duration_since(Instant::now()) <= JUDGE_PAUSE {
+            return;
+        }
+        thread::sleep(JUDGE_PAUSE);
     }
 }
 
@@ -1321,7 +1484,7 @@ pub(crate) fn observe_prompt(
     }
     // The delivery whose work this notice finished is listed first.
     left_open.sort_by_key(|way_back| !way_back.finished);
-    claims.save(now_ms);
+    judge_decided(state, &claims.save(now_ms), now_ms, PROMPT_JUDGE_BUDGET);
     Observed { armed, left_open }
 }
 
@@ -1529,6 +1692,11 @@ pub fn settle_at_stop(
             Verdict::Ignore => continue,
             Verdict::Leave(LeaveReason::Held) => {
                 claim.awaits = stop.awaited(claim);
+                // The person sees what the agent said at once. A failed note
+                // leaves the answer held all the same.
+                if claim.plan == Armed::NoReply(NoReplyCase::Relayed) {
+                    let _ = progress_note(state, &stop.session, claim, &stop.text.text, now_ms);
+                }
                 ClaimState::Left(LeaveReason::Held)
             }
             Verdict::Leave(reason) => ClaimState::Left(reason),
@@ -1554,7 +1722,7 @@ pub fn settle_at_stop(
         };
         claim.set(next, now_ms);
     }
-    claims.save(now_ms);
+    judge_decided(state, &claims.save(now_ms), now_ms, STOP_JUDGE_BUDGET);
 }
 
 impl Claim {
@@ -1660,6 +1828,33 @@ fn relay(
     })
 }
 
+/// Posts a held Relayed claim's final message as a note that the agent is
+/// still working, leaving its delivery open.
+fn progress_note(
+    state: &Path,
+    session: &str,
+    claim: &Claim,
+    text: &str,
+    now_ms: u64,
+) -> Result<Option<crate::MessageId>, crate::StoreError> {
+    crate::StateStore::open(state)?.transaction(|transaction| {
+        transaction.post_progress_note(
+            &claim.namespace,
+            &crate::TerminalRelayEnd {
+                agent_session_id: crate::AgentSessionId::new(session),
+                attempt_id: claim.attempt_id.clone(),
+                turn_started_at_ms: claim.armed_at_ms,
+                ended_at_ms: now_ms,
+                text: text.to_owned(),
+            },
+            &claim.turn,
+            &crate::MutationAttribution::new(crate::ActorKind::Plugin, "namedrop", now_ms),
+        )
+    })
+}
+
 #[cfg(test)]
 #[path = "final_reply_tests.rs"]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::hold_answer;

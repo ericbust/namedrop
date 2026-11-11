@@ -2,6 +2,8 @@
 mod cleanup;
 #[path = "support/delivered.rs"]
 mod delivered;
+#[path = "support/executable.rs"]
+mod executable;
 
 #[path = "support/xws.rs"]
 mod xws;
@@ -14,7 +16,7 @@ use std::{
     net::TcpStream,
     os::{
         fd::{AsRawFd, FromRawFd},
-        unix::{fs::PermissionsExt, process::CommandExt},
+        unix::process::CommandExt,
     },
     process::{Child, Command, Stdio},
     thread,
@@ -52,9 +54,28 @@ fn configure(f: &Fixture, response: Value) {
     fs::rename(temporary, f.root.join("observer.json")).unwrap();
 }
 
+fn responses(f: &Fixture) -> Value {
+    let mut responses = serde_json::Map::new();
+    for entry in fs::read_dir(f.root.join("responses")).unwrap() {
+        let entry = entry.unwrap();
+        responses.insert(
+            entry.file_name().into_string().unwrap(),
+            json!(fs::read_to_string(entry.path()).unwrap()),
+        );
+    }
+    Value::Object(responses)
+}
+
+fn store_responses(f: &Fixture, responses: &Value) {
+    for (key, value) in responses.as_object().unwrap() {
+        let temporary = f.root.join(format!("{key}.next"));
+        fs::write(&temporary, value.as_str().unwrap()).unwrap();
+        fs::rename(temporary, f.root.join("responses").join(key)).unwrap();
+    }
+}
+
 fn metadata_with_rows(f: &Fixture, rows: Value) -> Value {
-    let mut responses: Value =
-        serde_json::from_slice(&fs::read(f.root.join("responses.json")).unwrap()).unwrap();
+    let mut responses = responses(f);
     let mut panes: Value =
         serde_json::from_str(responses["pane list --workspace w1"].as_str().unwrap()).unwrap();
     panes["result"]["panes"][0]["scroll"] = json!({"viewport_rows": rows});
@@ -63,19 +84,14 @@ fn metadata_with_rows(f: &Fixture, rows: Value) -> Value {
 }
 
 fn set_rows(f: &Fixture, rows: Value) {
-    let temporary = f.root.join("responses-next.json");
-    fs::write(&temporary, metadata_with_rows(f, rows).to_string()).unwrap();
-    fs::rename(temporary, f.root.join("responses.json")).unwrap();
+    store_responses(f, &metadata_with_rows(f, rows));
 }
 
 fn set_process_info(f: &Fixture, info: Value) {
-    let mut responses: Value =
-        serde_json::from_slice(&fs::read(f.root.join("responses.json")).unwrap()).unwrap();
-    responses["pane process-info --pane pane-1-lead"] =
-        json!(json!({"result":{"process_info":info}}).to_string());
-    let temporary = f.root.join("responses-next.json");
-    fs::write(&temporary, responses.to_string()).unwrap();
-    fs::rename(temporary, f.root.join("responses.json")).unwrap();
+    store_responses(
+        f,
+        &json!({"pane process-info --pane pane-1-lead": json!({"result":{"process_info":info}}).to_string()}),
+    );
 }
 
 struct SourcePty {
@@ -227,6 +243,17 @@ fn geometry_invocations(f: &Fixture) -> Vec<Value> {
         .collect()
 }
 
+/// Probe starts are at least a second apart, so `since.elapsed()` admits at
+/// most one more probe than its whole seconds.
+fn assert_throttled_probes(f: &Fixture, since: Instant, at_least: usize) {
+    let probes = geometry_invocations(f).len();
+    let allowed = 1 + since.elapsed().as_secs() as usize;
+    assert!(
+        (at_least..=allowed).contains(&probes),
+        "{probes} TTY probes, expected {at_least} to {allowed}"
+    );
+}
+
 fn path(socket: &str, workspace: &str, alias: &str) -> String {
     format!(
         "/w/{}/participants/{}/live",
@@ -250,17 +277,37 @@ impl Server {
                 json!(f.herdr.execute(&args).unwrap().stdout),
             );
         }
-        fs::write(
-            f.root.join("responses.json"),
-            serde_json::to_vec(&responses).unwrap(),
-        )
-        .unwrap();
+        fs::create_dir_all(f.root.join("responses")).unwrap();
+        store_responses(f, &Value::Object(responses));
         configure(f, json!({}));
         configure_history(f, "");
+        // The dashboard gives Herdr metadata reads 150 to 500 ms. Python start-up
+        // under load outlasts that, so stored replies are answered by bash builtins.
         let shim = f.root.join("herdr");
-        fs::write(&shim, r#"#!/usr/bin/python3
-import base64,json,os,subprocess,sys,time
+        executable::write_executable(
+            &shim,
+            r#"#!/bin/bash
+root=${0%/*}
+if [ "$1 $2" = 'pane process-info' ]; then
+    printf '{"args":["pane","process-info","--pane","%s"]}\n' "$4" >>"$root/geometry-reads.jsonl"
+fi
+response="$root/responses/$*"
+IFS= read -r -d '' config <"$root/observer.json"
+if [ -f "$response" ] && [[ $config != *native_identity_gate* ]]; then
+    IFS= read -r -d '' body <"$response"
+    printf '%s\n' "$body"
+    exit 0
+fi
+exec /usr/bin/python3 "$root/herdr.py" "$@"
+"#,
+        );
+        fs::write(f.root.join("herdr.py"), r#"import base64,json,os,subprocess,sys,time
 root=os.path.dirname(__file__);args=sys.argv[1:]
+def store(responses):
+    for key,value in responses.items():
+        temporary=os.path.join(root,'%s.%d'%(key,os.getpid()))
+        with open(temporary,'w') as file:file.write(value)
+        os.replace(temporary,os.path.join(root,'responses',key))
 if args[:3]==['terminal','session','observe']:
     config=json.load(open(os.path.join(root,'observer.json')))
     child=None
@@ -282,7 +329,7 @@ if args[:3]==['terminal','session','observe']:
         while not os.path.exists(os.path.join(root,config['gate'])):time.sleep(.01)
     time.sleep(config.get('delay_rows',{}).get(str(rows),0))
     if config.get('mutate_metadata'):
-        json.dump(config['mutate_metadata'],open(os.path.join(root,'responses.json'),'w'))
+        store(config['mutate_metadata'])
     if config.get('raw') is not None:
         os.write(1,config['raw'].encode());sys.exit(0)
     if config.get('oversize'):
@@ -310,19 +357,16 @@ if args[:2]==['pane','read']:
             log.write(json.dumps({'args':args,'socket':os.environ.get('HERDR_SOCKET_PATH'),'pane':os.environ.get('HERDR_PANE_ID')})+'\n')
         config=json.load(open(os.path.join(root,'observer.json')))
         if config.get('history_mutate_metadata'):
-            json.dump(config['history_mutate_metadata'],open(os.path.join(root,'responses.json'),'w'))
+            store(config['history_mutate_metadata'])
         os.write(1,json.load(open(os.path.join(root,'history.json'))).encode());sys.exit(0)
     print('SANITIZED SNAPSHOT');sys.exit(0)
 if args[:2] in [['pane','run'],['pane','send-text'],['pane','send-keys']]:
     with open(os.path.join(root,'reads.jsonl'),'a') as log:
         log.write(json.dumps({'args':args,'socket':os.environ.get('HERDR_SOCKET_PATH')})+'\n')
     sys.exit(0)
-if args[:2]==['pane','process-info']:
-    with open(os.path.join(root,'geometry-reads.jsonl'),'a') as log:
-        log.write(json.dumps({'args':args})+'\n')
-responses=json.load(open(os.path.join(root,'responses.json')))
 key=' '.join(args)
-if key in responses:
+response=os.path.join(root,'responses',key)
+if os.path.isfile(response):
     config=json.load(open(os.path.join(root,'observer.json')))
     if key=='pane list --workspace w1' and config.get('native_identity_gate'):
         gate=os.path.join(root,config['native_identity_gate'])
@@ -331,11 +375,10 @@ if key in responses:
         except FileExistsError:pass
         else:
             while not os.path.exists(gate):time.sleep(.01)
-    print(responses[key])
+    print(open(response).read())
 elif args[:2]==['worktree','list']:sys.stderr.write('{"error":{"code":"not_git_worktree"}}');sys.exit(1)
 else:sys.exit(1)
 "#).unwrap();
-        fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_namedrop"))
             .arg("--plugin-state")
             .arg(&f.state)
@@ -828,11 +871,12 @@ fn cached_tty_rechecks_startup_resize_without_rediscovery_or_retained_descriptor
     let server = Server::start(&f);
     let source = SourcePty::new(200, 80);
     set_process_info(&f, json!({"tty":source.path}));
-    configure(&f, json!({"delay_rows":{"80":0.3},"quiet":true}));
+    configure(&f, json!({"gate":"resized","quiet":true}));
     thread::scope(|scope| {
         scope.spawn(|| {
             wait_for(|| !invocations(&f).is_empty());
             source.resize(240, 80);
+            fs::write(f.root.join("resized"), "").unwrap();
         });
         let mut live = server.live(&path("socket-a", "w1", "lead"));
         let reset = live.record().unwrap();
@@ -858,10 +902,11 @@ fn failed_tty_discovery_throttles_startup_but_rechecks_metadata_rows() {
         &f,
         json!({"mutate_metadata":metadata_with_rows(&f, json!(80)),"quiet":true}),
     );
+    let started = Instant::now();
     let mut live = server.live(&path("socket-a", "w1", "lead"));
     let reset = live.record().unwrap();
     assert_eq!(reset["rows"], 80);
-    assert_eq!(geometry_invocations(&f).len(), 1);
+    assert_throttled_probes(&f, started, 1);
     assert_eq!(invocations(&f).len(), 2);
     let source = SourcePty::new(200, 70);
     set_process_info(&f, json!({"tty":source.path}));
@@ -870,8 +915,7 @@ fn failed_tty_discovery_throttles_startup_but_rechecks_metadata_rows() {
     assert_eq!(resized["cols"], 200);
     assert_eq!(resized["rows"], 70);
     assert_eq!(resized["continuity"], reset["continuity"]);
-    let calls = geometry_invocations(&f);
-    assert_eq!(calls.len(), 2);
+    assert_throttled_probes(&f, started, 2);
 }
 
 #[test]
@@ -1250,7 +1294,7 @@ fn identity_replacement_during_reobservation_closes_original_continuity() {
         serde_json::from_str(responses["pane list --workspace w1"].as_str().unwrap()).unwrap();
     panes["result"]["panes"][0]["terminal_id"] = json!("replacement");
     responses["pane list --workspace w1"] = json!(panes.to_string());
-    fs::write(f.root.join("responses.json"), responses.to_string()).unwrap();
+    store_responses(&f, &responses);
     assert_eq!(
         live.record().unwrap(),
         json!({"v":1,"seq":2,"kind":"closed","reason":"replaced"})
@@ -1331,13 +1375,12 @@ fn input_submits_text_once_and_sends_allowlisted_keys() {
         ("--help  preserve 'quotes' and café", "working"),
         ("--help", "blocked"),
     ] {
-        let file = f.root.join("responses.json");
-        let mut responses: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        let mut responses = responses(&f);
         let mut panes: Value =
             serde_json::from_str(responses["pane list --workspace w1"].as_str().unwrap()).unwrap();
         panes["result"]["panes"][0]["agent_status"] = json!(status);
         responses["pane list --workspace w1"] = json!(panes.to_string());
-        fs::write(file, responses.to_string()).unwrap();
+        store_responses(&f, &responses);
         assert_eq!(
             post_input(
                 &server,
@@ -1411,16 +1454,14 @@ fn input_revalidation_allows_fresh_idle_but_refuses_replacement() {
                     f.db().execute("UPDATE agent_session_observations SET agent_session_id = 'replacement' WHERE address_id = ?1", [xws::address_id("w1", "lead")]).unwrap();
                 }
                 "terminal" => {
-                    let file = f.root.join("responses.json");
-                    let mut responses: Value =
-                        serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+                    let mut responses = responses(&f);
                     let mut panes: Value = serde_json::from_str(
                         responses["pane list --workspace w1"].as_str().unwrap(),
                     )
                     .unwrap();
                     panes["result"]["panes"][0]["terminal_id"] = json!("replacement");
                     responses["pane list --workspace w1"] = json!(panes.to_string());
-                    fs::write(file, responses.to_string()).unwrap();
+                    store_responses(&f, &responses);
                 }
                 _ => unreachable!(),
             }
@@ -1482,25 +1523,24 @@ fn input_refuses_wrong_binding_changed_session_and_offline_pane() {
     f.db().execute("UPDATE agent_session_observations SET agent_session_id = 'different' WHERE address_id = ?1", [xws::address_id("w1", "lead")]).unwrap();
     assert_eq!(post_input(&server, &target, &body).status, 410);
     f.db().execute("UPDATE agent_session_observations SET agent_session_id = 'session-pane-1-lead' WHERE address_id = ?1", [xws::address_id("w1", "lead")]).unwrap();
-    let rp = f.root.join("responses.json");
-    let mut responses: Value = serde_json::from_str(&fs::read_to_string(&rp).unwrap()).unwrap();
+    let mut responses = responses(&f);
     let mut panes: Value =
         serde_json::from_str(responses["pane list --workspace w1"].as_str().unwrap()).unwrap();
     panes["result"]["panes"][0]["agent_session"] = json!({"value":"changed-native-session"});
     responses["pane list --workspace w1"] = json!(panes.to_string());
-    fs::write(&rp, responses.to_string()).unwrap();
+    store_responses(&f, &responses);
     assert_eq!(post_input(&server, &target, &body).status, 410);
     panes["result"]["panes"][0]
         .as_object_mut()
         .unwrap()
         .remove("agent_session");
     responses["pane list --workspace w1"] = json!(panes.to_string());
-    fs::write(&rp, responses.to_string()).unwrap();
+    store_responses(&f, &responses);
     assert_eq!(post_input(&server, &target, &body).status, 410);
     panes["result"]["panes"][0]["agent_session"] = json!({"value":"session-pane-1-lead"});
     panes["result"]["panes"][0]["agent_status"] = json!("offline");
     responses["pane list --workspace w1"] = json!(panes.to_string());
-    fs::write(&rp, responses.to_string()).unwrap();
+    store_responses(&f, &responses);
     assert_eq!(post_input(&server, &target, &body).status, 410);
     assert!(!invocations(&f).iter().any(|call| matches!(
         call["args"][1].as_str(),
@@ -1624,8 +1664,7 @@ fn recent_history_is_bounded_sanitized_and_sent_after_reset() {
 fn history_from_a_replaced_native_session_is_never_sent() {
     let f = Fixture::new();
     let server = Server::start(&f);
-    let mut responses: Value =
-        serde_json::from_str(&fs::read_to_string(f.root.join("responses.json")).unwrap()).unwrap();
+    let mut responses = responses(&f);
     let mut panes: Value =
         serde_json::from_str(responses["pane list --workspace w1"].as_str().unwrap()).unwrap();
     panes["result"]["panes"][0]["terminal_id"] = json!("replacement");
@@ -1844,17 +1883,16 @@ fn continuity_refuses_host_and_recorded_session_changes_and_server_restart() {
     let retry = format!("{p}?continuity={}", reset["continuity"].as_str().unwrap());
     assert_eq!(server.get(&retry).status, 200);
     let before = invocations(&f).len();
-    let rp = f.root.join("responses.json");
-    let original = fs::read_to_string(&rp).unwrap();
-    let mut responses: Value = serde_json::from_str(&original).unwrap();
+    let original = responses(&f);
+    let mut responses = original.clone();
     let mut panes: Value =
         serde_json::from_str(responses["pane list --workspace w1"].as_str().unwrap()).unwrap();
     panes["result"]["panes"][0]["terminal_id"] = json!("different-immutable-id");
     responses["pane list --workspace w1"] = json!(panes.to_string());
-    fs::write(&rp, responses.to_string()).unwrap();
+    store_responses(&f, &responses);
     assert_eq!(server.get(&retry).status, 410);
     assert_eq!(invocations(&f).len(), before);
-    fs::write(&rp, &original).unwrap();
+    store_responses(&f, &original);
     drop(server);
     let server = Server::start(&f);
     assert_eq!(server.get(&retry).status, 410);
@@ -1867,8 +1905,7 @@ fn initial_attach_revalidation_refuses_changed_terminal_before_paint() {
     let f = Fixture::new();
     let server = Server::start(&f);
     let p = path("socket-a", "w1", "lead");
-    let mut responses: Value =
-        serde_json::from_str(&fs::read_to_string(f.root.join("responses.json")).unwrap()).unwrap();
+    let mut responses = responses(&f);
     let mut panes: Value =
         serde_json::from_str(responses["pane list --workspace w1"].as_str().unwrap()).unwrap();
     panes["result"]["panes"][0]["terminal_id"] = json!("replacement");
@@ -1891,8 +1928,7 @@ fn missing_session_is_allowed_but_later_identity_changes_end_view() {
             [xws::address_id("w1", "lead")],
         )
         .unwrap();
-    let rp = f.root.join("responses.json");
-    let mut responses: Value = serde_json::from_str(&fs::read_to_string(&rp).unwrap()).unwrap();
+    let mut responses = responses(&f);
     let mut panes: Value =
         serde_json::from_str(responses["pane list --workspace w1"].as_str().unwrap()).unwrap();
     panes["result"]["panes"][0]
@@ -1900,7 +1936,7 @@ fn missing_session_is_allowed_but_later_identity_changes_end_view() {
         .unwrap()
         .remove("agent_session");
     responses["pane list --workspace w1"] = json!(panes.to_string());
-    fs::write(&rp, responses.to_string()).unwrap();
+    store_responses(&f, &responses);
     configure(&f, json!({"quiet":true}));
     let mut live = server.live(&p);
     assert_eq!(live.status, 200);
@@ -1908,7 +1944,7 @@ fn missing_session_is_allowed_but_later_identity_changes_end_view() {
     assert_eq!(reset["kind"], "reset");
     panes["result"]["panes"][0]["agent_session"] = json!({"value":"newly-known"});
     responses["pane list --workspace w1"] = json!(panes.to_string());
-    fs::write(&rp, responses.to_string()).unwrap();
+    store_responses(&f, &responses);
     let final_record = live.record().unwrap();
     assert_eq!(final_record["kind"], "closed");
     assert_eq!(final_record["reason"], "replaced");

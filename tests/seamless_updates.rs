@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
 #[test]
 fn codex_activation_installs_and_verifies_the_local_plugin() {
@@ -70,16 +72,14 @@ fn live_schema_migration_preserves_commands_and_recovers_interruption() {
 /// unsupported architecture never issues the x86_64/aarch64-only syscall.
 #[test]
 fn linux_preflight_requires_landlock_and_named_prerequisites() {
-    use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
+    use std::{fs, path::Path, process::Command};
     let root = std::env::temp_dir().join(format!("namedrop-preflight-{}", std::process::id()));
     let _cleanup = cleanup::FixtureDirectory(root.clone());
 
     let bin = root.join("bin");
     fs::create_dir_all(&bin).unwrap();
     let stub = |name: &str, body: &str| {
-        let path = bin.join(name);
-        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        executable::write_executable(bin.join(name), format!("#!/bin/sh\n{body}\n"));
     };
     // Only the utilities the script itself needs, so no real host tool leaks in.
     for tool in ["awk", "cat", "date", "head", "sed", "tr"] {
@@ -125,6 +125,8 @@ fn linux_preflight_requires_landlock_and_named_prerequisites() {
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        // Shown only when an assertion below fails.
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
         (
             output.status.code(),
             stdout,

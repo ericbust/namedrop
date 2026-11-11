@@ -1328,7 +1328,8 @@ button.member:not(.more):hover {
   font-size: var(--text-xs);
   color: var(--text-muted);
 }
-.terminal-provenance {
+.terminal-provenance,
+.progress-note {
   display: block;
   margin: 2px 0;
   font-size: var(--text-xs);
@@ -1630,6 +1631,10 @@ button.member:not(.more):hover {
 .system .body {
   display: inline;
   line-height: inherit;
+}
+/* A progress note is the agent's words while it still works, not its answer. */
+[data-progress-note] .body {
+  color: var(--text-muted);
 }
 .reminder-clock {
   justify-self: center;

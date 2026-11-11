@@ -4,6 +4,8 @@ mod cleanup;
 mod delivered;
 #[path = "support/dispatch.rs"]
 mod dispatch;
+#[path = "support/executable.rs"]
+mod executable;
 
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
@@ -3702,7 +3704,6 @@ fn a_sweep_from_one_checkout_keeps_the_pin_of_an_active_grant_in_another() {
 
 #[test]
 fn capture_and_reads_in_a_selected_checkout_never_run_filesystem_monitor_hooks() {
-    use std::os::unix::fs::PermissionsExt;
     let directory = TestDirectory::new();
     init_git_repo(&directory);
     setup(&directory);
@@ -3717,15 +3718,13 @@ fn capture_and_reads_in_a_selected_checkout_never_run_filesystem_monitor_hooks()
     fs::write(worker.join("src/notes.txt"), "the worker's line\n").unwrap();
     let marker = directory.root.join("fsmonitor-ran");
     let hook = directory.root.join("fsmonitor-hook");
-    fs::write(
+    executable::write_executable(
         &hook,
         format!(
             "#!/bin/sh\ntouch '{}'\nprintf 'token\\0'\n",
             marker.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     git(
         &worker,
         &["config", "core.fsmonitor", hook.to_str().unwrap()],

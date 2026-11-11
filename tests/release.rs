@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
 use std::{
     fs,
@@ -41,8 +43,7 @@ impl Fixture {
     }
     fn script(&self, name: &str, body: &str) -> PathBuf {
         let path = self.0.join(name);
-        fs::write(&path, body).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        executable::write_executable(&path, body);
         path
     }
     fn command(&self, script: &str) -> Command {
@@ -151,13 +152,12 @@ printf '%s\n' "$*" >> "${{NAMEDROP_TEST_ENTRYPOINT_LOG:-/dev/null}}"
         let checkout = self.0.join("source checkout");
         fs::create_dir_all(checkout.join("scripts")).unwrap();
         for script in ["build.sh", "setup.sh", "run.sh"] {
-            fs::copy(
+            executable::copy_executable(
                 Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("scripts")
                     .join(script),
                 checkout.join("scripts").join(script),
-            )
-            .unwrap();
+            );
         }
         let checkout = checkout.canonicalize().unwrap();
         self.script("cargo", CARGO);

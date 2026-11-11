@@ -181,7 +181,9 @@ def read_rows(r, sent, scope, address):
 
 
 def replies_to(rows, address, message_id):
-    return tuple(row for row in rows if row.author == address and row.in_reply_to == message_id)
+    """The agent's answers to the message, without the notes it posted while its answer was held."""
+    return tuple(row for row in rows
+                 if row.author == address and row.in_reply_to == message_id and not row.progress_note)
 
 
 def wait_answer(r, sent, scope, address):

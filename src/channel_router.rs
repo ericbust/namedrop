@@ -439,7 +439,10 @@ fn recap(rows: &DashboardRows) -> Vec<String> {
         .messages
         .iter()
         .rev()
-        .filter(|message| message.grammar_version != "terminal-relay/v1")
+        .filter(|message| {
+            message.grammar_version != "terminal-relay/v1"
+                && !crate::store::is_progress_note(&message.message_id)
+        })
         .filter(|message| channel_threads.contains(message.thread_id.as_str()))
         .take(6)
         .map(|message| {

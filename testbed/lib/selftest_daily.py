@@ -267,8 +267,9 @@ def check_tracked_judge():
 
 
 def check_hold_judges():
-    held = dco.Held("left:held", 0, 0, 0, 1)
+    held = dco.Held("left:held", 0, 0, 0, 1, 1)
     assert dco.judge_hold("h", held).ok
+    assert not dco.judge_hold("h", held._replace(notes=0)).ok, "the person saw nothing while held"
     assert not dco.judge_hold("h", held._replace(relays=1)).ok, "posted while held"
     assert not dco.judge_hold("h", held._replace(dispositions=1)).ok
     assert not dco.judge_hold("h", held._replace(posts=1)).ok
@@ -280,7 +281,12 @@ def check_hold_judges():
     transcript = live.Transcript("claude", "s", "p", (), (live.Turn("p", (), (), (), 1), open_turn), frozenset())
     assert dco.way_back_turns(transcript, "a1") == (open_turn,) and not dco.way_back_turns(transcript, "a2")
     answer = du.parse_message({"message_id": "m2", "thread_id": "t", "in_reply_to": "m", "kind": "reply",
-                               "body": {"text": "amber1"}, "legs": []})
+                               "body": {"text": "amber1"}, "legs": [], "author": "a"})
+    note = du.parse_message({"message_id": "progress-note:a1:p", "thread_id": "t", "in_reply_to": "m",
+                             "kind": "reply", "body": {"text": "waiting"}, "legs": [], "author": "a",
+                             "progress_note": True})
+    assert dc.replies_to((note, answer), "a", "m") == (answer,), "a progress note counted as the answer"
+    assert not answer.progress_note
     hop = live.Hop("m", "person", "claude", None, 1, 1, 0, 1, "a1", "settled", 0, "reply", "q")
     ok = dco.judge_late_answer("h", "amber1", hop, (answer,), "t", (open_turn,), "agent_disposition", True)
     assert all(check.ok for check in ok)

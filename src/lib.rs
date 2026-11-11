@@ -267,4 +267,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[path = "../tests/support/executable.rs"]
+mod executable;
+#[cfg(test)]
 mod work_counters;

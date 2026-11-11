@@ -1017,3 +1017,49 @@ fn input_keeps_complete_posts_above_old_prefix_limit_when_they_fit() {
     let payload: Value = serde_json::from_str(&input.payload).unwrap();
     assert_eq!(payload["post"], source);
 }
+
+#[test]
+fn router_recap_leaves_progress_notes_out_and_keeps_the_answer() {
+    let mut rows = rows();
+    let message = |id: &str, body: &str, grammar: &str| MessageRow {
+        channel_to: None,
+        channel_state: None,
+        channel_mentioned: None,
+        woke: Vec::new(),
+        message_id: id.to_owned(),
+        thread_id: "channel-thread".to_owned(),
+        in_reply_to: (id != "root").then(|| "root".to_owned()),
+        created_at_ms: 0,
+        author_address_id: "claude".to_owned(),
+        author_is_human: id == "root",
+        grammar_version: grammar.to_owned(),
+        body: body.to_owned(),
+    };
+    rows.messages.extend([
+        message("root", "Run the build.", "channel/v1"),
+        message(
+            "progress-note:attempt:turn",
+            "NOTE_SENTINEL",
+            "final-message/v1",
+        ),
+        message(
+            "bridge:space-2:progress-note:attempt:turn",
+            "MIRRORED_NOTE_SENTINEL",
+            "final-message/v1",
+        ),
+        message(
+            "terminal-relay:attempt",
+            "ANSWER_SENTINEL",
+            "final-message/v1",
+        ),
+    ]);
+    let lines = recap(&rows);
+    assert!(
+        !lines.iter().any(|line| line.contains("NOTE_SENTINEL")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("ANSWER_SENTINEL")),
+        "{lines:?}"
+    );
+}

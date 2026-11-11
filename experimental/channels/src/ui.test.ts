@@ -631,6 +631,61 @@ test("attention actions show historical evidence and safe responses for every so
   assert.doesNotMatch(local, /Namedrop setup|Namedrop Doctor/);
 });
 
+test("a lost answer's card offers Dismiss, and a card whose agent can still answer does not", async () => {
+  const { AttentionActions } = await load<
+    typeof import("./ui/AttentionActions.tsx")
+  >("/src/ui/AttentionActions.tsx");
+  const { PeekContext } = await load<typeof import("./ui/PeekContext.tsx")>(
+    "/src/ui/PeekContext.tsx",
+  );
+  const value = JSON.parse((await fixtures())[0] ?? "null");
+  const responsible = value.frame.participants[0].address_id;
+  const shown = (answer_lost: string | null) => {
+    value.frame.attention = [
+      {
+        attention_id: "lost",
+        source_kind: "agent_disposition",
+        source_id: "attempt-1",
+        answer_lost,
+        summary: { text: "Lost", truncated: false },
+        opened_at_ms: 1,
+        conversation: { thread_id: "t", message_id: "m" },
+        response: {
+          kind: "reply",
+          thread_id: "t",
+          message_id: "m",
+          address_id: responsible,
+        },
+      },
+    ];
+    const { channel } = space(value);
+    const item = channel.attention[0];
+    assert.ok(item);
+    return buttons(
+      renderToStaticMarkup(
+        createElement(
+          PeekContext,
+          { value: { scope: channel.key, open() {} } },
+          createElement(AttentionActions, {
+            item,
+            channel,
+            absent: null,
+            onFocus() {},
+            onControl,
+          }),
+        ),
+      ),
+    );
+  };
+  for (const cause of ["retired", "replaced", "ended"])
+    assert.deepEqual(
+      shown(cause),
+      ["Show message", "Reply to @codex", "Dismiss"],
+      cause,
+    );
+  assert.deepEqual(shown(null), ["Show message", "Reply to @codex"]);
+});
+
 test("a Needs-you item keeps Show message, its response and Details on one action row, and its hint says where to answer", async () => {
   const { NeedsYou } = await load<typeof import("./ui/NeedsYou.tsx")>(
     "/src/ui/NeedsYou.tsx",
@@ -788,6 +843,7 @@ test("focused tracked evidence exposes the channel response path without a rejec
           id: "tracked-message",
           threadId: "tracked",
           inReplyTo: null,
+          progressNote: false,
           at: 1,
           author: "human",
           kind: "mention",
@@ -1038,4 +1094,108 @@ test("a reminder renders quietly without receipts or a reply action", async () =
   assert.match(markup, /⏰/);
   assert.match(markup, /Reminder for @codex: Check the build/);
   assert.doesNotMatch(markup, /class="(?:receipt|msg-head|msg-actions)/);
+});
+
+test("a progress note's label promises nothing, and only a held receipt says the answer will follow", async () => {
+  const { Message } = await load<typeof import("./ui/Message.tsx")>(
+    "/src/ui/Message.tsx",
+  );
+  const fixture = JSON.parse((await fixtures())[3] ?? "null");
+  const [question] = fixture.frame.messages;
+  const codex = question.legs[0].to;
+  const note = {
+    ...question,
+    message_id: "note",
+    in_reply_to: question.message_id,
+    at_ms: question.at_ms + 1,
+    author: codex,
+    kind: "reply",
+    progress_note: true,
+    body: { text: "The build is running.", truncated: false },
+    legs: [],
+  };
+  const answer = {
+    ...note,
+    message_id: "answer",
+    at_ms: question.at_ms + 2,
+    progress_note: false,
+    body: { text: "The build passed.", truncated: false },
+  };
+  const label = "Progress update. Not the final answer.";
+  const promise = /Its answer will follow/;
+  function render(stage: unknown, answered: boolean) {
+    fixture.frame.messages = [
+      { ...question, legs: [{ to: codex, stage }] },
+      note,
+      ...(answered ? [answer] : []),
+    ];
+    const { channel } = space(fixture);
+    const directory = { members: channel.members, homes: new Map() };
+    const [ask, noted, latest] = [...channel.messages.values()];
+    assert.ok(ask && noted);
+    const row = renderToStaticMarkup(
+      createElement(Message, { message: noted, directory, recipients: [] }),
+    );
+    const grouped = renderToStaticMarkup(
+      createElement(Message, {
+        message: noted,
+        directory,
+        recipients: [],
+        grouped: true,
+        showRecipients: false,
+      }),
+    );
+    const parent = renderToStaticMarkup(
+      createElement(Message, {
+        message: ask,
+        directory,
+        recipients: [codex],
+        latestReply: latest ?? noted,
+        replyCount: answered ? 1 : 0,
+        onThread: () => {},
+      }),
+    );
+    const receipt = parent.match(/<li data-stage=[^>]*>.*?<\/li>/s)?.[0];
+    const preview = parent.match(
+      /<button[^>]*class="reply-preview[^"]*"[^>]*>.*?<\/button>/s,
+    )?.[0];
+    assert.ok(receipt && preview, parent);
+    return { row, grouped, receipt, preview };
+  }
+
+  const held = render(
+    { stage: "working", acked_at_ms: 1, answer_held: true },
+    false,
+  );
+  assert.match(held.row, /data-progress-note=""/);
+  assert.match(held.row, new RegExp(`class="progress-note">${label}<`));
+  assert.ok(
+    held.grouped.includes(label),
+    "the label shows on a grouped row too",
+  );
+  assert.doesNotMatch(held.row, promise);
+  assert.match(held.receipt, /data-tone="working"/);
+  assert.match(held.receipt, /Still working\. Its answer will follow\./);
+  assert.match(
+    held.preview,
+    /aria-label="No replies yet\. Update from @codex at [^"]+\. Open thread"/,
+  );
+  assert.ok(held.preview.includes(`>${label}<`), held.preview);
+  assert.match(held.preview, /class="rp-count">No replies yet</);
+  assert.doesNotMatch(held.preview, promise);
+  assert.doesNotMatch(held.preview, /1 reply/);
+
+  const lost = render({ stage: "completed", kind: "settled" }, false);
+  assert.match(lost.row, new RegExp(`class="progress-note">${label}<`));
+  assert.ok(lost.preview.includes(`>${label}<`), lost.preview);
+  for (const markup of [lost.row, lost.receipt, lost.preview]) {
+    assert.doesNotMatch(markup, promise);
+  }
+
+  const answered = render({ stage: "replied", reply_id: "answer" }, true);
+  assert.match(answered.row, new RegExp(`class="progress-note">${label}<`));
+  for (const markup of [answered.row, answered.receipt, answered.preview]) {
+    assert.doesNotMatch(markup, promise);
+  }
+  assert.match(answered.preview, /aria-label="1 reply from @codex/);
 });

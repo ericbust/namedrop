@@ -6,12 +6,13 @@
 
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
 use namedrop::{suggest_agent_persona, summarize_agent_status};
 use serde_json::{Value, json};
 use std::{
     env, fs,
-    os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{
         Arc, Mutex, OnceLock, Weak,
@@ -238,8 +239,7 @@ fn create_fixture() -> cleanup::FixtureDirectory {
     scripts.extend([("sandbox-exec", FAKE_SANDBOX), ("codex", FAKE_CODEX)]);
     for (name, body) in scripts {
         let script = dir.join(name);
-        fs::write(&script, body).expect("fake CLI");
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).expect("fake CLI mode");
+        executable::write_executable(&script, body);
     }
     #[cfg(target_os = "linux")]
     {

@@ -3,6 +3,7 @@ import type {
   Activity,
   AddressId,
   Alias,
+  AnswerLost,
   Attention,
   AttentionResponse,
   ChannelSnapshot,
@@ -295,7 +296,22 @@ function attention(
       kind === "coordination" && item.coordination != null
         ? handoffWarning(item.coordination)
         : null,
+    answerLost:
+      kind === "agent_disposition" ? answerLost(item.answer_lost) : null,
   };
+}
+function answerLost(value: unknown): AnswerLost | null {
+  switch (value) {
+    case undefined:
+    case null:
+      return null;
+    case "retired":
+    case "replaced":
+    case "ended":
+      return value;
+    default:
+      return "unknown";
+  }
 }
 const causes: readonly WarningCause[] = [
   "blocked",
@@ -465,7 +481,11 @@ function deliveryStage(value: unknown): DeliveryStage {
     case "cancelled":
       return { stage };
     case "working":
-      return { stage, ackedAt: timestamp(item.acked_at_ms) };
+      return {
+        stage,
+        ackedAt: timestamp(item.acked_at_ms),
+        answerHeld: item.answer_held === true,
+      };
     case "replied":
       return { stage, replyId: identity(item.reply_id) };
     case "completed":
@@ -536,6 +556,7 @@ function message(value: unknown): Message {
     at: timestamp(item.at_ms),
     author: item.author === "human" ? "human" : addressId(item.author),
     kind: messageKind(item.kind),
+    progressNote: item.progress_note === true,
     body: safeText(item.body),
     legs: array(item.legs).map((raw) => {
       const leg = record(raw);

@@ -1,5 +1,7 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
+#[path = "support/executable.rs"]
+mod executable;
 
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, DeliveryAttemptId, DeliveryId, DeliveryState,
@@ -14,7 +16,7 @@ use std::{
     io::{Read, Write},
     os::{
         fd::AsRawFd,
-        unix::{fs::PermissionsExt, net::UnixStream, process::CommandExt},
+        unix::{net::UnixStream, process::CommandExt},
     },
     path::PathBuf,
     process::{Command, Stdio},
@@ -82,7 +84,10 @@ fn both_installed_stop_hooks_return_before_the_worker_settles_a_claim() {
         let fixture = Fixture::new();
         fixture.initialize_relay();
         let herdr = fixture.0.join("herdr");
-        fs::write(&herdr, "#!/bin/sh\ntouch ready\ni=0\nwhile [ ! -e release ] && [ \"$i\" -lt 200 ]; do sleep 0.01; i=$((i+1)); done\ntouch finished\nexit 1\n").unwrap();
+        executable::write_executable(
+            &herdr,
+            "#!/bin/sh\ntouch ready\ni=0\nwhile [ ! -e release ] && [ \"$i\" -lt 200 ]; do sleep 0.01; i=$((i+1)); done\ntouch finished\nexit 1\n",
+        );
         let package = install_integration_package(
             &fixture.0.join("home"),
             runtime,
@@ -194,8 +199,7 @@ impl Fixture {
         } else {
             "#!/bin/sh\nprintf '%s' \"$PPID\" > \"$STOP_TEST_WORKER_PID\"\nexit 1\n"
         };
-        fs::write(self.0.join("herdr"), script).unwrap();
-        fs::set_permissions(self.0.join("herdr"), fs::Permissions::from_mode(0o700)).unwrap();
+        executable::write_executable(self.0.join("herdr"), script);
     }
 
     fn initialize_relay(&self) {

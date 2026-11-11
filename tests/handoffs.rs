@@ -4,6 +4,8 @@ mod cleanup;
 mod delivered;
 #[path = "support/dispatch.rs"]
 mod dispatch;
+#[path = "support/executable.rs"]
+mod executable;
 
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
@@ -1399,7 +1401,6 @@ fn freshness_handles_directories_and_protected_paths_without_running_custom_filt
 
 #[test]
 fn freshness_does_not_run_git_filesystem_monitor_hooks() {
-    use std::os::unix::fs::PermissionsExt;
     let directory = TestDirectory::new();
     init_git_repo(&directory);
     setup(&directory);
@@ -1410,8 +1411,7 @@ fn freshness_does_not_run_git_filesystem_monitor_hooks() {
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
     let input = returned_path_review(&source, &reviewer, &herdr, "src");
     let hook = directory.repo.join(".git/fsmonitor-test");
-    fs::write(&hook, "#!/bin/sh\ntouch fsmonitor-ran\nprintf 'token\\0'\n").unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    executable::write_executable(&hook, "#!/bin/sh\ntouch fsmonitor-ran\nprintf 'token\\0'\n");
     git(
         &directory.repo,
         &["config", "core.fsmonitor", hook.to_str().unwrap()],
@@ -2191,7 +2191,6 @@ fn previewing_an_explicit_checkout_shows_it_without_capturing_or_writing() {
 
 #[test]
 fn cli_exposes_all_features_and_keeps_management_out_of_delivery_permissions() {
-    use std::os::unix::fs::PermissionsExt;
     let directory = TestDirectory::new();
     setup(&directory);
     let herdr = FakeHerdr::new(&directory);
@@ -2204,8 +2203,12 @@ fn cli_exposes_all_features_and_keeps_management_out_of_delivery_permissions() {
         .unwrap()
         .stdout;
     let worktree_output = serde_json::json!({"result":{"worktrees":[{"path":directory.repo,"open_workspace_id":"workspace-1"}]}});
-    fs::write(&mock,format!("#!/bin/sh\ncase \"$*\" in\n'pane list --workspace workspace-1') cat <<'PANES'\n{pane_output}\nPANES\n;;\n'worktree list --workspace workspace-1 --json') cat <<'WORKTREE'\n{worktree_output}\nWORKTREE\n;;\n*) exit 19;;\nesac\n")).unwrap();
-    fs::set_permissions(&mock, fs::Permissions::from_mode(0o700)).unwrap();
+    executable::write_executable(
+        &mock,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in\n'pane list --workspace workspace-1') cat <<'PANES'\n{pane_output}\nPANES\n;;\n'worktree list --workspace workspace-1 --json') cat <<'WORKTREE'\n{worktree_output}\nWORKTREE\n;;\n*) exit 19;;\nesac\n"
+        ),
+    );
     let run = |argv: &[&str], input: serde_json::Value| {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
             .current_dir(&directory.repo)

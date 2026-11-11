@@ -10,6 +10,33 @@ Each release is a section here, newest first. The GitHub release for a version u
 - Namedrop no longer types a message into a Claude Code or Codex prompt box that holds a draft you haven't sent. Before, a message to an idle agent was typed in at your cursor, and the agent got your draft split around the message as one prompt. The message now waits, and goes in within about 10 seconds after you send or clear the draft, without waiting for the agent's next turn or for its background agents to finish. A box you switched to shell mode by typing `!` counts as a draft.
 - Doctor now explains a message that has waited more than a minute for its agent (ND-DELIVERY-005). It says what Herdr reports for the agent, or that a draft in its prompt box is in the way.
 
+## [1.7.6] - 2026-11-10
+
+### Fixed
+
+- Channels no longer says an agent didn't answer your message while Namedrop holds its answer, not even for a moment. Namedrop holds an answer while background work the agent started is still running, or while the agent waits on a helper it asked. Before, the agent going idle raised "@name didn't answer a request" about 30 seconds after its turn ended, and sometimes for a moment right as the turn ended, even though the answer came once the work finished. Your message now reads "Still working. Its answer will follow." until the answer comes.
+- When you sent the message yourself, you now see what the agent said at once. Before, a held answer meant nothing in the thread until the work finished. Now the agent's last words from that turn appear in the thread right away, in reply to your message, marked "Progress update. Not the final answer." The note doesn't close your message or count as a reply, and the real answer still follows in the same thread. Messages between agents get no note.
+- You're warned only when a held answer can never arrive, and the warning says why. Channels shows "@name can't answer this anymore" when you closed its pane, the agent was removed, or a new session took its name, and "@name stopped before answering" when the agent exited in its pane or its pane has been gone for 10 minutes, as when Herdr restarted and the agent wasn't resumed. If that same session comes back, for example when you resume it, the warning goes away and the agent can still answer. After you review the warning, `delivery acknowledge` clears it.
+- If the turn that should carry a held answer ends without one, you get the ordinary warning that the agent didn't answer.
+- A request is now flagged as unanswered even when the agent's turn ended without the hook that records its end, as when you interrupt the agent with Esc or an API error ends its turn. Before, Channels showed nothing until the agent's next prompt. Now Namedrop waits 5 seconds after the agent goes idle for that hook, then shows the ordinary warning. If the hook ran but Namedrop's worker never finished with it, the warning comes 30 seconds after the hook.
+- A pane Namedrop loses track of for a moment, as while Herdr restarts, no longer flashes a warning that the agent can't answer, and no notification goes out for it. If the pane is still gone 10 minutes later, the warning comes then, with no further event needed. If your computer was asleep then, the warning comes when Channels next starts. Closing that pane later doesn't remove the name, so its aliases and messages stay. A pane you move to another workspace keeps its session, which can still answer a message from you, so no warning comes while it stays there. If you close it there, the warning comes 10 minutes later.
+- A lost answer's card in Channels has a Dismiss button. It asks once, then clears the warning as `delivery acknowledge` does, and your message then reads "Ended without an answer". If the warning was already cleared, because you dismissed it elsewhere or the answer came, the card says so and goes away on the next update.
+- Agents no longer read progress notes. The recap in a later delivery, a thread's context snapshot and the channel router leave them out, which also saves tokens. The real answer still reaches them.
+- A "didn't answer" warning that an earlier version raised on an answer that is still held is cleared when Channels starts. If that answer can no longer arrive, the warning is reworded to say why.
+- `delivery acknowledge` now also clears the warning for a delivery whose agent exited in its pane, or whose pane has been gone for 10 minutes. Before, it was refused until a new session appeared on that name.
+
+## [1.7.5] - 2026-11-10
+
+### Fixed
+
+- A reminder's clock no longer quits when Doctor checks on it at the moment it starts. Before, the reminder then waited with no clock until your next Namedrop command, so it could arrive late.
+
+## [1.7.4] - 2026-11-10
+
+### Fixed
+
+- Updates no longer pile up old copies of Namedrop. Each activation kept every version it had installed, under `runtime/releases/` in the state directory, so a machine that updated often collected dozens. After a successful activation, Namedrop now deletes all but the active version, the one before it, and any version a running Namedrop process still uses. Updating to 1.7.4 removes the old copies that nothing uses.
+
 ## [1.7.3] - 2026-11-10
 
 ### Fixed

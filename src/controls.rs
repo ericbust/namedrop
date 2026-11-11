@@ -83,7 +83,7 @@ where
         "delivery.acknowledge" => {
             let input: AcknowledgeDeliveryInput = parse_input(input)?;
             if !input.confirmed {
-                return Err("acknowledging a missing disposition requires explicit human confirmation; set confirmed:true after confirming the recipient is retired or its session was replaced".into());
+                return Err("acknowledging a missing disposition requires explicit human confirmation; set confirmed:true after confirming the recipient is retired, its session was replaced or its session ended".into());
             }
             let id = crate::DeliveryAttemptId::new(required(input.attempt_id, "attempt_id")?);
             let changed = store

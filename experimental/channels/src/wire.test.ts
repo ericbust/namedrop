@@ -572,3 +572,25 @@ test("participant subagents accept additive metadata and tolerate legacy or malf
   assert.equal(bounded?.text.length, 240);
   assert.equal(bounded?.truncated, true);
 });
+
+test("held answers: a held leg and a progress note parse, and an absent or malformed flag reads as ordinary", () => {
+  const stage = (value: unknown) =>
+    parseHistory([{ ...channelRow, legs: [{ to: "codex", stage: value }] }])[0]
+      ?.legs[0]?.stage;
+  assert.deepEqual(
+    stage({ stage: "working", acked_at_ms: 5, answer_held: true }),
+    { stage: "working", ackedAt: 5, answerHeld: true },
+  );
+  for (const held of [undefined, false, "yes", 1])
+    assert.deepEqual(
+      stage({ stage: "working", acked_at_ms: 5, answer_held: held }),
+      { stage: "working", ackedAt: 5, answerHeld: false },
+      String(held),
+    );
+  const note = (value: unknown) =>
+    parseHistory([{ ...channelRow, kind: "reply", progress_note: value }])[0]
+      ?.progressNote;
+  assert.equal(note(true), true);
+  for (const value of [undefined, false, "yes", 1])
+    assert.equal(note(value), false, String(value));
+});
