@@ -665,6 +665,7 @@ mod drain_report_tests {
                 address_id: namedrop::PaneAddressId::new("address-1"),
                 pane_id: "pane-1".to_owned(),
                 agent: namedrop::AgentRuntime::Codex,
+                session: None,
             }],
             ..DrainReport::default()
         };
@@ -1884,6 +1885,7 @@ mod worker_shutdown_tests {
             address_id: namedrop::PaneAddressId::new("address-1"),
             pane_id: "pane-1".to_owned(),
             agent: namedrop::AgentRuntime::ClaudeCode,
+            session: None,
         }
     }
 

@@ -19,6 +19,12 @@ use std::{
 };
 
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Deletes from the cursor to the start of its line in Claude Code's prompt
+/// box, and at the start of a line joins it to the line above. Claude Code
+/// 2.1.322 does this in a real pane, and every version from 2.1.261 carries
+/// the same editing command. Its `chat:clearInput` key, Ctrl+L, only draws
+/// the screen again.
+const CLAUDE_CODE_DELETE_LINE: &str = "ctrl+u";
 const MAX_MARKER: u64 = 8192;
 static NEXT_MARKER: AtomicU64 = AtomicU64::new(0);
 
@@ -344,6 +350,18 @@ impl PaneEffects {
         self.record(owner)
             .map_err(|e| format!("could not record pane input ownership: {e}"))?;
         herdr.execute(&["agent", "prompt", &self.pane, body])
+    }
+
+    /// Presses the key that deletes a line of Claude Code's prompt box,
+    /// `presses` times. It types nothing, so the pane's input keeps its owner.
+    pub(crate) fn delete_claude_code_input(
+        &self,
+        herdr: &impl HerdrCommandExecutor,
+        presses: usize,
+    ) -> Result<HerdrCommandOutput, String> {
+        let mut command = vec!["agent", "send-keys", self.pane.as_str()];
+        command.resize(command.len() + presses, CLAUDE_CODE_DELETE_LINE);
+        herdr.execute(&command)
     }
 
     pub(crate) fn run_terminal(
