@@ -9,9 +9,9 @@ use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, DeliveryId, DrainReport, HealthSeverity,
     HerdrCommandExecutor, HerdrCommandOutput, IdGenerator, LifecycleRuntime, MessageDraft,
     MessageId, MessageRecipientDraft, MutationAttribution, PaneAddressDraft, PaneAddressId,
-    PaneBindingId, PaneRoleId, PromptFailureKind, StateNamespace, StateStore, ThreadId,
-    complete_capability_profile, diagnose_collaboration, drain_mailboxes,
-    execute_integration_operation, issue_registration_challenge, recheck_drafts,
+    PaneBindingId, PaneRoleId, StateNamespace, StateStore, ThreadId, complete_capability_profile,
+    diagnose_collaboration, drain_mailboxes, execute_integration_operation,
+    issue_registration_challenge, recheck_drafts,
     turn_phase::{TurnEdge, record, record_restored},
 };
 use serde_json::json;
@@ -127,8 +127,8 @@ impl HerdrCommandExecutor for Recipient {
         Ok(HerdrCommandOutput { stdout })
     }
 
-    fn classify_prompt_failure(&self, _: &str) -> PromptFailureKind {
-        PromptFailureKind::AmbiguousInvocation
+    fn input_failure(&self, error: String) -> namedrop::mux::InputOutcome {
+        namedrop::mux::InputOutcome::Ambiguous(error)
     }
 }
 

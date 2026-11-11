@@ -37,11 +37,13 @@ pub enum InputKind<'a> {
     },
 }
 
+/// Each failure keeps the multiplexer's own words, so a caller that reports
+/// one says what it said before.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InputOutcome {
     Delivered,
     /// Nothing was typed, so the input can be queued again.
-    Declined(Retry),
+    Declined(Retry, String),
     /// Nothing was typed, and the same input cannot succeed later.
     Refused(String),
     /// The input may have reached the pane. It is never sent again.

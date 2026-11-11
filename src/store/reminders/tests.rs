@@ -5,6 +5,8 @@ use crate::{
     PaneBindingId, ProcessIds,
 };
 
+type PromptFailure = fn(String) -> crate::mux::InputOutcome;
+
 struct Fixture {
     state: PathBuf,
     live_session: Cell<&'static str>,
@@ -13,7 +15,7 @@ struct Fixture {
     discoveries: Cell<u64>,
     prompts: Cell<u64>,
     discovery_error: Cell<Option<&'static str>>,
-    prompt_failure: Cell<Option<crate::PromptFailureKind>>,
+    prompt_failure: Cell<Option<PromptFailure>>,
 }
 fn ns() -> StateNamespace {
     StateNamespace::for_space("test-socket", "test-space")
@@ -241,10 +243,10 @@ impl Drop for Fixture {
     }
 }
 impl HerdrCommandExecutor for Fixture {
-    fn classify_prompt_failure(&self, _error: &str) -> crate::PromptFailureKind {
+    fn input_failure(&self, error: String) -> crate::mux::InputOutcome {
         self.prompt_failure
             .get()
-            .unwrap_or(crate::PromptFailureKind::AmbiguousInvocation)
+            .unwrap_or(crate::mux::InputOutcome::Ambiguous)(error)
     }
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         let value = match args {
@@ -1438,9 +1440,10 @@ fn reminder_enqueue_reports_only_a_new_durable_fire() {
 
 #[test]
 fn reminder_dispatch_failure_finalizes_in_the_same_drain_but_ambiguity_waits() {
-    for kind in [
-        crate::PromptFailureKind::DefinitiveNonRetryable,
-        crate::PromptFailureKind::AmbiguousInvocation,
+    let refused: PromptFailure = crate::mux::InputOutcome::Refused;
+    for (outcome, refuses) in [
+        (refused, true),
+        (crate::mux::InputOutcome::Ambiguous, false),
     ] {
         let f = Fixture::new();
         f.set(
@@ -1452,7 +1455,7 @@ fn reminder_dispatch_failure_finalizes_in_the_same_drain_but_ambiguity_waits() {
             },
         );
         f.fire("r");
-        f.prompt_failure.set(Some(kind));
+        f.prompt_failure.set(Some(outcome));
         let runtime = crate::LifecycleRuntime {
             state_directory: &f.state,
             home_directory: None,
@@ -1468,7 +1471,7 @@ fn reminder_dispatch_failure_finalizes_in_the_same_drain_but_ambiguity_waits() {
         let report = crate::drain_mailboxes(&runtime).unwrap();
         assert_eq!(f.prompts.get(), 1);
         f.tx(|tx| {
-            if kind == crate::PromptFailureKind::DefinitiveNonRetryable {
+            if refuses {
                 assert_eq!(report.failed.len(), 1);
                 assert_eq!(
                     tx.reminder(&ns(), "r")?.state,

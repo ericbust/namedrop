@@ -113,7 +113,7 @@ pub use message::{
     parse_mentions, parse_prompt_mentions, recipient_outlooks, send_operator_direct_message,
     send_operator_message, validate_message_input,
 };
-pub use ports::{Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator, PromptFailureKind};
+pub use ports::{Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator};
 pub use runtime::{ProcessHerdr, ProcessIds, SystemClock};
 use serde::Serialize;
 pub use spaces::{SpaceScope, WorkspaceLabel};

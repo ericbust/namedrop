@@ -3,11 +3,11 @@
 
 use super::Transport;
 use crate::{
-    AgentRuntime, AgentSessionId, PromptFailureKind, SpaceId, WorktreeId,
+    AgentRuntime, AgentSessionId, SpaceId, WorktreeId,
     mux::{
-        AgentIdentity, AgentKind, AgentState, Badge, Checkout, Effect, Gone, Key, MuxError,
-        PaneFacts, PaneId, PaneProcess, PopupScreen, PopupSpec, Recipient, ScreenRequest,
-        SessionClaim, SpaceView, Style, TabId, TerminalId, Wrap,
+        AgentIdentity, AgentKind, AgentState, Badge, Checkout, Effect, Gone, InputOutcome, Key,
+        MuxError, PaneFacts, PaneId, PaneProcess, PopupScreen, PopupSpec, Recipient, Retry,
+        ScreenRequest, SessionClaim, SpaceView, Style, TabId, TerminalId, Wrap,
     },
 };
 use serde::{Deserialize, de::DeserializeOwned};
@@ -33,23 +33,25 @@ pub(super) fn mux_error(error: String) -> MuxError {
     }
 }
 
-/// The same table as `ProcessHerdr::classify_prompt_failure`.
-pub(super) fn prompt_failure(error: &str) -> PromptFailureKind {
-    match error_code(error).as_deref() {
+/// What a failed `agent prompt`, `pane run`, or `send-keys` means for its
+/// input. Only a code Herdr documents as raised before any input is sent
+/// declines; anything else may have reached the pane.
+pub(crate) fn input_failure(error: String) -> InputOutcome {
+    match error_code(&error).as_deref() {
         // `herdr agent prompt --help` (0.8.2): "If the agent is already
         // blocked, submission is rejected with `agent_blocked` before any
         // input is sent."
         Some("agent_not_found" | "pane_not_found" | "agent_busy" | "agent_blocked") => {
-            PromptFailureKind::TemporaryPreInvocation
+            InputOutcome::Declined(Retry::OnEvent, error)
         }
         Some("agent_not_ready" | "conflict" | "server_busy") => {
-            PromptFailureKind::TemporaryPreInvocationWithoutEvent
+            InputOutcome::Declined(Retry::AfterDelay, error)
         }
         Some(
             "invalid_request" | "invalid_args" | "invalid_input" | "unsupported"
             | "unknown_command",
-        ) => PromptFailureKind::DefinitiveNonRetryable,
-        _ => PromptFailureKind::AmbiguousInvocation,
+        ) => InputOutcome::Refused(error),
+        _ => InputOutcome::Ambiguous(error),
     }
 }
 

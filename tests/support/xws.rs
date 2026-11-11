@@ -5,10 +5,10 @@ use crate::cleanup;
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
     IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
-    PaneBindingId, PaneRoleId, PromptFailureKind, StateNamespace, StateStore,
-    complete_capability_profile, drain_mailboxes, execute_control_operation,
-    execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
-    execute_user_prompt_submit_hook, issue_registration_challenge, spaces_to_wake,
+    PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
+    drain_mailboxes, execute_control_operation, execute_integration_operation,
+    execute_lifecycle_operation, execute_message_operation, execute_user_prompt_submit_hook,
+    issue_registration_challenge, spaces_to_wake,
 };
 use serde_json::{Value, json};
 use std::{
@@ -242,11 +242,11 @@ impl HerdrCommandExecutor for FakeHerdr {
         Ok(HerdrCommandOutput { stdout })
     }
 
-    fn classify_prompt_failure(&self, error: &str) -> PromptFailureKind {
+    fn input_failure(&self, error: String) -> namedrop::mux::InputOutcome {
         if error == "definitive" {
-            PromptFailureKind::DefinitiveNonRetryable
+            namedrop::mux::InputOutcome::Refused(error)
         } else {
-            PromptFailureKind::AmbiguousInvocation
+            namedrop::mux::InputOutcome::Ambiguous(error)
         }
     }
 }

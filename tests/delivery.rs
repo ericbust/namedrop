@@ -8,10 +8,10 @@ use namedrop::{
     DeliveryId, DeliveryState, GraceDeadline, HealthRepairKind, HerdrCommandExecutor,
     HerdrCommandOutput, IdGenerator, LeaseDraft, LifecycleRuntime, MessageDraft, MessageId,
     MessageRecipientDraft, MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId,
-    PaneRoleId, PromptFailureKind, StateNamespace, StateStore, ThreadId,
-    complete_capability_profile, diagnose_collaboration, drain_mailboxes,
-    execute_control_operation, execute_integration_operation, execute_lifecycle_operation,
-    issue_registration_challenge,
+    PaneRoleId, StateNamespace, StateStore, ThreadId, complete_capability_profile,
+    diagnose_collaboration, drain_mailboxes, execute_control_operation,
+    execute_integration_operation, execute_lifecycle_operation, issue_registration_challenge,
+    mux::{InputOutcome, Retry},
 };
 use std::{
     fs,
@@ -166,11 +166,11 @@ impl HerdrCommandExecutor for FakeHerdr {
         Ok(HerdrCommandOutput { stdout })
     }
 
-    fn classify_prompt_failure(&self, error: &str) -> PromptFailureKind {
+    fn input_failure(&self, error: String) -> InputOutcome {
         if error.contains(r#""code":"invalid_input""#) {
-            PromptFailureKind::DefinitiveNonRetryable
+            InputOutcome::Refused(error)
         } else {
-            PromptFailureKind::AmbiguousInvocation
+            InputOutcome::Ambiguous(error)
         }
     }
 }
@@ -254,11 +254,11 @@ impl HerdrCommandExecutor for DynamicHerdr {
         Ok(HerdrCommandOutput { stdout })
     }
 
-    fn classify_prompt_failure(&self, error: &str) -> PromptFailureKind {
+    fn input_failure(&self, error: String) -> InputOutcome {
         if error == "definitive pre-invocation rejection" {
-            PromptFailureKind::TemporaryPreInvocation
+            InputOutcome::Declined(Retry::OnEvent, error)
         } else {
-            PromptFailureKind::AmbiguousInvocation
+            InputOutcome::Ambiguous(error)
         }
     }
 }

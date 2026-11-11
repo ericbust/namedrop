@@ -1,3 +1,4 @@
+use crate::mux::InputOutcome;
 use crate::{
     AgentSessionId, DeliveryAttemptId, DiscoveredPane, DiscoveredWorktree, LifecycleRuntime,
     MessageId, MutationAttribution, PaneAddressId, StateNamespace, StateStore, ThreadId,
@@ -692,15 +693,19 @@ where
             .to_string()
     })?;
     let current = integration_discovery(runtime)?;
-    let still_settled = current.panes.iter().any(|current| {
-        current.pane_id == pane.pane_id
-            && current.agent_session_id() == Some(agent_session_id)
-            && pane_agent_runtime(current) == Some(agent_runtime)
-            && current.accepts_prompt()
-    });
-    if !still_settled {
+    let Some(expect) = current
+        .panes
+        .iter()
+        .find(|current| {
+            current.pane_id == pane.pane_id
+                && current.agent_session_id() == Some(agent_session_id)
+                && pane_agent_runtime(current) == Some(agent_runtime)
+                && current.accepts_prompt()
+        })
+        .and_then(|current| current.agent.clone())
+    else {
         return Ok(());
-    }
+    };
 
     let executable = collaboration_executable()?;
     let prompt = registration_prompt(
@@ -725,33 +730,33 @@ where
     if !claimed {
         return Ok(());
     }
+    let request = crate::mux::PromptRequest {
+        expect: &expect,
+        text: &prompt,
+        admit: crate::mux::Admit::Settled,
+    };
     match effects.prompt(
         runtime.mux,
         &crate::pane_effects::InputOwner::Other,
-        &prompt,
+        request,
     ) {
-        Ok(_) => finish_challenge_prompt(
+        InputOutcome::Delivered => finish_challenge_prompt(
             runtime,
             &namespace,
             &challenge.registration_id,
             TransitionKind::Submitted,
             &attribution,
         ),
-        Err(error)
-            if runtime
-                .mux
-                .classify_prompt_failure(&error)
-                .is_temporary_pre_invocation() =>
-        {
-            finish_challenge_prompt(
-                runtime,
-                &namespace,
-                &challenge.registration_id,
-                TransitionKind::Challenged,
-                &attribution,
-            )
+        InputOutcome::Declined(..) => finish_challenge_prompt(
+            runtime,
+            &namespace,
+            &challenge.registration_id,
+            TransitionKind::Challenged,
+            &attribution,
+        ),
+        InputOutcome::Refused(error) | InputOutcome::Ambiguous(error) => {
+            record_registration_failure(&challenge.nonce, &error, runtime)
         }
-        Err(error) => record_registration_failure(&challenge.nonce, &error, runtime),
     }
 }
 
