@@ -7,6 +7,10 @@
 //! newer edge: the newer time wins. A prompt Namedrop's own hook blocked
 //! started no turn, so its prompt record also keeps the prompt it followed,
 //! which counts again once the block is recorded.
+//!
+//! Claude Code puts a prompt a hook blocked back into its prompt box. The
+//! block's record keeps that prompt's text, so delivery can tell it from a
+//! draft the person typed.
 
 use sha2::{Digest, Sha256};
 use std::{
@@ -45,12 +49,35 @@ impl TurnEdge {
 }
 
 fn edge_path(state: &Path, socket: &str, session: &str, edge: TurnEdge) -> PathBuf {
+    record_path(state, socket, session, edge.extension())
+}
+
+fn record_path(state: &Path, socket: &str, session: &str, extension: &str) -> PathBuf {
     let key = serde_json::to_vec(&(socket, session)).unwrap_or_default();
     state.join("turn-phase").join(format!(
-        "{}.{}",
-        crate::lower_hex(&Sha256::digest(key)),
-        edge.extension()
+        "{}.{extension}",
+        crate::lower_hex(&Sha256::digest(key))
     ))
+}
+
+/// Replaces `path` with `text` in one step, so a reader never sees half of it.
+fn write(path: &Path, text: &str) {
+    let mut next = path.as_os_str().to_owned();
+    next.push(format!(".next.{}", std::process::id()));
+    let next = PathBuf::from(next);
+    let written = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&next)
+        .and_then(|mut file| file.write_all(text.as_bytes()));
+    if written.is_ok() {
+        let _ = fs::rename(&next, path);
+    } else {
+        let _ = fs::remove_file(next);
+    }
 }
 
 /// The times an edge's file holds: when the edge was last passed, and for a
@@ -94,6 +121,18 @@ pub fn record(state: &Path, socket: &str, session: &str, edge: TurnEdge, at_ms: 
     if recorded.is_some_and(|recorded| recorded >= at_ms) {
         return;
     }
+    // A Stop with no turn known to run ends a turn no hook saw start, as a
+    // `!` shell command's does. The prompt box was sent since, so what Claude
+    // Code put back into it is gone.
+    if edge == TurnEdge::Stop
+        && !matches!(
+            read(state, socket, session),
+            Some(TurnPhase::Prompted { .. })
+        )
+        && restored_at(state, socket, session).is_some_and(|(kept_at_ms, _)| kept_at_ms < at_ms)
+    {
+        forget_restored(state, socket, session);
+    }
     let text = match (edge, turn_prompt(state, socket, session)) {
         (TurnEdge::Prompt, Some(before)) => format!("{at_ms} {before}"),
         _ => at_ms.to_string(),
@@ -108,19 +147,77 @@ pub fn record(state: &Path, socket: &str, session: &str, edge: TurnEdge, at_ms: 
     if recorded.is_none() {
         forget_old(directory);
     }
-    let next = path.with_extension(format!("{}.next.{}", edge.extension(), std::process::id()));
-    let written = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
+    write(&path, &text);
+}
+
+const RESTORED: &str = "restored";
+
+/// A longer prompt is not kept, so the box that holds it reads as a draft.
+const RESTORED_MAX_BYTES: usize = 64 * 1024;
+
+/// A prompt as the box shows it, whatever the box's width: how Claude Code
+/// wraps and indents the lines is its own.
+pub fn without_whitespace(text: &str) -> String {
+    text.chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
+
+/// Records the prompt Namedrop's own hook blocked at `at_ms`, which Claude
+/// Code puts back into the session's prompt box.
+pub fn record_restored(state: &Path, socket: &str, session: &str, at_ms: u64, prompt: &str) {
+    let path = record_path(state, socket, session, RESTORED);
+    let prompt = without_whitespace(prompt);
+    if prompt.is_empty() || prompt.len() > RESTORED_MAX_BYTES {
+        let _ = fs::remove_file(path);
+        return;
+    }
+    write(&path, &format!("{at_ms}\n{prompt}"));
+}
+
+/// The kept prompt and the time its hook blocked it.
+fn restored_at(state: &Path, socket: &str, session: &str) -> Option<(u64, String)> {
+    let mut text = String::new();
+    fs::OpenOptions::new()
+        .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&next)
-        .and_then(|mut file| file.write_all(text.as_bytes()));
-    if written.is_ok() {
-        let _ = fs::rename(&next, path);
-    } else {
-        let _ = fs::remove_file(next);
+        .open(record_path(state, socket, session, RESTORED))
+        .ok()?
+        .take(RESTORED_MAX_BYTES as u64 + 32)
+        .read_to_string(&mut text)
+        .ok()?;
+    let (at_ms, prompt) = text.split_once('\n')?;
+    Some((at_ms.parse().ok()?, prompt.to_owned()))
+}
+
+/// The prompt Claude Code put back into the session's prompt box, without its
+/// whitespace: the one Namedrop's hook blocked, while no prompt has been sent
+/// since. A prompt sent since took whatever the box held with it.
+pub fn restored(state: &Path, socket: &str, session: &str) -> Option<String> {
+    let (at_ms, prompt) = restored_at(state, socket, session)?;
+    let last_prompt = edge_at(state, socket, session, TurnEdge::Prompt)?;
+    (at_ms == last_prompt && edge_at(state, socket, session, TurnEdge::Blocked) == Some(at_ms))
+        .then_some(prompt)
+}
+
+/// Forgets the prompt Claude Code put back: the box no longer holds it, so
+/// the same words there later are a draft.
+pub fn forget_restored(state: &Path, socket: &str, session: &str) {
+    let _ = fs::remove_file(record_path(state, socket, session, RESTORED));
+}
+
+/// Claude Code empties the box when a prompt is sent and puts a blocked one
+/// back a moment after its hook returns. An empty box this soon after the
+/// block may still get the prompt back.
+const RESTORE_GRACE_MS: u64 = 2_000;
+
+/// The session's prompt box was seen empty at `now_ms`, so the prompt Claude
+/// Code put back is gone from it.
+pub fn box_seen_empty(state: &Path, socket: &str, session: &str, now_ms: u64) {
+    if restored_at(state, socket, session)
+        .is_some_and(|(at_ms, _)| at_ms.saturating_add(RESTORE_GRACE_MS) <= now_ms)
+    {
+        forget_restored(state, socket, session);
     }
 }
 

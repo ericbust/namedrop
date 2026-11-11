@@ -13,6 +13,7 @@ struct PromptInput {
     session_id: Option<String>,
     prompt_id: Option<String>,
     turn_id: Option<String>,
+    prompt: Option<String>,
 }
 
 /// A Claude Code prompt whose turn start this hook recorded.
@@ -20,6 +21,7 @@ pub struct Prompted {
     socket: String,
     session: String,
     at_ms: u64,
+    prompt: String,
 }
 
 /// Records that a Claude Code prompt starts a turn, from the hook's input and
@@ -40,6 +42,7 @@ pub fn record(state: &Path, input: &str) -> Option<Prompted> {
         socket: env::var("HERDR_SOCKET_PATH").ok()?,
         session: input.session_id.filter(|id| !id.is_empty())?,
         at_ms: SystemClock.now_unix_ms(),
+        prompt: input.prompt.unwrap_or_default(),
     };
     turn_phase::record(
         state,
@@ -52,7 +55,8 @@ pub fn record(state: &Path, input: &str) -> Option<Prompted> {
 }
 
 impl Prompted {
-    /// Namedrop's own hook blocked the prompt, so it started no turn.
+    /// Namedrop's own hook blocked the prompt, so it started no turn, and
+    /// Claude Code puts its text back into the prompt box.
     pub fn blocked(&self, state: &Path) {
         turn_phase::record(
             state,
@@ -61,5 +65,6 @@ impl Prompted {
             TurnEdge::Blocked,
             self.at_ms,
         );
+        turn_phase::record_restored(state, &self.socket, &self.session, self.at_ms, &self.prompt);
     }
 }

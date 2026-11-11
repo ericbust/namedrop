@@ -12,7 +12,7 @@ use namedrop::{
     PaneBindingId, PaneRoleId, PromptFailureKind, StateNamespace, StateStore, ThreadId,
     complete_capability_profile, diagnose_collaboration, drain_mailboxes,
     execute_integration_operation, issue_registration_challenge, recheck_drafts,
-    turn_phase::{TurnEdge, record},
+    turn_phase::{TurnEdge, record, record_restored},
 };
 use serde_json::json;
 use std::{
@@ -50,6 +50,14 @@ struct Recipient {
     screen_reads: AtomicU64,
     pane_lists: AtomicU64,
     prompts: Mutex<Vec<String>>,
+    /// The keys each `send-keys` call pressed in the pane.
+    keys: Mutex<Vec<Vec<String>>>,
+    /// Whether the delete key empties the box, as it does in Claude Code
+    /// 2.1.322.
+    delete_empties: std::sync::atomic::AtomicBool,
+    /// The screens the next batches of the delete key leave, first first.
+    /// Once they are used up, `delete_empties` decides.
+    after_delete: Mutex<std::collections::VecDeque<String>>,
 }
 
 impl HerdrCommandExecutor for Recipient {
@@ -94,6 +102,20 @@ impl HerdrCommandExecutor for Recipient {
                     .unwrap()
                     .clone()
                     .ok_or("the pane could not be read")?
+            }
+            ["agent", "send-keys", "pane-recipient", keys @ ..] => {
+                self.keys
+                    .lock()
+                    .unwrap()
+                    .push(keys.iter().map(|key| (*key).to_owned()).collect());
+                if keys.iter().all(|key| *key == "ctrl+u") {
+                    if let Some(next) = self.after_delete.lock().unwrap().pop_front() {
+                        *self.screen.lock().unwrap() = Some(next);
+                    } else if self.delete_empties.load(Ordering::Relaxed) {
+                        *self.screen.lock().unwrap() = Some(EMPTY_BOX.to_owned());
+                    }
+                }
+                "{}".to_owned()
             }
             ["agent", "prompt", "pane-recipient", prompt] => {
                 self.prompts.lock().unwrap().push((*prompt).to_owned());
@@ -180,6 +202,9 @@ impl Fixture {
                 screen_reads: AtomicU64::new(0),
                 pane_lists: AtomicU64::new(0),
                 prompts: Mutex::new(Vec::new()),
+                keys: Mutex::new(Vec::new()),
+                delete_empties: std::sync::atomic::AtomicBool::new(true),
+                after_delete: Mutex::new(std::collections::VecDeque::new()),
             },
             clock: TestClock::default(),
             ids: SequenceIds(AtomicU64::new(1)),
@@ -547,6 +572,264 @@ fn draft_held_mail_goes_in_once_the_box_empties_with_no_stop_or_status_event() {
         assert!(typed[0].contains("Are the tests green?"), "{typed:?}");
         assert!(delivered.draft_held.is_empty(), "{status}: {delivered:?}");
     }
+}
+
+/// The text of `DRAFT_BOX`'s box.
+const DRAFT_TEXT: &str = "draft for scenario c, keep me";
+
+impl Fixture {
+    /// Namedrop's hook sent `prompt` as a message and blocked it at `at_ms`,
+    /// and Claude Code put it back into the box.
+    fn sent_mention(&self, at_ms: u64, prompt: &str) {
+        self.edge(TurnEdge::Prompt, at_ms);
+        self.edge(TurnEdge::Blocked, at_ms);
+        record_restored(self.state(), "socket-a", SESSION, at_ms, prompt);
+    }
+
+    /// The keys each call pressed in the pane since the last call.
+    fn keys(&self) -> Vec<Vec<String>> {
+        std::mem::take(&mut *self.herdr.keys.lock().unwrap())
+    }
+}
+
+/// The batches of the key that deletes a row of Claude Code's prompt box,
+/// each with as many presses as `rows` says.
+fn delete_batches(rows: &[usize]) -> Vec<Vec<String>> {
+    rows.iter()
+        .map(|rows| vec!["ctrl+u".to_owned(); *rows])
+        .collect()
+}
+
+fn no_keys() -> Vec<Vec<String>> {
+    Vec::new()
+}
+
+/// `DRAFT_BOX` with `text` in its box. A line of `text` after the first is a
+/// further row of the box, as Claude Code 2.1.322 draws it.
+fn box_holding(text: &str) -> String {
+    let drawn = DRAFT_BOX.replace(DRAFT_TEXT, &text.replace('\n', "\n  "));
+    assert_ne!(drawn, DRAFT_BOX);
+    drawn
+}
+
+/// Claude Code 2.1.322 puts a prompt a hook blocked back into the prompt box,
+/// so a mention the person sent from the pane stays there. Namedrop deletes it
+/// with the key that deletes a row of the box, then types the answer into the
+/// empty box.
+#[test]
+fn a_box_holding_only_the_mention_namedrop_sent_is_cleared_and_takes_the_mail() {
+    for (status, edges) in [("idle", false), ("working", true)] {
+        let fixture = Fixture::new(AgentRuntime::ClaudeCode, status);
+        if edges {
+            fixture.edge(TurnEdge::Prompt, 2_000);
+            fixture.edge(TurnEdge::Stop, 3_000);
+        }
+        // Claude Code wraps and indents the text it puts back.
+        fixture.sent_mention(4_000, "draft for  scenario c,\nkeep me");
+        fixture.screen(Some(DRAFT_BOX));
+        let (report, typed) = fixture.drain_report();
+        assert_eq!(fixture.keys(), delete_batches(&[1]), "{status}");
+        assert_eq!(typed.len(), 1, "{status}: {typed:?}");
+        assert!(typed[0].contains("Are the tests green?"), "{typed:?}");
+        assert!(report.draft_held.is_empty(), "{status}: {report:?}");
+    }
+}
+
+/// One press deletes a row of the box or joins a line to the one above. A
+/// batch has as many presses as the box has rows, so no key is pressed in a
+/// box the batch already emptied, and the box is read before each batch.
+#[test]
+fn a_mention_of_several_lines_is_deleted_in_batches_no_longer_than_the_box() {
+    let fixture = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+    fixture.sent_mention(4_000, "@lead one\ntwo\nthree");
+    fixture.screen(Some(&box_holding("@lead one\ntwo\nthree")));
+    // Three presses delete `three`, join its line, and delete `two`. Its
+    // emptied row is still in the box.
+    *fixture.herdr.after_delete.lock().unwrap() = [box_holding("@lead one\n")].into();
+    let (report, typed) = fixture.drain_report();
+    assert_eq!(fixture.keys(), delete_batches(&[3, 2]));
+    assert_eq!(typed.len(), 1, "{typed:?}");
+    assert!(report.draft_held.is_empty(), "{report:?}");
+}
+
+/// Anything else in the box is the person's, and no key is pressed: text they
+/// added to the mention, took from it, or typed in its place, and whatever
+/// the box holds once a later prompt took the mention with it.
+#[test]
+fn a_box_that_holds_more_or_other_than_the_sent_mention_is_a_draft() {
+    for sent in [
+        // The person typed after the mention.
+        "draft for scenario c",
+        // The person typed in front of it.
+        "keep me",
+        // The person deleted the name in front, to send the rest elsewhere.
+        "@lead draft for scenario c, keep me",
+        "another mention, keep me",
+        "",
+    ] {
+        let fixture = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+        fixture.sent_mention(4_000, sent);
+        fixture.screen(Some(DRAFT_BOX));
+        let (report, typed) = fixture.drain_report();
+        assert_eq!((fixture.keys(), typed), (no_keys(), Vec::new()), "{sent:?}");
+        assert_eq!(report.draft_held.len(), 1, "{sent:?}: {report:?}");
+    }
+
+    // The person sent a prompt after the mention, then typed the same words.
+    let later = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+    later.sent_mention(4_000, DRAFT_TEXT);
+    later.edge(TurnEdge::Prompt, 5_000);
+    later.edge(TurnEdge::Stop, 6_000);
+    later.screen(Some(DRAFT_BOX));
+    assert_eq!((later.drain(), later.keys()), (Vec::new(), no_keys()));
+
+    // Codex puts no prompt back, so nothing is deleted from its box.
+    let codex = Fixture::new(AgentRuntime::Codex, "idle");
+    codex.sent_mention(4_000, "my unsent draft");
+    codex.screen(Some(CODEX_DRAFT));
+    assert_eq!((codex.drain(), codex.keys()), (Vec::new(), no_keys()));
+}
+
+/// A mention too tall for the box shows only its last rows, whether Claude
+/// Code scrolled the box or the pane cut its top off. Namedrop cannot see
+/// that the rest is the mention, so it deletes nothing and the mail waits.
+#[test]
+fn a_mention_taller_than_the_box_shows_is_left_alone() {
+    let tall = include_str!("fixtures/between-turns/claude-2.1.322-tall-draft.ansi");
+    let below_the_top: String = tall
+        .lines()
+        .skip_while(|line| !line.starts_with('\u{276f}'))
+        .skip(1)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mention: String = (1..=80).map(|line| format!("tall line {line}\n")).collect();
+    for screen in [tall.to_owned(), below_the_top] {
+        let fixture = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+        fixture.sent_mention(4_000, &mention);
+        fixture.screen(Some(&screen));
+        let (report, typed) = fixture.drain_report();
+        assert_eq!((fixture.keys(), typed), (no_keys(), Vec::new()));
+        assert_eq!(report.draft_held.len(), 1, "{report:?}");
+    }
+}
+
+/// The kept mention is good for the one time Claude Code put it back. Once
+/// the box was seen empty, or a turn no hook saw start has ended, as after a
+/// `!` shell command, the same words in the box are a draft the person typed.
+#[test]
+fn the_same_words_typed_again_after_the_box_emptied_are_a_draft() {
+    // Doctor reads the box while it is empty, well after the block.
+    let emptied = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+    emptied.sent_mention(4_000, DRAFT_TEXT);
+    emptied.screen(Some(EMPTY_BOX));
+    assert_eq!(emptied.long_wait(), None);
+    emptied.screen(Some(DRAFT_BOX));
+    let (report, typed) = emptied.drain_report();
+    assert_eq!((emptied.keys(), typed), (no_keys(), Vec::new()));
+    assert_eq!(report.draft_held.len(), 1, "{report:?}");
+
+    // A Stop arrives with no turn known to run.
+    let unseen_turn = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+    unseen_turn.sent_mention(4_000, DRAFT_TEXT);
+    unseen_turn.edge(TurnEdge::Stop, 5_000);
+    unseen_turn.screen(Some(DRAFT_BOX));
+    assert_eq!(
+        (unseen_turn.drain(), unseen_turn.keys()),
+        (Vec::new(), no_keys())
+    );
+
+    // The mention was sent while a turn ran. That turn's Stop leaves the
+    // mention in the box, so it is still deleted.
+    let mid_turn = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+    mid_turn.edge(TurnEdge::Prompt, 2_000);
+    mid_turn.sent_mention(4_000, DRAFT_TEXT);
+    mid_turn.edge(TurnEdge::Stop, 5_000);
+    mid_turn.screen(Some(DRAFT_BOX));
+    assert_eq!(mid_turn.drain().len(), 1);
+    assert_eq!(mid_turn.keys(), delete_batches(&[1]));
+
+    // Deleted once, the mention is forgotten: the same words are a draft.
+    mid_turn.screen(Some(DRAFT_BOX));
+    assert_eq!(mid_turn.long_wait(), None);
+    assert_eq!(mid_turn.keys(), no_keys());
+    assert_eq!(
+        namedrop::turn_phase::restored(mid_turn.state(), "socket-a", SESSION),
+        None
+    );
+}
+
+/// A draft held the mail, and the person then sent it as a mention. The
+/// recheck finds the same words in the box, now put back by Claude Code.
+#[test]
+fn held_mail_goes_in_once_the_draft_was_sent_as_a_mention() {
+    let fixture = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+    fixture.screen(Some(DRAFT_BOX));
+    let (held, typed) = fixture.drain_report();
+    assert_eq!((fixture.keys(), typed), (no_keys(), Vec::new()));
+    assert_eq!(held.draft_held.len(), 1, "{held:?}");
+    fixture.sent_mention(4_000, DRAFT_TEXT);
+    let (delivered, typed) = fixture.recheck(&held);
+    assert_eq!(fixture.keys(), delete_batches(&[1]));
+    assert_eq!(typed.len(), 1, "{typed:?}");
+    assert!(delivered.draft_held.is_empty(), "{delivered:?}");
+}
+
+/// The person starts typing while the mention is being deleted. Their text is
+/// not part of the mention, so no further key is pressed and the mail waits
+/// behind what is now their draft.
+#[test]
+fn text_the_person_types_while_the_mention_is_deleted_stops_the_keys() {
+    for theirs in [
+        // Behind what is left of the mention.
+        "@lead one and my new words",
+        // In place of it.
+        "my new words",
+        // The keys left more than they found.
+        "@lead one\ntwo\nthree and my new words",
+    ] {
+        let fixture = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+        fixture.sent_mention(4_000, "@lead one\ntwo\nthree");
+        fixture.screen(Some(&box_holding("@lead one\ntwo\nthree")));
+        *fixture.herdr.after_delete.lock().unwrap() =
+            [box_holding("@lead one\ntwo"), box_holding(theirs)].into();
+        let (held, typed) = fixture.drain_report();
+        assert_eq!(
+            (fixture.keys(), typed),
+            (delete_batches(&[3, 2]), Vec::new()),
+            "{theirs:?}"
+        );
+        assert_eq!(held.draft_held.len(), 1, "{theirs:?}: {held:?}");
+        // The recheck presses nothing either, and Doctor calls it a draft.
+        let (held, typed) = fixture.recheck(&held);
+        assert_eq!((fixture.keys(), typed), (no_keys(), Vec::new()));
+        assert_eq!(held.draft_held.len(), 1, "{theirs:?}: {held:?}");
+        let issue = fixture.long_wait().expect("Doctor explains the wait");
+        assert_eq!(issue.diagnostic["held_by"], "draft", "{theirs:?}");
+    }
+}
+
+/// The keys leave the mention where it is, as in a session that takes them
+/// another way. Nothing is typed behind it, one batch is pressed, and Doctor
+/// says what is in the way.
+#[test]
+fn a_sent_mention_the_keys_leave_holds_the_mail_until_the_person_clears_it() {
+    let fixture = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+    fixture.herdr.delete_empties.store(false, Ordering::Relaxed);
+    fixture.sent_mention(4_000, DRAFT_TEXT);
+    fixture.screen(Some(DRAFT_BOX));
+    let (held, typed) = fixture.drain_report();
+    assert_eq!((fixture.keys(), typed), (delete_batches(&[1]), Vec::new()));
+    assert_eq!(held.draft_held.len(), 1, "{held:?}");
+    // The worker's recheck reads the box and presses no key.
+    let (held, typed) = fixture.recheck(&held);
+    assert_eq!((fixture.keys(), typed), (no_keys(), Vec::new()));
+    assert_eq!(held.draft_held.len(), 1, "{held:?}");
+    let issue = fixture.long_wait().expect("Doctor explains the wait");
+    assert_eq!(issue.diagnostic["held_by"], "sent_prompt", "{issue:?}");
+    assert_eq!(fixture.keys(), no_keys());
+    fixture.screen(Some(EMPTY_BOX));
+    let (_, typed) = fixture.recheck(&held);
+    assert_eq!(typed.len(), 1, "{typed:?}");
 }
 
 #[test]

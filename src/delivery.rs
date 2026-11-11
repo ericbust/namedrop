@@ -48,6 +48,10 @@ pub struct DraftHold {
     pub address_id: crate::PaneAddressId,
     pub pane_id: String,
     pub agent: crate::AgentRuntime,
+    /// The agent session in the pane, whose sent mention Claude Code may put
+    /// back into the box. `None` once the clear key left that text there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 /// An idle submitted or acknowledged attempt still inside the acknowledgement
@@ -554,11 +558,13 @@ where
             continue;
         };
         let reach = candidate_reach(runtime, &first, &first_discovery);
-        if reach != Reach::Now
+        // A box that holds only a sent mention is cleared under the pane's
+        // lock, once this candidate is confirmed.
+        if !matches!(reach, Reach::Now | Reach::Waits(AgentWait::SentPrompt))
             || (first.pane_type == crate::PaneType::Terminal
                 && !crate::terminal::shell_is_available(runtime.herdr, &first.pane_id))
         {
-            report.note_draft(&reach, &address_id, &first.pane_id);
+            report.note_draft(&reach, &address_id, &first);
             continue;
         }
 
@@ -590,7 +596,20 @@ where
         if first != second {
             continue;
         }
-        let reach = candidate_reach(runtime, &second, &second_discovery);
+        let reach = match (
+            candidate_reach(runtime, &second, &second_discovery),
+            &effects,
+        ) {
+            (Reach::Waits(AgentWait::SentPrompt), Ok(effects)) => clear_sent_prompt(
+                runtime,
+                effects,
+                &second.pane_id,
+                second.agent_session_id.as_str(),
+            ),
+            // The dispatch below reports why the pane's lock failed.
+            (Reach::Waits(AgentWait::SentPrompt), Err(_)) => Reach::Now,
+            (reach, _) => reach,
+        };
         if reach != Reach::Now
             || (second.pane_type == crate::PaneType::Terminal
                 && (first_discovery
@@ -605,7 +624,7 @@ where
                         .map(|p| &p.terminal_id)
                     || !crate::terminal::shell_is_available(runtime.herdr, &second.pane_id)))
         {
-            report.note_draft(&reach, &address_id, &second.pane_id);
+            report.note_draft(&reach, &address_id, &second);
             continue;
         }
 
@@ -927,6 +946,7 @@ fn candidate_reach<E, C, I>(
 ) -> Reach
 where
     E: HerdrCommandExecutor,
+    C: Clock,
 {
     let Some(pane) = discovered
         .panes
@@ -949,13 +969,105 @@ where
     agent_wait(runtime, pane).map_or(Reach::Now, Reach::Waits)
 }
 
+/// A mention these batches do not delete in full stays in the box.
+const CLEAR_BATCHES: usize = 8;
+/// Claude Code draws the box again a moment after the keys.
+const CLEAR_REDRAW_MS: u64 = 150;
+
+/// Clears a Claude Code prompt box that holds only the prompt Namedrop's hook
+/// sent as a message. The mail goes in only once the box reads empty.
+///
+/// The box is read before each batch of keys. Keys are pressed only while its
+/// first row is on screen and it holds the sent prompt or what the last batch
+/// left of it, so text the person starts typing meanwhile is not deleted.
+/// One press deletes a row of the box or joins a line to the one above, so a
+/// batch of as many presses as the box has rows never presses a key in a box
+/// it has already emptied. A box the keys leave as it was holds the mail: the
+/// session may not take the keys as Claude Code 2.1.322 does, or has not
+/// drawn the box again yet.
+fn clear_sent_prompt<E, C, I>(
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+    effects: &crate::pane_effects::PaneEffects,
+    pane_id: &str,
+    session: &str,
+) -> Reach
+where
+    E: HerdrCommandExecutor,
+    C: Clock,
+{
+    let held = Reach::Waits(AgentWait::SentPrompt);
+    let (state, socket) = (runtime.state_directory, runtime.session_socket_id);
+    let Some(sent) = crate::turn_phase::restored(state, socket, session) else {
+        return held;
+    };
+    // Once a batch changed the box, the kept prompt no longer describes it.
+    let forget = || crate::turn_phase::forget_restored(state, socket, session);
+    let mut left: Option<usize> = None;
+    for batch in 0..=CLEAR_BATCHES {
+        let Some(screen) = read_screen(runtime, pane_id) else {
+            break;
+        };
+        match prompt_box(&screen, crate::AgentRuntime::ClaudeCode) {
+            PromptBox::Empty => {
+                forget();
+                return Reach::Now;
+            }
+            PromptBox::Draft => {}
+            _ => break,
+        }
+        let Some((typed, rows)) = whole_box(&screen) else {
+            break;
+        };
+        let still_sent = match left {
+            None => typed == sent,
+            Some(left) => typed.len() < left && sent.starts_with(&typed),
+        };
+        if !still_sent {
+            // The keys left the box as it was, or it holds other text now.
+            if left.is_some_and(|left| typed.len() != left) {
+                forget();
+            }
+            return held;
+        }
+        if batch == CLEAR_BATCHES
+            || effects
+                .delete_claude_code_input(runtime.herdr, rows)
+                .is_err()
+        {
+            break;
+        }
+        left = Some(typed.len());
+        runtime.clock.wait_ms(CLEAR_REDRAW_MS);
+    }
+    if left.is_some() {
+        forget();
+    }
+    held
+}
+
 impl DrainReport {
-    fn note_draft(&mut self, reach: &Reach, address_id: &crate::PaneAddressId, pane_id: &str) {
-        if let Reach::Waits(AgentWait::Draft(agent)) = reach {
+    fn note_draft(
+        &mut self,
+        reach: &Reach,
+        address_id: &crate::PaneAddressId,
+        candidate: &DispatchCandidate,
+    ) {
+        let (agent, session) = match reach {
+            Reach::Waits(AgentWait::Draft(agent)) => {
+                (*agent, Some(candidate.agent_session_id.as_str().to_owned()))
+            }
+            // The clear key left the text. Without the session the recheck
+            // reads the box as a draft, so the key is not sent again until
+            // the box changes.
+            Reach::Waits(AgentWait::SentPrompt) => (crate::AgentRuntime::ClaudeCode, None),
+            _ => return,
+        };
+        {
             self.draft_held.push(DraftHold {
                 address_id: address_id.clone(),
-                pane_id: pane_id.to_owned(),
-                agent: *agent,
+                pane_id: candidate.pane_id.clone(),
+                agent,
+                session,
             });
         }
     }
@@ -1003,6 +1115,10 @@ pub(crate) enum AgentWait {
     /// Herdr reports the session working between turns, and Namedrop found no
     /// prompt box to see that it is empty.
     PromptBoxUnseen,
+    /// Claude Code's prompt box holds only the prompt Namedrop's hook sent as
+    /// a message, which Claude Code put back after the hook blocked it. The
+    /// drain clears it before it types.
+    SentPrompt,
 }
 
 /// Why an agent pane's mail waits, or `None` when a prompt may be typed now.
@@ -1012,6 +1128,7 @@ pub(crate) fn agent_wait<E, C, I>(
 ) -> Option<AgentWait>
 where
     E: HerdrCommandExecutor,
+    C: Clock,
 {
     let phase = || {
         pane.agent_session_id.as_ref().and_then(|session| {
@@ -1027,9 +1144,14 @@ where
         return Some(AgentWait::Status(pane.agent_status.clone()));
     }
     let agent = crate::integration::pane_agent_runtime(pane)?;
-    match read_prompt_box(runtime.herdr, &pane.pane_id, agent) {
+    let session = pane
+        .agent_session_id
+        .as_ref()
+        .map(|session| session.as_str());
+    match read_prompt_box(runtime, &pane.pane_id, agent, session) {
         PromptBox::Empty => None,
         PromptBox::Draft => Some(AgentWait::Draft(agent)),
+        PromptBox::Restored => Some(AgentWait::SentPrompt),
         // Herdr's idle is the proof a prompt may go in, as it was before
         // Namedrop read the box, so a screen it doesn't recognize never
         // strands the mail. Between turns the empty box is the only proof.
@@ -1065,10 +1187,10 @@ where
         .into_iter()
         .filter(|hold| waiting.contains(&hold.address_id))
         .collect();
-    if held
-        .iter()
-        .all(|hold| read_prompt_box(runtime.herdr, &hold.pane_id, hold.agent) == PromptBox::Draft)
-    {
+    if held.iter().all(|hold| {
+        read_prompt_box(runtime, &hold.pane_id, hold.agent, hold.session.as_deref())
+            == PromptBox::Draft
+    }) {
         return Ok(DrainReport {
             draft_held: held,
             ..DrainReport::default()
@@ -1084,6 +1206,10 @@ enum PromptBox {
     /// Text the person typed and has not sent, or a box they switched to shell
     /// mode.
     Draft,
+    /// Only the prompt Namedrop's hook sent as a message and blocked, which
+    /// Claude Code put back into the box. The person has sent it, so deleting
+    /// it loses nothing of theirs.
+    Restored,
     /// The screen shows no prompt box Namedrop recognizes.
     Unseen,
 }
@@ -1091,12 +1217,51 @@ enum PromptBox {
 /// Enough of the screen's end for the box and whatever the agent draws under it.
 const PROMPT_BOX_LINES: &str = "60";
 
-fn read_prompt_box(
-    herdr: &impl HerdrCommandExecutor,
+fn read_prompt_box<E, C, I>(
+    runtime: &LifecycleRuntime<'_, E, C, I>,
     pane_id: &str,
     agent: crate::AgentRuntime,
-) -> PromptBox {
-    herdr
+    session: Option<&str>,
+) -> PromptBox
+where
+    E: HerdrCommandExecutor,
+    C: Clock,
+{
+    let Some(screen) = read_screen(runtime, pane_id) else {
+        return PromptBox::Unseen;
+    };
+    let held = prompt_box(&screen, agent);
+    let (Some(session), crate::AgentRuntime::ClaudeCode) = (session, agent) else {
+        return held;
+    };
+    let (state, socket) = (runtime.state_directory, runtime.session_socket_id);
+    match held {
+        // Whatever the box holds next is new text, also when it reads like
+        // the sent prompt.
+        PromptBox::Empty => {
+            crate::turn_phase::box_seen_empty(state, socket, session, runtime.clock.now_unix_ms());
+            held
+        }
+        PromptBox::Draft
+            if whole_box(&screen).is_some_and(|(typed, _)| {
+                crate::turn_phase::restored(state, socket, session).as_deref()
+                    == Some(typed.as_str())
+            }) =>
+        {
+            PromptBox::Restored
+        }
+        held => held,
+    }
+}
+
+/// The end of the pane's screen as Herdr renders it, or `None` when the pane
+/// could not be read.
+fn read_screen<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>, pane_id: &str) -> Option<String>
+where
+    E: HerdrCommandExecutor,
+{
+    runtime
+        .herdr
         .execute(&[
             "pane",
             "read",
@@ -1108,9 +1273,42 @@ fn read_prompt_box(
             "--format",
             "ansi",
         ])
-        .map_or(PromptBox::Unseen, |output| {
-            prompt_box(&output.stdout, agent)
+        .ok()
+        .map(|output| output.stdout)
+}
+
+/// The person's text in a Claude Code box whose first row is on screen,
+/// without whitespace, and the rows the box takes. `None` in shell mode, when
+/// no box is on screen, and when the screen starts inside the box.
+///
+/// A box too tall for Claude Code to show in full scrolls to its last rows
+/// and looks whole, so its text is only the end of what it holds.
+fn whole_box(screen: &str) -> Option<(String, usize)> {
+    let lines = cells(screen);
+    match claude_code_box(&lines)? {
+        Found::Box {
+            held,
+            rows: Some(rows),
+        } => Some((typed(&held).collect(), rows)),
+        _ => None,
+    }
+}
+
+fn find_box(lines: &[Vec<Cell>], agent: crate::AgentRuntime) -> Option<Found<'_>> {
+    match agent {
+        crate::AgentRuntime::ClaudeCode => claude_code_box(lines),
+        crate::AgentRuntime::Codex => codex_box(lines),
+    }
+}
+
+/// The characters of the box that the person typed.
+fn typed<'a>(held: &'a [&'a Cell]) -> impl Iterator<Item = char> + 'a {
+    let hinted = held.iter().any(|cell| cell.faint);
+    held.iter()
+        .filter(move |cell| {
+            !cell.character.is_whitespace() && !cell.faint && !(cell.cursor && hinted)
         })
+        .map(|cell| cell.character)
 }
 
 /// Both agents draw their placeholder, and Claude Code its suggested next
@@ -1120,20 +1318,12 @@ fn read_prompt_box(
 /// glyph as the box, so the box is the last one.
 fn prompt_box(screen: &str, agent: crate::AgentRuntime) -> PromptBox {
     let lines = cells(screen);
-    let found = match agent {
-        crate::AgentRuntime::ClaudeCode => claude_code_box(&lines),
-        crate::AgentRuntime::Codex => codex_box(&lines),
-    };
-    let held = match found {
+    let held = match find_box(&lines, agent) {
         None => return PromptBox::Unseen,
         Some(Found::ShellMode) => return PromptBox::Draft,
-        Some(Found::Box(held)) => held,
+        Some(Found::Box { held, .. }) => held,
     };
-    let hinted = held.iter().any(|cell| cell.faint);
-    let typed = held
-        .iter()
-        .any(|cell| !cell.character.is_whitespace() && !cell.faint && !(cell.cursor && hinted));
-    if typed {
+    if typed(&held).next().is_some() {
         PromptBox::Draft
     } else {
         PromptBox::Empty
@@ -1144,8 +1334,12 @@ fn prompt_box(screen: &str, agent: crate::AgentRuntime) -> PromptBox {
 enum Found<'a> {
     /// The person typed `!`, so whatever is typed next runs as a shell command.
     ShellMode,
-    /// The box's cells after its prompt glyph.
-    Box(Vec<&'a Cell>),
+    /// The box's cells after its prompt glyph, and for a Claude Code box
+    /// whose first row is on screen, the rows it takes.
+    Box {
+        held: Vec<&'a Cell>,
+        rows: Option<usize>,
+    },
 }
 
 fn starts_with(line: &[Cell], character: char) -> bool {
@@ -1174,19 +1368,23 @@ fn claude_code_box(lines: &[Vec<Cell>]) -> Option<Found<'_>> {
         let inside = &lines[..close];
         return (inside.iter().any(drafted)
             && inside.iter().all(|line| drafted(line) || blank(line)))
-        .then(|| Found::Box(inside.iter().flatten().collect()));
+        .then(|| Found::Box {
+            held: inside.iter().flatten().collect(),
+            rows: None,
+        });
     };
     if shell_mode(&lines[open]) {
         return Some(Found::ShellMode);
     }
     let close = lines[open + 1..].iter().position(rule)?;
-    Some(Found::Box(
-        lines[open..=open + close]
+    Some(Found::Box {
+        held: lines[open..=open + close]
             .iter()
             .flatten()
             .skip(1)
             .collect(),
-    ))
+        rows: Some(close + 1),
+    })
 }
 
 /// Codex draws its box as a `›` line, with any further lines of the draft
@@ -1203,13 +1401,14 @@ fn codex_box(lines: &[Vec<Cell>]) -> Option<Found<'_>> {
     }
     let blank = |line: &Vec<Cell>| line.iter().all(|cell| cell.character.is_whitespace());
     let close = lines[open + 1..].iter().position(blank)?;
-    Some(Found::Box(
-        lines[open..=open + close]
+    Some(Found::Box {
+        held: lines[open..=open + close]
             .iter()
             .flatten()
             .skip(1)
             .collect(),
-    ))
+        rows: None,
+    })
 }
 
 /// One character on screen, with the attributes that tell the person's text

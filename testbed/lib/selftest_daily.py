@@ -270,6 +270,15 @@ def check_hold_judges():
     held = dco.Held("left:held", 0, 0, 0, 1, 1)
     assert dco.judge_hold("h", held).ok
     assert not dco.judge_hold("h", held._replace(notes=0)).ok, "the person saw nothing while held"
+    wordless = dco.judge_hold("h", held._replace(notes=0, said=False))
+    assert wordless.ok and "words at the turn's end False" in wordless.detail, "nothing to show"
+    item = lambda role, text, **more: json.dumps({"type": "response_item", "payload": dict(
+        more, type="message", role=role, content=[{"type": "text", "text": text}])})
+    rollout = [item("user", "message a1"), item("assistant", "I'll run it.", phase="commentary"),
+               item("assistant", "", phase="final_answer"), item("user", "message a2"),
+               item("assistant", "Waiting on a helper.", phase="final_answer"), item("user", "message a3")]
+    assert live.codex_turn_end_words(rollout, "a1") == "", "commentary is not the turn's last word"
+    assert live.codex_turn_end_words(rollout, "a2") == "Waiting on a helper."
     assert not dco.judge_hold("h", held._replace(relays=1)).ok, "posted while held"
     assert not dco.judge_hold("h", held._replace(dispositions=1)).ok
     assert not dco.judge_hold("h", held._replace(posts=1)).ok

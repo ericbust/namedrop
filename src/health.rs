@@ -922,6 +922,14 @@ where
                 HealthRepairKind::HumanDecision,
                 format!("Send or clear the draft in @{alias}'s prompt box."),
             ),
+            AgentWait::SentPrompt => (
+                HealthSeverity::Notice,
+                format!(
+                    "@{alias}'s prompt box still shows a mention you already sent. Claude Code put it back, and Namedrop could not delete it. The message goes in within about 10 seconds after you clear the box."
+                ),
+                HealthRepairKind::HumanDecision,
+                format!("Clear @{alias}'s prompt box."),
+            ),
             AgentWait::PromptBoxUnseen => (
                 HealthSeverity::Info,
                 format!(
@@ -952,6 +960,7 @@ where
                 AgentWait::Status(_) => "status",
                 AgentWait::Draft(_) => "draft",
                 AgentWait::PromptBoxUnseen => "prompt_box_unseen",
+                AgentWait::SentPrompt => "sent_prompt",
             },
             "queued_at_ms": queued_at_ms,
             "waited_ms": waited_ms,

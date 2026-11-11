@@ -869,6 +869,11 @@ if args[:2] == ['workspace','list']: print(json.dumps({{'result':{{'workspaces':
 elif args[:2] == ['worktree','list']: print(json.dumps({{'result':{{'worktrees':[{{'path':{repo:?},'open_workspace_id':'workspace-1'}}]}}}}))
 elif args[:2] == ['pane','list']: print(json.dumps(panes))
 elif args[:3] == ['pane','read','pane-reviewer'] and (here / 'reviewer-screen').exists(): print((here / 'reviewer-screen').read_text(), end='')
+elif args[:2] == ['agent','send-keys']:
+    with (here / 'herdr-keys').open('a') as log: log.write(json.dumps(args[2:]) + '\n')
+    cleared = here / 'reviewer-screen-cleared'
+    if args[2] == 'pane-reviewer' and set(args[3:]) == {{'ctrl+u'}} and cleared.exists(): (here / 'reviewer-screen').write_text(cleared.read_text())
+    print('{{}}')
 else:
     if args[:2] == ['agent','prompt']:
         with (Path(__file__).parent / 'herdr-prompts').open('a') as log: log.write(json.dumps(args[2:]) + '\n')
@@ -5884,6 +5889,99 @@ fn a_mention_namedrop_sends_keeps_the_session_between_turns() {
         "{:?}",
         space.reviewer_phase()
     );
+    // Claude Code puts the blocked mention back into the prompt box, so the
+    // hook keeps its text for delivery to tell it from a draft and clear it.
+    assert_eq!(
+        namedrop::turn_phase::restored(&space.directory.state, "socket-a", "session-reviewer")
+            .as_deref(),
+        Some("@leadIsthebuildgreen?")
+    );
+}
+
+/// Claude Code 2.1.322 puts a prompt a hook blocked back into its prompt box,
+/// so a mention the person typed in the pane stays there after Namedrop sent
+/// it. Namedrop deletes it, then types the answer into the empty box as a
+/// prompt of its own.
+#[test]
+fn the_answer_to_a_mention_typed_in_a_claude_pane_goes_into_a_box_cleared_of_the_mention() {
+    let space = Space::new();
+    let mut command = space.command();
+    command.env("CLAUDE_CODE_SESSION_ID", "session-reviewer");
+    let mut hook = space.start_reviewer_prompt_in(command, "@lead Is the build green?");
+    let output: Value = serde_json::from_str(&hook.output()).unwrap();
+    assert_eq!(output["decision"], "block", "{output}");
+    hook.wait();
+    // The box as Claude Code draws it with the mention back in it.
+    let drawn: Vec<&str> = include_str!("fixtures/between-turns/claude-2.1.322-waiting-draft.ansi")
+        .lines()
+        .collect();
+    let box_line = drawn
+        .iter()
+        .rposition(|line| line.starts_with('\u{276f}'))
+        .unwrap();
+    let screen: Vec<&str> = drawn
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if index == box_line {
+                "\u{276f}\u{a0}@lead Is the build green?"
+            } else {
+                line
+            }
+        })
+        .collect();
+    fs::write(
+        space.directory.root.join("reviewer-screen"),
+        screen.join("\n"),
+    )
+    .unwrap();
+    // The box Claude Code draws once the delete key emptied it.
+    fs::write(
+        space.directory.root.join("reviewer-screen-cleared"),
+        include_str!("fixtures/between-turns/claude-2.1.322-waiting-empty.ansi"),
+    )
+    .unwrap();
+
+    namedrop::drain_mailboxes(&space.runtime("pane-lead")).unwrap();
+    let asked = space.herdr.envelope_for("pane-lead");
+    let answered = space
+        .command()
+        .arg("--plugin-state")
+        .arg(&space.directory.state)
+        .args([
+            "reply",
+            "--herdr-socket",
+            "socket-a",
+            "--herdr-workspace",
+            "workspace-1",
+        ])
+        .args(["--herdr-pane", "pane-lead", "--input-json"])
+        .arg(
+            json!({"attempt_id":asked["control"]["attempt_id"],
+                   "source":"@reviewer Yes, it is green."})
+            .to_string(),
+        )
+        .output()
+        .unwrap();
+    assert!(answered.status.success(), "{answered:?}");
+    // The reply's own mailbox worker may type the answer after the reply
+    // has returned.
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while space.prompted_by_binary("pane-reviewer").is_empty() && std::time::Instant::now() < until
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let typed = space.prompted_by_binary("pane-reviewer");
+    assert_eq!(typed.len(), 1, "{typed:?}");
+    assert_eq!(typed[0]["untrusted_body"], "Yes, it is green.");
+    let keys: Vec<Vec<String>> = fs::read_to_string(space.directory.root.join("herdr-keys"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(keys.len(), 1, "{keys:?}");
+    assert_eq!(keys[0][0], "pane-reviewer");
+    assert!(keys[0][1..].iter().all(|key| key == "ctrl+u"), "{keys:?}");
 }
 
 /// Another plugin's prompt hook blocked or stopped the prompt, and Claude Code

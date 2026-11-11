@@ -2,6 +2,14 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.7.8] - 2026-11-10
+
+### Fixed
+
+- A mention you type in a Claude Code pane gets its answer again. Claude Code puts a prompt a hook blocked back into the prompt box, and a mention Namedrop sends is such a prompt. Since 1.7.7, Namedrop read that leftover mention as a draft you hadn't sent, so the answer and every later message to that agent waited until you cleared the box, and Doctor reported a draft in the way (ND-DELIVERY-005).
+- Namedrop now deletes a mention it already sent from the box before it types the next message, so the message arrives as a prompt of its own. Before 1.7.7, the message was typed behind the leftover mention, and the agent got both as one prompt. Namedrop deletes the text only while the box holds exactly the mention it sent and you have sent nothing since. If you change that text or type after it, it is your draft and the message waits as before. A mention too long for the box to show in full is also left alone, and the message waits until you clear the box.
+- The mention is deleted with Ctrl+U, the key that deletes a row of Claude Code's prompt box. Namedrop reads the box before each few presses and stops as soon as it holds anything but the mention, so words you start typing meanwhile stay. If the mention stays, Namedrop types nothing, and Doctor tells you to clear the box (ND-DELIVERY-005, `held_by: sent_prompt`).
+
 ## [1.7.7] - 2026-11-10
 
 ### Fixed
