@@ -1,7 +1,8 @@
 use crate::integration::{onboard_settled_integrations, pane_agent_runtime};
 use crate::mux::{
-    AgentIdentity, AgentState, Applied, Depth, Effect, Gone, MuxAct, MuxError, MuxRead, PaneFacts,
-    PaneId, PopupScreen, PopupSpec, Scope, StateTexts, Survey, TabId, TerminalId, resolve_session,
+    AgentIdentity, AgentState, Applied, Depth, Effect, Gone, MuxAct, MuxError, MuxEvent, MuxRead,
+    PaneFacts, PaneId, PaneSlot, PopupScreen, PopupSpec, Scope, StateTexts, Survey, TabId,
+    TerminalId, resolve_session,
 };
 use crate::{
     ActorKind, AgentSessionId, AttentionItemRecord, Clock, HerdrCommandExecutor, IdGenerator,
@@ -175,98 +176,6 @@ struct RenameInput {
 #[serde(deny_unknown_fields)]
 struct ReleaseAliasInput {
     alias: String,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "type", deny_unknown_fields)]
-enum PaneLifecycleEvent {
-    #[serde(rename = "pane_created")]
-    Created { pane: PaneEventInfo },
-    #[serde(rename = "pane_closed")]
-    Closed {
-        pane_id: String,
-        workspace_id: String,
-    },
-    #[serde(rename = "pane_exited")]
-    Exited {
-        pane_id: String,
-        workspace_id: String,
-    },
-    #[serde(rename = "tab_closed")]
-    TabClosed {
-        tab_id: String,
-        workspace_id: String,
-    },
-    #[serde(rename = "pane_moved")]
-    Moved {
-        previous_pane_id: String,
-        previous_workspace_id: String,
-        #[serde(rename = "previous_tab_id")]
-        _previous_tab_id: String,
-        pane: PaneEventInfo,
-        created_tab: Option<Value>,
-        created_workspace: Option<Value>,
-        closed_tab_id: Option<String>,
-        closed_workspace_id: Option<String>,
-    },
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AgentStatusChangedEvent {
-    #[serde(rename = "type")]
-    event_type: AgentStatusEventType,
-    pane_id: String,
-    workspace_id: String,
-    agent_status: Option<String>,
-    released: Option<bool>,
-    final_status: Option<String>,
-    agent: Option<String>,
-    display_agent: Option<String>,
-    title: Option<String>,
-    #[serde(default)]
-    state_labels: std::collections::BTreeMap<String, String>,
-}
-
-#[derive(Deserialize)]
-enum AgentStatusEventType {
-    #[serde(rename = "pane_agent_status_changed")]
-    Changed,
-    #[serde(rename = "pane_agent_detected")]
-    Detected,
-}
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-struct AgentSessionEntry {
-    value: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-#[allow(dead_code)]
-struct PaneEventInfo {
-    pane_id: String,
-    workspace_id: String,
-    terminal_id: String,
-    tab_id: String,
-    focused: bool,
-    agent_status: String,
-    revision: u64,
-    agent: Option<String>,
-    agent_session: Option<AgentSessionEntry>,
-    cwd: Option<String>,
-    display_agent: Option<String>,
-    foreground_cwd: Option<String>,
-    label: Option<String>,
-    scroll: Option<Value>,
-    #[serde(default)]
-    state_labels: std::collections::BTreeMap<String, String>,
-    terminal_title: Option<String>,
-    terminal_title_stripped: Option<String>,
-    title: Option<String>,
-    #[serde(default)]
-    tokens: std::collections::BTreeMap<String, String>,
 }
 
 pub fn execute_lifecycle_operation<M, C, I>(
@@ -882,339 +791,360 @@ where
                 "drain": reconciliation.drain
             }))
         }
-        "event.pane-lifecycle" => {
-            let event: PaneLifecycleEvent = parse_input(input)?;
-            match event {
-                PaneLifecycleEvent::Created { pane } => {
-                    if let Ok(event_worktree) = discover_reminder_workspace(
-                        runtime.state_directory,
-                        &StateNamespace::for_space(runtime.session_socket_id, &pane.workspace_id),
-                        runtime.mux,
-                    ) {
-                        let event_namespace = event_worktree.namespace(runtime.session_socket_id);
-                        let event_runtime = LifecycleRuntime {
-                            workspace_id: Some(&pane.workspace_id),
-                            ..*runtime
-                        };
-                        let _ = reconcile_managed_tab_labels(
-                            &mut store,
-                            &event_namespace,
-                            &event_worktree,
-                            &event_runtime,
-                        );
-                    }
-                    Ok(json!({"type": "pane_created", "handled": true}))
-                }
-                PaneLifecycleEvent::Closed {
-                    pane_id,
-                    workspace_id,
-                }
-                | PaneLifecycleEvent::Exited {
-                    pane_id,
-                    workspace_id,
-                } => {
-                    let event_worktree = discover_reminder_workspace(
-                        runtime.state_directory,
-                        &StateNamespace::for_space(runtime.session_socket_id, &workspace_id),
-                        runtime.mux,
-                    )?;
-                    let event_namespace = event_worktree.namespace(runtime.session_socket_id);
-                    store
-                        .transaction(|transaction| {
-                            transaction.end_moves_into(
-                                runtime.session_socket_id,
-                                &pane_id,
-                                &attribution,
-                            )
-                        })
-                        .map_err(|error| error.to_string())?;
-                    require_activated(&mut store, &event_namespace)?;
-                    let removed_address_id = store
-                        .transaction(|transaction| {
-                            let binding = transaction
-                                .active_pane_bindings(&event_namespace)?
-                                .into_iter()
-                                .find(|binding| binding.pane_id == pane_id);
-                            if let Some(binding) = binding {
-                                transaction.cancel_and_remove_pane_address(
-                                    &event_namespace,
-                                    &binding.address_id,
-                                    &attribution,
-                                )?;
-                                return Ok(Some(binding.address_id));
-                            }
-                            Ok(None)
-                        })
-                        .map_err(|error| error.to_string())?;
-                    let event_runtime = LifecycleRuntime {
-                        workspace_id: Some(&workspace_id),
-                        ..*runtime
-                    };
-                    let refreshed = discover_reminder_workspace(
-                        runtime.state_directory,
-                        &StateNamespace::for_space(runtime.session_socket_id, &workspace_id),
-                        runtime.mux,
-                    )?;
-                    let _ = reconcile_managed_tab_labels(
-                        &mut store,
-                        &event_namespace,
-                        &refreshed,
-                        &event_runtime,
-                    );
-                    store
-                        .transaction(|transaction| {
-                            reconcile_delivery_state(
-                                transaction,
-                                &event_namespace,
-                                &refreshed.panes,
-                                false,
-                                runtime.state_directory,
-                                &attribution,
-                            )?;
-                            Ok(())
-                        })
-                        .map_err(|error| error.to_string())?;
-                    let drain = crate::drain_mailboxes(&event_runtime)?;
-                    Ok(json!({
-                        "type": "pane_unavailable",
-                        "handled": true,
-                        "removed_address_id": removed_address_id,
-                        "drain": drain
-                    }))
-                }
-                PaneLifecycleEvent::TabClosed {
-                    tab_id,
-                    workspace_id,
-                } => {
-                    let event_worktree = discover_reminder_workspace(
-                        runtime.state_directory,
-                        &StateNamespace::for_space(runtime.session_socket_id, &workspace_id),
-                        runtime.mux,
-                    )?;
-                    let event_namespace = event_worktree.namespace(runtime.session_socket_id);
-                    require_activated(&mut store, &event_namespace)?;
-                    let removed_bindings = store
-                        .transaction(|transaction| {
-                            let addresses = transaction.list_pane_addresses(&event_namespace)?;
-                            let bindings = transaction.active_pane_bindings(&event_namespace)?;
-                            let mut removed = Vec::new();
-                            for binding in bindings {
-                                let address = addresses
-                                    .iter()
-                                    .find(|address| address.id == binding.address_id);
-                                let exact_pane_is_live = event_worktree.panes.iter().any(|pane| {
-                                    pane.pane_id == binding.pane_id
-                                        && address.is_some_and(|address| {
-                                            address.agent_session_id.as_ref()
-                                                == pane.agent_session_id()
-                                        })
-                                });
-                                if binding.tab_id.as_deref() == Some(tab_id.as_str())
-                                    || (binding.tab_id.is_none() && !exact_pane_is_live)
-                                {
-                                    transaction.cancel_and_remove_pane_address(
-                                        &event_namespace,
-                                        &binding.address_id,
-                                        &attribution,
-                                    )?;
-                                    removed.push(binding);
-                                }
-                            }
-                            Ok(removed)
-                        })
-                        .map_err(|error| error.to_string())?;
-                    let event_runtime = LifecycleRuntime {
-                        workspace_id: Some(&workspace_id),
-                        ..*runtime
-                    };
-                    let refreshed = discover_reminder_workspace(
-                        runtime.state_directory,
-                        &StateNamespace::for_space(runtime.session_socket_id, &workspace_id),
-                        runtime.mux,
-                    )?;
-                    let _ = reconcile_managed_tab_labels(
-                        &mut store,
-                        &event_namespace,
-                        &refreshed,
-                        &event_runtime,
-                    );
-                    let drain = crate::drain_mailboxes(&event_runtime)?;
-                    Ok(json!({
-                        "type": "tab_unavailable",
-                        "handled": true,
-                        "tab_id": tab_id,
-                        "removed_address_ids": removed_bindings
-                            .into_iter()
-                            .map(|binding| binding.address_id)
-                            .collect::<Vec<_>>(),
-                        "drain": drain
-                    }))
-                }
-                PaneLifecycleEvent::Moved {
-                    previous_pane_id,
-                    previous_workspace_id,
-                    _previous_tab_id: _,
-                    pane,
-                    created_tab,
-                    created_workspace,
-                    closed_tab_id,
-                    closed_workspace_id,
-                } => {
-                    let _ = (
-                        created_tab,
-                        created_workspace,
-                        closed_tab_id,
-                        closed_workspace_id,
-                    );
-                    let source = discover_reminder_workspace(
-                        runtime.state_directory,
-                        &StateNamespace::for_space(
-                            runtime.session_socket_id,
-                            &previous_workspace_id,
-                        ),
-                        runtime.mux,
-                    )?;
-                    let source_namespace = source.namespace(runtime.session_socket_id);
-                    require_activated(&mut store, &source_namespace)?;
-                    let destination = discover_reminder_workspace(
-                        runtime.state_directory,
-                        &StateNamespace::for_space(runtime.session_socket_id, &pane.workspace_id),
-                        runtime.mux,
-                    )?;
-                    store
-                        .transaction(|transaction| {
-                            apply_pane_move(
-                                transaction,
-                                &source_namespace,
-                                &previous_pane_id,
-                                &pane.pane_id,
-                                &pane.tab_id,
-                                &destination.workspace_id,
-                                &attribution,
-                            )?;
-                            if destination.workspace_id == source_namespace.space_id.as_str() {
-                                reconcile_compacted_pane_bindings(
-                                    transaction,
-                                    &source_namespace,
-                                    &destination.panes,
-                                    &attribution,
-                                )?;
-                            }
-                            Ok(())
-                        })
-                        .map_err(|error| error.to_string())?;
-                    let event_runtime = LifecycleRuntime {
-                        workspace_id: Some(&previous_workspace_id),
-                        ..*runtime
-                    };
-                    let refreshed = discover_reminder_workspace(
-                        runtime.state_directory,
-                        &StateNamespace::for_space(
-                            runtime.session_socket_id,
-                            &previous_workspace_id,
-                        ),
-                        runtime.mux,
-                    )?;
-                    let _ = reconcile_managed_tab_labels(
-                        &mut store,
-                        &source_namespace,
-                        &refreshed,
-                        &event_runtime,
-                    );
-                    store
-                        .transaction(|transaction| {
-                            reconcile_delivery_state(
-                                transaction,
-                                &source_namespace,
-                                &refreshed.panes,
-                                false,
-                                runtime.state_directory,
-                                &attribution,
-                            )?;
-                            Ok(())
-                        })
-                        .map_err(|error| error.to_string())?;
-                    let drain = crate::drain_mailboxes(&event_runtime)?;
-                    Ok(json!({
-                        "type": "pane_moved",
-                        "handled": true,
-                        "drain": drain
-                    }))
-                }
-            }
-        }
-        "event.agent-status-changed" => {
-            let event: AgentStatusChangedEvent = parse_input(input)?;
-            let _ = (
-                event.agent_status,
-                event.released,
-                event.final_status,
-                event.agent,
-                event.display_agent,
-                event.title,
-                event.state_labels,
-            );
-            let event_worktree = discover_reminder_workspace(
-                runtime.state_directory,
-                &StateNamespace::for_space(runtime.session_socket_id, &event.workspace_id),
-                runtime.mux,
-            )?;
-            let event_namespace = event_worktree.namespace(runtime.session_socket_id);
-            require_activated(&mut store, &event_namespace)?;
-            if !event_worktree
-                .panes
-                .iter()
-                .any(|pane| pane.pane_id == event.pane_id)
-            {
-                return Err("status event pane is not live in its Worktree".to_owned());
-            }
-            store
-                .transaction(|transaction| {
-                    // More than one session may restart before the next status event.
-                    // Refresh every binding before onboarding inspects any of them.
-                    reconcile_discovered_panes(
-                        transaction,
-                        &event_namespace,
-                        &event_worktree.panes,
-                        runtime.ids,
-                        &attribution,
-                    )?;
-                    reconcile_delivery_state(
-                        transaction,
-                        &event_namespace,
-                        &event_worktree.panes,
-                        false,
-                        runtime.state_directory,
-                        &attribution,
-                    )?;
-                    Ok(())
-                })
-                .map_err(|error| error.to_string())?;
-            let event_runtime = LifecycleRuntime {
-                workspace_id: Some(&event.workspace_id),
-                ..*runtime
-            };
-            onboard_settled_integrations(&event_runtime, &event_worktree)?;
-            // Only a detection means an agent newly appeared; status changes
-            // arrive constantly and must never open a popup.
-            let tour = match event.event_type {
-                AgentStatusEventType::Detected => Some(crate::tour::show_for_first_agent(
-                    &event_runtime,
-                    &event_worktree,
-                    Some(&event.pane_id),
-                )),
-                AgentStatusEventType::Changed => None,
-            };
-            let drain = crate::drain_mailboxes(&event_runtime)?;
-            Ok(json!({
-                "type": "pane_agent_status_changed",
-                "handled": true,
-                "drain": drain,
-                "tour": tour
-            }))
+        "event.pane-lifecycle" | "event.agent-status-changed" => {
+            let event = crate::mux::herdr::decode_operation_input(operation, input)?;
+            handle_event(&mut store, &attribution, runtime, &event)
         }
         _ => Err(format!("{operation} is not a lifecycle operation")),
     }
+}
+
+/// Runs the handler for one multiplexer event. Each handler rediscovers the
+/// spaces the event names, so the event carries only IDs.
+fn handle_event<M, C, I>(
+    store: &mut StateStore,
+    attribution: &MutationAttribution,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    event: &MuxEvent,
+) -> Result<Value, String>
+where
+    M: crate::mux::Mux + HerdrCommandExecutor,
+    C: Clock,
+    I: IdGenerator,
+{
+    match event {
+        MuxEvent::PaneAppeared(pane) => pane_appeared(store, runtime, pane),
+        MuxEvent::PaneClosed(pane) => pane_closed(store, attribution, runtime, pane),
+        MuxEvent::TabClosed { space, tab } => tab_closed(store, attribution, runtime, space, tab),
+        MuxEvent::PaneMoved { from, to } => pane_moved(store, attribution, runtime, from, to),
+        MuxEvent::AgentDetected(pane) => {
+            agent_status_changed(store, attribution, runtime, pane, true)
+        }
+        MuxEvent::AgentStatusChanged(pane) => {
+            agent_status_changed(store, attribution, runtime, pane, false)
+        }
+    }
+}
+
+fn pane_appeared<M, C, I>(
+    store: &mut StateStore,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    pane: &PaneSlot,
+) -> Result<Value, String>
+where
+    M: crate::mux::Mux,
+    C: Clock,
+    I: IdGenerator,
+{
+    let workspace_id = pane.space.as_str();
+    if let Ok(event_worktree) = discover_reminder_workspace(
+        runtime.state_directory,
+        &StateNamespace::for_space(runtime.session_socket_id, workspace_id),
+        runtime.mux,
+    ) {
+        let event_namespace = event_worktree.namespace(runtime.session_socket_id);
+        let event_runtime = LifecycleRuntime {
+            workspace_id: Some(workspace_id),
+            ..*runtime
+        };
+        let _ =
+            reconcile_managed_tab_labels(store, &event_namespace, &event_worktree, &event_runtime);
+    }
+    Ok(json!({"type": "pane_created", "handled": true}))
+}
+
+fn pane_closed<M, C, I>(
+    store: &mut StateStore,
+    attribution: &MutationAttribution,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    pane: &PaneSlot,
+) -> Result<Value, String>
+where
+    M: crate::mux::Mux,
+    C: Clock,
+    I: IdGenerator,
+{
+    let (workspace_id, pane_id) = (pane.space.as_str(), pane.pane.as_str());
+    let event_worktree = discover_reminder_workspace(
+        runtime.state_directory,
+        &StateNamespace::for_space(runtime.session_socket_id, workspace_id),
+        runtime.mux,
+    )?;
+    let event_namespace = event_worktree.namespace(runtime.session_socket_id);
+    store
+        .transaction(|transaction| {
+            transaction.end_moves_into(runtime.session_socket_id, pane_id, attribution)
+        })
+        .map_err(|error| error.to_string())?;
+    require_activated(store, &event_namespace)?;
+    let removed_address_id = store
+        .transaction(|transaction| {
+            let binding = transaction
+                .active_pane_bindings(&event_namespace)?
+                .into_iter()
+                .find(|binding| binding.pane_id == pane_id);
+            if let Some(binding) = binding {
+                transaction.cancel_and_remove_pane_address(
+                    &event_namespace,
+                    &binding.address_id,
+                    attribution,
+                )?;
+                return Ok(Some(binding.address_id));
+            }
+            Ok(None)
+        })
+        .map_err(|error| error.to_string())?;
+    let event_runtime = LifecycleRuntime {
+        workspace_id: Some(workspace_id),
+        ..*runtime
+    };
+    let refreshed = discover_reminder_workspace(
+        runtime.state_directory,
+        &StateNamespace::for_space(runtime.session_socket_id, workspace_id),
+        runtime.mux,
+    )?;
+    let _ = reconcile_managed_tab_labels(store, &event_namespace, &refreshed, &event_runtime);
+    store
+        .transaction(|transaction| {
+            reconcile_delivery_state(
+                transaction,
+                &event_namespace,
+                &refreshed.panes,
+                false,
+                runtime.state_directory,
+                attribution,
+            )?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    let drain = crate::drain_mailboxes(&event_runtime)?;
+    Ok(json!({
+        "type": "pane_unavailable",
+        "handled": true,
+        "removed_address_id": removed_address_id,
+        "drain": drain
+    }))
+}
+
+fn tab_closed<M, C, I>(
+    store: &mut StateStore,
+    attribution: &MutationAttribution,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    space: &crate::SpaceId,
+    tab: &TabId,
+) -> Result<Value, String>
+where
+    M: crate::mux::Mux,
+    C: Clock,
+    I: IdGenerator,
+{
+    let workspace_id = space.as_str();
+    let event_worktree = discover_reminder_workspace(
+        runtime.state_directory,
+        &StateNamespace::for_space(runtime.session_socket_id, workspace_id),
+        runtime.mux,
+    )?;
+    let event_namespace = event_worktree.namespace(runtime.session_socket_id);
+    require_activated(store, &event_namespace)?;
+    let removed_bindings = store
+        .transaction(|transaction| {
+            let addresses = transaction.list_pane_addresses(&event_namespace)?;
+            let bindings = transaction.active_pane_bindings(&event_namespace)?;
+            let mut removed = Vec::new();
+            for binding in bindings {
+                let address = addresses
+                    .iter()
+                    .find(|address| address.id == binding.address_id);
+                let exact_pane_is_live = event_worktree.panes.iter().any(|pane| {
+                    pane.pane_id == binding.pane_id
+                        && address.is_some_and(|address| {
+                            address.agent_session_id.as_ref() == pane.agent_session_id()
+                        })
+                });
+                if binding.tab_id.as_deref() == Some(tab.as_str())
+                    || (binding.tab_id.is_none() && !exact_pane_is_live)
+                {
+                    transaction.cancel_and_remove_pane_address(
+                        &event_namespace,
+                        &binding.address_id,
+                        attribution,
+                    )?;
+                    removed.push(binding);
+                }
+            }
+            Ok(removed)
+        })
+        .map_err(|error| error.to_string())?;
+    let event_runtime = LifecycleRuntime {
+        workspace_id: Some(workspace_id),
+        ..*runtime
+    };
+    let refreshed = discover_reminder_workspace(
+        runtime.state_directory,
+        &StateNamespace::for_space(runtime.session_socket_id, workspace_id),
+        runtime.mux,
+    )?;
+    let _ = reconcile_managed_tab_labels(store, &event_namespace, &refreshed, &event_runtime);
+    let drain = crate::drain_mailboxes(&event_runtime)?;
+    Ok(json!({
+        "type": "tab_unavailable",
+        "handled": true,
+        "tab_id": tab.as_str(),
+        "removed_address_ids": removed_bindings
+            .into_iter()
+            .map(|binding| binding.address_id)
+            .collect::<Vec<_>>(),
+        "drain": drain
+    }))
+}
+
+fn pane_moved<M, C, I>(
+    store: &mut StateStore,
+    attribution: &MutationAttribution,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    from: &PaneSlot,
+    to: &PaneSlot,
+) -> Result<Value, String>
+where
+    M: crate::mux::Mux,
+    C: Clock,
+    I: IdGenerator,
+{
+    let previous_workspace_id = from.space.as_str();
+    let destination_tab = to
+        .tab
+        .as_ref()
+        .ok_or_else(|| "a moved pane event names no destination tab".to_owned())?;
+    let source = discover_reminder_workspace(
+        runtime.state_directory,
+        &StateNamespace::for_space(runtime.session_socket_id, previous_workspace_id),
+        runtime.mux,
+    )?;
+    let source_namespace = source.namespace(runtime.session_socket_id);
+    require_activated(store, &source_namespace)?;
+    let destination = discover_reminder_workspace(
+        runtime.state_directory,
+        &StateNamespace::for_space(runtime.session_socket_id, to.space.as_str()),
+        runtime.mux,
+    )?;
+    store
+        .transaction(|transaction| {
+            apply_pane_move(
+                transaction,
+                &source_namespace,
+                from.pane.as_str(),
+                to.pane.as_str(),
+                destination_tab.as_str(),
+                &destination.workspace_id,
+                attribution,
+            )?;
+            if destination.workspace_id == source_namespace.space_id.as_str() {
+                reconcile_compacted_pane_bindings(
+                    transaction,
+                    &source_namespace,
+                    &destination.panes,
+                    attribution,
+                )?;
+            }
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    let event_runtime = LifecycleRuntime {
+        workspace_id: Some(previous_workspace_id),
+        ..*runtime
+    };
+    let refreshed = discover_reminder_workspace(
+        runtime.state_directory,
+        &StateNamespace::for_space(runtime.session_socket_id, previous_workspace_id),
+        runtime.mux,
+    )?;
+    let _ = reconcile_managed_tab_labels(store, &source_namespace, &refreshed, &event_runtime);
+    store
+        .transaction(|transaction| {
+            reconcile_delivery_state(
+                transaction,
+                &source_namespace,
+                &refreshed.panes,
+                false,
+                runtime.state_directory,
+                attribution,
+            )?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    let drain = crate::drain_mailboxes(&event_runtime)?;
+    Ok(json!({
+        "type": "pane_moved",
+        "handled": true,
+        "drain": drain
+    }))
+}
+
+fn agent_status_changed<M, C, I>(
+    store: &mut StateStore,
+    attribution: &MutationAttribution,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    pane: &PaneSlot,
+    detected: bool,
+) -> Result<Value, String>
+where
+    M: crate::mux::Mux + HerdrCommandExecutor,
+    C: Clock,
+    I: IdGenerator,
+{
+    let (workspace_id, pane_id) = (pane.space.as_str(), pane.pane.as_str());
+    let event_worktree = discover_reminder_workspace(
+        runtime.state_directory,
+        &StateNamespace::for_space(runtime.session_socket_id, workspace_id),
+        runtime.mux,
+    )?;
+    let event_namespace = event_worktree.namespace(runtime.session_socket_id);
+    require_activated(store, &event_namespace)?;
+    if !event_worktree
+        .panes
+        .iter()
+        .any(|pane| pane.pane_id == pane_id)
+    {
+        return Err("status event pane is not live in its Worktree".to_owned());
+    }
+    store
+        .transaction(|transaction| {
+            // More than one session may restart before the next status event.
+            // Refresh every binding before onboarding inspects any of them.
+            reconcile_discovered_panes(
+                transaction,
+                &event_namespace,
+                &event_worktree.panes,
+                runtime.ids,
+                attribution,
+            )?;
+            reconcile_delivery_state(
+                transaction,
+                &event_namespace,
+                &event_worktree.panes,
+                false,
+                runtime.state_directory,
+                attribution,
+            )?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    let event_runtime = LifecycleRuntime {
+        workspace_id: Some(workspace_id),
+        ..*runtime
+    };
+    onboard_settled_integrations(&event_runtime, &event_worktree)?;
+    // Only a detection means an agent newly appeared; status changes
+    // arrive constantly and must never open a popup.
+    let tour = detected
+        .then(|| crate::tour::show_for_first_agent(&event_runtime, &event_worktree, Some(pane_id)));
+    let drain = crate::drain_mailboxes(&event_runtime)?;
+    Ok(json!({
+        "type": "pane_agent_status_changed",
+        "handled": true,
+        "drain": drain,
+        "tour": tour
+    }))
 }
 
 /// What a named pane's idle label tells the human.

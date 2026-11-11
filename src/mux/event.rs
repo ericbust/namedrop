@@ -14,16 +14,8 @@ pub struct PaneSlot {
 pub enum MuxEvent {
     PaneAppeared(PaneSlot),
     PaneClosed(PaneSlot),
-    PaneMoved {
-        from: PaneSlot,
-        to: PaneSlot,
-    },
-    TabClosed {
-        space: SpaceId,
-        tab: TabId,
-    },
+    PaneMoved { from: PaneSlot, to: PaneSlot },
+    TabClosed { space: SpaceId, tab: TabId },
     AgentDetected(PaneSlot),
     AgentStatusChanged(PaneSlot),
-    /// The event stream restarted, so every space needs rediscovery.
-    Resync,
 }

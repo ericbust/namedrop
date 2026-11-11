@@ -855,8 +855,10 @@ fn plugin_events_decode_to_id_only_mux_events() {
     ] {
         let event = data["type"].as_str().unwrap().to_owned();
         let envelope = json!({"event": event, "data": data}).to_string();
+        let raw = plugin_event_data(operation, &envelope, hook);
+        assert_eq!(raw.as_ref(), Ok(&data), "{hook}");
         assert_eq!(
-            decode_plugin_event(operation, hook, &envelope),
+            decode_operation_input(operation, raw.unwrap()),
             Ok(expected),
             "{hook}"
         );
@@ -867,11 +869,11 @@ fn plugin_events_decode_to_id_only_mux_events() {
 fn a_plugin_event_must_match_its_hook_and_operation_and_schema() {
     let data = json!({"type": "pane_closed", "pane_id": "p1", "workspace_id": "w1"});
     let envelope = json!({"event": "pane_closed", "data": data}).to_string();
-    assert!(decode_plugin_event("event.pane-lifecycle", "pane.created", &envelope).is_err());
-    assert!(decode_plugin_event("event.agent-status-changed", "pane.closed", &envelope).is_err());
+    assert!(plugin_event_data("event.pane-lifecycle", &envelope, "pane.created").is_err());
+    assert!(plugin_event_data("event.agent-status-changed", &envelope, "pane.closed").is_err());
     let unknown = json!({"event": "pane_resized", "data": {}}).to_string();
     assert_eq!(
-        decode_plugin_event("event.pane-lifecycle", "pane.resized", &unknown),
+        plugin_event_data("event.pane-lifecycle", &unknown, "pane.resized"),
         Err("unsupported Herdr plugin event: pane_resized".into())
     );
     let extra = json!({"type": "pane_closed", "pane_id": "p1", "workspace_id": "w1", "new": 1});
