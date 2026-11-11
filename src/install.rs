@@ -658,7 +658,7 @@ fn validate_claude_permission_paths(executable: &Path, state: &Path) -> Result<(
 
 fn claude_allow_rules(executable: &Path, state: &Path) -> Result<Vec<String>, String> {
     validate_claude_permission_paths(executable, state)?;
-    Ok(collaboration_permission_patterns(executable, state)
+    let mut rules: Vec<String> = collaboration_permission_patterns(executable, state)
         .into_iter()
         .map(|pattern| {
             format!(
@@ -668,7 +668,16 @@ fn claude_allow_rules(executable: &Path, state: &Path) -> Result<Vec<String>, St
                 pattern[3..].join(" ")
             )
         })
-        .collect())
+        .collect();
+    // Claude Code asks before it reads a file outside its working directory,
+    // and a message from Channels names its images by path in this directory.
+    rules.push(format!(
+        "Read(/{}/**)",
+        state
+            .join(crate::dashboard::CHANNEL_IMAGES_DIRECTORY)
+            .display()
+    ));
+    Ok(rules)
 }
 
 fn prepare_codex_policy(
@@ -1649,6 +1658,7 @@ mod permission_tests {
             "Bash('/opt/namedrop' --plugin-state '/opt/state' reminder cancel *)",
             "Bash('/opt/namedrop' --plugin-state '/opt/state' address list *)",
             "Bash('/opt/namedrop' --plugin-state '/opt/state' handoff acknowledge-granted *)",
+            "Read(//opt/state/channel-images/**)",
         ];
         assert_eq!(actual, expected);
         for operation in crate::operation_catalog()

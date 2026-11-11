@@ -50,6 +50,9 @@ import { ImageUploadContext } from "./ImageUploadContext.ts";
 import { measure } from "./measure.ts";
 import { useSkills } from "./useSkills.ts";
 
+type Uploading = { id: number; at: DraftKey };
+type Refused = { at: DraftKey; why: ImageRefusal };
+
 export function Composer({
   context,
   composer,
@@ -89,12 +92,13 @@ export function Composer({
   const typedAt = useRef<number | null>(null);
   const listId = useId();
   const upload = useContext(ImageUploadContext);
-  const [uploads, setUploads] = useState<readonly number[]>([]);
-  const [refused, setRefused] = useState<ImageRefusal | null>(null);
+  // Uploads still running, each with the draft it started in.
+  const [uploads, setUploads] = useState<readonly Uploading[]>([]);
+  const running = useRef<readonly Uploading[]>([]);
+  const [refused, setRefused] = useState<Refused | null>(null);
   const [dragging, setDragging] = useState(false);
   const picker = useRef<HTMLInputElement>(null);
   const uploadId = useRef(0);
-  const inFlightUploads = useRef(0);
 
   const at = draftKey(composer);
   const draft = drafts.get(at);
@@ -113,7 +117,9 @@ export function Composer({
   const leading = leadingMentions(sentText(text));
   const words = postSource(text, rule);
   const source = words === null ? null : withImages(words, images);
-  const attaching = uploads.length > 0;
+  const uploading = uploads.filter((upload) => upload.at === at);
+  const attaching = uploading.length > 0;
+  const refusal = refused?.at === at ? refused.why : null;
   const missingRecipient =
     rule.kind === "thread" && rule.to.length === 0 && leading.length === 0;
   const pickRecipient =
@@ -184,31 +190,35 @@ export function Composer({
     setGuarded(false);
     setRefused(null);
   }
+  function track(next: readonly Uploading[]) {
+    running.current = next;
+    setUploads(next);
+  }
   function attach(files: readonly File[]) {
     if (upload === null || closed !== null || sending) return;
     setRefused(null);
-    let attached = images.length + inFlightUploads.current;
     for (const file of files) {
-      const refusal = refusalOf(file, attached);
-      if (refusal !== null) {
-        setRefused(refusal);
+      const why = refusalOf(
+        file,
+        shown.current.images.length +
+          running.current.filter((other) => other.at === at).length,
+      );
+      if (why !== null) {
+        setRefused({ at, why });
         continue;
       }
-      attached += 1;
-      inFlightUploads.current += 1;
       uploadId.current += 1;
       const id = uploadId.current;
-      setUploads((all) => [...all, id]);
+      track([...running.current, { id, at }]);
       void upload(file).then((result) => {
-        inFlightUploads.current -= 1;
-        setUploads((all) => all.filter((other) => other !== id));
+        track(running.current.filter((other) => other.id !== id));
+        if (result.kind === "refused") {
+          setRefused({ at, why: result.why });
+          return;
+        }
         const now = shown.current;
         // The person moved to another conversation while it uploaded.
         if (now.at !== at) return;
-        if (result.kind === "refused") {
-          setRefused(result.why);
-          return;
-        }
         if (now.images.some((image) => image.name === result.image.name))
           return;
         const added = [...now.images, result.image];
@@ -247,7 +257,7 @@ export function Composer({
     event.preventDefault();
     setDragging(false);
     const files = imageFiles(event.dataTransfer, "drop");
-    if (files.length === 0) setRefused("type");
+    if (files.length === 0) setRefused({ at, why: "type" });
     else attach(files);
   }
   function choose(index: number) {
@@ -315,7 +325,10 @@ export function Composer({
     >
       <div className={attachments ? "composer-box has-images" : "composer-box"}>
         {attachments && (
-          <ul className="composer-images" aria-label="Attached images">
+          <ul
+            className="composer-images"
+            aria-label={composerCopy.attachedImages}
+          >
             {images.map((image, index) => (
               <li key={image.name} className="image-chip">
                 <img
@@ -334,13 +347,12 @@ export function Composer({
                 </button>
               </li>
             ))}
-            {uploads.map((id) => (
-              <li
-                key={id}
-                className="image-chip uploading"
-                role="status"
-                aria-label={composerCopy.uploadingImage}
-              />
+            {uploading.map(({ id }) => (
+              <li key={id} className="image-chip uploading">
+                <span className="sr-only" role="status">
+                  {composerCopy.uploadingImage}
+                </span>
+              </li>
             ))}
           </ul>
         )}
@@ -430,9 +442,9 @@ export function Composer({
           </p>
         ) : sending ? (
           <p>{composerCopy.sending}</p>
-        ) : refused !== null ? (
+        ) : refusal !== null ? (
           <p className="composer-guard" role="status">
-            {composerCopy.imageRefused[refused]}
+            {composerCopy.imageRefused[refusal]}
           </p>
         ) : dragging ? (
           <p>{composerCopy.dropImages}</p>

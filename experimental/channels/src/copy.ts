@@ -537,6 +537,7 @@ export const composerCopy = {
   needsMessage: (names: readonly string[]) =>
     `Add a message after ${shortList(names)}.`,
   attachImage: "Attach an image",
+  attachedImages: "Attached images",
   uploadingImage: "Uploading image…",
   removeImage: (position: number) => `Remove image ${position}`,
   attachedImage: (position: number) => `Attached image ${position}`,

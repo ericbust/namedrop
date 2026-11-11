@@ -14,6 +14,7 @@ pub mod snapshot;
 pub(crate) mod tailscale;
 mod thread_controls;
 
+pub(crate) use images::DIRECTORY as CHANNEL_IMAGES_DIRECTORY;
 pub(crate) use server_files::current_operator_session;
 
 /// Internal child entry point. A private stdin pipe ties an observer to its

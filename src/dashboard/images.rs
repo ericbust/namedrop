@@ -16,7 +16,7 @@ use std::{
 pub(crate) const MAX_BYTES: usize = 10 * 1024 * 1024;
 pub(crate) const MAX_PER_MESSAGE: usize = 4;
 const KEEP: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-const DIRECTORY: &str = "channel-images";
+pub(crate) const DIRECTORY: &str = "channel-images";
 const LINE_PREFIX: &str = "Image: ";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

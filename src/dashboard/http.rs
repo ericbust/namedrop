@@ -2336,9 +2336,9 @@ pub(super) fn wake_mailboxes_after_send(
     Ok(())
 }
 
-struct ImageUpload<'a>(&'a AtomicUsize);
+struct UploadPermit<'a>(&'a AtomicUsize);
 
-impl Drop for ImageUpload<'_> {
+impl Drop for UploadPermit<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
     }
@@ -2366,7 +2366,7 @@ fn upload_image(
         front.image_uploads.fetch_sub(1, Ordering::AcqRel);
         return respond_status(writer, Status::TooManyRequests);
     }
-    let _upload = ImageUpload(&front.image_uploads);
+    let _upload = UploadPermit(&front.image_uploads);
     let mut bytes = vec![0; length];
     if reader.read_exact(&mut bytes).is_err() {
         return respond_status(writer, Status::BadRequest);
@@ -3224,10 +3224,15 @@ mod tailnet_route_tests {
                 request
                     .headers
                     .push(("x-namedrop-csrf".into(), csrf_token(&session)));
-                assert!(matches!(
-                    route(&request, 1234, &token, &session, false, policy),
-                    Ok(Route::Send(_) | Route::ImageUpload)
-                ));
+                let routed = route(&request, 1234, &token, &session, false, policy);
+                assert!(
+                    if path == "/api/images" {
+                        matches!(routed, Ok(Route::ImageUpload))
+                    } else {
+                        matches!(routed, Ok(Route::Send(_)))
+                    },
+                    "{path}"
+                );
                 request
                     .headers
                     .push(("sec-fetch-site".into(), "same-site".into()));
