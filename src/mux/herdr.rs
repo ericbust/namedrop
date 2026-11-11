@@ -8,11 +8,12 @@ mod wire;
 pub use events::{decode_operation_input, decode_plugin_event};
 
 use super::{
-    Applied, Depth, Effect, Endpoint, InputKind, InputOutcome, MuxAct, MuxError, MuxInput, MuxKind,
-    MuxRead, PaneId, PaneInput, PaneProcess, Retry, Scope, Screen, ScreenRequest, Survey, TabId,
+    Applied, Budget, Depth, Effect, Endpoint, InputKind, InputOutcome, MuxAct, MuxError, MuxInput,
+    MuxKind, MuxRead, PaneId, PaneInput, PaneProcess, Retry, Scope, Screen, ScreenRequest, Survey,
+    TabId,
 };
 use crate::{HerdrCommandExecutor, PromptFailureKind};
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::atomic::AtomicBool};
 
 mod transport {
     use crate::PromptFailureKind;
@@ -174,6 +175,51 @@ static LEGACY_ENDPOINT: Endpoint = Endpoint {
 fn bridge<E: HerdrCommandExecutor + Sync>(executor: &E) -> HerdrMux<Legacy<'_, E>> {
     HerdrMux {
         transport: Legacy(executor),
+        endpoint: LEGACY_ENDPOINT.clone(),
+    }
+}
+
+/// A legacy executor's commands, each run under the budget `budget` returns
+/// just before it starts. Reads that share one deadline each get what is left,
+/// and an error from `budget` is the read's error, word for word.
+struct Bounded<'a, E, B> {
+    executor: &'a E,
+    cancelled: &'a AtomicBool,
+    budget: B,
+}
+
+impl<E, B> Transport for Bounded<'_, E, B>
+where
+    E: HerdrCommandExecutor + Sync,
+    B: Fn() -> Result<Budget, String> + Send + Sync,
+{
+    fn run(&self, args: &[&str]) -> Result<String, String> {
+        let budget = (self.budget)()?;
+        self.executor
+            .execute_bounded(
+                args,
+                budget.timeout,
+                self.cancelled,
+                budget.max_output_bytes,
+            )
+            .map(|output| output.stdout)
+    }
+}
+
+/// Reads through `executor` within a budget, which the bridge cannot give a
+/// plain `MuxRead` because the executor does not know one. Deleted with the
+/// bridge, when a connector fixes the budget instead.
+pub fn bounded<'a, E, B>(executor: &'a E, cancelled: &'a AtomicBool, budget: B) -> impl MuxRead + 'a
+where
+    E: HerdrCommandExecutor + Sync,
+    B: Fn() -> Result<Budget, String> + Send + Sync + 'a,
+{
+    HerdrMux {
+        transport: Bounded {
+            executor,
+            cancelled,
+            budget,
+        },
         endpoint: LEGACY_ENDPOINT.clone(),
     }
 }

@@ -1,10 +1,7 @@
 use crate::lifecycle::locate_agent_session_pane;
+use crate::mux::{MuxError, MuxRead, PaneId, PaneProcess};
 use crate::{ActorKind, Clock, DeliveryAttemptId, IdGenerator, MutationAttribution, StateStore};
-use crate::{
-    HerdrCommandExecutor, LifecycleRuntime, PaneType, discover_worktree,
-    discover_worktree_for_workspace,
-};
-use serde::Deserialize;
+use crate::{LifecycleRuntime, PaneType, discover_worktree, discover_worktree_for_workspace};
 use std::{
     io::{Read, Write},
     process::{Command, Stdio},
@@ -39,7 +36,7 @@ pub(crate) fn runner_command<M, C, I>(
 
 /// Runs inside the target terminal. The atomic claim rejects replay and binds
 /// execution to the physical terminal, not a potentially recycled pane label.
-pub fn execute_terminal<M: crate::mux::Mux + HerdrCommandExecutor, C: Clock, I: IdGenerator>(
+pub fn execute_terminal<M: MuxRead, C: Clock, I: IdGenerator>(
     attempt: &str,
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<i32, String> {
@@ -56,11 +53,9 @@ pub fn execute_terminal<M: crate::mux::Mux + HerdrCommandExecutor, C: Clock, I: 
     if pane.agent.is_some() || pane.agent_session_id.is_some() {
         return Err("terminal pane now contains an agent; command was not executed".to_owned());
     }
-    if !process_info(runtime.mux, &pane.pane_id).is_some_and(|p| {
-        p.foreground_processes
-            .iter()
-            .any(|p| p.pid == std::process::id())
-    }) {
+    if !process_info(runtime.mux, &pane.pane_id)
+        .is_some_and(|p| p.foreground_pids.contains(&std::process::id()))
+    {
         return Err(
             "terminal runner must be running in the target pane's foreground process group"
                 .to_owned(),
@@ -151,36 +146,15 @@ fn copy_output(mut reader: impl Read, mut writer: impl Write) -> Result<String, 
     Ok(text)
 }
 
-#[derive(Deserialize)]
-struct ProcessInfo {
-    shell_pid: u64,
-    foreground_process_group_id: u64,
-    #[serde(default)]
-    foreground_processes: Vec<Process>,
-}
-#[derive(Deserialize)]
-struct Process {
-    pid: u32,
+pub(crate) fn shell_is_available(mux: &impl MuxRead, pane_id: &str) -> bool {
+    process_info(mux, pane_id).is_some_and(|p| {
+        p.shell_pid
+            .is_some_and(|pid| pid > 0 && Some(pid) == p.foreground_group)
+    })
 }
 
-pub(crate) fn shell_is_available(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> bool {
-    process_info(herdr, pane_id)
-        .is_some_and(|p| p.shell_pid > 0 && p.shell_pid == p.foreground_process_group_id)
-}
-
-fn process_info(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> Option<ProcessInfo> {
-    herdr
-        .execute(&["pane", "process-info", "--pane", pane_id])
-        .ok()
-        .and_then(|out| parse_process_info(&out.stdout))
-}
-
-fn parse_process_info(stdout: &str) -> Option<ProcessInfo> {
-    serde_json::from_str::<serde_json::Value>(stdout)
-        .ok()
-        .and_then(|v| {
-            serde_json::from_value::<ProcessInfo>(v["result"]["process_info"].clone()).ok()
-        })
+fn process_info(mux: &impl MuxRead, pane_id: &str) -> Option<PaneProcess> {
+    mux.process(&PaneId::new(pane_id)).ok()
 }
 
 /// A pane ID inherited from the environment only identifies this process when
@@ -192,31 +166,33 @@ fn parse_process_info(stdout: &str) -> Option<ProcessInfo> {
 /// instead of falling back. When Herdr does not answer, nothing was learned
 /// about the pane, so its own error is the reason given.
 pub fn verify_inherited_pane(
-    herdr: &(impl crate::mux::MuxRead + HerdrCommandExecutor),
+    mux: &impl MuxRead,
     pane_id: &str,
     agent_session_ids: &[&str],
 ) -> Result<(), String> {
     let remedy = "Pass --herdr-pane <pane-id> to say which pane this command acts for.";
-    let output = herdr
-        .execute(&["pane", "process-info", "--pane", pane_id])
-        .map_err(|error| {
-            format!("could not verify the inherited HERDR_PANE_ID={pane_id}: {error} {remedy}")
-        })?;
-    let shell_pid = parse_process_info(&output.stdout)
-        .map(|p| p.shell_pid)
-        .filter(|pid| *pid > 0)
-        .ok_or_else(|| {
-            format!(
-                "HERDR_PANE_ID={pane_id} was inherited from the environment, but Herdr reports \
-                 no shell for pane {pane_id}, so the pane could not be verified. {remedy}"
-            )
-        })?;
+    let shell_pid = match mux.process(&PaneId::new(pane_id)) {
+        Ok(process) => process.shell_pid,
+        Err(MuxError::Protocol(_)) => None,
+        Err(error) => {
+            return Err(format!(
+                "could not verify the inherited HERDR_PANE_ID={pane_id}: {error} {remedy}"
+            ));
+        }
+    }
+    .filter(|pid| *pid > 0)
+    .ok_or_else(|| {
+        format!(
+            "HERDR_PANE_ID={pane_id} was inherited from the environment, but Herdr reports \
+             no shell for pane {pane_id}, so the pane could not be verified. {remedy}"
+        )
+    })?;
     let caller = std::process::id();
-    if ancestor_pids(caller).any(|pid| u64::from(pid) == shell_pid) {
+    if ancestor_pids(caller).any(|pid| pid == shell_pid) {
         return Ok(());
     }
     if agent_session_ids.iter().any(|session| {
-        locate_agent_session_pane(herdr, session).is_some_and(|(_, pane)| pane == pane_id)
+        locate_agent_session_pane(mux, session).is_some_and(|(_, pane)| pane == pane_id)
     }) {
         return Ok(());
     }
@@ -245,12 +221,8 @@ pub(crate) fn ancestor_pids(pid: u32) -> impl Iterator<Item = u32> {
 
 /// The pids Herdr reports in a pane's foreground process group, or `None` when
 /// Herdr does not answer.
-pub(crate) fn foreground_process_ids(
-    herdr: &impl HerdrCommandExecutor,
-    pane_id: &str,
-) -> Option<Vec<u32>> {
-    process_info(herdr, pane_id)
-        .map(|info| info.foreground_processes.iter().map(|p| p.pid).collect())
+pub(crate) fn foreground_process_ids(mux: &impl MuxRead, pane_id: &str) -> Option<Vec<u32>> {
+    process_info(mux, pane_id).map(|info| info.foreground_pids)
 }
 
 /// A process's argv, or `None` when the process is gone or unreadable.
@@ -390,7 +362,7 @@ fn parent_pid(pid: u32) -> Option<u32> {
 }
 
 /// Detection never infers a terminal merely from a missing native session ID.
-pub fn detect_pane_type<M: crate::mux::Mux + HerdrCommandExecutor, C, I>(
+pub fn detect_pane_type<M: MuxRead, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Option<PaneType>, String> {
     let discovered = match runtime.workspace_id {
@@ -407,18 +379,18 @@ pub fn detect_pane_type<M: crate::mux::Mux + HerdrCommandExecutor, C, I>(
     }
     Ok(process_info(runtime.mux, &pane.pane_id)
         .is_some_and(|p| {
-            p.shell_pid > 0
-                && (p.shell_pid == p.foreground_process_group_id
-                    || p.foreground_processes
-                        .iter()
-                        .any(|p| p.pid == std::process::id()))
+            p.shell_pid.is_some_and(|pid| {
+                pid > 0
+                    && (Some(pid) == p.foreground_group
+                        || p.foreground_pids.contains(&std::process::id()))
+            })
         })
         .then_some(PaneType::Terminal))
 }
 
 /// Both naming surfaces retain a saved type before considering live detection.
 /// Opening/cancelling a prompt must not create or migrate persisted state.
-pub fn default_pane_type<M: crate::mux::Mux + HerdrCommandExecutor, C, I>(
+pub fn default_pane_type<M: MuxRead, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Option<PaneType>, String> {
     let discovered = match runtime.workspace_id {

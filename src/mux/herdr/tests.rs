@@ -10,7 +10,7 @@ use crate::{
     },
 };
 use serde_json::json;
-use std::{path::Path, sync::Mutex};
+use std::{path::Path, sync::Mutex, time::Duration};
 
 type Reply = Box<dyn Fn(&[&str]) -> Result<String, String> + Send + Sync>;
 
@@ -645,6 +645,67 @@ fn every_legacy_executor_is_a_mux_that_keeps_its_own_classification() {
         InputOutcome::Refused(error("agent_busy"))
     );
     assert_eq!(*legacy.prompts.lock().unwrap(), ["hello"]);
+}
+
+/// Records the budget each bounded read was handed.
+struct Budgeted {
+    reads: Mutex<Vec<(String, Duration, usize, bool)>>,
+}
+
+impl HerdrCommandExecutor for Budgeted {
+    fn execute(&self, _args: &[&str]) -> Result<HerdrCommandOutput, String> {
+        panic!("a bounded read must not run unbounded")
+    }
+
+    fn execute_bounded(
+        &self,
+        args: &[&str],
+        timeout: Duration,
+        cancelled: &AtomicBool,
+        max_output_bytes: usize,
+    ) -> Result<HerdrCommandOutput, String> {
+        let cancelled = cancelled.load(std::sync::atomic::Ordering::Relaxed);
+        self.reads
+            .lock()
+            .unwrap()
+            .push((args.join(" "), timeout, max_output_bytes, cancelled));
+        Ok(HerdrCommandOutput {
+            stdout: json!({"result": {"label": "build"}}).to_string(),
+        })
+    }
+}
+
+#[test]
+fn a_bounded_read_asks_its_budget_before_every_command() {
+    let executor = Budgeted {
+        reads: Mutex::new(Vec::new()),
+    };
+    let cancelled = AtomicBool::new(true);
+    let left = Mutex::new(vec![Duration::from_millis(700), Duration::from_millis(900)]);
+    let reads = bounded(&executor, &cancelled, || {
+        let timeout = left.lock().unwrap().pop().ok_or("the budget ran out")?;
+        Ok(Budget {
+            timeout,
+            max_output_bytes: 4096,
+        })
+    });
+    let tab = TabId::new("tab1");
+    assert_eq!(reads.tab_label(&tab).unwrap().as_deref(), Some("build"));
+    assert_eq!(reads.tab_label(&tab).unwrap().as_deref(), Some("build"));
+    // The budget's own words reach the caller, and no command runs.
+    assert_eq!(
+        reads.tab_label(&tab).unwrap_err(),
+        MuxError::Unavailable("the budget ran out".to_owned())
+    );
+    let read = |timeout| {
+        (
+            "tab get tab1".to_owned(),
+            Duration::from_millis(timeout),
+            4096,
+            true,
+        )
+    };
+    assert_eq!(*executor.reads.lock().unwrap(), [read(900), read(700)]);
 }
 
 fn pane_event(pane: &str, workspace: &str, tab: &str) -> serde_json::Value {

@@ -963,17 +963,16 @@ where
                         })
                 })
                 .map_err(|error| error.to_string())?;
-            let lines = max_lines.to_string();
-            let output = runtime.mux.execute(&[
-                "pane",
-                "read",
-                &source,
-                "--source",
-                "recent-unwrapped",
-                "--lines",
-                &lines,
-            ])?;
-            Value::String(redact_disclosure_text(&output.stdout))
+            let request = crate::mux::ScreenRequest {
+                lines: *max_lines,
+                wrap: crate::mux::Wrap::Joined,
+                style: crate::mux::Style::Plain,
+            };
+            let screen = runtime
+                .mux
+                .screen(&crate::mux::PaneId::new(source), request)
+                .map_err(|error| error.to_string())?;
+            Value::String(redact_disclosure_text(&screen.text))
         }
         EvidenceSelection::File {
             locator,
@@ -1189,7 +1188,7 @@ fn discover<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<(StateNamespace, crate::DiscoveredWorktree), String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
 {
     let discovered = match runtime.workspace_id {
         Some(workspace_id) => discover_worktree_for_workspace(runtime.mux, workspace_id)?,

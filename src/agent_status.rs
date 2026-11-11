@@ -22,8 +22,9 @@
 
 use crate::{
     AgentRuntime, Clock, DeliveryState, DiscoveredPane, DiscoveredWorktree, HerdrCommandExecutor,
-    HerdrCommandOutput, IdGenerator, LifecycleRuntime, PaneAddressRecord, StateStore,
-    discover_worktree, discover_worktree_for_workspace,
+    IdGenerator, LifecycleRuntime, PaneAddressRecord, StateStore, discover_worktree,
+    discover_worktree_for_workspace,
+    mux::{Budget, MuxRead, PaneId, ScreenRequest, Style, Wrap},
 };
 use serde_json::{Value, json};
 use std::{
@@ -58,7 +59,7 @@ const MAX_PANE_ROWS: usize = 32;
 
 /// Recent unwrapped lines requested per excerpt. The plan's ceiling is 120; a
 /// glance only needs the tail, and every excerpt is byte-capped below.
-const EXCERPT_LINES: &str = "40";
+const EXCERPT_LINES: usize = 40;
 
 /// Bytes kept per excerpt, counted from the end.
 const MAX_EXCERPT_BYTES: usize = 2_048;
@@ -105,16 +106,23 @@ where
     I: IdGenerator,
 {
     let observed_at_ms = runtime.clock.now_unix_ms();
-    let reads = Deadline {
-        herdr: runtime.mux,
+    let collection = Collection {
         clock: runtime.clock,
         deadline_ms: observed_at_ms.saturating_add(COLLECTION_BUDGET_MS),
         cancelled,
     };
+    // Discovery, including the closing identity check, may use everything
+    // that is left: it is the one read the snapshot cannot do without.
+    let lists = crate::mux::herdr::bounded(runtime.mux, cancelled, || {
+        Ok(Budget {
+            timeout: collection.remaining()?,
+            max_output_bytes: MAX_LIST_OUTPUT_BYTES,
+        })
+    });
     let origin_pane_id = runtime
         .current_pane_id
         .ok_or("The agent status panel requires its invoking pane")?;
-    let discovered = discover(runtime, &reads)?;
+    let discovered = discover(runtime, &lists)?;
     let origin = bound_origin(
         &discovered,
         origin_pane_id,
@@ -131,18 +139,25 @@ where
         &mut warnings,
     );
 
-    let (addresses, handoffs) = read_state(runtime, &discovered, origin, &reads, &mut warnings);
+    let (addresses, handoffs) =
+        read_state(runtime, &discovered, origin, &collection, &mut warnings);
     let handoffs_available = handoffs.is_some();
     let waits = handoffs.map_or_else(Vec::new, |reports| {
         collect_waits(&reports, &addresses, &visible, &mut warnings)
     });
 
     let ordered = wait_first_order(&visible, origin, &waits);
-    let rows = pane_rows(&ordered, &addresses, &reads, &mut warnings);
+    let rows = pane_rows(
+        runtime.mux,
+        &ordered,
+        &addresses,
+        &collection,
+        &mut warnings,
+    );
 
     // Identities are re-read after the excerpts, so every pane in the snapshot
     // is one whose space, terminal and session held for the whole collection.
-    let verified = discover(runtime, &reads).map_err(|error| {
+    let verified = discover(runtime, &lists).map_err(|error| {
         format!("This space could not be re-checked before showing the panel: {error}")
     })?;
     if verified.workspace_id != discovered.workspace_id {
@@ -187,13 +202,8 @@ where
 
 fn discover<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
-    reads: &Deadline<'_, M, C>,
-) -> Result<DiscoveredWorktree, String>
-where
-    M: crate::mux::Mux + HerdrCommandExecutor,
-    C: Clock + Sync,
-    I: IdGenerator,
-{
+    reads: &impl MuxRead,
+) -> Result<DiscoveredWorktree, String> {
     match runtime.workspace_id {
         Some(workspace_id) => discover_worktree_for_workspace(reads, workspace_id),
         None => discover_worktree(reads, runtime.cwd),
@@ -201,17 +211,15 @@ where
 }
 
 /// Spends one collection budget across every read, so a slow pane cannot
-/// consume the whole panel's latency budget. Reads made through the existing
-/// discovery helpers pass through here too, and the state store is handed the
-/// same remaining budget.
-struct Deadline<'a, E, C> {
-    herdr: &'a E,
+/// consume the whole panel's latency budget. Discovery, the excerpt reads, and
+/// the state store are each handed what is left of it.
+struct Collection<'a, C> {
     clock: &'a C,
     deadline_ms: u64,
     cancelled: &'a AtomicBool,
 }
 
-impl<E: HerdrCommandExecutor, C: Clock> Deadline<'_, E, C> {
+impl<C: Clock> Collection<'_, C> {
     fn remaining(&self) -> Result<Duration, String> {
         if self.cancelled.load(Ordering::Relaxed) {
             return Err(CANCELLED.to_owned());
@@ -239,24 +247,6 @@ impl<E: HerdrCommandExecutor, C: Clock> Deadline<'_, E, C> {
                      snapshot's budget."
                 )
             })
-    }
-
-    fn bounded(
-        &self,
-        args: &[&str],
-        timeout: Duration,
-        max_output_bytes: usize,
-    ) -> Result<HerdrCommandOutput, String> {
-        self.herdr
-            .execute_bounded(args, timeout, self.cancelled, max_output_bytes)
-    }
-}
-
-impl<E: HerdrCommandExecutor, C: Clock> HerdrCommandExecutor for Deadline<'_, E, C> {
-    /// Discovery, including the closing identity check, may use everything that
-    /// is left: it is the one read the snapshot cannot do without.
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        self.bounded(args, self.remaining()?, MAX_LIST_OUTPUT_BYTES)
     }
 }
 
@@ -332,11 +322,10 @@ fn read_state<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
     discovered: &DiscoveredWorktree,
     origin: &DiscoveredPane,
-    reads: &Deadline<'_, M, C>,
+    reads: &Collection<'_, C>,
     warnings: &mut Vec<String>,
 ) -> (Vec<PaneAddressRecord>, Option<Vec<Value>>)
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -603,13 +592,14 @@ fn wait_first_order<'a>(
 /// identity its excerpt was read under, which is what [`verified_rows`] checks
 /// afterwards.
 fn pane_rows<E, C>(
+    herdr: &E,
     ordered: &[&DiscoveredPane],
     addresses: &[PaneAddressRecord],
-    reads: &Deadline<'_, E, C>,
+    reads: &Collection<'_, C>,
     warnings: &mut Vec<String>,
 ) -> Vec<Value>
 where
-    E: HerdrCommandExecutor,
+    E: HerdrCommandExecutor + Sync,
     C: Clock,
 {
     let listed = ordered.len().min(MAX_PANE_ROWS);
@@ -620,24 +610,27 @@ where
         let mut excerpt = String::new();
         if index < MAX_EXCERPT_PANES {
             match reads.remaining_before_verification() {
-                Ok(timeout) => match reads.bounded(
-                    &[
-                        "pane",
-                        "read",
-                        &pane.pane_id,
-                        "--source",
-                        "recent-unwrapped",
-                        "--lines",
-                        EXCERPT_LINES,
-                    ],
-                    timeout,
-                    MAX_EXCERPT_OUTPUT_BYTES,
-                ) {
-                    Ok(output) => excerpt = excerpt_text(&output.stdout),
-                    Err(error) => {
-                        read_error.get_or_insert(error);
+                Ok(timeout) => {
+                    let budget = || {
+                        Ok(Budget {
+                            timeout,
+                            max_output_bytes: MAX_EXCERPT_OUTPUT_BYTES,
+                        })
+                    };
+                    let request = ScreenRequest {
+                        lines: EXCERPT_LINES,
+                        wrap: Wrap::Joined,
+                        style: Style::Plain,
+                    };
+                    match crate::mux::herdr::bounded(herdr, reads.cancelled, budget)
+                        .screen(&PaneId::new(pane.pane_id.as_str()), request)
+                    {
+                        Ok(screen) => excerpt = excerpt_text(&screen.text),
+                        Err(error) => {
+                            read_error.get_or_insert(error.to_string());
+                        }
                     }
-                },
+                }
                 Err(_) => stopped_early = true,
             }
         }

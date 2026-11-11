@@ -200,6 +200,15 @@ Record each accepted deviation here, with its source, before the next commit sta
 - **`DiscoveredPane.agent` still holds Herdr's word,** rebuilt from `AgentKind` in `lifecycle.rs`. Commit 7 deletes that mapping when `DiscoveredPane` holds an `AgentIdentity`.
 - **Functions that only discover are bounded on `MuxRead`.** The agent status collector's `Deadline` wrapper reaches the port through the bridge, so its clock must be `Sync`, and it keeps today's per-read time and size limits.
 
+**Commit 6** (`refactor(mux): move the remaining reads onto the port`).
+
+- **The budget lives in the adapter, as a connection made with one.** `mux::herdr::bounded(executor, cancelled, budget)` returns a `MuxRead` whose every command runs through `execute_bounded` under the `Budget` that `budget` returns just before the command starts. It stands in for `MuxConnector::connect` until a connector exists, and it is deleted with the bridge in commit 16.
+- **A budget is a function of time, not a fixed value.** The sketch fixes `Budget` at connect time. The agent status collector and the popup's identity recheck share one deadline across several commands, and each command gets what is left: the tests pin that the second discovery read gets less than the first, and that an excerpt read gets the collection budget less the 250 ms reserve on the injected clock. So `budget` is asked before each command, and its error is the read's error, word for word ("Reading this space took longer than its 2000 ms budget.", "confirming the invoking pane ran out of time"). The cancellation flag is fixed for the connection. A connector with a fixed `Budget` is still enough for the dashboard reads in commit 11.
+- **What remains of `Deadline` is the collector's clock arithmetic.** `agent_status::Collection` holds the deadline and the reserve rule, and no longer wraps the executor. `BoundedReads` is gone outright.
+- **Budgeted reads keep `HerdrCommandExecutor`.** `collect_agent_status`, `latest_identity`, and the health check's `plugin list` need `execute_bounded` until a connector supplies the budget. Every other reader moved here (`verify_inherited_pane`, `shell_is_available`, `execute_terminal`, `detect_pane_type`, the prompt box read, the context pane read, the tab label read, and the Codex in-process check) is bounded on `MuxRead` alone.
+- **A process reply Herdr cannot parse still reads as "no shell".** `verify_inherited_pane` treats `MuxError::Protocol` as a missing shell, as the old parser's `None` did, so the two messages a person can see stay split exactly as before.
+- **The dashboard reads stay inline.** `live_peek`, `http`, `hub`, and `skills_api` still call `execute_bounded` on their own `ProcessHerdr`, so `execute_bounded` and its `ProcessHerdr` tests stay until commit 11 moves them behind `MuxConnector`.
+
 ## Open questions and risks
 
 - Is a dashboard key that reports busy during a delivery acceptable, or should it wait a short fixed time? Commit 12 decides.

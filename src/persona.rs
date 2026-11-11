@@ -10,8 +10,8 @@
 //! changed since that session last saw it.
 
 use crate::{
-    AgentRuntime, Clock, HerdrCommandExecutor, IdGenerator, LifecycleRuntime, PaneAddressLifecycle,
-    PaneAddressRecord, PaneType, StateStore,
+    AgentRuntime, Clock, IdGenerator, LifecycleRuntime, PaneAddressLifecycle, PaneAddressRecord,
+    PaneType, StateStore,
 };
 
 /// Every dynamic roster context starts with this. The generated hook wrappers
@@ -168,7 +168,7 @@ fn activated_space<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Option<ActivatedSpace>, Unread>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -213,7 +213,7 @@ where
 /// happens after activation and often after the session has started.
 pub(crate) fn session_policy<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>) -> Option<String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -232,7 +232,7 @@ pub(crate) fn workspace_context<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Option<WorkspaceContext>, Unread>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
