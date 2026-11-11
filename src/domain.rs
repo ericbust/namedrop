@@ -17,6 +17,7 @@ macro_rules! string_id {
         }
     };
 }
+pub(crate) use string_id;
 
 string_id!(WorktreeId);
 string_id!(SpaceId);
