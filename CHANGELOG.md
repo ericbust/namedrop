@@ -2,6 +2,12 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.7.10] - 2026-11-11
+
+### Fixed
+
+- `namedrop channels` no longer keeps the command that ran it waiting. When it started the Channels server, the server could keep a copy of an output pipe that belonged to its caller, so a script or tool that read that output waited until the server shut down after it went idle, 10 minutes by default. The server now starts without any such copy.
+
 ## [1.7.9] - 2026-11-11
 
 ### Added
