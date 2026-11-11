@@ -29,6 +29,8 @@ mod lifecycle;
 #[doc(hidden)]
 pub mod linux_sandbox;
 mod message;
+#[doc(hidden)]
+pub mod mux;
 mod pane_effects;
 mod pointer;
 #[doc(hidden)]

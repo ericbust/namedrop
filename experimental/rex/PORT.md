@@ -88,7 +88,7 @@ Functions that only look, such as discovery, `verify_inherited_pane`, and health
 **Delivery.** The gate belongs to the port contract. `deliver` follows three rules for every adapter. It sends a prompt only if the pane is admitted at send time. It reports any failure after the first byte as `Ambiguous`. It lets no unclassified error escape.
 
 - **Herdr enforces the gate itself.** The adapter maps Herdr's error codes exactly as `runtime.rs` does today.
-- **Rex uses the shared driver.** The Rex adapter implements three small `gate::RawChannel` methods: `facts`, `tap`, and `paste_submit`. `gate::emulate_prompt` runs them in a fixed order. It checks admission, opens a status tap, pastes and presses Enter on one connection, then waits for a change to `Working` from the tap. The tap opens before the paste, so a stale `working` state cannot confirm delivery. An adapter author cannot reorder these steps or skip the ambiguity rule, because the driver owns them.
+- **Rex uses the shared driver.** The Rex adapter implements three small `gate::RawChannel` methods: `facts`, `tap`, and `paste_submit`. `gate::emulate_prompt` runs them in a fixed order. It opens a status tap, checks admission, declines if any status change has already arrived on the tap, pastes and presses Enter on one connection, then waits for a change to `Working` from the tap. The tap opens before the facts are read, so a change between the read and the paste declines the prompt, and a stale `working` state cannot confirm delivery. An adapter author cannot reorder these steps or skip the ambiguity rule, because the driver owns them.
 - **Rex declines a between-turns prompt before it types.** On Herdr, Namedrop may deliver to a Claude Code session that reports `working` between turns. The driver declines that admission, because a later change to `Working` cannot confirm it. The message waits for `idle`, which is slower but never ambiguous.
 
 `delivery.rs` keeps one `match` on `InputOutcome` and has no knowledge of the multiplexer. The readiness policy, the prompt-box draft check, and `clear_sent_prompt` stay in `delivery.rs`, because they are about agents rather than multiplexers.
@@ -153,7 +153,17 @@ Each commit compiles and passes `cargo test`. Run `/verify` on real Herdr panes 
 
 ## Implementation reconciliation
 
-None yet. Record each accepted deviation here, with its source, before the next commit starts.
+Record each accepted deviation here, with its source, before the next commit starts.
+
+**Commit 1** (`feat(mux): add the multiplexer port model and delivery gate`). The deviations below were accepted in review of that commit.
+
+- **The tap opens before the facts are read.** The original order read the facts first, so a status change between the read and the paste went unseen. The driver now declines when the tap already holds a change. The [Delivery](#shape) text above is updated.
+- **The status decides admission, not `Admit`.** A between-turns request reports `working`, so it is declined before any input. `Admit` stays on `PromptRequest` for the Herdr adapter, which honors between-turns delivery natively.
+- **`PromptRequest.expect` is an `AgentIdentity`.** Admission compares its kind and its `SessionClaim`, so a replaced program, which has a new incarnation, is declined.
+- **A failure before the paste is `Declined(Retry::AfterDelay)`, and any paste error is `Ambiguous`,** whatever error the adapter reports.
+- **The module root is `src/mux.rs`,** beside `src/mux/`, which matches the rest of the crate.
+- **`PaneInput` has no constructor yet.** An unused constructor fails `-D warnings`. Commit 8 adds it with the `compile_fail` doctest.
+- **Deferred to the commits that use them:** `resolve_session`, the `Survey` lookup helpers, and `MuxEvent::space`.
 
 ## Open questions and risks
 

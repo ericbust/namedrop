@@ -1,6 +1,7 @@
 use crate::{
     ActiveThreadResponse, AgentSessionId, DeliveryAttemptId, DeliveryState, HerdrCommandExecutor,
     HerdrCommandOutput, PaneBindingId, StateNamespace, StateStore,
+    mux::{InputKind, PaneId},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -8,6 +9,7 @@ use std::{
     ffi::CString,
     fs::{File, OpenOptions},
     io::{self, Read, Write},
+    marker::PhantomData,
     os::{
         fd::{AsRawFd, FromRawFd, RawFd},
         unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
@@ -144,6 +146,25 @@ pub(crate) struct PaneEffects {
     directory: File,
     marker: CString,
     pane: String,
+}
+
+/// Input for one pane, borrowed from the `PaneEffects` lock that guards it.
+/// Only this module can build one, so `MuxInput::deliver` cannot be reached
+/// around the lock.
+pub struct PaneInput<'lock> {
+    _lock: PhantomData<&'lock PaneEffects>,
+    pane: &'lock PaneId,
+    kind: InputKind<'lock>,
+}
+
+impl<'lock> PaneInput<'lock> {
+    pub fn pane(&self) -> &PaneId {
+        self.pane
+    }
+
+    pub fn kind(&self) -> InputKind<'lock> {
+        self.kind
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
