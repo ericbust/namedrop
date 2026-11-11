@@ -671,12 +671,19 @@ fn claude_allow_rules(executable: &Path, state: &Path) -> Result<Vec<String>, St
         .collect();
     // Claude Code asks before it reads a file outside its working directory,
     // and a message from Channels names its images by path in this directory.
-    rules.push(format!(
-        "Read(/{}/**)",
-        state
-            .join(crate::dashboard::CHANNEL_IMAGES_DIRECTORY)
-            .display()
-    ));
+    // A path with a pattern character would widen the rule or cut it short,
+    // so such a state gets no rule and Claude Code asks.
+    if !state
+        .to_string_lossy()
+        .contains(['?', '[', ']', '{', '}', '(', ')'])
+    {
+        rules.push(format!(
+            "Read(/{}/**)",
+            state
+                .join(crate::dashboard::CHANNEL_IMAGES_DIRECTORY)
+                .display()
+        ));
+    }
     Ok(rules)
 }
 
@@ -1661,6 +1668,23 @@ mod permission_tests {
             "Read(//opt/state/channel-images/**)",
         ];
         assert_eq!(actual, expected);
+        for state in [
+            "/opt/sta?e",
+            "/opt/[state]",
+            "/opt/state]",
+            "/opt/{a,b}",
+            "/opt/state}",
+            "/opt/state (old)",
+            "/opt/state)",
+        ] {
+            let rules = claude_allow_rules(Path::new("/opt/namedrop"), Path::new(state)).unwrap();
+            assert_eq!(rules.len(), 22, "{state}");
+            assert!(
+                rules.iter().all(|rule| rule.starts_with("Bash(")),
+                "{state}"
+            );
+        }
+        assert!(claude_allow_rules(Path::new("/opt/namedrop"), Path::new("/opt/st*te")).is_err());
         for operation in crate::operation_catalog()
             .management_operations
             .iter()

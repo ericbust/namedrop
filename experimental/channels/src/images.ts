@@ -31,26 +31,62 @@ export function imageUrl(name: string): string {
 }
 function imageOf(line: string): AttachedImage | null {
   const name = LINE.exec(line)?.[1];
-  return name !== undefined && NAME.test(name) ? { name, line } : null;
+  // A path that steps up through `..` is not the image directory's own.
+  return name !== undefined && NAME.test(name) && !line.includes("/../")
+    ? { name, line }
+    : null;
 }
 
-// The text before the image lines, exactly as typed, and the images.
-export function splitImages(source: string): {
-  text: string;
+// Spaces, tabs and line ends only, the characters the server cuts.
+function trimLineEnd(text: string): string {
+  return text.replace(/[ \t\n\r]+$/, "");
+}
+// The image lines at the end of a source, and where the first of them starts.
+// The server reads a stored body the same way, in `split` of
+// src/dashboard/images.rs, and both are tested against
+// tests/fixtures/channel_images/lines.json. The server also knows its image
+// directory and takes no line that names a file anywhere else.
+function imageLines(source: string): {
+  start: number;
   images: readonly AttachedImage[];
 } {
   const images: AttachedImage[] = [];
-  let text = source;
+  let text = trimLineEnd(source);
+  let first = source.length;
   for (;;) {
     const start = text.lastIndexOf("\n") + 1;
     const image = imageOf(text.slice(start));
     if (image === null) break;
     images.unshift(image);
-    text = text.slice(0, Math.max(0, start - 1));
+    first = start;
+    text = trimLineEnd(text.slice(0, start));
     if (start === 0) break;
   }
-  if (images.length === 0) return { text: source, images };
-  return { text: text.endsWith("\n") ? text.slice(0, -1) : text, images };
+  return { start: first, images };
+}
+
+// A message's words without the image lines at its end, and the images. A
+// source with no image line comes back unchanged.
+export function splitImages(source: string): {
+  text: string;
+  images: readonly AttachedImage[];
+} {
+  const { start, images } = imageLines(source);
+  return images.length === 0
+    ? { text: source, images }
+    : { text: trimLineEnd(source.slice(0, start)), images };
+}
+// A draft's typed text, exactly as typed, and its images. `withImages` puts a
+// blank line between the two, and only that blank line is taken off here, so
+// a space or a new line the person just typed stays in the box.
+export function draftImages(draft: string): {
+  text: string;
+  images: readonly AttachedImage[];
+} {
+  const { start, images } = imageLines(draft);
+  if (images.length === 0) return { text: draft, images };
+  const typed = draft.slice(0, start);
+  return { text: typed.replace(/\n{1,2}$/, ""), images };
 }
 export function withImages(
   text: string,

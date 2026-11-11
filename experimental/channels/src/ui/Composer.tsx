@@ -28,12 +28,12 @@ import {
 import { composerCopy, recipientsLabel, sendErrorCopy } from "../copy.ts";
 import {
   type AttachedImage,
+  draftImages,
   IMAGE_TYPES,
   type ImageRefusal,
   imageFiles,
   imageUrl,
   refusalOf,
-  splitImages,
   withImages,
 } from "../images.ts";
 import type {
@@ -104,7 +104,7 @@ export function Composer({
   const draft = drafts.get(at);
   // A draft's text ends with a line for each image attached to it.
   const { text, images } = useMemo(
-    () => splitImages(draft?.text ?? ""),
+    () => draftImages(draft?.text ?? ""),
     [draft?.text],
   );
   // What an upload that finishes later adds its image to.

@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   type AttachedImage,
+  draftImages,
   imageFiles,
   isImageName,
   MAX_IMAGE_BYTES,
@@ -24,31 +26,60 @@ test("a draft keeps its typed text exactly beside its images", () => {
     "hello ",
     "hello\n",
     "hello\n\n",
+    "hello \t",
     "@lead look\nsecond line",
     "  indented",
   ]) {
     for (const images of [[a], [a, b]]) {
-      const split = splitImages(withImages(typed, images));
+      const split = draftImages(withImages(typed, images));
       assert.equal(split.text, typed);
       assert.deepEqual(split.images, images);
     }
     assert.equal(withImages(typed, []), typed);
-    assert.deepEqual(splitImages(typed), { text: typed, images: [] });
+    assert.deepEqual(draftImages(typed), { text: typed, images: [] });
   }
 });
 
-test("only lines at the end that name a stored image are images", () => {
-  for (const source of [
-    `${a.line}\nthen more text`,
-    "hi\nImage: channel-images/x.png",
-    `hi\nImage: /state/other/${a.name}`,
-    `hi\nImage: /state/channel-images/${"A".repeat(64)}.png`,
-    `hi\nImage: /state/channel-images/${"a".repeat(64)}.svg`,
-    `hi\nImage: /state/channel-images/sub/${a.name}`,
-    `hi\n image: /state/channel-images/${a.name}`,
-  ])
-    assert.deepEqual(splitImages(source), { text: source, images: [] });
-  assert.deepEqual(splitImages(`hi\n\n${a.line}`), { text: "hi", images: [a] });
+// The server's `split` reads the same file, so the page hides the lines the
+// server hides.
+const shared: {
+  directory: string;
+  cases: { name: string; body: string; text: string; images: string[] }[];
+} = JSON.parse(
+  readFileSync(
+    new URL(
+      "../../../tests/fixtures/channel_images/lines.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+);
+
+test("image lines are split off as the cases shared with the server say", () => {
+  assert.ok(shared.cases.length > 20);
+  for (const { name, body, text, images } of shared.cases) {
+    const split = splitImages(body);
+    assert.equal(split.text, text, name);
+    assert.deepEqual(
+      split.images.map((image) => image.name),
+      images,
+      name,
+    );
+    for (const image of split.images)
+      assert.equal(
+        image.line,
+        `Image: ${shared.directory}/${image.name}`,
+        name,
+      );
+    assert.deepEqual(
+      draftImages(body).images.map((image) => image.name),
+      images,
+      `${name}, as a draft`,
+    );
+  }
+});
+
+test("a name is a stored image's only in its exact form", () => {
   assert.equal(isImageName(a.name), true);
   assert.equal(isImageName(`../${a.name}`), false);
   assert.equal(isImageName(7), false);

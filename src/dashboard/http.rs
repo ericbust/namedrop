@@ -1205,7 +1205,6 @@ impl OperatorPost {
             || post.source.trim().is_empty()
             || post.source.len() > BODY_LIMIT
             || post.in_reply_to.as_deref().is_some_and(|id| !valid_id(id))
-            || too_many_images(&post.source)
         {
             return Err(Status::BadRequest);
         }
@@ -1250,8 +1249,9 @@ impl DeliverPost {
     }
 }
 
-fn too_many_images(source: &str) -> bool {
-    super::images::split(source).1.len() > super::images::MAX_PER_MESSAGE
+fn too_many_images(source: &str, state: &Path) -> bool {
+    let directory = super::images::directory(state);
+    super::images::split(source, Some(&directory)).1.len() > super::images::MAX_PER_MESSAGE
 }
 
 fn read_json_body<T: serde::de::DeserializeOwned>(
@@ -1326,6 +1326,7 @@ fn serve_connection(
         Ok(request) => request,
         Err(status) => return respond_status(&mut writer, status),
     };
+    let image_directory = super::images::directory(front.files.state());
     let ownership = super::tailscale::read(front.files.state()).ok().flatten();
     let tailnet = match &ownership {
         Some(super::tailscale::Ownership::Enabled(handler)) => Some(handler),
@@ -1514,7 +1515,9 @@ fn serve_connection(
                         .history
                         .messages
                         .iter()
-                        .map(|row| snapshot::message(row, &rows.history.legs))
+                        .map(|row| {
+                            snapshot::message(row, &rows.history.legs, Some(&image_directory))
+                        })
                         .collect();
                     let body=serde_json::to_vec(&serde_json::json!({"thread_id":rows.thread_id,"messages":messages,"earlier_omitted":rows.earlier_omitted})).map_err(io::Error::other)?;
                     respond(&mut writer, "200 OK", "application/json", "", &body)
@@ -1532,7 +1535,7 @@ fn serve_connection(
                 || post.request_id.chars().any(char::is_control)
                 || post.source.trim().is_empty()
                 || post.source.len() > BODY_LIMIT
-                || too_many_images(&post.source)
+                || too_many_images(&post.source, front.files.state())
             {
                 return respond_status(&mut writer, Status::BadRequest);
             }
@@ -1543,6 +1546,9 @@ fn serve_connection(
                 Ok(post) => post,
                 Err(status) => return respond_status(&mut writer, status),
             };
+            if too_many_images(&post.source, front.files.state()) {
+                return respond_status(&mut writer, Status::BadRequest);
+            }
             send_operator_post(&mut writer, front, key, post)
         }
         Ok(Route::CoordinationReview(key)) => {
@@ -1886,7 +1892,7 @@ fn serve_connection(
                     let mut messages: Vec<_> = rows
                         .messages
                         .iter()
-                        .map(|row| snapshot::message(row, &rows.legs))
+                        .map(|row| snapshot::message(row, &rows.legs, Some(&image_directory)))
                         .collect();
                     snapshot::channel_routing::merge(
                         front.files.state(),
@@ -1922,7 +1928,9 @@ fn serve_connection(
                         .history
                         .messages
                         .iter()
-                        .map(|row| snapshot::message(row, &context.history.legs))
+                        .map(|row| {
+                            snapshot::message(row, &context.history.legs, Some(&image_directory))
+                        })
                         .collect();
                     snapshot::channel_routing::merge(
                         front.files.state(),
@@ -1978,7 +1986,7 @@ fn serve_connection(
                     let text = if body.cut {
                         body.text.as_str()
                     } else {
-                        super::images::split(&body.text).0
+                        super::images::split(&body.text, Some(&image_directory)).0
                     };
                     let mut safe = snapshot::SafeText::from_untrusted(text, BODY_LIMIT);
                     safe.truncated |= body.cut;

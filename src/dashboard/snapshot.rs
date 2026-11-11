@@ -957,7 +957,7 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
     let messages: Vec<MessageRow> = rows
         .messages
         .iter()
-        .map(|m| message(m, &rows.legs))
+        .map(|m| message(m, &rows.legs, rows.image_directory.as_deref()))
         .collect();
     let participants = participants(rows, &messages, now_ms);
     let in_flight = rows
@@ -1146,8 +1146,12 @@ fn health(state: SpaceState, attention: usize, in_flight: usize, working: usize)
     }
 }
 
-pub(crate) fn message(row: &rows::MessageRow, legs: &[rows::LegRow]) -> MessageRow {
-    let (text, images) = super::images::split(&row.body);
+pub(crate) fn message(
+    row: &rows::MessageRow,
+    legs: &[rows::LegRow],
+    image_directory: Option<&std::path::Path>,
+) -> MessageRow {
+    let (text, images) = super::images::split(&row.body, image_directory);
     MessageRow {
         channel: row.channel_to.as_ref().map(|to| ChannelRouting {
             durable: row.channel_state.is_some(),
@@ -1208,7 +1212,10 @@ fn threads(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<ThreadChip> {
         .filter_map(|m| rows.threads.iter().find(|t| t.thread_id == m.thread_id))
         .map(|t| ThreadChip {
             thread_id: t.thread_id.clone(),
-            title: SafeText::from_untrusted(super::images::split(&t.title).0, SHORT_CHARS),
+            title: SafeText::from_untrusted(
+                super::images::split(&t.title, rows.image_directory.as_deref()).0,
+                SHORT_CHARS,
+            ),
             message_count: t.message_count,
         })
         .collect()
@@ -1375,7 +1382,7 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow], now_ms: i64) -> V
                     message_id: entry.message_id.clone(),
                     from: at(&entry.author_address_id, entry.author_is_human),
                     preview: SafeText::from_untrusted(
-                        super::images::split(&entry.body).0,
+                        super::images::split(&entry.body, rows.image_directory.as_deref()).0,
                         PREVIEW_CHARS,
                     ),
                     state: entry.state,

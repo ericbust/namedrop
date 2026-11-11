@@ -10,6 +10,7 @@ use std::{
     io::{self, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime},
 };
 
@@ -102,7 +103,8 @@ pub(crate) enum SaveError {
     Io(io::Error),
 }
 
-fn directory(state: &Path) -> PathBuf {
+/// Where a state directory keeps its images.
+pub(crate) fn directory(state: &Path) -> PathBuf {
     state.join(DIRECTORY)
 }
 
@@ -138,11 +140,17 @@ pub(crate) fn save(state: &Path, bytes: &[u8], now: SystemTime) -> Result<Name, 
         known.set_modified(now).map_err(SaveError::Io)?;
         return Ok(name);
     }
-    let temporary = directory.join(format!(".{}.{}.tmp", name.as_str(), std::process::id()));
+    // Two uploads of the same bytes at once must not write through one file.
+    static UPLOADS: AtomicU64 = AtomicU64::new(0);
+    let temporary = directory.join(format!(
+        ".{}.{}.{}.tmp",
+        name.as_str(),
+        std::process::id(),
+        UPLOADS.fetch_add(1, Ordering::Relaxed)
+    ));
     let written = OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
         .open(&temporary)
         .and_then(|mut file| {
@@ -190,27 +198,45 @@ pub(crate) fn prune(state: &Path, now: SystemTime) {
 }
 
 /// A message body without the image lines at its end, and the images those
-/// lines name, first to last.
-pub(crate) fn split(body: &str) -> (&str, Vec<Name>) {
-    let mut text = body.trim_end();
+/// lines name, first to last. Only a line that names a file in `directory`,
+/// this state's image directory, is one: a path into any other directory is
+/// text the reader must see. A body with no image line comes back unchanged.
+///
+/// The Channels page reads a draft the same way, in `splitImages` of
+/// `experimental/channels/src/images.ts`. Both are tested against
+/// `tests/fixtures/channel_images/lines.json`.
+pub(crate) fn split<'a>(body: &'a str, directory: Option<&Path>) -> (&'a str, Vec<Name>) {
+    let Some(directory) = directory else {
+        return (body, Vec::new());
+    };
+    let mut text = trim_line_end(body);
     let mut images = Vec::new();
-    while let Some(start) = text.rfind('\n').map(|at| at + 1).or(Some(0)) {
-        let Some(name) = image_of_line(&text[start..]) else {
+    loop {
+        let start = text.rfind('\n').map_or(0, |at| at + 1);
+        let Some(name) = image_of_line(&text[start..], directory) else {
             break;
         };
         images.push(name);
-        text = text[..start].trim_end();
+        text = trim_line_end(&text[..start]);
         if start == 0 {
             break;
         }
+    }
+    if images.is_empty() {
+        return (body, images);
     }
     images.reverse();
     (text, images)
 }
 
-fn image_of_line(line: &str) -> Option<Name> {
+/// Spaces, tabs and line ends only, so the page's JavaScript cuts the same characters.
+fn trim_line_end(text: &str) -> &str {
+    text.trim_end_matches([' ', '\t', '\n', '\r'])
+}
+
+fn image_of_line(line: &str, directory: &Path) -> Option<Name> {
     let path = Path::new(line.strip_prefix(LINE_PREFIX)?);
-    if !path.is_absolute() || path.parent()?.file_name()?.to_str()? != DIRECTORY {
+    if !path.is_absolute() || path.parent()? != directory {
         return None;
     }
     Name::parse(path.file_name()?.to_str()?)
@@ -325,38 +351,95 @@ mod tests {
     }
 
     #[test]
-    fn image_lines_at_the_end_of_a_body_are_split_off() {
-        let a = format!("{}.png", "a".repeat(64));
-        let b = format!("{}.webp", "b".repeat(64));
-        let line = |name: &str| format!("Image: /state/channel-images/{name}");
-        let body = format!("@lead look at this\n\n{}\n{}\n", line(&a), line(&b));
-        let (text, images) = split(&body);
-        assert_eq!(text, "@lead look at this");
+    fn many_uploads_of_the_same_image_at_once_all_store_it_whole() {
+        let state = state("together");
+        let stored = state.join("channel-images");
+        for round in 0..16u8 {
+            let mut bytes = PNG.to_vec();
+            bytes.extend((0..2_000_000u32).map(|n| (n % 251) as u8 ^ round));
+            let start = std::sync::Barrier::new(8);
+            let names: Vec<_> = std::thread::scope(|scope| {
+                let uploads: Vec<_> = (0..8)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            start.wait();
+                            save(&state, &bytes, SystemTime::now())
+                        })
+                    })
+                    .collect();
+                uploads
+                    .into_iter()
+                    .map(|upload| upload.join().unwrap())
+                    .collect()
+            });
+            for name in names {
+                let name = name.unwrap_or_else(|error| panic!("round {round}: {error:?}"));
+                assert_eq!(fs::read(stored.join(name.as_str())).unwrap(), bytes);
+            }
+        }
         assert_eq!(
-            images.iter().map(Name::as_str).collect::<Vec<_>>(),
-            [a.as_str(), b.as_str()]
+            fs::read_dir(&stored).unwrap().count(),
+            16,
+            "one file for each image and no upload leftover"
         );
-        assert_eq!(images[1].kind(), Kind::Webp);
+        fs::remove_dir_all(state).unwrap();
+    }
 
-        let only = line(&a);
-        assert_eq!(split(&only), ("", vec![Name::parse(&a).unwrap()]));
-
-        for unchanged in [
-            "plain text".to_owned(),
-            format!("{}\nthen more text", line(&a)),
-            format!("text\nImage: channel-images/{a}"),
-            format!("text\nImage: /state/other/{a}"),
-            format!("text\nImage: /state/channel-images/{}.png", "A".repeat(64)),
-            format!("text\nImage: /state/channel-images/{}.svg", "a".repeat(64)),
-            format!("text\nImage: /state/channel-images/../{a}"),
-            format!("text\n image: /state/channel-images/{a}"),
-        ] {
+    #[test]
+    fn image_lines_are_split_off_as_the_shared_cases_say() {
+        #[derive(serde::Deserialize)]
+        struct Cases {
+            directory: PathBuf,
+            cases: Vec<Case>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            body: String,
+            text: String,
+            images: Vec<String>,
+        }
+        let shared: Cases = serde_json::from_str(include_str!(
+            "../../tests/fixtures/channel_images/lines.json"
+        ))
+        .unwrap();
+        assert!(shared.cases.len() > 20);
+        for case in shared.cases {
+            let (text, images) = split(&case.body, Some(&shared.directory));
+            assert_eq!(text, case.text, "{}", case.name);
             assert_eq!(
-                split(&unchanged),
-                (unchanged.as_str(), vec![]),
-                "{unchanged}"
+                images.iter().map(Name::as_str).collect::<Vec<_>>(),
+                case.images,
+                "{}",
+                case.name
             );
         }
+    }
+
+    #[test]
+    fn a_line_that_names_a_file_in_another_directory_stays_text() {
+        let name = format!("{}.png", "a".repeat(64));
+        let ours = Path::new("/home/me/state/channel-images");
+        for elsewhere in [
+            "/tmp/channel-images",
+            "/home/me/state/channel-images/channel-images",
+            "/home/me/other-state/channel-images",
+            "/channel-images",
+            "/home/me/state/channel-images-old",
+        ] {
+            let body = format!("look\n\nImage: {elsewhere}/{name}");
+            assert_eq!(
+                split(&body, Some(ours)),
+                (body.as_str(), vec![]),
+                "{elsewhere}"
+            );
+        }
+        let body = format!("look\n\nImage: /home/me/state/channel-images/{name}");
+        assert_eq!(
+            split(&body, Some(ours)),
+            ("look", vec![Name::parse(&name).unwrap()])
+        );
+        assert_eq!(split(&body, None), (body.as_str(), vec![]));
     }
 
     #[test]
@@ -371,6 +454,9 @@ mod tests {
                 "0".repeat(64)
             )
         );
-        assert_eq!(split(&format!("hi\n\n{line}")), ("hi", vec![name]));
+        assert_eq!(
+            split(&format!("hi\n\n{line}"), Some(&directory(state))),
+            ("hi", vec![name])
+        );
     }
 }

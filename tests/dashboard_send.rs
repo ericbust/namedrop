@@ -3012,6 +3012,36 @@ else:
         assert!(message.get("images").is_none(), "{message}");
         assert_eq!(message["body"]["text"], "no image here");
 
+        // A line that names a file in any other directory is text the person must see.
+        let elsewhere = format!("Image: /tmp/channel-images/{name}");
+        let foreign = server.post(
+            &format!("/w/{}/messages", key.as_str()),
+            &json!({"request_id":"elsewhere", "source":format!("@planner look\n\n{elsewhere}")})
+                .to_string(),
+            &[],
+        );
+        assert_eq!(foreign.status, 200, "{}", foreign.body);
+        let foreign: Value = serde_json::from_str(&foreign.body).unwrap();
+        let history = server.request(
+            "GET",
+            &format!("/w/{}/messages", key.as_str()),
+            &[("Cookie", &server.cookie)],
+            "",
+        );
+        let history: Value = serde_json::from_str(&history.body).unwrap();
+        let message = history
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["message_id"] == foreign["message_id"])
+            .unwrap();
+        assert!(message.get("images").is_none(), "{message}");
+        assert_eq!(
+            message["body"]["text"],
+            format!("look\n\n{elsewhere}"),
+            "{message}"
+        );
+
         let five = format!("@planner too many\n\n{}", [line; 5].join("\n"));
         let before = f.message_rows();
         assert_eq!(
@@ -3025,6 +3055,51 @@ else:
             400
         );
         assert_eq!(f.message_rows(), before);
+    }
+
+    #[test]
+    fn two_uploads_of_the_same_image_at_once_both_succeed() {
+        use sha2::{Digest, Sha256};
+        let f = Fixture::new();
+        f.register_all();
+        let server = Server::start(&f, None);
+        for round in 0..4u8 {
+            let mut image = PNG.to_vec();
+            image.extend((0..3_000_000u32).map(|n| (n % 251) as u8 ^ round));
+            let start = std::sync::Barrier::new(2);
+            let answers: Vec<(u16, String)> = thread::scope(|scope| {
+                let uploads: Vec<_> = (0..2)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            start.wait();
+                            server.upload(&image)
+                        })
+                    })
+                    .collect();
+                uploads
+                    .into_iter()
+                    .map(|upload| upload.join().unwrap())
+                    .collect()
+            });
+            let name = format!("{}.png", namedrop::lower_hex(&Sha256::digest(&image)));
+            for (status, answer) in &answers {
+                assert_eq!(*status, 200, "round {round}: {answer}");
+                let answer: Value = serde_json::from_str(answer).unwrap();
+                assert_eq!(answer["name"], name.as_str(), "round {round}");
+            }
+            assert_eq!(
+                fs::read(f.state.join("channel-images").join(&name)).unwrap(),
+                image,
+                "round {round}"
+            );
+        }
+        assert_eq!(
+            fs::read_dir(f.state.join("channel-images"))
+                .unwrap()
+                .count(),
+            4,
+            "one file for each image and no upload leftover"
+        );
     }
 
     #[test]
