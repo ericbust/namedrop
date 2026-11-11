@@ -551,9 +551,30 @@ impl ServerFiles {
             .env_remove("HERDR_SOCKET_PATH")
             .stdin(stdin)
             .stdout(log.try_clone().map_err(|e| e.to_string())?)
-            .stderr(log)
+            .stderr(log);
+        close_inherited_descriptors_on_exec();
+        command
             .spawn()
             .map_err(|e| format!("could not start the dashboard server: {e}"))
+    }
+}
+
+/// The server outlives this command, so it must not keep a descriptor this
+/// command inherited without close-on-exec, such as its caller's output pipe
+/// leaked by another thread's concurrent spawn: that caller would wait on the
+/// pipe until the server exits. This process opens every descriptor of its
+/// own with close-on-exec, so marking all of them is harmless here.
+fn close_inherited_descriptors_on_exec() {
+    let Ok(entries) = fs::read_dir("/dev/fd") else {
+        return;
+    };
+    let descriptors: Vec<i32> = entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+        .filter(|&fd| fd > libc::STDERR_FILENO)
+        .collect();
+    for fd in descriptors {
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     }
 }
 
