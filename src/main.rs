@@ -13,7 +13,7 @@ use namedrop::{
     execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
     execute_session_start_hook, execute_user_prompt_submit_hook, is_context_operation,
     is_control_operation, is_integration_operation, is_lifecycle_operation, is_message_operation,
-    render_command_result_to_text, validate_message_input,
+    render_command_result_to_text, render_command_result_to_text_within, validate_message_input,
 };
 use serde::Deserialize;
 use std::{
@@ -2640,9 +2640,23 @@ fn retryable_agent_status_reconciliation(error: &str) -> bool {
     )
 }
 
+/// The width of the terminal `output` writes to, or `None` when it is not one.
+fn terminal_columns(output: &impl std::os::fd::AsRawFd) -> Option<usize> {
+    let mut size = std::mem::MaybeUninit::<libc::winsize>::uninit();
+    // SAFETY: TIOCGWINSZ only reads this open descriptor, and fills the
+    // winsize allocation when it succeeds.
+    let size = unsafe {
+        if libc::ioctl(output.as_raw_fd(), libc::TIOCGWINSZ, size.as_mut_ptr()) != 0 {
+            return None;
+        }
+        size.assume_init()
+    };
+    (size.ws_col > 0).then_some(usize::from(size.ws_col))
+}
+
 fn write_result(result: &CommandResult, exit_code: u8, format: ResultFormat) -> ExitCode {
     if format == ResultFormat::Human {
-        let text = render_command_result_to_text(result);
+        let text = render_command_result_to_text_within(result, terminal_columns(&io::stdout()));
         let written = if exit_code == 0 {
             writeln!(io::stdout().lock(), "{text}")
         } else {

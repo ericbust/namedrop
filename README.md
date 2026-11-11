@@ -364,11 +364,11 @@ Sign in to Tailscale on this machine and on your phone or Mac, then run:
 namedrop channels --tailscale --no-open
 ```
 
-Open the printed one-time HTTPS link on your other device. Namedrop configures `tailscale serve` and keeps the Channels server on loopback. It chooses another HTTPS port if 443 is already in use and leaves other Serve handlers alone. Your tailnet must have HTTPS enabled. Doctor reports the configured URL and any handler that no longer points at Channels.
+In a terminal, the command draws the one-time HTTPS link as a QR code and prints the link under it. Scan the code with your phone, or open the link on your other device. Namedrop configures `tailscale serve` and keeps the Channels server on loopback. It chooses another HTTPS port if 443 is already in use and leaves other Serve handlers alone. Your tailnet must have HTTPS enabled. Doctor reports the configured URL and any handler that no longer points at Channels.
 
 Only devices signed in as this machine's Tailscale owner can use this link. Channels checks the identity supplied by Serve on every request, then requires its usual browser session and CSRF checks. Shared-device users and tagged devices cannot sign in. This uses private Serve, never public Funnel. Local programs on the server remain trusted. **Type to agent** from your phone sends real input to the agent's pane.
 
-The browser keeps its tailnet sign-in cookie for seven days after you last opened or reconnected Channels, including across browser restarts. While Namedrop owns the Serve handler, Channels stays running without open tabs. If the browser loses its sign-in or the cookie expires, run `namedrop channels --tailscale --no-open` in the workspace on the Channels machine and open the new HTTPS link on your device.
+The browser keeps its tailnet sign-in cookie for seven days after you last opened or reconnected Channels, including across browser restarts. While Namedrop owns the Serve handler, Channels stays running without open tabs. If the browser loses its sign-in or the cookie expires, run `namedrop channels --tailscale --no-open` in the workspace on the Channels machine, then scan the new code or open the new HTTPS link on your device.
 
 To remove Namedrop's handler and disable tailnet access, run:
 

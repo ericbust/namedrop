@@ -114,7 +114,10 @@ pub use runtime::{ProcessHerdr, ProcessIds, SystemClock};
 use serde::Serialize;
 pub use spaces::{SpaceScope, WorkspaceLabel};
 mod output;
-pub use output::{agent_result_view, render_command_result_to_text};
+mod qr;
+pub use output::{
+    agent_result_view, render_command_result_to_text, render_command_result_to_text_within,
+};
 pub use store::coordination_review::{OperatorSession, REVIEW_GRANT_TTL_MS};
 pub use store::{
     StateStore, StateTransaction, StoreError, StoreErrorKind, WorktreePurgeResult,
@@ -269,5 +272,8 @@ mod tests {
 #[cfg(test)]
 #[path = "../tests/support/executable.rs"]
 mod executable;
+#[cfg(test)]
+#[path = "../tests/support/scan.rs"]
+mod scan;
 #[cfg(test)]
 mod work_counters;
