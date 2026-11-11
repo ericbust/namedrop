@@ -1,4 +1,4 @@
-use super::{PaneId, TabId};
+use super::{PaneFacts, PaneId, TabId};
 use std::path::PathBuf;
 
 /// Texts a named pane shows for each agent state.
@@ -29,7 +29,8 @@ pub enum PopupScreen {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PopupSpec {
     pub screen: PopupScreen,
-    pub target: PaneId,
+    /// The pane the popup acts for, as the caller discovered it.
+    pub target: PaneFacts,
     pub state_dir: PathBuf,
 }
 

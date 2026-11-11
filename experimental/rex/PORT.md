@@ -165,6 +165,29 @@ Record each accepted deviation here, with its source, before the next commit sta
 - **`PaneInput` has no constructor yet.** An unused constructor fails `-D warnings`. Commit 8 adds it with the `compile_fail` doctest.
 - **Deferred to the commits that use them:** `resolve_session`, the `Survey` lookup helpers, and `MuxEvent::space`.
 
+**Commit 2** (`test(mux): add FakeMux and its world builder`). Each model change below is something today's Herdr discovery reports that the commit 1 types could not hold, so commit 5 could not rebuild `DiscoveredWorktree` without it.
+
+- **`AgentKind::Unreported`.** Herdr can report a session with no agent kind. That pane is not free, so `agent` must be `Some`, and its kind needs a value.
+- **`PaneFacts.idle_label`.** `DiscoveredPane.idle_state_label` (Herdr's `state_labels.idle`) decides whether a pane's identity metadata is republished.
+- **`Checkout.repo_key` and `Checkout.repo_name`.** `workspace_labels` and the dashboard read them from the checkout Herdr stamps on a space.
+- **`SpaceView.worktree: Option<WorktreeId>`.** The stored key, the checkout path or `herdr-space:<id>`, is chosen by the adapter so the synthetic key stays in `mux/herdr/`. It is `None` when a survey does not resolve it. `Scope` documents which facts each scope and depth read, because `Scope::All` with `Depth::Panes` is one `pane list` that names no labels or checkouts.
+- **`PopupSpec.target` is a `PaneFacts`.** The Herdr popup command passes the target's space, terminal, and session, which a bare `PaneId` cannot supply without another `pane list`.
+- **Reaching the fake from `tests/`.** `mux::fake` is a `#[doc(hidden)] pub mod`, always compiled, as `namedrop::mux::fake::FakeMux`. No feature flag.
+- **Testing delivery before `PaneInput` exists.** `FakeMux::deliver` forwards to a crate-private `send(pane, kind)`, and the tests drive `send`. Commit 8 can test `deliver` itself.
+- **The fake reads what Herdr reads.** A survey reports only the facts Herdr's commands for that scope and depth return. A checkout listing names no space label, number, or repository name, and a space listing names no checkout label or branch. A test then sees the same partial facts from either implementation, and the commit 3 conformance suite checks it.
+- **Native gate.** By default the fake gates like Herdr: it declines a busy, blocked, or absent agent before typing, honors `Admit::BetweenTurns`, and checks no identity. `FakeMux::emulated()` runs `gate::emulate_prompt` instead. A prompted agent starts working unless `prompts_stay_settled()` is set.
+- **Deferred:** the queued `MuxEvent`s that the design mentions. No port method consumes events until step 5.
+
+**Commit 3** (`feat(mux): add the Herdr adapter and the legacy bridge`).
+
+- **The survey pairs.** `Space`/`Panes` is `worktree list --workspace` and `pane list --workspace` (`discover_worktree_for_workspace`). `Space`/`Spaces` is `workspace get` (the dashboard label). `CheckoutOf`/`Panes` is `discover_worktree`: `worktree list --cwd`, `workspace list`, one `worktree list --workspace` per space without a stamped checkout, then `pane list --workspace`. `CheckoutOf`/`Spaces` is the same without the pane listing. `All`/`Spaces` is `workspace list` (`workspace_labels`). `All`/`Panes` is `pane list` (`pane_workspace`, `locate_agent_session_pane`). `herdr/tests.rs` pins each.
+- **Lookup failures keep today's text.** A checkout Herdr does not resolve, does not have open, or has open in more than one space is `MuxError::Unavailable` with today's message, byte for byte. A listing without the requested space is `Protocol`. `pane_not_found` maps to `Gone(Pane)` beside `workspace_not_found`, and the raw error text is lost for both, so commits 5 and 6 must print their own text for `Gone`.
+- **The bridge is a blanket `impl<E: HerdrCommandExecutor + Send + Sync>`** of `MuxRead`, `MuxAct`, and `MuxInput`. It keeps the executor's own `classify_prompt_failure`, because several test fakes override it. Executors that hold a `RefCell` are not `Sync` and are not bridged; commit 4 must change those fakes to a `Mutex` or migrate them.
+- **The bridge's `endpoint()` has an empty key.** A legacy executor does not know its socket. Callers keep reading `session_socket_id` until commit 16, and commit 9 must not build the popup's `HERDR_SOCKET_PATH` from a bridged endpoint.
+- **No per-call budgets.** The bridge calls `execute`, never `execute_bounded`, because no budget exists until a connector makes one. Commit 6 and commit 11 must connect with today's per-read limits (`plugin list` 2 s and 64 KiB, the dashboard reads).
+- **`ProcessHerdr` is not copied.** It reaches the port through the bridge, so the process code is not duplicated. Commit 16 moves it into `mux/herdr/` as the private transport.
+- **Not yet in the adapter:** `status server` (the socket fallback) and `terminal session observe` (live peek). Both move with their callers.
+
 ## Open questions and risks
 
 - Is a dashboard key that reports busy during a delivery acceptable, or should it wait a short fixed time? Commit 12 decides.

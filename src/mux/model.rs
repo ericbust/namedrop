@@ -1,4 +1,4 @@
-use crate::{AgentRuntime, AgentSessionId, SpaceId, domain::string_id};
+use crate::{AgentRuntime, AgentSessionId, SpaceId, WorktreeId, domain::string_id};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, time::Duration};
 
@@ -67,6 +67,8 @@ impl AgentState {
 pub enum AgentKind {
     Known(AgentRuntime),
     Other(String),
+    /// The multiplexer reports a session but no agent kind.
+    Unreported,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -102,6 +104,8 @@ pub struct PaneFacts {
     /// session: a free terminal pane.
     pub agent: Option<AgentIdentity>,
     pub state: Option<AgentState>,
+    /// The text the multiplexer shows for this pane while its agent is idle.
+    pub idle_label: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -109,6 +113,8 @@ pub struct Checkout {
     pub path: std::path::PathBuf,
     pub label: Option<String>,
     pub branch: Option<String>,
+    pub repo_key: Option<String>,
+    pub repo_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -116,8 +122,13 @@ pub struct SpaceView {
     pub id: SpaceId,
     pub label: Option<String>,
     pub number: Option<u32>,
-    /// `None` when the space is not a Git checkout.
+    /// `None` when the space is not a Git checkout, or when the survey did
+    /// not read the checkout (see `Scope`).
     pub checkout: Option<Checkout>,
+    /// The key Namedrop stores the space's checkout state under: the checkout
+    /// path, or a multiplexer-chosen key for a space that is not a checkout.
+    /// `None` when the survey did not resolve it.
+    pub worktree: Option<WorktreeId>,
     /// Empty for a `Depth::Spaces` survey.
     pub panes: Vec<PaneFacts>,
 }
@@ -127,10 +138,18 @@ pub struct Survey {
     pub spaces: Vec<SpaceView>,
 }
 
+/// Which spaces a survey reads. Each scope reads only what the multiplexer
+/// reports in as few requests as today's code makes, so some facts stay unread.
 #[derive(Clone, Copy, Debug)]
 pub enum Scope<'a> {
+    /// One space, with its checkout and `worktree` key resolved. A
+    /// `Depth::Spaces` survey reads only the space's label and stamped checkout.
     Space(&'a SpaceId),
+    /// The one space that holds this checkout. More than one, or none, is an
+    /// error.
     CheckoutOf(&'a Path),
+    /// Every space. `Depth::Spaces` reads labels, numbers, and stamped
+    /// checkouts. `Depth::Panes` reads only panes, grouped by space.
     All,
 }
 
