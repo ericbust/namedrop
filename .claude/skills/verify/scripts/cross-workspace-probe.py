@@ -155,57 +155,65 @@ def all_settled(rows):
     return bool(rows) and all(d['state'] == 'settled' and d['attempts'] <= 1 for r in rows for d in r['to'])
 
 
-for pane in AGENT_PANES:
-    herdr('agent', 'wait', pane, '--until', 'idle', '--until', 'done', '--timeout', '120000', timeout=130)
+def checks():
+    for pane in AGENT_PANES:
+        herdr('agent', 'wait', pane, '--until', 'idle', '--until', 'done', '--timeout', '120000', timeout=130)
 
-t1 = word()
-since = type_into(claude, f'@lead reply with only the word {t1}')
-rows, context = settle(since, 60), hook_context(t1)
-sentence = re.search(r'@lead is not named in this workspace.*?Nothing was sent\.', context)
-check('bare @lead stays in alpha', not rows and '#beta @lead' in context,
-      f"{show(rows)}; hook context: {sentence.group(0) if sentence else context[:160]!r}")
+    t1 = word()
+    since = type_into(claude, f'@lead reply with only the word {t1}')
+    rows, context = settle(since, 60), hook_context(t1)
+    sentence = re.search(r'@lead is not named in this workspace.*?Nothing was sent\.', context)
+    check('bare @lead stays in alpha', not rows and '#beta @lead' in context,
+          f"{show(rows)}; hook context: {sentence.group(0) if sentence else context[:160]!r}")
 
-t2 = word()
-since = type_into(claude, f'#beta @lead reply with only the word {t2}')
-kept = composer(claude)
-rows = settle(since)
-sent, copy = where(rows, 'alpha', reply=False), where(rows, 'beta', reply=False)
-answer, back = where(rows, 'beta', 'lead', True), where(rows, 'alpha', reply=True, to='claude')
-check('#beta @lead from claude',
-      len(sent) == 1 and sent[0]['kind'] == 'human' and len(copy) == 1 and copy[0]['bridged'] == 'alpha'
-      and [d['alias'] for d in copy[0]['to']] == ['lead'] and len(answer) == 1 and len(back) == 1
-      and back[0]['bridged'] == 'beta' and t2 in back[0]['body'] and all_settled(rows),
-      f'input box kept {kept[:50]!r}; {show(rows)}')
-time.sleep(45)
-again = messages(since)
-check('no repeat within 45 s', again == rows, f'{len(rows)} messages before, {len(again)} after')
+    t2 = word()
+    since = type_into(claude, f'#beta @lead reply with only the word {t2}')
+    kept = composer(claude)
+    rows = settle(since)
+    sent, copy = where(rows, 'alpha', reply=False), where(rows, 'beta', reply=False)
+    answer, back = where(rows, 'beta', 'lead', True), where(rows, 'alpha', reply=True, to='claude')
+    check('#beta @lead from claude',
+          len(sent) == 1 and sent[0]['kind'] == 'human' and len(copy) == 1 and copy[0]['bridged'] == 'alpha'
+          and [d['alias'] for d in copy[0]['to']] == ['lead'] and len(answer) == 1 and len(back) == 1
+          and back[0]['bridged'] == 'beta' and t2 in back[0]['body'] and all_settled(rows),
+          f'input box kept {kept[:50]!r}; {show(rows)}')
+    time.sleep(45)
+    again = messages(since)
+    check('no repeat within 45 s', again == rows, f'{len(rows)} messages before, {len(again)} after')
 
-t3 = word()
-typed = now_ms()
-since = type_into(codex, f'#beta @lead reply with only the word {t3}')
-rows = settle(since)
-copy = where(rows, 'beta', reply=False, to='lead')
-first = copy[0]['to'][0]['first_attempt'] if copy else None
-lag = (first - typed) / 1000 if first else None
-back = where(rows, 'alpha', reply=True, to='codex')
-check('#beta @lead from codex',
-      lag is not None and lag <= 15 and len(where(rows, 'beta', 'lead', True)) == 1 and len(back) == 1
-      and t3 in back[0]['body'] and all_settled(rows),
-      f"delivered to beta {f'{lag:.1f} s' if lag is not None else 'never'} after typing; {show(rows)}")
+    t3 = word()
+    typed = now_ms()
+    since = type_into(codex, f'#beta @lead reply with only the word {t3}')
+    rows = settle(since)
+    copy = where(rows, 'beta', reply=False, to='lead')
+    first = copy[0]['to'][0]['first_attempt'] if copy else None
+    lag = (first - typed) / 1000 if first else None
+    back = where(rows, 'alpha', reply=True, to='codex')
+    check('#beta @lead from codex',
+          lag is not None and lag <= 15 and len(where(rows, 'beta', 'lead', True)) == 1 and len(back) == 1
+          and t3 in back[0]['body'] and all_settled(rows),
+          f"delivered to beta {f'{lag:.1f} s' if lag is not None else 'never'} after typing; {show(rows)}")
 
-t4 = word()
-since = type_into(claude, f'#all @codex reply with only the word {t4}')
-rows = settle(since)
-local, remote = where(rows, 'alpha', 'codex', True, bridged=None), where(rows, 'beta', 'codex', True)
-back = where(rows, 'alpha', reply=True, to='claude')
-check('#all @codex from claude',
-      len(local) == 1 and len(remote) == 1 and len(back) == 2 and all(t4 in r['body'] for r in back)
-      and all_settled(rows), show(rows))
+    t4 = word()
+    since = type_into(claude, f'#all @codex reply with only the word {t4}')
+    rows = settle(since)
+    local, remote = where(rows, 'alpha', 'codex', True, bridged=None), where(rows, 'beta', 'codex', True)
+    back = where(rows, 'alpha', reply=True, to='claude')
+    check('#all @codex from claude',
+          len(local) == 1 and len(remote) == 1 and len(back) == 2 and all(t4 in r['body'] for r in back)
+          and all_settled(rows), show(rows))
 
-if composer(claude):
-    herdr('agent', 'send-keys', claude, 'esc', 'esc')
-    time.sleep(1)
-check('claude input box empty', not composer(claude), repr(composer(claude)))
+
+try:
+    checks()
+finally:
+    # A check that failed or raised must not leave its mention in Claude's box, where the next
+    # thing typed would be sent behind it.
+    left = composer(claude)
+    if left:
+        herdr('agent', 'send-keys', claude, 'esc', 'esc')
+        time.sleep(1)
+    check('claude input box empty', not left, repr(left))
 
 print(f"{'PASS' if all(results) else 'FAIL'} {sum(results)}/{len(results)}")
 sys.exit(0 if all(results) else 1)

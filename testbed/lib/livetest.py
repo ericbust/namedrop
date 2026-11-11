@@ -40,7 +40,7 @@ covers. Each row is answered at most once per launch. Herdr's wait-output runs t
 too, one line at a time, so they stay line-local and in the subset Python `re` and Rust
 `regex` share."""
 
-KEYS = frozenset(("enter", "down", "esc", "c-c"))
+KEYS = frozenset(("enter", "down", "esc", "c-c", "ctrl+u"))
 
 
 def shell_prompt_pattern(ps1):
@@ -602,6 +602,33 @@ def answered(transcript, key):
 def final_answer(transcript, key):
     turns = delivery_turns(transcript, key)
     return turns[-1].answers[-1].strip() if turns and turns[-1].answers else ""
+
+
+def codex_turn_end_words(lines, key):
+    """The final answer of the Codex turn whose prompt holds key. Codex writes what it says before
+    a tool call as an assistant message too, in the phase commentary, and can end a turn with an
+    empty final answer."""
+    words, inside = "", False
+    for entry in json_lines(lines):
+        payload = entry.get("payload") or {}
+        if entry.get("type") != "response_item" or payload.get("type") != "message":
+            continue
+        text = "\n".join(item.get("text") or "" for item in payload.get("content") or ()
+                         if isinstance(item, dict))
+        if payload.get("role") == "user":
+            inside = bool(key) and key in text
+            words = "" if inside else words
+        elif inside and payload.get("role") == "assistant" and payload.get("phase") != "commentary":
+            words = text
+    return words.strip()
+
+
+def turn_end_words(transcript, key):
+    """What the turn that carried key said as it ended, which is the final message its Stop hook
+    gets: Claude Code's last text, Codex's final answer."""
+    if transcript.agent == "codex":
+        return codex_turn_end_words(transcript.path.read_text(errors="replace").splitlines(), key)
+    return final_answer(transcript, key)
 
 
 def without_leading_mention(text, alias):

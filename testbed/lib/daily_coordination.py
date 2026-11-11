@@ -228,11 +228,14 @@ def check_tracked(r):
                                                 ("new attention", new_items, 0)])]
 
 
-Held = namedtuple("Held", "claim dispositions relays posts helper_requests notes")
+Held = namedtuple("Held", "claim dispositions relays posts helper_requests notes said", defaults=(True,))
 """What the store shows while the turn is held. posts: the holder's rows in the person's thread,
-other than notes: the progress notes its held turns posted there."""
+other than notes: the progress notes its held turns posted there. said: the held turn ended with
+words. A real Codex told to write no status line ends it with an empty final message, which
+leaves Namedrop nothing to post."""
 
 HOLD_WAIT = 150
+SAID_WAIT = 10
 ANSWER_WAIT = 240
 HOLD_PROMPT = ("Ask the agent named {helper}, using a new `namedrop send` and not your reply line, to run "
                "`sleep 30` in its shell and then reply with the single word {word}. End this turn with a "
@@ -282,8 +285,8 @@ def held_snapshot(store, attempt, address, thread, helper_address, since):
 
 
 def judge_hold(label, held):
-    """While the turn is held: a request went out, and the person's thread shows the agent's words
-    as a progress note and no answer."""
+    """While the turn is held: a request went out, and the person's thread shows no answer. It
+    shows the agent's words as a progress note when the turn ended with any."""
     if held.claim is not None and (held.claim.startswith("done:") or held.claim == "left:no_final_text"):
         return Check(label + " hold", False, "{} hold: inconclusive, the turn was never held: claim {}, {} relay, "
                      "{} helper requests".format(label, held.claim, held.relays, held.helper_requests))
@@ -291,7 +294,8 @@ def judge_hold(label, held):
                                     ("dispositions", held.dispositions, 0),
                                     ("posted answer", held.relays, 0),
                                     ("posts in the thread", held.posts, 0),
-                                    ("progress notes", held.notes > 0, True),
+                                    ("words at the turn's end", held.said, None),
+                                    ("progress notes", held.notes > 0, True if held.said else None),
                                     ("helper requests", held.helper_requests, 1)])
 
 
@@ -329,6 +333,10 @@ def run_hold(r, holder, helper, scripted, rng, prompt=SCRIPTED_HOLD_PROMPT):
         send_during_turn(r, holder, attempt, SCRIPTED_HELP.format(helper=helper, word=word))
     r.settle(lambda: r.store.claims().get(attempt), lambda claim: claim not in (None, "open"), HOLD_WAIT)
     held = held_snapshot(r.store, attempt, address, sent.thread_id, helper_address, since)
+    # A host can write the turn's last line to its transcript after the Stop that held the claim.
+    key = du.prompt_key(r.store, attempt)
+    held = held._replace(said=held.notes > 0 or bool(r.settle(
+        lambda: live.turn_end_words(r.transcript(holder), key), bool, SAID_WAIT, watch=())))
     r.save("{}-hold.json".format(holder), {"word": word, "held": held._asdict(), "attempt": attempt})
     hold = judge_hold(label, held)
     if not hold.ok:

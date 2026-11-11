@@ -111,9 +111,17 @@ def agent_pids(r, agent):
             if Path((process.get("argv") or [""])[0]).name == agent]
 
 
+CLEAR_CLAUDE_BOX = ("ctrl+u",) * 32
+"""One press deletes a line of Claude Code's prompt box or joins it to the line above, and a
+press in an empty box does nothing."""
+
+
 def stop_agent(r, agent):
-    """End the session as a person does, and wait for the pane's shell."""
+    """End the session as a person does, and wait for the pane's shell. The key that deletes a line
+    of Claude Code's box goes first: text an earlier step left there would be sent in front of
+    `/exit`, which then exits nothing."""
     if agent == "claude":
+        r.keys(agent, CLEAR_CLAUDE_BOX)
         r.herdr_result("agent", "prompt", r.pane(agent), "/exit")
     else:
         r.keys(agent, ("c-c",))
@@ -273,7 +281,12 @@ def run_cross_workspace(r):
     if added.returncode:
         return [Check("second workspace", False, "second-workspace.py exited {}: {}".format(
             added.returncode, added.stdout[-300:]))]
-    probe = run_script(r, "cross-workspace-probe.py")
+    try:
+        probe = run_script(r, "cross-workspace-probe.py")
+    except subprocess.TimeoutExpired:
+        # The probe was killed before it could clear the mention it typed last.
+        r.keys("claude", CLEAR_CLAUDE_BOX)
+        raise
     checks = parse_probe(probe.stdout)
     return checks + [live.expect("cross-workspace probe exit", probe.returncode, 0)]
 
