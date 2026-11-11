@@ -64,28 +64,28 @@ Namedrop calls these 19 `herdr` subcommands: `worktree list`, `workspace list`, 
 
 Each step ends in a state that you can check before the next step starts.
 
-1. **Build a spike in `experimental/rex/`.** Write a small program, outside `src/`, that names two Rex blocks and delivers a gated mention from a Claude Code block to a Codex block. Use it to answer the questions under [What is not yet verified](#what-is-not-yet-verified). The step is done when this file records a go or a no-go.
+1. **Build a spike in `experimental/rex/`.** Write a small program, outside `src/`, that names two Rex blocks and delivers a gated mention from a Claude Code block to a Codex block. Use it to answer the questions under [What is not yet verified](#what-is-not-yet-verified). The step is done when this file records a go or a no-go. **Done: go.** The [spike results](spike/README.md) record the evidence and the findings that change steps 4 and 5.
 2. **Replace the argument-level trait with a semantic port.** Define operations such as list panes, prompt an agent, read a screen, and set a label. Move every Herdr command and every Herdr JSON shape into one Herdr adapter. Route the dashboard through the port. Give the tests one shared fake. Behavior does not change. The step is done when the existing tests pass and no `herdr` argument appears outside the adapter. This step is the largest, and it also limits the damage when Herdr changes its CLI.
 3. **Add neutral names.** Accept `NAMEDROP_*` environment variables and flags beside the `HERDR_*` ones. Make the state directory independent of `HERDR_PLUGIN_STATE_DIR`. The step is done when an agent with no `HERDR_*` variables can register and reply, and when `collab/v1` readers accept both sets of keys.
-4. **Write the Rex adapter.** Cover discovery, delivery, status, and labels. Take identity from `REX_BLOCK` and verify it against the process ancestors that `rex block call process` reports. Record the agent session from Namedrop's own SessionStart hook. Gate delivery on the root `program_status` record: send only on `idle` or `done`, send the paste and the Enter key on one API connection, then confirm that the state changes to `working`. The step is done when two agents in one Rex session can name each other, mention, and reply through the CLI.
-5. **Write the Rex bridge.** Run one process for each Rex server that reads `rex events --all --json` and calls the existing lifecycle and drain operations. Guard it with a lock so that a second start does nothing. The step is done when a closed block loses its name, and when a queued mention drains after the recipient reports `idle`, both without a manual command.
+4. **Write the Rex adapter.** Cover discovery, delivery, status, and labels. Take identity from `REX_BLOCK` and verify it against the process ancestors that `rex block call process` reports. Record the agent session from Namedrop's own SessionStart hook. Gate delivery on the root `program_status` record: send only on `idle` or `done`, send the paste and the Enter key on one API connection, then confirm delivery with a `program_status_changed` event to `working` that arrives after the paste. A `working` state read alone does not confirm delivery. Record the Rex server address with each name and pass it with `-S` on every call, because Rex does not set `REX_SERVER` in every block. The step is done when two agents in one Rex session can name each other, mention, and reply through the CLI.
+5. **Write the Rex bridge.** Run one process for each Rex server that reads `rex events --all --json` and calls the existing lifecycle and drain operations. Guard it with a lock so that a second start does nothing. When the event stream ends, reconnect and reconcile. A server restart keeps block IDs but starts a new program in each block, so the bridge must check that the named agent session still runs in the block before it keeps the name. The step is done when a closed block loses its name, and when a queued mention drains after the recipient reports `idle`, both without a manual command.
 6. **Add the UI and the installer.** Ship a Lua module that the user loads from `init.lua` with one `require` line. The module defines the palette actions and the key bindings, and it opens the naming, manage, doctor, status, and tour screens in floating layers. The step is done when a machine with Rex and no Herdr can install Namedrop, activate it, and name a pane from the palette.
 7. **Add verification and documentation.** Write a Rex driver for the testbed and a Rex checklist for `/verify`. State the supported Rex API revision in `docs/compatibility.md`. The step is done when `/verify` passes on Rex.
 
 ## What is not yet verified
 
-- What Claude Code and Codex do with a prompt that arrives in the middle of a turn, or while a permission prompt is open.
-- Whether block IDs and the event stream survive a restart of the Rex app.
-- Whether an action defined in `init.lua` appears in the command palette, and what context it receives.
-- Whether `rex block stream` can feed live peek in Channels.
+The spike answered the questions about mid-turn prompts, permission prompts, server restarts, `init.lua` actions, and finding `rex`. The [spike results](spike/README.md) record the answers. These questions remain open:
+
+- Whether actions from `init.lua` appear in the command palette of the Rex app. `rex actions` lists them, but the app was not attached to the spike's server.
+- Whether a restart of the Rex app, as opposed to the server, changes anything that Namedrop sees.
+- Whether the `data.connect` API can feed live peek in Channels. The `rex block stream` command is not implemented.
 - How block addresses behave across remote Rex hosts (`rex -S`).
-- How to find the `rex` binary outside a Rex terminal. Rex puts the binary on `PATH` only inside its own terminals, through `REX_BIN_DIR`.
 - Which adapter wins when one pane has both `HERDR_PANE_ID` and `REX_BLOCK`, for example Herdr running inside a Rex block.
 
 ## Risks
 
 - **Rex is a preview.** Public testing began on 2026-10-05, and builds change often. Gate on the API revision that `rex version` reports, and expect to update the adapter.
-- **Delivery safety moves into Namedrop.** Herdr's `agent prompt` fails before it sends any input, so Namedrop can requeue without a duplicate. Rex accepts input at any time. A failure after the paste is ambiguous, and Namedrop must hold the message instead of sending it again.
+- **Delivery safety moves into Namedrop.** Herdr's `agent prompt` fails before it sends any input, so Namedrop can requeue without a duplicate. Rex accepts input at any time. A failure after the paste is ambiguous, and Namedrop must hold the message instead of sending it again. A send at the wrong time is worse than a delay. The spike showed that Codex abandons its current task for a prompt that arrives mid-turn.
 - **Session labels are not identity.** Rex's own SessionStart hook tells the agent to rename the session. Key every space on the session ID.
 - **Hook order matters for Codex.** Codex approves hooks by position in `hooks.json`. Rex appends its hook last. Namedrop must also append, or the user must approve the Rex hook again.
 - **The install is manual.** With no plugin system, the user edits `init.lua` and a background process must start without a host to start it.
