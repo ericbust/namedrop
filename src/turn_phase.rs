@@ -121,6 +121,18 @@ pub fn record(state: &Path, socket: &str, session: &str, edge: TurnEdge, at_ms: 
     if recorded.is_some_and(|recorded| recorded >= at_ms) {
         return;
     }
+    // A Stop with no turn known to run ends a turn no hook saw start, as a
+    // `!` shell command's does. The prompt box was sent since, so what Claude
+    // Code put back into it is gone.
+    if edge == TurnEdge::Stop
+        && !matches!(
+            read(state, socket, session),
+            Some(TurnPhase::Prompted { .. })
+        )
+        && restored_at(state, socket, session).is_some_and(|(kept_at_ms, _)| kept_at_ms < at_ms)
+    {
+        forget_restored(state, socket, session);
+    }
     let text = match (edge, turn_prompt(state, socket, session)) {
         (TurnEdge::Prompt, Some(before)) => format!("{at_ms} {before}"),
         _ => at_ms.to_string(),
@@ -163,10 +175,8 @@ pub fn record_restored(state: &Path, socket: &str, session: &str, at_ms: u64, pr
     write(&path, &format!("{at_ms}\n{prompt}"));
 }
 
-/// The prompt Claude Code put back into the session's prompt box, without its
-/// whitespace: the one Namedrop's hook blocked, while no prompt has been sent
-/// since. A prompt sent since took whatever the box held with it.
-pub fn restored(state: &Path, socket: &str, session: &str) -> Option<String> {
+/// The kept prompt and the time its hook blocked it.
+fn restored_at(state: &Path, socket: &str, session: &str) -> Option<(u64, String)> {
     let mut text = String::new();
     fs::OpenOptions::new()
         .read(true)
@@ -177,10 +187,38 @@ pub fn restored(state: &Path, socket: &str, session: &str) -> Option<String> {
         .read_to_string(&mut text)
         .ok()?;
     let (at_ms, prompt) = text.split_once('\n')?;
-    let at_ms: u64 = at_ms.parse().ok()?;
+    Some((at_ms.parse().ok()?, prompt.to_owned()))
+}
+
+/// The prompt Claude Code put back into the session's prompt box, without its
+/// whitespace: the one Namedrop's hook blocked, while no prompt has been sent
+/// since. A prompt sent since took whatever the box held with it.
+pub fn restored(state: &Path, socket: &str, session: &str) -> Option<String> {
+    let (at_ms, prompt) = restored_at(state, socket, session)?;
     let last_prompt = edge_at(state, socket, session, TurnEdge::Prompt)?;
     (at_ms == last_prompt && edge_at(state, socket, session, TurnEdge::Blocked) == Some(at_ms))
-        .then(|| prompt.to_owned())
+        .then_some(prompt)
+}
+
+/// Forgets the prompt Claude Code put back: the box no longer holds it, so
+/// the same words there later are a draft.
+pub fn forget_restored(state: &Path, socket: &str, session: &str) {
+    let _ = fs::remove_file(record_path(state, socket, session, RESTORED));
+}
+
+/// Claude Code empties the box when a prompt is sent and puts a blocked one
+/// back a moment after its hook returns. An empty box this soon after the
+/// block may still get the prompt back.
+const RESTORE_GRACE_MS: u64 = 2_000;
+
+/// The session's prompt box was seen empty at `now_ms`, so the prompt Claude
+/// Code put back is gone from it.
+pub fn box_seen_empty(state: &Path, socket: &str, session: &str, now_ms: u64) {
+    if restored_at(state, socket, session)
+        .is_some_and(|(at_ms, _)| at_ms.saturating_add(RESTORE_GRACE_MS) <= now_ms)
+    {
+        forget_restored(state, socket, session);
+    }
 }
 
 /// A session that recorded no edge for this long has most likely ended. If it
