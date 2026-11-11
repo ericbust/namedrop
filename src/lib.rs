@@ -48,6 +48,7 @@ pub use shown_roster::forget_shown_roster;
 mod terminal;
 pub mod tour;
 mod transcript_usage;
+pub mod turn_phase;
 #[doc(hidden)]
 pub mod update_check;
 pub use terminal::{default_pane_type, detect_pane_type, execute_terminal, verify_inherited_pane};
@@ -57,7 +58,8 @@ pub(crate) const INTEGRATION_PACKAGE_ATTENTION_SOURCE_PREFIX: &str = "integratio
 pub use context::{execute_context_operation, execute_human_context_operation};
 pub use controls::execute_control_operation;
 pub use delivery::{
-    DrainReport, GraceDeadline, drain_mailboxes, drain_receipt, drain_reports, spaces_to_wake,
+    DraftHold, DrainReport, GraceDeadline, drain_mailboxes, drain_receipt, drain_reports,
+    mail_waits_for_session, recheck_drafts, spaces_to_wake,
 };
 pub(crate) use delivery::{publish_status_metadata, reconcile_delivery_state};
 pub use domain::*;

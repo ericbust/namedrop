@@ -50,6 +50,8 @@ struct CapturedStop {
     socket: String,
     ended_at_ms: u64,
     transcript_end: Option<u64>,
+    /// Whether the session holds a claim this Stop may settle.
+    settles: bool,
 }
 
 fn deadline(milliseconds: u64) {
@@ -60,7 +62,8 @@ fn deadline(milliseconds: u64) {
 }
 
 /// Hands a Stop to the detached worker when the session holds a claim the
-/// prompt hook armed. A Stop with none has nothing to settle.
+/// prompt hook armed, and every Claude Code Stop, whose worker records the
+/// turn's end for delivery.
 pub fn run(state: &Path) {
     deadline(250);
     let ended_at_ms = SystemClock.now_unix_ms();
@@ -77,13 +80,14 @@ pub fn run(state: &Path) {
             .filter(|path| path.is_absolute())?;
         namedrop::final_reply::names_notice(path, tasks, TURN_SCAN_BYTES, NOTICE_SCAN_BUDGET)
     };
-    if !namedrop::final_reply::stop_has_work(
+    let settles = namedrop::final_reply::stop_has_work(
         state,
         &socket,
         &input.session_id,
         input.turn().as_ref(),
         names_notice,
-    ) {
+    );
+    if !settles && !input.is_claude() {
         return;
     }
     let transcript_end = input.transcript_path.as_ref().and_then(|path| {
@@ -93,7 +97,7 @@ pub fn run(state: &Path) {
         let metadata = fs::symlink_metadata(path).ok()?;
         metadata.is_file().then_some(metadata.len())
     });
-    if let Some(turn) = input.turn() {
+    if settles && let Some(turn) = input.turn() {
         namedrop::final_reply::mark_stopped(state, &socket, &input.session_id, &turn, ended_at_ms);
     }
     let captured = CapturedStop {
@@ -101,6 +105,7 @@ pub fn run(state: &Path) {
         socket,
         ended_at_ms,
         transcript_end,
+        settles,
     };
     let Ok(executable) = env::current_exe() else {
         return;
@@ -138,32 +143,60 @@ pub fn run_worker(state: &Path) {
     };
     // The warning gets its own time, so a busy store can't keep the worker alive.
     deadline(12_000);
-    let (at_deadline, socket, session, turn, ended_at_ms) = (
-        state.to_owned(),
-        captured.socket.clone(),
-        captured.input.session_id.clone(),
-        captured.input.turn(),
-        captured.ended_at_ms,
-    );
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(10));
-        namedrop::final_reply::warn_stop_timed_out(
-            &at_deadline,
-            &socket,
-            &session,
-            turn.as_ref(),
-            ended_at_ms,
+    if captured.settles {
+        let (at_deadline, socket, session, turn, ended_at_ms) = (
+            state.to_owned(),
+            captured.socket.clone(),
+            captured.input.session_id.clone(),
+            captured.input.turn(),
+            captured.ended_at_ms,
         );
-        std::process::exit(0);
-    });
-    if let (Some(_), Some(path), Some(from)) = (
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(10));
+            namedrop::final_reply::warn_stop_timed_out(
+                &at_deadline,
+                &socket,
+                &session,
+                turn.as_ref(),
+                ended_at_ms,
+            );
+            std::process::exit(0);
+        });
+    }
+    let outcome = match (
         &captured.input.prompt_id,
         &captured.input.transcript_path,
         captured.transcript_end,
-    ) && another_hook_blocked(path, from)
-    {
+    ) {
+        (Some(_), Some(path), Some(from)) => stop_hook_outcome(path, from),
+        _ => None,
+    };
+    if outcome == Some(StopOutcome::Continued) {
         return;
     }
+    // Only now is the turn known to be over: a Stop another hook blocked
+    // continues it. A hook slower than the wait may still block, so with no
+    // outcome the turn counts as running, and its mail waits on Herdr's status
+    // or the turn's next Stop.
+    let ended = captured.input.is_claude() && outcome == Some(StopOutcome::Ended);
+    if ended {
+        namedrop::turn_phase::record(
+            state,
+            &captured.socket,
+            &captured.input.session_id,
+            namedrop::turn_phase::TurnEdge::Stop,
+            captured.ended_at_ms,
+        );
+    }
+    if captured.settles {
+        settle_stop(state, &captured);
+    }
+    if ended {
+        wake_waiting_mail(state, &captured.socket, &captured.input.session_id);
+    }
+}
+
+fn settle_stop(state: &Path, captured: &CapturedStop) {
     let running_tasks: Vec<String> = captured
         .input
         .background_tasks
@@ -196,49 +229,71 @@ pub fn run_worker(state: &Path) {
     );
 }
 
-/// Whether another Stop hook blocked this Stop, so Claude Code continues the
-/// turn and the text this Stop carries is not its final message. Claude Code
-/// records how the Stop's hooks ended after the transcript's end at the
-/// Stop: a "Stop hook feedback" prompt when one blocked, then a
-/// `stop_hook_summary`. The turn's next Stop settles the claim instead.
-/// With no summary in time it settles as it would without the check.
-fn another_hook_blocked(path: &Path, from: u64) -> bool {
+/// Herdr sends no status change when a session ends its turn with background
+/// agents still running, so the Stop's worker starts the drain that mail for
+/// the session waits on.
+fn wake_waiting_mail(state: &Path, socket: &str, session: &str) {
+    let Ok(space) = env::var("HERDR_WORKSPACE_ID") else {
+        return;
+    };
+    if namedrop::mail_waits_for_session(state, socket, &space, session) {
+        let _ = crate::schedule_mailbox_workers(state, socket, &space, false);
+    }
+}
+
+/// How a Stop's hooks ended. Claude Code records it after the transcript's
+/// end at the Stop: a "Stop hook feedback" prompt when one blocked, then a
+/// `stop_hook_summary`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StopOutcome {
+    Ended,
+    /// Another Stop hook blocked this Stop, so Claude Code continues the turn
+    /// and the text this Stop carries is not its final message. The turn's
+    /// next Stop settles the claim instead.
+    Continued,
+}
+
+fn stop_outcome(record: &Value) -> Option<StopOutcome> {
+    if record["type"] == "user"
+        && record["isMeta"] == true
+        && record["message"]["content"]
+            .as_str()
+            .is_some_and(|content| content.starts_with("Stop hook feedback:"))
+    {
+        return Some(StopOutcome::Continued);
+    }
+    (record["type"] == "system" && record["subtype"] == "stop_hook_summary")
+        .then_some(StopOutcome::Ended)
+}
+
+/// The first outcome Claude Code records after `from`, or `None` when it
+/// records none in time or the transcript can't be read.
+fn stop_hook_outcome(path: &Path, from: u64) -> Option<StopOutcome> {
     let until = Instant::now() + STOP_OUTCOME_WAIT;
     loop {
         let mut bytes = Vec::new();
-        let read = fs::OpenOptions::new()
+        fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(path)
             .and_then(|mut file| {
                 file.seek(SeekFrom::Start(from))?;
                 file.take(MAX_INPUT_BYTES).read_to_end(&mut bytes)
-            });
-        if read.is_err() {
-            return false;
-        }
+            })
+            .ok()?;
         let complete = bytes
             .iter()
             .rposition(|byte| *byte == b'\n')
             .map_or(&[][..], |end| &bytes[..end]);
-        for record in complete
+        if let Some(found) = complete
             .split(|byte| *byte == b'\n')
             .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+            .find_map(|record| stop_outcome(&record))
         {
-            if record["type"] == "user"
-                && record["isMeta"] == true
-                && record["message"]["content"]
-                    .as_str()
-                    .is_some_and(|content| content.starts_with("Stop hook feedback:"))
-            {
-                return true;
-            }
-            if record["type"] == "system" && record["subtype"] == "stop_hook_summary" {
-                return false;
-            }
+            return Some(found);
         }
         if Instant::now() >= until {
-            return false;
+            return None;
         }
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -307,7 +362,7 @@ fn stop_identity_prefix(bytes: &[u8]) -> Option<StopInput> {
         let item = value(bytes, &mut offset)?;
         if matches!(
             key.as_str(),
-            "hook_event_name" | "session_id" | "prompt_id" | "turn_id"
+            "hook_event_name" | "session_id" | "prompt_id" | "turn_id" | "transcript_path"
         ) {
             fields.insert(key, item);
         }
@@ -327,6 +382,11 @@ fn stop_identity_prefix(bytes: &[u8]) -> Option<StopInput> {
 }
 
 impl StopInput {
+    /// A Claude Code Stop carries a prompt id and no turn id.
+    fn is_claude(&self) -> bool {
+        self.prompt_id.is_some() && self.turn_id.is_none()
+    }
+
     fn turn(&self) -> Option<HostTurn> {
         HostTurn::from_ids(self.prompt_id.as_deref(), self.turn_id.as_deref())
     }
@@ -470,6 +530,8 @@ mod tests {
             assert_eq!(bounded.session_id, original.session_id);
             assert_eq!(bounded.prompt_id, original.prompt_id);
             assert_eq!(bounded.turn_id, original.turn_id);
+            // Kept so the worker can still learn whether the turn ended.
+            assert_eq!(bounded.transcript_path, original.transcript_path);
             assert_eq!(bounded.final_text(None).text, "");
         }
     }

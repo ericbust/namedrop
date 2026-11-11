@@ -4932,8 +4932,23 @@ impl StateTransaction<'_> {
         &self,
         namespace: &StateNamespace,
     ) -> Result<Vec<PaneAddressId>, StoreError> {
+        let mut addresses: Vec<PaneAddressId> = self
+            .queued_mailbox_heads(namespace)?
+            .into_iter()
+            .map(|(address_id, _, _)| address_id)
+            .collect();
+        addresses.sort();
+        Ok(addresses)
+    }
+
+    /// Each mailbox's queued head with nothing ahead of it, oldest first: the
+    /// address, the delivery and when it was queued.
+    pub(crate) fn queued_mailbox_heads(
+        &self,
+        namespace: &StateNamespace,
+    ) -> Result<Vec<(PaneAddressId, crate::DeliveryId, u64)>, StoreError> {
         let mut statement = self.transaction.prepare(
-            "SELECT d.address_id
+            "SELECT d.address_id, d.delivery_id, d.created_at_ms
              FROM mailbox_deliveries d
              WHERE d.session_socket_id = ?1 AND d.worktree_id = ?2
                AND d.state = 'queued'
@@ -4946,11 +4961,15 @@ impl StateTransaction<'_> {
                      AND earlier.mailbox_order < d.mailbox_order
                      AND earlier.state NOT IN ('settled', 'failed', 'cancelled')
                )
-             ORDER BY d.address_id",
+             ORDER BY d.created_at_ms, d.address_id",
         )?;
         statement
             .query_map(namespace_params(namespace), |row| {
-                row.get::<_, String>(0).map(PaneAddressId::new)
+                Ok((
+                    PaneAddressId::new(row.get::<_, String>(0)?),
+                    crate::DeliveryId::new(row.get::<_, String>(1)?),
+                    from_i64(row.get(2)?)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)

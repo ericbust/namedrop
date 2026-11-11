@@ -2,6 +2,14 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.7.7] - 2026-11-10
+
+### Fixed
+
+- A message to a Claude Code agent no longer waits while background agents it started are still running. Once the agent's turn ends, Namedrop types the message in within seconds. Before, Herdr reported such an agent as working until its background agents finished, so the message could wait 10 minutes or more while the agent sat ready for input. A turn that is still running still gets nothing until it ends. A mention the agent's prompt box sends starts no turn and doesn't hold the message. A prompt another plugin's hook blocks or stops counts as a started turn, so the message waits for the agent's next turn to end or for its background agents to finish. When another plugin's Stop hook runs longer than 3 seconds, the message waits for the background agents as before.
+- Namedrop no longer types a message into a Claude Code or Codex prompt box that holds a draft you haven't sent. Before, a message to an idle agent was typed in at your cursor, and the agent got your draft split around the message as one prompt. The message now waits, and goes in within about 10 seconds after you send or clear the draft, without waiting for the agent's next turn or for its background agents to finish. A box you switched to shell mode by typing `!` counts as a draft.
+- Doctor now explains a message that has waited more than a minute for its agent (ND-DELIVERY-005). It says what Herdr reports for the agent, or that a draft in its prompt box is in the way.
+
 ## [1.7.6] - 2026-11-10
 
 ### Fixed

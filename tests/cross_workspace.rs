@@ -3083,6 +3083,8 @@ fn a_single_workspace_terminal_issues_the_same_herdr_commands_as_before() {
         "pane report-metadata pane-1-planner --source namedrop --token namedrop-awaiting=1 --token namedrop-attention=0",
     ];
     let shell = "pane process-info --pane pane-1-build";
+    // Before typing into the idle agent, each check reads its prompt box.
+    let prompt_box = "pane read pane-1-lead --source recent --lines 60 --format ansi";
     let expected: Vec<&str> = [
         &discover[..],
         &discover,
@@ -3093,8 +3095,9 @@ fn a_single_workspace_terminal_issues_the_same_herdr_commands_as_before() {
         &discover,
         &[shell],
         &discover,
+        &[prompt_box],
         &discover,
-        &["agent prompt pane-1-lead"],
+        &[prompt_box, "agent prompt pane-1-lead"],
         &metadata,
     ]
     .concat();

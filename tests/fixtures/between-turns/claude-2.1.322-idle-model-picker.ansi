@@ -1,0 +1,18 @@
+[0m[38;2;153;153;153m✻[0m [0m[38;2;153;153;153mCogitated for 1s · done 12:20 PM[0m
+
+[0m[38;2;153;153;153m[48;2;55;55;55m❯ [0m[38;2;255;255;255m[48;2;55;55;55m/model[0m[48;2;55;55;55m                                                                                                                [0m
+
+[0m[38;2;177;185;249m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+  [0m[1m[38;2;177;185;249mSelect model[0m
+  [0m[38;2;153;153;153mSwitch between Claude models. Your pick becomes the default for new sessions. For other/previous model names, [0m
+  [0m[38;2;153;153;153mspecify with --model.[0m
+
+  [0m[38;2;177;185;249m❯[0m [0m[38;2;153;153;153m1. [0m[38;2;78;186;101mDefault (recommended)[0m [0m[38;2;78;186;101m✔[0m  [0m[38;2;153;153;153mOpus 5.5 · Best for everyday, complex tasks[0m
+    [0m[38;2;153;153;153m2. [0mOpus                     [0m[38;2;153;153;153mOpus 5.5 · Best for everyday, complex tasks[0m
+    [0m[38;2;153;153;153m3. [0mFable                    [0m[38;2;153;153;153mFable 5.1 · Most capable for your hardest and longest-running tasks[0m
+    [0m[38;2;153;153;153m4. [0mSonnet                   [0m[38;2;153;153;153mSonnet 5.5 · Efficient for routine tasks[0m
+    [0m[38;2;153;153;153m5. [0mHaiku                    [0m[38;2;153;153;153mHaiku 5.5 · Fastest for quick answers[0m
+
+  [0m[38;2;215;119;87m◐[0m[38;2;153;153;153m Medium effort (default) ←/→ to adjust[0m
+
+  [0m[38;2;153;153;153mEnter to set as default · s to use this session only · Esc to cancel[0m
