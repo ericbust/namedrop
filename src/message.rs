@@ -396,10 +396,10 @@ fn recipient_outlook(address: &PaneAddressRecord) -> RecipientOutlook {
     } else {
         match address.lifecycle {
             PaneAddressLifecycle::Occupied => {
-                // Dispatch waits for a Settled Observation, and only "idle" and
-                // "done" are settled. Every other status keeps the message queued.
+                // Dispatch waits for a Settled Observation. Every other status
+                // keeps the message queued.
                 let status = address.agent_status.as_deref().unwrap_or("unknown");
-                if matches!(status, "idle" | "done") {
+                if crate::mux::AgentState::parse(status).accepts_prompt() {
                     format!(
                         "@{alias}: Agent Session status {status} — settled, so delivery is imminent."
                     )

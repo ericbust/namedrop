@@ -1229,7 +1229,7 @@ fn require_live_context_session(
         .panes
         .iter()
         .find(|pane| pane.pane_id == pane_id)
-        .and_then(|pane| pane.agent_session_id.as_ref())
+        .and_then(|pane| pane.agent_session_id())
         != Some(session)
     {
         return Err(StoreError::invalid_input(

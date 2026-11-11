@@ -1542,10 +1542,14 @@ fn ambiguous_binding_recovery_opens_one_attention_item_until_an_explicit_rebind(
                         workspace_id: "workspace-1".to_owned(),
                         cwd: None,
                         pane_label: None,
-                        agent_session_id: Some(AgentSessionId::new("session-a")),
-                        agent: None,
-                        occupant_label: None,
-                        agent_status: Some("idle".to_owned()),
+                        agent: Some(namedrop::mux::AgentIdentity {
+                            kind: namedrop::mux::AgentKind::Unreported,
+                            label: None,
+                            session: namedrop::mux::SessionClaim::Reported(AgentSessionId::new(
+                                "session-a",
+                            )),
+                        }),
+                        agent_status: Some(namedrop::mux::AgentState::Idle),
                         idle_state_label: None,
                     },
                     namedrop::DiscoveredPane {
@@ -1555,10 +1559,14 @@ fn ambiguous_binding_recovery_opens_one_attention_item_until_an_explicit_rebind(
                         workspace_id: "workspace-1".to_owned(),
                         cwd: None,
                         pane_label: None,
-                        agent_session_id: Some(AgentSessionId::new("session-b")),
-                        agent: None,
-                        occupant_label: None,
-                        agent_status: Some("idle".to_owned()),
+                        agent: Some(namedrop::mux::AgentIdentity {
+                            kind: namedrop::mux::AgentKind::Unreported,
+                            label: None,
+                            session: namedrop::mux::SessionClaim::Reported(AgentSessionId::new(
+                                "session-b",
+                            )),
+                        }),
+                        agent_status: Some(namedrop::mux::AgentState::Idle),
                         idle_state_label: None,
                     },
                 ],

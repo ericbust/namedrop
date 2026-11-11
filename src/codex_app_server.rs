@@ -586,7 +586,7 @@ mod tests {
         }
     }
 
-    fn pane(pane_id: &str, agent: &str) -> DiscoveredPane {
+    fn pane(pane_id: &str, agent: crate::AgentRuntime) -> DiscoveredPane {
         DiscoveredPane {
             pane_id: pane_id.to_owned(),
             terminal_id: format!("t-{pane_id}"),
@@ -594,9 +594,11 @@ mod tests {
             workspace_id: "w1".to_owned(),
             cwd: None,
             pane_label: None,
-            agent_session_id: None,
-            agent: Some(agent.to_owned()),
-            occupant_label: None,
+            agent: Some(crate::mux::AgentIdentity {
+                kind: crate::mux::AgentKind::Known(agent),
+                label: None,
+                session: crate::mux::SessionClaim::None,
+            }),
             agent_status: None,
             idle_state_label: None,
         }
@@ -641,15 +643,15 @@ mod tests {
             ]),
             calls: Default::default(),
         };
-        let only_in_process = served(&root, &herdr, &[pane("w1:p1", "codex")]);
+        let only_in_process = served(&root, &herdr, &[pane("w1:p1", crate::AgentRuntime::Codex)]);
         let mixed = served(
             &root,
             &herdr,
             &[
-                pane("w1:p1", "codex"),
-                pane("w1:p2", "codex"),
-                pane("w1:p3", "codex"),
-                pane("w1:p4", "claude"),
+                pane("w1:p1", crate::AgentRuntime::Codex),
+                pane("w1:p2", crate::AgentRuntime::Codex),
+                pane("w1:p3", crate::AgentRuntime::Codex),
+                pane("w1:p4", crate::AgentRuntime::ClaudeCode),
             ],
         );
         assert!(
@@ -675,9 +677,16 @@ mod tests {
             foreground: BTreeMap::new(),
             calls: Default::default(),
         };
-        assert!(served(&root, &herdr, &[pane("w1:p1", "claude")]).is_none());
+        assert!(
+            served(
+                &root,
+                &herdr,
+                &[pane("w1:p1", crate::AgentRuntime::ClaudeCode)]
+            )
+            .is_none()
+        );
         assert!(herdr.calls.lock().unwrap().is_empty());
-        assert!(served(&root, &herdr, &[pane("w1:p1", "codex")]).is_some());
+        assert!(served(&root, &herdr, &[pane("w1:p1", crate::AgentRuntime::Codex)]).is_some());
         assert_eq!(
             herdr.calls.lock().unwrap().len(),
             1,
@@ -693,7 +702,7 @@ mod tests {
             foreground: BTreeMap::new(),
             calls: Default::default(),
         };
-        assert!(served(&root, &herdr, &[pane("w1:p1", "codex")]).is_none());
+        assert!(served(&root, &herdr, &[pane("w1:p1", crate::AgentRuntime::Codex)]).is_none());
     }
 
     fn assert_commands_are_exact(text: &str) {

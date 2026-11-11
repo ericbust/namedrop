@@ -1,6 +1,7 @@
 use crate::codex_app_server::ServedPanes;
 use crate::integration::pane_agent_runtime;
 use crate::lifecycle::{CollaborationSetup, terminal_safe_text};
+use crate::mux::AgentState;
 use crate::{
     AgentSessionId, AttentionSourceKind, Clock, HerdrCommandExecutor, IdGenerator,
     LifecycleRuntime, PaneAddressLifecycle, StateStore, discover_worktree,
@@ -382,7 +383,7 @@ where
         .iter()
         .filter(|pane| pane_agent_runtime(pane).is_some())
     {
-        if pane.agent_session_id.is_none() && !served_pane(Some(&pane.pane_id)) {
+        if pane.agent_session_id().is_none() && !served_pane(Some(&pane.pane_id)) {
             let agent_runtime = pane_agent_runtime(pane).expect("supported panes were filtered");
             let setup = crate::install::native_session_setup(agent_runtime);
             let mut native = issue(
@@ -450,7 +451,7 @@ where
                 .find(|p| address.pane_id.as_deref() == Some(p.pane_id.as_str()))
             {
                 if pane.agent.is_none()
-                    && pane.agent_session_id.is_none()
+                    && pane.agent_session_id().is_none()
                     && crate::terminal::shell_is_available(runtime.mux, &pane.pane_id)
                 {
                     available_terminals += 1;
@@ -469,7 +470,7 @@ where
             && !served_pane(address.pane_id.as_deref())
             && !setup.panes.iter().any(|pane| {
                 address.pane_id.as_deref() == Some(pane.pane_id.as_str())
-                    && pane.agent_session_id.is_none()
+                    && pane.agent_session_id().is_none()
             })
             && matches!(
                 address.lifecycle,
@@ -490,7 +491,7 @@ where
                 "registered_session_id": address.agent_session_id,
                 "live_session_id": setup.panes.iter()
                     .find(|pane| address.pane_id.as_deref() == Some(pane.pane_id.as_str()))
-                    .and_then(|pane| pane.agent_session_id.as_ref()),
+                    .and_then(|pane| pane.agent_session_id()),
             });
             add_operation(
                 &mut disconnected,
@@ -534,7 +535,7 @@ where
             .find(|pane| address.pane_id.as_deref() == Some(pane.pane_id.as_str()));
         if let Some(session) = pane
             .filter(|pane| pane_agent_runtime(pane) == Some(crate::AgentRuntime::Codex))
-            .and_then(|pane| pane.agent_session_id.as_ref())
+            .and_then(|pane| pane.agent_session_id())
             && crate::hook_runs::refused(runtime.state_directory, session.as_str())
         {
             let mut refused = issue(
@@ -816,7 +817,8 @@ where
     if pane_agent_runtime(&pane).is_none() {
         return Err("The invoking pane is not a supported agent.".to_owned());
     }
-    pane.agent_session_id
+    pane.agent_session_id()
+        .cloned()
         .ok_or_else(|| "No Herdr session identity for this pane now.".to_owned())
 }
 
@@ -881,8 +883,8 @@ where
         // A session other than the registered one is Doctor's disconnected issue.
         let Some(pane) = setup.panes.iter().find(|pane| {
             address.pane_id.as_deref() == Some(pane.pane_id.as_str())
-                && pane.agent_session_id.is_some()
-                && pane.agent_session_id == address.agent_session_id
+                && pane.agent_session_id().is_some()
+                && pane.agent_session_id() == address.agent_session_id.as_ref()
         }) else {
             continue;
         };
@@ -891,7 +893,7 @@ where
         };
         let alias = &address.alias;
         let (severity, explanation, kind, prompt) = match &wait {
-            AgentWait::Status(Some(status)) if status == "blocked" => (
+            AgentWait::Status(Some(AgentState::Blocked)) => (
                 HealthSeverity::Notice,
                 format!(
                     "Herdr reports @{alias} waiting on a question or permission prompt. The message goes in once it is answered."
@@ -899,7 +901,7 @@ where
                 HealthRepairKind::HumanDecision,
                 format!("Answer @{alias}'s prompt."),
             ),
-            AgentWait::Status(Some(status)) if status == "working" => (
+            AgentWait::Status(Some(AgentState::Working)) => (
                 HealthSeverity::Info,
                 format!("Herdr reports @{alias} working. The message goes in when its turn ends."),
                 HealthRepairKind::ProductAction,
@@ -909,7 +911,7 @@ where
                 HealthSeverity::Info,
                 format!(
                     "Herdr reports @{alias} {}. The message goes in once Herdr reports it idle.",
-                    status.as_deref().unwrap_or("with no status")
+                    status.as_ref().map_or("with no status", AgentState::as_str)
                 ),
                 HealthRepairKind::ProductAction,
                 format!("Wait for @{alias} to be ready."),

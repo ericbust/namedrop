@@ -504,7 +504,7 @@ where
                 .panes
                 .iter()
                 .find(|pane| pane.pane_id == pane_id)
-                .and_then(|pane| pane.agent_session_id.as_ref())
+                .and_then(|pane| pane.agent_session_id())
                 .ok_or_else(|| {
                     crate::StoreError::invalid_input(
                         "registration challenge requires a live Agent Session",
@@ -582,7 +582,7 @@ where
     let Some(agent_runtime) = pane_agent_runtime(pane) else {
         return Ok(());
     };
-    let Some(agent_session_id) = pane.agent_session_id.as_ref() else {
+    let Some(agent_session_id) = pane.agent_session_id() else {
         return Ok(());
     };
     let discovered = integration_discovery(runtime)?;
@@ -631,7 +631,7 @@ where
         "namedrop-onboarding",
         runtime.clock.now_unix_ms(),
     );
-    if pane.agent_status.as_deref() == Some("working") {
+    if pane.agent_status == Some(crate::mux::AgentState::Working) {
         return StateStore::open(runtime.state_directory)
             .map_err(|error| error.to_string())?
             .transaction(|transaction| {
@@ -644,11 +644,7 @@ where
             })
             .map_err(|error| error.to_string());
     }
-    if !pane
-        .agent_status
-        .as_deref()
-        .is_some_and(|status| matches!(status, "idle" | "done"))
-    {
+    if !pane.accepts_prompt() {
         return Ok(());
     }
 
@@ -698,12 +694,9 @@ where
     let current = integration_discovery(runtime)?;
     let still_settled = current.panes.iter().any(|current| {
         current.pane_id == pane.pane_id
-            && current.agent_session_id.as_ref() == Some(agent_session_id)
+            && current.agent_session_id() == Some(agent_session_id)
             && pane_agent_runtime(current) == Some(agent_runtime)
-            && current
-                .agent_status
-                .as_deref()
-                .is_some_and(|status| matches!(status, "idle" | "done"))
+            && current.accepts_prompt()
     });
     if !still_settled {
         return Ok(());
@@ -795,7 +788,7 @@ where
             if address.agent_session_id.as_ref() != Some(agent_session_id)
                 || !discovered.panes.iter().any(|pane| {
                     address.pane_id.as_ref() == Some(&pane.pane_id)
-                        && pane.agent_session_id.as_ref() == Some(agent_session_id)
+                        && pane.agent_session_id() == Some(agent_session_id)
                 })
             {
                 return Err(crate::StoreError::invalid_input(
@@ -1061,9 +1054,8 @@ where
 /// recognition rule serves onboarding and setup offers alike: a pane running no
 /// recognized supported runtime can hold no Agent Integration.
 pub(crate) fn pane_agent_runtime(pane: &DiscoveredPane) -> Option<AgentRuntime> {
-    match pane.agent.as_deref() {
-        Some("codex") => Some(AgentRuntime::Codex),
-        Some("claude") => Some(AgentRuntime::ClaudeCode),
+    match pane.agent.as_ref()?.kind {
+        crate::mux::AgentKind::Known(runtime) => Some(runtime),
         _ => None,
     }
 }
@@ -1141,7 +1133,7 @@ where
             .panes
             .iter()
             .find(|pane| pane.pane_id == pane_id)
-            .and_then(|pane| pane.agent_session_id.as_ref())
+            .and_then(|pane| pane.agent_session_id())
             == Some(&agent_session_id);
         if !native_session_matches {
             return Err(crate::StoreError::invalid_input(
@@ -1319,7 +1311,7 @@ fn authorized_delivery_session(
         .panes
         .iter()
         .find(|pane| pane.pane_id == pane_id)
-        .and_then(|pane| pane.agent_session_id.as_ref())
+        .and_then(|pane| pane.agent_session_id())
         == Some(&agent_session_id);
     if !native_session_matches {
         return Err(crate::StoreError::invalid_input(

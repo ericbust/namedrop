@@ -9113,9 +9113,7 @@ mod tests {
             workspace_id: "workspace".to_owned(),
             cwd: None,
             pane_label: None,
-            agent_session_id: None,
             agent: None,
-            occupant_label: None,
             agent_status: None,
             idle_state_label: None,
         };

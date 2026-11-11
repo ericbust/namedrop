@@ -184,7 +184,7 @@ where
             "workspace_id": discovered.workspace_id,
             "pane_id": origin.pane_id,
             "terminal_id": origin.terminal_id,
-            "session_id": origin.agent_session_id.as_ref().map(|session| session.as_str()),
+            "session_id": origin.agent_session_id().map(|session| session.as_str()),
             "host": host(origin),
             "cwd": origin.cwd,
             "label": label(origin, &addresses),
@@ -270,10 +270,7 @@ fn bound_origin<'a>(
         );
     }
     let expected_session = expected_session.filter(|session| !session.is_empty());
-    let observed_session = origin
-        .agent_session_id
-        .as_ref()
-        .map(|session| session.as_str());
+    let observed_session = origin.agent_session_id().map(|session| session.as_str());
     if observed_session != expected_session {
         return Err(
             "The invoking pane is running a different agent session. Close this panel and open it \
@@ -637,7 +634,7 @@ where
         rows.push(json!({
             "pane_id": pane.pane_id,
             "terminal_id": pane.terminal_id,
-            "session_id": pane.agent_session_id.as_ref().map(|session| session.as_str()),
+            "session_id": pane.agent_session_id().map(|session| session.as_str()),
             "label": label(pane, addresses),
             "persona": persona(pane, addresses),
             "host": host(pane),
@@ -685,8 +682,7 @@ fn verified_rows(
                 pane.workspace_id == verified.workspace_id
                     && Some(pane.pane_id.as_str()) == row["pane_id"].as_str()
                     && Some(pane.terminal_id.as_str()) == row["terminal_id"].as_str()
-                    && pane.agent_session_id.as_ref().map(|s| s.as_str())
-                        == row["session_id"].as_str()
+                    && pane.agent_session_id().map(|s| s.as_str()) == row["session_id"].as_str()
             });
             if !held {
                 changed += 1;
@@ -727,7 +723,7 @@ fn label(pane: &DiscoveredPane, addresses: &[PaneAddressRecord]) -> String {
         .map(|address| format!("@{}", address.alias));
     let label = alias
         .or_else(|| pane.pane_label.clone())
-        .or_else(|| pane.occupant_label.clone())
+        .or_else(|| pane.occupant_label().map(str::to_owned))
         .unwrap_or_else(|| pane.pane_id.clone());
     one_line(&label, MAX_LABEL_CHARS)
 }

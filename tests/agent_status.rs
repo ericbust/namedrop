@@ -185,7 +185,7 @@ fn live_origin_probe() {
         .iter()
         .find(|p| p.pane_id == pane_id)
         .expect("origin gone");
-    let session = origin.agent_session_id.as_ref().map(|id| id.as_str());
+    let session = origin.agent_session_id().map(|id| id.as_str());
     let clock = SystemClock;
     let ids = ProcessIds::default();
     let runtime = LifecycleRuntime {
@@ -249,7 +249,7 @@ fn live_origin_probe() {
     let unchanged = after.panes.iter().any(|p| {
         p.pane_id == pane_id
             && p.terminal_id == origin.terminal_id
-            && p.agent_session_id == origin.agent_session_id
+            && p.agent_session_id() == origin.agent_session_id()
     });
     let observation = json!({
         "pane":pane_id,"host":snapshot["origin"]["host"],"facts_ms":facts_ms,

@@ -192,7 +192,7 @@ pub(crate) fn latest_identity<M: HerdrCommandExecutor + Sync, C, I>(
     }
     // Compared exactly, both ways: a pane that gained an agent since the popup
     // opened is as much a different subject as one that swapped sessions.
-    let now = latest.agent_session_id.map(|id| id.as_str().to_owned());
+    let now = latest.agent_session_id().map(|id| id.as_str().to_owned());
     if now.as_deref() != session {
         return Identity::Changed(
             "This pane started a new agent session. Close this popup and open it again.".to_owned(),

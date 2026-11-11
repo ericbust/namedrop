@@ -50,7 +50,7 @@ pub fn execute_terminal<M: MuxRead, C: Clock, I: IdGenerator>(
         .iter()
         .find(|p| Some(p.pane_id.as_str()) == runtime.current_pane_id)
         .ok_or("terminal runner requires its current Herdr pane")?;
-    if pane.agent.is_some() || pane.agent_session_id.is_some() {
+    if pane.agent.is_some() {
         return Err("terminal pane now contains an agent; command was not executed".to_owned());
     }
     if !process_info(runtime.mux, &pane.pane_id)
@@ -374,7 +374,7 @@ pub fn detect_pane_type<M: MuxRead, C, I>(
         .iter()
         .find(|p| Some(p.pane_id.as_str()) == runtime.current_pane_id)
         .ok_or_else(|| "name must run from the Herdr pane being named".to_owned())?;
-    if pane.agent.is_some() || pane.agent_session_id.is_some() {
+    if pane.agent.is_some() {
         return Ok(Some(PaneType::Agent));
     }
     Ok(process_info(runtime.mux, &pane.pane_id)

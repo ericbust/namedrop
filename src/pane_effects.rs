@@ -423,8 +423,8 @@ pub(crate) fn interrupt_if_current(
             let live_matches = live.workspace_id == namespace.space_id.as_str()
                 && live.panes.iter().any(|pane| {
                     pane.pane_id == response.pane_id
-                        && pane.agent_session_id.as_ref() == Some(&response.agent_session_id)
-                        && pane.agent_status.as_deref() == Some("working")
+                        && pane.agent_session_id() == Some(&response.agent_session_id)
+                        && pane.agent_status == Some(crate::mux::AgentState::Working)
                 });
             let mut store = StateStore::open_read_only(state)
                 .map_err(|e| e.to_string())?

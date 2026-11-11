@@ -297,7 +297,9 @@ impl StateTransaction<'_> {
                         .unwrap_or_else(|| "unknown".to_owned()),
                     presence: if closed {
                         "gone"
-                    } else if matches!(status.as_deref(), Some("idle" | "done")) {
+                    } else if status.as_deref().is_some_and(|status| {
+                        crate::mux::AgentState::parse(status).accepts_prompt()
+                    }) {
                         "idle"
                     } else {
                         "working"

@@ -1,9 +1,10 @@
 #[path = "support/cleanup.rs"]
 mod cleanup;
 
+use namedrop::mux::{AgentIdentity, AgentKind, AgentState, SessionClaim};
 use namedrop::tour::{self, PageAction};
 use namedrop::{
-    AgentSessionId, Clock, DiscoveredPane, DiscoveredWorktree, HerdrCommandExecutor,
+    AgentRuntime, AgentSessionId, Clock, DiscoveredPane, DiscoveredWorktree, HerdrCommandExecutor,
     HerdrCommandOutput, IdGenerator, LifecycleRuntime, WorktreeId,
 };
 use std::{
@@ -324,7 +325,7 @@ impl IdGenerator for SequentialIds {
     }
 }
 
-fn pane(id: &str, agent: Option<&str>) -> DiscoveredPane {
+fn pane(id: &str, agent: Option<AgentRuntime>) -> DiscoveredPane {
     DiscoveredPane {
         pane_id: id.to_owned(),
         terminal_id: format!("terminal-{id}"),
@@ -332,10 +333,12 @@ fn pane(id: &str, agent: Option<&str>) -> DiscoveredPane {
         workspace_id: "workspace-1".to_owned(),
         cwd: Some("/repo".to_owned()),
         pane_label: None,
-        agent_session_id: agent.map(|_| AgentSessionId::new(format!("session-{id}"))),
-        agent: agent.map(str::to_owned),
-        occupant_label: None,
-        agent_status: agent.map(|_| "idle".to_owned()),
+        agent: agent.map(|runtime| AgentIdentity {
+            kind: AgentKind::Known(runtime),
+            label: None,
+            session: SessionClaim::Reported(AgentSessionId::new(format!("session-{id}"))),
+        }),
+        agent_status: agent.map(|_| AgentState::Idle),
         idle_state_label: None,
     }
 }
@@ -379,8 +382,8 @@ fn first_agent_show_opens_the_tour_popup_once() {
     let runtime = runtime(state, &herdr, &ids);
     let space = worktree(vec![
         pane("pane-shell", None),
-        pane("pane-1", Some("codex")),
-        pane("pane-2", Some("claude")),
+        pane("pane-1", Some(AgentRuntime::Codex)),
+        pane("pane-2", Some(AgentRuntime::ClaudeCode)),
     ]);
 
     let result = tour::show_for_first_agent(&runtime, &space, Some("pane-2"));
@@ -495,7 +498,7 @@ fn assert_marker_error_is_reported() {
     let herdr = PopupHerdr::default();
     let result = tour::show_for_first_agent(
         &runtime(&state, &herdr, &ids),
-        &worktree(vec![pane("pane-1", Some("codex"))]),
+        &worktree(vec![pane("pane-1", Some(AgentRuntime::Codex))]),
         None,
     );
     assert_eq!(result["shown"], false);
