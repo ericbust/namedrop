@@ -468,13 +468,13 @@ pub struct IntegrationRegistration {
     pub active: bool,
 }
 
-pub fn issue_registration_challenge<E, C, I>(
+pub fn issue_registration_challenge<M, C, I>(
     address_id: &PaneAddressId,
     agent_runtime: AgentRuntime,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<IntegrationChallenge, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -527,12 +527,12 @@ where
         .map_err(|error| error.to_string())
 }
 
-pub(crate) fn onboard_settled_integrations<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn onboard_settled_integrations<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     discovered: &DiscoveredWorktree,
 ) -> Result<crate::IntegrationPackageInstallation, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -568,14 +568,14 @@ where
     Ok(installation)
 }
 
-fn onboard_settled_integration<E, C, I>(
+fn onboard_settled_integration<M, C, I>(
     address_id: &PaneAddressId,
     pane: &DiscoveredPane,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     installation: &crate::IntegrationPackageInstallation,
 ) -> Result<(), String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -733,7 +733,7 @@ where
         return Ok(());
     }
     match effects.prompt(
-        runtime.herdr,
+        runtime.mux,
         &crate::pane_effects::InputOwner::Other,
         &prompt,
     ) {
@@ -746,7 +746,7 @@ where
         ),
         Err(error)
             if runtime
-                .herdr
+                .mux
                 .classify_prompt_failure(&error)
                 .is_temporary_pre_invocation() =>
         {
@@ -762,15 +762,15 @@ where
     }
 }
 
-fn automatically_register_integration<E, C, I>(
+fn automatically_register_integration<M, C, I>(
     address_id: &PaneAddressId,
     agent_session_id: &AgentSessionId,
     agent_runtime: AgentRuntime,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     namespace: &StateNamespace,
 ) -> Result<(), String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -917,7 +917,7 @@ fn concurrent_native_registration_completes_one_profile() {
         workspace_id: Some("space"),
         current_pane_id: Some("pane"),
         session_socket_id: "socket",
-        herdr: &Host,
+        mux: &Host,
         clock: &crate::SystemClock,
         ids: &crate::ProcessIds::default(),
     };
@@ -1034,15 +1034,15 @@ pub(crate) fn registration_command(
     ))
 }
 
-fn finish_challenge_prompt<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn finish_challenge_prompt<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     namespace: &StateNamespace,
     registration_id: &str,
     outcome: TransitionKind,
     attribution: &MutationAttribution,
 ) -> Result<(), String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
 {
     StateStore::open(runtime.state_directory)
         .map_err(|error| error.to_string())?
@@ -1088,13 +1088,13 @@ fn shell_argument(value: &str) -> String {
     }
 }
 
-pub fn execute_integration_operation<E, C, I>(
+pub fn execute_integration_operation<M, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1188,13 +1188,13 @@ where
     Ok(response)
 }
 
-fn record_registration_failure<E, C, I>(
+fn record_registration_failure<M, C, I>(
     nonce: &str,
     error: &str,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<(), String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1218,14 +1218,14 @@ where
         .map_err(|store_error| store_error.to_string())
 }
 
-pub(crate) fn execute_attempt_operation<E, C, I>(
+pub(crate) fn execute_attempt_operation<M, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     caller: Option<&crate::deferred_commands::Caller>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1347,12 +1347,12 @@ const HELD_GUIDANCE: &str = "Namedrop could not confirm these deliveries reached
 /// from the shared construction path, so a recovered envelope carries the
 /// current trusted instruction and tool metadata over durable message and
 /// attempt facts rather than the original prompt's bytes.
-fn execute_delivery_inbox<E, C, I>(
+fn execute_delivery_inbox<M, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1380,11 +1380,11 @@ pub(crate) enum CarriedDelivery<'a> {
 /// What a session whose context was rebuilt must be told: the deliveries it
 /// still owes, which a summary may have dropped. A pointer's details lived only
 /// in hook context, so without this a sender could wait forever.
-pub(crate) fn owed_deliveries_notice<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn owed_deliveries_notice<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Option<String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1436,12 +1436,12 @@ pub(crate) struct AuthenticatedDelivery {
 /// once per dispatch. A whole envelope attests only for an attempt with no
 /// pointer, which 1.6.0 or earlier typed; otherwise pasting what `delivery inbox`
 /// prints would attest and arm the dispatch again.
-pub(crate) fn authenticate_delivery_prompt<E, C, I>(
+pub(crate) fn authenticate_delivery_prompt<M, C, I>(
     carried: &CarriedDelivery<'_>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Option<AuthenticatedDelivery>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1493,8 +1493,8 @@ where
     .flatten()
 }
 
-fn with_outstanding_envelopes<E, C, I, T>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn with_outstanding_envelopes<M, C, I, T>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     read: impl FnOnce(
         &crate::StateTransaction<'_>,
         &StateNamespace,
@@ -1503,7 +1503,7 @@ fn with_outstanding_envelopes<E, C, I, T>(
     ) -> Result<T, crate::StoreError>,
 ) -> Result<T, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1619,15 +1619,15 @@ fn validate_registration_input(input: &RegistrationInput) -> Result<(), String> 
     Ok(())
 }
 
-fn integration_discovery<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn integration_discovery<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<DiscoveredWorktree, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
 {
     Ok(match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace_id) => discover_worktree_for_workspace(runtime.mux, workspace_id)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     })
 }
 
@@ -1920,9 +1920,9 @@ pub(crate) fn left_open_guidance(
 }
 
 /// The line that prints every delivery the session in this pane still owes.
-pub(crate) fn inbox_line<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> Option<String>
+pub(crate) fn inbox_line<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>) -> Option<String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {

@@ -98,7 +98,7 @@ impl Fixture {
             workspace_id: Some("synthetic-workspace"),
             current_pane_id: Some(pane),
             session_socket_id: "synthetic-socket",
-            herdr: self,
+            mux: self,
             clock: self,
             ids: self,
         }

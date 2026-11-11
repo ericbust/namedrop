@@ -48,13 +48,13 @@ struct PreviewInput {
 }
 
 /// Read request progress and replies without running recovery or dispatch.
-pub fn execute_handoff_operation<E, C, I>(
+pub fn execute_handoff_operation<M, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -99,8 +99,8 @@ where
         _ => return Err(format!("unsupported handoff operation: {operation}")),
     };
     let discovered = match runtime.workspace_id {
-        Some(workspace) => discover_worktree_for_workspace(runtime.herdr, workspace)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace) => discover_worktree_for_workspace(runtime.mux, workspace)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     let namespace = discovered.namespace(runtime.session_socket_id);
     let pane = runtime
@@ -112,7 +112,7 @@ where
     let remote = store
         .transaction(|tx| tx.queued_remote_seat_spaces(&namespace))
         .map_err(|e| e.to_string())?;
-    let live = crate::spaces::LiveSpaces::load(runtime.herdr, discovered.clone(), &remote);
+    let live = crate::spaces::LiveSpaces::load(runtime.mux, discovered.clone(), &remote);
     let (result, author) = store.transaction(|tx| {
         let author = crate::context::registered_current_address(tx, &namespace, pane, &discovered)?;
         let result = if let Some(id) = coordination_id { tx.coordination_report(&namespace,&id,&author)? } else if let Some(message_id) = message_id {
@@ -166,8 +166,8 @@ where
 /// a revision the lead has seen waits. The read has already succeeded, and a
 /// read that goes unrecorded only lets that check-in come sooner, so a store
 /// that cannot be written is left alone.
-fn record_reads<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn record_reads<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     namespace: &crate::StateNamespace,
     session: &crate::AgentSessionId,
     result: &Value,
@@ -195,9 +195,9 @@ fn record_reads<E, C, I>(
     });
 }
 
-fn preview<E, C, I>(input: Value, runtime: &LifecycleRuntime<'_, E, C, I>) -> Result<Value, String>
+fn preview<M, C, I>(input: Value, runtime: &LifecycleRuntime<'_, M, C, I>) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -219,8 +219,8 @@ where
     // The Space is resolved before the context block is previewed, so the
     // preview answers for the same context root the send would capture against.
     let discovered = match runtime.workspace_id {
-        Some(workspace) => discover_worktree_for_workspace(runtime.herdr, workspace)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace) => discover_worktree_for_workspace(runtime.mux, workspace)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     let context = input
         .context
@@ -235,7 +235,7 @@ where
         .ok_or("Namedrop has no saved state")?;
     let reference_aliases = crate::message::body_reference_aliases(
         &parsed,
-        &crate::spaces::HerdrWorkspaces::new(runtime.herdr),
+        &crate::spaces::HerdrWorkspaces::new(runtime.mux),
     );
     store.transaction(|tx| {
         let author = crate::context::registered_current_address(tx,&namespace,pane,&discovered)?;
@@ -254,12 +254,12 @@ where
 /// The caller's identity comes from its pane's exact registered session, never
 /// from the input, and the grant is consumed in the acknowledgement's
 /// transaction.
-fn acknowledge_granted<E, C, I>(
+fn acknowledge_granted<M, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    M: crate::mux::Mux + crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -269,8 +269,8 @@ where
         return Err("coordination_id is required".to_owned());
     }
     let discovered = match runtime.workspace_id {
-        Some(workspace) => discover_worktree_for_workspace(runtime.herdr, workspace)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace) => discover_worktree_for_workspace(runtime.mux, workspace)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     let namespace = discovered.namespace(runtime.session_socket_id);
     let pane = runtime

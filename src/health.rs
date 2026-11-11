@@ -71,9 +71,9 @@ pub struct HealthReport {
 }
 
 /// Inspect Namedrop without reconciling, retrying, cancelling, or changing state.
-pub fn diagnose_collaboration<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> HealthReport
+pub fn diagnose_collaboration<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>) -> HealthReport
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -116,9 +116,9 @@ where
     report
 }
 
-fn diagnose_space<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> HealthReport
+fn diagnose_space<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>) -> HealthReport
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -302,7 +302,7 @@ where
         issues.push(paused);
     }
     if let Some(stale) = crate::installed_runtime::stale_release(runtime.state_directory, || {
-        registered_plugin_root(runtime.herdr)
+        registered_plugin_root(runtime.mux)
     }) {
         issues.push(stale_runtime_issue(&stale));
     }
@@ -451,7 +451,7 @@ where
             {
                 if pane.agent.is_none()
                     && pane.agent_session_id.is_none()
-                    && crate::terminal::shell_is_available(runtime.herdr, &pane.pane_id)
+                    && crate::terminal::shell_is_available(runtime.mux, &pane.pane_id)
                 {
                     available_terminals += 1;
                 } else {
@@ -695,12 +695,12 @@ where
 /// `Ok` means only that the host accepted the prompt: nothing is repaired and
 /// no delivery is recorded. `Err` states, in its first words, why nothing was
 /// sent.
-pub fn request_doctor_assistance<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn request_doctor_assistance<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     expected_session_id: &str,
 ) -> Result<(), String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -762,14 +762,14 @@ where
     }
     let prompt = doctor_assistance_prompt(&report, pane_id, &live);
     match effects.prompt(
-        runtime.herdr,
+        runtime.mux,
         &crate::pane_effects::InputOwner::Other,
         &prompt,
     ) {
         Ok(_) => Ok(()),
         Err(error)
             if runtime
-                .herdr
+                .mux
                 .classify_prompt_failure(&error)
                 .is_temporary_pre_invocation() =>
         {
@@ -779,12 +779,12 @@ where
     }
 }
 
-fn invoking_pane_is_served<E: HerdrCommandExecutor, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn invoking_pane_is_served<M: crate::mux::Mux + HerdrCommandExecutor, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     space_id: &str,
     pane_id: &str,
 ) -> bool {
-    discover_worktree_for_workspace(runtime.herdr, space_id)
+    discover_worktree_for_workspace(runtime.mux, space_id)
         .ok()
         .and_then(|discovered| {
             let pane = discovered
@@ -798,17 +798,17 @@ fn invoking_pane_is_served<E: HerdrCommandExecutor, C, I>(
 
 /// The Agent Session live in `pane_id` right now, or why Doctor must not
 /// prompt that pane at all.
-fn live_agent_session<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn live_agent_session<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     space_id: &str,
     pane_id: &str,
 ) -> Result<AgentSessionId, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
-    let pane = discover_worktree_for_workspace(runtime.herdr, space_id)?
+    let pane = discover_worktree_for_workspace(runtime.mux, space_id)?
         .panes
         .into_iter()
         .find(|pane| pane.pane_id == pane_id)
@@ -856,13 +856,13 @@ const LONG_WAIT_MS: u64 = 60_000;
 
 /// Each agent mailbox whose next message has waited past `LONG_WAIT_MS`
 /// because delivery's own check refuses the pane right now, with what it saw.
-fn long_waits<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn long_waits<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     setup: &CollaborationSetup,
     queued_heads: &[(crate::PaneAddressId, crate::DeliveryId, u64)],
 ) -> Vec<HealthIssue>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
 {
     use crate::delivery::AgentWait;
@@ -970,17 +970,17 @@ where
     issues
 }
 
-fn load_health_snapshot<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn load_health_snapshot<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<HealthSnapshot, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
     let discovered = match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace_id) => discover_worktree_for_workspace(runtime.mux, workspace_id)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     let namespace = discovered.namespace(runtime.session_socket_id);
     let Some(mut store) =
@@ -1266,9 +1266,9 @@ fn issue(
     }
 }
 
-fn add_operation<E, C, I>(
+fn add_operation<M, C, I>(
     issue: &mut HealthIssue,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     space_id: &str,
     operation: &str,
     input: serde_json::Value,

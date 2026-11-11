@@ -9,9 +9,9 @@ use namedrop::{
 };
 use serde_json::Value;
 
-pub fn wake<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>)
+pub fn wake<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>)
 where
-    E: HerdrCommandExecutor,
+    M: namedrop::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -27,13 +27,13 @@ where
     }
 }
 
-pub fn message<E, C, I>(
+pub fn message<M, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: namedrop::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -44,13 +44,13 @@ where
     result
 }
 
-pub fn integration<E, C, I>(
+pub fn integration<M, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: namedrop::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {

@@ -119,7 +119,7 @@ print(json.dumps({'result':result}))
             workspace_id: None,
             current_pane_id: Some("pane-1"),
             session_socket_id: "socket-a",
-            herdr: &Host,
+            mux: &Host,
             clock: &Time,
             ids: &self.ids,
         }

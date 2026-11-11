@@ -1993,7 +1993,7 @@ fn send_direct_post(
         workspace_id: Some(namespace.space_id.as_str()),
         current_pane_id: None,
         session_socket_id: &namespace.session_socket_id,
-        herdr: &herdr,
+        mux: &herdr,
         clock: &crate::SystemClock,
         ids: &ids,
     };
@@ -2074,7 +2074,7 @@ fn send_operator_post(
         workspace_id: Some(namespace.space_id.as_str()),
         current_pane_id: None,
         session_socket_id: &namespace.session_socket_id,
-        herdr: &herdr,
+        mux: &herdr,
         clock: &crate::SystemClock,
         ids: &ids,
     };
@@ -2177,7 +2177,7 @@ fn send_coordination_review(
         workspace_id: Some(namespace.space_id.as_str()),
         current_pane_id: None,
         session_socket_id: &namespace.session_socket_id,
-        herdr: &herdr,
+        mux: &herdr,
         clock: &crate::SystemClock,
         ids: &ids,
     };

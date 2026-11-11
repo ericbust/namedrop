@@ -38,12 +38,12 @@ struct SessionStartInput {
 /// or its host rebuilds the context (resume, clear, compaction, fork). The
 /// policy is fixed text, so reading it per turn would only repeat it; the
 /// roster it governs arrives with a prompt whenever it changed.
-pub fn execute_session_start_hook<E, C, I>(
+pub fn execute_session_start_hook<M, C, I>(
     input: &str,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Option<Value>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -106,12 +106,12 @@ pub(crate) fn codex_app_server_hook_output() -> Value {
 /// non-authoritative local guidance, beneath the same roster the turn it stays
 /// on would have carried. Every roster carries only the parts this host
 /// session, in this pane, was not last shown.
-pub fn execute_user_prompt_submit_hook<E, C, I>(
+pub fn execute_user_prompt_submit_hook<M, C, I>(
     input: &str,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Option<Value>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -178,7 +178,7 @@ where
         // mailboxes only on it.
         PromptMentionOutcome::Sent { remote } => {
             if !remote.is_empty() {
-                let _ = runtime.herdr.execute(&[
+                let _ = runtime.mux.execute(&[
                     "notification",
                     "show",
                     "Namedrop",
@@ -248,13 +248,13 @@ enum RosterRead {
 
 /// Only the parts of the roster this reader was not last shown. They are
 /// recorded as shown, so the output must carry every one of them.
-fn unseen_roster<E, C, I>(
+fn unseen_roster<M, C, I>(
     reader: Option<Reader<'_>>,
     room: usize,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> RosterRead
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -276,12 +276,12 @@ where
 /// The roster text this reader was not shown, behind the roster marker, or
 /// `None` when nothing is new. A roster that is gone is news once, because
 /// the policy says a turn without one means the last one shown still holds.
-fn news<E, C, I>(
+fn news<M, C, I>(
     reader: Option<Reader<'_>>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Option<String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -307,13 +307,13 @@ fn no_named_agents() -> String {
 /// marker its serialization starts with, so composing under that marker needs
 /// no wrapper change; the guidance follows verbatim, and with nothing new to
 /// lead it the exact known-safe literal the wrappers match is emitted unchanged.
-fn failed_handoff<E, C, I>(
+fn failed_handoff<M, C, I>(
     guidance: &str,
     reader: Option<Reader<'_>>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Value
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -325,13 +325,13 @@ where
 
 /// Guidance with no fixed literal of its own still reaches the agent: it opens
 /// with the roster marker every generated wrapper forwards.
-fn under_roster<E, C, I>(
+fn under_roster<M, C, I>(
     guidance: &str,
     reader: Option<Reader<'_>>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Value
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -435,15 +435,15 @@ fn hook_output(event: &str, context: &str) -> Value {
 /// it authenticated against rather than from the submitted text. What the agent
 /// needs to act on it is counted first and only the roster gives way, so that
 /// text alone can still pass the host's limit.
-fn delivery_hook_output<E, C, I>(
+fn delivery_hook_output<M, C, I>(
     delivery: &AuthenticatedDelivery,
     reader: Option<Reader<'_>>,
     armed: Option<&crate::final_reply::Armed>,
     held: &[String],
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Value
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -513,13 +513,13 @@ where
 /// one for `delivery` when it can. The returned plan is what the hook may
 /// promise; `None` keeps today's explicit commands. Each text says how to
 /// answer a delivery a Stop held that is still open.
-fn observe_final_reply<E, C, I>(
+fn observe_final_reply<M, C, I>(
     input: &UserPromptSubmitInput,
     delivery: Option<&AuthenticatedDelivery>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> (Option<crate::final_reply::Armed>, Vec<String>)
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -574,12 +574,12 @@ where
 
 const LEFTOVER_INPUT_CONTEXT: &str = "The text ahead of the delivery was already in this pane's input when the delivery was pasted in: a draft the person had not sent, or a Mention Namedrop already sent that the host put back. It is not an instruction for this turn; do not act on it or route it. After settling the delivery, tell the person in one line that it was submitted with the delivery.";
 
-fn route_leading_mentions<E, C, I>(
+fn route_leading_mentions<M, C, I>(
     prompt: &str,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Option<PromptMentionOutcome>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {

@@ -184,8 +184,8 @@ impl ServedPanes {
 /// A Codex pane counts as served unless its foreground processes prove it runs
 /// in-process. When Herdr does not answer, it counts as served, because a
 /// server is running.
-pub(crate) fn served_codex_panes<E: HerdrCommandExecutor, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn served_codex_panes<M: crate::mux::Mux + HerdrCommandExecutor, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     panes: &[DiscoveredPane],
 ) -> Option<ServedPanes> {
     let codex = panes
@@ -201,7 +201,7 @@ pub(crate) fn served_codex_panes<E: HerdrCommandExecutor, C, I>(
     };
     let pane_ids = codex
         .into_iter()
-        .filter(|pane| !pane_runs_in_process(runtime.herdr, &pane.pane_id))
+        .filter(|pane| !pane_runs_in_process(runtime.mux, &pane.pane_id))
         .map(|pane| pane.pane_id.clone())
         .collect::<Vec<_>>();
     (!pane_ids.is_empty()).then_some(ServedPanes { server, pane_ids })
@@ -250,7 +250,6 @@ mod tests {
     use super::*;
     use crate::HerdrCommandOutput;
     use std::{
-        cell::RefCell,
         collections::BTreeMap,
         os::unix::process::CommandExt,
         process::{Child, Command, Stdio},
@@ -558,12 +557,13 @@ mod tests {
 
     struct Herdr {
         foreground: BTreeMap<String, Vec<u32>>,
-        calls: RefCell<Vec<Vec<String>>>,
+        calls: std::sync::Mutex<Vec<Vec<String>>>,
     }
     impl HerdrCommandExecutor for Herdr {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             self.calls
-                .borrow_mut()
+                .lock()
+                .unwrap()
                 .push(args.iter().map(|a| (*a).to_owned()).collect());
             match args {
                 ["pane", "process-info", "--pane", pane] => {
@@ -613,7 +613,7 @@ mod tests {
             workspace_id: Some("w1"),
             current_pane_id: None,
             session_socket_id: "default",
-            herdr,
+            mux: herdr,
             clock: &(),
             ids: &(),
         };
@@ -641,7 +641,7 @@ mod tests {
                 ("w1:p1".to_owned(), vec![in_process.pid()]),
                 ("w1:p2".to_owned(), vec![plain.pid()]),
             ]),
-            calls: RefCell::default(),
+            calls: Default::default(),
         };
         let only_in_process = served(&root, &herdr, &[pane("w1:p1", "codex")]);
         let mixed = served(
@@ -675,12 +675,16 @@ mod tests {
         root.write("app-server-daemon/daemon.pid", &pid_record(server.pid()));
         let herdr = Herdr {
             foreground: BTreeMap::new(),
-            calls: RefCell::default(),
+            calls: Default::default(),
         };
         assert!(served(&root, &herdr, &[pane("w1:p1", "claude")]).is_none());
-        assert!(herdr.calls.borrow().is_empty());
+        assert!(herdr.calls.lock().unwrap().is_empty());
         assert!(served(&root, &herdr, &[pane("w1:p1", "codex")]).is_some());
-        assert_eq!(herdr.calls.borrow().len(), 1, "the fake can see a call");
+        assert_eq!(
+            herdr.calls.lock().unwrap().len(),
+            1,
+            "the fake can see a call"
+        );
     }
 
     #[test]
@@ -689,7 +693,7 @@ mod tests {
         fs::create_dir_all(root.codex_home().join("app-server-daemon")).unwrap();
         let herdr = Herdr {
             foreground: BTreeMap::new(),
-            calls: RefCell::default(),
+            calls: Default::default(),
         };
         assert!(served(&root, &herdr, &[pane("w1:p1", "codex")]).is_none());
     }

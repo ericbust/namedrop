@@ -111,7 +111,7 @@ pub(super) fn launch(options: &RuntimeOptions, mode: UiMode) -> Result<serde_jso
             "--focus".to_owned(),
         ];
         let output = runtime
-            .herdr
+            .mux
             .execute(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
         serde_json::from_str(&output.stdout).map_err(|e| e.to_string())
     })
@@ -123,7 +123,7 @@ fn target_pane(
     let workspace = runtime
         .workspace_id
         .ok_or("This popup is missing its invoking space")?;
-    discover_worktree_for_workspace(runtime.herdr, workspace)?
+    discover_worktree_for_workspace(runtime.mux, workspace)?
         .panes
         .into_iter()
         .find(|p| Some(p.pane_id.as_str()) == runtime.current_pane_id)

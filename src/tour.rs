@@ -419,12 +419,12 @@ pub fn popup_open_args(
 }
 
 /// Opens the tour popup for `target` and returns Herdr's JSON result.
-pub fn open_popup<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn open_popup<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     target: &DiscoveredPane,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
 {
     let session = target
         .agent_session_id
@@ -440,7 +440,7 @@ where
         runtime.session_socket_id,
     );
     let output = runtime
-        .herdr
+        .mux
         .execute(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
     serde_json::from_str(&output.stdout)
         .map_err(|error| format!("Herdr returned an unreadable popup result: {error}"))
@@ -454,13 +454,13 @@ where
 /// instead of each opening a popup, and a failed open keeps the marker because
 /// retrying a popup on every later event would be worse than missing it once;
 /// the shortcut reopens it any time.
-pub fn show_for_first_agent<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn show_for_first_agent<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     discovered: &DiscoveredWorktree,
     preferred_pane_id: Option<&str>,
 ) -> Value
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
 {
     let not_shown =
         |reason: &str| json!({"shown": false, "presentation_id": CURRENT_ID, "reason": reason});

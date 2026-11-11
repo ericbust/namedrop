@@ -188,6 +188,18 @@ Record each accepted deviation here, with its source, before the next commit sta
 - **`ProcessHerdr` is not copied.** It reaches the port through the bridge, so the process code is not duplicated. Commit 16 moves it into `mux/herdr/` as the private transport.
 - **Not yet in the adapter:** `status server` (the socket fallback) and `terminal session observe` (live peek). Both move with their callers.
 
+**Commit 4** (`refactor(mux): rename LifecycleRuntime.herdr to mux`).
+
+- **The bound is `M: Mux + HerdrCommandExecutor`.** Callers that still build Herdr arguments call `execute` through the second bound. Each later commit drops `+ HerdrCommandExecutor` where its caller no longer needs it, and commit 16 deletes the rest.
+- **Test fakes that held a `Cell` or `RefCell` hold `tests/support/sync_cell.rs` instead,** a `Mutex` with the same methods, so they are `Sync` and pass through the bridge. Their assertions are unchanged.
+
+**Commit 5** (`refactor(mux): discover spaces and panes through survey`).
+
+- **`MuxError` keeps the multiplexer's words.** `Gone`, `Timeout`, and `TooLarge` now carry the error text, and `Display` prints it unchanged. This reverses the commit 3 note that `Gone` loses its text: a discovery error still reaches the reminder clock, the status-event retry, and the user as Herdr's own JSON, byte for byte, and `tests/deferred_commands.rs` pins that. The conformance suite compares only the kind of a failure, because the fake and Herdr word it differently.
+- **Only `discover_reminder_workspace` reads the error's type.** It fails a closed space's reminders on `Gone(Space)`. Every other discovery caller still receives a `String`, so `herdr_error_code` stays for the reminder clock until its callers take `MuxError`.
+- **`DiscoveredPane.agent` still holds Herdr's word,** rebuilt from `AgentKind` in `lifecycle.rs`. Commit 7 deletes that mapping when `DiscoveredPane` holds an `AgentIdentity`.
+- **Functions that only discover are bounded on `MuxRead`.** The agent status collector's `Deadline` wrapper reaches the port through the bridge, so its clock must be `Sync`, and it keeps today's per-read time and size limits.
+
 ## Open questions and risks
 
 - Is a dashboard key that reports busy during a delivery acceptable, or should it wait a short fixed time? Commit 12 decides.

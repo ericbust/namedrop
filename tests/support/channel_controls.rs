@@ -906,7 +906,7 @@ fn later_doctor_prompt_invalidates_an_old_active_mailbox_stop() {
         workspace_id: base.workspace_id,
         current_pane_id: base.current_pane_id,
         session_socket_id: base.session_socket_id,
-        herdr: &blocked,
+        mux: &blocked,
         clock: base.clock,
         ids: base.ids,
     };

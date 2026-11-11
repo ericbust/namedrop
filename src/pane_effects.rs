@@ -407,7 +407,7 @@ pub(crate) fn interrupt_if_current(
     state: &Path,
     namespace: &StateNamespace,
     responses: &[ActiveThreadResponse],
-    herdr: &impl HerdrCommandExecutor,
+    herdr: &(impl crate::mux::MuxRead + HerdrCommandExecutor),
     cwd: Option<&Path>,
 ) -> InterruptReport {
     let mut report = InterruptReport::default();

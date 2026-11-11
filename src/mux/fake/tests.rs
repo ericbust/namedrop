@@ -170,11 +170,11 @@ fn a_missing_space_or_pane_is_gone() {
     let mux = author_and_reviewer();
     assert_eq!(
         mux.survey(Scope::Space(&SpaceId::new("workspace-9")), Depth::Panes),
-        Err(MuxError::Gone(Gone::Space))
+        Err(MuxError::Gone(Gone::Space, "workspace-9 is gone".into()))
     );
     assert_eq!(
         mux.process(&PaneId::new("pane-9")),
-        Err(MuxError::Gone(Gone::Pane))
+        Err(MuxError::Gone(Gone::Pane, "pane-9 is gone".into()))
     );
 }
 
@@ -321,10 +321,10 @@ fn a_scripted_outcome_replaces_one_delivery_and_records_what_may_have_landed() {
 #[test]
 fn an_injected_error_fails_the_next_call_only() {
     let mux = author_and_reviewer();
-    mux.fail(Op::Survey, MuxError::Timeout);
+    mux.fail(Op::Survey, MuxError::Timeout("timed out".into()));
     assert_eq!(
         mux.survey(Scope::All, Depth::Spaces),
-        Err(MuxError::Timeout)
+        Err(MuxError::Timeout("timed out".into()))
     );
     assert!(mux.survey(Scope::All, Depth::Spaces).is_ok());
 }
@@ -374,7 +374,7 @@ fn an_effect_on_a_closed_pane_is_gone_and_not_logged() {
             pane: PaneId::new("pane-author"),
             badges: vec![Badge::Awaiting(1)],
         }),
-        Err(MuxError::Gone(Gone::Pane))
+        Err(MuxError::Gone(Gone::Pane, "pane-author is gone".into()))
     );
     assert!(mux.effects().is_empty());
 }

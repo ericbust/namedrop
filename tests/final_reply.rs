@@ -270,7 +270,7 @@ impl Space {
             workspace_id: None,
             current_pane_id: Some(pane),
             session_socket_id: "socket-a",
-            herdr: &self.herdr,
+            mux: &self.herdr,
             clock: &FixedClock,
             ids: &self.ids,
         }
@@ -2511,7 +2511,7 @@ impl Space {
         let runtime = self.runtime("pane-lead");
         LifecycleRuntime {
             clock,
-            herdr: runtime.herdr,
+            mux: runtime.mux,
             ids: runtime.ids,
             state_directory: runtime.state_directory,
             home_directory: runtime.home_directory,
@@ -3033,7 +3033,7 @@ impl Space {
             workspace_id: None,
             current_pane_id: Some(pane),
             session_socket_id: "socket-a",
-            herdr: &self.herdr,
+            mux: &self.herdr,
             clock: &namedrop::SystemClock,
             ids: &self.ids,
         }

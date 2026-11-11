@@ -355,7 +355,7 @@ fn a_contended_pane_defers_only_its_mailbox_until_the_next_drain() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        mux: &herdr,
         clock: &clock,
         ids: &ids,
     };
@@ -644,7 +644,7 @@ fn assert_expired_unsent_cancellation(fail_before_expiry: bool) {
         workspace_id: None,
         current_pane_id: Some("pane-recipient"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        mux: &herdr,
         clock: &clock,
         ids: &ids,
     };
@@ -847,7 +847,7 @@ fn human_mention_round_trip(hold_report: bool) {
         workspace_id: None,
         current_pane_id: Some("pane-recipient"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        mux: &herdr,
         clock: &clock,
         ids: &ids,
     };
@@ -1466,7 +1466,7 @@ fn status_events_preserve_busy_fifo_then_hold_a_submitted_attempt_on_session_cha
         workspace_id: None,
         current_pane_id: Some("pane-recipient"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        mux: &herdr,
         clock: &clock,
         ids: &ids,
     };
@@ -1807,7 +1807,7 @@ impl ObservedAttemptFixture {
             workspace_id: None,
             current_pane_id: Some("pane-recipient"),
             session_socket_id: "socket-a",
-            herdr: &self.herdr,
+            mux: &self.herdr,
             clock: &self.clock,
             ids: &self.ids,
         }
@@ -1960,7 +1960,7 @@ fn unsettled_agent_responses_remain_recoverable_in_the_inbox() {
         workspace_id: None,
         current_pane_id: Some("pane-recipient"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        mux: &herdr,
         clock: &clock,
         ids: &ids,
     };

@@ -211,9 +211,9 @@ pub fn mail_waits_for_session(
         .unwrap_or(false)
 }
 
-pub fn drain_receipt<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> Value
+pub fn drain_receipt<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>) -> Value
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -383,12 +383,12 @@ fn observe_agent_attempt(
     }
 }
 
-pub(crate) fn publish_status_metadata<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn publish_status_metadata<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     discovered: &crate::DiscoveredWorktree,
 ) -> Result<(), String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
 {
     let namespace = discovered.namespace(runtime.session_socket_id);
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
@@ -426,7 +426,7 @@ where
                     )?;
                 }
             }
-            runtime.herdr.execute(&[
+            runtime.mux.execute(&[
                 "pane",
                 "report-metadata",
                 &binding.pane_id,
@@ -442,11 +442,11 @@ where
     Ok(())
 }
 
-pub fn drain_mailboxes<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn drain_mailboxes<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<DrainReport, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -483,7 +483,7 @@ where
                 .transaction(|tx| tx.terminal_result(&namespace, &attempt.attempt_id))
                 .map_err(|e| e.to_string())?
                 .is_none()
-            && crate::terminal::shell_is_available(runtime.herdr, &attempt.pane_id)
+            && crate::terminal::shell_is_available(runtime.mux, &attempt.pane_id)
         {
             store
                 .transaction(|tx| {
@@ -523,8 +523,7 @@ where
     let remote_seats = store
         .transaction(|transaction| transaction.remote_seat_spaces(&namespace))
         .map_err(|error| error.to_string())?;
-    let live =
-        crate::spaces::LiveSpaces::load(runtime.herdr, first_discovery.clone(), &remote_seats);
+    let live = crate::spaces::LiveSpaces::load(runtime.mux, first_discovery.clone(), &remote_seats);
     let check_in_due_ms = store
         .transaction(|transaction| {
             transaction.complete_ready_result_sets(
@@ -562,7 +561,7 @@ where
         // lock, once this candidate is confirmed.
         if !matches!(reach, Reach::Now | Reach::Waits(AgentWait::SentPrompt))
             || (first.pane_type == crate::PaneType::Terminal
-                && !crate::terminal::shell_is_available(runtime.herdr, &first.pane_id))
+                && !crate::terminal::shell_is_available(runtime.mux, &first.pane_id))
         {
             report.note_draft(&reach, &address_id, &first);
             continue;
@@ -622,7 +621,7 @@ where
                         .iter()
                         .find(|p| p.pane_id == second.pane_id)
                         .map(|p| &p.terminal_id)
-                    || !crate::terminal::shell_is_available(runtime.herdr, &second.pane_id)))
+                    || !crate::terminal::shell_is_available(runtime.mux, &second.pane_id)))
         {
             report.note_draft(&reach, &address_id, &second);
             continue;
@@ -774,9 +773,9 @@ where
             &leased.agent_session_id,
         );
         let prompt_result = if second.pane_type == crate::PaneType::Terminal {
-            effects.run_terminal(runtime.herdr, &owner, &prompt)
+            effects.run_terminal(runtime.mux, &owner, &prompt)
         } else {
-            effects.prompt(runtime.herdr, &owner, &prompt)
+            effects.prompt(runtime.mux, &owner, &prompt)
         };
         let attribution = MutationAttribution::new(
             ActorKind::Plugin,
@@ -796,7 +795,7 @@ where
             continue;
         }
         let prompt_result =
-            prompt_result.map_err(|error| runtime.herdr.classify_prompt_failure(&error));
+            prompt_result.map_err(|error| runtime.mux.classify_prompt_failure(&error));
         match prompt_result {
             Ok(_) => {
                 store
@@ -911,19 +910,19 @@ where
     Ok(report)
 }
 
-fn discover<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn discover<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<crate::DiscoveredWorktree, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
 {
     match runtime.workspace_id {
         Some(workspace_id) => crate::lifecycle::discover_reminder_workspace(
             runtime.state_directory,
             &StateNamespace::for_space(runtime.session_socket_id, workspace_id),
-            runtime.herdr,
+            runtime.mux,
         ),
-        None => discover_worktree(runtime.herdr, runtime.cwd),
+        None => discover_worktree(runtime.mux, runtime.cwd),
     }
 }
 
@@ -939,13 +938,13 @@ enum Reach {
     Waits(AgentWait),
 }
 
-fn candidate_reach<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn candidate_reach<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     candidate: &DispatchCandidate,
     discovered: &crate::DiscoveredWorktree,
 ) -> Reach
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
 {
     let Some(pane) = discovered
@@ -985,14 +984,14 @@ const CLEAR_REDRAW_MS: u64 = 150;
 /// it has already emptied. A box the keys leave as it was holds the mail: the
 /// session may not take the keys as Claude Code 2.1.322 does, or has not
 /// drawn the box again yet.
-fn clear_sent_prompt<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn clear_sent_prompt<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     effects: &crate::pane_effects::PaneEffects,
     pane_id: &str,
     session: &str,
 ) -> Reach
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
 {
     let held = Reach::Waits(AgentWait::SentPrompt);
@@ -1029,11 +1028,7 @@ where
             }
             return held;
         }
-        if batch == CLEAR_BATCHES
-            || effects
-                .delete_claude_code_input(runtime.herdr, rows)
-                .is_err()
-        {
+        if batch == CLEAR_BATCHES || effects.delete_claude_code_input(runtime.mux, rows).is_err() {
             break;
         }
         left = Some(typed.len());
@@ -1122,12 +1117,12 @@ pub(crate) enum AgentWait {
 }
 
 /// Why an agent pane's mail waits, or `None` when a prompt may be typed now.
-pub(crate) fn agent_wait<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn agent_wait<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     pane: &DiscoveredPane,
 ) -> Option<AgentWait>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
 {
     let phase = || {
@@ -1163,12 +1158,12 @@ where
 /// Reads the prompt boxes again whose drafts held mail, one pane read each,
 /// and drains the space once one of them no longer holds a draft. Until then
 /// it reports the holds whose mail still waits.
-pub fn recheck_drafts<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn recheck_drafts<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     held: Vec<DraftHold>,
 ) -> Result<DrainReport, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -1217,14 +1212,14 @@ enum PromptBox {
 /// Enough of the screen's end for the box and whatever the agent draws under it.
 const PROMPT_BOX_LINES: &str = "60";
 
-fn read_prompt_box<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn read_prompt_box<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
     pane_id: &str,
     agent: crate::AgentRuntime,
     session: Option<&str>,
 ) -> PromptBox
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
 {
     let Some(screen) = read_screen(runtime, pane_id) else {
@@ -1256,12 +1251,12 @@ where
 
 /// The end of the pane's screen as Herdr renders it, or `None` when the pane
 /// could not be read.
-fn read_screen<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>, pane_id: &str) -> Option<String>
+fn read_screen<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>, pane_id: &str) -> Option<String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
 {
     runtime
-        .herdr
+        .mux
         .execute(&[
             "pane",
             "read",

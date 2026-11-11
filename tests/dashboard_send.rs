@@ -1160,7 +1160,7 @@ fn synchronous_terminal_completion_keeps_the_queued_successor_retryable() {
         workspace_id: Some("w1"),
         current_pane_id: None,
         session_socket_id: "socket-a",
-        herdr: &executor,
+        mux: &executor,
         clock: &f.clock,
         ids: &f.ids,
     };

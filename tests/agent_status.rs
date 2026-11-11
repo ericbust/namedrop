@@ -196,7 +196,7 @@ fn live_origin_probe() {
         workspace_id: Some(&workspace),
         current_pane_id: Some(&pane_id),
         session_socket_id: &socket,
-        herdr: &herdr,
+        mux: &herdr,
         clock: &clock,
         ids: &ids,
     };

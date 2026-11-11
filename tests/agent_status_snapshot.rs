@@ -489,7 +489,7 @@ fn runtime<'a>(
         workspace_id: Some("workspace-1"),
         current_pane_id: Some(pane_id),
         session_socket_id: "socket-a",
-        herdr,
+        mux: herdr,
         clock,
         ids,
     }

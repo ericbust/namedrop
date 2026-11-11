@@ -49,7 +49,12 @@ use std::{
 const DEFAULT_IDLE: Duration = Duration::from_secs(10 * 60);
 
 pub fn open(
-    runtime: &LifecycleRuntime<'_, impl HerdrCommandExecutor, impl Clock, impl IdGenerator>,
+    runtime: &LifecycleRuntime<
+        '_,
+        impl crate::mux::Mux + HerdrCommandExecutor,
+        impl Clock,
+        impl IdGenerator,
+    >,
     open_browser: bool,
     ui_directory: Option<&Path>,
     tailscale: Option<bool>,
@@ -64,13 +69,13 @@ pub fn open(
     let ui = UiSource::from_directory(ui_directory)?;
     let workspace_id = match runtime.workspace_id {
         Some(id) => id.to_owned(),
-        None => crate::discover_worktree(runtime.herdr, runtime.cwd)?.workspace_id,
+        None => crate::discover_worktree(runtime.mux, runtime.cwd)?.workspace_id,
     };
     let key = SpaceKey::of(&StateNamespace::for_space(
         runtime.session_socket_id,
         &workspace_id,
     ));
-    if let Some(workspace) = herdr_workspace(runtime.herdr, &workspace_id) {
+    if let Some(workspace) = herdr_workspace(runtime.mux, &workspace_id) {
         if let Some(label) = workspace.label.filter(|label| !label.trim().is_empty())
             && let Err(error) = files.record_label(key.as_str(), &label)
         {

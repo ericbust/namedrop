@@ -252,40 +252,40 @@ enum ContextInvocation {
     Human,
 }
 
-pub fn execute_context_operation<E, C, I>(
+pub fn execute_context_operation<M, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
     execute_context_operation_as(ContextInvocation::AgentSession, operation, input, runtime)
 }
 
-pub fn execute_human_context_operation<E, C, I>(
+pub fn execute_human_context_operation<M, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
     execute_context_operation_as(ContextInvocation::Human, operation, input, runtime)
 }
 
-fn execute_context_operation_as<E, C, I>(
+fn execute_context_operation_as<M, C, I>(
     invocation: ContextInvocation,
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -311,12 +311,12 @@ where
     }
 }
 
-fn create_human_grant<E, C, I>(
+fn create_human_grant<M, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -360,12 +360,12 @@ where
     Ok(json!({"grants": grants}))
 }
 
-fn revoke_human_grant<E, C, I>(
+fn revoke_human_grant<M, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -391,12 +391,12 @@ where
     .map_err(|error| error.to_string())
 }
 
-fn publish_snapshot<E, C, I>(
+fn publish_snapshot<M, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -675,12 +675,12 @@ where
     })
 }
 
-pub(crate) fn record_snapshot_activation_failure<E, C, I>(
+pub(crate) fn record_snapshot_activation_failure<M, C, I>(
     grant_ids: &[String],
     error: &str,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -711,13 +711,13 @@ pub(crate) fn record_snapshot_activation_failure<E, C, I>(
     }
 }
 
-fn inspect_context<E, C, I>(
+fn inspect_context<M, C, I>(
     input: Value,
     invocation: ContextInvocation,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -862,13 +862,13 @@ where
         .map_err(|error| error.to_string())
 }
 
-fn read_context<E, C, I>(
+fn read_context<M, C, I>(
     input: Value,
     invocation: ContextInvocation,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
     C: Clock,
     I: IdGenerator,
 {
@@ -964,7 +964,7 @@ where
                 })
                 .map_err(|error| error.to_string())?;
             let lines = max_lines.to_string();
-            let output = runtime.herdr.execute(&[
+            let output = runtime.mux.execute(&[
                 "pane",
                 "read",
                 &source,
@@ -1185,15 +1185,15 @@ fn absent_context_reference(
     ))
 }
 
-fn discover<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn discover<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<(StateNamespace, crate::DiscoveredWorktree), String>
 where
-    E: HerdrCommandExecutor,
+    M: crate::mux::Mux + HerdrCommandExecutor,
 {
     let discovered = match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace_id) => discover_worktree_for_workspace(runtime.mux, workspace_id)?,
+        None => discover_worktree(runtime.mux, runtime.cwd)?,
     };
     Ok((discovered.namespace(runtime.session_socket_id), discovered))
 }

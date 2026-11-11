@@ -175,7 +175,7 @@ fn name_activates_binds_registers_and_labels_the_current_native_pane() {
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        mux: &herdr,
         clock: &NameClock,
         ids: &ids,
     };
@@ -358,7 +358,7 @@ fn name_leaves_a_tab_shared_by_two_agents_unchanged() {
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        herdr: &MultiPaneHerdr,
+        mux: &MultiPaneHerdr,
         clock: &MultiPaneClock,
         ids: &ids,
     };
@@ -440,7 +440,7 @@ fn name_succeeds_with_a_warning_when_the_cosmetic_tab_label_cannot_be_applied() 
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        mux: &herdr,
         clock: &RenameFailureClock,
         ids: &ids,
     };
@@ -565,7 +565,7 @@ fn managed_singleton_tab_labels_restore_only_while_the_plugin_still_owns_them() 
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        mux: &herdr,
         clock: &ManagedLabelClock,
         ids: &ids,
     };
@@ -718,7 +718,7 @@ fn assert_native_session_events(events: &[(Option<&'static str>, serde_json::Val
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        mux: &herdr,
         clock: &PendingSessionClock,
         ids: &ids,
     };
@@ -854,7 +854,7 @@ fn name_upgrades_an_existing_address_to_zero_turn_registration() {
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        mux: &herdr,
         clock: &UpgradeClock,
         ids: &ids,
     };
@@ -1012,7 +1012,7 @@ fn restart_reconciliation_refreshes_panes_before_delivery_drain() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        mux: &herdr,
         clock: &FixedClock,
         ids: &FixedIds,
     };
@@ -1097,7 +1097,7 @@ fn activation_keeps_dispatch_gated_when_initial_reconciliation_fails() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        herdr: &FakeHerdr,
+        mux: &FakeHerdr,
         clock: &FixedClock,
         ids: &FixedIds,
     };
@@ -1784,7 +1784,7 @@ fn only_proven_same_worktree_moves_preserve_a_binding() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        herdr: &MoveHerdr,
+        mux: &MoveHerdr,
         clock: &FixedClock,
         ids: &FixedIds,
     };
@@ -1916,7 +1916,7 @@ fn lifecycle_operations_activate_create_bind_and_list_through_one_contract() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        herdr: &FakeHerdr,
+        mux: &FakeHerdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -2015,7 +2015,7 @@ fn lifecycle_operations_mutate_addresses_without_losing_identity() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        herdr: &FakeHerdr,
+        mux: &FakeHerdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -2123,7 +2123,7 @@ fn strict_inputs_and_activation_confirmation_fail_before_mutation() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        herdr: &FakeHerdr,
+        mux: &FakeHerdr,
         clock: &FixedClock,
         ids: &FixedIds,
     };
@@ -2245,7 +2245,7 @@ fn agent_status_events_replace_and_clear_the_current_occupant() {
         workspace_id: None,
         current_pane_id: Some("pane-live"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        mux: &herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -2390,7 +2390,7 @@ fn tab_close_cancels_outstanding_delivery_and_removes_every_attached_mention() {
         workspace_id: None,
         current_pane_id: Some("pane-lead"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        mux: &herdr,
         clock: &ClosingTabClock,
         ids: &ids,
     };
@@ -2647,7 +2647,7 @@ fn agent_status_event_reconciles_every_replaced_session_before_onboarding() {
         workspace_id: None,
         current_pane_id: Some("pane-first"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        mux: &herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -2834,7 +2834,7 @@ fn remove_unbinds_retires_and_releases_every_alias_atomically() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        mux: &herdr,
         clock: &FixedSetupClock,
         ids: &ids,
     };
@@ -3020,7 +3020,7 @@ fn agent_tab_runtime<'a>(
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        herdr,
+        mux: herdr,
         clock: &FixedClock,
         ids,
     }
@@ -3192,7 +3192,7 @@ fn tour_runtime<'a>(
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        herdr,
+        mux: herdr,
         clock: &TourClock,
         ids,
     }
@@ -3381,7 +3381,7 @@ fn name_refuses_a_retired_or_renamed_away_alias_with_a_clear_message() {
         workspace_id: None,
         current_pane_id: Some("pane-first"),
         session_socket_id: "socket-a",
-        herdr: &ThreePaneHerdr,
+        mux: &ThreePaneHerdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -3585,7 +3585,7 @@ fn trusted_state_worktrees_are_refused_by_activation_naming_and_doctor() {
             workspace_id: Some("workspace-1"),
             current_pane_id: Some("pane-1"),
             session_socket_id: "socket-a",
-            herdr: &herdr,
+            mux: &herdr,
             clock: &FixedClock,
             ids: &ids,
         };
