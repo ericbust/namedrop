@@ -1524,11 +1524,22 @@ fn generated_skill_command_forms_are_covered_by_managed_settings() {
     let permissions: Vec<String> =
         serde_json::from_value(settings["permissions"]["allow"].clone()).unwrap();
     assert_eq!(
-        permissions.len(),
+        permissions
+            .iter()
+            .filter(|rule| rule.starts_with("Bash("))
+            .count(),
         22,
         "registration uses the same fixed prefix as the other operations"
     );
-    for rule in &permissions {
+    assert_eq!(
+        permissions
+            .iter()
+            .filter(|rule| !rule.starts_with("Bash("))
+            .collect::<Vec<_>>(),
+        [&format!("Read(/{}/channel-images/**)", state.display())],
+        "the one other rule lets Claude Code open an image sent from Channels"
+    );
+    for rule in permissions.iter().filter(|rule| rule.starts_with("Bash(")) {
         assert!(
             rule.starts_with(&format!(
                 "Bash('{}' --plugin-state '{}' ",
@@ -1587,6 +1598,8 @@ fn generated_skill_command_forms_are_covered_by_managed_settings() {
             pattern[3..].join(" ")
         ));
     }
+    // Codex reads a file anywhere; only Claude Code needs the image directory allowed.
+    expected_permissions.push(format!("Read(/{}/channel-images/**)", state.display()));
     assert_eq!(permissions, expected_permissions);
     // Check every automatically permitted command named in the generated text.
     // User-requested management writes and doctor still require host approval.
@@ -3428,7 +3441,7 @@ fn activation_installs_both_shared_packages_before_challenging_either_runtime() 
             .unwrap();
     assert_eq!(
         settings["permissions"]["allow"].as_array().unwrap().len(),
-        22
+        23
     );
 
     execute_lifecycle_operation(
@@ -3557,7 +3570,7 @@ fn a_previous_version_package_is_replaced_without_touching_unrelated_files() {
     assert_eq!(settings["unrelated"], true);
     assert_eq!(
         settings["permissions"]["allow"].as_array().unwrap().len(),
-        22
+        23
     );
     assert_eq!(installed_names(&skill_root), ["namedrop", "other-skill"]);
 }

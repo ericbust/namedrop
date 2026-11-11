@@ -1,11 +1,13 @@
 // Claude Bash matching treats '*' as any characters, including spaces. Keep
 // assignments in the command string so this check cannot hide injection.
 pub fn bash_rule_matches(rule: &str, command: &str) -> bool {
-    let pattern = rule
+    // A rule for another tool, such as the Read rule for sent images, matches no command.
+    let Some(pattern) = rule
         .strip_prefix("Bash(")
-        .unwrap()
-        .strip_suffix(')')
-        .unwrap();
+        .and_then(|rule| rule.strip_suffix(')'))
+    else {
+        return false;
+    };
     let command = command.as_bytes();
     let mut matched = vec![false; command.len() + 1];
     matched[0] = true;
