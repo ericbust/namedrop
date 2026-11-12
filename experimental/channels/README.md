@@ -122,7 +122,8 @@ Failed history requests offer **Try again**. The member strip above the timeline
 wraps to two lines and folds the rest behind **+N more**.
 
 Message bodies render supported Markdown, including emphasis, headings, lists,
-tables, and fenced code. Collaborator text never becomes arbitrary HTML. HTTP and
+tables, and fenced code. A closed fence tagged `mermaid` is drawn as a diagram
+(see [Diagrams](#diagrams)). Collaborator text never becomes arbitrary HTML. HTTP and
 HTTPS URLs become links with `rel="noreferrer"`. Bodies over 480 characters have
 **Show more**, which can load the full sanitized body up to 64 Ki characters.
 Preview boundaries preserve surrogate pairs. Links are recognized
@@ -506,3 +507,55 @@ The benchmark alternates both versions, verifies each appended message, and
 records source hashes and actual loaded counts. The new cap applies during
 warmup, so a large preload retains 600 rows in the changed app. JSON parsing,
 fixture setup, and assertions are outside the reducer timing.
+
+## Diagrams
+
+`src/ui/Markdown.tsx` hands a closed `mermaid` fence to `src/ui/Diagram.tsx`.
+The component shows the block's source until the drawing is ready, and keeps it
+with "Diagram could not be drawn" when Mermaid cannot read it. A fence that the
+shortened view cuts, and any `mermaid` fence in a one-line preview, is the label
+"Diagram".
+
+`src/diagramDraw.ts` draws. It imports Mermaid 12.3.0 (MIT) and DOMPurify 3.4.17
+(Apache-2.0 or MPL-2.0), configures Mermaid from `src/diagramConfig.ts`, renders
+into a hidden element so text can be measured, cleans the SVG and returns it as a
+`data:image/svg+xml` address with its size. Drawings take turns, with a pause
+between two so the page can paint and take input. The page shows that address in an
+`<img>`, which is why a drawing cannot run script or load anything. The page's
+colors are read from its CSS variables and converted to sRGB hex on a canvas,
+because Mermaid's theme engine does not read `oklch()`.
+
+Mermaid is built apart from the page. `vite.config.ts` runs a second build with
+`src/diagramDraw.ts` as its entry, writes it to `dist/diagram/`, and gives the
+page the entry's address as `__DIAGRAM_ENTRY__`. In one build, Mermaid's chunks
+import the page's main chunk by its hashed name, so every change to the page
+would rename all 92 files in `src/dashboard/channels/diagram/`. Built apart,
+those files change only when Mermaid, DOMPurify, `src/diagramDraw.ts` or
+`src/diagramConfig.ts` change. Whatever `src/diagramDraw.ts` imports is built into those
+files, so keep its imports to `src/diagramConfig.ts` and types. `vite dev`
+imports the source directly.
+
+`diagramBudget()` in `src/diagram.ts` holds the two limits: a block over 10,000
+characters and a message's ninth diagram are shown as source with a note, and
+never reach the drawing code. `Diagram` draws only while it is on screen, and
+keeps its picture when the page's look changes until it is on screen again.
+
+The configuration locks `layout` to dagre. With that lock no diagram can reach
+Mermaid's ELK engine, so the diagram build replaces `elkjs` with
+`src/diagramNoElk.ts`, which saves 1.4 MB. Flowchart, sequence, class, state,
+ER, gantt, pie, git graph, mind map, timeline, journey, quadrant, requirement,
+C4, sankey, XY chart, block, packet, kanban and architecture diagrams all draw
+without it.
+
+Mermaid inserts a `<style>` element and style attributes while it draws, which
+the dashboard's `style-src 'self' 'unsafe-inline'` permits. The browser tests
+named `DIAGRAMS:` therefore run under the dashboard's policy. Every other
+browser test keeps the stricter `style-src 'self'`.
+
+One of those tests draws a hostile diagram whose label holds `onerror`. Mermaid
+passes every label to DOMPurify, which parses it with `DOMParser`. Chrome 157
+reports a `script-src-attr` violation for each handler in that parse, and
+Chromium 155 reports none. The parsed document has no window, so the handler
+cannot run. The test counts the handlers parsed that way, allows at most that
+many `script-src-attr` reports and no other, and checks that no element of the
+page carries a handler.

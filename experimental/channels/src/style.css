@@ -3056,3 +3056,105 @@ body.resizing-panels * {
   display: block;
   margin: 0 auto var(--space-4);
 }
+
+/* A drawn diagram. One wider than its column is shown smaller to fit, and its
+   full size is one press away. */
+.diagram {
+  max-width: 100%;
+  margin: 6px 0;
+  white-space: normal;
+}
+.diagram-box {
+  width: fit-content;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+}
+.diagram-view {
+  display: block;
+  max-width: 100%;
+  padding: 10px 12px;
+  cursor: zoom-in;
+}
+.diagram img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+.diagram-full img {
+  max-width: none;
+}
+.diagram .diagram-box + pre {
+  margin-bottom: 0;
+}
+.diagram figcaption {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: 6px;
+  font-size: var(--text-sm);
+}
+.diagram-note,
+.md-diagram {
+  color: var(--text-muted);
+}
+/* Mermaid measures its text here before the drawing becomes an image. */
+.diagram-stage {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 900px;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+}
+.diagram-full {
+  width: 100vw;
+  max-width: none;
+  height: 100dvh;
+  max-height: none;
+  margin: 0;
+  padding: var(--space-4);
+  border: 0;
+  background: none;
+  color: inherit;
+}
+.diagram-full[open] {
+  display: grid;
+  place-items: center;
+}
+.diagram-full::backdrop {
+  background: oklch(0.2 0.013 278 / 0.6);
+}
+.diagram-full-pane {
+  position: relative;
+  display: flex;
+  max-width: 100%;
+  max-height: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  overflow: hidden;
+}
+.diagram-full-scroll {
+  padding: var(--space-8) var(--space-5) var(--space-5);
+  overflow: auto;
+}
+.diagram-close {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  color: var(--text-muted);
+}
+.diagram-close:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
