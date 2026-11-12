@@ -145,7 +145,8 @@ export function Diagram({
     key: string;
     picture: Drawn | "failed";
   } | null>(() => {
-    const kept = made.get(key);
+    // A refused block is never a picture, even if the same source was drawn elsewhere.
+    const kept = refusal === null ? made.get(key) : undefined;
     return kept ? { key, picture: kept } : null;
   });
   const [showSource, setShowSource] = useState(false);
@@ -171,7 +172,8 @@ export function Diagram({
     return () => clearTimeout(timer);
   }, [copied]);
   const picture = shown?.picture ?? null;
-  const image = typeof picture === "object" ? picture : null;
+  const image =
+    refusal === null && typeof picture === "object" ? picture : null;
   const copy = () => {
     void navigator.clipboard?.writeText(source).then(
       () => setCopied(true),

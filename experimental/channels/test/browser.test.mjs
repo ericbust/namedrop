@@ -13786,6 +13786,47 @@ test("DIAGRAMS: a block over 10,000 characters and a message's ninth diagram are
   await diagramShots(ui, "caps");
 });
 
+test("DIAGRAMS: a diagram over the limit stays undrawn when the same source was already drawn", async (t) => {
+  const same = fenced("flowchart LR\n  A[Same plan] --> B", "Again", "");
+  const { ui } = await diagramRoom(t, [
+    Array.from({ length: 9 }, () => same).join("\n"),
+  ]);
+  await showWhole(ui, "d1");
+  const row = ui.page.locator('main [data-message-id="d1"]');
+  const diagrams = diagramOf(ui, "d1");
+  assert.equal(await diagrams.count(), 9);
+  for (let nth = 0; nth < 8; nth++) await pictureOf(diagrams.nth(nth));
+  const undrawn = async (when) => {
+    const ninth = diagrams.nth(8);
+    await ninth.scrollIntoViewIfNeeded();
+    await ninth.locator(".diagram-note").waitFor();
+    await ui.page.waitForTimeout(300);
+    assert.equal(
+      await ninth.locator(".diagram-note").textContent(),
+      "Only the first 8 diagrams in a message are drawn",
+      when,
+    );
+    assert.equal(
+      await ninth.locator("img").count(),
+      0,
+      `${when}: no picture beside the note`,
+    );
+    assert.equal(await ninth.locator("pre code").count(), 1, when);
+    assert.equal(
+      await ninth.getByRole("button", { name: "Show source" }).count(),
+      0,
+      when,
+    );
+  };
+  await undrawn("at first");
+  // The message is shown again, now that this source has a kept picture.
+  await row.getByRole("button", { name: "Show less" }).click();
+  await row.getByRole("button", { name: "Show more" }).click();
+  assert.equal(await diagrams.count(), 9);
+  await pictureOf(diagrams.nth(0));
+  await undrawn("shown again");
+});
+
 test("DIAGRAMS: the drawing follows the page's light and dark look", async (t) => {
   const { ui } = await diagramRoom(t, [fenced(FLOW)]);
   await ui.page.emulateMedia({ colorScheme: "light" });

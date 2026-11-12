@@ -439,6 +439,43 @@ fn the_page_names_its_diagram_code_and_the_server_serves_all_of_it_apart_from_th
     }
 }
 
+/// Every file of the built-in app, as a path the server serves it at.
+fn embedded_paths(directory: &Path, root: &Path, found: &mut Vec<String>) {
+    for entry in fs::read_dir(directory).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            embedded_paths(&path, root, found);
+        } else {
+            found.push(format!(
+                "/{}",
+                path.strip_prefix(root).unwrap().to_str().unwrap()
+            ));
+        }
+    }
+}
+
+#[test]
+fn every_built_in_file_kept_for_good_has_a_digest_in_its_name() {
+    let dashboard = Dashboard::new();
+    dashboard.open(None);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/dashboard/channels");
+    let mut paths = Vec::new();
+    embedded_paths(&root, &root, &mut paths);
+    assert!(paths.contains(&"/index.html".to_owned()), "{paths:?}");
+    assert!(paths.len() > 90, "{}", paths.len());
+    for path in paths.iter().filter(|path| *path != "/index.html") {
+        let served = dashboard.get(path, false);
+        served.status(200);
+        // An unhashed file sent with this header would stay in browsers
+        // after its content changed.
+        served.kept_for_good(path);
+    }
+    for path in ["/", "/index.html"] {
+        let page = dashboard.get(path, true);
+        assert_eq!(page.headers["Cache-Control"], "no-store", "{path}");
+    }
+}
+
 #[test]
 fn directory_assets_have_correct_types_and_are_read_fresh() {
     let dashboard = Dashboard::new();
