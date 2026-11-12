@@ -14,7 +14,7 @@ use crate::{AgentRuntime, AgentSessionId, SpaceId, WorktreeId};
 use std::{
     collections::{BTreeMap, VecDeque},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard, OnceLock},
+    sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
 
@@ -33,6 +33,35 @@ pub enum SentInput {
         recipient: Recipient,
         keys: Vec<Key>,
     },
+}
+
+/// An input a delivery tried to type, whether or not it reached the pane.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Attempt {
+    pub pane: PaneId,
+    pub input: SentInput,
+    pub outcome: InputOutcome,
+}
+
+/// A survey's scope without the space or checkout it names, so a world can
+/// say which surveys it answers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScopeKind {
+    Space,
+    PanesOf,
+    CheckoutOf,
+    All,
+}
+
+impl ScopeKind {
+    fn of(scope: Scope<'_>) -> Self {
+        match scope {
+            Scope::Space(_) => Self::Space,
+            Scope::PanesOf(_) => Self::PanesOf,
+            Scope::CheckoutOf(_) => Self::CheckoutOf,
+            Scope::All => Self::All,
+        }
+    }
 }
 
 /// A port call whose next use fails with an injected error.
@@ -83,13 +112,20 @@ pub(crate) struct World {
     pub(crate) tab_labels: BTreeMap<TabId, String>,
     pub(crate) integration_root: Option<PathBuf>,
     sent: Vec<Sent>,
+    attempts: Vec<Attempt>,
     effects: Vec<Effect>,
-    scripted: VecDeque<InputOutcome>,
+    attempted_effects: Vec<Effect>,
+    /// Outcomes for a pane's next inputs, first first.
+    scripted: BTreeMap<PaneId, VecDeque<InputOutcome>>,
+    /// The outcome of every input to a pane once its scripted ones are used.
+    answers: BTreeMap<PaneId, InputOutcome>,
     failures: Vec<(Op, MuxError)>,
     /// Every status change, per pane, in order. A gate tap reads the tail.
     changes: BTreeMap<PaneId, Vec<AgentState>>,
     prompts_stay_settled: bool,
     strict_reads: bool,
+    /// `None` answers every survey.
+    surveys: Option<Vec<(ScopeKind, Depth)>>,
 }
 
 fn gone(what: super::Gone, id: &str) -> MuxError {
@@ -125,6 +161,18 @@ impl World {
             return Err(MuxError::Unavailable(format!("the test gave no {what}")));
         }
         Ok(T::default())
+    }
+
+    fn scripted_outcome(&mut self, pane: &PaneId) -> Option<InputOutcome> {
+        self.scripted
+            .get_mut(pane)
+            .and_then(VecDeque::pop_front)
+            .or_else(|| self.answers.get(pane).cloned())
+    }
+
+    fn known_pane(&mut self, pane: &str) -> &mut FakePane {
+        self.pane_mut(&PaneId::new(pane))
+            .unwrap_or_else(|| panic!("the world has no pane {pane}"))
     }
 
     #[cfg(test)]
@@ -183,6 +231,14 @@ impl World {
     /// Mirrors what the Herdr adapter reads for each scope and depth, so a
     /// test sees the same partial facts from either implementation.
     fn survey(&self, scope: Scope<'_>, depth: Depth) -> Result<Survey, MuxError> {
+        let kind = ScopeKind::of(scope);
+        if let Some(surveys) = &self.surveys
+            && !surveys.contains(&(kind, depth))
+        {
+            return Err(MuxError::Unavailable(format!(
+                "the test answers no {kind:?} survey at {depth:?} depth"
+            )));
+        }
         let panes = depth == Depth::Panes;
         let spaces = match scope {
             Scope::Space(id) => {
@@ -266,12 +322,12 @@ pub struct FakeMux {
     emulated: bool,
 }
 
-type PromptObserver = Box<dyn Fn(&PaneId, &str) + Send + Sync>;
+type InputObserver = Arc<dyn Fn(&FakeMux, &Sent) + Send + Sync>;
 
 struct Shared {
     endpoint: Endpoint,
     world: Mutex<World>,
-    on_prompt: OnceLock<PromptObserver>,
+    observers: Mutex<Vec<InputObserver>>,
 }
 
 impl FakeMux {
@@ -309,17 +365,24 @@ impl FakeMux {
         self
     }
 
-    /// `observe` runs as each prompt is typed, before the delivery that typed
-    /// it returns, so it sees the store as the pane's agent would.
-    ///
-    /// # Panics
-    ///
-    /// When the world already has an observer.
-    pub fn on_prompt(&self, observe: impl Fn(&PaneId, &str) + Send + Sync + 'static) {
-        assert!(
-            self.shared.on_prompt.set(Box::new(observe)).is_ok(),
-            "a world takes one prompt observer"
-        );
+    /// Only surveys of these scopes and depths answer. Any other fails with
+    /// `MuxError::Unavailable`, as a Herdr fake fails a listing it was not
+    /// given.
+    pub fn strict_surveys(self, answered: &[(ScopeKind, Depth)]) -> Self {
+        self.lock().surveys = Some(answered.to_vec());
+        self
+    }
+
+    /// `observe` runs as each input is typed, before the delivery that typed
+    /// it returns, so it sees the store as the pane's agent would. It is
+    /// handed the world rather than holding it, so it can change what the
+    /// pane shows, and observers run in the order they were added.
+    pub fn on_input(&self, observe: impl Fn(&FakeMux, &Sent) + Send + Sync + 'static) {
+        self.shared
+            .observers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(Arc::new(observe));
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, World> {
@@ -343,13 +406,31 @@ impl FakeMux {
             .collect()
     }
 
+    /// Every input a delivery tried to type, with its outcome, including
+    /// the ones that were declined or refused before anything was typed.
+    pub fn attempts(&self) -> Vec<Attempt> {
+        self.lock().attempts.clone()
+    }
+
+    /// The effects that applied.
     pub fn effects(&self) -> Vec<Effect> {
         self.lock().effects.clone()
     }
 
+    /// Every effect the code tried to apply, including the ones that failed.
+    pub fn attempted_effects(&self) -> Vec<Effect> {
+        self.lock().attempted_effects.clone()
+    }
+
     /// The agent in `pane` changes status, as a running agent would.
+    ///
+    /// # Panics
+    ///
+    /// When the world has no such pane.
     pub fn set_state(&self, pane: &str, state: AgentState) {
-        self.lock().set_state(&PaneId::new(pane), state);
+        let mut world = self.lock();
+        world.known_pane(pane);
+        world.set_state(&PaneId::new(pane), state);
     }
 
     /// `pane` now reports `session`, as when another program replaces the
@@ -361,18 +442,15 @@ impl FakeMux {
     ///
     /// When the world has no such pane.
     pub fn set_session(&self, pane: &str, session: &str) {
-        let mut world = self.lock();
-        let found = world
-            .pane_mut(&PaneId::new(pane))
-            .unwrap_or_else(|| panic!("the world has no pane {pane}"));
-        unreported_agent(&mut found.facts).session =
+        unreported_agent(&mut self.lock().known_pane(pane).facts).session =
             SessionClaim::Reported(AgentSessionId::new(session));
     }
 
+    /// # Panics
+    ///
+    /// When the world has no such pane.
     pub fn set_screen(&self, pane: &str, text: &str) {
-        if let Some(found) = self.lock().pane_mut(&PaneId::new(pane)) {
-            found.screen = Some(text.to_owned());
-        }
+        self.lock().known_pane(pane).screen = Some(text.to_owned());
     }
 
     pub fn close_pane(&self, pane: &str) {
@@ -382,10 +460,21 @@ impl FakeMux {
         }
     }
 
-    /// The next delivery returns `outcome` without consulting the world.
-    /// `Delivered` and `Ambiguous` are recorded as sent.
-    pub fn script(&self, outcome: InputOutcome) {
-        self.lock().scripted.push_back(outcome);
+    /// The next input to `pane` returns `outcome` without consulting the
+    /// world. Scripted outcomes queue per pane. `Delivered` and `Ambiguous`
+    /// are recorded as sent.
+    pub fn script(&self, pane: &str, outcome: InputOutcome) {
+        self.lock()
+            .scripted
+            .entry(PaneId::new(pane))
+            .or_default()
+            .push_back(outcome);
+    }
+
+    /// Every input to `pane` that no `script` covers returns `outcome`
+    /// without consulting the world, as `script` does.
+    pub fn answer(&self, pane: &str, outcome: InputOutcome) {
+        self.lock().answers.insert(PaneId::new(pane), outcome);
     }
 
     /// The next call of `op` fails with `error`.
@@ -396,13 +485,23 @@ impl FakeMux {
     /// `MuxInput::deliver` minus the lock token, which only `pane_effects`
     /// can mint.
     pub(crate) fn send(&self, pane: &PaneId, kind: InputKind<'_>) -> InputOutcome {
-        let scripted = self.lock().scripted.pop_front();
+        let outcome = self.attempt(pane, kind);
+        self.lock().attempts.push(Attempt {
+            pane: pane.clone(),
+            input: sent_input(kind),
+            outcome: outcome.clone(),
+        });
+        outcome
+    }
+
+    fn attempt(&self, pane: &PaneId, kind: InputKind<'_>) -> InputOutcome {
+        let scripted = self.lock().scripted_outcome(pane);
         if let Some(outcome) = scripted {
             if matches!(
                 outcome,
                 InputOutcome::Delivered | InputOutcome::Ambiguous(_)
             ) {
-                self.record(pane, &kind);
+                self.typed(pane, sent_input(kind));
             }
             return outcome;
         }
@@ -413,7 +512,7 @@ impl FakeMux {
             );
         }
         let InputKind::Prompt(request) = kind else {
-            self.record(pane, &kind);
+            self.typed(pane, sent_input(kind));
             return InputOutcome::Delivered;
         };
         if self.emulated {
@@ -441,28 +540,22 @@ impl FakeMux {
         }
     }
 
-    fn record(&self, pane: &PaneId, kind: &InputKind<'_>) {
-        let input = match *kind {
-            InputKind::Prompt(request) => SentInput::Prompt(request.text.to_owned()),
-            InputKind::Line(line) => SentInput::Line(line.to_owned()),
-            InputKind::Keys { recipient, keys } => SentInput::Keys {
-                recipient,
-                keys: keys.to_vec(),
-            },
-        };
-        self.typed(Sent {
+    /// Records `input` as sent and shows it to the observers. The world is
+    /// unlocked while they run, so they may read and change it.
+    fn typed(&self, pane: &PaneId, input: SentInput) {
+        let sent = Sent {
             pane: pane.clone(),
             input,
-        });
-    }
-
-    /// Records `sent` and shows a prompt to the observer. The world is
-    /// unlocked while the observer runs, so it may read the fake.
-    fn typed(&self, sent: Sent) {
+        };
         self.lock().sent.push(sent.clone());
-        if let (SentInput::Prompt(text), Some(observe)) = (&sent.input, self.shared.on_prompt.get())
-        {
-            observe(&sent.pane, text);
+        let observers = self
+            .shared
+            .observers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        for observe in observers {
+            observe(self, &sent);
         }
     }
 
@@ -470,10 +563,7 @@ impl FakeMux {
         if self.lock().pane(pane).is_none() {
             return Err(ChannelError(format!("pane {} is gone", pane.as_str())));
         }
-        self.typed(Sent {
-            pane: pane.clone(),
-            input: SentInput::Prompt(text.to_owned()),
-        });
+        self.typed(pane, SentInput::Prompt(text.to_owned()));
         let mut world = self.lock();
         if let Err(error) = world.take_failure(Op::Deliver) {
             return Err(ChannelError(format!("{error:?}")));
@@ -547,6 +637,7 @@ impl MuxRead for FakeMux {
 impl MuxAct for FakeMux {
     fn apply(&self, effect: &Effect) -> Result<Applied, MuxError> {
         let mut world = self.lock();
+        world.attempted_effects.push(effect.clone());
         world.take_failure(Op::Apply)?;
         let mut applied = Applied::Done;
         match effect {
@@ -831,7 +922,7 @@ impl WorldBuilder {
             shared: Arc::new(Shared {
                 endpoint: self.endpoint,
                 world: Mutex::new(self.world),
-                on_prompt: OnceLock::new(),
+                observers: Mutex::default(),
             }),
             emulated: false,
         }
@@ -863,6 +954,17 @@ impl WorldBuilder {
     }
 }
 
+fn sent_input(kind: InputKind<'_>) -> SentInput {
+    match kind {
+        InputKind::Prompt(request) => SentInput::Prompt(request.text.to_owned()),
+        InputKind::Line(line) => SentInput::Line(line.to_owned()),
+        InputKind::Keys { recipient, keys } => SentInput::Keys {
+            recipient,
+            keys: keys.to_vec(),
+        },
+    }
+}
+
 /// The pane's agent, made one whose kind is unreported if the pane was free.
 fn unreported_agent(facts: &mut PaneFacts) -> &mut AgentIdentity {
     facts.agent.get_or_insert(AgentIdentity {
@@ -872,5 +974,8 @@ fn unreported_agent(facts: &mut PaneFacts) -> &mut AgentIdentity {
     })
 }
 
+mod strict;
 #[cfg(test)]
 mod tests;
+
+pub use strict::{CHECKOUT_LISTINGS, EVERY_LISTING, StrictSpace, Takes};

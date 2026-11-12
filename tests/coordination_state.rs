@@ -2,17 +2,17 @@
 mod cleanup;
 #[path = "support/dispatch.rs"]
 mod dispatch;
-#[path = "support/strict_space.rs"]
-mod strict_space;
 
-use namedrop::{mux::fake::FakeMux, *};
+use namedrop::{
+    mux::fake::{EVERY_LISTING, FakeMux, StrictSpace, Takes},
+    *,
+};
 use serde_json::{Value, json};
 use std::{
     fs,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
-use strict_space::{StrictSpace, Takes};
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 struct Fixture {
@@ -292,7 +292,8 @@ fn space_at(root: &std::path::Path) -> StrictSpace {
     }
     StrictSpace::new(
         world.build().prompts_stay_settled(),
-        Takes::PromptsAndMetadata,
+        EVERY_LISTING,
+        Takes::prompts_and_metadata(),
     )
 }
 

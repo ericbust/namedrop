@@ -1,19 +1,17 @@
 #![allow(dead_code)]
 
-pub mod strict_space;
-
 use crate::cleanup;
 
 use namedrop::{
     ActorKind, AgentSessionId, Clock, IdGenerator, MutationAttribution, PaneAddressDraft,
-    PaneAddressId, PaneBindingId, PaneRoleId, StateNamespace, StateStore, mux::fake::FakeMux,
+    PaneAddressId, PaneBindingId, PaneRoleId, StateNamespace, StateStore,
+    mux::fake::{CHECKOUT_LISTINGS, FakeMux, StrictSpace, Takes},
 };
 use std::{
     fs,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
-use strict_space::{StrictSpace, Takes};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -54,19 +52,18 @@ impl Drop for TestDirectory {
 
 /// The space `setup_addresses` names: checkout `/repo` open in `workspace-1`,
 /// and one idle pane, `pane-author`, whose session Herdr reports without
-/// naming its agent. Messaging only reads it: it takes no input and no
-/// effect.
+/// naming its agent. Messaging only reads it: it answers the three
+/// listings `/repo` needs, and takes no input and no effect.
 pub fn author_mux() -> StrictSpace {
     let mux = FakeMux::world()
         .space("workspace-1")
         .checkout("/repo")
         .pane("pane-author")
-        .terminal("terminal-author")
         .tab("tab-1")
         .session("session-author")
         .idle()
         .build();
-    StrictSpace::new(mux, Takes::Nothing)
+    StrictSpace::new(mux, CHECKOUT_LISTINGS, Takes::nothing())
 }
 
 pub struct FixedClock;

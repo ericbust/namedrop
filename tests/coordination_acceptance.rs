@@ -4,11 +4,12 @@ mod cleanup;
 mod delivered;
 #[path = "support/dispatch.rs"]
 mod dispatch;
-#[path = "support/strict_space.rs"]
-mod strict_space;
 
 use namedrop::{
-    mux::{AgentState, fake::FakeMux},
+    mux::{
+        AgentState,
+        fake::{EVERY_LISTING, FakeMux, SentInput, StrictSpace, Takes},
+    },
     *,
 };
 use serde_json::{Value, json};
@@ -21,7 +22,6 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
-use strict_space::{StrictSpace, Takes};
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 struct Fixture {
@@ -273,14 +273,16 @@ fn space_at(root: &std::path::Path, prompts: Arc<Mutex<Vec<(String, Value)>>>) -
             .state(state);
     }
     let mux = world.build().prompts_stay_settled();
-    mux.on_prompt(move |pane, prompt| {
-        let envelope = delivered::envelope_of(prompt);
-        prompts
-            .lock()
-            .unwrap()
-            .push((pane.as_str().to_owned(), envelope));
+    mux.on_input(move |_, sent| {
+        if let SentInput::Prompt(prompt) = &sent.input {
+            let envelope = delivered::envelope_of(prompt);
+            prompts
+                .lock()
+                .unwrap()
+                .push((sent.pane.as_str().to_owned(), envelope));
+        }
     });
-    StrictSpace::new(mux, Takes::PromptsAndMetadata)
+    StrictSpace::new(mux, EVERY_LISTING, Takes::prompts_and_metadata())
 }
 
 // This oracle consumes actual results, captured delivery prompts, and persisted

@@ -4,13 +4,11 @@
 mod cleanup;
 #[path = "support/delivered.rs"]
 mod delivered;
-#[path = "support/strict_space.rs"]
-mod strict_space;
 
 use namedrop::{
     AgentConfigDirectories, Clock, IdGenerator, LifecycleRuntime, StateStore,
     execute_user_prompt_submit_hook,
-    mux::fake::{FakeMux, SentInput},
+    mux::fake::{EVERY_LISTING, FakeMux, SentInput, StrictSpace, Takes},
 };
 use serde_json::{Value, json};
 use std::{
@@ -19,7 +17,6 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
-use strict_space::{StrictSpace, Takes};
 
 const SOCKET: &str = "/tmp/nd-tb-1000-a7d69c9d70a7c962.sock";
 const WORKSPACE: &str = "w1";
@@ -140,7 +137,8 @@ fn space_of(panes: &[Pane]) -> StrictSpace {
     }
     StrictSpace::new(
         world.build().prompts_stay_settled(),
-        Takes::PromptsAndMetadata,
+        EVERY_LISTING,
+        Takes::prompts_and_metadata(),
     )
 }
 

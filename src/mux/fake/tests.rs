@@ -366,11 +366,12 @@ fn lines_and_keys_are_recorded_for_their_pane() {
 }
 
 #[test]
-fn a_scripted_outcome_replaces_one_delivery_and_records_what_may_have_landed() {
+fn a_scripted_outcome_replaces_one_delivery_to_its_pane_and_records_what_may_have_landed() {
     let mux = author_and_reviewer();
     let author = identity(&mux, "pane-author");
-    mux.script(InputOutcome::Refused("invalid_input".into()));
-    mux.script(InputOutcome::Ambiguous("timed out".into()));
+    mux.script("pane-author", InputOutcome::Refused("invalid_input".into()));
+    mux.script("pane-author", InputOutcome::Ambiguous("timed out".into()));
+    mux.script("pane-shell", InputOutcome::Refused("not this pane".into()));
     assert_eq!(
         prompt(&mux, "pane-author", &author, Admit::Settled),
         InputOutcome::Refused("invalid_input".into())
@@ -382,6 +383,70 @@ fn a_scripted_outcome_replaces_one_delivery_and_records_what_may_have_landed() {
     );
     assert_eq!(prompts(&mux, "pane-author"), ["hello"]);
     assert_eq!(state(&mux, "pane-author"), Some(AgentState::Idle));
+    assert_eq!(
+        prompt(&mux, "pane-author", &author, Admit::Settled),
+        InputOutcome::Delivered,
+        "the script for another pane is not used"
+    );
+}
+
+#[test]
+fn an_answered_pane_gives_every_input_the_same_outcome_after_its_script() {
+    let mux = author_and_reviewer();
+    let author = identity(&mux, "pane-author");
+    mux.answer("pane-author", InputOutcome::Refused("invalid_input".into()));
+    mux.script("pane-author", InputOutcome::Delivered);
+    let outcomes: Vec<_> = (0..3)
+        .map(|_| prompt(&mux, "pane-author", &author, Admit::Settled))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            InputOutcome::Delivered,
+            InputOutcome::Refused("invalid_input".into()),
+            InputOutcome::Refused("invalid_input".into()),
+        ]
+    );
+    assert_eq!(prompts(&mux, "pane-author"), ["hello"]);
+}
+
+#[test]
+fn every_attempt_is_recorded_with_its_outcome_even_when_nothing_was_typed() {
+    let mux = author_and_reviewer();
+    let reviewer = identity(&mux, "pane-reviewer");
+    let keys = [Key::CtrlU; 3];
+    let ghost = mux.send(
+        &PaneId::new("pane-ghost"),
+        InputKind::Keys {
+            recipient: Recipient::Agent,
+            keys: &keys,
+        },
+    );
+    let busy = prompt(&mux, "pane-reviewer", &reviewer, Admit::Settled);
+    assert!(mux.sent().is_empty());
+    assert_eq!(
+        mux.attempts(),
+        [
+            Attempt {
+                pane: PaneId::new("pane-ghost"),
+                input: SentInput::Keys {
+                    recipient: Recipient::Agent,
+                    keys: keys.to_vec()
+                },
+                outcome: ghost,
+            },
+            Attempt {
+                pane: PaneId::new("pane-reviewer"),
+                input: SentInput::Prompt("hello".into()),
+                outcome: busy,
+            },
+        ]
+    );
+    assert!(
+        mux.attempts()
+            .iter()
+            .all(|attempt| matches!(attempt.outcome, InputOutcome::Declined(..)))
+    );
 }
 
 #[test]
@@ -466,6 +531,39 @@ fn an_effect_on_a_closed_pane_is_gone_and_not_logged() {
         Err(MuxError::Gone(Gone::Pane, "pane-author is gone".into()))
     );
     assert!(mux.effects().is_empty());
+    assert_eq!(mux.attempted_effects().len(), 1, "the attempt is logged");
+}
+
+#[test]
+fn a_strict_world_answers_only_the_surveys_it_names() {
+    let mux = author_and_reviewer().strict_surveys(&[(ScopeKind::All, Depth::Spaces)]);
+    assert_eq!(
+        mux.survey(Scope::All, Depth::Spaces).unwrap().spaces.len(),
+        2
+    );
+    assert_eq!(
+        mux.survey(Scope::All, Depth::Panes),
+        Err(MuxError::Unavailable(
+            "the test answers no All survey at Panes depth".into()
+        ))
+    );
+    let workspace = SpaceId::new("workspace-1");
+    assert!(matches!(
+        mux.survey(Scope::PanesOf(&workspace), Depth::Panes),
+        Err(MuxError::Unavailable(_))
+    ));
+}
+
+#[test]
+#[should_panic(expected = "the world has no pane pane-9")]
+fn setting_the_state_of_an_unknown_pane_panics() {
+    author_and_reviewer().set_state("pane-9", AgentState::Idle);
+}
+
+#[test]
+#[should_panic(expected = "the world has no pane pane-9")]
+fn setting_the_screen_of_an_unknown_pane_panics() {
+    author_and_reviewer().set_screen("pane-9", "text");
 }
 
 #[test]
@@ -548,36 +646,77 @@ fn strict_reads_fail_what_the_test_did_not_give_and_answer_what_it_did() {
 }
 
 #[test]
-fn the_prompt_observer_sees_each_prompt_while_it_is_typed() {
+fn input_observers_see_each_input_while_it_is_typed() {
     let mux = author_and_reviewer();
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let watcher = mux.clone();
-    mux.on_prompt({
+    for observer in ["first", "second"] {
         let seen = Arc::clone(&seen);
-        move |pane, text| {
-            seen.lock().unwrap().push((
-                pane.clone(),
-                text.to_owned(),
-                state(&watcher, pane.as_str()),
-            ));
-        }
-    });
+        mux.on_input(move |mux, sent| {
+            seen.lock()
+                .unwrap()
+                .push((observer, sent.clone(), state(mux, sent.pane.as_str())));
+        });
+    }
     let author = identity(&mux, "pane-author");
     assert_eq!(
         prompt(&mux, "pane-author", &author, Admit::Settled),
         InputOutcome::Delivered
     );
     mux.send(&PaneId::new("pane-author"), InputKind::Line("ls"));
+    mux.send(&PaneId::new("pane-ghost"), InputKind::Line("ls"));
+    let typed = |input| Sent {
+        pane: PaneId::new("pane-author"),
+        input,
+    };
+    let prompted = typed(SentInput::Prompt("hello".into()));
+    let line = typed(SentInput::Line("ls".into()));
     assert_eq!(
         *seen.lock().unwrap(),
-        [(
-            PaneId::new("pane-author"),
-            "hello".to_owned(),
-            Some(AgentState::Idle)
-        )],
-        "it runs before the prompt starts a turn, and only for prompts"
+        [
+            ("first", prompted.clone(), Some(AgentState::Idle)),
+            ("second", prompted, Some(AgentState::Idle)),
+            ("first", line.clone(), Some(AgentState::Working)),
+            ("second", line, Some(AgentState::Working)),
+        ],
+        "each runs before the prompt starts a turn, and only for what was typed"
     );
     assert_eq!(state(&mux, "pane-author"), Some(AgentState::Working));
+    assert_eq!(
+        Arc::strong_count(&mux.shared),
+        1,
+        "no observer holds the world"
+    );
+}
+
+#[test]
+fn an_observer_can_change_what_the_pane_shows_as_keys_arrive() {
+    let mux = author_and_reviewer();
+    mux.set_screen("pane-author", "> draft");
+    mux.on_input(|mux, sent| {
+        if let SentInput::Keys { keys, .. } = &sent.input
+            && keys.iter().all(|key| *key == Key::CtrlU)
+        {
+            mux.set_screen(sent.pane.as_str(), "> ");
+        }
+    });
+    let request = ScreenRequest {
+        lines: 1,
+        wrap: Wrap::Joined,
+        style: Style::Plain,
+    };
+    mux.send(
+        &PaneId::new("pane-author"),
+        InputKind::Keys {
+            recipient: Recipient::Agent,
+            keys: &[Key::CtrlU],
+        },
+    );
+    assert_eq!(
+        mux.screen(&PaneId::new("pane-author"), request)
+            .unwrap()
+            .text,
+        "> "
+    );
 }
 
 #[test]
