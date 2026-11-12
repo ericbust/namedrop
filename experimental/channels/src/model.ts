@@ -394,10 +394,10 @@ export type State = {
   outbox: ReadonlyMap<string, Outgoing>;
   drafts: ReadonlyMap<DraftKey, Draft>;
   heard: Heard;
-  // The newest message time seen when the first replay finished, then as
-  // frames apply; null before that. A channel first seen after it rings only
-  // for messages newer than this, so the first load never rings.
-  watermark: number | null;
+  // The newest message time when the first replay finished; null before
+  // then, so the first load never rings. A channel first seen later rings
+  // for its messages newer than this.
+  loadedAt: number | null;
 };
 export type PeekableKind = Exclude<MemberKind["type"], "human">;
 export type PeekTarget = Readonly<{

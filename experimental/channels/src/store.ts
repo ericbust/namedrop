@@ -63,7 +63,7 @@ export function initialState({
     outbox: new Map(),
     drafts: new Map(),
     heard: nothingHeard,
-    watermark: null,
+    loadedAt: null,
   };
 }
 export function bootState({
@@ -383,18 +383,18 @@ function hasActivity(a: Channel, b: Channel): boolean {
   );
 }
 // New messages in `next` from agents to the person, oldest first. With no
-// `previous` snapshot, only messages newer than `watermark` are new.
+// `previous` snapshot, only messages newer than `loadedAt` are new.
 export function heardIn(
   previous: Pick<Channel, "messages" | "latestMessages"> | undefined,
   next: Pick<Channel, "latestMessages" | "members">,
-  watermark: number | null,
+  loadedAt: number | null,
 ): Arrival[] {
   const arrivals: Arrival[] = [];
   const person = (id: AddressId | "human") =>
     id === "human" || next.members.get(id)?.kind.type === "human";
   const fresh = (row: Message) =>
     previous === undefined
-      ? watermark !== null && row.at > watermark
+      ? loadedAt !== null && row.at > loadedAt
       : !previous.latestMessages.has(row.id) && !previous.messages.has(row.id);
   for (const row of next.latestMessages.values()) {
     if (
@@ -413,13 +413,11 @@ export function heardIn(
 function hear(heard: Heard, arrivals: Arrival[]): Heard {
   return arrivals.length === 0 ? heard : { seq: heard.seq + 1, arrivals };
 }
-function newestAt(
-  watermark: number,
-  channel: Pick<Channel, "messages" | "latestMessages">,
-): number {
-  let newest = watermark;
-  for (const rows of [channel.messages, channel.latestMessages])
-    for (const row of rows.values()) newest = Math.max(newest, row.at);
+function newestAt(channels: Iterable<Channel>): number {
+  let newest = Number.NEGATIVE_INFINITY;
+  for (const channel of channels)
+    for (const rows of [channel.messages, channel.latestMessages])
+      for (const row of rows.values()) newest = Math.max(newest, row.at);
   return newest;
 }
 function clearUnread(
@@ -456,11 +454,9 @@ function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
     const channel = channels.get(key);
     return channel === undefined
       ? []
-      : heardIn(state.channels.get(key), channel, state.watermark);
+      : heardIn(state.channels.get(key), channel, state.loadedAt);
   });
-  let watermark = state.watermark ?? Number.NEGATIVE_INFINITY;
   for (const [key, channel] of channels) {
-    watermark = newestAt(watermark, channel);
     const previous = state.channels.get(key);
     if (
       previous &&
@@ -477,7 +473,7 @@ function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
     outbox: settleOutbox(state.outbox, [...channels.values()]),
     viewKnown: state.viewKnown || channels.size > 0 || keys !== null,
     heard: hear(state.heard, arrivals),
-    watermark,
+    loadedAt: state.loadedAt ?? newestAt(channels.values()),
     sync: { kind: keys === null ? "fallback" : "live" },
     landing:
       keys !== null && state.landing.kind === "discovering"
@@ -621,7 +617,7 @@ function step(state: State, event: Event): State {
       const channels = new Map(state.channels);
       channels.set(channel.key, accumulated);
       const selection = settle(state, channels, previous === undefined);
-      const arrivals = heardIn(previous, accumulated, state.watermark);
+      const arrivals = heardIn(previous, accumulated, state.loadedAt);
       let unread = state.unread;
       if (
         previous &&
@@ -637,10 +633,6 @@ function step(state: State, event: Event): State {
         outbox: settleOutbox(state.outbox, [accumulated]),
         viewKnown: true,
         heard: hear(state.heard, arrivals),
-        watermark:
-          state.watermark === null
-            ? null
-            : newestAt(state.watermark, accumulated),
       };
     }
     case "older":

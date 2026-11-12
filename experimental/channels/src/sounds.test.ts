@@ -286,7 +286,7 @@ test("sounds: a channel that first appears after the first load rings for its ne
   });
 });
 
-test("sounds: the watermark moves with live frames, so a later channel's older message stays silent", () => {
+test("sounds: a channel first seen later rings for a message newer than the page load, though older than live traffic since", () => {
   let state = reduce(initialState(), { type: "opened" });
   state = ready(apply(state, [{ ...before, at: 100 }]), [keyA]);
   state = apply(state, [
@@ -298,7 +298,10 @@ test("sounds: the watermark moves with live frames, so a later channel's older m
     [{ id: "late", author: "codex", to: ["human"], at: 800 }],
     keyB,
   );
-  assert.equal(state.heard, nothingHeard);
+  assert.deepEqual(state.heard, {
+    seq: 1,
+    arrivals: [{ agent: "codex", id: "late" }],
+  });
 });
 
 function peer(
