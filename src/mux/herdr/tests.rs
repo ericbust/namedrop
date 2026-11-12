@@ -179,6 +179,19 @@ fn a_closed_space_is_gone_without_listing_its_panes() {
 }
 
 #[test]
+fn a_space_is_gone_only_by_its_error_code_not_its_message() {
+    let transient =
+        json!({"error": {"code": "transport_unavailable", "message": "workspace_not_found"}})
+            .to_string();
+    let reply = transient.clone();
+    let mux = herdr(move |_| Err(reply.clone()));
+    assert_eq!(
+        mux.survey(Scope::Space(&space("w1")), Depth::Panes),
+        Err(MuxError::Unavailable(transient))
+    );
+}
+
+#[test]
 fn a_listing_that_omits_the_space_is_a_protocol_error() {
     let mux = herdr(|_| Ok(worktrees("w2", "/repo")));
     assert!(matches!(

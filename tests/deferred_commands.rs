@@ -32,8 +32,9 @@ struct Fixture {
 
 /// The reminder clock test's in-process event runs the script, because
 /// its transient case relies on this call writing
-/// `observed-discovery-error`. The clock subprocess itself did not run
-/// `worktree list` within 60 s, so on a `FakeMux` that wait times out.
+/// `observed-discovery-error`. The clock subprocess lists only by chance:
+/// its due reminders already await delivery when the error appears, so on a
+/// `FakeMux` that wait usually times out.
 struct ScriptHerdr<'a>(&'a Path);
 impl HerdrCommandExecutor for ScriptHerdr<'_> {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
