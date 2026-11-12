@@ -126,13 +126,14 @@ fn slot(space: &str, pane: &str, tab: Option<&str>) -> PaneSlot {
     }
 }
 
-/// A plugin hook's `HERDR_PLUGIN_EVENT_JSON`, checked against the hook event
-/// and the operation the manifest routes it to.
-pub fn decode_plugin_event(
+/// The data of a plugin hook's `HERDR_PLUGIN_EVENT_JSON`, checked against the
+/// hook event and the operation the manifest routes it to. The data stays raw
+/// because the status hook queues it for a worker to decode.
+pub fn plugin_event_data(
     operation: &str,
-    hook_event: &str,
     serialized: &str,
-) -> Result<MuxEvent, String> {
+    hook_event: &str,
+) -> Result<Value, String> {
     let envelope: PluginEventEnvelope =
         serde_json::from_str(serialized).map_err(|error| error.to_string())?;
     let expected = match envelope.event.as_str() {
@@ -151,7 +152,7 @@ pub fn decode_plugin_event(
             envelope.event
         ));
     }
-    decode_operation_input(operation, envelope.data)
+    Ok(envelope.data)
 }
 
 /// The Herdr event data an `event.*` operation receives as its input.

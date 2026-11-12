@@ -15,7 +15,6 @@ use namedrop::{
     is_control_operation, is_integration_operation, is_lifecycle_operation, is_message_operation,
     render_command_result_to_text, render_command_result_to_text_within, validate_message_input,
 };
-use serde::Deserialize;
 use std::{
     env, fs,
     io::{self, IsTerminal, Read, Write},
@@ -843,68 +842,10 @@ fn run_lifecycle(
     run_operation(operation, input, OperationKind::Lifecycle, options)
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PluginEventEnvelope {
-    event: String,
-    data: serde_json::Value,
-}
-
 fn plugin_event_input(operation: &str, serialized: &str) -> Result<serde_json::Value, String> {
     let hook_event = env::var("HERDR_PLUGIN_EVENT")
         .map_err(|_| "HERDR_PLUGIN_EVENT is required for an event hook".to_owned())?;
-    parse_plugin_event_input(operation, serialized, &hook_event)
-}
-
-fn parse_plugin_event_input(
-    operation: &str,
-    serialized: &str,
-    hook_event: &str,
-) -> Result<serde_json::Value, String> {
-    let envelope: PluginEventEnvelope =
-        serde_json::from_str(serialized).map_err(|error| error.to_string())?;
-    let expected = match envelope.event.as_str() {
-        "pane_created" => ("pane.created", "event.pane-lifecycle"),
-        "pane_moved" => ("pane.moved", "event.pane-lifecycle"),
-        "pane_closed" => ("pane.closed", "event.pane-lifecycle"),
-        "pane_exited" => ("pane.exited", "event.pane-lifecycle"),
-        "tab_closed" => ("tab.closed", "event.pane-lifecycle"),
-        "pane_agent_status_changed" => ("pane.agent_status_changed", "event.agent-status-changed"),
-        "pane_agent_detected" => ("pane.agent_detected", "event.agent-status-changed"),
-        other => return Err(format!("unsupported Herdr plugin event: {other}")),
-    };
-    if hook_event != expected.0 || operation != expected.1 {
-        return Err(format!(
-            "Herdr plugin event {} does not match operation {operation}",
-            envelope.event
-        ));
-    }
-    Ok(envelope.data)
-}
-
-#[cfg(test)]
-mod session_event_tests {
-    #[test]
-    fn agent_detection_events_reuse_registration_worker() {
-        let data = serde_json::json!({"type":"pane_agent_detected", "pane_id":"w1:p1",
-            "workspace_id":"w1", "agent":"codex", "released":false});
-        let event = serde_json::json!({"event":"pane_agent_detected", "data": data}).to_string();
-        let input = super::parse_plugin_event_input(
-            "event.agent-status-changed",
-            &event,
-            "pane.agent_detected",
-        )
-        .unwrap();
-        assert_eq!(input, data);
-        assert!(
-            super::parse_plugin_event_input("event.agent-status-changed", &event, "pane.created")
-                .is_err()
-        );
-        assert!(
-            super::parse_plugin_event_input("event.pane-lifecycle", &event, "pane.agent_detected")
-                .is_err()
-        );
-    }
+    namedrop::mux::herdr::plugin_event_data(operation, serialized, &hook_event)
 }
 
 #[derive(Clone, Copy)]

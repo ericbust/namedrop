@@ -238,6 +238,14 @@ Record each accepted deviation here, with its source, before the next commit sta
 - **`notification_shown` is true only for `Applied::Done`,** so a multiplexer that cannot notify reports `false`. Herdr's answer is unchanged.
 - **Bounds.** A script removed all 76 `crate::mux::Mux + HerdrCommandExecutor` bounds, and the compiler named the 6 that still need the legacy trait. `agent_status::collect_agent_status` needs it for `bounded` reads. `health::diagnose_space` needs it for the `plugin list` read, and so do its callers `diagnose_collaboration` and `request_doctor_assistance`. `dashboard::open` needs it for its inline `workspace get`. `execute_lifecycle_operation` needs it only for the tour popup's `at_socket`. `activate_shortcuts` and `apply_managed_tab_label` take `&impl MuxAct`, and `tour::open_popup` and `show_for_first_agent` take `HerdrCommandExecutor + Sync`.
 
+**Commit 10** (`refactor(mux): decode Herdr plugin events into MuxEvent`).
+
+- **`decode_plugin_event` is split in two, and its name is gone.** `herdr::plugin_event_data` checks the envelope and pairs the hook with its operation, then returns the event's data unchanged. `herdr::decode_operation_input` turns that data into a `MuxEvent`. The status hook writes the raw data to its queue, and the worker decodes it later. A hook that decoded the data would reject a malformed event at once, but today that event is queued and the worker drops it on its `invalid operation input: ` prefix. The pane-lifecycle hook and `execute_lifecycle_operation` callers also pass raw data. So no caller wanted the one-step decode. `main.rs` now calls `plugin_event_data` in place of its own copy.
+- **The data is decoded where it was parsed before.** `execute_lifecycle_operation` decodes after it discovers the invoking space and opens the store, as before. An event that is malformed and arrives while discovery fails still reports the discovery error. `lifecycle::handle_event` takes the store, the attribution, the runtime, and `&MuxEvent`, and it is private until the Rex bridge in step 5 calls it.
+- **Each variant has its own handler.** These are `pane_appeared`, `pane_closed`, `tab_closed`, `pane_moved`, and `agent_status_changed`. Only `agent_status_changed` needs `HerdrCommandExecutor`, for the tour popup. The others take `M: Mux`. `execute_lifecycle_operation` keeps both bounds, so no bound could be dropped.
+- **`MuxEvent::Resync` is deleted.** No Herdr event produces it, and no handler could run it without new behavior. Step 5 adds it with the handler the Rex stream needs.
+- **A move with no destination tab is an error.** `PaneSlot.tab` is optional because a close names no tab. Herdr's `pane_moved` always names one, so the error "a moved pane event names no destination tab" cannot occur on Herdr.
+
 ## Open questions and risks
 
 - Is a dashboard key that reports busy during a delivery acceptable, or should it wait a short fixed time? Commit 12 decides.

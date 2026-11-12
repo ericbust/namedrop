@@ -5,7 +5,7 @@
 mod events;
 mod wire;
 
-pub use events::{decode_operation_input, decode_plugin_event};
+pub use events::{decode_operation_input, plugin_event_data};
 pub(crate) use wire::input_failure;
 
 use super::{
