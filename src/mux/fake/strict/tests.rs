@@ -481,6 +481,16 @@ fn clones_that_observers_hooks_and_predicates_capture_do_not_outlive_the_space()
         drop(applying.effects());
         Err(MuxError::Unavailable("refused".into()))
     });
+    let commanded = space.clone();
+    space.on_command(move |_, _| {
+        drop(commanded.calls());
+        Ok(())
+    });
+    let deciding = space.clone();
+    space.answer_with(move |_, _, _| {
+        drop(deciding.attempts());
+        None
+    });
     prompt(&space, "pane-author");
     let _ = space.process(&PaneId::new("pane-author"));
     let _ = space.apply(&Effect::ReloadKeybindings);

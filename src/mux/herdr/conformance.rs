@@ -10,15 +10,15 @@ use crate::{
         InputOutcome, Key, MuxAct, MuxError, MuxRead, PaneId, PaneProcess, PromptRequest,
         Recipient, Retry, Scope, Screen, ScreenRequest, SessionClaim, StateTexts, Style, Survey,
         TabId, Wrap,
-        fake::{
-            FakeMux, FakePane, Listing, ScopeKind, Sent, SentInput, World, WorldBuilder, listings,
-        },
+        fake::{FakeMux, Listing, ScopeKind, Sent, SentInput, WorldBuilder, listings, wire},
     },
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{fmt::Debug, path::Path};
 
-/// Answers Herdr commands the way Herdr would for the fake's world.
+/// Answers Herdr commands the way Herdr would for the fake's world. Reads are
+/// `FakeMux::herdr_reply`'s, so script shims and this suite render one world
+/// one way.
 struct Wire(FakeMux);
 
 fn herdr_error(code: &str) -> String {
@@ -34,48 +34,6 @@ fn gone<T>(result: Result<T, MuxError>) -> Result<T, Option<Gone>> {
     })
 }
 
-fn agent_word(kind: &AgentKind) -> Option<String> {
-    match kind {
-        AgentKind::Known(AgentRuntime::ClaudeCode) => Some("claude".into()),
-        AgentKind::Known(AgentRuntime::Codex) => Some("codex".into()),
-        AgentKind::Other(name) => Some(name.clone()),
-        AgentKind::Unreported => None,
-    }
-}
-
-fn pane_json(pane: &FakePane) -> Value {
-    let facts = &pane.facts;
-    let agent = facts.agent.as_ref();
-    let word = agent.and_then(|agent| agent_word(&agent.kind));
-    let display = agent
-        .and_then(|agent| agent.label.clone())
-        .filter(|label| Some(label) != word.as_ref());
-    let session = agent.and_then(|agent| match &agent.session {
-        SessionClaim::Reported(session) => Some(json!({"value": session.as_str()})),
-        _ => None,
-    });
-    let mut json = json!({
-        "pane_id": facts.id.as_str(),
-        "terminal_id": facts.terminal.as_str(),
-        "tab_id": facts.tab.as_str(),
-        "workspace_id": facts.space.as_str(),
-        "cwd": facts.cwd,
-        "label": facts.title,
-        "agent": word,
-        "display_agent": display,
-        "agent_session": session,
-        "agent_status": facts.state.as_ref().map(AgentState::as_str),
-        "state_labels": facts.idle_label.as_ref().map(|idle| json!({"idle": idle})),
-        "scroll": facts.viewport_rows.map(|rows| json!({"viewport_rows": rows})),
-    });
-    if !facts.reports_session {
-        json.as_object_mut()
-            .expect("a pane is an object")
-            .remove("agent_session");
-    }
-    json
-}
-
 fn key(word: &str) -> Key {
     match word {
         "enter" => Key::Enter,
@@ -89,147 +47,14 @@ fn key(word: &str) -> Key {
 }
 
 impl Wire {
-    fn space<'w>(world: &'w World, id: &str) -> Result<&'w crate::mux::fake::FakeSpace, String> {
-        world
-            .spaces
-            .iter()
-            .find(|space| space.id.as_str() == id)
-            .ok_or_else(|| herdr_error("workspace_not_found"))
-    }
-
-    fn pane<'w>(world: &'w World, id: &str) -> Result<&'w FakePane, String> {
-        world
-            .pane(&PaneId::new(id))
-            .ok_or_else(|| herdr_error("pane_not_found"))
-    }
-
-    fn answer(&self, args: &[&str]) -> Result<Value, String> {
+    fn answer(&self, args: &[&str]) -> Result<String, String> {
         let mut world = self.0.lock();
-        Ok(match args {
-            ["worktree", "list", "--workspace", id, "--json"] => {
-                let space = Self::space(&world, id)?;
-                let checkout = space
-                    .checkout
-                    .as_ref()
-                    .ok_or_else(|| herdr_error("not_git_worktree"))?;
-                json!({"result": {
-                    "source": {"repo_key": checkout.repo_key},
-                    "worktrees": [{
-                        "path": checkout.path, "open_workspace_id": id,
-                        "label": checkout.label, "branch": checkout.branch,
-                        "is_linked_worktree": true,
-                    }],
-                }})
-            }
-            ["worktree", "list", "--cwd", cwd, "--json"] => {
-                let opener = world.spaces.iter().find(|space| {
-                    space
-                        .checkout
-                        .as_ref()
-                        .is_some_and(|checkout| checkout.path == Path::new(cwd))
-                });
-                match opener.and_then(|space| Some((space, space.checkout.as_ref()?))) {
-                    Some((space, checkout)) => json!({"result": {
-                        "source": {"repo_key": checkout.repo_key},
-                        "worktrees": [{
-                            "path": cwd, "open_workspace_id": space.id.as_str(),
-                            "label": checkout.label, "branch": checkout.branch,
-                            "is_linked_worktree": true,
-                        }],
-                    }}),
-                    None => json!({"result": {"source": null, "worktrees": []}}),
-                }
-            }
-            ["workspace", "list"] => {
-                let workspaces: Vec<_> = world
-                    .spaces
-                    .iter()
-                    .filter(|space| space.listed)
-                    .map(|space| {
-                        json!({
-                            "workspace_id": space.id.as_str(),
-                            "label": space.label,
-                            "number": space.number,
-                            "worktree": space.stamped().map(|checkout| json!({
-                                "checkout_path": checkout.path,
-                                "repo_key": checkout.repo_key,
-                                "repo_name": checkout.repo_name,
-                            })),
-                        })
-                    })
-                    .collect();
-                json!({"result": {"workspaces": workspaces}})
-            }
-            ["workspace", "get", id] => {
-                let space = Self::space(&world, id)?;
-                json!({"result": {"workspace": {
-                    "label": space.label,
-                    "number": space.number,
-                    "worktree": space.stamped().map(|checkout| json!({
-                        "checkout_path": checkout.path,
-                        "repo_key": checkout.repo_key,
-                        "repo_name": checkout.repo_name,
-                    })),
-                }}})
-            }
-            ["pane", "list"] => {
-                let panes: Vec<_> = world
-                    .spaces
-                    .iter()
-                    .flat_map(|space| space.listed_panes())
-                    .map(pane_json)
-                    .collect();
-                json!({"result": {"panes": panes}})
-            }
-            ["pane", "list", "--workspace", id] => {
-                let panes: Vec<_> = Self::space(&world, id)?
-                    .listed_panes()
-                    .map(pane_json)
-                    .collect();
-                json!({"result": {"panes": panes}})
-            }
-            ["pane", "read", id, "--source", _, "--lines", lines, ..] => {
-                let screen = Self::pane(&world, id)?.screen.clone().unwrap_or_default();
-                let lines: usize = lines.parse().unwrap();
-                let all: Vec<_> = screen.lines().collect();
-                return Ok(Value::String(
-                    all[all.len().saturating_sub(lines)..].join("\n"),
-                ));
-            }
-            ["pane", "process-info", "--pane", id] => {
-                let process = Self::pane(&world, id)?.process.clone().unwrap_or_default();
-                let foreground: Vec<_> = process
-                    .foreground_pids
-                    .iter()
-                    .map(|pid| json!({"pid": pid}))
-                    .collect();
-                json!({"result": {"process_info": {
-                    "shell_pid": process.shell_pid,
-                    "foreground_process_group_id": process.foreground_group,
-                    "foreground_processes": foreground,
-                    "tty": process.tty,
-                }}})
-            }
-            ["tab", "get", tab] => match world.tab_labels.get(&TabId::new(*tab)) {
-                Some(label) => json!({"result": {"label": label}}),
-                None => json!({"result": {}}),
-            },
-            ["tab", "rename", tab, label] => {
-                world
-                    .tab_labels
-                    .insert(TabId::new(*tab), (*label).to_owned());
-                json!({})
-            }
-            ["plugin", "list", "--plugin", "namedrop", "--json"] => {
-                let plugins: Vec<_> = world
-                    .integration_root
-                    .iter()
-                    .map(|root| json!({"plugin_id": "namedrop", "plugin_root": root}))
-                    .collect();
-                json!({"result": {"plugins": plugins}})
-            }
+        if let Some(read) = wire::reply(&world, args) {
+            return read.map(wire::stdout);
+        }
+        match args {
             ["agent", "prompt", id, text] => {
-                let facts = &Self::pane(&world, id)?.facts;
+                let facts = &wire::pane(&world, id)?.facts;
                 // Herdr resolves the target only to a pane whose agent it
                 // names, so a pane that reports only a session is not found.
                 if facts
@@ -248,18 +73,16 @@ impl Wire {
                     input: SentInput::Prompt((*text).to_owned()),
                 });
                 world.set_state(&pane, AgentState::Working);
-                json!({})
             }
             ["pane", "run", id, line] => {
-                Self::pane(&world, id)?;
+                wire::pane(&world, id)?;
                 world.record_sent(Sent {
                     pane: PaneId::new(*id),
                     input: SentInput::Line((*line).to_owned()),
                 });
-                json!({})
             }
             [owner @ ("agent" | "pane"), "send-keys", id, keys @ ..] => {
-                Self::pane(&world, id)?;
+                wire::pane(&world, id)?;
                 let recipient = if *owner == "agent" {
                     Recipient::Agent
                 } else {
@@ -272,7 +95,6 @@ impl Wire {
                         keys: keys.iter().map(|word| key(word)).collect(),
                     },
                 });
-                json!({})
             }
             ["pane", "report-metadata", id, rest @ ..] => {
                 let pane = world
@@ -289,21 +111,23 @@ impl Wire {
                         _ => {}
                     }
                 }
-                json!({})
             }
-            ["notification", "show", ..] | ["plugin", "pane", "open", ..] => json!({}),
-            ["server", "reload-config"] => json!({}),
+            ["tab", "rename", tab, label] => {
+                world
+                    .tab_labels
+                    .insert(TabId::new(*tab), (*label).to_owned());
+            }
+            ["notification", "show", ..] | ["plugin", "pane", "open", ..] => {}
+            ["server", "reload-config"] => {}
             other => panic!("the conformance wire does not answer {other:?}"),
-        })
+        }
+        Ok(json!({}).to_string())
     }
 }
 
 impl Transport for Wire {
     fn run(&self, args: &[&str]) -> Result<String, String> {
-        self.answer(args).map(|value| match value {
-            Value::String(text) => text,
-            json => json.to_string(),
-        })
+        self.answer(args)
     }
 }
 
@@ -845,4 +669,85 @@ fn the_fake_names_the_listings_the_adapter_runs_for_each_survey() {
             assert_eq!(ran, listings(kind, depth), "{kind:?} {depth:?}");
         }
     }
+}
+
+#[test]
+fn the_fake_hands_its_command_hooks_each_command_the_adapter_runs() {
+    let ids = ["workspace-1", "workspace-2", "workspace-9"].map(SpaceId::new);
+    let mut scopes: Vec<Scope<'_>> = ids
+        .iter()
+        .flat_map(|id| [Scope::Space(id), Scope::PanesOf(id)])
+        .collect();
+    for path in ["/repo", "/two", "/three", "/other", "/nowhere"] {
+        scopes.push(Scope::CheckoutOf(Path::new(path)));
+    }
+    scopes.push(Scope::All);
+    for world in [world, reshaped] {
+        for &scope in &scopes {
+            for depth in [Depth::Spaces, Depth::Panes] {
+                let herdr = HerdrMux::new(
+                    Recorded(Wire(world().build()), std::sync::Mutex::default()),
+                    "fake-socket",
+                );
+                let from_herdr = gone(herdr.survey(scope, depth).map(|_| ()));
+                let fake = world().build();
+                let ran = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let commands = std::sync::Arc::clone(&ran);
+                fake.on_command(move |_, command| {
+                    commands.lock().unwrap().extend(command.listing);
+                    Ok(())
+                });
+                let from_fake = gone(fake.survey(scope, depth).map(|_| ()));
+                assert_eq!(from_fake, from_herdr, "{scope:?} {depth:?}");
+                if from_fake.is_ok() {
+                    assert_eq!(
+                        *ran.lock().unwrap(),
+                        *herdr.transport.1.lock().unwrap(),
+                        "{scope:?} {depth:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn labelled() -> WorldBuilder {
+    FakeMux::world()
+        .space("workspace-1")
+        .pane("pane-codex")
+        .codex()
+        .agent_label("Codex")
+        .session("session-codex")
+        .idle()
+        .pane("pane-claude")
+        .claude()
+        .agent_label("claude")
+}
+
+#[test]
+fn an_agent_label_other_than_its_word_reaches_the_survey() {
+    let one = SpaceId::new("workspace-1");
+    let labels = agree(labelled, |mux, _| {
+        survey(mux, Scope::PanesOf(&one), Depth::Panes)
+            .unwrap()
+            .spaces
+            .remove(0)
+            .panes
+            .into_iter()
+            .map(|pane| pane.agent.map(|agent| (agent.kind, agent.label)))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        labels,
+        [
+            Some((
+                AgentKind::Known(AgentRuntime::Codex),
+                Some("Codex".to_owned())
+            )),
+            Some((
+                AgentKind::Known(AgentRuntime::ClaudeCode),
+                Some("claude".to_owned())
+            )),
+        ]
+    );
 }
