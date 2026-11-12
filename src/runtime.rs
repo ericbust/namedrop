@@ -256,6 +256,72 @@ mod tests {
         let _ = sentinel.wait();
     }
 
+    fn sh(script: &str) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", script]);
+        command
+    }
+
+    #[test]
+    fn a_short_answer_is_the_trimmed_stdout_of_a_command_that_succeeds() {
+        let timeout = Duration::from_secs(5);
+        assert_eq!(
+            short_answer(sh("printf ' ttys003 \\n'"), timeout).as_deref(),
+            Some("ttys003")
+        );
+        assert_eq!(short_answer(sh("printf ttys003; exit 1"), timeout), None);
+    }
+
+    #[test]
+    fn a_short_answer_holds_at_most_one_kib_on_either_stream() {
+        let timeout = Duration::from_secs(5);
+        let write = |bytes: usize, redirect: &str| {
+            sh(&format!(
+                "head -c {bytes} /dev/zero | tr '\\0' x {redirect}"
+            ))
+        };
+        assert_eq!(
+            short_answer(write(1024, ""), timeout).map(|answer| answer.len()),
+            Some(1024)
+        );
+        assert_eq!(short_answer(write(1025, ""), timeout), None);
+        assert_eq!(
+            short_answer(write(1024, ">&2"), timeout).as_deref(),
+            Some("")
+        );
+        assert_eq!(short_answer(write(1025, ">&2"), timeout), None);
+    }
+
+    #[test]
+    fn a_short_answer_past_its_timeout_is_none_and_stops_the_command_s_group() {
+        let pid_file = env::temp_dir().join(format!(
+            ".namedrop-short-answer-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&pid_file);
+        let started = Instant::now();
+        let answer = short_answer(
+            sh(&format!(
+                "sleep 30 & echo $! > '{}'; wait",
+                pid_file.display()
+            )),
+            Duration::from_millis(500),
+        );
+        assert_eq!(answer, None);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let grandchild = fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
+            .expect("the command never reported its child");
+        let _ = fs::remove_file(&pid_file);
+        assert!(
+            wait_until(Duration::from_secs(5), || (!is_running(grandchild))
+                .then_some(()))
+            .is_some(),
+            "the command's child {grandchild} survived its timeout"
+        );
+    }
+
     fn wait_until<T>(limit: Duration, mut probe: impl FnMut() -> Option<T>) -> Option<T> {
         let deadline = Instant::now() + limit;
         loop {
