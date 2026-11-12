@@ -3,15 +3,15 @@ mod cleanup;
 #[path = "support/dispatch.rs"]
 mod dispatch;
 
-use namedrop::*;
+use namedrop::{
+    mux::fake::{EVERY_LISTING, FakeMux, StrictSpace, Takes},
+    *,
+};
 use serde_json::{Value, json};
 use std::{
     fs,
     path::PathBuf,
-    sync::{
-        Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -20,7 +20,7 @@ struct Fixture {
     state: PathBuf,
     home: PathBuf,
     ids: AtomicU64,
-    session_override: Mutex<Option<(&'static str, &'static str)>>,
+    mux: StrictSpace,
 }
 impl Fixture {
     fn new() -> Self {
@@ -33,9 +33,9 @@ impl Fixture {
         let f = Self {
             state: root.join("state"),
             home: root.join("home"),
+            mux: space_at(&root),
             root,
             ids: AtomicU64::new(1),
-            session_override: Mutex::new(None),
         };
         fs::create_dir_all(&f.home).unwrap();
         let ns = StateNamespace::for_space("synthetic-socket", "synthetic-workspace");
@@ -89,7 +89,7 @@ impl Fixture {
         }
         f
     }
-    fn runtime<'a>(&'a self, pane: &'a str) -> LifecycleRuntime<'a, Self, Self, Self> {
+    fn runtime<'a>(&'a self, pane: &'a str) -> LifecycleRuntime<'a, FakeMux, Self, Self> {
         LifecycleRuntime {
             state_directory: &self.state,
             home_directory: Some(&self.home),
@@ -98,7 +98,7 @@ impl Fixture {
             workspace_id: Some("synthetic-workspace"),
             current_pane_id: Some(pane),
             session_socket_id: "synthetic-socket",
-            mux: self,
+            mux: &self.mux,
             clock: self,
             ids: self,
         }
@@ -156,7 +156,7 @@ impl Fixture {
         serde_json::from_slice(&output.stdout).unwrap()
     }
     fn replace_session(&self, name: &'static str, session: &'static str) {
-        *self.session_override.lock().unwrap() = Some((name, session));
+        self.override_session(Some((name, session)));
         StateStore::open(&self.state)
             .unwrap()
             .transaction(|tx| {
@@ -279,27 +279,36 @@ impl IdGenerator for Fixture {
         )
     }
 }
-impl HerdrCommandExecutor for Fixture {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let stdout = match args {
-            ["workspace", "list"] => {
-                json!({"result":{"workspaces":[{"workspace_id":"synthetic-workspace"}]}})
+/// Three idle agent panes in one space holding the fixture's checkout. A
+/// prompt leaves each pane idle.
+fn space_at(root: &std::path::Path) -> StrictSpace {
+    let mut world = FakeMux::world().space("synthetic-workspace").checkout(root);
+    for pane in PANES {
+        world = world
+            .pane(pane)
+            .tab("synthetic-tab")
+            .session(&format!("session-{pane}"))
+            .idle();
+    }
+    StrictSpace::new(
+        world.build().prompts_stay_settled(),
+        EVERY_LISTING,
+        Takes::prompts_and_metadata(),
+    )
+}
+
+const PANES: [&str; 3] = ["lead", "worker", "reviewer"];
+
+impl Fixture {
+    /// At most one pane runs a replacement program. Every other pane reports
+    /// its original session.
+    fn override_session(&self, replaced: Option<(&str, &str)>) {
+        for pane in PANES {
+            match replaced {
+                Some((name, session)) if name == pane => self.mux.set_session(pane, session),
+                _ => self.mux.set_session(pane, &format!("session-{pane}")),
             }
-            ["worktree", "list", ..] => {
-                json!({"result":{"worktrees":[{"path":self.root,"open_workspace_id":"synthetic-workspace"}]}})
-            }
-            ["pane", "list", ..] => {
-                json!({"result":{"panes":(["lead","worker","reviewer"].iter().map(|name|{
-                let replacement=*self.session_override.lock().unwrap();
-                json!({"pane_id":name,"terminal_id":format!("terminal-{name}"),"tab_id":"synthetic-tab","workspace_id":"synthetic-workspace","agent_session":{"value":replacement.filter(|(pane,_)|pane==name).map(|(_,session)|session.to_owned()).unwrap_or_else(||format!("session-{name}"))},"agent_status":"idle"})
-            }).collect::<Vec<_>>())}})
-            }
-            ["agent", "prompt", ..] | ["pane", "report-metadata", ..] => json!({}),
-            _ => return Err(format!("unexpected synthetic host command {args:?}")),
-        };
-        Ok(HerdrCommandOutput {
-            stdout: stdout.to_string(),
-        })
+        }
     }
 }
 
@@ -945,7 +954,7 @@ fn coordination_authority_and_revisions() {
     let c = f.begin("authority");
     let id = &c["coordination_id"];
     assert!(f.handoff("worker","handoff.resolve",json!({"request_id":"foreign","coordination_id":id,"outcome":"blocked","report":"No","reason":"Not owner"})).is_err());
-    *f.session_override.lock().unwrap() = Some(("lead", "replacement-session"));
+    f.override_session(Some(("lead", "replacement-session")));
     assert!(
         f.handoff(
             "lead",
@@ -954,7 +963,7 @@ fn coordination_authority_and_revisions() {
         )
         .is_err()
     );
-    *f.session_override.lock().unwrap() = None;
+    f.override_session(None);
     let old_profile = complete_capability_profile()
         .iter()
         .filter(|c| {
@@ -1088,9 +1097,9 @@ fn coordination_authority_and_revisions() {
     duplicate["request_id"] = json!("duplicate-outcome-new-key");
     assert!(f.message("worker", "reply", duplicate).is_err());
     assert_eq!(f.report(id)["revision"], revision);
-    *f.session_override.lock().unwrap() = Some(("worker", "replacement-worker"));
+    f.override_session(Some(("worker", "replacement-worker")));
     assert!(f.message("worker", "reply", blocked.clone()).is_err());
-    *f.session_override.lock().unwrap() = None;
+    f.override_session(None);
     blocked["blocked_reason"] = json!("changed reason");
     assert!(f.message("worker", "reply", blocked).is_err());
     let mut cycle = f.reply_input(&b, "reviewer", "cycle", Some("blocked"));
@@ -1427,14 +1436,14 @@ fn adoption_refusals_change_nothing() {
 
     let f = Fixture::new();
     let id = f.begin("a")["coordination_id"].clone();
-    *f.session_override.lock().unwrap() = Some(("lead", "replacement-session"));
+    f.override_session(Some(("lead", "replacement-session")));
     let error = f.rejects_unchanged(|| adopt(&f, "lead", &id));
     refusals.push((
         "live view replaced, store not observed",
         "live native Agent Session",
         error,
     ));
-    *f.session_override.lock().unwrap() = None;
+    f.override_session(None);
     let error = f.rejects_unchanged(|| adopt(&f, "lead", &id));
     refusals.push((
         "owner session still current",

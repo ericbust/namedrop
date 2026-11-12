@@ -118,6 +118,56 @@ fn a_session_without_an_agent_kind_is_still_an_agent() {
     );
 }
 
+fn surveyed_agent(mux: &FakeMux, space: &str, pane: &str) -> Option<AgentIdentity> {
+    mux.survey(Scope::Space(&SpaceId::new(space)), Depth::Panes)
+        .unwrap()
+        .spaces[0]
+        .panes
+        .iter()
+        .find(|facts| facts.id == PaneId::new(pane))
+        .expect("the survey lists the pane")
+        .agent
+        .clone()
+}
+
+#[test]
+fn a_new_session_keeps_the_agent_and_makes_a_free_pane_an_agent_like_the_builder() {
+    let mux = author_and_reviewer();
+    mux.set_session("pane-author", "session-replacement");
+    mux.set_session("pane-shell", "session-ghost");
+    assert_eq!(
+        surveyed_agent(&mux, "workspace-1", "pane-author"),
+        Some(AgentIdentity {
+            kind: AgentKind::Known(AgentRuntime::ClaudeCode),
+            label: Some("claude".into()),
+            session: SessionClaim::Reported(AgentSessionId::new("session-replacement")),
+        })
+    );
+    let built = FakeMux::world()
+        .space("workspace-2")
+        .pane("pane-shell")
+        .session("session-ghost")
+        .build();
+    assert_eq!(
+        surveyed_agent(&mux, "workspace-2", "pane-shell"),
+        surveyed_agent(&built, "workspace-2", "pane-shell")
+    );
+    assert_eq!(
+        surveyed_agent(&mux, "workspace-2", "pane-shell"),
+        Some(AgentIdentity {
+            kind: AgentKind::Unreported,
+            label: None,
+            session: SessionClaim::Reported(AgentSessionId::new("session-ghost")),
+        })
+    );
+}
+
+#[test]
+#[should_panic(expected = "the world has no pane pane-9")]
+fn a_new_session_for_a_missing_pane_is_a_test_bug() {
+    author_and_reviewer().set_session("pane-9", "session-9");
+}
+
 #[test]
 fn surveys_read_only_what_their_scope_and_depth_ask_for() {
     let mux = author_and_reviewer();
@@ -316,11 +366,12 @@ fn lines_and_keys_are_recorded_for_their_pane() {
 }
 
 #[test]
-fn a_scripted_outcome_replaces_one_delivery_and_records_what_may_have_landed() {
+fn a_scripted_outcome_replaces_one_delivery_to_its_pane_and_records_what_may_have_landed() {
     let mux = author_and_reviewer();
     let author = identity(&mux, "pane-author");
-    mux.script(InputOutcome::Refused("invalid_input".into()));
-    mux.script(InputOutcome::Ambiguous("timed out".into()));
+    mux.script("pane-author", InputOutcome::Refused("invalid_input".into()));
+    mux.script("pane-author", InputOutcome::Ambiguous("timed out".into()));
+    mux.script("pane-shell", InputOutcome::Refused("not this pane".into()));
     assert_eq!(
         prompt(&mux, "pane-author", &author, Admit::Settled),
         InputOutcome::Refused("invalid_input".into())
@@ -332,6 +383,70 @@ fn a_scripted_outcome_replaces_one_delivery_and_records_what_may_have_landed() {
     );
     assert_eq!(prompts(&mux, "pane-author"), ["hello"]);
     assert_eq!(state(&mux, "pane-author"), Some(AgentState::Idle));
+    assert_eq!(
+        prompt(&mux, "pane-author", &author, Admit::Settled),
+        InputOutcome::Delivered,
+        "the script for another pane is not used"
+    );
+}
+
+#[test]
+fn an_answered_pane_gives_every_input_the_same_outcome_after_its_script() {
+    let mux = author_and_reviewer();
+    let author = identity(&mux, "pane-author");
+    mux.answer("pane-author", InputOutcome::Refused("invalid_input".into()));
+    mux.script("pane-author", InputOutcome::Delivered);
+    let outcomes: Vec<_> = (0..3)
+        .map(|_| prompt(&mux, "pane-author", &author, Admit::Settled))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            InputOutcome::Delivered,
+            InputOutcome::Refused("invalid_input".into()),
+            InputOutcome::Refused("invalid_input".into()),
+        ]
+    );
+    assert_eq!(prompts(&mux, "pane-author"), ["hello"]);
+}
+
+#[test]
+fn every_attempt_is_recorded_with_its_outcome_even_when_nothing_was_typed() {
+    let mux = author_and_reviewer();
+    let reviewer = identity(&mux, "pane-reviewer");
+    let keys = [Key::CtrlU; 3];
+    let ghost = mux.send(
+        &PaneId::new("pane-ghost"),
+        InputKind::Keys {
+            recipient: Recipient::Agent,
+            keys: &keys,
+        },
+    );
+    let busy = prompt(&mux, "pane-reviewer", &reviewer, Admit::Settled);
+    assert!(mux.sent().is_empty());
+    assert_eq!(
+        mux.attempts(),
+        [
+            Attempt {
+                pane: PaneId::new("pane-ghost"),
+                input: SentInput::Keys {
+                    recipient: Recipient::Agent,
+                    keys: keys.to_vec()
+                },
+                outcome: ghost,
+            },
+            Attempt {
+                pane: PaneId::new("pane-reviewer"),
+                input: SentInput::Prompt("hello".into()),
+                outcome: busy,
+            },
+        ]
+    );
+    assert!(
+        mux.attempts()
+            .iter()
+            .all(|attempt| matches!(attempt.outcome, InputOutcome::Declined(..)))
+    );
 }
 
 #[test]
@@ -343,6 +458,18 @@ fn an_injected_error_fails_the_next_call_only() {
         Err(MuxError::Timeout("timed out".into()))
     );
     assert!(mux.survey(Scope::All, Depth::Spaces).is_ok());
+}
+
+#[test]
+fn an_effect_an_injection_fails_is_still_an_attempted_effect() {
+    let mux = author_and_reviewer();
+    mux.fail(Op::Apply, MuxError::Timeout("timed out".into()));
+    assert_eq!(
+        mux.apply(&Effect::ReloadKeybindings),
+        Err(MuxError::Timeout("timed out".into()))
+    );
+    assert!(mux.effects().is_empty());
+    assert_eq!(mux.attempted_effects(), [Effect::ReloadKeybindings]);
 }
 
 #[test]
@@ -416,6 +543,273 @@ fn an_effect_on_a_closed_pane_is_gone_and_not_logged() {
         Err(MuxError::Gone(Gone::Pane, "pane-author is gone".into()))
     );
     assert!(mux.effects().is_empty());
+    assert_eq!(mux.attempted_effects().len(), 1, "the attempt is logged");
+}
+
+#[test]
+fn a_strict_world_answers_only_the_surveys_it_names() {
+    let mux = author_and_reviewer().strict_surveys(&[(ScopeKind::All, Depth::Spaces)]);
+    assert_eq!(
+        mux.survey(Scope::All, Depth::Spaces).unwrap().spaces.len(),
+        2
+    );
+    assert_eq!(
+        mux.survey(Scope::All, Depth::Panes),
+        Err(MuxError::Unavailable(
+            "the test answers no All survey at Panes depth".into()
+        ))
+    );
+    let workspace = SpaceId::new("workspace-1");
+    assert!(matches!(
+        mux.survey(Scope::PanesOf(&workspace), Depth::Panes),
+        Err(MuxError::Unavailable(_))
+    ));
+}
+
+#[test]
+#[should_panic(expected = "the world has no pane pane-9")]
+fn setting_the_state_of_an_unknown_pane_panics() {
+    author_and_reviewer().set_state("pane-9", AgentState::Idle);
+}
+
+#[test]
+#[should_panic(expected = "the world has no pane pane-9")]
+fn setting_the_screen_of_an_unknown_pane_panics() {
+    author_and_reviewer().set_screen("pane-9", Some("text"));
+}
+
+#[test]
+#[should_panic(expected = "the world has no pane pane-9")]
+fn scripting_an_unknown_pane_panics() {
+    author_and_reviewer().script("pane-9", InputOutcome::Delivered);
+}
+
+#[test]
+#[should_panic(expected = "the world has no pane pane-9")]
+fn answering_for_an_unknown_pane_panics() {
+    author_and_reviewer().answer("pane-9", InputOutcome::Delivered);
+}
+
+#[test]
+#[should_panic(expected = "the world has no pane pane-9")]
+fn closing_an_unknown_pane_panics() {
+    author_and_reviewer().close_pane("pane-9");
+}
+
+#[test]
+#[should_panic(expected = "the world already answers only the surveys")]
+fn a_clone_cannot_widen_the_surveys_a_world_answers() {
+    let mux = author_and_reviewer().strict_surveys(&[(ScopeKind::All, Depth::Spaces)]);
+    let _ = mux
+        .clone()
+        .strict_surveys(&[(ScopeKind::All, Depth::Panes)]);
+}
+
+const AS_DRAWN_ANSI: ScreenShape = ScreenShape {
+    wrap: Wrap::AsDrawn,
+    style: Style::Ansi,
+    lines: None,
+};
+
+fn shaped(strict: bool) -> FakeMux {
+    let mux = FakeMux::world()
+        .space("workspace-1")
+        .pane("pane-drawn")
+        .screen("drawn")
+        .screen_shape(AS_DRAWN_ANSI)
+        .pane("pane-forty")
+        .screen("joined")
+        .screen_shape(ScreenShape {
+            wrap: Wrap::Joined,
+            style: Style::Plain,
+            lines: Some(40),
+        })
+        .pane("pane-any")
+        .screen("any")
+        .build();
+    if strict { mux.strict_reads() } else { mux }
+}
+
+fn read(
+    mux: &FakeMux,
+    pane: &str,
+    lines: usize,
+    wrap: Wrap,
+    style: Style,
+) -> Result<String, MuxError> {
+    mux.screen(&PaneId::new(pane), ScreenRequest { lines, wrap, style })
+        .map(|screen| screen.text)
+}
+
+#[test]
+fn a_shaped_screen_answers_only_its_shape_and_strict_reads_need_one() {
+    let strict = shaped(true);
+    assert_eq!(
+        read(&strict, "pane-drawn", 7, Wrap::AsDrawn, Style::Ansi),
+        Ok("drawn".into())
+    );
+    assert_eq!(
+        read(&strict, "pane-forty", 40, Wrap::Joined, Style::Plain),
+        Ok("joined".into())
+    );
+    for (pane, lines, wrap, style) in [
+        ("pane-drawn", 7, Wrap::Joined, Style::Ansi),
+        ("pane-drawn", 7, Wrap::AsDrawn, Style::Plain),
+        ("pane-forty", 39, Wrap::Joined, Style::Plain),
+        ("pane-forty", 40, Wrap::AsDrawn, Style::Plain),
+        ("pane-any", 40, Wrap::Joined, Style::Plain),
+    ] {
+        assert_eq!(
+            read(&strict, pane, lines, wrap, style),
+            Err(MuxError::Unavailable(format!(
+                "the test gave no screen for {pane} read as {wrap:?} {style:?} with {lines} lines"
+            ))),
+            "a strict read of {pane} as {wrap:?} {style:?} with {lines} lines"
+        );
+    }
+    let lenient = shaped(false);
+    assert_eq!(
+        read(&lenient, "pane-any", 40, Wrap::Joined, Style::Plain),
+        Ok("any".into())
+    );
+    assert_eq!(
+        read(&lenient, "pane-drawn", 7, Wrap::AsDrawn, Style::Ansi),
+        Ok("drawn".into())
+    );
+    assert_eq!(
+        read(&lenient, "pane-drawn", 7, Wrap::Joined, Style::Ansi),
+        Ok(String::new())
+    );
+}
+
+#[test]
+fn a_screen_can_be_taken_away_and_given_back_in_the_same_shape() {
+    let strict = shaped(true);
+    strict.set_screen("pane-drawn", None);
+    assert!(matches!(
+        read(&strict, "pane-drawn", 7, Wrap::AsDrawn, Style::Ansi),
+        Err(MuxError::Unavailable(_))
+    ));
+    strict.set_screen("pane-drawn", Some("back"));
+    assert_eq!(
+        read(&strict, "pane-drawn", 7, Wrap::AsDrawn, Style::Ansi),
+        Ok("back".into())
+    );
+    assert!(read(&strict, "pane-drawn", 7, Wrap::Joined, Style::Plain).is_err());
+}
+
+#[test]
+fn every_read_is_logged_with_its_shape_even_when_it_fails() {
+    let mux = author_and_reviewer().strict_surveys(&[(ScopeKind::All, Depth::Spaces)]);
+    let workspace = SpaceId::new("workspace-1");
+    mux.fail(Op::Screen, MuxError::Timeout("timed out".into()));
+    let request = ScreenRequest {
+        lines: 3,
+        wrap: Wrap::AsDrawn,
+        style: Style::Ansi,
+    };
+    assert!(mux.survey(Scope::All, Depth::Spaces).is_ok());
+    assert!(
+        mux.survey(Scope::PanesOf(&workspace), Depth::Panes)
+            .is_err()
+    );
+    assert!(mux.screen(&PaneId::new("pane-shell"), request).is_err());
+    assert!(mux.screen(&PaneId::new("pane-shell"), request).is_ok());
+    assert!(mux.process(&PaneId::new("pane-9")).is_err());
+    let _ = mux.tab_label(&TabId::new("tab-1"));
+    let _ = mux.integration_root();
+    let shell = Read::Screen {
+        pane: PaneId::new("pane-shell"),
+        request,
+    };
+    assert_eq!(
+        mux.reads(),
+        [
+            Read::Survey {
+                scope: Surveyed::All,
+                depth: Depth::Spaces
+            },
+            Read::Survey {
+                scope: Surveyed::PanesOf(workspace),
+                depth: Depth::Panes
+            },
+            shell.clone(),
+            shell,
+            Read::Process(PaneId::new("pane-9")),
+            Read::TabLabel(TabId::new("tab-1")),
+            Read::IntegrationRoot,
+        ]
+    );
+    assert_eq!(mux.screen_reads("pane-shell"), 2);
+    assert_eq!(mux.screen_reads("pane-author"), 0);
+    assert_eq!(mux.surveys_made(ScopeKind::All, Depth::Spaces), 1);
+    assert_eq!(mux.surveys_made(ScopeKind::PanesOf, Depth::Panes), 1);
+    assert_eq!(mux.surveys_made(ScopeKind::PanesOf, Depth::Spaces), 0);
+}
+
+#[test]
+fn a_read_hook_can_fail_every_listing_of_one_space_until_the_test_heals_it() {
+    let mux = author_and_reviewer();
+    let unreadable = Arc::new(Mutex::new(vec![SpaceId::new("workspace-2")]));
+    let failing = Arc::clone(&unreadable);
+    mux.on_read(move |_, read| match read {
+        Read::Survey {
+            scope: Surveyed::PanesOf(space),
+            ..
+        } if failing.lock().unwrap().contains(space) => Err(MuxError::Unavailable(format!(
+            "{} is unavailable",
+            space.as_str()
+        ))),
+        _ => Ok(()),
+    });
+    let (first, second) = (SpaceId::new("workspace-1"), SpaceId::new("workspace-2"));
+    for _ in 0..2 {
+        for depth in [Depth::Spaces, Depth::Panes] {
+            assert_eq!(
+                mux.survey(Scope::PanesOf(&second), depth),
+                Err(MuxError::Unavailable("workspace-2 is unavailable".into()))
+            );
+            assert!(mux.survey(Scope::PanesOf(&first), depth).is_ok());
+        }
+    }
+    unreadable.lock().unwrap().clear();
+    assert!(mux.survey(Scope::PanesOf(&second), Depth::Panes).is_ok());
+}
+
+#[test]
+fn a_read_hook_changes_the_world_before_the_read_answers() {
+    let mux = author_and_reviewer();
+    let lists = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&lists);
+    mux.on_read(move |mux, read| {
+        if matches!(
+            read,
+            Read::Survey {
+                depth: Depth::Panes,
+                ..
+            }
+        ) && counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 1
+        {
+            mux.set_state("pane-author", AgentState::Working);
+        }
+        Ok(())
+    });
+    let workspace = SpaceId::new("workspace-1");
+    let author_state = |mux: &FakeMux| {
+        mux.survey(Scope::PanesOf(&workspace), Depth::Panes)
+            .unwrap()
+            .spaces[0]
+            .panes[0]
+            .state
+            .clone()
+    };
+    assert_eq!(author_state(&mux), Some(AgentState::Idle));
+    assert_eq!(
+        author_state(&mux),
+        Some(AgentState::Working),
+        "the second listing"
+    );
+    assert_eq!(Arc::strong_count(&mux.shared), 1, "no hook holds the world");
 }
 
 #[test]
@@ -431,6 +825,159 @@ fn a_screen_read_returns_the_last_lines() {
         Ok(Screen {
             text: "two\nthree".into()
         })
+    );
+}
+
+#[test]
+fn strict_reads_fail_what_the_test_did_not_give_and_answer_what_it_did() {
+    let request = ScreenRequest {
+        lines: 2,
+        wrap: Wrap::Joined,
+        style: Style::Plain,
+    };
+    let lenient = author_and_reviewer();
+    assert_eq!(
+        lenient.screen(&PaneId::new("pane-author"), request),
+        Ok(Screen {
+            text: String::new()
+        })
+    );
+    assert_eq!(lenient.integration_root(), Ok(None));
+
+    let strict = FakeMux::world()
+        .space("workspace-1")
+        .pane("pane-given")
+        .screen("one\ntwo\nthree")
+        .screen_shape(ScreenShape {
+            wrap: Wrap::Joined,
+            style: Style::Plain,
+            lines: None,
+        })
+        .process(PaneProcess {
+            shell_pid: Some(7),
+            ..PaneProcess::default()
+        })
+        .tab("tab-given")
+        .tab_label("tab-given", "given")
+        .pane("pane-bare")
+        .build()
+        .strict_reads();
+    fn unavailable<T>(result: Result<T, MuxError>) -> bool {
+        matches!(result, Err(MuxError::Unavailable(_)))
+    }
+    assert!(unavailable(
+        strict.screen(&PaneId::new("pane-bare"), request)
+    ));
+    assert!(unavailable(strict.process(&PaneId::new("pane-bare"))));
+    assert!(unavailable(
+        strict.tab_label(&TabId::new("workspace-1:tab-1"))
+    ));
+    assert!(unavailable(strict.integration_root()));
+    assert_eq!(
+        strict.screen(&PaneId::new("pane-given"), request),
+        Ok(Screen {
+            text: "two\nthree".into()
+        })
+    );
+    assert_eq!(
+        strict
+            .process(&PaneId::new("pane-given"))
+            .unwrap()
+            .shell_pid,
+        Some(7)
+    );
+    assert_eq!(
+        strict.tab_label(&TabId::new("tab-given")),
+        Ok(Some("given".into()))
+    );
+    assert_eq!(
+        strict.screen(&PaneId::new("pane-9"), request),
+        Err(MuxError::Gone(Gone::Pane, "pane-9 is gone".into()))
+    );
+}
+
+#[test]
+fn input_observers_see_every_attempt_with_its_outcome_before_it_returns() {
+    let mux = author_and_reviewer();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    for observer in ["first", "second"] {
+        let seen = Arc::clone(&seen);
+        mux.on_input(move |mux, attempt| {
+            seen.lock()
+                .unwrap()
+                .push((observer, attempt.clone(), mux.attempts().len()));
+        });
+    }
+    let author = identity(&mux, "pane-author");
+    let reviewer = identity(&mux, "pane-reviewer");
+    mux.script("pane-shell", InputOutcome::Refused("invalid_input".into()));
+    let delivered = prompt(&mux, "pane-author", &author, Admit::Settled);
+    let busy = prompt(&mux, "pane-reviewer", &reviewer, Admit::Settled);
+    let refused = mux.send(&PaneId::new("pane-shell"), InputKind::Line("ls"));
+    let ghost = mux.send(&PaneId::new("pane-ghost"), InputKind::Line("ls"));
+    let attempt = |pane: &str, input, outcome| Attempt {
+        pane: PaneId::new(pane),
+        input,
+        outcome,
+    };
+    let attempts = [
+        attempt("pane-author", SentInput::Prompt("hello".into()), delivered),
+        attempt("pane-reviewer", SentInput::Prompt("hello".into()), busy),
+        attempt("pane-shell", SentInput::Line("ls".into()), refused),
+        attempt("pane-ghost", SentInput::Line("ls".into()), ghost),
+    ];
+    assert_eq!(attempts[0].outcome, InputOutcome::Delivered);
+    assert!(matches!(attempts[1].outcome, InputOutcome::Declined(..)));
+    assert!(matches!(attempts[3].outcome, InputOutcome::Declined(..)));
+    let expected: Vec<_> = attempts
+        .iter()
+        .enumerate()
+        .flat_map(|(index, attempt)| {
+            ["first", "second"].map(|observer| (observer, attempt.clone(), index + 1))
+        })
+        .collect();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        expected,
+        "each observer sees every attempt once, in order, after it is recorded"
+    );
+    assert_eq!(mux.attempts(), attempts);
+    assert_eq!(mux.sent().len(), 1, "only the delivered prompt was typed");
+    assert_eq!(
+        Arc::strong_count(&mux.shared),
+        1,
+        "no observer holds the world"
+    );
+}
+
+#[test]
+fn an_observer_can_change_what_the_pane_shows_as_keys_arrive() {
+    let mux = author_and_reviewer();
+    mux.set_screen("pane-author", Some("> draft"));
+    mux.on_input(|mux, attempt| {
+        if let SentInput::Keys { keys, .. } = &attempt.input
+            && keys.iter().all(|key| *key == Key::CtrlU)
+        {
+            mux.set_screen(attempt.pane.as_str(), Some("> "));
+        }
+    });
+    let request = ScreenRequest {
+        lines: 1,
+        wrap: Wrap::Joined,
+        style: Style::Plain,
+    };
+    mux.send(
+        &PaneId::new("pane-author"),
+        InputKind::Keys {
+            recipient: Recipient::Agent,
+            keys: &[Key::CtrlU],
+        },
+    );
+    assert_eq!(
+        mux.screen(&PaneId::new("pane-author"), request)
+            .unwrap()
+            .text,
+        "> "
     );
 }
 

@@ -341,6 +341,7 @@ dependencies = [
  "clap",
  "libc",
  "memchr",
+ "namedrop",
  "qrcode",
  "rqrr",
  "rusqlite",

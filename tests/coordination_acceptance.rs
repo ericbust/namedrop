@@ -5,14 +5,20 @@ mod delivered;
 #[path = "support/dispatch.rs"]
 mod dispatch;
 
-use namedrop::*;
+use namedrop::{
+    mux::{
+        AgentState,
+        fake::{EVERY_LISTING, FakeMux, SentInput, StrictSpace, Takes},
+    },
+    *,
+};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::PathBuf,
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -24,9 +30,9 @@ struct Fixture {
     home: PathBuf,
     ids: AtomicU64,
     now: AtomicU64,
-    statuses: Mutex<BTreeMap<String, String>>,
-    sessions: Mutex<BTreeMap<String, String>>,
-    prompts: Mutex<Vec<(String, Value)>>,
+    mux: StrictSpace,
+    /// Each prompt the code tried, as its pane and the envelope it named.
+    prompts: Arc<Mutex<Vec<(String, Value)>>>,
 }
 impl Fixture {
     fn new() -> Self {
@@ -38,19 +44,15 @@ impl Fixture {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
+        let prompts = Arc::new(Mutex::new(Vec::new()));
         let f = Self {
             state: root.join("state"),
             home: root.join("home"),
+            mux: space_at(&root, Arc::clone(&prompts)),
             root,
             ids: AtomicU64::new(1),
             now: AtomicU64::new(100),
-            statuses: Mutex::new(BTreeMap::from([
-                ("lead".into(), "working".into()),
-                ("worker".into(), "idle".into()),
-                ("reviewer".into(), "idle".into()),
-            ])),
-            sessions: Mutex::new(BTreeMap::new()),
-            prompts: Mutex::new(Vec::new()),
+            prompts,
         };
         fs::create_dir_all(&f.home).unwrap();
         let by = MutationAttribution::new(ActorKind::Human, "synthetic-user", 1);
@@ -99,7 +101,7 @@ impl Fixture {
     fn ns(&self) -> StateNamespace {
         StateNamespace::for_space("synthetic-socket", "synthetic-workspace")
     }
-    fn runtime<'a>(&'a self, pane: &'a str) -> LifecycleRuntime<'a, Self, Self, Self> {
+    fn runtime<'a>(&'a self, pane: &'a str) -> LifecycleRuntime<'a, FakeMux, Self, Self> {
         LifecycleRuntime {
             state_directory: &self.state,
             home_directory: Some(&self.home),
@@ -108,7 +110,7 @@ impl Fixture {
             workspace_id: Some("synthetic-workspace"),
             current_pane_id: Some(pane),
             session_socket_id: "synthetic-socket",
-            mux: self,
+            mux: &self.mux,
             clock: self,
             ids: self,
         }
@@ -182,10 +184,7 @@ impl Fixture {
         self.execute(pane, self.bound(e, "complete.no-reply"));
     }
     fn status(&self, pane: &str, status: &str) {
-        self.statuses
-            .lock()
-            .unwrap()
-            .insert(pane.into(), status.into());
+        self.mux.set_state(pane, AgentState::parse(status));
     }
     fn drain(&self) {
         drain_mailboxes(&self.runtime("lead")).unwrap();
@@ -254,34 +253,36 @@ impl IdGenerator for Fixture {
         )
     }
 }
-impl HerdrCommandExecutor for Fixture {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let value = match args {
-            ["workspace", "list"] => {
-                json!({"result":{"workspaces":[{"workspace_id":"synthetic-workspace"}]}})
-            }
-            ["worktree", "list", ..] => {
-                json!({"result":{"worktrees":[{"path":self.root,"open_workspace_id":"synthetic-workspace"}]}})
-            }
-            ["pane", "list", ..] => {
-                let statuses = self.statuses.lock().unwrap();
-                let sessions = self.sessions.lock().unwrap();
-                json!({"result":{"panes":(["lead","worker","reviewer"].map(|p|json!({"pane_id":p,"terminal_id":format!("terminal-{p}"),"tab_id":"synthetic-tab","workspace_id":"synthetic-workspace","agent_status":statuses[p],"agent_session":{"value":sessions.get(p).cloned().unwrap_or_else(||format!("session-{p}"))}})))}})
-            }
-            ["agent", "prompt", pane, prompt] => {
-                self.prompts
-                    .lock()
-                    .unwrap()
-                    .push(((*pane).into(), delivered::envelope_of(prompt)));
-                json!({})
-            }
-            ["pane", "report-metadata", ..] => json!({}),
-            _ => return Err(format!("unexpected fixture command {args:?}")),
-        };
-        Ok(HerdrCommandOutput {
-            stdout: value.to_string(),
-        })
+/// Three agent panes in one space holding the fixture's checkout. The lead
+/// starts working, and a prompt leaves each pane's status as it was. Each
+/// prompt's envelope goes to `prompts` before the delivery that tried it
+/// returns, when its attempt is still dispatching, so a pointer typed before
+/// its attempt row commits fails the test. Like the old fake's `agent
+/// prompt`, it sees every prompt the code tried, declined ones included.
+fn space_at(root: &std::path::Path, prompts: Arc<Mutex<Vec<(String, Value)>>>) -> StrictSpace {
+    let mut world = FakeMux::world().space("synthetic-workspace").checkout(root);
+    for (pane, state) in [
+        ("lead", AgentState::Working),
+        ("worker", AgentState::Idle),
+        ("reviewer", AgentState::Idle),
+    ] {
+        world = world
+            .pane(pane)
+            .tab("synthetic-tab")
+            .session(&format!("session-{pane}"))
+            .state(state);
     }
+    let mux = world.build().prompts_stay_settled();
+    mux.on_input(move |_, attempt| {
+        if let SentInput::Prompt(prompt) = &attempt.input {
+            let envelope = delivered::envelope_of(prompt);
+            prompts
+                .lock()
+                .unwrap()
+                .push((attempt.pane.as_str().to_owned(), envelope));
+        }
+    });
+    StrictSpace::new(mux, EVERY_LISTING, Takes::prompts_and_metadata())
 }
 
 // This oracle consumes actual results, captured delivery prompts, and persisted
@@ -435,17 +436,14 @@ fn separate_assignments() -> Value {
     completion["input"]["source"] =
         json!("@lead Complete synthetic checksum: 42; zero and final edge verified.");
     completion["input"]["work_outcome"] = json!("completed");
-    f.sessions
-        .lock()
-        .unwrap()
-        .insert("worker".into(), "replacement-worker".into());
+    f.mux.set_session("worker", "replacement-worker");
     let before = f.snapshot();
     assert!(
         f.run("worker", "reply", completion["input"].clone())
             .is_err()
     );
     assert_eq!(before, f.snapshot());
-    f.sessions.lock().unwrap().remove("worker");
+    f.mux.set_session("worker", "session-worker");
     f.execute("worker", completion.clone());
     let before = f.snapshot();
     f.execute("worker", completion);

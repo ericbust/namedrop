@@ -6,18 +6,16 @@ mod cleanup;
 mod delivered;
 
 use namedrop::{
-    AgentConfigDirectories, Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator,
-    LifecycleRuntime, StateStore, execute_user_prompt_submit_hook,
+    AgentConfigDirectories, Clock, IdGenerator, LifecycleRuntime, StateStore,
+    execute_user_prompt_submit_hook,
+    mux::fake::{EVERY_LISTING, FakeMux, SentInput, StrictSpace, Takes},
 };
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::{
-        Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 const SOCKET: &str = "/tmp/nd-tb-1000-a7d69c9d70a7c962.sock";
@@ -38,7 +36,7 @@ struct Fixture {
     state: PathBuf,
     socket: &'static str,
     clock: FixedClock,
-    herdr: FakeHerdr,
+    mux: StrictSpace,
     ids: Ids,
 }
 
@@ -62,10 +60,7 @@ impl Fixture {
             state,
             socket,
             clock: FixedClock(now_ms),
-            herdr: FakeHerdr {
-                panes,
-                prompts: Mutex::new(Vec::new()),
-            },
+            mux: space_of(&panes),
             ids: Ids(AtomicU64::new(1)),
         }
     }
@@ -76,7 +71,7 @@ impl Fixture {
         connection.pragma_update(None, "user_version", 7).unwrap();
     }
 
-    fn runtime<'a>(&'a self, pane: &'a str) -> LifecycleRuntime<'a, FakeHerdr, FixedClock, Ids> {
+    fn runtime<'a>(&'a self, pane: &'a str) -> LifecycleRuntime<'a, FakeMux, FixedClock, Ids> {
         LifecycleRuntime {
             state_directory: &self.state,
             home_directory: Some(&self.root),
@@ -85,7 +80,7 @@ impl Fixture {
             workspace_id: Some(WORKSPACE),
             current_pane_id: Some(pane),
             session_socket_id: self.socket,
-            mux: &self.herdr,
+            mux: &self.mux,
             clock: &self.clock,
             ids: &self.ids,
         }
@@ -127,47 +122,24 @@ type Pane = (&'static str, &'static str);
 
 const REAL_PANES: [Pane; 2] = [(CLAUDE_PANE, CLAUDE_SESSION), (CODEX_PANE, CODEX_SESSION)];
 
-struct FakeHerdr {
-    panes: Vec<Pane>,
-    prompts: Mutex<Vec<(String, String)>>,
-}
-
-impl HerdrCommandExecutor for FakeHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let stdout = match args {
-            ["workspace", "list"] => {
-                json!({"result":{"workspaces":[{"workspace_id":WORKSPACE}]}}).to_string()
-            }
-            ["worktree", "list", ..] => json!({"result": {"worktrees": [
-                {"path": "/repo", "open_workspace_id": WORKSPACE}
-            ]}})
-            .to_string(),
-            ["pane", "list", ..] => {
-                let panes = self
-                    .panes
-                    .iter()
-                    .enumerate()
-                    .map(|(at, (pane, session))| {
-                        json!({"pane_id":pane,"terminal_id":format!("t{at}"),
-                               "tab_id":format!("w1:t{at}"),"workspace_id":WORKSPACE,
-                               "agent":"claude","agent_session":{"value":session},
-                               "agent_status":"idle"})
-                    })
-                    .collect::<Vec<_>>();
-                json!({"result": {"panes": panes}}).to_string()
-            }
-            ["agent", "prompt", pane, prompt] => {
-                self.prompts
-                    .lock()
-                    .unwrap()
-                    .push(((*pane).to_owned(), (*prompt).to_owned()));
-                "{}".to_owned()
-            }
-            ["pane", "report-metadata", ..] => "{}".to_owned(),
-            _ => return Err(format!("unexpected Herdr command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput { stdout })
+/// Space `w1` with checkout `/repo`, where every pane runs Claude Code, sits
+/// idle, and stays idle after a prompt, as the 1.6.0 testbed did.
+fn space_of(panes: &[Pane]) -> StrictSpace {
+    let mut world = FakeMux::world().space(WORKSPACE).checkout("/repo");
+    for (at, (pane, session)) in panes.iter().enumerate() {
+        world = world
+            .pane(pane)
+            .terminal(&format!("t{at}"))
+            .tab(&format!("w1:t{at}"))
+            .claude()
+            .session(session)
+            .idle();
     }
+    StrictSpace::new(
+        world.build().prompts_stay_settled(),
+        EVERY_LISTING,
+        Takes::prompts_and_metadata(),
+    )
 }
 
 struct FixedClock(u64);
@@ -311,16 +283,15 @@ fn after_the_upgrade_a_new_delivery_is_a_pointer_to_the_same_sessions() {
     .unwrap();
     namedrop::drain_mailboxes(&runtime).unwrap();
     let typed = fixture
-        .herdr
-        .prompts
-        .lock()
-        .unwrap()
-        .iter()
+        .mux
+        .sent_to(CLAUDE_PANE)
+        .into_iter()
         .rev()
-        .find(|(pane, _)| pane == CLAUDE_PANE)
-        .unwrap_or_else(|| panic!("nothing was typed"))
-        .1
-        .clone();
+        .find_map(|sent| match sent.input {
+            SentInput::Prompt(prompt) => Some(prompt),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("nothing was typed"));
     assert!(typed.starts_with("Namedrop message "), "{typed}");
     let envelope: Value = delivered::envelope_of(&typed);
     assert_eq!(envelope["untrusted_body"], "Reply with AFTER.");

@@ -3,6 +3,7 @@
 
 mod effect;
 mod event;
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod fake;
 pub mod gate;

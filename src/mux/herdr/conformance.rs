@@ -181,7 +181,7 @@ impl Wire {
                 json!({"result": {"panes": panes}})
             }
             ["pane", "read", id, "--source", _, "--lines", lines, ..] => {
-                let screen = &Self::pane(&world, id)?.screen;
+                let screen = Self::pane(&world, id)?.screen.clone().unwrap_or_default();
                 let lines: usize = lines.parse().unwrap();
                 let all: Vec<_> = screen.lines().collect();
                 return Ok(Value::String(
@@ -189,7 +189,7 @@ impl Wire {
                 ));
             }
             ["pane", "process-info", "--pane", id] => {
-                let process = &Self::pane(&world, id)?.process;
+                let process = Self::pane(&world, id)?.process.clone().unwrap_or_default();
                 let foreground: Vec<_> = process
                     .foreground_pids
                     .iter()
