@@ -1,19 +1,21 @@
+#![cfg(feature = "test-support")]
 #[path = "support/cleanup.rs"]
 mod cleanup;
 
+use namedrop::mux::{
+    InputOutcome, Key, PaneId, Recipient,
+    fake::{Attempt, CHECKOUT_LISTINGS, FakeMux, SentInput, StrictSpace, Takes},
+};
 use namedrop::{
-    ActorKind, AgentSessionId, Clock, DeliveryId, HerdrCommandExecutor, HerdrCommandOutput,
-    IdGenerator, LifecycleRuntime, MessageDraft, MessageId, MessageRecipientDraft,
-    MutationAttribution, PaneAddressDraft, PaneAddressId, PaneRoleId, StateNamespace, StateStore,
-    StoreErrorKind, ThreadId, execute_control_operation, reconcile_discovered_panes,
+    ActorKind, AgentSessionId, Clock, DeliveryId, IdGenerator, LifecycleRuntime, MessageDraft,
+    MessageId, MessageRecipientDraft, MutationAttribution, PaneAddressDraft, PaneAddressId,
+    PaneRoleId, StateNamespace, StateStore, StoreErrorKind, ThreadId, execute_control_operation,
+    reconcile_discovered_panes,
 };
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{
-        Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -125,9 +127,7 @@ fn confirmed_cancel_held_is_exact_and_never_retries_or_stops_an_agent() {
                 Ok(())
             })
             .unwrap();
-        let herdr = FakeHerdr {
-            interrupted: Mutex::new(Vec::new()),
-        };
+        let herdr = fake_herdr();
         let ids = SequenceIds(AtomicU64::new(1));
         let runtime = LifecycleRuntime {
             state_directory: directory.path(),
@@ -137,7 +137,7 @@ fn confirmed_cancel_held_is_exact_and_never_retries_or_stops_an_agent() {
             workspace_id: None,
             current_pane_id: Some("pane-sender"),
             session_socket_id: "socket-a",
-            mux: &herdr,
+            mux: &*herdr,
             clock: &FixedClock,
             ids: &ids,
         };
@@ -204,7 +204,7 @@ fn confirmed_cancel_held_is_exact_and_never_retries_or_stops_an_agent() {
         } else {
             assert!(result.is_err(), "{state:?} was cancellable");
         }
-        assert!(herdr.interrupted.lock().unwrap().is_empty());
+        assert!(herdr.attempts().is_empty());
     }
 }
 
@@ -325,9 +325,7 @@ fn a_human_can_acknowledge_a_missing_disposition_only_for_a_retired_recipient() 
     assert!(namedrop::is_control_operation("delivery.acknowledge"));
     let directory = TestDirectory::new();
     settled_attempt_without_disposition(&directory, false);
-    let herdr = FakeHerdr {
-        interrupted: Mutex::new(Vec::new()),
-    };
+    let herdr = fake_herdr();
     let ids = SequenceIds(AtomicU64::new(1));
     let runtime = LifecycleRuntime {
         state_directory: directory.path(),
@@ -337,7 +335,7 @@ fn a_human_can_acknowledge_a_missing_disposition_only_for_a_retired_recipient() 
         workspace_id: None,
         current_pane_id: Some("pane-sender"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -401,7 +399,7 @@ fn a_human_can_acknowledge_a_missing_disposition_only_for_a_retired_recipient() 
         .unwrap();
     assert_eq!(acknowledgements, 1);
     assert_eq!(state_and_dispositions(), ("settled".to_owned(), 0));
-    assert!(herdr.interrupted.lock().unwrap().is_empty());
+    assert!(herdr.attempts().is_empty());
 }
 
 #[test]
@@ -485,9 +483,7 @@ fn expired_unsent_delivery_has_truthful_health_and_confirmed_exact_cancellation(
             Ok(())
         })
         .unwrap();
-    let herdr = FakeHerdr {
-        interrupted: Mutex::new(Vec::new()),
-    };
+    let herdr = fake_herdr();
     let ids = SequenceIds(AtomicU64::new(1));
     let runtime = LifecycleRuntime {
         state_directory: directory.path(),
@@ -497,7 +493,7 @@ fn expired_unsent_delivery_has_truthful_health_and_confirmed_exact_cancellation(
         workspace_id: None,
         current_pane_id: Some("pane-sender"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &LateClock,
         ids: &ids,
     };
@@ -541,7 +537,7 @@ fn expired_unsent_delivery_has_truthful_health_and_confirmed_exact_cancellation(
             .iter()
             .all(|issue| issue.repair.operation.as_deref() != Some("delivery.cancel-held"))
     );
-    assert!(herdr.interrupted.lock().unwrap().is_empty());
+    assert!(herdr.attempts().is_empty());
 }
 
 struct TestDirectory {
@@ -1242,41 +1238,44 @@ impl IdGenerator for SequenceIds {
     }
 }
 
-struct FakeHerdr {
-    interrupted: Mutex<Vec<Vec<String>>>,
+/// The world the old `FakeHerdr` answered: `/repo` open in workspace-1,
+/// listed through `CHECKOUT_LISTINGS` only, a sender pane with no session
+/// field, and a working recipient that reports a session but no agent kind.
+/// It takes only ctrl+c to the recipient's agent, as the old fake answered
+/// every other key with `invalid_key` and failed every other command.
+fn fake_herdr() -> StrictSpace {
+    let mux = FakeMux::world()
+        .endpoint("socket-a")
+        .space("workspace-1")
+        .checkout("/repo")
+        .unstamped()
+        .pane("pane-sender")
+        .terminal("terminal-sender")
+        .tab("tab-1")
+        .reports_session(false)
+        .pane("pane-recipient")
+        .terminal("terminal-recipient")
+        .tab("tab-1")
+        .session("session-recipient")
+        .working()
+        .build();
+    StrictSpace::new(
+        mux,
+        CHECKOUT_LISTINGS,
+        Takes::nothing().input(|attempt| *attempt == interrupt_recipient()),
+    )
 }
 
-impl HerdrCommandExecutor for FakeHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let stdout = match args {
-            ["workspace", "list"] => {
-                r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
-            }
-            ["worktree", "list", "--cwd", "/repo", "--json"] => {
-                r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-            }
-            ["pane", "list", "--workspace", "workspace-1"] => {
-                r#"{"result":{"panes":[{"pane_id":"pane-sender","terminal_id":"terminal-sender","tab_id":"tab-1","workspace_id":"workspace-1"},{"pane_id":"pane-recipient","terminal_id":"terminal-recipient","tab_id":"tab-1","workspace_id":"workspace-1","agent_session":{"value":"session-recipient"},"agent_status":"working"}]}}"#
-            }
-            // Herdr validates every key before writing bytes. Real Herdr 0.8.2
-            // accepted `ctrl+c` and answered `ctrl-c` with `invalid_key`.
-            ["agent", "send-keys", "pane-recipient", "ctrl+c"] => {
-                self.interrupted
-                    .lock()
-                    .unwrap()
-                    .push(args.iter().map(|value| (*value).to_owned()).collect());
-                "{}"
-            }
-            ["agent", "send-keys", _, key] => {
-                return Err(format!(
-                    r#"{{"error":{{"code":"invalid_key","message":"unsupported key {key}"}}}}"#
-                ));
-            }
-            _ => return Err(format!("unexpected Herdr command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput {
-            stdout: stdout.to_owned(),
-        })
+/// ctrl+c typed to the recipient's agent. Its Herdr spelling, `ctrl+c`, is
+/// pinned by the adapter's own tests.
+fn interrupt_recipient() -> Attempt {
+    Attempt {
+        pane: PaneId::new("pane-recipient"),
+        input: SentInput::Keys {
+            recipient: Recipient::Agent,
+            keys: vec![Key::CtrlC],
+        },
+        outcome: InputOutcome::Delivered,
     }
 }
 
@@ -1436,9 +1435,7 @@ fn control_operations_mutate_durable_state_and_stop_only_a_proven_thread_respons
             )
         })
         .unwrap();
-    let herdr = FakeHerdr {
-        interrupted: Mutex::new(Vec::new()),
-    };
+    let herdr = fake_herdr();
     let ids = SequenceIds(AtomicU64::new(1));
     let runtime = LifecycleRuntime {
         state_directory: directory.path(),
@@ -1448,7 +1445,7 @@ fn control_operations_mutate_durable_state_and_stop_only_a_proven_thread_respons
         workspace_id: None,
         current_pane_id: Some("pane-sender"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -1500,12 +1497,10 @@ fn control_operations_mutate_durable_state_and_stop_only_a_proven_thread_respons
         serde_json::json!(["pane-recipient"])
     );
     assert_eq!(stopped["warnings"], serde_json::json!([]));
-    // The exact key Herdr accepts is part of the contract, not the fake's
-    // leniency: `ctrl-c` is answered with `invalid_key` by the real host.
-    assert_eq!(
-        *herdr.interrupted.lock().unwrap(),
-        [["agent", "send-keys", "pane-recipient", "ctrl+c"].map(str::to_owned)]
-    );
+    // The exact key is part of the contract, not the fake's leniency. Its
+    // Herdr spelling is `ctrl+c`, which the adapter's tests pin, because the
+    // real host answers `ctrl-c` with `invalid_key`.
+    assert_eq!(herdr.attempts(), [interrupt_recipient()]);
 }
 
 #[test]
@@ -1704,9 +1699,7 @@ fn thread_stop_waits_out_a_live_peek_input_that_holds_the_pane_lock() {
     });
     holding.recv().unwrap();
     let started = Instant::now();
-    let herdr = FakeHerdr {
-        interrupted: Mutex::new(Vec::new()),
-    };
+    let herdr = fake_herdr();
     let ids = SequenceIds(AtomicU64::new(1));
     let runtime = LifecycleRuntime {
         state_directory: directory.path(),
@@ -1716,7 +1709,7 @@ fn thread_stop_waits_out_a_live_peek_input_that_holds_the_pane_lock() {
         workspace_id: None,
         current_pane_id: Some("pane-sender"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -1736,8 +1729,5 @@ fn thread_stop_waits_out_a_live_peek_input_that_holds_the_pane_lock() {
         started.elapsed() >= hold,
         "Stop interrupted while the input still held the pane"
     );
-    assert_eq!(
-        *herdr.interrupted.lock().unwrap(),
-        [["agent", "send-keys", "pane-recipient", "ctrl+c"].map(str::to_owned)]
-    );
+    assert_eq!(herdr.attempts(), [interrupt_recipient()]);
 }
