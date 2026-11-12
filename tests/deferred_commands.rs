@@ -1490,11 +1490,11 @@ fn assert_reminder_clock_discovery_failure(error: &str) {
         assert_deleted_workspace_failed_its_reminders(&connection);
         return;
     }
-    wait_for(|| discoveries() >= before + 2);
+    wait_for(|| discoveries() >= before + 2 || state() != "scheduled");
     assert_eq!(
         state(),
         "scheduled",
-        "a transient failure enqueued the reminder"
+        "a transient discovery failure changed the due reminder"
     );
     fs::remove_file(&error_path).unwrap();
     wait_for(|| state() == "awaiting_delivery");
