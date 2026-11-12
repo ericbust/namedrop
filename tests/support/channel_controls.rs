@@ -1160,7 +1160,7 @@ fn stop_after_a_live_peek_key_still_interrupts_the_turn() {
 }
 
 #[test]
-fn stop_after_a_line_typed_into_the_delivery_s_turn_still_interrupts_it() {
+fn stop_after_an_answer_to_the_delivery_s_blocked_question_still_interrupts_it() {
     let f = fixture();
     let (parent, server, sent) = peeked_turn(
         &f,

@@ -514,7 +514,10 @@ impl DashboardPane {
                 // instruction, and Codex drops the delivered task for it. The
                 // marker may also name a delivery whose turn already ended,
                 // since nothing clears it when the turn ends. So a line typed
-                // while the agent works is the person's turn.
+                // while the agent works is the person's turn. A blocked
+                // prompt in a turn the person started without a marker write
+                // looks the same, so its answer keeps the delivery's marker
+                // and Stop behaves as it did before the dashboard typed.
                 let answers_delivery = matches!(turn, Some(AgentState::Blocked))
                     && matches!(&previous, Ok(Some(bytes)) if matches!(
                         serde_json::from_slice(bytes),
