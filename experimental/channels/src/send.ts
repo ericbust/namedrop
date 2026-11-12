@@ -12,6 +12,11 @@ import type {
 } from "./model.ts";
 import { type ReminderConversation, reminderPath } from "./reminders.ts";
 import {
+  parseSoundSettings,
+  type SoundChange,
+  type SoundSettings,
+} from "./sounds.ts";
+import {
   parseDeliverAnswer,
   parseFullBody,
   parseImageUpload,
@@ -137,6 +142,25 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
     },
     prepare(): void {
       void token();
+    },
+    async sounds(signal: AbortSignal): Promise<SoundSettings | null> {
+      try {
+        const response = await fetcher("/api/sounds", {
+          credentials: "same-origin",
+          signal,
+        });
+        return response.ok ? parseSoundSettings(await response.json()) : null;
+      } catch {
+        return null;
+      }
+    },
+    async changeSound(change: SoundChange): Promise<SoundSettings | null> {
+      try {
+        const response = await postWithTokenRetry("/api/sounds", change);
+        return response.ok ? parseSoundSettings(await response.json()) : null;
+      } catch {
+        return null;
+      }
     },
     async fullBody(
       key: SpaceKey,

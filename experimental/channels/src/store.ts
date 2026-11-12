@@ -32,6 +32,7 @@ import type {
   TerminalRun,
 } from "./model.ts";
 import { samePeek } from "./peek.ts";
+import { type AgentKey, agentKey, nothingHeard } from "./sounds.ts";
 import { ENVOY } from "./wire.ts";
 
 export const channelCollator = new Intl.Collator();
@@ -61,6 +62,7 @@ export function initialState({
     nextRequestId: 1,
     outbox: new Map(),
     drafts: new Map(),
+    heard: nothingHeard,
   };
 }
 export function bootState({
@@ -379,6 +381,29 @@ function hasActivity(a: Channel, b: Channel): boolean {
     )
   );
 }
+// Agents whose new messages in `next` are to the person, oldest first.
+export function heardIn(
+  previous: Pick<Channel, "messages" | "latestMessages">,
+  next: Pick<Channel, "latestMessages" | "members">,
+): AgentKey[] {
+  const agents: AgentKey[] = [];
+  const person = (id: AddressId | "human") =>
+    id === "human" || next.members.get(id)?.kind.type === "human";
+  for (const row of next.latestMessages.values()) {
+    if (
+      previous.latestMessages.has(row.id) ||
+      previous.messages.has(row.id) ||
+      row.progressNote ||
+      isSystem(row) ||
+      !agentAuthor(row.author, next.members) ||
+      !row.legs.some((leg) => person(leg.to))
+    )
+      continue;
+    const key = agentKey(row.author);
+    if (key !== null && !agents.includes(key)) agents.push(key);
+  }
+  return agents;
+}
 function clearUnread(
   unread: ReadonlySet<SpaceKey>,
   key: SpaceKey | null,
@@ -567,6 +592,7 @@ function step(state: State, event: Event): State {
       const channels = new Map(state.channels);
       channels.set(channel.key, accumulated);
       const selection = settle(state, channels, previous === undefined);
+      const agents = previous ? heardIn(previous, accumulated) : [];
       let unread = state.unread;
       if (
         previous &&
@@ -581,6 +607,10 @@ function step(state: State, event: Event): State {
         unread,
         outbox: settleOutbox(state.outbox, [accumulated]),
         viewKnown: true,
+        heard:
+          agents.length === 0
+            ? state.heard
+            : { seq: state.heard.seq + 1, agents },
       };
     }
     case "older":
