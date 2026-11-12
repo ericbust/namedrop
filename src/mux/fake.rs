@@ -137,7 +137,7 @@ pub enum Op {
 /// The checkout a space listing names for a space. Herdr stamps it on the
 /// space when the space opens a worktree, and answers `worktree list
 /// --workspace` from the checkout itself, so the two can differ.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Stamp {
     /// The listing names the space's checkout.
     Checkout,
@@ -145,7 +145,7 @@ pub(crate) enum Stamp {
     Other(Option<Checkout>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FakeSpace {
     pub(crate) id: SpaceId,
     pub(crate) label: Option<String>,
@@ -183,7 +183,7 @@ impl FakeSpace {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FakePane {
     pub(crate) facts: PaneFacts,
     /// `None` until a test gives the pane a screen.
@@ -471,8 +471,9 @@ impl FakeMux {
 
     /// Prompts go through the real `gate::emulate_prompt`, as on a
     /// multiplexer without a native gate. By default the fake gates like
-    /// Herdr: it declines a blocked agent or a pane with none before typing,
-    /// types to a working one, and checks no identity.
+    /// Herdr: it declines a blocked agent, or a pane that reports no agent
+    /// kind, a session alone included, before typing, types to a working
+    /// one, and checks no identity.
     pub fn emulated(mut self) -> Self {
         self.emulated = true;
         self
@@ -677,14 +678,17 @@ impl FakeMux {
     /// `pane` now reports `session`, as when another program replaces the
     /// one that was running there. Like the builder's `.session(..)`, it
     /// keeps the agent's kind and label, and makes a free pane an agent whose
-    /// kind is unreported.
+    /// kind is unreported. The listing names the `agent_session` field again
+    /// if `omit_session` left it out.
     ///
     /// # Panics
     ///
     /// When the world has no such pane.
     pub fn set_session(&self, pane: &str, session: &str) {
-        unreported_agent(&mut self.lock().known_pane(pane).facts).session =
-            SessionClaim::Reported(AgentSessionId::new(session));
+        let mut world = self.lock();
+        let facts = &mut world.known_pane(pane).facts;
+        facts.reports_session = true;
+        unreported_agent(facts).session = SessionClaim::Reported(AgentSessionId::new(session));
     }
 
     /// `pane` shows `text`, or with `None` nothing a read can answer. The
@@ -741,7 +745,9 @@ impl FakeMux {
     /// # Panics
     ///
     /// When the world has no such space, when `describe` adds a space, a
-    /// tab label, or an integration root, or when a new pane's id is taken.
+    /// tab label, or an integration root, when it changes the space itself,
+    /// as `.checkout()`, `.label()`, `.unlisted()`, or `.stamped()` would,
+    /// or when a new pane's id is taken. The setters change a space.
     pub fn open_pane(&self, space: &str, describe: impl FnOnce(WorldBuilder) -> WorldBuilder) {
         let blank = FakeSpace {
             panes: Vec::new(),
@@ -755,7 +761,7 @@ impl FakeMux {
         } = describe(WorldBuilder {
             endpoint: self.shared.endpoint.clone(),
             world: World {
-                spaces: vec![blank],
+                spaces: vec![blank.clone()],
                 ..World::default()
             },
         })
@@ -764,7 +770,15 @@ impl FakeMux {
             spaces.len() == 1 && tab_labels.is_empty() && integration_root.is_none(),
             "open_pane describes panes only"
         );
-        let panes = spaces.pop().expect("one space").panes;
+        let described = spaces.pop().expect("one space");
+        assert!(
+            FakeSpace {
+                panes: Vec::new(),
+                ..described.clone()
+            } == blank,
+            "open_pane describes panes only, so it cannot change {space} itself"
+        );
+        let panes = described.panes;
         let mut world = self.lock();
         for pane in &panes {
             assert!(
@@ -835,6 +849,19 @@ impl FakeMux {
             agent.session = SessionClaim::None;
         }
         drop_empty_agent(facts);
+    }
+
+    /// `pane`'s listing leaves out its `agent_session` field, as the
+    /// builder's `.reports_session(false)` does, so it reports no session
+    /// and does not say that it has none. `set_session` names the field
+    /// again.
+    ///
+    /// # Panics
+    ///
+    /// When the world has no such pane.
+    pub fn omit_session(&self, pane: &str) {
+        self.clear_session(pane);
+        self.lock().known_pane(pane).facts.reports_session = false;
     }
 
     /// `pane`'s process, or with `None` nothing a read can answer.
@@ -930,12 +957,18 @@ impl FakeMux {
         if self.emulated {
             return gate::emulate_prompt(&Channel(self), pane, &request);
         }
-        // Herdr 0.9.5 `agent prompt` refuses only a blocked agent, and types
-        // to one that reports `working`, whatever the caller's `Admit`.
+        // Herdr 0.9.5 `agent prompt` refuses a pane that reports no agent
+        // word (`agent_not_found`, even when it reports a session) and a
+        // blocked agent, and types to one that reports `working`, whatever
+        // the caller's `Admit`.
         let admitted = {
             let world = self.lock();
             let facts = &world.pane(pane).expect("checked above").facts;
-            facts.agent.is_some() && facts.state != Some(AgentState::Blocked)
+            facts
+                .agent
+                .as_ref()
+                .is_some_and(|agent| agent.kind != AgentKind::Unreported)
+                && facts.state != Some(AgentState::Blocked)
         };
         if !admitted {
             return InputOutcome::Declined(

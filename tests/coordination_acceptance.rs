@@ -8,7 +8,7 @@ mod dispatch;
 
 use namedrop::{
     mux::{
-        AgentState,
+        AgentState, InputOutcome,
         fake::{EVERY_LISTING, FakeMux, SentInput, StrictSpace, Takes},
     },
     *,
@@ -274,6 +274,11 @@ fn space_at(root: &std::path::Path, prompts: Arc<Mutex<Vec<(String, Value)>>>) -
             .state(state);
     }
     let mux = world.build().prompts_stay_settled();
+    // The old fake listed each pane with a session and no agent word, which
+    // Herdr does not prompt, and took every prompt.
+    for pane in ["lead", "worker", "reviewer"] {
+        mux.answer(pane, InputOutcome::Delivered);
+    }
     mux.on_input(move |_, attempt| {
         if let SentInput::Prompt(prompt) = &attempt.input {
             let envelope = delivered::envelope_of(prompt);

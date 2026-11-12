@@ -1118,6 +1118,49 @@ fn opening_a_space_through_open_pane_panics() {
     author_and_reviewer().open_pane("workspace-2", |space| space.space("workspace-9"));
 }
 
+#[test]
+fn changing_the_space_itself_through_open_pane_panics() {
+    type Describe = fn(WorldBuilder) -> WorldBuilder;
+    let describes: [Describe; 5] = [
+        |space| space.checkout("/elsewhere").pane("pane-new"),
+        |space| space.label("renamed").pane("pane-new"),
+        |space| space.unlisted().pane("pane-new"),
+        |space| space.stamped("/elsewhere", Some("repo")).pane("pane-new"),
+        |space| space.pane("pane-new").label("late"),
+    ];
+    for describe in describes {
+        let mux = author_and_reviewer();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mux.open_pane("workspace-2", describe);
+        }))
+        .expect_err("a change to the space panics");
+        assert_eq!(
+            panicked.downcast_ref::<String>().map(String::as_str),
+            Some("open_pane describes panes only, so it cannot change workspace-2 itself")
+        );
+        assert!(mux.lock().pane(&PaneId::new("pane-new")).is_none());
+    }
+}
+
+#[test]
+fn an_omitted_session_field_reports_nothing_until_a_session_is_set_again() {
+    let mux = author_and_reviewer();
+    mux.omit_session("pane-reviewer");
+    let facts = mux.facts("pane-reviewer");
+    assert!(!facts.reports_session);
+    assert_eq!(
+        facts.agent.map(|agent| agent.session),
+        Some(SessionClaim::None)
+    );
+    mux.set_session("pane-reviewer", "session-next");
+    let facts = mux.facts("pane-reviewer");
+    assert!(facts.reports_session);
+    assert_eq!(
+        facts.agent.map(|agent| agent.session),
+        Some(SessionClaim::Reported(AgentSessionId::new("session-next")))
+    );
+}
+
 fn checkout_path(mux: &FakeMux, scope: Scope<'_>, depth: Depth) -> Option<PathBuf> {
     mux.survey(scope, depth).unwrap().spaces[0]
         .checkout
@@ -1337,8 +1380,9 @@ fn a_pane_can_report_no_session_field_at_all() {
 #[test]
 fn every_new_setter_panics_on_an_unknown_id() {
     type Call = Box<dyn Fn(&FakeMux)>;
-    let calls: [(&str, Call); 9] = [
+    let calls: [(&str, Call); 10] = [
         ("pane", Box::new(|mux| mux.hide_pane("pane-9"))),
+        ("pane", Box::new(|mux| mux.omit_session("pane-9"))),
         ("pane", Box::new(|mux| mux.show_pane("pane-9"))),
         ("pane", Box::new(|mux| mux.set_agent("pane-9", None))),
         ("pane", Box::new(|mux| mux.clear_session("pane-9"))),

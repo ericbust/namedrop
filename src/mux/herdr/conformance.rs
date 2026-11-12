@@ -230,7 +230,13 @@ impl Wire {
             }
             ["agent", "prompt", id, text] => {
                 let facts = &Self::pane(&world, id)?.facts;
-                if facts.agent.is_none() {
+                // Herdr resolves the target only to a pane whose agent it
+                // names, so a pane that reports only a session is not found.
+                if facts
+                    .agent
+                    .as_ref()
+                    .is_none_or(|agent| agent.kind == AgentKind::Unreported)
+                {
                     return Err(herdr_error("agent_not_found"));
                 }
                 if facts.state == Some(AgentState::Blocked) {
@@ -563,9 +569,12 @@ fn a_working_agent_takes_a_prompt_whatever_the_admission() {
     }
 }
 
+/// Herdr 0.9.5's `resolve_agent_target` (`src/app/terminal_targets.rs`)
+/// takes a pane only when Herdr names its agent, so `pane-orphan`, which
+/// reports a session and no agent word, answers `agent_not_found`.
 #[test]
 fn a_blocked_absent_or_missing_agent_is_declined_before_any_input() {
-    for pane in ["pane-blocked", "pane-shell", "pane-gone"] {
+    for pane in ["pane-blocked", "pane-shell", "pane-orphan", "pane-gone"] {
         let (outcome, sent) = agree(world, |mux, world| (prompt(mux, pane), world.sent()));
         assert_eq!(
             outcome,
@@ -763,6 +772,7 @@ fn reshaping_the_world_mid_test_agrees() {
         world.set_agent("pane-two", Some(AgentKind::Known(AgentRuntime::Codex)));
         world.set_agent("pane-three", None);
         world.clear_session("pane-new");
+        world.omit_session("pane-two");
         world.set_process(
             "pane-two",
             Some(PaneProcess {

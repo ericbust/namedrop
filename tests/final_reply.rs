@@ -19,8 +19,10 @@ use namedrop::{
     final_reply::{BoundOperation, FinalText, HostTurn, StopFacts, mark_stopped, settle_at_stop},
     issue_registration_challenge,
     mux::{
-        AgentKind, Depth, Effect, InputOutcome,
-        fake::{CHECKOUT_LISTINGS, FakeMux, ScopeKind, SentInput, StrictSpace, Takes},
+        AgentKind, Depth, Effect, InputOutcome, MuxError,
+        fake::{
+            CHECKOUT_LISTINGS, FakeMux, Read, ScopeKind, SentInput, StrictSpace, Surveyed, Takes,
+        },
     },
     send_operator_message,
 };
@@ -73,11 +75,15 @@ impl Drop for TestDirectory {
 
 /// `workspace-1`, which holds the test's repository, with the lead's Codex
 /// pane and the reviewer's pane, and `workspace-2`, which `workspace list`
-/// leaves out and which holds `{repo}-2`. The reviewer's session can show up
-/// there as `pane-elsewhere`. The space answers `workspace list` (no
-/// checkout stamp), `worktree list --cwd` and `--workspace`, and `pane list
-/// --workspace`. It takes `agent prompt` to any pane, any `pane
-/// report-metadata`, and any `notification show`.
+/// leaves out and which holds `{repo}-2`. The space answers `workspace list`
+/// (no checkout stamp), `worktree list --cwd` for the repository only,
+/// `worktree list --workspace`, and `pane list --workspace`. It takes `agent
+/// prompt` to any pane, any `pane report-metadata`, and any `notification
+/// show`.
+///
+/// The old fake could also list the reviewer's session in workspace-2 as
+/// `pane-elsewhere`. No test's outcome depended on it: the pane-moved test
+/// passed with it listed or not, so the switch is gone.
 ///
 /// The switches are the old executor's, and a read hook applies them to
 /// the world before every read.
@@ -86,8 +92,6 @@ struct FinalSpace {
     reviewer_host: Arc<Mutex<&'static str>>,
     /// Herdr no longer lists the reviewer's pane, as after it was closed.
     reviewer_gone: Arc<AtomicBool>,
-    /// Herdr lists the reviewer's session in `pane-elsewhere` of workspace-2.
-    reviewer_elsewhere: Arc<AtomicBool>,
     prompts: Arc<Mutex<Vec<(String, String)>>>,
     notifications: Arc<Mutex<Vec<String>>>,
 }
@@ -123,36 +127,31 @@ impl FinalSpace {
             .space("workspace-2")
             .checkout(format!("{}-2", worktree.display()))
             .unlisted()
-            .pane("pane-elsewhere")
-            .terminal("t2")
-            .tab("tab-9")
-            .claude()
-            .session("session-reviewer")
-            .working()
-            .hidden()
             .build();
-        for pane in ["pane-lead", "pane-reviewer", "pane-elsewhere"] {
+        for pane in ["pane-lead", "pane-reviewer"] {
             mux.answer(pane, InputOutcome::Delivered);
         }
         let reviewer_host = Arc::new(Mutex::new("claude"));
         let reviewer_gone = Arc::new(AtomicBool::new(false));
-        let reviewer_elsewhere = Arc::new(AtomicBool::new(false));
-        let (host, gone, elsewhere) = (
-            Arc::clone(&reviewer_host),
-            Arc::clone(&reviewer_gone),
-            Arc::clone(&reviewer_elsewhere),
-        );
-        mux.on_read(move |mux, _| {
+        let (host, gone) = (Arc::clone(&reviewer_host), Arc::clone(&reviewer_gone));
+        let repository = worktree.to_path_buf();
+        mux.on_read(move |mux, read| {
+            if let Read::Survey {
+                scope: Surveyed::CheckoutOf(path),
+                ..
+            } = read
+                && *path != repository
+            {
+                return Err(MuxError::Unavailable(format!(
+                    "unexpected Herdr command: worktree list --cwd {}",
+                    path.display()
+                )));
+            }
             mux.set_agent("pane-reviewer", Some(agent_kind(*host.lock().unwrap())));
             if gone.load(Ordering::Relaxed) {
                 mux.hide_pane("pane-reviewer");
             } else {
                 mux.show_pane("pane-reviewer");
-            }
-            if elsewhere.load(Ordering::Relaxed) {
-                mux.show_pane("pane-elsewhere");
-            } else {
-                mux.hide_pane("pane-elsewhere");
             }
             Ok(())
         });
@@ -188,7 +187,6 @@ impl FinalSpace {
             space: StrictSpace::new(mux, &listings, takes),
             reviewer_host,
             reviewer_gone,
-            reviewer_elsewhere,
             prompts,
             notifications,
         }
@@ -4296,7 +4294,6 @@ impl Space {
     /// `pane-elsewhere`, handled at `now_ms`.
     fn reviewer_pane_moved_at(&self, now_ms: u64) {
         self.reviewer_pane_gone(true);
-        self.herdr.reviewer_elsewhere.store(true, Ordering::Relaxed);
         namedrop::execute_lifecycle_operation(
             "event.pane-lifecycle",
             json!({"type":"pane_moved","previous_pane_id":"pane-reviewer",
@@ -4311,9 +4308,6 @@ impl Space {
 
     /// Herdr's event that `pane-elsewhere` closed, handled at `now_ms`.
     fn moved_pane_closed_at(&self, now_ms: u64) {
-        self.herdr
-            .reviewer_elsewhere
-            .store(false, Ordering::Relaxed);
         namedrop::execute_lifecycle_operation(
             "event.pane-lifecycle",
             json!({"type":"pane_closed","pane_id":"pane-elsewhere","workspace_id":"workspace-2"}),
