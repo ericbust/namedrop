@@ -1,3 +1,4 @@
+#![cfg(feature = "test-support")]
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -11,17 +12,22 @@ use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, AttachedContext, AttentionItemDraft, AttentionItemId,
     AttentionSourceKind, CONTEXT_DELIVERY_OPERATIONS, Clock, ContextGrantId, ContextRequest,
     DELIVERY_PERMITTED_OPERATIONS, DeliveryAddress, DeliveryAttemptId, DeliveryControl,
-    DeliveryControlDraft, DeliveryEnvelope, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator,
-    IntegrationToolInvocation, LifecycleRuntime, MessageId, MutationAttribution, OperationCatalog,
-    PaneAddressDraft, PaneAddressId, PaneBindingId, PaneRoleId, REPLY_BODY_PLACEHOLDER,
-    ResultSetCompletion, ResultSetOutcome, ResultSetStatus, StateNamespace, StateStore, ThreadId,
+    DeliveryControlDraft, DeliveryEnvelope, IdGenerator, IntegrationToolInvocation,
+    LifecycleRuntime, MessageId, MutationAttribution, OperationCatalog, PaneAddressDraft,
+    PaneAddressId, PaneBindingId, PaneRoleId, REPLY_BODY_PLACEHOLDER, ResultSetCompletion,
+    ResultSetOutcome, ResultSetStatus, StateNamespace, StateStore, ThreadId,
     complete_capability_profile, execute_integration_operation, execute_lifecycle_operation,
     execute_message_operation, install_integration_package, integration_package,
-    issue_registration_challenge, operation_catalog, package_directory,
-    trusted_delivery_instruction,
+    issue_registration_challenge,
+    mux::{
+        AgentKind, AgentState, Depth, Effect, InputOutcome, MuxError,
+        fake::{CHECKOUT_LISTINGS, FakeMux, Listing, ScopeKind, SentInput, StrictSpace, Takes},
+    },
+    operation_catalog, package_directory, trusted_delivery_instruction,
 };
 use std::{
     fs,
+    ops::Deref,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
@@ -91,26 +97,22 @@ impl Drop for TestDirectory {
     }
 }
 
-struct FakeHerdr;
-
-impl HerdrCommandExecutor for FakeHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let stdout = match args {
-            ["workspace", "list"] => {
-                r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
-            }
-            ["worktree", "list", "--cwd", "/repo", "--json"] | ["worktree", "list", "--json"] => {
-                r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-            }
-            ["pane", "list", "--workspace", "workspace-1"] => {
-                r#"{"result":{"panes":[{"pane_id":"pane-agent","terminal_id":"terminal-agent","tab_id":"tab-1","workspace_id":"workspace-1","agent_session":{"value":"session-1"},"agent_status":"idle"}]}}"#
-            }
-            _ => return Err(format!("unexpected Herdr command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput {
-            stdout: stdout.to_owned(),
-        })
-    }
+/// The world the old `FakeHerdr` listed: one pane that reports a session but
+/// no agent kind. It answered the checkout listings and failed every other
+/// command, input and effects included.
+fn fake_herdr() -> StrictSpace {
+    let mux = FakeMux::world()
+        .endpoint("socket-a")
+        .space("workspace-1")
+        .checkout("/repo")
+        .unstamped()
+        .pane("pane-agent")
+        .terminal("terminal-agent")
+        .tab("tab-1")
+        .session("session-1")
+        .idle()
+        .build();
+    StrictSpace::new(mux, CHECKOUT_LISTINGS, Takes::nothing())
 }
 
 struct FixedClock;
@@ -175,7 +177,8 @@ fn setup_registered_address(directory: &TestDirectory) {
 fn runtime<'a>(
     directory: &'a TestDirectory,
     ids: &'a SequenceIds,
-) -> LifecycleRuntime<'a, FakeHerdr, FixedClock, SequenceIds> {
+    mux: &'a FakeMux,
+) -> LifecycleRuntime<'a, FakeMux, FixedClock, SequenceIds> {
     LifecycleRuntime {
         state_directory: directory.path(),
         home_directory: Some(directory.home()),
@@ -184,7 +187,7 @@ fn runtime<'a>(
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &FakeHerdr,
+        mux,
         clock: &FixedClock,
         ids,
     }
@@ -313,6 +316,7 @@ fn registration_challenge_rejects_the_reserved_package_attention_namespace() {
 fn restored_current_registration_collision_cannot_resolve_package_attention() {
     let directory = TestDirectory::new();
     let ids = SequenceIds(AtomicU64::new(1));
+    let herdr = fake_herdr();
     setup_registered_address(&directory);
     open_codex_package_attention(&directory);
     insert_restored_registration(
@@ -325,7 +329,7 @@ fn restored_current_registration_collision_cannot_resolve_package_attention() {
     execute_integration_operation(
         "register",
         register_input("nonce-reserved-current"),
-        &runtime(&directory, &ids),
+        &runtime(&directory, &ids, &herdr),
     )
     .unwrap();
 
@@ -336,6 +340,7 @@ fn restored_current_registration_collision_cannot_resolve_package_attention() {
 fn restored_superseded_registration_collision_cannot_resolve_package_attention() {
     let directory = TestDirectory::new();
     let ids = SequenceIds(AtomicU64::new(1));
+    let herdr = fake_herdr();
     let scope = space_namespace();
     setup_registered_address(&directory);
     open_codex_package_attention(&directory);
@@ -362,46 +367,184 @@ fn restored_superseded_registration_collision_cannot_resolve_package_attention()
     execute_integration_operation(
         "register",
         register_input("nonce-current"),
-        &runtime(&directory, &ids),
+        &runtime(&directory, &ids, &herdr),
     )
     .unwrap();
 
     assert_codex_package_attention_is_unresolved(&directory);
 }
 
+/// The old production-shaped executor's world: a free pane that reports
+/// `unknown`, and the agent's pane, whose kind, session, and status are
+/// switches the tests flip. It answered the checkout listings and `worktree
+/// list --workspace`, `agent prompt` to the agent's pane, and `pane
+/// report-metadata`, and failed every other command.
 struct ProductionHerdr {
-    session: Mutex<String>,
-    agent: Mutex<String>,
-    status: Mutex<String>,
-    prompts: Mutex<Vec<String>>,
-    prompt_error: Mutex<Option<String>>,
-    prompt_gate: Mutex<Option<Arc<PromptGate>>>,
-    /// The temporary user home a priming probe reads, so a recorded prompt also
-    /// records whether both packages were installed when it was dispatched.
-    probed_home: Mutex<Option<PathBuf>>,
-    primed_at_prompt: Mutex<Vec<bool>>,
+    session: Arc<Mutex<String>>,
+    agent: Arc<Mutex<String>>,
+    status: Arc<Mutex<String>>,
+    /// Every prompt to the agent's pane, failed or not.
+    prompts: Arc<Mutex<Vec<String>>>,
+    /// Fails the next prompt to the agent's pane, once.
+    prompt_error: Arc<Mutex<Option<String>>>,
+    /// Holds every prompt the agent's pane took until the gate is released.
+    prompt_gate: Arc<Mutex<Option<Arc<PromptGate>>>>,
+    primed_at_prompt: Arc<Mutex<Vec<bool>>>,
+    space: StrictSpace,
 }
 
 impl Default for ProductionHerdr {
     fn default() -> Self {
-        Self {
-            session: Mutex::new("session-1".to_owned()),
-            agent: Mutex::new("codex".to_owned()),
-            status: Mutex::new("idle".to_owned()),
-            prompts: Mutex::new(Vec::new()),
-            prompt_error: Mutex::new(None),
-            prompt_gate: Mutex::new(None),
-            probed_home: Mutex::new(None),
-            primed_at_prompt: Mutex::new(Vec::new()),
-        }
+        Self::new(None)
+    }
+}
+
+impl Deref for ProductionHerdr {
+    type Target = FakeMux;
+
+    fn deref(&self) -> &FakeMux {
+        &self.space
+    }
+}
+
+/// The agent kind Herdr's word names.
+fn agent_kind(word: &str) -> AgentKind {
+    match word {
+        "claude" => AgentKind::Known(AgentRuntime::ClaudeCode),
+        "codex" => AgentKind::Known(AgentRuntime::Codex),
+        other => AgentKind::Other(other.to_owned()),
     }
 }
 
 impl ProductionHerdr {
     fn probing_home(home_directory: &Path) -> Self {
+        Self::new(Some(home_directory.to_path_buf()))
+    }
+
+    /// `probed_home` is the temporary user home a priming probe reads, so a
+    /// recorded prompt also records whether both packages were installed
+    /// when it was dispatched.
+    fn new(probed_home: Option<PathBuf>) -> Self {
+        let mux = FakeMux::world()
+            .endpoint("socket-a")
+            .space("workspace-1")
+            .checkout("/repo")
+            .unstamped()
+            .pane("pane-author")
+            .terminal("terminal-author")
+            .tab("tab-1")
+            .state(AgentState::Unknown("unknown".to_owned()))
+            .pane("pane-agent")
+            .terminal("terminal-agent")
+            .tab("tab-1")
+            .codex()
+            .agent_label("Agent")
+            .session("session-1")
+            .idle()
+            .build();
+        mux.answer("pane-agent", InputOutcome::Delivered);
+        let session = Arc::new(Mutex::new("session-1".to_owned()));
+        let agent = Arc::new(Mutex::new("codex".to_owned()));
+        let status = Arc::new(Mutex::new("idle".to_owned()));
+        let (listed_session, listed_agent, listed_status) = (
+            Arc::clone(&session),
+            Arc::clone(&agent),
+            Arc::clone(&status),
+        );
+        mux.on_read(move |mux, _| {
+            let kind = agent_kind(&listed_agent.lock().unwrap());
+            // `set_agent` relabels the pane, so only a new kind replaces the
+            // old listing's `display_agent` of "Agent".
+            if mux.facts("pane-agent").agent.map(|agent| agent.kind) != Some(kind.clone()) {
+                mux.set_agent("pane-agent", Some(kind));
+            }
+            mux.set_session("pane-agent", &listed_session.lock().unwrap());
+            mux.set_state(
+                "pane-agent",
+                AgentState::parse(&listed_status.lock().unwrap()),
+            );
+            // The old listing never showed what `pane report-metadata` wrote.
+            for pane in ["pane-author", "pane-agent"] {
+                mux.set_title(pane, None);
+                mux.set_idle_label(pane, None);
+            }
+            Ok(())
+        });
+        let prompt_error = Arc::new(Mutex::new(None::<String>));
+        let failing = Arc::clone(&prompt_error);
+        mux.answer_with(move |_, pane, input| {
+            if pane.as_str() != "pane-agent" || !matches!(input, SentInput::Prompt(_)) {
+                return None;
+            }
+            failing.lock().unwrap().take().map(InputOutcome::Ambiguous)
+        });
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let prompt_gate = Arc::new(Mutex::new(None::<Arc<PromptGate>>));
+        let primed_at_prompt = Arc::new(Mutex::new(Vec::new()));
+        let (sent, gate, primed) = (
+            Arc::clone(&prompts),
+            Arc::clone(&prompt_gate),
+            Arc::clone(&primed_at_prompt),
+        );
+        mux.on_input(move |_, attempt| {
+            let SentInput::Prompt(prompt) = &attempt.input else {
+                return;
+            };
+            if attempt.pane.as_str() != "pane-agent" {
+                return;
+            }
+            if let Some(home_directory) = &probed_home {
+                primed.lock().unwrap().push(
+                    [AgentRuntime::Codex, AgentRuntime::ClaudeCode]
+                        .into_iter()
+                        .all(|runtime| {
+                            package_directory(home_directory, runtime)
+                                .join("SKILL.md")
+                                .is_file()
+                        }),
+                );
+            }
+            sent.lock().unwrap().push(prompt.clone());
+            if attempt.outcome == InputOutcome::Delivered
+                && let Some(gate) = gate.lock().unwrap().clone()
+            {
+                gate.block_until_released();
+            }
+        });
+        mux.on_apply(|_, effect| match effect {
+            Effect::ReloadKeybindings => Err(MuxError::Unavailable(
+                r#"unexpected Herdr command: ["server", "reload-config"]"#.to_owned(),
+            )),
+            Effect::OpenPopup(_) => Err(MuxError::Unavailable(
+                r#"unexpected Herdr command: ["plugin", "pane", "open", ..]"#.to_owned(),
+            )),
+            _ => Ok(()),
+        });
+        let takes = Takes::nothing()
+            .input(|attempt| {
+                attempt.pane.as_str() == "pane-agent"
+                    && matches!(attempt.input, SentInput::Prompt(_))
+            })
+            .effect(|effect| {
+                matches!(
+                    effect,
+                    Effect::Identify { .. }
+                        | Effect::Badges { .. }
+                        | Effect::ReloadKeybindings
+                        | Effect::OpenPopup(_)
+                )
+            });
+        let mut listings = CHECKOUT_LISTINGS.to_vec();
+        listings.push((ScopeKind::Space, Depth::Panes));
         Self {
-            probed_home: Mutex::new(Some(home_directory.to_path_buf())),
-            ..Self::default()
+            session,
+            agent,
+            status,
+            prompts,
+            prompt_error,
+            prompt_gate,
+            primed_at_prompt,
+            space: StrictSpace::new(mux, &listings, takes),
         }
     }
 
@@ -446,70 +589,6 @@ impl PromptGate {
     }
 }
 
-impl HerdrCommandExecutor for ProductionHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let stdout = match args {
-            ["workspace", "list"] => {
-                r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#.to_owned()
-            }
-            ["worktree", "list", "--cwd", "/repo", "--json"]
-            | ["worktree", "list", "--json"]
-            | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
-                r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-                    .to_owned()
-            }
-            ["pane", "list", "--workspace", "workspace-1"] => serde_json::json!({
-                "result": {
-                    "panes": [
-                        {
-                            "pane_id": "pane-author",
-                            "terminal_id": "terminal-author",
-                            "tab_id": "tab-1",
-                            "workspace_id": "workspace-1",
-                            "agent_session": null,
-                            "agent_status": "unknown"
-                        },
-                        {
-                            "pane_id": "pane-agent",
-                            "terminal_id": "terminal-agent",
-                            "tab_id": "tab-1",
-                            "workspace_id": "workspace-1",
-                            "agent": self.agent.lock().unwrap().clone(),
-                            "display_agent": "Agent",
-                            "agent_session": {"value": self.session.lock().unwrap().clone()},
-                            "agent_status": self.status.lock().unwrap().clone()
-                        }
-                    ]
-                }
-            })
-            .to_string(),
-            ["agent", "prompt", "pane-agent", prompt] => {
-                if let Some(home_directory) = self.probed_home.lock().unwrap().as_ref() {
-                    let primed = [AgentRuntime::Codex, AgentRuntime::ClaudeCode]
-                        .into_iter()
-                        .all(|runtime| {
-                            package_directory(home_directory, runtime)
-                                .join("SKILL.md")
-                                .is_file()
-                        });
-                    self.primed_at_prompt.lock().unwrap().push(primed);
-                }
-                self.prompts.lock().unwrap().push((*prompt).to_owned());
-                if let Some(error) = self.prompt_error.lock().unwrap().take() {
-                    return Err(error);
-                }
-                if let Some(gate) = self.prompt_gate.lock().unwrap().clone() {
-                    gate.block_until_released();
-                }
-                "{}".to_owned()
-            }
-            ["pane", "report-metadata", ..] => "{}".to_owned(),
-            _ => return Err(format!("unexpected Herdr command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput { stdout })
-    }
-}
-
 fn registration_input_from_prompt(prompt: &str) -> serde_json::Value {
     let serialized = prompt
         .split_once("--input-json '")
@@ -551,7 +630,7 @@ fn registration_explains_unsafe_lock_permissions_without_internal_terms() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -595,7 +674,7 @@ fn registration_gate_timeout_keeps_the_same_challenge_retryable() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -680,44 +759,29 @@ fn registration_gate_timeout_keeps_the_same_challenge_retryable() {
 fn registration_final_discovery_failure_keeps_the_challenge_retryable() {
     use std::{os::fd::AsRawFd, sync::atomic::AtomicBool};
 
-    struct FailingDiscovery {
-        herdr: ProductionHerdr,
-        lock: fs::File,
-        fail: AtomicBool,
-    }
-
-    impl HerdrCommandExecutor for FailingDiscovery {
-        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-            if args == ["pane", "list", "--workspace", "workspace-1"]
-                && self.fail.load(Ordering::Relaxed)
-            {
-                let acquired =
-                    unsafe { libc::flock(self.lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-                if acquired == 0 {
-                    assert_eq!(
-                        unsafe { libc::flock(self.lock.as_raw_fd(), libc::LOCK_UN) },
-                        0
-                    );
-                } else {
-                    assert_eq!(
-                        std::io::Error::last_os_error().raw_os_error(),
-                        Some(libc::EWOULDBLOCK)
-                    );
-                    self.fail.store(false, Ordering::Relaxed);
-                    return Err("injected discovery failure while holding pane gate".to_owned());
-                }
-            }
-            self.herdr.execute(args)
-        }
-    }
-
     let directory = TestDirectory::new();
     setup_registered_address(&directory);
-    let herdr = FailingDiscovery {
-        herdr: ProductionHerdr::default(),
-        lock: registration_pane_lock(&directory),
-        fail: AtomicBool::new(true),
-    };
+    let herdr = ProductionHerdr::default();
+    let lock = registration_pane_lock(&directory);
+    let fail = AtomicBool::new(true);
+    herdr.on_command(move |_, command| {
+        if command.listing == Some(Listing::PanesOf) && fail.load(Ordering::Relaxed) {
+            let acquired = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if acquired == 0 {
+                assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) }, 0);
+            } else {
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::EWOULDBLOCK)
+                );
+                fail.store(false, Ordering::Relaxed);
+                return Err(MuxError::Unavailable(
+                    "injected discovery failure while holding pane gate".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    });
     let ids = SequenceIds(AtomicU64::new(1));
     let runtime = LifecycleRuntime {
         state_directory: directory.path(),
@@ -727,7 +791,7 @@ fn registration_final_discovery_failure_keeps_the_challenge_retryable() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -744,7 +808,7 @@ fn registration_final_discovery_failure_keeps_the_challenge_retryable() {
     )
     .unwrap_err();
     assert!(error.contains("injected discovery failure"), "{error}");
-    assert!(herdr.herdr.prompts.lock().unwrap().is_empty());
+    assert!(herdr.prompts.lock().unwrap().is_empty());
     let transitions = StateStore::open(directory.path())
         .unwrap()
         .transaction(|transaction| transaction.transition_facts(&space_namespace()))
@@ -766,7 +830,7 @@ fn registration_final_discovery_failure_keeps_the_challenge_retryable() {
         &runtime,
     )
     .unwrap();
-    let prompts = herdr.herdr.registration_prompts();
+    let prompts = herdr.registration_prompts();
     assert_eq!(prompts.len(), 1, "{prompts:?}");
     assert_eq!(
         registration_input_from_prompt(&prompts[0])["nonce"],
@@ -787,7 +851,7 @@ fn production_onboarding_challenges_registers_and_drains_queued_work() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -1010,7 +1074,7 @@ fn replacement_registration_clears_superseded_failure_attention() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -1094,7 +1158,7 @@ fn registered_working_recipient_drains_on_settle_without_explicit_reconciliation
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -1188,7 +1252,7 @@ fn production_onboarding_failure_keeps_delivery_queued_and_opens_attention() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -1252,7 +1316,7 @@ fn accepted_registration_prompt_that_settles_unregistered_opens_attention() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -1347,7 +1411,7 @@ fn working_observation_during_prompt_dispatch_still_opens_attention_after_settle
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -1420,7 +1484,7 @@ fn production_onboarding_recognizes_claude_code_sessions() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -2028,7 +2092,8 @@ fn shared_registration_conformance_binds_a_nonce_to_the_exact_agent_session() {
         let directory = TestDirectory::new();
         setup_registered_address(&directory);
         let ids = SequenceIds(AtomicU64::new(1));
-        let runtime = runtime(&directory, &ids);
+        let herdr = fake_herdr();
+        let runtime = runtime(&directory, &ids, &herdr);
         let challenge = issue_registration_challenge(
             &PaneAddressId::new("address-agent"),
             agent_runtime,
@@ -2100,7 +2165,8 @@ fn malformed_registration_response_opens_attention_for_its_challenge() {
     let directory = TestDirectory::new();
     setup_registered_address(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
-    let runtime = runtime(&directory, &ids);
+    let herdr = fake_herdr();
+    let runtime = runtime(&directory, &ids, &herdr);
     let challenge = issue_registration_challenge(
         &PaneAddressId::new("address-agent"),
         AgentRuntime::Codex,
@@ -2139,7 +2205,8 @@ fn unbinding_a_pane_address_expires_its_exact_session_registration() {
     let directory = TestDirectory::new();
     setup_registered_address(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
-    let runtime = runtime(&directory, &ids);
+    let herdr = fake_herdr();
+    let runtime = runtime(&directory, &ids, &herdr);
     let challenge = issue_registration_challenge(
         &PaneAddressId::new("address-agent"),
         AgentRuntime::Codex,
@@ -2191,7 +2258,8 @@ fn unbinding_a_pane_address_invalidates_its_pending_challenge() {
     let directory = TestDirectory::new();
     setup_registered_address(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
-    let runtime = runtime(&directory, &ids);
+    let herdr = fake_herdr();
+    let runtime = runtime(&directory, &ids, &herdr);
     let challenge = issue_registration_challenge(
         &PaneAddressId::new("address-agent"),
         AgentRuntime::Codex,
@@ -2879,7 +2947,8 @@ fn registration_returns_the_full_generic_catalog_tool_block() {
     let directory = TestDirectory::new();
     setup_registered_address(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
-    let runtime = runtime(&directory, &ids);
+    let herdr = fake_herdr();
+    let runtime = runtime(&directory, &ids, &herdr);
     let challenge = issue_registration_challenge(
         &PaneAddressId::new("address-agent"),
         AgentRuntime::Codex,
@@ -2956,7 +3025,7 @@ fn a_registration_under_a_smaller_profile_is_expired_and_re_challenged() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -3081,7 +3150,7 @@ fn older_complete_profiles_stay_registered_and_registerable() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -3401,7 +3470,7 @@ fn activation_installs_both_shared_packages_before_challenging_either_runtime() 
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -3478,7 +3547,7 @@ fn repeated_lifecycle_events_never_rewrite_an_unchanged_package() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -3538,7 +3607,7 @@ fn a_previous_version_package_is_replaced_without_touching_unrelated_files() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -3585,7 +3654,7 @@ fn an_unowned_package_blocks_its_runtime_until_a_later_refresh_succeeds() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -3719,7 +3788,7 @@ fn naming_reports_its_failed_runtime_without_claiming_readiness() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -4161,7 +4230,7 @@ fn an_unwritable_skill_root_blocks_its_runtime_and_recovers() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -4266,7 +4335,7 @@ fn a_registered_runtime_stops_delivering_while_its_package_refresh_fails() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -4412,7 +4481,7 @@ fn a_failed_package_leaves_the_other_runtime_delivering() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedClock,
         ids: &ids,
     };
