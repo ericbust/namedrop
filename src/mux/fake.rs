@@ -873,6 +873,16 @@ impl FakeMux {
         self.lock().known_pane(pane).process = process;
     }
 
+    /// `tab`'s label, or with `None` nothing a read can answer, as a rename
+    /// would leave it or as a test that answers one fixed label needs.
+    pub fn set_tab_label(&self, tab: &str, label: Option<&str>) {
+        let mut world = self.lock();
+        match label {
+            Some(label) => world.tab_labels.insert(TabId::new(tab), label.to_owned()),
+            None => world.tab_labels.remove(&TabId::new(tab)),
+        };
+    }
+
     /// Where Namedrop's Herdr integration is installed, or with `None`
     /// nothing a read can answer.
     pub fn set_integration_root(&self, root: Option<&Path>) {
