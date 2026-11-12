@@ -747,6 +747,184 @@ fn herdr_error_codes_decide_the_input_outcome() {
     ));
 }
 
+#[test]
+fn timeout_and_unknown_prompt_results_never_authorize_an_automatic_resend() {
+    for error in [
+        "Herdr command timed out after 10000 ms",
+        "connection closed after writing prompt",
+        r#"{"error":{"code":"connection_refused"}}"#,
+        r#"{"error":{"code":"unexpected"}}"#,
+        // Both can only be reported after Herdr accepted the submission, so
+        // the recipient may already have the prompt.
+        r#"{"error":{"code":"agent_prompt_stalled"}}"#,
+        r#"{"error":{"code":"timeout"}}"#,
+    ] {
+        assert_eq!(
+            input_failure(error.to_owned()),
+            InputOutcome::Ambiguous(error.to_owned()),
+            "{error}"
+        );
+    }
+    // Herdr rejects both before any input is sent. The `agent_blocked` payload
+    // is the verbatim stderr of `herdr agent prompt` 0.8.2 against a blocked
+    // recipient, exit code 1.
+    for error in [
+        r#"{"error":{"code":"agent_busy"}}"#,
+        r#"{"error":{"code":"agent_blocked","message":"agent w1:p1 is blocked and requires interactive input"},"id":"cli:agent:prompt"}"#,
+    ] {
+        assert_eq!(
+            input_failure(error.to_owned()),
+            InputOutcome::Declined(Retry::OnEvent, error.to_owned()),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn temporary_prompt_failures_only_request_polling_without_a_guaranteed_event() {
+    for (codes, expected) in [
+        (
+            &["server_busy", "conflict", "agent_not_ready"][..],
+            Retry::AfterDelay,
+        ),
+        (
+            &[
+                "agent_busy",
+                "agent_blocked",
+                "agent_not_found",
+                "pane_not_found",
+            ][..],
+            Retry::OnEvent,
+        ),
+    ] {
+        for code in codes {
+            let error = serde_json::json!({"error": {"code": code}}).to_string();
+            assert_eq!(
+                input_failure(error.clone()),
+                InputOutcome::Declined(expected, error),
+                "{code}"
+            );
+        }
+    }
+    let refused = serde_json::json!({"error": {"code": "invalid_input"}}).to_string();
+    assert_eq!(
+        input_failure(refused.clone()),
+        InputOutcome::Refused(refused)
+    );
+}
+
+/// Herdr as `tests/inherited_pane.rs` saw it through the executor port: the
+/// pane's shell is whatever pid the test says it is. These tests moved here
+/// because each pins `pane process-info`'s argv and reply.
+fn shell(pid: Option<u64>) -> HerdrMux<Scripted> {
+    herdr(move |args| {
+        assert_eq!(args, ["pane", "process-info", "--pane", "wH:p1"]);
+        let shell_pid = pid.ok_or_else(|| "pane not found".to_owned())?;
+        Ok(format!(
+            r#"{{"result":{{"process_info":{{"pane_id":"wH:p1","shell_pid":{shell_pid},"foreground_process_group_id":{shell_pid},"foreground_processes":[]}}}}}}"#
+        ))
+    })
+}
+
+/// Herdr names the pane's shell but no foreground process group.
+fn shell_without_group(pid: u64) -> HerdrMux<Scripted> {
+    herdr(move |args| {
+        assert_eq!(args, ["pane", "process-info", "--pane", "wH:p1"]);
+        Ok(format!(
+            r#"{{"result":{{"process_info":{{"pane_id":"wH:p1","shell_pid":{pid},"foreground_process_group_id":null,"foreground_processes":[]}}}}}}"#
+        ))
+    })
+}
+
+/// A live process that is certainly not an ancestor of this one.
+fn unrelated_process() -> std::process::Child {
+    std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap()
+}
+
+/// Herdr's own `pane list` output, captured from a live pane: many more
+/// fields than the fixture's, with the session under `agent_session`.
+fn live_pane_list() -> HerdrMux<Scripted> {
+    herdr(|args| {
+        match args {
+        ["pane", "process-info", ..] => Ok(r#"{"id":"cli:pane:process_info","result":{"process_info":{"foreground_process_group_id":1147346,"foreground_processes":[{"argv":["claude"],"cmdline":"claude","cwd":"/repo","name":"claude","pid":1147346}],"pane_id":"wG:p21","shell_pid":4000000000},"type":"pane_process_info"}}"#.to_owned()),
+        ["pane", "list"] => Ok(r#"{"id":"cli:pane:list","result":{"panes":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"sess-21"},"agent_status":"working","cwd":"/repo","focused":false,"foreground_cwd":"/repo","pane_id":"wG:p21","revision":20,"scroll":{"max_offset_from_bottom":0,"offset_from_bottom":0,"viewport_rows":40},"state_labels":{"working":"@a working"},"tab_id":"wG:tP","terminal_id":"term_1","terminal_title":"t","title":"@a","tokens":{"x":"0"},"workspace_id":"wG"},{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"sess-1"},"agent_status":"idle","cwd":"/repo","pane_id":"wG:p1","tab_id":"wG:tP","terminal_id":"term_2","workspace_id":"wG"},{"agent_status":"unknown","pane_id":"w9:p1","tab_id":"w9:t1","terminal_id":"term_3","workspace_id":"w9"}],"type":"pane_list"}}"#.to_owned()),
+        other => Err(format!("unexpected call {other:?}")),
+    }
+    })
+}
+
+#[test]
+fn an_inherited_pane_whose_shell_is_an_ancestor_is_accepted() {
+    let parent = u64::from(std::os::unix::process::parent_id());
+    assert_eq!(
+        crate::verify_inherited_pane(&shell(Some(parent)), "wH:p1", &[]),
+        Ok(())
+    );
+}
+
+#[test]
+fn an_inherited_pane_whose_shell_is_not_an_ancestor_is_refused_with_the_remedy() {
+    let mut other = unrelated_process();
+    let error = crate::verify_inherited_pane(&shell(Some(u64::from(other.id()))), "wH:p1", &[])
+        .unwrap_err();
+    other.kill().unwrap();
+    other.wait().unwrap();
+    assert!(error.contains("HERDR_PANE_ID=wH:p1"), "{error}");
+    assert!(error.contains("not running inside pane wH:p1"), "{error}");
+    assert!(error.contains("--herdr-pane"), "{error}");
+}
+
+#[test]
+fn an_inherited_pane_herdr_cannot_describe_is_refused_with_herdr_s_own_reason() {
+    let error = crate::verify_inherited_pane(&shell(None), "wH:p1", &[]).unwrap_err();
+    assert!(error.contains("HERDR_PANE_ID=wH:p1"), "{error}");
+    assert!(error.contains("pane not found"), "{error}");
+    assert!(error.contains("--herdr-pane"), "{error}");
+}
+
+#[test]
+fn an_inherited_pane_herdr_names_no_foreground_group_for_is_refused() {
+    let parent = u64::from(std::os::unix::process::parent_id());
+    let error =
+        crate::verify_inherited_pane(&shell_without_group(parent), "wH:p1", &[]).unwrap_err();
+    assert!(
+        error.contains("Herdr reports no shell for pane wH:p1"),
+        "{error}"
+    );
+    assert!(error.contains("--herdr-pane"), "{error}");
+}
+
+#[test]
+fn the_live_pane_list_shape_vouches_for_the_session_s_own_pane_only() {
+    assert_eq!(
+        crate::verify_inherited_pane(&live_pane_list(), "wG:p21", &["sess-21"]),
+        Ok(())
+    );
+    let error = crate::verify_inherited_pane(&live_pane_list(), "wG:p21", &["sess-1"]).unwrap_err();
+    assert!(error.contains("--herdr-pane"), "{error}");
+    let error = crate::verify_inherited_pane(&live_pane_list(), "wG:p21", &["nobody"]).unwrap_err();
+    assert!(error.contains("--herdr-pane"), "{error}");
+}
+
+#[test]
+fn a_refusal_says_how_many_agent_sessions_it_checked() {
+    let none = crate::verify_inherited_pane(&live_pane_list(), "wG:p21", &[]).unwrap_err();
+    assert!(
+        none.contains("There is no CODEX_SESSION_ID or CLAUDE_CODE_SESSION_ID in the environment"),
+        "{none}"
+    );
+    let elsewhere =
+        crate::verify_inherited_pane(&live_pane_list(), "wG:p21", &["sess-1"]).unwrap_err();
+    assert!(
+        elsewhere
+            .contains("None of the 1 agent session ID(s) in the environment runs in pane wG:p21"),
+        "{elsewhere}"
+    );
+}
+
 /// A legacy executor with its own classification, as several test fakes have.
 struct Legacy {
     prompts: Mutex<Vec<String>>,
