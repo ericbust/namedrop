@@ -1,6 +1,7 @@
 //! What the installed hook actually hands a native session at a prompt or task
 //! boundary: the current workspace persona roster, without changing how explicit
 //! Mentions route or how a Delivery Envelope authenticates.
+#![cfg(feature = "test-support")]
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
@@ -13,19 +14,28 @@ mod executable;
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
 use namedrop::{
-    ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
-    IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
-    PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
-    execute_codex_app_server_hook, execute_integration_operation, execute_lifecycle_operation,
-    execute_session_start_hook, execute_user_prompt_submit_hook, expand_attempt_reply,
-    install_integration_package, issue_registration_challenge,
+    ActorKind, AgentRuntime, AgentSessionId, Clock, IdGenerator, LifecycleRuntime,
+    MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId, PaneRoleId,
+    StateNamespace, StateStore, complete_capability_profile, execute_codex_app_server_hook,
+    execute_integration_operation, execute_lifecycle_operation, execute_session_start_hook,
+    execute_user_prompt_submit_hook, expand_attempt_reply, install_integration_package,
+    issue_registration_challenge,
+    mux::{
+        AgentState, Depth, InputOutcome,
+        fake::{
+            CHECKOUT_LISTINGS, FakeMux, ScopeKind, SentInput, StrictSpace, Takes, WorldBuilder,
+        },
+    },
 };
 use serde_json::{Value, json};
 use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 const ROSTER_MARKER: &str = "Namedrop workspace roster.";
@@ -79,25 +89,71 @@ impl Drop for TestDirectory {
     }
 }
 
-struct FakeHerdr {
-    worktree: String,
+/// The space the old Herdr fake answered: workspace-1, unstamped, checked out
+/// at the repo, with an idle Codex lead, an idle Claude reviewer, and two free
+/// panes that report no session and an `unknown` status. It answers `workspace
+/// list`, `worktree list --cwd <repo>`, `worktree list --workspace
+/// workspace-1`, and `pane list --workspace workspace-1`, takes prompts to any
+/// pane and `pane report-metadata`, and fails everything else.
+struct PersonaSpace {
     /// Serialized Delivery Envelopes handed to `agent prompt`, per pane.
-    prompts: std::sync::Mutex<Vec<(String, String)>>,
-    /// Every command run, so a test can prove one was never needed.
-    commands: AtomicU64,
+    prompts: Arc<Mutex<Vec<(String, String)>>>,
+    space: StrictSpace,
 }
 
-impl FakeHerdr {
+impl PersonaSpace {
     fn new(directory: &TestDirectory) -> Self {
+        let free = |world: WorldBuilder, pane: &str, terminal: &str, tab: &str| {
+            world
+                .pane(pane)
+                .terminal(terminal)
+                .tab(tab)
+                .reports_session(false)
+                .state(AgentState::Unknown("unknown".into()))
+        };
+        let world = FakeMux::world()
+            .endpoint("socket-a")
+            .space("workspace-1")
+            .checkout(&directory.repo)
+            .unstamped()
+            .pane("pane-lead")
+            .terminal("t1")
+            .tab("tab-1")
+            .codex()
+            .session("session-lead")
+            .idle()
+            .pane("pane-reviewer")
+            .terminal("t2")
+            .tab("tab-2")
+            .claude()
+            .session("session-reviewer")
+            .idle();
+        let world = free(world, "pane-quiet", "t3", "tab-3");
+        let mux = free(world, "pane-build", "t4", "tab-4").build();
+        for pane in ["pane-lead", "pane-reviewer", "pane-quiet", "pane-build"] {
+            mux.answer(pane, InputOutcome::Delivered);
+        }
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let typed = Arc::clone(&prompts);
+        mux.on_input(move |_, attempt| {
+            if let SentInput::Prompt(envelope) = &attempt.input {
+                typed
+                    .lock()
+                    .unwrap()
+                    .push((attempt.pane.as_str().to_owned(), envelope.clone()));
+            }
+        });
+        let mut listings = CHECKOUT_LISTINGS.to_vec();
+        listings.push((ScopeKind::Space, Depth::Panes));
         Self {
-            worktree: directory.repo.display().to_string(),
-            prompts: std::sync::Mutex::new(Vec::new()),
-            commands: AtomicU64::new(0),
+            prompts,
+            space: StrictSpace::new(mux, &listings, Takes::prompts_and_metadata()),
         }
     }
 
-    fn commands(&self) -> u64 {
-        self.commands.load(Ordering::Relaxed)
+    /// Every read, input, and effect, so a test can prove none was needed.
+    fn commands(&self) -> usize {
+        self.space.calls().len()
     }
 
     fn envelope_for(&self, pane_id: &str) -> Value {
@@ -108,45 +164,6 @@ impl FakeHerdr {
             .find(|(pane, _)| pane == pane_id)
             .unwrap_or_else(|| panic!("no envelope was dispatched to {pane_id}"));
         delivered::envelope_of(envelope)
-    }
-}
-
-impl HerdrCommandExecutor for FakeHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        self.commands.fetch_add(1, Ordering::Relaxed);
-        let stdout = match args {
-            ["workspace", "list"] => json!({"result":{"workspaces":[{"workspace_id":"workspace-1"}]}})
-            .to_string(),
-            ["worktree", "list", "--cwd", cwd, "--json"] if *cwd == self.worktree => json!({
-                "result": {"worktrees": [{"path": self.worktree, "open_workspace_id": "workspace-1"}]}
-            })
-            .to_string(),
-            ["worktree", "list", "--workspace", "workspace-1", "--json"] => json!({
-                "result": {"worktrees": [{"path": self.worktree, "open_workspace_id": "workspace-1"}]}
-            })
-            .to_string(),
-            ["pane", "list", "--workspace", "workspace-1"] => json!({"result": {"panes": [
-                {"pane_id":"pane-lead","terminal_id":"t1","tab_id":"tab-1","workspace_id":"workspace-1",
-                 "agent":"codex","agent_session":{"value":"session-lead"},"agent_status":"idle"},
-                {"pane_id":"pane-reviewer","terminal_id":"t2","tab_id":"tab-2","workspace_id":"workspace-1",
-                 "agent":"claude","agent_session":{"value":"session-reviewer"},"agent_status":"idle"},
-                {"pane_id":"pane-quiet","terminal_id":"t3","tab_id":"tab-3","workspace_id":"workspace-1",
-                 "agent_status":"unknown"},
-                {"pane_id":"pane-build","terminal_id":"t4","tab_id":"tab-4","workspace_id":"workspace-1",
-                 "agent_status":"unknown"}
-            ]}})
-            .to_string(),
-            ["agent", "prompt", pane_id, envelope] => {
-                self.prompts
-                    .lock()
-                    .unwrap()
-                    .push(((*pane_id).to_owned(), (*envelope).to_owned()));
-                "{}".to_owned()
-            }
-            ["pane", "report-metadata", ..] => "{}".to_owned(),
-            _ => return Err(format!("unexpected Herdr command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput { stdout })
     }
 }
 
@@ -234,10 +251,10 @@ fn setup(directory: &TestDirectory) {
 
 fn runtime<'a>(
     directory: &'a TestDirectory,
-    herdr: &'a FakeHerdr,
+    herdr: &'a PersonaSpace,
     ids: &'a SequenceIds,
     pane_id: &'a str,
-) -> LifecycleRuntime<'a, FakeHerdr, FixedClock, SequenceIds> {
+) -> LifecycleRuntime<'a, FakeMux, FixedClock, SequenceIds> {
     LifecycleRuntime {
         state_directory: &directory.state,
         home_directory: Some(&directory.home),
@@ -246,7 +263,7 @@ fn runtime<'a>(
         workspace_id: None,
         current_pane_id: Some(pane_id),
         session_socket_id: "socket-a",
-        mux: herdr,
+        mux: &herdr.space,
         clock: &FixedClock,
         ids,
     }
@@ -255,7 +272,7 @@ fn runtime<'a>(
 fn register(
     address_id: &str,
     host: AgentRuntime,
-    runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
+    runtime: &LifecycleRuntime<'_, FakeMux, FixedClock, SequenceIds>,
 ) {
     let challenge =
         issue_registration_challenge(&PaneAddressId::new(address_id), host, runtime).unwrap();
@@ -268,14 +285,21 @@ fn register(
     .unwrap();
 }
 
-fn as_typed(herdr: &FakeHerdr, prompt: &str) -> String {
-    let typed = herdr.prompts.lock().unwrap();
-    delivered::as_typed(typed.iter().map(|(_, typed)| typed.as_str()), prompt)
+fn as_typed(mux: &FakeMux, prompt: &str) -> String {
+    let typed: Vec<String> = mux
+        .sent()
+        .into_iter()
+        .filter_map(|sent| match sent.input {
+            SentInput::Prompt(text) => Some(text),
+            _ => None,
+        })
+        .collect();
+    delivered::as_typed(typed.iter().map(String::as_str), prompt)
 }
 
 fn hook(
     prompt: &str,
-    runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
+    runtime: &LifecycleRuntime<'_, FakeMux, FixedClock, SequenceIds>,
 ) -> Option<Value> {
     let prompt = as_typed(runtime.mux, prompt);
     execute_user_prompt_submit_hook(
@@ -288,7 +312,7 @@ fn hook(
 fn hook_as(
     session: &str,
     prompt: &str,
-    runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
+    runtime: &LifecycleRuntime<'_, FakeMux, FixedClock, SequenceIds>,
 ) -> Option<Value> {
     let prompt = as_typed(runtime.mux, prompt);
     execute_user_prompt_submit_hook(
@@ -329,7 +353,7 @@ fn forwarded(directory: &TestDirectory, host: AgentRuntime, output: &Value) -> S
 }
 
 fn session_start(
-    runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
+    runtime: &LifecycleRuntime<'_, FakeMux, FixedClock, SequenceIds>,
 ) -> Option<Value> {
     execute_session_start_hook(
         &json!({"hook_event_name":"SessionStart","source":"startup"}).to_string(),
@@ -349,7 +373,7 @@ fn context(output: &Value) -> String {
 fn an_ordinary_turn_carries_the_workspace_personas_generic_and_live_readiness() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     register("address-lead", AgentRuntime::Codex, &lead);
@@ -414,7 +438,7 @@ fn an_ordinary_turn_carries_the_workspace_personas_generic_and_live_readiness() 
 #[test]
 fn a_session_reads_the_selection_policy_once_and_before_the_first_name() {
     let directory = TestDirectory::new();
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
 
@@ -531,7 +555,7 @@ fn a_session_reads_the_selection_policy_once_and_before_the_first_name() {
 #[test]
 fn a_space_with_nothing_to_say_leaves_an_ordinary_prompt_untouched() {
     let directory = TestDirectory::new();
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
 
@@ -555,7 +579,7 @@ fn a_space_with_nothing_to_say_leaves_an_ordinary_prompt_untouched() {
 fn mentions_still_route_and_a_delivery_still_authenticates_exactly_as_before() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -623,7 +647,7 @@ fn mentions_still_route_and_a_delivery_still_authenticates_exactly_as_before() {
 fn a_delivery_the_host_marked_as_pasted_text_still_authenticates() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -641,7 +665,7 @@ fn a_delivery_the_host_marked_as_pasted_text_still_authenticates() {
         .as_str()
         .unwrap()
         .to_owned();
-    let envelope = as_typed(&herdr, &envelope.to_string());
+    let envelope = as_typed(&herdr.space, &envelope.to_string());
     let marked = |id: &str, body: &str| {
         format!("\n\n<pasted_content id=\"{id}\">\n{body}\n</pasted_content id=\"{id}\">\n")
     };
@@ -674,7 +698,7 @@ fn a_delivery_the_host_marked_as_pasted_text_still_authenticates() {
 fn a_delivery_pasted_behind_leftover_input_is_the_delivery_and_never_a_mention() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -702,7 +726,7 @@ fn a_delivery_pasted_behind_leftover_input_is_the_delivery_and_never_a_mention()
             .count()
     };
     let before = prompts_to_lead();
-    let envelope = as_typed(&herdr, &envelope.to_string());
+    let envelope = as_typed(&herdr.space, &envelope.to_string());
 
     // The live shape: the blocked-and-restored Mention, then the marked paste.
     let prompt = format!(
@@ -739,7 +763,7 @@ fn a_delivery_pasted_behind_leftover_input_is_the_delivery_and_never_a_mention()
     .unwrap();
     let to_codex = herdr.envelope_for("pane-lead");
     let before = herdr.prompts.lock().unwrap().len();
-    let to_codex = as_typed(&herdr, &to_codex.to_string());
+    let to_codex = as_typed(&herdr.space, &to_codex.to_string());
     let output = hook(&format!("@reviewer reply with pong{to_codex}"), &lead).unwrap();
     assert!(
         output.get("decision").is_none(),
@@ -763,7 +787,7 @@ fn a_delivery_pasted_behind_leftover_input_is_the_delivery_and_never_a_mention()
 fn an_incoming_task_reaches_both_hosts_with_the_roster_and_only_claude_with_the_attestation() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -954,7 +978,7 @@ fn an_incoming_task_reaches_both_hosts_with_the_roster_and_only_claude_with_the_
 fn self_and_its_persona_survive_the_listing_cap_with_the_remaining_count() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     register("address-lead", AgentRuntime::Codex, &lead);
@@ -1019,7 +1043,7 @@ fn self_and_its_persona_survive_the_listing_cap_with_the_remaining_count() {
 fn a_paused_space_makes_selection_unavailable_instead_of_offering_idle_peers() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     register("address-lead", AgentRuntime::Codex, &lead);
@@ -1058,7 +1082,7 @@ fn a_paused_space_makes_selection_unavailable_instead_of_offering_idle_peers() {
 fn persona_text_saved_before_the_limits_is_escaped_and_bounded_but_never_rewritten() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     register("address-lead", AgentRuntime::Codex, &lead);
@@ -1115,7 +1139,7 @@ fn persona_text_saved_before_the_limits_is_escaped_and_bounded_but_never_rewritt
 fn a_roster_too_large_for_the_hook_budget_gives_way_to_the_delivery() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -1189,7 +1213,7 @@ fn a_roster_too_large_for_the_hook_budget_gives_way_to_the_delivery() {
 fn a_persona_cannot_forge_another_roster_row_or_readiness_field() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     register("address-lead", AgentRuntime::Codex, &lead);
@@ -1233,7 +1257,7 @@ fn a_persona_cannot_forge_another_roster_row_or_readiness_field() {
 fn the_rendered_line_survives_a_hostile_installed_path() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -1305,7 +1329,7 @@ fn the_rendered_line_survives_a_hostile_installed_path() {
 fn every_rendered_line_matches_an_installed_codex_prefix_rule() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -1385,7 +1409,7 @@ fn every_rendered_line_matches_an_installed_codex_prefix_rule() {
 fn a_leading_mention_that_misses_keeps_its_guidance_and_gains_the_roster() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     register("address-lead", AgentRuntime::Codex, &lead);
@@ -1443,7 +1467,7 @@ fn a_leading_mention_that_misses_keeps_its_guidance_and_gains_the_roster() {
 #[test]
 fn a_miss_with_no_roster_still_emits_the_exact_known_safe_guidance() {
     let directory = TestDirectory::new();
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     let attribution = MutationAttribution::new(ActorKind::Human, "test", 1);
@@ -1467,7 +1491,7 @@ fn a_miss_with_no_roster_still_emits_the_exact_known_safe_guidance() {
 #[test]
 fn a_lone_agent_keeps_its_own_row_and_no_state_asks_herdr_nothing() {
     let directory = TestDirectory::new();
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
 
@@ -1514,7 +1538,7 @@ fn a_lone_agent_keeps_its_own_row_and_no_state_asks_herdr_nothing() {
 fn address_list_answers_availability_with_the_rosters_own_rule() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     register("address-lead", AgentRuntime::Codex, &lead);
@@ -1590,7 +1614,7 @@ fn address_list_answers_availability_with_the_rosters_own_rule() {
 fn address_list_reports_each_registered_agents_context_size_from_its_transcript() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     register("address-lead", AgentRuntime::Codex, &lead);
@@ -1720,7 +1744,7 @@ fn address_list_reports_each_registered_agents_context_size_from_its_transcript(
 fn both_installed_wrappers_forward_a_roster_and_only_claude_forwards_the_attestation() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     let executable = directory.root.join("hook-result");
@@ -1906,7 +1930,7 @@ fn the_compact_reply_line_and_the_bound_full_input_are_one_reply_in_either_order
     for compact_first in [true, false] {
         let directory = TestDirectory::new();
         setup(&directory);
-        let herdr = FakeHerdr::new(&directory);
+        let herdr = PersonaSpace::new(&directory);
         let ids = SequenceIds(AtomicU64::new(1));
         let lead = runtime(&directory, &herdr, &ids, "pane-lead");
         let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -1993,7 +2017,7 @@ fn a_compact_reply_names_its_attempt_or_is_refused() {
 fn a_session_is_shown_the_rows_again_only_when_a_peer_changed() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     register("address-lead", AgentRuntime::Codex, &lead);
@@ -2046,7 +2070,7 @@ fn a_session_is_shown_the_rows_again_only_when_a_peer_changed() {
 fn any_session_start_shows_that_session_the_whole_roster_again() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     register("address-lead", AgentRuntime::Codex, &lead);
@@ -2098,7 +2122,7 @@ fn any_session_start_shows_that_session_the_whole_roster_again() {
 fn an_incoming_task_with_an_unchanged_roster_still_carries_its_commands_on_both_hosts() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -2167,7 +2191,7 @@ fn an_incoming_task_with_an_unchanged_roster_still_carries_its_commands_on_both_
 fn a_miss_after_an_unchanged_roster_is_the_exact_known_safe_guidance() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     register("address-lead", AgentRuntime::Codex, &lead);
@@ -2216,7 +2240,7 @@ fn a_roster_that_is_gone_is_said_once_on_an_ordinary_turn() {
     for remove in [deactivate, retire_everyone] {
         let directory = TestDirectory::new();
         setup(&directory);
-        let herdr = FakeHerdr::new(&directory);
+        let herdr = PersonaSpace::new(&directory);
         let ids = SequenceIds(AtomicU64::new(1));
         let lead = runtime(&directory, &herdr, &ids, "pane-lead");
         let prompt = "Plan the SSO work.";
@@ -2248,7 +2272,7 @@ fn a_failed_handoff_says_once_that_the_roster_is_gone() {
     for remove in [deactivate, retire_everyone] {
         let directory = TestDirectory::new();
         setup(&directory);
-        let herdr = FakeHerdr::new(&directory);
+        let herdr = PersonaSpace::new(&directory);
         let ids = SequenceIds(AtomicU64::new(1));
         let lead = runtime(&directory, &herdr, &ids, "pane-lead");
         let prompt = "@missing please look";
@@ -2278,23 +2302,22 @@ fn a_failed_handoff_says_once_that_the_roster_is_gone() {
     }
 }
 
-struct UnreadableHerdr;
-impl HerdrCommandExecutor for UnreadableHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        Err(format!("Herdr did not answer {args:?}"))
-    }
-}
-
 /// Herdr not answering says nothing about the roster, so the turn stays
 /// silent and the session keeps what it was shown.
 #[test]
 fn a_roster_that_could_not_be_read_is_never_said_to_be_gone() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
-    let unreadable = LifecycleRuntime {
+    // A Herdr that answers nothing: every survey fails, and it takes no input or effect.
+    let unreadable_herdr = StrictSpace::new(
+        FakeMux::world().endpoint("socket-a").build(),
+        &[],
+        Takes::nothing(),
+    );
+    let unreadable: LifecycleRuntime<'_, FakeMux, FixedClock, SequenceIds> = LifecycleRuntime {
         state_directory: lead.state_directory,
         home_directory: lead.home_directory,
         agent_config: namedrop::AgentConfigDirectories::default(),
@@ -2302,12 +2325,12 @@ fn a_roster_that_could_not_be_read_is_never_said_to_be_gone() {
         workspace_id: lead.workspace_id,
         current_pane_id: lead.current_pane_id,
         session_socket_id: lead.session_socket_id,
-        mux: &UnreadableHerdr,
+        mux: &unreadable_herdr,
         clock: &FixedClock,
         ids: &ids,
     };
     let prompt = "Plan the SSO work.";
-    let turn = |runtime: &LifecycleRuntime<'_, UnreadableHerdr, FixedClock, SequenceIds>| {
+    let turn = |runtime: &LifecycleRuntime<'_, FakeMux, FixedClock, SequenceIds>| {
         execute_user_prompt_submit_hook(
             &json!({"hook_event_name":"UserPromptSubmit","prompt":prompt,"session_id":"session-1"})
                 .to_string(),
@@ -2331,7 +2354,7 @@ fn a_roster_that_could_not_be_read_is_never_said_to_be_gone() {
 fn two_panes_of_one_session_keep_separate_memories_and_one_start_resets_both() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = PersonaSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &ids, "pane-lead");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
