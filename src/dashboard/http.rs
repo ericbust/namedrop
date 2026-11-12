@@ -1389,11 +1389,14 @@ fn serve_connection(
         ),
         Ok(Route::ImageUpload) => upload_image(&mut reader, &mut writer, front, &request),
         Ok(Route::Image(name)) => serve_image(&mut writer, front, &name),
-        Ok(Route::Sounds) => respond_sounds(
-            &mut writer,
-            "200 OK",
-            &super::sounds::read(&front.files),
-        ),
+        Ok(Route::Sounds) => {
+            let settings = super::sounds::read(&front.files);
+            let settings = match known_agents(front, history_store) {
+                Some(known) => settings.prune(&known),
+                None => settings,
+            };
+            respond_sounds(&mut writer, "200 OK", &settings)
+        }
         Ok(Route::ChangeSounds) => {
             change_sounds(&mut reader, &mut writer, front, history_store, &request)
         }
@@ -2392,7 +2395,10 @@ fn change_sounds(
         settings = settings.prune(known);
     }
     let settings = match settings.clone().apply(change) {
-        Ok(changed) => changed,
+        Ok(changed) => match &known {
+            Some(known) => changed.prune(known),
+            None => changed,
+        },
         Err(super::sounds::Rejected::TooManyAgents) => {
             return respond_status(writer, Status::BadRequest);
         }

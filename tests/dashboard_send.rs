@@ -3224,7 +3224,8 @@ else:
         };
         assert_eq!(
             read(&server),
-            json!({"default": "chime", "muted": false, "agents": {"pane-address-9-9-9": "knock"}})
+            json!({"default": "chime", "muted": false, "agents": {}}),
+            "the page sees the same pruned picks a save compares against"
         );
         let stored = fs::read(&file).unwrap();
         let unknown = json!({"kind": "agent", "agent": "pane-address-9-9-9",
@@ -3254,8 +3255,7 @@ else:
             (
                 json!({"kind": "agent", "agent": "pane-address-1-2-3",
                        "sound": "soft", "was": null}),
-                json!({"default": "bell", "muted": true,
-                       "agents": {lead: "pop", "pane-address-1-2-3": "soft"}}),
+                json!({"default": "bell", "muted": true, "agents": {lead: "pop"}}),
             ),
             (
                 json!({"kind": "agent", "agent": tester, "sound": "none", "was": null}),
