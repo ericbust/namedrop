@@ -5,28 +5,34 @@
 //! a replaced session, a pane in another space, a wait invented from pane text,
 //! an unreadable store reported as emptiness, or a read that outruns its budget.
 
+#![cfg(feature = "test-support")]
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
 mod delivered;
 
 use namedrop::{
-    ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
-    IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
-    PaneBindingId, PaneRoleId, StateNamespace, StateStore, collect_agent_status,
-    complete_capability_profile, drain_mailboxes, execute_integration_operation,
-    execute_message_operation, issue_registration_challenge,
+    ActorKind, AgentRuntime, AgentSessionId, Clock, IdGenerator, LifecycleRuntime,
+    MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId, PaneRoleId,
+    StateNamespace, StateStore, collect_agent_status, complete_capability_profile, drain_mailboxes,
+    execute_integration_operation, execute_message_operation, issue_registration_challenge,
+    mux::{
+        AgentState, Budget, Depth, Effect, InputOutcome, MuxError, Style, Wrap,
+        fake::{
+            CHECKOUT_LISTINGS, Call, FakeMux, Listing, Read, ScopeKind, ScreenShape, SentInput,
+            StrictSpace, Takes, WorldBuilder, runs,
+        },
+    },
 };
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
     fs,
     path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Duration,
 };
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -115,33 +121,72 @@ impl IdGenerator for SequenceIds {
     }
 }
 
+/// A pane as the old executor listed it: in `tab-1` of workspace-1, in
+/// `/tmp/repo`, with no `agent_session` field when it has no session.
+struct Pane {
+    pane_id: String,
+    terminal_id: String,
+    agent: Option<&'static str>,
+    session: Option<String>,
+    status: &'static str,
+    title: &'static str,
+}
+
 fn pane(
     pane_id: &str,
     terminal_id: &str,
-    agent: Option<&str>,
+    agent: Option<&'static str>,
     session: Option<&str>,
-    status: &str,
-    title: &str,
-) -> Value {
-    let mut entry = json!({
-        "pane_id": pane_id,
-        "terminal_id": terminal_id,
-        "tab_id": "tab-1",
-        "workspace_id": "workspace-1",
-        "cwd": "/tmp/repo",
-        "agent_status": status,
-        "title": title,
-    });
-    if let Some(agent) = agent {
-        entry["agent"] = json!(agent);
+    status: &'static str,
+    title: &'static str,
+) -> Pane {
+    Pane {
+        pane_id: pane_id.to_owned(),
+        terminal_id: terminal_id.to_owned(),
+        agent,
+        session: session.map(str::to_owned),
+        status,
+        title,
     }
-    if let Some(session) = session {
-        entry["agent_session"] = json!({"value": session});
-    }
-    entry
 }
 
-fn default_panes() -> Vec<Value> {
+/// What `pane read --source recent-unwrapped --lines 40` asks for, the only
+/// read the old executor answered.
+const EXCERPT: ScreenShape = ScreenShape {
+    wrap: Wrap::Joined,
+    style: Style::Plain,
+    lines: Some(40),
+};
+
+/// What the old executor read back for every pane until a test set it.
+fn default_excerpt(pane_id: &str) -> String {
+    format!("{pane_id} recent output\nstill going\n")
+}
+
+/// Adds `pane` to the space `builder` is on.
+fn describe(builder: WorldBuilder, pane: &Pane) -> WorldBuilder {
+    let mut builder = builder
+        .pane(&pane.pane_id)
+        .terminal(&pane.terminal_id)
+        .tab("tab-1")
+        .cwd("/tmp/repo")
+        .title(pane.title)
+        .state(AgentState::parse(pane.status))
+        .screen(&default_excerpt(&pane.pane_id))
+        .screen_shape(EXCERPT);
+    builder = match pane.agent {
+        Some("claude") => builder.claude(),
+        Some("codex") => builder.codex(),
+        Some(other) => builder.other_agent(other),
+        None => builder,
+    };
+    match &pane.session {
+        Some(session) => builder.session(session),
+        None => builder.reports_session(false),
+    }
+}
+
+fn default_panes() -> Vec<Pane> {
     vec![
         pane(
             "pane-lead",
@@ -194,75 +239,191 @@ fn default_panes() -> Vec<Value> {
     ]
 }
 
-struct FakeHerdr {
+/// A bounded command with the budget it was handed.
+type Handed = (Read, Option<Listing>, Budget);
+
+/// The bytes an oversized pane read printed: twice the 64 KiB excerpt cap.
+const OVERSIZED_BYTES: usize = 128 * 1_024;
+
+/// Workspace-1 on the test's repository, holding the six default panes. The
+/// old executor answered `workspace list` (no checkout stamp), `worktree list
+/// --cwd` and `--workspace workspace-1`, `pane list --workspace workspace-1`,
+/// and `pane read --source recent-unwrapped --lines 40`. It took `agent
+/// prompt` to any pane and any `pane report-metadata`, and failed every other
+/// command. It charged each Herdr command against the test's clock, which
+/// the command hook does here, one command at a time.
+///
+/// The switches are the old executor's, and the hooks apply them.
+struct SnapshotSpace {
     clock: Arc<TestClock>,
     /// Milliseconds every Herdr call costs, and the extra a pane read costs.
-    command_cost_ms: AtomicU64,
-    read_cost_ms: AtomicU64,
+    command_cost_ms: Arc<AtomicU64>,
+    read_cost_ms: Arc<AtomicU64>,
     /// Milliseconds charged per clock reading between the pane listing and the
     /// first pane read, which is exactly the window the state store read runs in.
-    state_read_step_ms: AtomicU64,
+    state_read_step_ms: Arc<AtomicU64>,
     /// A pane whose output never comes back: the read spends exactly the
     /// timeout it was handed and then fails, the way a stalled subprocess does.
-    stalled: Mutex<Option<String>>,
-    /// Every timeout this executor was handed, per command.
-    timeouts: Mutex<Vec<(String, u64)>>,
+    stalled: Arc<Mutex<Option<String>>>,
+    timeouts: Arc<Mutex<Vec<Handed>>>,
     /// After serving a read for the first pane, give the second pane a new
     /// terminal and session: the pane id stays, the pane behind it does not.
-    replace_after_read: Mutex<Option<(String, String)>>,
-    worktree: String,
-    panes: Mutex<Vec<Value>>,
-    excerpts: Mutex<BTreeMap<String, String>>,
-    oversized: Mutex<Option<String>>,
-    prompt_failures: Mutex<Vec<String>>,
-    prompts: Mutex<Vec<(String, String)>>,
-    commands: Mutex<Vec<String>>,
-    cancel_on_read: Mutex<Option<Arc<AtomicBool>>>,
+    replace_after_read: Arc<Mutex<Option<(String, String)>>>,
+    oversized: Arc<Mutex<Option<String>>>,
+    prompt_failures: Arc<Mutex<Vec<String>>>,
+    prompts: Arc<Mutex<Vec<(String, String)>>>,
+    cancel_on_read: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    space: StrictSpace,
 }
 
-impl FakeHerdr {
+impl SnapshotSpace {
     fn new(directory: &TestDirectory, clock: Arc<TestClock>) -> Self {
-        let excerpts = default_panes()
-            .iter()
-            .map(|entry| {
-                let pane_id = entry["pane_id"].as_str().unwrap().to_owned();
-                let text = format!("{pane_id} recent output\nstill going\n");
-                (pane_id, text)
-            })
-            .collect();
-        Self {
-            clock,
-            command_cost_ms: AtomicU64::new(0),
-            state_read_step_ms: AtomicU64::new(0),
-            stalled: Mutex::new(None),
-            timeouts: Mutex::new(Vec::new()),
-            read_cost_ms: AtomicU64::new(0),
-            replace_after_read: Mutex::new(None),
-            worktree: directory.repo.display().to_string(),
-            panes: Mutex::new(default_panes()),
-            excerpts: Mutex::new(excerpts),
-            oversized: Mutex::new(None),
-            prompt_failures: Mutex::new(Vec::new()),
-            prompts: Mutex::new(Vec::new()),
-            commands: Mutex::new(Vec::new()),
-            cancel_on_read: Mutex::new(None),
+        let panes = default_panes();
+        let world = FakeMux::world()
+            .endpoint("socket-a")
+            .space("workspace-1")
+            .checkout(&directory.repo)
+            .unstamped();
+        let mux = panes.iter().fold(world, describe).build();
+        for pane in &panes {
+            mux.answer(&pane.pane_id, InputOutcome::Delivered);
         }
+        let fixture = Self {
+            clock,
+            command_cost_ms: Arc::default(),
+            read_cost_ms: Arc::default(),
+            state_read_step_ms: Arc::default(),
+            stalled: Arc::default(),
+            timeouts: Arc::default(),
+            replace_after_read: Arc::default(),
+            oversized: Arc::default(),
+            prompt_failures: Arc::default(),
+            prompts: Arc::default(),
+            cancel_on_read: Arc::default(),
+            space: StrictSpace::new(mux, &Self::surveys(), Self::takes()),
+        };
+        fixture.hook();
+        fixture
+    }
+
+    /// The surveys the old executor's listings answer.
+    fn surveys() -> Vec<(ScopeKind, Depth)> {
+        let mut surveys = CHECKOUT_LISTINGS.to_vec();
+        surveys.push((ScopeKind::Space, Depth::Panes));
+        surveys
+    }
+
+    fn takes() -> Takes {
+        Takes::nothing()
+            .input(|attempt| matches!(attempt.input, SentInput::Prompt(_)))
+            .effect(|effect| matches!(effect, Effect::Identify { .. } | Effect::Badges { .. }))
+    }
+
+    fn hook(&self) {
+        let oversized = Arc::clone(&self.oversized);
+        self.space.on_read(move |mux, _| {
+            if let Some(pane) = oversized.lock().unwrap().as_deref() {
+                mux.set_screen(pane, Some(&"x".repeat(OVERSIZED_BYTES)));
+            }
+            Ok(())
+        });
+        let failures = Arc::clone(&self.prompt_failures);
+        self.space.answer_with(move |_, pane, input| {
+            let failing = failures
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|failing| failing == pane.as_str());
+            (failing && matches!(input, SentInput::Prompt(_))).then(|| {
+                InputOutcome::Ambiguous("herdr could not tell whether the prompt arrived".into())
+            })
+        });
+        let prompts = Arc::clone(&self.prompts);
+        self.space.on_input(move |_, attempt| {
+            if let (SentInput::Prompt(envelope), InputOutcome::Delivered) =
+                (&attempt.input, &attempt.outcome)
+            {
+                prompts
+                    .lock()
+                    .unwrap()
+                    .push((attempt.pane.as_str().to_owned(), envelope.clone()));
+            }
+        });
+        let clock = Arc::clone(&self.clock);
+        let (command_cost, read_cost, state_step) = (
+            Arc::clone(&self.command_cost_ms),
+            Arc::clone(&self.read_cost_ms),
+            Arc::clone(&self.state_read_step_ms),
+        );
+        let (stalled, timeouts, replace, oversized, cancel) = (
+            Arc::clone(&self.stalled),
+            Arc::clone(&self.timeouts),
+            Arc::clone(&self.replace_after_read),
+            Arc::clone(&self.oversized),
+            Arc::clone(&self.cancel_on_read),
+        );
+        self.space.on_command(move |mux, command| {
+            let read_pane = match command.read {
+                Read::Screen { pane, .. } => Some(pane.as_str()),
+                _ => None,
+            };
+            if let Some(budget) = command.budget {
+                timeouts
+                    .lock()
+                    .unwrap()
+                    .push((command.read.clone(), command.listing, budget));
+                if read_pane.is_some() && stalled.lock().unwrap().as_deref() == read_pane {
+                    let timeout_ms = u64::try_from(budget.timeout.as_millis()).unwrap();
+                    clock.advance(timeout_ms);
+                    return Err(MuxError::Timeout(format!(
+                        "Herdr command timed out after {timeout_ms} ms"
+                    )));
+                }
+            }
+            clock.advance(command_cost.load(Ordering::Relaxed));
+            if command.listing == Some(Listing::PanesOf) {
+                clock.step(state_step.load(Ordering::Relaxed));
+            }
+            let Some(pane_id) = read_pane else {
+                return Ok(());
+            };
+            clock.step(0);
+            clock.advance(read_cost.load(Ordering::Relaxed));
+            if let Some(flag) = cancel.lock().unwrap().as_ref() {
+                flag.store(true, Ordering::Relaxed);
+            }
+            let target = replace
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|(trigger, _)| trigger == pane_id)
+                .map(|(_, target)| target.clone());
+            if let Some(target) = target {
+                mux.set_terminal(&target, "terminal-replacement");
+                mux.set_session(&target, "session-replacement");
+            }
+            if oversized.lock().unwrap().as_deref() == Some(pane_id)
+                && command
+                    .budget
+                    .is_some_and(|budget| OVERSIZED_BYTES > budget.max_output_bytes)
+            {
+                return Err(MuxError::TooLarge(
+                    "Herdr read exceeded its output limit".to_owned(),
+                ));
+            }
+            Ok(())
+        });
+    }
+
+    /// Opens `pane` at the end of the listing, as a pane the listing gained.
+    fn open(&self, pane: Pane) {
+        self.space
+            .open_pane("workspace-1", |space| describe(space, &pane));
+        self.space.answer(&pane.pane_id, InputOutcome::Delivered);
     }
 
     fn set_excerpt(&self, pane_id: &str, text: &str) {
-        self.excerpts
-            .lock()
-            .unwrap()
-            .insert(pane_id.to_owned(), text.to_owned());
-    }
-
-    fn edit_pane(&self, pane_id: &str, edit: impl FnOnce(&mut Value)) {
-        let mut panes = self.panes.lock().unwrap();
-        let entry = panes
-            .iter_mut()
-            .find(|entry| entry["pane_id"] == pane_id)
-            .unwrap();
-        edit(entry);
+        self.space.set_screen(pane_id, Some(text));
     }
 
     /// Charge every Herdr call, and pane reads extra, against the collection
@@ -277,14 +438,14 @@ impl FakeHerdr {
         self.stalled.lock().unwrap().replace(pane_id.to_owned());
     }
 
-    /// The timeout handed to the first command starting with `prefix`.
-    fn timeout_for(&self, prefix: &str) -> u64 {
+    /// The timeout handed to the first bounded command `command` names.
+    fn timeout_for(&self, command: impl Fn(&Read, Option<Listing>) -> bool) -> u64 {
         let timeouts = self.timeouts.lock().unwrap();
-        timeouts
+        let (_, _, budget) = timeouts
             .iter()
-            .find(|(command, _)| command.starts_with(prefix))
-            .unwrap_or_else(|| panic!("no command started with {prefix}"))
-            .1
+            .find(|(read, listing, _)| command(read, *listing))
+            .unwrap_or_else(|| panic!("no such command ran: {timeouts:?}"));
+        u64::try_from(budget.timeout.as_millis()).unwrap()
     }
 
     /// Charge the state store read, which makes no Herdr call of its own.
@@ -301,11 +462,20 @@ impl FakeHerdr {
             .replace((trigger.to_owned(), target.to_owned()));
     }
 
+    /// Herdr stops listing the pane.
     fn remove_pane(&self, pane_id: &str) {
-        self.panes
-            .lock()
-            .unwrap()
-            .retain(|e| e["pane_id"] != pane_id);
+        self.space.hide_pane(pane_id);
+    }
+
+    /// Every port call the code made, one per line, as the old executor
+    /// logged every command.
+    fn commands(&self) -> String {
+        self.space
+            .calls()
+            .iter()
+            .map(|call| format!("{call:?}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn envelope_for(&self, pane_id: &str) -> Value {
@@ -316,113 +486,6 @@ impl FakeHerdr {
             .find(|(pane, _)| pane == pane_id)
             .unwrap_or_else(|| panic!("nothing was dispatched to {pane_id}"));
         delivered::envelope_of(envelope)
-    }
-}
-
-impl HerdrCommandExecutor for FakeHerdr {
-    /// Herdr's real executor spends the timeout it is given, so this one does
-    /// too: it records every timeout, and a stalled pane read burns exactly
-    /// that much of the collection budget before failing.
-    fn execute_bounded(
-        &self,
-        args: &[&str],
-        timeout: Duration,
-        cancelled: &AtomicBool,
-        max_output_bytes: usize,
-    ) -> Result<HerdrCommandOutput, String> {
-        let timeout_ms = u64::try_from(timeout.as_millis()).unwrap();
-        self.timeouts
-            .lock()
-            .unwrap()
-            .push((args.join(" "), timeout_ms));
-        if cancelled.load(Ordering::Relaxed) {
-            return Err("Herdr read cancelled".to_owned());
-        }
-        if let ["pane", "read", pane_id, ..] = args
-            && self.stalled.lock().unwrap().as_deref() == Some(*pane_id)
-        {
-            self.commands.lock().unwrap().push(args.join(" "));
-            self.clock.advance(timeout_ms);
-            return Err(format!("Herdr command timed out after {timeout_ms} ms"));
-        }
-        let output = self.execute(args)?;
-        if output.stdout.len() > max_output_bytes {
-            return Err("Herdr read exceeded its output limit".to_owned());
-        }
-        Ok(output)
-    }
-
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        self.commands.lock().unwrap().push(args.join(" "));
-        self.clock
-            .advance(self.command_cost_ms.load(Ordering::Relaxed));
-        let stdout = match args {
-            ["workspace", "list"] => {
-                json!({"result":{"workspaces":[{"workspace_id":"workspace-1"}]}})
-                    .to_string()
-            }
-            ["worktree", "list", "--workspace", "workspace-1", "--json"]
-            | ["worktree", "list", "--cwd", _, "--json"] => {
-                json!({"result":{"worktrees":[{"path":self.worktree,"open_workspace_id":"workspace-1"}]}})
-                    .to_string()
-            }
-            ["pane", "list", "--workspace", "workspace-1"] => {
-                self.clock
-                    .step(self.state_read_step_ms.load(Ordering::Relaxed));
-                json!({"result":{"panes":*self.panes.lock().unwrap()}}).to_string()
-            }
-            [
-                "pane",
-                "read",
-                pane_id,
-                "--source",
-                "recent-unwrapped",
-                "--lines",
-                "40",
-            ] => {
-                self.clock.step(0);
-                self.clock.advance(self.read_cost_ms.load(Ordering::Relaxed));
-                if let Some(flag) = self.cancel_on_read.lock().unwrap().as_ref() {
-                    flag.store(true, Ordering::Relaxed);
-                }
-                let replace = self
-                    .replace_after_read
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .filter(|(trigger, _)| trigger == pane_id)
-                    .map(|(_, target)| target.clone());
-                if let Some(target) = replace {
-                    self.edit_pane(&target, |entry| {
-                        entry["terminal_id"] = json!("terminal-replacement");
-                        entry["agent_session"] = json!({"value": "session-replacement"});
-                    });
-                }
-                if self.oversized.lock().unwrap().as_deref() == Some(*pane_id) {
-                    "x".repeat(128 * 1_024)
-                } else {
-                    self.excerpts
-                        .lock()
-                        .unwrap()
-                        .get(*pane_id)
-                        .cloned()
-                        .unwrap_or_default()
-                }
-            }
-            ["agent", "prompt", pane_id, envelope] => {
-                if self.prompt_failures.lock().unwrap().iter().any(|p| p == pane_id) {
-                    return Err("herdr could not tell whether the prompt arrived".to_owned());
-                }
-                self.prompts
-                    .lock()
-                    .unwrap()
-                    .push(((*pane_id).to_owned(), (*envelope).to_owned()));
-                "{}".to_owned()
-            }
-            ["pane", "report-metadata", ..] => "{}".to_owned(),
-            _ => return Err(format!("unexpected Herdr command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput { stdout })
     }
 }
 
@@ -476,11 +539,11 @@ fn setup(directory: &TestDirectory) {
 
 fn runtime<'a>(
     directory: &'a TestDirectory,
-    herdr: &'a FakeHerdr,
+    herdr: &'a SnapshotSpace,
     clock: &'a TestClock,
     ids: &'a SequenceIds,
     pane_id: &'a str,
-) -> LifecycleRuntime<'a, FakeHerdr, TestClock, SequenceIds> {
+) -> LifecycleRuntime<'a, FakeMux, TestClock, SequenceIds> {
     LifecycleRuntime {
         state_directory: &directory.state,
         home_directory: Some(&directory.home),
@@ -489,7 +552,7 @@ fn runtime<'a>(
         workspace_id: Some("workspace-1"),
         current_pane_id: Some(pane_id),
         session_socket_id: "socket-a",
-        mux: herdr,
+        mux: &herdr.space,
         clock,
         ids,
     }
@@ -498,7 +561,7 @@ fn runtime<'a>(
 fn register(
     address_id: &str,
     agent_runtime: AgentRuntime,
-    runtime: &LifecycleRuntime<'_, FakeHerdr, TestClock, SequenceIds>,
+    runtime: &LifecycleRuntime<'_, FakeMux, TestClock, SequenceIds>,
 ) {
     let challenge =
         issue_registration_challenge(&PaneAddressId::new(address_id), agent_runtime, runtime)
@@ -520,7 +583,7 @@ fn register(
 /// which `collect_agent_status` reads from the environment, is set under one
 /// lock rather than concurrently with another test's reading.
 fn collect(
-    runtime: &LifecycleRuntime<'_, FakeHerdr, TestClock, SequenceIds>,
+    runtime: &LifecycleRuntime<'_, FakeMux, TestClock, SequenceIds>,
     expected_terminal: &str,
     expected_session: Option<&str>,
     panel_pane: Option<&str>,
@@ -575,7 +638,7 @@ fn origin_is_bound_and_peers_are_named_from_namedrop_state() {
     let directory = TestDirectory::new();
     setup(&directory);
     let clock = Arc::new(TestClock::fixed());
-    let herdr = FakeHerdr::new(&directory, Arc::clone(&clock));
+    let herdr = SnapshotSpace::new(&directory, Arc::clone(&clock));
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &clock, &ids, "pane-lead");
     register("address-lead", AgentRuntime::ClaudeCode, &lead);
@@ -639,7 +702,7 @@ fn a_replaced_identity_is_refused_rather_than_described() {
     let directory = TestDirectory::new();
     setup(&directory);
     let clock = Arc::new(TestClock::fixed());
-    let herdr = FakeHerdr::new(&directory, Arc::clone(&clock));
+    let herdr = SnapshotSpace::new(&directory, Arc::clone(&clock));
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &clock, &ids, "pane-lead");
     let open = AtomicBool::new(false);
@@ -669,7 +732,7 @@ fn excerpts_are_redacted_quoted_and_bounded_to_recent_output() {
     let directory = TestDirectory::new();
     setup(&directory);
     let clock = Arc::new(TestClock::fixed());
-    let herdr = FakeHerdr::new(&directory, Arc::clone(&clock));
+    let herdr = SnapshotSpace::new(&directory, Arc::clone(&clock));
     herdr.set_excerpt(
         "pane-lead",
         &format!(
@@ -723,7 +786,7 @@ fn outstanding_requests_report_delivery_truth_and_never_pane_text() {
     let directory = TestDirectory::new();
     setup(&directory);
     let clock = Arc::new(TestClock::fixed());
-    let herdr = FakeHerdr::new(&directory, Arc::clone(&clock));
+    let herdr = SnapshotSpace::new(&directory, Arc::clone(&clock));
     // A pane that merely says it is waiting is not evidence of a dependency.
     herdr.set_excerpt(
         "pane-docs",
@@ -867,7 +930,7 @@ fn personas_come_from_saved_names_and_never_from_pane_text() {
     drop(database);
 
     let clock = Arc::new(TestClock::fixed());
-    let herdr = FakeHerdr::new(&directory, Arc::clone(&clock));
+    let herdr = SnapshotSpace::new(&directory, Arc::clone(&clock));
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &clock, &ids, "pane-lead");
     register("address-lead", AgentRuntime::ClaudeCode, &lead);
@@ -932,7 +995,7 @@ fn personas_come_from_saved_names_and_never_from_pane_text() {
 fn unreadable_namedrop_state_is_unavailable_evidence_not_zero_dependencies() {
     let directory = TestDirectory::new();
     let clock = Arc::new(TestClock::fixed());
-    let herdr = FakeHerdr::new(&directory, Arc::clone(&clock));
+    let herdr = SnapshotSpace::new(&directory, Arc::clone(&clock));
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &clock, &ids, "pane-lead");
     let open = AtomicBool::new(false);
@@ -986,7 +1049,7 @@ fn collection_stops_at_its_budget_and_says_what_is_missing() {
     let directory = TestDirectory::new();
     setup(&directory);
     let clock = Arc::new(TestClock::fixed());
-    let herdr = FakeHerdr::new(&directory, Arc::clone(&clock));
+    let herdr = SnapshotSpace::new(&directory, Arc::clone(&clock));
     // Three excerpts fit in the 2000 ms budget once the closing identity check
     // keeps its reserve; the rest of the panes go undescribed.
     herdr.charge(0, 600);
@@ -1025,7 +1088,7 @@ fn cancellation_returns_no_snapshot_at_all() {
     let directory = TestDirectory::new();
     setup(&directory);
     let clock = Arc::new(TestClock::fixed());
-    let herdr = FakeHerdr::new(&directory, Arc::clone(&clock));
+    let herdr = SnapshotSpace::new(&directory, Arc::clone(&clock));
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &clock, &ids, "pane-lead");
 
@@ -1049,10 +1112,8 @@ fn only_the_invoking_space_is_read() {
     let directory = TestDirectory::new();
     setup(&directory);
     let clock = Arc::new(TestClock::fixed());
-    let herdr = FakeHerdr::new(&directory, Arc::clone(&clock));
-    herdr.edit_pane("pane-docs", |entry| {
-        entry["workspace_id"] = json!("workspace-9");
-    });
+    let herdr = SnapshotSpace::new(&directory, Arc::clone(&clock));
+    herdr.space.set_reported_space("pane-docs", "workspace-9");
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &clock, &ids, "pane-lead");
 
@@ -1071,16 +1132,18 @@ fn only_the_invoking_space_is_read() {
         "{}",
         warnings(&snapshot)
     );
-    let commands = herdr.commands.lock().unwrap().join("\n");
+    let commands = herdr.commands();
     assert!(!commands.contains("workspace-9"), "{commands}");
     assert!(!commands.contains("pane-docs"), "{commands}");
     // Reading is all it did: nothing here mutates Herdr or Namedrop state.
     assert!(
-        commands
-            .lines()
-            .all(|command| command.starts_with("worktree list")
-                || command.starts_with("pane list")
-                || command.starts_with("pane read")),
+        herdr.space.calls().iter().all(|call| match call {
+            Call::Read(read @ Read::Survey { .. }) => {
+                !runs(read, Listing::Spaces) && !runs(read, Listing::Space)
+            }
+            Call::Read(Read::Screen { .. }) => true,
+            _ => false,
+        }),
         "{commands}"
     );
 }
@@ -1090,10 +1153,10 @@ fn a_crowded_space_still_produces_a_bounded_snapshot() {
     let directory = TestDirectory::new();
     setup(&directory);
     let clock = Arc::new(TestClock::fixed());
-    let herdr = FakeHerdr::new(&directory, Arc::clone(&clock));
+    let herdr = SnapshotSpace::new(&directory, Arc::clone(&clock));
     for index in 0..40 {
         let pane_id = format!("pane-extra-{index}");
-        herdr.panes.lock().unwrap().push(pane(
+        herdr.open(pane(
             &pane_id,
             &format!("terminal-extra-{index}"),
             Some("codex"),
@@ -1142,7 +1205,7 @@ fn a_snapshot_whose_identities_cannot_be_rechecked_is_not_shown() {
     let directory = TestDirectory::new();
     setup(&directory);
     let clock = Arc::new(TestClock::fixed());
-    let herdr = FakeHerdr::new(&directory, Arc::clone(&clock));
+    let herdr = SnapshotSpace::new(&directory, Arc::clone(&clock));
     // Every call is expensive enough that nothing is left for the closing
     // check. An unverifiable snapshot is refused, not shown unverified.
     herdr.charge(500, 0);
@@ -1165,7 +1228,7 @@ fn a_peer_replaced_during_collection_is_dropped_rather_than_described() {
     let directory = TestDirectory::new();
     setup(&directory);
     let clock = Arc::new(TestClock::fixed());
-    let herdr = FakeHerdr::new(&directory, Arc::clone(&clock));
+    let herdr = SnapshotSpace::new(&directory, Arc::clone(&clock));
     // A pane id is a reusable handle: the reviewer's pane is read, then the id
     // is taken over by a different terminal and session before the panel paints.
     herdr.replace_after_read("pane-reviewer", "pane-reviewer");
@@ -1206,7 +1269,7 @@ fn the_origin_replaced_during_collection_is_refused() {
     let directory = TestDirectory::new();
     setup(&directory);
     let clock = Arc::new(TestClock::fixed());
-    let herdr = FakeHerdr::new(&directory, Arc::clone(&clock));
+    let herdr = SnapshotSpace::new(&directory, Arc::clone(&clock));
     // The invoking pane restarts its agent while the snapshot is being taken.
     herdr.replace_after_read("pane-lead", "pane-lead");
     let ids = SequenceIds(AtomicU64::new(1));
@@ -1229,7 +1292,7 @@ fn a_long_page_of_requests_leaves_budget_for_the_rest_of_the_panel() {
     let directory = TestDirectory::new();
     setup(&directory);
     let clock = Arc::new(TestClock::fixed());
-    let herdr = FakeHerdr::new(&directory, Arc::clone(&clock));
+    let herdr = SnapshotSpace::new(&directory, Arc::clone(&clock));
     let ids = SequenceIds(AtomicU64::new(1));
     let lead = runtime(&directory, &herdr, &clock, &ids, "pane-lead");
     register("address-lead", AgentRuntime::ClaudeCode, &lead);
@@ -1284,7 +1347,7 @@ fn a_stalled_pane_read_cannot_spend_the_identity_check_reserve() {
     let directory = TestDirectory::new();
     setup(&directory);
     let clock = Arc::new(TestClock::fixed());
-    let herdr = FakeHerdr::new(&directory, Arc::clone(&clock));
+    let herdr = SnapshotSpace::new(&directory, Arc::clone(&clock));
     // The origin's own output never comes back. A read that is merely allowed
     // to start would spend the whole remaining budget and leave the closing
     // identity check nothing, so the timeout it is handed has to be short.
@@ -1303,8 +1366,18 @@ fn a_stalled_pane_read_cannot_spend_the_identity_check_reserve() {
 
     // Discovery gets everything that is left; an excerpt read gets everything
     // except the reserve.
-    assert_eq!(herdr.timeout_for("worktree list"), 2_000);
-    assert_eq!(herdr.timeout_for("pane read pane-lead"), 2_000 - 250);
+    assert_eq!(
+        herdr.timeout_for(|_, listing| {
+            matches!(listing, Some(Listing::CheckoutAt | Listing::CheckoutOf))
+        }),
+        2_000
+    );
+    assert_eq!(
+        herdr.timeout_for(
+            |read, _| matches!(read, Read::Screen { pane, .. } if pane.as_str() == "pane-lead")
+        ),
+        2_000 - 250
+    );
     // The reserve survived the stall, so the closing check still ran and the
     // panel still gets a factual snapshot.
     assert_eq!(snapshot["origin"]["pane_id"], "pane-lead");
