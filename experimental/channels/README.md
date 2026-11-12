@@ -356,6 +356,35 @@ A frame's message row lists its images in `images` and leaves their lines out of
 `body`. A message with images needs words too, so Send stays off until there are
 some.
 
+## Create channels and add agents
+
+**+** beside **Channels** opens the New channel form in the sidebar, and **Add
+agent** in the member row opens its form under the row. Both open in place, with no
+dialog. On a phone the New channel form sits in the channel drawer. `src/create.ts`
+holds the drafts, the checks and the form's state machine as pure functions, and
+`NewChannelForm` and `AddAgentForm` render them.
+
+The New channel form reads `GET /w/<key>/folders` for **Recent folders**, where the
+key is the open channel's, or else the first channel's. A list that can't load is an
+empty one. **Create** posts `{name, folder}` to `POST /w/<key>/channels`, and the
+page opens the channel named by the `key` in the answer. **Add** posts
+`{kind, name, persona}` to `POST /w/<key>/agents` for the open channel. Both posts
+carry the `X-Namedrop-Csrf` header and retry once after a 403, like a send.
+
+The page checks a draft before it posts, with the server's own sentences, so a
+check reads the same wherever it is made. The server checks again, and its
+`{"error"}` sentence shows in the form as it is. The form keeps the draft after a
+refusal. While a post is pending, the button reads **Creating…** or **Adding…** and
+a second press does nothing.
+
+An agent that Channels started and that has not connected after 20 seconds arrives
+as an attention item with `source_kind` `agent_start` and a `pane` response. It
+shows under **Needs you** with a button that opens the agent's screen. The item's
+summary is its title and says what to do: finish Claude's setup, or send a new
+Codex its first message. The pane may be asking the person to trust the folder or
+to log in, and the page never answers that screen. The item leaves once the agent
+connects.
+
 ## Direct messages and reminders
 
 **Direct messages** lists Namedrop agents across workspaces, with a channel label
