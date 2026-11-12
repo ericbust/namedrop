@@ -1,6 +1,8 @@
 use super::{AgentIdentity, Key};
 
-/// Why the caller believes the agent can take a prompt now.
+/// Why the caller believes the agent can take a prompt now. No adapter
+/// reads it. Herdr types to an agent that reports `working` whatever the
+/// admission, and `gate::emulate_prompt` decides by status alone.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Admit {
     /// The agent reports `idle` or `done`.

@@ -244,14 +244,12 @@ fn a_settled_agent_takes_a_prompt_and_starts_working() {
 }
 
 #[test]
-fn the_native_gate_declines_a_busy_or_absent_agent_before_typing() {
+fn the_native_gate_declines_a_blocked_or_absent_agent_before_typing() {
     let mux = author_and_reviewer();
     let reviewer = identity(&mux, "pane-reviewer");
+    mux.set_state("pane-author", AgentState::Blocked);
     for (pane, reason) in [
-        (
-            "pane-reviewer",
-            "pane pane-reviewer cannot take a prompt now",
-        ),
+        ("pane-author", "pane pane-author cannot take a prompt now"),
         ("pane-shell", "pane pane-shell cannot take a prompt now"),
         ("pane-gone", "pane pane-gone is gone"),
     ] {
@@ -265,14 +263,22 @@ fn the_native_gate_declines_a_busy_or_absent_agent_before_typing() {
 }
 
 #[test]
-fn the_native_gate_honors_a_between_turns_admission_like_herdr() {
+fn the_native_gate_types_to_a_working_or_unknown_agent_whatever_the_admission_like_herdr() {
     let mux = author_and_reviewer();
     let reviewer = identity(&mux, "pane-reviewer");
+    for admit in [Admit::Settled, Admit::BetweenTurns] {
+        assert_eq!(
+            prompt(&mux, "pane-reviewer", &reviewer, admit),
+            InputOutcome::Delivered,
+            "{admit:?}"
+        );
+    }
+    mux.set_state("pane-reviewer", AgentState::Unknown("thinking".into()));
     assert_eq!(
-        prompt(&mux, "pane-reviewer", &reviewer, Admit::BetweenTurns),
+        prompt(&mux, "pane-reviewer", &reviewer, Admit::Settled),
         InputOutcome::Delivered
     );
-    assert_eq!(prompts(&mux, "pane-reviewer"), ["hello"]);
+    assert_eq!(prompts(&mux, "pane-reviewer"), ["hello", "hello", "hello"]);
 }
 
 #[test]
@@ -422,7 +428,8 @@ fn every_attempt_is_recorded_with_its_outcome_even_when_nothing_was_typed() {
             keys: &keys,
         },
     );
-    let busy = prompt(&mux, "pane-reviewer", &reviewer, Admit::Settled);
+    mux.set_state("pane-reviewer", AgentState::Blocked);
+    let blocked = prompt(&mux, "pane-reviewer", &reviewer, Admit::Settled);
     assert!(mux.sent().is_empty());
     assert_eq!(
         mux.attempts(),
@@ -438,7 +445,7 @@ fn every_attempt_is_recorded_with_its_outcome_even_when_nothing_was_typed() {
             Attempt {
                 pane: PaneId::new("pane-reviewer"),
                 input: SentInput::Prompt("hello".into()),
-                outcome: busy,
+                outcome: blocked,
             },
         ]
     );
@@ -912,7 +919,8 @@ fn input_observers_see_every_attempt_with_its_outcome_before_it_returns() {
     let reviewer = identity(&mux, "pane-reviewer");
     mux.script("pane-shell", InputOutcome::Refused("invalid_input".into()));
     let delivered = prompt(&mux, "pane-author", &author, Admit::Settled);
-    let busy = prompt(&mux, "pane-reviewer", &reviewer, Admit::Settled);
+    mux.set_state("pane-reviewer", AgentState::Blocked);
+    let blocked = prompt(&mux, "pane-reviewer", &reviewer, Admit::Settled);
     let refused = mux.send(&PaneId::new("pane-shell"), InputKind::Line("ls"));
     let ghost = mux.send(&PaneId::new("pane-ghost"), InputKind::Line("ls"));
     let attempt = |pane: &str, input, outcome| Attempt {
@@ -922,7 +930,7 @@ fn input_observers_see_every_attempt_with_its_outcome_before_it_returns() {
     };
     let attempts = [
         attempt("pane-author", SentInput::Prompt("hello".into()), delivered),
-        attempt("pane-reviewer", SentInput::Prompt("hello".into()), busy),
+        attempt("pane-reviewer", SentInput::Prompt("hello".into()), blocked),
         attempt("pane-shell", SentInput::Line("ls".into()), refused),
         attempt("pane-ghost", SentInput::Line("ls".into()), ghost),
     ];

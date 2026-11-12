@@ -467,7 +467,8 @@ impl FakeMux {
 
     /// Prompts go through the real `gate::emulate_prompt`, as on a
     /// multiplexer without a native gate. By default the fake gates like
-    /// Herdr: it refuses a busy agent before typing and checks no identity.
+    /// Herdr: it declines a blocked agent or a pane with none before typing,
+    /// types to a working one, and checks no identity.
     pub fn emulated(mut self) -> Self {
         self.emulated = true;
         self
@@ -908,15 +909,12 @@ impl FakeMux {
         if self.emulated {
             return gate::emulate_prompt(&Channel(self), pane, &request);
         }
+        // Herdr 0.9.5 `agent prompt` refuses only a blocked agent, and types
+        // to one that reports `working`, whatever the caller's `Admit`.
         let admitted = {
             let world = self.lock();
             let facts = &world.pane(pane).expect("checked above").facts;
-            facts.agent.is_some()
-                && facts.state.as_ref().is_some_and(|state| {
-                    state.accepts_prompt()
-                        || (*state == AgentState::Working
-                            && request.admit == super::Admit::BetweenTurns)
-                })
+            facts.agent.is_some() && facts.state != Some(AgentState::Blocked)
         };
         if !admitted {
             return InputOutcome::Declined(

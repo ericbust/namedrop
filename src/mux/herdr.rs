@@ -54,7 +54,8 @@ impl<T: Transport> HerdrMux<T> {
     }
 
     /// `MuxInput::deliver` minus the lock token. Herdr gates prompts itself:
-    /// `agent prompt` refuses a busy agent before it types.
+    /// `agent prompt` refuses a blocked agent before it types, and types to a
+    /// working one, so the request's `admit` is not passed.
     pub(crate) fn send(&self, pane: &PaneId, kind: InputKind<'_>) -> InputOutcome {
         let args = match kind {
             InputKind::Prompt(request) => {

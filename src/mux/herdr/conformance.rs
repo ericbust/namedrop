@@ -233,10 +233,8 @@ impl Wire {
                 if facts.agent.is_none() {
                     return Err(herdr_error("agent_not_found"));
                 }
-                match facts.state {
-                    Some(AgentState::Blocked) => return Err(herdr_error("agent_blocked")),
-                    Some(ref state) if state.accepts_prompt() => {}
-                    _ => return Err(herdr_error("agent_busy")),
+                if facts.state == Some(AgentState::Blocked) {
+                    return Err(herdr_error("agent_blocked"));
                 }
                 let pane = PaneId::new(*id);
                 world.record_sent(Sent {
@@ -529,9 +527,45 @@ fn a_settled_agent_takes_a_prompt_and_starts_working() {
     assert_eq!(state, Ok(Some(AgentState::Working)));
 }
 
+/// Herdr 0.9.5 types a prompt to an agent that reports `working`, and the
+/// agent queues it: `herdr agent prompt` answered `agent_prompted` with
+/// `agent_status: working` in a live probe (PORT.md, commit 14).
 #[test]
-fn a_busy_blocked_absent_or_missing_agent_is_declined_before_any_input() {
-    for pane in ["pane-reviewer", "pane-blocked", "pane-shell", "pane-gone"] {
+fn a_working_agent_takes_a_prompt_whatever_the_admission() {
+    for admit in [Admit::Settled, Admit::BetweenTurns] {
+        let (outcome, sent, state) = agree(world, |mux, world| {
+            let expect = AgentIdentity {
+                kind: AgentKind::Known(AgentRuntime::Codex),
+                label: None,
+                session: SessionClaim::None,
+            };
+            let request = PromptRequest {
+                expect: &expect,
+                text: "hello",
+                admit,
+            };
+            let outcome = mux.send(&PaneId::new("pane-reviewer"), InputKind::Prompt(request));
+            let state = mux
+                .survey(Scope::Space(&SpaceId::new("workspace-1")), Depth::Panes)
+                .map(|survey| survey.spaces[0].panes[1].state.clone());
+            (outcome, world.sent(), state)
+        });
+        assert_eq!(outcome, InputOutcome::Delivered, "{admit:?}");
+        assert_eq!(
+            sent,
+            [Sent {
+                pane: PaneId::new("pane-reviewer"),
+                input: SentInput::Prompt("hello".into()),
+            }],
+            "{admit:?}"
+        );
+        assert_eq!(state, Ok(Some(AgentState::Working)), "{admit:?}");
+    }
+}
+
+#[test]
+fn a_blocked_absent_or_missing_agent_is_declined_before_any_input() {
+    for pane in ["pane-blocked", "pane-shell", "pane-gone"] {
         let (outcome, sent) = agree(world, |mux, world| (prompt(mux, pane), world.sent()));
         assert_eq!(
             outcome,
