@@ -431,8 +431,8 @@ enum Status {
     Busy,
     MethodNotAllowed,
     Unavailable,
-    /// A 503 whose only cause is SQLite busy: the request read nothing from
-    /// the pane and sent nothing to it.
+    /// A 503 whose only cause is SQLite busy. It comes before the send, so
+    /// the request sent nothing to the pane.
     StoreBusy,
     PayloadTooLarge,
     TooManyRequests,
@@ -470,7 +470,7 @@ impl Status {
             Self::Busy => "Namedrop is typing into this pane right now, so nothing was sent.\n",
             Self::MethodNotAllowed => "Method not allowed.\n",
             Self::Unavailable => "History is temporarily unavailable.\n",
-            Self::StoreBusy => "Namedrop's state is busy, so nothing was read or sent.\n",
+            Self::StoreBusy => "Namedrop's state is busy, so nothing was sent.\n",
         }
     }
 }

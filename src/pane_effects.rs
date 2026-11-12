@@ -501,27 +501,26 @@ impl DashboardPane {
     }
 
     /// A key keeps the pane's input owner, as `delete_claude_code_input`
-    /// does. So does a line typed while a delivery's turn is working or
-    /// blocked: the person is answering inside that turn, and Stop still
-    /// interrupts it. Any other line starts the person's own turn and makes
-    /// them the owner, so a stopped thread no longer interrupts it.
+    /// does. So does a line typed while a delivery's agent is blocked on a
+    /// question or a permission prompt: the line answers it, and Stop still
+    /// interrupts that turn. Any other line starts the person's own turn and
+    /// makes them the owner, so a stopped thread no longer interrupts it.
     pub(crate) fn input(&self, mux: &impl MuxInput, input: DashboardInput<'_>) -> InputOutcome {
         let effects = &self.0;
         match input {
             DashboardInput::Line { text, turn } => {
                 let previous = effects.read_marker();
-                let delivery_turn = matches!(turn, Some(AgentState::Working | AgentState::Blocked))
+                // A working agent takes a line as the person's next
+                // instruction, and Codex drops the delivered task for it. The
+                // marker may also name a delivery whose turn already ended,
+                // since nothing clears it when the turn ends. So a line typed
+                // while the agent works is the person's turn.
+                let answers_delivery = matches!(turn, Some(AgentState::Blocked))
                     && matches!(&previous, Ok(Some(bytes)) if matches!(
                         serde_json::from_slice(bytes),
                         Ok(InputOwner::Delivery { .. })
                     ));
-                if delivery_turn {
-                    // An agent mid-turn may queue the line as the person's
-                    // next turn. Stop interrupts only the turn running when
-                    // it arrives, the delivery's. The queued turn is not
-                    // marked as the person's, so a Stop that arrives after it
-                    // starts, while the delivery is still in flight, would
-                    // interrupt it too.
+                if answers_delivery {
                     return mux.deliver(PaneInput::new(effects, InputKind::Line(text)));
                 }
                 // A send that proves nothing was typed hands the pane back.
@@ -1434,19 +1433,22 @@ mod tests {
     }
 
     #[test]
-    fn a_dashboard_line_answers_inside_a_delivery_s_running_turn_and_starts_its_own_otherwise() {
+    fn a_dashboard_line_answers_a_delivery_s_blocked_question_and_starts_its_own_turn_otherwise() {
         let unknown = AgentState::Unknown("offline".into());
-        let delivering = [AgentState::Working, AgentState::Blocked];
         for (turn, previous, answers) in [
-            (Some(&delivering[0]), Some(delivery()), true),
-            (Some(&delivering[1]), Some(delivery()), true),
+            (Some(&AgentState::Blocked), Some(delivery()), true),
+            (Some(&AgentState::Working), Some(delivery()), false),
             (Some(&AgentState::Idle), Some(delivery()), false),
             (Some(&AgentState::Done), Some(delivery()), false),
             (Some(&unknown), Some(delivery()), false),
             (None, Some(delivery()), false),
-            (Some(&delivering[0]), Some(InputOwner::Other), false),
-            (Some(&delivering[0]), Some(InputOwner::Dashboard), false),
-            (Some(&delivering[0]), None, false),
+            (Some(&AgentState::Blocked), Some(InputOwner::Other), false),
+            (
+                Some(&AgentState::Blocked),
+                Some(InputOwner::Dashboard),
+                false,
+            ),
+            (Some(&AgentState::Blocked), None, false),
         ] {
             let state = State::new();
             let gate = DashboardPane::try_acquire(&state.0, "socket", "pane").unwrap();
@@ -1469,7 +1471,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_answer_inside_a_delivery_s_turn_leaves_it_the_delivery_s() {
+    fn a_failed_answer_to_a_delivery_s_blocked_question_leaves_it_the_delivery_s() {
         for outcome in [
             InputOutcome::Refused("invalid_input".into()),
             InputOutcome::Declined(crate::mux::Retry::OnEvent, "pane_not_found".into()),
@@ -1481,7 +1483,7 @@ mod tests {
             let mux = author();
             mux.script(outcome.clone());
             assert_eq!(
-                gate.input(&mux, typed("yes", Some(&AgentState::Working))),
+                gate.input(&mux, typed("yes", Some(&AgentState::Blocked))),
                 outcome
             );
             assert_eq!(

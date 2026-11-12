@@ -1064,9 +1064,9 @@ fn planner_input(f: &Fixture) -> Vec<Value> {
         .collect()
 }
 
-/// The body of the one 503 live peek answers before it reads from or sends
-/// to the pane: SQLite was busy.
-const STORE_BUSY: &str = "Namedrop's state is busy, so nothing was read or sent.\n";
+/// The body of the one 503 live peek answers before it sends to the pane:
+/// SQLite was busy.
+const STORE_BUSY: &str = "Namedrop's state is busy, so nothing was sent.\n";
 
 /// A thread delivered to the planner's pane, the pane reporting `status`,
 /// and a dashboard serving it after the person sent `input` from live peek.
@@ -1161,66 +1161,73 @@ fn stop_after_a_live_peek_key_still_interrupts_the_turn() {
 
 #[test]
 fn stop_after_a_line_typed_into_the_delivery_s_turn_still_interrupts_it() {
-    for status in ["working", "blocked"] {
+    let f = fixture();
+    let (parent, server, sent) = peeked_turn(
+        &f,
+        "answer-then-stop",
+        "blocked",
+        json!({"kind":"text","text":"2"}),
+    );
+    assert_eq!(sent, 204);
+    report_status(&f, "working");
+    let receipt = stop(&server, &parent);
+    assert_eq!(
+        receipt["interrupted_pane_ids"],
+        json!(["pane-1-planner"]),
+        "the person's answer kept Stop from interrupting the delivery's turn: {receipt}"
+    );
+    assert_eq!(receipt["warnings"], json!([]), "{receipt}");
+    assert_eq!(
+        planner_input(&f),
+        [
+            json!(["pane", "run", "pane-1-planner", "2"]),
+            json!(["agent", "send-keys", "pane-1-planner", "ctrl+c"]),
+        ]
+    );
+}
+
+#[test]
+fn stop_after_a_line_that_starts_the_person_s_turn_warns_instead_of_interrupting_it() {
+    // A working agent takes the line as the person's next instruction.
+    for pane in ["idle", "working"] {
         let f = fixture();
-        let (parent, server, sent) = peeked_turn(
+        let (parent, server, status) = peeked_turn(
             &f,
-            "answer-then-stop",
-            status,
-            json!({"kind":"text","text":"2"}),
+            "line-then-stop",
+            pane,
+            json!({"kind":"text","text":"do this instead"}),
         );
-        assert_eq!(sent, 204, "{status}");
+        assert_eq!(status, 204, "{pane}");
         report_status(&f, "working");
         let receipt = stop(&server, &parent);
         assert_eq!(
             receipt["interrupted_pane_ids"],
-            json!(["pane-1-planner"]),
-            "{status}: the person's answer kept Stop from interrupting the delivery's turn: {receipt}"
+            json!([]),
+            "{pane}: Stop interrupted the person's turn: {receipt}"
         );
-        assert_eq!(receipt["warnings"], json!([]), "{status}: {receipt}");
+        assert_eq!(
+            receipt["warnings"],
+            json!([
+                "Could not confirm interruption of pane-1-planner after stopping the thread: the stopped thread no longer owns its pane input."
+            ]),
+            "{pane}"
+        );
         assert_eq!(
             planner_input(&f),
-            [
-                json!(["pane", "run", "pane-1-planner", "2"]),
-                json!(["agent", "send-keys", "pane-1-planner", "ctrl+c"]),
-            ],
-            "{status}"
+            [json!(["pane", "run", "pane-1-planner", "do this instead"])],
+            "{pane}"
         );
     }
 }
 
 #[test]
-fn stop_after_a_line_that_starts_the_person_s_turn_warns_instead_of_interrupting_it() {
-    let f = fixture();
-    let (parent, server, status) = peeked_turn(
-        &f,
-        "line-then-stop",
-        "idle",
-        json!({"kind":"text","text":"do this instead"}),
-    );
-    assert_eq!(status, 204);
-    report_status(&f, "working");
-    let receipt = stop(&server, &parent);
-    assert_eq!(receipt["interrupted_pane_ids"], json!([]), "{receipt}");
-    assert_eq!(
-        receipt["warnings"],
-        json!([
-            "Could not confirm interruption of pane-1-planner after stopping the thread: the stopped thread no longer owns its pane input."
-        ])
-    );
-    assert_eq!(
-        planner_input(&f),
-        [json!(["pane", "run", "pane-1-planner", "do this instead"])]
-    );
-}
-
-#[test]
 fn a_live_peek_send_that_fails_leaves_the_turn_to_stop() {
-    // An idle line takes the pane and hands it back. A working one never
-    // takes it.
+    // An idle or working line takes the pane and hands it back. A blocked
+    // one never takes it.
     for (pane, input) in [
         ("idle", json!({"kind":"text","text":"refused line"})),
         ("working", json!({"kind":"text","text":"refused line"})),
+        ("blocked", json!({"kind":"text","text":"refused line"})),
         ("working", json!({"kind":"key","key":"Enter"})),
     ] {
         let f = fixture();
