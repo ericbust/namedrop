@@ -68,6 +68,11 @@ const INVISIBLE = /[­؜᠎​‎‏‪-‮⁠-⁤⁦-⁯﻿￹-￻\u{E0000}-\u{
 const CONTROL = /\p{Cc}/u;
 const ALIAS = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
+// A label the server can route to: it has a letter or a digit, and isn't the
+// word that means every workspace.
+function routable(label: string): boolean {
+  return /[a-z0-9]/.test(label) && label !== "all";
+}
 export function channelRequest(draft: ChannelDraft): Checked<ChannelRequest> {
   const name = draft.name.trim();
   const folder = draft.folder.trim();
@@ -76,13 +81,13 @@ export function channelRequest(draft: ChannelDraft): Checked<ChannelRequest> {
       ? createCopy.channelNameMissing
       : [...name].length > MAX_CHANNEL_NAME
         ? createCopy.channelNameLong
-        : CONTROL.test(name) ||
-            INVISIBLE.test(name) ||
-            ["", "all"].includes(foldLabel(name))
-          ? createCopy.channelNameUnusable
-          : !folder.startsWith("/") && !folder.startsWith("~")
-            ? createCopy.folderNotPath
-            : null;
+        : CONTROL.test(name) || INVISIBLE.test(name)
+          ? createCopy.channelNameHidden
+          : !routable(foldLabel(name))
+            ? createCopy.channelNameUnusable
+            : !folder.startsWith("/") && !folder.startsWith("~")
+              ? createCopy.folderNotPath
+              : null;
   return problem === null
     ? { kind: "ok", request: { name, folder } }
     : { kind: "problem", message: problem };

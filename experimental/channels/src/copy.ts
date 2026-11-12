@@ -788,6 +788,8 @@ export const createCopy = {
   adding: "Adding…",
   channelNameMissing: "Give the channel a name.",
   channelNameLong: "A channel name can be up to 64 characters.",
+  channelNameHidden:
+    "A channel name can't contain control or invisible characters.",
   channelNameUnusable:
     'A channel name needs a letter or a digit, and it can\'t be "all".',
   folderNotPath: "Type the folder's full path, starting with / or ~.",
