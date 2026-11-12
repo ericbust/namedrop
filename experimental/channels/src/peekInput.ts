@@ -1,3 +1,4 @@
+import { peekInputCopy } from "./copy.ts";
 import type { PeekTarget } from "./model.ts";
 import { parseSessionToken } from "./wire.ts";
 
@@ -46,5 +47,7 @@ export async function sendPeekInput(
     if (session === used) session = null;
     response = await attempt(await token());
   }
-  if (!response.ok) throw new Error(`Input refused (${response.status})`);
+  if (response.status === 409)
+    throw new Error(peekInputCopy.busy(target.alias));
+  if (!response.ok) throw new Error(peekInputCopy.refused(response.status));
 }

@@ -67,6 +67,8 @@ pub(crate) enum InputOwner {
         binding_id: PaneBindingId,
         agent_session_id: AgentSessionId,
     },
+    /// A person typing in the dashboard's live peek.
+    Dashboard,
     Other,
 }
 
@@ -252,6 +254,16 @@ fn raw_open_directory(state: &File) -> io::Result<File> {
 impl PaneEffects {
     pub(crate) fn acquire(state: &Path, socket: &str, pane: &str) -> Result<Self, AcquireError> {
         Self::acquire_for(state, socket, pane, ACQUIRE_TIMEOUT)
+    }
+
+    /// One attempt, for a person who sees `Contended` at once instead of
+    /// input that lands after another owner's.
+    pub(crate) fn try_acquire(
+        state: &Path,
+        socket: &str,
+        pane: &str,
+    ) -> Result<Self, AcquireError> {
+        Self::acquire_for(state, socket, pane, Duration::ZERO)
     }
 
     fn acquire_for(
@@ -445,12 +457,36 @@ impl PaneEffects {
     ) -> InputOutcome {
         self.owned_input(mux, owner, InputKind::Line(command))
     }
+
+    /// The dashboard's only way into a pane. The person then owns the pane's
+    /// input, so a stopped thread no longer interrupts what they typed.
+    pub(crate) fn dashboard_input(&self, mux: &impl MuxInput, kind: InputKind<'_>) -> InputOutcome {
+        self.owned_input(mux, &InputOwner::Dashboard, kind)
+    }
 }
 
 #[derive(Default)]
 pub(crate) struct InterruptReport {
     pub interrupted_pane_ids: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+impl InterruptReport {
+    /// No response could be interrupted, because the multiplexer could not be
+    /// reached at all.
+    pub(crate) fn unreached(responses: &[ActiveThreadResponse], error: &str) -> Self {
+        Self {
+            interrupted_pane_ids: Vec::new(),
+            warnings: responses
+                .iter()
+                .map(|response| unconfirmed(&response.pane_id, error))
+                .collect(),
+        }
+    }
+}
+
+fn unconfirmed(pane_id: &str, error: &str) -> String {
+    format!("Could not confirm interruption of {pane_id} after stopping the thread: {error}.")
 }
 
 pub(crate) fn interrupt_if_current(
@@ -532,10 +568,7 @@ pub(crate) fn interrupt_if_current(
         })();
         match result {
             Ok(()) => report.interrupted_pane_ids.push(response.pane_id.clone()),
-            Err(error) => report.warnings.push(format!(
-                "Could not confirm interruption of {} after stopping the thread: {error}.",
-                response.pane_id
-            )),
+            Err(error) => report.warnings.push(unconfirmed(&response.pane_id, &error)),
         }
     }
     report
@@ -1237,5 +1270,105 @@ mod tests {
             ]
         );
         assert_eq!(gate.ownership(&delivery()), MarkerOwnership::Reject);
+    }
+
+    #[test]
+    fn a_dashboard_key_never_waits_behind_a_delivery_and_then_owns_the_pane() {
+        use crate::mux::fake::{Sent, SentInput};
+        let state = State::new();
+        let delivering = PaneEffects::acquire(&state.0, "socket", "pane").unwrap();
+        delivering.record(&delivery()).unwrap();
+        let started = Instant::now();
+        assert!(matches!(
+            PaneEffects::try_acquire(&state.0, "socket", "pane"),
+            Err(AcquireError::Contended)
+        ));
+        assert!(
+            started.elapsed() < ACQUIRE_TIMEOUT,
+            "the dashboard waited behind the delivery"
+        );
+        drop(delivering);
+        let mux = author();
+        let gate = PaneEffects::try_acquire(&state.0, "socket", "pane").unwrap();
+        let keys = InputKind::Keys {
+            recipient: Recipient::Pane,
+            keys: &[Key::Escape],
+        };
+        assert_eq!(gate.dashboard_input(&mux, keys), InputOutcome::Delivered);
+        assert_eq!(
+            gate.ownership(&delivery()),
+            MarkerOwnership::Reject,
+            "a stopped thread would interrupt what the person typed"
+        );
+        assert_eq!(
+            mux.sent(),
+            [Sent {
+                pane: PaneId::new("pane"),
+                input: SentInput::Keys {
+                    recipient: Recipient::Pane,
+                    keys: vec![Key::Escape],
+                },
+            }]
+        );
+    }
+
+    /// Text that would let dashboard code type into a pane around
+    /// `PaneEffects`, and the one dashboard file each may appear in. Until the
+    /// Herdr transport is private to `mux/herdr/`, the compiler cannot stop
+    /// the dashboard from naming it.
+    const RAW_INPUT: &[(&str, Option<&str>)] = &[
+        ("ProcessHerdr", None),
+        ("HerdrCommandExecutor", None),
+        ("execute_bounded", None),
+        (".execute(", None),
+        // The live-peek observer runs only `terminal session observe`.
+        ("HERDR_BIN_PATH", Some("observer_guard.rs")),
+        ("\"herdr\"", Some("observer_guard.rs")),
+        ("\"send-keys\"", None),
+        ("\"send-text\"", None),
+        ("\"pane\",\"run\"", None),
+        ("\"agent\",\"prompt\"", None),
+        ("TIOCSTI", None),
+    ];
+
+    fn rust_sources(directory: &Path, found: &mut Vec<std::path::PathBuf>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_sources(&path, found);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                found.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn dashboard_types_into_a_pane_only_through_pane_effects() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = vec![src.join("dashboard.rs")];
+        rust_sources(&src.join("dashboard"), &mut files);
+        assert!(
+            files
+                .iter()
+                .any(|file| file.ends_with("dashboard/live_peek.rs")),
+            "the scan must reach live peek: {files:?}"
+        );
+        let mut raw = Vec::new();
+        for file in &files {
+            let text: String = fs::read_to_string(file)
+                .unwrap()
+                .split_whitespace()
+                .collect();
+            for (token, allowed) in RAW_INPUT {
+                if text.contains(token) && allowed.is_none_or(|name| !file.ends_with(name)) {
+                    raw.push(format!("{} names {token}", file.display()));
+                }
+            }
+        }
+        assert!(
+            raw.is_empty(),
+            "Dashboard code reaches Herdr only through `Front.mux`, a `MuxConnector`, and types into a pane only through `PaneEffects::dashboard_input` or a `LifecycleRuntime` on that connection:\n{}",
+            raw.join("\n")
+        );
     }
 }

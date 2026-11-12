@@ -1,8 +1,12 @@
 use super::snapshot::SpaceKey;
 pub(super) use super::snapshot::ThreadAction as Action;
-use crate::{ActorKind, MutationAttribution, StateStore, StoreError, ThreadId};
+use crate::{
+    ActorKind, MutationAttribution, StateStore, StoreError, ThreadId,
+    mux::{Budget, MuxConnector},
+    pane_effects::{InterruptReport, interrupt_if_current},
+};
 use serde_json::{Value, json};
-use std::{error::Error, path::Path};
+use std::{error::Error, path::Path, sync::Arc};
 
 pub(super) enum ControlError {
     NotFound,
@@ -83,18 +87,19 @@ impl CommittedControl {
     pub(super) fn respond<T>(
         self,
         state: &Path,
+        mux: &dyn MuxConnector,
         completion: CompletionPermit,
         respond: impl FnOnce(&Value) -> T,
         drain: impl FnOnce(&crate::StateNamespace),
     ) -> T {
-        let (namespace, receipt) = self.finish(state);
+        let (namespace, receipt) = self.finish(state, mux);
         drop(completion);
         let result = respond(&receipt);
         drain(&namespace);
         result
     }
 
-    fn finish(self, state: &Path) -> (crate::StateNamespace, Value) {
+    fn finish(self, state: &Path, mux: &dyn MuxConnector) -> (crate::StateNamespace, Value) {
         let Self {
             namespace,
             control,
@@ -102,15 +107,15 @@ impl CommittedControl {
         } = self;
         let mut receipt = json!({"state": control});
         if let Some(stopped) = stopped {
-            let herdr = crate::ProcessHerdr::default()
-                .with_socket(Some(namespace.session_socket_id.clone()));
-            let report = crate::pane_effects::interrupt_if_current(
-                state,
-                &namespace,
-                &stopped.active_responses,
-                &herdr,
-                None,
-            );
+            let responses = &stopped.active_responses;
+            let report = match mux.connect(
+                &namespace.session_socket_id,
+                Budget::ADAPTER_DEFAULT,
+                Arc::default(),
+            ) {
+                Ok(herdr) => interrupt_if_current(state, &namespace, responses, &herdr, None),
+                Err(error) => InterruptReport::unreached(responses, &error.to_string()),
+            };
             receipt["cancelled_delivery_ids"] = json!(stopped.cancelled_delivery_ids);
             receipt["interrupted_pane_ids"] = json!(report.interrupted_pane_ids);
             receipt["warnings"] = json!(report.warnings);
@@ -205,6 +210,7 @@ mod tests {
                 };
                 let result = committed.respond(
                     Path::new("/nonexistent-namedrop-control-test"),
+                    &crate::mux::herdr::HerdrConnector,
                     permit,
                     |_| {
                         responding.send(()).unwrap();

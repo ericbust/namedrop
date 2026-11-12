@@ -1,4 +1,7 @@
-use crate::{Clock, StateNamespace, StateStore};
+use crate::{
+    Clock, StateNamespace, StateStore,
+    mux::{Budget, MuxConnector},
+};
 use std::{
     fs::{File, OpenOptions},
     os::{
@@ -52,11 +55,12 @@ pub(super) struct ChannelService {
     cancel: Arc<AtomicBool>,
     workers: Vec<JoinHandle<()>>,
     state: PathBuf,
+    mux: Arc<dyn MuxConnector>,
     ownership: Option<Arc<File>>,
 }
 
 impl ChannelService {
-    pub fn start(state: &Path) -> Result<Self, String> {
+    pub fn start(state: &Path, mux: Arc<dyn MuxConnector>) -> Result<Self, String> {
         let ownership = OpenOptions::new()
             .read(true)
             .write(true)
@@ -80,7 +84,7 @@ impl ChannelService {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        recover(state)?;
+        recover(state, &*mux)?;
         let ownership = Arc::new(ownership);
         #[cfg(target_os = "linux")]
         crate::agent_status_model::set_worker_lifetime_lease(Some(ownership.clone()));
@@ -90,16 +94,18 @@ impl ChannelService {
             wake: ChannelWake::default(),
             workers: Vec::new(),
             state: state.to_owned(),
+            mux,
             ownership: Some(ownership),
         };
         for index in 0..4 {
             let state = state.to_owned();
+            let mux = service.mux.clone();
             let cancel = service.cancel.clone();
             let wake = service.wake.clone();
             service.workers.push(
                 thread::Builder::new()
                     .name(format!("channel-router-{index}"))
-                    .spawn(move || worker(&state, &cancel, &wake, Duration::from_secs(5)))
+                    .spawn(move || worker(&state, &*mux, &cancel, &wake, Duration::from_secs(5)))
                     .map_err(|e| e.to_string())?,
             );
         }
@@ -117,7 +123,7 @@ impl ChannelService {
         for worker in self.workers.drain(..) {
             panicked |= worker.join().is_err();
         }
-        let recovery = recover(&self.state);
+        let recovery = recover(&self.state, &*self.mux);
         #[cfg(target_os = "linux")]
         crate::agent_status_model::set_worker_lifetime_lease(None);
         self.ownership.take();
@@ -138,7 +144,7 @@ impl Drop for ChannelService {
     }
 }
 
-fn recover(state: &Path) -> Result<(), String> {
+fn recover(state: &Path, mux: &dyn MuxConnector) -> Result<(), String> {
     if !state.join("namedrop.sqlite3").is_file() {
         return Ok(());
     }
@@ -162,12 +168,18 @@ fn recover(state: &Path) -> Result<(), String> {
         })
         .map_err(|e| e.to_string())?;
     for ns in namespaces {
-        drain(state, &ns);
+        drain(state, mux, &ns);
     }
     Ok(())
 }
 
-fn worker(state: &Path, cancel: &AtomicBool, wake: &ChannelWake, fallback: Duration) {
+fn worker(
+    state: &Path,
+    mux: &dyn MuxConnector,
+    cancel: &AtomicBool,
+    wake: &ChannelWake,
+    fallback: Duration,
+) {
     let mut store = None;
     while !cancel.load(Ordering::Acquire) {
         let generation = wake.generation();
@@ -271,7 +283,7 @@ fn worker(state: &Path, cancel: &AtomicBool, wake: &ChannelWake, fallback: Durat
             match completed {
                 Ok(true) => {
                     if !cancel.load(Ordering::Acquire) {
-                        drain(state, &claim.namespace);
+                        drain(state, mux, &claim.namespace);
                     }
                     break;
                 }
@@ -288,9 +300,18 @@ fn worker(state: &Path, cancel: &AtomicBool, wake: &ChannelWake, fallback: Durat
     }
 }
 
-pub(super) fn drain(state: &Path, namespace: &StateNamespace) {
-    let herdr =
-        crate::ProcessHerdr::default().with_socket(Some(namespace.session_socket_id.clone()));
+pub(super) fn drain(state: &Path, mux: &dyn MuxConnector, namespace: &StateNamespace) {
+    let herdr = match mux.connect(
+        &namespace.session_socket_id,
+        Budget::ADAPTER_DEFAULT,
+        Arc::default(),
+    ) {
+        Ok(herdr) => herdr,
+        Err(error) => {
+            eprintln!("dashboard: channel drain: {error}");
+            return;
+        }
+    };
     let ids = crate::ProcessIds::default();
     let runtime = crate::LifecycleRuntime {
         state_directory: state,
@@ -313,6 +334,10 @@ pub(super) fn drain(state: &Path, namespace: &StateNamespace) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn herdr() -> Arc<dyn MuxConnector> {
+        Arc::new(crate::mux::herdr::HerdrConnector)
+    }
 
     fn state_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -353,7 +378,7 @@ mod tests {
                 .unwrap();
         }
 
-        let mut service = ChannelService::start(&root).unwrap();
+        let mut service = ChannelService::start(&root, herdr()).unwrap();
         service.shutdown().unwrap();
 
         assert!(open_terminal_relay_items(&mut store, &answer).is_empty());
@@ -382,7 +407,7 @@ mod tests {
                 .unwrap()
         };
         let before = facts();
-        let mut successor = ChannelService::start(&root).unwrap();
+        let mut successor = ChannelService::start(&root, herdr()).unwrap();
         successor.shutdown().unwrap();
         assert_eq!(facts(), before, "a second run changes nothing");
         drop(store);
@@ -441,7 +466,7 @@ mod tests {
         }
         let acknowledged_before = disposition_warnings(&root, &acknowledged);
 
-        let mut service = ChannelService::start(&root).unwrap();
+        let mut service = ChannelService::start(&root, herdr()).unwrap();
         service.shutdown().unwrap();
 
         assert_eq!(
@@ -470,7 +495,7 @@ mod tests {
                 .unwrap()
         };
         let before = facts();
-        let mut successor = ChannelService::start(&root).unwrap();
+        let mut successor = ChannelService::start(&root, herdr()).unwrap();
         successor.shutdown().unwrap();
         assert_eq!(facts(), before, "a second run changes nothing");
         assert_eq!(disposition_warnings(&root, &replaced), lost);
@@ -499,7 +524,7 @@ mod tests {
             .unwrap();
         assert_eq!(disposition_warnings(&root, &ns), []);
 
-        let mut service = ChannelService::start(&root).unwrap();
+        let mut service = ChannelService::start(&root, herdr()).unwrap();
         service.shutdown().unwrap();
 
         let lost = disposition_warnings(&root, &ns);
@@ -541,7 +566,7 @@ mod tests {
             "{refused:?}"
         );
 
-        let mut service = ChannelService::start(&root).unwrap();
+        let mut service = ChannelService::start(&root, herdr()).unwrap();
         service.shutdown().unwrap();
         assert_eq!(
             disposition_warnings(&root, &judged),
@@ -634,7 +659,7 @@ mod tests {
             ["terminal-relay:dm-attempt", "terminal-relay:unarmed"]
         );
 
-        let mut service = ChannelService::start(&root).unwrap();
+        let mut service = ChannelService::start(&root, herdr()).unwrap();
         service.shutdown().unwrap();
 
         assert_eq!(open(), ["terminal-relay:dm-attempt"]);
@@ -702,7 +727,7 @@ mod tests {
         ));
         std::fs::create_dir_all(root.join("dashboard")).unwrap();
         drop(StateStore::open(&root).unwrap());
-        let mut service = ChannelService::start(&root).unwrap();
+        let mut service = ChannelService::start(&root, herdr()).unwrap();
         let count = || {
             std::fs::read_dir("/proc/self/fd")
                 .unwrap()
@@ -761,7 +786,7 @@ mod tests {
             crate::IdGenerator::next_id(&crate::ProcessIds::default(), "test")
         ));
         std::fs::create_dir_all(root.join("dashboard")).unwrap();
-        let mut service = ChannelService::start(&root).unwrap();
+        let mut service = ChannelService::start(&root, herdr()).unwrap();
         assert!(StateStore::open_read_only(&root).unwrap().is_none());
         service.shutdown().unwrap();
         assert!(StateStore::open_read_only(&root).unwrap().is_none());
@@ -799,7 +824,7 @@ mod tests {
         ));
         std::fs::create_dir_all(root.join("dashboard")).unwrap();
         drop(StateStore::open(&root).unwrap());
-        let mut service = ChannelService::start(&root).unwrap();
+        let mut service = ChannelService::start(&root, herdr()).unwrap();
         let claim_from_process = |held: bool| {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
@@ -836,7 +861,7 @@ mod tests {
         drop(claim);
         claim_from_process(false);
         std::fs::rename(root.join("saved.sqlite3"), &database).unwrap();
-        let mut successor = ChannelService::start(&root).unwrap();
+        let mut successor = ChannelService::start(&root, herdr()).unwrap();
         assert!(successor.ownership.is_some());
         successor.shutdown().unwrap();
         assert!(successor.ownership.is_none());
