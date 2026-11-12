@@ -3,7 +3,10 @@ use super::{
     ScreenRequest, Survey, TabId,
 };
 pub use crate::pane_effects::PaneInput;
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Gone {
@@ -62,5 +65,12 @@ pub trait Mux: MuxAct + MuxInput {}
 impl<T: MuxAct + MuxInput + ?Sized> Mux for T {}
 
 pub trait MuxConnector: Send + Sync {
-    fn connect(&self, endpoint: &str, budget: Budget) -> Result<Arc<dyn Mux>, MuxError>;
+    /// Every command the connection runs keeps to `budget`, and stops once
+    /// `cancelled` is set.
+    fn connect(
+        &self,
+        endpoint: &str,
+        budget: Budget,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<Arc<dyn Mux>, MuxError>;
 }

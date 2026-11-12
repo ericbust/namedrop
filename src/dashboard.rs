@@ -26,8 +26,10 @@ pub fn run_observer_guard(
     observer_guard::run(terminal, rows, cols)
 }
 
-use crate::{Clock, HerdrCommandExecutor, IdGenerator, LifecycleRuntime, StateNamespace};
-use serde::Deserialize;
+use crate::{
+    Clock, IdGenerator, LifecycleRuntime, StateNamespace,
+    mux::{Depth, MuxConnector, MuxRead, Scope, herdr::HerdrConnector},
+};
 use serde_json::{Value, json};
 use server_files::{ServerFiles, ServerInfo, Token, UiSource};
 use snapshot::{RepoRef, SpaceKey};
@@ -49,12 +51,7 @@ use std::{
 const DEFAULT_IDLE: Duration = Duration::from_secs(10 * 60);
 
 pub fn open(
-    runtime: &LifecycleRuntime<
-        '_,
-        impl crate::mux::Mux + HerdrCommandExecutor,
-        impl Clock,
-        impl IdGenerator,
-    >,
+    runtime: &LifecycleRuntime<'_, impl MuxRead, impl Clock, impl IdGenerator>,
     open_browser: bool,
     ui_directory: Option<&Path>,
     tailscale: Option<bool>,
@@ -75,13 +72,20 @@ pub fn open(
         runtime.session_socket_id,
         &workspace_id,
     ));
-    if let Some(workspace) = herdr_workspace(runtime.mux, &workspace_id) {
+    let space = crate::SpaceId::new(&workspace_id);
+    if let Some(workspace) = runtime
+        .mux
+        .survey(Scope::Space(&space), Depth::Spaces)
+        .ok()
+        .and_then(|survey| survey.spaces.into_iter().next())
+    {
         if let Some(label) = workspace.label.filter(|label| !label.trim().is_empty())
             && let Err(error) = files.record_label(key.as_str(), &label)
         {
             eprintln!("Could not save the workspace label: {error}");
         }
-        if let Err(error) = files.record_repo(key.as_str(), workspace.repo.as_ref()) {
+        let repo = RepoRef::of_checkout(workspace.checkout.as_ref());
+        if let Err(error) = files.record_repo(key.as_str(), repo.as_ref()) {
             eprintln!("Could not save the workspace repository: {error}");
         }
     }
@@ -224,37 +228,6 @@ fn answers(info: &ServerInfo, token: &Token) -> Option<ServerPhase> {
     })
 }
 
-#[derive(Deserialize)]
-struct HerdrWorkspaceGet {
-    result: HerdrWorkspaceGetResult,
-}
-
-#[derive(Deserialize)]
-struct HerdrWorkspaceGetResult {
-    workspace: HerdrWorkspace,
-}
-
-#[derive(Deserialize)]
-struct HerdrWorkspace {
-    label: Option<String>,
-    #[serde(
-        default,
-        rename = "worktree",
-        deserialize_with = "RepoRef::from_herdr_worktree"
-    )]
-    repo: Option<RepoRef>,
-}
-
-fn herdr_workspace(
-    herdr: &impl HerdrCommandExecutor,
-    workspace_id: &str,
-) -> Option<HerdrWorkspace> {
-    let output = herdr.execute(&["workspace", "get", workspace_id]).ok()?;
-    serde_json::from_str::<HerdrWorkspaceGet>(&output.stdout)
-        .ok()
-        .map(|get| get.result.workspace)
-}
-
 fn launch_browser(url: &str) -> bool {
     use std::os::unix::process::CommandExt;
     let opener = if cfg!(target_os = "macos") {
@@ -338,7 +311,9 @@ fn run_server(
     let mutations = Arc::new(std::sync::Mutex::new(()));
     let restarting = Arc::new(AtomicBool::new(false));
     let control_effects = thread_controls::ControlEffects::default();
+    let mux: Arc<dyn MuxConnector> = Arc::new(HerdrConnector);
     let front = Arc::new(http::Front {
+        mux: mux.clone(),
         port,
         files: ServerFiles::at(state)?,
         token: files.token()?,
@@ -355,7 +330,7 @@ fn run_server(
     let accept_stop = stop.clone();
     let acceptor = thread::spawn(move || http::accept_loop(listener, front, accept_stop));
     eprintln!("dashboard: serving 127.0.0.1:{port}");
-    let verdict = hub::run(&files, &instance, idle(), commands);
+    let verdict = hub::run(&files, &instance, idle(), commands, mux);
     eprintln!("dashboard: stopping: {}", verdict.reason());
     restarting.store(true, Ordering::Release);
     {

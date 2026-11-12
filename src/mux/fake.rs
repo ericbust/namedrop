@@ -185,6 +185,21 @@ impl World {
                     Self::listed_view(space)
                 }]
             }
+            Scope::PanesOf(id) => {
+                let space = self
+                    .spaces
+                    .iter()
+                    .find(|space| &space.id == id)
+                    .ok_or_else(|| gone(super::Gone::Space, id.as_str()))?;
+                vec![SpaceView {
+                    id: space.id.clone(),
+                    label: None,
+                    number: None,
+                    checkout: None,
+                    worktree: None,
+                    panes: Self::panes(space),
+                }]
+            }
             Scope::CheckoutOf(path) => {
                 let owners: Vec<_> = self
                     .spaces
@@ -495,6 +510,7 @@ impl MuxConnector for FakeMux {
         &self,
         endpoint: &str,
         _budget: super::Budget,
+        _cancelled: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<Arc<dyn super::Mux>, MuxError> {
         if endpoint != self.shared.endpoint.key {
             return Err(MuxError::Unavailable(format!(
@@ -624,6 +640,8 @@ impl WorldBuilder {
             agent: None,
             state: None,
             idle_label: None,
+            viewport_rows: None,
+            reports_session: true,
         };
         space.panes.push(FakePane {
             facts,
@@ -652,6 +670,11 @@ impl WorldBuilder {
 
     pub fn terminal(mut self, terminal: &str) -> Self {
         self.current_pane().facts.terminal = TerminalId::new(terminal);
+        self
+    }
+
+    pub fn viewport_rows(mut self, rows: u64) -> Self {
+        self.current_pane().facts.viewport_rows = Some(rows);
         self
     }
 

@@ -63,7 +63,8 @@ impl DiscoveredPane {
             .is_some_and(AgentState::accepts_prompt)
     }
 
-    /// The facts discovery read, for an effect that names its pane.
+    /// The facts discovery keeps, for an effect that names its pane. It keeps
+    /// neither the viewport rows nor whether a session was reported.
     pub fn facts(&self) -> PaneFacts {
         PaneFacts {
             id: PaneId::new(&self.pane_id),
@@ -75,6 +76,8 @@ impl DiscoveredPane {
             agent: self.agent.clone(),
             state: self.agent_status.clone(),
             idle_label: self.idle_state_label.clone(),
+            viewport_rows: None,
+            reports_session: false,
         }
     }
 }
@@ -1804,13 +1807,16 @@ pub(crate) fn discover_reminder_workspace(
 }
 
 pub fn discover_worktree_for_workspace(
-    mux: &impl MuxRead,
+    mux: &(impl MuxRead + ?Sized),
     workspace_id: &str,
 ) -> Result<DiscoveredWorktree, String> {
     survey_space(mux, workspace_id).map_err(|error| error.to_string())
 }
 
-fn survey_space(mux: &impl MuxRead, workspace_id: &str) -> Result<DiscoveredWorktree, MuxError> {
+fn survey_space(
+    mux: &(impl MuxRead + ?Sized),
+    workspace_id: &str,
+) -> Result<DiscoveredWorktree, MuxError> {
     let space = crate::SpaceId::new(workspace_id);
     surveyed(mux.survey(Scope::Space(&space), Depth::Panes))
 }

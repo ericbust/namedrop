@@ -166,9 +166,19 @@ struct PaneEntry {
     terminal_title_stripped: Option<String>,
     agent: Option<String>,
     display_agent: Option<String>,
-    agent_session: Option<AgentSessionEntry>,
+    /// The outer `None` when the reply leaves the field out, the inner one
+    /// when Herdr says `null`.
+    #[serde(default, deserialize_with = "present")]
+    agent_session: Option<Option<AgentSessionEntry>>,
     agent_status: Option<String>,
     state_labels: Option<BTreeMap<String, String>>,
+    scroll: Option<Value>,
+}
+
+fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
 }
 
 #[derive(Clone, Deserialize)]
@@ -187,7 +197,8 @@ pub(super) fn agent_kind(agent: &str) -> AgentKind {
 
 impl PaneEntry {
     fn facts(self) -> PaneFacts {
-        let agent = match (self.agent, self.agent_session) {
+        let reports_session = self.agent_session.is_some();
+        let agent = match (self.agent, self.agent_session.flatten()) {
             (None, None) => None,
             (agent, session) => Some(AgentIdentity {
                 kind: agent.as_deref().map_or(AgentKind::Unreported, agent_kind),
@@ -209,6 +220,12 @@ impl PaneEntry {
             idle_label: self
                 .state_labels
                 .and_then(|mut labels| labels.remove("idle")),
+            viewport_rows: self
+                .scroll
+                .as_ref()
+                .and_then(|scroll| scroll.get("viewport_rows"))
+                .and_then(Value::as_u64),
+            reports_session,
         }
     }
 }
@@ -217,7 +234,7 @@ fn number(number: Option<u64>) -> Option<u32> {
     number.and_then(|number| u32::try_from(number).ok())
 }
 
-fn bare_space(id: SpaceId) -> SpaceView {
+pub(super) fn bare_space(id: SpaceId) -> SpaceView {
     SpaceView {
         id,
         label: None,
@@ -506,6 +523,9 @@ pub(super) fn screen_args(pane: &PaneId, request: ScreenRequest) -> Vec<String> 
 
 #[derive(Deserialize)]
 struct ProcessInfo {
+    /// A pid that is not a `u32` reads as no shell, which is what a reply
+    /// that failed to parse meant, so a tty beside it stays readable.
+    #[serde(default, deserialize_with = "lenient_pid")]
     shell_pid: Option<u32>,
     foreground_process_group_id: Option<u32>,
     #[serde(default)]
@@ -516,6 +536,10 @@ struct ProcessInfo {
 #[derive(Deserialize)]
 struct ProcessEntry {
     pid: u32,
+}
+
+fn lenient_pid<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<u32>, D::Error> {
+    Ok(u32::deserialize(Value::deserialize(deserializer)?).ok())
 }
 
 pub(super) fn process(transport: &impl Transport, pane: &PaneId) -> Result<PaneProcess, MuxError> {

@@ -3,7 +3,7 @@
 //! health, lane order, redaction) lives here so the browser never re-derives.
 use crate::dashboard::rows::{self, DashboardRows};
 use crate::{DeliveryState, PaneType, StateNamespace, WorktreeState};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -92,20 +92,12 @@ impl RepoRef {
         })
     }
 
-    /// Reads Herdr's `worktree` object and drops its paths at the parse.
-    pub(crate) fn from_herdr_worktree<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Option<Self>, D::Error> {
-        #[derive(Deserialize)]
-        struct Worktree {
-            repo_key: Option<String>,
-            repo_name: Option<String>,
-        }
-        Ok(
-            Option::<Worktree>::deserialize(deserializer)?.and_then(|worktree| {
-                Self::of(worktree.repo_key.as_deref(), worktree.repo_name.as_deref())
-            }),
-        )
+    /// The repository of a checkout the multiplexer stamped on a space,
+    /// without its paths.
+    pub(crate) fn of_checkout(checkout: Option<&crate::mux::Checkout>) -> Option<Self> {
+        checkout.and_then(|checkout| {
+            Self::of(checkout.repo_key.as_deref(), checkout.repo_name.as_deref())
+        })
     }
 }
 

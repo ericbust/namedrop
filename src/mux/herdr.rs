@@ -9,11 +9,15 @@ pub use events::{decode_operation_input, plugin_event_data};
 pub(crate) use wire::input_failure;
 
 use super::{
-    Applied, Budget, Depth, Effect, Endpoint, InputKind, InputOutcome, MuxAct, MuxError, MuxInput,
-    MuxKind, MuxRead, PaneId, PaneInput, PaneProcess, Scope, Screen, ScreenRequest, Survey, TabId,
+    Applied, Budget, Depth, Effect, Endpoint, InputKind, InputOutcome, Mux, MuxAct, MuxConnector,
+    MuxError, MuxInput, MuxKind, MuxRead, PaneId, PaneInput, PaneProcess, Scope, Screen,
+    ScreenRequest, SpaceView, Survey, TabId,
 };
-use crate::HerdrCommandExecutor;
-use std::{path::PathBuf, sync::atomic::AtomicBool};
+use crate::{HerdrCommandExecutor, ProcessHerdr};
+use std::{
+    path::PathBuf,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 mod transport {
     use crate::mux::InputOutcome;
@@ -93,6 +97,10 @@ impl<T: Transport> MuxRead for HerdrMux<T> {
                 view.panes = wire::space_panes(transport, space)?;
                 vec![view]
             }
+            (Scope::PanesOf(space), _) => vec![SpaceView {
+                panes: wire::space_panes(transport, space)?,
+                ..wire::bare_space(space.clone())
+            }],
             (Scope::CheckoutOf(path), depth) => {
                 let mut view = wire::checkout_owner(transport, path)?;
                 if depth == Depth::Panes {
@@ -143,6 +151,50 @@ impl<T: Transport> MuxAct for HerdrMux<T> {
 impl<T: Transport> MuxInput for HerdrMux<T> {
     fn deliver(&self, input: PaneInput<'_>) -> InputOutcome {
         self.send(input.pane(), input.kind())
+    }
+}
+
+/// Connects to a Herdr server by its socket, the stored `session_socket_id`.
+pub struct HerdrConnector;
+
+impl MuxConnector for HerdrConnector {
+    fn connect(
+        &self,
+        socket: &str,
+        budget: Budget,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<Arc<dyn Mux>, MuxError> {
+        Ok(Arc::new(HerdrMux {
+            transport: Process {
+                herdr: ProcessHerdr::default().with_socket(Some(socket.to_owned())),
+                budget,
+                cancelled,
+            },
+            endpoint: Endpoint {
+                kind: MuxKind::Herdr,
+                key: socket.to_owned(),
+            },
+        }))
+    }
+}
+
+/// The `herdr` process, each command run within the connection's budget.
+struct Process {
+    herdr: ProcessHerdr,
+    budget: Budget,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Transport for Process {
+    fn run(&self, args: &[&str]) -> Result<String, String> {
+        self.herdr
+            .execute_bounded(
+                args,
+                self.budget.timeout,
+                &self.cancelled,
+                self.budget.max_output_bytes,
+            )
+            .map(|output| output.stdout)
     }
 }
 
