@@ -1,4 +1,6 @@
 import { Fragment, type ReactNode, useMemo } from "react";
+import { diagramCopy } from "../copy.ts";
+import { isDiagram } from "../diagram.ts";
 import {
   type Align,
   type Block,
@@ -7,6 +9,7 @@ import {
   parseMarkdown,
   type TableCell,
 } from "../markdown.ts";
+import { Diagram } from "./Diagram.tsx";
 
 // The server reads "\@name" as a reference that wakes no one, so the reader sees just the name.
 const ESCAPED_MENTION = /\\(?=@[a-z0-9])/g;
@@ -38,10 +41,17 @@ function inlines(nodes: readonly Inline[], links: boolean): ReactNode[] {
 const codeText = (block: Extract<Block, { kind: "code" }>) =>
   block.lines.map((line) => `${line.text}\n`).join("");
 
+const diagramLabel = (block: Block) => (
+  <span key={block.from} className="md-diagram">
+    {diagramCopy.label}
+  </span>
+);
+
 // The body is pre-wrap, so a paragraph renders as its own source text in the
 // flow and keeps the author's line breaks; only list, quote, code, heading and
-// table blocks become elements.
-function blockNode(block: Block, tail: ReactNode): ReactNode {
+// table blocks become elements. `cut` says the message is shown shortened, so
+// a block may end before its source does.
+function blockNode(block: Block, tail: ReactNode, cut: boolean): ReactNode {
   switch (block.kind) {
     case "paragraph":
       return (
@@ -58,6 +68,19 @@ function blockNode(block: Block, tail: ReactNode): ReactNode {
         </div>
       );
     case "code":
+      // A whole diagram is drawn. One the shortened view cuts off is a label,
+      // since half a diagram's source is neither a drawing nor worth reading.
+      if (isDiagram(block) && (block.closed || cut))
+        return (
+          <Fragment key={block.from}>
+            {block.closed ? (
+              <Diagram source={codeText(block)} />
+            ) : (
+              diagramLabel(block)
+            )}
+            {tail}
+          </Fragment>
+        );
       return (
         <Fragment key={block.from}>
           <pre>
@@ -76,7 +99,7 @@ function blockNode(block: Block, tail: ReactNode): ReactNode {
         >
           {block.items.map((item) => (
             <li key={item.from}>
-              {nested(item.blocks, item === last ? tail : null)}
+              {nested(item.blocks, item === last ? tail : null, cut)}
             </li>
           ))}
         </List>
@@ -84,7 +107,9 @@ function blockNode(block: Block, tail: ReactNode): ReactNode {
     }
     case "quote":
       return (
-        <blockquote key={block.from}>{nested(block.blocks, tail)}</blockquote>
+        <blockquote key={block.from}>
+          {nested(block.blocks, tail, cut)}
+        </blockquote>
       );
     case "table":
       return (
@@ -128,10 +153,18 @@ function Cells({
     </Cell>
   ));
 }
-function nested(blocks: readonly Block[], tail: ReactNode): ReactNode[] {
+function nested(
+  blocks: readonly Block[],
+  tail: ReactNode,
+  cut: boolean,
+): ReactNode[] {
   return blocks.map((block, index) => {
     const previous = blocks[index - 1];
-    const node = blockNode(block, index === blocks.length - 1 ? tail : null);
+    const node = blockNode(
+      block,
+      index === blocks.length - 1 ? tail : null,
+      cut,
+    );
     return previous?.kind === "paragraph" && block.kind === "paragraph" ? (
       <Fragment key={block.from}>
         {"\n\n"}
@@ -164,7 +197,13 @@ export function Markdown({
     const paragraph = block.kind === "paragraph";
     if (paragraph && flowing)
       out.push(source.slice(at, Math.min(block.from, limit)));
-    out.push(blockNode(block, inside && block === last ? tail : null));
+    out.push(
+      blockNode(
+        block,
+        inside && block === last ? tail : null,
+        limit < source.length,
+      ),
+    );
     at = block.to;
     flowing = paragraph;
   }
@@ -179,7 +218,9 @@ function flatInline(block: Block, links: boolean): ReactNode[] {
     case "heading":
       return inlines(block.inlines, links);
     case "code":
-      return [<code key={block.from}>{codeText(block).slice(0, -1)}</code>];
+      return isDiagram(block)
+        ? [diagramLabel(block)]
+        : [<code key={block.from}>{codeText(block).slice(0, -1)}</code>];
     case "list":
       return block.items.flatMap((item, index) => [
         index > 0 ? "\n" : null,

@@ -51,6 +51,12 @@ function frame(n, name, level = "calm", repo = undefined) {
 }
 const csp =
   "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+// The server's own policy. It allows inline styles, which the terminal view and
+// Mermaid's drawing need; every other test runs under the stricter one above.
+const serverCsp = csp.replace(
+  "style-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+);
 const types = {
   ".html": "text/html",
   ".js": "text/javascript",
@@ -339,6 +345,7 @@ async function open(
     onReview = () => ({ status: 200 }),
     observeLanding = false,
     liveInput = false,
+    inlineStyles = false,
     onSkills = () => ({ runtime: null, skills: [] }),
   } = {},
 ) {
@@ -494,7 +501,7 @@ async function open(
       res.writeHead(200, {
         "Content-Type":
           types[extname(file.pathname)] ?? "application/octet-stream",
-        "Content-Security-Policy": csp,
+        "Content-Security-Policy": inlineStyles ? serverCsp : csp,
         ...(page ? { "Set-Cookie": posts.cookie } : {}),
       });
       res.end(body);
@@ -13426,4 +13433,366 @@ test("IMAGES: a message without an image is sent as before, and the composer add
     source: "@codex just words",
   });
   assert.equal(ui.posts.uploads.length, 0);
+});
+
+const fenced = (source, before = "Here it is:", after = "Done.") =>
+  `${before}\n\`\`\`mermaid\n${source}\n\`\`\`\n${after}`;
+const FLOW =
+  "flowchart TD\n  A[Start] --> B{Ready?}\n  B -- yes --> C[Ship it]\n  B -- no --> D[Wait]";
+const SEQUENCE =
+  "sequenceDiagram\n  participant Alice\n  participant Bob\n  Alice->>Bob: Are you there?\n  Bob-->>Alice: Yes\n  Note over Alice,Bob: Both agree";
+async function diagramRoom(t, messages) {
+  const room = await chatRoom(
+    t,
+    messages.map((text, index) => channelPost(`d${index + 1}`, text, {})),
+    { inlineStyles: true },
+  );
+  const asked = [];
+  room.ui.page.on("request", (request) => asked.push(request.url()));
+  return { ...room, asked };
+}
+const diagramOf = (ui, id) =>
+  ui.page.locator(`main [data-message-id="${id}"] .diagram`);
+// A message over 480 characters is shown shortened until this is pressed.
+const showWhole = (ui, id) =>
+  ui.page
+    .locator(`main [data-message-id="${id}"]`)
+    .getByRole("button", { name: "Show more" })
+    .click();
+// The picture is an SVG document in a data: address; this is its source.
+const svgOf = async (image) =>
+  decodeURIComponent((await image.getAttribute("src")).split(",")[1]);
+// The words the picture shows, whatever elements Mermaid split them over.
+const wordsOf = (image) =>
+  image.evaluate((element) =>
+    [
+      ...new DOMParser()
+        .parseFromString(
+          decodeURIComponent(element.src.split(",")[1]),
+          "image/svg+xml",
+        )
+        .querySelectorAll("text"),
+    ]
+      .map(
+        (text) =>
+          [...text.querySelectorAll("tspan")]
+            .map((span) => span.textContent.trim())
+            .filter((word) => word !== "")
+            .join(" ") || text.textContent.trim(),
+      )
+      .join(" | "),
+  );
+async function diagramShots(ui, name) {
+  const directory = process.env.DIAGRAM_SCREENSHOTS;
+  if (!directory) return;
+  await mkdir(directory, { recursive: true });
+  await ui.page.screenshot({ path: `${directory}/${name}.png` });
+}
+
+test("DIAGRAMS: a flowchart and a sequence diagram are drawn, with the source and a copy one press away", async (t) => {
+  const { ui } = await diagramRoom(t, [fenced(FLOW), fenced(SEQUENCE)]);
+  await ui.page
+    .context()
+    .grantPermissions(["clipboard-read", "clipboard-write"]);
+  const flow = diagramOf(ui, "d1");
+  const sequence = diagramOf(ui, "d2");
+  for (const [diagram, words] of [
+    [flow, ["Start", "Ready?", "Ship it", "Wait"]],
+    [sequence, ["Alice", "Bob", "Are you there?", "Both agree"]],
+  ]) {
+    const image = diagram.locator(".diagram-box img");
+    await image.waitFor();
+    assert.ok((await drawn(image)) > 50, "the picture is drawn");
+    assert.equal(await image.getAttribute("alt"), "Diagram");
+    const shown = await wordsOf(image);
+    for (const word of words)
+      assert.ok(shown.includes(word), `${word}: ${shown}`);
+    assert.equal(await diagram.locator("pre").count(), 0, "no source yet");
+  }
+  const body = ui.page.locator('main [data-message-id="d1"] .body');
+  assert.ok((await body.textContent()).startsWith("Here it is:"));
+  assert.ok((await body.textContent()).includes("Done."));
+  assert.ok(
+    !(await body.textContent()).includes("flowchart TD"),
+    "the drawing stands where the source was",
+  );
+
+  const toggle = flow.getByRole("button", { name: "Show source" });
+  await toggle.click();
+  assert.equal(await flow.locator("pre code").textContent(), `${FLOW}\n`);
+  await flow.getByRole("button", { name: "Hide source" }).click();
+  assert.equal(await flow.locator("pre").count(), 0);
+
+  await flow.getByRole("button", { name: "Copy", exact: true }).click();
+  await flow.getByRole("button", { name: "Copied", exact: true }).waitFor();
+  assert.equal(
+    await ui.page.evaluate(() => navigator.clipboard.readText()),
+    `${FLOW}\n`,
+  );
+  assert.equal(
+    await ui.page.locator(".diagram-stage > *").count(),
+    0,
+    "Mermaid's working elements are gone",
+  );
+  await diagramShots(ui, "light");
+});
+
+test("DIAGRAMS: the drawing code loads only when a message holds a diagram", async (t) => {
+  const plain = await diagramRoom(t, [
+    "```js\nconst a = 1;\n```\nno diagram here",
+  ]);
+  await plain.ui.page.locator('main [data-message-id="d1"] pre').waitFor();
+  await plain.ui.page.waitForTimeout(300);
+  assert.deepEqual(
+    plain.asked.filter((url) => url.includes("/diagram/")),
+    [],
+    "a page without a diagram asks for none of the drawing code",
+  );
+
+  const { ui, asked } = await diagramRoom(t, [fenced(FLOW)]);
+  await diagramOf(ui, "d1").locator(".diagram-box img").waitFor();
+  const loaded = asked.filter((url) => url.includes("/diagram/"));
+  assert.ok(loaded.length > 0, "the diagram's code was asked for");
+  assert.ok(
+    loaded.every(
+      (url) => new URL(url).origin === new URL(ui.page.url()).origin,
+    ),
+    "and only from this server",
+  );
+  const bytes = (
+    await Promise.all(
+      loaded.map((url) =>
+        readFile(new URL(`../dist${new URL(url).pathname}`, import.meta.url)),
+      ),
+    )
+  ).reduce((sum, file) => sum + file.length, 0);
+  t.diagnostic(`a flowchart loads ${loaded.length} files, ${bytes} bytes`);
+  assert.ok(bytes < 1_500_000, `a flowchart loads ${bytes} bytes`);
+  assert.ok(
+    !loaded.some((url) => /elk|katex|cytoscape/.test(url)),
+    `a flowchart loads no layout engine or math code it does not use: ${loaded}`,
+  );
+});
+
+test("DIAGRAMS: a diagram that cannot be drawn shows its source and a quiet note", async (t) => {
+  const broken = "flowchart TD\n  A[Start --> ???\n  }}}";
+  const { ui } = await diagramRoom(t, [fenced(broken), fenced(FLOW)]);
+  const failed = diagramOf(ui, "d1");
+  await failed.locator(".diagram-note").waitFor();
+  assert.equal(
+    await failed.locator(".diagram-note").textContent(),
+    "Diagram could not be drawn",
+  );
+  assert.equal(await failed.locator("pre code").textContent(), `${broken}\n`);
+  assert.equal(await failed.locator("img").count(), 0);
+  assert.equal(
+    await failed.getByRole("button", { name: "Show source" }).count(),
+    0,
+  );
+  assert.equal(await failed.getByRole("button", { name: "Copy" }).count(), 1);
+  assert.ok(
+    !(await ui.page.locator("body").textContent()).includes("Syntax error"),
+    "no error drawing or parser message reaches the page",
+  );
+  await diagramOf(ui, "d2").locator(".diagram-box img").waitFor();
+  assert.equal(
+    await ui.page.locator(".diagram-stage > *").count(),
+    0,
+    "the failed drawing left nothing behind",
+  );
+  await diagramShots(ui, "broken");
+});
+
+test("DIAGRAMS: a diagram cannot run script, load anything remote, loosen its own settings or carry a link", async (t) => {
+  const hostile = [
+    '%%{init: {"securityLevel": "loose", "htmlLabels": true, "theme": "forest", "themeCSS": "@import url(https://evil.example/a.css); .node rect { fill: url(https://evil.example/b.png) }"}}%%',
+    "flowchart TD",
+    '  A["<img src=https://evil.example/c.png onerror=window.pwned=1>"] --> B["<script>window.pwned=2</script>"]',
+    '  B --> C["<a href=https://evil.example/d>click me</a>"]',
+    '  click A href "javascript:window.pwned=3"',
+    '  click B call window.alert("pwned")',
+    '  click C href "https://evil.example/e" _blank',
+  ].join("\n");
+  const { ui, asked } = await diagramRoom(t, [fenced(hostile), fenced(FLOW)]);
+  const dialogs = [];
+  ui.page.on("dialog", (dialog) => {
+    dialogs.push(dialog.message());
+    void dialog.dismiss();
+  });
+  await showWhole(ui, "d1");
+  const diagram = diagramOf(ui, "d1");
+  await diagram.locator(".diagram-box img, .diagram-note").first().waitFor();
+  await diagramOf(ui, "d2").locator(".diagram-box img").waitFor();
+  const image = diagram.locator(".diagram-box img");
+  assert.equal(await image.count(), 1, "the labels are drawn as text");
+  const svg = await svgOf(image);
+  for (const banned of [
+    "<script",
+    "<foreignObject",
+    "<a ",
+    "<image",
+    "onerror",
+    "javascript:",
+    "@import",
+  ])
+    assert.ok(!svg.includes(banned), `the picture holds no ${banned}`);
+  assert.ok(
+    (await wordsOf(image)).includes("click me"),
+    `a tag in a label is shown as its text: ${await wordsOf(image)}`,
+  );
+  // The page's own look, not the theme the diagram asked for.
+  assert.equal(
+    (await svgOf(diagramOf(ui, "d2").locator(".diagram-box img"))).includes(
+      "#cde498",
+    ),
+    false,
+  );
+  assert.ok(!svg.includes("#cde498"), "the diagram cannot choose its theme");
+
+  await image.click();
+  await ui.page.keyboard.press("Escape");
+  await ui.page.waitForTimeout(300);
+  assert.equal(
+    await ui.page.evaluate(() => window.pwned),
+    undefined,
+    "no script from the diagram ran",
+  );
+  assert.deepEqual(dialogs, []);
+  assert.deepEqual(
+    asked.filter(
+      (url) =>
+        !url.startsWith("data:") && new URL(url).hostname !== "127.0.0.1",
+    ),
+    [],
+    "nothing remote was asked for",
+  );
+  assert.equal(
+    await ui.page.locator("main .diagram a, main .diagram script").count(),
+    0,
+  );
+});
+
+test("DIAGRAMS: the drawing follows the page's light and dark look", async (t) => {
+  const { ui } = await diagramRoom(t, [fenced(FLOW)]);
+  const image = diagramOf(ui, "d1").locator(".diagram-box img");
+  const textColor = () =>
+    ui.page.evaluate(() => {
+      const canvas = document.createElement("canvas").getContext("2d");
+      canvas.fillStyle = getComputedStyle(
+        document.documentElement,
+      ).getPropertyValue("--text");
+      canvas.fillRect(0, 0, 1, 1);
+      return `#${[...canvas.getImageData(0, 0, 1, 1).data.slice(0, 3)].map((part) => part.toString(16).padStart(2, "0")).join("")}`;
+    });
+  await ui.page.emulateMedia({ colorScheme: "light" });
+  await image.waitFor();
+  const light = await textColor();
+  await eventually(
+    async () => (await svgOf(image)).includes(light),
+    "the light drawing",
+  );
+  const lightSource = await image.getAttribute("src");
+
+  await ui.page.emulateMedia({ colorScheme: "dark" });
+  const dark = await textColor();
+  assert.notEqual(dark, light);
+  await eventually(
+    async () => (await svgOf(image)).includes(dark),
+    "the dark drawing",
+  );
+  assert.ok(!(await svgOf(image)).includes(light));
+  assert.notEqual(await image.getAttribute("src"), lightSource);
+  assert.ok((await drawn(image)) > 50);
+  await diagramShots(ui, "dark");
+
+  await ui.page.evaluate(() => {
+    document.documentElement.dataset.theme = "light";
+  });
+  await eventually(
+    async () => (await svgOf(image)).includes(light),
+    "the page's own theme choice wins over the system's",
+  );
+});
+
+test("DIAGRAMS: at phone width a wide diagram scrolls in its own box, and a tap opens it full size", async (t) => {
+  const wide = `flowchart LR\n${Array.from({ length: 14 }, (_, n) => `  N${n}[Step number ${n}] --> N${n + 1}[Step number ${n + 1}]`).join("\n")}`;
+  const { ui } = await diagramRoom(t, [fenced(wide)]);
+  await ui.page.setViewportSize({ width: 390, height: 800 });
+  await showWhole(ui, "d1");
+  const diagram = diagramOf(ui, "d1");
+  const box = diagram.locator(".diagram-box");
+  const image = box.locator("img");
+  await image.waitFor();
+  const sizes = await box.evaluate((element) => ({
+    box: element.clientWidth,
+    content: element.scrollWidth,
+    page: document.scrollingElement.scrollWidth,
+    viewport: document.documentElement.clientWidth,
+    image: element.querySelector("img").getBoundingClientRect().width,
+    natural: element.querySelector("img").naturalWidth,
+  }));
+  assert.ok(sizes.natural > 1000, `the diagram is wide: ${sizes.natural}`);
+  assert.equal(sizes.image, sizes.natural, "it keeps its size");
+  assert.ok(sizes.content > sizes.box, "so its box scrolls");
+  assert.ok(sizes.box <= sizes.viewport);
+  assert.ok(sizes.page <= sizes.viewport, "and the page does not");
+  await diagramShots(ui, "phone");
+
+  const full = diagram.locator("dialog.diagram-full");
+  assert.equal(await full.evaluate((dialog) => dialog.open), false);
+  await diagram
+    .getByRole("button", { name: "Open the diagram full size" })
+    .click();
+  await eventually(() => full.evaluate((dialog) => dialog.open), "full size");
+  const shown = await full.evaluate((dialog) => {
+    const image = dialog.querySelector("img");
+    const pane = dialog
+      .querySelector(".diagram-full-pane")
+      .getBoundingClientRect();
+    return {
+      image: image.getBoundingClientRect().width,
+      natural: image.naturalWidth,
+      pane: pane.width,
+      viewport: document.documentElement.clientWidth,
+      page: document.scrollingElement.scrollWidth,
+    };
+  });
+  assert.equal(shown.image, shown.natural, "full size");
+  assert.ok(shown.pane <= shown.viewport, "inside the screen");
+  assert.ok(shown.page <= shown.viewport);
+  await diagramShots(ui, "phone-full");
+  await ui.page.keyboard.press("Escape");
+  await eventually(
+    async () => !(await full.evaluate((dialog) => dialog.open)),
+    "Escape closes it",
+  );
+  await diagram
+    .getByRole("button", { name: "Open the diagram full size" })
+    .click();
+  await full.getByRole("button", { name: "Close the diagram" }).click();
+  await eventually(
+    async () => !(await full.evaluate((dialog) => dialog.open)),
+    "the close button closes it",
+  );
+});
+
+test("DIAGRAMS: a shortened message shows a label for a diagram it cuts, and the whole message draws it", async (t) => {
+  const long = fenced(
+    `${FLOW}\n${Array.from({ length: 40 }, (_, n) => `  C --> E${n}[Extra step ${n}]`).join("\n")}`,
+    "A long plan follows.",
+  );
+  assert.ok(long.length > 480);
+  const { ui } = await diagramRoom(t, [long]);
+  const row = ui.page.locator('main [data-message-id="d1"]');
+  const label = row.locator(".body .md-diagram");
+  await label.waitFor();
+  assert.equal(await label.textContent(), "Diagram");
+  assert.equal(await row.locator(".diagram").count(), 0);
+  assert.ok(
+    !(await row.locator(".body").textContent()).includes("flowchart"),
+    "half a diagram's source is not shown",
+  );
+  await row.getByRole("button", { name: "Show more" }).click();
+  await row.locator(".diagram-box img").waitFor();
+  assert.equal(await label.count(), 0);
 });

@@ -506,6 +506,17 @@ export const imageCopy = {
   open: "Open the image in a new tab",
   gone: "Image no longer stored",
 };
+export const diagramCopy = {
+  label: "Diagram",
+  alt: "Diagram",
+  open: "Open the diagram full size",
+  close: "Close the diagram",
+  showSource: "Show source",
+  hideSource: "Hide source",
+  copy: "Copy",
+  copied: "Copied",
+  failed: "Diagram could not be drawn",
+};
 export const bodyCopy = {
   shortened: "Shortened by Namedrop.",
   unavailable: "Couldn't load the rest of this message. Try again.",

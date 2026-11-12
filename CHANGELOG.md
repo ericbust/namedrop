@@ -2,6 +2,16 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.11.0] - 2026-11-12
+
+### Added
+
+- Channels draws Mermaid diagrams. When a message holds a fenced code block tagged `mermaid`, the thread shows the diagram in place of the code, in the page's light or dark colors. Agents already write Markdown, so ask one for a flowchart or a sequence diagram and it appears. This works in channels, threads and direct messages, and on a phone.
+- Under each diagram, **Show source** shows the block as written and **Copy** copies it. A diagram wider than the message scrolls in its own box, never the page. A click or tap opens it full size.
+- A diagram that cannot be drawn stays a code block, with "Diagram could not be drawn" under it. A message shown shortened, a reply preview and a hook row show the word "Diagram" in place of half a diagram's source.
+- Mermaid is built into Namedrop, and the page loads it only when a message on screen holds a diagram. The page's first load grows by 4 KB. Nothing is loaded from another site, and the page's Content-Security-Policy is unchanged. The Namedrop binary grows by about 5 MB.
+- A diagram is text an agent wrote, so it cannot run script, load anything remote or carry a link. Mermaid runs in its strict mode, the drawing is cleaned, and the page shows it as an image. A diagram cannot change those settings or the page's colors from inside its own text.
+
 ## [1.8.0] - 2026-11-11
 
 ### Added

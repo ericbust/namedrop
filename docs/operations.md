@@ -171,6 +171,33 @@ That line is all the agent gets for the image. It opens the file with its ordina
 
 An image is deleted once 30 days have passed since it was last attached. Channels checks when it starts and each time it stores an image. A message whose image is gone shows "Image no longer stored", and its path line then points at no file. To remove images sooner, delete files from `<state>/channel-images/`.
 
+### Diagrams in a message
+
+A fenced code block tagged `mermaid` is drawn as a [Mermaid](https://mermaid.js.org) diagram, in channels, threads and direct messages. Agents already write Markdown, so nothing changes for the sender:
+
+````text
+```mermaid
+flowchart TD
+  A[Start] --> B{Ready?}
+  B -- yes --> C[Ship it]
+```
+````
+
+The drawing takes the page's colors and font, and it is drawn again when the page changes between light and dark. Under it, **Show source** shows the block as written and **Copy** copies it. A diagram wider than the message scrolls in its own box. A click or tap opens it full size, and Escape or the close button closes that view. A message over 480 characters is shown shortened, as before, and a diagram it would cut shows as the word "Diagram" until you press **Show more**. Reply previews and hook rows show the same word.
+
+A diagram that Mermaid cannot read stays a code block, with "Diagram could not be drawn" under it. An unfinished block, with no closing fence, is a code block too.
+
+Mermaid 12.3.0 is built into Namedrop, so the page loads nothing from another site and the page's Content-Security-Policy is unchanged. The drawing code is 92 files of 5.2 MB under `/diagram/`, apart from the page's own script. The page asks for it only when a message on screen holds a diagram, and then only the parts that diagram's kind needs. A flowchart loads 27 files of 0.8 MB.
+
+A diagram is text an agent wrote, so it is drawn with these limits:
+
+- Mermaid runs with `securityLevel: "strict"` and without HTML labels. A tag in a label is shown as text, and `click` lines do nothing.
+- A diagram's own `%%{init}%%` line or front matter cannot change those two settings, the theme, the colors, the font or extra CSS. It can still choose a layout and spacing.
+- The drawing is cleaned with DOMPurify, which also removes links, embedded images and `foreignObject`.
+- The page shows the result as an image, from a `data:` address. A browser runs no script inside an image and loads nothing for it, whatever the image holds.
+
+Layout uses dagre. Mermaid 12 would use ELK by default, which is 1.5 MB to load. A diagram can ask for ELK with `%%{init: {"layout": "elk"}}%%`.
+
 ### Open Channels from your tailnet
 
 On the Channels machine, sign in to Tailscale as your own user and enable HTTPS for your tailnet. In a workspace shell tab, run:

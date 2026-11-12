@@ -359,6 +359,56 @@ fn default_server_serves_built_channels_assets() {
 }
 
 #[test]
+fn the_page_names_its_diagram_code_and_the_server_serves_all_of_it_apart_from_the_page() {
+    let dashboard = Dashboard::new();
+    dashboard.open(None);
+    let page = dashboard.get("/", true);
+    page.status(200);
+    let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/dashboard/channels");
+    let names = |directory: &str| -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(bundle.join(directory))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    };
+    let script_name = names("assets")
+        .into_iter()
+        .find(|name| name.ends_with(".js"))
+        .unwrap();
+    let script = fs::read_to_string(bundle.join("assets").join(&script_name)).unwrap();
+    let start = script
+        .find("/diagram/draw-")
+        .expect("the page's script names the diagram code");
+    let entry = &script[start..start + script[start..].find(".js").unwrap() + ".js".len()];
+    let files = names("diagram");
+    assert!(
+        files.contains(&entry.trim_start_matches("/diagram/").to_owned()),
+        "{entry} is not among {files:?}"
+    );
+    for name in &files {
+        let path = format!("/diagram/{name}");
+        let served = dashboard.get(&path, false);
+        served.status(200);
+        let stored = fs::read(bundle.join("diagram").join(name)).unwrap();
+        assert_eq!(served.body, stored, "{path}");
+        assert_eq!(
+            served.headers["Content-Type"], "text/javascript; charset=utf-8",
+            "{path}"
+        );
+        assert_eq!(served.security(), page.security(), "{path}");
+        // A file that named the page's script would be renamed with every
+        // change to the page, and all 92 would be committed again.
+        let text = String::from_utf8_lossy(&stored);
+        assert!(
+            !text.contains("/assets/") && !text.contains(&script_name),
+            "{path} depends on the page's own files"
+        );
+    }
+}
+
+#[test]
 fn directory_assets_have_correct_types_and_are_read_fresh() {
     let dashboard = Dashboard::new();
     let ui = dashboard.ui("dist");
