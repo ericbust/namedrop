@@ -240,24 +240,24 @@ test("sounds: agent-to-agent traffic, the person's own posts, terminals, system 
   assert.equal(apply(loaded, [before, ...quiet]).heard, loaded.heard);
 });
 
-test("sounds: messages that arrive in a reconnect's replay stay silent, in a new channel too", () => {
-  let state = reduce(loaded, { type: "opened" });
+test("sounds: a reconnect rings for messages to the person that arrived while it was down, but the first load does not", () => {
+  let state = reduce(initialState(), { type: "opened" });
+  state = ready(apply(state, [{ ...before, at: 500 }]), [keyA]);
+  assert.equal(state.heard, nothingHeard);
+  state = reduce(state, { type: "disconnected" });
+  state = reduce(state, { type: "opened" });
   state = apply(state, [
-    before,
-    { id: "missed", author: "claude", to: ["human"] },
+    { ...before, at: 500 },
+    { id: "aside", author: "claude", to: ["codex"], at: 600 },
+    { id: "missed", author: "codex", to: ["human"], at: 601 },
   ]);
-  state = apply(
-    state,
-    [{ id: "elsewhere", author: "codex", to: ["human"] }],
-    keyB,
-  );
-  state = ready(state, [keyA, keyB]);
+  assert.equal(state.heard, nothingHeard, "nothing rings mid-replay");
+  state = ready(state, [keyA]);
   assert.equal(state.sync.kind, "live");
-  assert.ok(state.channels.get(keyA as SpaceKey)?.latestMessages.has("missed"));
-  assert.ok(
-    state.channels.get(keyB as SpaceKey)?.latestMessages.has("elsewhere"),
-  );
-  assert.equal(state.heard, loaded.heard);
+  assert.deepEqual(state.heard, {
+    seq: 1,
+    arrivals: [{ agent: "codex", id: "missed" }],
+  });
 });
 
 test("sounds: a channel that first appears after the first load rings for its new messages to the person, not its old ones", () => {

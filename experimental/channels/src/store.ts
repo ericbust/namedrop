@@ -32,7 +32,7 @@ import type {
   TerminalRun,
 } from "./model.ts";
 import { samePeek } from "./peek.ts";
-import { type Arrival, agentKey, nothingHeard } from "./sounds.ts";
+import { type Arrival, agentKey, type Heard, nothingHeard } from "./sounds.ts";
 import { ENVOY } from "./wire.ts";
 
 export const channelCollator = new Intl.Collator();
@@ -410,6 +410,9 @@ export function heardIn(
   }
   return arrivals;
 }
+function hear(heard: Heard, arrivals: Arrival[]): Heard {
+  return arrivals.length === 0 ? heard : { seq: heard.seq + 1, arrivals };
+}
 function newestAt(
   watermark: number,
   channel: Pick<Channel, "messages" | "latestMessages">,
@@ -448,6 +451,13 @@ function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
   const arrived = [...channels.keys()].some((key) => !state.channels.has(key));
   const selection = settle(state, channels, arrived);
   const unread = new Set([...state.unread].filter((key) => channels.has(key)));
+  // Messages that arrived while the stream was down ring once it is back.
+  const arrivals = [...pending.keys()].flatMap((key) => {
+    const channel = channels.get(key);
+    return channel === undefined
+      ? []
+      : heardIn(state.channels.get(key), channel, state.watermark);
+  });
   let watermark = state.watermark ?? Number.NEGATIVE_INFINITY;
   for (const [key, channel] of channels) {
     watermark = newestAt(watermark, channel);
@@ -466,6 +476,7 @@ function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
     unread,
     outbox: settleOutbox(state.outbox, [...channels.values()]),
     viewKnown: state.viewKnown || channels.size > 0 || keys !== null,
+    heard: hear(state.heard, arrivals),
     watermark,
     sync: { kind: keys === null ? "fallback" : "live" },
     landing:
@@ -625,10 +636,7 @@ function step(state: State, event: Event): State {
         unread,
         outbox: settleOutbox(state.outbox, [accumulated]),
         viewKnown: true,
-        heard:
-          arrivals.length === 0
-            ? state.heard
-            : { seq: state.heard.seq + 1, arrivals },
+        heard: hear(state.heard, arrivals),
         watermark:
           state.watermark === null
             ? null
