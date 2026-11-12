@@ -31,8 +31,7 @@ struct Fixture {
     ids: AtomicU64,
     now: AtomicU64,
     mux: StrictSpace,
-    /// Each prompt the space received, as its pane and the envelope it named
-    /// when it was typed.
+    /// Each prompt the code tried, as its pane and the envelope it named.
     prompts: Arc<Mutex<Vec<(String, Value)>>>,
 }
 impl Fixture {
@@ -256,9 +255,10 @@ impl IdGenerator for Fixture {
 }
 /// Three agent panes in one space holding the fixture's checkout. The lead
 /// starts working, and a prompt leaves each pane's status as it was. Each
-/// prompt's envelope goes to `prompts` while the prompt is typed, when its
-/// attempt is still dispatching, so a pointer typed before its attempt row
-/// commits fails the test.
+/// prompt's envelope goes to `prompts` before the delivery that tried it
+/// returns, when its attempt is still dispatching, so a pointer typed before
+/// its attempt row commits fails the test. Like the old fake's `agent
+/// prompt`, it sees every prompt the code tried, declined ones included.
 fn space_at(root: &std::path::Path, prompts: Arc<Mutex<Vec<(String, Value)>>>) -> StrictSpace {
     let mut world = FakeMux::world().space("synthetic-workspace").checkout(root);
     for (pane, state) in [
@@ -273,13 +273,13 @@ fn space_at(root: &std::path::Path, prompts: Arc<Mutex<Vec<(String, Value)>>>) -
             .state(state);
     }
     let mux = world.build().prompts_stay_settled();
-    mux.on_input(move |_, sent| {
-        if let SentInput::Prompt(prompt) = &sent.input {
+    mux.on_input(move |_, attempt| {
+        if let SentInput::Prompt(prompt) = &attempt.input {
             let envelope = delivered::envelope_of(prompt);
             prompts
                 .lock()
                 .unwrap()
-                .push((sent.pane.as_str().to_owned(), envelope));
+                .push((attempt.pane.as_str().to_owned(), envelope));
         }
     });
     StrictSpace::new(mux, EVERY_LISTING, Takes::prompts_and_metadata())

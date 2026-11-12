@@ -1,20 +1,22 @@
 //! `FakeMux`, an in-memory multiplexer for tests. It models spaces, tabs,
 //! panes, screens, and processes, and answers the port's questions from that
-//! world rather than matching command arguments. Always compiled, so tests in
-//! `tests/` reach it as `namedrop::mux::fake::FakeMux`.
+//! world rather than matching command arguments. It is compiled for the
+//! crate's own tests and under the `test-support` feature, which the crate's
+//! dev-dependency on itself turns on, so tests in `tests/` reach it as
+//! `namedrop::mux::fake::FakeMux` and a release build leaves it out.
 
 use super::{
     AgentIdentity, AgentKind, AgentState, Applied, Checkout, Depth, Effect, Endpoint, InputKind,
     InputOutcome, Key, MuxAct, MuxConnector, MuxError, MuxInput, MuxKind, MuxRead, PaneFacts,
     PaneId, PaneInput, PaneProcess, Recipient, Retry, Scope, Screen, ScreenRequest, SessionClaim,
-    SpaceView, Survey, TabId, TerminalId,
+    SpaceView, Style, Survey, TabId, TerminalId, Wrap,
     gate::{self, ChannelError, RawChannel, StatusTap},
 };
 use crate::{AgentRuntime, AgentSessionId, SpaceId, WorktreeId};
 use std::{
     collections::{BTreeMap, VecDeque},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
 
@@ -35,7 +37,7 @@ pub enum SentInput {
     },
 }
 
-/// An input a delivery tried to type, whether or not it reached the pane.
+/// An input the code tried to type, whether or not it reached the pane.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Attempt {
     pub pane: PaneId,
@@ -53,14 +55,66 @@ pub enum ScopeKind {
     All,
 }
 
-impl ScopeKind {
+/// A survey's scope as the read log keeps it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Surveyed {
+    Space(SpaceId),
+    PanesOf(SpaceId),
+    CheckoutOf(PathBuf),
+    All,
+}
+
+impl Surveyed {
     fn of(scope: Scope<'_>) -> Self {
         match scope {
-            Scope::Space(_) => Self::Space,
-            Scope::PanesOf(_) => Self::PanesOf,
-            Scope::CheckoutOf(_) => Self::CheckoutOf,
+            Scope::Space(id) => Self::Space(id.clone()),
+            Scope::PanesOf(id) => Self::PanesOf(id.clone()),
+            Scope::CheckoutOf(path) => Self::CheckoutOf(path.to_path_buf()),
             Scope::All => Self::All,
         }
+    }
+
+    pub fn kind(&self) -> ScopeKind {
+        match self {
+            Self::Space(_) => ScopeKind::Space,
+            Self::PanesOf(_) => ScopeKind::PanesOf,
+            Self::CheckoutOf(_) => ScopeKind::CheckoutOf,
+            Self::All => ScopeKind::All,
+        }
+    }
+}
+
+/// A read the code made, logged before the fake answers it, so a read that
+/// failed is logged too.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Read {
+    Survey {
+        scope: Surveyed,
+        depth: Depth,
+    },
+    Screen {
+        pane: PaneId,
+        request: ScreenRequest,
+    },
+    Process(PaneId),
+    TabLabel(TabId),
+    IntegrationRoot,
+}
+
+/// The screen reads a pane answers, as a Herdr fake answered one `pane read`
+/// argv. `lines: None` answers any number of lines.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScreenShape {
+    pub wrap: Wrap,
+    pub style: Style,
+    pub lines: Option<usize>,
+}
+
+impl ScreenShape {
+    fn answers(self, request: ScreenRequest) -> bool {
+        self.wrap == request.wrap
+            && self.style == request.style
+            && self.lines.is_none_or(|lines| lines == request.lines)
     }
 }
 
@@ -102,6 +156,8 @@ pub(crate) struct FakePane {
     pub(crate) facts: PaneFacts,
     /// `None` until a test gives the pane a screen.
     pub(crate) screen: Option<String>,
+    /// `None` answers a read of any shape, unless reads are strict.
+    pub(crate) screen_shape: Option<ScreenShape>,
     /// `None` until a test gives the pane a process.
     pub(crate) process: Option<PaneProcess>,
 }
@@ -113,6 +169,7 @@ pub(crate) struct World {
     pub(crate) integration_root: Option<PathBuf>,
     sent: Vec<Sent>,
     attempts: Vec<Attempt>,
+    reads: Vec<Read>,
     effects: Vec<Effect>,
     attempted_effects: Vec<Effect>,
     /// Outcomes for a pane's next inputs, first first.
@@ -154,7 +211,7 @@ impl World {
         }
     }
 
-    /// What a read the test did not script answers: the type's empty value,
+    /// What a read the test did not give answers: the type's empty value,
     /// or under `strict_reads` an error.
     fn unscripted<T: Default>(&self, what: String) -> Result<T, MuxError> {
         if self.strict_reads {
@@ -231,7 +288,7 @@ impl World {
     /// Mirrors what the Herdr adapter reads for each scope and depth, so a
     /// test sees the same partial facts from either implementation.
     fn survey(&self, scope: Scope<'_>, depth: Depth) -> Result<Survey, MuxError> {
-        let kind = ScopeKind::of(scope);
+        let kind = Surveyed::of(scope).kind();
         if let Some(surveys) = &self.surveys
             && !surveys.contains(&(kind, depth))
         {
@@ -322,12 +379,20 @@ pub struct FakeMux {
     emulated: bool,
 }
 
-type InputObserver = Arc<dyn Fn(&FakeMux, &Sent) + Send + Sync>;
+type InputObserver = Arc<dyn Fn(&FakeMux, &Attempt) + Send + Sync>;
+type ReadHook = Arc<dyn Fn(&FakeMux, &Read) -> Result<(), MuxError> + Send + Sync>;
 
 struct Shared {
     endpoint: Endpoint,
     world: Mutex<World>,
     observers: Mutex<Vec<InputObserver>>,
+    read_hooks: Mutex<Vec<ReadHook>>,
+}
+
+/// A poisoned lock still guards a consistent world. A test whose observer
+/// panicked must still be able to read the world.
+fn unpoisoned<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
+    lock.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl FakeMux {
@@ -359,7 +424,8 @@ impl FakeMux {
 
     /// A screen, process, tab label, or integration root the test did not
     /// give the world fails to read, as a Herdr fake fails a command it was
-    /// not given an answer for.
+    /// not given an answer for. A screen answers only the reads its pane's
+    /// `screen_shape` names. Nothing turns strict reads off again.
     pub fn strict_reads(self) -> Self {
         self.lock().strict_reads = true;
         self
@@ -368,30 +434,57 @@ impl FakeMux {
     /// Only surveys of these scopes and depths answer. Any other fails with
     /// `MuxError::Unavailable`, as a Herdr fake fails a listing it was not
     /// given.
+    ///
+    /// # Panics
+    ///
+    /// When the world already answers only some surveys, so that a clone
+    /// cannot widen what a `StrictSpace` answers.
     pub fn strict_surveys(self, answered: &[(ScopeKind, Depth)]) -> Self {
-        self.lock().surveys = Some(answered.to_vec());
+        {
+            let mut world = self.lock();
+            if let Some(surveys) = &world.surveys {
+                panic!("the world already answers only the surveys {surveys:?}");
+            }
+            world.surveys = Some(answered.to_vec());
+        }
         self
     }
 
-    /// `observe` runs as each input is typed, before the delivery that typed
-    /// it returns, so it sees the store as the pane's agent would. It is
-    /// handed the world rather than holding it, so it can change what the
-    /// pane shows, and observers run in the order they were added.
-    pub fn on_input(&self, observe: impl Fn(&FakeMux, &Sent) + Send + Sync + 'static) {
-        self.shared
-            .observers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(Arc::new(observe));
+    /// `observe` runs once for every input the code tried, with its outcome,
+    /// after the fake answered it and before the delivery that tried it
+    /// returns. So it sees declined and refused input, and the store as it
+    /// was while the input was dispatched. It is handed the world rather
+    /// than holding it, and the world is unlocked while it runs, so it can
+    /// change what the pane shows. Observers run in the order they were
+    /// added.
+    pub fn on_input(&self, observe: impl Fn(&FakeMux, &Attempt) + Send + Sync + 'static) {
+        unpoisoned(&self.shared.observers).push(Arc::new(observe));
+    }
+
+    /// `hook` runs before each read is answered, with the world unlocked, so
+    /// it can change what the read answers. An `Err` fails the read, so a
+    /// hook that fails every `Scope::PanesOf` of one space stands for a space
+    /// Herdr cannot list. Hooks run in the order they were added, and the
+    /// first `Err` ends the read.
+    pub fn on_read(
+        &self,
+        hook: impl Fn(&FakeMux, &Read) -> Result<(), MuxError> + Send + Sync + 'static,
+    ) {
+        unpoisoned(&self.shared.read_hooks).push(Arc::new(hook));
+    }
+
+    /// Drops every observer and read hook, with any handle to the world
+    /// they captured.
+    fn release_hooks(&self) {
+        unpoisoned(&self.shared.observers).clear();
+        unpoisoned(&self.shared.read_hooks).clear();
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, World> {
-        self.shared
-            .world
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        unpoisoned(&self.shared.world)
     }
 
+    /// The input that was typed, in the order typing started.
     pub fn sent(&self) -> Vec<Sent> {
         self.lock().sent.clone()
     }
@@ -406,10 +499,41 @@ impl FakeMux {
             .collect()
     }
 
-    /// Every input a delivery tried to type, with its outcome, including
-    /// the ones that were declined or refused before anything was typed.
+    /// Every input the code tried to type, with its outcome, including the
+    /// ones that were declined or refused before anything was typed. They
+    /// are in the order their deliveries finished, which differs from
+    /// `sent()`'s order only when inputs overlap on several threads.
     pub fn attempts(&self) -> Vec<Attempt> {
         self.lock().attempts.clone()
+    }
+
+    /// Every read the code made, in order, including the ones that failed.
+    pub fn reads(&self) -> Vec<Read> {
+        self.lock().reads.clone()
+    }
+
+    /// How many times the code read `pane`'s screen, in any shape.
+    pub fn screen_reads(&self, pane: &str) -> usize {
+        let pane = PaneId::new(pane);
+        self.lock()
+            .reads
+            .iter()
+            .filter(
+                |read| matches!(read, Read::Screen { pane: read_pane, .. } if *read_pane == pane),
+            )
+            .count()
+    }
+
+    /// How many surveys of this scope kind and depth the code made.
+    pub fn surveys_made(&self, kind: ScopeKind, depth: Depth) -> usize {
+        self.lock()
+            .reads
+            .iter()
+            .filter(|read| match read {
+                Read::Survey { scope, depth: made } => scope.kind() == kind && *made == depth,
+                _ => false,
+            })
+            .count()
     }
 
     /// The effects that applied.
@@ -446,25 +570,40 @@ impl FakeMux {
             SessionClaim::Reported(AgentSessionId::new(session));
     }
 
+    /// `pane` shows `text`, or with `None` nothing a read can answer. The
+    /// pane keeps its `screen_shape`.
+    ///
     /// # Panics
     ///
     /// When the world has no such pane.
-    pub fn set_screen(&self, pane: &str, text: &str) {
-        self.lock().known_pane(pane).screen = Some(text.to_owned());
+    pub fn set_screen(&self, pane: &str, text: Option<&str>) {
+        self.lock().known_pane(pane).screen = text.map(str::to_owned);
     }
 
+    /// # Panics
+    ///
+    /// When the world has no such pane.
     pub fn close_pane(&self, pane: &str) {
+        let mut world = self.lock();
+        world.known_pane(pane);
         let pane = PaneId::new(pane);
-        for space in &mut self.lock().spaces {
+        for space in &mut world.spaces {
             space.panes.retain(|candidate| candidate.facts.id != pane);
         }
     }
 
     /// The next input to `pane` returns `outcome` without consulting the
     /// world. Scripted outcomes queue per pane. `Delivered` and `Ambiguous`
-    /// are recorded as sent.
+    /// are recorded as sent. A `StrictSpace` fails the test for a script no
+    /// input used.
+    ///
+    /// # Panics
+    ///
+    /// When the world has no such pane.
     pub fn script(&self, pane: &str, outcome: InputOutcome) {
-        self.lock()
+        let mut world = self.lock();
+        world.known_pane(pane);
+        world
             .scripted
             .entry(PaneId::new(pane))
             .or_default()
@@ -472,26 +611,39 @@ impl FakeMux {
     }
 
     /// Every input to `pane` that no `script` covers returns `outcome`
-    /// without consulting the world, as `script` does.
+    /// without consulting the world, as `script` does. An answer covers any
+    /// number of inputs, none included.
+    ///
+    /// # Panics
+    ///
+    /// When the world has no such pane.
     pub fn answer(&self, pane: &str, outcome: InputOutcome) {
-        self.lock().answers.insert(PaneId::new(pane), outcome);
+        let mut world = self.lock();
+        world.known_pane(pane);
+        world.answers.insert(PaneId::new(pane), outcome);
     }
 
-    /// The next call of `op` fails with `error`.
+    /// The next call of `op` fails with `error`. A `StrictSpace` fails the
+    /// test for an injection no call used. For a failure that lasts, use
+    /// `on_read`.
     pub fn fail(&self, op: Op, error: MuxError) {
         self.lock().failures.push((op, error));
     }
 
     /// `MuxInput::deliver` minus the lock token, which only `pane_effects`
-    /// can mint.
+    /// can mint. Records the attempt, then shows it to the observers.
     pub(crate) fn send(&self, pane: &PaneId, kind: InputKind<'_>) -> InputOutcome {
-        let outcome = self.attempt(pane, kind);
-        self.lock().attempts.push(Attempt {
+        let attempt = Attempt {
             pane: pane.clone(),
             input: sent_input(kind),
-            outcome: outcome.clone(),
-        });
-        outcome
+            outcome: self.attempt(pane, kind),
+        };
+        self.lock().attempts.push(attempt.clone());
+        let observers = unpoisoned(&self.shared.observers).clone();
+        for observe in observers {
+            observe(self, &attempt);
+        }
+        attempt.outcome
     }
 
     fn attempt(&self, pane: &PaneId, kind: InputKind<'_>) -> InputOutcome {
@@ -540,31 +692,22 @@ impl FakeMux {
         }
     }
 
-    /// Records `input` as sent and shows it to the observers. The world is
-    /// unlocked while they run, so they may read and change it.
     fn typed(&self, pane: &PaneId, input: SentInput) {
-        let sent = Sent {
+        self.lock().sent.push(Sent {
             pane: pane.clone(),
             input,
-        };
-        self.lock().sent.push(sent.clone());
-        let observers = self
-            .shared
-            .observers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        for observe in observers {
-            observe(self, &sent);
-        }
+        });
     }
 
     fn type_prompt(&self, pane: &PaneId, text: &str) -> Result<(), ChannelError> {
-        if self.lock().pane(pane).is_none() {
+        let mut world = self.lock();
+        if world.pane(pane).is_none() {
             return Err(ChannelError(format!("pane {} is gone", pane.as_str())));
         }
-        self.typed(pane, SentInput::Prompt(text.to_owned()));
-        let mut world = self.lock();
+        world.sent.push(Sent {
+            pane: pane.clone(),
+            input: SentInput::Prompt(text.to_owned()),
+        });
         if let Err(error) = world.take_failure(Op::Deliver) {
             return Err(ChannelError(format!("{error:?}")));
         }
@@ -572,6 +715,13 @@ impl FakeMux {
             world.set_state(pane, AgentState::Working);
         }
         Ok(())
+    }
+
+    /// Logs `read` and runs the read hooks with the world unlocked.
+    fn read(&self, read: Read) -> Result<(), MuxError> {
+        self.lock().reads.push(read.clone());
+        let hooks = unpoisoned(&self.shared.read_hooks).clone();
+        hooks.iter().try_for_each(|hook| hook(self, &read))
     }
 }
 
@@ -581,21 +731,38 @@ impl MuxRead for FakeMux {
     }
 
     fn survey(&self, scope: Scope<'_>, depth: Depth) -> Result<Survey, MuxError> {
+        self.read(Read::Survey {
+            scope: Surveyed::of(scope),
+            depth,
+        })?;
         let mut world = self.lock();
         world.take_failure(Op::Survey)?;
         world.survey(scope, depth)
     }
 
     fn screen(&self, pane: &PaneId, request: ScreenRequest) -> Result<Screen, MuxError> {
+        self.read(Read::Screen {
+            pane: pane.clone(),
+            request,
+        })?;
         let mut world = self.lock();
         world.take_failure(Op::Screen)?;
-        let screen = match &world
+        let found = world
             .pane(pane)
-            .ok_or_else(|| gone(super::Gone::Pane, pane.as_str()))?
-            .screen
-        {
-            Some(screen) => screen.clone(),
-            None => world.unscripted(format!("screen for {}", pane.as_str()))?,
+            .ok_or_else(|| gone(super::Gone::Pane, pane.as_str()))?;
+        let answers = match found.screen_shape {
+            Some(shape) => shape.answers(request),
+            None => !world.strict_reads,
+        };
+        let screen = match &found.screen {
+            Some(screen) if answers => screen.clone(),
+            _ => world.unscripted(format!(
+                "screen for {} read as {:?} {:?} with {} lines",
+                pane.as_str(),
+                request.wrap,
+                request.style,
+                request.lines
+            ))?,
         };
         let lines: Vec<_> = screen.lines().collect();
         let text = lines[lines.len().saturating_sub(request.lines)..].join("\n");
@@ -603,6 +770,7 @@ impl MuxRead for FakeMux {
     }
 
     fn process(&self, pane: &PaneId) -> Result<PaneProcess, MuxError> {
+        self.read(Read::Process(pane.clone()))?;
         let mut world = self.lock();
         world.take_failure(Op::Process)?;
         match &world
@@ -616,6 +784,7 @@ impl MuxRead for FakeMux {
     }
 
     fn tab_label(&self, tab: &TabId) -> Result<Option<String>, MuxError> {
+        self.read(Read::TabLabel(tab.clone()))?;
         let mut world = self.lock();
         world.take_failure(Op::TabLabel)?;
         match world.tab_labels.get(tab) {
@@ -625,6 +794,7 @@ impl MuxRead for FakeMux {
     }
 
     fn integration_root(&self) -> Result<Option<PathBuf>, MuxError> {
+        self.read(Read::IntegrationRoot)?;
         let mut world = self.lock();
         world.take_failure(Op::IntegrationRoot)?;
         match &world.integration_root {
@@ -814,6 +984,7 @@ impl WorldBuilder {
         space.panes.push(FakePane {
             facts,
             screen: None,
+            screen_shape: None,
             process: None,
         });
         self
@@ -907,6 +1078,13 @@ impl WorldBuilder {
         self
     }
 
+    /// The pane's screen answers only reads of this shape. Without strict
+    /// reads, a read of another shape answers an empty screen.
+    pub fn screen_shape(mut self, shape: ScreenShape) -> Self {
+        self.current_pane().screen_shape = Some(shape);
+        self
+    }
+
     pub fn process(mut self, process: PaneProcess) -> Self {
         self.current_pane().process = Some(process);
         self
@@ -923,6 +1101,7 @@ impl WorldBuilder {
                 endpoint: self.endpoint,
                 world: Mutex::new(self.world),
                 observers: Mutex::default(),
+                read_hooks: Mutex::default(),
             }),
             emulated: false,
         }

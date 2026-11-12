@@ -33,5 +33,10 @@ serde_yaml_ng = "0.10.0"
 semver = "1.0.28"
 qrcode = { version = "0.14.1", default-features = false }
 
+[features]
+# `mux::fake`, the in-memory multiplexer that the tests in `tests/` build on.
+test-support = []
+
 [dev-dependencies]
+namedrop = { path = ".", features = ["test-support"] }
 rqrr = { version = "0.11.0", default-features = false }
