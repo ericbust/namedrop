@@ -25,6 +25,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "channel_create.rs"]
+mod channel_create;
 #[path = "channels_bundle.rs"]
 mod channels_bundle;
 #[path = "live_peek.rs"]
@@ -73,10 +75,11 @@ pub(crate) struct Front {
     pub channel_wake: super::channel_service::ChannelWake,
     pub control_effects: super::thread_controls::ControlEffects,
     pub image_uploads: AtomicUsize,
+    pub launches: super::launches::Launches,
 }
 
 impl Front {
-    fn admit_mutation(&self) -> Result<std::sync::MutexGuard<'_, ()>, Status> {
+    pub(super) fn admit_mutation(&self) -> Result<std::sync::MutexGuard<'_, ()>, Status> {
         let guard = self.mutations.lock().map_err(|_| Status::Unavailable)?;
         if self.restarting.load(Ordering::Acquire) || self.files.restarting() {
             return Err(Status::Unavailable);
@@ -441,7 +444,7 @@ impl Request {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Status {
+pub(super) enum Status {
     NoContent,
     BadRequest,
     Unauthorized,
@@ -691,6 +694,9 @@ enum Route {
         address_id: String,
     },
     CoordinationReview(SpaceKey),
+    CreateChannel(SpaceKey),
+    AddAgent(SpaceKey),
+    Folders(SpaceKey),
     Deliver {
         key: SpaceKey,
         message_id: String,
@@ -942,6 +948,14 @@ fn route(
                 let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
                 return Ok(Route::CoordinationReview(key));
             }
+            if let [key, action @ ("channels" | "agents")] = segments.as_slice() {
+                let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
+                return Ok(if *action == "channels" {
+                    Route::CreateChannel(key)
+                } else {
+                    Route::AddAgent(key)
+                });
+            }
             if let [key, "threads", thread, action] = segments.as_slice() {
                 let action = match *action {
                     "continue" => super::thread_controls::Action::Continue,
@@ -993,6 +1007,13 @@ fn route(
             } else {
                 Route::MessageContext { key, message_id }
             });
+        }
+        if let [key, "folders"] = segments.as_slice() {
+            authenticate_session(request, port, session)?;
+            authenticate_provenance(request, &origin)?;
+            return Ok(Route::Folders(
+                SpaceKey::parse(key).ok_or(Status::NotFound)?,
+            ));
         }
         if segments.get(1) == Some(&"participants") {
             authenticate_session(request, port, session)?;
@@ -1558,6 +1579,13 @@ fn serve_connection(
             };
             send_coordination_review(&mut writer, front, &key, &post)
         }
+        Ok(Route::CreateChannel(key)) => {
+            channel_create::create_channel(&mut reader, &mut writer, front, &request, &key)
+        }
+        Ok(Route::AddAgent(key)) => {
+            channel_create::add_agent(&mut reader, &mut writer, front, &request, &key)
+        }
+        Ok(Route::Folders(key)) => channel_create::folders(&mut writer, front, &key),
         Ok(Route::Deliver { key, message_id }) => {
             let post = match DeliverPost::read(&mut reader, &request) {
                 Ok(post) => post,
@@ -2927,6 +2955,72 @@ mod skill_route_tests {
 }
 
 #[cfg(test)]
+mod channel_create_route_tests {
+    use super::*;
+
+    #[test]
+    fn folders_is_a_session_get_and_channels_and_agents_are_csrf_posts() {
+        let state = std::env::temp_dir().join(crate::IdGenerator::next_id(
+            &crate::ProcessIds::default(),
+            "channel-create-route",
+        ));
+        let files = ServerFiles::at(&state).unwrap();
+        let token = files.token().unwrap();
+        let session = files.session().unwrap();
+        let routes = |method: &str, path: &str, csrf: bool| {
+            let mut headers = vec![
+                ("host".into(), "127.0.0.1:1234".into()),
+                (
+                    "cookie".into(),
+                    format!("{}={}", cookie_name(1234), session.as_str()),
+                ),
+            ];
+            if csrf {
+                headers.push(("x-namedrop-csrf".into(), csrf_token(&session)));
+            }
+            let request = Request {
+                method: method.into(),
+                path: path.into(),
+                query: None,
+                headers,
+            };
+            route(&request, 1234, &token, &session, false, None)
+        };
+        let key = "0123456789abcdef0123";
+        assert!(matches!(
+            routes("GET", &format!("/w/{key}/folders"), false),
+            Ok(Route::Folders(_))
+        ));
+        assert!(matches!(
+            routes("POST", &format!("/w/{key}/channels"), false),
+            Err(Status::Forbidden)
+        ));
+        assert!(matches!(
+            routes("POST", &format!("/w/{key}/channels"), true),
+            Ok(Route::CreateChannel(_))
+        ));
+        assert!(matches!(
+            routes("POST", &format!("/w/{key}/agents"), true),
+            Ok(Route::AddAgent(_))
+        ));
+        for (method, path) in [
+            ("GET", format!("/w/{key}/channels")),
+            ("GET", format!("/w/{key}/agents")),
+            ("POST", format!("/w/{key}/folders")),
+            ("GET", "/w/not-a-key/folders".to_owned()),
+            ("POST", "/w/not-a-key/agents".to_owned()),
+            ("POST", format!("/w/{key}/agents/extra")),
+        ] {
+            assert!(
+                matches!(routes(method, &path, true), Err(Status::NotFound)),
+                "{method} {path}"
+            );
+        }
+        std::fs::remove_dir_all(state).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod reminder_route_tests {
     use super::*;
 
@@ -3130,6 +3224,7 @@ mod tailnet_route_tests {
             "/w/0123456789abcdef0123/participants/agent/live",
             "/w/0123456789abcdef0123/participants/agent/skills",
             "/w/0123456789abcdef0123/threads/thread/reminders",
+            "/w/0123456789abcdef0123/folders",
         ];
         for path in paths {
             let mut request = request(
@@ -3213,7 +3308,12 @@ mod tailnet_route_tests {
                 None,
             ),
         ] {
-            for path in ["/w/0123456789abcdef0123/messages", "/api/images"] {
+            for path in [
+                "/w/0123456789abcdef0123/messages",
+                "/api/images",
+                "/w/0123456789abcdef0123/channels",
+                "/w/0123456789abcdef0123/agents",
+            ] {
                 let mut request = request(&host, login, Some(&origin));
                 request.method = "POST".into();
                 request.path = path.into();
@@ -3234,10 +3334,11 @@ mod tailnet_route_tests {
                     .push(("x-namedrop-csrf".into(), csrf_token(&session)));
                 let routed = route(&request, 1234, &token, &session, false, policy);
                 assert!(
-                    if path == "/api/images" {
-                        matches!(routed, Ok(Route::ImageUpload))
-                    } else {
-                        matches!(routed, Ok(Route::Send(_)))
+                    match path.rsplit('/').next() {
+                        Some("images") => matches!(routed, Ok(Route::ImageUpload)),
+                        Some("channels") => matches!(routed, Ok(Route::CreateChannel(_))),
+                        Some("agents") => matches!(routed, Ok(Route::AddAgent(_))),
+                        _ => matches!(routed, Ok(Route::Send(_))),
                     },
                     "{path}"
                 );

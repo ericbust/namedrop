@@ -421,6 +421,8 @@ struct Hub<'a> {
     unsupported_schema: bool,
     schema_busy_since: Option<Instant>,
     last_error: Option<String>,
+    launches: super::launches::Launches,
+    launches_revision: u64,
 }
 
 pub(crate) fn run(
@@ -428,6 +430,7 @@ pub(crate) fn run(
     instance: &str,
     idle: Option<Duration>,
     commands: Receiver<HubCommand>,
+    launches: super::launches::Launches,
 ) -> Verdict {
     let mut hub = Hub {
         files,
@@ -454,6 +457,8 @@ pub(crate) fn run(
         unsupported_schema: false,
         schema_busy_since: None,
         last_error: None,
+        launches,
+        launches_revision: 0,
     };
     let verdict = loop {
         let wait = if hub.retry_discovery_drain {
@@ -722,6 +727,9 @@ impl Hub<'_> {
         let subagents_changed =
             self.subagent_revision != Some(subagent_revision) || subagent_revision == [0xff; 32];
         self.subagent_revision = Some(subagent_revision);
+        let launches_revision = self.launches.revision();
+        let launches_changed = launches_revision != self.launches_revision;
+        self.launches_revision = launches_revision;
         let retention_expired = self.published.values().any(|published| {
             published
                 .expires_at_ms
@@ -730,6 +738,7 @@ impl Hub<'_> {
         if !database_changed
             && !metadata_changed
             && !subagents_changed
+            && !launches_changed
             && !retention_expired
             && incoming.is_none()
         {
@@ -1096,6 +1105,18 @@ impl Hub<'_> {
                     .filter(|expiry| *expiry > now)
                     .min();
                 let mut snapshot = snapshot::build(&rows, label.as_deref(), now);
+                let starting = self.launches.starting(&namespace);
+                let starts = snapshot.add_agent_start_cards(
+                    &rows,
+                    &super::launches::as_starting(&starting),
+                    now,
+                );
+                for address_id in &starts.settled {
+                    self.launches.forget(&namespace, address_id);
+                }
+                if let Some(due) = starts.next_due_ms {
+                    expires_at_ms = Some(expires_at_ms.map_or(due, |old| old.min(due)));
+                }
                 for participant in &mut snapshot.participants {
                     if !matches!(participant.kind, snapshot::ParticipantKind::Agent { .. }) {
                         continue;
@@ -1384,6 +1405,8 @@ mod tests {
             unsupported_schema: false,
             schema_busy_since: None,
             last_error: None,
+            launches: Default::default(),
+            launches_revision: 0,
         }
     }
 

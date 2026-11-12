@@ -7,6 +7,7 @@ mod http;
 mod hub;
 pub mod idle;
 mod images;
+mod launches;
 mod observer_guard;
 mod reminders;
 mod server_files;
@@ -420,6 +421,7 @@ fn run_server(
     let mutations = Arc::new(std::sync::Mutex::new(()));
     let restarting = Arc::new(AtomicBool::new(false));
     let control_effects = thread_controls::ControlEffects::default();
+    let launches = launches::Launches::default();
     let front = Arc::new(http::Front {
         port,
         files: ServerFiles::at(state)?,
@@ -433,13 +435,16 @@ fn run_server(
         channel_wake: channel_service.wake(),
         control_effects: control_effects.clone(),
         image_uploads: std::sync::atomic::AtomicUsize::new(0),
+        launches: launches.clone(),
     });
     images::prune(state, std::time::SystemTime::now());
     let stop = Arc::new(AtomicBool::new(false));
     let accept_stop = stop.clone();
+    let watched = front.clone();
+    thread::spawn(move || launches::watch(watched));
     let acceptor = thread::spawn(move || http::accept_loop(listener, front, accept_stop));
     eprintln!("dashboard: serving 127.0.0.1:{port}");
-    let verdict = hub::run(&files, &instance, idle::environment(), commands);
+    let verdict = hub::run(&files, &instance, idle::environment(), commands, launches);
     eprintln!("dashboard: stopping: {}", verdict.reason());
     restarting.store(true, Ordering::Release);
     {
