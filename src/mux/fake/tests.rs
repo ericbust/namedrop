@@ -1442,9 +1442,6 @@ fn a_connection_keeps_its_budget_and_cancel_flag_for_hooks_and_the_read_log() {
         saw.lock()
             .unwrap()
             .push((connection.budget(), connection.cancelled()));
-        if connection.cancelled() {
-            return Err(MuxError::Unavailable("cancelled".into()));
-        }
         Ok(())
     });
     let connected = mux
@@ -1452,11 +1449,15 @@ fn a_connection_keeps_its_budget_and_cancel_flag_for_hooks_and_the_read_log() {
         .unwrap();
     connected.integration_root().unwrap();
     cancelled.store(true, Ordering::SeqCst);
-    assert!(connected.integration_root().is_err());
+    assert_eq!(
+        connected.integration_root(),
+        Err(MuxError::Unavailable(CANCELLED.into())),
+        "a cancelled connection's read is refused before its hooks"
+    );
     mux.integration_root().unwrap();
     assert_eq!(
         *seen.lock().unwrap(),
-        [(Some(budget), false), (Some(budget), true), (None, false)]
+        [(Some(budget), false), (None, false)]
     );
     assert_eq!(
         mux.budgeted_reads(),
@@ -1467,6 +1468,33 @@ fn a_connection_keeps_its_budget_and_cancel_flag_for_hooks_and_the_read_log() {
         ]
     );
     assert_eq!(mux.reads().len(), 3);
+}
+
+#[test]
+fn a_connection_cancelled_mid_read_starts_none_of_the_read_s_later_commands() {
+    let mux = author_and_reviewer();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancel = Arc::clone(&cancelled);
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let commands = Arc::clone(&ran);
+    mux.on_command(move |_, command| {
+        commands.lock().unwrap().push(command.listing);
+        cancel.store(true, Ordering::SeqCst);
+        Ok(())
+    });
+    let connected = mux
+        .connect("socket-a", Budget::ADAPTER_DEFAULT, Arc::clone(&cancelled))
+        .unwrap();
+    assert_eq!(
+        connected.survey(Scope::CheckoutOf(Path::new("/repo")), Depth::Panes),
+        Err(MuxError::Unavailable(CANCELLED.into()))
+    );
+    assert_eq!(*ran.lock().unwrap(), [Some(Listing::CheckoutAt)]);
+    assert_eq!(
+        mux.budgeted_reads()[0].1,
+        [Budget::ADAPTER_DEFAULT, Budget::ADAPTER_DEFAULT],
+        "the second command asked its budget and then refused to start"
+    );
 }
 
 #[test]
@@ -1858,12 +1886,18 @@ fn a_command_hook_sees_the_flag_its_command_watches_change_while_it_runs() {
     let mux = author_and_reviewer();
     let watched = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::clone(&watched);
+    let connection = Arc::new(AtomicBool::new(false));
+    let cancel = Arc::clone(&connection);
     mux.on_command(move |_, command| {
         let before = command.cancelled();
-        if let Read::Screen { pane, .. } = command.read
-            && pane.as_str() == "pane-author"
-        {
-            FLAG.store(true, Ordering::SeqCst);
+        match command.read {
+            Read::Screen { pane, .. } if pane.as_str() == "pane-author" => {
+                FLAG.store(true, Ordering::SeqCst);
+            }
+            Read::IntegrationRoot if command.budget.is_some() => {
+                cancel.store(true, Ordering::SeqCst);
+            }
+            _ => {}
         }
         seen.lock().unwrap().push((before, command.cancelled()));
         Ok(())
@@ -1880,23 +1914,27 @@ fn a_command_hook_sees_the_flag_its_command_watches_change_while_it_runs() {
         Err(MuxError::Unavailable(CANCELLED.into())),
         "the next command does not start"
     );
-    let connection = Arc::new(AtomicBool::new(false));
     let connected = mux
         .connect("socket-a", Budget::ADAPTER_DEFAULT, Arc::clone(&connection))
         .unwrap();
     connected.integration_root().unwrap();
-    connection.store(true, Ordering::SeqCst);
-    connected
-        .within(Allowance::fixed(millis(1000)))
-        .tab_label(&TabId::new("workspace-1:tab-1"))
-        .unwrap_err();
-    connected
-        .tab_label(&TabId::new("workspace-1:tab-1"))
-        .unwrap();
+    let tab = TabId::new("workspace-1:tab-1");
+    let refused = Err(MuxError::Unavailable(CANCELLED.into()));
+    assert_eq!(
+        connected
+            .within(Allowance::fixed(millis(1000)))
+            .tab_label(&tab),
+        refused
+    );
+    assert_eq!(
+        connected.tab_label(&tab),
+        refused,
+        "a read on a cancelled connection does not start, as in the adapter"
+    );
     mux.integration_root().unwrap();
     assert_eq!(
         *watched.lock().unwrap(),
-        [(false, true), (false, false), (true, true), (false, false)],
+        [(false, true), (false, true), (false, false)],
         "a narrowed command watches its narrowest flag, a connection's its own, and a \
          builder handle's none"
     );

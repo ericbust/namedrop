@@ -1222,11 +1222,13 @@ impl FakeMux {
         Ok(())
     }
 
-    /// Serves `read`: logs it with its first command's budget, runs the read
-    /// hooks with the world unlocked, answers it from the world, then runs
-    /// the command hooks for each Herdr command it stands for. A handle that
-    /// a `Within` narrowed leaves the log and the commands to the `Within`.
-    /// A read that fails stops where it failed.
+    /// Serves `read`: logs it with its first command's budget, refuses it if
+    /// the connection is cancelled, runs the read hooks with the world
+    /// unlocked, answers it from the world, then runs the command hooks for
+    /// each Herdr command it stands for, refusing each later one once the
+    /// connection is cancelled. A handle that a `Within` narrowed leaves the
+    /// log, the refusals, and the commands to the `Within`. A read that fails
+    /// stops where it failed.
     fn serve<T>(
         &self,
         read: Read,
@@ -1243,6 +1245,9 @@ impl FakeMux {
             world.reads[index].1.extend(budget);
             index
         });
+        if logged.is_some() {
+            self.refuse_if_cancelled()?;
+        }
         let hooks = unpoisoned(&self.shared.read_hooks).clone();
         hooks.iter().try_for_each(|hook| hook(self, &read))?;
         let (answered, commands) = {
@@ -1260,6 +1265,7 @@ impl FakeMux {
         for (number, listing) in commands.into_iter().enumerate() {
             if number > 0 {
                 self.lock().reads[index].1.extend(budget);
+                self.refuse_if_cancelled()?;
             }
             self.run_command(&Command {
                 read: &read,
@@ -1269,6 +1275,15 @@ impl FakeMux {
             })?;
         }
         Ok(answered)
+    }
+
+    /// Refuses a command once the connection's flag is set, as a Herdr
+    /// command on a cancelled connection refuses to start.
+    fn refuse_if_cancelled(&self) -> Result<(), MuxError> {
+        if self.cancelled() {
+            return Err(MuxError::Unavailable(CANCELLED.to_owned()));
+        }
+        Ok(())
     }
 
     /// Runs the command hooks for one command, with the world unlocked.
@@ -1414,9 +1429,10 @@ impl MuxInput for FakeMux {
 
 impl MuxConnector for FakeMux {
     /// The connection keeps `budget` and `cancelled`, which `budget()`,
-    /// `cancelled()`, and `budgeted_reads()` report. The fake enforces
-    /// neither, so a read hook that models a stalled, oversized, or
-    /// cancelled read checks them on the connection it is handed.
+    /// `cancelled()`, and `budgeted_reads()` report. A read refuses each of
+    /// its commands that would start once `cancelled` is set, as the
+    /// adapter's commands do. The fake enforces no budget, so a hook that
+    /// models a stalled or oversized read checks the budget it is handed.
     fn connect(
         &self,
         endpoint: &str,
@@ -1483,10 +1499,7 @@ impl Within<'_> {
             }
             narrowing = within.wider;
         }
-        if self.base.cancelled() {
-            return Err(MuxError::Unavailable(CANCELLED.to_owned()));
-        }
-        Ok(())
+        self.base.refuse_if_cancelled()
     }
 
     /// The flag a command watches while it runs: the narrowest one a

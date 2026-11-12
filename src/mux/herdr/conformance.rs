@@ -2,19 +2,23 @@
 //! transport that answers Herdr commands from a fake world, so the fake
 //! cannot drift from what the adapter reads and does.
 
-use super::{HerdrMux, transport::Transport};
+use super::{HerdrConnector, HerdrMux, transport::Transport};
 use crate::{
     AgentRuntime, SpaceId,
     mux::{
-        Admit, AgentIdentity, AgentKind, AgentState, Badge, Depth, Effect, Gone, InputKind,
-        InputOutcome, Key, MuxAct, MuxError, MuxRead, PaneId, PaneProcess, PromptRequest,
-        Recipient, Retry, Scope, Screen, ScreenRequest, SessionClaim, StateTexts, Style, Survey,
-        TabId, Wrap,
+        Admit, AgentIdentity, AgentKind, AgentState, Badge, Budget, Depth, Effect, Gone, InputKind,
+        InputOutcome, Key, MuxAct, MuxConnector, MuxError, MuxRead, PaneId, PaneProcess,
+        PromptRequest, Recipient, Retry, Scope, Screen, ScreenRequest, SessionClaim, StateTexts,
+        Style, Survey, TabId, Wrap,
         fake::{FakeMux, Listing, ScopeKind, Sent, SentInput, WorldBuilder, listings, wire},
     },
 };
 use serde_json::json;
-use std::{fmt::Debug, path::Path};
+use std::{
+    fmt::Debug,
+    path::Path,
+    sync::{Arc, atomic::AtomicBool},
+};
 
 /// Answers Herdr commands the way Herdr would for the fake's world. Reads are
 /// `FakeMux::herdr_reply`'s, so script shims and this suite render one world
@@ -700,6 +704,34 @@ fn a_pane_that_reports_another_space_agrees_in_every_survey() {
         ],
         "`pane list` groups panes by the space each reports, first seen first"
     );
+}
+
+/// A plain read through a connection whose flag is set starts no command.
+/// The adapter's side is a real `herdr` process connection, which refuses
+/// before it spawns anything, so no Herdr need answer.
+#[test]
+fn a_read_on_a_cancelled_connection_is_refused_before_it_starts() {
+    let read = |connector: &dyn MuxConnector| {
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let connected = connector
+            .connect("socket-a", Budget::ADAPTER_DEFAULT, cancelled)
+            .unwrap();
+        (
+            connected.tab_label(&TabId::new("workspace-1:tab-1")),
+            connected.integration_root(),
+            connected.survey(Scope::All, Depth::Panes).map(|_| ()),
+        )
+    };
+    let fake = world().endpoint("socket-a").build();
+    let from_fake = read(&fake);
+    let from_herdr = read(&HerdrConnector);
+    assert_eq!(from_fake, from_herdr, "FakeMux and HerdrMux disagree");
+    let refused = MuxError::Unavailable("Herdr read cancelled".to_owned());
+    assert_eq!(
+        from_fake,
+        (Err(refused.clone()), Err(refused.clone()), Err(refused))
+    );
+    assert_eq!(fake.budgeted_reads().len(), 3, "each read is still logged");
 }
 
 /// Records each command's listing, so a test can compare the listings the
