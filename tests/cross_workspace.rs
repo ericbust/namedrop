@@ -1,3 +1,5 @@
+#![cfg(feature = "test-support")]
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
@@ -5,6 +7,10 @@ mod delivered;
 #[path = "support/executable.rs"]
 mod executable;
 
+use namedrop::mux::{
+    Effect,
+    fake::{Call, Read, SentInput},
+};
 use namedrop::{
     AgentRuntime, StateNamespace, StateStore, diagnose_collaboration, execute_control_operation,
     execute_group_operation, execute_handoff_operation, execute_integration_operation,
@@ -1160,7 +1166,7 @@ fn a_retry_returns_the_saved_receipt_even_after_the_workspace_is_renamed() {
             .lock()
             .unwrap()
             .iter()
-            .any(|c| c == "workspace list"),
+            .any(lists_spaces),
         "a retry reads no labels"
     );
     fixture.wake("w1");
@@ -1229,17 +1235,10 @@ fn a_single_workspace_session_issues_the_same_herdr_commands_as_before() {
     let (several_output, several_commands) = commands(&several, "@planner Plan the release.");
     assert_eq!(single_output, several_output);
     assert_eq!(single_commands, several_commands);
-    assert!(
-        !single_commands
-            .iter()
-            .any(|command| command == "workspace list")
-    );
+    assert!(!single_commands.iter().any(lists_spaces));
     let (_, remote) = commands(&several, "@tester Run the suite.");
     assert_eq!(
-        remote
-            .iter()
-            .filter(|command| *command == "workspace list")
-            .count(),
+        remote.iter().filter(|call| lists_spaces(call)).count(),
         1,
         "a name absent here reads labels once: {remote:?}"
     );
@@ -1289,13 +1288,7 @@ fn a_group_holding_a_remote_terminal_is_refused_whole() {
     assert_eq!(fixture.message_rows(), before);
     assert!(fixture.herdr.envelopes("pane-2-lead").is_empty());
     assert!(
-        !fixture
-            .herdr
-            .commands
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|c| c.starts_with("pane run")),
+        !fixture.herdr.commands.lock().unwrap().iter().any(runs_line),
         "no shell command ran"
     );
 }
@@ -2231,11 +2224,7 @@ fn the_roster_mentions_other_workspaces_without_reading_herdr_labels() {
         "the paragraph only follows today's roster"
     );
     assert_eq!(single_commands, several_commands);
-    assert!(
-        !several_commands
-            .iter()
-            .any(|command| command == "workspace list")
-    );
+    assert!(!several_commands.iter().any(lists_spaces));
 }
 
 /// The other-workspaces line is compared on its own: when only it changed,
@@ -3065,43 +3054,65 @@ fn a_single_workspace_terminal_issues_the_same_herdr_commands_as_before() {
         .lock()
         .unwrap()
         .iter()
-        .map(|command| {
-            if command.starts_with("pane run ") || command.starts_with("agent prompt ") {
-                command.split(' ').take(3).collect::<Vec<_>>().join(" ")
-            } else {
-                command.clone()
-            }
-        })
+        .map(step)
         .collect();
-    let discover = [
-        "worktree list --workspace w1 --json",
-        "pane list --workspace w1",
-    ];
+    // One space survey is `worktree list --workspace w1` and `pane list
+    // --workspace w1`, and each badge is `pane report-metadata` with
+    // `namedrop-awaiting` and `namedrop-attention`, as
+    // `src/mux/herdr/tests.rs` pins.
+    let discover = ["survey Space(w1) Panes"];
     let metadata = [
-        "pane report-metadata pane-1-build --source namedrop --token namedrop-awaiting=1 --token namedrop-attention=0",
-        "pane report-metadata pane-1-lead --source namedrop --token namedrop-awaiting=1 --token namedrop-attention=0",
-        "pane report-metadata pane-1-planner --source namedrop --token namedrop-awaiting=1 --token namedrop-attention=0",
+        "badges pane-1-build [Awaiting(1), Attention(0)]",
+        "badges pane-1-lead [Awaiting(1), Attention(0)]",
+        "badges pane-1-planner [Awaiting(1), Attention(0)]",
     ];
-    let shell = "pane process-info --pane pane-1-build";
+    let shell = "process pane-1-build";
     // Before typing into the idle agent, each check reads its prompt box.
-    let prompt_box = "pane read pane-1-lead --source recent --lines 60 --format ansi";
+    let prompt_box = "screen pane-1-lead AsDrawn Ansi 60";
     let expected: Vec<&str> = [
         &discover[..],
         &discover,
         &[shell],
         &discover,
-        &[shell, "pane run pane-1-build"],
+        &[shell, "line pane-1-build"],
         &metadata,
         &discover,
         &[shell],
         &discover,
         &[prompt_box],
         &discover,
-        &[prompt_box, "agent prompt pane-1-lead"],
+        &[prompt_box, "prompt pane-1-lead"],
         &metadata,
     ]
     .concat();
     assert_eq!(commands, expected);
+}
+
+/// One port call in a few words, with what was typed left out.
+fn step(call: &Call) -> String {
+    match call {
+        Call::Read(Read::Survey { scope, depth }) => format!("survey {scope:?} {depth:?}")
+            .replace("SpaceId(\"", "")
+            .replace("\")", ""),
+        Call::Read(Read::Process(pane)) => format!("process {}", pane.as_str()),
+        Call::Read(Read::Screen { pane, request }) => format!(
+            "screen {} {:?} {:?} {}",
+            pane.as_str(),
+            request.wrap,
+            request.style,
+            request.lines
+        ),
+        Call::Read(read) => format!("{read:?}"),
+        Call::Input(attempt) => match attempt.input {
+            SentInput::Prompt(_) => format!("prompt {}", attempt.pane.as_str()),
+            SentInput::Line(_) => format!("line {}", attempt.pane.as_str()),
+            SentInput::Keys { .. } => format!("{attempt:?}"),
+        },
+        Call::Effect(Effect::Badges { pane, badges }) => {
+            format!("badges {} {badges:?}", pane.as_str())
+        }
+        Call::Effect(effect) => format!("{effect:?}"),
+    }
 }
 
 #[test]

@@ -1,4 +1,5 @@
 #![cfg(target_os = "linux")]
+#![cfg(feature = "test-support")]
 
 #[path = "support/cleanup.rs"]
 mod cleanup;
