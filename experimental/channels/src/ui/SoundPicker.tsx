@@ -24,6 +24,7 @@ import { type SoundAccess, useSoundAccess } from "./useSounds.ts";
 type Choice = SoundId | null;
 type Failure = Exclude<Awaited<ReturnType<SoundAccess["change"]>>, "saved">;
 const FAILURES: Readonly<Record<Failure, string>> = {
+  conflict: "Sounds changed in another window. This shows the saved choice.",
   full: "Couldn't save that sound. Too many agents have their own sound.",
   failed: "Couldn't save that. Try again.",
 };

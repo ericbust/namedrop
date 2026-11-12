@@ -20,15 +20,29 @@ export type SoundSettings = Readonly<{
   muted: boolean;
   agents: ReadonlyMap<AgentKey, SoundId>;
 }>;
-// A refused save (400) means the list of agents with their own sound is full.
+// A refused save (400) means the list of agents with their own sound is full;
+// a conflict (409) means another save changed the value first, and carries
+// the settings the server kept.
 export type SaveResult =
   | { kind: "saved"; settings: SoundSettings }
+  | { kind: "conflict"; settings: SoundSettings }
   | { kind: "full" }
   | { kind: "failed" };
 export type SoundChange =
   | { kind: "default"; sound: SoundId }
   | { kind: "muted"; muted: boolean }
   | { kind: "agent"; agent: AgentKey; sound: SoundId | null };
+// The change as posted, with the value the page showed before it: the server
+// applies it only while that is still the stored value.
+export type SoundSave =
+  | { kind: "default"; sound: SoundId; was: SoundId }
+  | { kind: "muted"; muted: boolean; was: boolean }
+  | {
+      kind: "agent";
+      agent: AgentKey;
+      sound: SoundId | null;
+      was: SoundId | null;
+    };
 // A new message to the person: its author, and the id that keeps it from
 // ringing twice. A direct message's id is its peer's last agent message id.
 export type Arrival = Readonly<{ agent: AgentKey; id: string }>;
@@ -161,6 +175,23 @@ export function audible(settings: SoundSettings | null): boolean {
     (settings.default !== "none" ||
       [...settings.agents.values()].some((sound) => sound !== "none"))
   );
+}
+export function saveOf(
+  settings: SoundSettings,
+  change: SoundChange,
+): SoundSave {
+  switch (change.kind) {
+    case "default":
+      return { ...change, was: settings.default };
+    case "muted":
+      return { ...change, was: settings.muted };
+    case "agent":
+      return { ...change, was: settings.agents.get(change.agent) ?? null };
+    default: {
+      const exhaustive: never = change;
+      return exhaustive;
+    }
+  }
 }
 export function applyChange(
   settings: SoundSettings,

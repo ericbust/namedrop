@@ -15,6 +15,7 @@ import {
   parseSoundSettings,
   RECIPES,
   type SoundSettings,
+  saveOf,
   soundFor,
   TONES,
 } from "./sounds.ts";
@@ -62,6 +63,44 @@ test("sounds: an agent rings its own choice, else the Default, and never when mu
     null,
   );
   assert.equal(soundFor(null, agent("pane-address-1-2-3")), null);
+});
+
+test("sounds: a save carries the value the page showed before it, and null for an agent on the Default", () => {
+  const shown = settings({
+    default: "bell",
+    muted: true,
+    agents: { "pane-address-1-2-3": "pop" },
+  });
+  assert.deepEqual(saveOf(shown, { kind: "default", sound: "ping" }), {
+    kind: "default",
+    sound: "ping",
+    was: "bell",
+  });
+  assert.deepEqual(saveOf(shown, { kind: "muted", muted: false }), {
+    kind: "muted",
+    muted: false,
+    was: true,
+  });
+  const claude = agent("pane-address-1-2-3");
+  assert.deepEqual(
+    saveOf(shown, { kind: "agent", agent: claude, sound: null }),
+    {
+      kind: "agent",
+      agent: claude,
+      sound: null,
+      was: "pop",
+    },
+  );
+  const codex = agent("pane-address-4-5-6");
+  assert.deepEqual(
+    saveOf(shown, { kind: "agent", agent: codex, sound: "soft" }),
+    {
+      kind: "agent",
+      agent: codex,
+      sound: "soft",
+      was: null,
+    },
+  );
 });
 
 test("sounds: a burst rings the first arrival that has a sound", () => {

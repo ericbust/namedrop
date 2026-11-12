@@ -14,7 +14,7 @@ import { type ReminderConversation, reminderPath } from "./reminders.ts";
 import {
   parseSoundSettings,
   type SaveResult,
-  type SoundChange,
+  type SoundSave,
   type SoundSettings,
 } from "./sounds.ts";
 import {
@@ -155,16 +155,18 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
         return null;
       }
     },
-    async changeSound(change: SoundChange): Promise<SaveResult> {
+    async changeSound(save: SoundSave): Promise<SaveResult> {
       try {
-        const response = await postWithTokenRetry("/api/sounds", change);
+        const response = await postWithTokenRetry("/api/sounds", save);
         if (response.status === 400) return { kind: "full" };
-        const settings = response.ok
-          ? parseSoundSettings(await response.json())
-          : null;
-        return settings === null
-          ? { kind: "failed" }
-          : { kind: "saved", settings };
+        const settings =
+          response.ok || response.status === 409
+            ? parseSoundSettings(await response.json())
+            : null;
+        if (settings === null) return { kind: "failed" };
+        return response.ok
+          ? { kind: "saved", settings }
+          : { kind: "conflict", settings };
       } catch {
         return { kind: "failed" };
       }

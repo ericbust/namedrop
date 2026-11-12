@@ -65,27 +65,35 @@ pub(crate) struct Settings {
 }
 
 /// One edit the page posts, so two browsers changing different fields never
-/// overwrite each other.
+/// overwrite each other. `was` is the value the page showed before the edit,
+/// and the edit applies only while the stored value still matches it.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub(crate) enum Change {
     Default {
         sound: Sound,
+        was: Sound,
     },
     Muted {
         muted: bool,
+        was: bool,
     },
     Agent {
         agent: AgentKey,
         /// Required, so only an explicit `null` returns the agent to the default.
         #[serde(deserialize_with = "Option::deserialize")]
         sound: Option<Sound>,
+        /// Required; `null` means the agent had no sound of its own.
+        #[serde(deserialize_with = "Option::deserialize")]
+        was: Option<Sound>,
     },
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum Rejected {
     TooManyAgents,
+    /// The stored value is no longer the one the page showed.
+    Stale,
 }
 
 impl Settings {
@@ -98,15 +106,26 @@ impl Settings {
     }
 
     pub(crate) fn apply(mut self, change: Change) -> Result<Self, Rejected> {
+        let current = match &change {
+            Change::Default { was, .. } => self.default == *was,
+            Change::Muted { was, .. } => self.muted == *was,
+            Change::Agent { agent, was, .. } => self.agents.get(agent) == was.as_ref(),
+        };
+        if !current {
+            return Err(Rejected::Stale);
+        }
         match change {
-            Change::Default { sound } => self.default = sound,
-            Change::Muted { muted } => self.muted = muted,
-            Change::Agent { agent, sound: None } => {
+            Change::Default { sound, .. } => self.default = sound,
+            Change::Muted { muted, .. } => self.muted = muted,
+            Change::Agent {
+                agent, sound: None, ..
+            } => {
                 self.agents.remove(&agent);
             }
             Change::Agent {
                 agent,
                 sound: Some(sound),
+                ..
             } => {
                 if self.agents.len() >= MAX_AGENTS && !self.agents.contains_key(&agent) {
                     return Err(Rejected::TooManyAgents);
@@ -165,18 +184,20 @@ mod tests {
     #[test]
     fn each_change_sets_only_its_own_field() {
         let settings = Settings::default()
-            .apply(change(json!({"kind": "default", "sound": "bell"})).unwrap())
+            .apply(change(json!({"kind": "default", "sound": "bell", "was": "chime"})).unwrap())
             .unwrap()
-            .apply(change(json!({"kind": "muted", "muted": true})).unwrap())
+            .apply(change(json!({"kind": "muted", "muted": true, "was": false})).unwrap())
             .unwrap()
             .apply(
-                change(json!({"kind": "agent", "agent": "pane-address-1-2-3", "sound": "pop"}))
-                    .unwrap(),
+                change(json!({"kind": "agent", "agent": "pane-address-1-2-3",
+                              "sound": "pop", "was": null}))
+                .unwrap(),
             )
             .unwrap()
             .apply(
-                change(json!({"kind": "agent", "agent": "pane-address-4-5-6", "sound": "none"}))
-                    .unwrap(),
+                change(json!({"kind": "agent", "agent": "pane-address-4-5-6",
+                              "sound": "none", "was": null}))
+                .unwrap(),
             )
             .unwrap();
         assert_eq!(
@@ -189,8 +210,9 @@ mod tests {
         );
         let cleared = settings
             .apply(
-                change(json!({"kind": "agent", "agent": "pane-address-1-2-3", "sound": null}))
-                    .unwrap(),
+                change(json!({"kind": "agent", "agent": "pane-address-1-2-3",
+                              "sound": null, "was": "pop"}))
+                .unwrap(),
             )
             .unwrap();
         assert_eq!(
@@ -200,22 +222,108 @@ mod tests {
     }
 
     #[test]
+    fn a_change_applies_only_over_the_value_the_page_showed() {
+        let stored = Settings {
+            default: Sound::Bell,
+            muted: true,
+            agents: BTreeMap::from([(agent(1), Sound::Pop)]),
+        };
+        for (body, applies) in [
+            (
+                json!({"kind": "default", "sound": "ping", "was": "bell"}),
+                true,
+            ),
+            (
+                json!({"kind": "default", "sound": "ping", "was": "chime"}),
+                false,
+            ),
+            (
+                json!({"kind": "default", "sound": "bell", "was": "ping"}),
+                false,
+            ),
+            (json!({"kind": "muted", "muted": false, "was": true}), true),
+            (
+                json!({"kind": "muted", "muted": false, "was": false}),
+                false,
+            ),
+            (
+                json!({"kind": "agent", "agent": "pane-address-1", "sound": "soft", "was": "pop"}),
+                true,
+            ),
+            (
+                json!({"kind": "agent", "agent": "pane-address-1", "sound": null, "was": "pop"}),
+                true,
+            ),
+            (
+                json!({"kind": "agent", "agent": "pane-address-1", "sound": "soft", "was": "knock"}),
+                false,
+            ),
+            (
+                json!({"kind": "agent", "agent": "pane-address-1", "sound": "soft", "was": null}),
+                false,
+            ),
+            (
+                json!({"kind": "agent", "agent": "pane-address-2", "sound": "soft", "was": null}),
+                true,
+            ),
+            (
+                json!({"kind": "agent", "agent": "pane-address-2", "sound": "soft", "was": "pop"}),
+                false,
+            ),
+        ] {
+            let result = stored.clone().apply(change(body.clone()).unwrap());
+            if applies {
+                assert_ne!(result.unwrap(), stored, "{body}");
+            } else {
+                assert_eq!(result, Err(Rejected::Stale), "{body}");
+            }
+        }
+        let pruned = stored.prune(&HashSet::new());
+        assert_eq!(
+            pruned.clone().apply(
+                change(json!({"kind": "agent", "agent": "pane-address-1",
+                              "sound": "soft", "was": "pop"}))
+                .unwrap()
+            ),
+            Err(Rejected::Stale),
+            "a pruned agent compares as having no sound of its own"
+        );
+        pruned
+            .apply(
+                change(json!({"kind": "agent", "agent": "pane-address-1",
+                              "sound": "soft", "was": null}))
+                .unwrap(),
+            )
+            .unwrap();
+    }
+
+    #[test]
     fn a_full_list_refuses_a_new_agent_but_still_changes_or_clears_a_listed_one() {
         let mut full = Settings::default();
         for index in 0..MAX_AGENTS {
             full.agents.insert(agent(index), Sound::Ping);
         }
-        let set = |key: AgentKey, sound: Option<Sound>| Change::Agent { agent: key, sound };
+        let set = |from: &Settings, key: AgentKey, sound: Option<Sound>| Change::Agent {
+            was: from.agents.get(&key).copied(),
+            agent: key,
+            sound,
+        };
         assert_eq!(
-            full.clone().apply(set(agent(MAX_AGENTS), Some(Sound::Pop))),
+            full.clone()
+                .apply(set(&full, agent(MAX_AGENTS), Some(Sound::Pop))),
             Err(Rejected::TooManyAgents)
         );
-        let changed = full.clone().apply(set(agent(0), Some(Sound::Pop))).unwrap();
+        let changed = full
+            .clone()
+            .apply(set(&full, agent(0), Some(Sound::Pop)))
+            .unwrap();
         assert_eq!(changed.agents[&agent(0)], Sound::Pop);
-        let cleared = full.apply(set(agent(0), None)).unwrap();
+        let clear = set(&full, agent(0), None);
+        let cleared = full.apply(clear).unwrap();
         assert_eq!(cleared.agents.len(), MAX_AGENTS - 1);
+        let fill = set(&cleared, agent(MAX_AGENTS), Some(Sound::Pop));
         cleared
-            .apply(set(agent(MAX_AGENTS), Some(Sound::Pop)))
+            .apply(fill)
             .expect("a freed place takes a new agent");
     }
 
@@ -250,6 +358,7 @@ mod tests {
         let set = |key: AgentKey| Change::Agent {
             agent: key,
             sound: Some(Sound::Pop),
+            was: None,
         };
         let fits = full.prune(&known).apply(set(agent(MAX_AGENTS))).unwrap();
         assert_eq!(
@@ -264,16 +373,21 @@ mod tests {
     fn a_change_with_a_bad_agent_sound_or_shape_does_not_parse() {
         let long = "a".repeat(129);
         for body in [
-            json!({"kind": "agent", "agent": "", "sound": "pop"}),
-            json!({"kind": "agent", "agent": long, "sound": "pop"}),
-            json!({"kind": "agent", "agent": "pane/address", "sound": "pop"}),
-            json!({"kind": "agent", "agent": "pane address", "sound": "pop"}),
-            json!({"kind": "agent", "agent": "pane-address-1", "sound": "trumpet"}),
-            json!({"kind": "agent", "agent": "pane-address-1"}),
-            json!({"kind": "default", "sound": "Chime"}),
-            json!({"kind": "default", "sound": null}),
-            json!({"kind": "muted", "muted": "yes"}),
-            json!({"kind": "muted", "muted": true, "sound": "pop"}),
+            json!({"kind": "agent", "agent": "", "sound": "pop", "was": null}),
+            json!({"kind": "agent", "agent": long, "sound": "pop", "was": null}),
+            json!({"kind": "agent", "agent": "pane/address", "sound": "pop", "was": null}),
+            json!({"kind": "agent", "agent": "pane address", "sound": "pop", "was": null}),
+            json!({"kind": "agent", "agent": "pane-address-1", "sound": "trumpet", "was": null}),
+            json!({"kind": "agent", "agent": "pane-address-1", "was": null}),
+            json!({"kind": "agent", "agent": "pane-address-1", "sound": "pop"}),
+            json!({"kind": "agent", "agent": "pane-address-1", "sound": "pop", "was": "trumpet"}),
+            json!({"kind": "default", "sound": "Chime", "was": "bell"}),
+            json!({"kind": "default", "sound": null, "was": "bell"}),
+            json!({"kind": "default", "sound": "bell"}),
+            json!({"kind": "default", "sound": "bell", "was": null}),
+            json!({"kind": "muted", "muted": "yes", "was": false}),
+            json!({"kind": "muted", "muted": true}),
+            json!({"kind": "muted", "muted": true, "was": false, "sound": "pop"}),
             json!({"kind": "volume", "volume": 3}),
             json!({"sound": "pop"}),
         ] {
@@ -281,7 +395,8 @@ mod tests {
         }
         for key in ["a".repeat(128), "Pane_address-9".to_owned()] {
             assert!(
-                change(json!({"kind": "agent", "agent": key, "sound": "soft"})).is_ok(),
+                change(json!({"kind": "agent", "agent": key, "sound": "soft", "was": null}))
+                    .is_ok(),
                 "{key}"
             );
         }
@@ -304,6 +419,7 @@ mod tests {
             .apply(Change::Agent {
                 agent: agent(7),
                 sound: Some(Sound::Marimba),
+                was: None,
             })
             .unwrap();
         write(&files, &settings).unwrap();

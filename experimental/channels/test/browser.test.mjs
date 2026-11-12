@@ -153,15 +153,19 @@ function postRoute(onPost) {
     setSounds(value) {
       soundState = value;
     },
+    savedSounds() {
+      return soundState;
+    },
     refuseSounds(status) {
       soundRefusal = status;
     },
-    // `delay(post)` returns a promise to hold that post's answer, or null.
+    // `delay(post)` returns a promise to hold that post, or null.
     delaySounds(delay) {
       soundDelay = delay;
     },
     // Mirrors /api/sounds: GET reads the settings; POST takes one change with
-    // the CSRF header and answers with the settings it leaves.
+    // the CSRF header and answers with the settings it leaves, or 409 with
+    // the stored settings when its `was` is not the stored value.
     async sounds(req, res) {
       if (!authorized(req)) return sendJson(res, 401, {});
       if (req.method === "GET") return sendJson(res, 200, soundState);
@@ -173,7 +177,16 @@ function postRoute(onPost) {
       soundPosts.push(post);
       if (post.csrf !== session.csrf) return res.writeHead(403).end();
       if (soundRefusal !== null) return sendJson(res, soundRefusal, {});
+      await soundDelay(post);
       const change = post.body;
+      const stored =
+        change.kind === "default"
+          ? soundState.default
+          : change.kind === "muted"
+            ? soundState.muted
+            : (soundState.agents[change.agent] ?? null);
+      if (!("was" in change)) return sendJson(res, 400, {});
+      if (change.was !== stored) return sendJson(res, 409, soundState);
       if (change.kind === "default")
         soundState = { ...soundState, default: change.sound };
       else if (change.kind === "muted")
@@ -184,9 +197,7 @@ function postRoute(onPost) {
         else agents[change.agent] = change.sound;
         soundState = { ...soundState, agents };
       } else return sendJson(res, 400, {});
-      const answer = soundState;
-      await soundDelay(post);
-      sendJson(res, 200, answer);
+      sendJson(res, 200, soundState);
     },
     cookie: `${COOKIE}=${session.secret}; Path=/; HttpOnly; SameSite=Strict`,
     rotate() {
@@ -13652,6 +13663,7 @@ test("SOUNDS c: mute plays nothing until the person turns sounds back on", async
   assert.deepEqual(ui.posts.soundPosts[0].body, {
     kind: "muted",
     muted: false,
+    was: true,
   });
   await control.locator("summary").getByText("Sounds").waitFor();
   await send([toPerson("muted", SOUND_CLAUDE), toPerson("heard", SOUND_CODEX)]);
@@ -13747,7 +13759,7 @@ test("SOUNDS h: the agent picker saves the choice with the CSRF header, and prev
   await until(() => ui.posts.soundPosts.length === 1, "the sound change");
   assert.deepEqual(ui.posts.soundPosts[0], {
     csrf: ui.posts.session.csrf,
-    body: { kind: "agent", agent: SOUND_CLAUDE, sound: "pop" },
+    body: { kind: "agent", agent: SOUND_CLAUDE, sound: "pop", was: null },
   });
   await picker.locator("summary").getByText("Pop").waitFor();
   await group.getByRole("button", { name: "Play Pop" }).click();
@@ -13873,7 +13885,7 @@ test("SOUNDS m: a refused save says why and the picker shows the saved choice ag
   await picker.locator("summary").getByText("Pop").waitFor();
 });
 
-test("SOUNDS n: when two saves answer out of order, the picker keeps the later choice", async (t) => {
+test("SOUNDS n: two quick picks reach the server one at a time, and it keeps the later one", async (t) => {
   const { ui } = await soundRoom(
     t,
     {},
@@ -13893,23 +13905,69 @@ test("SOUNDS n: when two saves answer out of order, the picker keeps the later c
   const bell = group.getByRole("radio", { name: "Bell", exact: true });
   await group.getByRole("radio", { name: "Pop", exact: true }).check();
   await until(() => ui.posts.soundPosts.length === 1, "the first save");
-  const second = ui.page.waitForResponse(
-    (response) =>
-      response.request().method() === "POST" &&
-      response.request().postData()?.includes('"bell"'),
-  );
   await bell.check();
-  await second;
-  const first = ui.page.waitForResponse(
-    (response) =>
-      response.request().method() === "POST" &&
-      response.request().postData()?.includes('"pop"'),
+  await ui.page.evaluate(
+    () => new Promise((resolve) => setTimeout(resolve, 200)),
+  );
+  assert.equal(
+    ui.posts.soundPosts.length,
+    1,
+    "the second save waits for the first answer",
   );
   release();
-  await first;
-  await ui.page.evaluate(
-    () => new Promise((resolve) => setTimeout(resolve, 100)),
+  await until(() => ui.posts.soundPosts.length === 2, "the second save");
+  assert.deepEqual(ui.posts.soundPosts[1].body, {
+    kind: "agent",
+    agent: SOUND_CLAUDE,
+    sound: "bell",
+    was: "pop",
+  });
+  await until(
+    () => ui.posts.savedSounds().agents[SOUND_CLAUDE] === "bell",
+    "the server keeps the later pick",
   );
   assert.equal(await bell.isChecked(), true);
   await picker.locator("summary").getByText("Bell").waitFor();
+});
+
+test("SOUNDS o: a pick another window changed first shows the saved choice and says so", async (t) => {
+  const { ui } = await soundRoom(
+    t,
+    {},
+    {
+      path: `/?dm=${key(1)}/${encodeURIComponent(SOUND_CLAUDE)}`,
+      directPeers: () => [dmPeer(SOUND_CLAUDE, null)],
+    },
+  );
+  const picker = ui.page.locator(".dm-header .sound-picker");
+  await picker.locator("summary").click();
+  const group = picker.getByRole("group", { name: "Sound for @claude" });
+  await group.getByRole("radio", { name: "Default (Chime)" }).waitFor();
+  ui.posts.setSounds({
+    default: "chime",
+    muted: false,
+    agents: { [SOUND_CLAUDE]: "knock" },
+  });
+  await group.getByRole("radio", { name: "Pop", exact: true }).check();
+  await picker
+    .getByRole("alert")
+    .getByText(
+      "Sounds changed in another window. This shows the saved choice.",
+      { exact: true },
+    )
+    .waitFor();
+  await eventually(
+    async () =>
+      await group
+        .getByRole("radio", { name: "Knock", exact: true })
+        .isChecked(),
+    "the saved choice",
+  );
+  assert.equal(ui.posts.savedSounds().agents[SOUND_CLAUDE], "knock");
+  assert.deepEqual(ui.posts.soundPosts.at(-1).body, {
+    kind: "agent",
+    agent: SOUND_CLAUDE,
+    sound: "pop",
+    was: null,
+  });
 });

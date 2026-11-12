@@ -19,6 +19,7 @@ import {
   type SaveResult,
   type SoundChange,
   type SoundSettings,
+  saveOf,
   type Tone,
 } from "../sounds.ts";
 
@@ -51,6 +52,8 @@ export function useSounds(
   // Every load and save takes the next number; only the latest request's
   // answer is shown, so a late answer never brings back an older choice.
   const latest = useRef(0);
+  // Saves go one at a time, so the server gets this tab's picks in order.
+  const saving = useRef<Promise<unknown>>(Promise.resolve());
   const refresh = useCallback(() => {
     const request = ++latest.current;
     loading.current?.abort();
@@ -98,13 +101,20 @@ export function useSounds(
   useEffect(() => ring(channel), [ring, channel]);
   useEffect(() => ring(direct), [ring, direct]);
   const change = useCallback(
-    async (change: SoundChange) => {
+    async (change: SoundChange): Promise<SaveResult["kind"]> => {
+      const shown = current.current;
+      if (shown === null) return "failed";
       const request = ++latest.current;
       loading.current?.abort();
-      setSettings((settings) => settings && applyChange(settings, change));
-      const saved = await poster.changeSound(change);
+      const save = saveOf(shown, change);
+      current.current = applyChange(shown, change);
+      setSettings(current.current);
+      const run = saving.current.then(() => poster.changeSound(save));
+      saving.current = run;
+      const saved = await run;
       if (request !== latest.current) return saved.kind;
-      if (saved.kind === "saved") setSettings(saved.settings);
+      if (saved.kind === "saved" || saved.kind === "conflict")
+        setSettings(saved.settings);
       else refresh();
       return saved.kind;
     },

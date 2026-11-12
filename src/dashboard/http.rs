@@ -1389,7 +1389,11 @@ fn serve_connection(
         ),
         Ok(Route::ImageUpload) => upload_image(&mut reader, &mut writer, front, &request),
         Ok(Route::Image(name)) => serve_image(&mut writer, front, &name),
-        Ok(Route::Sounds) => respond_sounds(&mut writer, &super::sounds::read(&front.files)),
+        Ok(Route::Sounds) => respond_sounds(
+            &mut writer,
+            "200 OK",
+            &super::sounds::read(&front.files),
+        ),
         Ok(Route::ChangeSounds) => {
             change_sounds(&mut reader, &mut writer, front, history_store, &request)
         }
@@ -2387,13 +2391,19 @@ fn change_sounds(
     if let Some(known) = &known {
         settings = settings.prune(known);
     }
-    let Ok(settings) = settings.apply(change) else {
-        return respond_status(writer, Status::BadRequest);
+    let settings = match settings.clone().apply(change) {
+        Ok(changed) => changed,
+        Err(super::sounds::Rejected::TooManyAgents) => {
+            return respond_status(writer, Status::BadRequest);
+        }
+        Err(super::sounds::Rejected::Stale) => {
+            return respond_sounds(writer, "409 Conflict", &settings);
+        }
     };
     if super::sounds::write(&front.files, &settings).is_err() {
         return respond_status(writer, Status::Unavailable);
     }
-    respond_sounds(writer, &settings)
+    respond_sounds(writer, "200 OK", &settings)
 }
 
 /// The pane addresses of the agents the person can message today, or `None`
@@ -2408,10 +2418,14 @@ fn known_agents(front: &Front, history_store: &Mutex<HistoryStore>) -> Option<Ha
     Some(peers.into_iter().map(|peer| peer.address_id).collect())
 }
 
-fn respond_sounds(writer: &mut TcpStream, settings: &super::sounds::Settings) -> io::Result<()> {
+fn respond_sounds(
+    writer: &mut TcpStream,
+    status: &str,
+    settings: &super::sounds::Settings,
+) -> io::Result<()> {
     respond(
         writer,
-        "200 OK",
+        status,
         "application/json",
         "",
         &serde_json::to_vec(settings).expect("sound settings serialize"),

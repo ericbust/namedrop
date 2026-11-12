@@ -3226,32 +3226,44 @@ else:
             read(&server),
             json!({"default": "chime", "muted": false, "agents": {"pane-address-9-9-9": "knock"}})
         );
+        let stored = fs::read(&file).unwrap();
+        let unknown = json!({"kind": "agent", "agent": "pane-address-9-9-9",
+                             "sound": "pop", "was": "knock"});
+        let response = server.post("/api/sounds", &unknown.to_string(), &[]);
+        assert_eq!(response.status, 409, "{}", response.body);
+        assert_eq!(
+            serde_json::from_str::<Value>(&response.body).unwrap(),
+            json!({"default": "chime", "muted": false, "agents": {}}),
+            "an agent that is gone compares as having no sound of its own"
+        );
+        assert_eq!(fs::read(&file).unwrap(), stored, "a stale change");
         let (lead, tester) = ("address-w1-lead", "address-w2-tester");
         for (change, expected) in [
             (
-                json!({"kind": "default", "sound": "bell"}),
+                json!({"kind": "default", "sound": "bell", "was": "chime"}),
                 json!({"default": "bell", "muted": false, "agents": {}}),
             ),
             (
-                json!({"kind": "muted", "muted": true}),
+                json!({"kind": "muted", "muted": true, "was": false}),
                 json!({"default": "bell", "muted": true, "agents": {}}),
             ),
             (
-                json!({"kind": "agent", "agent": lead, "sound": "pop"}),
+                json!({"kind": "agent", "agent": lead, "sound": "pop", "was": null}),
                 json!({"default": "bell", "muted": true, "agents": {lead: "pop"}}),
             ),
             (
-                json!({"kind": "agent", "agent": "pane-address-1-2-3", "sound": "soft"}),
+                json!({"kind": "agent", "agent": "pane-address-1-2-3",
+                       "sound": "soft", "was": null}),
                 json!({"default": "bell", "muted": true,
                        "agents": {lead: "pop", "pane-address-1-2-3": "soft"}}),
             ),
             (
-                json!({"kind": "agent", "agent": tester, "sound": "none"}),
+                json!({"kind": "agent", "agent": tester, "sound": "none", "was": null}),
                 json!({"default": "bell", "muted": true,
                        "agents": {lead: "pop", tester: "none"}}),
             ),
             (
-                json!({"kind": "agent", "agent": lead, "sound": null}),
+                json!({"kind": "agent", "agent": lead, "sound": null, "was": "pop"}),
                 json!({"default": "bell", "muted": true, "agents": {tester: "none"}}),
             ),
         ] {
@@ -3266,14 +3278,33 @@ else:
         }
         let settled = read(&server);
         let stored = fs::read(&file).unwrap();
-        let repeat = json!({"kind": "agent", "agent": tester, "sound": "none"});
+        let same = json!({"kind": "agent", "agent": tester, "sound": "none", "was": "none"});
         assert_eq!(
-            server.post("/api/sounds", &repeat.to_string(), &[]).status,
+            server.post("/api/sounds", &same.to_string(), &[]).status,
             200
         );
-        assert_eq!(fs::read(&file).unwrap(), stored, "a repeated change");
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            stored,
+            "a change to the same value"
+        );
+        for stale in [
+            json!({"kind": "agent", "agent": tester, "sound": "none", "was": null}),
+            json!({"kind": "default", "sound": "ping", "was": "chime"}),
+            json!({"kind": "muted", "muted": false, "was": false}),
+        ] {
+            let response = server.post("/api/sounds", &stale.to_string(), &[]);
+            assert_eq!(response.status, 409, "{stale}: {}", response.body);
+            assert_eq!(
+                serde_json::from_str::<Value>(&response.body).unwrap(),
+                settled,
+                "{stale}"
+            );
+            assert_eq!(fs::read(&file).unwrap(), stored, "{stale}");
+        }
+        assert_eq!(read(&server), settled, "stale changes");
 
-        let unmute = json!({"kind": "muted", "muted": false}).to_string();
+        let unmute = json!({"kind": "muted", "muted": false, "was": true}).to_string();
         let without_csrf = [
             ("Cookie", server.cookie.as_str()),
             ("Content-Type", "application/json"),
@@ -3290,9 +3321,12 @@ else:
         assert_eq!(cross_site.status, 403);
         for body in [
             "not json".to_owned(),
-            json!({"kind": "default", "sound": "trumpet"}).to_string(),
-            json!({"kind": "agent", "agent": "pane/address", "sound": "pop"}).to_string(),
-            json!({"kind": "muted", "muted": false, "agent": "pane-address-1-2-3"}).to_string(),
+            json!({"kind": "default", "sound": "trumpet", "was": "bell"}).to_string(),
+            json!({"kind": "default", "sound": "ping"}).to_string(),
+            json!({"kind": "agent", "agent": "pane/address", "sound": "pop", "was": null})
+                .to_string(),
+            json!({"kind": "muted", "muted": false, "was": true, "agent": "pane-address-1-2-3"})
+                .to_string(),
         ] {
             assert_eq!(server.post("/api/sounds", &body, &[]).status, 400, "{body}");
         }
