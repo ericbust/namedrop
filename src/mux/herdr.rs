@@ -1,5 +1,8 @@
 //! The Herdr adapter: the only place that holds Herdr arguments, JSON, error
-//! codes, and plugin events, and the only code that runs Herdr.
+//! codes, and plugin events. Namedrop runs Herdr through it, except for the
+//! live-peek observer in `dashboard/observer_guard.rs`, which starts `herdr
+//! terminal session observe` until step 4 moves it here, and the update
+//! check, whose embedded `scripts/check-update.py` runs `herdr plugin list`.
 
 mod events;
 mod process;
