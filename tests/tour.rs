@@ -3,7 +3,7 @@
 mod cleanup;
 
 use namedrop::mux::{
-    AgentIdentity, AgentKind, AgentState, Effect, MuxError, PopupScreen, PopupSpec, SessionClaim,
+    AgentIdentity, AgentKind, AgentState, Effect, MuxError, PopupSpec, SessionClaim,
     fake::{FakeMux, StrictSpace, Takes},
 };
 use namedrop::tour::{self, PageAction};
@@ -292,9 +292,11 @@ fn marker_rejects_unsafe_presentation_ids() {
 }
 
 /// Takes popups and nothing else, as the old fake answered only `plugin pane
-/// open`. With `fail`, each popup fails with the old fake's words.
+/// open`. With `fail`, each popup fails with the old fake's words. Its
+/// endpoint is not the runtime's `session_socket_id`, so a popup that took
+/// its socket from the connection would name the wrong one.
 fn popup_herdr(fail: bool) -> StrictSpace {
-    let mux = FakeMux::world().endpoint("/run/herdr.sock").build();
+    let mux = FakeMux::world().endpoint("/run/fake-herdr.sock").build();
     if fail {
         mux.on_apply(|_, _| Err(MuxError::Unavailable("plugin pane open failed".to_owned())));
     }
@@ -302,15 +304,33 @@ fn popup_herdr(fail: bool) -> StrictSpace {
     StrictSpace::new(mux, &[], takes)
 }
 
-/// The tour popup for `target`, which `tour.rs`'s argv pin in
-/// `src/mux/herdr/tests.rs` turns into today's `plugin pane open`.
-fn tour_popup(target: &DiscoveredPane, state: &Path) -> Effect {
-    Effect::OpenPopup(Box::new(PopupSpec {
-        screen: PopupScreen::Tour,
-        target: target.facts(),
-        state_dir: state.to_owned(),
-        socket: "/run/herdr.sock".to_owned(),
-    }))
+/// What a popup names: its screen, then the values of the
+/// `NAMEDROP_TARGET_WORKSPACE`, `_PANE`, `_TERMINAL`, and `_SESSION`,
+/// `HERDR_PLUGIN_STATE_DIR`, and `HERDR_SOCKET_PATH` that the adapter's argv
+/// pin in `src/mux/herdr/tests.rs` passes to `plugin pane open`.
+fn popup_names(effect: &Effect) -> [String; 7] {
+    let Effect::OpenPopup(popup) = effect else {
+        panic!("not a popup: {effect:?}");
+    };
+    let PopupSpec {
+        screen,
+        target,
+        state_dir,
+        socket,
+    } = &**popup;
+    let session = match target.agent.as_ref().map(|agent| &agent.session) {
+        Some(SessionClaim::Reported(session)) => session.as_str(),
+        _ => "",
+    };
+    [
+        format!("{screen:?}"),
+        target.space.as_str().to_owned(),
+        target.id.as_str().to_owned(),
+        target.terminal.as_str().to_owned(),
+        session.to_owned(),
+        state_dir.display().to_string(),
+        socket.clone(),
+    ]
 }
 
 /// The pane each popup opened for, in order.
@@ -409,8 +429,19 @@ fn first_agent_show_opens_the_tour_popup_once() {
             "popup": {"opened_for": "pane-2"},
         })
     );
-    let expected = tour_popup(&space.panes[2], state);
-    assert_eq!(herdr.attempted_effects(), [expected]);
+    let opened: Vec<_> = herdr.attempted_effects().iter().map(popup_names).collect();
+    assert_eq!(
+        opened,
+        [[
+            "Tour",
+            "workspace-1",
+            "pane-2",
+            "terminal-pane-2",
+            "session-pane-2",
+            &state.display().to_string(),
+            "/run/herdr.sock",
+        ]]
+    );
     assert!(tour::is_shown(state, tour::CURRENT_ID).unwrap());
 
     let again = tour::show_for_first_agent(&runtime, &space, Some("pane-2"));
