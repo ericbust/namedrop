@@ -168,7 +168,7 @@ fn versions_compare_numerically_and_invalid_cache_never_produces_a_notice() {
     assert_eq!(f.notice(1001), None);
     fs::remove_file(f.state.join("update-check.json")).unwrap();
     assert_eq!(f.notice(1001), None);
-    f.seed("1.10.0");
+    f.seed("1.100.0");
     assert!(f.notice(1001).is_some());
     f.seed("9.10.0-exp.2");
     assert!(
