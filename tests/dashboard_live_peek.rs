@@ -1563,12 +1563,22 @@ fn input_reaches_a_named_agent_whose_session_has_not_connected() {
         serde_json::from_str(responses["pane list --workspace w1"].as_str().unwrap()).unwrap();
     let pane = panes["result"]["panes"][0].as_object_mut().unwrap();
     pane.remove("agent_session");
-    pane.insert("agent_status".into(), json!("blocked"));
+    pane.insert("agent".into(), Value::Null);
+    pane.insert("agent_status".into(), json!("idle"));
     responses["pane list --workspace w1"] = json!(panes.to_string());
     store_responses(&f, &responses);
     let target = input_path("socket-a", "w1", "lead");
     let continuity = live_continuity(&server, &path("socket-a", "w1", "lead"));
     let body = json!({"kind":"key","key":"Enter","continuity":continuity});
+    assert_eq!(
+        post_input(&server, &target, &body).status,
+        410,
+        "a named agent pane where no agent runs is a shell, and takes no input"
+    );
+    panes["result"]["panes"][0]["agent"] = json!("claude");
+    panes["result"]["panes"][0]["agent_status"] = json!("blocked");
+    responses["pane list --workspace w1"] = json!(panes.to_string());
+    store_responses(&f, &responses);
     assert_eq!(post_input(&server, &target, &body).status, 204);
     panes["result"]["panes"][0]["agent_session"] = json!({"value":"unrecorded-session"});
     responses["pane list --workspace w1"] = json!(panes.to_string());

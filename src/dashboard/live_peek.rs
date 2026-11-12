@@ -270,6 +270,8 @@ struct NativeIdentity {
     terminal: String,
     session: Option<String>,
     status: Option<String>,
+    /// Herdr sees an agent program in the pane, connected or not.
+    runs_agent: bool,
 }
 impl PartialEq for NativeIdentity {
     fn eq(&self, other: &Self) -> bool {
@@ -278,11 +280,15 @@ impl PartialEq for NativeIdentity {
 }
 impl Eq for NativeIdentity {}
 impl NativeIdentity {
+    /// Input goes to an agent, never to a bare shell: a pane with no session
+    /// takes it only while Herdr sees an agent there, as on a first-run
+    /// screen. A shell left behind by an agent that exited takes none.
     fn accepts_input(&self) -> bool {
-        !self
-            .status
-            .as_deref()
-            .is_some_and(|status| matches!(status, "offline" | "disconnected" | "unknown"))
+        (self.session.is_some() || self.runs_agent)
+            && !self
+                .status
+                .as_deref()
+                .is_some_and(|status| matches!(status, "offline" | "disconnected" | "unknown"))
     }
 }
 
@@ -471,6 +477,8 @@ struct Pane {
     pane_id: String,
     workspace_id: String,
     terminal_id: String,
+    #[serde(default)]
+    agent: Option<String>,
     agent_session: Option<Session>,
     agent_status: Option<String>,
     scroll: Option<serde_json::Value>,
@@ -529,6 +537,7 @@ fn native(binding: &LiveBinding, budget: Duration) -> Result<NativePane, Status>
             .map(|s| s.value)
             .filter(|s| !s.is_empty()),
         status: pane.agent_status,
+        runs_agent: pane.agent.is_some_and(|agent| !agent.is_empty()),
     };
     if binding
         .agent_session_id
@@ -1027,7 +1036,8 @@ impl LivePeeks {
             .map_err(|_| Status::Unavailable)?;
         let binding = recorded(&mut store, key, address)?;
         // An agent that hasn't connected has no session on either side; its
-        // first-run screens are answered here, so it takes input too.
+        // first-run screens are answered here, so it takes input too, while
+        // Herdr sees the agent running (`accepts_input`).
         if binding.pane_type != crate::PaneType::Agent {
             return Err(Status::Gone);
         }
