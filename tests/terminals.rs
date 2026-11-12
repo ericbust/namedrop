@@ -13,6 +13,8 @@ use std::sync::Mutex;
 struct Host {
     agent: Mutex<Option<&'static str>>,
     shell_ready: Mutex<bool>,
+    /// Herdr names no foreground group, though this process runs in it.
+    group_unreported: Mutex<bool>,
 }
 impl HerdrCommandExecutor for Host {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
@@ -25,6 +27,9 @@ impl HerdrCommandExecutor for Host {
             }
             ["pane", "list", ..] => {
                 json!({"result":{"panes":[{"pane_id":"p1","terminal_id":"t1","tab_id":"tab1","workspace_id":"w1","agent":*self.agent.lock().unwrap(),"agent_status":"unknown"}]}})
+            }
+            ["pane", "process-info", "--pane", "p1"] if *self.group_unreported.lock().unwrap() => {
+                json!({"result":{"process_info":{"pane_id":"p1","shell_pid":42,"foreground_process_group_id":null,"foreground_processes":[{"pid":std::process::id()}]}}})
             }
             ["pane", "process-info", "--pane", "p1"] => {
                 json!({"result":{"process_info":{"pane_id":"p1","shell_pid":42,"foreground_process_group_id":if *self.shell_ready.lock().unwrap(){42}else{43},"foreground_processes":[{"pid":42,"name":"zsh","argv0":"zsh"}]}}})
@@ -60,6 +65,7 @@ fn naming_detects_terminal_preserves_type_on_rename_and_allows_override() {
     let host = Host {
         agent: Mutex::new(None),
         shell_ready: Mutex::new(true),
+        group_unreported: Mutex::new(false),
     };
     let ids = ProcessIds::default();
     let runtime = LifecycleRuntime {
@@ -96,6 +102,35 @@ fn naming_detects_terminal_preserves_type_on_rename_and_allows_override() {
     let listed: Value = execute_lifecycle_operation("address.list", json!({}), &runtime).unwrap();
     assert!(listed.to_string().contains("\"pane_type\":\"agent\""));
     drop(directory);
+}
+
+#[test]
+fn a_pane_without_a_reported_foreground_group_is_uncertain() {
+    let directory = support::TestDirectory::new();
+    let host = Host {
+        agent: Mutex::new(None),
+        shell_ready: Mutex::new(true),
+        group_unreported: Mutex::new(true),
+    };
+    let ids = ProcessIds::default();
+    let runtime = LifecycleRuntime {
+        state_directory: directory.path(),
+        home_directory: None,
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: std::path::Path::new("/repo"),
+        workspace_id: Some("w1"),
+        current_pane_id: Some("p1"),
+        session_socket_id: "socket",
+        mux: &host,
+        clock: &Time,
+        ids: &ids,
+    };
+    assert_eq!(namedrop::detect_pane_type(&runtime).unwrap(), None);
+    *host.group_unreported.lock().unwrap() = false;
+    assert_eq!(
+        namedrop::detect_pane_type(&runtime).unwrap(),
+        Some(namedrop::PaneType::Terminal)
+    );
 }
 
 #[test]

@@ -411,7 +411,7 @@ where
         |reason: &str| json!({"shown": false, "presentation_id": CURRENT_ID, "reason": reason});
     let failed = |reason: &str, error: String| json!({"shown": false, "presentation_id": CURRENT_ID, "reason": reason, "error": error});
 
-    let agents = || discovered.panes.iter().filter(|pane| pane.agent.is_some());
+    let agents = || discovered.panes.iter().filter(|pane| pane.reports_kind());
     let Some(target) = preferred_pane_id
         .and_then(|preferred| agents().find(|pane| pane.pane_id == preferred))
         .or_else(|| agents().next())

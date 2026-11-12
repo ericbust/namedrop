@@ -2918,7 +2918,9 @@ impl Clock for FixedClock {
 /// optional native session and the idle label Namedrop last published.
 struct AgentTabHerdr {
     shell: Mutex<bool>,
+    agent: Mutex<Option<&'static str>>,
     session: Mutex<Option<&'static str>>,
+    shell_session: Mutex<Option<&'static str>>,
     label: Mutex<String>,
     idle_label: Mutex<Option<String>>,
     identity_reports: Mutex<Vec<String>>,
@@ -2928,7 +2930,9 @@ impl AgentTabHerdr {
     fn new(shell: bool, session: Option<&'static str>) -> Self {
         Self {
             shell: Mutex::new(shell),
+            agent: Mutex::new(Some("codex")),
             session: Mutex::new(session),
+            shell_session: Mutex::new(None),
             label: Mutex::new("Main".to_owned()),
             idle_label: Mutex::new(None),
             identity_reports: Mutex::new(Vec::new()),
@@ -2954,7 +2958,7 @@ impl HerdrCommandExecutor for AgentTabHerdr {
                     "terminal_id": "terminal-1",
                     "tab_id": "tab-1",
                     "workspace_id": "workspace-1",
-                    "agent": "codex",
+                    "agent": *self.agent.lock().unwrap(),
                     "agent_status": "idle"
                 });
                 if let Some(session) = *self.session.lock().unwrap() {
@@ -2965,13 +2969,18 @@ impl HerdrCommandExecutor for AgentTabHerdr {
                 }
                 let mut panes = vec![agent];
                 if *self.shell.lock().unwrap() {
-                    panes.push(serde_json::json!({
+                    let mut shell = serde_json::json!({
                         "pane_id": "pane-2",
                         "terminal_id": "terminal-2",
                         "tab_id": "tab-1",
                         "workspace_id": "workspace-1",
                         "agent_status": "unknown"
-                    }));
+                    });
+                    if let Some(session) = *self.shell_session.lock().unwrap() {
+                        shell["agent"] = serde_json::Value::Null;
+                        shell["agent_session"] = serde_json::json!({"value": session});
+                    }
+                    panes.push(shell);
                 }
                 serde_json::json!({"result": {"panes": panes}}).to_string()
             }
@@ -3052,6 +3061,53 @@ fn a_shell_pane_beside_a_named_agent_does_not_take_its_tab_label() {
     );
 }
 
+/// Herdr can report a session in a pane without the agent word that names
+/// what runs there. The pane is an agent pane, but not a recognized agent.
+#[test]
+fn naming_a_pane_herdr_reports_only_a_session_for_succeeds() {
+    let directory = TestDirectory::new();
+    let herdr = AgentTabHerdr::new(false, Some("session-1"));
+    *herdr.agent.lock().unwrap() = None;
+    let ids = FixedIds(AtomicU64::new(1));
+    let runtime = agent_tab_runtime(&directory, &herdr, &ids);
+
+    let named =
+        execute_lifecycle_operation("name", serde_json::json!({"alias": "reviewer"}), &runtime)
+            .unwrap();
+    assert_eq!(named["pane_type"], "agent");
+    let listed = execute_lifecycle_operation("address.list", serde_json::json!({}), &runtime)
+        .unwrap()
+        .to_string();
+    assert!(listed.contains("\"alias\":\"reviewer\""), "{listed}");
+}
+
+#[test]
+fn a_session_only_pane_beside_a_named_agent_does_not_take_its_tab_label() {
+    let directory = TestDirectory::new();
+    let herdr = AgentTabHerdr::new(true, Some("session-1"));
+    *herdr.shell_session.lock().unwrap() = Some("session-2");
+    let ids = FixedIds(AtomicU64::new(1));
+    let runtime = agent_tab_runtime(&directory, &herdr, &ids);
+
+    execute_lifecycle_operation("name", serde_json::json!({"alias": "reviewer"}), &runtime)
+        .unwrap();
+    assert_eq!(
+        *herdr.label.lock().unwrap(),
+        "@reviewer",
+        "naming beside a session-only pane still labels the tab"
+    );
+
+    *herdr.shell.lock().unwrap() = false;
+    execute_lifecycle_operation("reconcile", serde_json::json!({}), &runtime).unwrap();
+    *herdr.shell.lock().unwrap() = true;
+    execute_lifecycle_operation("reconcile", serde_json::json!({}), &runtime).unwrap();
+    assert_eq!(
+        *herdr.label.lock().unwrap(),
+        "@reviewer",
+        "a session-only pane opening beside the agent keeps its label"
+    );
+}
+
 #[test]
 fn a_native_agent_without_a_session_shows_a_connect_hint_until_it_registers() {
     let directory = TestDirectory::new();
@@ -3093,6 +3149,8 @@ fn a_native_agent_without_a_session_shows_a_connect_hint_until_it_registers() {
 /// Herdr command so tests can count tour popups.
 struct TourHerdr {
     agents: std::sync::Mutex<bool>,
+    /// The shell pane reports a session but no agent word.
+    session_only_shell: std::sync::Mutex<bool>,
     commands: std::sync::Mutex<Vec<Vec<String>>>,
 }
 
@@ -3100,6 +3158,7 @@ impl TourHerdr {
     fn new(agents: bool) -> Self {
         Self {
             agents: std::sync::Mutex::new(agents),
+            session_only_shell: std::sync::Mutex::new(false),
             commands: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -3148,8 +3207,13 @@ impl HerdrCommandExecutor for TourHerdr {
             }
             ["pane", "list", "--workspace", "workspace-1"] => {
                 let agents = *self.agents.lock().unwrap();
+                let mut shell = pane("pane-shell", false);
+                if *self.session_only_shell.lock().unwrap() {
+                    shell["agent"] = serde_json::Value::Null;
+                    shell["agent_session"] = serde_json::json!({"value": "session-pane-shell"});
+                }
                 serde_json::json!({"result": {"panes": [
-                    pane("pane-shell", false),
+                    shell,
                     pane("pane-a", agents),
                     pane("pane-b", agents),
                 ]}})
@@ -3339,6 +3403,31 @@ fn status_changes_never_open_the_tour_but_activation_with_an_agent_does_once() {
     assert_eq!(again["tour"]["shown"], false);
     assert_eq!(again["tour"]["reason"], "already_shown");
     assert_eq!(herdr.popup_opens().len(), 1, "the tour opened twice");
+}
+
+#[test]
+fn the_tour_skips_a_pane_herdr_reports_only_a_session_for() {
+    let ids = TourIds(AtomicU64::new(1));
+    let directory = TestDirectory::new();
+    let herdr = TourHerdr::new(false);
+    *herdr.session_only_shell.lock().unwrap() = true;
+    let runtime = tour_runtime(&directory, &herdr, &ids);
+    let activated =
+        execute_lifecycle_operation("activate", serde_json::json!({"confirmed": true}), &runtime)
+            .unwrap();
+    assert_eq!(activated["tour"]["shown"], false);
+    assert_eq!(activated["tour"]["reason"], "no_agent_pane");
+    assert!(herdr.popup_opens().is_empty());
+
+    let fresh = TestDirectory::new();
+    let herdr = TourHerdr::new(true);
+    *herdr.session_only_shell.lock().unwrap() = true;
+    let runtime = tour_runtime(&fresh, &herdr, &ids);
+    let activated =
+        execute_lifecycle_operation("activate", serde_json::json!({"confirmed": true}), &runtime)
+            .unwrap();
+    assert_eq!(activated["tour"]["pane_id"], "pane-a");
+    assert_eq!(herdr.popup_opens(), [expected_tour_open(&fresh, "pane-a")]);
 }
 
 #[test]
