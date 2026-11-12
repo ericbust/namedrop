@@ -637,6 +637,94 @@ fn server_reuse_requires_the_same_canonical_ui_setting() {
 }
 
 #[test]
+fn with_tailscale_access_on_another_ui_restarts_the_server_and_a_killed_server_returns_with_it() {
+    let dashboard = Dashboard::new();
+    let custom = dashboard.ui("custom");
+    dashboard.open(None);
+    let first = dashboard.info();
+    fs::write(
+        dashboard.state().join("dashboard/tailscale.json"),
+        serde_json::json!({
+            "version": 1,
+            "state": "enabled",
+            "handler": {
+                "dns_name": "device.tail123.ts.net",
+                "https_port": 443,
+                "owner_login": "owner@example.com",
+                "backend_port": first["port"],
+            },
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let session = fs::read_to_string(dashboard.state().join("dashboard/session")).unwrap();
+    let request = dashboard.state().join("dashboard/ui-request.json");
+
+    let switched = dashboard.open(Some(&custom));
+    assert_eq!(switched["server"], "restarted", "{switched}");
+    let second = dashboard.info();
+    assert_ne!(second["pid"], first["pid"]);
+    assert_eq!(second["port"], first["port"], "the handler's port is kept");
+    assert_eq!(
+        second["ui"]["Directory"],
+        fs::canonicalize(&custom).unwrap().to_str().unwrap()
+    );
+    assert_eq!(dashboard.get("/", true).body, b"<h1>custom</h1>");
+    assert_eq!(
+        fs::read_to_string(dashboard.state().join("dashboard/session")).unwrap(),
+        session,
+        "a signed-in device stays signed in"
+    );
+    assert!(!request.exists(), "the request is spent");
+    assert_eq!(dashboard.open(Some(&custom))["server"], "running");
+
+    // The server is killed, and Herdr's startup command brings it back.
+    let killed = second["pid"].as_u64().unwrap();
+    assert!(
+        Command::new("kill")
+            .args(["-KILL", &killed.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let returned = eventually(|| {
+        let _ = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+            .arg("--plugin-state")
+            .arg(dashboard.state())
+            .args(["--herdr-socket", "assets-test", "--herdr-workspace", "w1"])
+            .arg("reconcile")
+            .env("TMPDIR", dashboard.root())
+            .env("HOME", dashboard.root())
+            .env("XDG_CONFIG_HOME", dashboard.root().join("config"))
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HERDR_WORKSPACE_ID")
+            .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("HERDR_PLUGIN_STATE_DIR")
+            .env("HERDR_BIN_PATH", dashboard.root().join("herdr"))
+            .output()
+            .unwrap();
+        let info = dashboard.info();
+        (info["pid"] != killed && connect_ok(first["port"].as_u64().unwrap() as u16))
+            .then_some(info)
+    })
+    .expect("the killed server returns");
+    assert_eq!(
+        returned["ui"], second["ui"],
+        "with the app that was switched to"
+    );
+    assert_eq!(dashboard.get("/", true).body, b"<h1>custom</h1>");
+
+    let back = dashboard.open(None);
+    assert_eq!(back["server"], "restarted", "{back}");
+    assert_eq!(dashboard.info()["ui"], "Embedded");
+    assert_eq!(dashboard.info()["port"], first["port"]);
+}
+
+fn connect_ok(port: u16) -> bool {
+    TcpStream::connect(("127.0.0.1", port)).is_ok()
+}
+
+#[test]
 fn concurrent_first_opens_choose_one_ui_and_reject_the_other() {
     let dashboard = Dashboard::new();
     let a = dashboard.ui("a");

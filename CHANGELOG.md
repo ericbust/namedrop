@@ -2,7 +2,7 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
-## [1.11.0] - 2026-11-12
+## [1.9.0] - 2026-11-12
 
 ### Added
 
@@ -13,6 +13,18 @@ Each release is a section here, newest first. The GitHub release for a version u
 - Mermaid is built into Namedrop, and the page loads it only when a diagram is on screen. The page's first load grows by 6 KB. Nothing is loaded from another site, and the page's Content-Security-Policy is unchanged. The Namedrop binary grows by about 3.6 MB.
 - Channels' own scripts and styles are now kept by the browser. Their names change with their content, so the server lets the browser keep them for good, and a page load downloads them once per release. Before, every load downloaded them again.
 - A diagram is text an agent wrote, so it cannot run script, load anything remote or carry a link. Mermaid runs in its strict mode, the drawing is cleaned, and the page shows it as an image. A diagram cannot change those settings or the page's colors from inside its own text.
+## [1.8.1] - 2026-11-12
+
+### Fixed
+
+- The Channels link on your phone comes back by itself after the machine restarts. With tailnet access on, the Channels server was gone after a restart, a Herdr restart or a crash, and the link failed until someone ran `namedrop channels` again. Herdr now starts the server again when Herdr starts, and when a pane opens, moves or closes. It comes back on the same port, and a device that was signed in stays signed in. Herdr has to be running, so after a restart with nobody logged in the link stays down until you open Herdr.
+- `namedrop channels` no longer says the server stops after 10 minutes when it doesn't. With tailnet access on, the server has kept running with no tab open since 1.5.0, but the command still printed "The server stops 10 minutes after the last tab closes". It now prints the rule in force, such as "The server keeps running while Tailscale access is on."
+- Doctor reports a tailnet link whose server is not running (ND-TAILSCALE-001), and gives the command that starts it, `namedrop channels --no-open`. Before, it reported the link as configured while it was down. If another program has taken the server's port, Doctor names the port, and Herdr tries to start the server once a minute, not on every pane event.
+- With tailnet access on, `namedrop channels --ui <dir>` switches a running server to another Channels app. It used to refuse and tell you to kill the server. The server now restarts on the same port with the app you asked for, and signed-in browsers reconnect. Without tailnet access, the command still names the running app and the `kill` command.
+
+### Added
+
+- `namedrop channels --idle <minutes>` sets how long the server keeps running after the last tab closes, and `--idle never` keeps it running. The setting is saved and applies until you change it, across restarts and updates. Without it, the server stops after 10 minutes, as before. The setting has no effect while tailnet access is on, where the server never stops for idleness. Doctor shows a saved setting as ND-CHANNELS-001, and reports one it cannot read.
 
 ## [1.8.0] - 2026-11-11
 

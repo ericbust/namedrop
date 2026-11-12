@@ -109,6 +109,17 @@ pub(super) fn operation_lock(files: &ServerFiles) -> Result<File, String> {
     }
 }
 
+/// `None` while an enable or a removal holds the lock. A hook must not wait
+/// for one, and that operation settles the server itself.
+pub(super) fn try_operation_lock(files: &ServerFiles) -> Result<Option<File>, String> {
+    let file = private_file(&files.state().join("dashboard/tailscale.lock"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(error) => Err(format!("could not lock Channels Tailscale setup: {error}")),
+    }
+}
+
 fn write(files: &ServerFiles, ownership: &Ownership) -> Result<(), String> {
     let mut value = serde_json::to_value(ownership).map_err(|error| error.to_string())?;
     value
@@ -543,6 +554,51 @@ fn disable_with(files: &ServerFiles, cli: &Cli<'_>) -> Result<(), String> {
 pub(crate) struct Diagnostic {
     pub url: Option<String>,
     pub problem: Option<String>,
+    pub repair: Repair,
+}
+
+/// What puts the link right.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Repair {
+    /// Nothing is wrong; a new device signs in with a fresh link.
+    SignIn,
+    /// The record or the handler is wrong, so access is set up again.
+    Reconfigure,
+    /// The handler is intact and only the server behind it is gone.
+    Start,
+    /// Another program holds the port the handler forwards to.
+    FreePort(u16),
+}
+
+/// The handler is intact. Says what is wrong with the server behind it.
+/// `server_pid` is the last server to publish itself on this port.
+fn backend_fault(state: &Path, port: u16, server_pid: u32) -> Option<(String, Repair)> {
+    let listening = std::net::TcpStream::connect_timeout(
+        &(std::net::Ipv4Addr::LOCALHOST, port).into(),
+        Duration::from_millis(500),
+    )
+    .is_ok();
+    // Either a start was refused the port, or the server that had it is gone
+    // and something else answers there now.
+    let server_gone = libc::pid_t::try_from(server_pid).is_ok_and(|pid| {
+        let signalled = unsafe { libc::kill(pid, 0) };
+        signalled != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    });
+    let taken = server_gone
+        || super::server_files::BindFailure::read(state).is_some_and(|f| f.port == port);
+    match (listening, taken) {
+        (false, _) => Some((
+            "the Channels server is not running, so the tailnet link fails".to_owned(),
+            Repair::Start,
+        )),
+        (true, true) => Some((
+            format!(
+                "another program is using port {port}, so the Channels server cannot start, and the Tailscale handler forwards tailnet requests to that program"
+            ),
+            Repair::FreePort(port),
+        )),
+        (true, false) => None,
+    }
 }
 
 pub(crate) fn diagnose(state: &Path) -> Option<Diagnostic> {
@@ -557,11 +613,13 @@ fn diagnose_with(state: &Path, cli: &Cli<'_>) -> Option<Diagnostic> {
             return Some(Diagnostic {
                 url: None,
                 problem: Some(problem),
+                repair: Repair::Reconfigure,
             });
         }
     };
     let handler = ownership.handler();
-    let inspect = || {
+    let mut server_pid = None;
+    let mut inspect = || {
         if !matches!(ownership, Ownership::Enabled(_)) {
             return Err(
                 "Channels Tailscale setup or removal is incomplete; tailnet access is disabled"
@@ -576,6 +634,7 @@ fn diagnose_with(state: &Path, cli: &Cli<'_>) -> Option<Diagnostic> {
         if server.port != handler.backend_port {
             return Err("Tailscale handler targets a stale Channels backend port".to_owned());
         }
+        server_pid = Some(server.pid);
         let status = cli.status()?;
         if status.funnel.contains(&handler.https_port) {
             return Err(
@@ -602,9 +661,17 @@ fn diagnose_with(state: &Path, cli: &Cli<'_>) -> Option<Diagnostic> {
         }
         Ok(())
     };
+    let (problem, repair) = match inspect() {
+        Err(problem) => (Some(problem), Repair::Reconfigure),
+        Ok(()) => match backend_fault(state, handler.backend_port, server_pid.unwrap_or(0)) {
+            Some((problem, repair)) => (Some(problem), repair),
+            None => (None, Repair::SignIn),
+        },
+    };
     Some(Diagnostic {
         url: Some(handler.origin()),
-        problem: inspect().err(),
+        problem,
+        repair,
     })
 }
 
@@ -917,12 +984,17 @@ mod tests {
         assert!(!absent.exists());
     }
     #[test]
-    fn diagnostics_report_url_incomplete_missing_funnel_foreign_and_stale_target() {
-        let fixture = Fixture::new(own_config(&handler()));
-        let owned = handler();
+    fn diagnostics_report_url_incomplete_missing_funnel_foreign_stale_target_and_a_stopped_server()
+    {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let owned = OwnedHandler {
+            backend_port: listener.local_addr().unwrap().port(),
+            ..handler()
+        };
+        let fixture = Fixture::new(own_config(&owned));
         let server = super::super::server_files::ServerInfo {
             pid: 1,
-            port: 1234,
+            port: owned.backend_port,
             instance: "test".into(),
             started_at_ms: 0,
             ui: super::super::server_files::UiSource::Embedded,
@@ -938,6 +1010,7 @@ mod tests {
             Some("https://device.tail123.ts.net")
         );
         assert!(diagnostic.problem.is_none());
+        assert_eq!(diagnostic.repair, Repair::SignIn);
         for (config, expected) in [
             (json!({}), "missing"),
             (
@@ -972,7 +1045,53 @@ mod tests {
                 .problem
                 .unwrap();
             assert!(problem.contains(expected), "{problem}");
+            assert_eq!(
+                diagnose_with(fixture.files.state(), &fixture.cli())
+                    .unwrap()
+                    .repair,
+                Repair::Reconfigure
+            );
         }
+        fixture.put("serve.json", own_config(&owned));
+        // A server that could not bind left its note, and the port still answers.
+        fixture.files.record_bind_failure(owned.backend_port);
+        let busy = diagnose_with(fixture.files.state(), &fixture.cli()).unwrap();
+        assert_eq!(busy.repair, Repair::FreePort(owned.backend_port));
+        assert!(
+            busy.problem
+                .as_deref()
+                .is_some_and(|problem| problem.starts_with(&format!(
+                    "another program is using port {}",
+                    owned.backend_port
+                ))),
+            "{:?}",
+            busy.problem
+        );
+        fixture.files.clear_bind_failure();
+        // No start was refused yet, but the server that published itself is gone.
+        let mut exited = Command::new("true").spawn().unwrap();
+        exited.wait().unwrap();
+        fixture.put(
+            "state/dashboard/server.json",
+            serde_json::to_value(super::super::server_files::ServerInfo {
+                pid: exited.id(),
+                ..server
+            })
+            .unwrap(),
+        );
+        assert_eq!(
+            diagnose_with(fixture.files.state(), &fixture.cli())
+                .unwrap()
+                .repair,
+            Repair::FreePort(owned.backend_port)
+        );
+        drop(listener);
+        let stopped = diagnose_with(fixture.files.state(), &fixture.cli()).unwrap();
+        assert_eq!(stopped.repair, Repair::Start);
+        assert_eq!(
+            stopped.problem.as_deref(),
+            Some("the Channels server is not running, so the tailnet link fails")
+        );
         write(&fixture.files, &Ownership::Installing(owned)).unwrap();
         assert!(
             diagnose_with(fixture.files.state(), &fixture.cli())

@@ -67,6 +67,7 @@ pub fn render_command_result_to_text_within(
                 "Channels Tailscale access is off. The owned Serve handler has been removed."
                     .into(),
             );
+            lines.extend(crate::dashboard::idle::sentence(&data["idle"]));
         }
         "dashboard" => {
             lines.push(format!(
@@ -90,18 +91,19 @@ pub fn render_command_result_to_text_within(
                 lines.extend(code.rows.iter().map(|row| format!("{QR_INDENT}{row}")));
             }
             lines.push(format!("  {}", text(&data["url"])));
-            lines.push(
-                if data["opened"] == true {
-                    "Opened in your browser. It stops on its own 10 minutes after the last tab closes."
-                } else if code.is_some() {
-                    "Scan the code or open that URL on a device signed in to your Tailscale account within 10 minutes; it works once. The server stops 10 minutes after the last tab closes."
-                } else if data["tailscale"] == true {
-                    "Open that URL on a device signed in to your Tailscale account within 10 minutes; it works once. The server stops 10 minutes after the last tab closes."
-                } else {
-                    "Open that URL in a browser on this machine within 10 minutes; it works once. The server stops on its own 10 minutes after the last tab closes."
-                }
-                .into(),
-            );
+            let link = if data["opened"] == true {
+                "Opened in your browser."
+            } else if code.is_some() {
+                "Scan the code or open that URL on a device signed in to your Tailscale account within 10 minutes; it works once."
+            } else if data["tailscale"] == true {
+                "Open that URL on a device signed in to your Tailscale account within 10 minutes; it works once."
+            } else {
+                "Open that URL in a browser on this machine within 10 minutes; it works once."
+            };
+            lines.push(match crate::dashboard::idle::sentence(&data["idle"]) {
+                Some(idle) => format!("{link} {idle}"),
+                None => link.to_owned(),
+            });
             if let Some(needed) = too_narrow_for {
                 lines.push(format!(
                     "This terminal is too narrow for a QR code to scan. Widen it to {needed} columns and run the command again."
@@ -839,10 +841,15 @@ mod tests {
     }
 
     fn channels(url: &str, tailscale: bool, opened: bool) -> CommandResult {
+        let idle = if tailscale {
+            json!({"stop_after_ms": null, "source": "tailscale"})
+        } else {
+            json!({"stop_after_ms": 600_000, "source": "default"})
+        };
         CommandResult::success(
             "dashboard",
             json!({"url": url, "space_key": "0123456789abcdef0123", "workspace_id": "w1",
-                   "server": "running", "opened": opened, "tailscale": tailscale}),
+                   "server": "running", "opened": opened, "tailscale": tailscale, "idle": idle}),
         )
     }
 
@@ -877,7 +884,7 @@ mod tests {
         assert_eq!(
             render_command_result_to_text_within(&channels(local, false, false), Some(200)),
             format!(
-                "Namedrop dashboard for workspace w1 is live:\n  {local}\nOpen that URL in a browser on this machine within 10 minutes; it works once. The server stops on its own 10 minutes after the last tab closes."
+                "Namedrop dashboard for workspace w1 is live:\n  {local}\nOpen that URL in a browser on this machine within 10 minutes; it works once. The server stops 10 minutes after the last tab closes."
             )
         );
         assert!(plain(&render_command_result_to_text_within(
@@ -889,12 +896,50 @@ mod tests {
         assert_eq!(
             render_command_result_to_text(&tailnet),
             format!(
-                "Namedrop dashboard for workspace w1 is live:\n  {TAILNET_LINK}\nOpen that URL on a device signed in to your Tailscale account within 10 minutes; it works once. The server stops 10 minutes after the last tab closes."
+                "Namedrop dashboard for workspace w1 is live:\n  {TAILNET_LINK}\nOpen that URL on a device signed in to your Tailscale account within 10 minutes; it works once. The server keeps running while Tailscale access is on."
             )
         );
         let full = serde_json::to_string(&tailnet).unwrap();
         let agent = agent_result_view(&serde_json::to_value(&tailnet).unwrap()).to_string();
         assert!(plain(&full) && plain(&agent), "{full}\n{agent}");
+    }
+
+    #[test]
+    fn channels_says_when_the_server_stops_under_the_rule_in_force() {
+        let said = |tailscale: Value, idle: Value| {
+            render_command_result_to_text(&CommandResult::success(
+                "dashboard",
+                json!({"url": "http://127.0.0.1:4000/w/k?n=1", "workspace_id": "w1",
+                       "opened": true, "tailscale": tailscale, "idle": idle}),
+            ))
+        };
+        assert!(
+            said(
+                json!(false),
+                json!({"stop_after_ms": null, "source": "tailscale"})
+            )
+            .ends_with(
+                "Opened in your browser. The server keeps running while Tailscale access is on."
+            ),
+            "a plain open reports Tailscale access that an earlier command turned on"
+        );
+        assert!(
+            said(
+                json!(false),
+                json!({"stop_after_ms": 1_800_000, "source": "setting"})
+            )
+            .ends_with(
+                "The server stops 30 minutes after the last tab closes, as set with `--idle`."
+            )
+        );
+        assert_eq!(
+            said(
+                json!("off"),
+                json!({"stop_after_ms": null, "source": "setting"})
+            ),
+            "Channels Tailscale access is off. The owned Serve handler has been removed.\nThe server keeps running with no tab open, as set with `--idle never`."
+        );
+        assert!(said(json!(false), json!(null)).ends_with("Opened in your browser."));
     }
 
     #[test]
@@ -906,7 +951,7 @@ mod tests {
         assert_eq!(
             render_command_result_to_text_within(&tailnet, Some(width - 1)),
             format!(
-                "Namedrop dashboard for workspace w1 is live:\n  {TAILNET_LINK}\nOpen that URL on a device signed in to your Tailscale account within 10 minutes; it works once. The server stops 10 minutes after the last tab closes.\nThis terminal is too narrow for a QR code to scan. Widen it to {width} columns and run the command again."
+                "Namedrop dashboard for workspace w1 is live:\n  {TAILNET_LINK}\nOpen that URL on a device signed in to your Tailscale account within 10 minutes; it works once. The server keeps running while Tailscale access is on.\nThis terminal is too narrow for a QR code to scan. Widen it to {width} columns and run the command again."
             )
         );
     }
