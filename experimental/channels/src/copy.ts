@@ -36,6 +36,7 @@ export type IconName =
   | "clock"
   | "done"
   | "hash"
+  | "image"
   | "inbox"
   | "menu"
   | "pause"
@@ -499,6 +500,12 @@ function shortList(names: readonly string[]): string {
     ? `${shown} ${overflowCopy(names.length - SHOWN_RECIPIENTS)}`
     : shown;
 }
+export const imageCopy = {
+  sent: (position: number, total: number) =>
+    total === 1 ? "Image" : `Image ${position} of ${total}`,
+  open: "Open the image in a new tab",
+  gone: "Image no longer stored",
+};
 export const bodyCopy = {
   shortened: "Shortened by Namedrop.",
   unavailable: "Couldn't load the rest of this message. Try again.",
@@ -529,6 +536,19 @@ export const composerCopy = {
     `Pick who gets this: ${names.join(" or ")}`,
   needsMessage: (names: readonly string[]) =>
     `Add a message after ${shortList(names)}.`,
+  attachImage: "Attach an image",
+  attachedImages: "Attached images",
+  uploadingImage: "Uploading image…",
+  removeImage: (position: number) => `Remove image ${position}`,
+  attachedImage: (position: number) => `Attached image ${position}`,
+  needsWords: "Add a message to send with the image.",
+  dropImages: "Drop images to attach them",
+  imageRefused: {
+    type: "Only PNG, JPEG, GIF and WebP images can be attached.",
+    size: "That image is over 10 MB.",
+    count: "A message takes up to 4 images.",
+    failed: "Couldn't upload the image. Try again.",
+  },
   postNotSent: "A post wasn't sent",
   replyNotSent: "Reply not sent · Open thread",
 };

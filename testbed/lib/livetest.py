@@ -71,8 +71,9 @@ SCREENS = (
            None, ""),
     # "No, exit" has the focus; a bare enter quits Claude.
     Screen("claude", "folder-trust", r"Quick safety check", ("down", "enter"), ANSWER, None, ""),
-    # Claude draws a no-break space after the composer's arrow.
-    Screen("claude", "ready", "^❯[ \u00a0]", (), READY, None, ""),
+    # Claude draws a no-break space after the composer's arrow. An empty composer with no
+    # suggestion in it reads as the bare arrow, because Herdr cuts the space at a line's end.
+    Screen("claude", "ready", "^❯(?:[ \u00a0]|$)", (), READY, None, ""),
     # Codex 0.163.0.
     Screen("codex", "channel-closed", r"remote app-server worker channel is closed", (), FATAL,
            None, "Codex's shared app-server restarted under the window (it updates itself); "

@@ -519,3 +519,62 @@ test("reminder Cancel sends the scoped id with CSRF and retries an expired token
     ],
   );
 });
+
+test("uploadImage: posts the file's bytes with the session token, refreshes a stale token once, and says why an upload was refused", async () => {
+  const name = `${"a".repeat(64)}.png`;
+  const line = `Image: /state/channel-images/${name}`;
+  let token = "t1";
+  let answer: () => Response = () => json(200, { name, line });
+  const server = fakeServer(({ url, init }) => {
+    if (url === "/api/session") return json(200, { csrf_token: token });
+    const csrf = new Headers(init?.headers).get("X-Namedrop-Csrf");
+    return csrf === "t2"
+      ? answer()
+      : new Response("Forbidden.\n", { status: 403 });
+  });
+  const poster = createPoster(server.fetcher);
+  poster.prepare();
+  token = "t2";
+  const file = new Blob(["png bytes"], { type: "image/png" });
+  assert.deepEqual(await poster.uploadImage(file), {
+    kind: "stored",
+    image: { name, line },
+  });
+  const uploads = server.seen.filter(
+    (exchange) => exchange.url === "/api/images",
+  );
+  assert.equal(uploads.length, 2, "one refused try, then the fresh token");
+  assert.equal(uploads[1]?.init?.method, "POST");
+  assert.equal(uploads[1]?.init?.body, file, "the bytes go up as they are");
+
+  for (const [status, why] of [
+    [415, "type"],
+    [413, "size"],
+    [429, "failed"],
+    [503, "failed"],
+  ] as const) {
+    answer = () => new Response("", { status });
+    assert.deepEqual(await poster.uploadImage(file), { kind: "refused", why });
+  }
+  for (const wrong of [
+    { name, line: `Image: /state/channel-images/${"b".repeat(64)}.png` },
+    { name, line: `text first\n${line}` },
+    { name: "../session", line: "Image: /state/dashboard/session" },
+    { name },
+  ]) {
+    answer = () => json(200, wrong);
+    assert.deepEqual(
+      await poster.uploadImage(file),
+      { kind: "refused", why: "failed" },
+      JSON.stringify(wrong),
+    );
+  }
+  const offline = createPoster(async (input) => {
+    if (String(input) === "/api/session") return json(200, { csrf_token: "t" });
+    throw new TypeError("Failed to fetch");
+  });
+  assert.deepEqual(await offline.uploadImage(file), {
+    kind: "refused",
+    why: "failed",
+  });
+});

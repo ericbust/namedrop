@@ -229,6 +229,8 @@ CLAUDE_TRUST = """Accessing workspace:
 """
 CLAUDE_COMPOSER = ("● ready\n\n✻ Churned for 6s\n" + "─" * 40 + "\n❯ ask @codex what its name is\n" +
                    "─" * 40 + "\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents\n")
+CLAUDE_EMPTY_COMPOSER = ("▎ https://code.claude.com/docs/en/permission-modes\n\n" + "─" * 40 + "\n❯\n" +
+                         "─" * 40 + "\n  ⏵⏵ auto mode on (shift+tab to cycle)\n")
 CODEX_LOADING = """  >_ OpenAI Codex (v0.162.1)
      /home/u/…/test-x/repo
 
@@ -275,6 +277,7 @@ def classified(agent, text):
 
 def check_screens():
     cases = [("claude", CLAUDE_TRUST, "folder-trust"), ("claude", CLAUDE_COMPOSER, "ready"),
+             ("claude", CLAUDE_EMPTY_COMPOSER, "ready"),
              ("claude", "Security notes:\n Claude can make mistakes\n Press Enter to continue…",
               "security-notes"),
              ("claude", "Let's get started.\n Choose the text style that looks best with your terminal",

@@ -5,6 +5,7 @@ mod channel_service;
 mod coordination_review;
 mod http;
 mod hub;
+mod images;
 mod observer_guard;
 mod reminders;
 mod server_files;
@@ -13,6 +14,7 @@ pub mod snapshot;
 pub(crate) mod tailscale;
 mod thread_controls;
 
+pub(crate) use images::DIRECTORY as CHANNEL_IMAGES_DIRECTORY;
 pub(crate) use server_files::current_operator_session;
 
 /// Internal child entry point. A private stdin pipe ties an observer to its
@@ -345,7 +347,9 @@ fn run_server(
         mutations: mutations.clone(),
         channel_wake: channel_service.wake(),
         control_effects: control_effects.clone(),
+        image_uploads: std::sync::atomic::AtomicUsize::new(0),
     });
+    images::prune(state, std::time::SystemTime::now());
     let stop = Arc::new(AtomicBool::new(false));
     let accept_stop = stop.clone();
     let acceptor = thread::spawn(move || http::accept_loop(listener, front, accept_stop));

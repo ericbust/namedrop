@@ -594,3 +594,17 @@ test("held answers: a held leg and a progress note parse, and an absent or malfo
   for (const value of [undefined, false, "yes", 1])
     assert.equal(note(value), false, String(value));
 });
+
+test("images: a row lists its stored images, and a missing or malformed list reads as none", () => {
+  const name = `${"a".repeat(64)}.png`;
+  const images = (value: unknown) =>
+    parseHistory([{ ...channelRow, images: value }])[0]?.images;
+  assert.deepEqual(images([name]), [name]);
+  assert.deepEqual(
+    images([name, "../session", 7, `${"a".repeat(64)}.svg`, null]),
+    [name],
+    "a name that is not a stored image's is dropped",
+  );
+  for (const value of [undefined, null, "x", {}, [], ["nope"]])
+    assert.deepEqual(images(value), [], JSON.stringify(value));
+});

@@ -18,6 +18,9 @@ pub const TERMINAL_RUN_WINDOW: i64 = 20;
 pub const COORDINATION_WINDOW: i64 = 20;
 
 pub struct DashboardRows {
+    /// Where this state keeps the images sent from Channels. A message line
+    /// that names a file there is an image; with `None` every line is text.
+    pub image_directory: Option<std::path::PathBuf>,
     pub namespace: StateNamespace,
     pub worktree: Option<crate::WorktreeState>,
     /// Includes retired addresses, so old messages keep their author's lane.
@@ -322,7 +325,12 @@ impl StateStore {
         &mut self,
         namespace: &StateNamespace,
     ) -> Result<DashboardRows, StoreError> {
-        self.transaction(|transaction| transaction.dashboard_rows(namespace))
+        let mut rows = self.transaction(|transaction| transaction.dashboard_rows(namespace))?;
+        rows.image_directory = Some(
+            self.state_directory
+                .join(crate::dashboard::CHANNEL_IMAGES_DIRECTORY),
+        );
+        Ok(rows)
     }
 
     pub fn dashboard_spaces(&mut self) -> Result<Vec<SpaceRow>, StoreError> {
@@ -1329,6 +1337,7 @@ impl StateTransaction<'_> {
                 ))
         });
         let mut rows = DashboardRows {
+            image_directory: None,
             namespace: namespace.clone(),
             worktree: self.worktree_state(namespace)?,
             addresses,

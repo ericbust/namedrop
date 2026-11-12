@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname } from "node:path";
@@ -83,6 +84,15 @@ function readBody(req) {
     req.on("error", reject);
   });
 }
+function readBytes(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+const PNG_START = Buffer.from("89504e470d0a1a0a", "hex");
 function sendJson(res, status, value) {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(value));
@@ -94,6 +104,8 @@ function postRoute(onPost) {
   const controls = [];
   const deliveries = [];
   const receipts = new Map();
+  const images = new Map();
+  const uploads = [];
   const authorized = (req) =>
     (req.headers.cookie ?? "")
       .split(/;\s*/)
@@ -104,6 +116,34 @@ function postRoute(onPost) {
     controls,
     deliveries,
     receipts,
+    images,
+    uploads,
+    // Mirrors POST /api/images: cookie, CSRF header, raw bytes, type from the bytes.
+    async upload(req, res) {
+      const bytes = await readBytes(req);
+      const upload = {
+        csrf: req.headers["x-namedrop-csrf"] ?? null,
+        bytes: bytes.length,
+        status: 0,
+      };
+      uploads.push(upload);
+      const reply = (status, value) => {
+        upload.status = status;
+        sendJson(res, status, value);
+      };
+      if (!authorized(req)) return reply(401, {});
+      if (upload.csrf !== session.csrf) return reply(403, {});
+      if (!bytes.subarray(0, 8).equals(PNG_START)) return reply(415, {});
+      const name = `${createHash("sha256").update(bytes).digest("hex")}.png`;
+      images.set(name, bytes);
+      reply(200, { name, line: `Image: /state/channel-images/${name}` });
+    },
+    image(req, res, name) {
+      const bytes = authorized(req) ? images.get(name) : undefined;
+      if (bytes === undefined) return res.writeHead(404).end();
+      res.writeHead(200, { "Content-Type": "image/png" });
+      res.end(bytes);
+    },
     cookie: `${COOKIE}=${session.secret}; Path=/; HttpOnly; SameSite=Strict`,
     rotate() {
       session.csrf = `csrf-${Number(session.csrf.slice(5)) + 1}`;
@@ -338,6 +378,11 @@ async function open(
     if (url.pathname === "/api/session") return posts.token(req, res);
     if (url.pathname === "/api/direct-messages")
       return sendJson(res, 200, { peers: [] });
+    if (req.method === "POST" && url.pathname === "/api/images")
+      return posts.upload(req, res);
+    const image = /^\/api\/images\/([^/]+)$/.exec(url.pathname)?.[1];
+    if (req.method === "GET" && image !== undefined)
+      return posts.image(req, res, image);
     if (
       req.method === "POST" &&
       /^\/w\/[^/]+\/participants\/[^/]+\/input$/.test(url.pathname)
@@ -13136,4 +13181,249 @@ test("subagents: live Peek header follows running and stopped subagents", async 
     await drawer(ui).getByRole("button", { name: "Type to agent" }).count(),
     1,
   );
+});
+
+// A real picture, so the browser draws it: one pixel of the given grey.
+function png(grey) {
+  const crcTable = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc = (bytes) => {
+    let c = 0xffffffff;
+    for (const byte of bytes) c = crcTable[(c ^ byte) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type), data]);
+    const out = Buffer.alloc(body.length + 8);
+    out.writeUInt32BE(data.length, 0);
+    body.copy(out, 4);
+    out.writeUInt32BE(crc(body), body.length + 4);
+    return out;
+  };
+  const header = Buffer.from([0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]);
+  const pixel = Buffer.from([
+    0x78,
+    0x01,
+    0x01,
+    0x02,
+    0x00,
+    0xfd,
+    0xff,
+    0x00,
+    grey,
+    0,
+    0,
+    0,
+    0,
+  ]);
+  // Adler-32 of the two raw bytes: a filter byte of 0 and the pixel.
+  const a = (1 + grey) % 65521;
+  const b = (1 + a) % 65521;
+  pixel.writeUInt32BE(((b << 16) | a) >>> 0, 9);
+  return Buffer.concat([
+    PNG_START,
+    chunk("IHDR", header),
+    chunk("IDAT", pixel),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+// Hands the composer files the way a paste or a drop does.
+function giveFiles(box, kind, files, text = "") {
+  return box.evaluate(
+    (element, { kind, files, text }) => {
+      const data = new DataTransfer();
+      for (const file of files)
+        data.items.add(
+          new File([new Uint8Array(file.bytes)], file.name, {
+            type: file.type,
+          }),
+        );
+      if (text !== "") data.setData("text/plain", text);
+      const event =
+        kind === "paste"
+          ? new ClipboardEvent("paste", {
+              clipboardData: data,
+              bubbles: true,
+              cancelable: true,
+            })
+          : new DragEvent("drop", {
+              dataTransfer: data,
+              bubbles: true,
+              cancelable: true,
+            });
+      element.dispatchEvent(event);
+      return event.defaultPrevented;
+    },
+    { kind, files, text },
+  );
+}
+const shot = (grey, name = "shot.png", type = "image/png") => ({
+  bytes: [...png(grey)],
+  name,
+  type,
+});
+const drawn = (image) =>
+  image.evaluate(
+    (element) =>
+      new Promise((resolve) => {
+        const done = () => resolve(element.naturalWidth);
+        if (element.complete) done();
+        else {
+          element.addEventListener("load", done);
+          element.addEventListener("error", done);
+        }
+      }),
+  );
+
+test("IMAGES: a pasted or dropped image shows as a chip, goes with the message as a path line, and shows in the thread", async (t) => {
+  const { ui } = await chatRoom(t, []);
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const composer = ui.page.locator("main .composer");
+  const status = composer.locator(".composer-status");
+  const send = composer.getByRole("button", { name: "Send", exact: true });
+  const chips = composer.locator(".image-chip img");
+  await box.click();
+
+  assert.equal(
+    await giveFiles(box, "paste", [shot(10)], "cell A1"),
+    false,
+    "a paste that carries text stays a text paste",
+  );
+  assert.equal(await chips.count(), 0);
+  assert.equal(ui.posts.uploads.length, 0);
+
+  assert.equal(await giveFiles(box, "paste", [shot(10)]), true);
+  await chips.first().waitFor();
+  assert.equal(await chips.first().getAttribute("alt"), "Attached image 1");
+  assert.equal(await drawn(chips.first()), 1, "the chip draws the picture");
+  assert.equal(ui.posts.uploads[0].csrf, ui.posts.session.csrf);
+  assert.equal(await box.inputValue(), "", "the box holds no path");
+  assert.equal(
+    await status.textContent(),
+    "Add a message to send with the image.",
+  );
+  assert.equal(await send.isDisabled(), true);
+
+  assert.equal(await giveFiles(composer, "drop", [shot(20)]), true);
+  await eventually(async () => (await chips.count()) === 2, "the dropped chip");
+  assert.equal(
+    await giveFiles(composer, "drop", [
+      shot(30, "drawing.svg", "image/svg+xml"),
+    ]),
+    true,
+  );
+  assert.equal(
+    await status.textContent(),
+    "Only PNG, JPEG, GIF and WebP images can be attached.",
+  );
+  await giveFiles(box, "paste", [shot(10)]);
+  await until(() => ui.posts.uploads.length === 3, "the same picture again");
+  await eventually(
+    async () => (await composer.locator(".image-chip.uploading").count()) === 0,
+    "the upload to end",
+  );
+  assert.equal(await chips.count(), 2, "the same picture attaches once");
+
+  await composer.getByRole("button", { name: "Remove image 2" }).click();
+  assert.equal(await chips.count(), 1);
+  await giveFiles(box, "paste", [shot(40), shot(50), shot(60), shot(70)]);
+  await eventually(async () => (await chips.count()) === 4, "four chips");
+  assert.equal(await status.textContent(), "A message takes up to 4 images.");
+  assert.equal(ui.posts.uploads.length, 6, "the fifth image is not uploaded");
+  for (const position of [4, 3, 2])
+    await composer
+      .getByRole("button", { name: `Remove image ${position}` })
+      .click();
+  assert.equal(await chips.count(), 1);
+
+  await box.fill("@codex what does this show? ");
+  assert.equal(await box.inputValue(), "@codex what does this show? ");
+  assert.equal(await chips.count(), 1, "typing keeps the chip");
+  await ui.page.setViewportSize({ width: 390, height: 800 });
+  assert.equal(
+    await ui.page.evaluate(
+      () =>
+        document.documentElement.scrollWidth <=
+        document.documentElement.clientWidth,
+    ),
+    true,
+    "the chip row fits a phone",
+  );
+  const boxEdge = await composer.locator(".composer-box").boundingBox();
+  const chipEdge = await composer.locator(".image-chip").boundingBox();
+  assert.ok(chipEdge.x >= boxEdge.x && chipEdge.y >= boxEdge.y);
+  await ui.page.setViewportSize({ width: 1280, height: 720 });
+
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the post");
+  const [name] = [...ui.posts.images.keys()];
+  assert.equal(
+    ui.posts.attempts[0].body.source,
+    `@codex what does this show?\n\nImage: /state/channel-images/${name}`,
+  );
+  const pending = ui.page.locator("main article.pending");
+  await pending.waitFor();
+  assert.equal(
+    await pending.locator(".body").textContent(),
+    "@codex what does this show?",
+  );
+  assert.equal(await drawn(pending.locator(".msg-images img")), 1);
+  await eventually(async () => (await chips.count()) === 0, "the chips clear");
+  assert.equal(await box.inputValue(), "");
+
+  const row = ui.posts.postedRow(ui.posts.attempts[0].body.request_id);
+  row.body = { text: "what does this show?", truncated: false };
+  row.images = [name];
+  const value = team(1, "alpha");
+  value.frame.messages = [row];
+  ui.connections.at(-1).send("space", value);
+  const sent = ui.page.locator(
+    `main [data-message-id="${row.message_id}"] .msg-images`,
+  );
+  await sent.waitFor();
+  assert.equal(await drawn(sent.locator("img")), 1);
+  assert.equal(await sent.locator("img").getAttribute("alt"), "Image");
+  assert.equal(
+    await sent.locator("a").getAttribute("href"),
+    `/api/images/${name}`,
+  );
+
+  ui.posts.images.clear();
+  const old = message("old", "an older picture", {
+    images: [`${"0".repeat(64)}.png`],
+    at_ms: 50,
+  });
+  value.frame.messages = [old, row];
+  ui.connections.at(-1).send("space", value);
+  await ui.page
+    .locator('main [data-message-id="old"]')
+    .getByText("Image no longer stored")
+    .waitFor();
+});
+
+test("IMAGES: a message without an image is sent as before, and the composer adds only the attach button", async (t) => {
+  const { ui } = await chatRoom(t, []);
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const composer = ui.page.locator("main .composer");
+  await box.fill("@codex just words");
+  assert.equal(await composer.locator(".composer-images").count(), 0);
+  assert.equal(
+    await composer.locator(".composer-box").evaluate((element) => {
+      const style = getComputedStyle(element);
+      return `${style.flexWrap} ${element.children.length}`;
+    }),
+    "nowrap 4",
+    "the text, the hidden picker, the attach button and Send",
+  );
+  await composer.getByRole("button", { name: "Attach an image" }).waitFor();
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the post");
+  assert.deepEqual(ui.posts.attempts[0].body, {
+    request_id: ui.posts.attempts[0].body.request_id,
+    source: "@codex just words",
+  });
+  assert.equal(ui.posts.uploads.length, 0);
 });

@@ -51,6 +51,7 @@ pub(super) fn rows() -> DashboardRows {
     })
     .collect();
     DashboardRows {
+        image_directory: None,
         namespace: StateNamespace::new("synthetic", SpaceId::new("w-router")),
         worktree: None,
         addresses,

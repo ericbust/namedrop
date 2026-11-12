@@ -2,6 +2,17 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.8.0] - 2026-11-11
+
+### Added
+
+- You can send images to an agent from Channels. Paste an image into the message box, drop it there, or pick it with the new image button beside Send. Each image shows as a small thumbnail above your text, with a button to remove it. After you send, the thumbnails show under the message in the thread, and a click opens the full image. This works in channels, threads and direct messages, on a phone, and over the tailnet link.
+- A message takes up to 4 images of up to 10 MB each. PNG, JPEG, GIF and WebP are accepted. Channels reads the type from the file's bytes, not its name, and refuses anything else. A message with images still needs some words, and Send stays off until you type them.
+- The agent gets one line per image at the end of your message, `Image: ` and the file's absolute path. Claude Code and Codex open it with their ordinary file tools. No image data travels in the message, so an image costs the agent's prompt one short line until it opens the file.
+- Claude Code opens the image without asking. It normally asks before it reads a file outside its working directory, so activation now adds one read rule for the image directory to Claude Code's settings, beside the command permissions Namedrop already manages. Deactivating the last worktree removes it. If Claude Code asks anyway, as it can right after an update, answer in its pane once and reactivate Namedrop.
+- Images are stored under `channel-images/` in Namedrop's state directory, readable by you only, and named by the SHA-256 of their bytes. The same image sent twice is stored once. An image is deleted 30 days after it was last attached, when Channels starts or when the next image is stored. A thread then shows "Image no longer stored" in its place.
+- A message with no image is sent and shown as before.
+
 ## [1.7.9] - 2026-11-11
 
 ### Added

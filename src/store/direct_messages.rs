@@ -968,6 +968,7 @@ mod tests {
         let request = serde_json::to_value(crate::dashboard::snapshot::message(
             &history.history.messages[0],
             &history.history.legs,
+            None,
         ))
         .unwrap();
         assert_eq!(
