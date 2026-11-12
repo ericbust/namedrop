@@ -20,8 +20,8 @@ use namedrop::{
     mux::{
         AgentState, Budget, Depth, Effect, InputOutcome, MuxError, Style, Wrap,
         fake::{
-            CHECKOUT_LISTINGS, Call, FakeMux, Listing, Read, ScopeKind, ScreenShape, SentInput,
-            StrictSpace, Takes, WorldBuilder, runs,
+            CHECKOUT_LISTINGS, Call, Command, FakeMux, Listing, Read, ScopeKind, ScreenShape,
+            SentInput, StrictSpace, Surveyed, Takes, WorldBuilder, runs,
         },
     },
 };
@@ -245,13 +245,53 @@ type Handed = (Read, Option<Listing>, Budget);
 /// The bytes an oversized pane read printed: twice the 64 KiB excerpt cap.
 const OVERSIZED_BYTES: usize = 128 * 1_024;
 
+/// What Herdr prints for `command`, whose length the old executor held to
+/// the command's output cap. A survey's commands all name workspace-1, the
+/// one space, and a pane read prints the lines it asked for.
+fn printed(mux: &FakeMux, command: &Command<'_>) -> String {
+    let lines;
+    let args: Vec<&str> = match (command.read, command.listing) {
+        (Read::Screen { pane, request }, None) => {
+            lines = request.lines.to_string();
+            let source = "recent-unwrapped";
+            vec![
+                "pane",
+                "read",
+                pane.as_str(),
+                "--source",
+                source,
+                "--lines",
+                &lines,
+            ]
+        }
+        (_, Some(Listing::Spaces)) => vec!["workspace", "list"],
+        (
+            Read::Survey {
+                scope: Surveyed::CheckoutOf(path),
+                ..
+            },
+            Some(Listing::CheckoutAt),
+        ) => {
+            let path = path.to_str().unwrap();
+            vec!["worktree", "list", "--cwd", path, "--json"]
+        }
+        (_, Some(Listing::CheckoutOf)) => {
+            vec!["worktree", "list", "--workspace", "workspace-1", "--json"]
+        }
+        (_, Some(Listing::PanesOf)) => vec!["pane", "list", "--workspace", "workspace-1"],
+        (read, listing) => panic!("the old executor ran no {read:?} {listing:?}"),
+    };
+    mux.herdr_reply(&args).unwrap_or_else(|error| error)
+}
+
 /// Workspace-1 on the test's repository, holding the six default panes. The
 /// old executor answered `workspace list` (no checkout stamp), `worktree list
 /// --cwd` and `--workspace workspace-1`, `pane list --workspace workspace-1`,
 /// and `pane read --source recent-unwrapped --lines 40`. It took `agent
 /// prompt` to any pane and any `pane report-metadata`, and failed every other
-/// command. It charged each Herdr command against the test's clock, which
-/// the command hook does here, one command at a time.
+/// command. It charged each Herdr command against the test's clock and
+/// refused any bounded command whose output outgrew its cap, which the
+/// command hook does here, one command at a time.
 ///
 /// The switches are the old executor's, and the hooks apply them.
 struct SnapshotSpace {
@@ -355,11 +395,10 @@ impl SnapshotSpace {
             Arc::clone(&self.read_cost_ms),
             Arc::clone(&self.state_read_step_ms),
         );
-        let (stalled, timeouts, replace, oversized, cancel) = (
+        let (stalled, timeouts, replace, cancel) = (
             Arc::clone(&self.stalled),
             Arc::clone(&self.timeouts),
             Arc::clone(&self.replace_after_read),
-            Arc::clone(&self.oversized),
             Arc::clone(&self.cancel_on_read),
         );
         self.space.on_command(move |mux, command| {
@@ -384,34 +423,29 @@ impl SnapshotSpace {
             if command.listing == Some(Listing::PanesOf) {
                 clock.step(state_step.load(Ordering::Relaxed));
             }
-            let Some(pane_id) = read_pane else {
-                return Ok(());
-            };
-            clock.step(0);
-            clock.advance(read_cost.load(Ordering::Relaxed));
-            if let Some(flag) = cancel.lock().unwrap().as_ref() {
-                flag.store(true, Ordering::Relaxed);
+            if let Some(pane_id) = read_pane {
+                clock.step(0);
+                clock.advance(read_cost.load(Ordering::Relaxed));
+                if let Some(flag) = cancel.lock().unwrap().as_ref() {
+                    flag.store(true, Ordering::Relaxed);
+                }
+                let target = replace
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .filter(|(trigger, _)| trigger == pane_id)
+                    .map(|(_, target)| target.clone());
+                if let Some(target) = target {
+                    mux.set_terminal(&target, "terminal-replacement");
+                    mux.set_session(&target, "session-replacement");
+                }
             }
-            let target = replace
-                .lock()
-                .unwrap()
-                .as_ref()
-                .filter(|(trigger, _)| trigger == pane_id)
-                .map(|(_, target)| target.clone());
-            if let Some(target) = target {
-                mux.set_terminal(&target, "terminal-replacement");
-                mux.set_session(&target, "session-replacement");
+            match command.budget {
+                Some(budget) if printed(mux, command).len() > budget.max_output_bytes => Err(
+                    MuxError::TooLarge("Herdr read exceeded its output limit".to_owned()),
+                ),
+                _ => Ok(()),
             }
-            if oversized.lock().unwrap().as_deref() == Some(pane_id)
-                && command
-                    .budget
-                    .is_some_and(|budget| OVERSIZED_BYTES > budget.max_output_bytes)
-            {
-                return Err(MuxError::TooLarge(
-                    "Herdr read exceeded its output limit".to_owned(),
-                ));
-            }
-            Ok(())
         });
     }
 
@@ -735,9 +769,11 @@ fn excerpts_are_redacted_quoted_and_bounded_to_recent_output() {
     let herdr = SnapshotSpace::new(&directory, Arc::clone(&clock));
     herdr.set_excerpt(
         "pane-lead",
+        // Herdr prints only the 40 lines read, so the filler fits in them and
+        // still outgrows the 2 KiB excerpt.
         &format!(
             "AWS_SECRET_ACCESS_KEY=do-not-share\n\u{1b}[31mred\u{1b}[0m\n{}\nlast line here\n",
-            "filler line\n".repeat(600)
+            format!("{}\n", "filler line ".repeat(16)).repeat(36)
         ),
     );
     herdr
