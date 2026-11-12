@@ -32,6 +32,7 @@ import { channelSuffix, connectionStatus, sortedChannels } from "../store.ts";
 import { routePath } from "../wire.ts";
 import { isHandoff } from "./Handoffs.tsx";
 import { Icon } from "./Icons.tsx";
+import { SoundChip, SoundSettingsControl } from "./SoundPicker.tsx";
 
 // One entry per row of the channel's Needs-you banner, where handoffs share one.
 function reason(channel: Channel): string {
@@ -604,11 +605,15 @@ export function Sidebar({
         {drawer === null && (
           <span className={`connection-dot ${connection}`} aria-hidden="true" />
         )}
-        {connection === "live"
-          ? "Live"
-          : connection === "connecting"
-            ? "Connecting…"
-            : "Reconnecting…"}
+        <span className="connection-status">
+          {connection === "live"
+            ? "Live"
+            : connection === "connecting"
+              ? "Connecting…"
+              : "Reconnecting…"}
+        </span>
+        <SoundChip />
+        <SoundSettingsControl />
       </footer>
     </aside>
   );

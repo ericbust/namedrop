@@ -1,3 +1,5 @@
+import type { Heard } from "./sounds.ts";
+
 export type SpaceKey = string & { readonly __brand: "SpaceKey" };
 export type AddressId = string & { readonly __brand: "AddressId" };
 
@@ -391,6 +393,7 @@ export type State = {
   nextRequestId: number;
   outbox: ReadonlyMap<string, Outgoing>;
   drafts: ReadonlyMap<DraftKey, Draft>;
+  heard: Heard;
 };
 export type PeekableKind = Exclude<MemberKind["type"], "human">;
 export type PeekTarget = Readonly<{

@@ -9,6 +9,7 @@ import { isDeepStrictEqual } from "node:util";
 import { chromium } from "playwright-core";
 import { build } from "vite";
 import { threadControlCopy } from "../src/copy.ts";
+import { RECIPES } from "../src/sounds.ts";
 
 const key = (n) => n.toString(16).padStart(20, "0");
 const fixture = JSON.parse(
@@ -106,6 +107,8 @@ function postRoute(onPost) {
   const receipts = new Map();
   const images = new Map();
   const uploads = [];
+  const soundPosts = [];
+  let soundState = { default: "chime", muted: false, agents: {} };
   const authorized = (req) =>
     (req.headers.cookie ?? "")
       .split(/;\s*/)
@@ -143,6 +146,35 @@ function postRoute(onPost) {
       if (bytes === undefined) return res.writeHead(404).end();
       res.writeHead(200, { "Content-Type": "image/png" });
       res.end(bytes);
+    },
+    soundPosts,
+    setSounds(value) {
+      soundState = value;
+    },
+    // Mirrors /api/sounds: GET reads the settings; POST takes one change with
+    // the CSRF header and answers with the settings it leaves.
+    async sounds(req, res) {
+      if (!authorized(req)) return sendJson(res, 401, {});
+      if (req.method === "GET") return sendJson(res, 200, soundState);
+      if (req.method !== "POST") return res.writeHead(405).end();
+      const post = {
+        csrf: req.headers["x-namedrop-csrf"] ?? null,
+        body: JSON.parse(await readBody(req)),
+      };
+      soundPosts.push(post);
+      if (post.csrf !== session.csrf) return res.writeHead(403).end();
+      const change = post.body;
+      if (change.kind === "default")
+        soundState = { ...soundState, default: change.sound };
+      else if (change.kind === "muted")
+        soundState = { ...soundState, muted: change.muted };
+      else if (change.kind === "agent") {
+        const agents = { ...soundState.agents };
+        if (change.sound === null) delete agents[change.agent];
+        else agents[change.agent] = change.sound;
+        soundState = { ...soundState, agents };
+      } else return sendJson(res, 400, {});
+      sendJson(res, 200, soundState);
     },
     cookie: `${COOKIE}=${session.secret}; Path=/; HttpOnly; SameSite=Strict`,
     rotate() {
@@ -340,6 +372,8 @@ async function open(
     observeLanding = false,
     liveInput = false,
     onSkills = () => ({ runtime: null, skills: [] }),
+    sounds = undefined,
+    directPeers = () => [],
   } = {},
 ) {
   const clients = new Set();
@@ -351,6 +385,7 @@ async function open(
   const inputRequests = [];
   const skillRequests = [];
   const posts = postRoute(onPost);
+  if (sounds !== undefined) posts.setSounds(sounds);
   const reviews = [];
   const screens = screenRoute(onScreen);
   const server = createServer(async (req, res) => {
@@ -377,7 +412,14 @@ async function open(
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname === "/api/session") return posts.token(req, res);
     if (url.pathname === "/api/direct-messages")
-      return sendJson(res, 200, { peers: [] });
+      return sendJson(res, 200, { peers: await directPeers() });
+    if (url.pathname === "/api/sounds") return posts.sounds(req, res);
+    if (/^\/w\/[^/]+\/direct-messages\/[^/]+\/messages$/.test(url.pathname))
+      return sendJson(res, 200, {
+        thread_id: null,
+        messages: [],
+        earlier_omitted: false,
+      });
     if (req.method === "POST" && url.pathname === "/api/images")
       return posts.upload(req, res);
     const image = /^\/api\/images\/([^/]+)$/.exec(url.pathname)?.[1];
@@ -506,6 +548,50 @@ async function open(
   const page = await browser.newPage();
   page.setDefaultTimeout(5000);
   page.on("pageerror", (error) => errors.push(error.message));
+  await page.addInitScript(() => {
+    // Records each note the page plays: its first frequency and its start.
+    window.played = [];
+    const param = () => ({
+      value: 0,
+      first: null,
+      setValueAtTime(value) {
+        this.first ??= value;
+        return this;
+      },
+      linearRampToValueAtTime() {
+        return this;
+      },
+      exponentialRampToValueAtTime() {
+        return this;
+      },
+    });
+    const node = () => ({ connect: (target) => target });
+    window.AudioContext = class {
+      state = "suspended";
+      destination = {};
+      get currentTime() {
+        return performance.now() / 1000;
+      }
+      addEventListener() {}
+      resume() {
+        this.state = "running";
+        return Promise.resolve();
+      }
+      createGain() {
+        return { ...node(), gain: param() };
+      }
+      createOscillator() {
+        const frequency = param();
+        return {
+          ...node(),
+          type: "sine",
+          frequency,
+          start: (at) => window.played.push({ freq: frequency.first, at }),
+          stop() {},
+        };
+      }
+    };
+  });
   await page.addInitScript((observeLanding) => {
     window.cspErrors = [];
     window.initialHistoryLength = history.length;
@@ -869,7 +955,7 @@ test("fix3 item 2: slow first discovery stays loading past the replay timeout un
     "Connecting to Namedrop",
   );
   assert.equal(
-    await ui.page.locator(".sidebar-footer").textContent(),
+    await ui.page.locator(".sidebar-footer .connection-status").textContent(),
     "Connecting…",
   );
   assert.equal(
@@ -1067,7 +1153,7 @@ test("fix3 item 2: interrupted staged discovery and first retries remain loading
   );
   assert.equal(await ui.channels.getByRole("button").count(), 0);
   assert.equal(
-    await ui.page.locator(".sidebar-footer").textContent(),
+    await ui.page.locator(".sidebar-footer .connection-status").textContent(),
     "Connecting…",
   );
   ui.connections[1].send("ready", { keys: [] });
@@ -1086,7 +1172,10 @@ test("fix3 item 2: legacy fallback data followed by last gone keeps known empty 
   await ui.page
     .getByRole("heading", { name: "No workspaces yet", exact: true })
     .waitFor();
-  assert.equal(await ui.page.locator(".sidebar-footer").textContent(), "Live");
+  assert.equal(
+    await ui.page.locator(".sidebar-footer .connection-status").textContent(),
+    "Live",
+  );
   assert.equal(ui.connections.length, 1);
 });
 
@@ -13426,4 +13515,225 @@ test("IMAGES: a message without an image is sent as before, and the composer add
     source: "@codex just words",
   });
   assert.equal(ui.posts.uploads.length, 0);
+});
+
+const SOUND_CODEX = "pane-address-1-1-1";
+const SOUND_CLAUDE = "pane-address-2-2-2";
+const SOUND_SHELL = "pane-address-3-3-3";
+const tune = (tone) => RECIPES[tone].map((note) => note.freq);
+// The notes played so far, grouped into sounds: a sound lasts under 0.6 s.
+async function sounds(page) {
+  const notes = await page.evaluate(() => window.played);
+  const groups = [];
+  for (const note of notes.toSorted((a, b) => a.at - b.at)) {
+    const last = groups.at(-1);
+    if (last && note.at - last.start < 0.7) last.freqs.push(note.freq);
+    else groups.push({ start: note.at, freqs: [note.freq] });
+  }
+  return groups.map((group) => group.freqs);
+}
+async function heardSounds(page, count) {
+  await page.waitForFunction((count) => window.played.length >= count, count);
+  return sounds(page);
+}
+const toPerson = (id, author, text = id) =>
+  message(id, text, {
+    author,
+    legs: [{ to: "human", stage: { stage: "delivered" } }],
+  });
+function room(messages) {
+  const value = frame(1, "alpha");
+  const [codex] = value.frame.participants;
+  value.frame.participants = [
+    { ...codex, address_id: SOUND_CODEX },
+    { ...codex, address_id: SOUND_CLAUDE, alias: "@claude" },
+    {
+      ...codex,
+      address_id: SOUND_SHELL,
+      alias: "@shell",
+      kind: { type: "terminal" },
+    },
+  ];
+  value.frame.messages = messages;
+  return value;
+}
+async function soundRoom(t, settings, options = {}) {
+  const ui = await open(t, (client) => replay(client, [room([])]), undefined, {
+    sounds: { default: "chime", muted: false, agents: {}, ...settings },
+    ...options,
+  });
+  await ui.live();
+  const send = async (messages) => {
+    ui.connections.at(-1).send("space", room(messages));
+    await ui.page
+      .locator(`main [data-message-id="${messages.at(-1).message_id}"]`)
+      .waitFor();
+  };
+  const unlock = async () => {
+    await ui.page.locator(".sound-chip").waitFor();
+    await ui.page.keyboard.press("Shift");
+    await ui.page.locator(".sound-chip").waitFor({ state: "detached" });
+  };
+  return { ui, send, unlock };
+}
+const dmPeer = (address, last) => ({
+  space_key: key(1),
+  address_id: address,
+  alias: "claude",
+  workspace_label: "alpha",
+  pane_label: null,
+  runtime: "claude-code",
+  presence: "idle",
+  closed: false,
+  thread_id: null,
+  last_activity_ms: null,
+  last_message_id: last,
+  last_agent_message_id: last,
+  attention_count: 0,
+});
+
+test("SOUNDS a: a direct message from an agent plays that agent's sound", async (t) => {
+  let reads = 0;
+  let last = "dm-1";
+  const { ui, unlock } = await soundRoom(
+    t,
+    { agents: { [SOUND_CLAUDE]: "knock" } },
+    {
+      directPeers: () => {
+        reads += 1;
+        return [dmPeer(SOUND_CLAUDE, last)];
+      },
+    },
+  );
+  await unlock();
+  await until(() => reads >= 1, "the first directory read");
+  last = "dm-2";
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("knock")]);
+});
+
+test("SOUNDS b: an agent set to None plays nothing", async (t) => {
+  const { ui, send, unlock } = await soundRoom(t, {
+    agents: { [SOUND_CLAUDE]: "none", [SOUND_CODEX]: "pop" },
+  });
+  await unlock();
+  await send([toPerson("quiet", SOUND_CLAUDE)]);
+  await send([toPerson("quiet", SOUND_CLAUDE), toPerson("loud", SOUND_CODEX)]);
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("pop")]);
+});
+
+test("SOUNDS c: mute plays nothing until the person turns sounds back on", async (t) => {
+  const { ui, send } = await soundRoom(t, {
+    muted: true,
+    agents: { [SOUND_CLAUDE]: "bell", [SOUND_CODEX]: "pop" },
+  });
+  const control = ui.page.locator(".sound-settings");
+  await control.locator("summary").getByText("Muted").click();
+  await send([toPerson("muted", SOUND_CLAUDE)]);
+  await control.getByRole("checkbox", { name: "Mute all sounds" }).uncheck();
+  await until(() => ui.posts.soundPosts.length === 1, "the mute change");
+  assert.deepEqual(ui.posts.soundPosts[0].body, {
+    kind: "muted",
+    muted: false,
+  });
+  await control.locator("summary").getByText("Sounds").waitFor();
+  await send([toPerson("muted", SOUND_CLAUDE), toPerson("heard", SOUND_CODEX)]);
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("pop")]);
+});
+
+test("SOUNDS d: agent-to-agent traffic and the person's own message stay silent", async (t) => {
+  const { ui, send, unlock } = await soundRoom(t, {
+    agents: { [SOUND_CLAUDE]: "bell", [SOUND_CODEX]: "pop" },
+  });
+  await unlock();
+  const quiet = [
+    message("between", "@codex over to you", {
+      author: SOUND_CLAUDE,
+      legs: [{ to: SOUND_CODEX, stage: { stage: "delivered" } }],
+    }),
+    message("mine", "@claude hello", {
+      legs: [{ to: SOUND_CLAUDE, stage: { stage: "delivered" } }],
+    }),
+    message("run", "ls", {
+      author: SOUND_SHELL,
+      legs: [{ to: "human", stage: { stage: "delivered" } }],
+    }),
+  ];
+  await send(quiet);
+  await send([...quiet, toPerson("answer", SOUND_CODEX)]);
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("pop")]);
+});
+
+test("SOUNDS e: an agent's answer to the person in a channel plays its sound", async (t) => {
+  const { ui, send, unlock } = await soundRoom(t, {
+    agents: { [SOUND_CLAUDE]: "marimba" },
+  });
+  await unlock();
+  await send([toPerson("answer", SOUND_CLAUDE, "Here is what I found.")]);
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("marimba")]);
+});
+
+test("SOUNDS f: a burst within a second plays once", async (t) => {
+  const { ui, send, unlock } = await soundRoom(t, {
+    agents: { [SOUND_CLAUDE]: "bell", [SOUND_CODEX]: "pop" },
+  });
+  await unlock();
+  const burst = [toPerson("one", SOUND_CLAUDE), toPerson("two", SOUND_CODEX)];
+  await send(burst.slice(0, 1));
+  await send(burst);
+  await send([...burst, toPerson("three", SOUND_CODEX)]);
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  await send([
+    ...burst,
+    toPerson("three", SOUND_CODEX),
+    toPerson("four", SOUND_CLAUDE),
+  ]);
+  assert.deepEqual(await heardSounds(ui.page, tune("bell").length * 2), [
+    tune("bell"),
+    tune("bell"),
+  ]);
+});
+
+test("SOUNDS g: before any click a quiet chip asks for one, nothing plays, and the click hides it", async (t) => {
+  const { ui, send } = await soundRoom(t, {});
+  const chip = ui.page.getByRole("button", { name: "Click to turn on sounds" });
+  await chip.waitFor();
+  assert.equal(await chip.getAttribute("role"), null);
+  await send([toPerson("early", SOUND_CLAUDE)]);
+  assert.deepEqual(await sounds(ui.page), []);
+  await chip.click();
+  await chip.waitFor({ state: "detached" });
+  await send([
+    toPerson("early", SOUND_CLAUDE),
+    toPerson("later", SOUND_CLAUDE),
+  ]);
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("chime")]);
+});
+
+test("SOUNDS h: the agent picker saves the choice with the CSRF header, and preview plays it", async (t) => {
+  const { ui } = await soundRoom(
+    t,
+    {},
+    {
+      path: `/?dm=${key(1)}/${encodeURIComponent(SOUND_CLAUDE)}`,
+      directPeers: () => [dmPeer(SOUND_CLAUDE, null)],
+    },
+  );
+  const picker = ui.page.locator(".dm-header .sound-picker");
+  await picker.locator("summary").click();
+  const group = picker.getByRole("group", { name: "Sound for @claude" });
+  assert.equal(
+    await group.getByRole("radio", { name: "Default (Chime)" }).isChecked(),
+    true,
+  );
+  await group.getByRole("radio", { name: "Pop", exact: true }).check();
+  await until(() => ui.posts.soundPosts.length === 1, "the sound change");
+  assert.deepEqual(ui.posts.soundPosts[0], {
+    csrf: ui.posts.session.csrf,
+    body: { kind: "agent", agent: SOUND_CLAUDE, sound: "pop" },
+  });
+  await picker.locator("summary").getByText("Pop").waitFor();
+  await group.getByRole("button", { name: "Play Pop" }).click();
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("pop")]);
+  await ui.page.keyboard.press("Escape");
+  assert.equal(await picker.evaluate((details) => details.open), false);
 });

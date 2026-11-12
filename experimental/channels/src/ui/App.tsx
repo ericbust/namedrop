@@ -93,6 +93,7 @@ import { ChannelsToggle, Sidebar } from "./Sidebar.tsx";
 import { ThreadPane, type ThreadResponse } from "./ThreadPane.tsx";
 import { type Located, Timeline } from "./Timeline.tsx";
 import { useDirectMessages } from "./useDirectMessages.ts";
+import { SoundContext, useSounds } from "./useSounds.ts";
 
 const noGroups: ReadonlyMap<string, ThreadGroup> = new Map();
 const noRows: readonly TimelineRow[] = [];
@@ -179,6 +180,7 @@ export function App() {
     bootState({ visible: !document.hidden, route: routeOf(location) }),
   );
   const dm = useDirectMessages(selectedDm, poster, state.channels);
+  const sounds = useSounds(poster, state.heard, dm.heard);
   const [frameVersion, frameArrived] = useReducer(
     (version: number) => version + 1,
     0,
@@ -1048,7 +1050,7 @@ export function App() {
     }
   }
   const updatedAt = lastUpdate.current;
-  return (
+  const page = (
     <PeekContext value={peekAccess}>
       <MessageContexts
         deliveries={deliveryAccess}
@@ -1404,4 +1406,5 @@ export function App() {
       </MessageContexts>
     </PeekContext>
   );
+  return <SoundContext value={sounds}>{page}</SoundContext>;
 }
