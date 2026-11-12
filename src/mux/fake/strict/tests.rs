@@ -240,6 +240,62 @@ fn each_listing_answers_exactly_its_surveys() {
 }
 
 #[test]
+fn each_listing_constant_is_every_survey_whose_herdr_listings_its_fake_answered() {
+    let pairs = [
+        ScopeKind::Space,
+        ScopeKind::PanesOf,
+        ScopeKind::CheckoutOf,
+        ScopeKind::All,
+    ]
+    .into_iter()
+    .flat_map(|kind| [(kind, Depth::Spaces), (kind, Depth::Panes)]);
+    let within = |answered: &[Listing]| -> Vec<(ScopeKind, Depth)> {
+        pairs
+            .clone()
+            .filter(|(kind, depth)| {
+                listings(*kind, *depth)
+                    .iter()
+                    .all(|listing| answered.contains(listing))
+            })
+            .collect()
+    };
+    let sorted = |pairs: &[(ScopeKind, Depth)]| {
+        let mut pairs: Vec<_> = pairs.iter().map(|pair| format!("{pair:?}")).collect();
+        pairs.sort();
+        pairs
+    };
+    assert_eq!(
+        sorted(&within(&[
+            Listing::Spaces,
+            Listing::CheckoutAt,
+            Listing::PanesOf
+        ])),
+        sorted(CHECKOUT_LISTINGS)
+    );
+    assert_eq!(
+        sorted(&within(&[
+            Listing::Spaces,
+            Listing::CheckoutAt,
+            Listing::CheckoutOf,
+            Listing::AllPanes,
+            Listing::PanesOf
+        ])),
+        sorted(EVERY_LISTING)
+    );
+    let space = crate::SpaceId::new("workspace-1");
+    let read = |scope: Scope<'_>, depth| Read::Survey {
+        scope: super::super::Surveyed::of(scope),
+        depth,
+    };
+    assert!(runs(
+        &read(Scope::Space(&space), Depth::Panes),
+        Listing::PanesOf
+    ));
+    assert!(!runs(&read(Scope::All, Depth::Panes), Listing::PanesOf));
+    assert!(!runs(&Read::IntegrationRoot, Listing::PanesOf));
+}
+
+#[test]
 fn prompts_and_metadata_takes_prompts_identity_and_badges_and_nothing_else() {
     let taken = space(Takes::prompts_and_metadata());
     prompt(&taken, "pane-author");
@@ -404,12 +460,14 @@ fn a_connection_that_outlives_the_space_fails_the_test() {
 fn clones_that_observers_hooks_and_predicates_capture_do_not_outlive_the_space() {
     let mux = author();
     let reader = mux.clone();
-    let takes = Takes::nothing().input(move |attempt| {
-        reader
-            .sent_to(attempt.pane.as_str())
-            .iter()
-            .any(|sent| sent.input == attempt.input)
-    });
+    let takes = Takes::nothing()
+        .input(move |attempt| {
+            reader
+                .sent_to(attempt.pane.as_str())
+                .iter()
+                .any(|sent| sent.input == attempt.input)
+        })
+        .effect(|effect| *effect == Effect::ReloadKeybindings);
     let space = StrictSpace::new(mux, CHECKOUT_LISTINGS, takes);
     let observed = space.clone();
     space.on_input(move |_, _| drop(observed.sent()));
@@ -418,8 +476,14 @@ fn clones_that_observers_hooks_and_predicates_capture_do_not_outlive_the_space()
         drop(hooked.reads());
         Ok(())
     });
+    let applying = space.clone();
+    space.on_apply(move |_, _| {
+        drop(applying.effects());
+        Err(MuxError::Unavailable("refused".into()))
+    });
     prompt(&space, "pane-author");
     let _ = space.process(&PaneId::new("pane-author"));
+    let _ = space.apply(&Effect::ReloadKeybindings);
     let (done, verdict_of) = mpsc::channel();
     std::thread::spawn(move || done.send(verdict(space)).unwrap());
     assert_eq!(

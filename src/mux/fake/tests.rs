@@ -244,14 +244,12 @@ fn a_settled_agent_takes_a_prompt_and_starts_working() {
 }
 
 #[test]
-fn the_native_gate_declines_a_busy_or_absent_agent_before_typing() {
+fn the_native_gate_declines_a_blocked_or_absent_agent_before_typing() {
     let mux = author_and_reviewer();
     let reviewer = identity(&mux, "pane-reviewer");
+    mux.set_state("pane-author", AgentState::Blocked);
     for (pane, reason) in [
-        (
-            "pane-reviewer",
-            "pane pane-reviewer cannot take a prompt now",
-        ),
+        ("pane-author", "pane pane-author cannot take a prompt now"),
         ("pane-shell", "pane pane-shell cannot take a prompt now"),
         ("pane-gone", "pane pane-gone is gone"),
     ] {
@@ -265,14 +263,22 @@ fn the_native_gate_declines_a_busy_or_absent_agent_before_typing() {
 }
 
 #[test]
-fn the_native_gate_honors_a_between_turns_admission_like_herdr() {
+fn the_native_gate_types_to_a_working_or_unknown_agent_whatever_the_admission_like_herdr() {
     let mux = author_and_reviewer();
     let reviewer = identity(&mux, "pane-reviewer");
+    for admit in [Admit::Settled, Admit::BetweenTurns] {
+        assert_eq!(
+            prompt(&mux, "pane-reviewer", &reviewer, admit),
+            InputOutcome::Delivered,
+            "{admit:?}"
+        );
+    }
+    mux.set_state("pane-reviewer", AgentState::Unknown("thinking".into()));
     assert_eq!(
-        prompt(&mux, "pane-reviewer", &reviewer, Admit::BetweenTurns),
+        prompt(&mux, "pane-reviewer", &reviewer, Admit::Settled),
         InputOutcome::Delivered
     );
-    assert_eq!(prompts(&mux, "pane-reviewer"), ["hello"]);
+    assert_eq!(prompts(&mux, "pane-reviewer"), ["hello", "hello", "hello"]);
 }
 
 #[test]
@@ -422,7 +428,8 @@ fn every_attempt_is_recorded_with_its_outcome_even_when_nothing_was_typed() {
             keys: &keys,
         },
     );
-    let busy = prompt(&mux, "pane-reviewer", &reviewer, Admit::Settled);
+    mux.set_state("pane-reviewer", AgentState::Blocked);
+    let blocked = prompt(&mux, "pane-reviewer", &reviewer, Admit::Settled);
     assert!(mux.sent().is_empty());
     assert_eq!(
         mux.attempts(),
@@ -438,7 +445,7 @@ fn every_attempt_is_recorded_with_its_outcome_even_when_nothing_was_typed() {
             Attempt {
                 pane: PaneId::new("pane-reviewer"),
                 input: SentInput::Prompt("hello".into()),
-                outcome: busy,
+                outcome: blocked,
             },
         ]
     );
@@ -912,7 +919,8 @@ fn input_observers_see_every_attempt_with_its_outcome_before_it_returns() {
     let reviewer = identity(&mux, "pane-reviewer");
     mux.script("pane-shell", InputOutcome::Refused("invalid_input".into()));
     let delivered = prompt(&mux, "pane-author", &author, Admit::Settled);
-    let busy = prompt(&mux, "pane-reviewer", &reviewer, Admit::Settled);
+    mux.set_state("pane-reviewer", AgentState::Blocked);
+    let blocked = prompt(&mux, "pane-reviewer", &reviewer, Admit::Settled);
     let refused = mux.send(&PaneId::new("pane-shell"), InputKind::Line("ls"));
     let ghost = mux.send(&PaneId::new("pane-ghost"), InputKind::Line("ls"));
     let attempt = |pane: &str, input, outcome| Attempt {
@@ -922,7 +930,7 @@ fn input_observers_see_every_attempt_with_its_outcome_before_it_returns() {
     };
     let attempts = [
         attempt("pane-author", SentInput::Prompt("hello".into()), delivered),
-        attempt("pane-reviewer", SentInput::Prompt("hello".into()), busy),
+        attempt("pane-reviewer", SentInput::Prompt("hello".into()), blocked),
         attempt("pane-shell", SentInput::Line("ls".into()), refused),
         attempt("pane-ghost", SentInput::Line("ls".into()), ghost),
     ];
@@ -995,4 +1003,518 @@ fn a_connection_to_the_fake_endpoint_shares_its_world() {
     let connected = mux.connect("socket-a", budget, Arc::default()).unwrap();
     connected.apply(&Effect::ReloadKeybindings).unwrap();
     assert_eq!(mux.effects(), [Effect::ReloadKeybindings]);
+}
+
+fn listed_panes(mux: &FakeMux, space: &str) -> Vec<String> {
+    mux.survey(Scope::PanesOf(&SpaceId::new(space)), Depth::Panes)
+        .unwrap()
+        .spaces[0]
+        .panes
+        .iter()
+        .map(|pane| pane.id.as_str().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_hidden_pane_leaves_every_listing_keeps_its_place_and_still_takes_reads_and_input() {
+    let mux = author_and_reviewer();
+    mux.hide_pane("pane-author");
+    assert_eq!(listed_panes(&mux, "workspace-1"), ["pane-reviewer"]);
+    let one = SpaceId::new("workspace-1");
+    for (scope, depth) in [
+        (Scope::Space(&one), Depth::Panes),
+        (Scope::CheckoutOf(Path::new("/repo")), Depth::Panes),
+        (Scope::All, Depth::Panes),
+    ] {
+        let survey = mux.survey(scope, depth).unwrap();
+        assert!(
+            survey
+                .spaces
+                .iter()
+                .flat_map(|space| &space.panes)
+                .all(|pane| pane.id.as_str() != "pane-author"),
+            "{scope:?} {depth:?}"
+        );
+    }
+    let author = identity(&mux, "pane-author");
+    assert_eq!(
+        prompt(&mux, "pane-author", &author, Admit::Settled),
+        InputOutcome::Delivered
+    );
+    mux.show_pane("pane-author");
+    assert_eq!(
+        listed_panes(&mux, "workspace-1"),
+        ["pane-author", "pane-reviewer"],
+        "back in its old place"
+    );
+}
+
+#[test]
+fn a_space_whose_only_pane_is_hidden_leaves_the_all_panes_listing() {
+    let mux = author_and_reviewer();
+    mux.hide_pane("pane-shell");
+    let survey = mux.survey(Scope::All, Depth::Panes).unwrap();
+    assert!(
+        survey
+            .spaces
+            .iter()
+            .all(|space| space.id.as_str() != "workspace-2")
+    );
+}
+
+#[test]
+fn a_pane_hidden_by_the_builder_appears_when_shown() {
+    let mux = FakeMux::world()
+        .space("workspace-1")
+        .pane("pane-a")
+        .pane("pane-b")
+        .hidden()
+        .build();
+    assert_eq!(listed_panes(&mux, "workspace-1"), ["pane-a"]);
+    mux.show_pane("pane-b");
+    assert_eq!(listed_panes(&mux, "workspace-1"), ["pane-a", "pane-b"]);
+}
+
+#[test]
+fn an_opened_pane_joins_the_end_of_its_space_as_described() {
+    let mux = author_and_reviewer();
+    mux.open_pane("workspace-2", |space| {
+        space
+            .pane("pane-elsewhere")
+            .terminal("t2")
+            .tab("tab-9")
+            .claude()
+            .session("session-reviewer")
+            .working()
+    });
+    assert_eq!(
+        listed_panes(&mux, "workspace-2"),
+        ["pane-shell", "pane-elsewhere"]
+    );
+    let opened = mux.facts("pane-elsewhere");
+    assert_eq!(opened.space, SpaceId::new("workspace-2"));
+    assert_eq!(opened.terminal, TerminalId::new("t2"));
+    assert_eq!(opened.tab, TabId::new("tab-9"));
+    assert_eq!(opened.state, Some(AgentState::Working));
+    assert_eq!(
+        opened.agent,
+        Some(AgentIdentity {
+            kind: AgentKind::Known(AgentRuntime::ClaudeCode),
+            label: Some("claude".into()),
+            session: SessionClaim::Reported(AgentSessionId::new("session-reviewer")),
+        })
+    );
+}
+
+#[test]
+#[should_panic(expected = "the world already has a pane pane-author")]
+fn opening_a_pane_whose_id_is_taken_panics() {
+    author_and_reviewer().open_pane("workspace-2", |space| space.pane("pane-author"));
+}
+
+#[test]
+#[should_panic(expected = "open_pane describes panes only")]
+fn opening_a_space_through_open_pane_panics() {
+    author_and_reviewer().open_pane("workspace-2", |space| space.space("workspace-9"));
+}
+
+fn checkout_path(mux: &FakeMux, scope: Scope<'_>, depth: Depth) -> Option<PathBuf> {
+    mux.survey(scope, depth).unwrap().spaces[0]
+        .checkout
+        .as_ref()
+        .map(|checkout| checkout.path.clone())
+}
+
+#[test]
+fn a_checkout_can_be_removed_restored_and_moved_and_the_listing_follows_it() {
+    let mux = author_and_reviewer();
+    let one = SpaceId::new("workspace-1");
+    mux.set_checkout("workspace-1", None);
+    assert_eq!(checkout_path(&mux, Scope::Space(&one), Depth::Panes), None);
+    assert_eq!(
+        mux.survey(Scope::Space(&one), Depth::Panes).unwrap().spaces[0].worktree,
+        Some(WorktreeId::new("herdr-space:workspace-1"))
+    );
+    assert!(
+        mux.survey(Scope::CheckoutOf(Path::new("/repo")), Depth::Panes)
+            .is_err()
+    );
+    mux.set_checkout("workspace-1", Some(Path::new("/repo")));
+    assert_eq!(
+        checkout_path(&mux, Scope::CheckoutOf(Path::new("/repo")), Depth::Spaces),
+        Some("/repo".into())
+    );
+    mux.set_checkout("workspace-1", Some(Path::new("/moved")));
+    assert_eq!(
+        checkout_path(&mux, Scope::Space(&one), Depth::Spaces),
+        Some("/moved".into()),
+        "the listing names the moved checkout"
+    );
+    assert_eq!(
+        checkout_path(&mux, Scope::Space(&one), Depth::Panes),
+        Some("/moved".into())
+    );
+}
+
+#[test]
+fn a_stamp_and_an_unlisted_space_change_only_the_space_listings() {
+    let mux = FakeMux::world()
+        .space("w1")
+        .label("one")
+        .checkout("/repo")
+        .stamped("/worktrees/repo/one", Some("repo"))
+        .space("w2")
+        .checkout("/two")
+        .unstamped()
+        .space("w3")
+        .checkout("/three")
+        .unlisted()
+        .build();
+    let listed = mux.survey(Scope::All, Depth::Spaces).unwrap();
+    let stamps: Vec<_> = listed
+        .spaces
+        .iter()
+        .map(|space| {
+            (
+                space.id.as_str().to_owned(),
+                space
+                    .checkout
+                    .as_ref()
+                    .map(|checkout| checkout.path.clone()),
+                space
+                    .checkout
+                    .as_ref()
+                    .and_then(|checkout| checkout.repo_name.clone()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        stamps,
+        [
+            (
+                "w1".to_owned(),
+                Some(PathBuf::from("/worktrees/repo/one")),
+                Some("repo".to_owned())
+            ),
+            ("w2".to_owned(), None, None),
+        ],
+        "w3 is unlisted"
+    );
+    let w1 = SpaceId::new("w1");
+    assert_eq!(
+        checkout_path(&mux, Scope::Space(&w1), Depth::Spaces),
+        Some("/worktrees/repo/one".into()),
+        "workspace get names the stamp"
+    );
+    assert_eq!(
+        checkout_path(&mux, Scope::Space(&w1), Depth::Panes),
+        Some("/repo".into()),
+        "worktree list --workspace names the checkout"
+    );
+    let w3 = SpaceId::new("w3");
+    assert_eq!(
+        checkout_path(&mux, Scope::Space(&w3), Depth::Panes),
+        Some("/three".into()),
+        "an unlisted space still answers by id"
+    );
+    assert_eq!(
+        checkout_path(&mux, Scope::CheckoutOf(Path::new("/two")), Depth::Spaces),
+        Some("/two".into())
+    );
+}
+
+#[test]
+fn an_agent_kind_and_a_session_come_and_go_as_herdr_reports_them() {
+    let mux = author_and_reviewer();
+    mux.set_agent("pane-shell", Some(AgentKind::Known(AgentRuntime::Codex)));
+    assert_eq!(
+        mux.facts("pane-shell").agent,
+        Some(AgentIdentity {
+            kind: AgentKind::Known(AgentRuntime::Codex),
+            label: Some("codex".into()),
+            session: SessionClaim::None,
+        })
+    );
+    mux.set_agent("pane-author", None);
+    assert_eq!(
+        mux.facts("pane-author").agent,
+        Some(AgentIdentity {
+            kind: AgentKind::Unreported,
+            label: None,
+            session: SessionClaim::Reported(AgentSessionId::new("session-author")),
+        }),
+        "a pane that still reports a session is an agent"
+    );
+    mux.clear_session("pane-author");
+    assert_eq!(mux.facts("pane-author").agent, None, "a free terminal pane");
+    mux.clear_session("pane-reviewer");
+    assert_eq!(
+        mux.facts("pane-reviewer").agent,
+        Some(AgentIdentity {
+            kind: AgentKind::Known(AgentRuntime::Codex),
+            label: Some("codex".into()),
+            session: SessionClaim::None,
+        }),
+        "a pane that reports a kind is an agent"
+    );
+    mux.set_agent("pane-reviewer", None);
+    assert_eq!(mux.facts("pane-reviewer").agent, None);
+    mux.set_agent("pane-reviewer", Some(AgentKind::Other("aider".into())));
+    assert_eq!(
+        mux.facts("pane-reviewer")
+            .agent
+            .and_then(|agent| agent.label),
+        Some("aider".into())
+    );
+}
+
+#[test]
+fn a_process_a_space_label_and_the_integration_root_answer_later_reads() {
+    let mux = author_and_reviewer().strict_reads();
+    let author = PaneId::new("pane-author");
+    assert!(matches!(
+        mux.process(&author),
+        Err(MuxError::Unavailable(_))
+    ));
+    let process = PaneProcess {
+        shell_pid: Some(41),
+        foreground_group: Some(42),
+        foreground_pids: vec![42],
+        tty: Some("/dev/ttys004".into()),
+    };
+    mux.set_process("pane-author", Some(process.clone()));
+    assert_eq!(mux.process(&author), Ok(process));
+    mux.set_process("pane-author", None);
+    assert!(matches!(
+        mux.process(&author),
+        Err(MuxError::Unavailable(_))
+    ));
+    assert!(matches!(
+        mux.integration_root(),
+        Err(MuxError::Unavailable(_))
+    ));
+    mux.set_integration_root(Some(Path::new("/plugins/namedrop")));
+    assert_eq!(mux.integration_root(), Ok(Some("/plugins/namedrop".into())));
+    mux.set_integration_root(None);
+    assert!(mux.integration_root().is_err());
+    let one = SpaceId::new("workspace-1");
+    let label = |mux: &FakeMux| {
+        mux.survey(Scope::Space(&one), Depth::Spaces)
+            .unwrap()
+            .spaces[0]
+            .label
+            .clone()
+    };
+    mux.set_label("workspace-1", Some("renamed"));
+    assert_eq!(label(&mux), Some("renamed".into()));
+    mux.set_label("workspace-1", None);
+    assert_eq!(label(&mux), None);
+}
+
+#[test]
+fn a_pane_can_report_no_session_field_at_all() {
+    let mux = FakeMux::world()
+        .space("workspace-1")
+        .pane("pane-quiet")
+        .claude()
+        .idle()
+        .reports_session(false)
+        .pane("pane-loud")
+        .claude()
+        .idle()
+        .build();
+    let survey = mux
+        .survey(Scope::PanesOf(&SpaceId::new("workspace-1")), Depth::Panes)
+        .unwrap();
+    let reports: Vec<_> = survey.spaces[0]
+        .panes
+        .iter()
+        .map(|pane| pane.reports_session)
+        .collect();
+    assert_eq!(reports, [false, true]);
+}
+
+#[test]
+fn every_new_setter_panics_on_an_unknown_id() {
+    type Call = Box<dyn Fn(&FakeMux)>;
+    let calls: [(&str, Call); 9] = [
+        ("pane", Box::new(|mux| mux.hide_pane("pane-9"))),
+        ("pane", Box::new(|mux| mux.show_pane("pane-9"))),
+        ("pane", Box::new(|mux| mux.set_agent("pane-9", None))),
+        ("pane", Box::new(|mux| mux.clear_session("pane-9"))),
+        ("pane", Box::new(|mux| mux.set_process("pane-9", None))),
+        (
+            "pane",
+            Box::new(|mux| {
+                mux.facts("pane-9");
+            }),
+        ),
+        (
+            "space",
+            Box::new(|mux| mux.open_pane("workspace-9", |space| space.pane("pane-new"))),
+        ),
+        (
+            "space",
+            Box::new(|mux| mux.set_checkout("workspace-9", Some(Path::new("/x")))),
+        ),
+        ("space", Box::new(|mux| mux.set_label("workspace-9", None))),
+    ];
+    for (what, call) in calls {
+        let mux = author_and_reviewer();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call(&mux)))
+            .expect_err("an unknown id panics");
+        let message = panicked
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            message.starts_with(&format!("the world has no {what} ")),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn a_connection_keeps_its_budget_and_cancel_flag_for_hooks_and_the_read_log() {
+    let mux = author_and_reviewer();
+    let budget = Budget {
+        timeout: Duration::from_millis(500),
+        max_output_bytes: 4096,
+    };
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let saw = Arc::clone(&seen);
+    mux.on_read(move |connection, _| {
+        saw.lock()
+            .unwrap()
+            .push((connection.budget(), connection.cancelled()));
+        if connection.cancelled() {
+            return Err(MuxError::Unavailable("cancelled".into()));
+        }
+        Ok(())
+    });
+    let connected = mux
+        .connect("socket-a", budget, Arc::clone(&cancelled))
+        .unwrap();
+    connected.integration_root().unwrap();
+    cancelled.store(true, Ordering::SeqCst);
+    assert!(connected.integration_root().is_err());
+    mux.integration_root().unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(Some(budget), false), (Some(budget), true), (None, false)]
+    );
+    assert_eq!(
+        mux.budgeted_reads(),
+        [
+            (Read::IntegrationRoot, Some(budget)),
+            (Read::IntegrationRoot, Some(budget)),
+            (Read::IntegrationRoot, None),
+        ]
+    );
+    assert_eq!(mux.reads().len(), 3);
+}
+
+#[test]
+fn facts_inspect_the_world_without_logging_a_read_or_running_a_hook() {
+    let mux = author_and_reviewer();
+    mux.on_read(|_, _| panic!("facts ran a read hook"));
+    mux.hide_pane("pane-author");
+    assert_eq!(mux.facts("pane-author").state, Some(AgentState::Idle));
+    assert!(mux.reads().is_empty());
+}
+
+/// Runs `f` on a thread and fails, rather than hangs, when it does not end
+/// within five seconds, as when it waits on a lock its caller holds.
+fn finishes(f: impl FnOnce() + Send + 'static) {
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        f();
+        let _ = done.send(());
+    });
+    finished
+        .recv_timeout(Duration::from_secs(5))
+        .expect("finished without waiting on a lock it holds");
+}
+
+#[test]
+fn hooks_and_observers_run_with_the_world_and_their_own_lists_unlocked() {
+    finishes(|| {
+        let mux = author_and_reviewer();
+        mux.on_read(|mux, read| {
+            if matches!(read, Read::IntegrationRoot) {
+                mux.set_state("pane-author", AgentState::Done);
+                mux.on_read(|_, _| Ok(()));
+                mux.on_input(|_, _| {});
+            }
+            Ok(())
+        });
+        mux.on_input(|mux, _| {
+            mux.set_screen("pane-shell", Some("observed"));
+            mux.on_input(|_, _| {});
+            mux.on_read(|_, _| Ok(()));
+        });
+        mux.integration_root().unwrap();
+        assert_eq!(state(&mux, "pane-author"), Some(AgentState::Done));
+        mux.send(&PaneId::new("pane-shell"), InputKind::Line("ls"));
+        assert_eq!(
+            mux.lock()
+                .pane(&PaneId::new("pane-shell"))
+                .and_then(|pane| pane.screen.clone()),
+            Some("observed".into())
+        );
+    });
+}
+
+#[test]
+fn a_read_within_a_budget_logs_the_tighter_of_it_and_the_connection_s() {
+    let mux = author_and_reviewer();
+    let budget = |millis, bytes| Budget {
+        timeout: Duration::from_millis(millis),
+        max_output_bytes: bytes,
+    };
+    mux.within(budget(2000, 65536)).integration_root().unwrap();
+    let connected = mux
+        .connect("socket-a", budget(500, 1 << 20), Arc::default())
+        .unwrap();
+    connected
+        .within(budget(2000, 65536))
+        .integration_root()
+        .unwrap();
+    assert_eq!(
+        mux.budgeted_reads(),
+        [
+            (Read::IntegrationRoot, Some(budget(2000, 65536))),
+            (Read::IntegrationRoot, Some(budget(500, 65536))),
+        ]
+    );
+}
+
+#[test]
+fn an_apply_hook_fails_the_effects_it_names_and_each_stays_attempted() {
+    let mux = author_and_reviewer();
+    mux.on_apply(|mux, effect| match effect {
+        Effect::ReloadKeybindings => {
+            mux.set_state("pane-author", AgentState::Done);
+            Err(MuxError::Unavailable(
+                "server reload-config is unexpected".into(),
+            ))
+        }
+        _ => Ok(()),
+    });
+    assert_eq!(
+        mux.apply(&Effect::ReloadKeybindings),
+        Err(MuxError::Unavailable(
+            "server reload-config is unexpected".into()
+        ))
+    );
+    let rename = Effect::RenameTab {
+        tab: TabId::new("workspace-1:tab-1"),
+        label: "@author".into(),
+    };
+    assert_eq!(mux.apply(&rename), Ok(Applied::Done));
+    assert_eq!(state(&mux, "pane-author"), Some(AgentState::Done));
+    assert_eq!(mux.effects(), std::slice::from_ref(&rename));
+    assert_eq!(mux.attempted_effects(), [Effect::ReloadKeybindings, rename]);
+    assert_eq!(Arc::strong_count(&mux.shared), 1, "no hook holds the world");
 }

@@ -20,7 +20,7 @@ use std::{
 };
 
 mod transport {
-    use crate::mux::InputOutcome;
+    use crate::mux::{Budget, InputOutcome};
 
     /// Runs one Herdr command and returns its stdout, or its error text.
     /// Public only inside this private module, so nothing outside the
@@ -28,13 +28,62 @@ mod transport {
     pub trait Transport: Send + Sync {
         fn run(&self, args: &[&str]) -> Result<String, String>;
 
+        /// `run` held to `budget` as well. A scripted transport has no
+        /// clock or output cap to hold, so it runs the command as `run` does.
+        fn run_within(&self, args: &[&str], _budget: Budget) -> Result<String, String> {
+            self.run(args)
+        }
+
         fn input_failure(&self, error: String) -> InputOutcome {
             super::wire::input_failure(error)
         }
     }
+
+    impl<T: Transport + ?Sized> Transport for &T {
+        fn run(&self, args: &[&str]) -> Result<String, String> {
+            (**self).run(args)
+        }
+
+        fn run_within(&self, args: &[&str], budget: Budget) -> Result<String, String> {
+            (**self).run_within(args, budget)
+        }
+
+        fn input_failure(&self, error: String) -> InputOutcome {
+            (**self).input_failure(error)
+        }
+    }
+
+    /// A transport whose every command is held to `budget` as well.
+    pub struct Within<T> {
+        pub transport: T,
+        pub budget: Budget,
+    }
+
+    impl<T: Transport> Transport for Within<T> {
+        fn run(&self, args: &[&str]) -> Result<String, String> {
+            self.transport.run_within(args, self.budget)
+        }
+
+        fn run_within(&self, args: &[&str], budget: Budget) -> Result<String, String> {
+            self.transport
+                .run_within(args, tighter(self.budget, budget))
+        }
+
+        fn input_failure(&self, error: String) -> InputOutcome {
+            self.transport.input_failure(error)
+        }
+    }
+
+    /// Each limit of the two that is reached first.
+    pub fn tighter(one: Budget, other: Budget) -> Budget {
+        Budget {
+            timeout: one.timeout.min(other.timeout),
+            max_output_bytes: one.max_output_bytes.min(other.max_output_bytes),
+        }
+    }
 }
 
-use transport::Transport;
+use transport::{Transport, Within, tighter};
 
 pub(crate) struct HerdrMux<T> {
     transport: T,
@@ -54,7 +103,8 @@ impl<T: Transport> HerdrMux<T> {
     }
 
     /// `MuxInput::deliver` minus the lock token. Herdr gates prompts itself:
-    /// `agent prompt` refuses a busy agent before it types.
+    /// `agent prompt` refuses a blocked agent before it types, and types to a
+    /// working one, so the request's `admit` is not passed.
     pub(crate) fn send(&self, pane: &PaneId, kind: InputKind<'_>) -> InputOutcome {
         let args = match kind {
             InputKind::Prompt(request) => {
@@ -132,6 +182,16 @@ impl<T: Transport> MuxRead for HerdrMux<T> {
     fn integration_root(&self) -> Result<Option<PathBuf>, MuxError> {
         wire::integration_root(&self.transport)
     }
+
+    /// The transport's type is erased, so a budget within a budget is the
+    /// same type rather than a new one for each level.
+    fn within(&self, budget: Budget) -> Box<dyn MuxRead + '_> {
+        let transport: &dyn Transport = &self.transport;
+        Box::new(HerdrMux {
+            transport: Within { transport, budget },
+            endpoint: self.endpoint.clone(),
+        })
+    }
 }
 
 impl<T: Transport> MuxAct for HerdrMux<T> {
@@ -187,12 +247,17 @@ struct Process {
 
 impl Transport for Process {
     fn run(&self, args: &[&str]) -> Result<String, String> {
+        self.run_within(args, self.budget)
+    }
+
+    fn run_within(&self, args: &[&str], budget: Budget) -> Result<String, String> {
+        let budget = tighter(self.budget, budget);
         self.herdr
             .execute_bounded(
                 args,
-                self.budget.timeout,
+                budget.timeout,
                 &self.cancelled,
-                self.budget.max_output_bytes,
+                budget.max_output_bytes,
             )
             .map(|output| output.stdout)
     }
@@ -208,39 +273,42 @@ impl<E: HerdrCommandExecutor + Sync> Transport for Legacy<'_, E> {
         self.0.execute(args).map(|output| output.stdout)
     }
 
+    /// `execute_bounded` with no cancellation, as `bounded` runs a read
+    /// whose caller has nothing to cancel.
+    fn run_within(&self, args: &[&str], budget: Budget) -> Result<String, String> {
+        self.0
+            .execute_bounded(
+                args,
+                budget.timeout,
+                &AtomicBool::new(false),
+                budget.max_output_bytes,
+            )
+            .map(|output| output.stdout)
+    }
+
     /// The executor's own classification, so a bridged fake keeps its answers.
     fn input_failure(&self, error: String) -> InputOutcome {
         self.0.input_failure(error)
     }
 }
 
-/// A legacy executor does not know its socket. Callers keep reading
-/// `LifecycleRuntime::session_socket_id` until the bridge is deleted.
+/// A legacy executor's endpoint when it names none: an empty key.
 static LEGACY_ENDPOINT: Endpoint = Endpoint {
     kind: MuxKind::Herdr,
     key: String::new(),
 };
 
+pub(crate) fn legacy_endpoint() -> &'static Endpoint {
+    &LEGACY_ENDPOINT
+}
+
+/// The executor's own `mux_endpoint`, so a popup through the bridge names the
+/// socket a keyed `ProcessHerdr` was given. Deleted with the bridge, when a
+/// connector fixes the endpoint instead.
 fn bridge<E: HerdrCommandExecutor + Sync>(executor: &E) -> HerdrMux<Legacy<'_, E>> {
     HerdrMux {
         transport: Legacy(executor),
-        endpoint: LEGACY_ENDPOINT.clone(),
-    }
-}
-
-/// A legacy executor that knows the Herdr session it speaks to, so a popup's
-/// `HERDR_SOCKET_PATH` names that session instead of the bridge's empty key.
-/// Deleted with the bridge, when a connector fixes the endpoint instead.
-pub fn at_socket<'a, E: HerdrCommandExecutor + Sync>(
-    executor: &'a E,
-    socket: &str,
-) -> impl MuxAct + 'a {
-    HerdrMux {
-        transport: Legacy(executor),
-        endpoint: Endpoint {
-            kind: MuxKind::Herdr,
-            key: socket.to_owned(),
-        },
+        endpoint: executor.mux_endpoint().clone(),
     }
 }
 
@@ -259,7 +327,11 @@ where
     B: Fn() -> Result<Budget, String> + Send + Sync,
 {
     fn run(&self, args: &[&str]) -> Result<String, String> {
-        let budget = (self.budget)()?;
+        self.run_within(args, Budget::ADAPTER_DEFAULT)
+    }
+
+    fn run_within(&self, args: &[&str], budget: Budget) -> Result<String, String> {
+        let budget = tighter((self.budget)()?, budget);
         self.executor
             .execute_bounded(
                 args,
@@ -291,7 +363,7 @@ where
 
 impl<E: HerdrCommandExecutor + Send + Sync> MuxRead for E {
     fn endpoint(&self) -> &Endpoint {
-        &LEGACY_ENDPOINT
+        self.mux_endpoint()
     }
 
     fn survey(&self, scope: Scope<'_>, depth: Depth) -> Result<Survey, MuxError> {
@@ -312,6 +384,16 @@ impl<E: HerdrCommandExecutor + Send + Sync> MuxRead for E {
 
     fn integration_root(&self) -> Result<Option<PathBuf>, MuxError> {
         bridge(self).integration_root()
+    }
+
+    fn within(&self, budget: Budget) -> Box<dyn MuxRead + '_> {
+        Box::new(HerdrMux {
+            transport: Within {
+                transport: Legacy(self),
+                budget,
+            },
+            endpoint: self.mux_endpoint().clone(),
+        })
     }
 }
 

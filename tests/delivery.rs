@@ -1,3 +1,4 @@
+#![cfg(feature = "test-support")]
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
@@ -5,19 +6,26 @@ mod delivered;
 
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, AttentionSourceKind, Clock, DeliveryAttemptId,
-    DeliveryId, DeliveryState, GraceDeadline, HealthRepairKind, HerdrCommandExecutor,
-    HerdrCommandOutput, IdGenerator, LeaseDraft, LifecycleRuntime, MessageDraft, MessageId,
-    MessageRecipientDraft, MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId,
-    PaneRoleId, StateNamespace, StateStore, ThreadId, complete_capability_profile,
-    diagnose_collaboration, drain_mailboxes, execute_control_operation,
-    execute_integration_operation, execute_lifecycle_operation, issue_registration_challenge,
-    mux::{InputOutcome, Retry},
+    DeliveryId, DeliveryState, GraceDeadline, HealthRepairKind, IdGenerator, LeaseDraft,
+    LifecycleRuntime, MessageDraft, MessageId, MessageRecipientDraft, MutationAttribution,
+    PaneAddressDraft, PaneAddressId, PaneBindingId, PaneRoleId, StateNamespace, StateStore,
+    ThreadId, complete_capability_profile, diagnose_collaboration, drain_mailboxes,
+    execute_control_operation, execute_integration_operation, execute_lifecycle_operation,
+    issue_registration_challenge,
+    mux::{
+        AgentState, Badge, Depth, Effect, InputOutcome, Retry,
+        fake::{
+            Attempt, CHECKOUT_LISTINGS, FakeMux, Listing, ScopeKind, SentInput, StrictSpace, Takes,
+            runs,
+        },
+    },
 };
 use std::{
     fs,
+    ops::Deref,
     path::{Path, PathBuf},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -80,186 +88,226 @@ impl Drop for TestDirectory {
     }
 }
 
-#[derive(Default)]
-struct FakeHerdr {
-    metadata: Mutex<Vec<Vec<String>>>,
-    notifications: Mutex<Vec<Vec<String>>>,
-    prompts: Mutex<Vec<String>>,
+/// Whether a badge list runs a `pane report-metadata --source namedrop`
+/// with exactly two `--token`s, as the old fakes matched it. A list with no
+/// counters runs no such command, so the old fakes never saw it.
+fn two_token_counters(badges: &[Badge]) -> bool {
+    let counters = badges
+        .iter()
+        .filter(|badge| matches!(badge, Badge::Awaiting(_) | Badge::Attention(_)))
+        .count();
+    counters == 0 || counters == 2
 }
 
-impl HerdrCommandExecutor for FakeHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let stdout = match args {
-            ["workspace", "list"] => {
-                r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
-                    .to_owned()
-            }
-            ["worktree", "list", "--cwd", "/repo", "--json"]
-            | ["worktree", "list", "--json"] => {
-                r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-                    .to_owned()
-            }
-            ["pane", "list", "--workspace", "workspace-1"] => r#"{"result":{"panes":[
-                {"pane_id":"pane-author","terminal_id":"terminal-author","tab_id":"tab-1","workspace_id":"workspace-1","agent_session":{"value":"session-author"},"agent_status":"idle"},
-                {"pane_id":"pane-recipient","terminal_id":"terminal-recipient","tab_id":"tab-1","workspace_id":"workspace-1","agent_session":{"value":"session-recipient"},"agent_status":"done"},
-                {"pane_id":"pane-failure","terminal_id":"terminal-failure","tab_id":"tab-1","workspace_id":"workspace-1","agent_session":{"value":"session-failure"},"agent_status":"idle"},
-                {"pane_id":"pane-invalid","terminal_id":"terminal-invalid","tab_id":"tab-1","workspace_id":"workspace-1","agent_session":{"value":"session-invalid"},"agent_status":"idle"}
-            ]}}"#
-            .to_owned(),
-            ["agent", "prompt", "pane-author" | "pane-recipient", envelope] => {
-                self.prompts.lock().unwrap().push((*envelope).to_owned());
-                "{}".to_owned()
-            }
-            ["agent", "prompt", "pane-failure", envelope] => {
-                self.prompts.lock().unwrap().push((*envelope).to_owned());
-                return Err("agent.prompt outcome is ambiguous".to_owned());
-            }
-            ["agent", "prompt", "pane-invalid", envelope] => {
-                self.prompts.lock().unwrap().push((*envelope).to_owned());
-                return Err(
-                    r#"{"error":{"code":"invalid_input","message":"invalid prompt"}}"#.to_owned(),
-                );
-            }
-            notification @ ["notification", "show", _, "--body", _, "--position", "bottom-right", "--sound", "done"] => {
-                self.notifications
-                    .lock()
-                    .unwrap()
-                    .push(notification.iter().map(|argument| (*argument).to_owned()).collect());
-                "{}".to_owned()
-            }
-            metadata @ [
-                "pane",
-                "report-metadata",
-                "pane-author",
-                "--source",
-                "namedrop-relay",
-                "--token",
-                _,
-                "--ttl-ms",
-                "15000",
-            ] => {
-                self.metadata
-                    .lock()
-                    .unwrap()
-                    .push(metadata.iter().map(|argument| (*argument).to_owned()).collect());
-                "{}".to_owned()
-            }
-            metadata @ [
-                "pane",
-                "report-metadata",
-                _,
-                "--source",
-                "namedrop",
-                "--token",
-                _,
-                "--token",
-                _,
-            ] => {
-                self.metadata
-                    .lock()
-                    .unwrap()
-                    .push(metadata.iter().map(|argument| (*argument).to_owned()).collect());
-                "{}".to_owned()
-            }
-            _ => return Err(format!("unexpected Herdr command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput { stdout })
-    }
+/// The prompts the code tried to type, refused and ambiguous ones included,
+/// as the old fakes kept every `agent prompt` they were sent.
+fn prompts_tried(space: &FakeMux) -> Vec<String> {
+    space
+        .attempts()
+        .into_iter()
+        .filter_map(|Attempt { input, .. }| match input {
+            SentInput::Prompt(text) => Some(text),
+            _ => None,
+        })
+        .collect()
+}
 
-    fn input_failure(&self, error: String) -> InputOutcome {
-        if error.contains(r#""code":"invalid_input""#) {
-            InputOutcome::Refused(error)
-        } else {
-            InputOutcome::Ambiguous(error)
+/// Four agents in `workspace-1`, which holds `/repo`, each reporting a
+/// session and no agent kind: the author and the recipient succeed,
+/// `pane-failure` fails ambiguously, and `pane-invalid` refuses the prompt.
+/// The old fake gated nothing, so each pane answers every prompt. The space
+/// answers `workspace list` (no checkout stamp), `worktree list --cwd`, and
+/// `pane list --workspace`. It takes `agent prompt` to the four panes,
+/// `notification show` with `--sound done`, a relay badge on `pane-author`,
+/// and two counter tokens on any pane.
+struct StaticSpace {
+    space: StrictSpace,
+}
+
+impl StaticSpace {
+    fn new() -> Self {
+        let mut world = FakeMux::world()
+            .endpoint("socket-a")
+            .space("workspace-1")
+            .checkout("/repo")
+            .unstamped();
+        for (name, state) in [
+            ("author", AgentState::Idle),
+            ("recipient", AgentState::Done),
+            ("failure", AgentState::Idle),
+            ("invalid", AgentState::Idle),
+        ] {
+            world = world
+                .pane(&format!("pane-{name}"))
+                .terminal(&format!("terminal-{name}"))
+                .tab("tab-1")
+                .session(&format!("session-{name}"))
+                .state(state);
+        }
+        let mux = world.build();
+        for (pane, outcome) in [
+            ("pane-author", InputOutcome::Delivered),
+            ("pane-recipient", InputOutcome::Delivered),
+            (
+                "pane-failure",
+                InputOutcome::Ambiguous("agent.prompt outcome is ambiguous".into()),
+            ),
+            (
+                "pane-invalid",
+                InputOutcome::Refused(
+                    r#"{"error":{"code":"invalid_input","message":"invalid prompt"}}"#.into(),
+                ),
+            ),
+        ] {
+            mux.answer(pane, outcome);
+        }
+        let takes = Takes::nothing()
+            .input(|attempt| {
+                matches!(attempt.input, SentInput::Prompt(_))
+                    && [
+                        "pane-author",
+                        "pane-recipient",
+                        "pane-failure",
+                        "pane-invalid",
+                    ]
+                    .contains(&attempt.pane.as_str())
+            })
+            .effect(|effect| matches!(effect, Effect::Notify { sound: true, .. }))
+            .effect(|effect| match effect {
+                Effect::Badges { pane, badges } => {
+                    two_token_counters(badges)
+                        && badges.iter().all(|badge| {
+                            !matches!(badge, Badge::Relay { .. }) || pane.as_str() == "pane-author"
+                        })
+                }
+                _ => false,
+            });
+        Self {
+            space: StrictSpace::new(mux, CHECKOUT_LISTINGS, takes),
         }
     }
+
+    fn prompts(&self) -> Vec<String> {
+        prompts_tried(self)
+    }
+
+    /// The title and body of each notification shown.
+    fn notifications(&self) -> Vec<(String, String)> {
+        self.effects()
+            .into_iter()
+            .filter_map(|effect| match effect {
+                Effect::Notify { title, body, .. } => Some((title, body)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every badge list published, on any pane.
+    fn badges(&self) -> Vec<Vec<Badge>> {
+        self.effects()
+            .into_iter()
+            .filter_map(|effect| match effect {
+                Effect::Badges { badges, .. } => Some(badges),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
-struct DynamicHerdr {
-    session: Mutex<String>,
-    status: Mutex<String>,
-    prompts: AtomicU64,
-    definitive_failures: AtomicU64,
-    pane_lists_before_working: AtomicU64,
+impl Deref for StaticSpace {
+    type Target = FakeMux;
+
+    fn deref(&self) -> &FakeMux {
+        &self.space
+    }
 }
 
-impl DynamicHerdr {
+/// One agent, `pane-recipient` in `workspace-1`, whose session and status
+/// the test changes, and which starts working at the `pane list
+/// --workspace` that empties `lists_before_working`. The old fake gated
+/// nothing, so it answers every prompt, after the declines the test asks
+/// for. The space answers every `workspace list`, `worktree list`, and
+/// `pane list --workspace`, and takes `agent prompt` to `pane-recipient`
+/// and two counter tokens on any pane.
+struct DynamicSpace {
+    space: StrictSpace,
+    lists_before_working: Arc<AtomicU64>,
+}
+
+impl DynamicSpace {
+    fn new(session: &str, status: &str) -> Self {
+        let mux = FakeMux::world()
+            .endpoint("socket-a")
+            .space("workspace-1")
+            .checkout("/repo")
+            .unstamped()
+            .pane("pane-recipient")
+            .terminal("terminal-recipient")
+            .tab("tab-1")
+            .session(session)
+            .state(AgentState::parse(status))
+            .build();
+        mux.answer("pane-recipient", InputOutcome::Delivered);
+        let lists_before_working = Arc::new(AtomicU64::new(0));
+        let remaining = Arc::clone(&lists_before_working);
+        mux.on_read(move |mux, read| {
+            if runs(read, Listing::PanesOf)
+                && remaining.try_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                    left.checked_sub(1)
+                }) == Ok(1)
+            {
+                mux.set_state("pane-recipient", AgentState::Working);
+            }
+            Ok(())
+        });
+        let takes = Takes::nothing()
+            .input(|attempt| {
+                attempt.pane.as_str() == "pane-recipient"
+                    && matches!(attempt.input, SentInput::Prompt(_))
+            })
+            .effect(|effect| {
+                matches!(effect, Effect::Badges { badges, .. }
+                    if !badges.iter().any(|badge| matches!(badge, Badge::Relay { .. }))
+                        && two_token_counters(badges))
+            });
+        let mut listings = CHECKOUT_LISTINGS.to_vec();
+        listings.push((ScopeKind::Space, Depth::Panes));
+        Self {
+            space: StrictSpace::new(mux, &listings, takes),
+            lists_before_working,
+        }
+    }
+
     fn set_occupant(&self, session: &str, status: &str) {
-        *self.session.lock().unwrap() = session.to_owned();
-        *self.status.lock().unwrap() = status.to_owned();
+        self.space.set_session("pane-recipient", session);
+        self.space
+            .set_state("pane-recipient", AgentState::parse(status));
+    }
+
+    /// The next prompt is declined before anything is typed.
+    fn reject_next_prompt(&self) {
+        self.space.script(
+            "pane-recipient",
+            InputOutcome::Declined(Retry::OnEvent, "definitive pre-invocation rejection".into()),
+        );
+    }
+
+    /// The agent starts working at the `lists`th `pane list --workspace`
+    /// from now.
+    fn start_working_at_list(&self, lists: u64) {
+        self.lists_before_working.store(lists, Ordering::Relaxed);
+    }
+
+    fn prompt_count(&self) -> u64 {
+        prompts_tried(self).len() as u64
     }
 }
 
-impl HerdrCommandExecutor for DynamicHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let stdout = match args {
-            ["workspace", "list"] => {
-                r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#.to_owned()
-            }
-            ["worktree", "list", "--cwd", "/repo", "--json"]
-            | ["worktree", "list", "--json"]
-            | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
-                r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-                    .to_owned()
-            }
-            ["pane", "list", "--workspace", "workspace-1"] => {
-                if self.pane_lists_before_working.try_update(
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                    |remaining| remaining.checked_sub(1),
-                ) == Ok(1)
-                {
-                    *self.status.lock().unwrap() = "working".to_owned();
-                }
-                serde_json::json!({
-                    "result": {
-                        "panes": [{
-                            "pane_id": "pane-recipient",
-                            "terminal_id": "terminal-recipient",
-                            "tab_id": "tab-1",
-                            "workspace_id": "workspace-1",
-                            "agent_session": {"value": self.session.lock().unwrap().clone()},
-                            "agent_status": self.status.lock().unwrap().clone()
-                        }]
-                    }
-                })
-                .to_string()
-            }
-            ["agent", "prompt", "pane-recipient", _] => {
-                self.prompts.fetch_add(1, Ordering::Relaxed);
-                if self
-                    .definitive_failures
-                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
-                        remaining.checked_sub(1)
-                    })
-                    .is_ok()
-                {
-                    return Err("definitive pre-invocation rejection".to_owned());
-                }
-                "{}".to_owned()
-            }
-            [
-                "pane",
-                "report-metadata",
-                _,
-                "--source",
-                "namedrop",
-                "--token",
-                _,
-                "--token",
-                _,
-            ] => "{}".to_owned(),
-            _ => return Err(format!("unexpected Herdr command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput { stdout })
-    }
+impl Deref for DynamicSpace {
+    type Target = FakeMux;
 
-    fn input_failure(&self, error: String) -> InputOutcome {
-        if error == "definitive pre-invocation rejection" {
-            InputOutcome::Declined(Retry::OnEvent, error)
-        } else {
-            InputOutcome::Ambiguous(error)
-        }
+    fn deref(&self) -> &FakeMux {
+        &self.space
     }
 }
 
@@ -343,7 +391,7 @@ fn a_contended_pane_defers_only_its_mailbox_until_the_next_drain() {
             tx.complete_reconciliation(&namespace)
         })
         .unwrap();
-    let herdr = FakeHerdr::default();
+    let herdr = StaticSpace::new();
     let clock = TestClock::default();
     clock.now_ms.store(100, Ordering::Relaxed);
     let ids = SequenceIds(AtomicU64::new(1));
@@ -355,7 +403,7 @@ fn a_contended_pane_defers_only_its_mailbox_until_the_next_drain() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &clock,
         ids: &ids,
     };
@@ -457,9 +505,7 @@ fn a_contended_pane_defers_only_its_mailbox_until_the_next_drain() {
     );
     let envelopes = || {
         herdr
-            .prompts
-            .lock()
-            .unwrap()
+            .prompts()
             .iter()
             .map(|prompt| delivered::envelope_of(prompt))
             .collect::<Vec<_>>()
@@ -626,13 +672,7 @@ fn assert_expired_unsent_cancellation(fail_before_expiry: bool) {
             tx.complete_reconciliation(&namespace)
         })
         .unwrap();
-    let herdr = DynamicHerdr {
-        session: Mutex::new("session-1".into()),
-        status: Mutex::new("working".into()),
-        prompts: AtomicU64::new(0),
-        definitive_failures: AtomicU64::new(0),
-        pane_lists_before_working: AtomicU64::new(0),
-    };
+    let herdr = DynamicSpace::new("session-1", "working");
     let clock = TestClock::default();
     clock.now_ms.store(100, Ordering::Relaxed);
     let ids = SequenceIds(AtomicU64::new(1));
@@ -644,7 +684,7 @@ fn assert_expired_unsent_cancellation(fail_before_expiry: bool) {
         workspace_id: None,
         current_pane_id: Some("pane-recipient"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &clock,
         ids: &ids,
     };
@@ -694,7 +734,7 @@ fn assert_expired_unsent_cancellation(fail_before_expiry: bool) {
     let failed_prompts = u64::from(fail_before_expiry);
     if fail_before_expiry {
         herdr.set_occupant("session-1", "idle");
-        herdr.definitive_failures.store(1, Ordering::Relaxed);
+        herdr.reject_next_prompt();
         assert_eq!(drain_mailboxes(&runtime).unwrap().requeued.len(), 1);
         herdr.set_occupant("session-1", "working");
     }
@@ -703,7 +743,7 @@ fn assert_expired_unsent_cancellation(fail_before_expiry: bool) {
     assert_eq!(expired.expired, [DeliveryId::new("delivery-1")]);
     herdr.set_occupant("session-1", "idle");
     assert!(drain_mailboxes(&runtime).unwrap().submitted.is_empty());
-    assert_eq!(herdr.prompts.load(Ordering::Relaxed), failed_prompts);
+    assert_eq!(herdr.prompt_count(), failed_prompts);
 
     let cancelled = execute_control_operation(
         "delivery.cancel-held",
@@ -716,7 +756,7 @@ fn assert_expired_unsent_cancellation(fail_before_expiry: bool) {
     assert_eq!(cancelled["state"], "cancelled");
     assert_eq!(cancelled["drain"]["submitted"].as_array().unwrap().len(), 1);
     assert_eq!(
-        herdr.prompts.load(Ordering::Relaxed),
+        herdr.prompt_count(),
         failed_prompts + 1,
         "only the next message is submitted"
     );
@@ -732,7 +772,7 @@ fn assert_expired_unsent_cancellation(fail_before_expiry: bool) {
         "the old identifier cannot cancel anything else"
     );
     assert!(drain_mailboxes(&runtime).unwrap().submitted.is_empty());
-    assert_eq!(herdr.prompts.load(Ordering::Relaxed), failed_prompts + 1);
+    assert_eq!(herdr.prompt_count(), failed_prompts + 1);
     let attention = StateStore::open(directory.path())
         .unwrap()
         .transaction(|tx| tx.unresolved_attention_items(&namespace))
@@ -836,7 +876,7 @@ fn human_mention_round_trip(hold_report: bool) {
         })
         .unwrap();
 
-    let herdr = FakeHerdr::default();
+    let herdr = StaticSpace::new();
     let clock = TestClock::default();
     let ids = SequenceIds(AtomicU64::new(1));
     let runtime = LifecycleRuntime {
@@ -847,7 +887,7 @@ fn human_mention_round_trip(hold_report: bool) {
         workspace_id: None,
         current_pane_id: Some("pane-recipient"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &clock,
         ids: &ids,
     };
@@ -966,7 +1006,7 @@ fn human_mention_round_trip(hold_report: bool) {
     );
     assert_eq!(clock.waits.lock().unwrap().as_slice(), [500]);
     assert_eq!(first.submitted.len(), 1);
-    let prompts = herdr.prompts.lock().unwrap();
+    let prompts = herdr.prompts();
     assert_eq!(prompts.len(), 1);
     let envelope: serde_json::Value = delivered::envelope_of(&prompts[0]);
     assert_eq!(envelope["control"]["protocol_version"], "collab/v1");
@@ -1064,14 +1104,14 @@ fn human_mention_round_trip(hold_report: bool) {
     let returned_attempts = disposition_drain.submitted;
     assert_eq!(returned_attempts.len(), 1);
     let return_attempt_id = returned_attempts[0].as_str().to_owned();
-    assert_eq!(herdr.prompts.lock().unwrap().len(), 2);
-    let notifications = herdr.notifications.lock().unwrap();
+    assert_eq!(herdr.prompts().len(), 2);
+    let notifications = herdr.notifications();
     assert_eq!(notifications.len(), 1);
-    assert_eq!(notifications[0][2], "@recipient replied");
-    assert_eq!(notifications[0][4], "REVIEW COMPLETE");
+    assert_eq!(notifications[0].0, "@recipient replied");
+    assert_eq!(notifications[0].1, "REVIEW COMPLETE");
     drop(notifications);
     assert!(drain_mailboxes(&runtime).unwrap().submitted.is_empty());
-    let prompts = herdr.prompts.lock().unwrap();
+    let prompts = herdr.prompts();
     assert_eq!(prompts.len(), 2);
     let returned: serde_json::Value = delivered::envelope_of(&prompts[1]);
     assert_eq!(returned["control"]["reply_mode"], "report_to_human");
@@ -1206,7 +1246,7 @@ fn human_mention_round_trip(hold_report: bool) {
             .unwrap(),
         DeliveryState::Acknowledged
     );
-    assert_eq!(herdr.prompts.lock().unwrap().len(), 3);
+    assert_eq!(herdr.prompts().len(), 3);
 
     StateStore::open(directory.path())
         .unwrap()
@@ -1243,7 +1283,7 @@ fn human_mention_round_trip(hold_report: bool) {
     let expired = drain_mailboxes(&runtime).unwrap();
 
     assert_eq!(expired.expired, [DeliveryId::new("delivery-3")]);
-    assert_eq!(herdr.prompts.lock().unwrap().len(), 3);
+    assert_eq!(herdr.prompts().len(), 3);
 
     StateStore::open(directory.path())
         .unwrap()
@@ -1281,12 +1321,12 @@ fn human_mention_round_trip(hold_report: bool) {
 
     assert_eq!(ambiguous.held.len(), 1);
     assert!(after_ambiguous.held.is_empty());
-    assert_eq!(herdr.prompts.lock().unwrap().len(), 4);
-    assert!(herdr.metadata.lock().unwrap().iter().any(|command| {
-        command.contains(&"namedrop-awaiting=0".to_owned())
-            && command
+    assert_eq!(herdr.prompts().len(), 4);
+    assert!(herdr.badges().iter().any(|badges| {
+        badges.contains(&Badge::Awaiting(0))
+            && badges
                 .iter()
-                .any(|value| value.starts_with("namedrop-attention="))
+                .any(|badge| matches!(badge, Badge::Attention(_)))
     }));
 
     StateStore::open(directory.path())
@@ -1325,7 +1365,7 @@ fn human_mention_round_trip(hold_report: bool) {
     let after_failed = drain_mailboxes(&runtime).unwrap();
 
     assert!(after_failed.failed.is_empty());
-    assert_eq!(herdr.prompts.lock().unwrap().len(), 5);
+    assert_eq!(herdr.prompts().len(), 5);
     StateStore::open(directory.path())
         .unwrap()
         .transaction(|transaction| {
@@ -1345,11 +1385,11 @@ fn human_mention_round_trip(hold_report: bool) {
             Ok(())
         })
         .unwrap();
-    assert!(herdr.metadata.lock().unwrap().iter().any(|command| {
-        command.contains(&"namedrop-awaiting=0".to_owned())
-            && command
+    assert!(herdr.badges().iter().any(|badges| {
+        badges.contains(&Badge::Awaiting(0))
+            && badges
                 .iter()
-                .any(|value| value.starts_with("namedrop-attention="))
+                .any(|badge| matches!(badge, Badge::Attention(_)))
     }));
 }
 
@@ -1448,13 +1488,7 @@ fn status_events_preserve_busy_fifo_then_hold_a_submitted_attempt_on_session_cha
         })
         .unwrap();
 
-    let herdr = DynamicHerdr {
-        session: Mutex::new("session-1".to_owned()),
-        status: Mutex::new("working".to_owned()),
-        prompts: AtomicU64::new(0),
-        definitive_failures: AtomicU64::new(0),
-        pane_lists_before_working: AtomicU64::new(0),
-    };
+    let herdr = DynamicSpace::new("session-1", "working");
     let clock = TestClock::default();
     clock.now_ms.store(100, Ordering::Relaxed);
     let ids = SequenceIds(AtomicU64::new(1));
@@ -1466,7 +1500,7 @@ fn status_events_preserve_busy_fifo_then_hold_a_submitted_attempt_on_session_cha
         workspace_id: None,
         current_pane_id: Some("pane-recipient"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &clock,
         ids: &ids,
     };
@@ -1515,7 +1549,7 @@ fn status_events_preserve_busy_fifo_then_hold_a_submitted_attempt_on_session_cha
         .unwrap();
 
     assert!(drain_mailboxes(&runtime).unwrap().submitted.is_empty());
-    assert_eq!(herdr.prompts.load(Ordering::Relaxed), 0);
+    assert_eq!(herdr.prompt_count(), 0);
 
     StateStore::open(directory.path())
         .unwrap()
@@ -1601,7 +1635,7 @@ fn status_events_preserve_busy_fifo_then_hold_a_submitted_attempt_on_session_cha
         &runtime,
     )
     .unwrap();
-    herdr.pane_lists_before_working.store(2, Ordering::Relaxed);
+    herdr.start_working_at_list(2);
     execute_integration_operation(
         "register",
         serde_json::json!({
@@ -1614,10 +1648,10 @@ fn status_events_preserve_busy_fifo_then_hold_a_submitted_attempt_on_session_cha
     )
     .unwrap();
     assert!(drain_mailboxes(&runtime).unwrap().submitted.is_empty());
-    assert_eq!(herdr.prompts.load(Ordering::Relaxed), 0);
+    assert_eq!(herdr.prompt_count(), 0);
 
     herdr.set_occupant("session-1", "idle");
-    herdr.definitive_failures.store(1, Ordering::Relaxed);
+    herdr.reject_next_prompt();
     let event_result = execute_lifecycle_operation(
         "event.agent-status-changed",
         serde_json::json!({
@@ -1633,11 +1667,11 @@ fn status_events_preserve_busy_fifo_then_hold_a_submitted_attempt_on_session_cha
         event_result["drain"]["requeued"].as_array().unwrap().len(),
         1
     );
-    assert_eq!(herdr.prompts.load(Ordering::Relaxed), 1);
+    assert_eq!(herdr.prompt_count(), 1);
 
     let retry = drain_mailboxes(&runtime).unwrap();
     let attempt_id = retry.submitted[0].clone();
-    assert_eq!(herdr.prompts.load(Ordering::Relaxed), 2);
+    assert_eq!(herdr.prompt_count(), 2);
     let rejected_attempt = event_result["drain"]["requeued"][0].as_str().unwrap();
     let attention = StateStore::open(directory.path())
         .unwrap()
@@ -1672,7 +1706,7 @@ fn status_events_preserve_busy_fifo_then_hold_a_submitted_attempt_on_session_cha
             .unwrap(),
         DeliveryState::Held
     );
-    assert_eq!(herdr.prompts.load(Ordering::Relaxed), 2);
+    assert_eq!(herdr.prompt_count(), 2);
 }
 
 const OBSERVED_ATTEMPT_CREATED_AT_MS: u64 = 100;
@@ -1680,7 +1714,7 @@ const OBSERVED_ATTEMPT_CREATED_AT_MS: u64 = 100;
 struct ObservedAttemptFixture {
     directory: TestDirectory,
     namespace: StateNamespace,
-    herdr: DynamicHerdr,
+    herdr: DynamicSpace,
     clock: TestClock,
     ids: SequenceIds,
     attempt_id: DeliveryAttemptId,
@@ -1781,13 +1815,7 @@ impl ObservedAttemptFixture {
                 Ok(())
             })
             .unwrap();
-        let herdr = DynamicHerdr {
-            session: Mutex::new("session-1".to_owned()),
-            status: Mutex::new("idle".to_owned()),
-            prompts: AtomicU64::new(0),
-            definitive_failures: AtomicU64::new(0),
-            pane_lists_before_working: AtomicU64::new(0),
-        };
+        let herdr = DynamicSpace::new("session-1", "idle");
         Self {
             directory,
             namespace,
@@ -1798,7 +1826,7 @@ impl ObservedAttemptFixture {
         }
     }
 
-    fn runtime(&self) -> LifecycleRuntime<'_, DynamicHerdr, TestClock, SequenceIds> {
+    fn runtime(&self) -> LifecycleRuntime<'_, FakeMux, TestClock, SequenceIds> {
         LifecycleRuntime {
             state_directory: self.directory.path(),
             home_directory: Some(self.directory.home()),
@@ -1807,7 +1835,7 @@ impl ObservedAttemptFixture {
             workspace_id: None,
             current_pane_id: Some("pane-recipient"),
             session_socket_id: "socket-a",
-            mux: &self.herdr,
+            mux: &*self.herdr,
             clock: &self.clock,
             ids: &self.ids,
         }
@@ -1949,7 +1977,7 @@ fn unsettled_agent_responses_remain_recoverable_in_the_inbox() {
         })
         .unwrap();
 
-    let herdr = FakeHerdr::default();
+    let herdr = StaticSpace::new();
     let clock = TestClock::default();
     let ids = SequenceIds(AtomicU64::new(1));
     let runtime = LifecycleRuntime {
@@ -1960,7 +1988,7 @@ fn unsettled_agent_responses_remain_recoverable_in_the_inbox() {
         workspace_id: None,
         current_pane_id: Some("pane-recipient"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &clock,
         ids: &ids,
     };

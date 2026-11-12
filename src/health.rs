@@ -3,9 +3,8 @@ use crate::integration::pane_agent_runtime;
 use crate::lifecycle::{CollaborationSetup, terminal_safe_text};
 use crate::mux::{AgentState, InputOutcome};
 use crate::{
-    AgentSessionId, AttentionSourceKind, Clock, HerdrCommandExecutor, IdGenerator,
-    LifecycleRuntime, PaneAddressLifecycle, StateStore, discover_worktree,
-    discover_worktree_for_workspace,
+    AgentSessionId, AttentionSourceKind, Clock, IdGenerator, LifecycleRuntime,
+    PaneAddressLifecycle, StateStore, discover_worktree, discover_worktree_for_workspace,
 };
 use serde::{Deserialize, Serialize};
 
@@ -74,7 +73,7 @@ pub struct HealthReport {
 /// Inspect Namedrop without reconciling, retrying, cancelling, or changing state.
 pub fn diagnose_collaboration<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>) -> HealthReport
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -119,7 +118,7 @@ where
 
 fn diagnose_space<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>) -> HealthReport
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -701,7 +700,7 @@ pub fn request_doctor_assistance<M, C, I>(
     expected_session_id: &str,
 ) -> Result<(), String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -1123,19 +1122,14 @@ fn health_issue_for_attention(source: AttentionSourceKind) -> HealthIssue {
     }
 }
 
-fn registered_plugin_root<E: HerdrCommandExecutor + Sync>(herdr: &E) -> Option<std::path::PathBuf> {
-    use crate::mux::MuxRead;
-    let not_cancelled = std::sync::atomic::AtomicBool::new(false);
-    let budget = || {
-        Ok(crate::mux::Budget {
-            timeout: std::time::Duration::from_secs(2),
-            max_output_bytes: 64 * 1024,
-        })
-    };
-    crate::mux::herdr::bounded(herdr, &not_cancelled, budget)
-        .integration_root()
-        .ok()
-        .flatten()
+fn registered_plugin_root(mux: &impl crate::mux::MuxRead) -> Option<std::path::PathBuf> {
+    mux.within(crate::mux::Budget {
+        timeout: std::time::Duration::from_secs(2),
+        max_output_bytes: 64 * 1024,
+    })
+    .integration_root()
+    .ok()
+    .flatten()
 }
 
 /// The status worker runs detached with its output discarded, so the event it

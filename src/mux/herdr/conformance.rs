@@ -10,7 +10,9 @@ use crate::{
         InputOutcome, Key, MuxAct, MuxError, MuxRead, PaneId, PaneProcess, PromptRequest,
         Recipient, Retry, Scope, Screen, ScreenRequest, SessionClaim, StateTexts, Style, Survey,
         TabId, Wrap,
-        fake::{FakeMux, FakePane, Sent, SentInput, World, WorldBuilder},
+        fake::{
+            FakeMux, FakePane, Listing, ScopeKind, Sent, SentInput, World, WorldBuilder, listings,
+        },
     },
 };
 use serde_json::{Value, json};
@@ -52,7 +54,7 @@ fn pane_json(pane: &FakePane) -> Value {
         SessionClaim::Reported(session) => Some(json!({"value": session.as_str()})),
         _ => None,
     });
-    json!({
+    let mut json = json!({
         "pane_id": facts.id.as_str(),
         "terminal_id": facts.terminal.as_str(),
         "tab_id": facts.tab.as_str(),
@@ -65,7 +67,13 @@ fn pane_json(pane: &FakePane) -> Value {
         "agent_status": facts.state.as_ref().map(AgentState::as_str),
         "state_labels": facts.idle_label.as_ref().map(|idle| json!({"idle": idle})),
         "scroll": facts.viewport_rows.map(|rows| json!({"viewport_rows": rows})),
-    })
+    });
+    if !facts.reports_session {
+        json.as_object_mut()
+            .expect("a pane is an object")
+            .remove("agent_session");
+    }
+    json
 }
 
 fn key(word: &str) -> Key {
@@ -136,12 +144,13 @@ impl Wire {
                 let workspaces: Vec<_> = world
                     .spaces
                     .iter()
+                    .filter(|space| space.listed)
                     .map(|space| {
                         json!({
                             "workspace_id": space.id.as_str(),
                             "label": space.label,
                             "number": space.number,
-                            "worktree": space.checkout.as_ref().map(|checkout| json!({
+                            "worktree": space.stamped().map(|checkout| json!({
                                 "checkout_path": checkout.path,
                                 "repo_key": checkout.repo_key,
                                 "repo_name": checkout.repo_name,
@@ -156,7 +165,7 @@ impl Wire {
                 json!({"result": {"workspace": {
                     "label": space.label,
                     "number": space.number,
-                    "worktree": space.checkout.as_ref().map(|checkout| json!({
+                    "worktree": space.stamped().map(|checkout| json!({
                         "checkout_path": checkout.path,
                         "repo_key": checkout.repo_key,
                         "repo_name": checkout.repo_name,
@@ -167,15 +176,14 @@ impl Wire {
                 let panes: Vec<_> = world
                     .spaces
                     .iter()
-                    .flat_map(|space| &space.panes)
+                    .flat_map(|space| space.listed_panes())
                     .map(pane_json)
                     .collect();
                 json!({"result": {"panes": panes}})
             }
             ["pane", "list", "--workspace", id] => {
                 let panes: Vec<_> = Self::space(&world, id)?
-                    .panes
-                    .iter()
+                    .listed_panes()
                     .map(pane_json)
                     .collect();
                 json!({"result": {"panes": panes}})
@@ -225,10 +233,8 @@ impl Wire {
                 if facts.agent.is_none() {
                     return Err(herdr_error("agent_not_found"));
                 }
-                match facts.state {
-                    Some(AgentState::Blocked) => return Err(herdr_error("agent_blocked")),
-                    Some(ref state) if state.accepts_prompt() => {}
-                    _ => return Err(herdr_error("agent_busy")),
+                if facts.state == Some(AgentState::Blocked) {
+                    return Err(herdr_error("agent_blocked"));
                 }
                 let pane = PaneId::new(*id);
                 world.record_sent(Sent {
@@ -521,9 +527,45 @@ fn a_settled_agent_takes_a_prompt_and_starts_working() {
     assert_eq!(state, Ok(Some(AgentState::Working)));
 }
 
+/// Herdr 0.9.5 types a prompt to an agent that reports `working`, and the
+/// agent queues it: `herdr agent prompt` answered `agent_prompted` with
+/// `agent_status: working` in a live probe (PORT.md, commit 14).
 #[test]
-fn a_busy_blocked_absent_or_missing_agent_is_declined_before_any_input() {
-    for pane in ["pane-reviewer", "pane-blocked", "pane-shell", "pane-gone"] {
+fn a_working_agent_takes_a_prompt_whatever_the_admission() {
+    for admit in [Admit::Settled, Admit::BetweenTurns] {
+        let (outcome, sent, state) = agree(world, |mux, world| {
+            let expect = AgentIdentity {
+                kind: AgentKind::Known(AgentRuntime::Codex),
+                label: None,
+                session: SessionClaim::None,
+            };
+            let request = PromptRequest {
+                expect: &expect,
+                text: "hello",
+                admit,
+            };
+            let outcome = mux.send(&PaneId::new("pane-reviewer"), InputKind::Prompt(request));
+            let state = mux
+                .survey(Scope::Space(&SpaceId::new("workspace-1")), Depth::Panes)
+                .map(|survey| survey.spaces[0].panes[1].state.clone());
+            (outcome, world.sent(), state)
+        });
+        assert_eq!(outcome, InputOutcome::Delivered, "{admit:?}");
+        assert_eq!(
+            sent,
+            [Sent {
+                pane: PaneId::new("pane-reviewer"),
+                input: SentInput::Prompt("hello".into()),
+            }],
+            "{admit:?}"
+        );
+        assert_eq!(state, Ok(Some(AgentState::Working)), "{admit:?}");
+    }
+}
+
+#[test]
+fn a_blocked_absent_or_missing_agent_is_declined_before_any_input() {
+    for pane in ["pane-blocked", "pane-shell", "pane-gone"] {
         let (outcome, sent) = agree(world, |mux, world| (prompt(mux, pane), world.sent()));
         assert_eq!(
             outcome,
@@ -601,4 +643,196 @@ fn effects_change_what_later_reads_report() {
         Ok((Some("@lead".into()), Some("@lead ready".into())))
     );
     assert_eq!(after.2, Ok(Some("@lead".into())));
+}
+
+/// A stamp that differs from the space's checkout, a space the listing
+/// names without one, an unlisted space, a hidden pane, and a pane whose
+/// listing has no `agent_session` field.
+fn reshaped() -> WorldBuilder {
+    FakeMux::world()
+        .space("workspace-1")
+        .label("main")
+        .checkout("/repo")
+        .stamped("/worktrees/repo/main", Some("repo"))
+        .pane("pane-author")
+        .claude()
+        .session("session-author")
+        .idle()
+        .pane("pane-quiet")
+        .claude()
+        .idle()
+        .reports_session(false)
+        .pane("pane-hidden")
+        .codex()
+        .session("session-hidden")
+        .working()
+        .hidden()
+        .space("workspace-2")
+        .label("unstamped")
+        .checkout("/two")
+        .unstamped()
+        .pane("pane-two")
+        .space("workspace-3")
+        .label("unlisted")
+        .checkout("/three")
+        .unlisted()
+        .pane("pane-three")
+        .session("session-three")
+}
+
+fn every_survey(mux: &dyn Subject) -> Vec<Result<Survey, MuxError>> {
+    let ids = ["workspace-1", "workspace-2", "workspace-3"].map(SpaceId::new);
+    let mut found = Vec::new();
+    for depth in [Depth::Spaces, Depth::Panes] {
+        for id in &ids {
+            found.push(survey(mux, Scope::Space(id), depth));
+            found.push(survey(mux, Scope::PanesOf(id), depth));
+        }
+        for path in ["/repo", "/two", "/three"] {
+            found.push(survey(mux, Scope::CheckoutOf(Path::new(path)), depth));
+        }
+        found.push(survey(mux, Scope::All, depth));
+    }
+    found
+}
+
+#[test]
+fn stamps_unlisted_spaces_hidden_panes_and_missing_session_fields_agree() {
+    let found = agree(reshaped, |mux, _| every_survey(mux));
+    assert!(found.iter().all(Result::is_ok), "{found:?}");
+    let listed = agree(reshaped, |mux, _| survey(mux, Scope::All, Depth::Spaces)).unwrap();
+    let stamps: Vec<_> = listed
+        .spaces
+        .iter()
+        .map(|space| {
+            (
+                space.id.as_str().to_owned(),
+                space
+                    .checkout
+                    .as_ref()
+                    .map(|checkout| checkout.path.clone()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        stamps,
+        [
+            (
+                "workspace-1".to_owned(),
+                Some("/worktrees/repo/main".into())
+            ),
+            ("workspace-2".to_owned(), None),
+        ]
+    );
+    let panes = agree(reshaped, |mux, _| {
+        survey(mux, Scope::All, Depth::Panes).map(|survey| {
+            survey
+                .spaces
+                .iter()
+                .flat_map(|space| &space.panes)
+                .map(|pane| (pane.id.as_str().to_owned(), pane.reports_session))
+                .collect::<Vec<_>>()
+        })
+    });
+    assert_eq!(
+        panes.unwrap(),
+        [
+            ("pane-author".to_owned(), true),
+            ("pane-quiet".to_owned(), false),
+            ("pane-two".to_owned(), true),
+            ("pane-three".to_owned(), true),
+        ]
+    );
+}
+
+#[test]
+fn reshaping_the_world_mid_test_agrees() {
+    let found = agree(reshaped, |mux, world| {
+        world.show_pane("pane-hidden");
+        world.hide_pane("pane-author");
+        world.open_pane("workspace-2", |space| {
+            space
+                .pane("pane-new")
+                .claude()
+                .session("session-new")
+                .idle()
+        });
+        world.set_checkout("workspace-2", Some(Path::new("/moved")));
+        world.set_checkout("workspace-1", None);
+        world.set_label("workspace-2", Some("renamed"));
+        world.set_agent("pane-two", Some(AgentKind::Known(AgentRuntime::Codex)));
+        world.set_agent("pane-three", None);
+        world.clear_session("pane-new");
+        world.set_process(
+            "pane-two",
+            Some(PaneProcess {
+                shell_pid: Some(7),
+                foreground_group: Some(8),
+                foreground_pids: vec![8],
+                tty: None,
+            }),
+        );
+        world.set_integration_root(Some(Path::new("/plugins/namedrop")));
+        let mut found = every_survey(mux);
+        found.push(survey(
+            mux,
+            Scope::CheckoutOf(Path::new("/moved")),
+            Depth::Panes,
+        ));
+        (
+            found.into_iter().map(gone).collect::<Vec<_>>(),
+            mux.process(&PaneId::new("pane-two")),
+            mux.integration_root(),
+        )
+    });
+    assert!(
+        found.0.last().is_some_and(Result::is_ok),
+        "the moved checkout resolves"
+    );
+    assert_eq!(found.1.map(|process| process.shell_pid), Ok(Some(7)));
+    assert_eq!(found.2, Ok(Some("/plugins/namedrop".into())));
+}
+
+/// Records each command's listing, so a test can compare the listings the
+/// adapter ran with the ones `fake::listings` names.
+struct Recorded(Wire, std::sync::Mutex<Vec<Listing>>);
+
+impl Transport for Recorded {
+    fn run(&self, args: &[&str]) -> Result<String, String> {
+        let listing = match args {
+            ["workspace", "list"] => Some(Listing::Spaces),
+            ["workspace", "get", ..] => Some(Listing::Space),
+            ["worktree", "list", "--cwd", ..] => Some(Listing::CheckoutAt),
+            ["worktree", "list", "--workspace", ..] => Some(Listing::CheckoutOf),
+            ["pane", "list"] => Some(Listing::AllPanes),
+            ["pane", "list", "--workspace", _] => Some(Listing::PanesOf),
+            _ => None,
+        };
+        self.1.lock().unwrap().extend(listing);
+        self.0.run(args)
+    }
+}
+
+#[test]
+fn the_fake_names_the_listings_the_adapter_runs_for_each_survey() {
+    let one = SpaceId::new("workspace-1");
+    for (kind, scope) in [
+        (ScopeKind::Space, Scope::Space(&one)),
+        (ScopeKind::PanesOf, Scope::PanesOf(&one)),
+        (ScopeKind::CheckoutOf, Scope::CheckoutOf(Path::new("/repo"))),
+        (ScopeKind::All, Scope::All),
+    ] {
+        for depth in [Depth::Spaces, Depth::Panes] {
+            let herdr = HerdrMux::new(
+                Recorded(Wire(world().build()), std::sync::Mutex::default()),
+                "fake-socket",
+            );
+            herdr.survey(scope, depth).unwrap();
+            let mut ran = herdr.transport.1.lock().unwrap().clone();
+            if kind == ScopeKind::CheckoutOf {
+                ran.retain(|listing| *listing != Listing::CheckoutOf);
+            }
+            assert_eq!(ran, listings(kind, depth), "{kind:?} {depth:?}");
+        }
+    }
 }

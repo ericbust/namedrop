@@ -1331,13 +1331,14 @@ mod tests {
             InputOutcome::Delivered
         );
         assert_eq!(gate.ownership(&delivery()), MarkerOwnership::Match);
+        mux.set_state("pane", crate::mux::AgentState::Blocked);
         assert_eq!(
             gate.prompt(&mux, &delivery(), request),
             InputOutcome::Declined(
                 crate::mux::Retry::OnEvent,
                 "pane pane cannot take a prompt now".into()
             ),
-            "the agent the first prompt started is working"
+            "the agent waits on a question"
         );
         assert_eq!(
             gate.delete_claude_code_input(&mux, 2),

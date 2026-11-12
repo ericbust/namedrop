@@ -46,6 +46,10 @@ pub trait MuxRead: Send + Sync {
     fn process(&self, pane: &PaneId) -> Result<PaneProcess, MuxError>;
     fn tab_label(&self, tab: &TabId) -> Result<Option<String>, MuxError>;
     fn integration_root(&self) -> Result<Option<PathBuf>, MuxError>;
+    /// The same connection with each command held to `budget` as well as
+    /// to the connection's own, as a connector would make it. A read that
+    /// must answer fast, such as health's integration root, reads through it.
+    fn within(&self, budget: Budget) -> Box<dyn MuxRead + '_>;
 }
 
 pub trait MuxAct: MuxRead {
@@ -89,6 +93,10 @@ impl MuxRead for Arc<dyn Mux> {
 
     fn integration_root(&self) -> Result<Option<PathBuf>, MuxError> {
         (**self).integration_root()
+    }
+
+    fn within(&self, budget: Budget) -> Box<dyn MuxRead + '_> {
+        (**self).within(budget)
     }
 }
 

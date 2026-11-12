@@ -5,11 +5,10 @@ use crate::mux::{
     TerminalId, resolve_session,
 };
 use crate::{
-    ActorKind, AgentSessionId, AttentionItemRecord, Clock, HerdrCommandExecutor, IdGenerator,
-    MutationAttribution, PaneAddressDraft, PaneAddressId, PaneAddressRecord, PaneBindingId,
-    PaneRoleId, PaneRolePreset, StateNamespace, StateStore, StateTransaction, StoreError,
-    WorktreeId, WorktreeState, normalize_alias, publish_status_metadata, reconcile_delivery_state,
-    validate_alias,
+    ActorKind, AgentSessionId, AttentionItemRecord, Clock, IdGenerator, MutationAttribution,
+    PaneAddressDraft, PaneAddressId, PaneAddressRecord, PaneBindingId, PaneRoleId, PaneRolePreset,
+    StateNamespace, StateStore, StateTransaction, StoreError, WorktreeId, WorktreeState,
+    normalize_alias, publish_status_metadata, reconcile_delivery_state, validate_alias,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -196,7 +195,7 @@ pub fn execute_lifecycle_operation<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -818,7 +817,7 @@ fn handle_event<M, C, I>(
     event: &MuxEvent,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -1098,7 +1097,7 @@ fn agent_status_changed<M, C, I>(
     detected: bool,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -1236,22 +1235,23 @@ where
     Ok(())
 }
 
-/// Opens `screen` for `target` and returns the multiplexer's reply.
+/// Opens `screen` for `target` and returns the multiplexer's reply. The
+/// popup reconnects to the runtime's own connection, whose endpoint names
+/// it.
 pub fn open_popup<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
     screen: PopupScreen,
     target: PaneFacts,
 ) -> Result<serde_json::Value, MuxError>
 where
-    M: HerdrCommandExecutor + Sync,
+    M: MuxAct,
 {
     let popup = PopupSpec {
         screen,
         target,
         state_dir: runtime.state_directory.to_owned(),
     };
-    let mux = crate::mux::herdr::at_socket(runtime.mux, runtime.session_socket_id);
-    match mux.apply(&Effect::OpenPopup(popup))? {
+    match runtime.mux.apply(&Effect::OpenPopup(popup))? {
         Applied::Opened(reply) => Ok(reply),
         Applied::Done | Applied::Unsupported => Ok(serde_json::Value::Null),
     }
