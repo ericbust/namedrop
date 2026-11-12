@@ -293,7 +293,19 @@ struct PopupHerdr {
     fail: bool,
 }
 
+/// The runtime's `session_socket_id`, which the bridge took the popup's
+/// socket from before the connection named it.
+static POPUP_SOCKET: std::sync::LazyLock<namedrop::mux::Endpoint> =
+    std::sync::LazyLock::new(|| namedrop::mux::Endpoint {
+        kind: namedrop::mux::MuxKind::Herdr,
+        key: "/run/herdr.sock".to_owned(),
+    });
+
 impl HerdrCommandExecutor for PopupHerdr {
+    fn mux_endpoint(&self) -> &namedrop::mux::Endpoint {
+        &POPUP_SOCKET
+    }
+
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         self.commands
             .lock()

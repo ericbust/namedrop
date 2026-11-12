@@ -227,7 +227,11 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
                 state,
                 &SystemClock,
                 &ProcessIds::default(),
-                |ns| ProcessHerdr::default().with_socket(Some(ns.session_socket_id.clone())),
+                |ns| {
+                    ProcessHerdr::default()
+                        .with_socket(Some(ns.session_socket_id.clone()))
+                        .keyed(&ns.session_socket_id)
+                },
                 &mut catch_up,
             ) {
                 Ok(_) => {}

@@ -8,7 +8,7 @@
 //! presentation twice while a new id is shown exactly once.
 
 use crate::{
-    DiscoveredPane, DiscoveredWorktree, HerdrCommandExecutor, LifecycleRuntime,
+    DiscoveredPane, DiscoveredWorktree, LifecycleRuntime,
     mux::{MuxError, PopupScreen},
 };
 use serde_json::{Value, json};
@@ -381,7 +381,7 @@ pub fn open_popup<M, C, I>(
     target: &DiscoveredPane,
 ) -> Result<Value, String>
 where
-    M: HerdrCommandExecutor + Sync,
+    M: crate::mux::MuxAct,
 {
     crate::open_popup(runtime, PopupScreen::Tour, target.facts()).map_err(|error| match error {
         MuxError::Protocol(error) => {
@@ -405,7 +405,7 @@ pub fn show_for_first_agent<M, C, I>(
     preferred_pane_id: Option<&str>,
 ) -> Value
 where
-    M: HerdrCommandExecutor + Sync,
+    M: crate::mux::MuxAct,
 {
     let not_shown =
         |reason: &str| json!({"shown": false, "presentation_id": CURRENT_ID, "reason": reason});

@@ -17,6 +17,7 @@ pub struct ProcessHerdr {
     binary: String,
     timeout: Duration,
     socket: Option<String>,
+    endpoint: crate::mux::Endpoint,
 }
 
 impl Default for ProcessHerdr {
@@ -24,6 +25,7 @@ impl Default for ProcessHerdr {
         Self {
             binary: env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_owned()),
             socket: None,
+            endpoint: crate::mux::herdr::legacy_endpoint().clone(),
             timeout: Duration::from_millis(
                 env::var("NAMEDROP_HERDR_TIMEOUT_MS")
                     .ok()
@@ -60,6 +62,14 @@ impl ProcessHerdr {
 
     pub fn with_socket(mut self, socket: Option<String>) -> Self {
         self.socket = socket;
+        self
+    }
+
+    /// The runtime's `session_socket_id`, which a popup opened through this
+    /// executor passes on as `HERDR_SOCKET_PATH`. It changes no command
+    /// Herdr runs, so `with_socket` still decides which server answers.
+    pub fn keyed(mut self, session_socket_id: &str) -> Self {
+        self.endpoint.key = session_socket_id.to_owned();
         self
     }
 
@@ -191,6 +201,10 @@ impl ProcessHerdr {
 }
 
 impl HerdrCommandExecutor for ProcessHerdr {
+    fn mux_endpoint(&self) -> &crate::mux::Endpoint {
+        &self.endpoint
+    }
+
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         let output = self.output(args)?;
         if !output.status.success() {
@@ -287,6 +301,7 @@ mod bounded_read_tests {
             binary: "/bin/sh".to_owned(),
             timeout: Duration::from_secs(2),
             socket: None,
+            endpoint: crate::mux::herdr::legacy_endpoint().clone(),
         };
         let cancelled = AtomicBool::new(false);
         let deadline = Duration::from_millis(80);

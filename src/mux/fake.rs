@@ -1029,6 +1029,31 @@ impl MuxRead for FakeMux {
         }
     }
 
+    /// A handle whose reads log `budget`, or the tighter of it and the
+    /// connection's own, as `budget()` reports.
+    fn within(&self, budget: Budget) -> Box<dyn MuxRead + '_> {
+        let connection = match &self.connection {
+            Some(connection) => Connection {
+                budget: Budget {
+                    timeout: connection.budget.timeout.min(budget.timeout),
+                    max_output_bytes: connection
+                        .budget
+                        .max_output_bytes
+                        .min(budget.max_output_bytes),
+                },
+                cancelled: Arc::clone(&connection.cancelled),
+            },
+            None => Connection {
+                budget,
+                cancelled: Arc::default(),
+            },
+        };
+        Box::new(FakeMux {
+            connection: Some(connection),
+            ..self.clone()
+        })
+    }
+
     fn integration_root(&self) -> Result<Option<PathBuf>, MuxError> {
         self.read(Read::IntegrationRoot)?;
         let mut world = self.lock();

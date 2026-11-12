@@ -1465,3 +1465,27 @@ fn hooks_and_observers_run_with_the_world_and_their_own_lists_unlocked() {
         );
     });
 }
+
+#[test]
+fn a_read_within_a_budget_logs_the_tighter_of_it_and_the_connection_s() {
+    let mux = author_and_reviewer();
+    let budget = |millis, bytes| Budget {
+        timeout: Duration::from_millis(millis),
+        max_output_bytes: bytes,
+    };
+    mux.within(budget(2000, 65536)).integration_root().unwrap();
+    let connected = mux
+        .connect("socket-a", budget(500, 1 << 20), Arc::default())
+        .unwrap();
+    connected
+        .within(budget(2000, 65536))
+        .integration_root()
+        .unwrap();
+    assert_eq!(
+        mux.budgeted_reads(),
+        [
+            (Read::IntegrationRoot, Some(budget(2000, 65536))),
+            (Read::IntegrationRoot, Some(budget(500, 65536))),
+        ]
+    );
+}
