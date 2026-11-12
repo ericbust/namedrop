@@ -1,3 +1,4 @@
+#![cfg(feature = "test-support")]
 #[path = "support/cleanup.rs"]
 mod cleanup;
 
@@ -14,15 +15,22 @@ use namedrop::{
     PaneAddressId, PaneAddressLifecycle, PaneBindingId, PaneRoleId, PaneRolePreset, StateNamespace,
     StateStore, StoreErrorKind, ThreadId, WorktreeId, discover_worktree,
     discover_worktree_for_workspace, execute_lifecycle_operation, execute_message_operation,
-    locate_agent_session_pane, normalize_alias, package_directory, pane_workspace,
-    reconcile_discovered_panes, validate_alias,
+    locate_agent_session_pane,
+    mux::{
+        Depth, Effect, InputOutcome, MuxError,
+        fake::{
+            CHECKOUT_LISTINGS, FakeMux, Listing, Read, ScopeKind, SentInput, StrictSpace, Surveyed,
+            Takes, WorldBuilder,
+        },
+    },
+    normalize_alias, package_directory, pane_workspace, reconcile_discovered_panes, validate_alias,
 };
 use rusqlite::Connection;
 use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -85,6 +93,45 @@ fn address_with(id: &str, alias: &str) -> PaneAddressDraft {
 
 fn address() -> PaneAddressDraft {
     address_with("address-planner", "planner")
+}
+
+/// Workspace-1 on the checkout `/repo`, which `workspace list` names with no
+/// worktree stamp, as every old fake in this file listed it.
+fn repo_world() -> WorldBuilder {
+    FakeMux::world()
+        .endpoint("socket-a")
+        .space("workspace-1")
+        .checkout("/repo")
+        .unstamped()
+}
+
+/// The effects the old fakes failed: activation's keybinding reload and tour
+/// popup, and a message's notification.
+fn refused(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ReloadKeybindings | Effect::OpenPopup(_) | Effect::Notify { .. }
+    )
+}
+
+/// The old fakes' `workspace list`, `worktree list --cwd /repo`, and `pane
+/// list --workspace`, and `worktree list --workspace` when `per_space`. The
+/// space takes what `takes` names, and the effects the old fakes failed,
+/// which fail with the old words.
+fn lifecycle_space(mux: FakeMux, per_space: bool, takes: Takes) -> StrictSpace {
+    mux.on_apply(|_, effect| {
+        if refused(effect) {
+            return Err(MuxError::Unavailable(format!(
+                "unexpected Herdr command: {effect:?}"
+            )));
+        }
+        Ok(())
+    });
+    let mut surveys = CHECKOUT_LISTINGS.to_vec();
+    if per_space {
+        surveys.push((ScopeKind::Space, Depth::Panes));
+    }
+    StrictSpace::new(mux, &surveys, takes.effect(refused))
 }
 
 #[test]
@@ -956,32 +1003,6 @@ fn explicit_deactivation_and_reactivation_preserve_worktree_state() {
 
 #[test]
 fn restart_reconciliation_refreshes_panes_before_delivery_drain() {
-    struct CountingHerdr {
-        pane_lists: AtomicU64,
-    }
-
-    impl HerdrCommandExecutor for CountingHerdr {
-        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-            let stdout = match args {
-                ["workspace", "list"] => {
-                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
-                }
-                ["worktree", "list", "--cwd", "/repo", "--json"]
-                | ["worktree", "list", "--json"] => {
-                    r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-                }
-                ["pane", "list", "--workspace", "workspace-1"] => {
-                    self.pane_lists.fetch_add(1, Ordering::Relaxed);
-                    r#"{"result":{"panes":[]}}"#
-                }
-                _ => return Err(format!("unexpected Herdr command: {args:?}")),
-            };
-            Ok(HerdrCommandOutput {
-                stdout: stdout.to_owned(),
-            })
-        }
-    }
-
     struct FixedClock;
     impl Clock for FixedClock {
         fn now_unix_ms(&self) -> u64 {
@@ -1001,9 +1022,15 @@ fn restart_reconciliation_refreshes_panes_before_delivery_drain() {
         .unwrap()
         .transaction(|transaction| transaction.activate_worktree(&namespace(), &attribution(1)))
         .unwrap();
-    let herdr = CountingHerdr {
-        pane_lists: AtomicU64::new(0),
-    };
+    let space = lifecycle_space(repo_world().build(), false, Takes::nothing());
+    let pane_lists = Arc::new(AtomicU64::new(0));
+    let counted = Arc::clone(&pane_lists);
+    space.on_command(move |_, command| {
+        if command.listing == Some(Listing::PanesOf) {
+            counted.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    });
     let runtime = namedrop::LifecycleRuntime {
         state_directory: directory.path(),
         home_directory: Some(directory.home()),
@@ -1012,7 +1039,7 @@ fn restart_reconciliation_refreshes_panes_before_delivery_drain() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*space,
         clock: &FixedClock,
         ids: &FixedIds,
     };
@@ -1020,7 +1047,7 @@ fn restart_reconciliation_refreshes_panes_before_delivery_drain() {
     execute_lifecycle_operation("reconcile", serde_json::json!({}), &runtime).unwrap();
 
     assert_eq!(
-        herdr.pane_lists.load(Ordering::Relaxed),
+        pane_lists.load(Ordering::Relaxed),
         2,
         "initial discovery and delivery drain must each observe host state"
     );
@@ -1028,25 +1055,7 @@ fn restart_reconciliation_refreshes_panes_before_delivery_drain() {
 
 #[test]
 fn activation_keeps_dispatch_gated_when_initial_reconciliation_fails() {
-    struct FakeHerdr;
-    impl HerdrCommandExecutor for FakeHerdr {
-        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-            let stdout = match args {
-                ["workspace", "list"] => {
-                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
-                }
-                ["worktree", "list", "--cwd", "/repo", "--json"]
-                | ["worktree", "list", "--json"] => {
-                    r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-                }
-                ["pane", "list", "--workspace", "workspace-1"] => r#"{"result":{"panes":[]}}"#,
-                _ => return Err(format!("unexpected Herdr command: {args:?}")),
-            };
-            Ok(HerdrCommandOutput {
-                stdout: stdout.to_owned(),
-            })
-        }
-    }
+    let space = lifecycle_space(repo_world().build(), false, Takes::nothing());
     struct FixedClock;
     impl Clock for FixedClock {
         fn now_unix_ms(&self) -> u64 {
@@ -1097,7 +1106,7 @@ fn activation_keeps_dispatch_gated_when_initial_reconciliation_fails() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        mux: &FakeHerdr,
+        mux: &*space,
         clock: &FixedClock,
         ids: &FixedIds,
     };
@@ -1262,27 +1271,18 @@ fn rename_release_and_retirement_preserve_identity_boundaries() {
 
 #[test]
 fn herdr_discovery_and_restart_reconciliation_fail_closed() {
-    struct FakeHerdr;
-    impl HerdrCommandExecutor for FakeHerdr {
-        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-            let stdout = match args {
-                ["workspace", "list"] => {
-                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
-                }
-                ["worktree", "list", "--cwd", "/repo", "--json"]
-                | ["worktree", "list", "--json"] => {
-                    r#"{"result":{"source":{"source_workspace_id":"workspace-1"},"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-                }
-                ["pane", "list", "--workspace", "workspace-1"] => {
-                    r#"{"result":{"panes":[{"pane_id":"pane-live","terminal_id":"terminal-live","tab_id":"tab-live","workspace_id":"workspace-1","cwd":"/repo","agent_session":{"value":"session-live"},"agent_status":"idle"}]}}"#
-                }
-                _ => return Err(format!("unexpected Herdr command: {args:?}")),
-            };
-            Ok(HerdrCommandOutput {
-                stdout: stdout.to_owned(),
-            })
-        }
-    }
+    let space = lifecycle_space(
+        repo_world()
+            .pane("pane-live")
+            .terminal("terminal-live")
+            .tab("tab-live")
+            .cwd("/repo")
+            .session("session-live")
+            .idle()
+            .build(),
+        false,
+        Takes::nothing(),
+    );
 
     struct SequenceIds;
     impl IdGenerator for SequenceIds {
@@ -1291,7 +1291,7 @@ fn herdr_discovery_and_restart_reconciliation_fail_closed() {
         }
     }
 
-    let discovered = discover_worktree(&FakeHerdr, Path::new("/repo")).unwrap();
+    let discovered = discover_worktree(&*space, Path::new("/repo")).unwrap();
     assert_eq!(discovered.worktree_id, WorktreeId::new("/repo"));
     assert_eq!(discovered.workspace_id, "workspace-1");
     assert_eq!(discovered.panes.len(), 1);
@@ -1462,33 +1462,39 @@ fn workspace_discovery_keeps_failing_closed_when_source_names_another_space() {
 
 #[test]
 fn agent_session_lookup_needs_one_exact_herdr_pane() {
-    struct PanesHerdr;
-    impl HerdrCommandExecutor for PanesHerdr {
-        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-            assert_eq!(args, ["pane", "list"]);
-            let pane = |space: &str, pane: &str, session: &str| {
-                serde_json::json!({
-                    "pane_id": pane, "terminal_id": "t", "tab_id": "tab", "workspace_id": space,
-                    "agent_session": {"value": session}
-                })
-            };
-            Ok(HerdrCommandOutput {
-                stdout: serde_json::json!({"result": {"panes": [
-                    pane("w1", "w1:p1", "solo"),
-                    pane("w2", "w2:p1", "twice"),
-                    pane("w3", "w3:p1", "twice"),
-                ]}})
-                .to_string(),
-            })
-        }
-    }
+    let space = StrictSpace::new(
+        FakeMux::world()
+            .space("w1")
+            .pane("w1:p1")
+            .terminal("t")
+            .tab("tab")
+            .session("solo")
+            .space("w2")
+            .pane("w2:p1")
+            .terminal("t")
+            .tab("tab")
+            .session("twice")
+            .space("w3")
+            .pane("w3:p1")
+            .terminal("t")
+            .tab("tab")
+            .session("twice")
+            .build(),
+        &[(ScopeKind::All, Depth::Panes)],
+        Takes::nothing(),
+    );
 
     assert_eq!(
-        locate_agent_session_pane(&PanesHerdr, "solo"),
+        locate_agent_session_pane(&*space, "solo"),
         Some(("w1".to_owned(), "w1:p1".to_owned()))
     );
-    assert_eq!(locate_agent_session_pane(&PanesHerdr, "twice"), None);
-    assert_eq!(locate_agent_session_pane(&PanesHerdr, "missing"), None);
+    assert_eq!(locate_agent_session_pane(&*space, "twice"), None);
+    assert_eq!(locate_agent_session_pane(&*space, "missing"), None);
+    assert!(space.reads().iter().all(|read| *read
+        == Read::Survey {
+            scope: Surveyed::All,
+            depth: Depth::Panes
+        }));
 }
 
 /// Herdr with checkout `/repo` (of repository `/repo/.git`, linked when
@@ -1703,48 +1709,46 @@ fn cwd_discovery_skips_spaces_that_cannot_own_a_linked_checkout() {
 
 #[test]
 fn a_known_pane_names_its_space() {
-    struct PanesHerdr;
-    impl HerdrCommandExecutor for PanesHerdr {
-        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-            assert_eq!(args, ["pane", "list"]);
-            Ok(HerdrCommandOutput {
-                stdout: r#"{"result":{"panes":[{"pane_id":"w1:p1","terminal_id":"t1","tab_id":"tab-1","workspace_id":"w1"},{"pane_id":"w2:p1","terminal_id":"t2","tab_id":"tab-2","workspace_id":"w2"}]}}"#.to_owned(),
-            })
-        }
-    }
+    let space = StrictSpace::new(
+        FakeMux::world()
+            .space("w1")
+            .pane("w1:p1")
+            .terminal("t1")
+            .tab("tab-1")
+            .reports_session(false)
+            .space("w2")
+            .pane("w2:p1")
+            .terminal("t2")
+            .tab("tab-2")
+            .reports_session(false)
+            .build(),
+        &[(ScopeKind::All, Depth::Panes)],
+        Takes::nothing(),
+    );
 
-    assert_eq!(pane_workspace(&PanesHerdr, "w2:p1").unwrap(), "w2");
-    let error = pane_workspace(&PanesHerdr, "w9:p1").unwrap_err();
+    assert_eq!(pane_workspace(&*space, "w2:p1").unwrap(), "w2");
+    let error = pane_workspace(&*space, "w9:p1").unwrap_err();
     assert!(error.contains("w9:p1"), "{error}");
     assert!(error.contains("--herdr-workspace"), "{error}");
+    assert!(space.reads().iter().all(|read| *read
+        == Read::Survey {
+            scope: Surveyed::All,
+            depth: Depth::Panes
+        }));
 }
 
 #[test]
 fn only_proven_same_worktree_moves_preserve_a_binding() {
-    struct MoveHerdr;
-    impl HerdrCommandExecutor for MoveHerdr {
-        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-            let stdout = match args {
-                ["workspace", "list"] => {
-                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
-                }
-                ["worktree", "list", "--cwd", "/repo", "--json"]
-                | ["worktree", "list", "--json"]
-                | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
-                    r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-                }
-                ["worktree", "list", "--workspace", "workspace-2", "--json"] => {
-                    r#"{"result":{"worktrees":[{"path":"/other","open_workspace_id":"workspace-2"}]}}"#
-                }
-                ["pane", "list", "--workspace", "workspace-1"]
-                | ["pane", "list", "--workspace", "workspace-2"] => r#"{"result":{"panes":[]}}"#,
-                _ => return Err(format!("unexpected Herdr command: {args:?}")),
-            };
-            Ok(HerdrCommandOutput {
-                stdout: stdout.to_owned(),
-            })
-        }
-    }
+    let space = lifecycle_space(
+        repo_world()
+            .space("workspace-2")
+            .checkout("/other")
+            .unstamped()
+            .unlisted()
+            .build(),
+        true,
+        Takes::nothing(),
+    );
     struct FixedClock;
     impl Clock for FixedClock {
         fn now_unix_ms(&self) -> u64 {
@@ -1784,7 +1788,7 @@ fn only_proven_same_worktree_moves_preserve_a_binding() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        mux: &MoveHerdr,
+        mux: &*space,
         clock: &FixedClock,
         ids: &FixedIds,
     };
@@ -1869,27 +1873,29 @@ fn only_proven_same_worktree_moves_preserve_a_binding() {
 
 #[test]
 fn lifecycle_operations_activate_create_bind_and_list_through_one_contract() {
-    struct FakeHerdr;
-    impl HerdrCommandExecutor for FakeHerdr {
-        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-            let stdout = match args {
-                ["workspace", "list"] => {
-                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
-                }
-                ["worktree", "list", "--cwd", "/repo", "--json"]
-                | ["worktree", "list", "--json"] => {
-                    r#"{"result":{"source":{"source_workspace_id":"workspace-1"},"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-                }
-                ["pane", "list", "--workspace", "workspace-1"] => {
-                    r#"{"result":{"panes":[{"pane_id":"pane-live","terminal_id":"terminal-live","tab_id":"tab-live","workspace_id":"workspace-1","cwd":"/repo","label":"Review pane","agent":"codex","display_agent":"Codex","agent_session":{"value":"session-live"},"agent_status":"idle"}]}}"#
-                }
-                _ => return Err(format!("unexpected Herdr command: {args:?}")),
-            };
-            Ok(HerdrCommandOutput {
-                stdout: stdout.to_owned(),
-            })
-        }
-    }
+    let space = lifecycle_space(
+        repo_world()
+            .pane("pane-live")
+            .terminal("terminal-live")
+            .tab("tab-live")
+            .cwd("/repo")
+            .title("Review pane")
+            .codex()
+            .agent_label("Codex")
+            .session("session-live")
+            .idle()
+            .build(),
+        false,
+        Takes::nothing().input(|attempt| {
+            attempt.pane.as_str() == "pane-live" && matches!(attempt.input, SentInput::Prompt(_))
+        }),
+    );
+    // The old fake failed the registration prompt, which a legacy executor
+    // reports as possibly typed.
+    space.answer(
+        "pane-live",
+        InputOutcome::Ambiguous("unexpected Herdr command: agent prompt".to_owned()),
+    );
 
     struct FixedClock;
     impl Clock for FixedClock {
@@ -1916,7 +1922,7 @@ fn lifecycle_operations_activate_create_bind_and_list_through_one_contract() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        mux: &FakeHerdr,
+        mux: &*space,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -1969,27 +1975,16 @@ fn lifecycle_operations_activate_create_bind_and_list_through_one_contract() {
 
 #[test]
 fn lifecycle_operations_mutate_addresses_without_losing_identity() {
-    struct FakeHerdr;
-    impl HerdrCommandExecutor for FakeHerdr {
-        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-            let stdout = match args {
-                ["workspace", "list"] => {
-                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
-                }
-                ["worktree", "list", "--cwd", "/repo", "--json"]
-                | ["worktree", "list", "--json"] => {
-                    r#"{"result":{"source":{"source_workspace_id":"workspace-1"},"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-                }
-                ["pane", "list", "--workspace", "workspace-1"] => {
-                    r#"{"result":{"panes":[{"pane_id":"pane-live","terminal_id":"terminal-live","tab_id":"tab-live","workspace_id":"workspace-1","cwd":"/repo","agent_session":null,"agent_status":null}]}}"#
-                }
-                _ => return Err(format!("unexpected Herdr command: {args:?}")),
-            };
-            Ok(HerdrCommandOutput {
-                stdout: stdout.to_owned(),
-            })
-        }
-    }
+    let space = lifecycle_space(
+        repo_world()
+            .pane("pane-live")
+            .terminal("terminal-live")
+            .tab("tab-live")
+            .cwd("/repo")
+            .build(),
+        false,
+        Takes::nothing(),
+    );
 
     struct FixedClock;
     impl Clock for FixedClock {
@@ -2015,7 +2010,7 @@ fn lifecycle_operations_mutate_addresses_without_losing_identity() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        mux: &FakeHerdr,
+        mux: &*space,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -2083,25 +2078,7 @@ fn lifecycle_operations_mutate_addresses_without_losing_identity() {
 
 #[test]
 fn strict_inputs_and_activation_confirmation_fail_before_mutation() {
-    struct FakeHerdr;
-    impl HerdrCommandExecutor for FakeHerdr {
-        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-            let stdout = match args {
-                ["workspace", "list"] => {
-                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
-                }
-                ["worktree", "list", "--cwd", "/repo", "--json"]
-                | ["worktree", "list", "--json"] => {
-                    r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-                }
-                ["pane", "list", "--workspace", "workspace-1"] => r#"{"result":{"panes":[]}}"#,
-                _ => return Err(format!("unexpected Herdr command: {args:?}")),
-            };
-            Ok(HerdrCommandOutput {
-                stdout: stdout.to_owned(),
-            })
-        }
-    }
+    let space = StrictSpace::new(repo_world().build(), CHECKOUT_LISTINGS, Takes::nothing());
     struct FixedClock;
     impl Clock for FixedClock {
         fn now_unix_ms(&self) -> u64 {
@@ -2123,7 +2100,7 @@ fn strict_inputs_and_activation_confirmation_fail_before_mutation() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        mux: &FakeHerdr,
+        mux: &*space,
         clock: &FixedClock,
         ids: &FixedIds,
     };
