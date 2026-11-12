@@ -13933,9 +13933,10 @@ test("ADD AGENT: a new agent that hasn't connected shows a needs-you card that n
       source_id: CODEX,
       source_kind: "agent_start",
       summary: {
-        text: "@codex hasn't connected yet. Open its pane. It may be asking you to trust the folder or to log in. A new Codex connects after its first prompt.",
+        text: "Send @codex its first message in its pane",
         truncated: false,
       },
+      subject_alias: "codex",
       opened_at_ms: Date.now() - 30_000,
       response: { kind: "pane", address_id: CODEX },
     },
@@ -13943,10 +13944,10 @@ test("ADD AGENT: a new agent that hasn't connected shows a needs-you card that n
   const ui = await open(t, (client) => replay(client, [value]));
   await ui.live();
   const card = ui.page.getByRole("region", { name: "Attention needed" });
-  await card.getByText("@codex hasn't connected yet").waitFor();
+  await card.getByText("Send @codex its first message in its pane").waitFor();
   await card
     .getByText(
-      "Open its pane. It may be asking you to trust the folder or to log in. A new Codex connects after its first prompt.",
+      "Open its pane. It may first ask you to trust the folder or to log in.",
     )
     .waitFor();
   await card.getByRole("button", { name: "See @codex's screen" }).click();
@@ -13956,7 +13957,7 @@ test("ADD AGENT: a new agent that hasn't connected shows a needs-you card that n
       .getByRole("navigation", { name: "Needs you" })
       .locator(".row-reason")
       .textContent(),
-    "@codex hasn't connected yet",
+    "Send @codex its first message in its pane",
   );
 });
 

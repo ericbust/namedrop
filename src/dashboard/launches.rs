@@ -4,7 +4,7 @@
 //! look at its pane, and a session Herdr reports is connected by naming the
 //! pane again.
 use super::http::Front;
-use super::snapshot::{SpaceKey, StartingAgent};
+use super::snapshot::{SpaceKey, StartedAgent, StartingAgent};
 use crate::store::dashboard::LiveMember;
 use crate::{HerdrCommandExecutor, LifecycleRuntime, ProcessHerdr, StateNamespace, StateStore};
 use serde_json::{Value, json};
@@ -35,6 +35,7 @@ struct Registry {
 pub(crate) struct Launch {
     pub namespace: StateNamespace,
     pub address_id: String,
+    pub agent: StartedAgent,
     pub pane_id: String,
     pub started_at_ms: i64,
     next_check_ms: i64,
@@ -46,12 +47,14 @@ impl Launch {
     pub fn new(
         namespace: StateNamespace,
         address_id: String,
+        agent: StartedAgent,
         pane_id: String,
         started_at_ms: i64,
     ) -> Self {
         Self {
             namespace,
             address_id,
+            agent,
             pane_id,
             started_at_ms,
             next_check_ms: started_at_ms.saturating_add(FAST_CHECK_MS),
@@ -96,12 +99,18 @@ impl Launches {
     }
 
     /// The space's remembered launches as the snapshot reads them.
-    pub fn starting(&self, namespace: &StateNamespace) -> Vec<(String, i64)> {
+    pub fn starting(&self, namespace: &StateNamespace) -> Vec<Started> {
         self.registry()
             .launches
             .iter()
             .filter(|launch| launch.namespace == *namespace)
-            .map(|launch| (launch.address_id.clone(), launch.started_at_ms))
+            .map(|launch| {
+                (
+                    launch.address_id.clone(),
+                    launch.started_at_ms,
+                    launch.agent,
+                )
+            })
             .collect()
     }
 
@@ -136,12 +145,16 @@ impl Launches {
     }
 }
 
-pub(crate) fn as_starting(starting: &[(String, i64)]) -> Vec<StartingAgent<'_>> {
+/// A remembered launch: its address, when it started, and what was started.
+pub(crate) type Started = (String, i64, StartedAgent);
+
+pub(crate) fn as_starting(starting: &[Started]) -> Vec<StartingAgent<'_>> {
     starting
         .iter()
-        .map(|(address_id, started_at_ms)| StartingAgent {
+        .map(|(address_id, started_at_ms, agent)| StartingAgent {
             address_id,
             started_at_ms: *started_at_ms,
+            agent: *agent,
         })
         .collect()
 }
@@ -340,6 +353,7 @@ mod tests {
         Launch::new(
             StateNamespace::for_space("socket", "w1"),
             "address".into(),
+            StartedAgent::Claude,
             "w1:p2".into(),
             started_at_ms,
         )
@@ -360,7 +374,7 @@ mod tests {
         assert!(launches.take_due(i64::MAX - 1).is_empty());
         assert_eq!(
             launches.starting(&StateNamespace::for_space("socket", "w1")),
-            vec![("address".to_owned(), 0)],
+            vec![("address".to_owned(), 0, StartedAgent::Claude)],
             "a launch past its watch is kept for the snapshot to settle"
         );
     }
@@ -445,14 +459,15 @@ mod tests {
             address("shell", crate::PaneType::Terminal),
         ]);
         let started = [
-            ("waiting".to_owned(), 0),
-            ("young".to_owned(), 5_000),
-            ("connected".to_owned(), 0),
-            ("retired".to_owned(), 0),
-            ("closed".to_owned(), 0),
-            ("shell".to_owned(), 0),
-            ("missing".to_owned(), 0),
-        ];
+            ("waiting", 0),
+            ("young", 5_000),
+            ("connected", 0),
+            ("retired", 0),
+            ("closed", 0),
+            ("shell", 0),
+            ("missing", 0),
+        ]
+        .map(|(address, at)| (address.to_owned(), at, StartedAgent::Claude));
         let mut built = snapshot::build(&rows, None, 20_000);
         assert_eq!(built.health, SpaceHealth::Calm);
         let starts = built.add_agent_start_cards(&rows, &as_starting(&started), 20_000);
@@ -475,13 +490,23 @@ mod tests {
                 "conversation": null,
                 "response": {"kind": "pane", "address_id": "waiting"},
                 "source_kind": "agent_start",
-                "summary": {"text": "@waiting hasn't connected yet. Open its pane. It may be asking you to trust the folder or to log in. A new Codex connects after its first prompt.", "truncated": false},
+                "summary": {"text": "Finish Claude's setup in @waiting's pane", "truncated": false},
                 "opened_at_ms": 20_000,
                 "subject_alias": "waiting",
                 "message_id": null,
             }])
         );
         assert_eq!(built.health, SpaceHealth::NeedsYou { items: 1 });
+        let mut codex = snapshot::build(&rows, None, 20_000);
+        codex.add_agent_start_cards(
+            &rows,
+            &as_starting(&[("waiting".to_owned(), 0, StartedAgent::Codex)]),
+            20_000,
+        );
+        assert_eq!(
+            codex.attention[0].summary.text,
+            "Send @waiting its first message in its pane"
+        );
         let mut early = snapshot::build(&rows, None, 19_999);
         early.add_agent_start_cards(&rows, &as_starting(&started[..1]), 19_999);
         assert!(early.attention.is_empty());

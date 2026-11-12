@@ -1107,10 +1107,30 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
 /// asks the person to look at its pane.
 pub const AGENT_START_GRACE_MS: i64 = 20_000;
 
+/// The agent program Channels started in a pane.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartedAgent {
+    Claude,
+    Codex,
+}
+
+impl StartedAgent {
+    /// What the person does for an agent that hasn't connected. Claude Code
+    /// connects once its first-run screens are answered; a new Codex connects
+    /// after its first prompt.
+    fn asks(self, alias: &str) -> String {
+        match self {
+            Self::Claude => format!("Finish Claude's setup in @{alias}'s pane"),
+            Self::Codex => format!("Send @{alias} its first message in its pane"),
+        }
+    }
+}
+
 /// An agent Channels started in this space, by address, with when it started.
 pub struct StartingAgent<'a> {
     pub address_id: &'a str,
     pub started_at_ms: i64,
+    pub agent: StartedAgent,
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -1157,13 +1177,7 @@ impl DashboardSnapshot {
                     address_id: address.address_id.clone(),
                 },
                 source_kind: AttentionSourceKind::AgentStart,
-                summary: SafeText::from_untrusted(
-                    &format!(
-                        "@{} hasn't connected yet. Open its pane. It may be asking you to trust the folder or to log in. A new Codex connects after its first prompt.",
-                        address.alias
-                    ),
-                    SHORT_CHARS,
-                ),
+                summary: SafeText::from_untrusted(&agent.agent.asks(&address.alias), SHORT_CHARS),
                 subject_summary: None,
                 opened_at_ms: due_ms,
                 subject_alias: Some(address.alias.clone()),

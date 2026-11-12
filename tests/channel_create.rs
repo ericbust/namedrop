@@ -1105,7 +1105,7 @@ fn an_agent_that_has_not_connected_needs_the_person_until_its_session_is_named()
     );
     assert_eq!(
         card["summary"]["text"],
-        "@coder hasn't connected yet. Open its pane. It may be asking you to trust the folder or to log in. A new Codex connects after its first prompt."
+        "Finish Claude's setup in @coder's pane"
     );
     report_session(&f, "w1:p4", "session-coder");
     wait_for("the reported session to be named", || {

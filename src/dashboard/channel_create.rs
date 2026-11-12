@@ -4,7 +4,7 @@
 //! the socket of a space Namedrop already knows.
 use super::super::hub::{HubCommand, now_ms};
 use super::super::launches::{Launch, run_lifecycle};
-use super::super::snapshot::SpaceKey;
+use super::super::snapshot::{SpaceKey, StartedAgent};
 use super::{Front, Request, read_json_body, respond, respond_status};
 use crate::store::AliasClaim;
 use crate::store::dashboard::SpaceRow;
@@ -71,6 +71,15 @@ impl AgentKind {
         match self {
             Self::Claude | Self::Codex => crate::PaneType::Agent,
             Self::Terminal => crate::PaneType::Terminal,
+        }
+    }
+
+    /// The agent program this kind starts; a terminal starts none.
+    fn started(self) -> Option<StartedAgent> {
+        match self {
+            Self::Claude => Some(StartedAgent::Claude),
+            Self::Codex => Some(StartedAgent::Codex),
+            Self::Terminal => None,
         }
     }
 
@@ -799,9 +808,9 @@ fn add(front: &Front, key: &SpaceKey, agent: NewAgent) -> Result<(String, String
         }
         Err(()) => return Err(AgentRefusal::NameUnconfirmed(agent.alias)),
     };
-    if let Some(command) = agent.kind.command() {
+    if let (Some(command), Some(program)) = (agent.kind.command(), agent.kind.started()) {
         // A pane that didn't start still shows as needing the person, who can
-        // start it by hand in the pane view, so this is not a refusal.
+        // start the agent by hand in Herdr, so this is not a refusal.
         let started =
             crate::pane_effects::PaneEffects::acquire(state, &namespace.session_socket_id, &pane)
                 .map_err(|error| error.to_string())
@@ -809,9 +818,13 @@ fn add(front: &Front, key: &SpaceKey, agent: NewAgent) -> Result<(String, String
         if let Err(error) = started {
             eprintln!("dashboard: could not start {command} in {pane}: {error}");
         }
-        front
-            .launches
-            .record(Launch::new(namespace, address_id.clone(), pane, now_ms()));
+        front.launches.record(Launch::new(
+            namespace,
+            address_id.clone(),
+            program,
+            pane,
+            now_ms(),
+        ));
     }
     Ok((address_id, agent.alias))
 }

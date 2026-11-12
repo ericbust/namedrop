@@ -627,17 +627,17 @@ included, at 844 by 300 and in a 390 by 460 window at 125 percent zoom (312 by
 368 CSS pixels). A longer card scrolls inside. See App shell for each layout.
 Announce new items through a polite live region.
 
-| `source`                                | Title                                                                                                | Hint                                                                                                               |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `agent_status`                          | the server summary, which is already short, such as "@claude is waiting on an approval or question." | Answer it in its pane in Herdr.                                                                                    |
-| `agent_disposition`, `delivery_attempt` | Unanswered request                                                                                   | An agent ended its turn without replying.                                                                          |
-| `automatic_reply_limit`                 | Reply limit reached                                                                                  | Continue or stop this thread from its pane.                                                                        |
-| `coordination`                          | Coordination needs a decision                                                                        | Read the report, then answer the lead.                                                                             |
-| `context_grant`                         | Shared context failed                                                                                | Namedrop couldn't capture it. Ask the sender to share it again.                                                    |
-| `pane_binding`                          | An agent's pane changed                                                                              | Name the pane again to reconnect it.                                                                               |
-| `integration_registration`              | Agent setup incomplete                                                                               | Start a new session in that pane.                                                                                  |
-| `agent_start`                           | "@reviewer hasn't connected yet", named from its pane when the item names no agent                   | Open its pane. It may be asking you to trust the folder or to log in. A new Codex connects after its first prompt. |
-| `unknown`                               | Something needs you                                                                                  | Open Details for the full message.                                                                                 |
+| `source`                                | Title                                                                                                | Hint                                                                  |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `agent_status`                          | the server summary, which is already short, such as "@claude is waiting on an approval or question." | Answer it in its pane in Herdr.                                       |
+| `agent_disposition`, `delivery_attempt` | Unanswered request                                                                                   | An agent ended its turn without replying.                             |
+| `automatic_reply_limit`                 | Reply limit reached                                                                                  | Continue or stop this thread from its pane.                           |
+| `coordination`                          | Coordination needs a decision                                                                        | Read the report, then answer the lead.                                |
+| `context_grant`                         | Shared context failed                                                                                | Namedrop couldn't capture it. Ask the sender to share it again.       |
+| `pane_binding`                          | An agent's pane changed                                                                              | Name the pane again to reconnect it.                                  |
+| `integration_registration`              | Agent setup incomplete                                                                               | Start a new session in that pane.                                     |
+| `agent_start`                           | the server summary, which says what to do, such as "Finish Claude's setup in @reviewer's pane"       | Open its pane. It may first ask you to trust the folder or to log in. |
+| `unknown`                               | Something needs you                                                                                  | Open Details for the full message.                                    |
 
 Never cut the server's summary mid-word into the visible line. When an
 `agent_status` summary is longer than 90 characters, use the `unknown` title and

@@ -205,7 +205,7 @@ test("attention wire reads a new agent that hasn't connected as agent_start, ans
       source_id: "pane-address-9",
       source_kind: "agent_start",
       summary: {
-        text: "@reviewer hasn't connected yet. Open its pane. It may be asking you to trust the folder or to log in. A new Codex connects after its first prompt.",
+        text: "Finish Claude's setup in @reviewer's pane",
         truncated: false,
       },
       opened_at_ms: 10,

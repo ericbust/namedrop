@@ -179,10 +179,12 @@ const attentionTable: Record<Attention["source"], AttentionRow> = {
     named: (alias) => `${alias} isn't set up yet`,
     hint: "Start a new session in that pane.",
   },
+  // The server's summary says what to do, which differs for Claude Code and
+  // Codex, and is the title. These stand in when it sends none.
   agent_start: {
-    title: "A new agent hasn't connected yet",
-    named: (alias) => `${alias} hasn't connected yet`,
-    hint: "Open its pane. It may be asking you to trust the folder or to log in. A new Codex connects after its first prompt.",
+    title: "Finish a new agent's setup in its pane",
+    named: (alias) => `Finish ${alias}'s setup in its pane`,
+    hint: "Open its pane. It may first ask you to trust the folder or to log in.",
   },
   unknown: { ...needsYou, hint: "Open Details for the full message." },
 };
@@ -351,7 +353,7 @@ export function attentionCopy(
       : { hint: absenceCopy(absent), hintTitle: null };
   const hintTitle = response?.hintTitle ?? null;
   if (
-    item.source === "agent_status" &&
+    (item.source === "agent_status" || item.source === "agent_start") &&
     !truncated &&
     text.trim() &&
     text.length <= SHORT_SUMMARY
@@ -363,15 +365,10 @@ export function attentionCopy(
       details: null,
     };
   const details = `${text}${truncated ? "…" : ""}`;
-  // A new agent's card answers with its pane, which names the agent even when
-  // the item itself doesn't.
-  const subject =
-    item.subjectAlias ??
-    (item.source === "agent_start" ? (responder?.alias ?? null) : null);
-  return subject === null
+  return item.subjectAlias === null
     ? { title: row.title, hint: response?.hint ?? row.hint, hintTitle, details }
     : {
-        title: row.named(subject),
+        title: row.named(item.subjectAlias),
         hint: response?.hint ?? row.namedHint ?? row.hint,
         hintTitle,
         details,

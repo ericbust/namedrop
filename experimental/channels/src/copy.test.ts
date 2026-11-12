@@ -1009,46 +1009,48 @@ test("create copy: no string says operator or carries a long dash", () => {
   }
 });
 
-test("a new agent's card names it from its pane, says what the pane may be asking, and offers the pane", () => {
+test("a new agent's card says what to do in the server's words, hints at the first-run screens, and offers the pane", () => {
   const item: Attention = {
     rowKey: "agent-start-a9",
     sourceId: "a9",
     source: "agent_start",
     summary: {
-      text: "@reviewer hasn't connected yet. Open its pane. It may be asking you to trust the folder or to log in. A new Codex connects after its first prompt.",
+      text: "Finish Claude's setup in @reviewer's pane",
       truncated: false,
     },
     subjectSummary: null,
     openedAt: 1,
-    subjectAlias: null,
+    subjectAlias: "@reviewer",
     messageId: null,
     threadId: null,
     actions: [],
     response: { kind: "pane", addressId: "a9" as AddressId },
   };
-  const responder: Member = {
-    id: "a9" as AddressId,
-    alias: "@reviewer",
-    kind: { type: "agent", runtime: "claude" },
-    activity: "idle",
-    recentlyClosed: false,
-    role: null,
-    paneLabel: null,
-    subagents: [],
-  };
   const hint =
-    "Open its pane. It may be asking you to trust the folder or to log in. A new Codex connects after its first prompt.";
-  assert.deepEqual(attentionCopy(item, responder), {
-    title: "@reviewer hasn't connected yet",
+    "Open its pane. It may first ask you to trust the folder or to log in.";
+  assert.deepEqual(attentionCopy(item), {
+    title: "Finish Claude's setup in @reviewer's pane",
     hint,
     hintTitle: null,
-    details: item.summary.text,
+    details: null,
+  });
+  const codex = "Send @reviewer its first message in its pane";
+  assert.equal(
+    attentionCopy({ ...item, summary: { text: codex, truncated: false } })
+      .title,
+    codex,
+  );
+  const silent = { ...item, summary: { text: "", truncated: false } };
+  assert.deepEqual(attentionCopy(silent), {
+    title: "Finish @reviewer's setup in its pane",
+    hint,
+    hintTitle: null,
+    details: "",
   });
   assert.equal(
-    attentionCopy({ ...item, subjectAlias: "@named" }).title,
-    "@named hasn't connected yet",
+    attentionCopy({ ...silent, subjectAlias: null }).title,
+    "Finish a new agent's setup in its pane",
   );
-  assert.equal(attentionCopy(item).title, "A new agent hasn't connected yet");
-  assert.equal(attentionKind(item), "A new agent hasn't connected yet");
+  assert.equal(attentionKind(item), "Finish a new agent's setup in its pane");
   assert.equal(responseCopy.pane("@reviewer"), "See @reviewer's screen");
 });
