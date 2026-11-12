@@ -75,15 +75,12 @@ impl Drop for TestDirectory {
 
 /// `workspace-1`, which holds the test's repository, with the lead's Codex
 /// pane and the reviewer's pane, and `workspace-2`, which `workspace list`
-/// leaves out and which holds `{repo}-2`. The space answers `workspace list`
-/// (no checkout stamp), `worktree list --cwd` for the repository only,
-/// `worktree list --workspace`, and `pane list --workspace`. It takes `agent
-/// prompt` to any pane, any `pane report-metadata`, and any `notification
-/// show`.
-///
-/// The old fake could also list the reviewer's session in workspace-2 as
-/// `pane-elsewhere`. No test's outcome depended on it: the pane-moved test
-/// passed with it listed or not, so the switch is gone.
+/// leaves out and which holds `{repo}-2`. The reviewer's session shows up
+/// there as `pane-elsewhere` while the reviewer's pane is moved. The space
+/// answers `workspace list` (no checkout stamp), `worktree list --cwd` for
+/// the repository only, `worktree list --workspace`, and `pane list
+/// --workspace`. It takes `agent prompt` to any pane, any `pane
+/// report-metadata`, and any `notification show`.
 ///
 /// The switches are the old executor's, and a read hook applies them to
 /// the world before every read.
@@ -92,6 +89,8 @@ struct FinalSpace {
     reviewer_host: Arc<Mutex<&'static str>>,
     /// Herdr no longer lists the reviewer's pane, as after it was closed.
     reviewer_gone: Arc<AtomicBool>,
+    /// Herdr lists the reviewer's session in `pane-elsewhere` of workspace-2.
+    reviewer_elsewhere: Arc<AtomicBool>,
     prompts: Arc<Mutex<Vec<(String, String)>>>,
     notifications: Arc<Mutex<Vec<String>>>,
 }
@@ -127,13 +126,25 @@ impl FinalSpace {
             .space("workspace-2")
             .checkout(format!("{}-2", worktree.display()))
             .unlisted()
+            .pane("pane-elsewhere")
+            .terminal("t2")
+            .tab("tab-9")
+            .claude()
+            .session("session-reviewer")
+            .working()
+            .hidden()
             .build();
-        for pane in ["pane-lead", "pane-reviewer"] {
+        for pane in ["pane-lead", "pane-reviewer", "pane-elsewhere"] {
             mux.answer(pane, InputOutcome::Delivered);
         }
         let reviewer_host = Arc::new(Mutex::new("claude"));
         let reviewer_gone = Arc::new(AtomicBool::new(false));
-        let (host, gone) = (Arc::clone(&reviewer_host), Arc::clone(&reviewer_gone));
+        let reviewer_elsewhere = Arc::new(AtomicBool::new(false));
+        let (host, gone, elsewhere) = (
+            Arc::clone(&reviewer_host),
+            Arc::clone(&reviewer_gone),
+            Arc::clone(&reviewer_elsewhere),
+        );
         let repository = worktree.to_path_buf();
         mux.on_read(move |mux, read| {
             if let Read::Survey {
@@ -152,6 +163,11 @@ impl FinalSpace {
                 mux.hide_pane("pane-reviewer");
             } else {
                 mux.show_pane("pane-reviewer");
+            }
+            if elsewhere.load(Ordering::Relaxed) {
+                mux.show_pane("pane-elsewhere");
+            } else {
+                mux.hide_pane("pane-elsewhere");
             }
             Ok(())
         });
@@ -187,6 +203,7 @@ impl FinalSpace {
             space: StrictSpace::new(mux, &listings, takes),
             reviewer_host,
             reviewer_gone,
+            reviewer_elsewhere,
             prompts,
             notifications,
         }
@@ -4294,6 +4311,7 @@ impl Space {
     /// `pane-elsewhere`, handled at `now_ms`.
     fn reviewer_pane_moved_at(&self, now_ms: u64) {
         self.reviewer_pane_gone(true);
+        self.herdr.reviewer_elsewhere.store(true, Ordering::Relaxed);
         namedrop::execute_lifecycle_operation(
             "event.pane-lifecycle",
             json!({"type":"pane_moved","previous_pane_id":"pane-reviewer",
@@ -4308,6 +4326,9 @@ impl Space {
 
     /// Herdr's event that `pane-elsewhere` closed, handled at `now_ms`.
     fn moved_pane_closed_at(&self, now_ms: u64) {
+        self.herdr
+            .reviewer_elsewhere
+            .store(false, Ordering::Relaxed);
         namedrop::execute_lifecycle_operation(
             "event.pane-lifecycle",
             json!({"type":"pane_closed","pane_id":"pane-elsewhere","workspace_id":"workspace-2"}),
@@ -4329,6 +4350,22 @@ impl Space {
         serde_json::from_value::<namedrop::DrainReport>(reconciled["drain"].clone())
             .unwrap()
             .next_due_ms()
+    }
+
+    /// Each pane workspace-2's reconcile discovers, with its session.
+    fn workspace_2_panes(&self) -> Vec<(String, Option<String>)> {
+        namedrop::discover_worktree_for_workspace(&*self.herdr.space, "workspace-2")
+            .unwrap()
+            .panes
+            .iter()
+            .map(|pane| {
+                (
+                    pane.pane_id.clone(),
+                    pane.agent_session_id()
+                        .map(|session| session.as_str().to_owned()),
+                )
+            })
+            .collect()
     }
 
     /// Whether Herdr lists the reviewer's pane.
@@ -4434,6 +4471,14 @@ fn a_pane_moved_to_another_workspace_loses_its_held_answer_only_once_it_closes()
     space.settle_attempt(&ask);
     space.reviewer_pane_moved_at(IDLE);
     assert!(!space.reviewer_bound());
+    assert_eq!(
+        space.workspace_2_panes(),
+        [(
+            "pane-elsewhere".to_owned(),
+            Some("session-reviewer".to_owned())
+        )],
+        "fixture precondition: the fixture lists the moved pane in workspace-2 until it closes"
+    );
     let long_after = IDLE + 3 * UNBOUND_GRACE_MS;
     assert_eq!(space.observe_at(IDLE + UNBOUND_GRACE_MS), None);
     assert_eq!(space.observe_workspace_2_at(IDLE + UNBOUND_GRACE_MS), None);
@@ -4448,6 +4493,11 @@ fn a_pane_moved_to_another_workspace_loses_its_held_answer_only_once_it_closes()
 
     let closed = long_after + 1;
     space.moved_pane_closed_at(closed);
+    assert_eq!(
+        space.workspace_2_panes(),
+        [],
+        "fixture precondition: the fixture stops listing the moved pane once it closes"
+    );
     let lost_at = closed + UNBOUND_GRACE_MS;
     assert_eq!(space.observe_at(closed), Some(lost_at));
     assert!(!space.disposition_warning_ever_opened());

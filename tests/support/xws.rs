@@ -3,12 +3,18 @@
 use crate::cleanup;
 
 use namedrop::{
-    ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
-    IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
-    PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
-    drain_mailboxes, execute_control_operation, execute_integration_operation,
-    execute_lifecycle_operation, execute_message_operation, execute_user_prompt_submit_hook,
-    issue_registration_challenge, spaces_to_wake,
+    ActorKind, AgentRuntime, AgentSessionId, Clock, IdGenerator, LifecycleRuntime,
+    MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId, PaneRoleId,
+    StateNamespace, StateStore, complete_capability_profile, drain_mailboxes,
+    execute_control_operation, execute_integration_operation, execute_lifecycle_operation,
+    execute_message_operation, execute_user_prompt_submit_hook, issue_registration_challenge,
+    mux::{
+        AgentState, Depth, Effect, InputOutcome, MuxError, PaneProcess,
+        fake::{
+            Call, FakeMux, Listing, Read, ScopeKind, SentInput, StrictSpace, Surveyed, Takes, runs,
+        },
+    },
+    spaces_to_wake,
 };
 use serde_json::{Value, json};
 use std::{
@@ -16,7 +22,7 @@ use std::{
     fs,
     path::PathBuf,
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
@@ -50,49 +56,302 @@ pub const SPACES: [Space; 3] = [
     ),
 ];
 
-pub struct FakeHerdr {
+/// The switches and records of the old executor. Tests flip and read them
+/// through `FakeHerdr`, and the space's hooks apply and fill them.
+#[derive(Clone, Default)]
+pub struct Herdr {
     pub repo: String,
-    pub labels: Mutex<Vec<(String, String)>>,
+    pub labels: Arc<Mutex<Vec<(String, String)>>>,
     /// The repository Herdr stamps on a workspace's checkout, by workspace id.
-    pub repos: Mutex<Vec<(String, String)>>,
-    pub workspace_list_fails: AtomicBool,
-    pub prompts: Mutex<Vec<(String, String)>>,
-    pub notifications: Mutex<Vec<Vec<String>>>,
-    pub commands: Mutex<Vec<String>>,
-    pub statuses: Mutex<BTreeMap<String, String>>,
-    pub sessions: Mutex<BTreeMap<String, String>>,
-    pub unreadable: Mutex<BTreeSet<String>>,
-    pub missing_panes: Mutex<BTreeSet<String>>,
-    pub failing_prompts: Mutex<BTreeSet<String>>,
+    pub repos: Arc<Mutex<Vec<(String, String)>>>,
+    pub workspace_list_fails: Arc<AtomicBool>,
+    pub prompts: Arc<Mutex<Vec<(String, String)>>>,
+    /// Each notification's title and body.
+    pub notifications: Arc<Mutex<Vec<Vec<String>>>>,
+    /// Every read, input, and effect the code tried, as the old executor
+    /// logged every command, so a test can clear it.
+    pub commands: Arc<Mutex<Vec<Call>>>,
+    pub statuses: Arc<Mutex<BTreeMap<String, String>>>,
+    pub sessions: Arc<Mutex<BTreeMap<String, String>>>,
+    pub unreadable: Arc<Mutex<BTreeSet<String>>>,
+    pub missing_panes: Arc<Mutex<BTreeSet<String>>>,
+    pub failing_prompts: Arc<Mutex<BTreeSet<String>>>,
     /// Shell panes as (workspace, pane, physical terminal).
-    pub terminals: Mutex<Vec<(String, String, String)>>,
-    pub runs: Mutex<Vec<(String, String)>>,
-    pub shells_busy: AtomicBool,
+    pub terminals: Arc<Mutex<Vec<(String, String, String)>>>,
+    pub runs: Arc<Mutex<Vec<(String, String)>>>,
+    pub shells_busy: Arc<AtomicBool>,
+    /// Every shell pane a switch ever opened in the world.
+    opened: Arc<Mutex<BTreeSet<String>>>,
+}
+
+/// The three workspaces of `SPACES`. The old executor answered `workspace
+/// list` (each space's label and number, and a stamp for each space in
+/// `repos`), `worktree list --workspace` (the repository for w1 and
+/// `not_git_worktree` for the others), `pane list --workspace`, and `pane
+/// process-info` for shell panes. It took `agent prompt` and `pane run` to
+/// any pane, `notification show`, and `pane report-metadata`, and it failed
+/// every other command, `worktree list --cwd`, `pane read`, and `agent
+/// send-keys` among them. A read hook applies the switches to the world
+/// before every read, and `reply` applies them before it renders one.
+pub struct FakeHerdr {
+    herdr: Herdr,
+    pub space: StrictSpace,
+}
+
+impl std::ops::Deref for FakeHerdr {
+    type Target = Herdr;
+
+    fn deref(&self) -> &Herdr {
+        &self.herdr
+    }
+}
+
+/// Whether `call` lists the workspaces, Herdr's `workspace list`. The space
+/// answers no checkout survey, so only a survey of every space at the
+/// spaces depth runs it.
+pub fn lists_spaces(call: &Call) -> bool {
+    matches!(
+        call,
+        Call::Read(Read::Survey {
+            scope: Surveyed::All,
+            depth: Depth::Spaces
+        })
+    )
+}
+
+/// Whether `call` ran a command line in a pane, Herdr's `pane run`.
+pub fn runs_line(call: &Call) -> bool {
+    matches!(call, Call::Input(attempt) if matches!(attempt.input, SentInput::Line(_)))
 }
 
 impl FakeHerdr {
     pub fn new(repo: &std::path::Path) -> Self {
-        Self {
+        let herdr = Herdr {
             repo: repo.display().to_string(),
-            labels: Mutex::new(
+            labels: Arc::new(Mutex::new(
                 SPACES
                     .iter()
                     .map(|(id, label, _)| ((*id).to_owned(), (*label).to_owned()))
                     .collect(),
-            ),
-            repos: Mutex::new(Vec::new()),
-            workspace_list_fails: AtomicBool::new(false),
-            prompts: Mutex::new(Vec::new()),
-            notifications: Mutex::new(Vec::new()),
-            commands: Mutex::new(Vec::new()),
-            statuses: Mutex::new(BTreeMap::new()),
-            sessions: Mutex::new(BTreeMap::new()),
-            unreadable: Mutex::new(BTreeSet::new()),
-            missing_panes: Mutex::new(BTreeSet::new()),
-            failing_prompts: Mutex::new(BTreeSet::new()),
-            terminals: Mutex::new(Vec::new()),
-            runs: Mutex::new(Vec::new()),
-            shells_busy: AtomicBool::new(false),
+            )),
+            ..Herdr::default()
+        };
+        let mut world = FakeMux::world().endpoint("socket-a");
+        for (id, label, agents) in SPACES {
+            world = world.space(id).label(label).unstamped();
+            if id == "w1" {
+                world = world.checkout(repo);
+            }
+            for (index, (_, pane)) in agents.iter().enumerate() {
+                world = world
+                    .pane(pane)
+                    .terminal(&format!("t-{pane}"))
+                    .tab(&format!("tab-{index}"))
+                    .codex()
+                    .session(&session(pane))
+                    .idle();
+            }
+        }
+        let mux = world.build();
+        for (_, _, agents) in SPACES {
+            for (_, pane) in agents {
+                mux.answer(pane, InputOutcome::Delivered);
+            }
+        }
+        let surveys = [
+            (ScopeKind::All, Depth::Spaces),
+            (ScopeKind::Space, Depth::Panes),
+            (ScopeKind::PanesOf, Depth::Spaces),
+            (ScopeKind::PanesOf, Depth::Panes),
+        ];
+        let takes = Takes::nothing()
+            .input(|attempt| matches!(attempt.input, SentInput::Prompt(_) | SentInput::Line(_)))
+            .effect(|effect| {
+                matches!(
+                    effect,
+                    Effect::Notify { .. } | Effect::Identify { .. } | Effect::Badges { .. }
+                )
+            });
+        let fake = Self {
+            space: StrictSpace::new(mux, &surveys, takes),
+            herdr,
+        };
+        fake.hook();
+        fake
+    }
+
+    fn hook(&self) {
+        let herdr = self.herdr.clone();
+        self.space.on_read(move |mux, read| {
+            herdr
+                .commands
+                .lock()
+                .unwrap()
+                .push(Call::Read(read.clone()));
+            herdr.sync(mux);
+            if lists_spaces(&Call::Read(read.clone()))
+                && herdr.workspace_list_fails.load(Ordering::Relaxed)
+            {
+                return Err(MuxError::Unavailable(
+                    "herdr: workspace list is unavailable".to_owned(),
+                ));
+            }
+            let listed = match read {
+                Read::Survey {
+                    scope: Surveyed::Space(space) | Surveyed::PanesOf(space),
+                    ..
+                } if runs(read, Listing::PanesOf) => Some(space.as_str()),
+                _ => None,
+            };
+            if let Some(space) = listed
+                && herdr.unreadable.lock().unwrap().contains(space)
+            {
+                return Err(MuxError::Unavailable(format!(
+                    "herdr: workspace {space} is unavailable"
+                )));
+            }
+            Ok(())
+        });
+        let failing = Arc::clone(&self.herdr.failing_prompts);
+        self.space.answer_with(move |_, pane, input| {
+            (matches!(input, SentInput::Prompt(_))
+                && failing.lock().unwrap().contains(pane.as_str()))
+            .then(|| InputOutcome::Refused("definitive".to_owned()))
+        });
+        let herdr = self.herdr.clone();
+        self.space.on_input(move |_, attempt| {
+            herdr
+                .commands
+                .lock()
+                .unwrap()
+                .push(Call::Input(attempt.clone()));
+            if attempt.outcome != InputOutcome::Delivered {
+                return;
+            }
+            let pane = attempt.pane.as_str().to_owned();
+            match &attempt.input {
+                SentInput::Prompt(prompt) => {
+                    herdr.prompts.lock().unwrap().push((pane, prompt.clone()))
+                }
+                SentInput::Line(line) => herdr.runs.lock().unwrap().push((pane, line.clone())),
+                SentInput::Keys { .. } => {}
+            }
+        });
+        let herdr = self.herdr.clone();
+        self.space.on_apply(move |_, effect| {
+            herdr
+                .commands
+                .lock()
+                .unwrap()
+                .push(Call::Effect(effect.clone()));
+            if let Effect::Notify { title, body, .. } = effect {
+                herdr
+                    .notifications
+                    .lock()
+                    .unwrap()
+                    .push(vec![title.clone(), body.clone()]);
+            }
+            Ok(())
+        });
+    }
+
+    /// What Herdr prints for `args`, for a script `herdr` that serves the
+    /// dashboard. It applies the switches, `workspace_list_fails` and
+    /// `unreadable` included, and answers only the three listings the old
+    /// executor answered, failing any other command as it did. The test
+    /// reads the reply for itself, so it is not in `commands` and runs no
+    /// hook.
+    pub fn reply(&self, args: &[&str]) -> Result<String, String> {
+        self.herdr.sync(&self.space);
+        match args {
+            ["workspace", "list"] if self.workspace_list_fails.load(Ordering::Relaxed) => {
+                Err("herdr: workspace list is unavailable".to_owned())
+            }
+            ["pane", "list", "--workspace", space]
+                if self.unreadable.lock().unwrap().contains(*space) =>
+            {
+                Err(format!("herdr: workspace {space} is unavailable"))
+            }
+            ["workspace", "list"]
+            | ["worktree", "list", "--workspace", _, "--json"]
+            | ["pane", "list", "--workspace", _] => self.space.herdr_reply(args),
+            _ => Err(format!("unexpected Herdr command: {args:?}")),
+        }
+    }
+}
+
+impl Herdr {
+    /// Applies the switches to the world.
+    fn sync(&self, mux: &FakeMux) {
+        let repos = self.repos.lock().unwrap().clone();
+        for (space, label) in self.labels.lock().unwrap().iter() {
+            mux.set_label(space, Some(label));
+            let stamp = repos
+                .iter()
+                .find(|(stamped, _)| stamped == space)
+                .map(|(_, repo)| (PathBuf::from(format!("/worktrees/{repo}/{label}")), repo));
+            mux.set_stamp(
+                space,
+                stamp
+                    .as_ref()
+                    .map(|(path, repo)| (path.as_path(), Some(repo.as_str()))),
+            );
+        }
+        let statuses = self.statuses.lock().unwrap().clone();
+        let sessions = self.sessions.lock().unwrap().clone();
+        let missing = self.missing_panes.lock().unwrap().clone();
+        for (_, _, agents) in SPACES {
+            for (_, pane) in agents {
+                let status = statuses.get(*pane).map_or("idle", String::as_str);
+                mux.set_state(pane, AgentState::parse(status));
+                let session = sessions
+                    .get(*pane)
+                    .cloned()
+                    .unwrap_or_else(|| session(pane));
+                mux.set_session(pane, &session);
+                if missing.contains(*pane) {
+                    mux.hide_pane(pane);
+                } else {
+                    mux.show_pane(pane);
+                }
+            }
+        }
+        let group = if self.shells_busy.load(Ordering::Relaxed) {
+            43
+        } else {
+            42
+        };
+        let terminals = self.terminals.lock().unwrap().clone();
+        let mut opened = self.opened.lock().unwrap();
+        for (space, pane, terminal) in &terminals {
+            if opened.insert(pane.clone()) {
+                mux.open_pane(space, |space| {
+                    space
+                        .pane(pane)
+                        .terminal(terminal)
+                        .tab("tab-shell")
+                        .state(AgentState::parse("unknown"))
+                        .reports_session(false)
+                });
+                mux.answer(pane, InputOutcome::Delivered);
+            }
+            mux.show_pane(pane);
+            mux.set_terminal(pane, terminal);
+            mux.set_process(
+                pane,
+                Some(PaneProcess {
+                    shell_pid: Some(42),
+                    foreground_group: Some(group),
+                    foreground_pids: vec![std::process::id()],
+                    tty: None,
+                }),
+            );
+        }
+        for pane in opened.iter() {
+            if !terminals.iter().any(|(_, shell, _)| shell == pane) {
+                mux.hide_pane(pane);
+                mux.set_process(pane, None);
+            }
         }
     }
 
@@ -129,125 +388,6 @@ impl FakeHerdr {
         self.envelopes(pane)
             .pop()
             .unwrap_or_else(|| panic!("no envelope was dispatched to {pane}"))
-    }
-}
-
-impl HerdrCommandExecutor for FakeHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        self.commands.lock().unwrap().push(args.join(" "));
-        let stdout = match args {
-            ["workspace", "list"] if self.workspace_list_fails.load(Ordering::Relaxed) => {
-                return Err("herdr: workspace list is unavailable".to_owned());
-            }
-            ["workspace", "list"] => {
-                let labels = self.labels.lock().unwrap();
-                let repos = self.repos.lock().unwrap();
-                json!({"result":{"type":"workspace_list","workspaces": labels.iter().enumerate()
-                    .map(|(number, (id, label))| {
-                        let mut workspace = json!({"workspace_id":id,"label":label,"number":number + 1});
-                        if let Some((_, repo)) = repos.iter().find(|(space, _)| space == id) {
-                            workspace["worktree"] = json!({
-                                "checkout_path": format!("/worktrees/{repo}/{label}"),
-                                "is_linked_worktree": true,
-                                "repo_name": repo,
-                            });
-                        }
-                        workspace
-                    })
-                    .collect::<Vec<_>>()}})
-                .to_string()
-            }
-            ["worktree", "list", "--workspace", "w1", "--json"] => {
-                json!({"result":{"worktrees":[{"path":self.repo,"open_workspace_id":"w1"}]}})
-                    .to_string()
-            }
-            ["worktree", "list", "--workspace", _, "--json"] => {
-                return Err(json!({"error":{"code":"not_git_worktree"}}).to_string());
-            }
-            ["pane", "list", "--workspace", workspace]
-                if self.unreadable.lock().unwrap().contains(*workspace) =>
-            {
-                return Err(format!("herdr: workspace {workspace} is unavailable"));
-            }
-            ["pane", "list", "--workspace", workspace] => {
-                let statuses = self.statuses.lock().unwrap().clone();
-                let sessions = self.sessions.lock().unwrap().clone();
-                let (statuses, sessions) = (&statuses, &sessions);
-                let mut panes: Vec<Value> = SPACES
-                    .iter()
-                    .filter(|(id, _, _)| id == workspace)
-                    .flat_map(|(id, _, agents)| {
-                        agents.iter().enumerate().map(move |(index, (_, pane))| {
-                            json!({"pane_id":pane,"terminal_id":format!("t-{pane}"),
-                                   "tab_id":format!("tab-{index}"),"workspace_id":id,"agent":"codex",
-                                   "agent_session":{"value":sessions.get(*pane).cloned().unwrap_or_else(|| session(pane))},
-                                   "agent_status":statuses.get(*pane).map_or("idle", String::as_str)})
-                        })
-                    })
-                    .collect();
-                let missing = self.missing_panes.lock().unwrap();
-                panes.retain(|pane| !missing.contains(pane["pane_id"].as_str().unwrap()));
-                panes.extend(
-                    self.terminals
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .filter(|(id, _, _)| id == workspace)
-                        .map(|(id, pane, terminal)| {
-                            json!({"pane_id":pane,"terminal_id":terminal,"tab_id":"tab-shell",
-                                   "workspace_id":id,"agent":null,"agent_status":"unknown"})
-                        }),
-                );
-                json!({"result":{"panes":panes}}).to_string()
-            }
-            ["pane", "process-info", "--pane", pane] if self.is_terminal(pane) => {
-                let group = if self.shells_busy.load(Ordering::Relaxed) {
-                    43
-                } else {
-                    42
-                };
-                json!({"result":{"process_info":{"shell_pid":42,"foreground_process_group_id":group,
-                       "foreground_processes":[{"pid":std::process::id()}]}}})
-                .to_string()
-            }
-            ["pane", "run", pane, command] => {
-                self.runs
-                    .lock()
-                    .unwrap()
-                    .push(((*pane).to_owned(), (*command).to_owned()));
-                "{}".to_owned()
-            }
-            ["agent", "prompt", pane, _]
-                if self.failing_prompts.lock().unwrap().contains(*pane) =>
-            {
-                return Err("definitive".to_owned());
-            }
-            ["agent", "prompt", pane, prompt] => {
-                self.prompts
-                    .lock()
-                    .unwrap()
-                    .push(((*pane).to_owned(), (*prompt).to_owned()));
-                "{}".to_owned()
-            }
-            ["notification", "show", ..] => {
-                self.notifications
-                    .lock()
-                    .unwrap()
-                    .push(args.iter().map(|arg| (*arg).to_owned()).collect());
-                "{}".to_owned()
-            }
-            ["pane", "report-metadata", ..] => "{}".to_owned(),
-            _ => return Err(format!("unexpected Herdr command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput { stdout })
-    }
-
-    fn input_failure(&self, error: String) -> namedrop::mux::InputOutcome {
-        if error == "definitive" {
-            namedrop::mux::InputOutcome::Refused(error)
-        } else {
-            namedrop::mux::InputOutcome::Ambiguous(error)
-        }
     }
 }
 
@@ -303,7 +443,7 @@ pub struct Fixture {
     pub clock: TestClock,
 }
 
-pub type Runtime<'a> = LifecycleRuntime<'a, FakeHerdr, TestClock, SequenceIds>;
+pub type Runtime<'a> = LifecycleRuntime<'a, FakeMux, TestClock, SequenceIds>;
 
 impl Fixture {
     fn as_typed(&self, prompt: &str) -> String {
@@ -391,7 +531,7 @@ impl Fixture {
             workspace_id: Some(workspace),
             current_pane_id: Some(pane),
             session_socket_id: "socket-a",
-            mux: &self.herdr,
+            mux: &self.herdr.space,
             clock: &self.clock,
             ids: &self.ids,
         }

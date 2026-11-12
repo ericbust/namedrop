@@ -1,3 +1,5 @@
+#![cfg(feature = "test-support")]
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
@@ -8,7 +10,7 @@ mod executable;
 #[path = "support/xws.rs"]
 mod xws;
 
-use namedrop::{HerdrCommandExecutor, StateNamespace, dashboard::snapshot::SpaceKey};
+use namedrop::{StateNamespace, dashboard::snapshot::SpaceKey};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -282,10 +284,7 @@ impl Server {
             vec!["pane", "list", "--workspace", "w2"],
             vec!["pane", "list", "--workspace", "w3"],
         ] {
-            responses.insert(
-                args.join(" "),
-                json!(f.herdr.execute(&args).unwrap().stdout),
-            );
+            responses.insert(args.join(" "), json!(f.herdr.reply(&args).unwrap()));
         }
         fs::create_dir_all(f.root.join("responses")).unwrap();
         store_responses(f, &Value::Object(responses));

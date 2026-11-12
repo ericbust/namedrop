@@ -63,6 +63,7 @@ fn host() -> StrictSpace {
         .pane("p2")
         .terminal("t2")
         .tab("tab2")
+        .reports_session(false)
         .state(namedrop::mux::AgentState::parse("unknown"))
         .tab_label("tab1", "Main")
         .tab_label("tab2", "Main")

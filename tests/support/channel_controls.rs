@@ -1,5 +1,4 @@
 use super::*;
-use namedrop::HerdrCommandExecutor;
 use namedrop::dashboard::snapshot::SpaceKey;
 
 fn held_thread(f: &Fixture) -> Value {
@@ -870,21 +869,8 @@ fn later_input_waits_until_stops_proven_interrupt_finishes() {
 
 #[test]
 fn later_doctor_prompt_invalidates_an_old_active_mailbox_stop() {
-    use std::sync::{Mutex, mpsc};
-    struct BlockInput<'a> {
-        herdr: &'a xws::FakeHerdr,
-        entered: mpsc::Sender<()>,
-        release: Mutex<mpsc::Receiver<()>>,
-    }
-    impl HerdrCommandExecutor for BlockInput<'_> {
-        fn execute(&self, args: &[&str]) -> Result<namedrop::HerdrCommandOutput, String> {
-            if args.starts_with(&["agent", "prompt"]) {
-                self.entered.send(()).unwrap();
-                self.release.lock().unwrap().recv().unwrap();
-            }
-            self.herdr.execute(args)
-        }
-    }
+    use namedrop::mux::fake::SentInput;
+    use std::sync::{Arc, Mutex, mpsc};
     let f = fixture();
     let parent = plain_root(&f, "doctor-later", "Please inspect.");
     let session = xws::session("pane-1-planner");
@@ -892,24 +878,18 @@ fn later_doctor_prompt_invalidates_an_old_active_mailbox_stop() {
     let server = Server::start(&f, "not json", true);
     let (entered, input_entered) = mpsc::channel();
     let (release, input_release) = mpsc::channel();
-    let blocked = BlockInput {
-        herdr: &f.herdr,
-        entered,
-        release: Mutex::new(input_release),
-    };
-    let base = f.runtime("w1", "pane-1-planner");
-    let runtime = namedrop::LifecycleRuntime {
-        state_directory: base.state_directory,
-        home_directory: base.home_directory,
-        agent_config: base.agent_config,
-        cwd: base.cwd,
-        workspace_id: base.workspace_id,
-        current_pane_id: base.current_pane_id,
-        session_socket_id: base.session_socket_id,
-        mux: &blocked,
-        clock: base.clock,
-        ids: base.ids,
-    };
+    let gate = Arc::new(Mutex::new(Some((entered, input_release))));
+    f.herdr.space.answer_with(move |_, _, input| {
+        let held = matches!(input, SentInput::Prompt(_))
+            .then(|| gate.lock().unwrap().take())
+            .flatten();
+        if let Some((entered, release)) = held {
+            entered.send(()).unwrap();
+            release.recv().unwrap();
+        }
+        None
+    });
+    let runtime = f.runtime("w1", "pane-1-planner");
     let (responded, response) = mpsc::channel();
     thread::scope(|scope| {
         let doctor = scope.spawn(|| namedrop::request_doctor_assistance(&runtime, &session));
@@ -1110,9 +1090,8 @@ fn report_status(f: &Fixture, status: &str) {
     let key = "pane list --workspace w1";
     let reply = f
         .herdr
-        .execute(&["pane", "list", "--workspace", "w1"])
-        .unwrap()
-        .stdout;
+        .reply(&["pane", "list", "--workspace", "w1"])
+        .unwrap();
     let file = f.root.join("http-herdr-responses.json");
     let mut responses: Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
     responses[key] = json!(reply);

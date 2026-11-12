@@ -1381,8 +1381,17 @@ fn a_pane_can_report_no_session_field_at_all() {
 #[test]
 fn every_new_setter_panics_on_an_unknown_id() {
     type Call = Box<dyn Fn(&FakeMux)>;
-    let calls: [(&str, Call); 10] = [
+    let calls: [(&str, Call); 16] = [
         ("pane", Box::new(|mux| mux.hide_pane("pane-9"))),
+        ("pane", Box::new(|mux| mux.set_title("pane-9", None))),
+        ("pane", Box::new(|mux| mux.set_idle_label("pane-9", None))),
+        ("space", Box::new(|mux| mux.set_stamp("workspace-9", None))),
+        ("pane", Box::new(|mux| mux.set_terminal("pane-9", "t9"))),
+        (
+            "pane",
+            Box::new(|mux| mux.set_reported_space("pane-9", "workspace-1")),
+        ),
+        ("pane", Box::new(|mux| mux.clear_state("pane-9"))),
         ("pane", Box::new(|mux| mux.omit_session("pane-9"))),
         ("pane", Box::new(|mux| mux.show_pane("pane-9"))),
         ("pane", Box::new(|mux| mux.set_agent("pane-9", None))),
@@ -1433,9 +1442,6 @@ fn a_connection_keeps_its_budget_and_cancel_flag_for_hooks_and_the_read_log() {
         saw.lock()
             .unwrap()
             .push((connection.budget(), connection.cancelled()));
-        if connection.cancelled() {
-            return Err(MuxError::Unavailable("cancelled".into()));
-        }
         Ok(())
     });
     let connected = mux
@@ -1443,11 +1449,15 @@ fn a_connection_keeps_its_budget_and_cancel_flag_for_hooks_and_the_read_log() {
         .unwrap();
     connected.integration_root().unwrap();
     cancelled.store(true, Ordering::SeqCst);
-    assert!(connected.integration_root().is_err());
+    assert_eq!(
+        connected.integration_root(),
+        Err(MuxError::Unavailable(CANCELLED.into())),
+        "a cancelled connection's read is refused before its hooks"
+    );
     mux.integration_root().unwrap();
     assert_eq!(
         *seen.lock().unwrap(),
-        [(Some(budget), false), (Some(budget), true), (None, false)]
+        [(Some(budget), false), (None, false)]
     );
     assert_eq!(
         mux.budgeted_reads(),
@@ -1458,6 +1468,33 @@ fn a_connection_keeps_its_budget_and_cancel_flag_for_hooks_and_the_read_log() {
         ]
     );
     assert_eq!(mux.reads().len(), 3);
+}
+
+#[test]
+fn a_connection_cancelled_mid_read_starts_none_of_the_read_s_later_commands() {
+    let mux = author_and_reviewer();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let cancel = Arc::clone(&cancelled);
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let commands = Arc::clone(&ran);
+    mux.on_command(move |_, command| {
+        commands.lock().unwrap().push(command.listing);
+        cancel.store(true, Ordering::SeqCst);
+        Ok(())
+    });
+    let connected = mux
+        .connect("socket-a", Budget::ADAPTER_DEFAULT, Arc::clone(&cancelled))
+        .unwrap();
+    assert_eq!(
+        connected.survey(Scope::CheckoutOf(Path::new("/repo")), Depth::Panes),
+        Err(MuxError::Unavailable(CANCELLED.into()))
+    );
+    assert_eq!(*ran.lock().unwrap(), [Some(Listing::CheckoutAt)]);
+    assert_eq!(
+        mux.budgeted_reads()[0].1,
+        [Budget::ADAPTER_DEFAULT, Budget::ADAPTER_DEFAULT],
+        "the second command asked its budget and then refused to start"
+    );
 }
 
 #[test]
@@ -1679,4 +1716,413 @@ fn an_apply_hook_fails_the_effects_it_names_and_each_stays_attempted() {
     assert_eq!(mux.effects(), std::slice::from_ref(&rename));
     assert_eq!(mux.attempted_effects(), [Effect::ReloadKeybindings, rename]);
     assert_eq!(Arc::strong_count(&mux.shared), 1, "no hook holds the world");
+}
+
+const SCREEN: ScreenRequest = ScreenRequest {
+    wrap: Wrap::AsDrawn,
+    style: Style::Plain,
+    lines: 10,
+};
+
+fn millis(millis: u64) -> Budget {
+    Budget {
+        timeout: Duration::from_millis(millis),
+        max_output_bytes: 4096,
+    }
+}
+
+/// An allowance that hands out `budgets` last first and counts each ask.
+fn counted(budgets: Vec<u64>) -> (Mutex<Vec<u64>>, Mutex<usize>) {
+    (Mutex::new(budgets), Mutex::new(0))
+}
+
+#[test]
+fn a_read_that_fails_on_its_first_command_keeps_its_own_error_and_asks_one_budget() {
+    let mux = author_and_reviewer();
+    let (left, asked) = counted(vec![300, 500, 900]);
+    let cancelled = AtomicBool::new(false);
+    let reads = mux.within(Allowance::each(
+        || {
+            *asked.lock().unwrap() += 1;
+            Ok(millis(
+                left.lock().unwrap().pop().ok_or("the budget ran out")?,
+            ))
+        },
+        &cancelled,
+    ));
+    let missing = SpaceId::new("workspace-9");
+    assert!(matches!(
+        reads.survey(Scope::Space(&missing), Depth::Panes),
+        Err(MuxError::Gone(Gone::Space, _))
+    ));
+    mux.fail(Op::Survey, MuxError::Unavailable("listing failed".into()));
+    assert_eq!(
+        reads.survey(Scope::CheckoutOf(Path::new("/repo")), Depth::Panes),
+        Err(MuxError::Unavailable("listing failed".into()))
+    );
+    assert_eq!(*asked.lock().unwrap(), 2, "one budget per failed read");
+    assert_eq!(
+        mux.budgeted_reads()
+            .into_iter()
+            .map(|(_, budgets)| budgets)
+            .collect::<Vec<_>>(),
+        [vec![millis(900)], vec![millis(500)]]
+    );
+}
+
+#[test]
+fn command_hooks_run_once_per_command_in_order_with_each_command_s_budget() {
+    let mux = FakeMux::world()
+        .space("workspace-1")
+        .checkout("/repo")
+        .pane("pane-author")
+        .claude()
+        .space("workspace-2")
+        .unstamped()
+        .space("workspace-3")
+        .checkout("/three")
+        .build();
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&ran);
+    mux.on_command(move |_, command| {
+        seen.lock()
+            .unwrap()
+            .push((command.read.clone(), command.listing, command.budget));
+        Ok(())
+    });
+    let left = Mutex::new(vec![100, 200, 300, 400, 500, 600, 700]);
+    let cancelled = AtomicBool::new(false);
+    let reads = mux.within(Allowance::each(
+        || Ok(millis(left.lock().unwrap().pop().ok_or("ran out")?)),
+        &cancelled,
+    ));
+    let checkout = Read::Survey {
+        scope: Surveyed::CheckoutOf("/repo".into()),
+        depth: Depth::Panes,
+    };
+    reads
+        .survey(Scope::CheckoutOf(Path::new("/repo")), Depth::Panes)
+        .unwrap();
+    reads.integration_root().unwrap();
+    mux.screen(&PaneId::new("pane-author"), SCREEN).unwrap();
+    let screen = Read::Screen {
+        pane: PaneId::new("pane-author"),
+        request: SCREEN,
+    };
+    // workspace-2 names no checkout, so the adapter lists its own; workspace-3
+    // is stamped with its checkout and costs nothing.
+    assert_eq!(
+        *ran.lock().unwrap(),
+        [
+            (
+                checkout.clone(),
+                Some(Listing::CheckoutAt),
+                Some(millis(700))
+            ),
+            (checkout.clone(), Some(Listing::Spaces), Some(millis(600))),
+            (
+                checkout.clone(),
+                Some(Listing::CheckoutOf),
+                Some(millis(500))
+            ),
+            (checkout.clone(), Some(Listing::PanesOf), Some(millis(400))),
+            (Read::IntegrationRoot, None, Some(millis(300))),
+            (screen.clone(), None, None),
+        ]
+    );
+    assert_eq!(
+        mux.budgeted_reads(),
+        [
+            (
+                checkout,
+                vec![millis(700), millis(600), millis(500), millis(400)]
+            ),
+            (Read::IntegrationRoot, vec![millis(300)]),
+            (screen, vec![]),
+        ]
+    );
+}
+
+#[test]
+fn a_command_hook_error_fails_the_read_and_no_later_command_runs() {
+    let mux = author_and_reviewer();
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&ran);
+    mux.on_command(move |_, command| {
+        seen.lock().unwrap().push(command.listing);
+        match command.listing {
+            Some(Listing::CheckoutOf) => Err(MuxError::Timeout(
+                "Herdr command timed out after 900 ms".into(),
+            )),
+            _ => Ok(()),
+        }
+    });
+    let space = SpaceId::new("workspace-1");
+    let left = Mutex::new(vec![500, 900]);
+    let cancelled = AtomicBool::new(false);
+    let reads = mux.within(Allowance::each(
+        || Ok(millis(left.lock().unwrap().pop().ok_or("ran out")?)),
+        &cancelled,
+    ));
+    assert_eq!(
+        reads.survey(Scope::Space(&space), Depth::Panes),
+        Err(MuxError::Timeout(
+            "Herdr command timed out after 900 ms".into()
+        ))
+    );
+    assert_eq!(*ran.lock().unwrap(), [Some(Listing::CheckoutOf)]);
+    assert_eq!(mux.budgeted_reads()[0].1, [millis(900)]);
+    mux.fail(Op::Survey, MuxError::Unavailable("listing failed".into()));
+    assert!(mux.survey(Scope::All, Depth::Spaces).is_err());
+    assert_eq!(
+        ran.lock().unwrap().len(),
+        1,
+        "a failed read runs no command"
+    );
+}
+
+#[test]
+fn a_command_hook_sees_the_flag_its_command_watches_change_while_it_runs() {
+    let mux = author_and_reviewer();
+    let watched = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&watched);
+    let connection = Arc::new(AtomicBool::new(false));
+    let cancel = Arc::clone(&connection);
+    mux.on_command(move |_, command| {
+        let before = command.cancelled();
+        match command.read {
+            Read::Screen { pane, .. } if pane.as_str() == "pane-author" => {
+                FLAG.store(true, Ordering::SeqCst);
+            }
+            Read::IntegrationRoot if command.budget.is_some() => {
+                cancel.store(true, Ordering::SeqCst);
+            }
+            _ => {}
+        }
+        seen.lock().unwrap().push((before, command.cancelled()));
+        Ok(())
+    });
+    static FLAG: AtomicBool = AtomicBool::new(false);
+    let budget = || Ok(millis(1000));
+    let wide = AtomicBool::new(false);
+    let reads = mux.within(Allowance::each(budget, &wide));
+    let narrow = reads.within(Allowance::each(budget, &FLAG));
+    let author = PaneId::new("pane-author");
+    narrow.screen(&author, SCREEN).unwrap();
+    assert_eq!(
+        narrow.screen(&author, SCREEN),
+        Err(MuxError::Unavailable(CANCELLED.into())),
+        "the next command does not start"
+    );
+    let connected = mux
+        .connect("socket-a", Budget::ADAPTER_DEFAULT, Arc::clone(&connection))
+        .unwrap();
+    connected.integration_root().unwrap();
+    let tab = TabId::new("workspace-1:tab-1");
+    let refused = Err(MuxError::Unavailable(CANCELLED.into()));
+    assert_eq!(
+        connected
+            .within(Allowance::fixed(millis(1000)))
+            .tab_label(&tab),
+        refused
+    );
+    assert_eq!(
+        connected.tab_label(&tab),
+        refused,
+        "a read on a cancelled connection does not start, as in the adapter"
+    );
+    mux.integration_root().unwrap();
+    assert_eq!(
+        *watched.lock().unwrap(),
+        [(false, true), (false, true), (false, false)],
+        "a narrowed command watches its narrowest flag, a connection's its own, and a \
+         builder handle's none"
+    );
+}
+
+#[test]
+fn every_call_is_logged_in_the_order_it_was_made() {
+    let mux = author_and_reviewer();
+    let author = PaneId::new("pane-author");
+    mux.survey(Scope::All, Depth::Spaces).unwrap();
+    mux.send(&author, InputKind::Line("ls"));
+    let _ = mux.apply(&Effect::ReloadKeybindings);
+    mux.process(&author).unwrap();
+    assert_eq!(
+        mux.calls(),
+        [
+            Call::Read(Read::Survey {
+                scope: Surveyed::All,
+                depth: Depth::Spaces
+            }),
+            Call::Input(mux.attempts()[0].clone()),
+            Call::Effect(Effect::ReloadKeybindings),
+            Call::Read(Read::Process(author)),
+        ]
+    );
+}
+
+#[test]
+fn a_decider_answers_an_input_by_its_content_before_scripts_answers_and_the_gate() {
+    let mux = author_and_reviewer();
+    let author = PaneId::new("pane-author");
+    mux.answer("pane-author", InputOutcome::Delivered);
+    mux.answer_with(|mux, pane, input| {
+        assert!(mux.lock().pane(pane).is_some(), "the world is unlocked");
+        match input {
+            SentInput::Keys { keys, .. } if keys != &[Key::CtrlC] => {
+                Some(InputOutcome::Ambiguous("invalid_key".into()))
+            }
+            SentInput::Prompt(text) if text.starts_with("Coordination ") => Some(
+                InputOutcome::Declined(Retry::OnEvent, "synthetic-preinvocation".into()),
+            ),
+            _ => None,
+        }
+    });
+    let keys = |keys: &[Key]| {
+        mux.send(
+            &author,
+            InputKind::Keys {
+                recipient: Recipient::Agent,
+                keys,
+            },
+        )
+    };
+    assert_eq!(keys(&[Key::CtrlC]), InputOutcome::Delivered);
+    assert_eq!(
+        keys(&[Key::Escape]),
+        InputOutcome::Ambiguous("invalid_key".into())
+    );
+    let identity = identity(&mux, "pane-author");
+    let nudge = PromptRequest {
+        expect: &identity,
+        text: "Coordination nudge",
+        admit: Admit::Settled,
+    };
+    assert_eq!(
+        mux.send(&author, InputKind::Prompt(nudge)),
+        InputOutcome::Declined(Retry::OnEvent, "synthetic-preinvocation".into())
+    );
+    assert_eq!(
+        mux.attempts()
+            .into_iter()
+            .map(|attempt| attempt.outcome)
+            .collect::<Vec<_>>(),
+        [
+            InputOutcome::Delivered,
+            InputOutcome::Ambiguous("invalid_key".into()),
+            InputOutcome::Declined(Retry::OnEvent, "synthetic-preinvocation".into()),
+        ]
+    );
+    assert_eq!(
+        mux.sent_to("pane-author").len(),
+        2,
+        "the decline typed nothing"
+    );
+}
+
+#[test]
+fn a_terminal_a_reported_space_a_status_and_an_agent_label_change_what_listings_report() {
+    let mux = author_and_reviewer();
+    mux.set_terminal("pane-author", "terminal-replacement");
+    mux.set_reported_space("pane-reviewer", "workspace-9");
+    mux.clear_state("pane-reviewer");
+    mux.set_title("pane-author", Some("@author"));
+    mux.set_idle_label("pane-author", Some("@author ready"));
+    mux.set_stamp("workspace-1", Some((Path::new("/stamped"), Some("repo"))));
+    let stamped = mux.survey(Scope::All, Depth::Spaces).unwrap().spaces[0]
+        .checkout
+        .clone()
+        .map(|checkout| (checkout.path, checkout.repo_name));
+    assert_eq!(stamped, Some(("/stamped".into(), Some("repo".into()))));
+    mux.set_stamp("workspace-1", None);
+    assert_eq!(
+        mux.survey(Scope::All, Depth::Spaces).unwrap().spaces[0].checkout,
+        None
+    );
+    let author = mux.facts("pane-author");
+    assert_eq!(
+        (author.title.as_deref(), author.idle_label.as_deref()),
+        (Some("@author"), Some("@author ready"))
+    );
+    let one = SpaceId::new("workspace-1");
+    let panes = mux
+        .survey(Scope::PanesOf(&one), Depth::Panes)
+        .unwrap()
+        .spaces
+        .remove(0)
+        .panes;
+    assert_eq!(
+        panes
+            .iter()
+            .map(|pane| (
+                pane.id.as_str(),
+                pane.terminal.as_str(),
+                pane.space.as_str(),
+                pane.state.clone()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (
+                "pane-author",
+                "terminal-replacement",
+                "workspace-1",
+                Some(AgentState::Idle)
+            ),
+            (
+                "pane-reviewer",
+                "terminal-pane-reviewer",
+                "workspace-9",
+                None
+            ),
+        ]
+    );
+    let labelled = FakeMux::world()
+        .space("workspace-1")
+        .pane("pane-codex")
+        .codex()
+        .agent_label("Codex")
+        .build();
+    assert_eq!(
+        labelled.facts("pane-codex").agent.unwrap().label.as_deref(),
+        Some("Codex")
+    );
+}
+
+#[test]
+fn the_herdr_reply_renders_the_world_as_herdr_prints_it_without_logging_a_read() {
+    let mux = author_and_reviewer();
+    mux.on_read(|_, _| panic!("herdr_reply ran a read hook"));
+    let listed: serde_json::Value = serde_json::from_str(
+        &mux.herdr_reply(&["pane", "list", "--workspace", "workspace-1"])
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        listed["result"]["panes"][1]["agent_session"]["value"],
+        "session-reviewer"
+    );
+    assert_eq!(
+        mux.herdr_reply(&[
+            "pane",
+            "read",
+            "pane-shell",
+            "--source",
+            "recent",
+            "--lines",
+            "2"
+        ]),
+        Ok("two\nthree".into())
+    );
+    assert_eq!(
+        mux.herdr_reply(&["workspace", "get", "workspace-9"]),
+        Err(r#"{"error":{"code":"workspace_not_found"}}"#.into())
+    );
+    assert!(mux.reads().is_empty());
+}
+
+#[test]
+#[should_panic(expected = "herdr_reply renders only Herdr's reads")]
+fn the_herdr_reply_refuses_a_command_that_is_not_a_read() {
+    let _ = author_and_reviewer().herdr_reply(&["server", "reload-config"]);
 }

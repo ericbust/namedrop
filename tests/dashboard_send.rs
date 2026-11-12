@@ -1,3 +1,5 @@
+#![cfg(feature = "test-support")]
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
@@ -1130,17 +1132,55 @@ fn conflicting_operator_pane_receives_ordinary_alias_send_without_silent_settlem
 
 #[test]
 fn synchronous_terminal_completion_keeps_the_queued_successor_retryable() {
-    use namedrop::{HerdrCommandExecutor, HerdrCommandOutput, LifecycleRuntime};
-    use std::sync::atomic::Ordering;
+    use namedrop::{
+        LifecycleRuntime,
+        mux::{
+            Allowance, Applied, Depth, Effect, Endpoint, InputKind, InputOutcome, MuxAct, MuxError,
+            MuxInput, MuxRead, PaneId, PaneInput, PaneProcess, Scope, Screen, ScreenRequest,
+            Survey, TabId,
+        },
+    };
+    use std::{path::PathBuf, sync::atomic::Ordering};
 
+    /// The fixture's space, whose every line typed into a pane runs that
+    /// pane's terminal command to its end before the delivery returns.
     struct CompletingTerminal<'a>(&'a Fixture);
-    impl HerdrCommandExecutor for CompletingTerminal<'_> {
-        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-            let output = self.0.herdr.execute(args)?;
-            if let ["pane", "run", pane, _] = args {
-                assert_eq!(self.0.run_terminal("w1", pane)?, 0);
+    impl MuxRead for CompletingTerminal<'_> {
+        fn endpoint(&self) -> &Endpoint {
+            self.0.herdr.space.endpoint()
+        }
+        fn survey(&self, scope: Scope<'_>, depth: Depth) -> Result<Survey, MuxError> {
+            self.0.herdr.space.survey(scope, depth)
+        }
+        fn screen(&self, pane: &PaneId, request: ScreenRequest) -> Result<Screen, MuxError> {
+            self.0.herdr.space.screen(pane, request)
+        }
+        fn process(&self, pane: &PaneId) -> Result<PaneProcess, MuxError> {
+            self.0.herdr.space.process(pane)
+        }
+        fn tab_label(&self, tab: &TabId) -> Result<Option<String>, MuxError> {
+            self.0.herdr.space.tab_label(tab)
+        }
+        fn integration_root(&self) -> Result<Option<PathBuf>, MuxError> {
+            self.0.herdr.space.integration_root()
+        }
+        fn within<'a>(&'a self, allowance: Allowance<'a>) -> Box<dyn MuxRead + 'a> {
+            self.0.herdr.space.within(allowance)
+        }
+    }
+    impl MuxAct for CompletingTerminal<'_> {
+        fn apply(&self, effect: &Effect) -> Result<Applied, MuxError> {
+            self.0.herdr.space.apply(effect)
+        }
+    }
+    impl MuxInput for CompletingTerminal<'_> {
+        fn deliver(&self, input: PaneInput<'_>) -> InputOutcome {
+            let ran = matches!(input.kind(), InputKind::Line(_)).then(|| input.pane().clone());
+            let outcome = self.0.herdr.space.deliver(input);
+            if let Some(pane) = ran {
+                assert_eq!(self.0.run_terminal("w1", pane.as_str()), Ok(0));
             }
-            Ok(output)
+            outcome
         }
     }
 
@@ -1203,7 +1243,6 @@ fn terminal_retry_excludes_stale_and_disabled_heads() {
 
 mod http {
     use super::*;
-    use namedrop::HerdrCommandExecutor;
     use namedrop::dashboard::snapshot::SpaceKey;
     use serde_json::Value;
     use std::{
@@ -1334,10 +1373,7 @@ mod http {
                 vec!["pane", "list", "--workspace", "w2"],
                 vec!["pane", "list", "--workspace", "w3"],
             ] {
-                responses.insert(
-                    args.join(" "),
-                    json!(f.herdr.execute(&args).unwrap().stdout),
-                );
+                responses.insert(args.join(" "), json!(f.herdr.reply(&args).unwrap()));
             }
             let responses_file = f.root.join("http-herdr-responses.json");
             fs::write(&responses_file, serde_json::to_vec(&responses).unwrap()).unwrap();

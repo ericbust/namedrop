@@ -1,7 +1,7 @@
 use super::executable;
 use super::xws::{self, Fixture};
 use namedrop::dashboard::snapshot::SpaceKey;
-use namedrop::{HerdrCommandExecutor, IdGenerator, ProcessIds, StateNamespace, StateStore};
+use namedrop::{IdGenerator, ProcessIds, StateNamespace, StateStore};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -147,10 +147,7 @@ impl Server {
             vec!["pane", "list", "--workspace", "w2"],
             vec!["pane", "list", "--workspace", "w3"],
         ] {
-            responses.insert(
-                args.join(" "),
-                json!(f.herdr.execute(&args).unwrap().stdout),
-            );
+            responses.insert(args.join(" "), json!(f.herdr.reply(&args).unwrap()));
         }
         let responses_file = f.root.join("http-herdr-responses.json");
         fs::write(&responses_file, serde_json::to_vec(&responses).unwrap()).unwrap();
