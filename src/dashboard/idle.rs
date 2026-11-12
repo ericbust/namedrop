@@ -21,9 +21,13 @@ impl FromStr for Stop {
         if text == "never" {
             return Ok(Self::Never);
         }
-        text.parse()
+        // `u32` parsing also takes "+5" and "05", which are not what `--idle` shows back.
+        let plain = text.bytes().all(|byte| byte.is_ascii_digit()) && !text.starts_with('0');
+        plain
+            .then(|| text.parse().ok())
+            .flatten()
             .map(Self::AfterMinutes)
-            .map_err(|_| "expected `never` or a whole number of minutes, 1 or more".to_owned())
+            .ok_or_else(|| "expected `never` or a whole number of minutes, 1 or more".to_owned())
     }
 }
 
@@ -49,13 +53,21 @@ pub(super) fn save(files: &ServerFiles, stop: Stop) -> Result<(), String> {
         .map_err(|error| format!("could not save the Channels idle setting: {error}"))
 }
 
-/// A missing or unreadable setting is no setting, so the default applies.
-fn saved(state: &Path) -> Option<Stop> {
-    fs::read_to_string(state.join("dashboard").join(FILE))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+/// The saved choice, `None` when there is none, or why the file cannot be used.
+pub(crate) fn saved(state: &Path) -> Result<Option<Stop>, String> {
+    let path = state.join("dashboard").join(FILE);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("could not read {}: {error}", path.display())),
+    };
+    text.trim().parse().map(Some).map_err(|_| {
+        let shown: String = text.trim().chars().take(40).collect();
+        format!(
+            "{} holds {shown:?}, which is not `never` or a whole number of minutes from 1",
+            path.display()
+        )
+    })
 }
 
 /// The test override. It is read once by the server that it applies to.
@@ -71,14 +83,17 @@ pub(crate) enum Source {
     Tailscale,
     Environment,
     Setting,
+    /// A setting is saved but cannot be used, so the default applies.
+    UnreadableSetting,
     Default,
 }
 
 impl Source {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::Tailscale,
         Self::Environment,
         Self::Setting,
+        Self::UnreadableSetting,
         Self::Default,
     ];
 
@@ -87,6 +102,7 @@ impl Source {
             Self::Tailscale => "tailscale",
             Self::Environment => "environment",
             Self::Setting => "setting",
+            Self::UnreadableSetting => "unreadable_setting",
             Self::Default => "default",
         }
     }
@@ -115,13 +131,17 @@ pub(crate) fn policy(state: &Path, tailnet_owned: bool, environment: Option<Dura
         };
     }
     match saved(state) {
-        Some(stop) => Policy {
+        Ok(Some(stop)) => Policy {
             limit: stop.limit(),
             source: Source::Setting,
         },
-        None => Policy {
+        Ok(None) => Policy {
             limit: Some(DEFAULT),
             source: Source::Default,
+        },
+        Err(_) => Policy {
+            limit: Some(DEFAULT),
+            source: Source::UnreadableSetting,
         },
     }
 }
@@ -154,6 +174,9 @@ impl Policy {
             (Source::Setting, Some(after)) => {
                 format!("The server stops {after} after the last tab closes, as set with `--idle`.")
             }
+            (Source::UnreadableSetting, Some(after)) => format!(
+                "The saved idle setting cannot be read, so the server stops {after} after the last tab closes."
+            ),
             (_, None) => "The server keeps running with no tab open.".to_owned(),
             (_, Some(after)) => format!("The server stops {after} after the last tab closes."),
         }
@@ -192,7 +215,20 @@ mod tests {
             "45".parse(),
             Ok(Stop::AfterMinutes(NonZeroU32::new(45).unwrap()))
         );
-        for refused in ["0", "-5", "1.5", "", "Never", "10m", "ten"] {
+        for refused in [
+            "0",
+            "-5",
+            "+5",
+            "05",
+            "007",
+            "1.5",
+            "",
+            " 5",
+            "Never",
+            "10m",
+            "ten",
+            "4294967296",
+        ] {
             assert!(refused.parse::<Stop>().is_err(), "{refused:?}");
         }
     }
@@ -229,8 +265,33 @@ mod tests {
         let never = policy(state, false, None);
         assert_eq!((never.limit, never.source), (None, Source::Setting));
 
-        fs::write(state.join("dashboard/idle"), "soon").unwrap();
-        assert_eq!(policy(state, false, None), default);
+        for unusable in ["soon", "+5", "05", ""] {
+            fs::write(state.join("dashboard/idle"), unusable).unwrap();
+            let unreadable = policy(state, false, None);
+            assert_eq!(
+                (unreadable.limit, unreadable.source),
+                (minutes(10), Source::UnreadableSetting),
+                "{unusable:?}"
+            );
+            let reason = saved(state).unwrap_err();
+            assert!(
+                reason.contains("dashboard/idle") && reason.contains(&format!("{unusable:?}")),
+                "{reason}"
+            );
+        }
+        assert_eq!(
+            policy(state, false, None).sentence(),
+            "The saved idle setting cannot be read, so the server stops 10 minutes after the last tab closes."
+        );
+        fs::write(state.join("dashboard/idle"), "30\n").unwrap();
+        assert_eq!(
+            saved(state),
+            Ok(Some(Stop::AfterMinutes(NonZeroU32::new(30).unwrap()))),
+            "a hand-written file may end with a line break"
+        );
+        fs::remove_file(state.join("dashboard/idle")).unwrap();
+        fs::create_dir(state.join("dashboard/idle")).unwrap();
+        assert!(saved(state).unwrap_err().contains("could not read"));
         let _ = fs::remove_dir_all(state);
     }
 

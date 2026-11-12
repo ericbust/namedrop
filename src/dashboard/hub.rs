@@ -618,6 +618,15 @@ impl Hub<'_> {
         {
             return Some(Verdict::Exit("server.json was replaced"));
         }
+        if let Some(requested) = self.files.requested_ui() {
+            let serves_it = self.files.info().is_some_and(|info| info.ui == requested);
+            if !serves_it && requested.usable() && tailnet.is_ok() {
+                return Some(Verdict::Handoff("another Channels app was requested"));
+            }
+            if serves_it || !requested.usable() {
+                let _ = self.files.take_ui_request();
+            }
+        }
         if self.idle_since.is_some_and(|since| {
             super::idle::policy(self.files.state(), tailnet_owned, self.idle)
                 .reached(now.duration_since(since))

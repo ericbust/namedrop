@@ -137,6 +137,20 @@ pub fn revive(state: &Path) -> Result<bool, String> {
         return Ok(false);
     }
     let files = ServerFiles::at(state)?;
+    // Under the lock a removal cannot take the record away between this
+    // read and the spawn. An operation that holds it settles the server.
+    let Some(_operation) = tailscale::try_operation_lock(&files)? else {
+        return Ok(false);
+    };
+    let Ok(Some(tailscale::Ownership::Enabled(handler))) = tailscale::read(state) else {
+        return Ok(false);
+    };
+    // A port another program holds fails every start, so wait before the next.
+    if server_files::BindFailure::read(state)
+        .is_some_and(|failure| failure.backs_off(handler.backend_port, hub::now_ms()))
+    {
+        return Ok(false);
+    }
     let Some(_no_handoff) = files.handoff_reader()? else {
         return Ok(false);
     };
@@ -158,9 +172,12 @@ fn ensure(
     let pinned_port = ownership
         .as_ref()
         .map(|record| record.handler().backend_port);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut deadline = Instant::now() + Duration::from_secs(5);
     let mut spawned = false;
     let mut waiting_for_matching_handoff = false;
+    // With Tailscale access on, a killed server comes back with the app it
+    // had, so the running server is asked to hand off to the requested one.
+    let mut switching = false;
     loop {
         let handoff_reader = files.handoff_reader()?;
         if handoff_reader.is_none() {
@@ -168,7 +185,8 @@ fn ensure(
             if let Some(info) = &active {
                 if &info.ui == ui {
                     waiting_for_matching_handoff = true;
-                } else if !waiting_for_matching_handoff || Instant::now() >= deadline {
+                } else if !(waiting_for_matching_handoff || switching) || Instant::now() >= deadline
+                {
                     return Err(format!(
                         "the dashboard server is running with {} and is restarting; retry when it finishes before requesting {}",
                         info.ui.setting(),
@@ -190,6 +208,23 @@ fn ensure(
                 if pinned_port.is_some_and(|port| port != info.port) {
                     return Err("Channels server port differs from its owned Tailscale target; turn Tailscale off before restarting it".to_owned());
                 }
+                if &info.ui != ui && pinned_port.is_some() {
+                    if !switching {
+                        files.request_ui(ui)?;
+                        switching = true;
+                        deadline = Instant::now() + Duration::from_secs(30);
+                    } else if Instant::now() >= deadline {
+                        return Err(format!(
+                            "the dashboard server did not switch from {} to {}; see {}",
+                            info.ui.setting(),
+                            ui.setting(),
+                            files.state().join("dashboard/server.log").display()
+                        ));
+                    }
+                    drop(handoff_reader);
+                    thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
                 if &info.ui != ui {
                     if phase == ServerPhase::Restarting {
                         return Err(format!(
@@ -205,7 +240,12 @@ fn ensure(
                         ui.setting()
                     ));
                 }
-                return Ok((if spawned { "started" } else { "running" }, info));
+                let server = match (spawned, switching) {
+                    (true, _) => "started",
+                    (false, true) => "restarted",
+                    (false, false) => "running",
+                };
+                return Ok((server, info));
             }
         } else if !spawned {
             files.spawn(ui)?;
@@ -356,7 +396,13 @@ fn run_server(
     let listener = bind(
         pinned.or_else(|| files.info().map(|info| info.port)),
         pinned.is_some(),
-    )?;
+    )
+    .inspect_err(|_| {
+        if let Some(port) = pinned {
+            files.record_bind_failure(port);
+        }
+    })?;
+    files.clear_bind_failure();
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let instance = server_files::random_hex(16)?;
     let mut channel_service = channel_service::ChannelService::start(state)?;
@@ -406,7 +452,8 @@ fn run_server(
     match verdict {
         hub::Verdict::Handoff(_) => {
             restarting.store(true, Ordering::Release);
-            files.handoff(&ui, claim, || {
+            let next_ui = files.take_ui_request().unwrap_or_else(|| ui.clone());
+            files.handoff(&next_ui, claim, || {
                 stop.store(true, Ordering::Release);
                 TcpStream::connect_timeout(
                     &(Ipv4Addr::LOCALHOST, port).into(),

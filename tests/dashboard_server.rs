@@ -1195,6 +1195,127 @@ fn herdr_startup_starts_the_server_again_only_while_tailscale_access_is_on() {
 }
 
 #[test]
+fn herdr_startup_leaves_the_server_to_a_tailscale_operation_in_progress() {
+    let directory = TestDirectory::new();
+    let state = state(&directory);
+    let _stop = StopOnDrop(state.clone());
+    fake_herdr(directory.path());
+    seed(&state, "w1", &["a"]);
+    let port = free_port();
+    record_tailscale(&state, "enabled", port);
+
+    // `namedrop channels --tailscale off` holds this lock from before it
+    // reads the record until after it removes it.
+    let operation = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(state.join("dashboard/tailscale.lock"))
+        .unwrap();
+    operation.lock().unwrap();
+    herdr_startup(directory.path());
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        live_servers(&state),
+        0,
+        "startup must not start a server while a removal may be taking the record away"
+    );
+    fs::remove_file(state.join("dashboard/tailscale.json")).unwrap();
+    drop(operation);
+
+    herdr_startup(directory.path());
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        live_servers(&state),
+        0,
+        "the record is gone, so nothing starts"
+    );
+
+    record_tailscale(&state, "enabled", port);
+    herdr_startup(directory.path());
+    assert!(
+        eventually(Duration::from_secs(10), || (live_servers(&state) == 1
+            && TcpStream::connect(("127.0.0.1", port)).is_ok())
+        .then_some(()))
+        .is_some(),
+        "with the lock free and the record enabled, startup starts the server"
+    );
+}
+
+#[test]
+fn herdr_startup_waits_a_minute_before_it_retries_a_port_another_program_holds() {
+    let directory = TestDirectory::new();
+    let state = state(&directory);
+    let _stop = StopOnDrop(state.clone());
+    fake_herdr(directory.path());
+    seed(&state, "w1", &["a"]);
+    let other_program = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = other_program.local_addr().unwrap().port();
+    record_tailscale(&state, "enabled", port);
+    let marker = state.join("dashboard/bind-failed.json");
+    let failure =
+        || -> Option<serde_json::Value> { serde_json::from_slice(&fs::read(&marker).ok()?).ok() };
+    let refused_starts = || {
+        fs::read_to_string(state.join("dashboard/server.log"))
+            .unwrap_or_default()
+            .matches("could not bind the owned Tailscale backend port")
+            .count()
+    };
+
+    herdr_startup(directory.path());
+    let noted = eventually(Duration::from_secs(10), failure)
+        .expect("the server that could not bind leaves a note");
+    assert_eq!(noted["port"], port);
+    assert_eq!(refused_starts(), 1);
+
+    for _ in 0..3 {
+        herdr_startup(directory.path());
+    }
+    thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        refused_starts(),
+        1,
+        "three more events inside the minute start no server"
+    );
+    assert_eq!(live_servers(&state), 0);
+
+    // The minute has passed and the port is still taken: one more try.
+    let mut old = noted.clone();
+    old["at_ms"] = (noted["at_ms"].as_i64().unwrap() - 61_000).into();
+    fs::write(&marker, old.to_string()).unwrap();
+    herdr_startup(directory.path());
+    assert!(
+        eventually(Duration::from_secs(10), || (refused_starts() == 2)
+            .then_some(()))
+        .is_some(),
+        "after the minute, startup tries once more"
+    );
+    assert!(
+        eventually(Duration::from_secs(5), || failure()
+            .filter(|now| now["at_ms"].as_i64() > old["at_ms"].as_i64()))
+        .is_some(),
+        "and the failed try starts a new minute"
+    );
+
+    // The other program is gone and the minute has passed.
+    drop(other_program);
+    fs::write(&marker, old.to_string()).unwrap();
+    herdr_startup(directory.path());
+    assert!(
+        eventually(Duration::from_secs(10), || (server_record(&state)?["port"]
+            == port
+            && TcpStream::connect(("127.0.0.1", port)).is_ok())
+        .then_some(()))
+        .is_some(),
+        "the server binds the freed port"
+    );
+    assert!(
+        eventually(Duration::from_secs(5), || (!marker.exists()).then_some(())).is_some(),
+        "a server that binds removes the note"
+    );
+}
+
+#[test]
 fn racing_opens_converge_on_one_server() {
     let directory = TestDirectory::new();
     let state = state(&directory);

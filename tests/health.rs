@@ -1435,6 +1435,51 @@ fn doctor_shows_a_saved_channels_idle_setting_as_information() {
 }
 
 #[test]
+fn doctor_reports_a_saved_channels_idle_setting_it_cannot_read() {
+    let f = Fixture::new();
+    if update_profile::isolate(&f.root, &f.home) {
+        return;
+    }
+    f.register();
+    assert_eq!(
+        diagnose_collaboration(&f.runtime()).status,
+        HealthStatus::Healthy
+    );
+    fs::create_dir_all(f.root.join("dashboard")).unwrap();
+    for unusable in ["+5", "05", "soon"] {
+        fs::write(f.root.join("dashboard/idle"), unusable).unwrap();
+        let report = diagnose_collaboration(&f.runtime());
+        assert_eq!(report.status, HealthStatus::NeedsAttention, "{unusable}");
+        let shown = issues_with(&report, "ND-CHANNELS-001");
+        let [setting] = shown[..] else {
+            panic!("{shown:?}");
+        };
+        assert_eq!(setting.severity, HealthSeverity::Notice);
+        assert_eq!(
+            setting.summary,
+            "Channels cannot read its saved idle setting."
+        );
+        assert!(
+            setting.explanation.contains("dashboard/idle")
+                && setting.explanation.contains(&format!("{unusable:?}"))
+                && setting
+                    .explanation
+                    .ends_with("The 10 minute default applies."),
+            "{}",
+            setting.explanation
+        );
+        assert_eq!(
+            setting.diagnostic["idle"],
+            json!({"stop_after_ms": 600_000, "source": "unreadable_setting"})
+        );
+        assert_eq!(
+            setting.repair.prompt,
+            "Run `namedrop channels --idle <minutes|never>` to save it again."
+        );
+    }
+}
+
+#[test]
 fn doctor_reports_a_shared_codex_app_server_once_with_only_its_remedy() {
     let f = Fixture::new();
     let codex_home = f.home.join(".codex");

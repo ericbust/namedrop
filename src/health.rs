@@ -77,6 +77,7 @@ where
     C: Clock,
     I: IdGenerator,
 {
+    use crate::dashboard::tailscale::Repair;
     let mut report = diagnose_space(runtime);
     if let Some(diagnostic) = crate::dashboard::tailscale::diagnose(runtime.state_directory) {
         let idle = crate::dashboard::idle_policy(runtime.state_directory);
@@ -101,12 +102,11 @@ where
             },
             &explanation,
             HealthRepairKind::HumanDecision,
-            if diagnostic.stopped {
-                "Run `namedrop channels --no-open` to start the server again on the same port. Devices that are signed in stay signed in. Herdr also starts it when Herdr starts."
-            } else if problem {
-                "Run `namedrop channels --tailscale off`, then `namedrop channels --tailscale` to configure access again."
-            } else {
-                "Run `namedrop channels --tailscale --no-open` for a one-time sign-in link."
+            &match diagnostic.repair {
+                Repair::Start => "Run `namedrop channels --no-open` to start the server again on the same port. Devices that are signed in stay signed in. Herdr also starts it when Herdr starts.".to_owned(),
+                Repair::FreePort(port) => format!("Stop the program that uses port {port}, then run `namedrop channels --no-open`. To move Channels to another port instead, run `namedrop channels --tailscale off`, then `namedrop channels --tailscale`."),
+                Repair::Reconfigure => "Run `namedrop channels --tailscale off`, then `namedrop channels --tailscale` to configure access again.".to_owned(),
+                Repair::SignIn => "Run `namedrop channels --tailscale --no-open` for a one-time sign-in link.".to_owned(),
             },
         );
         check.diagnostic = serde_json::json!({
@@ -118,20 +118,34 @@ where
         if problem && report.status == HealthStatus::Healthy {
             report.status = HealthStatus::NeedsAttention;
         }
-    } else {
-        let idle = crate::dashboard::idle_policy(runtime.state_directory);
-        if idle.source == crate::dashboard::idle::Source::Setting {
-            let mut check = issue(
-                "ND-CHANNELS-001",
-                HealthSeverity::Info,
-                "Channels has a saved idle setting.",
-                &idle.sentence(),
-                HealthRepairKind::HumanDecision,
-                "Run `namedrop channels --idle <minutes|never>` to change it.",
-            );
-            check.diagnostic = serde_json::json!({"idle": idle.json()});
-            report.issues.push(check);
+    }
+    let idle = crate::dashboard::idle_policy(runtime.state_directory);
+    let setting = match crate::dashboard::idle::saved(runtime.state_directory) {
+        Err(unreadable) => Some(issue(
+            "ND-CHANNELS-001",
+            HealthSeverity::Notice,
+            "Channels cannot read its saved idle setting.",
+            &format!("{unreadable}. The 10 minute default applies."),
+            HealthRepairKind::HumanDecision,
+            "Run `namedrop channels --idle <minutes|never>` to save it again.",
+        )),
+        // With Tailscale access on, the tailnet entry above already says the setting is unused.
+        Ok(Some(_)) if idle.source == crate::dashboard::idle::Source::Setting => Some(issue(
+            "ND-CHANNELS-001",
+            HealthSeverity::Info,
+            "Channels has a saved idle setting.",
+            &idle.sentence(),
+            HealthRepairKind::HumanDecision,
+            "Run `namedrop channels --idle <minutes|never>` to change it.",
+        )),
+        Ok(_) => None,
+    };
+    if let Some(mut check) = setting {
+        if check.severity == HealthSeverity::Notice && report.status == HealthStatus::Healthy {
+            report.status = HealthStatus::NeedsAttention;
         }
+        check.diagnostic = serde_json::json!({"idle": idle.json()});
+        report.issues.push(check);
     }
     report
 }
