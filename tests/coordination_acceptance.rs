@@ -5,7 +5,13 @@ mod delivered;
 #[path = "support/dispatch.rs"]
 mod dispatch;
 
-use namedrop::*;
+use namedrop::{
+    mux::{
+        AgentState,
+        fake::{FakeMux, SentInput},
+    },
+    *,
+};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -24,8 +30,8 @@ struct Fixture {
     home: PathBuf,
     ids: AtomicU64,
     now: AtomicU64,
-    statuses: Mutex<BTreeMap<String, String>>,
-    sessions: Mutex<BTreeMap<String, String>>,
+    mux: FakeMux,
+    /// Each prompt the space received, as its pane and envelope.
     prompts: Mutex<Vec<(String, Value)>>,
 }
 impl Fixture {
@@ -41,15 +47,10 @@ impl Fixture {
         let f = Self {
             state: root.join("state"),
             home: root.join("home"),
+            mux: space_at(&root),
             root,
             ids: AtomicU64::new(1),
             now: AtomicU64::new(100),
-            statuses: Mutex::new(BTreeMap::from([
-                ("lead".into(), "working".into()),
-                ("worker".into(), "idle".into()),
-                ("reviewer".into(), "idle".into()),
-            ])),
-            sessions: Mutex::new(BTreeMap::new()),
             prompts: Mutex::new(Vec::new()),
         };
         fs::create_dir_all(&f.home).unwrap();
@@ -99,7 +100,7 @@ impl Fixture {
     fn ns(&self) -> StateNamespace {
         StateNamespace::for_space("synthetic-socket", "synthetic-workspace")
     }
-    fn runtime<'a>(&'a self, pane: &'a str) -> LifecycleRuntime<'a, Self, Self, Self> {
+    fn runtime<'a>(&'a self, pane: &'a str) -> LifecycleRuntime<'a, FakeMux, Self, Self> {
         LifecycleRuntime {
             state_directory: &self.state,
             home_directory: Some(&self.home),
@@ -108,7 +109,7 @@ impl Fixture {
             workspace_id: Some("synthetic-workspace"),
             current_pane_id: Some(pane),
             session_socket_id: "synthetic-socket",
-            mux: self,
+            mux: &self.mux,
             clock: self,
             ids: self,
         }
@@ -124,7 +125,7 @@ impl Fixture {
     }
     fn run(&self, pane: &str, token: &str, input: Value) -> Result<Value, String> {
         let r = self.runtime(pane);
-        match token {
+        let result = match token {
             "send" | "reply" => dispatch::message(token, input, &r),
             "handoff.begin" | "handoff.resolve" | "handoff.results" | "handoff.status" => {
                 execute_handoff_operation(token, input, &r)
@@ -132,7 +133,9 @@ impl Fixture {
             "context.inspect" | "context.read" => execute_context_operation(token, input, &r),
             "complete.no-reply" => dispatch::integration("complete", input, &r),
             _ => panic!("unexpected bound action {token}"),
-        }
+        };
+        drop(self.prompts());
+        result
     }
     fn bound(&self, envelope: &Value, token: &str) -> Value {
         envelope["control"]["tool"]["operations"]
@@ -160,9 +163,7 @@ impl Fixture {
         self.run("lead","send",json!({"coordination_id":id,"request_id":key,"source":source,"author_kind":"agent_session"})).unwrap()
     }
     fn envelope(&self, pane: &str, message: &Value) -> Value {
-        self.prompts
-            .lock()
-            .unwrap()
+        self.prompts()
             .iter()
             .find(|(p, e)| p == pane && e["control"]["message_id"] == *message)
             .unwrap()
@@ -182,13 +183,29 @@ impl Fixture {
         self.execute(pane, self.bound(e, "complete.no-reply"));
     }
     fn status(&self, pane: &str, status: &str) {
-        self.statuses
-            .lock()
-            .unwrap()
-            .insert(pane.into(), status.into());
+        self.mux.set_state(pane, AgentState::parse(status));
+    }
+    /// Reads each new prompt's envelope once, as the old fake did when the
+    /// prompt was typed, so a later state change cannot rewrite it.
+    fn prompts(&self) -> std::sync::MutexGuard<'_, Vec<(String, Value)>> {
+        let mut prompts = self.prompts.lock().unwrap();
+        let typed: Vec<_> = self
+            .mux
+            .sent()
+            .into_iter()
+            .filter_map(|sent| match sent.input {
+                SentInput::Prompt(prompt) => Some((sent.pane.as_str().to_owned(), prompt)),
+                _ => None,
+            })
+            .collect();
+        for (pane, prompt) in &typed[prompts.len()..] {
+            prompts.push((pane.clone(), delivered::envelope_of(prompt)));
+        }
+        prompts
     }
     fn drain(&self) {
         drain_mailboxes(&self.runtime("lead")).unwrap();
+        drop(self.prompts());
     }
     fn results(&self, id: &Value) -> Value {
         self.run("lead", "handoff.results", json!({"coordination_id":id}))
@@ -217,9 +234,7 @@ impl Fixture {
         panic!("receipts did not settle");
     }
     fn nudges(&self) -> Vec<Value> {
-        self.prompts
-            .lock()
-            .unwrap()
+        self.prompts()
             .iter()
             .filter(|(_, e)| e["control"]["coordination_nudge"] == true)
             .map(|(_, e)| e.clone())
@@ -237,6 +252,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        delivered::only_prompts_and_metadata(&self.mux);
         let _ = cleanup::remove_fixture(&self.root);
     }
 }
@@ -254,34 +270,22 @@ impl IdGenerator for Fixture {
         )
     }
 }
-impl HerdrCommandExecutor for Fixture {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let value = match args {
-            ["workspace", "list"] => {
-                json!({"result":{"workspaces":[{"workspace_id":"synthetic-workspace"}]}})
-            }
-            ["worktree", "list", ..] => {
-                json!({"result":{"worktrees":[{"path":self.root,"open_workspace_id":"synthetic-workspace"}]}})
-            }
-            ["pane", "list", ..] => {
-                let statuses = self.statuses.lock().unwrap();
-                let sessions = self.sessions.lock().unwrap();
-                json!({"result":{"panes":(["lead","worker","reviewer"].map(|p|json!({"pane_id":p,"terminal_id":format!("terminal-{p}"),"tab_id":"synthetic-tab","workspace_id":"synthetic-workspace","agent_status":statuses[p],"agent_session":{"value":sessions.get(p).cloned().unwrap_or_else(||format!("session-{p}"))}})))}})
-            }
-            ["agent", "prompt", pane, prompt] => {
-                self.prompts
-                    .lock()
-                    .unwrap()
-                    .push(((*pane).into(), delivered::envelope_of(prompt)));
-                json!({})
-            }
-            ["pane", "report-metadata", ..] => json!({}),
-            _ => return Err(format!("unexpected fixture command {args:?}")),
-        };
-        Ok(HerdrCommandOutput {
-            stdout: value.to_string(),
-        })
+/// Three agent panes in one space holding the fixture's checkout. The lead
+/// starts working, and a prompt leaves each pane's status as it was.
+fn space_at(root: &std::path::Path) -> FakeMux {
+    let mut world = FakeMux::world().space("synthetic-workspace").checkout(root);
+    for (pane, state) in [
+        ("lead", AgentState::Working),
+        ("worker", AgentState::Idle),
+        ("reviewer", AgentState::Idle),
+    ] {
+        world = world
+            .pane(pane)
+            .tab("synthetic-tab")
+            .session(&format!("session-{pane}"))
+            .state(state);
     }
+    world.build().prompts_stay_settled()
 }
 
 // This oracle consumes actual results, captured delivery prompts, and persisted
@@ -435,17 +439,14 @@ fn separate_assignments() -> Value {
     completion["input"]["source"] =
         json!("@lead Complete synthetic checksum: 42; zero and final edge verified.");
     completion["input"]["work_outcome"] = json!("completed");
-    f.sessions
-        .lock()
-        .unwrap()
-        .insert("worker".into(), "replacement-worker".into());
+    f.mux.set_session("worker", "replacement-worker");
     let before = f.snapshot();
     assert!(
         f.run("worker", "reply", completion["input"].clone())
             .is_err()
     );
     assert_eq!(before, f.snapshot());
-    f.sessions.lock().unwrap().remove("worker");
+    f.mux.set_session("worker", "session-worker");
     f.execute("worker", completion.clone());
     let before = f.snapshot();
     f.execute("worker", completion);
@@ -596,9 +597,7 @@ fn coordination_protocol_and_legacy_routes() {
     f.status("lead", "idle");
     f.settle_receipts();
     let joined = f
-        .prompts
-        .lock()
-        .unwrap()
+        .prompts()
         .iter()
         .find(|(_, e)| !e["control"]["result_set"].is_null())
         .unwrap()
@@ -681,9 +680,7 @@ fn coordination_protocol_and_legacy_routes() {
     legacy.status("lead", "idle");
     legacy.settle_receipts();
     let joined = legacy
-        .prompts
-        .lock()
-        .unwrap()
+        .prompts()
         .iter()
         .find(|(_, e)| !e["control"]["result_set"].is_null())
         .unwrap()
@@ -772,9 +769,7 @@ fn a_lead_that_reads_the_reply_and_goes_idle_is_checked_in_on_after_the_hold() {
     );
     f.drain();
     let delivered: Vec<Value> = f
-        .prompts
-        .lock()
-        .unwrap()
+        .prompts()
         .iter()
         .filter(|(pane, _)| pane == "lead")
         .map(|(_, e)| e.clone())

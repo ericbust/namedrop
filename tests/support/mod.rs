@@ -3,9 +3,8 @@
 use crate::cleanup;
 
 use namedrop::{
-    ActorKind, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator,
-    MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId, PaneRoleId,
-    StateNamespace, StateStore,
+    ActorKind, AgentSessionId, Clock, IdGenerator, MutationAttribution, PaneAddressDraft,
+    PaneAddressId, PaneBindingId, PaneRoleId, StateNamespace, StateStore, mux::fake::FakeMux,
 };
 use std::{
     fs,
@@ -50,26 +49,18 @@ impl Drop for TestDirectory {
     }
 }
 
-pub struct FakeHerdr;
-
-impl HerdrCommandExecutor for FakeHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let stdout = match args {
-            ["workspace", "list"] => {
-                r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
-            }
-            ["worktree", "list", "--cwd", "/repo", "--json"] => {
-                r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-            }
-            ["pane", "list", "--workspace", "workspace-1"] => {
-                r#"{"result":{"panes":[{"pane_id":"pane-author","terminal_id":"terminal-author","tab_id":"tab-1","workspace_id":"workspace-1","agent_session":{"value":"session-author"},"agent_status":"idle"}]}}"#
-            }
-            _ => return Err(format!("unexpected Herdr command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput {
-            stdout: stdout.to_owned(),
-        })
-    }
+/// The space `setup_addresses` names: checkout `/repo` open in `workspace-1`,
+/// and one idle pane, `pane-author`, whose session Herdr reports without
+/// naming its agent.
+pub fn author_mux() -> FakeMux {
+    FakeMux::world()
+        .space("workspace-1")
+        .checkout("/repo")
+        .pane("pane-author")
+        .tab("tab-1")
+        .session("session-author")
+        .idle()
+        .build()
 }
 
 pub struct FixedClock;

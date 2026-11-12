@@ -316,6 +316,16 @@ impl FakeMux {
         self.lock().set_state(&PaneId::new(pane), state);
     }
 
+    /// The agent in `pane` now reports `session`, as when another program
+    /// replaces the one that was running there.
+    pub fn set_session(&self, pane: &str, session: &str) {
+        if let Some(found) = self.lock().pane_mut(&PaneId::new(pane))
+            && let Some(agent) = found.facts.agent.as_mut()
+        {
+            agent.session = SessionClaim::Reported(AgentSessionId::new(session));
+        }
+    }
+
     pub fn set_screen(&self, pane: &str, text: &str) {
         if let Some(found) = self.lock().pane_mut(&PaneId::new(pane)) {
             found.screen = text.to_owned();

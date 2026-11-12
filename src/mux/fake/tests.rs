@@ -119,6 +119,21 @@ fn a_session_without_an_agent_kind_is_still_an_agent() {
 }
 
 #[test]
+fn a_replaced_agent_reports_its_new_session_and_a_free_pane_stays_free() {
+    let mux = author_and_reviewer();
+    mux.set_session("pane-author", "session-replacement");
+    mux.set_session("pane-shell", "session-ghost");
+    assert_eq!(
+        identity(&mux, "pane-author").session,
+        SessionClaim::Reported(AgentSessionId::new("session-replacement"))
+    );
+    let survey = mux
+        .survey(Scope::Space(&SpaceId::new("workspace-2")), Depth::Panes)
+        .unwrap();
+    assert_eq!(survey.spaces[0].panes[0].agent, None);
+}
+
+#[test]
 fn surveys_read_only_what_their_scope_and_depth_ask_for() {
     let mux = author_and_reviewer();
     let summary = mux
