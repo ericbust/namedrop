@@ -1,8 +1,13 @@
+#![cfg(feature = "test-support")]
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
 mod executable;
 
+use namedrop::mux::{
+    Effect, InputOutcome, MuxError,
+    fake::{EVERY_LISTING, FakeMux, StrictSpace, Takes},
+};
 use namedrop::*;
 use serde_json::{Value, json};
 use std::{
@@ -29,6 +34,8 @@ struct Fixture {
     home: PathBuf,
     claude: PathBuf,
     ids: Ids,
+    /// Last, so it judges the world after `Drop` removed the fixture.
+    host: StrictSpace,
 }
 impl Fixture {
     fn new() -> Self {
@@ -62,6 +69,7 @@ print(json.dumps({'result':result}))
             home,
             claude,
             ids: Ids(AtomicU64::new(0)),
+            host: host(),
         }
     }
     fn settings(&self) -> PathBuf {
@@ -107,7 +115,7 @@ print(json.dumps({'result':result}))
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
         serde_json::from_value(report["data"].clone()).unwrap_or_else(|_| panic!("{output:?}"))
     }
-    fn runtime(&self) -> LifecycleRuntime<'_, Host, Time, Ids> {
+    fn runtime(&self) -> LifecycleRuntime<'_, mux::fake::FakeMux, Time, Ids> {
         LifecycleRuntime {
             state_directory: &self.root,
             home_directory: Some(&self.home),
@@ -119,7 +127,7 @@ print(json.dumps({'result':result}))
             workspace_id: None,
             current_pane_id: Some("pane-1"),
             session_socket_id: "socket-a",
-            mux: &Host,
+            mux: &self.host,
             clock: &Time,
             ids: &self.ids,
         }
@@ -187,26 +195,38 @@ impl Drop for Fixture {
         cleanup::remove_fixture(&self.root).unwrap();
     }
 }
-struct Host;
-impl HerdrCommandExecutor for Host {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let stdout = match args {
-            ["workspace", "list"] => {
-                json!({"result":{"workspaces":[{"workspace_id":"workspace-1"}]}})
-            }
-            ["worktree", "list", ..] => {
-                json!({"result":{"worktrees":[{"path":"/repo", "open_workspace_id":"workspace-1"}]}})
-            }
-            ["pane", "list", ..] => {
-                json!({"result":{"panes":[{"pane_id":"pane-1", "terminal_id":"terminal-1", "tab_id":"tab-1", "workspace_id":"workspace-1", "agent":"claude", "agent_session":{"value":"session-1"}, "agent_status":"idle"}]}})
-            }
-            ["pane", "report-metadata", ..] | ["agent", "prompt", ..] => json!({}),
-            _ => return Err(format!("unexpected command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput {
-            stdout: stdout.to_string(),
-        })
-    }
+/// Every listing of `workspace-1`, which holds `/repo` and one idle Claude
+/// pane, `pane-1`. It takes any prompt, which it answers `Delivered`
+/// whatever the pane's state, and any `pane report-metadata`, as the old
+/// fake did. The old fake failed `server reload-config` and the tour's
+/// `plugin pane open`, which activation moves past, so both are taken and
+/// fail.
+fn host() -> StrictSpace {
+    let mux = FakeMux::world()
+        .endpoint("socket-a")
+        .space("workspace-1")
+        .checkout("/repo")
+        .unstamped()
+        .pane("pane-1")
+        .terminal("terminal-1")
+        .tab("tab-1")
+        .claude()
+        .session("session-1")
+        .idle()
+        .build();
+    mux.answer("pane-1", InputOutcome::Delivered);
+    mux.on_apply(|_, effect| match effect {
+        Effect::ReloadKeybindings => Err(MuxError::Unavailable(
+            r#"unexpected command: ["server", "reload-config"]"#.to_owned(),
+        )),
+        Effect::OpenPopup(_) => Err(MuxError::Unavailable(
+            r#"unexpected command: ["plugin", "pane", "open", ..]"#.to_owned(),
+        )),
+        _ => Ok(()),
+    });
+    let takes = Takes::prompts_and_metadata()
+        .effect(|effect| matches!(effect, Effect::ReloadKeybindings | Effect::OpenPopup(_)));
+    StrictSpace::new(mux, EVERY_LISTING, takes)
 }
 struct Time;
 impl Clock for Time {
