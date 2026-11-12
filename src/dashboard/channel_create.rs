@@ -770,7 +770,11 @@ fn add(front: &Front, key: &SpaceKey, agent: NewAgent) -> Result<(String, String
     if let Some(command) = agent.kind.command() {
         // A pane that didn't start still shows as needing the person, who can
         // start it by hand in the pane view, so this is not a refusal.
-        if let Err(error) = herdr.0.execute(&["pane", "run", &pane, command]) {
+        let started =
+            crate::pane_effects::PaneEffects::acquire(state, &namespace.session_socket_id, &pane)
+                .map_err(|error| error.to_string())
+                .and_then(|effects| effects.start_agent(&herdr.0, command));
+        if let Err(error) = started {
             eprintln!("dashboard: could not start {command} in {pane}: {error}");
         }
         front.launches.record(Launch::new(

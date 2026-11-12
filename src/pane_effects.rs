@@ -374,6 +374,17 @@ impl PaneEffects {
             .map_err(|e| format!("could not record pane input ownership: {e}"))?;
         herdr.execute(&["pane", "run", &self.pane, command])
     }
+
+    /// Starts an agent in the pane just opened for it. Nothing has typed into
+    /// that pane yet, so its input has no owner to record. The command is
+    /// static text, never anything a request carried.
+    pub(crate) fn start_agent(
+        &self,
+        herdr: &impl HerdrCommandExecutor,
+        command: &'static str,
+    ) -> Result<HerdrCommandOutput, String> {
+        herdr.execute(&["pane", "run", &self.pane, command])
+    }
 }
 
 #[derive(Default)]
