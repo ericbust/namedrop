@@ -4,13 +4,15 @@ mod cleanup;
 #[path = "support/executable.rs"]
 mod executable;
 mod support;
-use namedrop::mux::fake::{EVERY_LISTING, FakeMux, StrictSpace, Takes};
+use namedrop::mux::{
+    Gone, MuxError,
+    fake::{EVERY_LISTING, FakeMux, Op, StrictSpace, Takes},
+};
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, DeliveryAttemptId, DeliveryId, DeliveryState,
-    HerdrCommandExecutor, HerdrCommandOutput, LeaseDraft, LifecycleRuntime, MessageDraft,
-    MessageId, MessageRecipientDraft, MutationAttribution, PaneAddressId, PaneBindingId,
-    ProcessIds, StateNamespace, StateStore, SystemClock, ThreadId, complete_capability_profile,
-    execute_integration_operation,
+    LeaseDraft, LifecycleRuntime, MessageDraft, MessageId, MessageRecipientDraft,
+    MutationAttribution, PaneAddressId, PaneBindingId, ProcessIds, StateNamespace, StateStore,
+    SystemClock, ThreadId, complete_capability_profile, execute_integration_operation,
 };
 use serde_json::{Value, json};
 use std::{
@@ -28,34 +30,6 @@ struct Fixture {
     socket: String,
     herdr: PathBuf,
     _listener: UnixListener,
-}
-
-/// The reminder clock test's in-process event runs the script, because
-/// its transient case relies on this call writing
-/// `observed-discovery-error`. The clock subprocess lists only by chance:
-/// its due reminders already await delivery when the error appears, so on a
-/// `FakeMux` that wait usually times out.
-struct ScriptHerdr<'a>(&'a Path);
-impl HerdrCommandExecutor for ScriptHerdr<'_> {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let output = Command::new(self.0)
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", self.0.parent().unwrap().join("home"))
-            .env(
-                "XDG_CONFIG_HOME",
-                self.0.parent().unwrap().join("xdg-config"),
-            )
-            .args(args)
-            .output()
-            .map_err(|error| error.to_string())?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
-        }
-        Ok(HerdrCommandOutput {
-            stdout: String::from_utf8(output.stdout).map_err(|error| error.to_string())?,
-        })
-    }
 }
 
 /// The world the old in-process executor answered: `/repo` open in
@@ -1293,7 +1267,17 @@ fn reminder_empty_exit_set_races_and_common_command_recovery() {
 }
 
 #[test]
-fn reminder_clock_fails_deleted_workspace_and_preserves_ambiguous_transport() {
+fn reminder_event_fails_deleted_workspace_and_preserves_ambiguous_transport() {
+    assert_reminder_event_discovery_failure("workspace_not_found");
+}
+
+#[test]
+fn reminder_event_keeps_transient_discovery_pending() {
+    assert_reminder_event_discovery_failure("transport_unavailable");
+}
+
+#[test]
+fn reminder_clock_fails_deleted_workspace() {
     assert_reminder_clock_discovery_failure("workspace_not_found");
 }
 
@@ -1302,7 +1286,52 @@ fn reminder_clock_keeps_transient_discovery_pending() {
     assert_reminder_clock_discovery_failure("transport_unavailable");
 }
 
-fn assert_reminder_clock_discovery_failure(error: &str) {
+/// Herdr's answer to a failed `worktree list`, whose message names
+/// `workspace_not_found` whatever its code.
+fn discovery_error(code: &str) -> String {
+    json!({"error":{"code":code,"message":"workspace_not_found text alone is not authoritative"}})
+        .to_string()
+}
+
+fn reminder_states(connection: &rusqlite::Connection) -> Vec<(String, String)> {
+    let mut statement = connection
+        .prepare("SELECT state,state_json FROM reminders ORDER BY request_id")
+        .unwrap();
+    statement
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+fn reminder_delivery_state(connection: &rusqlite::Connection, request: &str) -> String {
+    connection.query_row("SELECT d.state FROM mailbox_deliveries d JOIN reminder_fires f USING(session_socket_id,worktree_id,delivery_id) JOIN reminders r USING(session_socket_id,worktree_id,reminder_id) WHERE r.request_id=?1", [request], |r| r.get(0)).unwrap()
+}
+
+fn delivery_attempts(connection: &rusqlite::Connection) -> i64 {
+    connection
+        .query_row("SELECT count(*) FROM delivery_attempts", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn assert_deleted_workspace_failed_its_reminders(connection: &rusqlite::Connection) {
+    let states = reminder_states(connection);
+    assert!(
+        states.iter().all(|(state, _)| state == "failed"),
+        "deleted workspace left pending reminders: {states:?}"
+    );
+    assert!(
+        states
+            .iter()
+            .all(|(_, state)| state.contains("workspace") && state.contains("gone")),
+        "missing failure explanation: {states:?}"
+    );
+}
+
+/// A lifecycle event whose discovery fails: a deleted workspace fails every
+/// pending reminder and its queued delivery, and leaves a held or submitted
+/// delivery as it is; a transient failure changes nothing.
+fn assert_reminder_event_discovery_failure(error: &str) {
     let f = Fixture::new();
     let lock = fs::OpenOptions::new()
         .read(true)
@@ -1346,58 +1375,31 @@ fn assert_reminder_clock_discovery_failure(error: &str) {
             .unwrap()
             == 3
     });
+    drop(clock);
     connection.execute_batch("UPDATE mailbox_deliveries SET state='held' WHERE delivery_id IN (SELECT f.delivery_id FROM reminder_fires f JOIN reminders r USING(session_socket_id,worktree_id,reminder_id) WHERE r.request_id='held'); UPDATE mailbox_deliveries SET state='submitted' WHERE delivery_id IN (SELECT f.delivery_id FROM reminder_fires f JOIN reminders r USING(session_socket_id,worktree_id,reminder_id) WHERE r.request_id='submitted');").unwrap();
-    let error_payload = json!({"error":{"code":error,"message":"workspace_not_found text alone is not authoritative"}}).to_string();
-    let error_path = f.directory.path().join("discovery-error");
-    let temporary_error_path = error_path.with_extension("tmp");
-    fs::write(&temporary_error_path, &error_payload).unwrap();
-    fs::rename(temporary_error_path, error_path).unwrap();
+    let error_payload = discovery_error(error);
+    let herdr = native(&f.socket);
+    herdr.fail(
+        Op::Survey,
+        if error == "workspace_not_found" {
+            MuxError::Gone(Gone::Space, error_payload.clone())
+        } else {
+            MuxError::Unavailable(error_payload.clone())
+        },
+    );
     let failure = namedrop::execute_lifecycle_operation(
         "event.agent-status-changed",
         json!({"type":"pane_agent_status_changed","pane_id":"pane-author","workspace_id":"workspace-1","agent_status":"working"}),
         &LifecycleRuntime {
-            state_directory:f.directory.path(),home_directory:Some(f.directory.home()),agent_config:Default::default(),cwd:Path::new("/repo"),workspace_id:Some("workspace-1"),current_pane_id:None,session_socket_id:&f.socket,mux:&ScriptHerdr(&f.herdr),clock:&SystemClock,ids:&ProcessIds::default(),
+            state_directory:f.directory.path(),home_directory:Some(f.directory.home()),agent_config:Default::default(),cwd:Path::new("/repo"),workspace_id:Some("workspace-1"),current_pane_id:None,session_socket_id:&f.socket,mux:&*herdr,clock:&SystemClock,ids:&ProcessIds::default(),
         },
     ).unwrap_err();
     assert_eq!(failure, error_payload);
-    wait_for(|| {
-        if error == "workspace_not_found" {
-            connection
-                .query_row(
-                    "SELECT count(*) FROM reminders WHERE state='failed'",
-                    [],
-                    |r| r.get::<_, i64>(0),
-                )
-                .unwrap()
-                == 4
-        } else {
-            fs::read_to_string(f.directory.path().join("observed-discovery-error"))
-                .is_ok_and(|observed| observed == error_payload)
-        }
-    });
-    drop(clock);
-    let mut statement = connection
-        .prepare("SELECT state,state_json FROM reminders ORDER BY request_id")
-        .unwrap();
-    let states = statement
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
     if error == "workspace_not_found" {
-        assert!(
-            states.iter().all(|(state, _)| state == "failed"),
-            "deleted workspace left pending reminders: {states:?}"
-        );
-        assert!(
-            states
-                .iter()
-                .all(|(_, state)| state.contains("workspace") && state.contains("gone")),
-            "missing failure explanation: {states:?}"
-        );
+        assert_deleted_workspace_failed_its_reminders(&connection);
     } else {
         assert_eq!(
-            states
+            reminder_states(&connection)
                 .iter()
                 .map(|(state, _)| state.as_str())
                 .collect::<Vec<_>>(),
@@ -1410,10 +1412,7 @@ fn assert_reminder_clock_discovery_failure(error: &str) {
         );
     }
     assert_eq!(
-        connection
-            .query_row("SELECT d.state FROM mailbox_deliveries d JOIN reminder_fires f USING(session_socket_id,worktree_id,delivery_id) JOIN reminders r USING(session_socket_id,worktree_id,reminder_id) WHERE r.request_id='queued'", [], |r| r
-                .get::<_, String>(0))
-            .unwrap(),
+        reminder_delivery_state(&connection, "queued"),
         if error == "workspace_not_found" {
             "failed"
         } else {
@@ -1421,16 +1420,94 @@ fn assert_reminder_clock_discovery_failure(error: &str) {
         }
     );
     for state in ["held", "submitted"] {
-        let actual: String = connection.query_row("SELECT d.state FROM mailbox_deliveries d JOIN reminder_fires f USING(session_socket_id,worktree_id,delivery_id) JOIN reminders r USING(session_socket_id,worktree_id,reminder_id) WHERE r.request_id=?1", [state], |r| r.get(0)).unwrap();
-        assert_eq!(actual, state);
+        assert_eq!(reminder_delivery_state(&connection, state), state);
     }
-    assert_eq!(
+    assert_eq!(delivery_attempts(&connection), 0);
+}
+
+/// The clock's own discovery of a due reminder fails: a deleted workspace
+/// fails its reminders, and a transient failure leaves the due reminder
+/// scheduled until a later discovery succeeds.
+fn assert_reminder_clock_discovery_failure(error: &str) {
+    let f = Fixture::new();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(f.directory.path().join("reminder-clock.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    f.reminder("scheduled", "1h");
+    let queued = f.reminder("queued", "1m");
+    let connection =
+        rusqlite::Connection::open(f.directory.path().join("namedrop.sqlite3")).unwrap();
+    let id = queued["reminder_id"].as_str().unwrap();
+    let state = || {
         connection
-            .query_row("SELECT count(*) FROM delivery_attempts", [], |r| r
-                .get::<_, i64>(0))
-            .unwrap(),
-        0
+            .query_row(
+                "SELECT state FROM reminders WHERE reminder_id=?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+    };
+    let due = SystemClock.now_unix_ms() - 1;
+    connection.execute("UPDATE reminders SET due_at_ms=?1,state_json=json_set(state_json,'$.due_at_ms',?1) WHERE request_id='queued'",[due as i64]).unwrap();
+    let mut busy = panes("session-author");
+    busy["result"]["panes"][0]["agent_status"] = json!("working");
+    fs::write(f.directory.path().join("panes.json"), busy.to_string()).unwrap();
+    let error_payload = discovery_error(error);
+    let error_path = f.directory.path().join("discovery-error");
+    fs::write(&error_path, &error_payload).unwrap();
+    let calls = f.directory.path().join("herdr-calls");
+    let discoveries = || {
+        fs::read_to_string(&calls)
+            .unwrap_or_default()
+            .lines()
+            .filter(|call| call.contains(r#""worktree", "list""#))
+            .count()
+    };
+    let before = discoveries();
+    lock.unlock().unwrap();
+    let clock = f.clock();
+    wait_for(|| {
+        fs::read_to_string(f.directory.path().join("observed-discovery-error"))
+            .is_ok_and(|observed| observed == error_payload)
+    });
+    if error == "workspace_not_found" {
+        wait_for(|| {
+            connection
+                .query_row(
+                    "SELECT count(*) FROM reminders WHERE state='failed'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+                == 2
+        });
+        drop(clock);
+        assert_deleted_workspace_failed_its_reminders(&connection);
+        return;
+    }
+    wait_for(|| discoveries() >= before + 2);
+    assert_eq!(
+        state(),
+        "scheduled",
+        "a transient failure enqueued the reminder"
     );
+    fs::remove_file(&error_path).unwrap();
+    wait_for(|| state() == "awaiting_delivery");
+    drop(clock);
+    assert_eq!(
+        reminder_states(&connection)
+            .iter()
+            .map(|(state, _)| state.as_str())
+            .collect::<Vec<_>>(),
+        vec!["awaiting_delivery", "scheduled"]
+    );
+    assert_eq!(reminder_delivery_state(&connection, "queued"), "queued");
+    assert_eq!(delivery_attempts(&connection), 0);
 }
 
 #[test]
