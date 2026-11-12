@@ -1,3 +1,4 @@
+use crate::mux::{Applied, Badge, Effect, PaneId};
 use crate::spaces::{RouteRefusal, ScopedName, SpaceScope, UnplacedName, WorkspaceLabel};
 use crate::{
     ActorKind, ContextGrantDraft, ContextGrantId, ContextReferenceDraft, ContextSnapshotId,
@@ -625,7 +626,7 @@ pub fn execute_message_operation<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -639,7 +640,7 @@ pub(crate) fn execute_message_operation_with_caller<M, C, I>(
     caller: Option<&crate::deferred_commands::Caller>,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -664,7 +665,7 @@ pub fn send_operator_message<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, OperatorSendError>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -679,7 +680,7 @@ pub fn send_operator_direct_message<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, OperatorSendError>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -695,7 +696,7 @@ pub(crate) fn send_operator_direct_message_observing_commit<M, C, I, R>(
     observe_commit: impl FnOnce(&Value) -> R,
 ) -> Result<(Value, R), OperatorSendError>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -750,7 +751,7 @@ pub(crate) fn send_operator_message_observing_commit<M, C, I, R>(
     observe_commit: impl FnOnce(&Value) -> R,
 ) -> Result<(Value, R), OperatorSendError>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -823,7 +824,7 @@ pub(crate) fn send_operator_channel_message_observing_commit<M, C, I, R>(
     observe_commit: impl FnOnce(&Value) -> R,
 ) -> Result<(Value, R), OperatorSendError>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -884,7 +885,7 @@ fn dispatch_prepared_message<M, C, I, R>(
     observe_commit: impl FnOnce(&Value) -> R,
 ) -> Result<(Value, R), SendError>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -922,7 +923,7 @@ pub(crate) fn recover_deferred_message<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Option<Value>, String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1017,7 +1018,7 @@ pub(crate) fn persist_prompt_mention_operation<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Option<PromptMentionOutcome>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1053,7 +1054,7 @@ fn persist_prompt_mention<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Vec<crate::store::ForwardedCopy>, SendError>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1099,7 +1100,7 @@ fn workspace_prompt_refusal<M, C, I>(
     workspaces: &crate::spaces::HerdrWorkspaces<'_, M>,
 ) -> SendError
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1115,7 +1116,7 @@ fn names_in_prompt_scope<M, C, I>(
     workspaces: &crate::spaces::HerdrWorkspaces<'_, M>,
 ) -> Result<Vec<ScopedName>, SendError>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1256,7 +1257,7 @@ fn persist_prepared_message_operation<M, C, I>(
     caller: Option<&crate::deferred_commands::Caller>,
 ) -> Result<PersistedMessage, SendError>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -2028,7 +2029,7 @@ fn present_committed<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<PersistedMessage, SendError>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
 {
     let Committed {
         channel,
@@ -2094,40 +2095,29 @@ fn present_relay_result<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Value
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
 {
     let title = format!("@{} replied", relay.sender_alias);
     let body = read_by_person(&relay.body);
     let summary = body.lines().next().unwrap_or_default().trim();
     let summary = summary.chars().take(160).collect::<String>();
-    let token = format!("namedrop-relay=@{}: {summary}", relay.sender_alias);
-    let notification = runtime.mux.execute(&[
-        "notification",
-        "show",
-        &title,
-        "--body",
-        &body,
-        "--position",
-        "bottom-right",
-        "--sound",
-        "done",
-    ]);
-    let metadata = runtime.mux.execute(&[
-        "pane",
-        "report-metadata",
-        &relay.pane_id,
-        "--source",
-        "namedrop-relay",
-        "--token",
-        &token,
-        "--ttl-ms",
-        "15000",
-    ]);
+    let notification = runtime.mux.apply(&Effect::Notify {
+        title,
+        body: body.clone(),
+        sound: true,
+    });
+    let metadata = runtime.mux.apply(&Effect::Badges {
+        pane: PaneId::new(&relay.pane_id),
+        badges: vec![Badge::Relay {
+            alias: relay.sender_alias.clone(),
+            summary,
+        }],
+    });
     json!({
         "mode": crate::DeliveryReplyMode::ReturnToSource.as_str(),
-        "notification_shown": notification.is_ok(),
-        "notification_error": notification.err(),
-        "metadata_error": metadata.err(),
+        "notification_shown": matches!(notification, Ok(Applied::Done)),
+        "notification_error": notification.err().map(|error| error.to_string()),
+        "metadata_error": metadata.err().map(|error| error.to_string()),
     })
 }
 

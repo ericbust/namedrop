@@ -868,7 +868,7 @@ fn long_waits<M, C, I>(
     queued_heads: &[(crate::PaneAddressId, crate::DeliveryId, u64)],
 ) -> Vec<HealthIssue>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
 {
     use crate::delivery::AgentWait;

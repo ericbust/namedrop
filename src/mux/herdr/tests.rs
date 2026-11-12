@@ -474,7 +474,12 @@ fn each_effect_runs_today_s_command() {
         }),
         Effect::ReloadKeybindings,
     ] {
-        assert_eq!(mux.apply(&effect), Ok(Applied::Done));
+        let applied = if matches!(effect, Effect::OpenPopup(_)) {
+            Applied::Opened(json!({}))
+        } else {
+            Applied::Done
+        };
+        assert_eq!(mux.apply(&effect), Ok(applied));
     }
     let popup_env = "--env NAMEDROP_TARGET_WORKSPACE=w1 --env NAMEDROP_TARGET_PANE=p1 \
                      --env NAMEDROP_TARGET_TERMINAL=t1 --env NAMEDROP_TARGET_SESSION=s1 \
@@ -510,18 +515,64 @@ fn each_effect_runs_today_s_command() {
     );
 }
 
-#[test]
-fn the_tour_popup_matches_the_tour_module_s_own_arguments() {
-    let mux = herdr(|_| Ok("{}".into()));
-    mux.apply(&Effect::OpenPopup(PopupSpec {
+fn tour_popup() -> Effect {
+    Effect::OpenPopup(PopupSpec {
         screen: PopupScreen::Tour,
         target: target(),
         state_dir: "/state".into(),
-    }))
-    .unwrap();
-    let expected =
-        crate::tour::popup_open_args("w1", "p1", "t1", "s1", Path::new("/state"), "socket-a");
-    assert_eq!(calls(&mux), [expected.join(" ")]);
+    })
+}
+
+#[test]
+fn a_popup_returns_herdr_s_reply_and_an_unreadable_one_is_a_protocol_error() {
+    let reply = json!({"result": {"type": "plugin_pane_opened", "pane_id": "popup-1"}});
+    let opened = herdr(move |_| Ok(reply.to_string()));
+    assert_eq!(
+        opened.apply(&tour_popup()),
+        Ok(Applied::Opened(
+            json!({"result": {"type": "plugin_pane_opened", "pane_id": "popup-1"}})
+        ))
+    );
+    let garbled = herdr(|_| Ok("not json".into()));
+    assert!(matches!(
+        garbled.apply(&tour_popup()),
+        Err(MuxError::Protocol(_))
+    ));
+    let refused = herdr(|_| Err(error("plugin_not_found")));
+    assert_eq!(
+        refused.apply(&tour_popup()),
+        Err(MuxError::Unavailable(error("plugin_not_found")))
+    );
+}
+
+/// A legacy executor that records each command and answers `{}`.
+#[derive(Default)]
+struct Recording(Mutex<Vec<String>>);
+
+impl HerdrCommandExecutor for Recording {
+    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+        self.0.lock().unwrap().push(args.join(" "));
+        Ok(HerdrCommandOutput {
+            stdout: "{}".into(),
+        })
+    }
+}
+
+#[test]
+fn a_popup_names_the_socket_its_legacy_executor_was_given() {
+    let legacy = Recording::default();
+    at_socket(&legacy, "/tmp/herdr.sock")
+        .apply(&tour_popup())
+        .unwrap();
+    assert_eq!(
+        *legacy.0.lock().unwrap(),
+        [
+            "plugin pane open --plugin namedrop --entrypoint tour --placement popup --width 72 \
+          --height 24 --env NAMEDROP_TARGET_WORKSPACE=w1 --env NAMEDROP_TARGET_PANE=p1 \
+          --env NAMEDROP_TARGET_TERMINAL=t1 --env NAMEDROP_TARGET_SESSION=s1 \
+          --env HERDR_PLUGIN_STATE_DIR=/state --env HERDR_SOCKET_PATH=/tmp/herdr.sock --focus"
+        ]
+    );
 }
 
 #[test]

@@ -1,12 +1,11 @@
 use crate::lifecycle::PaneLabel;
-use crate::mux::{AgentState, InputOutcome, Retry};
+use crate::mux::{AgentState, Badge, Effect, InputOutcome, PaneId, Retry};
 use crate::store::LostSettle;
 use crate::{
     ActorKind, Clock, DeliveryAttemptId, DeliveryState, DiscoveredPane, DispatchCandidate,
-    HerdrCommandExecutor, IdGenerator, InflightDeliveryAttempt, IntegrationToolInvocation,
-    LeaseDraft, LifecycleRuntime, MutationAttribution, StateNamespace, StateStore,
-    StateTransaction, StoreError, collaboration_executable, discover_worktree,
-    store::WakeReadiness, tool_environment,
+    IdGenerator, InflightDeliveryAttempt, IntegrationToolInvocation, LeaseDraft, LifecycleRuntime,
+    MutationAttribution, StateNamespace, StateStore, StateTransaction, StoreError,
+    collaboration_executable, discover_worktree, store::WakeReadiness, tool_environment,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -214,7 +213,7 @@ pub fn mail_waits_for_session(
 
 pub fn drain_receipt<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>) -> Value
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -384,7 +383,7 @@ pub(crate) fn publish_status_metadata<M, C, I>(
     discovered: &crate::DiscoveredWorktree,
 ) -> Result<(), String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
 {
     let namespace = discovered.namespace(runtime.session_socket_id);
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
@@ -400,8 +399,6 @@ where
         })
         .map_err(|error| error.to_string())?;
     let served = crate::codex_app_server::served_codex_panes(runtime, &discovered.panes);
-    let awaiting_token = format!("namedrop-awaiting={waiting}");
-    let attention_token = format!("namedrop-attention={attention}");
     for binding in bindings {
         if let Some(pane) = discovered
             .panes
@@ -422,17 +419,13 @@ where
                     )?;
                 }
             }
-            runtime.mux.execute(&[
-                "pane",
-                "report-metadata",
-                &binding.pane_id,
-                "--source",
-                "namedrop",
-                "--token",
-                &awaiting_token,
-                "--token",
-                &attention_token,
-            ])?;
+            runtime
+                .mux
+                .apply(&Effect::Badges {
+                    pane: PaneId::new(&binding.pane_id),
+                    badges: vec![Badge::Awaiting(waiting), Badge::Attention(attention)],
+                })
+                .map_err(|error| error.to_string())?;
         }
     }
     Ok(())
@@ -442,7 +435,7 @@ pub fn drain_mailboxes<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<DrainReport, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -956,7 +949,7 @@ fn candidate_reach<M, C, I>(
     discovered: &crate::DiscoveredWorktree,
 ) -> Reach
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
 {
     let Some(pane) = discovered
@@ -1003,7 +996,7 @@ fn clear_sent_prompt<M, C, I>(
     session: &str,
 ) -> Reach
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
 {
     let held = Reach::Waits(AgentWait::SentPrompt);
@@ -1174,7 +1167,7 @@ pub fn recheck_drafts<M, C, I>(
     held: Vec<DraftHold>,
 ) -> Result<DrainReport, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {

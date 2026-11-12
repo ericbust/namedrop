@@ -475,7 +475,7 @@ pub fn issue_registration_challenge<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<IntegrationChallenge, String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -533,7 +533,7 @@ pub(crate) fn onboard_settled_integrations<M, C, I>(
     discovered: &DiscoveredWorktree,
 ) -> Result<crate::IntegrationPackageInstallation, String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -576,7 +576,7 @@ fn onboard_settled_integration<M, C, I>(
     installation: &crate::IntegrationPackageInstallation,
 ) -> Result<(), String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -768,7 +768,7 @@ fn automatically_register_integration<M, C, I>(
     namespace: &StateNamespace,
 ) -> Result<(), String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1040,7 +1040,7 @@ fn finish_challenge_prompt<M, C, I>(
     attribution: &MutationAttribution,
 ) -> Result<(), String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
 {
     StateStore::open(runtime.state_directory)
         .map_err(|error| error.to_string())?
@@ -1091,7 +1091,7 @@ pub fn execute_integration_operation<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1191,7 +1191,7 @@ fn record_registration_failure<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<(), String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1222,7 +1222,7 @@ pub(crate) fn execute_attempt_operation<M, C, I>(
     caller: Option<&crate::deferred_commands::Caller>,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1349,7 +1349,7 @@ fn execute_delivery_inbox<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1381,7 +1381,7 @@ pub(crate) fn owed_deliveries_notice<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Option<String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1438,7 +1438,7 @@ pub(crate) fn authenticate_delivery_prompt<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Option<AuthenticatedDelivery>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1500,7 +1500,7 @@ fn with_outstanding_envelopes<M, C, I, T>(
     ) -> Result<T, crate::StoreError>,
 ) -> Result<T, String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1620,7 +1620,7 @@ fn integration_discovery<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<DiscoveredWorktree, String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
 {
     Ok(match runtime.workspace_id {
         Some(workspace_id) => discover_worktree_for_workspace(runtime.mux, workspace_id)?,
@@ -1919,7 +1919,7 @@ pub(crate) fn left_open_guidance(
 /// The line that prints every delivery the session in this pane still owes.
 pub(crate) fn inbox_line<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>) -> Option<String>
 where
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: crate::Clock,
     I: crate::IdGenerator,
 {

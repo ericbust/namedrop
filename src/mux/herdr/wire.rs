@@ -59,7 +59,7 @@ pub(super) fn run(transport: &impl Transport, args: &[&str]) -> Result<String, M
     transport.run(args).map_err(mux_error)
 }
 
-fn parse<T: DeserializeOwned>(stdout: &str) -> Result<T, MuxError> {
+pub(super) fn parse<T: DeserializeOwned>(stdout: &str) -> Result<T, MuxError> {
     serde_json::from_str(stdout).map_err(|error| MuxError::Protocol(error.to_string()))
 }
 

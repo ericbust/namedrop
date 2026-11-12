@@ -278,11 +278,7 @@ fn timestamp_ms(value: &str) -> Result<u64, String> {
         .map_err(|_| invalid())
 }
 
-pub fn execute_reminder_operation<
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
-    C: crate::Clock,
-    I: crate::IdGenerator,
->(
+pub fn execute_reminder_operation<M: crate::mux::Mux, C: crate::Clock, I: crate::IdGenerator>(
     operation: &str,
     input: Value,
     runtime: &crate::LifecycleRuntime<'_, M, C, I>,
@@ -290,11 +286,7 @@ pub fn execute_reminder_operation<
     execute_with_caller(operation, input, runtime, None)
 }
 
-pub(crate) fn execute_with_caller<
-    M: crate::mux::Mux + crate::HerdrCommandExecutor,
-    C: crate::Clock,
-    I: crate::IdGenerator,
->(
+pub(crate) fn execute_with_caller<M: crate::mux::Mux, C: crate::Clock, I: crate::IdGenerator>(
     operation: &str,
     input: Value,
     runtime: &crate::LifecycleRuntime<'_, M, C, I>,

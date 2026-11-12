@@ -1,7 +1,7 @@
 use crate::integration::{onboard_settled_integrations, pane_agent_runtime};
 use crate::mux::{
-    AgentIdentity, AgentState, Depth, Gone, MuxError, MuxRead, PaneFacts, Scope, Survey, TabId,
-    resolve_session,
+    AgentIdentity, AgentState, Applied, Depth, Effect, Gone, MuxAct, MuxError, MuxRead, PaneFacts,
+    PaneId, PopupScreen, PopupSpec, Scope, StateTexts, Survey, TabId, TerminalId, resolve_session,
 };
 use crate::{
     ActorKind, AgentSessionId, AttentionItemRecord, Clock, HerdrCommandExecutor, IdGenerator,
@@ -60,6 +60,21 @@ impl DiscoveredPane {
         self.agent_status
             .as_ref()
             .is_some_and(AgentState::accepts_prompt)
+    }
+
+    /// The facts discovery read, for an effect that names its pane.
+    pub fn facts(&self) -> PaneFacts {
+        PaneFacts {
+            id: PaneId::new(&self.pane_id),
+            terminal: TerminalId::new(&self.terminal_id),
+            tab: TabId::new(&self.tab_id),
+            space: crate::SpaceId::new(&self.workspace_id),
+            cwd: self.cwd.clone(),
+            title: self.pane_label.clone(),
+            agent: self.agent.clone(),
+            state: self.agent_status.clone(),
+            idle_label: self.idle_state_label.clone(),
+        }
     }
 }
 
@@ -1261,34 +1276,52 @@ pub(crate) fn publish_pane_address_metadata<M, C, I>(
     label: PaneLabel,
 ) -> Result<(), String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
 {
-    let title = format!("@{alias}");
     let hint = label.hint(alias);
-    let ready = hint.clone().unwrap_or_else(|| format!("@{alias} ready"));
-    let working = format!("@{alias} working");
-    let blocked = format!("@{alias} needs attention");
-    let unknown = hint.unwrap_or_else(|| format!("@{alias} status unknown"));
-    runtime.mux.execute(&[
-        "pane",
-        "report-metadata",
-        pane_id,
-        "--source",
-        "namedrop-identity",
-        "--title",
-        &title,
-        "--state-label",
-        &format!("idle={ready}"),
-        "--state-label",
-        &format!("done={ready}"),
-        "--state-label",
-        &format!("working={working}"),
-        "--state-label",
-        &format!("blocked={blocked}"),
-        "--state-label",
-        &format!("unknown={unknown}"),
-    ])?;
+    let texts = StateTexts {
+        ready: hint.clone().unwrap_or_else(|| format!("@{alias} ready")),
+        working: format!("@{alias} working"),
+        attention: format!("@{alias} needs attention"),
+        unknown: hint.unwrap_or_else(|| format!("@{alias} status unknown")),
+    };
+    runtime
+        .mux
+        .apply(&Effect::Identify {
+            pane: PaneId::new(pane_id),
+            alias: alias.to_owned(),
+            texts,
+        })
+        .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+/// Opens `screen` for `target` and returns the multiplexer's reply.
+pub fn open_popup<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    screen: PopupScreen,
+    target: PaneFacts,
+) -> Result<serde_json::Value, MuxError>
+where
+    M: HerdrCommandExecutor + Sync,
+{
+    let popup = PopupSpec {
+        screen,
+        target,
+        state_dir: runtime.state_directory.to_owned(),
+    };
+    let mux = crate::mux::herdr::at_socket(runtime.mux, runtime.session_socket_id);
+    match mux.apply(&Effect::OpenPopup(popup))? {
+        Applied::Opened(reply) => Ok(reply),
+        Applied::Done | Applied::Unsupported => Ok(serde_json::Value::Null),
+    }
+}
+
+fn rename_tab(mux: &impl MuxAct, tab_id: &str, label: &str) -> Result<Applied, MuxError> {
+    mux.apply(&Effect::RenameTab {
+        tab: TabId::new(tab_id),
+        label: label.to_owned(),
+    })
 }
 
 struct WorktreeReconciliation {
@@ -1306,7 +1339,7 @@ fn reconcile_worktree<M, C, I>(
     after_restart: bool,
 ) -> Result<WorktreeReconciliation, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -1356,7 +1389,7 @@ fn apply_managed_tab_label(
     tab_id: &str,
     address_id: &PaneAddressId,
     desired_label: &str,
-    herdr: &(impl MuxRead + HerdrCommandExecutor),
+    herdr: &impl MuxAct,
 ) -> Value {
     let warning = || {
         json!({
@@ -1397,10 +1430,7 @@ fn apply_managed_tab_label(
         Ok(false) => json!({"status": "applied"}),
         Err(_) => warning(),
         Ok(true) => {
-            if herdr
-                .execute(&["tab", "rename", tab_id, desired_label])
-                .is_err()
-            {
+            if rename_tab(herdr, tab_id, desired_label).is_err() {
                 return warning();
             }
             let finalized = store.transaction(|transaction| {
@@ -1456,7 +1486,7 @@ fn reconcile_managed_tab_labels<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Result<(), String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -1519,11 +1549,7 @@ where
                         .map_err(|error| error.to_string())?;
                     continue;
                 }
-                if runtime
-                    .mux
-                    .execute(&["tab", "rename", &label.tab_id, &pending])
-                    .is_err()
-                {
+                if rename_tab(runtime.mux, &label.tab_id, &pending).is_err() {
                     continue;
                 }
             }
@@ -1571,11 +1597,7 @@ where
         store
             .transaction(|transaction| transaction.put_managed_tab_label(namespace, &label))
             .map_err(|error| error.to_string())?;
-        if runtime
-            .mux
-            .execute(&["tab", "rename", &label.tab_id, &replacement])
-            .is_err()
-        {
+        if rename_tab(runtime.mux, &label.tab_id, &replacement).is_err() {
             continue;
         }
         store

@@ -60,9 +60,12 @@ pub enum Effect {
     ReloadKeybindings,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Applied {
     Done,
+    /// The popup opened. Carries the multiplexer's own reply, which
+    /// `namedrop ui` and the tour report print unchanged.
+    Opened(serde_json::Value),
     /// The multiplexer cannot show this effect. Callers ignore it.
     Unsupported,
 }

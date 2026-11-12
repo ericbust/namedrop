@@ -7,7 +7,10 @@
 //! the checkout, so replacing or reinstalling the package never shows the same
 //! presentation twice while a new id is shown exactly once.
 
-use crate::{DiscoveredPane, DiscoveredWorktree, HerdrCommandExecutor, LifecycleRuntime};
+use crate::{
+    DiscoveredPane, DiscoveredWorktree, HerdrCommandExecutor, LifecycleRuntime,
+    mux::{MuxError, PopupScreen},
+};
 use serde_json::{Value, json};
 use std::{
     collections::HashSet,
@@ -372,77 +375,20 @@ pub fn reset(state_directory: &Path, id: &str) -> Result<bool, String> {
     }
 }
 
-/// The exact `herdr` argv that opens the tour popup for one pane. The popup
-/// learns its invoking pane and state directory from the environment, like
-/// the other Namedrop popups.
-pub fn popup_open_args(
-    workspace: &str,
-    pane: &str,
-    terminal: &str,
-    session: &str,
-    state_directory: &Path,
-    socket: &str,
-) -> Vec<String> {
-    [
-        "plugin",
-        "pane",
-        "open",
-        "--plugin",
-        "namedrop",
-        "--entrypoint",
-        ENTRYPOINT,
-        "--placement",
-        "popup",
-        "--width",
-        POPUP_WIDTH,
-        "--height",
-        POPUP_HEIGHT,
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .chain([
-        "--env".to_owned(),
-        format!("NAMEDROP_TARGET_WORKSPACE={workspace}"),
-        "--env".to_owned(),
-        format!("NAMEDROP_TARGET_PANE={pane}"),
-        "--env".to_owned(),
-        format!("NAMEDROP_TARGET_TERMINAL={terminal}"),
-        "--env".to_owned(),
-        format!("NAMEDROP_TARGET_SESSION={session}"),
-        "--env".to_owned(),
-        format!("HERDR_PLUGIN_STATE_DIR={}", state_directory.display()),
-        "--env".to_owned(),
-        format!("HERDR_SOCKET_PATH={socket}"),
-        "--focus".to_owned(),
-    ])
-    .collect()
-}
-
 /// Opens the tour popup for `target` and returns Herdr's JSON result.
 pub fn open_popup<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
     target: &DiscoveredPane,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: HerdrCommandExecutor + Sync,
 {
-    let session = target
-        .agent_session_id()
-        .map(|id| id.as_str())
-        .unwrap_or_default();
-    let args = popup_open_args(
-        &target.workspace_id,
-        &target.pane_id,
-        &target.terminal_id,
-        session,
-        runtime.state_directory,
-        runtime.session_socket_id,
-    );
-    let output = runtime
-        .mux
-        .execute(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
-    serde_json::from_str(&output.stdout)
-        .map_err(|error| format!("Herdr returned an unreadable popup result: {error}"))
+    crate::open_popup(runtime, PopupScreen::Tour, target.facts()).map_err(|error| match error {
+        MuxError::Protocol(error) => {
+            format!("Herdr returned an unreadable popup result: {error}")
+        }
+        error => error.to_string(),
+    })
 }
 
 /// Shows the current presentation on the first agent pane Namedrop sees.
@@ -459,7 +405,7 @@ pub fn show_for_first_agent<M, C, I>(
     preferred_pane_id: Option<&str>,
 ) -> Value
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: HerdrCommandExecutor + Sync,
 {
     let not_shown =
         |reason: &str| json!({"shown": false, "presentation_id": CURRENT_ID, "reason": reason});

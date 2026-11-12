@@ -1,9 +1,10 @@
 use crate::integration::{AuthenticatedDelivery, CarriedDelivery};
 use crate::message::PromptMentionOutcome;
+use crate::mux::Effect;
 use crate::persona::{CONTEXT_BUDGET, context_size};
 use crate::shown_roster::Reader;
 use crate::spaces::{RouteRefusal, ScopedName, SpaceScope, UnplacedName};
-use crate::{Clock, HerdrCommandExecutor, IdGenerator, LifecycleRuntime};
+use crate::{Clock, IdGenerator, LifecycleRuntime};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -43,7 +44,7 @@ pub fn execute_session_start_hook<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Option<Value>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -111,7 +112,7 @@ pub fn execute_user_prompt_submit_hook<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Option<Value>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -178,15 +179,11 @@ where
         // mailboxes only on it.
         PromptMentionOutcome::Sent { remote } => {
             if !remote.is_empty() {
-                let _ = runtime.mux.execute(&[
-                    "notification",
-                    "show",
-                    "Namedrop",
-                    "--body",
-                    &format!("Sent to {}", remote.join(", ")),
-                    "--position",
-                    "bottom-right",
-                ]);
+                let _ = runtime.mux.apply(&Effect::Notify {
+                    title: "Namedrop".to_owned(),
+                    body: format!("Sent to {}", remote.join(", ")),
+                    sound: false,
+                });
             }
             Some(json!({
                 "decision": "block",
@@ -254,7 +251,7 @@ fn unseen_roster<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> RosterRead
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -281,7 +278,7 @@ fn news<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Option<String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -313,7 +310,7 @@ fn failed_handoff<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Value
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -331,7 +328,7 @@ fn under_roster<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Value
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -443,7 +440,7 @@ fn delivery_hook_output<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Value
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -519,7 +516,7 @@ fn observe_final_reply<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> (Option<crate::final_reply::Armed>, Vec<String>)
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
@@ -579,7 +576,7 @@ fn route_leading_mentions<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
 ) -> Option<PromptMentionOutcome>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {

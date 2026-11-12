@@ -1,5 +1,5 @@
 //! Shared shortcut installation for activation and the explicit repair command.
-use crate::HerdrCommandExecutor;
+use crate::mux::{Effect, MuxAct};
 use std::{
     env, fs,
     io::Write,
@@ -199,13 +199,10 @@ pub fn install_shortcuts(
     result
 }
 
-pub(crate) fn activate_shortcuts(
-    home: Option<&Path>,
-    herdr: &impl HerdrCommandExecutor,
-) -> serde_json::Value {
+pub(crate) fn activate_shortcuts(home: Option<&Path>, mux: &impl MuxAct) -> serde_json::Value {
     match install_shortcuts(None, home) {
         Ok(mut report) => {
-            match herdr.execute(&["server", "reload-config"]) {
+            match mux.apply(&Effect::ReloadKeybindings) {
                 Ok(_) => {
                     report["reloaded"] = serde_json::json!(true);
                     report.as_object_mut().unwrap().remove("next_step");
