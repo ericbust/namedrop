@@ -525,6 +525,85 @@ fn a_new_channel_is_a_new_workspace_with_namedrop_active_and_in_the_index() {
     );
 }
 
+/// A request as Tailscale Serve hands it to the loopback listener: the
+/// tailnet name as Host, and the login Serve authenticated.
+fn over_the_tailnet(
+    login: &'static str,
+    origin: &'static str,
+) -> [(&'static str, &'static str); 4] {
+    [
+        ("Host", "fixture.tail0000.ts.net"),
+        ("Tailscale-User-Login", login),
+        ("X-Forwarded-For", "100.64.0.1"),
+        ("Origin", origin),
+    ]
+}
+
+#[test]
+fn a_channel_is_created_through_the_tailnet_link_by_its_owner_only() {
+    let f = fixture();
+    let backend_port = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    fs::create_dir_all(f.state.join("dashboard")).unwrap();
+    fs::write(
+        f.state.join("dashboard/tailscale.json"),
+        json!({
+            "version": 1,
+            "state": "enabled",
+            "handler": {
+                "dns_name": "fixture.tail0000.ts.net",
+                "https_port": 443,
+                "owner_login": "owner@example.com",
+                "backend_port": backend_port,
+            },
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let server = Server::start(&f);
+    assert_eq!(server.port, backend_port);
+    let path = format!("/w/{}/channels", key("w1"));
+    let body = json!({"name": "From my phone", "folder": "~/project"});
+    const OWN: &str = "https://fixture.tail0000.ts.net";
+    for (why, via) in [
+        (
+            "another tailnet login",
+            over_the_tailnet("guest@example.com", OWN),
+        ),
+        (
+            "a page on another site",
+            over_the_tailnet("owner@example.com", "https://elsewhere.example"),
+        ),
+    ] {
+        assert_eq!(server.post_with(&path, &body, &via).status, 403, "{why}");
+    }
+    let owner = over_the_tailnet("owner@example.com", OWN);
+    let no_token = server.request(
+        "POST",
+        &path,
+        &[
+            &owner[..],
+            &[
+                ("Cookie", server.cookie.as_str()),
+                ("Content-Type", "application/json"),
+            ],
+        ]
+        .concat(),
+        &body.to_string(),
+    );
+    assert_eq!(no_token.status, 403, "the owner still needs the CSRF token");
+    assert!(creations(&f).is_empty(), "{:?}", creations(&f));
+    let response = server.post_with(&path, &body, &owner);
+    assert_eq!(response.status, 201, "{}", response.body);
+    assert_eq!(response.json()["label"], "From my phone");
+    let created = creations(&f);
+    assert_eq!(created.len(), 1, "{created:?}");
+    assert_eq!(created[0][..2], ["workspace", "create"]);
+}
+
 #[test]
 fn a_refused_channel_reads_plainly_and_creates_no_workspace() {
     let f = fixture();
