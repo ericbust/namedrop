@@ -3260,3 +3260,35 @@ fn a_held_answer_to_a_cross_workspace_ask_shows_as_worked_on_where_it_was_asked(
         "the asking workspace still says the agent works on an answer that can't arrive"
     );
 }
+
+/// The dashboard tests hand `reply`'s output to a script `herdr`, so it
+/// fails what the old executor failed: a switched-off `workspace list`, an
+/// unreadable workspace's panes, and every command it did not answer.
+#[test]
+fn the_fixture_s_herdr_replies_fail_as_its_old_executor_did() {
+    let fixture = Fixture::new();
+    let herdr = &fixture.herdr;
+    let list = ["pane", "list", "--workspace", "w2"];
+    assert!(herdr.reply(&["workspace", "list"]).unwrap().contains("ws1"));
+    assert!(herdr.reply(&list).unwrap().contains("pane-2-tester"));
+    herdr.workspace_list_fails.store(true, Ordering::Relaxed);
+    herdr.unreadable.lock().unwrap().insert("w2".to_owned());
+    assert_eq!(
+        herdr.reply(&["workspace", "list"]),
+        Err("herdr: workspace list is unavailable".to_owned())
+    );
+    assert_eq!(
+        herdr.reply(&list),
+        Err("herdr: workspace w2 is unavailable".to_owned())
+    );
+    assert!(herdr.reply(&["pane", "list"]).is_err());
+    assert!(
+        herdr
+            .reply(&["worktree", "list", "--cwd", "/tmp", "--json"])
+            .is_err()
+    );
+    assert!(
+        herdr.commands.lock().unwrap().is_empty(),
+        "replies are not logged"
+    );
+}

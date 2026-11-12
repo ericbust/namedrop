@@ -255,11 +255,28 @@ impl FakeHerdr {
         });
     }
 
-    /// What Herdr prints for the read `args`, with the switches applied, for
-    /// a script `herdr` that serves the dashboard.
+    /// What Herdr prints for `args`, for a script `herdr` that serves the
+    /// dashboard. It applies the switches, `workspace_list_fails` and
+    /// `unreadable` included, and answers only the three listings the old
+    /// executor answered, failing any other command as it did. The test
+    /// reads the reply for itself, so it is not in `commands` and runs no
+    /// hook.
     pub fn reply(&self, args: &[&str]) -> Result<String, String> {
         self.herdr.sync(&self.space);
-        self.space.herdr_reply(args)
+        match args {
+            ["workspace", "list"] if self.workspace_list_fails.load(Ordering::Relaxed) => {
+                Err("herdr: workspace list is unavailable".to_owned())
+            }
+            ["pane", "list", "--workspace", space]
+                if self.unreadable.lock().unwrap().contains(*space) =>
+            {
+                Err(format!("herdr: workspace {space} is unavailable"))
+            }
+            ["workspace", "list"]
+            | ["worktree", "list", "--workspace", _, "--json"]
+            | ["pane", "list", "--workspace", _] => self.space.herdr_reply(args),
+            _ => Err(format!("unexpected Herdr command: {args:?}")),
+        }
     }
 }
 
