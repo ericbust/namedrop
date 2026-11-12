@@ -1,3 +1,4 @@
+import type { AddedAgent, CreatedChannel } from "./create.ts";
 import type { DirectHistory, DirectPeer } from "./direct-messages.ts";
 import { type AttachedImage, isImageName, splitImages } from "./images.ts";
 import type {
@@ -261,6 +262,7 @@ function attention(
     case "coordination":
     case "agent_status":
     case "terminal_relay":
+    case "agent_start":
       source = kind;
       break;
     default:
@@ -787,6 +789,26 @@ export function parseImageUpload(raw: unknown): AttachedImage {
   )
     throw new Error("Upload answer does not name one stored image");
   return image;
+}
+export function parseFolders(raw: unknown): readonly string[] {
+  return array(record(raw).folders).filter(
+    (folder): folder is string => typeof folder === "string" && folder !== "",
+  );
+}
+export function parseCreatedChannel(raw: unknown): CreatedChannel {
+  const item = record(raw);
+  return {
+    key: spaceKey(item.key),
+    workspaceId: identity(item.workspace_id),
+    label: text(item.label),
+  };
+}
+export function parseAddedAgent(raw: unknown): AddedAgent {
+  const item = record(raw);
+  return {
+    addressId: addressId(item.address_id),
+    alias: identity(item.alias).replace(/^@/, ""),
+  };
 }
 export function parseSessionToken(raw: unknown): string {
   return identity(record(raw).csrf_token);

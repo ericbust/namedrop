@@ -6,6 +6,8 @@ import {
   avatarHue,
   composerCopy,
   composerPlaceholder,
+  createCopy,
+  createFailureCopy,
   dayBounds,
   dayLabel,
   disabledChannelCopy,
@@ -959,4 +961,94 @@ test("an unanswered-request card whose held answer can't arrive says why in plai
     },
     "an ordinary unanswered request keeps its words",
   );
+});
+
+test("create failures: the server's sentence shows as is, an expired session reads as it does for a post, and anything else asks to try again", () => {
+  const sentence = (status: number, message: string) =>
+    createFailureCopy({ status, message });
+  for (const [status, message] of [
+    [400, "That folder doesn't exist. Namedrop never creates folders."],
+    [404, "This channel's workspace is closed."],
+    [409, "Another channel is already named #web. Pick a different name."],
+    [500, "Herdr couldn't create the workspace. Try again."],
+    [
+      503,
+      "Herdr isn't reachable. Check that Herdr is running, then try again.",
+    ],
+  ] as const)
+    assert.equal(sentence(status, ` ${message} `), message, `status ${status}`);
+  const expired = "Your session expired. Reload the page to keep posting.";
+  assert.equal(sentence(401, "No session."), expired);
+  assert.equal(sentence(403, "Forbidden."), expired);
+  assert.equal(
+    sendErrorCopy({ status: 403, message: "" }),
+    expired,
+    "the same words a refused post shows",
+  );
+  for (const [status, message] of [
+    [0, ""],
+    [409, ""],
+    [413, "Too large."],
+    [201, ""],
+  ] as const)
+    assert.equal(sentence(status, message), createCopy.failed, `${status}`);
+  assert.equal(createCopy.failed, "Namedrop couldn't do that. Try again.");
+});
+
+test("create copy: no string says operator or carries a long dash", () => {
+  const strings = Object.values(createCopy).flatMap((value) =>
+    typeof value === "string"
+      ? [value]
+      : typeof value === "function"
+        ? [value("name")]
+        : Object.values(value),
+  );
+  for (const text of strings) {
+    assert.equal(/operator/i.test(text), false, text);
+    assert.equal(/[\u2013\u2014]/.test(text), false, text);
+  }
+});
+
+test("a new agent's card names it from its pane, says what the pane may be asking, and offers the pane", () => {
+  const item: Attention = {
+    rowKey: "agent-start-a9",
+    sourceId: "a9",
+    source: "agent_start",
+    summary: {
+      text: "@reviewer hasn't connected yet. Open its pane. It may be asking you to trust the folder or to log in. A new Codex connects after its first prompt.",
+      truncated: false,
+    },
+    subjectSummary: null,
+    openedAt: 1,
+    subjectAlias: null,
+    messageId: null,
+    threadId: null,
+    actions: [],
+    response: { kind: "pane", addressId: "a9" as AddressId },
+  };
+  const responder: Member = {
+    id: "a9" as AddressId,
+    alias: "@reviewer",
+    kind: { type: "agent", runtime: "claude" },
+    activity: "idle",
+    recentlyClosed: false,
+    role: null,
+    paneLabel: null,
+    subagents: [],
+  };
+  const hint =
+    "Open its pane. It may be asking you to trust the folder or to log in. A new Codex connects after its first prompt.";
+  assert.deepEqual(attentionCopy(item, responder), {
+    title: "@reviewer hasn't connected yet",
+    hint,
+    hintTitle: null,
+    details: item.summary.text,
+  });
+  assert.equal(
+    attentionCopy({ ...item, subjectAlias: "@named" }).title,
+    "@named hasn't connected yet",
+  );
+  assert.equal(attentionCopy(item).title, "A new agent hasn't connected yet");
+  assert.equal(attentionKind(item), "A new agent hasn't connected yet");
+  assert.equal(responseCopy.pane("@reviewer"), "See @reviewer's screen");
 });

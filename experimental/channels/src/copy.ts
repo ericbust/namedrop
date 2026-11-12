@@ -40,6 +40,7 @@ export type IconName =
   | "inbox"
   | "menu"
   | "pause"
+  | "plus"
   | "plug"
   | "prompt"
   | "pulse"
@@ -178,6 +179,11 @@ const attentionTable: Record<Attention["source"], AttentionRow> = {
     named: (alias) => `${alias} isn't set up yet`,
     hint: "Start a new session in that pane.",
   },
+  agent_start: {
+    title: "A new agent hasn't connected yet",
+    named: (alias) => `${alias} hasn't connected yet`,
+    hint: "Open its pane. It may be asking you to trust the folder or to log in. A new Codex connects after its first prompt.",
+  },
   unknown: { ...needsYou, hint: "Open Details for the full message." },
 };
 // An unanswered-request item whose held answer can never arrive, by cause.
@@ -276,10 +282,12 @@ function responseHint(
     return { hint: pausedHint, hintTitle: null };
   const who = responder?.alias ?? item.subjectAlias;
   const pane = item.response?.kind === "pane";
-  // A context grant that failed is shared again by its sender, not fixed in the pane.
+  // A context grant that failed is shared again by its sender, not fixed in the
+  // pane, and a new agent's own hint already says what its pane may be asking.
   if (
     who === null ||
     item.source === "context_grant" ||
+    item.source === "agent_start" ||
     !(pane || item.source === "agent_status")
   )
     return null;
@@ -355,10 +363,15 @@ export function attentionCopy(
       details: null,
     };
   const details = `${text}${truncated ? "…" : ""}`;
-  return item.subjectAlias === null
+  // A new agent's card answers with its pane, which names the agent even when
+  // the item itself doesn't.
+  const subject =
+    item.subjectAlias ??
+    (item.source === "agent_start" ? (responder?.alias ?? null) : null);
+  return subject === null
     ? { title: row.title, hint: response?.hint ?? row.hint, hintTitle, details }
     : {
-        title: row.named(item.subjectAlias),
+        title: row.named(subject),
         hint: response?.hint ?? row.namedHint ?? row.hint,
         hintTitle,
         details,
@@ -752,6 +765,53 @@ export const sidebarCopy = {
   ) =>
     `Moved ${name} to position ${position} of ${total}${group === null ? "" : ` in ${group}`}`,
 };
+// The refusal sentences match the server's word for word, so a check the page
+// makes first reads the same as the one the server would make.
+export const createCopy = {
+  newChannel: "New channel",
+  noChannelYet: "Activate Namedrop in one Herdr workspace first.",
+  name: "Name",
+  folder: "Folder",
+  folderPlaceholder: "~/projects/app",
+  recentFolders: "Recent folders",
+  create: "Create",
+  creating: "Creating…",
+  cancel: "Cancel",
+  addAgent: "Add agent",
+  kind: "Kind",
+  kinds: { claude: "Claude Code", codex: "Codex", terminal: "Terminal" },
+  agentName: "Name",
+  persona: "Persona",
+  optional: "optional",
+  personaPlaceholder: "Reviews changes before they merge",
+  add: "Add",
+  adding: "Adding…",
+  channelNameMissing: "Give the channel a name.",
+  channelNameLong: "A channel name can be up to 64 characters.",
+  channelNameUnusable:
+    'A channel name needs a letter or a digit, and it can\'t be "all".',
+  folderNotPath: "Type the folder's full path, starting with / or ~.",
+  agentNameRule:
+    "A name uses lowercase letters, digits and single hyphens, like code-reviewer.",
+  agentNameTaken: (name: string) =>
+    `@${name} is already in use in this channel. Pick a different name.`,
+  personaLong: "A persona can be up to 1,000 characters.",
+  personaInvisible: "A persona can't contain control or invisible characters.",
+  failed: "Namedrop couldn't do that. Try again.",
+};
+const createSays = new Set([400, 404, 409, 500, 503]);
+// The server words each refusal for the person, so the page shows it as is.
+export function createFailureCopy({
+  status,
+  message,
+}: {
+  status: number;
+  message: string;
+}): string {
+  if (status === 401 || status === 403) return sessionExpired();
+  const text = message.trim();
+  return createSays.has(status) && text ? text : createCopy.failed;
+}
 export const peekCopy = {
   label: (alias: string) => `Screen of ${alias}`,
   where: (channel: string) => `in ${channel}`,

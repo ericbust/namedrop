@@ -18,6 +18,7 @@ const sources = [
   "context_grant",
   "pane_binding",
   "integration_registration",
+  "agent_start",
 ];
 for (const source of sources) {
   test(`attention wire preserves ${source} evidence and safe response independently of loaded messages`, () => {
@@ -27,6 +28,7 @@ for (const source of sources) {
       "context_grant",
       "pane_binding",
       "integration_registration",
+      "agent_start",
     ].includes(source);
     value.frame.attention = [
       {
@@ -193,4 +195,31 @@ test("attention wire reads why a held answer was lost on an unanswered-request i
   assert.equal(parse("agent_disposition", undefined), null);
   assert.equal(parse("agent_disposition", null), null);
   assert.equal(parse("delivery_attempt", "retired"), null);
+});
+
+test("attention wire reads a new agent that hasn't connected as agent_start, answered by its pane", () => {
+  const value = structuredClone(fixture);
+  value.frame.attention = [
+    {
+      attention_id: "agent-start-pane-address-9",
+      source_id: "pane-address-9",
+      source_kind: "agent_start",
+      summary: {
+        text: "@reviewer hasn't connected yet. Open its pane. It may be asking you to trust the folder or to log in. A new Codex connects after its first prompt.",
+        truncated: false,
+      },
+      opened_at_ms: 10,
+      response: { kind: "pane", address_id: "pane-address-9" },
+    },
+  ];
+  const event = parseEvent("space", JSON.stringify(value));
+  assert.ok(event?.type === "space");
+  const item = event.channel.attention[0];
+  assert.equal(item?.source, "agent_start");
+  assert.equal(item?.rowKey, "agent-start-pane-address-9");
+  assert.equal(item?.sourceId, "pane-address-9");
+  assert.deepEqual(item?.response, {
+    kind: "pane",
+    addressId: "pane-address-9",
+  });
 });

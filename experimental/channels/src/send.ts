@@ -1,3 +1,10 @@
+import type {
+  AgentRequest,
+  AgentResult,
+  ChannelRequest,
+  ChannelResult,
+  Refusal,
+} from "./create.ts";
 import type { ImageUpload } from "./images.ts";
 import type {
   AddressId,
@@ -12,7 +19,10 @@ import type {
 } from "./model.ts";
 import { type ReminderConversation, reminderPath } from "./reminders.ts";
 import {
+  parseAddedAgent,
+  parseCreatedChannel,
   parseDeliverAnswer,
+  parseFolders,
   parseFullBody,
   parseImageUpload,
   parseReceipt,
@@ -108,7 +118,70 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
       headers: csrf === null ? {} : { "X-Namedrop-Csrf": csrf },
     });
   }
+  // A refusal's sentence comes from the server's body; a 2xx whose body can't
+  // be read is no answer the page can act on.
+  async function create<T>(
+    path: string,
+    body: object,
+    parse: (raw: unknown) => T,
+  ): Promise<{ kind: "created"; value: T } | Refusal> {
+    try {
+      const response = await postWithTokenRetry(path, body);
+      const answer = await response.text();
+      if (!response.ok)
+        return {
+          kind: "refused",
+          status: response.status,
+          message: parseRefusal(answer),
+        };
+      try {
+        return { kind: "created", value: parse(JSON.parse(answer)) };
+      } catch {
+        return { kind: "refused", status: 0, message: "" };
+      }
+    } catch {
+      return { kind: "refused", status: 0, message: "" };
+    }
+  }
   return {
+    // Recent folders are a shortcut, so a list that can't load is an empty one.
+    async folders(
+      key: SpaceKey,
+      signal: AbortSignal,
+    ): Promise<readonly string[]> {
+      try {
+        const response = await fetcher(`/w/${key}/folders`, {
+          credentials: "same-origin",
+          signal,
+        });
+        return response.ok ? parseFolders(await response.json()) : [];
+      } catch {
+        return [];
+      }
+    },
+    async createChannel(
+      key: SpaceKey,
+      request: ChannelRequest,
+    ): Promise<ChannelResult> {
+      const result = await create(
+        `/w/${key}/channels`,
+        { name: request.name, folder: request.folder },
+        parseCreatedChannel,
+      );
+      return result.kind === "created"
+        ? { kind: "created", channel: result.value }
+        : result;
+    },
+    async addAgent(key: SpaceKey, request: AgentRequest): Promise<AgentResult> {
+      const result = await create(
+        `/w/${key}/agents`,
+        { kind: request.kind, name: request.name, persona: request.persona },
+        parseAddedAgent,
+      );
+      return result.kind === "created"
+        ? { kind: "created", agent: result.value }
+        : result;
+    },
     async reminders(target: ReminderConversation, signal: AbortSignal) {
       const response = await fetcher(reminderPath(target), {
         credentials: "same-origin",
