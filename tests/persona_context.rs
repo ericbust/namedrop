@@ -21,9 +21,10 @@ use namedrop::{
     execute_user_prompt_submit_hook, expand_attempt_reply, install_integration_package,
     issue_registration_challenge,
     mux::{
-        AgentState, Depth, InputOutcome,
+        AgentState, Depth, InputOutcome, MuxError,
         fake::{
-            CHECKOUT_LISTINGS, FakeMux, ScopeKind, SentInput, StrictSpace, Takes, WorldBuilder,
+            CHECKOUT_LISTINGS, FakeMux, Read, ScopeKind, SentInput, StrictSpace, Surveyed, Takes,
+            WorldBuilder,
         },
     },
 };
@@ -133,6 +134,18 @@ impl PersonaSpace {
         for pane in ["pane-lead", "pane-reviewer", "pane-quiet", "pane-build"] {
             mux.answer(pane, InputOutcome::Delivered);
         }
+        // The old fake matched `worktree list --cwd` by the path's exact spelling.
+        let repo = directory.repo.clone();
+        mux.on_read(move |_, read| match read {
+            Read::Survey {
+                scope: Surveyed::CheckoutOf(path),
+                ..
+            } if path.as_os_str() != repo.as_os_str() => Err(MuxError::Unavailable(format!(
+                "no checkout is spelled {}",
+                path.display()
+            ))),
+            _ => Ok(()),
+        });
         let prompts = Arc::new(Mutex::new(Vec::new()));
         let typed = Arc::clone(&prompts);
         mux.on_input(move |_, attempt| {
