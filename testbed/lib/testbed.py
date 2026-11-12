@@ -299,7 +299,8 @@ class Profile:
                                 stdout=subprocess.PIPE if capture else None,
                                 stderr=subprocess.STDOUT if capture else None)
         if check and result.returncode != 0:
-            fail("command failed: " + shlex.join(full) + "\n" + (result.stdout or "see output above"))
+            shown = shlex.join(full).replace("\r", "\\r")
+            fail("command failed: " + shown + "\n" + (result.stdout or "see output above"))
         return result
 
     def herdr(self, *args, check=True):
@@ -554,10 +555,14 @@ class Profile:
         # The poll below stops once .exit exists, so the code lands in a temp
         # file first and the rename makes .exit appear already written.
         written = self.dir / "logs" / (label + ".exit.tmp")
-        shell = "{ " + command + "; } > " + shlex.quote(str(output)) + \
+        shell = "{ " + command + "\n} > " + shlex.quote(str(output)) + \
                 ' 2>&1; printf "%s" "$?" > ' + shlex.quote(str(written)) + \
-                " && mv -f " + shlex.quote(str(written)) + " " + shlex.quote(str(done))
-        self.run(["herdr", "pane", "run", pane, shell])
+                " && mv -f " + shlex.quote(str(written)) + " " + shlex.quote(str(done)) + "\n"
+        # Sourced from a file so the typed line stays short: macOS drops a typed line
+        # past the tty's 1024-byte canonical limit, which a fresh pane still has.
+        script = self.dir / "logs" / (label + ".sh")
+        script.write_text(shell)
+        self.type_line(pane, ". " + shlex.quote(str(script)))
         deadline = time.monotonic() + timeout
         while not done.exists() and time.monotonic() < deadline:
             time.sleep(0.1)
@@ -623,6 +628,15 @@ class Profile:
             if spec.kind == "agent":
                 self.launch(spec.alias, os.environ.get(spec.variable, spec.default))
 
+    def type_line(self, pane, text):
+        """Type `text` and Enter into `pane` in one request.
+
+        `pane run` pastes, and a pane whose program died with bracketed paste on
+        (a killed agent) hands bash 3.2 the paste markers as part of the line.
+        `send-text` writes raw bytes, so a trailing carriage return submits it.
+        """
+        self.run(["herdr", "pane", "send-text", pane, text + "\r"])
+
     def launch(self, alias, command):
         pane = self.state["panes"][alias]
         live = self.herdr("pane", "list", "--workspace", self.state["workspace"])["panes"]
@@ -632,7 +646,7 @@ class Profile:
             fail("the launch command for @{} must not be empty".format(alias))
         # No exec: when the CLI exits, the pane keeps its shell and the error stays
         # on screen, and the next `up` sees no agent in the pane and starts it again.
-        self.run(["herdr", "pane", "run", pane, command])
+        self.type_line(pane, command)
         self.state["launched_" + alias] = True
         self.save()
 

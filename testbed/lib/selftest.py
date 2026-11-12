@@ -739,19 +739,84 @@ def check_pane_exit(scratch):
     profile = object.__new__(testbed.Profile)
     profile.dir = scratch / "pane-exit"
     (profile.dir / "logs").mkdir(parents=True)
-    started = []
+    started, panes, ran = [], PastingPanes(), [0]
 
     def run(command):
+        # The pane's shell runs each completed line; paste markers would reach it too.
+        panes.run(command)
+        done, _ = panes.lines("w:p")
         slow = 'printf() { sleep 0.3; command printf "$@"; }; '
-        started.append(subprocess.Popen(["bash", "-c", slow + command[-1]]))
+        for line in done[ran[0]:]:
+            started.append(subprocess.Popen(["bash", "-c", slow + line]))
+        ran[0] = len(done)
 
     profile.run = run
     try:
         assert profile.in_pane("w:p", "echo out; (exit 3)", "probe", timeout=10) == (3, "out\n")
+        long = "echo " + "x" * 2000
+        assert profile.in_pane("w:p", long, "long", timeout=10) == (0, "x" * 2000 + "\n")
+        # A reused label runs the new command and reads its own exit code.
+        assert profile.in_pane("w:p", "(exit 5)", "probe", timeout=10) == (5, "")
     finally:
         for process in started:
             process.wait()
-    return "pane exit: .exit appears only with the exit code in it"
+    assert set(panes.streams) == {"w:p"}, panes.streams
+    longest = max(len(line) for line in panes.lines("w:p")[0])
+    assert longest < 1024, longest
+    return "pane exit: .exit appears only with the exit code in it, and a long command stays a short typed line"
+
+
+class PastingPanes:
+    """Herdr panes whose last program died with bracketed paste on, as a killed agent leaves them.
+
+    Each pane's shell sees one byte stream: `pane run` arrives wrapped in paste markers
+    plus a carriage return, `send-text` arrives raw, and a carriage return ends a line.
+    """
+
+    def __init__(self):
+        self.streams = {}
+
+    def run(self, command):
+        assert command[:2] == ["herdr", "pane"], command
+        verb, pane = command[2], command[3]
+        assert verb == "send-keys" or len(command) == 5, command
+        if verb == "run":
+            data = "\x1b[200~" + command[-1] + "\x1b[201~\r"
+        elif verb == "send-text":
+            data = command[-1]
+        elif verb == "send-keys":
+            data = "".join("\r" if key == "enter" else "<" + key + ">" for key in command[4:])
+        else:
+            raise AssertionError(command)
+        self.streams[pane] = self.streams.get(pane, "") + data
+
+    def lines(self, pane):
+        *done, typed = self.streams.get(pane, "").split("\r")
+        return done, typed
+
+
+def check_launch_after_kill():
+    profile = object.__new__(testbed.Profile)
+    panes = PastingPanes()
+    profile.state = {"workspace": "w1", "panes": {"claude": "w1:p2"}}
+    # Codex still runs in its own pane; only the killed claude pane is relaunched.
+    profile.herdr = lambda *args: {"panes": [{"pane_id": "w1:p2", "agent": None},
+                                             {"pane_id": "w1:p3", "agent": "codex"}]}
+    profile.run = panes.run
+    profile.save = lambda: None
+    profile.launch("claude", "claude --resume 14c7")
+    assert panes.lines("w1:p2") == (["claude --resume 14c7"], ""), panes.streams
+    assert set(panes.streams) == {"w1:p2"}, panes.streams
+    assert profile.state.get("launched_claude") is True, profile.state
+    running = object.__new__(testbed.Profile)
+    untouched = PastingPanes()
+    running.state = {"workspace": "w1", "panes": {"claude": "w1:p2"}}
+    running.herdr = lambda *args: {"panes": [{"pane_id": "w1:p2", "agent": "claude"}]}
+    running.run = untouched.run
+    running.save = lambda: None
+    running.launch("claude", "claude --resume 14c7")
+    assert untouched.streams == {}, untouched.streams
+    return "launch: a pane left in bracketed paste gets the command with no paste markers; a running agent gets nothing"
 
 
 def check_checklist_prompts(kit):
@@ -784,6 +849,7 @@ def run(kit):
                   ("report", check_report),
                   ("seeds", check_seeds),
                   ("pane exit", lambda: check_pane_exit(base)),
+                  ("launch after kill", check_launch_after_kill),
                   ("CHECKLIST prompts", lambda: check_checklist_prompts(kit))]
         checks += selftest_daily.checks(base)
         for label, check in checks:
