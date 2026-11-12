@@ -20,6 +20,11 @@ export type SoundSettings = Readonly<{
   muted: boolean;
   agents: ReadonlyMap<AgentKey, SoundId>;
 }>;
+// A refused save (400) means the list of agents with their own sound is full.
+export type SaveResult =
+  | { kind: "saved"; settings: SoundSettings }
+  | { kind: "full" }
+  | { kind: "failed" };
 export type SoundChange =
   | { kind: "default"; sound: SoundId }
   | { kind: "muted"; muted: boolean }

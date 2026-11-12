@@ -6,7 +6,10 @@
 use super::server_files::ServerFiles;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, fs};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fs,
+};
 
 const FILE: &str = "sounds.json";
 const MAX_AGENTS: usize = 512;
@@ -86,6 +89,14 @@ pub(crate) enum Rejected {
 }
 
 impl Settings {
+    /// Drops the overrides of agents that are no longer known pane addresses,
+    /// so the cap counts only agents that still exist. A change applies after
+    /// this, so the agent it sets stays even when it is not known.
+    pub(crate) fn prune(mut self, known: &HashSet<String>) -> Self {
+        self.agents.retain(|agent, _| known.contains(&agent.0));
+        self
+    }
+
     pub(crate) fn apply(mut self, change: Change) -> Result<Self, Rejected> {
         match change {
             Change::Default { sound } => self.default = sound,
@@ -206,6 +217,47 @@ mod tests {
         cleared
             .apply(set(agent(MAX_AGENTS), Some(Sound::Pop)))
             .expect("a freed place takes a new agent");
+    }
+
+    #[test]
+    fn pruning_keeps_known_agents_and_the_change_after_it_sets_any_agent() {
+        let mut settings = Settings {
+            default: Sound::Bell,
+            muted: true,
+            ..Settings::default()
+        };
+        for index in 0..4 {
+            settings.agents.insert(agent(index), Sound::Pop);
+        }
+        let known: HashSet<String> = [agent(0), agent(2), agent(9)]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let pruned = settings.clone().prune(&known);
+        assert_eq!(
+            pruned.agents.keys().cloned().collect::<Vec<_>>(),
+            [agent(0), agent(2)]
+        );
+        assert_eq!((pruned.default, pruned.muted), (Sound::Bell, true));
+        assert!(settings.prune(&HashSet::new()).agents.is_empty());
+        let mut full = Settings::default();
+        for index in 0..MAX_AGENTS {
+            full.agents.insert(agent(index), Sound::Ping);
+        }
+        let known = (0..MAX_AGENTS - 1)
+            .map(|index| String::from(agent(index)))
+            .collect();
+        let set = |key: AgentKey| Change::Agent {
+            agent: key,
+            sound: Some(Sound::Pop),
+        };
+        let fits = full.prune(&known).apply(set(agent(MAX_AGENTS))).unwrap();
+        assert_eq!(
+            fits.agents[&agent(MAX_AGENTS)],
+            Sound::Pop,
+            "a pick after a pane closed fits again, though its agent is not known yet"
+        );
+        assert_eq!(fits.agents.len(), MAX_AGENTS);
     }
 
     #[test]

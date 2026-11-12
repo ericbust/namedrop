@@ -109,6 +109,7 @@ function postRoute(onPost) {
   const uploads = [];
   const soundPosts = [];
   let soundState = { default: "chime", muted: false, agents: {} };
+  let soundRefusal = null;
   const authorized = (req) =>
     (req.headers.cookie ?? "")
       .split(/;\s*/)
@@ -151,6 +152,9 @@ function postRoute(onPost) {
     setSounds(value) {
       soundState = value;
     },
+    refuseSounds(status) {
+      soundRefusal = status;
+    },
     // Mirrors /api/sounds: GET reads the settings; POST takes one change with
     // the CSRF header and answers with the settings it leaves.
     async sounds(req, res) {
@@ -163,6 +167,7 @@ function postRoute(onPost) {
       };
       soundPosts.push(post);
       if (post.csrf !== session.csrf) return res.writeHead(403).end();
+      if (soundRefusal !== null) return sendJson(res, soundRefusal, {});
       const change = post.body;
       if (change.kind === "default")
         soundState = { ...soundState, default: change.sound };
@@ -13828,4 +13833,35 @@ test("SOUNDS l: one direct message plays once across three tabs, whenever each t
   }
   const heard = await Promise.all(tabs.map((tab) => sounds(tab.page)));
   assert.deepEqual(heard.flat(), [tune("knock")]);
+});
+
+test("SOUNDS m: a refused save says why and the picker shows the saved choice again", async (t) => {
+  const { ui } = await soundRoom(
+    t,
+    { agents: { [SOUND_CLAUDE]: "bell" } },
+    {
+      path: `/?dm=${key(1)}/${encodeURIComponent(SOUND_CLAUDE)}`,
+      directPeers: () => [dmPeer(SOUND_CLAUDE, null)],
+    },
+  );
+  const picker = ui.page.locator(".dm-header .sound-picker");
+  await picker.locator("summary").click();
+  const group = picker.getByRole("group", { name: "Sound for @claude" });
+  const bell = group.getByRole("radio", { name: "Bell", exact: true });
+  const pop = group.getByRole("radio", { name: "Pop", exact: true });
+  const alert = picker.getByRole("alert");
+  for (const [status, text] of [
+    [400, "Couldn't save that sound. Too many agents have their own sound."],
+    [503, "Couldn't save that. Try again."],
+  ]) {
+    ui.posts.refuseSounds(status);
+    await pop.check();
+    await alert.getByText(text, { exact: true }).waitFor();
+    await eventually(async () => await bell.isChecked(), "the saved choice");
+    assert.equal(await pop.isChecked(), false);
+  }
+  ui.posts.refuseSounds(null);
+  await pop.check();
+  await alert.waitFor({ state: "detached" });
+  await picker.locator("summary").getByText("Pop").waitFor();
 });

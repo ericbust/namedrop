@@ -22,6 +22,11 @@ import { type SoundAccess, useSoundAccess } from "./useSounds.ts";
 
 // `null` is the agent's Default row: it follows the Default sound.
 type Choice = SoundId | null;
+type Failure = Exclude<Awaited<ReturnType<SoundAccess["change"]>>, "saved">;
+const FAILURES: Readonly<Record<Failure, string>> = {
+  full: "Couldn't save that sound. Too many agents have their own sound.",
+  failed: "Couldn't save that. Try again.",
+};
 const CHOICES: readonly SoundId[] = [...TONES, "none"];
 
 function useDismiss(details: RefObject<HTMLDetailsElement | null>) {
@@ -77,12 +82,14 @@ function SoundMenu({
 }) {
   const details = useRef<HTMLDetailsElement>(null);
   const group = useId();
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState<Failure | null>(null);
   useDismiss(details);
   const { settings } = sounds;
   const save = (change: SoundChange) => {
-    setFailed(false);
-    void sounds.change(change).then((saved) => setFailed(!saved));
+    setFailed(null);
+    void sounds
+      .change(change)
+      .then((saved) => setFailed(saved === "saved" ? null : saved));
   };
   const toneOf = (choice: Choice): Tone | null => {
     const sound = choice ?? settings?.default ?? "none";
@@ -94,7 +101,7 @@ function SoundMenu({
       ref={details}
       onToggle={(event) => {
         if (event.currentTarget.open) sounds.refresh();
-        else setFailed(false);
+        else setFailed(null);
       }}
     >
       <summary title={title}>{summary}</summary>
@@ -134,9 +141,9 @@ function SoundMenu({
                 );
               })}
             </fieldset>
-            {failed && (
+            {failed !== null && (
               <p className="sound-note" role="alert">
-                Couldn't save that. Try again.
+                {FAILURES[failed]}
               </p>
             )}
           </>

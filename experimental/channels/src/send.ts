@@ -13,6 +13,7 @@ import type {
 import { type ReminderConversation, reminderPath } from "./reminders.ts";
 import {
   parseSoundSettings,
+  type SaveResult,
   type SoundChange,
   type SoundSettings,
 } from "./sounds.ts";
@@ -154,12 +155,18 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
         return null;
       }
     },
-    async changeSound(change: SoundChange): Promise<SoundSettings | null> {
+    async changeSound(change: SoundChange): Promise<SaveResult> {
       try {
         const response = await postWithTokenRetry("/api/sounds", change);
-        return response.ok ? parseSoundSettings(await response.json()) : null;
+        if (response.status === 400) return { kind: "full" };
+        const settings = response.ok
+          ? parseSoundSettings(await response.json())
+          : null;
+        return settings === null
+          ? { kind: "failed" }
+          : { kind: "saved", settings };
       } catch {
-        return null;
+        return { kind: "failed" };
       }
     },
     async fullBody(

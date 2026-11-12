@@ -5,7 +5,7 @@ use crate::{HerdrCommandExecutor, ProcessHerdr, StateStore, store::dashboard::Sc
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::CString,
     fs::File,
     io::{self, BufRead, BufReader, Read, Write},
@@ -1390,7 +1390,9 @@ fn serve_connection(
         Ok(Route::ImageUpload) => upload_image(&mut reader, &mut writer, front, &request),
         Ok(Route::Image(name)) => serve_image(&mut writer, front, &name),
         Ok(Route::Sounds) => respond_sounds(&mut writer, &super::sounds::read(&front.files)),
-        Ok(Route::ChangeSounds) => change_sounds(&mut reader, &mut writer, front, &request),
+        Ok(Route::ChangeSounds) => {
+            change_sounds(&mut reader, &mut writer, front, history_store, &request)
+        }
         Ok(Route::DirectMessages) => {
             let result = (|| {
                 let mut guard = history_store.lock().map_err(|_| Status::Unavailable)?;
@@ -2369,23 +2371,41 @@ fn change_sounds(
     reader: &mut impl Read,
     writer: &mut TcpStream,
     front: &Front,
+    history_store: &Mutex<HistoryStore>,
     request: &Request,
 ) -> io::Result<()> {
     let change = match read_json_body::<super::sounds::Change>(reader, request) {
         Ok(change) => change,
         Err(status) => return respond_status(writer, status),
     };
+    let known = known_agents(front, history_store);
     let _admitted = match front.admit_mutation() {
         Ok(guard) => guard,
         Err(status) => return respond_status(writer, status),
     };
-    let Ok(settings) = super::sounds::read(&front.files).apply(change) else {
+    let mut settings = super::sounds::read(&front.files);
+    if let Some(known) = &known {
+        settings = settings.prune(known);
+    }
+    let Ok(settings) = settings.apply(change) else {
         return respond_status(writer, Status::BadRequest);
     };
     if super::sounds::write(&front.files, &settings).is_err() {
         return respond_status(writer, Status::Unavailable);
     }
     respond_sounds(writer, &settings)
+}
+
+/// The pane addresses of the agents the person can message today, or `None`
+/// when the listing fails, so nothing is pruned on a guess.
+fn known_agents(front: &Front, history_store: &Mutex<HistoryStore>) -> Option<HashSet<String>> {
+    let mut guard = history_store.lock().ok()?;
+    let peers = guard
+        .store(front.files.state())
+        .ok()?
+        .direct_message_peers()
+        .ok()?;
+    Some(peers.into_iter().map(|peer| peer.address_id).collect())
 }
 
 fn respond_sounds(writer: &mut TcpStream, settings: &super::sounds::Settings) -> io::Result<()> {

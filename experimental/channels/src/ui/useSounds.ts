@@ -16,6 +16,7 @@ import {
   createPlayer,
   type Heard,
   type PlayerKind,
+  type SaveResult,
   type SoundChange,
   type SoundSettings,
   type Tone,
@@ -25,7 +26,7 @@ export type SoundAccess = Readonly<{
   settings: SoundSettings | null;
   player: PlayerKind;
   refresh(): void;
-  change(change: SoundChange): Promise<boolean>;
+  change(change: SoundChange): Promise<SaveResult["kind"]>;
   preview(tone: Tone): void;
   unlock(): void;
 }>;
@@ -97,12 +98,9 @@ export function useSounds(
       loading.current?.abort();
       setSettings((settings) => settings && applyChange(settings, change));
       const saved = await poster.changeSound(change);
-      if (saved === null) {
-        refresh();
-        return false;
-      }
-      setSettings(saved);
-      return true;
+      if (saved.kind === "saved") setSettings(saved.settings);
+      else refresh();
+      return saved.kind;
     },
     [poster, refresh],
   );

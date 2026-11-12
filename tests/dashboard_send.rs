@@ -3194,6 +3194,15 @@ else:
     #[test]
     fn sound_choices_change_one_field_at_a_time_and_survive_a_restart() {
         let f = Fixture::new();
+        let file = f.state.join("dashboard/sounds.json");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(
+            &file,
+            json!({"version": 1, "default": "chime", "muted": false,
+                   "agents": {"pane-address-9-9-9": "knock"}})
+            .to_string(),
+        )
+        .unwrap();
         let server = Server::start(&f, None);
         let read = |server: &Server| {
             let response = server.request(
@@ -3215,8 +3224,9 @@ else:
         };
         assert_eq!(
             read(&server),
-            json!({"default": "chime", "muted": false, "agents": {}})
+            json!({"default": "chime", "muted": false, "agents": {"pane-address-9-9-9": "knock"}})
         );
+        let (lead, tester) = ("address-w1-lead", "address-w2-tester");
         for (change, expected) in [
             (
                 json!({"kind": "default", "sound": "bell"}),
@@ -3227,17 +3237,22 @@ else:
                 json!({"default": "bell", "muted": true, "agents": {}}),
             ),
             (
-                json!({"kind": "agent", "agent": "pane-address-1-2-3", "sound": "pop"}),
-                json!({"default": "bell", "muted": true, "agents": {"pane-address-1-2-3": "pop"}}),
+                json!({"kind": "agent", "agent": lead, "sound": "pop"}),
+                json!({"default": "bell", "muted": true, "agents": {lead: "pop"}}),
             ),
             (
-                json!({"kind": "agent", "agent": "pane-address-4-5-6", "sound": "none"}),
+                json!({"kind": "agent", "agent": "pane-address-1-2-3", "sound": "soft"}),
                 json!({"default": "bell", "muted": true,
-                       "agents": {"pane-address-1-2-3": "pop", "pane-address-4-5-6": "none"}}),
+                       "agents": {lead: "pop", "pane-address-1-2-3": "soft"}}),
             ),
             (
-                json!({"kind": "agent", "agent": "pane-address-1-2-3", "sound": null}),
-                json!({"default": "bell", "muted": true, "agents": {"pane-address-4-5-6": "none"}}),
+                json!({"kind": "agent", "agent": tester, "sound": "none"}),
+                json!({"default": "bell", "muted": true,
+                       "agents": {lead: "pop", tester: "none"}}),
+            ),
+            (
+                json!({"kind": "agent", "agent": lead, "sound": null}),
+                json!({"default": "bell", "muted": true, "agents": {tester: "none"}}),
             ),
         ] {
             let response = server.post("/api/sounds", &change.to_string(), &[]);
@@ -3250,9 +3265,8 @@ else:
             assert_eq!(read(&server), expected, "{change}");
         }
         let settled = read(&server);
-        let file = f.state.join("dashboard/sounds.json");
         let stored = fs::read(&file).unwrap();
-        let repeat = json!({"kind": "agent", "agent": "pane-address-4-5-6", "sound": "none"});
+        let repeat = json!({"kind": "agent", "agent": tester, "sound": "none"});
         assert_eq!(
             server.post("/api/sounds", &repeat.to_string(), &[]).status,
             200
