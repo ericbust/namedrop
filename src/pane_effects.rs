@@ -1484,7 +1484,7 @@ mod tests {
             let gate = DashboardPane::try_acquire(&state.0, "socket", "pane").unwrap();
             gate.0.record(&delivery()).unwrap();
             let mux = author();
-            mux.script(outcome.clone());
+            mux.script("pane", outcome.clone());
             assert_eq!(
                 gate.input(&mux, typed("yes", Some(&AgentState::Blocked))),
                 outcome
@@ -1516,7 +1516,7 @@ mod tests {
                 gate.0.record(owner).unwrap();
             }
             let mux = author();
-            mux.script(outcome.clone());
+            mux.script("pane", outcome.clone());
             assert_eq!(
                 gate.input(&mux, typed("refused", Some(&AgentState::Idle))),
                 outcome
@@ -1539,7 +1539,7 @@ mod tests {
         let gate = DashboardPane::try_acquire(&state.0, "socket", "pane").unwrap();
         gate.0.record(&delivery()).unwrap();
         let mux = author();
-        mux.script(InputOutcome::Ambiguous("timed out".into()));
+        mux.script("pane", InputOutcome::Ambiguous("timed out".into()));
         assert_eq!(
             gate.input(&mux, typed("maybe typed", Some(&AgentState::Idle))),
             InputOutcome::Ambiguous("timed out".into())
