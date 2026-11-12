@@ -34,12 +34,9 @@ const HERDR_COMMANDS: &[&[&str]] = &[
     &["worktree", "list"],
 ];
 
-/// Text that starts the `herdr` binary.
-const HERDR_BINARY: &[&str] = &[
-    r#"var("HERDR_BIN_PATH")"#,
-    r#"var_os("HERDR_BIN_PATH")"#,
-    r#"Command::new("herdr""#,
-];
+/// Text that starts the `herdr` binary. The variable's name alone counts,
+/// so reading it through a constant or `vars_os()` still does.
+const HERDR_BINARY: &[&str] = &[r#""HERDR_BIN_PATH""#, r#"Command::new("herdr""#];
 
 /// What a file outside the adapter may name, by file under `src/`.
 const ALLOWED: &[(&str, &str)] = &[
@@ -47,7 +44,10 @@ const ALLOWED: &[(&str, &str)] = &[
     // until step 4 moves it into the adapter. The dashboard check in
     // `pane_effects.rs` pins its arguments.
     ("dashboard/observer_guard.rs", r#""terminal","session""#),
-    ("dashboard/observer_guard.rs", r#"var_os("HERDR_BIN_PATH")"#),
+    ("dashboard/observer_guard.rs", r#""HERDR_BIN_PATH""#),
+    // The dashboard check names the variable to forbid it outside the
+    // observer guard.
+    ("pane_effects.rs", r#""HERDR_BIN_PATH""#),
     // A command the person is told to run, never run here.
     ("install.rs", r#""integration","install""#),
     // git's `worktree list`, not Herdr's.
@@ -259,11 +259,19 @@ fn the_boundary_check_catches_each_way_to_name_herdr() {
         ),
         (
             r#"Command::new(env::var("HERDR_BIN_PATH").unwrap())"#,
-            r#"var("HERDR_BIN_PATH")"#,
+            r#""HERDR_BIN_PATH""#,
         ),
         (
             r#"std::env::var_os( "HERDR_BIN_PATH" )"#,
-            r#"var_os("HERDR_BIN_PATH")"#,
+            r#""HERDR_BIN_PATH""#,
+        ),
+        (
+            r#"const BIN: &str = "HERDR_BIN_PATH"; Command::new(env::var(BIN).unwrap())"#,
+            r#""HERDR_BIN_PATH""#,
+        ),
+        (
+            r#"env::vars_os().find(|(key, _)| key == "HERDR_BIN_PATH")"#,
+            r#""HERDR_BIN_PATH""#,
         ),
     ] {
         assert_eq!(
@@ -288,7 +296,7 @@ fn the_boundary_check_catches_each_way_to_name_herdr() {
         caught(observer),
         [
             r#"new/module/reads.rs names "terminal","session""#,
-            r#"new/module/reads.rs names var_os("HERDR_BIN_PATH")"#,
+            r#"new/module/reads.rs names "HERDR_BIN_PATH""#,
         ],
         "an allowance holds for its own file only"
     );
