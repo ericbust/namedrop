@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { diagramCopy } from "../copy.ts";
-import type { DiagramRefusal, Drawn, Palette } from "../diagram.ts";
+import {
+  type DiagramRefusal,
+  type Drawn,
+  MIN_DIAGRAM_SCALE,
+  type Palette,
+} from "../diagram.ts";
 import { Icon } from "./Icons.tsx";
 
 // Used when a browser cannot read one of the page's colors.
@@ -201,6 +206,7 @@ export function Diagram({
               height={image.height}
               alt={diagramCopy.alt}
               draggable={false}
+              style={{ minWidth: Math.round(image.width * MIN_DIAGRAM_SCALE) }}
             />
           </button>
         </div>

@@ -13439,6 +13439,14 @@ const fenced = (source, before = "Here it is:", after = "Done.") =>
   `${before}\n\`\`\`mermaid\n${source}\n\`\`\`\n${after}`;
 const FLOW =
   "flowchart TD\n  A[Start] --> B{Ready?}\n  B -- yes --> C[Ship it]\n  B -- no --> D[Wait]";
+// A left-to-right chain. Each step adds about 200 px to the drawing's width.
+const chain = (steps) =>
+  `flowchart LR\n${Array.from({ length: steps - 1 }, (_, n) => `  N${n}[Step number ${n}] --> N${n + 1}[Step number ${n + 1}]`).join("\n")}`;
+// What a live agent answered with. Fitted to the thread pane it was 289 by 45 px.
+const REVIEW_FLOW =
+  "flowchart LR\n  A[Author opens PR] --> B[CI runs checks]\n  B --> C[Reviewer assigned]\n  C --> D{Review decision}\n  D -->|Changes requested| E[Author pushes fixes]\n  E --> B\n  D -->|Approved| F[Final CI pass]\n  F --> G[Merge to main]\n  G --> H[Delete branch]";
+// A drawing is fitted to its column down to this share of its drawn size.
+const SMALLEST_SCALE = 0.7;
 const SEQUENCE =
   "sequenceDiagram\n  participant Alice\n  participant Bob\n  Alice->>Bob: Are you there?\n  Bob-->>Alice: Yes\n  Note over Alice,Bob: Both agree";
 async function diagramRoom(t, messages) {
@@ -13518,15 +13526,31 @@ const fitOf = (box) =>
       viewport: document.documentElement.clientWidth,
     };
   });
-function assertFits(fit, what) {
-  assert.ok(fit.inside, `${what}: the whole picture is inside its box`);
-  assert.ok(fit.content <= fit.box, `${what}: its box does not scroll`);
+function assertShape(fit, what) {
   assert.ok(fit.page <= fit.viewport, `${what}: the page does not scroll`);
   const shape = fit.naturalWidth / fit.naturalHeight;
   assert.ok(
     Math.abs(fit.width / fit.height - shape) / shape < 0.02,
     `${what}: the picture keeps its shape`,
   );
+}
+function assertFits(fit, what) {
+  assert.ok(fit.inside, `${what}: the whole picture is inside its box`);
+  assert.ok(fit.content <= fit.box, `${what}: its box does not scroll`);
+  assert.ok(
+    fit.width >= fit.naturalWidth * SMALLEST_SCALE - 1,
+    `${what}: the picture is no smaller than its labels can be read at: ${fit.width} of ${fit.naturalWidth}`,
+  );
+  assertShape(fit, what);
+}
+// A picture that would be too small to read if it were fitted.
+function assertReadable(fit, what) {
+  assert.ok(
+    Math.abs(fit.width - fit.naturalWidth * SMALLEST_SCALE) <= 1,
+    `${what}: the picture is ${SMALLEST_SCALE} of its drawn size: ${fit.width} of ${fit.naturalWidth}`,
+  );
+  assert.ok(fit.content > fit.box, `${what}: its box scrolls sideways`);
+  assertShape(fit, what);
 }
 async function diagramShots(ui, name) {
   const directory = process.env.DIAGRAM_SCREENSHOTS;
@@ -13953,22 +13977,29 @@ test("DIAGRAMS: a diagram is drawn when it comes on screen, and drawn again for 
   );
 });
 
-test("DIAGRAMS: at phone width a wide diagram is shown smaller to fit, and a tap opens it full size", async (t) => {
-  const wide = `flowchart LR\n${Array.from({ length: 14 }, (_, n) => `  N${n}[Step number ${n}] --> N${n + 1}[Step number ${n + 1}]`).join("\n")}`;
-  const { ui } = await diagramRoom(t, [fenced(wide)]);
+test("DIAGRAMS: at phone width a diagram a little too wide is shown smaller to fit, and a tap opens a wide one full size", async (t) => {
+  const { ui } = await diagramRoom(t, [fenced(chain(2)), fenced(chain(15))]);
   await ui.page.setViewportSize({ width: 390, height: 800 });
-  await showWhole(ui, "d1");
-  const diagram = diagramOf(ui, "d1");
-  const box = diagram.locator(".diagram-box");
-  await pictureOf(diagram);
-  const fit = await fitOf(box);
+  const fitted = diagramOf(ui, "d1");
+  await pictureOf(fitted);
+  const fit = await fitOf(fitted.locator(".diagram-box"));
   assert.ok(
-    fit.naturalWidth > 1000,
-    `the diagram is wide: ${fit.naturalWidth}`,
+    fit.naturalWidth > fit.box,
+    `the diagram is wider than the screen's column: ${fit.naturalWidth} > ${fit.box}`,
   );
   assert.ok(fit.width < fit.box, "it is shown smaller than its box");
   assertFits(fit, "at 390 px");
-  await diagramShots(ui, "phone");
+  await diagramShots(ui, "phone-fitted");
+
+  await showWhole(ui, "d2");
+  const diagram = diagramOf(ui, "d2");
+  await pictureOf(diagram);
+  const wide = await fitOf(diagram.locator(".diagram-box"));
+  assert.ok(
+    wide.naturalWidth > 1000,
+    `the diagram is wide: ${wide.naturalWidth}`,
+  );
+  assertReadable(wide, "at 390 px");
 
   const full = diagram.locator("dialog.diagram-full");
   assert.equal(await full.evaluate((dialog) => dialog.open), false);
@@ -14034,8 +14065,7 @@ test("DIAGRAMS: a shortened message shows a label for a diagram it cuts, and the
 
 test("DIAGRAMS: an agent's answer shows as the word Diagram in the reply preview and fits the thread pane as a drawing", async (t) => {
   const value = replyRows();
-  const wide = `flowchart LR\n${Array.from({ length: 6 }, (_, n) => `  S${n}[Step number ${n}] --> S${n + 1}[Step number ${n + 1}]`).join("\n")}`;
-  value.frame.messages[1].body.text = fenced(wide, "Here is the plan.");
+  value.frame.messages[1].body.text = fenced(chain(2), "Here is the plan.");
   const ui = await open(t, (client) => replay(client, [value]), undefined, {
     inlineStyles: true,
   });
@@ -14070,5 +14100,82 @@ test("DIAGRAMS: an agent's answer shows as the word Diagram in the reply preview
     sizes.content <= sizes.pane,
     "the thread pane does not scroll sideways",
   );
-  await diagramShots(ui, "thread");
+  await diagramShots(ui, "thread-fitted");
+});
+
+test("DIAGRAMS: a diagram too wide to read when fitted keeps a readable size and scrolls sideways inside its box, never the page", async (t) => {
+  const value = replyRows();
+  value.frame.messages[1].body.text = fenced(
+    REVIEW_FLOW,
+    "A pull request is opened, checked, reviewed, then merged.",
+  );
+  const ui = await open(t, (client) => replay(client, [value]), undefined, {
+    inlineStyles: true,
+  });
+  await ui.live();
+  await ui.page
+    .locator('.timeline [data-message-id="parent"] .reply-preview')
+    .click();
+  const pane = ui.page.locator("aside.thread");
+  const diagram = pane.locator('[data-message-id="answer"] .diagram');
+  const box = diagram.locator(".diagram-box");
+  await pictureOf(diagram);
+  for (const [width, what, shot] of [
+    [1280, "in the thread pane", "thread"],
+    [390, "at 390 px", "phone"],
+  ]) {
+    await ui.page.setViewportSize({ width, height: 800 });
+    const fit = await fitOf(box);
+    assert.ok(
+      fit.naturalWidth * SMALLEST_SCALE > fit.box,
+      `${what}: fitted, the diagram would be too small to read: ${fit.naturalWidth} in ${fit.box}`,
+    );
+    assertReadable(fit, what);
+    assert.ok(
+      fit.height >= 120,
+      `${what}: it is tall enough to read: ${fit.height}`,
+    );
+    const sizes = await pane.evaluate((thread) => ({
+      pane: thread.clientWidth,
+      content: thread.scrollWidth,
+    }));
+    assert.ok(
+      sizes.content <= sizes.pane,
+      `${what}: the thread pane does not scroll sideways`,
+    );
+    await diagramShots(ui, shot);
+    const end = await box.evaluate((element) => {
+      element.scrollLeft = element.scrollWidth;
+      const shown = element.querySelector("img").getBoundingClientRect();
+      const frame = element.getBoundingClientRect();
+      const reached = {
+        scrolled: element.scrollLeft,
+        inside: shown.right <= frame.right + 0.5,
+        page: document.scrollingElement.scrollLeft,
+      };
+      element.scrollLeft = 0;
+      return reached;
+    });
+    assert.ok(end.scrolled > 0, `${what}: the box scrolls`);
+    assert.ok(end.inside, `${what}: scrolling it shows the picture's far end`);
+    assert.equal(end.page, 0, `${what}: the page stays where it was`);
+  }
+
+  await diagram.locator(".diagram-view").focus();
+  await ui.page.keyboard.press("ArrowRight");
+  await eventually(
+    () => box.evaluate((element) => element.scrollLeft > 0),
+    "the arrow keys scroll the box from the keyboard",
+  );
+  const full = diagram.locator("dialog.diagram-full");
+  await diagram
+    .getByRole("button", { name: "Open the diagram full size" })
+    .click();
+  await eventually(() => full.evaluate((dialog) => dialog.open), "full size");
+  const image = full.locator("img");
+  assert.equal(
+    await image.evaluate((element) => element.getBoundingClientRect().width),
+    await image.evaluate((element) => element.naturalWidth),
+    "a tap still opens it full size",
+  );
 });

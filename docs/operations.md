@@ -183,7 +183,7 @@ flowchart TD
 ```
 ````
 
-The drawing takes the page's colors and font, and it is drawn again when the page changes between light and dark. Under it, **Show source** shows the block as written and **Copy** copies it. A diagram wider than its column is shown smaller to fit, in the channel, the thread pane and on a phone. A click or tap opens it full size in a view that scrolls, and Escape or the close button closes that view. A message over 480 characters is shown shortened, as before, and a diagram it would cut shows as the word "Diagram" until you press **Show more**. Reply previews and hook rows show the same word.
+The drawing takes the page's colors and font, and it is drawn again when the page changes between light and dark. Under it, **Show source** shows the block as written and **Copy** copies it. A diagram wider than its column is shown smaller to fit, in the channel, the thread pane and on a phone. It is never shown below 0.7 of its drawn size, where its labels are about 10 px. A diagram too wide for that keeps that size and scrolls sideways inside its own box, by swipe, scrollbar or the arrow keys; the page does not scroll. A click or tap opens it full size in a view that scrolls, and Escape or the close button closes that view. A message over 480 characters is shown shortened, as before, and a diagram it would cut shows as the word "Diagram" until you press **Show more**. Reply previews and hook rows show the same word.
 
 A diagram that Mermaid cannot read stays a code block, with "Diagram could not be drawn" under it. An unfinished block, with no closing fence, is a code block too.
 
