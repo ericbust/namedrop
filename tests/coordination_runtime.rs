@@ -1318,9 +1318,11 @@ fn coordination_wait_and_authority_controls() {
     f.status("lead", "blocked");
     f.drain();
     assert_eq!(f.wake_count(), 0);
+    assert_eq!(f.attention_count(), 1);
     f.status("lead", "unknown");
     f.drain();
     assert_eq!(f.wake_count(), 0);
+    assert_eq!(f.attention_count(), 1);
     f.status("lead", "idle");
     f.settle_lead_inputs();
     f.drain();
@@ -1354,6 +1356,28 @@ fn coordination_wait_and_authority_controls() {
         f.wake_count(),
         1,
         "idle wait on completed dependency cannot suppress continuation"
+    );
+    let unknown = Fixture::new();
+    let id = unknown.begin();
+    let a = unknown.send(&id, "first", "worker");
+    let b = unknown.send(&id, "second", "reviewer");
+    unknown.status("lead", "idle");
+    unknown.drain();
+    unknown.status("lead", "working");
+    unknown.reply(
+        &a,
+        "worker",
+        "blocked",
+        "blocked",
+        Some(&b["coordination"][0]["assignment_id"]),
+    );
+    unknown.status("lead", "unknown");
+    unknown.drain();
+    assert_eq!(unknown.wake_count(), 0);
+    assert_eq!(
+        unknown.attention_count(),
+        1,
+        "a lead whose status is unknown is not settled"
     );
     let disabled = Fixture::new();
     let id = disabled.begin();
