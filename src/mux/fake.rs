@@ -14,7 +14,7 @@ use crate::{AgentRuntime, AgentSessionId, SpaceId, WorktreeId};
 use std::{
     collections::{BTreeMap, VecDeque},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
     time::Duration,
 };
 
@@ -71,8 +71,10 @@ impl FakeSpace {
 #[derive(Clone, Debug)]
 pub(crate) struct FakePane {
     pub(crate) facts: PaneFacts,
-    pub(crate) screen: String,
-    pub(crate) process: PaneProcess,
+    /// `None` until a test gives the pane a screen.
+    pub(crate) screen: Option<String>,
+    /// `None` until a test gives the pane a process.
+    pub(crate) process: Option<PaneProcess>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -87,6 +89,7 @@ pub(crate) struct World {
     /// Every status change, per pane, in order. A gate tap reads the tail.
     changes: BTreeMap<PaneId, Vec<AgentState>>,
     prompts_stay_settled: bool,
+    strict_reads: bool,
 }
 
 fn gone(what: super::Gone, id: &str) -> MuxError {
@@ -113,6 +116,15 @@ impl World {
             Some(index) => Err(self.failures.remove(index).1),
             None => Ok(()),
         }
+    }
+
+    /// What a read the test did not script answers: the type's empty value,
+    /// or under `strict_reads` an error.
+    fn unscripted<T: Default>(&self, what: String) -> Result<T, MuxError> {
+        if self.strict_reads {
+            return Err(MuxError::Unavailable(format!("the test gave no {what}")));
+        }
+        Ok(T::default())
     }
 
     #[cfg(test)]
@@ -254,9 +266,12 @@ pub struct FakeMux {
     emulated: bool,
 }
 
+type PromptObserver = Box<dyn Fn(&PaneId, &str) + Send + Sync>;
+
 struct Shared {
     endpoint: Endpoint,
     world: Mutex<World>,
+    on_prompt: OnceLock<PromptObserver>,
 }
 
 impl FakeMux {
@@ -284,6 +299,27 @@ impl FakeMux {
     pub fn prompts_stay_settled(self) -> Self {
         self.lock().prompts_stay_settled = true;
         self
+    }
+
+    /// A screen, process, tab label, or integration root the test did not
+    /// give the world fails to read, as a Herdr fake fails a command it was
+    /// not given an answer for.
+    pub fn strict_reads(self) -> Self {
+        self.lock().strict_reads = true;
+        self
+    }
+
+    /// `observe` runs as each prompt is typed, before the delivery that typed
+    /// it returns, so it sees the store as the pane's agent would.
+    ///
+    /// # Panics
+    ///
+    /// When the world already has an observer.
+    pub fn on_prompt(&self, observe: impl Fn(&PaneId, &str) + Send + Sync + 'static) {
+        assert!(
+            self.shared.on_prompt.set(Box::new(observe)).is_ok(),
+            "a world takes one prompt observer"
+        );
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, World> {
@@ -316,19 +352,26 @@ impl FakeMux {
         self.lock().set_state(&PaneId::new(pane), state);
     }
 
-    /// The agent in `pane` now reports `session`, as when another program
-    /// replaces the one that was running there.
+    /// `pane` now reports `session`, as when another program replaces the
+    /// one that was running there. Like the builder's `.session(..)`, it
+    /// keeps the agent's kind and label, and makes a free pane an agent whose
+    /// kind is unreported.
+    ///
+    /// # Panics
+    ///
+    /// When the world has no such pane.
     pub fn set_session(&self, pane: &str, session: &str) {
-        if let Some(found) = self.lock().pane_mut(&PaneId::new(pane))
-            && let Some(agent) = found.facts.agent.as_mut()
-        {
-            agent.session = SessionClaim::Reported(AgentSessionId::new(session));
-        }
+        let mut world = self.lock();
+        let found = world
+            .pane_mut(&PaneId::new(pane))
+            .unwrap_or_else(|| panic!("the world has no pane {pane}"));
+        unreported_agent(&mut found.facts).session =
+            SessionClaim::Reported(AgentSessionId::new(session));
     }
 
     pub fn set_screen(&self, pane: &str, text: &str) {
         if let Some(found) = self.lock().pane_mut(&PaneId::new(pane)) {
-            found.screen = text.to_owned();
+            found.screen = Some(text.to_owned());
         }
     }
 
@@ -407,21 +450,31 @@ impl FakeMux {
                 keys: keys.to_vec(),
             },
         };
-        self.lock().sent.push(Sent {
+        self.typed(Sent {
             pane: pane.clone(),
             input,
         });
     }
 
+    /// Records `sent` and shows a prompt to the observer. The world is
+    /// unlocked while the observer runs, so it may read the fake.
+    fn typed(&self, sent: Sent) {
+        self.lock().sent.push(sent.clone());
+        if let (SentInput::Prompt(text), Some(observe)) = (&sent.input, self.shared.on_prompt.get())
+        {
+            observe(&sent.pane, text);
+        }
+    }
+
     fn type_prompt(&self, pane: &PaneId, text: &str) -> Result<(), ChannelError> {
-        let mut world = self.lock();
-        if world.pane(pane).is_none() {
+        if self.lock().pane(pane).is_none() {
             return Err(ChannelError(format!("pane {} is gone", pane.as_str())));
         }
-        world.sent.push(Sent {
+        self.typed(Sent {
             pane: pane.clone(),
             input: SentInput::Prompt(text.to_owned()),
         });
+        let mut world = self.lock();
         if let Err(error) = world.take_failure(Op::Deliver) {
             return Err(ChannelError(format!("{error:?}")));
         }
@@ -446,10 +499,14 @@ impl MuxRead for FakeMux {
     fn screen(&self, pane: &PaneId, request: ScreenRequest) -> Result<Screen, MuxError> {
         let mut world = self.lock();
         world.take_failure(Op::Screen)?;
-        let screen = &world
+        let screen = match &world
             .pane(pane)
             .ok_or_else(|| gone(super::Gone::Pane, pane.as_str()))?
-            .screen;
+            .screen
+        {
+            Some(screen) => screen.clone(),
+            None => world.unscripted(format!("screen for {}", pane.as_str()))?,
+        };
         let lines: Vec<_> = screen.lines().collect();
         let text = lines[lines.len().saturating_sub(request.lines)..].join("\n");
         Ok(Screen { text })
@@ -458,22 +515,32 @@ impl MuxRead for FakeMux {
     fn process(&self, pane: &PaneId) -> Result<PaneProcess, MuxError> {
         let mut world = self.lock();
         world.take_failure(Op::Process)?;
-        world
+        match &world
             .pane(pane)
-            .map(|pane| pane.process.clone())
-            .ok_or_else(|| gone(super::Gone::Pane, pane.as_str()))
+            .ok_or_else(|| gone(super::Gone::Pane, pane.as_str()))?
+            .process
+        {
+            Some(process) => Ok(process.clone()),
+            None => world.unscripted(format!("process for {}", pane.as_str())),
+        }
     }
 
     fn tab_label(&self, tab: &TabId) -> Result<Option<String>, MuxError> {
         let mut world = self.lock();
         world.take_failure(Op::TabLabel)?;
-        Ok(world.tab_labels.get(tab).cloned())
+        match world.tab_labels.get(tab) {
+            Some(label) => Ok(Some(label.clone())),
+            None => world.unscripted(format!("label for {}", tab.as_str())),
+        }
     }
 
     fn integration_root(&self) -> Result<Option<PathBuf>, MuxError> {
         let mut world = self.lock();
         world.take_failure(Op::IntegrationRoot)?;
-        Ok(world.integration_root.clone())
+        match &world.integration_root {
+            Some(root) => Ok(Some(root.clone())),
+            None => world.unscripted("integration root".to_owned()),
+        }
     }
 }
 
@@ -655,13 +722,8 @@ impl WorldBuilder {
         };
         space.panes.push(FakePane {
             facts,
-            screen: String::new(),
-            process: PaneProcess {
-                shell_pid: None,
-                foreground_group: None,
-                foreground_pids: Vec::new(),
-                tty: None,
-            },
+            screen: None,
+            process: None,
         });
         self
     }
@@ -750,12 +812,12 @@ impl WorldBuilder {
     }
 
     pub fn screen(mut self, text: &str) -> Self {
-        self.current_pane().screen = text.to_owned();
+        self.current_pane().screen = Some(text.to_owned());
         self
     }
 
     pub fn process(mut self, process: PaneProcess) -> Self {
-        self.current_pane().process = process;
+        self.current_pane().process = Some(process);
         self
     }
 
@@ -769,6 +831,7 @@ impl WorldBuilder {
             shared: Arc::new(Shared {
                 endpoint: self.endpoint,
                 world: Mutex::new(self.world),
+                on_prompt: OnceLock::new(),
             }),
             emulated: false,
         }
@@ -796,15 +859,17 @@ impl WorldBuilder {
     }
 
     fn current_agent(&mut self) -> &mut AgentIdentity {
-        self.current_pane()
-            .facts
-            .agent
-            .get_or_insert(AgentIdentity {
-                kind: AgentKind::Unreported,
-                label: None,
-                session: SessionClaim::None,
-            })
+        unreported_agent(&mut self.current_pane().facts)
     }
+}
+
+/// The pane's agent, made one whose kind is unreported if the pane was free.
+fn unreported_agent(facts: &mut PaneFacts) -> &mut AgentIdentity {
+    facts.agent.get_or_insert(AgentIdentity {
+        kind: AgentKind::Unreported,
+        label: None,
+        session: SessionClaim::None,
+    })
 }
 
 #[cfg(test)]

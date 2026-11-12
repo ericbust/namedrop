@@ -4,36 +4,9 @@
 //! dispatch and the hook do, whether or not the attempt has settled since. A
 //! prompt that is already an envelope parses as itself.
 
-use namedrop::{
-    DeliveryAttemptId, IntegrationToolInvocation, StateNamespace, StateStore,
-    mux::{
-        Effect,
-        fake::{FakeMux, SentInput},
-    },
-};
+use namedrop::{DeliveryAttemptId, IntegrationToolInvocation, StateNamespace, StateStore};
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
-
-/// Panics unless `mux` took only prompts, pane metadata, and badges. A test
-/// whose space answers nothing else calls this when it ends, so a delivery
-/// that types keys or a line, or applies another effect, fails it.
-pub fn only_prompts_and_metadata(mux: &FakeMux) {
-    if std::thread::panicking() {
-        return;
-    }
-    for sent in mux.sent() {
-        assert!(
-            matches!(sent.input, SentInput::Prompt(_)),
-            "the space takes only prompts: {sent:?}"
-        );
-    }
-    for effect in mux.effects() {
-        assert!(
-            matches!(effect, Effect::Identify { .. } | Effect::Badges { .. }),
-            "the space takes only pane metadata: {effect:?}"
-        );
-    }
-}
 
 pub fn envelope_of(prompt: &str) -> Value {
     if let Ok(envelope) = serde_json::from_str(prompt) {

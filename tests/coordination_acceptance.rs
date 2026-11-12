@@ -4,12 +4,11 @@ mod cleanup;
 mod delivered;
 #[path = "support/dispatch.rs"]
 mod dispatch;
+#[path = "support/strict_space.rs"]
+mod strict_space;
 
 use namedrop::{
-    mux::{
-        AgentState,
-        fake::{FakeMux, SentInput},
-    },
+    mux::{AgentState, fake::FakeMux},
     *,
 };
 use serde_json::{Value, json};
@@ -18,10 +17,11 @@ use std::{
     fs,
     path::PathBuf,
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
+use strict_space::{StrictSpace, Takes};
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
 struct Fixture {
@@ -30,9 +30,10 @@ struct Fixture {
     home: PathBuf,
     ids: AtomicU64,
     now: AtomicU64,
-    mux: FakeMux,
-    /// Each prompt the space received, as its pane and envelope.
-    prompts: Mutex<Vec<(String, Value)>>,
+    mux: StrictSpace,
+    /// Each prompt the space received, as its pane and the envelope it named
+    /// when it was typed.
+    prompts: Arc<Mutex<Vec<(String, Value)>>>,
 }
 impl Fixture {
     fn new() -> Self {
@@ -44,14 +45,15 @@ impl Fixture {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
+        let prompts = Arc::new(Mutex::new(Vec::new()));
         let f = Self {
             state: root.join("state"),
             home: root.join("home"),
-            mux: space_at(&root),
+            mux: space_at(&root, Arc::clone(&prompts)),
             root,
             ids: AtomicU64::new(1),
             now: AtomicU64::new(100),
-            prompts: Mutex::new(Vec::new()),
+            prompts,
         };
         fs::create_dir_all(&f.home).unwrap();
         let by = MutationAttribution::new(ActorKind::Human, "synthetic-user", 1);
@@ -125,7 +127,7 @@ impl Fixture {
     }
     fn run(&self, pane: &str, token: &str, input: Value) -> Result<Value, String> {
         let r = self.runtime(pane);
-        let result = match token {
+        match token {
             "send" | "reply" => dispatch::message(token, input, &r),
             "handoff.begin" | "handoff.resolve" | "handoff.results" | "handoff.status" => {
                 execute_handoff_operation(token, input, &r)
@@ -133,9 +135,7 @@ impl Fixture {
             "context.inspect" | "context.read" => execute_context_operation(token, input, &r),
             "complete.no-reply" => dispatch::integration("complete", input, &r),
             _ => panic!("unexpected bound action {token}"),
-        };
-        drop(self.prompts());
-        result
+        }
     }
     fn bound(&self, envelope: &Value, token: &str) -> Value {
         envelope["control"]["tool"]["operations"]
@@ -163,7 +163,9 @@ impl Fixture {
         self.run("lead","send",json!({"coordination_id":id,"request_id":key,"source":source,"author_kind":"agent_session"})).unwrap()
     }
     fn envelope(&self, pane: &str, message: &Value) -> Value {
-        self.prompts()
+        self.prompts
+            .lock()
+            .unwrap()
             .iter()
             .find(|(p, e)| p == pane && e["control"]["message_id"] == *message)
             .unwrap()
@@ -185,27 +187,8 @@ impl Fixture {
     fn status(&self, pane: &str, status: &str) {
         self.mux.set_state(pane, AgentState::parse(status));
     }
-    /// Reads each new prompt's envelope once, as the old fake did when the
-    /// prompt was typed, so a later state change cannot rewrite it.
-    fn prompts(&self) -> std::sync::MutexGuard<'_, Vec<(String, Value)>> {
-        let mut prompts = self.prompts.lock().unwrap();
-        let typed: Vec<_> = self
-            .mux
-            .sent()
-            .into_iter()
-            .filter_map(|sent| match sent.input {
-                SentInput::Prompt(prompt) => Some((sent.pane.as_str().to_owned(), prompt)),
-                _ => None,
-            })
-            .collect();
-        for (pane, prompt) in &typed[prompts.len()..] {
-            prompts.push((pane.clone(), delivered::envelope_of(prompt)));
-        }
-        prompts
-    }
     fn drain(&self) {
         drain_mailboxes(&self.runtime("lead")).unwrap();
-        drop(self.prompts());
     }
     fn results(&self, id: &Value) -> Value {
         self.run("lead", "handoff.results", json!({"coordination_id":id}))
@@ -234,7 +217,9 @@ impl Fixture {
         panic!("receipts did not settle");
     }
     fn nudges(&self) -> Vec<Value> {
-        self.prompts()
+        self.prompts
+            .lock()
+            .unwrap()
             .iter()
             .filter(|(_, e)| e["control"]["coordination_nudge"] == true)
             .map(|(_, e)| e.clone())
@@ -252,7 +237,6 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        delivered::only_prompts_and_metadata(&self.mux);
         let _ = cleanup::remove_fixture(&self.root);
     }
 }
@@ -271,8 +255,11 @@ impl IdGenerator for Fixture {
     }
 }
 /// Three agent panes in one space holding the fixture's checkout. The lead
-/// starts working, and a prompt leaves each pane's status as it was.
-fn space_at(root: &std::path::Path) -> FakeMux {
+/// starts working, and a prompt leaves each pane's status as it was. Each
+/// prompt's envelope goes to `prompts` while the prompt is typed, when its
+/// attempt is still dispatching, so a pointer typed before its attempt row
+/// commits fails the test.
+fn space_at(root: &std::path::Path, prompts: Arc<Mutex<Vec<(String, Value)>>>) -> StrictSpace {
     let mut world = FakeMux::world().space("synthetic-workspace").checkout(root);
     for (pane, state) in [
         ("lead", AgentState::Working),
@@ -285,7 +272,15 @@ fn space_at(root: &std::path::Path) -> FakeMux {
             .session(&format!("session-{pane}"))
             .state(state);
     }
-    world.build().prompts_stay_settled()
+    let mux = world.build().prompts_stay_settled();
+    mux.on_prompt(move |pane, prompt| {
+        let envelope = delivered::envelope_of(prompt);
+        prompts
+            .lock()
+            .unwrap()
+            .push((pane.as_str().to_owned(), envelope));
+    });
+    StrictSpace::new(mux, Takes::PromptsAndMetadata)
 }
 
 // This oracle consumes actual results, captured delivery prompts, and persisted
@@ -597,7 +592,9 @@ fn coordination_protocol_and_legacy_routes() {
     f.status("lead", "idle");
     f.settle_receipts();
     let joined = f
-        .prompts()
+        .prompts
+        .lock()
+        .unwrap()
         .iter()
         .find(|(_, e)| !e["control"]["result_set"].is_null())
         .unwrap()
@@ -680,7 +677,9 @@ fn coordination_protocol_and_legacy_routes() {
     legacy.status("lead", "idle");
     legacy.settle_receipts();
     let joined = legacy
-        .prompts()
+        .prompts
+        .lock()
+        .unwrap()
         .iter()
         .find(|(_, e)| !e["control"]["result_set"].is_null())
         .unwrap()
@@ -769,7 +768,9 @@ fn a_lead_that_reads_the_reply_and_goes_idle_is_checked_in_on_after_the_hold() {
     );
     f.drain();
     let delivered: Vec<Value> = f
-        .prompts()
+        .prompts
+        .lock()
+        .unwrap()
         .iter()
         .filter(|(pane, _)| pane == "lead")
         .map(|(_, e)| e.clone())

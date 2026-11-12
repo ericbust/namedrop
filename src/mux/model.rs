@@ -217,7 +217,7 @@ pub struct Screen {
     pub text: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PaneProcess {
     pub shell_pid: Option<u32>,
     pub foreground_group: Option<u32>,

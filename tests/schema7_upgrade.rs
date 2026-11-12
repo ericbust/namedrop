@@ -4,6 +4,8 @@
 mod cleanup;
 #[path = "support/delivered.rs"]
 mod delivered;
+#[path = "support/strict_space.rs"]
+mod strict_space;
 
 use namedrop::{
     AgentConfigDirectories, Clock, IdGenerator, LifecycleRuntime, StateStore,
@@ -17,6 +19,7 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
+use strict_space::{StrictSpace, Takes};
 
 const SOCKET: &str = "/tmp/nd-tb-1000-a7d69c9d70a7c962.sock";
 const WORKSPACE: &str = "w1";
@@ -36,7 +39,7 @@ struct Fixture {
     state: PathBuf,
     socket: &'static str,
     clock: FixedClock,
-    mux: FakeMux,
+    mux: StrictSpace,
     ids: Ids,
 }
 
@@ -113,7 +116,6 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        delivered::only_prompts_and_metadata(&self.mux);
         cleanup::remove_fixture(&self.root).unwrap();
     }
 }
@@ -125,7 +127,7 @@ const REAL_PANES: [Pane; 2] = [(CLAUDE_PANE, CLAUDE_SESSION), (CODEX_PANE, CODEX
 
 /// Space `w1` with checkout `/repo`, where every pane runs Claude Code, sits
 /// idle, and stays idle after a prompt, as the 1.6.0 testbed did.
-fn space_of(panes: &[Pane]) -> FakeMux {
+fn space_of(panes: &[Pane]) -> StrictSpace {
     let mut world = FakeMux::world().space(WORKSPACE).checkout("/repo");
     for (at, (pane, session)) in panes.iter().enumerate() {
         world = world
@@ -136,7 +138,10 @@ fn space_of(panes: &[Pane]) -> FakeMux {
             .session(session)
             .idle();
     }
-    world.build().prompts_stay_settled()
+    StrictSpace::new(
+        world.build().prompts_stay_settled(),
+        Takes::PromptsAndMetadata,
+    )
 }
 
 struct FixedClock(u64);

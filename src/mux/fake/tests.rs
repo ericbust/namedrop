@@ -118,19 +118,54 @@ fn a_session_without_an_agent_kind_is_still_an_agent() {
     );
 }
 
+fn surveyed_agent(mux: &FakeMux, space: &str, pane: &str) -> Option<AgentIdentity> {
+    mux.survey(Scope::Space(&SpaceId::new(space)), Depth::Panes)
+        .unwrap()
+        .spaces[0]
+        .panes
+        .iter()
+        .find(|facts| facts.id == PaneId::new(pane))
+        .expect("the survey lists the pane")
+        .agent
+        .clone()
+}
+
 #[test]
-fn a_replaced_agent_reports_its_new_session_and_a_free_pane_stays_free() {
+fn a_new_session_keeps_the_agent_and_makes_a_free_pane_an_agent_like_the_builder() {
     let mux = author_and_reviewer();
     mux.set_session("pane-author", "session-replacement");
     mux.set_session("pane-shell", "session-ghost");
     assert_eq!(
-        identity(&mux, "pane-author").session,
-        SessionClaim::Reported(AgentSessionId::new("session-replacement"))
+        surveyed_agent(&mux, "workspace-1", "pane-author"),
+        Some(AgentIdentity {
+            kind: AgentKind::Known(AgentRuntime::ClaudeCode),
+            label: Some("claude".into()),
+            session: SessionClaim::Reported(AgentSessionId::new("session-replacement")),
+        })
     );
-    let survey = mux
-        .survey(Scope::Space(&SpaceId::new("workspace-2")), Depth::Panes)
-        .unwrap();
-    assert_eq!(survey.spaces[0].panes[0].agent, None);
+    let built = FakeMux::world()
+        .space("workspace-2")
+        .pane("pane-shell")
+        .session("session-ghost")
+        .build();
+    assert_eq!(
+        surveyed_agent(&mux, "workspace-2", "pane-shell"),
+        surveyed_agent(&built, "workspace-2", "pane-shell")
+    );
+    assert_eq!(
+        surveyed_agent(&mux, "workspace-2", "pane-shell"),
+        Some(AgentIdentity {
+            kind: AgentKind::Unreported,
+            label: None,
+            session: SessionClaim::Reported(AgentSessionId::new("session-ghost")),
+        })
+    );
+}
+
+#[test]
+#[should_panic(expected = "the world has no pane pane-9")]
+fn a_new_session_for_a_missing_pane_is_a_test_bug() {
+    author_and_reviewer().set_session("pane-9", "session-9");
 }
 
 #[test]
@@ -447,6 +482,102 @@ fn a_screen_read_returns_the_last_lines() {
             text: "two\nthree".into()
         })
     );
+}
+
+#[test]
+fn strict_reads_fail_what_the_test_did_not_give_and_answer_what_it_did() {
+    let request = ScreenRequest {
+        lines: 2,
+        wrap: Wrap::Joined,
+        style: Style::Plain,
+    };
+    let lenient = author_and_reviewer();
+    assert_eq!(
+        lenient.screen(&PaneId::new("pane-author"), request),
+        Ok(Screen {
+            text: String::new()
+        })
+    );
+    assert_eq!(lenient.integration_root(), Ok(None));
+
+    let strict = FakeMux::world()
+        .space("workspace-1")
+        .pane("pane-given")
+        .screen("one\ntwo\nthree")
+        .process(PaneProcess {
+            shell_pid: Some(7),
+            ..PaneProcess::default()
+        })
+        .tab("tab-given")
+        .tab_label("tab-given", "given")
+        .pane("pane-bare")
+        .build()
+        .strict_reads();
+    fn unavailable<T>(result: Result<T, MuxError>) -> bool {
+        matches!(result, Err(MuxError::Unavailable(_)))
+    }
+    assert!(unavailable(
+        strict.screen(&PaneId::new("pane-bare"), request)
+    ));
+    assert!(unavailable(strict.process(&PaneId::new("pane-bare"))));
+    assert!(unavailable(
+        strict.tab_label(&TabId::new("workspace-1:tab-1"))
+    ));
+    assert!(unavailable(strict.integration_root()));
+    assert_eq!(
+        strict.screen(&PaneId::new("pane-given"), request),
+        Ok(Screen {
+            text: "two\nthree".into()
+        })
+    );
+    assert_eq!(
+        strict
+            .process(&PaneId::new("pane-given"))
+            .unwrap()
+            .shell_pid,
+        Some(7)
+    );
+    assert_eq!(
+        strict.tab_label(&TabId::new("tab-given")),
+        Ok(Some("given".into()))
+    );
+    assert_eq!(
+        strict.screen(&PaneId::new("pane-9"), request),
+        Err(MuxError::Gone(Gone::Pane, "pane-9 is gone".into()))
+    );
+}
+
+#[test]
+fn the_prompt_observer_sees_each_prompt_while_it_is_typed() {
+    let mux = author_and_reviewer();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let watcher = mux.clone();
+    mux.on_prompt({
+        let seen = Arc::clone(&seen);
+        move |pane, text| {
+            seen.lock().unwrap().push((
+                pane.clone(),
+                text.to_owned(),
+                state(&watcher, pane.as_str()),
+            ));
+        }
+    });
+    let author = identity(&mux, "pane-author");
+    assert_eq!(
+        prompt(&mux, "pane-author", &author, Admit::Settled),
+        InputOutcome::Delivered
+    );
+    mux.send(&PaneId::new("pane-author"), InputKind::Line("ls"));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(
+            PaneId::new("pane-author"),
+            "hello".to_owned(),
+            Some(AgentState::Idle)
+        )],
+        "it runs before the prompt starts a turn, and only for prompts"
+    );
+    assert_eq!(state(&mux, "pane-author"), Some(AgentState::Working));
 }
 
 #[test]
