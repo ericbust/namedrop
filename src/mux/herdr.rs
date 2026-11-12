@@ -282,6 +282,8 @@ pub fn server_socket() -> Option<String> {
 }
 
 #[cfg(test)]
+pub(crate) mod boundary;
+#[cfg(test)]
 mod conformance;
 #[cfg(test)]
 mod tests;
