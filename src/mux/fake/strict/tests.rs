@@ -240,6 +240,62 @@ fn each_listing_answers_exactly_its_surveys() {
 }
 
 #[test]
+fn each_listing_constant_is_every_survey_whose_herdr_listings_its_fake_answered() {
+    let pairs = [
+        ScopeKind::Space,
+        ScopeKind::PanesOf,
+        ScopeKind::CheckoutOf,
+        ScopeKind::All,
+    ]
+    .into_iter()
+    .flat_map(|kind| [(kind, Depth::Spaces), (kind, Depth::Panes)]);
+    let within = |answered: &[Listing]| -> Vec<(ScopeKind, Depth)> {
+        pairs
+            .clone()
+            .filter(|(kind, depth)| {
+                listings(*kind, *depth)
+                    .iter()
+                    .all(|listing| answered.contains(listing))
+            })
+            .collect()
+    };
+    let sorted = |pairs: &[(ScopeKind, Depth)]| {
+        let mut pairs: Vec<_> = pairs.iter().map(|pair| format!("{pair:?}")).collect();
+        pairs.sort();
+        pairs
+    };
+    assert_eq!(
+        sorted(&within(&[
+            Listing::Spaces,
+            Listing::CheckoutAt,
+            Listing::PanesOf
+        ])),
+        sorted(CHECKOUT_LISTINGS)
+    );
+    assert_eq!(
+        sorted(&within(&[
+            Listing::Spaces,
+            Listing::CheckoutAt,
+            Listing::CheckoutOf,
+            Listing::AllPanes,
+            Listing::PanesOf
+        ])),
+        sorted(EVERY_LISTING)
+    );
+    let space = crate::SpaceId::new("workspace-1");
+    let read = |scope: Scope<'_>, depth| Read::Survey {
+        scope: super::super::Surveyed::of(scope),
+        depth,
+    };
+    assert!(runs(
+        &read(Scope::Space(&space), Depth::Panes),
+        Listing::PanesOf
+    ));
+    assert!(!runs(&read(Scope::All, Depth::Panes), Listing::PanesOf));
+    assert!(!runs(&Read::IntegrationRoot, Listing::PanesOf));
+}
+
+#[test]
 fn prompts_and_metadata_takes_prompts_identity_and_badges_and_nothing_else() {
     let taken = space(Takes::prompts_and_metadata());
     prompt(&taken, "pane-author");

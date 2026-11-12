@@ -29,7 +29,7 @@
 //!   not a handle that outlives the space. The space drops them before it
 //!   counts handles.
 
-use super::{Attempt, FakeMux, ScopeKind, SentInput};
+use super::{Attempt, FakeMux, Read, ScopeKind, SentInput};
 use crate::mux::{Depth, Effect};
 use std::{mem, ops::Deref, sync::Arc};
 
@@ -54,6 +54,47 @@ pub const EVERY_LISTING: &[(ScopeKind, Depth)] = &[
     (ScopeKind::PanesOf, Depth::Spaces),
     (ScopeKind::PanesOf, Depth::Panes),
 ];
+
+/// A Herdr listing command, as an old fake matched it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Listing {
+    /// `workspace list`
+    Spaces,
+    /// `workspace get <space>`
+    Space,
+    /// `worktree list --cwd <path>`
+    CheckoutAt,
+    /// `worktree list --workspace <space>`
+    CheckoutOf,
+    /// `pane list`
+    AllPanes,
+    /// `pane list --workspace <space>`
+    PanesOf,
+}
+
+/// The listings the Herdr adapter runs for a survey of `kind` at `depth`, so
+/// a fixture that counted one of the old fake's commands counts the same
+/// surveys. A checkout survey also runs `worktree list --workspace` for each
+/// listed space whose listing names no checkout, which is left out here
+/// because the count depends on the world.
+pub fn listings(kind: ScopeKind, depth: Depth) -> &'static [Listing] {
+    match (kind, depth) {
+        (ScopeKind::Space, Depth::Spaces) => &[Listing::Space],
+        (ScopeKind::Space, Depth::Panes) => &[Listing::CheckoutOf, Listing::PanesOf],
+        (ScopeKind::PanesOf, _) => &[Listing::PanesOf],
+        (ScopeKind::CheckoutOf, Depth::Spaces) => &[Listing::CheckoutAt, Listing::Spaces],
+        (ScopeKind::CheckoutOf, Depth::Panes) => {
+            &[Listing::CheckoutAt, Listing::Spaces, Listing::PanesOf]
+        }
+        (ScopeKind::All, Depth::Spaces) => &[Listing::Spaces],
+        (ScopeKind::All, Depth::Panes) => &[Listing::AllPanes],
+    }
+}
+
+/// Whether `read` is a survey that runs `listing`.
+pub fn runs(read: &Read, listing: Listing) -> bool {
+    matches!(read, Read::Survey { scope, depth } if listings(scope.kind(), *depth).contains(&listing))
+}
 
 type Allow<T> = Box<dyn Fn(&T) -> bool + Send + Sync>;
 

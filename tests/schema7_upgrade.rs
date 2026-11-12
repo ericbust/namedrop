@@ -1,5 +1,6 @@
 //! A real 1.6.0 state database upgraded by this build: nothing is lost, and the
 //! delivery 1.6.0 left open still authenticates from the bytes 1.6.0 typed.
+#![cfg(feature = "test-support")]
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]

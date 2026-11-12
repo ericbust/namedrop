@@ -6,17 +6,20 @@
 //! `namedrop::mux::fake::FakeMux` and a release build leaves it out.
 
 use super::{
-    AgentIdentity, AgentKind, AgentState, Applied, Checkout, Depth, Effect, Endpoint, InputKind,
-    InputOutcome, Key, MuxAct, MuxConnector, MuxError, MuxInput, MuxKind, MuxRead, PaneFacts,
-    PaneId, PaneInput, PaneProcess, Recipient, Retry, Scope, Screen, ScreenRequest, SessionClaim,
-    SpaceView, Style, Survey, TabId, TerminalId, Wrap,
+    AgentIdentity, AgentKind, AgentState, Applied, Budget, Checkout, Depth, Effect, Endpoint,
+    InputKind, InputOutcome, Key, MuxAct, MuxConnector, MuxError, MuxInput, MuxKind, MuxRead,
+    PaneFacts, PaneId, PaneInput, PaneProcess, Recipient, Retry, Scope, Screen, ScreenRequest,
+    SessionClaim, SpaceView, Style, Survey, TabId, TerminalId, Wrap,
     gate::{self, ChannelError, RawChannel, StatusTap},
 };
 use crate::{AgentRuntime, AgentSessionId, SpaceId, WorktreeId};
 use std::{
     collections::{BTreeMap, VecDeque},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -131,16 +134,45 @@ pub enum Op {
     Deliver,
 }
 
+/// The checkout a space listing names for a space. Herdr stamps it on the
+/// space when the space opens a worktree, and answers `worktree list
+/// --workspace` from the checkout itself, so the two can differ.
+#[derive(Clone, Debug)]
+pub(crate) enum Stamp {
+    /// The listing names the space's checkout.
+    Checkout,
+    /// The listing names this checkout, or none.
+    Other(Option<Checkout>),
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct FakeSpace {
     pub(crate) id: SpaceId,
     pub(crate) label: Option<String>,
     pub(crate) number: Option<u32>,
+    /// What `worktree list --workspace` answers for the space.
     pub(crate) checkout: Option<Checkout>,
+    pub(crate) stamp: Stamp,
+    /// `false` leaves the space out of `workspace list`, though a lookup by
+    /// its id still answers.
+    pub(crate) listed: bool,
     pub(crate) panes: Vec<FakePane>,
 }
 
 impl FakeSpace {
+    /// The checkout `workspace list` and `workspace get` name.
+    pub(crate) fn stamped(&self) -> Option<&Checkout> {
+        match &self.stamp {
+            Stamp::Checkout => self.checkout.as_ref(),
+            Stamp::Other(stamped) => stamped.as_ref(),
+        }
+    }
+
+    /// The panes a pane listing names, which leaves out hidden ones.
+    pub(crate) fn listed_panes(&self) -> impl Iterator<Item = &FakePane> {
+        self.panes.iter().filter(|pane| !pane.hidden)
+    }
+
     /// Matches the Herdr adapter, so stored state keys do not depend on
     /// which implementation a test uses.
     pub(crate) fn worktree(&self) -> WorktreeId {
@@ -160,6 +192,8 @@ pub(crate) struct FakePane {
     pub(crate) screen_shape: Option<ScreenShape>,
     /// `None` until a test gives the pane a process.
     pub(crate) process: Option<PaneProcess>,
+    /// Left out of every pane listing. Reads and input still reach it.
+    pub(crate) hidden: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -169,7 +203,8 @@ pub(crate) struct World {
     pub(crate) integration_root: Option<PathBuf>,
     sent: Vec<Sent>,
     attempts: Vec<Attempt>,
-    reads: Vec<Read>,
+    /// Each read with the budget of the connection that made it.
+    reads: Vec<(Read, Option<Budget>)>,
     effects: Vec<Effect>,
     attempted_effects: Vec<Effect>,
     /// Outcomes for a pane's next inputs, first first.
@@ -232,6 +267,13 @@ impl World {
             .unwrap_or_else(|| panic!("the world has no pane {pane}"))
     }
 
+    fn known_space(&mut self, space: &str) -> &mut FakeSpace {
+        self.spaces
+            .iter_mut()
+            .find(|candidate| candidate.id.as_str() == space)
+            .unwrap_or_else(|| panic!("the world has no space {space}"))
+    }
+
     #[cfg(test)]
     pub(crate) fn record_sent(&mut self, sent: Sent) {
         self.sent.push(sent);
@@ -245,7 +287,10 @@ impl World {
     }
 
     fn panes(space: &FakeSpace) -> Vec<PaneFacts> {
-        space.panes.iter().map(|pane| pane.facts.clone()).collect()
+        space
+            .listed_panes()
+            .map(|pane| pane.facts.clone())
+            .collect()
     }
 
     /// What a checkout listing reports: the checkout and its key, but no
@@ -275,7 +320,7 @@ impl World {
             id: space.id.clone(),
             label: space.label.clone(),
             number: space.number,
-            checkout: space.checkout.clone().map(|checkout| Checkout {
+            checkout: space.stamped().cloned().map(|checkout| Checkout {
                 label: None,
                 branch: None,
                 ..checkout
@@ -355,7 +400,7 @@ impl World {
             Scope::All if panes => self
                 .spaces
                 .iter()
-                .filter(|space| !space.panes.is_empty())
+                .filter(|space| space.listed_panes().next().is_some())
                 .map(|space| SpaceView {
                     id: space.id.clone(),
                     label: None,
@@ -365,7 +410,12 @@ impl World {
                     panes: Self::panes(space),
                 })
                 .collect(),
-            Scope::All => self.spaces.iter().map(Self::listed_view).collect(),
+            Scope::All => self
+                .spaces
+                .iter()
+                .filter(|space| space.listed)
+                .map(Self::listed_view)
+                .collect(),
         };
         Ok(Survey { spaces })
     }
@@ -377,6 +427,14 @@ impl World {
 pub struct FakeMux {
     shared: Arc<Shared>,
     emulated: bool,
+    /// What `connect` was given. `None` for a handle the builder made.
+    connection: Option<Connection>,
+}
+
+#[derive(Clone)]
+struct Connection {
+    budget: Budget,
+    cancelled: Arc<AtomicBool>,
 }
 
 type InputObserver = Arc<dyn Fn(&FakeMux, &Attempt) + Send + Sync>;
@@ -456,7 +514,11 @@ impl FakeMux {
     /// was while the input was dispatched. It is handed the world rather
     /// than holding it, and the world is unlocked while it runs, so it can
     /// change what the pane shows. Observers run in the order they were
-    /// added.
+    /// added. An observer that models how the pane reacts checks
+    /// `attempt.outcome` first, because a declined or refused input typed
+    /// nothing. Under `emulated()` the gate has confirmed or given up on a
+    /// prompt before any observer runs, so an observer cannot change the
+    /// status inside its confirmation window.
     pub fn on_input(&self, observe: impl Fn(&FakeMux, &Attempt) + Send + Sync + 'static) {
         unpoisoned(&self.shared.observers).push(Arc::new(observe));
     }
@@ -509,14 +571,48 @@ impl FakeMux {
 
     /// Every read the code made, in order, including the ones that failed.
     pub fn reads(&self) -> Vec<Read> {
+        self.lock()
+            .reads
+            .iter()
+            .map(|(read, _)| read.clone())
+            .collect()
+    }
+
+    /// Every read, with the budget of the connection that made it, or
+    /// `None` for a read made through a handle the builder made.
+    pub fn budgeted_reads(&self) -> Vec<(Read, Option<Budget>)> {
         self.lock().reads.clone()
+    }
+
+    /// The budget `connect` gave this handle, or `None` for a handle the
+    /// builder made. A read hook is handed the connection that reads, so it
+    /// can check the budget the read runs under.
+    pub fn budget(&self) -> Option<Budget> {
+        self.connection.as_ref().map(|connection| connection.budget)
+    }
+
+    /// Whether the code set the cancellation flag it gave `connect`.
+    pub fn cancelled(&self) -> bool {
+        self.connection
+            .as_ref()
+            .is_some_and(|connection| connection.cancelled.load(Ordering::SeqCst))
+    }
+
+    /// The pane's facts as the world holds them, hidden or not. Unlike a
+    /// survey it is not logged and runs no hook, so a hook can inspect the
+    /// world without re-entering itself.
+    ///
+    /// # Panics
+    ///
+    /// When the world has no such pane.
+    pub fn facts(&self, pane: &str) -> PaneFacts {
+        self.lock().known_pane(pane).facts.clone()
     }
 
     /// How many times the code read `pane`'s screen, in any shape.
     pub fn screen_reads(&self, pane: &str) -> usize {
         let pane = PaneId::new(pane);
-        self.lock()
-            .reads
+        self.reads()
             .iter()
             .filter(
                 |read| matches!(read, Read::Screen { pane: read_pane, .. } if *read_pane == pane),
@@ -526,8 +622,7 @@ impl FakeMux {
 
     /// How many surveys of this scope kind and depth the code made.
     pub fn surveys_made(&self, kind: ScopeKind, depth: Depth) -> usize {
-        self.lock()
-            .reads
+        self.reads()
             .iter()
             .filter(|read| match read {
                 Read::Survey { scope, depth: made } => scope.kind() == kind && *made == depth,
@@ -580,6 +675,9 @@ impl FakeMux {
         self.lock().known_pane(pane).screen = text.map(str::to_owned);
     }
 
+    /// The pane is gone for good: no listing names it, and reads and input
+    /// answer that it is gone. For a pane that comes back, use `hide_pane`.
+    ///
     /// # Panics
     ///
     /// When the world has no such pane.
@@ -590,6 +688,146 @@ impl FakeMux {
         for space in &mut world.spaces {
             space.panes.retain(|candidate| candidate.facts.id != pane);
         }
+    }
+
+    /// No pane listing names `pane` until `show_pane`, as when Herdr stops
+    /// listing a pane that closed or moved. Reads and input still reach it,
+    /// as the old fakes still answered them, and it keeps its place in its
+    /// space's listing.
+    ///
+    /// # Panics
+    ///
+    /// When the world has no such pane.
+    pub fn hide_pane(&self, pane: &str) {
+        self.lock().known_pane(pane).hidden = true;
+    }
+
+    /// Pane listings name `pane` again, in its old place.
+    ///
+    /// # Panics
+    ///
+    /// When the world has no such pane.
+    pub fn show_pane(&self, pane: &str) {
+        self.lock().known_pane(pane).hidden = false;
+    }
+
+    /// Opens panes in `space` mid-test. `describe` is handed a builder whose
+    /// current space is `space`, and adds panes with the builder's own pane
+    /// methods, as in `|space| space.pane("pane-2").claude().idle()`. They
+    /// join the end of the space's listing.
+    ///
+    /// # Panics
+    ///
+    /// When the world has no such space, when `describe` adds a space, a
+    /// tab label, or an integration root, or when a new pane's id is taken.
+    pub fn open_pane(&self, space: &str, describe: impl FnOnce(WorldBuilder) -> WorldBuilder) {
+        let blank = FakeSpace {
+            panes: Vec::new(),
+            ..self.lock().known_space(space).clone()
+        };
+        let World {
+            mut spaces,
+            tab_labels,
+            integration_root,
+            ..
+        } = describe(WorldBuilder {
+            endpoint: self.shared.endpoint.clone(),
+            world: World {
+                spaces: vec![blank],
+                ..World::default()
+            },
+        })
+        .world;
+        assert!(
+            spaces.len() == 1 && tab_labels.is_empty() && integration_root.is_none(),
+            "open_pane describes panes only"
+        );
+        let panes = spaces.pop().expect("one space").panes;
+        let mut world = self.lock();
+        for pane in &panes {
+            assert!(
+                world.pane(&pane.facts.id).is_none(),
+                "the world already has a pane {}",
+                pane.facts.id.as_str()
+            );
+        }
+        world.known_space(space).panes.extend(panes);
+    }
+
+    /// `space` now holds `checkout`, or none, as `worktree list --workspace`
+    /// answers. A space whose listing names its checkout names the new one.
+    ///
+    /// # Panics
+    ///
+    /// When the world has no such space.
+    pub fn set_checkout(&self, space: &str, checkout: Option<&Path>) {
+        self.lock().known_space(space).checkout = checkout.map(bare_checkout);
+    }
+
+    /// The space listing names `space` with `label`, or with none.
+    ///
+    /// # Panics
+    ///
+    /// When the world has no such space.
+    pub fn set_label(&self, space: &str, label: Option<&str>) {
+        self.lock().known_space(space).label = label.map(str::to_owned);
+    }
+
+    /// `pane` reports an agent of `kind`, named as the builder names it, and
+    /// keeps its session. With `None` it reports no agent kind: a pane that
+    /// still reports a session stays an agent whose kind is unreported, and
+    /// one that reports none becomes a free terminal pane.
+    ///
+    /// # Panics
+    ///
+    /// When the world has no such pane.
+    pub fn set_agent(&self, pane: &str, kind: Option<AgentKind>) {
+        let mut world = self.lock();
+        let facts = &mut world.known_pane(pane).facts;
+        match kind {
+            Some(kind) => {
+                let agent = unreported_agent(facts);
+                agent.label = agent_word(&kind);
+                agent.kind = kind;
+            }
+            None => {
+                if let Some(agent) = &mut facts.agent {
+                    agent.kind = AgentKind::Unreported;
+                    agent.label = None;
+                }
+                drop_empty_agent(facts);
+            }
+        }
+    }
+
+    /// `pane` reports no session. An agent whose kind is unreported then
+    /// reports nothing, so the pane becomes a free terminal pane.
+    ///
+    /// # Panics
+    ///
+    /// When the world has no such pane.
+    pub fn clear_session(&self, pane: &str) {
+        let mut world = self.lock();
+        let facts = &mut world.known_pane(pane).facts;
+        if let Some(agent) = &mut facts.agent {
+            agent.session = SessionClaim::None;
+        }
+        drop_empty_agent(facts);
+    }
+
+    /// `pane`'s process, or with `None` nothing a read can answer.
+    ///
+    /// # Panics
+    ///
+    /// When the world has no such pane.
+    pub fn set_process(&self, pane: &str, process: Option<PaneProcess>) {
+        self.lock().known_pane(pane).process = process;
+    }
+
+    /// Where Namedrop's Herdr integration is installed, or with `None`
+    /// nothing a read can answer.
+    pub fn set_integration_root(&self, root: Option<&Path>) {
+        self.lock().integration_root = root.map(Path::to_path_buf);
     }
 
     /// The next input to `pane` returns `outcome` without consulting the
@@ -719,7 +957,7 @@ impl FakeMux {
 
     /// Logs `read` and runs the read hooks with the world unlocked.
     fn read(&self, read: Read) -> Result<(), MuxError> {
-        self.lock().reads.push(read.clone());
+        self.lock().reads.push((read.clone(), self.budget()));
         let hooks = unpoisoned(&self.shared.read_hooks).clone();
         hooks.iter().try_for_each(|hook| hook(self, &read))
     }
@@ -844,18 +1082,25 @@ impl MuxInput for FakeMux {
 }
 
 impl MuxConnector for FakeMux {
+    /// The connection keeps `budget` and `cancelled`, which `budget()`,
+    /// `cancelled()`, and `budgeted_reads()` report. The fake enforces
+    /// neither, so a read hook that models a stalled, oversized, or
+    /// cancelled read checks them on the connection it is handed.
     fn connect(
         &self,
         endpoint: &str,
-        _budget: super::Budget,
-        _cancelled: Arc<std::sync::atomic::AtomicBool>,
+        budget: Budget,
+        cancelled: Arc<AtomicBool>,
     ) -> Result<Arc<dyn super::Mux>, MuxError> {
         if endpoint != self.shared.endpoint.key {
             return Err(MuxError::Unavailable(format!(
                 "no multiplexer answers at {endpoint}"
             )));
         }
-        Ok(Arc::new(self.clone()))
+        Ok(Arc::new(FakeMux {
+            connection: Some(Connection { budget, cancelled }),
+            ..self.clone()
+        }))
     }
 }
 
@@ -931,8 +1176,33 @@ impl WorldBuilder {
             label: None,
             number,
             checkout: None,
+            stamp: Stamp::Checkout,
+            listed: true,
             panes: Vec::new(),
         });
+        self
+    }
+
+    /// `workspace list` leaves the space out. A lookup by its id still
+    /// answers.
+    pub fn unlisted(mut self) -> Self {
+        self.current_space().listed = false;
+        self
+    }
+
+    /// The space listing names `path`, of the repository `repo_name`, as the
+    /// space's checkout, whatever `worktree list --workspace` answers.
+    pub fn stamped(mut self, path: impl AsRef<Path>, repo_name: Option<&str>) -> Self {
+        self.current_space().stamp = Stamp::Other(Some(Checkout {
+            repo_name: repo_name.map(str::to_owned),
+            ..bare_checkout(path.as_ref())
+        }));
+        self
+    }
+
+    /// The space listing names no checkout for the space.
+    pub fn unstamped(mut self) -> Self {
+        self.current_space().stamp = Stamp::Other(None);
         self
     }
 
@@ -942,13 +1212,7 @@ impl WorldBuilder {
     }
 
     pub fn checkout(mut self, path: impl AsRef<Path>) -> Self {
-        self.current_space().checkout = Some(Checkout {
-            path: path.as_ref().to_path_buf(),
-            label: None,
-            branch: None,
-            repo_key: None,
-            repo_name: None,
-        });
+        self.current_space().checkout = Some(bare_checkout(path.as_ref()));
         self
     }
 
@@ -986,7 +1250,21 @@ impl WorldBuilder {
             screen: None,
             screen_shape: None,
             process: None,
+            hidden: false,
         });
+        self
+    }
+
+    /// No pane listing names the pane until `FakeMux::show_pane`.
+    pub fn hidden(mut self) -> Self {
+        self.current_pane().hidden = true;
+        self
+    }
+
+    /// With `false`, a pane listing leaves out the pane's `agent_session`
+    /// field. By default it reports the field, null when there is no session.
+    pub fn reports_session(mut self, reports: bool) -> Self {
+        self.current_pane().facts.reports_session = reports;
         self
     }
 
@@ -1023,22 +1301,22 @@ impl WorldBuilder {
     }
 
     pub fn claude(self) -> Self {
-        self.agent(AgentKind::Known(AgentRuntime::ClaudeCode), "claude")
+        self.agent(AgentKind::Known(AgentRuntime::ClaudeCode))
     }
 
     pub fn codex(self) -> Self {
-        self.agent(AgentKind::Known(AgentRuntime::Codex), "codex")
+        self.agent(AgentKind::Known(AgentRuntime::Codex))
     }
 
     /// An agent the port does not recognize, named as the multiplexer names it.
     pub fn other_agent(self, name: &str) -> Self {
-        self.agent(AgentKind::Other(name.to_owned()), name)
+        self.agent(AgentKind::Other(name.to_owned()))
     }
 
-    fn agent(mut self, kind: AgentKind, label: &str) -> Self {
+    fn agent(mut self, kind: AgentKind) -> Self {
         let agent = self.current_agent();
+        agent.label = agent_word(&kind);
         agent.kind = kind;
-        agent.label = Some(label.to_owned());
         self
     }
 
@@ -1104,6 +1382,7 @@ impl WorldBuilder {
                 read_hooks: Mutex::default(),
             }),
             emulated: false,
+            connection: None,
         }
     }
 
@@ -1144,6 +1423,36 @@ fn sent_input(kind: InputKind<'_>) -> SentInput {
     }
 }
 
+fn bare_checkout(path: &Path) -> Checkout {
+    Checkout {
+        path: path.to_path_buf(),
+        label: None,
+        branch: None,
+        repo_key: None,
+        repo_name: None,
+    }
+}
+
+/// The word the builder names an agent of `kind` by.
+fn agent_word(kind: &AgentKind) -> Option<String> {
+    match kind {
+        AgentKind::Known(AgentRuntime::ClaudeCode) => Some("claude".to_owned()),
+        AgentKind::Known(AgentRuntime::Codex) => Some("codex".to_owned()),
+        AgentKind::Other(name) => Some(name.clone()),
+        AgentKind::Unreported => None,
+    }
+}
+
+/// A pane that reports neither an agent kind nor a session is a free
+/// terminal pane, as the Herdr adapter reads it.
+fn drop_empty_agent(facts: &mut PaneFacts) {
+    if facts.agent.as_ref().is_some_and(|agent| {
+        agent.kind == AgentKind::Unreported && agent.session == SessionClaim::None
+    }) {
+        facts.agent = None;
+    }
+}
+
 /// The pane's agent, made one whose kind is unreported if the pane was free.
 fn unreported_agent(facts: &mut PaneFacts) -> &mut AgentIdentity {
     facts.agent.get_or_insert(AgentIdentity {
@@ -1157,4 +1466,4 @@ mod strict;
 #[cfg(test)]
 mod tests;
 
-pub use strict::{CHECKOUT_LISTINGS, EVERY_LISTING, StrictSpace, Takes};
+pub use strict::{CHECKOUT_LISTINGS, EVERY_LISTING, Listing, StrictSpace, Takes, listings, runs};
