@@ -6,10 +6,13 @@ import {
   useRef,
   useState,
 } from "react";
-import { presenceWord, runtimeName } from "../copy.ts";
+import { createCopy, presenceWord, runtimeName } from "../copy.ts";
+import { takenNames } from "../create.ts";
 import type { Activity, ChannelSnapshot, Member } from "../model.ts";
 import { peekTarget } from "../peek.ts";
+import { AddAgentForm, type AddAgentRequest } from "./AddAgent.tsx";
 import { Avatar } from "./Avatar.tsx";
+import { Icon } from "./Icons.tsx";
 import { useShortWindow } from "./measure.ts";
 import { PeekControl, usePeek } from "./PeekContext.tsx";
 
@@ -197,12 +200,28 @@ function Chip({ member }: { member: Member }) {
     </fieldset>
   );
 }
+// `addAgent` is null while the channel can't take a new agent.
 export function MemberStrip({
   members,
+  addAgent,
 }: {
   members: ChannelSnapshot["members"];
+  addAgent: AddAgentRequest | null;
 }) {
   const sorted = useMemo(() => sortedMembers(members), [members]);
+  const [adding, setAdding] = useState(false);
+  const addButton = useRef<HTMLButtonElement>(null);
+  const formId = useId();
+  const taken = useMemo(() => takenNames(members.values()), [members]);
+  const closeForm = () => {
+    setAdding(false);
+    addButton.current?.focus();
+  };
+  // A channel that pauses drops the form, so resuming never brings back a stale one.
+  const canAdd = addAgent !== null;
+  useEffect(() => {
+    if (!canAdd) setAdding(false);
+  }, [canAdd]);
   const list = useRef<HTMLUListElement>(null);
   const [width, setWidth] = useState(0);
   const [expanded, setExpanded] = useState(false);
@@ -244,32 +263,56 @@ export function MemberStrip({
     }
     setMeasured({ members: sorted, width, rows, count });
   }, [expanded, limit, rows, sorted, width]);
-  if (sorted.length === 0)
-    return (
-      <div className="members">
-        <p className="member-note">No members yet</p>
-      </div>
-    );
   const shown = limit === null ? sorted : sorted.slice(0, limit);
+  const open = adding && canAdd;
   return (
-    <ul className="members" aria-label="Members" ref={list}>
-      {shown.map((member) => (
-        <li key={member.id} data-address-id={member.id}>
-          <Chip member={member} />
-        </li>
-      ))}
-      {shown.length < sorted.length && (
-        <li>
+    <>
+      <div className="members">
+        {sorted.length === 0 ? (
+          <p className="member-note">No members yet</p>
+        ) : (
+          <ul className="member-list" aria-label="Members" ref={list}>
+            {shown.map((member) => (
+              <li key={member.id} data-address-id={member.id}>
+                <Chip member={member} />
+              </li>
+            ))}
+            {shown.length < sorted.length && (
+              <li>
+                <button
+                  type="button"
+                  className="member more"
+                  aria-expanded="false"
+                  onClick={() => setExpanded(true)}
+                >
+                  +{sorted.length - shown.length} more
+                </button>
+              </li>
+            )}
+          </ul>
+        )}
+        {addAgent !== null && (
           <button
+            ref={addButton}
             type="button"
-            className="member more"
-            aria-expanded="false"
-            onClick={() => setExpanded(true)}
+            className="member member-add"
+            aria-expanded={open}
+            aria-controls={open ? formId : undefined}
+            onClick={() => (open ? closeForm() : setAdding(true))}
           >
-            +{sorted.length - shown.length} more
+            <Icon name="plus" className="icon-14" />
+            {createCopy.addAgent}
           </button>
-        </li>
+        )}
+      </div>
+      {open && (
+        <AddAgentForm
+          id={formId}
+          taken={taken}
+          add={addAgent}
+          onClose={closeForm}
+        />
       )}
-    </ul>
+    </>
   );
 }

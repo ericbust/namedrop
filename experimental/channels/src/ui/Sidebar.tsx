@@ -9,10 +9,12 @@ import {
   useRef,
   useState,
 } from "react";
+import { responderOf } from "../attention.ts";
 import {
   activityCopy,
   attentionCopy,
   composerCopy,
+  createCopy,
   reviewCopy,
   sidebarCopy,
 } from "../copy.ts";
@@ -32,6 +34,7 @@ import { channelSuffix, connectionStatus, sortedChannels } from "../store.ts";
 import { routePath } from "../wire.ts";
 import { isHandoff } from "./Handoffs.tsx";
 import { Icon } from "./Icons.tsx";
+import { type ChannelCreator, NewChannelForm } from "./NewChannel.tsx";
 
 // One entry per row of the channel's Needs-you banner, where handoffs share one.
 function reason(channel: Channel): string {
@@ -39,7 +42,9 @@ function reason(channel: Channel): string {
   const rows = [
     ...channel.attention
       .filter((item) => !isHandoff(item))
-      .map((item) => attentionCopy(item).title),
+      .map(
+        (item) => attentionCopy(item, responderOf(item, channel.members)).title,
+      ),
     ...(handoffs > 0 ? [reviewCopy.group(handoffs)] : []),
   ];
   const [first] = rows;
@@ -72,6 +77,7 @@ type Props = {
   onSelect: (key: SpaceKey) => void;
   onActivity: () => void;
   onAnnounce: (words: string) => void;
+  creator: ChannelCreator;
   directMessages?: ReactNode;
   directSelected?: boolean;
 };
@@ -94,6 +100,7 @@ export function Sidebar({
   onSelect,
   onActivity,
   onAnnounce,
+  creator,
   directMessages,
   directSelected = false,
 }: Props) {
@@ -106,6 +113,34 @@ export function Sidebar({
   const hiddenWithFocus = useRef(false);
   const connection = connectionStatus(state);
   const channels = sortedChannels(state);
+  const [creating, setCreating] = useState(false);
+  const [awaiting, setAwaiting] = useState<SpaceKey | null>(null);
+  const newChannelButton = useRef<HTMLButtonElement>(null);
+  const formId = useId();
+  const hintId = useId();
+  // A new workspace opens in the Herdr session of the channel in view.
+  const createIn =
+    channels.find((channel) => channel.key === state.selection.key)?.key ??
+    channels[0]?.key ??
+    null;
+  const creatingIn = creating ? createIn : null;
+  function closeForm() {
+    setCreating(false);
+    newChannelButton.current?.focus();
+  }
+  // The server answers before or after the new channel reaches the index, so
+  // the page opens it whenever both have happened.
+  useEffect(() => {
+    if (awaiting === null || !state.channels.has(awaiting)) return;
+    setAwaiting(null);
+    onSelect(awaiting);
+    if (drawer === null && document.activeElement === newChannelButton.current)
+      sidebar.current
+        ?.querySelector<HTMLButtonElement>(
+          `.channels-navigation button[data-channel-key="${awaiting}"]`,
+        )
+        ?.focus();
+  }, [awaiting, state.channels, onSelect, drawer]);
   const modal = drawer?.open === true;
   const close = drawer?.onClose;
   const phone = drawer !== null;
@@ -509,6 +544,8 @@ export function Sidebar({
           aria-label="Channel list"
           className="nav-section channels-navigation"
           onKeyDown={(event) => {
+            // Arrows and Home and End move the caret in the form's fields.
+            if ((event.target as Element).closest(".create-form")) return;
             if (!arrangeKey(event)) move(event);
           }}
           onDragLeave={(event) => {
@@ -517,8 +554,50 @@ export function Sidebar({
           }}
         >
           <p className="nav-label">
-            Channels<span className="count">{channels.length}</span>
+            Channels
+            <span className="nav-label-end">
+              <span className="count">{channels.length}</span>
+              <button
+                ref={newChannelButton}
+                type="button"
+                className="new-channel-button"
+                aria-label={createCopy.newChannel}
+                title={
+                  createIn === null
+                    ? createCopy.noChannelYet
+                    : createCopy.newChannel
+                }
+                aria-disabled={createIn === null || undefined}
+                aria-describedby={createIn === null ? hintId : undefined}
+                aria-expanded={creatingIn !== null}
+                aria-controls={creatingIn !== null ? formId : undefined}
+                onClick={() => {
+                  if (createIn === null) return;
+                  if (creating) closeForm();
+                  else setCreating(true);
+                }}
+              >
+                <Icon name="plus" />
+              </button>
+              {createIn === null && (
+                <span className="sr-only" id={hintId}>
+                  {createCopy.noChannelYet}
+                </span>
+              )}
+            </span>
           </p>
+          {creatingIn !== null && (
+            <NewChannelForm
+              id={formId}
+              target={creatingIn}
+              creator={creator}
+              onClose={closeForm}
+              onCreated={(key) => {
+                closeForm();
+                setAwaiting(key);
+              }}
+            />
+          )}
           {channels.length === 0 && connection !== "live" ? (
             <div className="skeleton" aria-hidden="true">
               <div className="skeleton-row" />
