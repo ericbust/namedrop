@@ -1,7 +1,7 @@
 use crate::{
     ActiveThreadResponse, AgentSessionId, DeliveryAttemptId, DeliveryState, PaneBindingId,
     StateNamespace, StateStore,
-    mux::{InputKind, InputOutcome, Key, MuxInput, PaneId, PromptRequest, Recipient},
+    mux::{AgentState, InputKind, InputOutcome, Key, MuxInput, PaneId, PromptRequest, Recipient},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -21,6 +21,11 @@ use std::{
 };
 
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Longer than live peek holds a pane's lock for one input: two identity
+/// surveys of up to 500 ms, a store read, and a send of up to 2 s, about
+/// 3.1 s in all. A thread stop that arrives during that input still
+/// interrupts once the input ends.
+const INTERRUPT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Deletes from the cursor to the start of its line in Claude Code's prompt
 /// box, and at the start of a line joins it to the line above. Claude Code
 /// 2.1.322 does this in a real pane, and every version from 2.1.261 carries
@@ -469,8 +474,12 @@ impl PaneEffects {
 
 /// What a person sends from the dashboard's live peek.
 pub(crate) enum DashboardInput<'a> {
-    /// `pane run`: the person typing a prompt of their own.
-    Line(&'a str),
+    /// `pane run`. `turn` is the pane's state in the survey taken under the
+    /// lock, which decides whose turn the line belongs to.
+    Line {
+        text: &'a str,
+        turn: Option<&'a AgentState>,
+    },
     /// `pane send-keys`: an answer inside the turn already running.
     Key(Key),
 }
@@ -491,20 +500,35 @@ impl DashboardPane {
         PaneEffects::acquire_for(state, socket, pane, Duration::ZERO).map(Self)
     }
 
-    /// A line makes the person the pane's input owner, so a stopped thread
-    /// no longer interrupts the turn they started. A key keeps the owner,
-    /// as `delete_claude_code_input` does, so Stop still interrupts a turn
-    /// the person only answered a permission prompt in.
+    /// A key keeps the pane's input owner, as `delete_claude_code_input`
+    /// does. So does a line typed while a delivery's turn is working or
+    /// blocked: the person is answering inside that turn, and Stop still
+    /// interrupts it. Any other line starts the person's own turn and makes
+    /// them the owner, so a stopped thread no longer interrupts it.
     pub(crate) fn input(&self, mux: &impl MuxInput, input: DashboardInput<'_>) -> InputOutcome {
         let effects = &self.0;
         match input {
-            DashboardInput::Line(line) => {
+            DashboardInput::Line { text, turn } => {
+                let previous = effects.read_marker();
+                let delivery_turn = matches!(turn, Some(AgentState::Working | AgentState::Blocked))
+                    && matches!(&previous, Ok(Some(bytes)) if matches!(
+                        serde_json::from_slice(bytes),
+                        Ok(InputOwner::Delivery { .. })
+                    ));
+                if delivery_turn {
+                    // An agent mid-turn may queue the line as the person's
+                    // next turn. Stop interrupts only the turn running when
+                    // it arrives, the delivery's. The queued turn is not
+                    // marked as the person's, so a Stop that arrives after it
+                    // starts, while the delivery is still in flight, would
+                    // interrupt it too.
+                    return mux.deliver(PaneInput::new(effects, InputKind::Line(text)));
+                }
                 // A send that proves nothing was typed hands the pane back.
                 // An ambiguous one keeps the person as owner, as a doctor's
                 // or registration's does, since their line may have landed.
-                let previous = effects.read_marker();
                 let outcome =
-                    effects.owned_input(mux, &InputOwner::Dashboard, InputKind::Line(line));
+                    effects.owned_input(mux, &InputOwner::Dashboard, InputKind::Line(text));
                 if matches!(
                     outcome,
                     InputOutcome::Declined(..) | InputOutcome::Refused(_)
@@ -561,9 +585,13 @@ pub(crate) fn interrupt_if_current(
     let mut report = InterruptReport::default();
     for response in responses {
         let result = (|| -> Result<(), String> {
-            let effects =
-                PaneEffects::acquire(state, &namespace.session_socket_id, &response.pane_id)
-                    .map_err(|error| error.to_string())?;
+            let effects = PaneEffects::acquire_for(
+                state,
+                &namespace.session_socket_id,
+                &response.pane_id,
+                INTERRUPT_ACQUIRE_TIMEOUT,
+            )
+            .map_err(|error| error.to_string())?;
             let live = match cwd {
                 Some(cwd) => crate::discover_worktree(herdr, cwd)?,
                 None => crate::discover_worktree_for_workspace(herdr, namespace.space_id.as_str())?,
@@ -636,9 +664,16 @@ pub(crate) fn interrupt_if_current(
     report
 }
 
+#[cfg(test)]
+thread_local! {
+    static FLOCK_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn acquire_flock(fd: RawFd, timeout: Duration) -> Result<(), AcquireError> {
     let deadline = Instant::now() + timeout;
     loop {
+        #[cfg(test)]
+        FLOCK_ATTEMPTS.set(FLOCK_ATTEMPTS.get() + 1);
         if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
             break;
         }
@@ -1340,17 +1375,15 @@ mod tests {
         let state = State::new();
         let delivering = PaneEffects::acquire(&state.0, "socket", "pane").unwrap();
         delivering.record(&delivery()).unwrap();
-        let started = Instant::now();
+        FLOCK_ATTEMPTS.set(0);
         assert!(matches!(
             DashboardPane::try_acquire(&state.0, "socket", "pane"),
             Err(AcquireError::Contended)
         ));
-        // A wait polls every 5 ms until ACQUIRE_TIMEOUT, so one attempt
-        // that opens two files ends far below this.
-        assert!(
-            started.elapsed() < Duration::from_millis(100),
-            "the dashboard waited {:?} behind the delivery",
-            started.elapsed()
+        assert_eq!(
+            FLOCK_ATTEMPTS.get(),
+            1,
+            "the dashboard tried the delivery's lock again instead of answering busy"
         );
         drop(delivering);
         let mux = author();
@@ -1365,7 +1398,7 @@ mod tests {
             "a key the person pressed inside the delivery's turn kept Stop from interrupting it"
         );
         assert_eq!(
-            gate.input(&mux, DashboardInput::Line("my own prompt")),
+            gate.input(&mux, typed("my own prompt", Some(&AgentState::Idle))),
             InputOutcome::Delivered
         );
         assert_eq!(
@@ -1396,6 +1429,69 @@ mod tests {
         );
     }
 
+    fn typed<'a>(text: &'a str, turn: Option<&'a AgentState>) -> DashboardInput<'a> {
+        DashboardInput::Line { text, turn }
+    }
+
+    #[test]
+    fn a_dashboard_line_answers_inside_a_delivery_s_running_turn_and_starts_its_own_otherwise() {
+        let unknown = AgentState::Unknown("offline".into());
+        let delivering = [AgentState::Working, AgentState::Blocked];
+        for (turn, previous, answers) in [
+            (Some(&delivering[0]), Some(delivery()), true),
+            (Some(&delivering[1]), Some(delivery()), true),
+            (Some(&AgentState::Idle), Some(delivery()), false),
+            (Some(&AgentState::Done), Some(delivery()), false),
+            (Some(&unknown), Some(delivery()), false),
+            (None, Some(delivery()), false),
+            (Some(&delivering[0]), Some(InputOwner::Other), false),
+            (Some(&delivering[0]), Some(InputOwner::Dashboard), false),
+            (Some(&delivering[0]), None, false),
+        ] {
+            let state = State::new();
+            let gate = DashboardPane::try_acquire(&state.0, "socket", "pane").unwrap();
+            if let Some(owner) = &previous {
+                gate.0.record(owner).unwrap();
+            }
+            let mux = author();
+            assert_eq!(gate.input(&mux, typed("2", turn)), InputOutcome::Delivered);
+            let expected = if answers {
+                delivery()
+            } else {
+                InputOwner::Dashboard
+            };
+            assert_eq!(
+                gate.0.ownership(&expected),
+                MarkerOwnership::Match,
+                "a line typed while the pane was {turn:?} under {previous:?} left the wrong owner"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_answer_inside_a_delivery_s_turn_leaves_it_the_delivery_s() {
+        for outcome in [
+            InputOutcome::Refused("invalid_input".into()),
+            InputOutcome::Declined(crate::mux::Retry::OnEvent, "pane_not_found".into()),
+            InputOutcome::Ambiguous("timed out".into()),
+        ] {
+            let state = State::new();
+            let gate = DashboardPane::try_acquire(&state.0, "socket", "pane").unwrap();
+            gate.0.record(&delivery()).unwrap();
+            let mux = author();
+            mux.script(outcome.clone());
+            assert_eq!(
+                gate.input(&mux, typed("yes", Some(&AgentState::Working))),
+                outcome
+            );
+            assert_eq!(
+                gate.0.ownership(&delivery()),
+                MarkerOwnership::Match,
+                "{outcome:?} took the delivery's turn from Stop"
+            );
+        }
+    }
+
     #[test]
     fn a_dashboard_line_that_types_nothing_hands_the_pane_back() {
         for (previous, outcome) in [
@@ -1416,7 +1512,10 @@ mod tests {
             }
             let mux = author();
             mux.script(outcome.clone());
-            assert_eq!(gate.input(&mux, DashboardInput::Line("refused")), outcome);
+            assert_eq!(
+                gate.input(&mux, typed("refused", Some(&AgentState::Idle))),
+                outcome
+            );
             assert_eq!(
                 gate.0.ownership(&delivery()),
                 if previous.is_some() {
@@ -1437,7 +1536,7 @@ mod tests {
         let mux = author();
         mux.script(InputOutcome::Ambiguous("timed out".into()));
         assert_eq!(
-            gate.input(&mux, DashboardInput::Line("maybe typed")),
+            gate.input(&mux, typed("maybe typed", Some(&AgentState::Idle))),
             InputOutcome::Ambiguous("timed out".into())
         );
         assert_eq!(gate.0.ownership(&delivery()), MarkerOwnership::Reject);
@@ -1448,12 +1547,18 @@ mod tests {
     }
 
     /// Source with whitespace and string conversions removed, so
-    /// `"pane" .to_owned(), "run"` reads as `"pane","run"`.
+    /// `"pane" .to_owned(), String::from("run")` reads as `"pane","run"`.
     fn compact(source: &str) -> String {
-        let text: String = source.split_whitespace().collect();
-        [".to_owned()", ".to_string()", ".into()"]
-            .iter()
-            .fold(text, |text, conversion| text.replace(conversion, ""))
+        let mut text = [".to_owned()", ".to_string()", ".into()"].iter().fold(
+            source.split_whitespace().collect::<String>(),
+            |text, conversion| text.replace(conversion, ""),
+        );
+        while let Some(at) = text.find("String::from(") {
+            let call = call_at(&text[at..], "String::from(");
+            let argument = call["String::from(".len()..call.len() - 1].to_owned();
+            text.replace_range(at..at + call.len(), &argument);
+        }
+        text
     }
 
     fn rust_sources(directory: &Path, found: &mut Vec<std::path::PathBuf>) {
@@ -1479,7 +1584,8 @@ mod tests {
     /// as a fake's `["agent","prompt",..] =>` matches arguments; it cannot
     /// send them.
     fn input_verbs(source: &str) -> Vec<&'static str> {
-        let text = compact(source);
+        // `.arg("pane").arg("run")` names the same verb as `"pane","run"`.
+        let text = compact(source).replace(").arg(", ",");
         INPUT_VERBS
             .iter()
             .copied()
@@ -1536,6 +1642,8 @@ mod tests {
             for source in [
                 format!("herdr.execute ( & [ \"{kind}\" ,\n \"{operation}\", pane ] )"),
                 format!("vec![\"{kind}\".to_owned(),\n \"{operation}\".to_owned(), pane]"),
+                format!("Command::new(bin).arg(\"{kind}\")\n .arg(\"{operation}\").arg(pane)"),
+                format!("vec![String::from(\"{kind}\"), String::from(\"{operation}\"), pane]"),
             ] {
                 for owner in ["pane_effects.rs", "mux/herdr.rs", "mux/herdr/wire.rs"] {
                     fs::write(state.0.join(owner), &source).unwrap();
@@ -1576,10 +1684,6 @@ mod tests {
         ("HERDR_BIN_PATH", Some("observer_guard.rs")),
         ("\"herdr\"", Some("observer_guard.rs")),
         ("TIOCSTI", None),
-        ("Commandas", None),
-        ("<Command>", None),
-        ("=Command;", None),
-        ("=std::process::Command;", None),
         ("posix_spawn", None),
         ("libc::exec", None),
         ("libc::fork", None),
@@ -1616,6 +1720,54 @@ mod tests {
         ("dashboard/tailscale.rs", "Command::new(self.0)"),
         ("dashboard/tailscale.rs", "Command::new(&executable)"),
     ];
+
+    /// Every line of dashboard code that names `Command` other than in a
+    /// listed `Command::new` call, so an alias, a type path, or a second
+    /// import fails the check whatever its spelling.
+    const DASHBOARD_COMMAND_NAMES: &[(&str, &str)] = &[
+        ("dashboard.rs", "process::{Command, ExitCode, Stdio},"),
+        ("dashboard/http.rs", "process::{Command, Stdio},"),
+        (
+            "dashboard/live_peek.rs",
+            "process::{Child, ChildStdin, ChildStdout, Command, Stdio},",
+        ),
+        (
+            "dashboard/observer_guard.rs",
+            "process::{Command, ExitCode, Stdio},",
+        ),
+        (
+            "dashboard/server_files.rs",
+            "process::{Command, ExitStatus, Stdio},",
+        ),
+        (
+            "dashboard/skills.rs",
+            r#""---\ndescription: Command duplicate\n---\n","#,
+        ),
+        (
+            "dashboard/snapshot.rs",
+            "/// Command and exit code only; terminal output never leaves the store.",
+        ),
+        ("dashboard/tailscale.rs", "process::{Command, Stdio},"),
+    ];
+
+    /// Each place `source` names the identifier `Command`, by line, other
+    /// than as `Command::new`.
+    fn command_names(source: &str) -> Vec<&str> {
+        let identifier = |c: char| c.is_alphanumeric() || c == '_';
+        source
+            .lines()
+            .flat_map(|line| {
+                line.match_indices("Command")
+                    .filter(move |&(at, _)| {
+                        let after = &line[at + "Command".len()..];
+                        !line[..at].ends_with(identifier)
+                            && !after.starts_with(identifier)
+                            && !after.starts_with("::new")
+                    })
+                    .map(move |_| line.trim())
+            })
+            .collect()
+    }
 
     /// The only arguments the observer guard gives Herdr.
     const OBSERVER_ARGUMENTS: &[&str] = &[
@@ -1657,10 +1809,20 @@ mod tests {
         files.retain(|file| file.exists());
         files.sort();
         let mut allowed = DASHBOARD_SPAWNS.to_vec();
+        let mut named = DASHBOARD_COMMAND_NAMES.to_vec();
         let mut raw = Vec::new();
         for file in &files {
             let name = file.strip_prefix(src).unwrap().to_str().unwrap();
-            let text = compact(&fs::read_to_string(file).unwrap());
+            let source = fs::read_to_string(file).unwrap();
+            for line in command_names(&source) {
+                match named.iter().position(|&entry| entry == (name, line)) {
+                    Some(index) => {
+                        named.swap_remove(index);
+                    }
+                    None => raw.push(format!("{name} names Command in {line}")),
+                }
+            }
+            let text = compact(&source);
             for (token, owner) in DASHBOARD_RAW {
                 if text.contains(token) && owner.is_none_or(|owner| !file.ends_with(owner)) {
                     raw.push(format!("{name} names {token}"));
@@ -1745,7 +1907,23 @@ mod tests {
             ),
             (
                 "use std::process::Command as Spawn; Spawn::new(program)",
-                "names Commandas",
+                "names Command in use std::process::Command as Spawn; Spawn::new(program)",
+            ),
+            (
+                "type Spawn = process::Command; Spawn::new(program)",
+                "names Command in type Spawn = process::Command; Spawn::new(program)",
+            ),
+            (
+                "<std::process::Command>::new(program)",
+                "names Command in <std::process::Command>::new(program)",
+            ),
+            (
+                r#"Command::new(bin).arg("pane").arg("run")"#,
+                r#"names "pane","run""#,
+            ),
+            (
+                r#"let argv = vec![String::from("agent"), String::from("prompt")];"#,
+                r#"names "agent","prompt""#,
             ),
             (
                 "let spawn = Command::new; spawn(program)",

@@ -1602,3 +1602,142 @@ fn ambiguous_binding_recovery_opens_one_attention_item_until_an_explicit_rebind(
         0
     );
 }
+
+#[test]
+fn thread_stop_waits_out_a_live_peek_input_that_holds_the_pane_lock() {
+    use namedrop::{DeliveryAttemptId, DeliveryState, LeaseDraft, PaneBindingId};
+    use sha2::{Digest, Sha256};
+    use std::{
+        os::{
+            fd::AsRawFd,
+            unix::fs::{OpenOptionsExt, PermissionsExt},
+        },
+        sync::mpsc,
+        thread,
+        time::{Duration, Instant},
+    };
+    let directory = TestDirectory::new();
+    let namespace = StateNamespace::for_space("socket-a", "workspace-1");
+    let thread_id = ThreadId::new("thread-1");
+    let sender = PaneAddressId::new("address-sender");
+    let recipient = PaneAddressId::new("address-recipient");
+    let human = attribution(ActorKind::Human, "local-human", 1);
+    StateStore::open(directory.path())
+        .unwrap()
+        .transaction(|tx| {
+            tx.activate_worktree(&namespace, &human)?;
+            tx.create_pane_address(&namespace, &address("address-sender", "sender"), &human)?;
+            tx.create_pane_address(
+                &namespace,
+                &address("address-recipient", "recipient"),
+                &human,
+            )?;
+            tx.bind_pane(
+                &namespace,
+                &PaneBindingId::new("binding-recipient"),
+                &recipient,
+                "pane-recipient",
+                &human,
+            )?;
+            tx.observe_agent_session(
+                &namespace,
+                "observation-recipient",
+                &recipient,
+                &AgentSessionId::new("session-recipient"),
+                "working",
+                &human,
+            )?;
+            tx.create_thread(&namespace, &thread_id, "Controls", &human)?;
+            tx.append_message(
+                &namespace,
+                &message(1, &thread_id, &sender, ActorKind::Human, &recipient, None),
+                &human,
+            )?;
+            tx.lease_mailbox_head(
+                &namespace,
+                &recipient,
+                &LeaseDraft {
+                    attempt_id: DeliveryAttemptId::new("attempt-1"),
+                    binding_id: PaneBindingId::new("binding-recipient"),
+                    agent_session_id: AgentSessionId::new("session-recipient"),
+                    retry_of_attempt_id: None,
+                    owner: "test".to_owned(),
+                    acquired_at_ms: 2,
+                    expires_at_ms: 102,
+                },
+                &human,
+            )?;
+            tx.transition_delivery_attempt(
+                &namespace,
+                &DeliveryAttemptId::new("attempt-1"),
+                DeliveryState::Submitted,
+                &human,
+            )
+        })
+        .unwrap();
+    // Live peek holds this lock for up to about 3.1 s per input, longer than
+    // the 2 s a delivery waits.
+    let hold = Duration::from_millis(2500);
+    let locks = directory.path().join("pane-effects");
+    fs::create_dir_all(&locks).unwrap();
+    fs::set_permissions(&locks, fs::Permissions::from_mode(0o700)).unwrap();
+    let key = namedrop::lower_hex(&Sha256::digest(
+        serde_json::to_vec(&("socket-a", "pane-recipient")).unwrap(),
+    ));
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(locks.join(format!("{key}.lock")))
+        .unwrap();
+    let (held, holding) = mpsc::channel();
+    let input = thread::spawn(move || {
+        // SAFETY: flock borrows the descriptor this thread owns.
+        assert_eq!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        held.send(()).unwrap();
+        thread::sleep(hold);
+    });
+    holding.recv().unwrap();
+    let started = Instant::now();
+    let herdr = FakeHerdr {
+        interrupted: Mutex::new(Vec::new()),
+    };
+    let ids = SequenceIds(AtomicU64::new(1));
+    let runtime = LifecycleRuntime {
+        state_directory: directory.path(),
+        home_directory: Some(directory.home()),
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new("/repo"),
+        workspace_id: None,
+        current_pane_id: Some("pane-sender"),
+        session_socket_id: "socket-a",
+        mux: &herdr,
+        clock: &FixedClock,
+        ids: &ids,
+    };
+    let stopped = execute_control_operation(
+        "thread.stop",
+        serde_json::json!({"thread_id": "thread-1"}),
+        &runtime,
+    )
+    .unwrap();
+    input.join().unwrap();
+    assert_eq!(stopped["warnings"], serde_json::json!([]), "{stopped}");
+    assert_eq!(
+        stopped["interrupted_pane_ids"],
+        serde_json::json!(["pane-recipient"])
+    );
+    assert!(
+        started.elapsed() >= hold,
+        "Stop interrupted while the input still held the pane"
+    );
+    assert_eq!(
+        *herdr.interrupted.lock().unwrap(),
+        [["agent", "send-keys", "pane-recipient", "ctrl+c"].map(str::to_owned)]
+    );
+}

@@ -1064,15 +1064,19 @@ fn planner_input(f: &Fixture) -> Vec<Value> {
         .collect()
 }
 
-/// A thread whose delivery's turn is running in the planner's pane, and a
-/// dashboard serving it after the person sent `input` from live peek.
-fn peeked_turn(f: &Fixture, request: &str, input: Value) -> (Value, Server, u16) {
+/// The body of the one 503 live peek answers before it reads from or sends
+/// to the pane: SQLite was busy.
+const STORE_BUSY: &str = "Namedrop's state is busy, so nothing was read or sent.\n";
+
+/// A thread delivered to the planner's pane, the pane reporting `status`,
+/// and a dashboard serving it after the person sent `input` from live peek.
+fn peeked_turn(f: &Fixture, request: &str, status: &str, input: Value) -> (Value, Server, u16) {
     let parent = plain_root(f, request, "Please inspect.");
-    f.status("pane-1-planner", "working");
+    f.status("pane-1-planner", status);
     let server = Server::start(f, "not json", true);
     // Live peek waits only 100 ms for SQLite, and the dashboard's workers
-    // write to it while the turn starts. A busy store answers 503 before
-    // anything is read from or sent to the pane, so only that 503 is retried.
+    // write to it while the turn starts. A stream types nothing, so any of
+    // its 503s is retried. Input retries only the busy store's 503.
     let deadline = Instant::now() + Duration::from_secs(10);
     let live = loop {
         let live = server.live(&peek_path("planner", "live"));
@@ -1089,15 +1093,35 @@ fn peeked_turn(f: &Fixture, request: &str, input: Value) -> (Value, Server, u16)
     input["continuity"] = continuity;
     let status = loop {
         let sent = planner_input(f).len();
-        let status = server
-            .post(&peek_path("planner", "input"), &input.to_string(), &[])
-            .status;
-        if status != 503 || planner_input(f).len() != sent || Instant::now() >= deadline {
-            break status;
+        let response = server.post(&peek_path("planner", "input"), &input.to_string(), &[]);
+        if response.status != 503 || response.body != STORE_BUSY || Instant::now() >= deadline {
+            break response.status;
         }
+        assert_eq!(planner_input(f).len(), sent, "a busy store sent input");
         thread::sleep(Duration::from_millis(50));
     };
     (parent, server, status)
+}
+
+/// Makes the planner's pane report `status` to the dashboard already
+/// running, as its turn starts or ends.
+fn report_status(f: &Fixture, status: &str) {
+    f.status("pane-1-planner", status);
+    let key = "pane list --workspace w1";
+    let reply = f
+        .herdr
+        .execute(&["pane", "list", "--workspace", "w1"])
+        .unwrap()
+        .stdout;
+    let file = f.root.join("http-herdr-responses.json");
+    let mut responses: Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    responses[key] = json!(reply);
+    let temporary = f.root.join("http-herdr-responses.json.next");
+    fs::write(&temporary, responses.to_string()).unwrap();
+    fs::rename(&temporary, &file).unwrap();
+    let temporary = f.root.join("http-herdr-reply.next");
+    fs::write(&temporary, reply).unwrap();
+    fs::rename(&temporary, f.root.join("http-herdr-replies").join(key)).unwrap();
 }
 
 fn stop(server: &Server, parent: &Value) -> Value {
@@ -1110,8 +1134,12 @@ fn stop(server: &Server, parent: &Value) -> Value {
 fn stop_after_a_live_peek_key_still_interrupts_the_turn() {
     for (key, sent) in [("Enter", "enter"), ("ArrowDown", "down"), ("Escape", "esc")] {
         let f = fixture();
-        let (parent, server, status) =
-            peeked_turn(&f, "key-then-stop", json!({"kind":"key","key":key}));
+        let (parent, server, status) = peeked_turn(
+            &f,
+            "key-then-stop",
+            "working",
+            json!({"kind":"key","key":key}),
+        );
         assert_eq!(status, 204, "{key}");
         let receipt = stop(&server, &parent);
         assert_eq!(
@@ -1132,14 +1160,46 @@ fn stop_after_a_live_peek_key_still_interrupts_the_turn() {
 }
 
 #[test]
-fn stop_after_a_typed_live_peek_line_warns_instead_of_interrupting_it() {
+fn stop_after_a_line_typed_into_the_delivery_s_turn_still_interrupts_it() {
+    for status in ["working", "blocked"] {
+        let f = fixture();
+        let (parent, server, sent) = peeked_turn(
+            &f,
+            "answer-then-stop",
+            status,
+            json!({"kind":"text","text":"2"}),
+        );
+        assert_eq!(sent, 204, "{status}");
+        report_status(&f, "working");
+        let receipt = stop(&server, &parent);
+        assert_eq!(
+            receipt["interrupted_pane_ids"],
+            json!(["pane-1-planner"]),
+            "{status}: the person's answer kept Stop from interrupting the delivery's turn: {receipt}"
+        );
+        assert_eq!(receipt["warnings"], json!([]), "{status}: {receipt}");
+        assert_eq!(
+            planner_input(&f),
+            [
+                json!(["pane", "run", "pane-1-planner", "2"]),
+                json!(["agent", "send-keys", "pane-1-planner", "ctrl+c"]),
+            ],
+            "{status}"
+        );
+    }
+}
+
+#[test]
+fn stop_after_a_line_that_starts_the_person_s_turn_warns_instead_of_interrupting_it() {
     let f = fixture();
     let (parent, server, status) = peeked_turn(
         &f,
         "line-then-stop",
+        "idle",
         json!({"kind":"text","text":"do this instead"}),
     );
     assert_eq!(status, 204);
+    report_status(&f, "working");
     let receipt = stop(&server, &parent);
     assert_eq!(receipt["interrupted_pane_ids"], json!([]), "{receipt}");
     assert_eq!(
@@ -1156,9 +1216,12 @@ fn stop_after_a_typed_live_peek_line_warns_instead_of_interrupting_it() {
 
 #[test]
 fn a_live_peek_send_that_fails_leaves_the_turn_to_stop() {
-    for input in [
-        json!({"kind":"text","text":"refused line"}),
-        json!({"kind":"key","key":"Enter"}),
+    // An idle line takes the pane and hands it back. A working one never
+    // takes it.
+    for (pane, input) in [
+        ("idle", json!({"kind":"text","text":"refused line"})),
+        ("working", json!({"kind":"text","text":"refused line"})),
+        ("working", json!({"kind":"key","key":"Enter"})),
     ] {
         let f = fixture();
         fs::write(
@@ -1166,8 +1229,9 @@ fn a_live_peek_send_that_fails_leaves_the_turn_to_stop() {
             r#"{"error":{"code":"invalid_input","message":"refused"}}"#,
         )
         .unwrap();
-        let (parent, server, status) = peeked_turn(&f, "failed-then-stop", input.clone());
+        let (parent, server, status) = peeked_turn(&f, "failed-then-stop", pane, input.clone());
         assert_eq!(status, 503, "{input}");
+        report_status(&f, "working");
         assert_eq!(
             planner_input(&f).len(),
             1,

@@ -5,9 +5,10 @@ use super::{
     strip_terminal_sequences,
 };
 use crate::{
-    StateStore,
+    StateStore, StoreError, StoreErrorKind,
     mux::{
-        Budget, Depth, InputOutcome, Key, MuxConnector, PaneId, Scope, ScreenRequest, Style, Wrap,
+        AgentState, Budget, Depth, InputOutcome, Key, MuxConnector, PaneId, Scope, ScreenRequest,
+        Style, Wrap,
     },
     pane_effects::{AcquireError, DashboardInput, DashboardPane},
     store::dashboard::{LiveBinding, LiveMember},
@@ -269,7 +270,7 @@ pub(super) fn continuity_query(query: Option<&str>) -> Result<Option<String>, St
 struct NativeIdentity {
     terminal: String,
     session: Option<String>,
-    status: Option<String>,
+    status: Option<AgentState>,
 }
 impl PartialEq for NativeIdentity {
     fn eq(&self, other: &Self) -> bool {
@@ -281,8 +282,8 @@ impl NativeIdentity {
     fn accepts_input(&self) -> bool {
         !self
             .status
-            .as_deref()
-            .is_some_and(|status| matches!(status, "offline" | "disconnected" | "unknown"))
+            .as_ref()
+            .is_some_and(|status| matches!(status.as_str(), "offline" | "disconnected" | "unknown"))
     }
 }
 
@@ -445,10 +446,17 @@ impl TtyDiscovery {
     }
 }
 
+fn store_status(error: StoreError) -> Status {
+    match error.kind() {
+        StoreErrorKind::Busy => Status::StoreBusy,
+        _ => Status::Unavailable,
+    }
+}
+
 fn recorded(store: &mut StateStore, key: &SpaceKey, address: &str) -> Result<LiveBinding, Status> {
     match store
         .dashboard_live_member(key, address)
-        .map_err(|_| Status::Unavailable)?
+        .map_err(store_status)?
     {
         LiveMember::Missing => Err(Status::NotFound),
         LiveMember::Gone => Err(Status::Gone),
@@ -496,7 +504,7 @@ fn native(
             .and_then(|agent| crate::mux::resolve_session(&agent.session))
             .map(|session| session.as_str().to_owned())
             .filter(|s| !s.is_empty()),
-        status: pane.state.as_ref().map(|state| state.as_str().to_owned()),
+        status: pane.state.clone(),
     };
     if binding
         .agent_session_id
@@ -994,11 +1002,11 @@ impl LivePeeks {
             recent.push_back(now);
         }
         let mut store = StateStore::open_read_only(front.files.state())
-            .map_err(|_| Status::Unavailable)?
+            .map_err(store_status)?
             .ok_or(Status::NotFound)?;
         store
             .set_busy_timeout(Duration::from_millis(100))
-            .map_err(|_| Status::Unavailable)?;
+            .map_err(store_status)?;
         let binding = recorded(&mut store, key, address)?;
         if binding.pane_type != crate::PaneType::Agent || binding.agent_session_id.is_none() {
             return Err(Status::Gone);
@@ -1042,7 +1050,13 @@ impl LivePeeks {
                 if current != binding || updated != identity || !updated.accepts_input() {
                     return Err(Status::Gone);
                 }
-                effects.input(&herdr, DashboardInput::Line(&text))
+                effects.input(
+                    &herdr,
+                    DashboardInput::Line {
+                        text: &text,
+                        turn: updated.status.as_ref(),
+                    },
+                )
             }
             InputPost::Key { key, .. } => effects.input(&herdr, DashboardInput::Key(key.key())),
         };
@@ -1079,11 +1093,11 @@ impl LivePeeks {
                 return Err(Status::Unavailable);
             }
             let mut store = StateStore::open_read_only(front.files.state())
-                .map_err(|_| Status::Unavailable)?
+                .map_err(store_status)?
                 .ok_or(Status::NotFound)?;
             store
                 .set_busy_timeout(Duration::from_millis(100))
-                .map_err(|_| Status::Unavailable)?;
+                .map_err(store_status)?;
             let binding = recorded(&mut store, key, address)?;
             let pane = native(
                 &*front.mux,
@@ -1218,7 +1232,7 @@ impl LivePeeks {
                     Err(Status::NotFound) => Some(Event::Closed {
                         reason: Closed::Missing,
                     }),
-                    Err(Status::Unavailable) => Some(Event::Unavailable {
+                    Err(Status::Unavailable | Status::StoreBusy) => Some(Event::Unavailable {
                         reason: Unavailable::Busy,
                     }),
                     _ => Some(Event::Closed {

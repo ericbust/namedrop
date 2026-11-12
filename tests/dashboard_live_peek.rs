@@ -282,7 +282,9 @@ impl Server {
         configure(f, json!({}));
         configure_history(f, "");
         // The dashboard gives Herdr metadata reads 150 to 500 ms. Python start-up
-        // under load outlasts that, so stored replies are answered by bash builtins.
+        // under load outlasts that, so bash answers stored replies, and holds
+        // the first identity survey at `native_identity_gate` until the gate
+        // file exists.
         let shim = f.root.join("herdr");
         executable::write_executable(
             &shim,
@@ -293,7 +295,13 @@ if [ "$1 $2" = 'pane process-info' ]; then
 fi
 response="$root/responses/$*"
 IFS= read -r -d '' config <"$root/observer.json"
-if [ -f "$response" ] && [[ $config != *native_identity_gate* ]]; then
+if [ -f "$response" ]; then
+    if [ "$*" = 'pane list --workspace w1' ] && [[ $config =~ \"native_identity_gate\":\"([^\"]+)\" ]]; then
+        gate="$root/${BASH_REMATCH[1]}"
+        if (set -C; : >"$gate.captured") 2>/dev/null; then
+            while [ ! -e "$gate" ]; do sleep 0.01; done
+        fi
+    fi
     IFS= read -r -d '' body <"$response"
     printf '%s\n' "$body"
     exit 0
@@ -364,19 +372,7 @@ if args[:2] in [['pane','run'],['pane','send-text'],['pane','send-keys']]:
     with open(os.path.join(root,'reads.jsonl'),'a') as log:
         log.write(json.dumps({'args':args,'socket':os.environ.get('HERDR_SOCKET_PATH')})+'\n')
     sys.exit(0)
-key=' '.join(args)
-response=os.path.join(root,'responses',key)
-if os.path.isfile(response):
-    config=json.load(open(os.path.join(root,'observer.json')))
-    if key=='pane list --workspace w1' and config.get('native_identity_gate'):
-        gate=os.path.join(root,config['native_identity_gate'])
-        try:
-            with open(gate+'.captured','x'):pass
-        except FileExistsError:pass
-        else:
-            while not os.path.exists(gate):time.sleep(.01)
-    print(open(response).read())
-elif args[:2]==['worktree','list']:sys.stderr.write('{"error":{"code":"not_git_worktree"}}');sys.exit(1)
+if args[:2]==['worktree','list']:sys.stderr.write('{"error":{"code":"not_git_worktree"}}');sys.exit(1)
 else:sys.exit(1)
 "#).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_namedrop"))
@@ -1721,6 +1717,29 @@ fn a_replaced_pane_answers_gone_even_while_a_delivery_holds_it() {
             "This participant's pane is no longer available.\n"
         );
     }
+    assert_eq!(sent_inputs(&f), Vec::<Value>::new());
+}
+
+#[test]
+fn input_while_sqlite_is_locked_answers_a_store_busy_503_and_sends_nothing() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let target = input_path("socket-a", "w1", "lead");
+    let continuity = live_continuity(&server, &path("socket-a", "w1", "lead"));
+    let csrf = server.csrf();
+    let writer = f.db();
+    writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let response = server.post(
+        &target,
+        &json!({"kind":"key","key":"Enter","continuity":continuity}).to_string(),
+        &[("Cookie", &server.cookie), ("X-Namedrop-Csrf", &csrf)],
+    );
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(response.status, 503, "{}", response.body);
+    assert_eq!(
+        response.body,
+        "Namedrop's state is busy, so nothing was read or sent.\n"
+    );
     assert_eq!(sent_inputs(&f), Vec::<Value>::new());
 }
 
