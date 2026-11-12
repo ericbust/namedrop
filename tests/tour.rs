@@ -1,18 +1,22 @@
+#![cfg(feature = "test-support")]
 #[path = "support/cleanup.rs"]
 mod cleanup;
 
-use namedrop::mux::{AgentIdentity, AgentKind, AgentState, SessionClaim};
+use namedrop::mux::{
+    AgentIdentity, AgentKind, AgentState, Effect, MuxError, PopupScreen, PopupSpec, SessionClaim,
+    fake::{FakeMux, StrictSpace, Takes},
+};
 use namedrop::tour::{self, PageAction};
 use namedrop::{
-    AgentRuntime, AgentSessionId, Clock, DiscoveredPane, DiscoveredWorktree, HerdrCommandExecutor,
-    HerdrCommandOutput, IdGenerator, LifecycleRuntime, WorktreeId,
+    AgentRuntime, AgentSessionId, Clock, DiscoveredPane, DiscoveredWorktree, IdGenerator,
+    LifecycleRuntime, WorktreeId,
 };
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::{
-        Arc, Barrier, Mutex,
+        Arc, Barrier,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -287,36 +291,33 @@ fn marker_rejects_unsafe_presentation_ids() {
     assert!(tour::mark_shown(state, &longest).unwrap());
 }
 
-#[derive(Default)]
-struct PopupHerdr {
-    commands: Mutex<Vec<Vec<String>>>,
-    fail: bool,
+/// Takes popups and nothing else, as the old fake answered only `plugin pane
+/// open`. With `fail`, each popup fails with the old fake's words.
+fn popup_herdr(fail: bool) -> StrictSpace {
+    let mux = FakeMux::world().endpoint("/run/herdr.sock").build();
+    if fail {
+        mux.on_apply(|_, _| Err(MuxError::Unavailable("plugin pane open failed".to_owned())));
+    }
+    let takes = Takes::nothing().effect(|effect| matches!(effect, Effect::OpenPopup(_)));
+    StrictSpace::new(mux, &[], takes)
 }
 
-/// The runtime's `session_socket_id`, which the bridge took the popup's
-/// socket from before the connection named it.
-static POPUP_SOCKET: std::sync::LazyLock<namedrop::mux::Endpoint> =
-    std::sync::LazyLock::new(|| namedrop::mux::Endpoint {
-        kind: namedrop::mux::MuxKind::Herdr,
-        key: "/run/herdr.sock".to_owned(),
-    });
+/// The tour popup for `target`, which `tour.rs`'s argv pin in
+/// `src/mux/herdr/tests.rs` turns into today's `plugin pane open`.
+fn tour_popup(target: &DiscoveredPane, state: &Path) -> Effect {
+    Effect::OpenPopup(Box::new(PopupSpec {
+        screen: PopupScreen::Tour,
+        target: target.facts(),
+        state_dir: state.to_owned(),
+        socket: "/run/herdr.sock".to_owned(),
+    }))
+}
 
-impl HerdrCommandExecutor for PopupHerdr {
-    fn mux_endpoint(&self) -> &namedrop::mux::Endpoint {
-        &POPUP_SOCKET
-    }
-
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        self.commands
-            .lock()
-            .unwrap()
-            .push(args.iter().map(|argument| (*argument).to_owned()).collect());
-        if self.fail {
-            return Err("plugin pane open failed".to_owned());
-        }
-        Ok(HerdrCommandOutput {
-            stdout: r#"{"result":{"pane_id":"popup-1"}}"#.to_owned(),
-        })
+/// The pane each popup opened for, in order.
+fn popup_target(effect: &Effect) -> String {
+    match effect {
+        Effect::OpenPopup(popup) => popup.target.id.as_str().to_owned(),
+        other => panic!("not a popup: {other:?}"),
     }
 }
 
@@ -368,9 +369,9 @@ fn worktree(panes: Vec<DiscoveredPane>) -> DiscoveredWorktree {
 
 fn runtime<'a>(
     state: &'a Path,
-    herdr: &'a PopupHerdr,
+    herdr: &'a FakeMux,
     ids: &'a SequentialIds,
-) -> LifecycleRuntime<'a, PopupHerdr, FixedClock, SequentialIds> {
+) -> LifecycleRuntime<'a, FakeMux, FixedClock, SequentialIds> {
     LifecycleRuntime {
         state_directory: state,
         home_directory: None,
@@ -390,7 +391,7 @@ fn first_agent_show_opens_the_tour_popup_once() {
     let directory = TestDirectory::new();
     let state = directory.path();
     let ids = SequentialIds(AtomicU64::new(1));
-    let herdr = PopupHerdr::default();
+    let herdr = popup_herdr(false);
     let runtime = runtime(state, &herdr, &ids);
     let space = worktree(vec![
         pane("pane-shell", None),
@@ -405,38 +406,11 @@ fn first_agent_show_opens_the_tour_popup_once() {
             "shown": true,
             "presentation_id": "welcome-1",
             "pane_id": "pane-2",
-            "popup": {"result": {"pane_id": "popup-1"}},
+            "popup": {"opened_for": "pane-2"},
         })
     );
-    let expected = [
-        "plugin",
-        "pane",
-        "open",
-        "--plugin",
-        "namedrop",
-        "--entrypoint",
-        "tour",
-        "--placement",
-        "popup",
-        "--width",
-        "72",
-        "--height",
-        "24",
-        "--env",
-        "NAMEDROP_TARGET_WORKSPACE=workspace-1",
-        "--env",
-        "NAMEDROP_TARGET_PANE=pane-2",
-        "--env",
-        "NAMEDROP_TARGET_TERMINAL=terminal-pane-2",
-        "--env",
-        "NAMEDROP_TARGET_SESSION=session-pane-2",
-        "--env",
-        &format!("HERDR_PLUGIN_STATE_DIR={}", state.display()),
-        "--env",
-        "HERDR_SOCKET_PATH=/run/herdr.sock",
-        "--focus",
-    ];
-    assert_eq!(*herdr.commands.lock().unwrap(), [expected]);
+    let expected = tour_popup(&space.panes[2], state);
+    assert_eq!(herdr.attempted_effects(), [expected]);
     assert!(tour::is_shown(state, tour::CURRENT_ID).unwrap());
 
     let again = tour::show_for_first_agent(&runtime, &space, Some("pane-2"));
@@ -444,14 +418,14 @@ fn first_agent_show_opens_the_tour_popup_once() {
         again,
         serde_json::json!({"shown": false, "presentation_id": "welcome-1", "reason": "already_shown"})
     );
-    assert_eq!(herdr.commands.lock().unwrap().len(), 1, "opened twice");
+    assert_eq!(herdr.attempted_effects().len(), 1, "opened twice");
 
     // Without a usable preference the first agent pane in discovery order wins.
     assert!(tour::reset(state, tour::CURRENT_ID).unwrap());
     let result = tour::show_for_first_agent(&runtime, &space, Some("pane-shell"));
     assert_eq!(result["pane_id"], "pane-1");
-    let result_args = herdr.commands.lock().unwrap()[1].clone();
-    assert!(result_args.contains(&"NAMEDROP_TARGET_PANE=pane-1".to_owned()));
+    let result_target = popup_target(&herdr.attempted_effects()[1]);
+    assert!(result_target == "pane-1");
     assert!(tour::reset(state, tour::CURRENT_ID).unwrap());
     assert_eq!(
         tour::show_for_first_agent(&runtime, &space, None)["pane_id"],
@@ -459,7 +433,7 @@ fn first_agent_show_opens_the_tour_popup_once() {
     );
 
     let fresh = TestDirectory::new();
-    let quiet = PopupHerdr::default();
+    let quiet = popup_herdr(false);
     let shells = worktree(vec![pane("pane-shell", None)]);
     let result = tour::show_for_first_agent(
         &self::runtime(fresh.path(), &quiet, &ids),
@@ -470,13 +444,10 @@ fn first_agent_show_opens_the_tour_popup_once() {
         result,
         serde_json::json!({"shown": false, "presentation_id": "welcome-1", "reason": "no_agent_pane"})
     );
-    assert!(quiet.commands.lock().unwrap().is_empty());
+    assert!(quiet.attempted_effects().is_empty());
     assert!(!tour::is_shown(fresh.path(), tour::CURRENT_ID).unwrap());
 
-    let failing = PopupHerdr {
-        fail: true,
-        ..PopupHerdr::default()
-    };
+    let failing = popup_herdr(true);
     let result =
         tour::show_for_first_agent(&self::runtime(fresh.path(), &failing, &ids), &space, None);
     assert_eq!(
@@ -489,13 +460,13 @@ fn first_agent_show_opens_the_tour_popup_once() {
             "pane_id": "pane-1",
         })
     );
-    assert_eq!(failing.commands.lock().unwrap().len(), 1);
+    assert_eq!(failing.attempted_effects().len(), 1);
     // The marker stays so a broken popup is not retried on every event.
     assert!(tour::is_shown(fresh.path(), tour::CURRENT_ID).unwrap());
     let result =
         tour::show_for_first_agent(&self::runtime(fresh.path(), &failing, &ids), &space, None);
     assert_eq!(result["reason"], "already_shown");
-    assert_eq!(failing.commands.lock().unwrap().len(), 1);
+    assert_eq!(failing.attempted_effects().len(), 1);
 
     assert_marker_error_is_reported();
 }
@@ -507,7 +478,7 @@ fn assert_marker_error_is_reported() {
     let state = directory.path().join("not-a-directory");
     fs::write(&state, b"").unwrap();
     let ids = SequentialIds(AtomicU64::new(1));
-    let herdr = PopupHerdr::default();
+    let herdr = popup_herdr(false);
     let result = tour::show_for_first_agent(
         &runtime(&state, &herdr, &ids),
         &worktree(vec![pane("pane-1", Some(AgentRuntime::Codex))]),
@@ -520,7 +491,7 @@ fn assert_marker_error_is_reported() {
             .as_str()
             .is_some_and(|error| !error.is_empty())
     );
-    assert!(herdr.commands.lock().unwrap().is_empty());
+    assert!(herdr.attempted_effects().is_empty());
 }
 
 #[test]

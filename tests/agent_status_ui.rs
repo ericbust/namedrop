@@ -1,9 +1,11 @@
+#![cfg(feature = "test-support")]
 //! Popup behaviour for the agent status panel.
 //!
 //! The panel lives in the binary, so the module is compiled into this suite
 //! directly and driven through its injected data plane. Nothing here starts a
 //! host CLI, reaches a Herdr server or spends a model call: the collection,
 //! description and identity steps are all supplied by the test.
+use namedrop::mux::fake::{EVERY_LISTING, FakeMux, StrictSpace, Takes};
 use serde_json::{Value, json};
 use std::{
     io::{self, Cursor, Read, Write},
@@ -1235,100 +1237,70 @@ fn a_cancelled_pass_never_spends_a_herdr_call_confirming_it() {
 // actually wires in, including the executor adapter that bounds its reads.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, PartialEq)]
-enum Call {
-    Unbounded(String),
-    Bounded(String, Duration),
-}
-
-#[derive(Default)]
+/// `w44`, holding `/repo`, with one working Codex pane, `p1`, in `terminal`.
+/// It reports `session`, or leaves the `agent_session` field out for `None`,
+/// and with `closed` no listing names it. It answers every `worktree list`
+/// and `pane list`, as the old fake did, and takes no input or effect, which
+/// the identity recheck never sends.
 struct FakeHerdr {
-    calls: std::sync::Mutex<Vec<Call>>,
-    terminal: String,
-    session: Option<String>,
-    closed: bool,
+    space: StrictSpace,
 }
 
 impl FakeHerdr {
     fn new(terminal: &str, session: Option<&str>) -> Self {
+        Self::listed(terminal, session, false)
+    }
+
+    fn closed(terminal: &str, session: Option<&str>) -> Self {
+        Self::listed(terminal, session, true)
+    }
+
+    fn listed(terminal: &str, session: Option<&str>, closed: bool) -> Self {
+        let mut world = FakeMux::world()
+            .endpoint("socket")
+            .space("w44")
+            .checkout("/repo")
+            .pane("p1")
+            .terminal(terminal)
+            .tab("tab1")
+            .codex()
+            .working();
+        world = match session {
+            Some(session) => world.session(session),
+            None => world.reports_session(false),
+        };
+        if closed {
+            world = world.hidden();
+        }
+        // Each read takes 2 ms, as each Herdr command takes time, so the
+        // second command of a read shows what the first spent.
+        let mux = world.build();
+        mux.on_read(|_, _| {
+            std::thread::sleep(Duration::from_millis(2));
+            Ok(())
+        });
         Self {
-            terminal: terminal.to_owned(),
-            session: session.map(str::to_owned),
-            ..Self::default()
+            space: StrictSpace::new(mux, EVERY_LISTING, Takes::nothing()),
         }
     }
 
-    fn answer(&self, args: &[&str]) -> Result<namedrop::HerdrCommandOutput, String> {
-        let stdout = match (args.first(), args.get(1)) {
-            (Some(&"worktree"), Some(&"list")) => {
-                r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"w44"}]}}"#
-                    .to_owned()
-            }
-            (Some(&"pane"), Some(&"list")) if self.closed => {
-                r#"{"result":{"panes":[]}}"#.to_owned()
-            }
-            (Some(&"pane"), Some(&"list")) => {
-                let session = self
-                    .session
-                    .as_ref()
-                    .map(|value| format!(r#""agent_session":{{"value":"{value}"}},"#))
-                    .unwrap_or_default();
-                format!(
-                    r#"{{"result":{{"panes":[{{"pane_id":"p1","terminal_id":"{}","tab_id":"tab1","workspace_id":"w44","agent":"codex",{session}"agent_status":"working"}}]}}}}"#,
-                    self.terminal
-                )
-            }
-            _ => "{}".to_owned(),
-        };
-        Ok(namedrop::HerdrCommandOutput { stdout })
-    }
-
+    /// The timeout each bounded Herdr command was handed, in order.
     fn bounded_calls(&self) -> Vec<Duration> {
-        self.calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|call| match call {
-                Call::Bounded(_, timeout) => Some(*timeout),
-                Call::Unbounded(_) => None,
-            })
+        self.space
+            .budgeted_reads()
+            .into_iter()
+            .flat_map(|(_, budgets)| budgets)
+            .map(|budget| budget.timeout)
             .collect()
     }
 
+    /// Reads made with no budget at all.
     fn unbounded_calls(&self) -> usize {
-        self.calls
-            .lock()
-            .unwrap()
+        self.space
+            .budgeted_reads()
             .iter()
-            .filter(|call| matches!(call, Call::Unbounded(_)))
+            .filter(|(_, budgets)| budgets.is_empty())
             .count()
-    }
-}
-
-impl namedrop::HerdrCommandExecutor for FakeHerdr {
-    fn execute(&self, args: &[&str]) -> Result<namedrop::HerdrCommandOutput, String> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(Call::Unbounded(args.join(" ")));
-        self.answer(args)
-    }
-
-    fn execute_bounded(
-        &self,
-        args: &[&str],
-        timeout: Duration,
-        cancelled: &AtomicBool,
-        _max_output_bytes: usize,
-    ) -> Result<namedrop::HerdrCommandOutput, String> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(Call::Bounded(args.join(" "), timeout));
-        if cancelled.load(Ordering::SeqCst) {
-            return Err("Herdr read cancelled".to_owned());
-        }
-        self.answer(args)
     }
 }
 
@@ -1356,7 +1328,7 @@ fn check(herdr: &FakeHerdr, session: Option<&str>, cancelled: &AtomicBool) -> Id
         workspace_id: Some("w44"),
         current_pane_id: Some("p1"),
         session_socket_id: "socket",
-        mux: herdr,
+        mux: &*herdr.space,
         clock: &FakeClock,
         ids: &FakeIds,
     };
@@ -1371,7 +1343,12 @@ fn the_identity_recheck_reads_through_bounded_calls_only() {
     // Discovery makes two ordinary reads on Herdr's ten-second default. Both
     // must have gone through the bounded path instead, sharing one short
     // budget, or Esc would wait on them.
-    assert_eq!(herdr.unbounded_calls(), 0, "{:?}", herdr.calls.lock());
+    assert_eq!(
+        herdr.unbounded_calls(),
+        0,
+        "{:?}",
+        herdr.space.budgeted_reads()
+    );
     let timeouts = herdr.bounded_calls();
     assert_eq!(timeouts.len(), 2, "{timeouts:?}");
     assert!(
@@ -1379,7 +1356,10 @@ fn the_identity_recheck_reads_through_bounded_calls_only() {
         "{timeouts:?}"
     );
     // Shared, not per call: the second read gets what the first left.
-    assert!(timeouts[1] < timeouts[0], "{timeouts:?}");
+    assert!(
+        timeouts[1] + Duration::from_millis(1) < timeouts[0],
+        "{timeouts:?}"
+    );
 }
 
 #[test]
@@ -1423,10 +1403,7 @@ fn the_identity_recheck_separates_a_real_change_from_a_failed_check() {
     let never = FakeHerdr::new("t1", None);
     assert_eq!(check(&never, None, &cancelled), Identity::Same);
     // A closed pane is a confirmed change, not a failed check.
-    let closed = FakeHerdr {
-        closed: true,
-        ..FakeHerdr::new("t1", Some("s1"))
-    };
+    let closed = FakeHerdr::closed("t1", Some("s1"));
     assert!(matches!(
         check(&closed, Some("s1"), &cancelled),
         Identity::Changed(_)

@@ -1,11 +1,15 @@
 //! Persona persistence, lifecycle, and validation, exercised through the public
 //! lifecycle operations and the CLI the user actually types.
+#![cfg(feature = "test-support")]
 #[path = "support/cleanup.rs"]
 mod cleanup;
 
 use namedrop::{
-    Clock, HerdrCommandExecutor, HerdrCommandOutput, LifecycleRuntime, ProcessIds, StateNamespace,
-    StateStore, execute_lifecycle_operation,
+    Clock, LifecycleRuntime, ProcessIds, StateNamespace, StateStore, execute_lifecycle_operation,
+    mux::{
+        Effect,
+        fake::{EVERY_LISTING, FakeMux, Read, StrictSpace, Takes},
+    },
 };
 use serde_json::{Value, json};
 use std::{
@@ -40,32 +44,42 @@ impl Drop for TestDirectory {
 }
 
 /// One agent pane and one shell pane, so a persona can be refused for a named
-/// terminal and an agent name can be rebound without leaving the space.
-#[derive(Clone, Copy)]
-struct Host;
-impl HerdrCommandExecutor for Host {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let value = match args {
-            ["workspace", "list"] => {
-                json!({"result":{"workspaces":[{"workspace_id":"w1"}]}})
-            }
-            ["worktree", "list", ..] => {
-                json!({"result":{"worktrees":[{"path":"/repo","open_workspace_id":"w1"}]}})
-            }
-            ["pane", "list", ..] => json!({"result":{"panes":[
-                {"pane_id":"p1","terminal_id":"t1","tab_id":"tab1","workspace_id":"w1",
-                 "agent":"codex","agent_session":{"value":"s1"},"agent_status":"idle"},
-                {"pane_id":"p2","terminal_id":"t2","tab_id":"tab2","workspace_id":"w1",
-                 "agent_status":"unknown"}
-            ]}}),
-            ["tab", "get", ..] => json!({"result":{"label":"Main"}}),
-            ["pane", "report-metadata", ..] | ["tab", "rename", ..] => json!({}),
-            _ => return Err(format!("unexpected command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput {
-            stdout: value.to_string(),
-        })
-    }
+/// terminal and an agent name can be rebound without leaving the space. It
+/// answers every listing of `w1`, which holds `/repo`, and every tab label as
+/// `Main`, even after a rename, as the old fake did. It takes identity and
+/// badge metadata and tab renames, and no input.
+fn host() -> StrictSpace {
+    let mux = FakeMux::world()
+        .endpoint("socket")
+        .space("w1")
+        .checkout("/repo")
+        .unstamped()
+        .pane("p1")
+        .terminal("t1")
+        .tab("tab1")
+        .codex()
+        .session("s1")
+        .idle()
+        .pane("p2")
+        .terminal("t2")
+        .tab("tab2")
+        .state(namedrop::mux::AgentState::parse("unknown"))
+        .tab_label("tab1", "Main")
+        .tab_label("tab2", "Main")
+        .build();
+    mux.on_read(|mux, read| {
+        if let Read::TabLabel(tab) = read {
+            mux.set_tab_label(tab.as_str(), Some("Main"));
+        }
+        Ok(())
+    });
+    let takes = Takes::nothing().effect(|effect| {
+        matches!(
+            effect,
+            Effect::Identify { .. } | Effect::Badges { .. } | Effect::RenameTab { .. }
+        )
+    });
+    StrictSpace::new(mux, EVERY_LISTING, takes)
 }
 
 #[derive(Clone, Copy)]
@@ -96,6 +110,7 @@ fn saved_persona(state: &Path, address_id: &str) -> Option<String> {
 
 #[test]
 fn a_persona_survives_renaming_rebinding_and_restart_until_it_is_cleared() {
+    let host = host();
     let directory = TestDirectory::new();
     let ids = ProcessIds::default();
     let agent = LifecycleRuntime {
@@ -106,7 +121,7 @@ fn a_persona_survives_renaming_rebinding_and_restart_until_it_is_cleared() {
         workspace_id: Some("w1"),
         current_pane_id: Some("p1"),
         session_socket_id: "socket",
-        mux: &Host,
+        mux: &*host,
         clock: &Time,
         ids: &ids,
     };
@@ -172,6 +187,7 @@ fn a_persona_survives_renaming_rebinding_and_restart_until_it_is_cleared() {
 
 #[test]
 fn persona_input_is_bounded_control_safe_and_never_clears_by_accident() {
+    let host = host();
     let directory = TestDirectory::new();
     let ids = ProcessIds::default();
     let pane = |pane_id| LifecycleRuntime {
@@ -182,7 +198,7 @@ fn persona_input_is_bounded_control_safe_and_never_clears_by_accident() {
         workspace_id: Some("w1"),
         current_pane_id: Some(pane_id),
         session_socket_id: "socket",
-        mux: &Host,
+        mux: &*host,
         clock: &Time,
         ids: &ids,
     };
@@ -293,6 +309,7 @@ fn persona_input_is_bounded_control_safe_and_never_clears_by_accident() {
 
 #[test]
 fn upgrading_keeps_custom_descriptions_and_starts_native_names_generic() {
+    let host = host();
     let directory = TestDirectory::new();
     let ids = ProcessIds::default();
     let runtime = LifecycleRuntime {
@@ -303,7 +320,7 @@ fn upgrading_keeps_custom_descriptions_and_starts_native_names_generic() {
         workspace_id: Some("w1"),
         current_pane_id: Some("p1"),
         session_socket_id: "socket",
-        mux: &Host,
+        mux: &*host,
         clock: &Time,
         ids: &ids,
     };

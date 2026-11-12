@@ -21,10 +21,10 @@
 //!   answer, and an ambiguous submission is uncertain rather than undelivered.
 
 use crate::{
-    AgentRuntime, Clock, DeliveryState, DiscoveredPane, DiscoveredWorktree, HerdrCommandExecutor,
-    IdGenerator, LifecycleRuntime, PaneAddressRecord, StateStore, discover_worktree,
+    AgentRuntime, Clock, DeliveryState, DiscoveredPane, DiscoveredWorktree, IdGenerator,
+    LifecycleRuntime, PaneAddressRecord, StateStore, discover_worktree,
     discover_worktree_for_workspace,
-    mux::{Budget, MuxRead, PaneId, ScreenRequest, Style, Wrap},
+    mux::{Allowance, Budget, MuxRead, PaneId, ScreenRequest, Style, Wrap},
 };
 use serde_json::{Value, json};
 use std::{
@@ -101,7 +101,7 @@ pub fn collect_agent_status<M, C, I>(
     cancelled: &AtomicBool,
 ) -> Result<Value, String>
 where
-    M: crate::mux::Mux + HerdrCommandExecutor,
+    M: crate::mux::Mux,
     C: Clock + Sync,
     I: IdGenerator,
 {
@@ -113,16 +113,19 @@ where
     };
     // Discovery, including the closing identity check, may use everything
     // that is left: it is the one read the snapshot cannot do without.
-    let lists = crate::mux::herdr::bounded(runtime.mux, cancelled, || {
-        Ok(Budget {
-            timeout: collection.remaining()?,
-            max_output_bytes: MAX_LIST_OUTPUT_BYTES,
-        })
-    });
+    let lists = runtime.mux.within(Allowance::each(
+        || {
+            Ok(Budget {
+                timeout: collection.remaining()?,
+                max_output_bytes: MAX_LIST_OUTPUT_BYTES,
+            })
+        },
+        cancelled,
+    ));
     let origin_pane_id = runtime
         .current_pane_id
         .ok_or("The agent status panel requires its invoking pane")?;
-    let discovered = discover(runtime, &lists)?;
+    let discovered = discover(runtime, &*lists)?;
     let origin = bound_origin(
         &discovered,
         origin_pane_id,
@@ -157,7 +160,7 @@ where
 
     // Identities are re-read after the excerpts, so every pane in the snapshot
     // is one whose space, terminal and session held for the whole collection.
-    let verified = discover(runtime, &lists).map_err(|error| {
+    let verified = discover(runtime, &*lists).map_err(|error| {
         format!("This space could not be re-checked before showing the panel: {error}")
     })?;
     if verified.workspace_id != discovered.workspace_id {
@@ -202,7 +205,7 @@ where
 
 fn discover<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
-    reads: &impl MuxRead,
+    reads: &(impl MuxRead + ?Sized),
 ) -> Result<DiscoveredWorktree, String> {
     match runtime.workspace_id {
         Some(workspace_id) => discover_worktree_for_workspace(reads, workspace_id),
@@ -588,15 +591,14 @@ fn wait_first_order<'a>(
 /// the excerpt cap and the remaining budget allow. Each row carries the exact
 /// identity its excerpt was read under, which is what [`verified_rows`] checks
 /// afterwards.
-fn pane_rows<E, C>(
-    herdr: &E,
+fn pane_rows<C>(
+    mux: &impl MuxRead,
     ordered: &[&DiscoveredPane],
     addresses: &[PaneAddressRecord],
     reads: &Collection<'_, C>,
     warnings: &mut Vec<String>,
 ) -> Vec<Value>
 where
-    E: HerdrCommandExecutor + Sync,
     C: Clock,
 {
     let listed = ordered.len().min(MAX_PANE_ROWS);
@@ -608,7 +610,7 @@ where
         if index < MAX_EXCERPT_PANES {
             match reads.remaining_before_verification() {
                 Ok(timeout) => {
-                    let budget = || {
+                    let budget = move || {
                         Ok(Budget {
                             timeout,
                             max_output_bytes: MAX_EXCERPT_OUTPUT_BYTES,
@@ -619,7 +621,8 @@ where
                         wrap: Wrap::Joined,
                         style: Style::Plain,
                     };
-                    match crate::mux::herdr::bounded(herdr, reads.cancelled, budget)
+                    match mux
+                        .within(Allowance::each(budget, reads.cancelled))
                         .screen(&PaneId::new(pane.pane_id.as_str()), request)
                     {
                         Ok(screen) => excerpt = excerpt_text(&screen.text),

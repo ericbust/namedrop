@@ -699,7 +699,6 @@ mod tests {
         io::BufRead,
         os::unix::fs::PermissionsExt,
         process::{Child, Command, Stdio},
-        sync::Mutex,
     };
 
     #[test]
@@ -1211,12 +1210,20 @@ mod tests {
         );
     }
 
-    struct FakeInput(Mutex<Vec<String>>);
-    impl crate::HerdrCommandExecutor for FakeInput {
-        fn execute(&self, args: &[&str]) -> Result<crate::HerdrCommandOutput, String> {
-            self.0.lock().unwrap().push(args.join(" "));
-            Err("ambiguous transport failure".into())
-        }
+    /// Takes input to `pane` only, and answers every input with an ambiguous
+    /// transport failure, as the old fake answered every command.
+    fn failing_input() -> crate::mux::fake::StrictSpace {
+        let mux = crate::mux::fake::FakeMux::world()
+            .space("space")
+            .pane("pane")
+            .build();
+        mux.answer(
+            "pane",
+            InputOutcome::Ambiguous("ambiguous transport failure".into()),
+        );
+        let takes =
+            crate::mux::fake::Takes::nothing().input(|attempt| attempt.pane.as_str() == "pane");
+        crate::mux::fake::StrictSpace::new(mux, &[], takes)
     }
     fn delivery() -> InputOwner {
         InputOwner::delivery(
@@ -1234,12 +1241,12 @@ mod tests {
         assert_eq!(gate.ownership(&delivery()), MarkerOwnership::LegacyAbsent);
         gate.record(&delivery()).unwrap();
         assert_eq!(gate.ownership(&delivery()), MarkerOwnership::Match);
-        let input = FakeInput(Mutex::new(Vec::new()));
+        let input = failing_input();
         assert_eq!(
-            gate.run_terminal(&input, &InputOwner::Other, "doctor or registration"),
+            gate.run_terminal(&*input, &InputOwner::Other, "doctor or registration"),
             InputOutcome::Ambiguous("ambiguous transport failure".into())
         );
-        assert_eq!(input.0.lock().unwrap().len(), 1);
+        assert_eq!(input.attempts().len(), 1);
         assert!(
             gate.ownership(&delivery()) == MarkerOwnership::Reject,
             "later prompt left old interrupt ownership intact"
@@ -1253,12 +1260,12 @@ mod tests {
         fs::remove_file(&marker).unwrap();
         fs::create_dir(&marker).unwrap();
         assert!(matches!(
-            gate.run_terminal(&input, &delivery(), "forbidden"),
+            gate.run_terminal(&*input, &delivery(), "forbidden"),
             InputOutcome::Ambiguous(error)
                 if error.starts_with("could not record pane input ownership: ")
         ));
         assert_eq!(
-            input.0.lock().unwrap().len(),
+            input.attempts().len(),
             1,
             "physical input occurred after failed marker write"
         );

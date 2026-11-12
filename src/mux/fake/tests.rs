@@ -524,11 +524,12 @@ fn an_opened_popup_names_its_target_and_is_logged() {
         .unwrap()
         .facts
         .clone();
-    let popup = Effect::OpenPopup(PopupSpec {
+    let popup = Effect::OpenPopup(Box::new(PopupSpec {
         screen: PopupScreen::Doctor,
         target,
         state_dir: "/state".into(),
-    });
+        socket: "socket-a".into(),
+    }));
     assert_eq!(
         mux.apply(&popup),
         Ok(Applied::Opened(
@@ -1118,6 +1119,49 @@ fn opening_a_space_through_open_pane_panics() {
     author_and_reviewer().open_pane("workspace-2", |space| space.space("workspace-9"));
 }
 
+#[test]
+fn changing_the_space_itself_through_open_pane_panics() {
+    type Describe = fn(WorldBuilder) -> WorldBuilder;
+    let describes: [Describe; 5] = [
+        |space| space.checkout("/elsewhere").pane("pane-new"),
+        |space| space.label("renamed").pane("pane-new"),
+        |space| space.unlisted().pane("pane-new"),
+        |space| space.stamped("/elsewhere", Some("repo")).pane("pane-new"),
+        |space| space.pane("pane-new").label("late"),
+    ];
+    for describe in describes {
+        let mux = author_and_reviewer();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mux.open_pane("workspace-2", describe);
+        }))
+        .expect_err("a change to the space panics");
+        assert_eq!(
+            panicked.downcast_ref::<String>().map(String::as_str),
+            Some("open_pane describes panes only, so it cannot change workspace-2 itself")
+        );
+        assert!(mux.lock().pane(&PaneId::new("pane-new")).is_none());
+    }
+}
+
+#[test]
+fn an_omitted_session_field_reports_nothing_until_a_session_is_set_again() {
+    let mux = author_and_reviewer();
+    mux.omit_session("pane-reviewer");
+    let facts = mux.facts("pane-reviewer");
+    assert!(!facts.reports_session);
+    assert_eq!(
+        facts.agent.map(|agent| agent.session),
+        Some(SessionClaim::None)
+    );
+    mux.set_session("pane-reviewer", "session-next");
+    let facts = mux.facts("pane-reviewer");
+    assert!(facts.reports_session);
+    assert_eq!(
+        facts.agent.map(|agent| agent.session),
+        Some(SessionClaim::Reported(AgentSessionId::new("session-next")))
+    );
+}
+
 fn checkout_path(mux: &FakeMux, scope: Scope<'_>, depth: Depth) -> Option<PathBuf> {
     mux.survey(scope, depth).unwrap().spaces[0]
         .checkout
@@ -1337,8 +1381,9 @@ fn a_pane_can_report_no_session_field_at_all() {
 #[test]
 fn every_new_setter_panics_on_an_unknown_id() {
     type Call = Box<dyn Fn(&FakeMux)>;
-    let calls: [(&str, Call); 9] = [
+    let calls: [(&str, Call); 10] = [
         ("pane", Box::new(|mux| mux.hide_pane("pane-9"))),
+        ("pane", Box::new(|mux| mux.omit_session("pane-9"))),
         ("pane", Box::new(|mux| mux.show_pane("pane-9"))),
         ("pane", Box::new(|mux| mux.set_agent("pane-9", None))),
         ("pane", Box::new(|mux| mux.clear_session("pane-9"))),
@@ -1407,9 +1452,9 @@ fn a_connection_keeps_its_budget_and_cancel_flag_for_hooks_and_the_read_log() {
     assert_eq!(
         mux.budgeted_reads(),
         [
-            (Read::IntegrationRoot, Some(budget)),
-            (Read::IntegrationRoot, Some(budget)),
-            (Read::IntegrationRoot, None),
+            (Read::IntegrationRoot, vec![budget]),
+            (Read::IntegrationRoot, vec![budget]),
+            (Read::IntegrationRoot, vec![]),
         ]
     );
     assert_eq!(mux.reads().len(), 3);
@@ -1473,21 +1518,138 @@ fn a_read_within_a_budget_logs_the_tighter_of_it_and_the_connection_s() {
         timeout: Duration::from_millis(millis),
         max_output_bytes: bytes,
     };
-    mux.within(budget(2000, 65536)).integration_root().unwrap();
+    mux.within(Allowance::fixed(budget(2000, 65536)))
+        .integration_root()
+        .unwrap();
     let connected = mux
         .connect("socket-a", budget(500, 1 << 20), Arc::default())
         .unwrap();
     connected
-        .within(budget(2000, 65536))
+        .within(Allowance::fixed(budget(2000, 65536)))
+        .integration_root()
+        .unwrap();
+    connected
+        .within(Allowance::fixed(budget(2000, 65536)))
+        .within(Allowance::fixed(budget(700, 1 << 30)))
         .integration_root()
         .unwrap();
     assert_eq!(
         mux.budgeted_reads(),
         [
-            (Read::IntegrationRoot, Some(budget(2000, 65536))),
-            (Read::IntegrationRoot, Some(budget(500, 65536))),
+            (Read::IntegrationRoot, vec![budget(2000, 65536)]),
+            (Read::IntegrationRoot, vec![budget(500, 65536)]),
+            (Read::IntegrationRoot, vec![budget(500, 65536)]),
         ]
     );
+    assert_eq!(Arc::strong_count(&mux.shared), 2, "only the connection");
+}
+
+#[test]
+fn a_narrowed_read_asks_its_budget_before_each_command_it_stands_for() {
+    let mux = author_and_reviewer();
+    let left = Mutex::new(vec![300, 500, 900]);
+    let cancelled = AtomicBool::new(false);
+    let asked = mux.within(Allowance::each(
+        || {
+            let millis = left.lock().unwrap().pop().ok_or("the budget ran out")?;
+            Ok(Budget {
+                timeout: Duration::from_millis(millis),
+                max_output_bytes: 4096,
+            })
+        },
+        &cancelled,
+    ));
+    let space = SpaceId::new("workspace-1");
+    asked.survey(Scope::Space(&space), Depth::Panes).unwrap();
+    // One budget is left, and a checkout survey stands for three listings,
+    // so it fails with the budget's own words after its first command.
+    assert_eq!(
+        asked.survey(Scope::CheckoutOf(Path::new("/repo")), Depth::Panes),
+        Err(MuxError::Unavailable("the budget ran out".into()))
+    );
+    assert_eq!(
+        asked.integration_root(),
+        Err(MuxError::Unavailable("the budget ran out".into()))
+    );
+    let millis = |millis| Budget {
+        timeout: Duration::from_millis(millis),
+        max_output_bytes: 4096,
+    };
+    assert_eq!(
+        mux.budgeted_reads(),
+        [
+            (
+                Read::Survey {
+                    scope: Surveyed::Space(space.clone()),
+                    depth: Depth::Panes
+                },
+                vec![millis(900), millis(500)]
+            ),
+            (
+                Read::Survey {
+                    scope: Surveyed::CheckoutOf("/repo".into()),
+                    depth: Depth::Panes
+                },
+                vec![millis(300)]
+            ),
+            (Read::IntegrationRoot, vec![]),
+        ]
+    );
+}
+
+#[test]
+fn a_narrowed_read_stops_once_its_flag_or_a_wider_one_is_set() {
+    let mux = author_and_reviewer();
+    let ran = Arc::new(Mutex::new(0));
+    let counted = Arc::clone(&ran);
+    mux.on_read(move |_, _| {
+        *counted.lock().unwrap() += 1;
+        Ok(())
+    });
+    let budget = || {
+        Ok(Budget {
+            timeout: Duration::from_secs(1),
+            max_output_bytes: 4096,
+        })
+    };
+    let narrow = AtomicBool::new(true);
+    let cancelled = Err(MuxError::Unavailable("Herdr read cancelled".into()));
+    assert_eq!(
+        mux.within(Allowance::each(budget, &narrow))
+            .integration_root(),
+        cancelled
+    );
+    let wide = AtomicBool::new(true);
+    let open = AtomicBool::new(false);
+    assert_eq!(
+        mux.within(Allowance::each(budget, &wide))
+            .within(Allowance::each(budget, &open))
+            .integration_root(),
+        cancelled
+    );
+    let connection = Arc::new(AtomicBool::new(true));
+    let connected = mux
+        .connect("socket-a", Budget::ADAPTER_DEFAULT, Arc::clone(&connection))
+        .unwrap();
+    assert_eq!(
+        connected
+            .within(Allowance::each(budget, &open))
+            .integration_root(),
+        cancelled
+    );
+    assert_eq!(*ran.lock().unwrap(), 0, "no cancelled read is answered");
+    assert!(
+        mux.budgeted_reads()
+            .iter()
+            .all(|(_, budgets)| budgets.len() == 1),
+        "each refused command was handed its budget first"
+    );
+    assert_eq!(
+        mux.within(Allowance::each(budget, &open))
+            .integration_root(),
+        Ok(None)
+    );
+    assert_eq!(*ran.lock().unwrap(), 1);
 }
 
 #[test]

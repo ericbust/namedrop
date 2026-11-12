@@ -1,6 +1,6 @@
 use super::{
-    Applied, Budget, Depth, Effect, Endpoint, InputOutcome, PaneId, PaneProcess, Scope, Screen,
-    ScreenRequest, Survey, TabId,
+    Allowance, Applied, Budget, Depth, Effect, Endpoint, InputOutcome, PaneId, PaneProcess, Scope,
+    Screen, ScreenRequest, Survey, TabId,
 };
 pub use crate::pane_effects::PaneInput;
 use std::{
@@ -46,10 +46,11 @@ pub trait MuxRead: Send + Sync {
     fn process(&self, pane: &PaneId) -> Result<PaneProcess, MuxError>;
     fn tab_label(&self, tab: &TabId) -> Result<Option<String>, MuxError>;
     fn integration_root(&self) -> Result<Option<PathBuf>, MuxError>;
-    /// The same connection with each command held to `budget` as well as
-    /// to the connection's own, as a connector would make it. A read that
-    /// must answer fast, such as health's integration root, reads through it.
-    fn within(&self, budget: Budget) -> Box<dyn MuxRead + '_>;
+    /// The same connection with each command held to `allowance` as well as
+    /// to the connection's own budget, as a connector would make it. A read
+    /// that must answer fast, such as health's integration root or the agent
+    /// status panel's, reads through it.
+    fn within<'a>(&'a self, allowance: Allowance<'a>) -> Box<dyn MuxRead + 'a>;
 }
 
 pub trait MuxAct: MuxRead {
@@ -95,8 +96,8 @@ impl MuxRead for Arc<dyn Mux> {
         (**self).integration_root()
     }
 
-    fn within(&self, budget: Budget) -> Box<dyn MuxRead + '_> {
-        (**self).within(budget)
+    fn within<'a>(&'a self, allowance: Allowance<'a>) -> Box<dyn MuxRead + 'a> {
+        (**self).within(allowance)
     }
 }
 

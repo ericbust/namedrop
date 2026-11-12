@@ -10,7 +10,11 @@ use crate::{
     },
 };
 use serde_json::json;
-use std::{path::Path, sync::Mutex, time::Duration};
+use std::{
+    path::Path,
+    sync::{Mutex, atomic::AtomicBool},
+    time::Duration,
+};
 
 type Reply = Box<dyn Fn(&[&str]) -> Result<String, String> + Send + Sync>;
 
@@ -529,16 +533,18 @@ fn each_effect_runs_today_s_command() {
             body: "Sent to @b".into(),
             sound: false,
         },
-        Effect::OpenPopup(PopupSpec {
+        Effect::OpenPopup(Box::new(PopupSpec {
             screen: PopupScreen::Status,
             target: target(),
             state_dir: "/state".into(),
-        }),
-        Effect::OpenPopup(PopupSpec {
+            socket: "socket-a".into(),
+        })),
+        Effect::OpenPopup(Box::new(PopupSpec {
             screen: PopupScreen::Tour,
             target: target(),
             state_dir: "/state".into(),
-        }),
+            socket: "socket-a".into(),
+        })),
         Effect::ReloadKeybindings,
     ] {
         let applied = if matches!(effect, Effect::OpenPopup(_)) {
@@ -583,11 +589,12 @@ fn each_effect_runs_today_s_command() {
 }
 
 fn tour_popup() -> Effect {
-    Effect::OpenPopup(PopupSpec {
+    Effect::OpenPopup(Box::new(PopupSpec {
         screen: PopupScreen::Tour,
         target: target(),
         state_dir: "/state".into(),
-    })
+        socket: "/tmp/herdr.sock".into(),
+    }))
 }
 
 #[test]
@@ -612,21 +619,8 @@ fn a_popup_returns_herdr_s_reply_and_an_unreadable_one_is_a_protocol_error() {
     );
 }
 
-/// A legacy executor that records each command, answers `{}`, and names
-/// the endpoint it was given.
-struct Recording(Mutex<Vec<String>>, Endpoint);
-
-impl Recording {
-    fn keyed(key: &str) -> Self {
-        Self(
-            Mutex::default(),
-            Endpoint {
-                kind: MuxKind::Herdr,
-                key: key.to_owned(),
-            },
-        )
-    }
-}
+/// A legacy executor that records each command and answers `{}`.
+struct Recording(Mutex<Vec<String>>);
 
 impl HerdrCommandExecutor for Recording {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
@@ -635,38 +629,25 @@ impl HerdrCommandExecutor for Recording {
             stdout: "{}".into(),
         })
     }
-
-    fn mux_endpoint(&self) -> &Endpoint {
-        &self.1
-    }
 }
 
+/// The socket comes from the popup's spec, which `lifecycle::open_popup`
+/// fills from the runtime's `session_socket_id`, never from the endpoint of
+/// the connection that opens it.
 #[test]
-fn a_popup_names_the_socket_its_legacy_executor_was_keyed_with() {
-    for key in ["/tmp/herdr.sock", ""] {
-        let legacy = Recording::keyed(key);
-        assert_eq!(legacy.endpoint().key, key);
-        legacy.apply(&tour_popup()).unwrap();
-        assert_eq!(
-            *legacy.0.lock().unwrap(),
-            [format!(
-                "plugin pane open --plugin namedrop --entrypoint tour --placement popup --width 72 \
-                 --height 24 --env NAMEDROP_TARGET_WORKSPACE=w1 --env NAMEDROP_TARGET_PANE=p1 \
-                 --env NAMEDROP_TARGET_TERMINAL=t1 --env NAMEDROP_TARGET_SESSION=s1 \
-                 --env HERDR_PLUGIN_STATE_DIR=/state --env HERDR_SOCKET_PATH={key} --focus"
-            )]
-        );
-    }
-}
-
-#[test]
-fn a_keyed_process_herdr_names_its_session_socket_and_an_unkeyed_one_names_none() {
-    assert_eq!(ProcessHerdr::default().endpoint().key, "");
-    let keyed = ProcessHerdr::default()
-        .with_socket(None)
-        .keyed("/run/herdr.sock");
-    assert_eq!(keyed.endpoint().key, "/run/herdr.sock");
-    assert_eq!(keyed.endpoint().kind, MuxKind::Herdr);
+fn a_popup_names_the_socket_its_spec_carries_whatever_the_connection() {
+    let legacy = Recording(Mutex::default());
+    assert_eq!(legacy.endpoint().key, "");
+    legacy.apply(&tour_popup()).unwrap();
+    let scripted = herdr(|_| Ok("{}".into()));
+    assert_eq!(scripted.endpoint().key, "socket-a");
+    scripted.apply(&tour_popup()).unwrap();
+    let argv = "plugin pane open --plugin namedrop --entrypoint tour --placement popup --width 72 \
+                --height 24 --env NAMEDROP_TARGET_WORKSPACE=w1 --env NAMEDROP_TARGET_PANE=p1 \
+                --env NAMEDROP_TARGET_TERMINAL=t1 --env NAMEDROP_TARGET_SESSION=s1 \
+                --env HERDR_PLUGIN_STATE_DIR=/state --env HERDR_SOCKET_PATH=/tmp/herdr.sock --focus";
+    assert_eq!(*legacy.0.lock().unwrap(), [argv]);
+    assert_eq!(calls(&scripted), [argv]);
 }
 
 #[test]
@@ -766,6 +747,184 @@ fn herdr_error_codes_decide_the_input_outcome() {
     ));
 }
 
+#[test]
+fn timeout_and_unknown_prompt_results_never_authorize_an_automatic_resend() {
+    for error in [
+        "Herdr command timed out after 10000 ms",
+        "connection closed after writing prompt",
+        r#"{"error":{"code":"connection_refused"}}"#,
+        r#"{"error":{"code":"unexpected"}}"#,
+        // Both can only be reported after Herdr accepted the submission, so
+        // the recipient may already have the prompt.
+        r#"{"error":{"code":"agent_prompt_stalled"}}"#,
+        r#"{"error":{"code":"timeout"}}"#,
+    ] {
+        assert_eq!(
+            input_failure(error.to_owned()),
+            InputOutcome::Ambiguous(error.to_owned()),
+            "{error}"
+        );
+    }
+    // Herdr rejects both before any input is sent. The `agent_blocked` payload
+    // is the verbatim stderr of `herdr agent prompt` 0.8.2 against a blocked
+    // recipient, exit code 1.
+    for error in [
+        r#"{"error":{"code":"agent_busy"}}"#,
+        r#"{"error":{"code":"agent_blocked","message":"agent w1:p1 is blocked and requires interactive input"},"id":"cli:agent:prompt"}"#,
+    ] {
+        assert_eq!(
+            input_failure(error.to_owned()),
+            InputOutcome::Declined(Retry::OnEvent, error.to_owned()),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn temporary_prompt_failures_only_request_polling_without_a_guaranteed_event() {
+    for (codes, expected) in [
+        (
+            &["server_busy", "conflict", "agent_not_ready"][..],
+            Retry::AfterDelay,
+        ),
+        (
+            &[
+                "agent_busy",
+                "agent_blocked",
+                "agent_not_found",
+                "pane_not_found",
+            ][..],
+            Retry::OnEvent,
+        ),
+    ] {
+        for code in codes {
+            let error = serde_json::json!({"error": {"code": code}}).to_string();
+            assert_eq!(
+                input_failure(error.clone()),
+                InputOutcome::Declined(expected, error),
+                "{code}"
+            );
+        }
+    }
+    let refused = serde_json::json!({"error": {"code": "invalid_input"}}).to_string();
+    assert_eq!(
+        input_failure(refused.clone()),
+        InputOutcome::Refused(refused)
+    );
+}
+
+/// Herdr as `tests/inherited_pane.rs` saw it through the executor port: the
+/// pane's shell is whatever pid the test says it is. These tests moved here
+/// because each pins `pane process-info`'s argv and reply.
+fn shell(pid: Option<u64>) -> HerdrMux<Scripted> {
+    herdr(move |args| {
+        assert_eq!(args, ["pane", "process-info", "--pane", "wH:p1"]);
+        let shell_pid = pid.ok_or_else(|| "pane not found".to_owned())?;
+        Ok(format!(
+            r#"{{"result":{{"process_info":{{"pane_id":"wH:p1","shell_pid":{shell_pid},"foreground_process_group_id":{shell_pid},"foreground_processes":[]}}}}}}"#
+        ))
+    })
+}
+
+/// Herdr names the pane's shell but no foreground process group.
+fn shell_without_group(pid: u64) -> HerdrMux<Scripted> {
+    herdr(move |args| {
+        assert_eq!(args, ["pane", "process-info", "--pane", "wH:p1"]);
+        Ok(format!(
+            r#"{{"result":{{"process_info":{{"pane_id":"wH:p1","shell_pid":{pid},"foreground_process_group_id":null,"foreground_processes":[]}}}}}}"#
+        ))
+    })
+}
+
+/// A live process that is certainly not an ancestor of this one.
+fn unrelated_process() -> std::process::Child {
+    std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap()
+}
+
+/// Herdr's own `pane list` output, captured from a live pane: many more
+/// fields than the fixture's, with the session under `agent_session`.
+fn live_pane_list() -> HerdrMux<Scripted> {
+    herdr(|args| {
+        match args {
+        ["pane", "process-info", ..] => Ok(r#"{"id":"cli:pane:process_info","result":{"process_info":{"foreground_process_group_id":1147346,"foreground_processes":[{"argv":["claude"],"cmdline":"claude","cwd":"/repo","name":"claude","pid":1147346}],"pane_id":"wG:p21","shell_pid":4000000000},"type":"pane_process_info"}}"#.to_owned()),
+        ["pane", "list"] => Ok(r#"{"id":"cli:pane:list","result":{"panes":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"sess-21"},"agent_status":"working","cwd":"/repo","focused":false,"foreground_cwd":"/repo","pane_id":"wG:p21","revision":20,"scroll":{"max_offset_from_bottom":0,"offset_from_bottom":0,"viewport_rows":40},"state_labels":{"working":"@a working"},"tab_id":"wG:tP","terminal_id":"term_1","terminal_title":"t","title":"@a","tokens":{"x":"0"},"workspace_id":"wG"},{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"sess-1"},"agent_status":"idle","cwd":"/repo","pane_id":"wG:p1","tab_id":"wG:tP","terminal_id":"term_2","workspace_id":"wG"},{"agent_status":"unknown","pane_id":"w9:p1","tab_id":"w9:t1","terminal_id":"term_3","workspace_id":"w9"}],"type":"pane_list"}}"#.to_owned()),
+        other => Err(format!("unexpected call {other:?}")),
+    }
+    })
+}
+
+#[test]
+fn an_inherited_pane_whose_shell_is_an_ancestor_is_accepted() {
+    let parent = u64::from(std::os::unix::process::parent_id());
+    assert_eq!(
+        crate::verify_inherited_pane(&shell(Some(parent)), "wH:p1", &[]),
+        Ok(())
+    );
+}
+
+#[test]
+fn an_inherited_pane_whose_shell_is_not_an_ancestor_is_refused_with_the_remedy() {
+    let mut other = unrelated_process();
+    let error = crate::verify_inherited_pane(&shell(Some(u64::from(other.id()))), "wH:p1", &[])
+        .unwrap_err();
+    other.kill().unwrap();
+    other.wait().unwrap();
+    assert!(error.contains("HERDR_PANE_ID=wH:p1"), "{error}");
+    assert!(error.contains("not running inside pane wH:p1"), "{error}");
+    assert!(error.contains("--herdr-pane"), "{error}");
+}
+
+#[test]
+fn an_inherited_pane_herdr_cannot_describe_is_refused_with_herdr_s_own_reason() {
+    let error = crate::verify_inherited_pane(&shell(None), "wH:p1", &[]).unwrap_err();
+    assert!(error.contains("HERDR_PANE_ID=wH:p1"), "{error}");
+    assert!(error.contains("pane not found"), "{error}");
+    assert!(error.contains("--herdr-pane"), "{error}");
+}
+
+#[test]
+fn an_inherited_pane_herdr_names_no_foreground_group_for_is_refused() {
+    let parent = u64::from(std::os::unix::process::parent_id());
+    let error =
+        crate::verify_inherited_pane(&shell_without_group(parent), "wH:p1", &[]).unwrap_err();
+    assert!(
+        error.contains("Herdr reports no shell for pane wH:p1"),
+        "{error}"
+    );
+    assert!(error.contains("--herdr-pane"), "{error}");
+}
+
+#[test]
+fn the_live_pane_list_shape_vouches_for_the_session_s_own_pane_only() {
+    assert_eq!(
+        crate::verify_inherited_pane(&live_pane_list(), "wG:p21", &["sess-21"]),
+        Ok(())
+    );
+    let error = crate::verify_inherited_pane(&live_pane_list(), "wG:p21", &["sess-1"]).unwrap_err();
+    assert!(error.contains("--herdr-pane"), "{error}");
+    let error = crate::verify_inherited_pane(&live_pane_list(), "wG:p21", &["nobody"]).unwrap_err();
+    assert!(error.contains("--herdr-pane"), "{error}");
+}
+
+#[test]
+fn a_refusal_says_how_many_agent_sessions_it_checked() {
+    let none = crate::verify_inherited_pane(&live_pane_list(), "wG:p21", &[]).unwrap_err();
+    assert!(
+        none.contains("There is no CODEX_SESSION_ID or CLAUDE_CODE_SESSION_ID in the environment"),
+        "{none}"
+    );
+    let elsewhere =
+        crate::verify_inherited_pane(&live_pane_list(), "wG:p21", &["sess-1"]).unwrap_err();
+    assert!(
+        elsewhere
+            .contains("None of the 1 agent session ID(s) in the environment runs in pane wG:p21"),
+        "{elsewhere}"
+    );
+}
+
 /// A legacy executor with its own classification, as several test fakes have.
 struct Legacy {
     prompts: Mutex<Vec<String>>,
@@ -813,9 +972,31 @@ fn every_legacy_executor_is_a_mux_that_keeps_its_own_classification() {
     assert_eq!(*legacy.prompts.lock().unwrap(), ["hello"]);
 }
 
-/// Records the budget each bounded read was handed.
+/// Records each bounded read: its command, its budget, and the flag that
+/// cancels it, by address, so a test can tell whose flag a read watched.
 struct Budgeted {
-    reads: Mutex<Vec<(String, Duration, usize, bool)>>,
+    reads: Mutex<Vec<(String, Duration, usize, usize)>>,
+}
+
+impl Budgeted {
+    fn new() -> Self {
+        Self {
+            reads: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn commands(&self) -> Vec<(String, Duration, usize)> {
+        self.reads
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(args, timeout, bytes, _)| (args.clone(), *timeout, *bytes))
+            .collect()
+    }
+}
+
+fn address(flag: &AtomicBool) -> usize {
+    std::ptr::from_ref(flag) as usize
 }
 
 impl HerdrCommandExecutor for Budgeted {
@@ -830,11 +1011,12 @@ impl HerdrCommandExecutor for Budgeted {
         cancelled: &AtomicBool,
         max_output_bytes: usize,
     ) -> Result<HerdrCommandOutput, String> {
-        let cancelled = cancelled.load(std::sync::atomic::Ordering::Relaxed);
-        self.reads
-            .lock()
-            .unwrap()
-            .push((args.join(" "), timeout, max_output_bytes, cancelled));
+        self.reads.lock().unwrap().push((
+            args.join(" "),
+            timeout,
+            max_output_bytes,
+            address(cancelled),
+        ));
         Ok(HerdrCommandOutput {
             stdout: json!({"result": {"label": "build"}}).to_string(),
         })
@@ -842,19 +1024,20 @@ impl HerdrCommandExecutor for Budgeted {
 }
 
 #[test]
-fn a_bounded_read_asks_its_budget_before_every_command() {
-    let executor = Budgeted {
-        reads: Mutex::new(Vec::new()),
-    };
-    let cancelled = AtomicBool::new(true);
+fn a_read_within_a_shrinking_budget_asks_it_before_every_command_and_watches_the_caller_s_flag() {
+    let executor = Budgeted::new();
+    let cancelled = AtomicBool::new(false);
     let left = Mutex::new(vec![Duration::from_millis(700), Duration::from_millis(900)]);
-    let reads = bounded(&executor, &cancelled, || {
-        let timeout = left.lock().unwrap().pop().ok_or("the budget ran out")?;
-        Ok(Budget {
-            timeout,
-            max_output_bytes: 4096,
-        })
-    });
+    let reads = executor.within(Allowance::each(
+        || {
+            let timeout = left.lock().unwrap().pop().ok_or("the budget ran out")?;
+            Ok(Budget {
+                timeout,
+                max_output_bytes: 4096,
+            })
+        },
+        &cancelled,
+    ));
     let tab = TabId::new("tab1");
     assert_eq!(reads.tab_label(&tab).unwrap().as_deref(), Some("build"));
     assert_eq!(reads.tab_label(&tab).unwrap().as_deref(), Some("build"));
@@ -868,63 +1051,83 @@ fn a_bounded_read_asks_its_budget_before_every_command() {
             "tab get tab1".to_owned(),
             Duration::from_millis(timeout),
             4096,
-            true,
+            address(&cancelled),
         )
     };
-    assert_eq!(*executor.reads.lock().unwrap(), [read(900), read(700)]);
+    assert_eq!(
+        *executor.reads.lock().unwrap(),
+        [read(900), read(700)],
+        "what `bounded` ran for the agent status panel and its identity recheck"
+    );
 }
 
 #[test]
 fn a_read_within_a_budget_runs_bounded_and_uncancelled_through_a_legacy_executor() {
-    let executor = Budgeted {
-        reads: Mutex::new(Vec::new()),
-    };
+    let executor = Budgeted::new();
     let budget = Budget {
         timeout: Duration::from_secs(2),
         max_output_bytes: 64 * 1024,
     };
     let tab = TabId::new("tab1");
     assert_eq!(
-        executor.within(budget).tab_label(&tab).unwrap().as_deref(),
+        executor
+            .within(Allowance::fixed(budget))
+            .tab_label(&tab)
+            .unwrap()
+            .as_deref(),
         Some("build")
     );
     assert_eq!(
-        *executor.reads.lock().unwrap(),
-        [(
-            "tab get tab1".to_owned(),
-            Duration::from_secs(2),
-            64 * 1024,
-            false
-        )],
-        "what health's plugin list ran through `bounded` before"
+        executor.commands(),
+        [("tab get tab1".to_owned(), Duration::from_secs(2), 64 * 1024)]
     );
 }
 
 #[test]
-fn a_budget_within_a_budget_keeps_the_tighter_limit_of_each() {
-    let executor = Budgeted {
-        reads: Mutex::new(Vec::new()),
-    };
-    let cancelled = AtomicBool::new(true);
-    let reads = bounded(&executor, &cancelled, || {
-        Ok(Budget {
-            timeout: Duration::from_millis(700),
-            max_output_bytes: 1 << 20,
-        })
-    });
+fn health_reads_the_integration_root_within_two_seconds_and_64_kib() {
+    let executor = Budgeted::new();
+    assert_eq!(crate::health::registered_plugin_root(&executor), None);
+    assert_eq!(
+        executor.commands(),
+        [(
+            "plugin list --plugin namedrop --json".to_owned(),
+            Duration::from_secs(2),
+            64 * 1024
+        )],
+        "what health's plugin list ran through `bounded` before commit 14"
+    );
+}
+
+#[test]
+fn a_budget_within_a_budget_keeps_the_tighter_limit_of_each_and_the_narrowest_flag() {
+    let executor = Budgeted::new();
+    let wide = AtomicBool::new(false);
+    let reads = executor.within(Allowance::each(
+        || {
+            Ok(Budget {
+                timeout: Duration::from_millis(700),
+                max_output_bytes: 1 << 20,
+            })
+        },
+        &wide,
+    ));
     let tab = TabId::new("tab1");
-    let inner = reads.within(Budget {
+    let inner = reads.within(Allowance::fixed(Budget {
         timeout: Duration::from_secs(2),
         max_output_bytes: 4096,
-    });
+    }));
     inner.tab_label(&tab).unwrap();
-    inner
-        .within(Budget {
-            timeout: Duration::from_millis(300),
-            max_output_bytes: 1 << 30,
-        })
-        .tab_label(&tab)
-        .unwrap();
+    let narrow = AtomicBool::new(false);
+    let narrowest = inner.within(Allowance::each(
+        || {
+            Ok(Budget {
+                timeout: Duration::from_millis(300),
+                max_output_bytes: 1 << 30,
+            })
+        },
+        &narrow,
+    ));
+    narrowest.tab_label(&tab).unwrap();
     assert_eq!(
         *executor.reads.lock().unwrap(),
         [
@@ -932,26 +1135,46 @@ fn a_budget_within_a_budget_keeps_the_tighter_limit_of_each() {
                 "tab get tab1".to_owned(),
                 Duration::from_millis(700),
                 4096,
-                true
+                address(&wide)
             ),
             (
                 "tab get tab1".to_owned(),
                 Duration::from_millis(300),
                 4096,
-                true
+                address(&narrow)
             ),
         ]
     );
+    // A command watches one flag, so a wider flag that is already set
+    // refuses the command before it starts.
+    wide.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        narrowest.tab_label(&tab),
+        Err(MuxError::Unavailable("Herdr read cancelled".to_owned()))
+    );
+    assert_eq!(executor.reads.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn a_scripted_transport_refuses_a_cancelled_command_before_it_starts() {
+    let mux = herdr(|_| Ok(json!({"result": {"label": "build"}}).to_string()));
+    let cancelled = AtomicBool::new(true);
+    let within = mux.within(Allowance::each(|| Ok(Budget::ADAPTER_DEFAULT), &cancelled));
+    assert_eq!(
+        within.tab_label(&TabId::new("tab1")),
+        Err(MuxError::Unavailable("Herdr read cancelled".to_owned()))
+    );
+    assert!(calls(&mux).is_empty());
 }
 
 #[test]
 fn a_scripted_connection_within_a_budget_runs_the_same_command() {
     let mux = herdr(|_| Ok(json!({"result": {"label": "build"}}).to_string()));
     let tab = TabId::new("tab1");
-    let within = mux.within(Budget {
+    let within = mux.within(Allowance::fixed(Budget {
         timeout: Duration::from_secs(2),
         max_output_bytes: 4096,
-    });
+    }));
     assert_eq!(within.tab_label(&tab).unwrap().as_deref(), Some("build"));
     assert_eq!(within.endpoint(), mux.endpoint());
     assert_eq!(calls(&mux), ["tab get tab1"]);

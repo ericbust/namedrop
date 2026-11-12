@@ -30,13 +30,6 @@ pub trait HerdrCommandExecutor {
     fn input_failure(&self, error: String) -> crate::mux::InputOutcome {
         crate::mux::InputOutcome::Ambiguous(error)
     }
-
-    /// The endpoint the bridge reports for this executor. Its key is the
-    /// `HERDR_SOCKET_PATH` a popup opened through the executor passes on. A
-    /// test fake that does not open popups keeps the empty default.
-    fn mux_endpoint(&self) -> &crate::mux::Endpoint {
-        crate::mux::herdr::legacy_endpoint()
-    }
 }
 
 pub trait Clock {

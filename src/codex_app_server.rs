@@ -246,7 +246,6 @@ fn is_server_binary(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{HerdrCommandExecutor, HerdrCommandOutput};
     use std::{
         collections::BTreeMap,
         os::unix::process::CommandExt,
@@ -553,40 +552,30 @@ mod tests {
         )));
     }
 
-    struct Herdr {
+    /// Answers `pane process-info` for each pane in `foreground`, with shell
+    /// 1, unless the pane is in `no_shell`, foreground group 2, and those
+    /// pids, and fails every other read, as the old fake did. Panes
+    /// `w1:p1` to `w1:p4` exist, so a pane the test gave no process fails as
+    /// unanswered rather than gone.
+    fn herdr(
         foreground: BTreeMap<String, Vec<u32>>,
-        /// Panes whose reply names no shell, as Herdr can report a pane.
         no_shell: Vec<&'static str>,
-        calls: std::sync::Mutex<Vec<Vec<String>>>,
-    }
-    impl HerdrCommandExecutor for Herdr {
-        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(args.iter().map(|a| (*a).to_owned()).collect());
-            match args {
-                ["pane", "process-info", "--pane", pane] => {
-                    let pids = self
-                        .foreground
-                        .get(*pane)
-                        .ok_or_else(|| "herdr is not answering".to_owned())?;
-                    let processes = pids
-                        .iter()
-                        .map(|pid| json!({"pid": pid}))
-                        .collect::<Vec<_>>();
-                    let shell = (!self.no_shell.contains(pane)).then_some(1);
-                    Ok(HerdrCommandOutput {
-                        stdout: json!({"result": {"process_info": {
-                            "shell_pid": shell, "foreground_process_group_id": 2,
-                            "foreground_processes": processes
-                        }}})
-                        .to_string(),
-                    })
-                }
-                _ => Err(format!("unexpected herdr call {args:?}")),
+    ) -> crate::mux::fake::StrictSpace {
+        let mut world = crate::mux::fake::FakeMux::world()
+            .endpoint("default")
+            .space("w1");
+        for pane in ["w1:p1", "w1:p2", "w1:p3", "w1:p4"] {
+            world = world.pane(pane);
+            if let Some(pids) = foreground.get(pane) {
+                world = world.process(crate::mux::PaneProcess {
+                    shell_pid: (!no_shell.contains(&pane)).then_some(1),
+                    foreground_group: Some(2),
+                    foreground_pids: pids.clone(),
+                    tty: None,
+                });
             }
         }
+        crate::mux::fake::StrictSpace::new(world.build(), &[], crate::mux::fake::Takes::nothing())
     }
 
     fn pane(pane_id: &str, agent: crate::AgentRuntime) -> DiscoveredPane {
@@ -607,7 +596,11 @@ mod tests {
         }
     }
 
-    fn served(root: &Root, herdr: &Herdr, panes: &[DiscoveredPane]) -> Option<ServedPanes> {
+    fn served(
+        root: &Root,
+        herdr: &crate::mux::fake::FakeMux,
+        panes: &[DiscoveredPane],
+    ) -> Option<ServedPanes> {
         let runtime = LifecycleRuntime {
             state_directory: &root.0,
             home_directory: Some(&root.0),
@@ -639,14 +632,13 @@ mod tests {
                 "pane fixtures must run directly without a shell launcher"
             );
         }
-        let herdr = Herdr {
-            foreground: BTreeMap::from([
+        let herdr = herdr(
+            BTreeMap::from([
                 ("w1:p1".to_owned(), vec![in_process.pid()]),
                 ("w1:p2".to_owned(), vec![plain.pid()]),
             ]),
-            no_shell: Vec::new(),
-            calls: Default::default(),
-        };
+            Vec::new(),
+        );
         let only_in_process = served(&root, &herdr, &[pane("w1:p1", crate::AgentRuntime::Codex)]);
         let mixed = served(
             &root,
@@ -678,11 +670,10 @@ mod tests {
         let server = Process::server(&root.codex_home());
         root.write("app-server-daemon/daemon.pid", &pid_record(server.pid()));
         let in_process = Process::spawn(Command::new("sleep").arg0("--no-daemon").arg("30"));
-        let herdr = Herdr {
-            foreground: BTreeMap::from([("w1:p1".to_owned(), vec![in_process.pid()])]),
-            no_shell: vec!["w1:p1"],
-            calls: Default::default(),
-        };
+        let herdr = herdr(
+            BTreeMap::from([("w1:p1".to_owned(), vec![in_process.pid()])]),
+            vec!["w1:p1"],
+        );
         let served = served(&root, &herdr, &[pane("w1:p1", crate::AgentRuntime::Codex)])
             .expect("a reply without a shell proves nothing, so the pane stays served");
         assert_eq!(served.pane_ids(), ["w1:p1"]);
@@ -693,11 +684,7 @@ mod tests {
         let root = Root::new();
         let server = Process::server(&root.codex_home());
         root.write("app-server-daemon/daemon.pid", &pid_record(server.pid()));
-        let herdr = Herdr {
-            foreground: BTreeMap::new(),
-            no_shell: Vec::new(),
-            calls: Default::default(),
-        };
+        let herdr = herdr(BTreeMap::new(), Vec::new());
         assert!(
             served(
                 &root,
@@ -706,24 +693,16 @@ mod tests {
             )
             .is_none()
         );
-        assert!(herdr.calls.lock().unwrap().is_empty());
+        assert!(herdr.reads().is_empty());
         assert!(served(&root, &herdr, &[pane("w1:p1", crate::AgentRuntime::Codex)]).is_some());
-        assert_eq!(
-            herdr.calls.lock().unwrap().len(),
-            1,
-            "the fake can see a call"
-        );
+        assert_eq!(herdr.reads().len(), 1, "the fake can see a call");
     }
 
     #[test]
     fn without_a_running_server_no_pane_is_served() {
         let root = Root::new();
         fs::create_dir_all(root.codex_home().join("app-server-daemon")).unwrap();
-        let herdr = Herdr {
-            foreground: BTreeMap::new(),
-            no_shell: Vec::new(),
-            calls: Default::default(),
-        };
+        let herdr = herdr(BTreeMap::new(), Vec::new());
         assert!(served(&root, &herdr, &[pane("w1:p1", crate::AgentRuntime::Codex)]).is_none());
     }
 

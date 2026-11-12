@@ -1184,11 +1184,11 @@ pub(crate) fn plan_route(
 mod tests {
     use super::*;
 
-    struct NoHerdr;
-    impl crate::HerdrCommandExecutor for NoHerdr {
-        fn execute(&self, args: &[&str]) -> Result<crate::HerdrCommandOutput, String> {
-            panic!("no Herdr command was expected: {args:?}")
-        }
+    /// Fails the test on any read, as the old fake panicked on any command.
+    fn no_herdr() -> crate::mux::fake::StrictSpace {
+        let mux = crate::mux::fake::FakeMux::world().build();
+        mux.on_read(|_, read| panic!("no Herdr command was expected: {read:?}"));
+        crate::mux::fake::StrictSpace::new(mux, &[], crate::mux::fake::Takes::nothing())
     }
 
     #[test]
@@ -1201,14 +1201,15 @@ mod tests {
             branch: None,
             panes: Vec::new(),
         };
-        let live = LiveSpaces::load(&NoHerdr, here.clone(), &[SpaceId::new("w1")]);
+        let no_herdr = no_herdr();
+        let live = LiveSpaces::load(&*no_herdr, here.clone(), &[SpaceId::new("w1")]);
         assert_eq!(live.of(&SpaceId::new("w1")), Some(&here));
         assert_eq!(
             live.of(&SpaceId::new("w2")),
             None,
             "an unread workspace is unknown"
         );
-        LiveSpaces::load(&NoHerdr, here, &[]);
+        LiveSpaces::load(&*no_herdr, here, &[]);
     }
 
     fn label(token: &str) -> WorkspaceLabel {

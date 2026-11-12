@@ -1236,8 +1236,7 @@ where
 }
 
 /// Opens `screen` for `target` and returns the multiplexer's reply. The
-/// popup reconnects to the runtime's own connection, whose endpoint names
-/// it.
+/// popup reconnects to the runtime's own `session_socket_id`.
 pub fn open_popup<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
     screen: PopupScreen,
@@ -1250,8 +1249,9 @@ where
         screen,
         target,
         state_dir: runtime.state_directory.to_owned(),
+        socket: runtime.session_socket_id.to_owned(),
     };
-    match runtime.mux.apply(&Effect::OpenPopup(popup))? {
+    match runtime.mux.apply(&Effect::OpenPopup(Box::new(popup)))? {
         Applied::Opened(reply) => Ok(reply),
         Applied::Done | Applied::Unsupported => Ok(serde_json::Value::Null),
     }
@@ -1771,7 +1771,10 @@ where
     Ok(serde_json::json!({"here": here_label, "workspaces": workspaces}))
 }
 
-pub fn discover_worktree(mux: &impl MuxRead, cwd: &Path) -> Result<DiscoveredWorktree, String> {
+pub fn discover_worktree(
+    mux: &(impl MuxRead + ?Sized),
+    cwd: &Path,
+) -> Result<DiscoveredWorktree, String> {
     surveyed(mux.survey(Scope::CheckoutOf(cwd), Depth::Panes)).map_err(|error| error.to_string())
 }
 

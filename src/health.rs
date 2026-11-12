@@ -1122,11 +1122,11 @@ fn health_issue_for_attention(source: AttentionSourceKind) -> HealthIssue {
     }
 }
 
-fn registered_plugin_root(mux: &impl crate::mux::MuxRead) -> Option<std::path::PathBuf> {
-    mux.within(crate::mux::Budget {
+pub(crate) fn registered_plugin_root(mux: &impl crate::mux::MuxRead) -> Option<std::path::PathBuf> {
+    mux.within(crate::mux::Allowance::fixed(crate::mux::Budget {
         timeout: std::time::Duration::from_secs(2),
         max_output_bytes: 64 * 1024,
-    })
+    }))
     .integration_root()
     .ok()
     .flatten()

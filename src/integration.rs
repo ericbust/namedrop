@@ -835,27 +835,29 @@ where
 
 #[test]
 fn concurrent_native_registration_completes_one_profile() {
-    use crate::{Clock, HerdrCommandExecutor, HerdrCommandOutput};
-    struct Host;
-    impl HerdrCommandExecutor for Host {
-        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-            let value = match args {
-                ["workspace", "list"] => {
-                    json!({"result":{"workspaces":[{"workspace_id":"space"}]}})
-                }
-                ["worktree", "list", ..] => {
-                    json!({"result":{"worktrees":[{"path":"/repo","open_workspace_id":"space"}]}})
-                }
-                ["pane", "list", ..] => {
-                    json!({"result":{"panes":[{"pane_id":"pane","terminal_id":"terminal","tab_id":"tab","workspace_id":"space","agent":"codex","agent_session":{"value":"session"},"agent_status":"idle"}]}})
-                }
-                _ => return Err(format!("unexpected command: {args:?}")),
-            };
-            Ok(HerdrCommandOutput {
-                stdout: value.to_string(),
-            })
-        }
-    }
+    use crate::{
+        Clock,
+        mux::fake::{EVERY_LISTING, FakeMux, StrictSpace, Takes},
+    };
+    // Every `workspace list`, `worktree list`, and `pane list` of `space`,
+    // which holds `/repo` and one idle Codex pane, and nothing else, as the
+    // old fake answered.
+    let host = StrictSpace::new(
+        FakeMux::world()
+            .endpoint("socket")
+            .space("space")
+            .checkout("/repo")
+            .unstamped()
+            .pane("pane")
+            .terminal("terminal")
+            .tab("tab")
+            .codex()
+            .session("session")
+            .idle()
+            .build(),
+        EVERY_LISTING,
+        Takes::nothing(),
+    );
     let state = std::env::temp_dir().join(format!(
         "namedrop-native-registration-{}-{}",
         std::process::id(),
@@ -915,7 +917,7 @@ fn concurrent_native_registration_completes_one_profile() {
         workspace_id: Some("space"),
         current_pane_id: Some("pane"),
         session_socket_id: "socket",
-        mux: &Host,
+        mux: &*host,
         clock: &crate::SystemClock,
         ids: &crate::ProcessIds::default(),
     };

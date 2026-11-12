@@ -5,7 +5,10 @@ mod cleanup;
 mod dispatch;
 
 use namedrop::{
-    mux::fake::{EVERY_LISTING, FakeMux, StrictSpace, Takes},
+    mux::{
+        InputOutcome,
+        fake::{EVERY_LISTING, FakeMux, StrictSpace, Takes},
+    },
     *,
 };
 use serde_json::{Value, json};
@@ -281,7 +284,9 @@ impl IdGenerator for Fixture {
     }
 }
 /// Three idle agent panes in one space holding the fixture's checkout. A
-/// prompt leaves each pane idle.
+/// prompt leaves each pane idle. The old fake listed each pane with a
+/// session and no agent word, which Herdr does not prompt, and took every
+/// prompt, so each pane answers `Delivered`.
 fn space_at(root: &std::path::Path) -> StrictSpace {
     let mut world = FakeMux::world().space("synthetic-workspace").checkout(root);
     for pane in PANES {
@@ -291,11 +296,11 @@ fn space_at(root: &std::path::Path) -> StrictSpace {
             .session(&format!("session-{pane}"))
             .idle();
     }
-    StrictSpace::new(
-        world.build().prompts_stay_settled(),
-        EVERY_LISTING,
-        Takes::prompts_and_metadata(),
-    )
+    let mux = world.build().prompts_stay_settled();
+    for pane in PANES {
+        mux.answer(pane, InputOutcome::Delivered);
+    }
+    StrictSpace::new(mux, EVERY_LISTING, Takes::prompts_and_metadata())
 }
 
 const PANES: [&str; 3] = ["lead", "worker", "reviewer"];

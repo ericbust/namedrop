@@ -26,6 +26,7 @@ fn host(process: PaneProcess) -> StrictSpace {
         .pane("p1")
         .terminal("t1")
         .tab("tab1")
+        .reports_session(false)
         .state(AgentState::parse("unknown"))
         .process(process)
         .tab_label("tab1", "Main")

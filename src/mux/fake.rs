@@ -6,10 +6,10 @@
 //! `namedrop::mux::fake::FakeMux` and a release build leaves it out.
 
 use super::{
-    AgentIdentity, AgentKind, AgentState, Applied, Budget, Checkout, Depth, Effect, Endpoint,
-    InputKind, InputOutcome, Key, MuxAct, MuxConnector, MuxError, MuxInput, MuxKind, MuxRead,
-    PaneFacts, PaneId, PaneInput, PaneProcess, Recipient, Retry, Scope, Screen, ScreenRequest,
-    SessionClaim, SpaceView, Style, Survey, TabId, TerminalId, Wrap,
+    AgentIdentity, AgentKind, AgentState, Allowance, Applied, Budget, Checkout, Depth, Effect,
+    Endpoint, InputKind, InputOutcome, Key, MuxAct, MuxConnector, MuxError, MuxInput, MuxKind,
+    MuxRead, PaneFacts, PaneId, PaneInput, PaneProcess, Recipient, Retry, Scope, Screen,
+    ScreenRequest, SessionClaim, SpaceView, Style, Survey, TabId, TerminalId, Wrap,
     gate::{self, ChannelError, RawChannel, StatusTap},
 };
 use crate::{AgentRuntime, AgentSessionId, SpaceId, WorktreeId};
@@ -137,7 +137,7 @@ pub enum Op {
 /// The checkout a space listing names for a space. Herdr stamps it on the
 /// space when the space opens a worktree, and answers `worktree list
 /// --workspace` from the checkout itself, so the two can differ.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Stamp {
     /// The listing names the space's checkout.
     Checkout,
@@ -145,7 +145,7 @@ pub(crate) enum Stamp {
     Other(Option<Checkout>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FakeSpace {
     pub(crate) id: SpaceId,
     pub(crate) label: Option<String>,
@@ -183,7 +183,7 @@ impl FakeSpace {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FakePane {
     pub(crate) facts: PaneFacts,
     /// `None` until a test gives the pane a screen.
@@ -203,8 +203,8 @@ pub(crate) struct World {
     pub(crate) integration_root: Option<PathBuf>,
     sent: Vec<Sent>,
     attempts: Vec<Attempt>,
-    /// Each read with the budget of the connection that made it.
-    reads: Vec<(Read, Option<Budget>)>,
+    /// Each read with the budget each Herdr command it stands for ran under.
+    reads: Vec<(Read, Vec<Budget>)>,
     effects: Vec<Effect>,
     attempted_effects: Vec<Effect>,
     /// Outcomes for a pane's next inputs, first first.
@@ -435,6 +435,8 @@ pub struct FakeMux {
 struct Connection {
     budget: Budget,
     cancelled: Arc<AtomicBool>,
+    /// A narrowed handle already logged the read this handle answers.
+    logged: bool,
 }
 
 type InputObserver = Arc<dyn Fn(&FakeMux, &Attempt) + Send + Sync>;
@@ -469,8 +471,9 @@ impl FakeMux {
 
     /// Prompts go through the real `gate::emulate_prompt`, as on a
     /// multiplexer without a native gate. By default the fake gates like
-    /// Herdr: it declines a blocked agent or a pane with none before typing,
-    /// types to a working one, and checks no identity.
+    /// Herdr: it declines a blocked agent, or a pane that reports no agent
+    /// kind, a session alone included, before typing, types to a working
+    /// one, and checks no identity.
     pub fn emulated(mut self) -> Self {
         self.emulated = true;
         self
@@ -594,9 +597,13 @@ impl FakeMux {
             .collect()
     }
 
-    /// Every read, with the budget of the connection that made it, or
-    /// `None` for a read made through a handle the builder made.
-    pub fn budgeted_reads(&self) -> Vec<(Read, Option<Budget>)> {
+    /// Every read, with the budget each Herdr command it stands for ran
+    /// under: one per listing `listings` names for a survey, and one for any
+    /// other read. A read through a handle the builder made has none. Through
+    /// `within`, each budget is asked just before its command, as the Herdr
+    /// adapter asks, and a read that stopped early lists only the budgets it
+    /// asked for.
+    pub fn budgeted_reads(&self) -> Vec<(Read, Vec<Budget>)> {
         self.lock().reads.clone()
     }
 
@@ -671,14 +678,17 @@ impl FakeMux {
     /// `pane` now reports `session`, as when another program replaces the
     /// one that was running there. Like the builder's `.session(..)`, it
     /// keeps the agent's kind and label, and makes a free pane an agent whose
-    /// kind is unreported.
+    /// kind is unreported. The listing names the `agent_session` field again
+    /// if `omit_session` left it out.
     ///
     /// # Panics
     ///
     /// When the world has no such pane.
     pub fn set_session(&self, pane: &str, session: &str) {
-        unreported_agent(&mut self.lock().known_pane(pane).facts).session =
-            SessionClaim::Reported(AgentSessionId::new(session));
+        let mut world = self.lock();
+        let facts = &mut world.known_pane(pane).facts;
+        facts.reports_session = true;
+        unreported_agent(facts).session = SessionClaim::Reported(AgentSessionId::new(session));
     }
 
     /// `pane` shows `text`, or with `None` nothing a read can answer. The
@@ -735,7 +745,9 @@ impl FakeMux {
     /// # Panics
     ///
     /// When the world has no such space, when `describe` adds a space, a
-    /// tab label, or an integration root, or when a new pane's id is taken.
+    /// tab label, or an integration root, when it changes the space itself,
+    /// as `.checkout()`, `.label()`, `.unlisted()`, or `.stamped()` would,
+    /// or when a new pane's id is taken. The setters change a space.
     pub fn open_pane(&self, space: &str, describe: impl FnOnce(WorldBuilder) -> WorldBuilder) {
         let blank = FakeSpace {
             panes: Vec::new(),
@@ -749,7 +761,7 @@ impl FakeMux {
         } = describe(WorldBuilder {
             endpoint: self.shared.endpoint.clone(),
             world: World {
-                spaces: vec![blank],
+                spaces: vec![blank.clone()],
                 ..World::default()
             },
         })
@@ -758,7 +770,15 @@ impl FakeMux {
             spaces.len() == 1 && tab_labels.is_empty() && integration_root.is_none(),
             "open_pane describes panes only"
         );
-        let panes = spaces.pop().expect("one space").panes;
+        let described = spaces.pop().expect("one space");
+        assert!(
+            FakeSpace {
+                panes: Vec::new(),
+                ..described.clone()
+            } == blank,
+            "open_pane describes panes only, so it cannot change {space} itself"
+        );
+        let panes = described.panes;
         let mut world = self.lock();
         for pane in &panes {
             assert!(
@@ -831,6 +851,19 @@ impl FakeMux {
         drop_empty_agent(facts);
     }
 
+    /// `pane`'s listing leaves out its `agent_session` field, as the
+    /// builder's `.reports_session(false)` does, so it reports no session
+    /// and does not say that it has none. `set_session` names the field
+    /// again.
+    ///
+    /// # Panics
+    ///
+    /// When the world has no such pane.
+    pub fn omit_session(&self, pane: &str) {
+        self.clear_session(pane);
+        self.lock().known_pane(pane).facts.reports_session = false;
+    }
+
     /// `pane`'s process, or with `None` nothing a read can answer.
     ///
     /// # Panics
@@ -838,6 +871,16 @@ impl FakeMux {
     /// When the world has no such pane.
     pub fn set_process(&self, pane: &str, process: Option<PaneProcess>) {
         self.lock().known_pane(pane).process = process;
+    }
+
+    /// `tab`'s label, or with `None` nothing a read can answer, as a rename
+    /// would leave it or as a test that answers one fixed label needs.
+    pub fn set_tab_label(&self, tab: &str, label: Option<&str>) {
+        let mut world = self.lock();
+        match label {
+            Some(label) => world.tab_labels.insert(TabId::new(tab), label.to_owned()),
+            None => world.tab_labels.remove(&TabId::new(tab)),
+        };
     }
 
     /// Where Namedrop's Herdr integration is installed, or with `None`
@@ -924,12 +967,18 @@ impl FakeMux {
         if self.emulated {
             return gate::emulate_prompt(&Channel(self), pane, &request);
         }
-        // Herdr 0.9.5 `agent prompt` refuses only a blocked agent, and types
-        // to one that reports `working`, whatever the caller's `Admit`.
+        // Herdr 0.9.5 `agent prompt` refuses a pane that reports no agent
+        // word (`agent_not_found`, even when it reports a session) and a
+        // blocked agent, and types to one that reports `working`, whatever
+        // the caller's `Admit`.
         let admitted = {
             let world = self.lock();
             let facts = &world.pane(pane).expect("checked above").facts;
-            facts.agent.is_some() && facts.state != Some(AgentState::Blocked)
+            facts
+                .agent
+                .as_ref()
+                .is_some_and(|agent| agent.kind != AgentKind::Unreported)
+                && facts.state != Some(AgentState::Blocked)
         };
         if !admitted {
             return InputOutcome::Declined(
@@ -968,9 +1017,18 @@ impl FakeMux {
         Ok(())
     }
 
-    /// Logs `read` and runs the read hooks with the world unlocked.
+    /// Logs `read`, unless a narrowed handle logs it, and runs the read
+    /// hooks with the world unlocked.
     fn read(&self, read: Read) -> Result<(), MuxError> {
-        self.lock().reads.push((read.clone(), self.budget()));
+        match &self.connection {
+            Some(Connection { logged: true, .. }) => {}
+            connection => {
+                let budgets = connection.as_ref().map_or_else(Vec::new, |connection| {
+                    vec![connection.budget; commands(&read)]
+                });
+                self.lock().reads.push((read.clone(), budgets));
+            }
+        }
         let hooks = unpoisoned(&self.shared.read_hooks).clone();
         hooks.iter().try_for_each(|hook| hook(self, &read))
     }
@@ -1044,28 +1102,11 @@ impl MuxRead for FakeMux {
         }
     }
 
-    /// A handle whose reads log `budget`, or the tighter of it and the
-    /// connection's own, as `budget()` reports.
-    fn within(&self, budget: Budget) -> Box<dyn MuxRead + '_> {
-        let connection = match &self.connection {
-            Some(connection) => Connection {
-                budget: Budget {
-                    timeout: connection.budget.timeout.min(budget.timeout),
-                    max_output_bytes: connection
-                        .budget
-                        .max_output_bytes
-                        .min(budget.max_output_bytes),
-                },
-                cancelled: Arc::clone(&connection.cancelled),
-            },
-            None => Connection {
-                budget,
-                cancelled: Arc::default(),
-            },
-        };
-        Box::new(FakeMux {
-            connection: Some(connection),
-            ..self.clone()
+    fn within<'a>(&'a self, allowance: Allowance<'a>) -> Box<dyn MuxRead + 'a> {
+        Box::new(Within {
+            base: self,
+            wider: None,
+            allowance,
         })
     }
 
@@ -1138,11 +1179,163 @@ impl MuxConnector for FakeMux {
             )));
         }
         Ok(Arc::new(FakeMux {
-            connection: Some(Connection { budget, cancelled }),
+            connection: Some(Connection {
+                budget,
+                cancelled,
+                logged: false,
+            }),
             ..self.clone()
         }))
     }
 }
+
+/// The Herdr commands a read stands for: one per listing for a survey.
+fn commands(read: &Read) -> usize {
+    match read {
+        Read::Survey { scope, depth } => listings(scope.kind(), *depth).len(),
+        _ => 1,
+    }
+}
+
+/// A handle narrowed by `within`. It asks its budget, and every wider one's,
+/// just before each Herdr command the read stands for, and refuses a command
+/// once any of their flags is set, as the Herdr adapter does. The fake
+/// enforces no budget itself, so a read hook that models a stalled or
+/// oversized read checks `budget()` on the handle it is handed, which holds
+/// the budget of the read's first command.
+struct Within<'a> {
+    base: &'a FakeMux,
+    wider: Option<&'a Within<'a>>,
+    allowance: Allowance<'a>,
+}
+
+impl Within<'_> {
+    /// The budget for the next command, the tightest of every narrowing and
+    /// of the connection's own. The narrowest is asked first, as in the
+    /// adapter, so its error wins.
+    fn budget(&self) -> Result<Budget, MuxError> {
+        let mut budget = self.base.budget().unwrap_or(Budget::ADAPTER_DEFAULT);
+        let mut narrowing = Some(self);
+        while let Some(within) = narrowing {
+            let asked = within.allowance.budget().map_err(MuxError::Unavailable)?;
+            budget = Budget {
+                timeout: budget.timeout.min(asked.timeout),
+                max_output_bytes: budget.max_output_bytes.min(asked.max_output_bytes),
+            };
+            narrowing = within.wider;
+        }
+        Ok(budget)
+    }
+
+    /// Refuses a command once any narrowing's flag, or the connection's own,
+    /// is set, as a Herdr command handed its budget refuses to start.
+    fn refuse_if_cancelled(&self) -> Result<(), MuxError> {
+        let mut narrowing = Some(self);
+        while let Some(within) = narrowing {
+            if within
+                .allowance
+                .cancelled()
+                .is_some_and(|flag| flag.load(Ordering::Relaxed))
+            {
+                return Err(MuxError::Unavailable(CANCELLED.to_owned()));
+            }
+            narrowing = within.wider;
+        }
+        if self.base.cancelled() {
+            return Err(MuxError::Unavailable(CANCELLED.to_owned()));
+        }
+        Ok(())
+    }
+
+    /// Asks the first command's budget and logs the read with it, refuses
+    /// it if cancelled, answers it through a handle that holds that budget,
+    /// then does the same for each of the read's other commands. A failed
+    /// ask or a refusal fails the read, with the answer dropped.
+    fn read<T>(
+        &self,
+        read: Read,
+        answer: impl FnOnce(&FakeMux) -> Result<T, MuxError>,
+    ) -> Result<T, MuxError> {
+        let commands = commands(&read);
+        let first = self.budget();
+        let index = {
+            let mut world = self.base.lock();
+            let asked = first
+                .as_ref()
+                .map_or_else(|_| Vec::new(), |budget| vec![*budget]);
+            world.reads.push((read, asked));
+            world.reads.len() - 1
+        };
+        let first = first?;
+        self.refuse_if_cancelled()?;
+        let handle = FakeMux {
+            connection: Some(Connection {
+                budget: first,
+                cancelled: self
+                    .base
+                    .connection
+                    .as_ref()
+                    .map_or_else(Arc::default, |connection| Arc::clone(&connection.cancelled)),
+                logged: true,
+            }),
+            ..self.base.clone()
+        };
+        let answered = answer(&handle);
+        drop(handle);
+        for _ in 1..commands {
+            let budget = self.budget()?;
+            self.base.lock().reads[index].1.push(budget);
+            self.refuse_if_cancelled()?;
+        }
+        answered
+    }
+}
+
+impl MuxRead for Within<'_> {
+    fn endpoint(&self) -> &Endpoint {
+        self.base.endpoint()
+    }
+
+    fn survey(&self, scope: Scope<'_>, depth: Depth) -> Result<Survey, MuxError> {
+        let read = Read::Survey {
+            scope: Surveyed::of(scope),
+            depth,
+        };
+        self.read(read, |handle| handle.survey(scope, depth))
+    }
+
+    fn screen(&self, pane: &PaneId, request: ScreenRequest) -> Result<Screen, MuxError> {
+        let read = Read::Screen {
+            pane: pane.clone(),
+            request,
+        };
+        self.read(read, |handle| handle.screen(pane, request))
+    }
+
+    fn process(&self, pane: &PaneId) -> Result<PaneProcess, MuxError> {
+        self.read(Read::Process(pane.clone()), |handle| handle.process(pane))
+    }
+
+    fn tab_label(&self, tab: &TabId) -> Result<Option<String>, MuxError> {
+        self.read(Read::TabLabel(tab.clone()), |handle| handle.tab_label(tab))
+    }
+
+    fn integration_root(&self) -> Result<Option<PathBuf>, MuxError> {
+        self.read(Read::IntegrationRoot, MuxRead::integration_root)
+    }
+
+    fn within<'a>(&'a self, allowance: Allowance<'a>) -> Box<dyn MuxRead + 'a> {
+        Box::new(Within {
+            base: self.base,
+            wider: Some(self),
+            allowance,
+        })
+    }
+}
+
+/// What a command cancelled before it started answers, in the words of
+/// `ProcessHerdr` and of a legacy executor's `execute_bounded`.
+const CANCELLED: &str = "Herdr read cancelled";
 
 struct Channel<'a>(&'a FakeMux);
 

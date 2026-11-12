@@ -141,7 +141,7 @@ impl Switches {
             None => {}
         }
         if *self.terminal.lock().unwrap() {
-            mux.clear_session("pane-reviewer");
+            mux.omit_session("pane-reviewer");
             mux.set_state("pane-reviewer", AgentState::parse("unknown"));
         }
         let process = if *self.shell_unreported.lock().unwrap() {
@@ -2564,6 +2564,13 @@ fn a_replacement_installation_preserves_every_durable_record_and_resends_nothing
     )
     .unwrap();
 
+    // The old fake refused `server reload-config`, so activation saved the
+    // shortcuts and said it could not reload them.
+    assert_eq!(
+        activated["shortcuts"]["reloaded"],
+        serde_json::json!(false),
+        "{activated}"
+    );
     // Activation alone gates dispatch behind a fresh reconciliation, so the
     // resend question is only answered once the space is draining again.
     for bucket in ["requeued", "submitted", "held", "terminal_running"] {

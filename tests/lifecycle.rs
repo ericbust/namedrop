@@ -3174,19 +3174,7 @@ impl TourHerdr {
     }
 }
 
-/// The runtime's `session_socket_id`, which the bridge took the popup's
-/// socket from before the connection named it.
-static TOUR_SOCKET: std::sync::LazyLock<namedrop::mux::Endpoint> =
-    std::sync::LazyLock::new(|| namedrop::mux::Endpoint {
-        kind: namedrop::mux::MuxKind::Herdr,
-        key: "socket-a".to_owned(),
-    });
-
 impl HerdrCommandExecutor for TourHerdr {
-    fn mux_endpoint(&self) -> &namedrop::mux::Endpoint {
-        &TOUR_SOCKET
-    }
-
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         self.commands
             .lock()
