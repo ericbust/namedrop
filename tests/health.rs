@@ -1,3 +1,4 @@
+#![cfg(feature = "test-support")]
 #[path = "support/cleanup.rs"]
 mod cleanup;
 
@@ -8,12 +9,20 @@ mod sync_cell;
 #[path = "support/update_profile.rs"]
 mod update_profile;
 
+use namedrop::mux::{
+    AgentKind, Depth, Effect, InputOutcome, MuxError, PaneProcess,
+    fake::{CHECKOUT_LISTINGS, FakeMux, Read, ScopeKind, SentInput, StrictSpace, Takes},
+};
 use namedrop::*;
 use serde_json::json;
 use std::{
     fs,
+    ops::Deref,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use sync_cell::{Cell, RefCell};
 
@@ -134,18 +143,11 @@ impl Fixture {
         Self {
             root,
             home,
-            host: Host {
-                session: RefCell::new("session-old".into()),
-                missing_session: Cell::new(false),
-                prompts: RefCell::new(Vec::new()),
-                prompt_error: RefCell::new(None),
-                plugin_root: RefCell::new(None),
-                plugin_lists: Cell::new(0),
-            },
+            host: Host::new(),
             ids: Ids(AtomicU64::new(1)),
         }
     }
-    fn runtime(&self) -> LifecycleRuntime<'_, Host, Time, Ids> {
+    fn runtime(&self) -> LifecycleRuntime<'_, FakeMux, Time, Ids> {
         LifecycleRuntime {
             state_directory: &self.root,
             home_directory: Some(&self.home),
@@ -242,55 +244,110 @@ impl Drop for Fixture {
         update_profile::cleanup(&self.root);
     }
 }
+/// The old executor's switches, which a read hook and an input decider apply,
+/// and its records, which the hooks fill. The space is last, so it judges
+/// the world after the switches drop.
 struct Host {
-    session: RefCell<String>,
-    missing_session: Cell<bool>,
-    prompts: RefCell<Vec<(String, String)>>,
-    prompt_error: RefCell<Option<String>>,
-    plugin_root: RefCell<Option<PathBuf>>,
-    plugin_lists: Cell<u32>,
+    session: Arc<RefCell<String>>,
+    missing_session: Arc<Cell<bool>>,
+    prompts: Arc<RefCell<Vec<(String, String)>>>,
+    prompt_error: Arc<RefCell<Option<String>>>,
+    plugin_root: Arc<RefCell<Option<PathBuf>>>,
+    plugin_lists: Arc<Cell<u32>>,
+    space: StrictSpace,
 }
-impl HerdrCommandExecutor for Host {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let mut stdout = match args {
-            ["workspace", "list"] => {
-                json!({"result":{"workspaces":[{"workspace_id":"workspace-1"}]}})
-            }
-            ["worktree", "list", "--cwd", "/repo", "--json"]
-            | ["worktree", "list", "--json"]
-            | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
-                json!({"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}})
-            }
-            ["pane", "list", "--workspace", "workspace-1"] => {
-                json!({"result":{"panes":[{"pane_id":"pane-1","terminal_id":"terminal-1","tab_id":"tab-1","workspace_id":"workspace-1","agent":"claude","agent_session":{"value":self.session.borrow().clone()},"agent_status":"idle"}]}})
-            }
-            ["pane", "report-metadata", ..] => json!({}),
-            ["agent", "prompt", pane_id, prompt] => {
-                self.prompts
-                    .borrow_mut()
-                    .push(((*pane_id).to_owned(), (*prompt).to_owned()));
-                if let Some(error) = self.prompt_error.borrow().clone() {
-                    return Err(error);
-                }
-                json!({})
-            }
-            ["plugin", "list", "--plugin", "namedrop", "--json"] => {
-                self.plugin_lists.set(self.plugin_lists.get() + 1);
-                match self.plugin_root.borrow().as_ref() {
-                    Some(root) => {
-                        json!({"result":{"type":"plugin_list","plugins":[{"plugin_id":"namedrop","plugin_root":root}]}})
-                    }
-                    None => return Err("plugin namedrop is not installed".into()),
-                }
-            }
-            _ => return Err(format!("unexpected command {args:?}")),
+impl Host {
+    /// `/repo` open in workspace-1, listed by `workspace list`, `worktree
+    /// list --cwd` and `--workspace`, and `pane list --workspace`, and one
+    /// idle Claude pane. It takes prompts to any pane and `pane
+    /// report-metadata`, and reads no screen, process, or tab label. The
+    /// tour's keybinding reload and popup fail, as the old executor failed
+    /// every command it did not list.
+    fn new() -> Self {
+        let mux = FakeMux::world()
+            .endpoint("socket-a")
+            .space("workspace-1")
+            .checkout("/repo")
+            .unstamped()
+            .pane("pane-1")
+            .terminal("terminal-1")
+            .tab("tab-1")
+            .claude()
+            .session("session-old")
+            .idle()
+            .build();
+        let mut surveys = CHECKOUT_LISTINGS.to_vec();
+        surveys.push((ScopeKind::Space, Depth::Panes));
+        let host = Self {
+            session: Arc::new(RefCell::new("session-old".into())),
+            missing_session: Arc::new(Cell::new(false)),
+            prompts: Arc::new(RefCell::new(Vec::new())),
+            prompt_error: Arc::new(RefCell::new(None)),
+            plugin_root: Arc::new(RefCell::new(None)),
+            plugin_lists: Arc::new(Cell::new(0)),
+            space: StrictSpace::new(
+                mux,
+                &surveys,
+                Takes::prompts_and_metadata().effect(|effect| {
+                    matches!(effect, Effect::ReloadKeybindings | Effect::OpenPopup(_))
+                }),
+            ),
         };
-        if self.missing_session.get() && args.starts_with(&["pane", "list"]) {
-            stdout["result"]["panes"][0]["agent_session"] = serde_json::Value::Null;
-        }
-        Ok(HerdrCommandOutput {
-            stdout: stdout.to_string(),
-        })
+        host.on_apply(|_, effect| match effect {
+            Effect::ReloadKeybindings => Err(MuxError::Unavailable(
+                r#"unexpected command ["server", "reload-config"]"#.to_owned(),
+            )),
+            Effect::OpenPopup(_) => Err(MuxError::Unavailable(
+                r#"unexpected command ["plugin", "pane", "open", ..]"#.to_owned(),
+            )),
+            _ => Ok(()),
+        });
+        let (session, missing_session) = (host.session.clone(), host.missing_session.clone());
+        let (plugin_root, plugin_lists) = (host.plugin_root.clone(), host.plugin_lists.clone());
+        host.on_read(move |mux, read| {
+            mux.set_session("pane-1", &session.borrow());
+            if missing_session.get() {
+                mux.clear_session("pane-1");
+            }
+            if *read != Read::IntegrationRoot {
+                return Ok(());
+            }
+            plugin_lists.set(plugin_lists.get() + 1);
+            match plugin_root.borrow().as_deref() {
+                Some(root) => {
+                    mux.set_integration_root(Some(root));
+                    Ok(())
+                }
+                None => Err(MuxError::Unavailable(
+                    "plugin namedrop is not installed".into(),
+                )),
+            }
+        });
+        let prompts = host.prompts.clone();
+        host.on_input(move |_, attempt| {
+            if let SentInput::Prompt(text) = &attempt.input {
+                prompts
+                    .borrow_mut()
+                    .push((attempt.pane.as_str().to_owned(), text.clone()));
+            }
+        });
+        // An error without a Herdr code may have reached the pane, as the
+        // adapter reads it.
+        let prompt_error = host.prompt_error.clone();
+        host.answer_with(move |_, _, input| {
+            matches!(input, SentInput::Prompt(_)).then(|| match prompt_error.borrow().clone() {
+                Some(error) => InputOutcome::Ambiguous(error),
+                None => InputOutcome::Delivered,
+            })
+        });
+        host
+    }
+}
+impl Deref for Host {
+    type Target = FakeMux;
+
+    fn deref(&self) -> &FakeMux {
+        &self.space
     }
 }
 struct Time;
@@ -760,17 +817,10 @@ fn human_doctor_shows_exact_targets_quoted_commands_and_hook_setup_steps() {
     assert!(rendered.contains("approve Namedrop in /hooks"));
 }
 
-struct CodexHost<'a>(&'a Host);
-impl HerdrCommandExecutor for CodexHost<'_> {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let mut output = self.0.execute(args)?;
-        if args.starts_with(&["pane", "list"]) {
-            let mut value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
-            value["result"]["panes"][0]["agent"] = json!("codex");
-            output.stdout = value.to_string();
-        }
-        Ok(output)
-    }
+/// The host with pane-1 reporting Codex.
+fn codex(host: &Host) -> &FakeMux {
+    host.set_agent("pane-1", Some(AgentKind::Known(AgentRuntime::Codex)));
+    host
 }
 
 #[cfg(target_os = "linux")]
@@ -799,7 +849,7 @@ fn doctor_reports_unsupported_codex_without_preparing_its_home() {
     namedrop::linux_sandbox::check_support().expect("Linux tests require Landlock");
     let f = Fixture::new();
     f.register();
-    let host = CodexHost(&f.host);
+    let host = codex(&f.host);
     let runtime = LifecycleRuntime {
         state_directory: &f.root,
         home_directory: Some(&f.home),
@@ -808,7 +858,7 @@ fn doctor_reports_unsupported_codex_without_preparing_its_home() {
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        mux: &host,
+        mux: host,
         clock: &Time,
         ids: &f.ids,
     };
@@ -851,7 +901,7 @@ fn doctor_keeps_secret_shaped_paths_and_setup_commands_exact() {
         &state,
     )
     .unwrap();
-    let host = CodexHost(&f.host);
+    let host = codex(&f.host);
     let runtime = LifecycleRuntime {
         state_directory: &state,
         home_directory: Some(&home),
@@ -860,7 +910,7 @@ fn doctor_keeps_secret_shaped_paths_and_setup_commands_exact() {
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        mux: &host,
+        mux: host,
         clock: &Time,
         ids: &f.ids,
     };
@@ -906,15 +956,18 @@ fn doctor_keeps_secret_shaped_paths_and_setup_commands_exact() {
 
 #[test]
 fn doctor_unavailable_preserves_the_underlying_cause() {
-    struct Broken;
-    impl HerdrCommandExecutor for Broken {
-        fn execute(&self, _: &[&str]) -> Result<HerdrCommandOutput, String> {
-            Err("socket /tmp/missing-herdr.sock refused the connection\nAPI_TOKEN=secret-should-not-leak".into())
-        }
-    }
+    // Every read fails as a Herdr that refused the connection.
+    let broken = StrictSpace::new(
+        FakeMux::world().endpoint("socket-a").build(),
+        &[],
+        Takes::nothing(),
+    );
+    broken.on_read(|_, _| {
+        Err(MuxError::Unavailable("socket /tmp/missing-herdr.sock refused the connection\nAPI_TOKEN=secret-should-not-leak".into()))
+    });
     let f = Fixture::new();
     let runtime = LifecycleRuntime {
-        mux: &Broken,
+        mux: &*broken,
         state_directory: &f.root,
         home_directory: Some(&f.home),
         agent_config: namedrop::AgentConfigDirectories::default(),
@@ -1332,55 +1385,40 @@ fn doctor_skips_the_runtime_check_when_herdr_has_no_plugin_root() {
     assert_eq!(f.host.plugin_lists.get(), 1);
 }
 
-/// Two Codex panes: pane-1 holds the Fixture's session, pane-2 has none.
-struct TwoCodexPanes<'a> {
-    host: &'a Host,
-    foreground: Option<u32>,
-}
-impl HerdrCommandExecutor for TwoCodexPanes<'_> {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        if let ["pane", "process-info", "--pane", _] = args {
-            let pid = self.foreground.ok_or("herdr did not answer")?;
-            return Ok(HerdrCommandOutput {
-                stdout: json!({"result":{"process_info":{"shell_pid":1,"foreground_process_group_id":pid,"foreground_processes":[{"pid":pid}]}}}).to_string(),
-            });
-        }
-        let mut output = self.host.execute(args)?;
-        if args.starts_with(&["pane", "list"]) {
-            let mut value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
-            let mut second = value["result"]["panes"][0].clone();
-            second["pane_id"] = json!("pane-2");
-            second["terminal_id"] = json!("terminal-2");
-            second["agent_session"] = serde_json::Value::Null;
-            value["result"]["panes"]
-                .as_array_mut()
-                .unwrap()
-                .push(second);
-            for pane in value["result"]["panes"].as_array_mut().unwrap() {
-                pane["agent"] = json!("codex");
-            }
-            output.stdout = value.to_string();
-        }
-        Ok(output)
-    }
-}
-
 impl Fixture {
     /// A registered space whose pane-1 now runs a session that is not the
     /// registered one, so without the server it reports ND-SESSION-001, and
-    /// whose pane-2 has no session, so it reports ND-SESSION-002.
-    fn two_codex_panes(&self, foreground: Option<u32>) -> TwoCodexPanes<'_> {
+    /// whose pane-2 has no session, so it reports ND-SESSION-002. Both panes
+    /// run Codex, and each answers `pane process-info` with `foreground` as
+    /// its foreground process, or fails to without one.
+    fn two_codex_panes(&self, foreground: Option<u32>) -> &FakeMux {
         self.register();
         *self.host.session.borrow_mut() = "session-new".into();
-        TwoCodexPanes {
-            host: &self.host,
-            foreground,
+        self.host.open_pane("workspace-1", |pane| {
+            pane.pane("pane-2")
+                .terminal("terminal-2")
+                .tab("tab-1")
+                .codex()
+                .idle()
+        });
+        self.host
+            .set_agent("pane-1", Some(AgentKind::Known(AgentRuntime::Codex)));
+        if let Some(pid) = foreground {
+            for pane in ["pane-1", "pane-2"] {
+                self.host.set_process(
+                    pane,
+                    Some(PaneProcess {
+                        shell_pid: Some(1),
+                        foreground_group: Some(pid),
+                        foreground_pids: vec![pid],
+                        tty: None,
+                    }),
+                );
+            }
         }
+        &self.host
     }
-    fn codex_runtime<'a>(
-        &'a self,
-        host: &'a TwoCodexPanes<'a>,
-    ) -> LifecycleRuntime<'a, TwoCodexPanes<'a>, Time, Ids> {
+    fn codex_runtime<'a>(&'a self, host: &'a FakeMux) -> LifecycleRuntime<'a, FakeMux, Time, Ids> {
         LifecycleRuntime {
             state_directory: &self.root,
             home_directory: Some(&self.home),
@@ -1410,7 +1448,7 @@ fn doctor_reports_a_shared_codex_app_server_once_with_only_its_remedy() {
     let codex_home = f.home.join(".codex");
     let server = codex_app_server::start_server(&codex_home);
     let host = f.two_codex_panes(None);
-    let runtime = f.codex_runtime(&host);
+    let runtime = f.codex_runtime(host);
     let codex_before = codex_app_server::snapshot(&codex_home);
     let database = fs::read(f.root.join("namedrop.sqlite3")).unwrap();
 
@@ -1510,7 +1548,7 @@ fn doctor_names_a_server_that_outlived_turning_its_setting_off() {
     )
     .unwrap();
     let host = f.two_codex_panes(None);
-    let report = diagnose_collaboration(&f.codex_runtime(&host));
+    let report = diagnose_collaboration(&f.codex_runtime(host));
     let shared = issues_with(&report, "ND-SESSION-003");
     assert_eq!(shared.len(), 1);
     assert!(
@@ -1537,7 +1575,7 @@ fn doctor_keeps_the_session_issues_when_codex_runs_in_process() {
     )
     .unwrap();
     let host = f.two_codex_panes(None);
-    let report = diagnose_collaboration(&f.codex_runtime(&host));
+    let report = diagnose_collaboration(&f.codex_runtime(host));
     assert!(
         issues_with(&report, "ND-SESSION-003").is_empty(),
         "{:?}",
@@ -1558,7 +1596,7 @@ fn doctor_leaves_no_daemon_codex_panes_alone_beside_a_running_server() {
     let _server = codex_app_server::start_server(&f.home.join(".codex"));
     let in_process = codex_app_server::in_process_codex();
     let host = f.two_codex_panes(Some(in_process.pid()));
-    let report = diagnose_collaboration(&f.codex_runtime(&host));
+    let report = diagnose_collaboration(&f.codex_runtime(host));
     assert!(
         issues_with(&report, "ND-SESSION-003").is_empty(),
         "{:?}",
@@ -1572,7 +1610,7 @@ fn doctor_assistance_names_the_shared_app_server_for_a_pane_without_a_session() 
     let f = Fixture::new();
     let _server = codex_app_server::start_server(&f.home.join(".codex"));
     let host = f.two_codex_panes(None);
-    let refused = request_doctor_assistance(&f.codex_runtime(&host), "").unwrap_err();
+    let refused = request_doctor_assistance(&f.codex_runtime(host), "").unwrap_err();
     assert!(
         refused.starts_with(&format!("Nothing was sent: {}", codex_app_server::SUMMARY)),
         "{refused}"
