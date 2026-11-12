@@ -1,40 +1,11 @@
-use crate::{Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator};
+use crate::{Clock, IdGenerator};
 use std::{
-    env, fs,
-    io::{Read, Seek, SeekFrom},
-    os::unix::{fs::OpenOptionsExt, process::CommandExt},
-    process::{Child, Command, Output, Stdio},
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    os::unix::process::CommandExt,
+    process::{Child, Command, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-
-static NEXT_HERDR_OUTPUT_FILE: AtomicU64 = AtomicU64::new(1);
-const DEFAULT_HERDR_TIMEOUT_MS: u64 = 10_000;
-const MAX_HERDR_TIMEOUT_MS: u64 = 60_000;
-
-pub struct ProcessHerdr {
-    binary: String,
-    timeout: Duration,
-    socket: Option<String>,
-}
-
-impl Default for ProcessHerdr {
-    fn default() -> Self {
-        Self {
-            binary: env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_owned()),
-            socket: None,
-            timeout: Duration::from_millis(
-                env::var("NAMEDROP_HERDR_TIMEOUT_MS")
-                    .ok()
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .filter(|milliseconds| *milliseconds > 0)
-                    .unwrap_or(DEFAULT_HERDR_TIMEOUT_MS)
-                    .min(MAX_HERDR_TIMEOUT_MS),
-            ),
-        }
-    }
-}
 
 /// The terminal `ps` names as `pid`'s controlling TTY, or `None` when `ps`
 /// fails, writes more than 1 KiB to either stream, or outlives `timeout`.
@@ -69,171 +40,6 @@ pub(crate) fn controlling_tty(pid: u64, timeout: Duration) -> Option<String> {
     String::from_utf8(output.stdout)
         .ok()
         .map(|tty| tty.trim().to_owned())
-}
-
-impl ProcessHerdr {
-    pub fn with_socket(mut self, socket: Option<String>) -> Self {
-        self.socket = socket;
-        self
-    }
-
-    fn output_file(&self, stream: &str) -> Result<fs::File, String> {
-        for _ in 0..16 {
-            let path = env::temp_dir().join(format!(
-                ".namedrop-herdr-{stream}-{}-{}",
-                std::process::id(),
-                NEXT_HERDR_OUTPUT_FILE.fetch_add(1, Ordering::Relaxed)
-            ));
-            match fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&path)
-            {
-                Ok(file) => {
-                    fs::remove_file(&path).map_err(|error| {
-                        format!("failed to secure Herdr command output: {error}")
-                    })?;
-                    return Ok(file);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => {
-                    return Err(format!("failed to capture Herdr command output: {error}"));
-                }
-            }
-        }
-        Err("failed to reserve Herdr command output".to_owned())
-    }
-
-    fn read_output(
-        &self,
-        mut file: fs::File,
-        stream: &str,
-        max_output_bytes: usize,
-    ) -> Result<Vec<u8>, String> {
-        file.seek(SeekFrom::Start(0))
-            .map_err(|error| format!("failed to read Herdr command {stream}: {error}"))?;
-        let mut bytes = Vec::new();
-        file.take(max_output_bytes.saturating_add(1) as u64)
-            .read_to_end(&mut bytes)
-            .map_err(|error| format!("failed to read Herdr command {stream}: {error}"))?;
-        if bytes.len() > max_output_bytes {
-            return Err("Herdr read exceeded its output limit".to_owned());
-        }
-        Ok(bytes)
-    }
-
-    fn output(&self, args: &[&str]) -> Result<Output, String> {
-        self.output_bounded(args, self.timeout, &AtomicBool::new(false), usize::MAX)
-    }
-
-    fn output_bounded(
-        &self,
-        args: &[&str],
-        timeout: Duration,
-        cancelled: &AtomicBool,
-        max_output_bytes: usize,
-    ) -> Result<Output, String> {
-        if cancelled.load(Ordering::Relaxed) {
-            return Err("Herdr read cancelled".to_owned());
-        }
-        let mut command = Command::new(&self.binary);
-        command.args(args).process_group(0);
-        if let Some(socket) = &self.socket {
-            command.env("HERDR_SOCKET_PATH", socket);
-        }
-        let timeout = timeout.min(self.timeout);
-        let stdout = self.output_file("stdout")?;
-        let stderr = self.output_file("stderr")?;
-        let mut child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout.try_clone().map_err(|error| {
-                format!("failed to capture Herdr command stdout: {error}")
-            })?))
-            .stderr(Stdio::from(stderr.try_clone().map_err(|error| {
-                format!("failed to capture Herdr command stderr: {error}")
-            })?))
-            .spawn()
-            .map_err(|error| format!("failed to run {}: {error}", self.binary))?;
-        let deadline = Instant::now() + timeout;
-        let status = loop {
-            let oversized = [&stdout, &stderr].iter().any(|file| {
-                file.metadata()
-                    .map(|meta| meta.len() > max_output_bytes as u64)
-                    .unwrap_or(true)
-            });
-            if cancelled.load(Ordering::Relaxed) || oversized {
-                stop_process_group(&mut child);
-                return Err(if oversized {
-                    "Herdr read exceeded its output limit"
-                } else {
-                    "Herdr read cancelled"
-                }
-                .to_owned());
-            }
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|error| format!("failed to wait for {}: {error}", self.binary))?
-            {
-                break status;
-            }
-            if Instant::now() >= deadline {
-                stop_process_group(&mut child);
-                return Err(format!(
-                    "Herdr command timed out after {} ms",
-                    timeout.as_millis()
-                ));
-            }
-            thread::sleep(Duration::from_millis(5));
-        };
-        if [&stdout, &stderr].iter().any(|file| {
-            file.metadata()
-                .map(|meta| meta.len() > max_output_bytes as u64)
-                .unwrap_or(true)
-        }) {
-            return Err("Herdr read exceeded its output limit".to_owned());
-        }
-        let stdout = self.read_output(stdout, "stdout", max_output_bytes)?;
-        let stderr = self.read_output(stderr, "stderr", max_output_bytes)?;
-        Ok(Output {
-            status,
-            stdout,
-            stderr,
-        })
-    }
-}
-
-impl HerdrCommandExecutor for ProcessHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let output = self.output(args)?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
-        }
-        Ok(HerdrCommandOutput {
-            stdout: String::from_utf8(output.stdout).map_err(|error| error.to_string())?,
-        })
-    }
-
-    fn execute_bounded(
-        &self,
-        args: &[&str],
-        timeout: Duration,
-        cancelled: &AtomicBool,
-        max_output_bytes: usize,
-    ) -> Result<HerdrCommandOutput, String> {
-        let output = self.output_bounded(args, timeout, cancelled, max_output_bytes)?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
-        }
-        Ok(HerdrCommandOutput {
-            stdout: String::from_utf8(output.stdout).map_err(|error| error.to_string())?,
-        })
-    }
-
-    fn input_failure(&self, error: String) -> crate::mux::InputOutcome {
-        crate::mux::herdr::input_failure(error)
-    }
 }
 
 pub struct SystemClock;
@@ -292,52 +98,9 @@ pub(crate) fn stop_process_group(child: &mut Child) {
 }
 
 #[cfg(test)]
-mod bounded_read_tests {
+mod tests {
     use super::*;
-
-    #[test]
-    fn bounded_reads_enforce_output_deadline_and_cancellation() {
-        let executor = ProcessHerdr {
-            binary: "/bin/sh".to_owned(),
-            timeout: Duration::from_secs(2),
-            socket: None,
-        };
-        let cancelled = AtomicBool::new(false);
-        let deadline = Duration::from_millis(80);
-        assert_eq!(
-            executor
-                .execute_bounded(&["-c", "printf ok"], deadline, &cancelled, 2)
-                .unwrap()
-                .stdout,
-            "ok"
-        );
-        assert!(
-            executor
-                .execute_bounded(&["-c", "printf too-long"], deadline, &cancelled, 2)
-                .unwrap_err()
-                .contains("output limit")
-        );
-        let start = Instant::now();
-        assert!(
-            executor
-                .execute_bounded(&["-c", "sleep 10"], deadline, &cancelled, 100)
-                .unwrap_err()
-                .contains("timed out")
-        );
-        assert!(start.elapsed() < Duration::from_secs(1));
-        thread::scope(|scope| {
-            scope.spawn(|| {
-                thread::sleep(Duration::from_millis(30));
-                cancelled.store(true, Ordering::Relaxed);
-            });
-            assert!(
-                executor
-                    .execute_bounded(&["-c", "sleep 10"], Duration::from_secs(1), &cancelled, 100)
-                    .unwrap_err()
-                    .contains("cancelled")
-            );
-        });
-    }
+    use std::{env, fs};
 
     #[test]
     fn stopping_a_child_kills_its_whole_process_group_and_nothing_else() {

@@ -1,8 +1,8 @@
 //! Pins the Herdr arguments each port call runs, over a scripted transport.
 
-use super::*;
+use super::{wire::input_failure, *};
 use crate::{
-    AgentRuntime, AgentSessionId, HerdrCommandOutput, SpaceId, WorktreeId,
+    AgentRuntime, AgentSessionId, SpaceId, WorktreeId,
     mux::{
         Admit, AgentIdentity, AgentKind, AgentState, Badge, Checkout, Gone, Key, MuxEvent,
         PaneFacts, PaneSlot, PopupScreen, PopupSpec, PromptRequest, Recipient, Retry, SessionClaim,
@@ -893,35 +893,27 @@ fn a_popup_returns_herdr_s_reply_and_an_unreadable_one_is_a_protocol_error() {
     );
 }
 
-/// A legacy executor that records each command and answers `{}`.
-struct Recording(Mutex<Vec<String>>);
-
-impl HerdrCommandExecutor for Recording {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        self.0.lock().unwrap().push(args.join(" "));
-        Ok(HerdrCommandOutput {
-            stdout: "{}".into(),
-        })
-    }
-}
-
 /// The socket comes from the popup's spec, which `lifecycle::open_popup`
 /// fills from the runtime's `session_socket_id`, never from the endpoint of
 /// the connection that opens it.
 #[test]
 fn a_popup_names_the_socket_its_spec_carries_whatever_the_connection() {
-    let legacy = Recording(Mutex::default());
-    assert_eq!(legacy.endpoint().key, "");
-    legacy.apply(&tour_popup()).unwrap();
-    let scripted = herdr(|_| Ok("{}".into()));
-    assert_eq!(scripted.endpoint().key, "socket-a");
-    scripted.apply(&tour_popup()).unwrap();
     let argv = "plugin pane open --plugin namedrop --entrypoint tour --placement popup --width 72 \
                 --height 24 --env NAMEDROP_TARGET_WORKSPACE=w1 --env NAMEDROP_TARGET_PANE=p1 \
                 --env NAMEDROP_TARGET_TERMINAL=t1 --env NAMEDROP_TARGET_SESSION=s1 \
                 --env HERDR_PLUGIN_STATE_DIR=/state --env HERDR_SOCKET_PATH=/tmp/herdr.sock --focus";
-    assert_eq!(*legacy.0.lock().unwrap(), [argv]);
-    assert_eq!(calls(&scripted), [argv]);
+    for socket in ["socket-a", ""] {
+        let mux = HerdrMux::new(
+            Scripted {
+                calls: Mutex::new(Vec::new()),
+                reply: Box::new(|_| Ok("{}".into())),
+            },
+            socket,
+        );
+        assert_eq!(mux.endpoint().key, socket);
+        mux.apply(&tour_popup()).unwrap();
+        assert_eq!(calls(&mux), [argv]);
+    }
 }
 
 #[test]
@@ -1199,234 +1191,22 @@ fn a_refusal_says_how_many_agent_sessions_it_checked() {
     );
 }
 
-/// A legacy executor with its own classification, as several test fakes have.
-struct Legacy {
-    prompts: Mutex<Vec<String>>,
-}
-
-impl HerdrCommandExecutor for Legacy {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        match args {
-            ["pane", "list"] => Ok(HerdrCommandOutput {
-                stdout: pane_list(),
-            }),
-            ["agent", "prompt", _, text] => {
-                self.prompts.lock().unwrap().push((*text).to_owned());
-                Err(error("agent_busy"))
-            }
-            _ => Err("unexpected".into()),
-        }
-    }
-
-    fn input_failure(&self, error: String) -> InputOutcome {
-        InputOutcome::Refused(error)
-    }
-}
-
-#[test]
-fn every_legacy_executor_is_a_mux_that_keeps_its_own_classification() {
-    let legacy = Legacy {
-        prompts: Mutex::new(Vec::new()),
-    };
-    let spaces = MuxRead::survey(&legacy, Scope::All, Depth::Panes)
-        .unwrap()
-        .spaces;
-    assert_eq!(spaces.len(), 2);
-    assert_eq!(MuxRead::endpoint(&legacy).kind, MuxKind::Herdr);
-    let expect = target().agent.unwrap();
-    let request = PromptRequest {
-        expect: &expect,
-        text: "hello",
-        admit: Admit::Settled,
-    };
-    assert_eq!(
-        bridge(&legacy).send(&PaneId::new("p1"), InputKind::Prompt(request)),
-        InputOutcome::Refused(error("agent_busy"))
-    );
-    assert_eq!(*legacy.prompts.lock().unwrap(), ["hello"]);
-}
-
-/// Records each bounded read: its command, its budget, and the flag that
-/// cancels it, by address, so a test can tell whose flag a read watched.
-struct Budgeted {
-    reads: Mutex<Vec<(String, Duration, usize, usize)>>,
-}
-
-impl Budgeted {
-    fn new() -> Self {
-        Self {
-            reads: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn commands(&self) -> Vec<(String, Duration, usize)> {
-        self.reads
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(args, timeout, bytes, _)| (args.clone(), *timeout, *bytes))
-            .collect()
-    }
-}
-
-fn address(flag: &AtomicBool) -> usize {
-    std::ptr::from_ref(flag) as usize
-}
-
-impl HerdrCommandExecutor for Budgeted {
-    fn execute(&self, _args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        panic!("a bounded read must not run unbounded")
-    }
-
-    fn execute_bounded(
-        &self,
-        args: &[&str],
-        timeout: Duration,
-        cancelled: &AtomicBool,
-        max_output_bytes: usize,
-    ) -> Result<HerdrCommandOutput, String> {
-        self.reads.lock().unwrap().push((
-            args.join(" "),
-            timeout,
-            max_output_bytes,
-            address(cancelled),
-        ));
-        Ok(HerdrCommandOutput {
-            stdout: json!({"result": {"label": "build"}}).to_string(),
-        })
-    }
-}
-
-#[test]
-fn a_read_within_a_shrinking_budget_asks_it_before_every_command_and_watches_the_caller_s_flag() {
-    let executor = Budgeted::new();
-    let cancelled = AtomicBool::new(false);
-    let left = Mutex::new(vec![Duration::from_millis(700), Duration::from_millis(900)]);
-    let reads = executor.within(Allowance::each(
-        || {
-            let timeout = left.lock().unwrap().pop().ok_or("the budget ran out")?;
-            Ok(Budget {
-                timeout,
-                max_output_bytes: 4096,
-            })
-        },
-        &cancelled,
-    ));
-    let tab = TabId::new("tab1");
-    assert_eq!(reads.tab_label(&tab).unwrap().as_deref(), Some("build"));
-    assert_eq!(reads.tab_label(&tab).unwrap().as_deref(), Some("build"));
-    // The budget's own words reach the caller, and no command runs.
-    assert_eq!(
-        reads.tab_label(&tab).unwrap_err(),
-        MuxError::Unavailable("the budget ran out".to_owned())
-    );
-    let read = |timeout| {
-        (
-            "tab get tab1".to_owned(),
-            Duration::from_millis(timeout),
-            4096,
-            address(&cancelled),
-        )
-    };
-    assert_eq!(
-        *executor.reads.lock().unwrap(),
-        [read(900), read(700)],
-        "what `bounded` ran for the agent status panel and its identity recheck"
-    );
-}
-
-#[test]
-fn a_read_within_a_budget_runs_bounded_and_uncancelled_through_a_legacy_executor() {
-    let executor = Budgeted::new();
-    let budget = Budget {
-        timeout: Duration::from_secs(2),
-        max_output_bytes: 64 * 1024,
-    };
-    let tab = TabId::new("tab1");
-    assert_eq!(
-        executor
-            .within(Allowance::fixed(budget))
-            .tab_label(&tab)
-            .unwrap()
-            .as_deref(),
-        Some("build")
-    );
-    assert_eq!(
-        executor.commands(),
-        [("tab get tab1".to_owned(), Duration::from_secs(2), 64 * 1024)]
-    );
-}
-
+/// Health's `plugin list` must answer within 2 s and 64 KiB however long
+/// the connection's own budget is.
 #[test]
 fn health_reads_the_integration_root_within_two_seconds_and_64_kib() {
-    let executor = Budgeted::new();
-    assert_eq!(crate::health::registered_plugin_root(&executor), None);
+    let mux = crate::mux::fake::FakeMux::world().build();
+    assert_eq!(crate::health::registered_plugin_root(&mux), None);
     assert_eq!(
-        executor.commands(),
+        mux.budgeted_reads(),
         [(
-            "plugin list --plugin namedrop --json".to_owned(),
-            Duration::from_secs(2),
-            64 * 1024
-        )],
-        "what health's plugin list ran through `bounded` before commit 14"
+            crate::mux::fake::Read::IntegrationRoot,
+            vec![Budget {
+                timeout: Duration::from_secs(2),
+                max_output_bytes: 64 * 1024,
+            }]
+        )]
     );
-}
-
-#[test]
-fn a_budget_within_a_budget_keeps_the_tighter_limit_of_each_and_the_narrowest_flag() {
-    let executor = Budgeted::new();
-    let wide = AtomicBool::new(false);
-    let reads = executor.within(Allowance::each(
-        || {
-            Ok(Budget {
-                timeout: Duration::from_millis(700),
-                max_output_bytes: 1 << 20,
-            })
-        },
-        &wide,
-    ));
-    let tab = TabId::new("tab1");
-    let inner = reads.within(Allowance::fixed(Budget {
-        timeout: Duration::from_secs(2),
-        max_output_bytes: 4096,
-    }));
-    inner.tab_label(&tab).unwrap();
-    let narrow = AtomicBool::new(false);
-    let narrowest = inner.within(Allowance::each(
-        || {
-            Ok(Budget {
-                timeout: Duration::from_millis(300),
-                max_output_bytes: 1 << 30,
-            })
-        },
-        &narrow,
-    ));
-    narrowest.tab_label(&tab).unwrap();
-    assert_eq!(
-        *executor.reads.lock().unwrap(),
-        [
-            (
-                "tab get tab1".to_owned(),
-                Duration::from_millis(700),
-                4096,
-                address(&wide)
-            ),
-            (
-                "tab get tab1".to_owned(),
-                Duration::from_millis(300),
-                4096,
-                address(&narrow)
-            ),
-        ]
-    );
-    // A command watches one flag, so a wider flag that is already set
-    // refuses the command before it starts.
-    wide.store(true, std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(
-        narrowest.tab_label(&tab),
-        Err(MuxError::Unavailable("Herdr read cancelled".to_owned()))
-    );
-    assert_eq!(executor.reads.lock().unwrap().len(), 2);
 }
 
 #[test]

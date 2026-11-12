@@ -1684,14 +1684,10 @@ mod tests {
     /// Text that would let dashboard code type into a pane around
     /// `DashboardPane`, and the one dashboard file each may appear in. The
     /// dashboard is a sibling of the delivery code in this crate, so no
-    /// visibility can hide `PaneEffects` or `InputOwner` from it alone, and
-    /// until the Herdr transport is private to `mux/herdr/` the compiler
-    /// cannot stop it naming that either.
+    /// visibility can hide `PaneEffects` or `InputOwner` from it alone. The
+    /// Herdr transport is private to `mux/herdr/`, so the compiler stops the
+    /// dashboard naming that.
     const DASHBOARD_RAW: &[(&str, Option<&str>)] = &[
-        ("ProcessHerdr", None),
-        ("HerdrCommandExecutor", None),
-        ("execute_bounded", None),
-        (".execute(", None),
         ("PaneEffects", None),
         ("InputOwner", None),
         ("HERDR_BIN_PATH", Some("observer_guard.rs")),
@@ -1905,10 +1901,6 @@ mod tests {
             (
                 r#"Command::new("herdr").args(["pane", "send-keys", pane, "enter"])"#,
                 r#"names "herdr""#,
-            ),
-            (
-                r#"ProcessHerdr::for_binary(bin).execute(&["pane", "send-keys", pane])"#,
-                "names ProcessHerdr",
             ),
             (
                 "PaneEffects::acquire(state, socket, pane)?.run_terminal(&herdr, &owner, text)",
