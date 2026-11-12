@@ -1,4 +1,4 @@
-use crate::{Clock, LifecycleRuntime, ProcessHerdr, ProcessIds, StateStore, SystemClock};
+use crate::{Clock, LifecycleRuntime, ProcessIds, StateStore, SystemClock, mux::Budget};
 use rusqlite::{Connection, OpenFlags};
 use std::{
     fs,
@@ -227,7 +227,13 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
                 state,
                 &SystemClock,
                 &ProcessIds::default(),
-                |ns| ProcessHerdr::default().with_socket(Some(ns.session_socket_id.clone())),
+                |ns| {
+                    crate::mux::herdr::connect(
+                        Some(&ns.session_socket_id),
+                        Budget::ADAPTER_DEFAULT,
+                        Default::default(),
+                    )
+                },
                 &mut catch_up,
             ) {
                 Ok(_) => {}

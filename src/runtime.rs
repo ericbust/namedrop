@@ -36,28 +36,42 @@ impl Default for ProcessHerdr {
     }
 }
 
-/// The terminal `ps` names as `pid`'s controlling TTY, read within `timeout`.
-/// Not a Herdr read. It borrows `ProcessHerdr`'s bounded runner.
+/// The terminal `ps` names as `pid`'s controlling TTY, or `None` when `ps`
+/// fails, writes more than 1 KiB to either stream, or outlives `timeout`.
 pub(crate) fn controlling_tty(pid: u64, timeout: Duration) -> Option<String> {
-    ProcessHerdr::for_binary("/bin/ps")
-        .execute_bounded(
-            &["-p", &pid.to_string(), "-o", "tty="],
-            timeout,
-            &AtomicBool::new(false),
-            1024,
-        )
+    const MAX_OUTPUT_BYTES: usize = 1024;
+    let mut child = Command::new("/bin/ps")
+        .args(["-p", &pid.to_string(), "-o", "tty="])
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+            _ => {
+                stop_process_group(&mut child);
+                return None;
+            }
+        }
+    }
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success()
+        || output.stdout.len() > MAX_OUTPUT_BYTES
+        || output.stderr.len() > MAX_OUTPUT_BYTES
+    {
+        return None;
+    }
+    String::from_utf8(output.stdout)
         .ok()
-        .map(|output| output.stdout.trim().to_owned())
+        .map(|tty| tty.trim().to_owned())
 }
 
 impl ProcessHerdr {
-    fn for_binary(binary: &str) -> Self {
-        Self {
-            binary: binary.to_owned(),
-            ..Self::default()
-        }
-    }
-
     pub fn with_socket(mut self, socket: Option<String>) -> Self {
         self.socket = socket;
         self

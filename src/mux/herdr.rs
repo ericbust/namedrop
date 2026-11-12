@@ -270,18 +270,37 @@ impl MuxConnector for HerdrConnector {
         budget: Budget,
         cancelled: Arc<AtomicBool>,
     ) -> Result<Arc<dyn Mux>, MuxError> {
-        Ok(Arc::new(HerdrMux {
-            transport: Process {
-                herdr: ProcessHerdr::default().with_socket(Some(socket.to_owned())),
-                budget,
-                cancelled,
-            },
-            endpoint: Endpoint {
-                kind: MuxKind::Herdr,
-                key: socket.to_owned(),
-            },
-        }))
+        Ok(connect(Some(socket), budget, cancelled))
     }
+}
+
+/// The one way to make a Herdr connection. Each command runs the `herdr`
+/// that `HERDR_BIN_PATH` names, within `budget`, until `cancelled` is set.
+/// With no `socket`, each command inherits `HERDR_SOCKET_PATH`, or Herdr's
+/// own default, and the endpoint's key is empty.
+pub fn connect(socket: Option<&str>, budget: Budget, cancelled: Arc<AtomicBool>) -> Arc<dyn Mux> {
+    Arc::new(HerdrMux {
+        transport: Process {
+            herdr: ProcessHerdr::default().with_socket(socket.map(str::to_owned)),
+            budget,
+            cancelled,
+        },
+        endpoint: Endpoint {
+            kind: MuxKind::Herdr,
+            key: socket.unwrap_or_default().to_owned(),
+        },
+    })
+}
+
+/// The socket of the Herdr server a command reaches with no socket of its
+/// own, as `status server` reports it, or `None` when it reports none.
+pub fn server_socket() -> Option<String> {
+    let process = Process {
+        herdr: ProcessHerdr::default(),
+        budget: Budget::ADAPTER_DEFAULT,
+        cancelled: Arc::default(),
+    };
+    wire::server_socket(&process)
 }
 
 /// The `herdr` process, each command run within the connection's budget.

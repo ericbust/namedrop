@@ -573,6 +573,15 @@ pub(super) fn tab_label(
         .map(str::to_owned))
 }
 
+/// The socket `status server` names, or `None` when it fails or names none.
+pub(super) fn server_socket(transport: &impl Transport) -> Option<String> {
+    transport
+        .run(&["status", "server"])
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("socket: ").map(str::to_owned))
+}
+
 pub(super) fn integration_root(
     transport: &impl Transport,
 ) -> Result<Option<std::path::PathBuf>, MuxError> {

@@ -1,7 +1,7 @@
 //! Durable handoff of bound agent commands when the pane cannot connect to Herdr.
 use crate::{
-    AgentSessionId, Clock, IdGenerator, LifecycleRuntime, PaneAddressId, ProcessHerdr, ProcessIds,
-    StateNamespace, StateStore, StoreError, SystemClock, cli::RuntimeOptions,
+    AgentSessionId, Clock, IdGenerator, LifecycleRuntime, PaneAddressId, ProcessIds,
+    StateNamespace, StateStore, StoreError, SystemClock, cli::RuntimeOptions, mux::Budget,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -674,8 +674,11 @@ fn clear_pending(pending: &Dir, key: &str) -> Result<(), String> {
 }
 
 fn execute_request(state: &Path, request: &Request) -> Result<Value, String> {
-    let herdr = ProcessHerdr::default()
-        .with_socket(Some(request.caller.namespace.session_socket_id.clone()));
+    let herdr = crate::mux::herdr::connect(
+        Some(&request.caller.namespace.session_socket_id),
+        Budget::ADAPTER_DEFAULT,
+        Default::default(),
+    );
     // From the worker's own environment, so a deferred `address list` reports
     // context sizes as a direct one does.
     let directories = crate::InheritedDirectories::from_environment();

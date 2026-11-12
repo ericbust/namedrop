@@ -84,9 +84,7 @@ pub(super) fn launch(options: &RuntimeOptions, mode: UiMode) -> Result<serde_jso
     })
 }
 
-fn target_pane(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-) -> Result<DiscoveredPane, String> {
+fn target_pane(runtime: &Runtime<'_>) -> Result<DiscoveredPane, String> {
     let workspace = runtime
         .workspace_id
         .ok_or("This popup is missing its invoking space")?;
@@ -99,9 +97,7 @@ fn target_pane(
         })
 }
 
-fn target_terminal(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-) -> Result<String, String> {
+fn target_terminal(runtime: &Runtime<'_>) -> Result<String, String> {
     target_pane(runtime).map(|pane| pane.terminal_id)
 }
 
@@ -152,11 +148,7 @@ fn run_prompt(options: &RuntimeOptions, mode: UiMode) -> Result<(), String> {
     })
 }
 
-fn doctor_prompt(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-    terminal: &str,
-    session: &str,
-) -> Result<(), String> {
+fn doctor_prompt(runtime: &Runtime<'_>, terminal: &str, session: &str) -> Result<(), String> {
     let _input_mode = InputMode::enter()?;
     let mut notice = String::new();
     'refresh: loop {
@@ -272,10 +264,7 @@ fn doctor_prompt(
 
 /// Names the invoking pane and returns the confirmation it printed, or
 /// `None` when the person cancelled.
-fn name_prompt(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-    terminal: &str,
-) -> Result<Option<String>, String> {
+fn name_prompt(runtime: &Runtime<'_>, terminal: &str) -> Result<Option<String>, String> {
     let default = namedrop::default_pane_type(runtime)?;
     say(Tone::Strong, "Name this pane\n");
     say(
@@ -394,10 +383,7 @@ const TOUR_OFFER: &str = "Press T for the tour.";
 
 /// The tour popup. Opening it counts as showing the current presentation, so
 /// a tour someone opened by hand never pops up again on its own.
-fn tour_prompt(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-    terminal: &str,
-) -> Result<(), String> {
+fn tour_prompt(runtime: &Runtime<'_>, terminal: &str) -> Result<(), String> {
     let _input_mode = InputMode::enter()?;
     // A marker that cannot be written only means the tour may open again, so
     // it is reported on the page instead of costing the tour itself.
@@ -411,11 +397,7 @@ fn tour_prompt(
 /// Pages the current tour from Manage or Doctor, which stay open after it; a
 /// tour that cannot load becomes their notice. Only the tour popup records
 /// the tour as shown, so Doctor stays read-only.
-fn inline_tour(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-    terminal: &str,
-    notice: &mut String,
-) -> Result<(), String> {
+fn inline_tour(runtime: &Runtime<'_>, terminal: &str, notice: &mut String) -> Result<(), String> {
     match tour::current() {
         Ok(presentation) => tour_pages(runtime, terminal, &presentation, None),
         Err(error) => {
@@ -430,7 +412,7 @@ fn inline_tour(
 /// the ordinary name prompt on N and then returns to that page, showing what
 /// was named once at its top.
 fn tour_pages(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
+    runtime: &Runtime<'_>,
     terminal: &str,
     presentation: &Presentation,
     warning: Option<&str>,
@@ -485,9 +467,7 @@ fn tour_pages(
 /// Whether this space has no names at all. It reads without creating or
 /// changing state, because Doctor stays read-only; a store that cannot be
 /// read answers `false`, so the tour is offered only where it is known to fit.
-fn space_has_no_names(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-) -> bool {
+fn space_has_no_names(runtime: &Runtime<'_>) -> bool {
     let Some(workspace) = runtime.workspace_id else {
         return false;
     };
@@ -505,10 +485,7 @@ fn space_has_no_names(
     }
 }
 
-fn manage_prompt(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-    terminal: &str,
-) -> Result<(), String> {
+fn manage_prompt(runtime: &Runtime<'_>, terminal: &str) -> Result<(), String> {
     let _input_mode = InputMode::enter()?;
     let mut selected = 0usize;
     let mut notice = String::new();

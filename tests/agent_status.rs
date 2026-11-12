@@ -39,7 +39,7 @@ fn with_runtime_options<T>(
     _action: impl FnOnce(
         &namedrop::LifecycleRuntime<
             '_,
-            namedrop::ProcessHerdr,
+            std::sync::Arc<dyn namedrop::mux::Mux>,
             namedrop::SystemClock,
             namedrop::ProcessIds,
         >,
@@ -166,8 +166,8 @@ struct Fixture(PathBuf);
 #[ignore = "requires explicit live acceptance and authenticated model usage"]
 fn live_origin_probe() {
     use namedrop::{
-        LifecycleRuntime, ProcessHerdr, ProcessIds, SystemClock, collect_agent_status,
-        discover_worktree_for_workspace, summarize_agent_status,
+        LifecycleRuntime, ProcessIds, SystemClock, collect_agent_status,
+        discover_worktree_for_workspace, mux, summarize_agent_status,
     };
     use serde_json::json;
     use std::{env, sync::atomic::AtomicBool, time::Instant};
@@ -178,7 +178,11 @@ fn live_origin_probe() {
     let state = PathBuf::from(env::var("HERDR_PLUGIN_STATE_DIR").expect("state required"));
     let home = env::var_os("HOME").map(PathBuf::from);
     let cwd = env::current_dir().unwrap();
-    let herdr = ProcessHerdr::default().with_socket(Some(socket.clone()));
+    let herdr = mux::herdr::connect(
+        Some(&socket),
+        mux::Budget::ADAPTER_DEFAULT,
+        Default::default(),
+    );
     let before = discover_worktree_for_workspace(&herdr, &workspace).unwrap();
     let origin = before
         .panes
