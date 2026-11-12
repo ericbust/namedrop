@@ -594,7 +594,7 @@ pub(super) fn integration_root(
 
 /// Each command an effect runs, in order. A badge list that mixes the
 /// counters and a relay runs one command per metadata source.
-pub(super) fn effect_commands(effect: &Effect, socket: &str) -> Vec<Vec<String>> {
+pub(super) fn effect_commands(effect: &Effect) -> Vec<Vec<String>> {
     let strings = |args: &[&str]| args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
     match effect {
         Effect::Identify { pane, alias, texts } => vec![strings(&[
@@ -665,12 +665,12 @@ pub(super) fn effect_commands(effect: &Effect, socket: &str) -> Vec<Vec<String>>
             }
             vec![command]
         }
-        Effect::OpenPopup(popup) => vec![popup_args(popup, socket)],
+        Effect::OpenPopup(popup) => vec![popup_args(popup)],
         Effect::ReloadKeybindings => vec![strings(&["server", "reload-config"])],
     }
 }
 
-fn popup_args(popup: &PopupSpec, socket: &str) -> Vec<String> {
+fn popup_args(popup: &PopupSpec) -> Vec<String> {
     let screen = popup.screen;
     let (entrypoint, width, height) = match screen {
         PopupScreen::Name => ("naming", "72", "20"),
@@ -717,7 +717,7 @@ fn popup_args(popup: &PopupSpec, socket: &str) -> Vec<String> {
         "--env".to_owned(),
         format!("HERDR_PLUGIN_STATE_DIR={}", popup.state_dir.display()),
         "--env".to_owned(),
-        format!("HERDR_SOCKET_PATH={socket}"),
+        format!("HERDR_SOCKET_PATH={}", popup.socket),
         "--focus".to_owned(),
     ])
     .collect()

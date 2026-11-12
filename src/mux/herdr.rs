@@ -243,7 +243,7 @@ impl<T: Transport> MuxRead for HerdrMux<T> {
 impl<T: Transport> MuxAct for HerdrMux<T> {
     fn apply(&self, effect: &Effect) -> Result<Applied, MuxError> {
         let mut reply = String::new();
-        for command in wire::effect_commands(effect, &self.endpoint.key) {
+        for command in wire::effect_commands(effect) {
             let args: Vec<_> = command.iter().map(String::as_str).collect();
             reply = wire::run(&self.transport, &args)?;
         }
@@ -350,23 +350,17 @@ static LEGACY_ENDPOINT: Endpoint = Endpoint {
     key: String::new(),
 };
 
-pub(crate) fn legacy_endpoint() -> &'static Endpoint {
-    &LEGACY_ENDPOINT
-}
-
-/// The executor's own `mux_endpoint`, so a popup through the bridge names the
-/// socket a keyed `ProcessHerdr` was given. Deleted with the bridge, when a
-/// connector fixes the endpoint instead.
+/// Deleted with the bridge, when a connector fixes the endpoint instead.
 fn bridge<E: HerdrCommandExecutor + Sync>(executor: &E) -> HerdrMux<Legacy<'_, E>> {
     HerdrMux {
         transport: Legacy(executor),
-        endpoint: executor.mux_endpoint().clone(),
+        endpoint: LEGACY_ENDPOINT.clone(),
     }
 }
 
 impl<E: HerdrCommandExecutor + Send + Sync> MuxRead for E {
     fn endpoint(&self) -> &Endpoint {
-        self.mux_endpoint()
+        &LEGACY_ENDPOINT
     }
 
     fn survey(&self, scope: Scope<'_>, depth: Depth) -> Result<Survey, MuxError> {
@@ -395,7 +389,7 @@ impl<E: HerdrCommandExecutor + Send + Sync> MuxRead for E {
                 transport: Legacy(self),
                 allowance,
             },
-            endpoint: self.mux_endpoint().clone(),
+            endpoint: LEGACY_ENDPOINT.clone(),
         })
     }
 }

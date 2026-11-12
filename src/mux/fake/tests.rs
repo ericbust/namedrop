@@ -524,11 +524,12 @@ fn an_opened_popup_names_its_target_and_is_logged() {
         .unwrap()
         .facts
         .clone();
-    let popup = Effect::OpenPopup(PopupSpec {
+    let popup = Effect::OpenPopup(Box::new(PopupSpec {
         screen: PopupScreen::Doctor,
         target,
         state_dir: "/state".into(),
-    });
+        socket: "socket-a".into(),
+    }));
     assert_eq!(
         mux.apply(&popup),
         Ok(Applied::Opened(

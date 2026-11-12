@@ -968,7 +968,6 @@ fn with_runtime_options<T>(
         pane_id = pane_id.or(Some(pane));
     }
     let socket_id = session_socket_id(options.herdr_socket.clone(), &herdr);
-    let herdr = herdr.keyed(&socket_id);
     let clock = SystemClock;
     let ids = ProcessIds::default();
     action(&LifecycleRuntime {

@@ -675,8 +675,7 @@ fn clear_pending(pending: &Dir, key: &str) -> Result<(), String> {
 
 fn execute_request(state: &Path, request: &Request) -> Result<Value, String> {
     let herdr = ProcessHerdr::default()
-        .with_socket(Some(request.caller.namespace.session_socket_id.clone()))
-        .keyed(&request.caller.namespace.session_socket_id);
+        .with_socket(Some(request.caller.namespace.session_socket_id.clone()));
     // From the worker's own environment, so a deferred `address list` reports
     // context sizes as a direct one does.
     let directories = crate::InheritedDirectories::from_environment();

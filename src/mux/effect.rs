@@ -32,6 +32,9 @@ pub struct PopupSpec {
     /// The pane the popup acts for, as the caller discovered it.
     pub target: PaneFacts,
     pub state_dir: PathBuf,
+    /// The runtime's `session_socket_id`, which the popup's own Namedrop
+    /// reconnects to.
+    pub socket: String,
 }
 
 /// Everything Namedrop does to a multiplexer other than typing into a pane.
@@ -56,7 +59,7 @@ pub enum Effect {
         body: String,
         sound: bool,
     },
-    OpenPopup(PopupSpec),
+    OpenPopup(Box<PopupSpec>),
     ReloadKeybindings,
 }
 

@@ -533,16 +533,18 @@ fn each_effect_runs_today_s_command() {
             body: "Sent to @b".into(),
             sound: false,
         },
-        Effect::OpenPopup(PopupSpec {
+        Effect::OpenPopup(Box::new(PopupSpec {
             screen: PopupScreen::Status,
             target: target(),
             state_dir: "/state".into(),
-        }),
-        Effect::OpenPopup(PopupSpec {
+            socket: "socket-a".into(),
+        })),
+        Effect::OpenPopup(Box::new(PopupSpec {
             screen: PopupScreen::Tour,
             target: target(),
             state_dir: "/state".into(),
-        }),
+            socket: "socket-a".into(),
+        })),
         Effect::ReloadKeybindings,
     ] {
         let applied = if matches!(effect, Effect::OpenPopup(_)) {
@@ -587,11 +589,12 @@ fn each_effect_runs_today_s_command() {
 }
 
 fn tour_popup() -> Effect {
-    Effect::OpenPopup(PopupSpec {
+    Effect::OpenPopup(Box::new(PopupSpec {
         screen: PopupScreen::Tour,
         target: target(),
         state_dir: "/state".into(),
-    })
+        socket: "/tmp/herdr.sock".into(),
+    }))
 }
 
 #[test]
@@ -616,21 +619,8 @@ fn a_popup_returns_herdr_s_reply_and_an_unreadable_one_is_a_protocol_error() {
     );
 }
 
-/// A legacy executor that records each command, answers `{}`, and names
-/// the endpoint it was given.
-struct Recording(Mutex<Vec<String>>, Endpoint);
-
-impl Recording {
-    fn keyed(key: &str) -> Self {
-        Self(
-            Mutex::default(),
-            Endpoint {
-                kind: MuxKind::Herdr,
-                key: key.to_owned(),
-            },
-        )
-    }
-}
+/// A legacy executor that records each command and answers `{}`.
+struct Recording(Mutex<Vec<String>>);
 
 impl HerdrCommandExecutor for Recording {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
@@ -639,38 +629,25 @@ impl HerdrCommandExecutor for Recording {
             stdout: "{}".into(),
         })
     }
-
-    fn mux_endpoint(&self) -> &Endpoint {
-        &self.1
-    }
 }
 
+/// The socket comes from the popup's spec, which `lifecycle::open_popup`
+/// fills from the runtime's `session_socket_id`, never from the endpoint of
+/// the connection that opens it.
 #[test]
-fn a_popup_names_the_socket_its_legacy_executor_was_keyed_with() {
-    for key in ["/tmp/herdr.sock", ""] {
-        let legacy = Recording::keyed(key);
-        assert_eq!(legacy.endpoint().key, key);
-        legacy.apply(&tour_popup()).unwrap();
-        assert_eq!(
-            *legacy.0.lock().unwrap(),
-            [format!(
-                "plugin pane open --plugin namedrop --entrypoint tour --placement popup --width 72 \
-                 --height 24 --env NAMEDROP_TARGET_WORKSPACE=w1 --env NAMEDROP_TARGET_PANE=p1 \
-                 --env NAMEDROP_TARGET_TERMINAL=t1 --env NAMEDROP_TARGET_SESSION=s1 \
-                 --env HERDR_PLUGIN_STATE_DIR=/state --env HERDR_SOCKET_PATH={key} --focus"
-            )]
-        );
-    }
-}
-
-#[test]
-fn a_keyed_process_herdr_names_its_session_socket_and_an_unkeyed_one_names_none() {
-    assert_eq!(ProcessHerdr::default().endpoint().key, "");
-    let keyed = ProcessHerdr::default()
-        .with_socket(None)
-        .keyed("/run/herdr.sock");
-    assert_eq!(keyed.endpoint().key, "/run/herdr.sock");
-    assert_eq!(keyed.endpoint().kind, MuxKind::Herdr);
+fn a_popup_names_the_socket_its_spec_carries_whatever_the_connection() {
+    let legacy = Recording(Mutex::default());
+    assert_eq!(legacy.endpoint().key, "");
+    legacy.apply(&tour_popup()).unwrap();
+    let scripted = herdr(|_| Ok("{}".into()));
+    assert_eq!(scripted.endpoint().key, "socket-a");
+    scripted.apply(&tour_popup()).unwrap();
+    let argv = "plugin pane open --plugin namedrop --entrypoint tour --placement popup --width 72 \
+                --height 24 --env NAMEDROP_TARGET_WORKSPACE=w1 --env NAMEDROP_TARGET_PANE=p1 \
+                --env NAMEDROP_TARGET_TERMINAL=t1 --env NAMEDROP_TARGET_SESSION=s1 \
+                --env HERDR_PLUGIN_STATE_DIR=/state --env HERDR_SOCKET_PATH=/tmp/herdr.sock --focus";
+    assert_eq!(*legacy.0.lock().unwrap(), [argv]);
+    assert_eq!(calls(&scripted), [argv]);
 }
 
 #[test]
