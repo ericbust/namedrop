@@ -1,21 +1,49 @@
 use super::*;
+use crate::mux::{
+    AgentState, Effect, Gone, InputOutcome, MuxError,
+    fake::{EVERY_LISTING, FakeMux, Listing, SentInput, StrictSpace, Takes, runs},
+};
 use crate::sync_cell::Cell;
-use crate::{
-    AgentRuntime, DeliveryAttemptId, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator,
-    PaneBindingId, ProcessIds,
+use crate::{AgentRuntime, DeliveryAttemptId, IdGenerator, PaneBindingId, ProcessIds};
+use std::{
+    collections::BTreeMap,
+    ops::Deref,
+    sync::{Arc, Mutex},
 };
 
 type PromptFailure = fn(String) -> crate::mux::InputOutcome;
 
+/// The old executor's switches and counters. Every world's hooks share them,
+/// and the fixture derefs to them, so a test sets `f.busy` as before.
+#[derive(Clone)]
+struct Switches {
+    live_session: Arc<Cell<&'static str>>,
+    now: Arc<Cell<u64>>,
+    busy: Arc<Cell<bool>>,
+    discoveries: Arc<Cell<u64>>,
+    prompts: Arc<Cell<u64>>,
+    discovery_error: Arc<Cell<Option<&'static str>>>,
+    prompt_failure: Arc<Cell<Option<PromptFailure>>>,
+}
+
+type ScopedError = Arc<Cell<Option<&'static str>>>;
+
 struct Fixture {
     state: PathBuf,
-    live_session: Cell<&'static str>,
-    now: Cell<u64>,
-    busy: Cell<bool>,
-    discoveries: Cell<u64>,
-    prompts: Cell<u64>,
-    discovery_error: Cell<Option<&'static str>>,
-    prompt_failure: Cell<Option<PromptFailure>>,
+    switches: Switches,
+    /// The worlds of other namespaces, by space id, each with its own error
+    /// switch. Built once, so a clone handed to a cycle never outlives its
+    /// space.
+    scoped: Mutex<BTreeMap<String, (ScopedError, StrictSpace)>>,
+    /// Last, so it judges the world after `Drop` removed the state directory.
+    space: StrictSpace,
+}
+impl Deref for Fixture {
+    type Target = Switches;
+
+    fn deref(&self) -> &Switches {
+        &self.switches
+    }
 }
 fn ns() -> StateNamespace {
     StateNamespace::for_space("test-socket", "test-space")
@@ -33,15 +61,28 @@ fn owner() -> ReminderOwner {
 }
 impl Fixture {
     fn new() -> Self {
+        // A fresh `ProcessIds` restarts its sequence, and the clock has only
+        // microseconds on macOS, so two fixtures made at once could share a
+        // directory without this process-wide count.
+        static FIXTURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let fixture = FIXTURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let switches = Switches {
+            live_session: Arc::new(Cell::new("session")),
+            now: Arc::new(Cell::new(60_000)),
+            busy: Arc::new(Cell::new(false)),
+            discoveries: Arc::new(Cell::new(0)),
+            prompts: Arc::new(Cell::new(0)),
+            discovery_error: Arc::new(Cell::new(None)),
+            prompt_failure: Arc::new(Cell::new(None)),
+        };
         let f = Self {
-            state: std::env::temp_dir().join(ProcessIds::default().next_id("test-reminders")),
-            live_session: Cell::new("session"),
-            now: Cell::new(60_000),
-            busy: Cell::new(false),
-            discoveries: Cell::new(0),
-            prompts: Cell::new(0),
-            discovery_error: Cell::new(None),
-            prompt_failure: Cell::new(None),
+            state: std::env::temp_dir().join(format!(
+                "{}-{fixture}",
+                ProcessIds::default().next_id("test-reminders")
+            )),
+            space: world("test-space", &switches, None),
+            switches,
+            scoped: Mutex::new(BTreeMap::new()),
         };
         f.initialize(&ns());
         f
@@ -117,7 +158,7 @@ impl Fixture {
         self.tx(|tx| tx.set_reminder(&ns(), id.into(), owner(), self.spec(reply, repeat), id, id));
     }
     fn live(&self) -> crate::DiscoveredWorktree {
-        crate::discover_worktree_for_workspace(self, "test-space").unwrap()
+        crate::discover_worktree_for_workspace(&*self.space, "test-space").unwrap()
     }
     fn fire(&self, id: &str) {
         let live = self.live();
@@ -242,41 +283,135 @@ impl Drop for Fixture {
         fs::remove_dir_all(&self.state).unwrap();
     }
 }
-impl HerdrCommandExecutor for Fixture {
-    fn input_failure(&self, error: String) -> crate::mux::InputOutcome {
-        self.prompt_failure
-            .get()
-            .unwrap_or(crate::mux::InputOutcome::Ambiguous)(error)
+impl Fixture {
+    /// An owned handle on the fixture's world, as `cycle_with` takes one per
+    /// namespace.
+    fn mux(&self) -> FakeMux {
+        (*self.space).clone()
     }
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let value = match args {
-            ["workspace", "list"] => {
-                json!({"result":{"workspaces":[{"workspace_id":"test-space"}]}})
-            }
-            ["worktree", "list", ..] => {
-                self.discoveries.set(self.discoveries.get() + 1);
-                if let Some(code) = self.discovery_error.get() {
-                    return Err(json!({"error":{"code":code,"message":"workspace_not_found text alone is not authoritative"}}).to_string());
-                }
-                json!({"result":{"worktrees":[{"path":"/test-repo","open_workspace_id":"test-space"}]}})
-            }
-            ["pane", "list", ..] => {
-                json!({"result":{"panes":[{"pane_id":"pane","terminal_id":"terminal","tab_id":"tab","workspace_id":"test-space","agent_session":{"value":self.live_session.get()},"agent_status":if self.busy.get() { "working" } else { "idle" }}]}})
-            }
-            ["pane", "report-metadata", ..] | ["notification", "show", ..] => json!({}),
-            ["agent", "prompt", "pane", _] => {
-                self.prompts.set(self.prompts.get() + 1);
-                if self.prompt_failure.get().is_some() {
-                    return Err("fake prompt failure".into());
-                }
-                self.now.set(900_000);
-                json!({})
-            }
-            _ => return Err(format!("unexpected fake Herdr command {args:?}")),
+
+    /// `namespace`'s world: the fixture's own for `ns()`, and otherwise a
+    /// world of the same shape in the namespace's space, sharing the
+    /// fixture's switches and counters, whose worktree listings fail with
+    /// `error`'s code before they are counted.
+    fn scoped(&self, namespace: &StateNamespace, error: Option<&'static str>) -> FakeMux {
+        if *namespace == ns() {
+            let None = error else {
+                panic!("the fixture's own world fails by its `discovery_error` switch");
+            };
+            return self.mux();
+        }
+        let mut scoped = self.scoped.lock().unwrap();
+        let (switch, space) = scoped
+            .entry(namespace.space_id.as_str().to_owned())
+            .or_insert_with(|| {
+                let switch = Arc::new(Cell::new(None));
+                let space = world(
+                    namespace.space_id.as_str(),
+                    &self.switches,
+                    Some(switch.clone()),
+                );
+                (switch, space)
+            });
+        switch.set(error);
+        (**space).clone()
+    }
+}
+
+/// `/test-repo` open in `space`, listed by every `workspace list`, `worktree
+/// list`, and `pane list`, and one pane, `pane`, that reports a session but no
+/// agent kind. The hooks do what the old executor did per command: apply the
+/// session and busy switches, count each `worktree list` and fail it while an
+/// error switch is set, answer a prompt to `pane` through `prompt_failure`,
+/// count it, and move the clock past a slow prompt that landed. The space
+/// takes those prompts, `pane report-metadata`, and `notification show`.
+fn world(space: &str, switches: &Switches, scoped_error: Option<ScopedError>) -> StrictSpace {
+    let mux = FakeMux::world()
+        .endpoint("test-socket")
+        .space(space)
+        .checkout("/test-repo")
+        .unstamped()
+        .pane("pane")
+        .terminal("terminal")
+        .tab("tab")
+        .session("session")
+        .idle()
+        .build();
+    let takes = Takes::nothing().input(prompts_pane).effect(|effect| {
+        matches!(
+            effect,
+            Effect::Identify { .. } | Effect::Badges { .. } | Effect::Notify { .. }
+        )
+    });
+    let space = StrictSpace::new(mux, EVERY_LISTING, takes);
+    let s = switches.clone();
+    space.on_read(move |mux, read| {
+        mux.set_session("pane", s.live_session.get());
+        mux.set_state(
+            "pane",
+            if s.busy.get() {
+                AgentState::Working
+            } else {
+                AgentState::Idle
+            },
+        );
+        if !runs(read, Listing::CheckoutAt) && !runs(read, Listing::CheckoutOf) {
+            return Ok(());
+        }
+        if let Some(code) = scoped_error.as_ref().and_then(|error| error.get()) {
+            return Err(discovery_error(code, json!({"error":{"code":code}})));
+        }
+        let Some(code) = s.discovery_error.get() else {
+            return Ok(());
         };
-        Ok(HerdrCommandOutput {
-            stdout: value.to_string(),
+        s.discoveries.set(s.discoveries.get() + 1);
+        Err(discovery_error(
+            code,
+            json!({"error":{"code":code,"message":"workspace_not_found text alone is not authoritative"}}),
+        ))
+    });
+    let s = switches.clone();
+    space.on_command(move |_, command| {
+        if matches!(
+            command.listing,
+            Some(Listing::CheckoutAt | Listing::CheckoutOf)
+        ) {
+            s.discoveries.set(s.discoveries.get() + 1);
+        }
+        Ok(())
+    });
+    let s = switches.clone();
+    space.answer_with(move |_, pane, input| {
+        (pane.as_str() == "pane" && matches!(input, SentInput::Prompt(_))).then(|| {
+            s.prompt_failure
+                .get()
+                .map_or(InputOutcome::Delivered, |classify| {
+                    classify("fake prompt failure".into())
+                })
         })
+    });
+    let s = switches.clone();
+    space.on_input(move |_, attempt| {
+        if prompts_pane(attempt) {
+            s.prompts.set(s.prompts.get() + 1);
+            if attempt.outcome == InputOutcome::Delivered {
+                s.now.set(900_000);
+            }
+        }
+    });
+    space
+}
+
+fn prompts_pane(attempt: &crate::mux::fake::Attempt) -> bool {
+    attempt.pane.as_str() == "pane" && matches!(attempt.input, SentInput::Prompt(_))
+}
+
+/// The adapter's reading of the two codes these tests fail a discovery with.
+fn discovery_error(code: &str, body: Value) -> MuxError {
+    if code == "workspace_not_found" {
+        MuxError::Gone(Gone::Space, body.to_string())
+    } else {
+        MuxError::Unavailable(body.to_string())
     }
 }
 
@@ -518,7 +653,7 @@ fn assert_fresh_reminder_reply(grammar: &str, nested: bool) {
         workspace_id: Some("test-space"),
         current_pane_id: Some("pane"),
         session_socket_id: "test-socket",
-        mux: &f,
+        mux: &*f.space,
         clock: &crate::SystemClock,
         ids: &ProcessIds::default(),
     };
@@ -857,7 +992,7 @@ fn reminder_reply_keeps_historical_alias_refusal() {
         workspace_id: Some("test-space"),
         current_pane_id: Some("pane"),
         session_socket_id: "test-socket",
-        mux: &f,
+        mux: &*f.space,
         clock: &crate::SystemClock,
         ids: &ProcessIds::default(),
     };
@@ -933,7 +1068,7 @@ fn reminder_fixed_delay_starts_after_a_slow_successful_prompt() {
         workspace_id: Some("test-space"),
         current_pane_id: None,
         session_socket_id: "test-socket",
-        mux: &f,
+        mux: &*f.space,
         clock: &f,
         ids: &ProcessIds::default(),
     };
@@ -1100,13 +1235,6 @@ fn reminder_refuses_unsupported_system_only_origin() {
     });
 }
 
-struct MeasurementHerdr<'a>(&'a Fixture);
-impl HerdrCommandExecutor for MeasurementHerdr<'_> {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        self.0.execute(args)
-    }
-}
-
 #[test]
 fn reminder_busy_clock_work_measurement() {
     let f = Fixture::new();
@@ -1135,7 +1263,7 @@ fn reminder_busy_clock_work_measurement() {
     let mut catch_up = crate::reminder::CatchUp::default();
     let startup_scope = crate::work_counters::Scope::start();
     let startup_result =
-        crate::reminder::cycle_with(&f.state, &f, &ids, |_| MeasurementHerdr(&f), &mut catch_up);
+        crate::reminder::cycle_with(&f.state, &f, &ids, |_| f.mux(), &mut catch_up);
     let startup = startup_scope.finish();
     startup_result.unwrap();
     let startup_discoveries = f.discoveries.replace(0);
@@ -1143,9 +1271,7 @@ fn reminder_busy_clock_work_measurement() {
     let mut errors = 0;
     for second in 1..=300 {
         f.now.set(60_000 + second * 1000);
-        if crate::reminder::cycle_with(&f.state, &f, &ids, |_| MeasurementHerdr(&f), &mut catch_up)
-            .is_err()
-        {
+        if crate::reminder::cycle_with(&f.state, &f, &ids, |_| f.mux(), &mut catch_up).is_err() {
             errors += 1;
         }
     }
@@ -1210,7 +1336,7 @@ fn reminder_busy_clock_work_measurement() {
         workspace_id: Some("test-space"),
         current_pane_id: Some("pane"),
         session_socket_id: "test-socket",
-        mux: &f,
+        mux: &*f.space,
         clock: &f,
         ids: &ids,
     };
@@ -1242,7 +1368,7 @@ fn reminder_idle_cycle_is_read_only_under_an_external_writer() {
         &f.state,
         &f,
         &ProcessIds::default(),
-        |_| MeasurementHerdr(&f),
+        |_| f.mux(),
         &mut crate::reminder::CatchUp::completed(),
     );
     let counts = scope.finish();
@@ -1263,7 +1389,7 @@ fn reminder_future_only_startup_has_no_discovery_write_or_drain() {
         &f.state,
         &f,
         &ProcessIds::default(),
-        |_| MeasurementHerdr(&f),
+        |_| f.mux(),
         &mut crate::reminder::CatchUp::default(),
     );
     let counts = scope.finish();
@@ -1295,7 +1421,7 @@ fn reminder_due_cycle_ignores_future_namespaces_and_deduplicates_catchup() {
         &ProcessIds::default(),
         |namespace| {
             visited.push(namespace.clone());
-            MeasurementHerdr(&f)
+            f.mux()
         },
         &mut crate::reminder::CatchUp::default(),
     );
@@ -1324,7 +1450,7 @@ fn reminder_cancelled_after_plan_does_not_drain() {
         &ProcessIds::default(),
         |_| {
             f.tx(|tx| tx.cancel_reminder(&ns(), &owner(), "due", 60_000));
-            MeasurementHerdr(&f)
+            f.mux()
         },
         &mut crate::reminder::CatchUp::completed(),
     );
@@ -1368,7 +1494,7 @@ fn reminder_terminal_mailbox_cleanup_remains_hook_visible() {
         workspace_id: Some("test-space"),
         current_pane_id: None,
         session_socket_id: "test-socket",
-        mux: &f,
+        mux: &*f.space,
         clock: &f,
         ids: &ProcessIds::default(),
     };
@@ -1397,7 +1523,7 @@ fn reminder_startup_catchup_keeps_transient_failure_eligible() {
         &f.state,
         &f,
         &ProcessIds::default(),
-        |_| MeasurementHerdr(&f),
+        |_| f.mux(),
         &mut catch_up,
     )
     .unwrap();
@@ -1415,7 +1541,7 @@ fn reminder_startup_catchup_keeps_transient_failure_eligible() {
         &f.state,
         &f,
         &ProcessIds::default(),
-        |_| MeasurementHerdr(&f),
+        |_| f.mux(),
         &mut catch_up,
     );
     let counts = scope.finish();
@@ -1464,7 +1590,7 @@ fn reminder_dispatch_failure_finalizes_in_the_same_drain_but_ambiguity_waits() {
             workspace_id: Some("test-space"),
             current_pane_id: None,
             session_socket_id: "test-socket",
-            mux: &f,
+            mux: &*f.space,
             clock: &f,
             ids: &ProcessIds::default(),
         };
@@ -1491,26 +1617,6 @@ fn reminder_dispatch_failure_finalizes_in_the_same_drain_but_ambiguity_waits() {
     }
 }
 
-struct ScopedHerdr<'a> {
-    fixture: &'a Fixture,
-    namespace: StateNamespace,
-    error: Option<&'static str>,
-}
-impl HerdrCommandExecutor for ScopedHerdr<'_> {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        if args.starts_with(&["worktree", "list"])
-            && let Some(code) = self.error
-        {
-            return Err(json!({"error":{"code":code}}).to_string());
-        }
-        self.fixture.execute(args).map(|output| HerdrCommandOutput {
-            stdout: output
-                .stdout
-                .replace("test-space", self.namespace.space_id.as_str()),
-        })
-    }
-}
-
 #[test]
 fn reminder_startup_retry_does_not_redrain_successful_busy_namespaces() {
     for error in ["transport_unavailable", "workspace_not_found"] {
@@ -1520,11 +1626,7 @@ fn reminder_startup_retry_does_not_redrain_successful_busy_namespaces() {
         f.fire("busy");
         let unavailable = StateNamespace::for_space("test-socket", "unavailable");
         f.initialize(&unavailable);
-        let herdr = ScopedHerdr {
-            fixture: &f,
-            namespace: unavailable.clone(),
-            error: None,
-        };
+        let herdr = f.scoped(&unavailable, None);
         let live = crate::discover_worktree_for_workspace(&herdr, "unavailable").unwrap();
         f.tx(|tx| {
             tx.set_reminder(
@@ -1545,11 +1647,7 @@ fn reminder_startup_retry_does_not_redrain_successful_busy_namespaces() {
             &ProcessIds::default(),
             |namespace| {
                 visited.push(namespace.clone());
-                ScopedHerdr {
-                    fixture: &f,
-                    namespace: namespace.clone(),
-                    error: (namespace == &unavailable).then_some(error),
-                }
+                f.scoped(namespace, (namespace == &unavailable).then_some(error))
             },
             &mut catch_up,
         )
@@ -1566,11 +1664,7 @@ fn reminder_startup_retry_does_not_redrain_successful_busy_namespaces() {
             &ProcessIds::default(),
             |namespace| {
                 visited.push(namespace.clone());
-                ScopedHerdr {
-                    fixture: &f,
-                    namespace: namespace.clone(),
-                    error: (namespace == &unavailable).then_some(error),
-                }
+                f.scoped(namespace, (namespace == &unavailable).then_some(error))
             },
             &mut catch_up,
         );
@@ -1600,11 +1694,7 @@ fn reminder_startup_retry_does_not_redrain_successful_busy_namespaces() {
                 &ProcessIds::default(),
                 |namespace| {
                     visited.push(namespace.clone());
-                    ScopedHerdr {
-                        fixture: &f,
-                        namespace: namespace.clone(),
-                        error: None,
-                    }
+                    f.scoped(namespace, None)
                 },
                 &mut catch_up,
             )
@@ -1703,7 +1793,7 @@ fn reminder_operator_wakes_keep_dm_and_channel_reply_routes() {
             workspace_id: Some("test-space"),
             current_pane_id: Some("pane"),
             session_socket_id: "test-socket",
-            mux: &f,
+            mux: &*f.space,
             clock: &crate::SystemClock,
             ids: &ids,
         };

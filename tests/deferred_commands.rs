@@ -1,9 +1,10 @@
-#![cfg(target_os = "linux")]
+#![cfg(all(target_os = "linux", feature = "test-support"))]
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
 mod executable;
 mod support;
+use namedrop::mux::fake::{EVERY_LISTING, FakeMux, StrictSpace, Takes};
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, DeliveryAttemptId, DeliveryId, DeliveryState,
     HerdrCommandExecutor, HerdrCommandOutput, LeaseDraft, LifecycleRuntime, MessageDraft,
@@ -29,6 +30,11 @@ struct Fixture {
     _listener: UnixListener,
 }
 
+/// The reminder clock test's in-process event runs the script, because
+/// its transient case relies on this call writing
+/// `observed-discovery-error`. The clock subprocess lists only by chance:
+/// its due reminders already await delivery when the error appears, so on a
+/// `FakeMux` that wait usually times out.
 struct ScriptHerdr<'a>(&'a Path);
 impl HerdrCommandExecutor for ScriptHerdr<'_> {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
@@ -52,23 +58,23 @@ impl HerdrCommandExecutor for ScriptHerdr<'_> {
     }
 }
 
-struct NativeHerdr;
-impl HerdrCommandExecutor for NativeHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let value = match args {
-            ["worktree", "list", ..] => {
-                json!({"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}})
-            }
-            ["workspace", "list"] => {
-                json!({"result":{"workspaces":[{"workspace_id":"workspace-1"}]}})
-            }
-            ["pane", "list", ..] => panes("session-author"),
-            _ => return Err(format!("unexpected Herdr command {args:?}")),
-        };
-        Ok(HerdrCommandOutput {
-            stdout: value.to_string(),
-        })
-    }
+/// The world the old in-process executor answered: `/repo` open in
+/// workspace-1 and one idle pane, `pane-author`, that reports a session but no
+/// agent kind. It answers every `worktree list` and `pane list`, as the old
+/// executor matched them with any arguments, and takes no input or effect.
+fn native(socket: &str) -> StrictSpace {
+    let mux = FakeMux::world()
+        .endpoint(socket)
+        .space("workspace-1")
+        .checkout("/repo")
+        .unstamped()
+        .pane("pane-author")
+        .terminal("terminal-author")
+        .tab("tab-1")
+        .session("session-author")
+        .idle()
+        .build();
+    StrictSpace::new(mux, EVERY_LISTING, Takes::nothing())
 }
 
 fn panes(session: &str) -> Value {
@@ -133,7 +139,7 @@ impl Fixture {
         execute_integration_operation("register", json!({"runtime":"codex","protocol_version":"collab/v1","nonce":"nonce","capabilities":complete_capability_profile()}), &LifecycleRuntime {
             state_directory:directory.path(), home_directory:None, agent_config:Default::default(),
             cwd:Path::new("/repo"), workspace_id:Some("workspace-1"), current_pane_id:Some("pane-author"),
-            session_socket_id:&socket, mux:&NativeHerdr, clock:&SystemClock, ids:&ProcessIds::default(),
+            session_socket_id:&socket, mux:&*native(&socket), clock:&SystemClock, ids:&ProcessIds::default(),
         }).unwrap();
         fs::write(
             directory.path().join("panes.json"),
@@ -508,7 +514,7 @@ fn committed_untracked_send_cannot_gain_coordination_when_first_queued() {
             workspace_id: Some("workspace-1"),
             current_pane_id: Some("pane-author"),
             session_socket_id: &fixture.socket,
-            mux: &NativeHerdr,
+            mux: &*native(&fixture.socket),
             clock: &SystemClock,
             ids: &ProcessIds::default(),
         },
