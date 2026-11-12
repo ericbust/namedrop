@@ -460,12 +460,14 @@ fn a_connection_that_outlives_the_space_fails_the_test() {
 fn clones_that_observers_hooks_and_predicates_capture_do_not_outlive_the_space() {
     let mux = author();
     let reader = mux.clone();
-    let takes = Takes::nothing().input(move |attempt| {
-        reader
-            .sent_to(attempt.pane.as_str())
-            .iter()
-            .any(|sent| sent.input == attempt.input)
-    });
+    let takes = Takes::nothing()
+        .input(move |attempt| {
+            reader
+                .sent_to(attempt.pane.as_str())
+                .iter()
+                .any(|sent| sent.input == attempt.input)
+        })
+        .effect(|effect| *effect == Effect::ReloadKeybindings);
     let space = StrictSpace::new(mux, CHECKOUT_LISTINGS, takes);
     let observed = space.clone();
     space.on_input(move |_, _| drop(observed.sent()));
@@ -474,8 +476,14 @@ fn clones_that_observers_hooks_and_predicates_capture_do_not_outlive_the_space()
         drop(hooked.reads());
         Ok(())
     });
+    let applying = space.clone();
+    space.on_apply(move |_, _| {
+        drop(applying.effects());
+        Err(MuxError::Unavailable("refused".into()))
+    });
     prompt(&space, "pane-author");
     let _ = space.process(&PaneId::new("pane-author"));
+    let _ = space.apply(&Effect::ReloadKeybindings);
     let (done, verdict_of) = mpsc::channel();
     std::thread::spawn(move || done.send(verdict(space)).unwrap());
     assert_eq!(

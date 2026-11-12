@@ -1,5 +1,6 @@
 //! A delivery settled from the agent's final message: the prompt hook arms a
 //! claim and says so, and the Stop runs the bound operation the CLI runs.
+#![cfg(feature = "test-support")]
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
@@ -10,13 +11,18 @@ mod dispatch;
 mod executable;
 
 use namedrop::{
-    ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
-    IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
-    PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
-    execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
-    execute_session_start_hook, execute_user_prompt_submit_hook, expand_attempt_reply,
+    ActorKind, AgentRuntime, AgentSessionId, Clock, IdGenerator, LifecycleRuntime,
+    MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId, PaneRoleId,
+    StateNamespace, StateStore, complete_capability_profile, execute_integration_operation,
+    execute_lifecycle_operation, execute_message_operation, execute_session_start_hook,
+    execute_user_prompt_submit_hook, expand_attempt_reply,
     final_reply::{BoundOperation, FinalText, HostTurn, StopFacts, mark_stopped, settle_at_stop},
-    issue_registration_challenge, send_operator_message,
+    issue_registration_challenge,
+    mux::{
+        AgentKind, Depth, Effect, InputOutcome,
+        fake::{CHECKOUT_LISTINGS, FakeMux, ScopeKind, SentInput, StrictSpace, Takes},
+    },
+    send_operator_message,
 };
 use serde_json::{Value, json};
 use std::{
@@ -25,7 +31,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
@@ -65,18 +71,129 @@ impl Drop for TestDirectory {
     }
 }
 
-struct FakeHerdr {
-    worktree: String,
-    reviewer_host: Mutex<&'static str>,
+/// `workspace-1`, which holds the test's repository, with the lead's Codex
+/// pane and the reviewer's pane, and `workspace-2`, which `workspace list`
+/// leaves out and which holds `{repo}-2`. The reviewer's session can show up
+/// there as `pane-elsewhere`. The space answers `workspace list` (no
+/// checkout stamp), `worktree list --cwd` and `--workspace`, and `pane list
+/// --workspace`. It takes `agent prompt` to any pane, any `pane
+/// report-metadata`, and any `notification show`.
+///
+/// The switches are the old executor's, and a read hook applies them to
+/// the world before every read.
+struct FinalSpace {
+    space: StrictSpace,
+    reviewer_host: Arc<Mutex<&'static str>>,
     /// Herdr no longer lists the reviewer's pane, as after it was closed.
-    reviewer_gone: AtomicBool,
+    reviewer_gone: Arc<AtomicBool>,
     /// Herdr lists the reviewer's session in `pane-elsewhere` of workspace-2.
-    reviewer_elsewhere: AtomicBool,
-    prompts: Mutex<Vec<(String, String)>>,
-    notifications: Mutex<Vec<String>>,
+    reviewer_elsewhere: Arc<AtomicBool>,
+    prompts: Arc<Mutex<Vec<(String, String)>>>,
+    notifications: Arc<Mutex<Vec<String>>>,
 }
 
-impl FakeHerdr {
+/// The agent kind Herdr's word names.
+fn agent_kind(word: &str) -> AgentKind {
+    match word {
+        "claude" => AgentKind::Known(AgentRuntime::ClaudeCode),
+        "codex" => AgentKind::Known(AgentRuntime::Codex),
+        other => AgentKind::Other(other.to_owned()),
+    }
+}
+
+impl FinalSpace {
+    fn new(worktree: &Path) -> Self {
+        let mux = FakeMux::world()
+            .endpoint("socket-a")
+            .space("workspace-1")
+            .checkout(worktree)
+            .unstamped()
+            .pane("pane-lead")
+            .terminal("t1")
+            .tab("tab-1")
+            .codex()
+            .session("session-lead")
+            .idle()
+            .pane("pane-reviewer")
+            .terminal("t2")
+            .tab("tab-2")
+            .claude()
+            .session("session-reviewer")
+            .idle()
+            .space("workspace-2")
+            .checkout(format!("{}-2", worktree.display()))
+            .unlisted()
+            .pane("pane-elsewhere")
+            .terminal("t2")
+            .tab("tab-9")
+            .claude()
+            .session("session-reviewer")
+            .working()
+            .hidden()
+            .build();
+        for pane in ["pane-lead", "pane-reviewer", "pane-elsewhere"] {
+            mux.answer(pane, InputOutcome::Delivered);
+        }
+        let reviewer_host = Arc::new(Mutex::new("claude"));
+        let reviewer_gone = Arc::new(AtomicBool::new(false));
+        let reviewer_elsewhere = Arc::new(AtomicBool::new(false));
+        let (host, gone, elsewhere) = (
+            Arc::clone(&reviewer_host),
+            Arc::clone(&reviewer_gone),
+            Arc::clone(&reviewer_elsewhere),
+        );
+        mux.on_read(move |mux, _| {
+            mux.set_agent("pane-reviewer", Some(agent_kind(*host.lock().unwrap())));
+            if gone.load(Ordering::Relaxed) {
+                mux.hide_pane("pane-reviewer");
+            } else {
+                mux.show_pane("pane-reviewer");
+            }
+            if elsewhere.load(Ordering::Relaxed) {
+                mux.show_pane("pane-elsewhere");
+            } else {
+                mux.hide_pane("pane-elsewhere");
+            }
+            Ok(())
+        });
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let typed = Arc::clone(&prompts);
+        mux.on_input(move |_, attempt| {
+            if let SentInput::Prompt(envelope) = &attempt.input {
+                typed
+                    .lock()
+                    .unwrap()
+                    .push((attempt.pane.as_str().to_owned(), envelope.clone()));
+            }
+        });
+        let notifications = Arc::new(Mutex::new(Vec::new()));
+        let shown = Arc::clone(&notifications);
+        mux.on_apply(move |_, effect| {
+            if let Effect::Notify { body, .. } = effect {
+                shown.lock().unwrap().push(body.clone());
+            }
+            Ok(())
+        });
+        let takes = Takes::nothing()
+            .input(|attempt| matches!(attempt.input, SentInput::Prompt(_)))
+            .effect(|effect| {
+                matches!(
+                    effect,
+                    Effect::Identify { .. } | Effect::Badges { .. } | Effect::Notify { .. }
+                )
+            });
+        let mut listings = CHECKOUT_LISTINGS.to_vec();
+        listings.push((ScopeKind::Space, Depth::Panes));
+        Self {
+            space: StrictSpace::new(mux, &listings, takes),
+            reviewer_host,
+            reviewer_gone,
+            reviewer_elsewhere,
+            prompts,
+            notifications,
+        }
+    }
+
     fn envelope_for(&self, pane_id: &str) -> Value {
         let prompts = self.prompts.lock().unwrap();
         let (_, envelope) = prompts
@@ -90,66 +207,6 @@ impl FakeHerdr {
     fn prompt_count(&self, pane_id: &str) -> usize {
         let prompts = self.prompts.lock().unwrap();
         prompts.iter().filter(|(pane, _)| pane == pane_id).count()
-    }
-}
-
-impl HerdrCommandExecutor for FakeHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let stdout = match args {
-            ["workspace", "list"] => {
-                json!({"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}).to_string()
-            }
-            ["worktree", "list", "--cwd", cwd, "--json"] if *cwd == self.worktree => json!({
-                "result": {"worktrees": [{"path": self.worktree, "open_workspace_id": "workspace-1"}]}
-            })
-            .to_string(),
-            ["worktree", "list", "--workspace", "workspace-1", "--json"] => json!({
-                "result": {"worktrees": [{"path": self.worktree, "open_workspace_id": "workspace-1"}]}
-            })
-            .to_string(),
-            ["pane", "list", "--workspace", "workspace-1"] => {
-                let mut panes = vec![json!(
-                    {"pane_id":"pane-lead","terminal_id":"t1","tab_id":"tab-1","workspace_id":"workspace-1",
-                     "agent":"codex","agent_session":{"value":"session-lead"},"agent_status":"idle"}
-                )];
-                if !self.reviewer_gone.load(Ordering::Relaxed) {
-                    panes.push(json!(
-                        {"pane_id":"pane-reviewer","terminal_id":"t2","tab_id":"tab-2","workspace_id":"workspace-1",
-                         "agent":*self.reviewer_host.lock().unwrap(),"agent_session":{"value":"session-reviewer"},"agent_status":"idle"}
-                    ));
-                }
-                json!({"result": {"panes": panes}}).to_string()
-            }
-            ["worktree", "list", "--workspace", "workspace-2", "--json"] => json!({
-                "result": {"worktrees": [{"path": format!("{}-2", self.worktree), "open_workspace_id": "workspace-2"}]}
-            })
-            .to_string(),
-            ["pane", "list", "--workspace", "workspace-2"] => {
-                let panes = if self.reviewer_elsewhere.load(Ordering::Relaxed) {
-                    vec![json!(
-                        {"pane_id":"pane-elsewhere","terminal_id":"t2","tab_id":"tab-9","workspace_id":"workspace-2",
-                         "agent":"claude","agent_session":{"value":"session-reviewer"},"agent_status":"working"}
-                    )]
-                } else {
-                    Vec::new()
-                };
-                json!({"result": {"panes": panes}}).to_string()
-            }
-            ["agent", "prompt", pane_id, envelope] => {
-                self.prompts
-                    .lock()
-                    .unwrap()
-                    .push(((*pane_id).to_owned(), (*envelope).to_owned()));
-                "{}".to_owned()
-            }
-            ["pane", "report-metadata", ..] => "{}".to_owned(),
-            ["notification", "show", _, "--body", body, ..] => {
-                self.notifications.lock().unwrap().push((*body).to_owned());
-                "{}".to_owned()
-            }
-            _ => return Err(format!("unexpected Herdr command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput { stdout })
     }
 }
 
@@ -174,7 +231,7 @@ fn namespace() -> StateNamespace {
 
 struct Space {
     directory: TestDirectory,
-    herdr: FakeHerdr,
+    herdr: FinalSpace,
     ids: SequenceIds,
 }
 
@@ -221,14 +278,7 @@ impl Space {
             .unwrap()
             .transaction(|transaction| transaction.complete_reconciliation(&namespace()))
             .unwrap();
-        let herdr = FakeHerdr {
-            reviewer_host: Mutex::new("claude"),
-            reviewer_gone: AtomicBool::new(false),
-            reviewer_elsewhere: AtomicBool::new(false),
-            worktree: directory.repo.display().to_string(),
-            prompts: Mutex::new(Vec::new()),
-            notifications: Mutex::new(Vec::new()),
-        };
+        let herdr = FinalSpace::new(&directory.repo);
         let space = Self {
             directory,
             herdr,
@@ -261,7 +311,7 @@ impl Space {
     fn runtime<'a>(
         &'a self,
         pane: &'a str,
-    ) -> LifecycleRuntime<'a, FakeHerdr, FixedClock, SequenceIds> {
+    ) -> LifecycleRuntime<'a, FakeMux, FixedClock, SequenceIds> {
         LifecycleRuntime {
             state_directory: &self.directory.state,
             home_directory: Some(&self.directory.home),
@@ -270,7 +320,7 @@ impl Space {
             workspace_id: None,
             current_pane_id: Some(pane),
             session_socket_id: "socket-a",
-            mux: &self.herdr,
+            mux: &self.herdr.space,
             clock: &FixedClock,
             ids: &self.ids,
         }
@@ -2507,7 +2557,7 @@ impl Space {
     /// Reconcile at `now_ms`, with every pane idle. The drain report's
     /// earliest due time, when it must run again with no other event.
     /// The lead pane's runtime with `clock`.
-    fn runtime_at<'a>(&'a self, clock: &'a At) -> LifecycleRuntime<'a, FakeHerdr, At, SequenceIds> {
+    fn runtime_at<'a>(&'a self, clock: &'a At) -> LifecycleRuntime<'a, FakeMux, At, SequenceIds> {
         let runtime = self.runtime("pane-lead");
         LifecycleRuntime {
             clock,
@@ -3024,7 +3074,7 @@ impl Space {
     fn real_runtime<'a>(
         &'a self,
         pane: &'a str,
-    ) -> LifecycleRuntime<'a, FakeHerdr, namedrop::SystemClock, SequenceIds> {
+    ) -> LifecycleRuntime<'a, FakeMux, namedrop::SystemClock, SequenceIds> {
         LifecycleRuntime {
             state_directory: &self.directory.state,
             home_directory: Some(&self.directory.home),
@@ -3033,7 +3083,7 @@ impl Space {
             workspace_id: None,
             current_pane_id: Some(pane),
             session_socket_id: "socket-a",
-            mux: &self.herdr,
+            mux: &self.herdr.space,
             clock: &namedrop::SystemClock,
             ids: &self.ids,
         }

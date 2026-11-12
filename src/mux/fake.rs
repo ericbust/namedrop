@@ -439,12 +439,14 @@ struct Connection {
 
 type InputObserver = Arc<dyn Fn(&FakeMux, &Attempt) + Send + Sync>;
 type ReadHook = Arc<dyn Fn(&FakeMux, &Read) -> Result<(), MuxError> + Send + Sync>;
+type ApplyHook = Arc<dyn Fn(&FakeMux, &Effect) -> Result<(), MuxError> + Send + Sync>;
 
 struct Shared {
     endpoint: Endpoint,
     world: Mutex<World>,
     observers: Mutex<Vec<InputObserver>>,
     read_hooks: Mutex<Vec<ReadHook>>,
+    apply_hooks: Mutex<Vec<ApplyHook>>,
 }
 
 /// A poisoned lock still guards a consistent world. A test whose observer
@@ -536,11 +538,24 @@ impl FakeMux {
         unpoisoned(&self.shared.read_hooks).push(Arc::new(hook));
     }
 
-    /// Drops every observer and read hook, with any handle to the world
-    /// they captured.
+    /// `hook` runs before each effect applies, after it is recorded as
+    /// attempted, with the world unlocked. An `Err` fails the effect, so a
+    /// hook that fails `Effect::ReloadKeybindings` stands for a Herdr fake
+    /// that answered `server reload-config` with an error. Hooks run in the
+    /// order they were added, and the first `Err` ends the effect.
+    pub fn on_apply(
+        &self,
+        hook: impl Fn(&FakeMux, &Effect) -> Result<(), MuxError> + Send + Sync + 'static,
+    ) {
+        unpoisoned(&self.shared.apply_hooks).push(Arc::new(hook));
+    }
+
+    /// Drops every observer and hook, with any handle to the world they
+    /// captured.
     fn release_hooks(&self) {
         unpoisoned(&self.shared.observers).clear();
         unpoisoned(&self.shared.read_hooks).clear();
+        unpoisoned(&self.shared.apply_hooks).clear();
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, World> {
@@ -1067,8 +1082,10 @@ impl MuxRead for FakeMux {
 
 impl MuxAct for FakeMux {
     fn apply(&self, effect: &Effect) -> Result<Applied, MuxError> {
+        self.lock().attempted_effects.push(effect.clone());
+        let hooks = unpoisoned(&self.shared.apply_hooks).clone();
+        hooks.iter().try_for_each(|hook| hook(self, effect))?;
         let mut world = self.lock();
-        world.attempted_effects.push(effect.clone());
         world.take_failure(Op::Apply)?;
         let mut applied = Applied::Done;
         match effect {
@@ -1403,6 +1420,7 @@ impl WorldBuilder {
                 world: Mutex::new(self.world),
                 observers: Mutex::default(),
                 read_hooks: Mutex::default(),
+                apply_hooks: Mutex::default(),
             }),
             emulated: false,
             connection: None,

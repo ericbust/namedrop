@@ -1,48 +1,54 @@
+#![cfg(feature = "test-support")]
 #[path = "support/cleanup.rs"]
 mod cleanup;
 
 mod support;
 
 use namedrop::{
-    Clock, HerdrCommandExecutor, HerdrCommandOutput, LifecycleRuntime, ProcessIds,
-    execute_lifecycle_operation,
+    AgentRuntime, Clock, LifecycleRuntime, ProcessIds, execute_lifecycle_operation,
+    mux::{
+        AgentKind, AgentState, Effect, PaneProcess,
+        fake::{EVERY_LISTING, FakeMux, StrictSpace, Takes},
+    },
 };
 use serde_json::{Value, json};
-use std::sync::Mutex;
 
-struct Host {
-    agent: Mutex<Option<&'static str>>,
-    shell_ready: Mutex<bool>,
-    /// Herdr names no foreground group, though this process runs in it.
-    group_unreported: Mutex<bool>,
+/// Pane `p1` of space `w1`, which holds `/repo`. Herdr lists it with status
+/// `unknown` and no agent or session, and `tab get` names its tab `Main`.
+/// The space answers every listing and `pane process-info --pane p1`, and
+/// takes `pane report-metadata` and `tab rename` but no input.
+fn host(process: PaneProcess) -> StrictSpace {
+    let mux = FakeMux::world()
+        .endpoint("socket")
+        .space("w1")
+        .checkout("/repo")
+        .unstamped()
+        .pane("p1")
+        .terminal("t1")
+        .tab("tab1")
+        .state(AgentState::parse("unknown"))
+        .process(process)
+        .tab_label("tab1", "Main")
+        .build();
+    let takes = Takes::nothing().effect(|effect| {
+        matches!(
+            effect,
+            Effect::Identify { .. } | Effect::Badges { .. } | Effect::RenameTab { .. }
+        )
+    });
+    StrictSpace::new(mux, EVERY_LISTING, takes)
 }
-impl HerdrCommandExecutor for Host {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let value = match args {
-            ["workspace", "list"] => {
-                json!({"result":{"workspaces":[{"workspace_id":"w1"}]}})
-            }
-            ["worktree", "list", ..] => {
-                json!({"result":{"worktrees":[{"path":"/repo","open_workspace_id":"w1"}]}})
-            }
-            ["pane", "list", ..] => {
-                json!({"result":{"panes":[{"pane_id":"p1","terminal_id":"t1","tab_id":"tab1","workspace_id":"w1","agent":*self.agent.lock().unwrap(),"agent_status":"unknown"}]}})
-            }
-            ["pane", "process-info", "--pane", "p1"] if *self.group_unreported.lock().unwrap() => {
-                json!({"result":{"process_info":{"pane_id":"p1","shell_pid":42,"foreground_process_group_id":null,"foreground_processes":[{"pid":std::process::id()}]}}})
-            }
-            ["pane", "process-info", "--pane", "p1"] => {
-                json!({"result":{"process_info":{"pane_id":"p1","shell_pid":42,"foreground_process_group_id":if *self.shell_ready.lock().unwrap(){42}else{43},"foreground_processes":[{"pid":42,"name":"zsh","argv0":"zsh"}]}}})
-            }
-            ["tab", "get", ..] => json!({"result":{"label":"Main"}}),
-            ["pane", "report-metadata", ..] | ["tab", "rename", ..] => json!({}),
-            _ => return Err(format!("unexpected command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput {
-            stdout: value.to_string(),
-        })
+
+/// `p1`'s shell, 42, with the foreground group Herdr reports, if any.
+fn shell(group: Option<u32>, foreground: u32) -> PaneProcess {
+    PaneProcess {
+        shell_pid: Some(42),
+        foreground_group: group,
+        foreground_pids: vec![foreground],
+        tty: None,
     }
 }
+
 struct Time;
 impl Clock for Time {
     fn now_unix_ms(&self) -> u64 {
@@ -53,6 +59,7 @@ impl Clock for Time {
 
 #[test]
 fn naming_detects_terminal_preserves_type_on_rename_and_allows_override() {
+    let host = host(shell(Some(42), 42));
     let directory = support::TestDirectory::new();
     let root = directory.path();
     if std::env::var_os("NAMEDROP_TERMINAL_CLEANUP_CHILD").is_some() {
@@ -62,11 +69,6 @@ fn naming_detects_terminal_preserves_type_on_rename_and_allows_override() {
         )
         .unwrap();
     }
-    let host = Host {
-        agent: Mutex::new(None),
-        shell_ready: Mutex::new(true),
-        group_unreported: Mutex::new(false),
-    };
     let ids = ProcessIds::default();
     let runtime = LifecycleRuntime {
         state_directory: root,
@@ -76,20 +78,20 @@ fn naming_detects_terminal_preserves_type_on_rename_and_allows_override() {
         workspace_id: Some("w1"),
         current_pane_id: Some("p1"),
         session_socket_id: "socket",
-        mux: &host,
+        mux: &*host,
         clock: &Time,
         ids: &ids,
     };
     let name = |input| execute_lifecycle_operation("name", input, &runtime).unwrap();
-    *host.shell_ready.lock().unwrap() = false;
+    host.set_process("p1", Some(shell(Some(43), 42)));
     assert!(
         execute_lifecycle_operation("name", json!({"alias":"build"}), &runtime)
             .unwrap_err()
             .contains("uncertain")
     );
-    *host.shell_ready.lock().unwrap() = true;
+    host.set_process("p1", Some(shell(Some(42), 42)));
     assert_eq!(name(json!({"alias":"build"}))["pane_type"], "terminal");
-    *host.agent.lock().unwrap() = Some("codex");
+    host.set_agent("p1", Some(AgentKind::Known(AgentRuntime::Codex)));
     assert_eq!(
         namedrop::detect_pane_type(&runtime).unwrap(),
         Some(namedrop::PaneType::Agent)
@@ -106,12 +108,8 @@ fn naming_detects_terminal_preserves_type_on_rename_and_allows_override() {
 
 #[test]
 fn a_pane_without_a_reported_foreground_group_is_uncertain() {
+    let host = host(shell(None, std::process::id()));
     let directory = support::TestDirectory::new();
-    let host = Host {
-        agent: Mutex::new(None),
-        shell_ready: Mutex::new(true),
-        group_unreported: Mutex::new(true),
-    };
     let ids = ProcessIds::default();
     let runtime = LifecycleRuntime {
         state_directory: directory.path(),
@@ -121,12 +119,12 @@ fn a_pane_without_a_reported_foreground_group_is_uncertain() {
         workspace_id: Some("w1"),
         current_pane_id: Some("p1"),
         session_socket_id: "socket",
-        mux: &host,
+        mux: &*host,
         clock: &Time,
         ids: &ids,
     };
     assert_eq!(namedrop::detect_pane_type(&runtime).unwrap(), None);
-    *host.group_unreported.lock().unwrap() = false;
+    host.set_process("p1", Some(shell(Some(42), 42)));
     assert_eq!(
         namedrop::detect_pane_type(&runtime).unwrap(),
         Some(namedrop::PaneType::Terminal)

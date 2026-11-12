@@ -1489,3 +1489,32 @@ fn a_read_within_a_budget_logs_the_tighter_of_it_and_the_connection_s() {
         ]
     );
 }
+
+#[test]
+fn an_apply_hook_fails_the_effects_it_names_and_each_stays_attempted() {
+    let mux = author_and_reviewer();
+    mux.on_apply(|mux, effect| match effect {
+        Effect::ReloadKeybindings => {
+            mux.set_state("pane-author", AgentState::Done);
+            Err(MuxError::Unavailable(
+                "server reload-config is unexpected".into(),
+            ))
+        }
+        _ => Ok(()),
+    });
+    assert_eq!(
+        mux.apply(&Effect::ReloadKeybindings),
+        Err(MuxError::Unavailable(
+            "server reload-config is unexpected".into()
+        ))
+    );
+    let rename = Effect::RenameTab {
+        tab: TabId::new("workspace-1:tab-1"),
+        label: "@author".into(),
+    };
+    assert_eq!(mux.apply(&rename), Ok(Applied::Done));
+    assert_eq!(state(&mux, "pane-author"), Some(AgentState::Done));
+    assert_eq!(mux.effects(), std::slice::from_ref(&rename));
+    assert_eq!(mux.attempted_effects(), [Effect::ReloadKeybindings, rename]);
+    assert_eq!(Arc::strong_count(&mux.shared), 1, "no hook holds the world");
+}

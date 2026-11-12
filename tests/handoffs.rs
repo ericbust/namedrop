@@ -1,3 +1,4 @@
+#![cfg(feature = "test-support")]
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
@@ -8,15 +9,22 @@ mod dispatch;
 mod executable;
 
 use namedrop::{
-    ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
-    IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
-    PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
-    execute_handoff_operation, execute_integration_operation, issue_registration_challenge,
+    ActorKind, AgentRuntime, AgentSessionId, Clock, IdGenerator, LifecycleRuntime,
+    MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId, PaneRoleId,
+    StateNamespace, StateStore, complete_capability_profile, execute_handoff_operation,
+    execute_integration_operation, issue_registration_challenge,
+    mux::{
+        AgentState, Depth, Effect, InputOutcome, MuxError, PaneProcess, Style, Wrap,
+        fake::{CHECKOUT_LISTINGS, FakeMux, ScopeKind, ScreenShape, SentInput, StrictSpace, Takes},
+    },
 };
 use std::{
     fs,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -63,52 +71,190 @@ impl Drop for TestDirectory {
     }
 }
 
-struct FakeHerdr {
-    source_working: std::sync::Mutex<bool>,
-    terminal: std::sync::Mutex<bool>,
-    shell_ready: std::sync::Mutex<bool>,
+/// `workspace-1`, which holds the test's repository, with three agents that
+/// report a session and no agent kind: `pane-source`, `pane-reviewer`, and
+/// `pane-researcher`. The space answers `workspace list` (no checkout
+/// stamp), `worktree list --cwd` and `--workspace`, and `pane list
+/// --workspace`. It reads only `pane-reviewer`'s process and `pane-source`'s
+/// screen as `--source recent-unwrapped --lines 40`. It takes `agent prompt`
+/// to any of the three, `pane run` in `pane-reviewer`, and any `pane
+/// report-metadata`. It answers `server reload-config` with the old
+/// executor's error, which activation reports and moves past.
+///
+/// The switches are the old executor's, and a read hook applies them to
+/// the world before every read.
+struct HandoffSpace {
+    space: StrictSpace,
+    source_working: Arc<Mutex<bool>>,
+    /// Herdr reports `pane-reviewer` with no session and status `unknown`.
+    terminal: Arc<Mutex<bool>>,
+    shell_ready: Arc<Mutex<bool>>,
     /// Herdr names no shell for the terminal pane.
-    shell_unreported: std::sync::Mutex<bool>,
-    terminal_runs: std::sync::Mutex<Vec<String>>,
-    worktree: String,
+    shell_unreported: Arc<Mutex<bool>>,
+    terminal_runs: Arc<Mutex<Vec<String>>>,
     /// Report this Space as not being a Git Worktree at all.
-    no_worktree: std::sync::Mutex<bool>,
-    live_pane_override: std::sync::Mutex<Option<(String, Option<String>)>>,
+    no_worktree: Arc<Mutex<bool>>,
+    /// A pane that reports another session, or with `None` is not listed.
+    live_pane_override: Arc<Mutex<LiveOverride>>,
     /// Serialized Delivery Envelopes handed to `agent prompt`, per pane.
-    prompts: std::sync::Mutex<Vec<(String, String)>>,
+    prompts: Arc<Mutex<Vec<(String, String)>>>,
 }
 
-impl FakeHerdr {
-    fn new(worktree: &TestDirectory) -> Self {
-        Self {
-            source_working: std::sync::Mutex::new(false),
-            terminal: std::sync::Mutex::new(false),
-            shell_ready: std::sync::Mutex::new(true),
-            shell_unreported: std::sync::Mutex::new(false),
-            terminal_runs: std::sync::Mutex::new(vec![]),
-            worktree: worktree.repo.display().to_string(),
-            no_worktree: std::sync::Mutex::new(false),
-            live_pane_override: std::sync::Mutex::new(None),
-            prompts: std::sync::Mutex::new(Vec::new()),
-        }
-    }
+const AGENTS: [&str; 3] = ["source", "reviewer", "researcher"];
 
-    /// Herdr's answer for either Worktree lookup. `no_worktree` makes it report
-    /// a Space that is not a Git Worktree, the shape `is_no_worktree_error`
-    /// recognizes.
-    fn worktree_list(&self) -> Result<String, String> {
-        if *self.no_worktree.lock().unwrap() {
-            return Err(serde_json::json!({"error":{"code":"not_git_worktree"}}).to_string());
+/// A pane that reports another session, or with `None` is not listed.
+type LiveOverride = Option<(String, Option<String>)>;
+
+/// The switches, as the read hook sees them.
+#[derive(Clone)]
+struct Switches {
+    worktree: PathBuf,
+    source_working: Arc<Mutex<bool>>,
+    terminal: Arc<Mutex<bool>>,
+    shell_ready: Arc<Mutex<bool>>,
+    shell_unreported: Arc<Mutex<bool>>,
+    no_worktree: Arc<Mutex<bool>>,
+    live_pane_override: Arc<Mutex<LiveOverride>>,
+}
+
+impl Switches {
+    /// The world the old executor answered from, given the switches now.
+    fn apply(&self, mux: &FakeMux) {
+        let no_worktree = *self.no_worktree.lock().unwrap();
+        mux.set_checkout(
+            "workspace-1",
+            (!no_worktree).then_some(self.worktree.as_path()),
+        );
+        let live_override = self.live_pane_override.lock().unwrap().clone();
+        for agent in AGENTS {
+            let pane = format!("pane-{agent}");
+            mux.show_pane(&pane);
+            mux.set_session(&pane, &format!("session-{agent}"));
+            mux.set_state(&pane, AgentState::Idle);
         }
-        Ok(serde_json::json!({
-            "result": {
-                "worktrees": [{
-                    "path": self.worktree,
-                    "open_workspace_id": "workspace-1"
-                }]
+        if *self.source_working.lock().unwrap() {
+            mux.set_state("pane-source", AgentState::Working);
+        }
+        match live_override {
+            Some((pane, Some(session))) => mux.set_session(&pane, &session),
+            Some((pane, None)) => mux.hide_pane(&pane),
+            None => {}
+        }
+        if *self.terminal.lock().unwrap() {
+            mux.clear_session("pane-reviewer");
+            mux.set_state("pane-reviewer", AgentState::parse("unknown"));
+        }
+        let process = if *self.shell_unreported.lock().unwrap() {
+            PaneProcess {
+                shell_pid: None,
+                foreground_group: Some(42),
+                foreground_pids: vec![std::process::id()],
+                tty: None,
             }
-        })
-        .to_string())
+        } else {
+            PaneProcess {
+                shell_pid: Some(42),
+                foreground_group: Some(if *self.shell_ready.lock().unwrap() {
+                    42
+                } else {
+                    43
+                }),
+                foreground_pids: vec![std::process::id()],
+                tty: None,
+            }
+        };
+        mux.set_process("pane-reviewer", Some(process));
+    }
+}
+
+impl HandoffSpace {
+    fn new(worktree: &TestDirectory) -> Self {
+        let mut world = FakeMux::world()
+            .endpoint("socket-a")
+            .space("workspace-1")
+            .checkout(&worktree.repo)
+            .unstamped();
+        for agent in AGENTS {
+            world = world
+                .pane(&format!("pane-{agent}"))
+                .terminal(&format!("terminal-{agent}"))
+                .tab("tab-1")
+                .session(&format!("session-{agent}"))
+                .idle();
+            if agent == "source" {
+                world = world
+                    .screen("pane output café\nAWS_SECRET_ACCESS_KEY=do-not-share\n")
+                    .screen_shape(ScreenShape {
+                        wrap: Wrap::Joined,
+                        style: Style::Plain,
+                        lines: Some(40),
+                    });
+            }
+        }
+        let mux = world.build();
+        let switches = Switches {
+            worktree: worktree.repo.clone(),
+            source_working: Arc::new(Mutex::new(false)),
+            terminal: Arc::new(Mutex::new(false)),
+            shell_ready: Arc::new(Mutex::new(true)),
+            shell_unreported: Arc::new(Mutex::new(false)),
+            no_worktree: Arc::new(Mutex::new(false)),
+            live_pane_override: Arc::new(Mutex::new(None)),
+        };
+        for agent in AGENTS {
+            mux.answer(&format!("pane-{agent}"), InputOutcome::Delivered);
+        }
+        let hook = switches.clone();
+        mux.on_read(move |mux, _| {
+            hook.apply(mux);
+            Ok(())
+        });
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let terminal_runs = Arc::new(Mutex::new(Vec::new()));
+        let (sent, ran) = (Arc::clone(&prompts), Arc::clone(&terminal_runs));
+        mux.on_input(move |_, attempt| match &attempt.input {
+            SentInput::Prompt(envelope) => sent
+                .lock()
+                .unwrap()
+                .push((attempt.pane.as_str().to_owned(), envelope.clone())),
+            SentInput::Line(command) => ran.lock().unwrap().push(command.clone()),
+            SentInput::Keys { .. } => {}
+        });
+        let takes = Takes::nothing()
+            .input(|attempt| match &attempt.input {
+                SentInput::Prompt(_) => AGENTS
+                    .iter()
+                    .any(|agent| attempt.pane.as_str() == format!("pane-{agent}")),
+                SentInput::Line(_) => attempt.pane.as_str() == "pane-reviewer",
+                SentInput::Keys { .. } => false,
+            })
+            .effect(|effect| {
+                matches!(
+                    effect,
+                    Effect::Identify { .. } | Effect::Badges { .. } | Effect::ReloadKeybindings
+                )
+            });
+        mux.on_apply(|_, effect| match effect {
+            Effect::ReloadKeybindings => Err(MuxError::Unavailable(
+                r#"unexpected Herdr command: ["server", "reload-config"]"#.to_owned(),
+            )),
+            _ => Ok(()),
+        });
+        let mut listings = CHECKOUT_LISTINGS.to_vec();
+        listings.push((ScopeKind::Space, Depth::Panes));
+        let space = StrictSpace::new(mux, &listings, takes);
+        switches.apply(&space);
+        Self {
+            space,
+            source_working: switches.source_working,
+            terminal: switches.terminal,
+            shell_ready: switches.shell_ready,
+            shell_unreported: switches.shell_unreported,
+            terminal_runs,
+            no_worktree: switches.no_worktree,
+            live_pane_override: switches.live_pane_override,
+            prompts,
+        }
     }
 
     fn prompt_for_pane(&self, pane_id: &str) -> serde_json::Value {
@@ -119,118 +265,6 @@ impl FakeHerdr {
             .find(|(pane, _)| pane == pane_id)
             .unwrap_or_else(|| panic!("no envelope was dispatched to {pane_id}"));
         delivered::envelope_of(envelope)
-    }
-}
-
-impl HerdrCommandExecutor for FakeHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let mut stdout = match args {
-            ["pane","process-info","--pane","pane-reviewer"] if *self.shell_unreported.lock().unwrap() => serde_json::json!({"result":{"process_info":{"shell_pid":null,"foreground_process_group_id":42,"foreground_processes":[{"pid":std::process::id()}]}}}).to_string(),
-            ["pane","process-info","--pane","pane-reviewer"] => serde_json::json!({"result":{"process_info":{"shell_pid":42,"foreground_process_group_id":if *self.shell_ready.lock().unwrap(){42}else{43},"foreground_processes":[{"pid":std::process::id()}]}}}).to_string(),
-            ["pane","run","pane-reviewer",command]=>{self.terminal_runs.lock().unwrap().push(command.to_string());"{}".to_owned()},
-            // A Herdr pane exports HERDR_WORKSPACE_ID, so an installed session
-            // resolves its Space by workspace id rather than by the invoking
-            // process's directory. Either way the Space's Worktree path comes
-            // from Herdr, so both lookups answer identically — unless this Space
-            // has no Git Worktree, which Herdr reports as an error code.
-            ["workspace", "list"] => {
-                serde_json::json!({"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}).to_string()
-            }
-            ["worktree", "list", "--cwd", cwd, "--json"] if *cwd == self.worktree => {
-                self.worktree_list()?
-            }
-            ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
-                self.worktree_list()?
-            }
-            ["pane", "list", "--workspace", "workspace-1"] => serde_json::json!({
-                "result": {
-                    "panes": [
-                        {
-                            "pane_id": "pane-source",
-                            "terminal_id": "terminal-source",
-                            "tab_id": "tab-1",
-                            "workspace_id": "workspace-1",
-                            "agent_session": {"value": "session-source"},
-                            "agent_status": if *self.source_working.lock().unwrap() { "working" } else { "idle" }
-                        },
-                        {
-                            "pane_id": "pane-reviewer",
-                            "terminal_id": "terminal-reviewer",
-                            "tab_id": "tab-1",
-                            "workspace_id": "workspace-1",
-                            "agent_session": {"value": "session-reviewer"},
-                            "agent_status": "idle"
-                        },
-                        {
-                            "pane_id": "pane-researcher",
-                            "terminal_id": "terminal-researcher",
-                            "tab_id": "tab-1",
-                            "workspace_id": "workspace-1",
-                            "agent_session": {"value": "session-researcher"},
-                            "agent_status": "idle"
-                        }
-                    ]
-                }
-            })
-            .to_string(),
-            [
-                "pane",
-                "read",
-                "pane-source",
-                "--source",
-                "recent-unwrapped",
-                "--lines",
-                "40",
-            ] => "pane output café\nAWS_SECRET_ACCESS_KEY=do-not-share\n".to_owned(),
-            ["agent", "prompt", pane_id, envelope] => {
-                self.prompts
-                    .lock()
-                    .unwrap()
-                    .push(((*pane_id).to_owned(), (*envelope).to_owned()));
-                "{}".to_owned()
-            }
-            [
-                "pane",
-                "report-metadata",
-                _,
-                "--source",
-                "namedrop",
-                "--token",
-                _,
-                "--token",
-                _,
-                "--token",
-                _,
-            ] => "{}".to_owned(),
-            ["pane","report-metadata",..] => "{}".to_owned(),
-            _ => return Err(format!("unexpected Herdr command: {args:?}")),
-        };
-        if args == ["pane", "list", "--workspace", "workspace-1"]
-            && let Some((pane_id, session)) = self.live_pane_override.lock().unwrap().as_ref()
-        {
-            let mut value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-            let panes = value["result"]["panes"].as_array_mut().unwrap();
-            if let Some(session) = session {
-                panes
-                    .iter_mut()
-                    .find(|pane| pane["pane_id"] == *pane_id)
-                    .unwrap()["agent_session"]["value"] = serde_json::json!(session);
-            } else {
-                panes.retain(|pane| pane["pane_id"] != *pane_id);
-            }
-            stdout = value.to_string();
-        }
-        if matches!(args, ["pane", "list", ..]) && *self.terminal.lock().unwrap() {
-            let mut value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-            for pane in value["result"]["panes"].as_array_mut().unwrap() {
-                if pane["pane_id"] == "pane-reviewer" {
-                    pane.as_object_mut().unwrap().remove("agent_session");
-                    pane["agent_status"] = serde_json::json!("unknown");
-                }
-            }
-            stdout = value.to_string();
-        }
-        Ok(HerdrCommandOutput { stdout })
     }
 }
 
@@ -311,10 +345,10 @@ fn setup(directory: &TestDirectory) {
 
 fn runtime<'a>(
     directory: &'a TestDirectory,
-    herdr: &'a FakeHerdr,
+    herdr: &'a HandoffSpace,
     ids: &'a SequenceIds,
     pane_id: &'a str,
-) -> LifecycleRuntime<'a, FakeHerdr, FixedClock, SequenceIds> {
+) -> LifecycleRuntime<'a, FakeMux, FixedClock, SequenceIds> {
     LifecycleRuntime {
         state_directory: &directory.state,
         home_directory: Some(&directory.home),
@@ -323,13 +357,13 @@ fn runtime<'a>(
         workspace_id: None,
         current_pane_id: Some(pane_id),
         session_socket_id: "socket-a",
-        mux: herdr,
+        mux: &herdr.space,
         clock: &FixedClock,
         ids,
     }
 }
 
-fn register(address_id: &str, runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>) {
+fn register(address_id: &str, runtime: &LifecycleRuntime<'_, FakeMux, FixedClock, SequenceIds>) {
     let challenge = issue_registration_challenge(
         &PaneAddressId::new(address_id),
         AgentRuntime::Codex,
@@ -353,7 +387,7 @@ fn register(address_id: &str, runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClo
 fn terminal_command_returns_exit_output_once_and_waits_for_shell() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     register("address-source", &source);
@@ -421,7 +455,7 @@ fn terminal_command_returns_exit_output_once_and_waits_for_shell() {
 fn the_terminal_runner_refuses_a_pane_herdr_names_no_shell_for() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     register("address-source", &source);
@@ -484,7 +518,7 @@ fn schema_two_upgrade_preserves_names_as_agents() {
 fn joined_results_do_not_block_a_source_converted_to_terminal() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let researcher = runtime(&directory, &herdr, &ids, "pane-researcher");
@@ -529,7 +563,7 @@ fn joined_results_do_not_block_a_source_converted_to_terminal() {
 fn terminal_results_do_not_block_a_source_converted_to_terminal() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     *herdr.terminal.lock().unwrap() = true;
@@ -585,7 +619,7 @@ fn terminal_results_do_not_block_a_source_converted_to_terminal() {
 fn status_reports_only_the_calling_sessions_outstanding_handoffs_without_writes() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     register("address-source", &source);
@@ -664,7 +698,7 @@ fn partial_results_leave_the_final_join_pending_and_report_each_terminal_outcome
     let directory = TestDirectory::new();
     setup(&directory);
     complete_reconciliation(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -748,7 +782,7 @@ fn early_one_and_two_result_reads_preserve_reply_fifo_and_final_answer_instructi
     let directory = TestDirectory::new();
     setup(&directory);
     complete_reconciliation(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -878,7 +912,7 @@ fn early_one_and_two_result_reads_preserve_reply_fifo_and_final_answer_instructi
 fn groups_expand_atomically_and_replay_keeps_the_original_members() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     namedrop::execute_group_operation(
@@ -919,7 +953,7 @@ fn groups_expand_atomically_and_replay_keeps_the_original_members() {
 fn a_group_cannot_take_a_closed_agents_last_alias() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let namespace = StateNamespace::for_space("socket-a", "workspace-1");
@@ -959,7 +993,7 @@ fn a_group_cannot_take_a_closed_agents_last_alias() {
 fn a_closed_agents_previous_name_can_become_a_group() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let namespace = StateNamespace::for_space("socket-a", "workspace-1");
@@ -1048,7 +1082,7 @@ fn preview_shows_expanded_live_recipients_and_redacted_context_without_mutation(
     let directory = TestDirectory::new();
     init_git_repo(&directory);
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     register("address-source", &source);
@@ -1101,7 +1135,7 @@ fn returned_reviews_report_fresh_stale_and_unknown_against_the_captured_files() 
     init_git_repo(&directory);
     setup(&directory);
     complete_reconciliation(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -1156,7 +1190,7 @@ fn returned_reviews_report_fresh_stale_and_unknown_against_the_captured_files() 
 fn invalid_groups_are_atomic_aliases_are_exclusive_and_members_follow_renames() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let set = |alias: &str, members: serde_json::Value| {
@@ -1213,7 +1247,7 @@ fn invalid_groups_are_atomic_aliases_are_exclusive_and_members_follow_renames() 
 fn a_schema_one_upgrade_preserves_existing_requests_and_replays() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let input =
@@ -1247,7 +1281,7 @@ fn held_work_needs_attention_and_reads_cannot_recover_or_cancel_it() {
     let directory = TestDirectory::new();
     setup(&directory);
     complete_reconciliation(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -1301,7 +1335,7 @@ fn held_work_needs_attention_and_reads_cannot_recover_or_cancel_it() {
 fn stale_sessions_cannot_read_results_or_preview_and_status_pages_are_complete() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     register("address-source", &source);
@@ -1350,7 +1384,7 @@ fn stale_sessions_cannot_read_results_or_preview_and_status_pages_are_complete()
 fn direct_group_preview_matches_the_verbatim_native_handoff() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     register("address-source", &source);
@@ -1399,7 +1433,7 @@ fn freshness_handles_directories_and_protected_paths_without_running_custom_filt
     init_git_repo(&directory);
     setup(&directory);
     complete_reconciliation(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -1450,7 +1484,7 @@ fn freshness_does_not_run_git_filesystem_monitor_hooks() {
     init_git_repo(&directory);
     setup(&directory);
     complete_reconciliation(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -1477,7 +1511,7 @@ fn freshness_keeps_unknown_evidence_when_a_reviewed_descendant_becomes_protected
     init_git_repo(&directory);
     setup(&directory);
     complete_reconciliation(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -1505,7 +1539,7 @@ fn freshness_normalizes_valid_relative_evidence_paths() {
         init_git_repo(&directory);
         setup(&directory);
         complete_reconciliation(&directory);
-        let herdr = FakeHerdr::new(&directory);
+        let herdr = HandoffSpace::new(&directory);
         let ids = SequenceIds(AtomicU64::new(1));
         let source = runtime(&directory, &herdr, &ids, "pane-source");
         let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -1537,7 +1571,7 @@ fn freshness_cannot_certify_ignored_evidence_that_was_never_pinned() {
     fs::write(directory.repo.join("ignored.log"), "ignored evidence\n").unwrap();
     setup(&directory);
     complete_reconciliation(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -1560,7 +1594,7 @@ fn freshness_cannot_certify_ignored_evidence_that_was_never_pinned() {
 fn text_that_addresses_nobody_is_left_untouched_by_the_hook() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     register("address-source", &source);
@@ -1637,7 +1671,7 @@ fn freshness_judges_the_spaces_worktree_not_the_calling_directory() {
     init_git_repo(&directory);
     setup(&directory);
     complete_reconciliation(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -1688,7 +1722,7 @@ fn legacy_reviews_follow_the_space_and_bound_reviews_keep_their_checkout() {
     init_git_repo(&directory);
     setup(&directory);
     complete_reconciliation(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -1747,7 +1781,7 @@ fn context_capture_pins_the_spaces_worktree_not_the_calling_directory() {
     init_git_repo(&directory);
     setup(&directory);
     complete_reconciliation(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     // A sibling checkout of the same repository, with a reviewed file changed
     // only there.
@@ -1834,7 +1868,7 @@ fn a_space_without_a_worktree_refuses_to_capture_context() {
     init_git_repo(&directory);
     setup(&directory);
     complete_reconciliation(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -1903,7 +1937,7 @@ fn root_independent_context_can_be_previewed_sent_and_replied_without_a_worktree
     let directory = TestDirectory::new();
     setup(&directory);
     complete_reconciliation(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -1984,9 +2018,9 @@ fn path_review_input(request_id: &str, path: &str) -> serde_json::Value {
 }
 
 fn returned_path_review(
-    source: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
-    reviewer: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
-    herdr: &FakeHerdr,
+    source: &LifecycleRuntime<'_, FakeMux, FixedClock, SequenceIds>,
+    reviewer: &LifecycleRuntime<'_, FakeMux, FixedClock, SequenceIds>,
+    herdr: &HandoffSpace,
     path: &str,
 ) -> serde_json::Value {
     register("address-source", source);
@@ -2000,9 +2034,9 @@ fn returned_path_review(
 }
 
 fn returned_review(
-    source: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
-    reviewer: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
-    herdr: &FakeHerdr,
+    source: &LifecycleRuntime<'_, FakeMux, FixedClock, SequenceIds>,
+    reviewer: &LifecycleRuntime<'_, FakeMux, FixedClock, SequenceIds>,
+    herdr: &HandoffSpace,
     input: serde_json::Value,
 ) -> serde_json::Value {
     let reply_id = format!("{}-reply", input["request_id"].as_str().unwrap());
@@ -2069,7 +2103,7 @@ fn reviews_of_an_explicit_checkout_are_judged_in_that_checkout() {
     init_git_repo(&directory);
     setup(&directory);
     complete_reconciliation(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -2138,7 +2172,7 @@ fn a_review_whose_checkout_is_gone_or_replaced_is_unknown() {
     init_git_repo(&directory);
     setup(&directory);
     complete_reconciliation(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
@@ -2180,7 +2214,7 @@ fn previewing_an_explicit_checkout_shows_it_without_capturing_or_writing() {
     let directory = TestDirectory::new();
     init_git_repo(&directory);
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     register("address-source", &source);
@@ -2238,15 +2272,19 @@ fn previewing_an_explicit_checkout_shows_it_without_capturing_or_writing() {
 fn cli_exposes_all_features_and_keeps_management_out_of_delivery_permissions() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let source = runtime(&directory, &herdr, &ids, "pane-source");
     register("address-source", &source);
     let mock = directory.root.join("herdr");
-    let pane_output = herdr
-        .execute(&["pane", "list", "--workspace", "workspace-1"])
-        .unwrap()
-        .stdout;
+    let pane_output = serde_json::json!({"result": {"panes": AGENTS.map(|agent| serde_json::json!({
+        "pane_id": format!("pane-{agent}"),
+        "terminal_id": format!("terminal-{agent}"),
+        "tab_id": "tab-1",
+        "workspace_id": "workspace-1",
+        "agent_session": {"value": format!("session-{agent}")},
+        "agent_status": "idle",
+    }))}});
     let worktree_output = serde_json::json!({"result":{"worktrees":[{"path":directory.repo,"open_workspace_id":"workspace-1"}]}});
     executable::write_executable(
         &mock,
@@ -2424,7 +2462,7 @@ fn durable_records(directory: &TestDirectory) -> String {
 /// queued behind that hold. Returns the held attempt.
 fn state_worth_preserving(
     directory: &TestDirectory,
-    herdr: &FakeHerdr,
+    herdr: &HandoffSpace,
     ids: &SequenceIds,
 ) -> namedrop::DeliveryAttemptId {
     complete_reconciliation(directory);
@@ -2496,7 +2534,7 @@ fn state_worth_preserving(
 fn a_replacement_installation_preserves_every_durable_record_and_resends_nothing() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     let held = state_worth_preserving(&directory, &herdr, &ids);
     let before = durable_records(&directory);
@@ -2617,7 +2655,7 @@ fn a_replacement_installation_preserves_every_durable_record_and_resends_nothing
 fn state_newer_than_the_executable_is_refused_instead_of_downgraded() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     state_worth_preserving(&directory, &herdr, &ids);
     let before = durable_records(&directory);
@@ -2729,7 +2767,7 @@ fn missing_schema_6_pieces(database: &std::path::Path) -> Vec<&'static str> {
 fn pre_release_schema_6_state_is_completed_on_open() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     state_worth_preserving(&directory, &herdr, &ids);
     let before = durable_records(&directory);
@@ -2789,7 +2827,7 @@ fn pre_release_schema_6_state_is_completed_on_open() {
 fn read_only_opens_name_pre_release_schema_6_and_never_complete_it() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     state_worth_preserving(&directory, &herdr, &ids);
     let before = durable_records(&directory);
@@ -2859,7 +2897,7 @@ fn read_only_opens_name_pre_release_schema_6_and_never_complete_it() {
 fn a_matching_backup_restores_exactly_the_records_a_rollback_needs() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     state_worth_preserving(&directory, &herdr, &ids);
     let database = directory.state.join("namedrop.sqlite3");
@@ -2944,7 +2982,7 @@ fn a_matching_backup_restores_exactly_the_records_a_rollback_needs() {
 fn durable_state_uses_a_rollback_journal_and_never_a_wal_sidecar() {
     let directory = TestDirectory::new();
     setup(&directory);
-    let herdr = FakeHerdr::new(&directory);
+    let herdr = HandoffSpace::new(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
     state_worth_preserving(&directory, &herdr, &ids);
     let database = directory.state.join("namedrop.sqlite3");
