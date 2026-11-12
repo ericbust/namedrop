@@ -627,6 +627,81 @@ fn reshaping_the_world_mid_test_agrees() {
     assert_eq!(found.2, Ok(Some("/plugins/namedrop".into())));
 }
 
+#[test]
+fn a_pane_that_reports_another_space_agrees_in_every_survey() {
+    let ids = ["workspace-1", "workspace-2", "workspace-3", "workspace-9"].map(SpaceId::new);
+    let (found, grouped) = agree(world, |mux, world| {
+        world.set_reported_space("pane-reviewer", "workspace-9");
+        world.set_reported_space("pane-orphan", "workspace-1");
+        let mut scopes: Vec<Scope<'_>> = ids
+            .iter()
+            .flat_map(|id| [Scope::Space(id), Scope::PanesOf(id)])
+            .collect();
+        scopes.extend(["/repo", "/other"].map(|path| Scope::CheckoutOf(Path::new(path))));
+        scopes.push(Scope::All);
+        let mut found = Vec::new();
+        for depth in [Depth::Spaces, Depth::Panes] {
+            for &scope in &scopes {
+                let result = gone(survey(mux, scope, depth));
+                found.push((format!("{scope:?} {depth:?}"), result));
+            }
+        }
+        let grouped = survey(mux, Scope::All, Depth::Panes).map(|survey| {
+            survey
+                .spaces
+                .into_iter()
+                .map(|space| {
+                    let panes: Vec<_> = space
+                        .panes
+                        .iter()
+                        .map(|pane| pane.id.as_str().to_owned())
+                        .collect();
+                    (space.id.as_str().to_owned(), panes)
+                })
+                .collect::<Vec<_>>()
+        });
+        (found, grouped)
+    });
+    let failed: Vec<_> = found
+        .iter()
+        .filter(|(_, result)| result.is_err())
+        .map(|(scope, result)| (scope.as_str(), result.clone().map(|_| ())))
+        .collect();
+    assert_eq!(
+        failed.len(),
+        4,
+        "only workspace-9, which no space is, fails: {failed:?}"
+    );
+    assert!(
+        failed
+            .iter()
+            .all(|(scope, result)| scope.contains("workspace-9")
+                && *result == Err(Some(Gone::Space))),
+        "{failed:?}"
+    );
+    let owned = |id: &str, panes: &[&str]| {
+        (
+            id.to_owned(),
+            panes
+                .iter()
+                .map(|&pane| pane.to_owned())
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert_eq!(
+        grouped.unwrap(),
+        [
+            owned(
+                "workspace-1",
+                &["pane-author", "pane-blocked", "pane-orphan"]
+            ),
+            owned("workspace-9", &["pane-reviewer"]),
+            owned("workspace-2", &["pane-shell"]),
+        ],
+        "`pane list` groups panes by the space each reports, first seen first"
+    );
+}
+
 /// Records each command's listing, so a test can compare the listings the
 /// adapter ran with the ones `fake::listings` names.
 struct Recorded(Wire, std::sync::Mutex<Vec<Listing>>);

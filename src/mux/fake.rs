@@ -472,19 +472,25 @@ impl World {
                     }
                 }
             }
-            Scope::All if panes => self
-                .spaces
-                .iter()
-                .filter(|space| space.listed_panes().next().is_some())
-                .map(|space| SpaceView {
-                    id: space.id.clone(),
-                    label: None,
-                    number: None,
-                    checkout: None,
-                    worktree: None,
-                    panes: Self::panes(space),
-                })
-                .collect(),
+            // `pane list` names every pane once, and the adapter groups them
+            // by the space each reports, in the order it first sees each.
+            Scope::All if panes => {
+                let mut grouped: Vec<SpaceView> = Vec::new();
+                for facts in self.spaces.iter().flat_map(Self::panes) {
+                    match grouped.iter_mut().find(|space| space.id == facts.space) {
+                        Some(space) => space.panes.push(facts),
+                        None => grouped.push(SpaceView {
+                            id: facts.space.clone(),
+                            label: None,
+                            number: None,
+                            checkout: None,
+                            worktree: None,
+                            panes: vec![facts],
+                        }),
+                    }
+                }
+                grouped
+            }
             Scope::All => self
                 .spaces
                 .iter()
@@ -821,7 +827,8 @@ impl FakeMux {
 
     /// `pane` keeps its place in its space's listing but reports `space` as
     /// its `workspace_id`, as a listing that races a move does. `space` need
-    /// not be in the world.
+    /// not be in the world. An all-panes survey groups the pane under
+    /// `space`, as the adapter groups `pane list` by each pane's report.
     ///
     /// # Panics
     ///
