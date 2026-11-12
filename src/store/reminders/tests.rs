@@ -33,8 +33,16 @@ fn owner() -> ReminderOwner {
 }
 impl Fixture {
     fn new() -> Self {
+        // A fresh `ProcessIds` restarts its sequence, and the clock has only
+        // microseconds on macOS, so two fixtures made at once could share a
+        // directory without this process-wide count.
+        static FIXTURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let fixture = FIXTURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let f = Self {
-            state: std::env::temp_dir().join(ProcessIds::default().next_id("test-reminders")),
+            state: std::env::temp_dir().join(format!(
+                "{}-{fixture}",
+                ProcessIds::default().next_id("test-reminders")
+            )),
             live_session: Cell::new("session"),
             now: Cell::new(60_000),
             busy: Cell::new(false),
