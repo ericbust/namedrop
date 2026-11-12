@@ -13796,3 +13796,40 @@ test("DIAGRAMS: a shortened message shows a label for a diagram it cuts, and the
   await row.locator(".diagram-box img").waitFor();
   assert.equal(await label.count(), 0);
 });
+
+test("DIAGRAMS: an agent's answer shows as the word Diagram in the reply preview and as a drawing in its thread", async (t) => {
+  const value = replyRows();
+  value.frame.messages[1].body.text = fenced(FLOW, "Here is the plan.");
+  const ui = await open(t, (client) => replay(client, [value]), undefined, {
+    inlineStyles: true,
+  });
+  await ui.live();
+  const preview = ui.page.locator(
+    '.timeline [data-message-id="parent"] .reply-preview',
+  );
+  await preview.locator(".md-diagram").waitFor();
+  assert.equal(await preview.locator(".md-diagram").textContent(), "Diagram");
+  assert.ok(
+    !(await preview.textContent()).includes("flowchart"),
+    "the preview holds none of the diagram's source",
+  );
+  assert.equal(await ui.page.locator(".timeline .diagram").count(), 0);
+
+  await preview.click();
+  const pane = ui.page.locator("aside.thread");
+  const image = pane.locator('[data-message-id="answer"] .diagram-box img');
+  await image.waitFor();
+  assert.ok((await drawn(image)) > 50);
+  const sizes = await pane.evaluate((thread) => ({
+    pane: thread.clientWidth,
+    content: thread.scrollWidth,
+    page: document.scrollingElement.scrollWidth,
+    viewport: document.documentElement.clientWidth,
+  }));
+  assert.ok(
+    sizes.content <= sizes.pane,
+    "the thread pane does not scroll sideways",
+  );
+  assert.ok(sizes.page <= sizes.viewport);
+  await diagramShots(ui, "thread");
+});
