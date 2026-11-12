@@ -1771,7 +1771,10 @@ where
     Ok(serde_json::json!({"here": here_label, "workspaces": workspaces}))
 }
 
-pub fn discover_worktree(mux: &impl MuxRead, cwd: &Path) -> Result<DiscoveredWorktree, String> {
+pub fn discover_worktree(
+    mux: &(impl MuxRead + ?Sized),
+    cwd: &Path,
+) -> Result<DiscoveredWorktree, String> {
     surveyed(mux.survey(Scope::CheckoutOf(cwd), Depth::Panes)).map_err(|error| error.to_string())
 }
 

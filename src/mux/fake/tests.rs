@@ -1407,9 +1407,9 @@ fn a_connection_keeps_its_budget_and_cancel_flag_for_hooks_and_the_read_log() {
     assert_eq!(
         mux.budgeted_reads(),
         [
-            (Read::IntegrationRoot, Some(budget)),
-            (Read::IntegrationRoot, Some(budget)),
-            (Read::IntegrationRoot, None),
+            (Read::IntegrationRoot, vec![budget]),
+            (Read::IntegrationRoot, vec![budget]),
+            (Read::IntegrationRoot, vec![]),
         ]
     );
     assert_eq!(mux.reads().len(), 3);
@@ -1473,21 +1473,132 @@ fn a_read_within_a_budget_logs_the_tighter_of_it_and_the_connection_s() {
         timeout: Duration::from_millis(millis),
         max_output_bytes: bytes,
     };
-    mux.within(budget(2000, 65536)).integration_root().unwrap();
+    mux.within(Allowance::fixed(budget(2000, 65536)))
+        .integration_root()
+        .unwrap();
     let connected = mux
         .connect("socket-a", budget(500, 1 << 20), Arc::default())
         .unwrap();
     connected
-        .within(budget(2000, 65536))
+        .within(Allowance::fixed(budget(2000, 65536)))
+        .integration_root()
+        .unwrap();
+    connected
+        .within(Allowance::fixed(budget(2000, 65536)))
+        .within(Allowance::fixed(budget(700, 1 << 30)))
         .integration_root()
         .unwrap();
     assert_eq!(
         mux.budgeted_reads(),
         [
-            (Read::IntegrationRoot, Some(budget(2000, 65536))),
-            (Read::IntegrationRoot, Some(budget(500, 65536))),
+            (Read::IntegrationRoot, vec![budget(2000, 65536)]),
+            (Read::IntegrationRoot, vec![budget(500, 65536)]),
+            (Read::IntegrationRoot, vec![budget(500, 65536)]),
         ]
     );
+    assert_eq!(Arc::strong_count(&mux.shared), 2, "only the connection");
+}
+
+#[test]
+fn a_narrowed_read_asks_its_budget_before_each_command_it_stands_for() {
+    let mux = author_and_reviewer();
+    let left = Mutex::new(vec![300, 500, 900]);
+    let cancelled = AtomicBool::new(false);
+    let asked = mux.within(Allowance::each(
+        || {
+            let millis = left.lock().unwrap().pop().ok_or("the budget ran out")?;
+            Ok(Budget {
+                timeout: Duration::from_millis(millis),
+                max_output_bytes: 4096,
+            })
+        },
+        &cancelled,
+    ));
+    let space = SpaceId::new("workspace-1");
+    asked.survey(Scope::Space(&space), Depth::Panes).unwrap();
+    // One budget is left, and a checkout survey stands for three listings,
+    // so it fails with the budget's own words after its first command.
+    assert_eq!(
+        asked.survey(Scope::CheckoutOf(Path::new("/repo")), Depth::Panes),
+        Err(MuxError::Unavailable("the budget ran out".into()))
+    );
+    assert_eq!(
+        asked.integration_root(),
+        Err(MuxError::Unavailable("the budget ran out".into()))
+    );
+    let millis = |millis| Budget {
+        timeout: Duration::from_millis(millis),
+        max_output_bytes: 4096,
+    };
+    assert_eq!(
+        mux.budgeted_reads(),
+        [
+            (
+                Read::Survey {
+                    scope: Surveyed::Space(space.clone()),
+                    depth: Depth::Panes
+                },
+                vec![millis(900), millis(500)]
+            ),
+            (
+                Read::Survey {
+                    scope: Surveyed::CheckoutOf("/repo".into()),
+                    depth: Depth::Panes
+                },
+                vec![millis(300)]
+            ),
+            (Read::IntegrationRoot, vec![]),
+        ]
+    );
+}
+
+#[test]
+fn a_narrowed_read_stops_once_its_flag_or_a_wider_one_is_set() {
+    let mux = author_and_reviewer();
+    let ran = Arc::new(Mutex::new(0));
+    let counted = Arc::clone(&ran);
+    mux.on_read(move |_, _| {
+        *counted.lock().unwrap() += 1;
+        Ok(())
+    });
+    let budget = || {
+        Ok(Budget {
+            timeout: Duration::from_secs(1),
+            max_output_bytes: 4096,
+        })
+    };
+    let narrow = AtomicBool::new(true);
+    let cancelled = Err(MuxError::Unavailable("Herdr read cancelled".into()));
+    assert_eq!(
+        mux.within(Allowance::each(budget, &narrow))
+            .integration_root(),
+        cancelled
+    );
+    let wide = AtomicBool::new(true);
+    let open = AtomicBool::new(false);
+    assert_eq!(
+        mux.within(Allowance::each(budget, &wide))
+            .within(Allowance::each(budget, &open))
+            .integration_root(),
+        cancelled
+    );
+    let connection = Arc::new(AtomicBool::new(true));
+    let connected = mux
+        .connect("socket-a", Budget::ADAPTER_DEFAULT, Arc::clone(&connection))
+        .unwrap();
+    assert_eq!(
+        connected
+            .within(Allowance::each(budget, &open))
+            .integration_root(),
+        cancelled
+    );
+    assert_eq!(*ran.lock().unwrap(), 0, "no cancelled read is answered");
+    assert_eq!(
+        mux.within(Allowance::each(budget, &open))
+            .integration_root(),
+        Ok(None)
+    );
+    assert_eq!(*ran.lock().unwrap(), 1);
 }
 
 #[test]

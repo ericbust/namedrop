@@ -9,9 +9,9 @@ pub use events::{decode_operation_input, plugin_event_data};
 pub(crate) use wire::input_failure;
 
 use super::{
-    Applied, Budget, Depth, Effect, Endpoint, InputKind, InputOutcome, Mux, MuxAct, MuxConnector,
-    MuxError, MuxInput, MuxKind, MuxRead, PaneId, PaneInput, PaneProcess, Scope, Screen,
-    ScreenRequest, SpaceView, Survey, TabId,
+    Allowance, Applied, Budget, Depth, Effect, Endpoint, InputKind, InputOutcome, Mux, MuxAct,
+    MuxConnector, MuxError, MuxInput, MuxKind, MuxRead, PaneId, PaneInput, PaneProcess, Scope,
+    Screen, ScreenRequest, SpaceView, Survey, TabId,
 };
 use crate::{HerdrCommandExecutor, ProcessHerdr};
 use std::{
@@ -20,7 +20,12 @@ use std::{
 };
 
 mod transport {
-    use crate::mux::{Budget, InputOutcome};
+    use crate::mux::{Allowance, Budget, InputOutcome};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// What a command that was cancelled before it started answers, in the
+    /// words `ProcessHerdr` uses.
+    pub const CANCELLED: &str = "Herdr read cancelled";
 
     /// Runs one Herdr command and returns its stdout, or its error text.
     /// Public only inside this private module, so nothing outside the
@@ -28,9 +33,19 @@ mod transport {
     pub trait Transport: Send + Sync {
         fn run(&self, args: &[&str]) -> Result<String, String>;
 
-        /// `run` held to `budget` as well. A scripted transport has no
-        /// clock or output cap to hold, so it runs the command as `run` does.
-        fn run_within(&self, args: &[&str], _budget: Budget) -> Result<String, String> {
+        /// `run` held to `budget` as well, and cancelled by `cancelled` in
+        /// place of the transport's own flag when it is given. A scripted
+        /// transport has no clock or output cap to hold, so it only refuses a
+        /// command that is cancelled before it starts.
+        fn run_within(
+            &self,
+            args: &[&str],
+            _budget: Budget,
+            cancelled: Option<&AtomicBool>,
+        ) -> Result<String, String> {
+            if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                return Err(CANCELLED.to_owned());
+            }
             self.run(args)
         }
 
@@ -44,8 +59,13 @@ mod transport {
             (**self).run(args)
         }
 
-        fn run_within(&self, args: &[&str], budget: Budget) -> Result<String, String> {
-            (**self).run_within(args, budget)
+        fn run_within(
+            &self,
+            args: &[&str],
+            budget: Budget,
+            cancelled: Option<&AtomicBool>,
+        ) -> Result<String, String> {
+            (**self).run_within(args, budget, cancelled)
         }
 
         fn input_failure(&self, error: String) -> InputOutcome {
@@ -53,20 +73,28 @@ mod transport {
         }
     }
 
-    /// A transport whose every command is held to `budget` as well.
-    pub struct Within<T> {
+    /// A transport whose every command is held to `allowance` as well.
+    pub struct Within<'a, T> {
         pub transport: T,
-        pub budget: Budget,
+        pub allowance: Allowance<'a>,
     }
 
-    impl<T: Transport> Transport for Within<T> {
+    impl<T: Transport> Transport for Within<'_, T> {
         fn run(&self, args: &[&str]) -> Result<String, String> {
-            self.transport.run_within(args, self.budget)
+            self.run_within(args, Budget::ADAPTER_DEFAULT, None)
         }
 
-        fn run_within(&self, args: &[&str], budget: Budget) -> Result<String, String> {
-            self.transport
-                .run_within(args, tighter(self.budget, budget))
+        /// The allowance's budget is asked before anything else, so its error
+        /// wins, as it did when the caller's budget was asked first.
+        fn run_within(
+            &self,
+            args: &[&str],
+            budget: Budget,
+            cancelled: Option<&AtomicBool>,
+        ) -> Result<String, String> {
+            let budget = tighter(self.allowance.budget()?, budget);
+            let cancelled = narrowest(cancelled, self.allowance.cancelled())?;
+            self.transport.run_within(args, budget, cancelled)
         }
 
         fn input_failure(&self, error: String) -> InputOutcome {
@@ -81,9 +109,24 @@ mod transport {
             max_output_bytes: one.max_output_bytes.min(other.max_output_bytes),
         }
     }
+
+    /// The flag a command watches while it runs: the narrower connection's,
+    /// or the wider one's when the narrower names none. A command watches
+    /// one flag, so a wider flag that is already set refuses it here, before
+    /// it starts.
+    pub fn narrowest<'f>(
+        narrower: Option<&'f AtomicBool>,
+        wider: Option<&'f AtomicBool>,
+    ) -> Result<Option<&'f AtomicBool>, String> {
+        match (narrower, wider) {
+            (Some(_), Some(wider)) if wider.load(Ordering::Relaxed) => Err(CANCELLED.to_owned()),
+            (Some(narrower), _) => Ok(Some(narrower)),
+            (None, wider) => Ok(wider),
+        }
+    }
 }
 
-use transport::{Transport, Within, tighter};
+use transport::{Transport, Within, narrowest, tighter};
 
 pub(crate) struct HerdrMux<T> {
     transport: T,
@@ -185,10 +228,13 @@ impl<T: Transport> MuxRead for HerdrMux<T> {
 
     /// The transport's type is erased, so a budget within a budget is the
     /// same type rather than a new one for each level.
-    fn within(&self, budget: Budget) -> Box<dyn MuxRead + '_> {
+    fn within<'a>(&'a self, allowance: Allowance<'a>) -> Box<dyn MuxRead + 'a> {
         let transport: &dyn Transport = &self.transport;
         Box::new(HerdrMux {
-            transport: Within { transport, budget },
+            transport: Within {
+                transport,
+                allowance,
+            },
             endpoint: self.endpoint.clone(),
         })
     }
@@ -247,18 +293,19 @@ struct Process {
 
 impl Transport for Process {
     fn run(&self, args: &[&str]) -> Result<String, String> {
-        self.run_within(args, self.budget)
+        self.run_within(args, self.budget, None)
     }
 
-    fn run_within(&self, args: &[&str], budget: Budget) -> Result<String, String> {
+    fn run_within(
+        &self,
+        args: &[&str],
+        budget: Budget,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<String, String> {
         let budget = tighter(self.budget, budget);
+        let cancelled = narrowest(cancelled, Some(&self.cancelled))?.unwrap_or(&self.cancelled);
         self.herdr
-            .execute_bounded(
-                args,
-                budget.timeout,
-                &self.cancelled,
-                budget.max_output_bytes,
-            )
+            .execute_bounded(args, budget.timeout, cancelled, budget.max_output_bytes)
             .map(|output| output.stdout)
     }
 }
@@ -273,14 +320,19 @@ impl<E: HerdrCommandExecutor + Sync> Transport for Legacy<'_, E> {
         self.0.execute(args).map(|output| output.stdout)
     }
 
-    /// `execute_bounded` with no cancellation, as `bounded` runs a read
-    /// whose caller has nothing to cancel.
-    fn run_within(&self, args: &[&str], budget: Budget) -> Result<String, String> {
+    /// `execute_bounded`, never cancelled unless the read names a flag,
+    /// since a legacy executor has no flag of its own.
+    fn run_within(
+        &self,
+        args: &[&str],
+        budget: Budget,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<String, String> {
         self.0
             .execute_bounded(
                 args,
                 budget.timeout,
-                &AtomicBool::new(false),
+                cancelled.unwrap_or(&AtomicBool::new(false)),
                 budget.max_output_bytes,
             )
             .map(|output| output.stdout)
@@ -312,55 +364,6 @@ fn bridge<E: HerdrCommandExecutor + Sync>(executor: &E) -> HerdrMux<Legacy<'_, E
     }
 }
 
-/// A legacy executor's commands, each run under the budget `budget` returns
-/// just before it starts. Reads that share one deadline each get what is left,
-/// and an error from `budget` is the read's error, word for word.
-struct Bounded<'a, E, B> {
-    executor: &'a E,
-    cancelled: &'a AtomicBool,
-    budget: B,
-}
-
-impl<E, B> Transport for Bounded<'_, E, B>
-where
-    E: HerdrCommandExecutor + Sync,
-    B: Fn() -> Result<Budget, String> + Send + Sync,
-{
-    fn run(&self, args: &[&str]) -> Result<String, String> {
-        self.run_within(args, Budget::ADAPTER_DEFAULT)
-    }
-
-    fn run_within(&self, args: &[&str], budget: Budget) -> Result<String, String> {
-        let budget = tighter((self.budget)()?, budget);
-        self.executor
-            .execute_bounded(
-                args,
-                budget.timeout,
-                self.cancelled,
-                budget.max_output_bytes,
-            )
-            .map(|output| output.stdout)
-    }
-}
-
-/// Reads through `executor` within a budget, which the bridge cannot give a
-/// plain `MuxRead` because the executor does not know one. Deleted with the
-/// bridge, when a connector fixes the budget instead.
-pub fn bounded<'a, E, B>(executor: &'a E, cancelled: &'a AtomicBool, budget: B) -> impl MuxRead + 'a
-where
-    E: HerdrCommandExecutor + Sync,
-    B: Fn() -> Result<Budget, String> + Send + Sync + 'a,
-{
-    HerdrMux {
-        transport: Bounded {
-            executor,
-            cancelled,
-            budget,
-        },
-        endpoint: LEGACY_ENDPOINT.clone(),
-    }
-}
-
 impl<E: HerdrCommandExecutor + Send + Sync> MuxRead for E {
     fn endpoint(&self) -> &Endpoint {
         self.mux_endpoint()
@@ -386,11 +389,11 @@ impl<E: HerdrCommandExecutor + Send + Sync> MuxRead for E {
         bridge(self).integration_root()
     }
 
-    fn within(&self, budget: Budget) -> Box<dyn MuxRead + '_> {
+    fn within<'a>(&'a self, allowance: Allowance<'a>) -> Box<dyn MuxRead + 'a> {
         Box::new(HerdrMux {
             transport: Within {
                 transport: Legacy(self),
-                budget,
+                allowance,
             },
             endpoint: self.mux_endpoint().clone(),
         })

@@ -10,7 +10,11 @@ use crate::{
     },
 };
 use serde_json::json;
-use std::{path::Path, sync::Mutex, time::Duration};
+use std::{
+    path::Path,
+    sync::{Mutex, atomic::AtomicBool},
+    time::Duration,
+};
 
 type Reply = Box<dyn Fn(&[&str]) -> Result<String, String> + Send + Sync>;
 
@@ -813,9 +817,31 @@ fn every_legacy_executor_is_a_mux_that_keeps_its_own_classification() {
     assert_eq!(*legacy.prompts.lock().unwrap(), ["hello"]);
 }
 
-/// Records the budget each bounded read was handed.
+/// Records each bounded read: its command, its budget, and the flag that
+/// cancels it, by address, so a test can tell whose flag a read watched.
 struct Budgeted {
-    reads: Mutex<Vec<(String, Duration, usize, bool)>>,
+    reads: Mutex<Vec<(String, Duration, usize, usize)>>,
+}
+
+impl Budgeted {
+    fn new() -> Self {
+        Self {
+            reads: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn commands(&self) -> Vec<(String, Duration, usize)> {
+        self.reads
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(args, timeout, bytes, _)| (args.clone(), *timeout, *bytes))
+            .collect()
+    }
+}
+
+fn address(flag: &AtomicBool) -> usize {
+    std::ptr::from_ref(flag) as usize
 }
 
 impl HerdrCommandExecutor for Budgeted {
@@ -830,11 +856,12 @@ impl HerdrCommandExecutor for Budgeted {
         cancelled: &AtomicBool,
         max_output_bytes: usize,
     ) -> Result<HerdrCommandOutput, String> {
-        let cancelled = cancelled.load(std::sync::atomic::Ordering::Relaxed);
-        self.reads
-            .lock()
-            .unwrap()
-            .push((args.join(" "), timeout, max_output_bytes, cancelled));
+        self.reads.lock().unwrap().push((
+            args.join(" "),
+            timeout,
+            max_output_bytes,
+            address(cancelled),
+        ));
         Ok(HerdrCommandOutput {
             stdout: json!({"result": {"label": "build"}}).to_string(),
         })
@@ -842,19 +869,20 @@ impl HerdrCommandExecutor for Budgeted {
 }
 
 #[test]
-fn a_bounded_read_asks_its_budget_before_every_command() {
-    let executor = Budgeted {
-        reads: Mutex::new(Vec::new()),
-    };
-    let cancelled = AtomicBool::new(true);
+fn a_read_within_a_shrinking_budget_asks_it_before_every_command_and_watches_the_caller_s_flag() {
+    let executor = Budgeted::new();
+    let cancelled = AtomicBool::new(false);
     let left = Mutex::new(vec![Duration::from_millis(700), Duration::from_millis(900)]);
-    let reads = bounded(&executor, &cancelled, || {
-        let timeout = left.lock().unwrap().pop().ok_or("the budget ran out")?;
-        Ok(Budget {
-            timeout,
-            max_output_bytes: 4096,
-        })
-    });
+    let reads = executor.within(Allowance::each(
+        || {
+            let timeout = left.lock().unwrap().pop().ok_or("the budget ran out")?;
+            Ok(Budget {
+                timeout,
+                max_output_bytes: 4096,
+            })
+        },
+        &cancelled,
+    ));
     let tab = TabId::new("tab1");
     assert_eq!(reads.tab_label(&tab).unwrap().as_deref(), Some("build"));
     assert_eq!(reads.tab_label(&tab).unwrap().as_deref(), Some("build"));
@@ -868,63 +896,83 @@ fn a_bounded_read_asks_its_budget_before_every_command() {
             "tab get tab1".to_owned(),
             Duration::from_millis(timeout),
             4096,
-            true,
+            address(&cancelled),
         )
     };
-    assert_eq!(*executor.reads.lock().unwrap(), [read(900), read(700)]);
+    assert_eq!(
+        *executor.reads.lock().unwrap(),
+        [read(900), read(700)],
+        "what `bounded` ran for the agent status panel and its identity recheck"
+    );
 }
 
 #[test]
 fn a_read_within_a_budget_runs_bounded_and_uncancelled_through_a_legacy_executor() {
-    let executor = Budgeted {
-        reads: Mutex::new(Vec::new()),
-    };
+    let executor = Budgeted::new();
     let budget = Budget {
         timeout: Duration::from_secs(2),
         max_output_bytes: 64 * 1024,
     };
     let tab = TabId::new("tab1");
     assert_eq!(
-        executor.within(budget).tab_label(&tab).unwrap().as_deref(),
+        executor
+            .within(Allowance::fixed(budget))
+            .tab_label(&tab)
+            .unwrap()
+            .as_deref(),
         Some("build")
     );
     assert_eq!(
-        *executor.reads.lock().unwrap(),
-        [(
-            "tab get tab1".to_owned(),
-            Duration::from_secs(2),
-            64 * 1024,
-            false
-        )],
-        "what health's plugin list ran through `bounded` before"
+        executor.commands(),
+        [("tab get tab1".to_owned(), Duration::from_secs(2), 64 * 1024)]
     );
 }
 
 #[test]
-fn a_budget_within_a_budget_keeps_the_tighter_limit_of_each() {
-    let executor = Budgeted {
-        reads: Mutex::new(Vec::new()),
-    };
-    let cancelled = AtomicBool::new(true);
-    let reads = bounded(&executor, &cancelled, || {
-        Ok(Budget {
-            timeout: Duration::from_millis(700),
-            max_output_bytes: 1 << 20,
-        })
-    });
+fn health_reads_the_integration_root_within_two_seconds_and_64_kib() {
+    let executor = Budgeted::new();
+    assert_eq!(crate::health::registered_plugin_root(&executor), None);
+    assert_eq!(
+        executor.commands(),
+        [(
+            "plugin list --plugin namedrop --json".to_owned(),
+            Duration::from_secs(2),
+            64 * 1024
+        )],
+        "what health's plugin list ran through `bounded` before commit 14"
+    );
+}
+
+#[test]
+fn a_budget_within_a_budget_keeps_the_tighter_limit_of_each_and_the_narrowest_flag() {
+    let executor = Budgeted::new();
+    let wide = AtomicBool::new(false);
+    let reads = executor.within(Allowance::each(
+        || {
+            Ok(Budget {
+                timeout: Duration::from_millis(700),
+                max_output_bytes: 1 << 20,
+            })
+        },
+        &wide,
+    ));
     let tab = TabId::new("tab1");
-    let inner = reads.within(Budget {
+    let inner = reads.within(Allowance::fixed(Budget {
         timeout: Duration::from_secs(2),
         max_output_bytes: 4096,
-    });
+    }));
     inner.tab_label(&tab).unwrap();
-    inner
-        .within(Budget {
-            timeout: Duration::from_millis(300),
-            max_output_bytes: 1 << 30,
-        })
-        .tab_label(&tab)
-        .unwrap();
+    let narrow = AtomicBool::new(false);
+    let narrowest = inner.within(Allowance::each(
+        || {
+            Ok(Budget {
+                timeout: Duration::from_millis(300),
+                max_output_bytes: 1 << 30,
+            })
+        },
+        &narrow,
+    ));
+    narrowest.tab_label(&tab).unwrap();
     assert_eq!(
         *executor.reads.lock().unwrap(),
         [
@@ -932,26 +980,46 @@ fn a_budget_within_a_budget_keeps_the_tighter_limit_of_each() {
                 "tab get tab1".to_owned(),
                 Duration::from_millis(700),
                 4096,
-                true
+                address(&wide)
             ),
             (
                 "tab get tab1".to_owned(),
                 Duration::from_millis(300),
                 4096,
-                true
+                address(&narrow)
             ),
         ]
     );
+    // A command watches one flag, so a wider flag that is already set
+    // refuses the command before it starts.
+    wide.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        narrowest.tab_label(&tab),
+        Err(MuxError::Unavailable("Herdr read cancelled".to_owned()))
+    );
+    assert_eq!(executor.reads.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn a_scripted_transport_refuses_a_cancelled_command_before_it_starts() {
+    let mux = herdr(|_| Ok(json!({"result": {"label": "build"}}).to_string()));
+    let cancelled = AtomicBool::new(true);
+    let within = mux.within(Allowance::each(|| Ok(Budget::ADAPTER_DEFAULT), &cancelled));
+    assert_eq!(
+        within.tab_label(&TabId::new("tab1")),
+        Err(MuxError::Unavailable("Herdr read cancelled".to_owned()))
+    );
+    assert!(calls(&mux).is_empty());
 }
 
 #[test]
 fn a_scripted_connection_within_a_budget_runs_the_same_command() {
     let mux = herdr(|_| Ok(json!({"result": {"label": "build"}}).to_string()));
     let tab = TabId::new("tab1");
-    let within = mux.within(Budget {
+    let within = mux.within(Allowance::fixed(Budget {
         timeout: Duration::from_secs(2),
         max_output_bytes: 4096,
-    });
+    }));
     assert_eq!(within.tab_label(&tab).unwrap().as_deref(), Some("build"));
     assert_eq!(within.endpoint(), mux.endpoint());
     assert_eq!(calls(&mux), ["tab get tab1"]);

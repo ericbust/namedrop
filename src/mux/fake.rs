@@ -6,10 +6,10 @@
 //! `namedrop::mux::fake::FakeMux` and a release build leaves it out.
 
 use super::{
-    AgentIdentity, AgentKind, AgentState, Applied, Budget, Checkout, Depth, Effect, Endpoint,
-    InputKind, InputOutcome, Key, MuxAct, MuxConnector, MuxError, MuxInput, MuxKind, MuxRead,
-    PaneFacts, PaneId, PaneInput, PaneProcess, Recipient, Retry, Scope, Screen, ScreenRequest,
-    SessionClaim, SpaceView, Style, Survey, TabId, TerminalId, Wrap,
+    AgentIdentity, AgentKind, AgentState, Allowance, Applied, Budget, Checkout, Depth, Effect,
+    Endpoint, InputKind, InputOutcome, Key, MuxAct, MuxConnector, MuxError, MuxInput, MuxKind,
+    MuxRead, PaneFacts, PaneId, PaneInput, PaneProcess, Recipient, Retry, Scope, Screen,
+    ScreenRequest, SessionClaim, SpaceView, Style, Survey, TabId, TerminalId, Wrap,
     gate::{self, ChannelError, RawChannel, StatusTap},
 };
 use crate::{AgentRuntime, AgentSessionId, SpaceId, WorktreeId};
@@ -203,8 +203,8 @@ pub(crate) struct World {
     pub(crate) integration_root: Option<PathBuf>,
     sent: Vec<Sent>,
     attempts: Vec<Attempt>,
-    /// Each read with the budget of the connection that made it.
-    reads: Vec<(Read, Option<Budget>)>,
+    /// Each read with the budget each Herdr command it stands for ran under.
+    reads: Vec<(Read, Vec<Budget>)>,
     effects: Vec<Effect>,
     attempted_effects: Vec<Effect>,
     /// Outcomes for a pane's next inputs, first first.
@@ -435,6 +435,8 @@ pub struct FakeMux {
 struct Connection {
     budget: Budget,
     cancelled: Arc<AtomicBool>,
+    /// A narrowed handle already logged the read this handle answers.
+    logged: bool,
 }
 
 type InputObserver = Arc<dyn Fn(&FakeMux, &Attempt) + Send + Sync>;
@@ -594,9 +596,13 @@ impl FakeMux {
             .collect()
     }
 
-    /// Every read, with the budget of the connection that made it, or
-    /// `None` for a read made through a handle the builder made.
-    pub fn budgeted_reads(&self) -> Vec<(Read, Option<Budget>)> {
+    /// Every read, with the budget each Herdr command it stands for ran
+    /// under: one per listing `listings` names for a survey, and one for any
+    /// other read. A read through a handle the builder made has none. Through
+    /// `within`, each budget is asked just before its command, as the Herdr
+    /// adapter asks, and a read that stopped early lists only the budgets it
+    /// asked for.
+    pub fn budgeted_reads(&self) -> Vec<(Read, Vec<Budget>)> {
         self.lock().reads.clone()
     }
 
@@ -968,9 +974,18 @@ impl FakeMux {
         Ok(())
     }
 
-    /// Logs `read` and runs the read hooks with the world unlocked.
+    /// Logs `read`, unless a narrowed handle logs it, and runs the read
+    /// hooks with the world unlocked.
     fn read(&self, read: Read) -> Result<(), MuxError> {
-        self.lock().reads.push((read.clone(), self.budget()));
+        match &self.connection {
+            Some(Connection { logged: true, .. }) => {}
+            connection => {
+                let budgets = connection.as_ref().map_or_else(Vec::new, |connection| {
+                    vec![connection.budget; commands(&read)]
+                });
+                self.lock().reads.push((read.clone(), budgets));
+            }
+        }
         let hooks = unpoisoned(&self.shared.read_hooks).clone();
         hooks.iter().try_for_each(|hook| hook(self, &read))
     }
@@ -1044,28 +1059,11 @@ impl MuxRead for FakeMux {
         }
     }
 
-    /// A handle whose reads log `budget`, or the tighter of it and the
-    /// connection's own, as `budget()` reports.
-    fn within(&self, budget: Budget) -> Box<dyn MuxRead + '_> {
-        let connection = match &self.connection {
-            Some(connection) => Connection {
-                budget: Budget {
-                    timeout: connection.budget.timeout.min(budget.timeout),
-                    max_output_bytes: connection
-                        .budget
-                        .max_output_bytes
-                        .min(budget.max_output_bytes),
-                },
-                cancelled: Arc::clone(&connection.cancelled),
-            },
-            None => Connection {
-                budget,
-                cancelled: Arc::default(),
-            },
-        };
-        Box::new(FakeMux {
-            connection: Some(connection),
-            ..self.clone()
+    fn within<'a>(&'a self, allowance: Allowance<'a>) -> Box<dyn MuxRead + 'a> {
+        Box::new(Within {
+            base: self,
+            wider: None,
+            allowance,
         })
     }
 
@@ -1138,11 +1136,149 @@ impl MuxConnector for FakeMux {
             )));
         }
         Ok(Arc::new(FakeMux {
-            connection: Some(Connection { budget, cancelled }),
+            connection: Some(Connection {
+                budget,
+                cancelled,
+                logged: false,
+            }),
             ..self.clone()
         }))
     }
 }
+
+/// The Herdr commands a read stands for: one per listing for a survey.
+fn commands(read: &Read) -> usize {
+    match read {
+        Read::Survey { scope, depth } => listings(scope.kind(), *depth).len(),
+        _ => 1,
+    }
+}
+
+/// A handle narrowed by `within`. It asks its budget, and every wider one's,
+/// just before each Herdr command the read stands for, and refuses a command
+/// once any of their flags is set, as the Herdr adapter does. The fake
+/// enforces no budget itself, so a read hook that models a stalled or
+/// oversized read checks `budget()` on the handle it is handed, which holds
+/// the budget of the read's first command.
+struct Within<'a> {
+    base: &'a FakeMux,
+    wider: Option<&'a Within<'a>>,
+    allowance: Allowance<'a>,
+}
+
+impl Within<'_> {
+    /// The budget for the next command, the tightest of every narrowing and
+    /// of the connection's own. The narrowest is asked first, as in the
+    /// adapter, so its error wins.
+    fn ask(&self) -> Result<Budget, MuxError> {
+        let mut budget = self.base.budget().unwrap_or(Budget::ADAPTER_DEFAULT);
+        let mut narrowing = Some(self);
+        while let Some(within) = narrowing {
+            let asked = within.allowance.budget().map_err(MuxError::Unavailable)?;
+            budget = Budget {
+                timeout: budget.timeout.min(asked.timeout),
+                max_output_bytes: budget.max_output_bytes.min(asked.max_output_bytes),
+            };
+            if within
+                .allowance
+                .cancelled()
+                .is_some_and(|flag| flag.load(Ordering::Relaxed))
+            {
+                return Err(MuxError::Unavailable(CANCELLED.to_owned()));
+            }
+            narrowing = within.wider;
+        }
+        if self.base.cancelled() {
+            return Err(MuxError::Unavailable(CANCELLED.to_owned()));
+        }
+        Ok(budget)
+    }
+
+    /// Asks the first command's budget, logs the read, answers it through a
+    /// handle that holds that budget, then asks the budgets of the read's
+    /// other commands. A failed ask fails the read with the answer dropped.
+    fn read<T>(
+        &self,
+        read: Read,
+        answer: impl FnOnce(&FakeMux) -> Result<T, MuxError>,
+    ) -> Result<T, MuxError> {
+        let commands = commands(&read);
+        let first = self.ask();
+        let index = {
+            let mut world = self.base.lock();
+            let asked = first
+                .as_ref()
+                .map_or_else(|_| Vec::new(), |budget| vec![*budget]);
+            world.reads.push((read, asked));
+            world.reads.len() - 1
+        };
+        let handle = FakeMux {
+            connection: Some(Connection {
+                budget: first?,
+                cancelled: self
+                    .base
+                    .connection
+                    .as_ref()
+                    .map_or_else(Arc::default, |connection| Arc::clone(&connection.cancelled)),
+                logged: true,
+            }),
+            ..self.base.clone()
+        };
+        let answered = answer(&handle);
+        drop(handle);
+        for _ in 1..commands {
+            let budget = self.ask()?;
+            self.base.lock().reads[index].1.push(budget);
+        }
+        answered
+    }
+}
+
+impl MuxRead for Within<'_> {
+    fn endpoint(&self) -> &Endpoint {
+        self.base.endpoint()
+    }
+
+    fn survey(&self, scope: Scope<'_>, depth: Depth) -> Result<Survey, MuxError> {
+        let read = Read::Survey {
+            scope: Surveyed::of(scope),
+            depth,
+        };
+        self.read(read, |handle| handle.survey(scope, depth))
+    }
+
+    fn screen(&self, pane: &PaneId, request: ScreenRequest) -> Result<Screen, MuxError> {
+        let read = Read::Screen {
+            pane: pane.clone(),
+            request,
+        };
+        self.read(read, |handle| handle.screen(pane, request))
+    }
+
+    fn process(&self, pane: &PaneId) -> Result<PaneProcess, MuxError> {
+        self.read(Read::Process(pane.clone()), |handle| handle.process(pane))
+    }
+
+    fn tab_label(&self, tab: &TabId) -> Result<Option<String>, MuxError> {
+        self.read(Read::TabLabel(tab.clone()), |handle| handle.tab_label(tab))
+    }
+
+    fn integration_root(&self) -> Result<Option<PathBuf>, MuxError> {
+        self.read(Read::IntegrationRoot, MuxRead::integration_root)
+    }
+
+    fn within<'a>(&'a self, allowance: Allowance<'a>) -> Box<dyn MuxRead + 'a> {
+        Box::new(Within {
+            base: self.base,
+            wider: Some(self),
+            allowance,
+        })
+    }
+}
+
+/// What a command cancelled before it started answers, in the words of
+/// `ProcessHerdr` and of a legacy executor's `execute_bounded`.
+const CANCELLED: &str = "Herdr read cancelled";
 
 struct Channel<'a>(&'a FakeMux);
 

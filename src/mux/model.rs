@@ -1,6 +1,6 @@
 use crate::{AgentRuntime, AgentSessionId, SpaceId, WorktreeId, domain::string_id};
 use serde::{Deserialize, Serialize};
-use std::{path::Path, time::Duration};
+use std::{path::Path, sync::atomic::AtomicBool, time::Duration};
 
 string_id!(PaneId);
 string_id!(TabId);
@@ -34,6 +34,50 @@ impl Budget {
         timeout: Duration::MAX,
         max_output_bytes: usize::MAX,
     };
+}
+
+/// What a narrowed connection holds each of its commands to, on top of the
+/// connection's own budget. See `MuxRead::within`.
+pub struct Allowance<'a> {
+    budget: Box<dyn Fn() -> Result<Budget, String> + Send + Sync + 'a>,
+    cancelled: Option<&'a AtomicBool>,
+}
+
+impl<'a> Allowance<'a> {
+    /// Every command held to `budget`. The connection's own flag still
+    /// cancels it.
+    pub fn fixed(budget: Budget) -> Self {
+        Self {
+            budget: Box::new(move || Ok(budget)),
+            cancelled: None,
+        }
+    }
+
+    /// Each command held to the budget `budget` returns just before the
+    /// command starts, so reads that share one deadline each get what is
+    /// left. An error from `budget` is the read's error, word for word, and no
+    /// command runs. Setting `cancelled` stops a command before it starts and
+    /// while it runs.
+    pub fn each(
+        budget: impl Fn() -> Result<Budget, String> + Send + Sync + 'a,
+        cancelled: &'a AtomicBool,
+    ) -> Self {
+        Self {
+            budget: Box::new(budget),
+            cancelled: Some(cancelled),
+        }
+    }
+
+    /// The budget for the command about to start.
+    pub fn budget(&self) -> Result<Budget, String> {
+        (self.budget)()
+    }
+
+    /// The flag that cancels this connection's commands, or `None` for the
+    /// connection's own.
+    pub fn cancelled(&self) -> Option<&'a AtomicBool> {
+        self.cancelled
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
