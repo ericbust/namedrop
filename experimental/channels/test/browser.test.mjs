@@ -13660,6 +13660,22 @@ test("DIAGRAMS: a diagram cannot run script, load anything remote, loosen its ow
     '  click C href "https://evil.example/e" _blank',
   ].join("\n");
   const { ui, asked } = await diagramRoom(t, [fenced(hostile), fenced(FLOW)]);
+  // Mermaid hands each label to DOMPurify, which parses it with DOMParser to
+  // strip what the label must not hold. That document has no window, so a
+  // handler in it cannot run. This counts the handlers parsed that way.
+  await ui.page.evaluate(() => {
+    window.inertHandlers = 0;
+    const parse = DOMParser.prototype.parseFromString;
+    DOMParser.prototype.parseFromString = function (markup, type) {
+      const parsed = parse.call(this, markup, type);
+      if (parsed.defaultView === null)
+        for (const element of parsed.querySelectorAll("*"))
+          window.inertHandlers += [...element.attributes].filter((attribute) =>
+            attribute.name.startsWith("on"),
+          ).length;
+      return parsed;
+    };
+  });
   const dialogs = [];
   ui.page.on("dialog", (dialog) => {
     dialogs.push(dialog.message());
@@ -13720,6 +13736,41 @@ test("DIAGRAMS: a diagram cannot run script, load anything remote, loosen its ow
     await ui.page.locator("main .diagram a, main .diagram script").count(),
     0,
   );
+  assert.equal(
+    await ui.page.evaluate(
+      () =>
+        [...document.querySelectorAll("*")].filter((element) =>
+          [...element.attributes].some((attribute) =>
+            attribute.name.startsWith("on"),
+          ),
+        ).length,
+    ),
+    0,
+    "no element of the page carries an inline handler",
+  );
+  // Chrome 157 reports a blocked inline handler for each one DOMParser meets
+  // under the page's policy, although no handler in such a document can run.
+  // Chromium 155 reports none. Those reports are accounted for here, one per
+  // handler parsed that way at most, and any other report still fails the
+  // check that follows every test.
+  const { reports, inert } = await ui.page.evaluate(() => ({
+    reports: window.cspErrors,
+    inert: window.inertHandlers,
+  }));
+  assert.ok(inert > 0, "the label's handler reached DOMPurify to be removed");
+  assert.deepEqual(
+    reports.filter((directive) => directive !== "script-src-attr"),
+    [],
+  );
+  assert.ok(
+    reports.length <= inert,
+    `${reports.length} reports for ${inert} handlers parsed in a document with no window`,
+  );
+  await ui.page.evaluate(() => {
+    window.cspErrors = window.cspErrors.filter(
+      (directive) => directive !== "script-src-attr",
+    );
+  });
 });
 
 test("DIAGRAMS: a block over 10,000 characters and a message's ninth diagram are shown as source, undrawn", async (t) => {

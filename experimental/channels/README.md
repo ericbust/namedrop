@@ -551,3 +551,11 @@ Mermaid inserts a `<style>` element and style attributes while it draws, which
 the dashboard's `style-src 'self' 'unsafe-inline'` permits. The browser tests
 named `DIAGRAMS:` therefore run under the dashboard's policy. Every other
 browser test keeps the stricter `style-src 'self'`.
+
+One of those tests draws a hostile diagram whose label holds `onerror`. Mermaid
+passes every label to DOMPurify, which parses it with `DOMParser`. Chrome 157
+reports a `script-src-attr` violation for each handler in that parse, and
+Chromium 155 reports none. The parsed document has no window, so the handler
+cannot run. The test counts the handlers parsed that way, allows at most that
+many `script-src-attr` reports and no other, and checks that no element of the
+page carries a handler.

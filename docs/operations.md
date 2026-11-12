@@ -198,6 +198,8 @@ A diagram is text an agent wrote, so it is drawn with these limits:
 - The drawing is cleaned with DOMPurify, which also removes links, embedded images and `foreignObject`.
 - The page shows the result as an image, from a `data:` address. A browser runs no script inside an image and loads nothing for it, whatever the image holds.
 
+If a label holds an inline handler, such as `<img onerror=…>`, Chrome 157 and later log "Refused to execute inline event handler" in the console. DOMPurify parses the label with `DOMParser` to remove the handler, and Chrome reports each handler it meets there under the page's policy. That document has no window, so the handler cannot run, with or without the policy.
+
 Layout uses dagre, and a diagram cannot ask for another engine. Mermaid 12 would use ELK by default, which is 1.5 MB to load and slow on a large graph. Every diagram kind tested draws without it, so the ELK engine is left out of the build.
 
 ### Open Channels from your tailnet
