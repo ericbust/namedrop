@@ -356,6 +356,19 @@ A frame's message row lists its images in `images` and leaves their lines out of
 `body`. A message with images needs words too, so Send stays off until there are
 some.
 
+Sounds are synthesized with Web Audio from the recipe table in `src/sounds.ts`,
+so the page fetches no audio and the CSP stays `default-src 'none'`. The reducer
+sets `State.heard` (a sequence number and agent keys) only for a live `space`
+frame with a previous snapshot, from `heardIn()` in `src/store.ts`: new messages
+by an agent with a leg to the person, without system kinds or progress notes.
+Direct messages come from `heardDirect()` in `src/direct-messages.ts`, a changed
+`lastAgentMessageId` after the first poll. `useSounds` in `src/ui/useSounds.ts`
+loads `GET /api/sounds`, posts each change to `POST /api/sounds` with the
+`X-Namedrop-Csrf` header, and rings through `createPlayer()`. The player stays
+`locked` until a pointer or key event on the page, and holds the Web Lock
+`namedrop:channel-sound` for a second around each sound, so one browser plays one
+sound a second across its tabs. Without Web Locks, each tab keeps its own second.
+
 ## Direct messages and reminders
 
 **Direct messages** lists Namedrop agents across workspaces, with a channel label

@@ -171,6 +171,14 @@ That line is all the agent gets for the image. It opens the file with its ordina
 
 An image is deleted once 30 days have passed since it was last attached. Channels checks when it starts and each time it stores an image. A message whose image is gone shows "Image no longer stored", and its path line then points at no file. To remove images sooner, delete files from `<state>/channel-images/`.
 
+### Sounds
+
+Channels plays a sound when an agent messages you: a direct message from an agent, or an agent's message in a channel or thread that is addressed to you. Messages between agents, your own messages, reminders, nudges and progress notes stay silent. A burst plays one sound, at most one a second across the tabs of one browser. Every open Channels tab plays it, background tabs too. Messages that arrive while a tab is reconnecting, or before it first loads, play no sound.
+
+Click the speaker button in an agent's direct message header or in its Peek panel to pick its sound: Chime, Ping, Pop, Knock, Bell, Blip, Marimba, Soft, None, or Default. The play button beside each sound plays it once. **Sounds** at the bottom of the sidebar sets the Default sound, Chime at first, and holds **Mute all sounds**. A browser plays sound only after you click or press a key on the page once. Until then the sidebar shows "Click to turn on sounds".
+
+The picks are stored in `<state>/dashboard/sounds.json`, so every browser that opens this Channels server plays the same sounds. A pick is keyed by the agent's pane address, so it survives a rename but not a new pane. `GET /api/sounds` returns `{"default", "muted", "agents"}`. `POST /api/sounds` takes one change, such as `{"kind":"agent","agent":"<address>","sound":"pop"}`, and needs the session cookie and the session's CSRF token, like posting. `"sound": null` returns that agent to the Default. A file that cannot be read counts as the factory settings until the next change replaces it.
+
 ### Open Channels from your tailnet
 
 On the Channels machine, sign in to Tailscale as your own user and enable HTTPS for your tailnet. In a workspace shell tab, run:

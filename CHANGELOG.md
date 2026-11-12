@@ -2,6 +2,17 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.9.0] - 2026-11-12
+
+### Added
+
+- Channels plays a sound when an agent messages you, so you hear it from another window or across the room. It plays for a direct message from an agent and for an agent's answer in a channel or thread that is addressed to you. Messages between agents and your own messages stay silent, and so do reminders, nudges and progress notes. A burst plays one sound, at most one a second.
+- Pick a sound for each agent. Click the speaker button in the agent's direct message header or in its Peek panel, and choose Chime, Ping, Pop, Knock, Bell, Blip, Marimba, Soft or None. Each sound has a play button to hear it first. An agent without its own pick plays the Default sound.
+- **Sounds** at the bottom of the sidebar sets the Default sound, Chime at first, and has **Mute all sounds**.
+- Your picks are saved by Namedrop, not by the browser, so Channels on your laptop and on your phone over the tailnet link play the same sounds. A pick follows the agent's pane, so it stays when you rename the agent.
+- Any open Channels tab plays the sound, a background tab too. A browser plays sound only after you click once on the page, so until then a small "Click to turn on sounds" note shows at the bottom of the sidebar.
+- The sounds are made in the page with the browser's Web Audio, so Channels loads no audio files.
+
 ## [1.8.0] - 2026-11-11
 
 ### Added
