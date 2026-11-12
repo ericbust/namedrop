@@ -1600,6 +1600,9 @@ fn input_while_a_delivery_holds_the_pane_answers_busy_at_once_and_sends_nothing(
     ] {
         let started = Instant::now();
         let response = post_input(&server, &target, &body);
+        // A waiting acquire gives up only after ACQUIRE_TIMEOUT, 2 s, so a
+        // shorter request never waited. The rest is the pane survey, a
+        // Python start-up that load can stretch well past 100 ms.
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "input waited {:?} for the delivery's pane lock",
@@ -1662,6 +1665,91 @@ fn refused_keys_never_land_later_and_resent_keys_keep_their_order() {
             json!(["pane", "send-keys", "pane-1-lead", "down"]),
             json!(["pane", "send-keys", "pane-1-lead", "enter"]),
         ]
+    );
+}
+
+#[test]
+fn a_key_posted_while_a_delivery_finishes_answers_busy_and_never_lands_after_it() {
+    for body in [
+        json!({"kind":"key","key":"Enter"}),
+        json!({"kind":"text","text":"after you"}),
+    ] {
+        let f = Fixture::new();
+        let server = Server::start(&f);
+        let target = input_path("socket-a", "w1", "lead");
+        let continuity = live_continuity(&server, &path("socket-a", "w1", "lead"));
+        let mut body = body;
+        body["continuity"] = json!(continuity);
+        let delivering = hold_pane_lock(&f, "pane-1-lead");
+        configure(&f, json!({"native_identity_gate":"finish-identity"}));
+        let response = thread::scope(|scope| {
+            let request = scope.spawn(|| post_input(&server, &target, &body));
+            wait_for(|| f.root.join("finish-identity.captured").exists());
+            drop(delivering);
+            fs::write(f.root.join("finish-identity"), "").unwrap();
+            request.join().unwrap()
+        });
+        assert_eq!(
+            response.status, 409,
+            "{body}: input posted while the delivery held the pane landed after it"
+        );
+        assert_eq!(sent_inputs(&f), Vec::<Value>::new(), "{body}");
+    }
+}
+
+#[test]
+fn a_replaced_pane_answers_gone_even_while_a_delivery_holds_it() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let target = input_path("socket-a", "w1", "lead");
+    let continuity = live_continuity(&server, &path("socket-a", "w1", "lead"));
+    let _delivering = hold_pane_lock(&f, "pane-1-lead");
+    let mut responses = responses(&f);
+    let mut panes: Value =
+        serde_json::from_str(responses["pane list --workspace w1"].as_str().unwrap()).unwrap();
+    panes["result"]["panes"][0]["terminal_id"] = json!("replacement");
+    responses["pane list --workspace w1"] = json!(panes.to_string());
+    store_responses(&f, &responses);
+    for body in [
+        json!({"kind":"key","key":"Enter","continuity":continuity}),
+        json!({"kind":"text","text":"continue","continuity":continuity}),
+    ] {
+        let response = post_input(&server, &target, &body);
+        assert_eq!(response.status, 410, "{body}: {}", response.body);
+        assert_eq!(
+            response.body,
+            "This participant's pane is no longer available.\n"
+        );
+    }
+    assert_eq!(sent_inputs(&f), Vec::<Value>::new());
+}
+
+#[test]
+fn input_refuses_an_unsafe_pane_lock_directory_and_sends_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let target = input_path("socket-a", "w1", "lead");
+    let continuity = live_continuity(&server, &path("socket-a", "w1", "lead"));
+    let directory = f.state.join("pane-effects");
+    fs::create_dir_all(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
+    for body in [
+        json!({"kind":"key","key":"Enter","continuity":continuity}),
+        json!({"kind":"text","text":"continue","continuity":continuity}),
+    ] {
+        assert_eq!(post_input(&server, &target, &body).status, 503, "{body}");
+    }
+    assert_eq!(sent_inputs(&f), Vec::<Value>::new());
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        post_input(
+            &server,
+            &target,
+            &json!({"kind":"key","key":"Enter","continuity":continuity})
+        )
+        .status,
+        204
     );
 }
 

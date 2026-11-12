@@ -179,6 +179,57 @@ mod tests {
     use std::{sync::mpsc, thread, time::Duration};
 
     #[test]
+    fn a_stop_that_cannot_reach_the_multiplexer_warns_for_each_response() {
+        struct Unreachable;
+        impl MuxConnector for Unreachable {
+            fn connect(
+                &self,
+                _: &str,
+                _: Budget,
+                _: Arc<std::sync::atomic::AtomicBool>,
+            ) -> Result<Arc<dyn crate::mux::Mux>, crate::mux::MuxError> {
+                Err(crate::mux::MuxError::Unavailable(
+                    "Herdr is not running".into(),
+                ))
+            }
+        }
+        let control = crate::ThreadControlState {
+            stopped: true,
+            paused: false,
+            reply_allowance: 10,
+            reply_limit_paused: false,
+        };
+        let response = |pane: &str| crate::ActiveThreadResponse {
+            attempt_id: crate::DeliveryAttemptId::new("attempt"),
+            binding_id: crate::PaneBindingId::new("binding"),
+            pane_id: pane.into(),
+            agent_session_id: crate::AgentSessionId::new("session"),
+            binding_active: true,
+        };
+        let committed = CommittedControl {
+            namespace: crate::StateNamespace::for_space("socket", "space"),
+            control: control.clone(),
+            stopped: Some(crate::ThreadStopResult {
+                state: control,
+                cancelled_delivery_ids: Vec::new(),
+                active_responses: vec![response("w1:p1"), response("w1:p2")],
+            }),
+        };
+        let (_, receipt) = committed.finish(
+            Path::new("/nonexistent-namedrop-control-test"),
+            &Unreachable,
+        );
+        assert_eq!(receipt["interrupted_pane_ids"], json!([]));
+        assert_eq!(
+            receipt["warnings"],
+            json!([
+                "Could not confirm interruption of w1:p1 after stopping the thread: Herdr is not running.",
+                "Could not confirm interruption of w1:p2 after stopping the thread: Herdr is not running.",
+            ])
+        );
+    }
+
+    #[test]
     fn handoff_waits_for_effects_and_slow_response_releases_completion() {
         let effects = ControlEffects::default();
         let permit = effects.track();

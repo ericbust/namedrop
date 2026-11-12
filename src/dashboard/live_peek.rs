@@ -7,10 +7,9 @@ use super::{
 use crate::{
     StateStore,
     mux::{
-        Budget, Depth, InputKind, InputOutcome, Key, MuxConnector, PaneId, Recipient, Scope,
-        ScreenRequest, Style, Wrap,
+        Budget, Depth, InputOutcome, Key, MuxConnector, PaneId, Scope, ScreenRequest, Style, Wrap,
     },
-    pane_effects::{AcquireError, PaneEffects},
+    pane_effects::{AcquireError, DashboardInput, DashboardPane},
     store::dashboard::{LiveBinding, LiveMember},
 };
 use serde::{Deserialize, Serialize};
@@ -1004,6 +1003,15 @@ impl LivePeeks {
         if binding.pane_type != crate::PaneType::Agent || binding.agent_session_id.is_none() {
             return Err(Status::Gone);
         }
+        // The lock is tried before the identity survey, so a delivery that
+        // holds it now cannot release it during the survey and have this
+        // input land just after its prompt. Waiting would land it there too,
+        // so a busy pane answers at once.
+        let effects = DashboardPane::try_acquire(
+            front.files.state(),
+            &binding.namespace.session_socket_id,
+            &binding.pane_id,
+        );
         let mux = &*front.mux;
         let identity = native(mux, &binding, Duration::from_millis(500))?.identity;
         if !identity.accepts_input() {
@@ -1015,13 +1023,7 @@ impl LivePeeks {
         if post.continuity() != continuity(front, address, &binding, &identity) {
             return Err(Status::Gone);
         }
-        // Waiting would land this input after another owner's, on a screen
-        // the person has not seen, so a busy pane answers at once.
-        let effects = match PaneEffects::try_acquire(
-            front.files.state(),
-            &binding.namespace.session_socket_id,
-            &binding.pane_id,
-        ) {
+        let effects = match effects {
             Ok(effects) => effects,
             Err(AcquireError::Contended) => return Err(Status::Busy),
             Err(AcquireError::Fault(_)) => return Err(Status::Unavailable),
@@ -1040,15 +1042,9 @@ impl LivePeeks {
                 if current != binding || updated != identity || !updated.accepts_input() {
                     return Err(Status::Gone);
                 }
-                effects.dashboard_input(&herdr, InputKind::Line(&text))
+                effects.input(&herdr, DashboardInput::Line(&text))
             }
-            InputPost::Key { key, .. } => effects.dashboard_input(
-                &herdr,
-                InputKind::Keys {
-                    recipient: Recipient::Pane,
-                    keys: &[key.key()],
-                },
-            ),
+            InputPost::Key { key, .. } => effects.input(&herdr, DashboardInput::Key(key.key())),
         };
         match outcome {
             InputOutcome::Delivered => Ok(()),
