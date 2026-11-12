@@ -1551,6 +1551,40 @@ fn reminder_startup_catchup_keeps_transient_failure_eligible() {
     assert_eq!(f.prompts.get(), 0);
 }
 
+/// The due loop reads Herdr's error code, not its message: a transient
+/// failure whose text names `workspace_not_found` keeps its namespace
+/// draining and due for a retry.
+#[test]
+fn reminder_due_discovery_reads_the_error_code_not_its_text() {
+    let f = Fixture::new();
+    f.busy.set(true);
+    f.set("queued", None, crate::reminder::Repeat::Once);
+    f.fire("queued");
+    f.set("due", None, crate::reminder::Repeat::Once);
+    f.discovery_error.set(Some("transport_unavailable"));
+    let mut catch_up = crate::reminder::CatchUp::default();
+    let scope = crate::work_counters::Scope::start();
+    let caught_up = crate::reminder::cycle_with(
+        &f.state,
+        &f,
+        &ProcessIds::default(),
+        |_| f.mux(),
+        &mut catch_up,
+    )
+    .unwrap();
+    let counts = scope.finish();
+    assert!(!caught_up);
+    assert_eq!(counts.drains, 1);
+    assert_eq!(counts.drain_errors, 1);
+    f.tx(|tx| {
+        assert!(matches!(
+            tx.reminder(&ns(), "due")?.state,
+            ReminderState::Scheduled { .. }
+        ));
+        Ok(())
+    });
+}
+
 #[test]
 fn reminder_enqueue_reports_only_a_new_durable_fire() {
     let f = Fixture::new();
