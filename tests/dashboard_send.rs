@@ -3192,6 +3192,104 @@ else:
     }
 
     #[test]
+    fn sound_choices_change_one_field_at_a_time_and_survive_a_restart() {
+        let f = Fixture::new();
+        let server = Server::start(&f, None);
+        let read = |server: &Server| {
+            let response = server.request(
+                "GET",
+                "/api/sounds",
+                &[("Cookie", server.cookie.as_str())],
+                "",
+            );
+            assert_eq!(response.status, 200, "{}", response.body);
+            assert!(
+                response
+                    .head
+                    .lines()
+                    .any(|line| line == "Content-Type: application/json"),
+                "{}",
+                response.head
+            );
+            serde_json::from_str::<Value>(&response.body).unwrap()
+        };
+        assert_eq!(
+            read(&server),
+            json!({"default": "chime", "muted": false, "agents": {}})
+        );
+        for (change, expected) in [
+            (
+                json!({"kind": "default", "sound": "bell"}),
+                json!({"default": "bell", "muted": false, "agents": {}}),
+            ),
+            (
+                json!({"kind": "muted", "muted": true}),
+                json!({"default": "bell", "muted": true, "agents": {}}),
+            ),
+            (
+                json!({"kind": "agent", "agent": "pane-address-1-2-3", "sound": "pop"}),
+                json!({"default": "bell", "muted": true, "agents": {"pane-address-1-2-3": "pop"}}),
+            ),
+            (
+                json!({"kind": "agent", "agent": "pane-address-4-5-6", "sound": "none"}),
+                json!({"default": "bell", "muted": true,
+                       "agents": {"pane-address-1-2-3": "pop", "pane-address-4-5-6": "none"}}),
+            ),
+            (
+                json!({"kind": "agent", "agent": "pane-address-1-2-3", "sound": null}),
+                json!({"default": "bell", "muted": true, "agents": {"pane-address-4-5-6": "none"}}),
+            ),
+        ] {
+            let response = server.post("/api/sounds", &change.to_string(), &[]);
+            assert_eq!(response.status, 200, "{change}: {}", response.body);
+            assert_eq!(
+                serde_json::from_str::<Value>(&response.body).unwrap(),
+                expected,
+                "{change}"
+            );
+            assert_eq!(read(&server), expected, "{change}");
+        }
+        let settled = read(&server);
+        let file = f.state.join("dashboard/sounds.json");
+        let stored = fs::read(&file).unwrap();
+        let repeat = json!({"kind": "agent", "agent": "pane-address-4-5-6", "sound": "none"});
+        assert_eq!(
+            server.post("/api/sounds", &repeat.to_string(), &[]).status,
+            200
+        );
+        assert_eq!(fs::read(&file).unwrap(), stored, "a repeated change");
+
+        let unmute = json!({"kind": "muted", "muted": false}).to_string();
+        let without_csrf = [
+            ("Cookie", server.cookie.as_str()),
+            ("Content-Type", "application/json"),
+        ];
+        for (method, headers, body, expected) in [
+            ("POST", without_csrf.as_slice(), unmute.as_str(), 403),
+            ("GET", &[], "", 401),
+            ("PUT", &[], unmute.as_str(), 405),
+        ] {
+            let response = server.request(method, "/api/sounds", headers, body);
+            assert_eq!(response.status, expected, "{method} {headers:?}");
+        }
+        let cross_site = server.post("/api/sounds", &unmute, &[("Sec-Fetch-Site", "cross-site")]);
+        assert_eq!(cross_site.status, 403);
+        for body in [
+            "not json".to_owned(),
+            json!({"kind": "default", "sound": "trumpet"}).to_string(),
+            json!({"kind": "agent", "agent": "pane/address", "sound": "pop"}).to_string(),
+            json!({"kind": "muted", "muted": false, "agent": "pane-address-1-2-3"}).to_string(),
+        ] {
+            assert_eq!(server.post("/api/sounds", &body, &[]).status, 400, "{body}");
+        }
+        assert_eq!(fs::read(&file).unwrap(), stored, "refused changes");
+
+        drop(server);
+        let server = Server::start(&f, None);
+        assert_eq!(read(&server), settled);
+    }
+
+    #[test]
     fn csrf_origin_host_and_framing_refuse_before_any_database_is_opened() {
         let mut f = Fixture::new();
         let empty_state = f.root.join("empty-state");
