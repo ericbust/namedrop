@@ -441,7 +441,10 @@ fn run_server(
     let stop = Arc::new(AtomicBool::new(false));
     let accept_stop = stop.clone();
     let watched = front.clone();
-    thread::spawn(move || launches::watch(watched));
+    thread::Builder::new()
+        .name("agent-launches".to_owned())
+        .spawn(move || launches::watch(watched))
+        .map_err(|error| format!("could not start the agent launch watcher: {error}"))?;
     let acceptor = thread::spawn(move || http::accept_loop(listener, front, accept_stop));
     eprintln!("dashboard: serving 127.0.0.1:{port}");
     let verdict = hub::run(&files, &instance, idle::environment(), commands, launches);
