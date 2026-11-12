@@ -1,21 +1,72 @@
 use super::*;
 use crate::sync_cell::Cell;
 use crate::{
-    ActorKind, AgentRuntime, HerdrCommandExecutor, HerdrCommandOutput, MutationAttribution,
+    ActorKind, AgentRuntime, MutationAttribution,
+    mux::Depth,
+    mux::fake::{EVERY_LISTING, FakeMux, Read, StrictSpace, Surveyed, Takes},
 };
+use std::sync::Arc;
 
+/// The space is declared last, so it judges the world after the fixture's
+/// `Drop` removed its directory.
 struct Fixture {
     state: PathBuf,
-    rotate_on_workspace_list: Cell<bool>,
+    rotate_on_workspace_list: Arc<Cell<bool>>,
     ids: ProcessIds,
+    mux: StrictSpace,
+}
+
+/// `workspace-1`, labelled `local`, holding `/repo`, and `pane-author`, which
+/// reports `session-author` and no agent word and is working. It answers
+/// every `worktree list`, `workspace list`, and `pane list`, and nothing
+/// else, as the old fake did. A `workspace list` rotates the author's
+/// session first while `rotate` is set, and clears it.
+fn space(state: &Path, rotate: &Arc<Cell<bool>>) -> StrictSpace {
+    let mux = FakeMux::world()
+        .endpoint("socket")
+        .space("workspace-1")
+        .label("local")
+        .checkout("/repo")
+        .unstamped()
+        .pane("pane-author")
+        .terminal("terminal-author")
+        .tab("tab-1")
+        .session("session-author")
+        .working()
+        .build();
+    let (state, rotate) = (state.to_path_buf(), Arc::clone(rotate));
+    mux.on_read(move |_, read| {
+        if matches!(
+            read,
+            Read::Survey {
+                scope: Surveyed::All,
+                depth: Depth::Spaces
+            }
+        ) && rotate.replace(false)
+        {
+            rotate_session(&state);
+        }
+        Ok(())
+    });
+    StrictSpace::new(mux, EVERY_LISTING, Takes::nothing())
 }
 
 impl Fixture {
     fn new() -> Self {
-        let state = std::env::temp_dir().join(ProcessIds::default().next_id("caller-race"));
+        // A fresh `ProcessIds` restarts its sequence, and the clock has only
+        // microseconds on macOS, so two fixtures made at once could share a
+        // directory without this process-wide count.
+        static FIXTURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let fixture = FIXTURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let state = std::env::temp_dir().join(format!(
+            "{}-{fixture}",
+            ProcessIds::default().next_id("caller-race")
+        ));
+        let rotate_on_workspace_list = Arc::new(Cell::new(false));
         let fixture = Self {
+            mux: space(&state, &rotate_on_workspace_list),
             state,
-            rotate_on_workspace_list: Cell::new(false),
+            rotate_on_workspace_list,
             ids: ProcessIds::default(),
         };
         StateStore::open(&fixture.state)
@@ -58,7 +109,7 @@ impl Fixture {
         fixture
     }
 
-    fn runtime(&self) -> LifecycleRuntime<'_, Self, SystemClock, ProcessIds> {
+    fn runtime(&self) -> LifecycleRuntime<'_, FakeMux, SystemClock, ProcessIds> {
         LifecycleRuntime {
             state_directory: &self.state,
             home_directory: None,
@@ -67,7 +118,7 @@ impl Fixture {
             workspace_id: Some("workspace-1"),
             current_pane_id: Some("pane-author"),
             session_socket_id: "socket",
-            mux: self,
+            mux: &self.mux,
             clock: &SystemClock,
             ids: &self.ids,
         }
@@ -75,29 +126,12 @@ impl Fixture {
 
     fn validated_caller(&self) -> Caller {
         let caller = stored_caller(&self.state, namespace(), "pane-author".into()).unwrap();
-        validate_live_caller(&self.state, &caller, self).unwrap();
+        validate_live_caller(&self.state, &caller, &*self.mux).unwrap();
         caller
     }
 
     fn rotate_session(&self) {
-        StateStore::open(&self.state)
-            .unwrap()
-            .transaction(|tx| {
-                // Vacating the pane expires its registration. Returning the original
-                // session isolates registration freshness from ordinary session checks.
-                for session in ["", "replacement-session", "session-author"] {
-                    tx.observe_agent_session(
-                        &namespace(),
-                        session,
-                        &PaneAddressId::new("author"),
-                        &AgentSessionId::new(session),
-                        "working",
-                        &attribution(),
-                    )?;
-                }
-                register(tx, "replacement-registration")
-            })
-            .unwrap();
+        rotate_session(&self.state);
     }
 
     fn send(&self, input: Value, caller: Option<&Caller>) -> Result<Value, String> {
@@ -125,27 +159,25 @@ impl Drop for Fixture {
     }
 }
 
-impl HerdrCommandExecutor for Fixture {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let value = match args {
-            ["worktree", "list", ..] => {
-                json!({"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}})
+fn rotate_session(state: &Path) {
+    StateStore::open(state)
+        .unwrap()
+        .transaction(|tx| {
+            // Vacating the pane expires its registration. Returning the original
+            // session isolates registration freshness from ordinary session checks.
+            for session in ["", "replacement-session", "session-author"] {
+                tx.observe_agent_session(
+                    &namespace(),
+                    session,
+                    &PaneAddressId::new("author"),
+                    &AgentSessionId::new(session),
+                    "working",
+                    &attribution(),
+                )?;
             }
-            ["workspace", "list"] => {
-                if self.rotate_on_workspace_list.replace(false) {
-                    self.rotate_session();
-                }
-                json!({"result":{"workspaces":[{"workspace_id":"workspace-1","label":"local"}]}})
-            }
-            ["pane", "list", ..] => {
-                json!({"result":{"panes":[{"pane_id":"pane-author","terminal_id":"terminal-author","tab_id":"tab-1","workspace_id":"workspace-1","agent_session":{"value":"session-author"},"agent_status":"working"}]}})
-            }
-            _ => return Err(format!("unexpected Herdr command {args:?}")),
-        };
-        Ok(HerdrCommandOutput {
-            stdout: value.to_string(),
+            register(tx, "replacement-registration")
         })
-    }
+        .unwrap();
 }
 
 fn namespace() -> StateNamespace {
