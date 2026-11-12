@@ -1,3 +1,4 @@
+#![cfg(feature = "test-support")]
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
@@ -7,14 +8,20 @@ mod dispatch;
 #[path = "support/executable.rs"]
 mod executable;
 
-use namedrop::*;
+use namedrop::{
+    mux::{
+        AgentState, InputOutcome, Retry,
+        fake::{EVERY_LISTING, FakeMux, Listing, SentInput, StrictSpace, Takes},
+    },
+    *,
+};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     fs,
     path::PathBuf,
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -26,15 +33,19 @@ struct Fixture {
     home: PathBuf,
     ids: AtomicU64,
     now: AtomicU64,
-    statuses: Mutex<BTreeMap<String, String>>,
-    sessions: Mutex<BTreeMap<String, String>>,
-    prompts: Mutex<Vec<(String, Value)>>,
-    typed: Mutex<Vec<String>>,
-    fail_next_nudge: Mutex<bool>,
-    pane_lists: AtomicU64,
-    lead_working_after: AtomicU64,
-    worker_working_after: AtomicU64,
+    statuses: Arc<Mutex<BTreeMap<String, String>>>,
+    sessions: Arc<Mutex<BTreeMap<String, String>>>,
+    prompts: Arc<Mutex<Vec<(String, Value)>>>,
+    typed: Arc<Mutex<Vec<String>>>,
+    fail_next_nudge: Arc<Mutex<bool>>,
+    pane_lists: Arc<AtomicU64>,
+    lead_working_after: Arc<AtomicU64>,
+    worker_working_after: Arc<AtomicU64>,
     pause_on_wait_thread: Mutex<Option<ThreadId>>,
+    /// The synthetic Herdr: it answers every listing, takes prompts to any
+    /// pane and `pane report-metadata`, and fails everything else. Its hooks
+    /// read the switches above and fill the records.
+    space: StrictSpace,
 }
 impl Fixture {
     fn new() -> Self {
@@ -46,25 +57,116 @@ impl Fixture {
         let state = root.join("state");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
+        let statuses = Arc::new(Mutex::new(BTreeMap::<String, String>::from([
+            ("lead".into(), "working".into()),
+            ("worker".into(), "idle".into()),
+            ("reviewer".into(), "idle".into()),
+        ])));
+        let sessions = Arc::new(Mutex::new(BTreeMap::new()));
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let typed = Arc::new(Mutex::new(Vec::new()));
+        let fail_next_nudge = Arc::new(Mutex::new(false));
+        let pane_lists = Arc::new(AtomicU64::new(0));
+        let lead_working_after = Arc::new(AtomicU64::new(u64::MAX));
+        let worker_working_after = Arc::new(AtomicU64::new(u64::MAX));
+        let mux = FakeMux::world()
+            .endpoint("synthetic-socket")
+            .space("synthetic-workspace")
+            .checkout(&root)
+            .unstamped()
+            .pane("lead")
+            .tab("synthetic-tab")
+            .codex()
+            .session("session-lead")
+            .working()
+            .pane("reviewer")
+            .tab("synthetic-tab")
+            .codex()
+            .session("session-reviewer")
+            .idle()
+            .pane("worker")
+            .tab("synthetic-tab")
+            .codex()
+            .session("session-worker")
+            .idle()
+            .build();
+        for name in ["lead", "reviewer", "worker"] {
+            mux.answer(name, InputOutcome::Delivered);
+        }
+        let (shown, resumed) = (Arc::clone(&statuses), Arc::clone(&sessions));
+        let (listed, lead_after, worker_after) = (
+            Arc::clone(&pane_lists),
+            Arc::clone(&lead_working_after),
+            Arc::clone(&worker_working_after),
+        );
+        // `lead` or `worker` lists as working from the Nth `pane list` on,
+        // counting the listing this read would run.
+        mux.on_read(move |mux, _| {
+            let listing = listed.load(Ordering::Relaxed) + 1;
+            let sessions = resumed.lock().unwrap();
+            for (name, status) in shown.lock().unwrap().iter() {
+                let working = (name == "lead" && listing >= lead_after.load(Ordering::Relaxed))
+                    || (name == "worker" && listing >= worker_after.load(Ordering::Relaxed));
+                mux.set_state(
+                    name,
+                    if working {
+                        AgentState::Working
+                    } else {
+                        AgentState::parse(status)
+                    },
+                );
+                let session = sessions.get(name).cloned();
+                mux.set_session(name, &session.unwrap_or_else(|| format!("session-{name}")));
+            }
+            Ok(())
+        });
+        let listed = Arc::clone(&pane_lists);
+        mux.on_command(move |_, command| {
+            if matches!(command.listing, Some(Listing::PanesOf | Listing::AllPanes)) {
+                listed.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(())
+        });
+        let failing = Arc::clone(&fail_next_nudge);
+        mux.answer_with(move |_, _, input| {
+            let SentInput::Prompt(prompt) = input else {
+                return None;
+            };
+            let nudge = delivered::envelope_of(prompt)["untrusted_body"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("Coordination ");
+            (nudge && std::mem::take(&mut *failing.lock().unwrap()))
+                .then(|| InputOutcome::Declined(Retry::OnEvent, "synthetic-preinvocation".into()))
+        });
+        let (raw, decoded) = (Arc::clone(&typed), Arc::clone(&prompts));
+        mux.on_input(move |_, attempt| {
+            if let SentInput::Prompt(prompt) = &attempt.input
+                && !matches!(attempt.outcome, InputOutcome::Declined(..))
+            {
+                raw.lock().unwrap().push(prompt.clone());
+                decoded.lock().unwrap().push((
+                    attempt.pane.as_str().to_owned(),
+                    delivered::envelope_of(prompt),
+                ));
+            }
+        });
         let f = Self {
             root,
             state,
             home,
             ids: AtomicU64::new(1),
             now: AtomicU64::new(100),
-            statuses: Mutex::new(BTreeMap::from([
-                ("lead".into(), "working".into()),
-                ("worker".into(), "idle".into()),
-                ("reviewer".into(), "idle".into()),
-            ])),
-            sessions: Mutex::new(BTreeMap::new()),
-            prompts: Mutex::new(Vec::new()),
-            typed: Mutex::new(Vec::new()),
-            fail_next_nudge: Mutex::new(false),
-            pane_lists: AtomicU64::new(0),
-            lead_working_after: AtomicU64::new(u64::MAX),
-            worker_working_after: AtomicU64::new(u64::MAX),
+            statuses,
+            sessions,
+            prompts,
+            typed,
+            fail_next_nudge,
+            pane_lists,
+            lead_working_after,
+            worker_working_after,
             pause_on_wait_thread: Mutex::new(None),
+            space: StrictSpace::new(mux, EVERY_LISTING, Takes::prompts_and_metadata()),
         };
         let ns = f.ns();
         let by = MutationAttribution::new(ActorKind::Human, "synthetic-user", 1);
@@ -305,7 +407,7 @@ impl Fixture {
     fn ns(&self) -> StateNamespace {
         StateNamespace::for_space("synthetic-socket", "synthetic-workspace")
     }
-    fn runtime<'a>(&'a self, pane: &'a str) -> LifecycleRuntime<'a, Self, Self, Self> {
+    fn runtime<'a>(&'a self, pane: &'a str) -> LifecycleRuntime<'a, FakeMux, Self, Self> {
         LifecycleRuntime {
             state_directory: &self.state,
             home_directory: Some(&self.home),
@@ -314,7 +416,7 @@ impl Fixture {
             workspace_id: Some("synthetic-workspace"),
             current_pane_id: Some(pane),
             session_socket_id: "synthetic-socket",
-            mux: self,
+            mux: &self.space,
             clock: self,
             ids: self,
         }
@@ -404,11 +506,25 @@ impl Fixture {
         }
         panic!("synthetic lead mailbox did not settle")
     }
+    /// A pane the synthetic Herdr has not listed yet joins the listing.
     fn status(&self, pane: &str, status: &str) {
-        self.statuses
+        let added = self
+            .statuses
             .lock()
             .unwrap()
-            .insert(pane.into(), status.into());
+            .insert(pane.into(), status.into())
+            .is_none();
+        if added {
+            self.space.open_pane("synthetic-workspace", |space| {
+                space
+                    .pane(pane)
+                    .tab("synthetic-tab")
+                    .codex()
+                    .session(&format!("session-{pane}"))
+                    .idle()
+            });
+            self.space.answer(pane, InputOutcome::Delivered);
+        }
     }
     fn nudge_prompts(&self) -> Vec<Value> {
         self.prompts
@@ -546,54 +662,6 @@ impl IdGenerator for Fixture {
         )
     }
 }
-impl HerdrCommandExecutor for Fixture {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let stdout = match args {
-            ["workspace", "list"] => {
-                json!({"result":{"workspaces":[{"workspace_id":"synthetic-workspace"}]}})
-            }
-            ["worktree", "list", ..] => {
-                json!({"result":{"worktrees":[{"path":self.root,"open_workspace_id":"synthetic-workspace"}]}})
-            }
-            ["pane", "list", ..] => {
-                let count = self.pane_lists.fetch_add(1, Ordering::Relaxed) + 1;
-                let statuses = self.statuses.lock().unwrap();
-                let sessions = self.sessions.lock().unwrap();
-                json!({"result":{"panes":(statuses.keys().map(String::as_str).map(|name|json!({"pane_id":name,"agent":"codex","terminal_id":format!("terminal-{name}"),"tab_id":"synthetic-tab","workspace_id":"synthetic-workspace","agent_session":{"value":sessions.get(name).cloned().unwrap_or_else(||format!("session-{name}"))},"agent_status":if (name=="lead" && count>=self.lead_working_after.load(Ordering::Relaxed)) || (name=="worker" && count>=self.worker_working_after.load(Ordering::Relaxed)) {"working"} else {statuses.get(name).map(String::as_str).unwrap_or("unknown")}})).collect::<Vec<_>>())}})
-            }
-            ["agent", "prompt", pane, prompt] => {
-                let envelope: Value = delivered::envelope_of(prompt);
-                if envelope["untrusted_body"]
-                    .as_str()
-                    .unwrap_or("")
-                    .starts_with("Coordination ")
-                    && std::mem::take(&mut *self.fail_next_nudge.lock().unwrap())
-                {
-                    return Err("synthetic-preinvocation".into());
-                }
-                self.typed.lock().unwrap().push((*prompt).to_owned());
-                self.prompts
-                    .lock()
-                    .unwrap()
-                    .push(((*pane).into(), envelope));
-                json!({})
-            }
-            ["pane", "report-metadata", ..] => json!({}),
-            _ => return Err(format!("unexpected synthetic host command {args:?}")),
-        };
-        Ok(HerdrCommandOutput {
-            stdout: stdout.to_string(),
-        })
-    }
-    fn input_failure(&self, error: String) -> namedrop::mux::InputOutcome {
-        if error == "synthetic-preinvocation" {
-            namedrop::mux::InputOutcome::Declined(namedrop::mux::Retry::OnEvent, error)
-        } else {
-            namedrop::mux::InputOutcome::Ambiguous(error)
-        }
-    }
-}
-
 #[test]
 fn coordinator_callback_adds_two_workers_with_separate_checkout_context() {
     let f = Fixture::new();
