@@ -74,6 +74,16 @@ fn store_responses(f: &Fixture, responses: &Value) {
     }
 }
 
+/// Makes the lead's pane report `status` to the surveys that follow.
+fn report_agent_status(f: &Fixture, status: &str) {
+    let mut responses = responses(f);
+    let mut panes: Value =
+        serde_json::from_str(responses["pane list --workspace w1"].as_str().unwrap()).unwrap();
+    panes["result"]["panes"][0]["agent_status"] = json!(status);
+    responses["pane list --workspace w1"] = json!(panes.to_string());
+    store_responses(f, &responses);
+}
+
 fn metadata_with_rows(f: &Fixture, rows: Value) -> Value {
     let mut responses = responses(f);
     let mut panes: Value =
@@ -282,7 +292,10 @@ impl Server {
         configure(f, json!({}));
         configure_history(f, "");
         // The dashboard gives Herdr metadata reads 150 to 500 ms. Python start-up
-        // under load outlasts that, so stored replies are answered by bash builtins.
+        // under load outlasts that, so bash answers stored replies. It holds
+        // the first identity survey at `native_identity_gate` until the gate
+        // file exists, with the reply read before the hold, as the pane was
+        // when the survey started.
         let shim = f.root.join("herdr");
         executable::write_executable(
             &shim,
@@ -293,8 +306,14 @@ if [ "$1 $2" = 'pane process-info' ]; then
 fi
 response="$root/responses/$*"
 IFS= read -r -d '' config <"$root/observer.json"
-if [ -f "$response" ] && [[ $config != *native_identity_gate* ]]; then
+if [ -f "$response" ]; then
     IFS= read -r -d '' body <"$response"
+    if [ "$*" = 'pane list --workspace w1' ] && [[ $config =~ \"native_identity_gate\":\"([^\"]+)\" ]]; then
+        gate="$root/${BASH_REMATCH[1]}"
+        if (set -C; : >"$gate.captured") 2>/dev/null; then
+            while [ ! -e "$gate" ]; do sleep 0.01; done
+        fi
+    fi
     printf '%s\n' "$body"
     exit 0
 fi
@@ -364,19 +383,7 @@ if args[:2] in [['pane','run'],['pane','send-text'],['pane','send-keys']]:
     with open(os.path.join(root,'reads.jsonl'),'a') as log:
         log.write(json.dumps({'args':args,'socket':os.environ.get('HERDR_SOCKET_PATH')})+'\n')
     sys.exit(0)
-key=' '.join(args)
-response=os.path.join(root,'responses',key)
-if os.path.isfile(response):
-    config=json.load(open(os.path.join(root,'observer.json')))
-    if key=='pane list --workspace w1' and config.get('native_identity_gate'):
-        gate=os.path.join(root,config['native_identity_gate'])
-        try:
-            with open(gate+'.captured','x'):pass
-        except FileExistsError:pass
-        else:
-            while not os.path.exists(gate):time.sleep(.01)
-    print(open(response).read())
-elif args[:2]==['worktree','list']:sys.stderr.write('{"error":{"code":"not_git_worktree"}}');sys.exit(1)
+if args[:2]==['worktree','list']:sys.stderr.write('{"error":{"code":"not_git_worktree"}}');sys.exit(1)
 else:sys.exit(1)
 "#).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_namedrop"))
@@ -1375,12 +1382,7 @@ fn input_submits_text_once_and_sends_allowlisted_keys() {
         ("--help  preserve 'quotes' and café", "working"),
         ("--help", "blocked"),
     ] {
-        let mut responses = responses(&f);
-        let mut panes: Value =
-            serde_json::from_str(responses["pane list --workspace w1"].as_str().unwrap()).unwrap();
-        panes["result"]["panes"][0]["agent_status"] = json!(status);
-        responses["pane list --workspace w1"] = json!(panes.to_string());
-        store_responses(&f, &responses);
+        report_agent_status(&f, status);
         assert_eq!(
             post_input(
                 &server,
@@ -1546,6 +1548,301 @@ fn input_refuses_wrong_binding_changed_session_and_offline_pane() {
         call["args"][1].as_str(),
         Some("run" | "send-text" | "send-keys")
     )));
+}
+
+/// The file `PaneEffects` keeps for `pane` with `extension`: `lock` for its
+/// lock, `json` for its input ownership marker.
+fn pane_effects_file(f: &Fixture, pane: &str, extension: &str) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+    let directory = f.state.join("pane-effects");
+    fs::create_dir_all(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let key = namedrop::lower_hex(&Sha256::digest(
+        serde_json::to_vec(&("socket-a", pane)).unwrap(),
+    ));
+    directory.join(format!("{key}.{extension}"))
+}
+
+/// Takes the pane lock a delivery takes before it types into `pane`.
+fn hold_pane_lock(f: &Fixture, pane: &str) -> fs::File {
+    use std::os::unix::fs::OpenOptionsExt;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(pane_effects_file(f, pane, "lock"))
+        .unwrap();
+    // SAFETY: flock borrows the descriptor this test owns.
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    lock
+}
+
+fn sent_inputs(f: &Fixture) -> Vec<Value> {
+    invocations(f)
+        .into_iter()
+        .filter(|call| {
+            matches!(
+                call["args"][1].as_str(),
+                Some("run" | "send-text" | "send-keys")
+            )
+        })
+        .map(|call| call["args"].clone())
+        .collect()
+}
+
+#[test]
+fn input_while_a_delivery_holds_the_pane_answers_busy_at_once_and_sends_nothing() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let target = input_path("socket-a", "w1", "lead");
+    let continuity = live_continuity(&server, &path("socket-a", "w1", "lead"));
+    let delivering = hold_pane_lock(&f, "pane-1-lead");
+    for body in [
+        json!({"kind":"key","key":"Ctrl-C","continuity":continuity}),
+        json!({"kind":"text","text":"stop that","continuity":continuity}),
+    ] {
+        let started = Instant::now();
+        let response = post_input(&server, &target, &body);
+        // A waiting acquire gives up only after ACQUIRE_TIMEOUT, 2 s, so a
+        // shorter request never waited. The rest is the pane survey, a
+        // Python start-up that load can stretch well past 100 ms.
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "input waited {:?} for the delivery's pane lock",
+            started.elapsed()
+        );
+        assert_eq!(response.status, 409, "{body}");
+        assert_eq!(
+            response.body,
+            "Namedrop is typing into this pane right now, so nothing was sent.\n"
+        );
+    }
+    assert_eq!(sent_inputs(&f), Vec::<Value>::new());
+    drop(delivering);
+    assert_eq!(
+        post_input(
+            &server,
+            &target,
+            &json!({"kind":"text","text":"stop that","continuity":continuity})
+        )
+        .status,
+        204
+    );
+    assert_eq!(
+        sent_inputs(&f),
+        vec![json!(["pane", "run", "pane-1-lead", "stop that"])]
+    );
+}
+
+#[test]
+fn refused_keys_never_land_later_and_resent_keys_keep_their_order() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let target = input_path("socket-a", "w1", "lead");
+    let continuity = live_continuity(&server, &path("socket-a", "w1", "lead"));
+    let key = |key: &str| {
+        post_input(
+            &server,
+            &target,
+            &json!({"kind":"key","key":key,"continuity":continuity}),
+        )
+        .status
+    };
+    assert_eq!(key("ArrowUp"), 204);
+    let delivering = hold_pane_lock(&f, "pane-1-lead");
+    assert_eq!(key("ArrowDown"), 409);
+    assert_eq!(key("Enter"), 409);
+    drop(delivering);
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        sent_inputs(&f),
+        vec![json!(["pane", "send-keys", "pane-1-lead", "up"])],
+        "a refused key reached the pane after the lock was free"
+    );
+    assert_eq!(key("ArrowDown"), 204);
+    assert_eq!(key("Enter"), 204);
+    assert_eq!(
+        sent_inputs(&f),
+        vec![
+            json!(["pane", "send-keys", "pane-1-lead", "up"]),
+            json!(["pane", "send-keys", "pane-1-lead", "down"]),
+            json!(["pane", "send-keys", "pane-1-lead", "enter"]),
+        ]
+    );
+}
+
+#[test]
+fn a_key_posted_while_a_delivery_finishes_answers_busy_and_never_lands_after_it() {
+    for body in [
+        json!({"kind":"key","key":"Enter"}),
+        json!({"kind":"text","text":"after you"}),
+    ] {
+        let f = Fixture::new();
+        let server = Server::start(&f);
+        let target = input_path("socket-a", "w1", "lead");
+        let continuity = live_continuity(&server, &path("socket-a", "w1", "lead"));
+        let mut body = body;
+        body["continuity"] = json!(continuity);
+        let delivering = hold_pane_lock(&f, "pane-1-lead");
+        configure(&f, json!({"native_identity_gate":"finish-identity"}));
+        let response = thread::scope(|scope| {
+            let request = scope.spawn(|| post_input(&server, &target, &body));
+            wait_for(|| f.root.join("finish-identity.captured").exists());
+            drop(delivering);
+            fs::write(f.root.join("finish-identity"), "").unwrap();
+            request.join().unwrap()
+        });
+        assert_eq!(
+            response.status, 409,
+            "{body}: input posted while the delivery held the pane landed after it"
+        );
+        assert_eq!(sent_inputs(&f), Vec::<Value>::new(), "{body}");
+    }
+}
+
+#[test]
+fn a_line_belongs_to_the_turn_of_the_survey_taken_just_before_it_is_sent() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let delivery = json!({"Delivery":{
+        "namespace":{"session_socket_id":"socket-a","space_id":"w1"},
+        "attempt_id":"attempt-1",
+        "binding_id":"binding-1",
+        "agent_session_id":"session-1",
+    }})
+    .to_string();
+    for (first, second, owner) in [
+        ("idle", "blocked", delivery.as_str()),
+        ("blocked", "idle", r#""Dashboard""#),
+    ] {
+        let f = Fixture::new();
+        let server = Server::start(&f);
+        let target = input_path("socket-a", "w1", "lead");
+        let continuity = live_continuity(&server, &path("socket-a", "w1", "lead"));
+        let marker = pane_effects_file(&f, "pane-1-lead", "json");
+        fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&marker)
+            .unwrap()
+            .write_all(delivery.as_bytes())
+            .unwrap();
+        report_agent_status(&f, first);
+        configure(&f, json!({"native_identity_gate":"finish-identity"}));
+        let response = thread::scope(|scope| {
+            let request = scope.spawn(|| {
+                post_input(
+                    &server,
+                    &target,
+                    &json!({"kind":"text","text":"2","continuity":continuity}),
+                )
+            });
+            wait_for(|| f.root.join("finish-identity.captured").exists());
+            report_agent_status(&f, second);
+            fs::write(f.root.join("finish-identity"), "").unwrap();
+            request.join().unwrap()
+        });
+        assert_eq!(
+            response.status, 204,
+            "{first} then {second}: {}",
+            response.body
+        );
+        assert_eq!(
+            fs::read_to_string(&marker).unwrap(),
+            owner,
+            "a line surveyed {first} then {second} took its owner from the first survey"
+        );
+        assert_eq!(
+            sent_inputs(&f),
+            [json!(["pane", "run", "pane-1-lead", "2"])],
+            "{first} then {second}"
+        );
+    }
+}
+
+#[test]
+fn a_replaced_pane_answers_gone_even_while_a_delivery_holds_it() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let target = input_path("socket-a", "w1", "lead");
+    let continuity = live_continuity(&server, &path("socket-a", "w1", "lead"));
+    let _delivering = hold_pane_lock(&f, "pane-1-lead");
+    let mut responses = responses(&f);
+    let mut panes: Value =
+        serde_json::from_str(responses["pane list --workspace w1"].as_str().unwrap()).unwrap();
+    panes["result"]["panes"][0]["terminal_id"] = json!("replacement");
+    responses["pane list --workspace w1"] = json!(panes.to_string());
+    store_responses(&f, &responses);
+    for body in [
+        json!({"kind":"key","key":"Enter","continuity":continuity}),
+        json!({"kind":"text","text":"continue","continuity":continuity}),
+    ] {
+        let response = post_input(&server, &target, &body);
+        assert_eq!(response.status, 410, "{body}: {}", response.body);
+        assert_eq!(
+            response.body,
+            "This participant's pane is no longer available.\n"
+        );
+    }
+    assert_eq!(sent_inputs(&f), Vec::<Value>::new());
+}
+
+#[test]
+fn input_while_sqlite_is_locked_answers_a_store_busy_503_and_sends_nothing() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let target = input_path("socket-a", "w1", "lead");
+    let continuity = live_continuity(&server, &path("socket-a", "w1", "lead"));
+    let csrf = server.csrf();
+    let writer = f.db();
+    writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let response = server.post(
+        &target,
+        &json!({"kind":"key","key":"Enter","continuity":continuity}).to_string(),
+        &[("Cookie", &server.cookie), ("X-Namedrop-Csrf", &csrf)],
+    );
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(response.status, 503, "{}", response.body);
+    assert_eq!(
+        response.body,
+        "Namedrop's state is busy, so nothing was sent.\n"
+    );
+    assert_eq!(sent_inputs(&f), Vec::<Value>::new());
+}
+
+#[test]
+fn input_refuses_an_unsafe_pane_lock_directory_and_sends_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let target = input_path("socket-a", "w1", "lead");
+    let continuity = live_continuity(&server, &path("socket-a", "w1", "lead"));
+    let directory = f.state.join("pane-effects");
+    fs::create_dir_all(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
+    for body in [
+        json!({"kind":"key","key":"Enter","continuity":continuity}),
+        json!({"kind":"text","text":"continue","continuity":continuity}),
+    ] {
+        assert_eq!(post_input(&server, &target, &body).status, 503, "{body}");
+    }
+    assert_eq!(sent_inputs(&f), Vec::<Value>::new());
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        post_input(
+            &server,
+            &target,
+            &json!({"kind":"key","key":"Enter","continuity":continuity})
+        )
+        .status,
+        204
+    );
 }
 
 #[test]

@@ -2,7 +2,7 @@ use super::hub::{Frame, HubCommand, SpaceEvent, Subscription};
 use super::server_files::{ServerFiles, Token, UiSource, open_directory};
 use super::snapshot::{self, SpaceKey};
 use crate::{
-    ProcessHerdr, StateStore,
+    StateStore,
     mux::{Budget, Gone, MuxConnector, MuxError, ScreenRequest, Style, Wrap},
     store::dashboard::ScreenPane,
 };
@@ -427,8 +427,13 @@ enum Status {
     Forbidden,
     NotFound,
     Gone,
+    /// Another owner holds the pane's input, so nothing was typed.
+    Busy,
     MethodNotAllowed,
     Unavailable,
+    /// A 503 whose only cause is SQLite busy. It comes before the send, so
+    /// the request sent nothing to the pane.
+    StoreBusy,
     PayloadTooLarge,
     TooManyRequests,
 }
@@ -444,8 +449,9 @@ impl Status {
             Self::Forbidden => "403 Forbidden",
             Self::NotFound => "404 Not Found",
             Self::Gone => "410 Gone",
+            Self::Busy => "409 Conflict",
             Self::MethodNotAllowed => "405 Method Not Allowed",
-            Self::Unavailable => "503 Service Unavailable",
+            Self::Unavailable | Self::StoreBusy => "503 Service Unavailable",
         }
     }
 
@@ -461,8 +467,10 @@ impl Status {
             Self::Forbidden => "Forbidden.\n",
             Self::NotFound => "Not found.\n",
             Self::Gone => "This participant's pane is no longer available.\n",
+            Self::Busy => "Namedrop is typing into this pane right now, so nothing was sent.\n",
             Self::MethodNotAllowed => "Method not allowed.\n",
             Self::Unavailable => "History is temporarily unavailable.\n",
+            Self::StoreBusy => "Namedrop's state is busy, so nothing was sent.\n",
         }
     }
 }
@@ -1522,7 +1530,7 @@ fn serve_connection(
                         receipt.to_string().as_bytes(),
                     );
                     drop(admitted);
-                    super::channel_service::drain(front.files.state(), &namespace);
+                    super::channel_service::drain(front.files.state(), &*front.mux, &namespace);
                     response
                 }
                 Err(error) => {
@@ -1661,6 +1669,7 @@ fn serve_connection(
                     drop(admitted);
                     committed.respond(
                         front.files.state(),
+                        &*front.mux,
                         completion,
                         |receipt| {
                             respond(
@@ -1671,7 +1680,9 @@ fn serve_connection(
                                 receipt.to_string().as_bytes(),
                             )
                         },
-                        |namespace| super::channel_service::drain(front.files.state(), namespace),
+                        |namespace| {
+                            super::channel_service::drain(front.files.state(), &*front.mux, namespace)
+                        },
                     )
                 }
                 Err(super::thread_controls::ControlError::NotFound) => {
@@ -1979,7 +1990,13 @@ fn send_direct_post(
     let Some(namespace) = namespace else {
         return respond_status(writer, Status::NotFound);
     };
-    let herdr = ProcessHerdr::default().with_socket(Some(namespace.session_socket_id.clone()));
+    let Ok(herdr) = front.mux.connect(
+        &namespace.session_socket_id,
+        Budget::ADAPTER_DEFAULT,
+        Arc::default(),
+    ) else {
+        return respond_status(writer, Status::Unavailable);
+    };
     let ids = crate::ProcessIds::default();
     let runtime = crate::LifecycleRuntime {
         state_directory: front.files.state(),
@@ -2059,8 +2076,13 @@ fn send_operator_post(
     let Some(namespace) = namespace else {
         return respond_status(writer, Status::NotFound);
     };
-    let herdr =
-        crate::ProcessHerdr::default().with_socket(Some(namespace.session_socket_id.clone()));
+    let Ok(herdr) = front.mux.connect(
+        &namespace.session_socket_id,
+        Budget::ADAPTER_DEFAULT,
+        Arc::default(),
+    ) else {
+        return respond_status(writer, Status::Unavailable);
+    };
     let ids = crate::ProcessIds::default();
     let runtime = crate::LifecycleRuntime {
         state_directory: front.files.state(),
@@ -2162,8 +2184,13 @@ fn send_coordination_review(
         }
     };
     let namespace = &draft.namespace;
-    let herdr =
-        crate::ProcessHerdr::default().with_socket(Some(namespace.session_socket_id.clone()));
+    let Ok(herdr) = front.mux.connect(
+        &namespace.session_socket_id,
+        Budget::ADAPTER_DEFAULT,
+        Arc::default(),
+    ) else {
+        return respond_status(writer, Status::Unavailable);
+    };
     let ids = crate::ProcessIds::default();
     let runtime = crate::LifecycleRuntime {
         state_directory: front.files.state(),

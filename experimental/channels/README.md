@@ -164,7 +164,10 @@ locally to see a wider grid. Opening
 or resizing Peek sends no terminal input, source resize, focus, or takeover command.
 The browser uses pinned xterm 6.0.0. **Type to agent** is a separate, explicit
 input control for prompts, Esc, Ctrl-C, arrows, and Enter. Input requires a
-current live continuity value and agent binding. It goes to the real pane.
+current live continuity value and agent binding. It goes to the real pane
+through the pane's input lock. While a delivery, doctor, or thread stop holds
+that lock, input answers `409` at once and sends nothing, so it never lands
+after input the person has not seen.
 Live terminal paints can contain secrets. Text snapshots and fetched history
 redact recognized secrets, but redaction cannot catch every secret.
 

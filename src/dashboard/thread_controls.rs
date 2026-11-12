@@ -1,8 +1,12 @@
 use super::snapshot::SpaceKey;
 pub(super) use super::snapshot::ThreadAction as Action;
-use crate::{ActorKind, MutationAttribution, StateStore, StoreError, ThreadId};
+use crate::{
+    ActorKind, MutationAttribution, StateStore, StoreError, ThreadId,
+    mux::{Budget, MuxConnector},
+    pane_effects::{InterruptReport, interrupt_if_current},
+};
 use serde_json::{Value, json};
-use std::{error::Error, path::Path};
+use std::{error::Error, path::Path, sync::Arc};
 
 pub(super) enum ControlError {
     NotFound,
@@ -83,18 +87,19 @@ impl CommittedControl {
     pub(super) fn respond<T>(
         self,
         state: &Path,
+        mux: &dyn MuxConnector,
         completion: CompletionPermit,
         respond: impl FnOnce(&Value) -> T,
         drain: impl FnOnce(&crate::StateNamespace),
     ) -> T {
-        let (namespace, receipt) = self.finish(state);
+        let (namespace, receipt) = self.finish(state, mux);
         drop(completion);
         let result = respond(&receipt);
         drain(&namespace);
         result
     }
 
-    fn finish(self, state: &Path) -> (crate::StateNamespace, Value) {
+    fn finish(self, state: &Path, mux: &dyn MuxConnector) -> (crate::StateNamespace, Value) {
         let Self {
             namespace,
             control,
@@ -102,15 +107,15 @@ impl CommittedControl {
         } = self;
         let mut receipt = json!({"state": control});
         if let Some(stopped) = stopped {
-            let herdr = crate::ProcessHerdr::default()
-                .with_socket(Some(namespace.session_socket_id.clone()));
-            let report = crate::pane_effects::interrupt_if_current(
-                state,
-                &namespace,
-                &stopped.active_responses,
-                &herdr,
-                None,
-            );
+            let responses = &stopped.active_responses;
+            let report = match mux.connect(
+                &namespace.session_socket_id,
+                Budget::ADAPTER_DEFAULT,
+                Arc::default(),
+            ) {
+                Ok(herdr) => interrupt_if_current(state, &namespace, responses, &herdr, None),
+                Err(error) => InterruptReport::unreached(responses, &error.to_string()),
+            };
             receipt["cancelled_delivery_ids"] = json!(stopped.cancelled_delivery_ids);
             receipt["interrupted_pane_ids"] = json!(report.interrupted_pane_ids);
             receipt["warnings"] = json!(report.warnings);
@@ -174,6 +179,57 @@ mod tests {
     use std::{sync::mpsc, thread, time::Duration};
 
     #[test]
+    fn a_stop_that_cannot_reach_the_multiplexer_warns_for_each_response() {
+        struct Unreachable;
+        impl MuxConnector for Unreachable {
+            fn connect(
+                &self,
+                _: &str,
+                _: Budget,
+                _: Arc<std::sync::atomic::AtomicBool>,
+            ) -> Result<Arc<dyn crate::mux::Mux>, crate::mux::MuxError> {
+                Err(crate::mux::MuxError::Unavailable(
+                    "Herdr is not running".into(),
+                ))
+            }
+        }
+        let control = crate::ThreadControlState {
+            stopped: true,
+            paused: false,
+            reply_allowance: 10,
+            reply_limit_paused: false,
+        };
+        let response = |pane: &str| crate::ActiveThreadResponse {
+            attempt_id: crate::DeliveryAttemptId::new("attempt"),
+            binding_id: crate::PaneBindingId::new("binding"),
+            pane_id: pane.into(),
+            agent_session_id: crate::AgentSessionId::new("session"),
+            binding_active: true,
+        };
+        let committed = CommittedControl {
+            namespace: crate::StateNamespace::for_space("socket", "space"),
+            control: control.clone(),
+            stopped: Some(crate::ThreadStopResult {
+                state: control,
+                cancelled_delivery_ids: Vec::new(),
+                active_responses: vec![response("w1:p1"), response("w1:p2")],
+            }),
+        };
+        let (_, receipt) = committed.finish(
+            Path::new("/nonexistent-namedrop-control-test"),
+            &Unreachable,
+        );
+        assert_eq!(receipt["interrupted_pane_ids"], json!([]));
+        assert_eq!(
+            receipt["warnings"],
+            json!([
+                "Could not confirm interruption of w1:p1 after stopping the thread: Herdr is not running.",
+                "Could not confirm interruption of w1:p2 after stopping the thread: Herdr is not running.",
+            ])
+        );
+    }
+
+    #[test]
     fn handoff_waits_for_effects_and_slow_response_releases_completion() {
         let effects = ControlEffects::default();
         let permit = effects.track();
@@ -205,6 +261,7 @@ mod tests {
                 };
                 let result = committed.respond(
                     Path::new("/nonexistent-namedrop-control-test"),
+                    &crate::mux::herdr::HerdrConnector,
                     permit,
                     |_| {
                         responding.send(()).unwrap();

@@ -154,11 +154,30 @@ impl Server {
         }
         let responses_file = f.root.join("http-herdr-responses.json");
         fs::write(&responses_file, serde_json::to_vec(&responses).unwrap()).unwrap();
+        let replies = f.root.join("http-herdr-replies");
+        fs::create_dir_all(&replies).unwrap();
+        for (key, reply) in &responses {
+            fs::write(replies.join(key), reply.as_str().unwrap()).unwrap();
+        }
         let shim = f.root.join("http-herdr");
+        // Live peek gives its pane survey at most 500 ms. Python start-up
+        // under load outlasts that, so bash answers the stored replies.
         executable::write_executable(
             &shim,
-            r#"#!/usr/bin/python3
-import json, os, sys, time
+            r#"#!/bin/bash
+root=${0%/*}
+reply="$root/http-herdr-replies/$*"
+if [ -f "$reply" ] && ! { [ "$*" = 'pane list --workspace w1' ] && [ -e "$root/discovery-gate" ]; }; then
+    IFS= read -r -d '' body <"$reply"
+    printf '%s\n' "$body"
+    exit 0
+fi
+exec /usr/bin/python3 "$root/http-herdr.py" "$@"
+"#,
+        );
+        fs::write(
+            f.root.join("http-herdr.py"),
+            r#"import json, os, sys, time
 args = sys.argv[1:]
 root = os.path.dirname(__file__)
 if args == ['pane', 'list', '--workspace', 'w1']:
@@ -199,11 +218,25 @@ elif args[:2] in [['agent', 'prompt'], ['agent', 'send-keys'], ['pane', 'report-
         while os.path.exists(os.path.join(root, 'prompt-gate')):
             time.sleep(0.01)
     print('{}')
+elif args[:3] == ['terminal', 'session', 'observe']:
+    import base64
+    rows = int(args[args.index('--rows') + 1]) if '--rows' in args else 40
+    cols = int(args[args.index('--cols') + 1]) if '--cols' in args else 120
+    print(json.dumps({'type': 'terminal.frame', 'encoding': 'ansi', 'full': True, 'width': cols, 'height': rows, 'seq': 1, 'bytes': base64.b64encode(b'\x1b[2J\x1b[HPEEK').decode()}), flush=True)
+    print(json.dumps({'type': 'terminal.closed', 'reason': 'test'}), flush=True)
+elif args[:2] in [['pane', 'run'], ['pane', 'send-keys']]:
+    with open(os.path.join(root, 'http-herdr-invocations.jsonl'), 'a') as log:
+        log.write(json.dumps({'args': args, 'socket': os.environ.get('HERDR_SOCKET_PATH')}) + '\n')
+    error = os.path.join(root, 'pane-input-error')
+    if os.path.exists(error):
+        sys.stderr.write(open(error).read())
+        sys.exit(1)
 else:
     sys.stderr.write('unexpected Herdr invocation: ' + key)
     sys.exit(1)
 "#,
-        );
+        )
+        .unwrap();
         let stderr_path = f.root.join(format!(
             "dashboard-server-{}.stderr",
             ProcessIds::default().next_id("startup")
@@ -301,13 +334,31 @@ else:
         server
     }
 
+    /// A live-peek stream, read to its end. The request keeps its write half
+    /// open, because the stream ends when the viewer disconnects.
+    pub(super) fn live(&self, path: &str) -> Response {
+        self.read(
+            &format!(
+                "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: {}\r\n\r\n",
+                self.port, self.cookie
+            ),
+            false,
+        )
+    }
+
     fn raw(&self, request: &str) -> Response {
+        self.read(request, true)
+    }
+
+    fn read(&self, request: &str, close_write: bool) -> Response {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(20)))
             .unwrap();
         stream.write_all(request.as_bytes()).unwrap();
-        stream.shutdown(Shutdown::Write).unwrap();
+        if close_write {
+            stream.shutdown(Shutdown::Write).unwrap();
+        }
         let mut bytes = Vec::new();
         stream
             .read_to_end(&mut bytes)

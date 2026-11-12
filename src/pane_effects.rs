@@ -1,7 +1,7 @@
 use crate::{
     ActiveThreadResponse, AgentSessionId, DeliveryAttemptId, DeliveryState, PaneBindingId,
     StateNamespace, StateStore,
-    mux::{InputKind, InputOutcome, Key, MuxInput, PaneId, PromptRequest, Recipient},
+    mux::{AgentState, InputKind, InputOutcome, Key, MuxInput, PaneId, PromptRequest, Recipient},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -21,6 +21,11 @@ use std::{
 };
 
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Longer than live peek holds a pane's lock for one input: two identity
+/// surveys of up to 500 ms, a store read, and a send of up to 2 s, about
+/// 3.1 s in all. A thread stop that arrives during that input still
+/// interrupts once the input ends.
+const INTERRUPT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Deletes from the cursor to the start of its line in Claude Code's prompt
 /// box, and at the start of a line joins it to the line above. Claude Code
 /// 2.1.322 does this in a real pane, and every version from 2.1.261 carries
@@ -67,6 +72,8 @@ pub(crate) enum InputOwner {
         binding_id: PaneBindingId,
         agent_session_id: AgentSessionId,
     },
+    /// A person typing a line into the dashboard's live peek.
+    Dashboard,
     Other,
 }
 
@@ -329,6 +336,10 @@ impl PaneEffects {
     }
 
     fn record(&self, owner: &InputOwner) -> io::Result<()> {
+        self.write_marker(&serde_json::to_vec(owner)?)
+    }
+
+    fn write_marker(&self, bytes: &[u8]) -> io::Result<()> {
         let temporary = CString::new(format!(
             "{}.{}.{}.tmp",
             self.marker.to_string_lossy(),
@@ -342,7 +353,7 @@ impl PaneEffects {
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
                 self.pane.as_str(),
             )?;
-            file.write_all(&serde_json::to_vec(owner)?)?;
+            file.write_all(bytes)?;
             file.sync_all()?;
             if unsafe {
                 libc::renameat(
@@ -365,7 +376,8 @@ impl PaneEffects {
         result
     }
 
-    fn ownership(&self, expected: &InputOwner) -> MarkerOwnership {
+    /// The marker's bytes, or `None` when the pane has no marker.
+    fn read_marker(&self) -> io::Result<Option<Vec<u8>>> {
         let file = match open_at(
             &self.directory,
             &self.marker,
@@ -373,24 +385,37 @@ impl PaneEffects {
             self.pane.as_str(),
         ) {
             Ok(file) => file,
-            Err(error) => {
-                return if error.kind() == io::ErrorKind::NotFound {
-                    MarkerOwnership::LegacyAbsent
-                } else {
-                    MarkerOwnership::Reject
-                };
-            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
         };
-        if file.metadata().map_or(true, |meta| meta.len() > MAX_MARKER) {
-            return MarkerOwnership::Reject;
+        if file.metadata()?.len() > MAX_MARKER {
+            return Err(io::Error::other("pane input ownership marker is too large"));
         }
         let mut bytes = Vec::new();
-        if file.take(MAX_MARKER + 1).read_to_end(&mut bytes).is_ok()
-            && serde_json::from_slice::<InputOwner>(&bytes).is_ok_and(|owner| owner == *expected)
-        {
-            MarkerOwnership::Match
-        } else {
-            MarkerOwnership::Reject
+        file.take(MAX_MARKER + 1).read_to_end(&mut bytes)?;
+        Ok(Some(bytes))
+    }
+
+    fn restore_marker(&self, previous: Option<&[u8]>) -> io::Result<()> {
+        let Some(bytes) = previous else {
+            if unsafe { libc::unlinkat(self.directory.as_raw_fd(), self.marker.as_ptr(), 0) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            return self.directory.sync_all();
+        };
+        self.write_marker(bytes)
+    }
+
+    fn ownership(&self, expected: &InputOwner) -> MarkerOwnership {
+        match self.read_marker() {
+            Ok(None) => MarkerOwnership::LegacyAbsent,
+            Ok(Some(bytes))
+                if serde_json::from_slice::<InputOwner>(&bytes)
+                    .is_ok_and(|owner| owner == *expected) =>
+            {
+                MarkerOwnership::Match
+            }
+            Ok(Some(_)) | Err(_) => MarkerOwnership::Reject,
         }
     }
 
@@ -447,10 +472,109 @@ impl PaneEffects {
     }
 }
 
+/// What a person sends from the dashboard's live peek.
+pub(crate) enum DashboardInput<'a> {
+    /// `pane run`. `turn` is the pane's state in the survey taken under the
+    /// lock, which decides whose turn the line belongs to.
+    Line {
+        text: &'a str,
+        turn: Option<&'a AgentState>,
+    },
+    /// `pane send-keys`: an answer inside the turn already running.
+    Key(Key),
+}
+
+/// The pane lock as the dashboard holds it, taken in one attempt. It sends
+/// only as the person, so dashboard code can neither wait behind another
+/// owner nor record a delivery's ownership.
+pub(crate) struct DashboardPane(PaneEffects);
+
+impl DashboardPane {
+    /// One attempt, for a person who sees `Contended` at once instead of
+    /// input that lands after another owner's.
+    pub(crate) fn try_acquire(
+        state: &Path,
+        socket: &str,
+        pane: &str,
+    ) -> Result<Self, AcquireError> {
+        PaneEffects::acquire_for(state, socket, pane, Duration::ZERO).map(Self)
+    }
+
+    /// A key keeps the pane's input owner, as `delete_claude_code_input`
+    /// does. So does a line typed while a delivery's agent is blocked on a
+    /// question or a permission prompt: the line answers it, and Stop still
+    /// interrupts that turn. Any other line starts the person's own turn and
+    /// makes them the owner, so a stopped thread no longer interrupts it.
+    pub(crate) fn input(&self, mux: &impl MuxInput, input: DashboardInput<'_>) -> InputOutcome {
+        let effects = &self.0;
+        match input {
+            DashboardInput::Line { text, turn } => {
+                let previous = effects.read_marker();
+                // A working agent takes a line as the person's next
+                // instruction, and Codex drops the delivered task for it. The
+                // marker may also name a delivery whose turn already ended,
+                // since nothing clears it when the turn ends. So a line typed
+                // while the agent works is the person's turn. A blocked
+                // prompt in a turn the person started without a marker write
+                // looks the same, so its answer keeps the delivery's marker
+                // and Stop behaves as it did before the dashboard typed.
+                let answers_delivery = matches!(turn, Some(AgentState::Blocked))
+                    && matches!(&previous, Ok(Some(bytes)) if matches!(
+                        serde_json::from_slice(bytes),
+                        Ok(InputOwner::Delivery { .. })
+                    ));
+                if answers_delivery {
+                    return mux.deliver(PaneInput::new(effects, InputKind::Line(text)));
+                }
+                // A send that proves nothing was typed hands the pane back.
+                // An ambiguous one keeps the person as owner, as a doctor's
+                // or registration's does, since their line may have landed.
+                let outcome =
+                    effects.owned_input(mux, &InputOwner::Dashboard, InputKind::Line(text));
+                if matches!(
+                    outcome,
+                    InputOutcome::Declined(..) | InputOutcome::Refused(_)
+                ) && let Ok(previous) = previous
+                {
+                    // A restore that fails leaves the person as owner, so a
+                    // stop warns instead of interrupting.
+                    let _ = effects.restore_marker(previous.as_deref());
+                }
+                outcome
+            }
+            DashboardInput::Key(key) => mux.deliver(PaneInput::new(
+                effects,
+                InputKind::Keys {
+                    recipient: Recipient::Pane,
+                    keys: &[key],
+                },
+            )),
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct InterruptReport {
     pub interrupted_pane_ids: Vec<String>,
     pub warnings: Vec<String>,
+}
+
+impl InterruptReport {
+    /// No response could be interrupted, because the multiplexer could not be
+    /// reached at all.
+    pub(crate) fn unreached(responses: &[ActiveThreadResponse], error: &str) -> Self {
+        Self {
+            interrupted_pane_ids: Vec::new(),
+            warnings: responses
+                .iter()
+                .map(|response| unconfirmed(&response.pane_id, error))
+                .collect(),
+        }
+    }
+}
+
+fn unconfirmed(pane_id: &str, error: &str) -> String {
+    format!("Could not confirm interruption of {pane_id} after stopping the thread: {error}.")
 }
 
 pub(crate) fn interrupt_if_current(
@@ -463,9 +587,13 @@ pub(crate) fn interrupt_if_current(
     let mut report = InterruptReport::default();
     for response in responses {
         let result = (|| -> Result<(), String> {
-            let effects =
-                PaneEffects::acquire(state, &namespace.session_socket_id, &response.pane_id)
-                    .map_err(|error| error.to_string())?;
+            let effects = PaneEffects::acquire_for(
+                state,
+                &namespace.session_socket_id,
+                &response.pane_id,
+                INTERRUPT_ACQUIRE_TIMEOUT,
+            )
+            .map_err(|error| error.to_string())?;
             let live = match cwd {
                 Some(cwd) => crate::discover_worktree(herdr, cwd)?,
                 None => crate::discover_worktree_for_workspace(herdr, namespace.space_id.as_str())?,
@@ -532,18 +660,22 @@ pub(crate) fn interrupt_if_current(
         })();
         match result {
             Ok(()) => report.interrupted_pane_ids.push(response.pane_id.clone()),
-            Err(error) => report.warnings.push(format!(
-                "Could not confirm interruption of {} after stopping the thread: {error}.",
-                response.pane_id
-            )),
+            Err(error) => report.warnings.push(unconfirmed(&response.pane_id, &error)),
         }
     }
     report
 }
 
+#[cfg(test)]
+thread_local! {
+    static FLOCK_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn acquire_flock(fd: RawFd, timeout: Duration) -> Result<(), AcquireError> {
     let deadline = Instant::now() + timeout;
     loop {
+        #[cfg(test)]
+        FLOCK_ATTEMPTS.set(FLOCK_ATTEMPTS.get() + 1);
         if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
             break;
         }
@@ -1237,5 +1369,611 @@ mod tests {
             ]
         );
         assert_eq!(gate.ownership(&delivery()), MarkerOwnership::Reject);
+    }
+
+    #[test]
+    fn a_dashboard_key_never_waits_behind_a_delivery_and_keeps_its_owner() {
+        use crate::mux::fake::{Sent, SentInput};
+        let state = State::new();
+        let delivering = PaneEffects::acquire(&state.0, "socket", "pane").unwrap();
+        delivering.record(&delivery()).unwrap();
+        FLOCK_ATTEMPTS.set(0);
+        assert!(matches!(
+            DashboardPane::try_acquire(&state.0, "socket", "pane"),
+            Err(AcquireError::Contended)
+        ));
+        assert_eq!(
+            FLOCK_ATTEMPTS.get(),
+            1,
+            "the dashboard tried the delivery's lock again instead of answering busy"
+        );
+        drop(delivering);
+        let mux = author();
+        let gate = DashboardPane::try_acquire(&state.0, "socket", "pane").unwrap();
+        assert_eq!(
+            gate.input(&mux, DashboardInput::Key(Key::Escape)),
+            InputOutcome::Delivered
+        );
+        assert_eq!(
+            gate.0.ownership(&delivery()),
+            MarkerOwnership::Match,
+            "a key the person pressed inside the delivery's turn kept Stop from interrupting it"
+        );
+        assert_eq!(
+            gate.input(&mux, typed("my own prompt", Some(&AgentState::Idle))),
+            InputOutcome::Delivered
+        );
+        assert_eq!(
+            gate.0.ownership(&delivery()),
+            MarkerOwnership::Reject,
+            "a stopped thread would interrupt the turn the person typed"
+        );
+        assert_eq!(
+            gate.0.ownership(&InputOwner::Dashboard),
+            MarkerOwnership::Match
+        );
+        let pane = PaneId::new("pane");
+        assert_eq!(
+            mux.sent(),
+            [
+                Sent {
+                    pane: pane.clone(),
+                    input: SentInput::Keys {
+                        recipient: Recipient::Pane,
+                        keys: vec![Key::Escape],
+                    },
+                },
+                Sent {
+                    pane,
+                    input: SentInput::Line("my own prompt".into()),
+                },
+            ]
+        );
+    }
+
+    fn typed<'a>(text: &'a str, turn: Option<&'a AgentState>) -> DashboardInput<'a> {
+        DashboardInput::Line { text, turn }
+    }
+
+    #[test]
+    fn a_dashboard_line_answers_a_delivery_s_blocked_question_and_starts_its_own_turn_otherwise() {
+        let unknown = AgentState::Unknown("offline".into());
+        for (turn, previous, answers) in [
+            (Some(&AgentState::Blocked), Some(delivery()), true),
+            (Some(&AgentState::Working), Some(delivery()), false),
+            (Some(&AgentState::Idle), Some(delivery()), false),
+            (Some(&AgentState::Done), Some(delivery()), false),
+            (Some(&unknown), Some(delivery()), false),
+            (None, Some(delivery()), false),
+            (Some(&AgentState::Blocked), Some(InputOwner::Other), false),
+            (
+                Some(&AgentState::Blocked),
+                Some(InputOwner::Dashboard),
+                false,
+            ),
+            (Some(&AgentState::Blocked), None, false),
+        ] {
+            let state = State::new();
+            let gate = DashboardPane::try_acquire(&state.0, "socket", "pane").unwrap();
+            if let Some(owner) = &previous {
+                gate.0.record(owner).unwrap();
+            }
+            let mux = author();
+            assert_eq!(gate.input(&mux, typed("2", turn)), InputOutcome::Delivered);
+            let expected = if answers {
+                delivery()
+            } else {
+                InputOwner::Dashboard
+            };
+            assert_eq!(
+                gate.0.ownership(&expected),
+                MarkerOwnership::Match,
+                "a line typed while the pane was {turn:?} under {previous:?} left the wrong owner"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_answer_to_a_delivery_s_blocked_question_leaves_it_the_delivery_s() {
+        for outcome in [
+            InputOutcome::Refused("invalid_input".into()),
+            InputOutcome::Declined(crate::mux::Retry::OnEvent, "pane_not_found".into()),
+            InputOutcome::Ambiguous("timed out".into()),
+        ] {
+            let state = State::new();
+            let gate = DashboardPane::try_acquire(&state.0, "socket", "pane").unwrap();
+            gate.0.record(&delivery()).unwrap();
+            let mux = author();
+            mux.script(outcome.clone());
+            assert_eq!(
+                gate.input(&mux, typed("yes", Some(&AgentState::Blocked))),
+                outcome
+            );
+            assert_eq!(
+                gate.0.ownership(&delivery()),
+                MarkerOwnership::Match,
+                "{outcome:?} took the delivery's turn from Stop"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dashboard_line_that_types_nothing_hands_the_pane_back() {
+        for (previous, outcome) in [
+            (
+                Some(delivery()),
+                InputOutcome::Refused("invalid_input".into()),
+            ),
+            (
+                Some(delivery()),
+                InputOutcome::Declined(crate::mux::Retry::OnEvent, "pane_not_found".into()),
+            ),
+            (None, InputOutcome::Refused("invalid_input".into())),
+        ] {
+            let state = State::new();
+            let gate = DashboardPane::try_acquire(&state.0, "socket", "pane").unwrap();
+            if let Some(owner) = &previous {
+                gate.0.record(owner).unwrap();
+            }
+            let mux = author();
+            mux.script(outcome.clone());
+            assert_eq!(
+                gate.input(&mux, typed("refused", Some(&AgentState::Idle))),
+                outcome
+            );
+            assert_eq!(
+                gate.0.ownership(&delivery()),
+                if previous.is_some() {
+                    MarkerOwnership::Match
+                } else {
+                    MarkerOwnership::LegacyAbsent
+                },
+                "{outcome:?} took the pane from its owner"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dashboard_line_that_may_have_landed_keeps_the_person_as_owner() {
+        let state = State::new();
+        let gate = DashboardPane::try_acquire(&state.0, "socket", "pane").unwrap();
+        gate.0.record(&delivery()).unwrap();
+        let mux = author();
+        mux.script(InputOutcome::Ambiguous("timed out".into()));
+        assert_eq!(
+            gate.input(&mux, typed("maybe typed", Some(&AgentState::Idle))),
+            InputOutcome::Ambiguous("timed out".into())
+        );
+        assert_eq!(gate.0.ownership(&delivery()), MarkerOwnership::Reject);
+        assert_eq!(
+            gate.0.ownership(&InputOwner::Dashboard),
+            MarkerOwnership::Match
+        );
+    }
+
+    /// Source with whitespace and string conversions removed, so
+    /// `"pane" .to_owned(), String::from("run")` reads as `"pane","run"`.
+    fn compact(source: &str) -> String {
+        let mut text = [".to_owned()", ".to_string()", ".into()"].iter().fold(
+            source.split_whitespace().collect::<String>(),
+            |text, conversion| text.replace(conversion, ""),
+        );
+        while let Some(at) = text.find("String::from(") {
+            let call = call_at(&text[at..], "String::from(");
+            let argument = call["String::from(".len()..call.len() - 1].to_owned();
+            text.replace_range(at..at + call.len(), &argument);
+        }
+        text
+    }
+
+    fn rust_sources(directory: &Path, found: &mut Vec<std::path::PathBuf>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_sources(&path, found);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                found.push(path);
+            }
+        }
+    }
+
+    /// Herdr arguments that type into a pane.
+    const INPUT_VERBS: &[&str] = &[
+        r#""agent","prompt""#,
+        r#""pane","run""#,
+        r#""send-keys""#,
+        r#""send-text""#,
+    ];
+
+    /// The input verbs `source` names outside a slice pattern. A pattern such
+    /// as a fake's `["agent","prompt",..] =>` matches arguments; it cannot
+    /// send them.
+    fn input_verbs(source: &str) -> Vec<&'static str> {
+        // `.arg("pane").arg("run")` names the same verb as `"pane","run"`.
+        let text = compact(source).replace(").arg(", ",");
+        INPUT_VERBS
+            .iter()
+            .copied()
+            .filter(|verb| {
+                text.match_indices(verb).any(|(at, _)| {
+                    let after = &text[at + verb.len()..];
+                    !after.find(']').is_some_and(|end| {
+                        after[end + 1..].starts_with("=>") || after[end + 1..].starts_with('|')
+                    })
+                })
+            })
+            .collect()
+    }
+
+    /// Files under `src` that name a Herdr input verb, other than the Herdr
+    /// adapter and this module. Until commit 16 makes the transport private
+    /// to `mux/herdr/`, only these two may build the arguments that type.
+    fn raw_input_outside_the_adapter(src: &Path) -> Vec<String> {
+        let mut files = Vec::new();
+        rust_sources(src, &mut files);
+        files.sort();
+        let owners = [src.join("mux/herdr.rs"), src.join("pane_effects.rs")];
+        files
+            .iter()
+            .filter(|file| !file.starts_with(src.join("mux/herdr")) && !owners.contains(file))
+            .flat_map(|file| {
+                input_verbs(&fs::read_to_string(file).unwrap())
+                    .into_iter()
+                    .map(move |verb| format!("{} names {verb}", file.display()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn direct_literal_physical_input_calls_are_owned_here() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        assert_eq!(raw_input_outside_the_adapter(&src), Vec::<String>::new());
+    }
+
+    #[test]
+    fn raw_input_check_detects_new_nested_files_and_formatting() {
+        let state = State::new();
+        for directory in ["mux/herdr", "new/module"] {
+            fs::create_dir_all(state.0.join(directory)).unwrap();
+        }
+        let bypass = state.0.join("new/module/input.rs");
+        for (kind, operation) in [
+            ("agent", "prompt"),
+            ("pane", "run"),
+            ("pane", "send-keys"),
+            ("agent", "send-keys"),
+            ("pane", "send-text"),
+        ] {
+            for source in [
+                format!("herdr.execute ( & [ \"{kind}\" ,\n \"{operation}\", pane ] )"),
+                format!("vec![\"{kind}\".to_owned(),\n \"{operation}\".to_owned(), pane]"),
+                format!("Command::new(bin).arg(\"{kind}\")\n .arg(\"{operation}\").arg(pane)"),
+                format!("vec![String::from(\"{kind}\"), String::from(\"{operation}\"), pane]"),
+            ] {
+                for owner in ["pane_effects.rs", "mux/herdr.rs", "mux/herdr/wire.rs"] {
+                    fs::write(state.0.join(owner), &source).unwrap();
+                }
+                fs::write(&bypass, &source).unwrap();
+                let found = raw_input_outside_the_adapter(&state.0);
+                assert_eq!(found.len(), 1, "{source}: {found:?}");
+                assert!(
+                    found[0].starts_with(&bypass.display().to_string()),
+                    "{found:?}"
+                );
+            }
+        }
+        fs::write(
+            &bypass,
+            "match args { [\"agent\", \"prompt\", pane, _] => {} [\"pane\", \"run\", ..] | [\"pane\", \"send-keys\", ..] => {} _ => {} }\neffects.prompt(herdr, owner, body)",
+        )
+        .unwrap();
+        assert_eq!(
+            raw_input_outside_the_adapter(&state.0),
+            Vec::<String>::new()
+        );
+    }
+
+    /// Text that would let dashboard code type into a pane around
+    /// `DashboardPane`, and the one dashboard file each may appear in. The
+    /// dashboard is a sibling of the delivery code in this crate, so no
+    /// visibility can hide `PaneEffects` or `InputOwner` from it alone, and
+    /// until the Herdr transport is private to `mux/herdr/` the compiler
+    /// cannot stop it naming that either.
+    const DASHBOARD_RAW: &[(&str, Option<&str>)] = &[
+        ("ProcessHerdr", None),
+        ("HerdrCommandExecutor", None),
+        ("execute_bounded", None),
+        (".execute(", None),
+        ("PaneEffects", None),
+        ("InputOwner", None),
+        ("HERDR_BIN_PATH", Some("observer_guard.rs")),
+        ("\"herdr\"", Some("observer_guard.rs")),
+        ("TIOCSTI", None),
+        ("posix_spawn", None),
+        ("libc::exec", None),
+        ("libc::fork", None),
+        ("libc::system", None),
+        (".exec()", None),
+    ];
+
+    /// Every process dashboard code starts, by file and program. Only the
+    /// observer guard starts Herdr.
+    const DASHBOARD_SPAWNS: &[(&str, &str)] = &[
+        ("dashboard.rs", "Command::new(opener)"),
+        (
+            "dashboard/channel_service.rs",
+            "Command::new(std::env::current_exe().unwrap())",
+        ),
+        (
+            "dashboard/channel_service.rs",
+            "Command::new(std::env::current_exe().unwrap())",
+        ),
+        (
+            "dashboard/http.rs",
+            "Command::new(crate::runtime_executable()?)",
+        ),
+        (
+            "dashboard/live_peek.rs",
+            "Command::new(std::env::current_exe()?)",
+        ),
+        (
+            "dashboard/observer_guard.rs",
+            r#"Command::new(env::var_os("HERDR_BIN_PATH").unwrap_or_else(||"herdr"))"#,
+        ),
+        ("dashboard/server_files.rs", "Command::new(executable)"),
+        ("dashboard/server_files.rs", "Command::new(executable)"),
+        ("dashboard/tailscale.rs", "Command::new(self.0)"),
+        ("dashboard/tailscale.rs", "Command::new(&executable)"),
+    ];
+
+    /// Every line of dashboard code that names `Command` other than in a
+    /// listed `Command::new` call, so an alias, a type path, or a second
+    /// import fails the check whatever its spelling.
+    const DASHBOARD_COMMAND_NAMES: &[(&str, &str)] = &[
+        ("dashboard.rs", "process::{Command, ExitCode, Stdio},"),
+        ("dashboard/http.rs", "process::{Command, Stdio},"),
+        (
+            "dashboard/live_peek.rs",
+            "process::{Child, ChildStdin, ChildStdout, Command, Stdio},",
+        ),
+        (
+            "dashboard/observer_guard.rs",
+            "process::{Command, ExitCode, Stdio},",
+        ),
+        (
+            "dashboard/server_files.rs",
+            "process::{Command, ExitStatus, Stdio},",
+        ),
+        (
+            "dashboard/skills.rs",
+            r#""---\ndescription: Command duplicate\n---\n","#,
+        ),
+        (
+            "dashboard/snapshot.rs",
+            "/// Command and exit code only; terminal output never leaves the store.",
+        ),
+        ("dashboard/tailscale.rs", "process::{Command, Stdio},"),
+    ];
+
+    /// Each place `source` names the identifier `Command`, by line, other
+    /// than as `Command::new`.
+    fn command_names(source: &str) -> Vec<&str> {
+        let identifier = |c: char| c.is_alphanumeric() || c == '_';
+        source
+            .lines()
+            .flat_map(|line| {
+                line.match_indices("Command")
+                    .filter(move |&(at, _)| {
+                        let after = &line[at + "Command".len()..];
+                        !line[..at].ends_with(identifier)
+                            && !after.starts_with(identifier)
+                            && !after.starts_with("::new")
+                    })
+                    .map(move |_| line.trim())
+            })
+            .collect()
+    }
+
+    /// The only arguments the observer guard gives Herdr.
+    const OBSERVER_ARGUMENTS: &[&str] = &[
+        r#".args(["terminal","session","observe",terminal])"#,
+        r#".arg("--rows")"#,
+        ".arg(rows)",
+        r#".arg("--cols")"#,
+        ".arg(cols)",
+    ];
+
+    /// The call at the start of `text`, with its argument list when it has
+    /// one.
+    fn call_at<'a>(text: &'a str, call: &str) -> &'a str {
+        let mut depth = 0;
+        let name = call.trim_end_matches('(').len();
+        for (at, character) in text.char_indices().skip(name) {
+            match character {
+                '(' => depth += 1,
+                ')' if depth == 1 => return &text[..=at],
+                ')' => depth -= 1,
+                _ if depth == 0 => return &text[..at],
+                _ => {}
+            }
+        }
+        text
+    }
+
+    fn calls<'a>(text: &'a str, call: &str) -> Vec<&'a str> {
+        text.match_indices(call)
+            .map(|(at, _)| call_at(&text[at..], call))
+            .collect()
+    }
+
+    /// Dashboard code under `src` that could type into a pane around
+    /// `DashboardPane` and `interrupt_if_current`.
+    fn dashboard_bypasses(src: &Path) -> Vec<String> {
+        let mut files = vec![src.join("dashboard.rs")];
+        rust_sources(&src.join("dashboard"), &mut files);
+        files.retain(|file| file.exists());
+        files.sort();
+        let mut allowed = DASHBOARD_SPAWNS.to_vec();
+        let mut named = DASHBOARD_COMMAND_NAMES.to_vec();
+        let mut raw = Vec::new();
+        for file in &files {
+            let name = file.strip_prefix(src).unwrap().to_str().unwrap();
+            let source = fs::read_to_string(file).unwrap();
+            for line in command_names(&source) {
+                match named.iter().position(|&entry| entry == (name, line)) {
+                    Some(index) => {
+                        named.swap_remove(index);
+                    }
+                    None => raw.push(format!("{name} names Command in {line}")),
+                }
+            }
+            let text = compact(&source);
+            for (token, owner) in DASHBOARD_RAW {
+                if text.contains(token) && owner.is_none_or(|owner| !file.ends_with(owner)) {
+                    raw.push(format!("{name} names {token}"));
+                }
+            }
+            for verb in input_verbs(&text) {
+                raw.push(format!("{name} names {verb}"));
+            }
+            for spawn in calls(&text, "Command::new") {
+                match allowed.iter().position(|&entry| entry == (name, spawn)) {
+                    Some(index) => {
+                        allowed.swap_remove(index);
+                    }
+                    None => raw.push(format!("{name} starts {spawn}")),
+                }
+            }
+            if name == "dashboard/observer_guard.rs" {
+                for argument in calls(&text, ".arg(")
+                    .into_iter()
+                    .chain(calls(&text, ".args("))
+                {
+                    if !OBSERVER_ARGUMENTS.contains(&argument) {
+                        raw.push(format!("{name} gives Herdr {argument}"));
+                    }
+                }
+            }
+        }
+        raw
+    }
+
+    #[test]
+    fn dashboard_types_into_a_pane_only_through_pane_effects() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        assert!(
+            src.join("dashboard/live_peek.rs").exists()
+                && src.join("dashboard/observer_guard.rs").exists(),
+            "the scan must reach live peek and the observer guard"
+        );
+        let raw = dashboard_bypasses(&src);
+        assert!(
+            raw.is_empty(),
+            "Dashboard code reaches Herdr only through `Front.mux`, a `MuxConnector`, starts Herdr only in the observer guard, and types into a pane only through `DashboardPane::input` or `interrupt_if_current` on that connection:\n{}",
+            raw.join("\n")
+        );
+    }
+
+    #[test]
+    fn dashboard_check_catches_each_bypass() {
+        let state = State::new();
+        fs::create_dir_all(state.0.join("dashboard")).unwrap();
+        let observer = r#"let mut command = Command::new(env::var_os("HERDR_BIN_PATH").unwrap_or_else(|| "herdr".into()));
+            command.args(["terminal", "session", "observe", terminal]);
+            command.arg("--rows").arg(rows.to_string());"#;
+        fs::write(state.0.join("dashboard/observer_guard.rs"), observer).unwrap();
+        fs::write(
+            state.0.join("dashboard.rs"),
+            "Command::new(opener).arg(url)",
+        )
+        .unwrap();
+        assert_eq!(dashboard_bypasses(&state.0), Vec::<String>::new());
+        let bypass = state.0.join("dashboard/thread_controls.rs");
+        for (source, caught) in [
+            (
+                r#"std::process::Command::new(concat!("her", "dr")).arg("pane").arg("run")"#,
+                r#"starts Command::new(concat!("her","dr"))"#,
+            ),
+            (
+                r#"Command::new("herdr").args(["pane", "send-keys", pane, "enter"])"#,
+                r#"names "herdr""#,
+            ),
+            (
+                r#"ProcessHerdr::for_binary(bin).execute(&["pane", "send-keys", pane])"#,
+                "names ProcessHerdr",
+            ),
+            (
+                "PaneEffects::acquire(state, socket, pane)?.run_terminal(&herdr, &owner, text)",
+                "names PaneEffects",
+            ),
+            (
+                "effects.prompt(&herdr, &InputOwner::delivery(ns, attempt, binding, session), request)",
+                "names InputOwner",
+            ),
+            (
+                "use std::process::Command as Spawn; Spawn::new(program)",
+                "names Command in use std::process::Command as Spawn; Spawn::new(program)",
+            ),
+            (
+                "type Spawn = process::Command; Spawn::new(program)",
+                "names Command in type Spawn = process::Command; Spawn::new(program)",
+            ),
+            (
+                "<std::process::Command>::new(program)",
+                "names Command in <std::process::Command>::new(program)",
+            ),
+            (
+                r#"Command::new(bin).arg("pane").arg("run")"#,
+                r#"names "pane","run""#,
+            ),
+            (
+                r#"let argv = vec![String::from("agent"), String::from("prompt")];"#,
+                r#"names "agent","prompt""#,
+            ),
+            (
+                "let spawn = Command::new; spawn(program)",
+                "starts Command::new",
+            ),
+            (
+                r#"let argv = vec!["agent".to_owned(), "prompt".to_owned()];"#,
+                r#"names "agent","prompt""#,
+            ),
+        ] {
+            fs::write(&bypass, source).unwrap();
+            let found = dashboard_bypasses(&state.0);
+            assert!(
+                found
+                    .iter()
+                    .any(|line| *line == format!("dashboard/thread_controls.rs {caught}")),
+                "{source} was not caught: {found:?}"
+            );
+        }
+        fs::remove_file(&bypass).unwrap();
+        fs::write(
+            state.0.join("dashboard/observer_guard.rs"),
+            observer.replace(
+                r#""terminal", "session", "observe""#,
+                r#""pane", "send-text""#,
+            ),
+        )
+        .unwrap();
+        let found = dashboard_bypasses(&state.0);
+        assert!(
+            found.contains(
+                &r#"dashboard/observer_guard.rs gives Herdr .args(["pane","send-text",terminal])"#
+                    .to_owned()
+            ),
+            "{found:?}"
+        );
+        fs::write(
+            state.0.join("dashboard.rs"),
+            "Command::new(opener).arg(url); Command::new(opener).arg(url)",
+        )
+        .unwrap();
+        assert!(
+            dashboard_bypasses(&state.0)
+                .contains(&"dashboard.rs starts Command::new(opener)".to_owned()),
+            "a second spawn of an allowed program was not caught"
+        );
     }
 }

@@ -1042,6 +1042,224 @@ fn failed_interrupt_reports_committed_stop_with_an_unconfirmed_warning() {
     );
 }
 
+fn peek_path(alias: &str, endpoint: &str) -> String {
+    let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+    format!(
+        "/w/{}/participants/{}/{endpoint}",
+        key.as_str(),
+        xws::address_id("w1", alias)
+    )
+}
+
+/// What the planner's pane was sent, in order: live-peek input and Stop's
+/// interrupt.
+fn planner_input(f: &Fixture) -> Vec<Value> {
+    fs::read_to_string(f.root.join("http-herdr-invocations.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap()["args"].clone())
+        .filter(|args| {
+            args[2] == "pane-1-planner" && matches!(args[1].as_str(), Some("run" | "send-keys"))
+        })
+        .collect()
+}
+
+/// The body of the one 503 live peek answers before it sends to the pane:
+/// SQLite was busy.
+const STORE_BUSY: &str = "Namedrop's state is busy, so nothing was sent.\n";
+
+/// A thread delivered to the planner's pane, the pane reporting `status`,
+/// and a dashboard serving it after the person sent `input` from live peek.
+fn peeked_turn(f: &Fixture, request: &str, status: &str, input: Value) -> (Value, Server, u16) {
+    let parent = plain_root(f, request, "Please inspect.");
+    f.status("pane-1-planner", status);
+    let server = Server::start(f, "not json", true);
+    // Live peek waits only 100 ms for SQLite, and the dashboard's workers
+    // write to it while the turn starts. A stream types nothing, so any of
+    // its 503s is retried. Input retries only the busy store's 503.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let live = loop {
+        let live = server.live(&peek_path("planner", "live"));
+        if live.status != 503 || Instant::now() >= deadline {
+            break live;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(live.status, 200, "{}", live.body);
+    let continuity =
+        serde_json::from_str::<Value>(live.body.lines().next().unwrap()).unwrap()["continuity"]
+            .clone();
+    let mut input = input;
+    input["continuity"] = continuity;
+    let status = loop {
+        let sent = planner_input(f).len();
+        let response = server.post(&peek_path("planner", "input"), &input.to_string(), &[]);
+        if response.status != 503 || response.body != STORE_BUSY || Instant::now() >= deadline {
+            break response.status;
+        }
+        assert_eq!(planner_input(f).len(), sent, "a busy store sent input");
+        thread::sleep(Duration::from_millis(50));
+    };
+    (parent, server, status)
+}
+
+/// Makes the planner's pane report `status` to the dashboard already
+/// running, as its turn starts or ends.
+fn report_status(f: &Fixture, status: &str) {
+    f.status("pane-1-planner", status);
+    let key = "pane list --workspace w1";
+    let reply = f
+        .herdr
+        .execute(&["pane", "list", "--workspace", "w1"])
+        .unwrap()
+        .stdout;
+    let file = f.root.join("http-herdr-responses.json");
+    let mut responses: Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+    responses[key] = json!(reply);
+    let temporary = f.root.join("http-herdr-responses.json.next");
+    fs::write(&temporary, responses.to_string()).unwrap();
+    fs::rename(&temporary, &file).unwrap();
+    let temporary = f.root.join("http-herdr-reply.next");
+    fs::write(&temporary, reply).unwrap();
+    fs::rename(&temporary, f.root.join("http-herdr-replies").join(key)).unwrap();
+}
+
+fn stop(server: &Server, parent: &Value) -> Value {
+    let response = server.post(&control_path("w1", parent, "stop"), "{}", &[]);
+    assert_eq!(response.status, 200, "{}", response.body);
+    serde_json::from_str(&response.body).unwrap()
+}
+
+#[test]
+fn stop_after_a_live_peek_key_still_interrupts_the_turn() {
+    for (key, sent) in [("Enter", "enter"), ("ArrowDown", "down"), ("Escape", "esc")] {
+        let f = fixture();
+        let (parent, server, status) = peeked_turn(
+            &f,
+            "key-then-stop",
+            "working",
+            json!({"kind":"key","key":key}),
+        );
+        assert_eq!(status, 204, "{key}");
+        let receipt = stop(&server, &parent);
+        assert_eq!(
+            receipt["interrupted_pane_ids"],
+            json!(["pane-1-planner"]),
+            "{key}: {receipt}"
+        );
+        assert_eq!(receipt["warnings"], json!([]), "{key}: {receipt}");
+        assert_eq!(
+            planner_input(&f),
+            [
+                json!(["pane", "send-keys", "pane-1-planner", sent]),
+                json!(["agent", "send-keys", "pane-1-planner", "ctrl+c"]),
+            ],
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn stop_after_an_answer_to_the_delivery_s_blocked_question_still_interrupts_it() {
+    let f = fixture();
+    let (parent, server, sent) = peeked_turn(
+        &f,
+        "answer-then-stop",
+        "blocked",
+        json!({"kind":"text","text":"2"}),
+    );
+    assert_eq!(sent, 204);
+    report_status(&f, "working");
+    let receipt = stop(&server, &parent);
+    assert_eq!(
+        receipt["interrupted_pane_ids"],
+        json!(["pane-1-planner"]),
+        "the person's answer kept Stop from interrupting the delivery's turn: {receipt}"
+    );
+    assert_eq!(receipt["warnings"], json!([]), "{receipt}");
+    assert_eq!(
+        planner_input(&f),
+        [
+            json!(["pane", "run", "pane-1-planner", "2"]),
+            json!(["agent", "send-keys", "pane-1-planner", "ctrl+c"]),
+        ]
+    );
+}
+
+#[test]
+fn stop_after_a_line_that_starts_the_person_s_turn_warns_instead_of_interrupting_it() {
+    // A working agent takes the line as the person's next instruction.
+    for pane in ["idle", "working"] {
+        let f = fixture();
+        let (parent, server, status) = peeked_turn(
+            &f,
+            "line-then-stop",
+            pane,
+            json!({"kind":"text","text":"do this instead"}),
+        );
+        assert_eq!(status, 204, "{pane}");
+        report_status(&f, "working");
+        let receipt = stop(&server, &parent);
+        assert_eq!(
+            receipt["interrupted_pane_ids"],
+            json!([]),
+            "{pane}: Stop interrupted the person's turn: {receipt}"
+        );
+        assert_eq!(
+            receipt["warnings"],
+            json!([
+                "Could not confirm interruption of pane-1-planner after stopping the thread: the stopped thread no longer owns its pane input."
+            ]),
+            "{pane}"
+        );
+        assert_eq!(
+            planner_input(&f),
+            [json!(["pane", "run", "pane-1-planner", "do this instead"])],
+            "{pane}"
+        );
+    }
+}
+
+#[test]
+fn a_live_peek_send_that_fails_leaves_the_turn_to_stop() {
+    // An idle or working line takes the pane and hands it back. A blocked
+    // one never takes it.
+    for (pane, input) in [
+        ("idle", json!({"kind":"text","text":"refused line"})),
+        ("working", json!({"kind":"text","text":"refused line"})),
+        ("blocked", json!({"kind":"text","text":"refused line"})),
+        ("working", json!({"kind":"key","key":"Enter"})),
+    ] {
+        let f = fixture();
+        fs::write(
+            f.root.join("pane-input-error"),
+            r#"{"error":{"code":"invalid_input","message":"refused"}}"#,
+        )
+        .unwrap();
+        let (parent, server, status) = peeked_turn(&f, "failed-then-stop", pane, input.clone());
+        assert_eq!(status, 503, "{input}");
+        report_status(&f, "working");
+        assert_eq!(
+            planner_input(&f).len(),
+            1,
+            "{input}: the refused send was never tried"
+        );
+        fs::remove_file(f.root.join("pane-input-error")).unwrap();
+        let receipt = stop(&server, &parent);
+        assert_eq!(
+            receipt["interrupted_pane_ids"],
+            json!(["pane-1-planner"]),
+            "{input}: {receipt}"
+        );
+        assert_eq!(receipt["warnings"], json!([]), "{input}: {receipt}");
+        assert_eq!(
+            planner_input(&f).last(),
+            Some(&json!(["agent", "send-keys", "pane-1-planner", "ctrl+c"])),
+            "{input}"
+        );
+    }
+}
+
 fn dismiss_path(attempt: &str) -> String {
     let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
     format!("/w/{}/attempts/{attempt}/dismiss", key.as_str())

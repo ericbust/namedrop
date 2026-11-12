@@ -761,6 +761,12 @@ export const peekCopy = {
     "Live view isn’t available. Try again or choose Text snapshot.",
   liveUnsupported: "Live view isn’t available. Showing a text snapshot.",
 };
+// Type to agent adds ". Try again." after each of these.
+export const peekInputCopy = {
+  busy: (alias: string) =>
+    `Namedrop is typing into ${alias} right now, so nothing was sent`,
+  refused: (status: number) => `Input refused (${status})`,
+};
 export const peekFailureCopy = {
   closed: (who) => ({
     title: "Pane closed",

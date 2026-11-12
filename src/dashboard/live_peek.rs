@@ -5,8 +5,12 @@ use super::{
     strip_terminal_sequences,
 };
 use crate::{
-    HerdrCommandExecutor, ProcessHerdr, StateStore,
-    mux::{Budget, Depth, MuxConnector, PaneId, Scope, ScreenRequest, Style, Wrap},
+    StateStore, StoreError, StoreErrorKind,
+    mux::{
+        AgentState, Budget, Depth, InputOutcome, Key, MuxConnector, PaneId, Scope, ScreenRequest,
+        Style, Wrap,
+    },
+    pane_effects::{AcquireError, DashboardInput, DashboardPane},
     store::dashboard::{LiveBinding, LiveMember},
 };
 use serde::{Deserialize, Serialize};
@@ -169,13 +173,13 @@ pub(super) enum InputKey {
 }
 
 impl InputKey {
-    fn herdr(&self) -> &'static str {
+    fn key(&self) -> Key {
         match self {
-            Self::Enter => "enter",
-            Self::Escape => "esc",
-            Self::CtrlC => "ctrl+c",
-            Self::ArrowUp => "up",
-            Self::ArrowDown => "down",
+            Self::Enter => Key::Enter,
+            Self::Escape => Key::Escape,
+            Self::CtrlC => Key::CtrlC,
+            Self::ArrowUp => Key::Up,
+            Self::ArrowDown => Key::Down,
         }
     }
 }
@@ -266,7 +270,7 @@ pub(super) fn continuity_query(query: Option<&str>) -> Result<Option<String>, St
 struct NativeIdentity {
     terminal: String,
     session: Option<String>,
-    status: Option<String>,
+    status: Option<AgentState>,
 }
 impl PartialEq for NativeIdentity {
     fn eq(&self, other: &Self) -> bool {
@@ -278,8 +282,8 @@ impl NativeIdentity {
     fn accepts_input(&self) -> bool {
         !self
             .status
-            .as_deref()
-            .is_some_and(|status| matches!(status, "offline" | "disconnected" | "unknown"))
+            .as_ref()
+            .is_some_and(|status| matches!(status.as_str(), "offline" | "disconnected" | "unknown"))
     }
 }
 
@@ -370,16 +374,10 @@ fn shell_tty(pid: u64, budget: Duration) -> Option<PathBuf> {
     if pid == 0 || pid > i32::MAX as u64 || budget.is_zero() {
         return None;
     }
-    let result = ProcessHerdr::for_binary("/bin/ps").execute_bounded(
-        &["-p", &pid.to_string(), "-o", "tty="],
+    tty_path(&crate::runtime::controlling_tty(
+        pid,
         budget.min(Duration::from_millis(150)),
-        &AtomicBool::new(false),
-        1024,
-    );
-    let Ok(result) = result else {
-        return None;
-    };
-    tty_path(result.stdout.trim())
+    )?)
 }
 
 fn source_tty(mux: &dyn MuxConnector, binding: &LiveBinding, budget: Duration) -> Option<PathBuf> {
@@ -448,10 +446,17 @@ impl TtyDiscovery {
     }
 }
 
+fn store_status(error: StoreError) -> Status {
+    match error.kind() {
+        StoreErrorKind::Busy => Status::StoreBusy,
+        _ => Status::Unavailable,
+    }
+}
+
 fn recorded(store: &mut StateStore, key: &SpaceKey, address: &str) -> Result<LiveBinding, Status> {
     match store
         .dashboard_live_member(key, address)
-        .map_err(|_| Status::Unavailable)?
+        .map_err(store_status)?
     {
         LiveMember::Missing => Err(Status::NotFound),
         LiveMember::Gone => Err(Status::Gone),
@@ -499,7 +504,7 @@ fn native(
             .and_then(|agent| crate::mux::resolve_session(&agent.session))
             .map(|session| session.as_str().to_owned())
             .filter(|s| !s.is_empty()),
-        status: pane.state.as_ref().map(|state| state.as_str().to_owned()),
+        status: pane.state.clone(),
     };
     if binding
         .agent_session_id
@@ -997,15 +1002,24 @@ impl LivePeeks {
             recent.push_back(now);
         }
         let mut store = StateStore::open_read_only(front.files.state())
-            .map_err(|_| Status::Unavailable)?
+            .map_err(store_status)?
             .ok_or(Status::NotFound)?;
         store
             .set_busy_timeout(Duration::from_millis(100))
-            .map_err(|_| Status::Unavailable)?;
+            .map_err(store_status)?;
         let binding = recorded(&mut store, key, address)?;
         if binding.pane_type != crate::PaneType::Agent || binding.agent_session_id.is_none() {
             return Err(Status::Gone);
         }
+        // The lock is tried before the identity survey, so a delivery that
+        // holds it now cannot release it during the survey and have this
+        // input land just after its prompt. Waiting would land it there too,
+        // so a busy pane answers at once.
+        let effects = DashboardPane::try_acquire(
+            front.files.state(),
+            &binding.namespace.session_socket_id,
+            &binding.pane_id,
+        );
         let mux = &*front.mux;
         let identity = native(mux, &binding, Duration::from_millis(500))?.identity;
         if !identity.accepts_input() {
@@ -1017,25 +1031,39 @@ impl LivePeeks {
         if post.continuity() != continuity(front, address, &binding, &identity) {
             return Err(Status::Gone);
         }
-        let herdr =
-            ProcessHerdr::default().with_socket(Some(binding.namespace.session_socket_id.clone()));
-        let send = |args: &[&str]| {
-            herdr
-                .execute_bounded(args, Duration::from_secs(2), &AtomicBool::new(false), 4096)
-                .map(|_| ())
-                .map_err(|_| Status::Unavailable)
+        let effects = match effects {
+            Ok(effects) => effects,
+            Err(AcquireError::Contended) => return Err(Status::Busy),
+            Err(AcquireError::Fault(_)) => return Err(Status::Unavailable),
         };
-        match post {
+        let budget = Budget {
+            timeout: Duration::from_secs(2),
+            max_output_bytes: 4096,
+        };
+        let herdr = mux
+            .connect(&binding.namespace.session_socket_id, budget, Arc::default())
+            .map_err(|_| Status::Unavailable)?;
+        let outcome = match post {
             InputPost::Text { text, .. } => {
                 let current = recorded(&mut store, key, address)?;
                 let updated = native(mux, &binding, Duration::from_millis(500))?.identity;
                 if current != binding || updated != identity || !updated.accepts_input() {
                     return Err(Status::Gone);
                 }
-                send(&["pane", "run", &binding.pane_id, &text])
+                effects.input(
+                    &herdr,
+                    DashboardInput::Line {
+                        text: &text,
+                        turn: updated.status.as_ref(),
+                    },
+                )
             }
-            InputPost::Key { key, .. } => {
-                send(&["pane", "send-keys", &binding.pane_id, key.herdr()])
+            InputPost::Key { key, .. } => effects.input(&herdr, DashboardInput::Key(key.key())),
+        };
+        match outcome {
+            InputOutcome::Delivered => Ok(()),
+            InputOutcome::Declined(..) | InputOutcome::Refused(_) | InputOutcome::Ambiguous(_) => {
+                Err(Status::Unavailable)
             }
         }
     }
@@ -1065,11 +1093,11 @@ impl LivePeeks {
                 return Err(Status::Unavailable);
             }
             let mut store = StateStore::open_read_only(front.files.state())
-                .map_err(|_| Status::Unavailable)?
+                .map_err(store_status)?
                 .ok_or(Status::NotFound)?;
             store
                 .set_busy_timeout(Duration::from_millis(100))
-                .map_err(|_| Status::Unavailable)?;
+                .map_err(store_status)?;
             let binding = recorded(&mut store, key, address)?;
             let pane = native(
                 &*front.mux,
@@ -1204,7 +1232,7 @@ impl LivePeeks {
                     Err(Status::NotFound) => Some(Event::Closed {
                         reason: Closed::Missing,
                     }),
-                    Err(Status::Unavailable) => Some(Event::Unavailable {
+                    Err(Status::Unavailable | Status::StoreBusy) => Some(Event::Unavailable {
                         reason: Unavailable::Busy,
                     }),
                     _ => Some(Event::Closed {
