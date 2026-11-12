@@ -35,7 +35,6 @@ struct Registry {
 pub(crate) struct Launch {
     pub namespace: StateNamespace,
     pub address_id: String,
-    pub alias: String,
     pub pane_id: String,
     pub started_at_ms: i64,
     next_check_ms: i64,
@@ -47,14 +46,12 @@ impl Launch {
     pub fn new(
         namespace: StateNamespace,
         address_id: String,
-        alias: String,
         pane_id: String,
         started_at_ms: i64,
     ) -> Self {
         Self {
             namespace,
             address_id,
-            alias,
             pane_id,
             started_at_ms,
             next_check_ms: started_at_ms.saturating_add(FAST_CHECK_MS),
@@ -162,29 +159,39 @@ fn check_interval_ms(age_ms: i64) -> Option<i64> {
 
 #[derive(Debug, Eq, PartialEq)]
 enum Observed {
+    /// Namedrop was never activated here, or the person deactivated it.
+    SpaceOff,
+    SpacePaused,
     /// Missing, retired, or no longer bound to a pane.
     AddressGone,
     Occupied,
     PaneGone,
     Pane {
         session: Option<String>,
+        /// The address's name now, which the person may have changed.
+        alias: String,
     },
 }
 
 #[derive(Debug, Eq, PartialEq)]
 enum Step {
     Forget,
-    Name(String),
+    Name { session: String, alias: String },
     Wait,
 }
 
+/// Naming a pane activates its space, so a space the person turned off ends
+/// the launch, and a paused one waits.
 fn step(observed: Observed, named_for: Option<&str>) -> Step {
     match observed {
-        Observed::AddressGone | Observed::Occupied | Observed::PaneGone => Step::Forget,
+        Observed::SpaceOff | Observed::AddressGone | Observed::Occupied | Observed::PaneGone => {
+            Step::Forget
+        }
         Observed::Pane {
             session: Some(session),
-        } if named_for != Some(session.as_str()) => Step::Name(session),
-        Observed::Pane { .. } => Step::Wait,
+            alias,
+        } if named_for != Some(session.as_str()) => Step::Name { session, alias },
+        Observed::SpacePaused | Observed::Pane { .. } => Step::Wait,
     }
 }
 
@@ -198,14 +205,20 @@ pub(crate) fn watch(front: Arc<Front>) {
 }
 
 fn check(front: &Front, launch: &Launch) {
-    let Some(observed) = observe(front.files.state(), launch) else {
-        return;
+    let next = || {
+        observe(front.files.state(), launch)
+            .map(|observed| step(observed, launch.named_for.as_deref()))
     };
-    match step(observed, launch.named_for.as_deref()) {
-        Step::Wait => {}
-        Step::Forget => front.launches.forget(&launch.namespace, &launch.address_id),
-        Step::Name(session) => {
+    match next() {
+        None | Some(Step::Wait) => {}
+        Some(Step::Forget) => front.launches.forget(&launch.namespace, &launch.address_id),
+        Some(Step::Name { .. }) => {
             let Ok(_admitted) = front.admit_mutation() else {
+                return;
+            };
+            // Read again now that no other change from the page can run: the
+            // space may have been turned off while this waited its turn.
+            let Some(Step::Name { session, alias }) = next() else {
                 return;
             };
             let named = run_lifecycle(
@@ -213,7 +226,7 @@ fn check(front: &Front, launch: &Launch) {
                 &launch.namespace,
                 Some(&launch.pane_id),
                 "name",
-                json!({"alias": launch.alias}),
+                json!({ "alias": alias }),
             );
             if named.is_ok_and(|result| result["registered"] == true) {
                 front.launches.forget(&launch.namespace, &launch.address_id);
@@ -228,6 +241,28 @@ fn check(front: &Front, launch: &Launch) {
 fn observe(state: &Path, launch: &Launch) -> Option<Observed> {
     let mut store = StateStore::open_read_only(state).ok()??;
     store.set_busy_timeout(Duration::from_millis(100)).ok()?;
+    let (space, alias) = store
+        .transaction(|transaction| {
+            Ok((
+                transaction.worktree_state(&launch.namespace)?,
+                transaction
+                    .list_pane_addresses(&launch.namespace)?
+                    .into_iter()
+                    .find(|address| address.id.as_str() == launch.address_id)
+                    .map(|address| address.alias),
+            ))
+        })
+        .ok()?;
+    match space {
+        Some(space) if space.activated && !space.deactivated && !space.paused => {}
+        Some(space) if space.activated && !space.deactivated => {
+            return Some(Observed::SpacePaused);
+        }
+        _ => return Some(Observed::SpaceOff),
+    }
+    let Some(alias) = alias else {
+        return Some(Observed::AddressGone);
+    };
     match store
         .dashboard_live_member(&SpaceKey::of(&launch.namespace), &launch.address_id)
         .ok()?
@@ -262,6 +297,7 @@ fn observe(state: &Path, launch: &Launch) -> Option<Observed> {
                 .as_str()
                 .filter(|session| !session.is_empty())
                 .map(str::to_owned),
+            alias,
         },
     })
 }
@@ -304,7 +340,6 @@ mod tests {
         Launch::new(
             StateNamespace::for_space("socket", "w1"),
             "address".into(),
-            "coder".into(),
             "w1:p2".into(),
             started_at_ms,
         )
@@ -455,15 +490,26 @@ mod tests {
 
     #[test]
     fn a_reported_session_is_named_once_and_any_end_forgets() {
-        let session = |value: &str| Observed::Pane {
-            session: Some(value.to_owned()),
+        let pane = |session: Option<&str>| Observed::Pane {
+            session: session.map(str::to_owned),
+            alias: "coder".into(),
+        };
+        let name = |session: &str| Step::Name {
+            session: session.into(),
+            alias: "coder".into(),
         };
         assert_eq!(step(Observed::AddressGone, None), Step::Forget);
         assert_eq!(step(Observed::Occupied, None), Step::Forget);
         assert_eq!(step(Observed::PaneGone, Some("s")), Step::Forget);
-        assert_eq!(step(Observed::Pane { session: None }, None), Step::Wait);
-        assert_eq!(step(session("s"), None), Step::Name("s".into()));
-        assert_eq!(step(session("s"), Some("s")), Step::Wait);
-        assert_eq!(step(session("t"), Some("s")), Step::Name("t".into()));
+        assert_eq!(step(pane(None), None), Step::Wait);
+        assert_eq!(step(pane(Some("s")), None), name("s"));
+        assert_eq!(step(pane(Some("s")), Some("s")), Step::Wait);
+        assert_eq!(step(pane(Some("t")), Some("s")), name("t"));
+    }
+
+    #[test]
+    fn a_space_turned_off_ends_the_launch_and_a_paused_one_waits() {
+        assert_eq!(step(Observed::SpaceOff, None), Step::Forget);
+        assert_eq!(step(Observed::SpacePaused, None), Step::Wait);
     }
 }

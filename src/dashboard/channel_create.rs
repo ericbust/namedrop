@@ -187,6 +187,7 @@ enum AgentRefusal {
     HerdrUnreachable,
     TabFailed,
     NameFailed,
+    NameUnconfirmed(String),
 }
 
 impl AgentRefusal {
@@ -256,6 +257,12 @@ impl AgentRefusal {
                 "500 Internal Server Error",
                 "Namedrop couldn't name the new pane, so its tab was closed again. Try again."
                     .into(),
+            ),
+            Self::NameUnconfirmed(alias) => (
+                "500 Internal Server Error",
+                format!(
+                    "Namedrop opened a tab for @{alias} but couldn't confirm its name. Check the channel before you try again."
+                ),
             ),
         }
     }
@@ -564,6 +571,33 @@ fn read_state<T>(
     store.transaction(read).map_err(|_| ())
 }
 
+/// The address the pane is bound to, read a few times because the hub and
+/// the name step write to the same database.
+fn named_address(
+    state: &Path,
+    namespace: &StateNamespace,
+    pane: &str,
+) -> Result<Option<String>, ()> {
+    let read = || {
+        read_state(state, |tx| {
+            Ok(tx
+                .active_pane_bindings(namespace)?
+                .into_iter()
+                .find(|binding| binding.pane_id == pane)
+                .map(|binding| binding.address_id.as_str().to_owned()))
+        })
+    };
+    let mut found = read();
+    for _ in 0..8 {
+        if found.is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        found = read();
+    }
+    found
+}
+
 fn reply_json(writer: &mut TcpStream, status: &str, body: serde_json::Value) -> io::Result<()> {
     respond(
         writer,
@@ -738,7 +772,7 @@ fn add(front: &Front, key: &SpaceKey, agent: NewAgent) -> Result<(String, String
             AgentRefusal::TabFailed
         })?;
     let pane = tab.root_pane.pane_id;
-    let named = run_lifecycle(
+    if let Err(error) = run_lifecycle(
         state,
         &namespace,
         Some(&pane),
@@ -748,24 +782,22 @@ fn add(front: &Front, key: &SpaceKey, agent: NewAgent) -> Result<(String, String
             "pane_type": agent.kind.pane_type(),
             "persona": agent.persona,
         }),
-    )
-    .map_err(|error| eprintln!("dashboard: could not name the new pane {pane}: {error}"))
-    .and_then(|_| {
-        read_state(state, |tx| {
-            Ok(tx
-                .active_pane_bindings(&namespace)?
-                .into_iter()
-                .find(|binding| binding.pane_id == pane)
-                .map(|binding| binding.address_id.as_str().to_owned()))
-        })?
-        .ok_or(())
-    });
-    let Ok(address_id) = named else {
-        herdr.undo(Undo::Tab(tab.tab.tab_id));
-        return Err(match claim(&agent.alias) {
-            Ok(Some(claim)) => AgentRefusal::NameTaken(agent.alias, claim),
-            _ => AgentRefusal::NameFailed,
-        });
+    ) {
+        eprintln!("dashboard: naming the new pane {pane} failed: {error}");
+    }
+    // The name step saves the name before its last steps, so the pane's own
+    // binding says whether it is named, whatever the step answered. Closing
+    // the tab of a named pane would use the name up.
+    let address_id = match named_address(state, &namespace, &pane) {
+        Ok(Some(address_id)) => address_id,
+        Ok(None) => {
+            herdr.undo(Undo::Tab(tab.tab.tab_id));
+            return Err(match claim(&agent.alias) {
+                Ok(Some(claim)) => AgentRefusal::NameTaken(agent.alias, claim),
+                _ => AgentRefusal::NameFailed,
+            });
+        }
+        Err(()) => return Err(AgentRefusal::NameUnconfirmed(agent.alias)),
     };
     if let Some(command) = agent.kind.command() {
         // A pane that didn't start still shows as needing the person, who can
@@ -777,13 +809,9 @@ fn add(front: &Front, key: &SpaceKey, agent: NewAgent) -> Result<(String, String
         if let Err(error) = started {
             eprintln!("dashboard: could not start {command} in {pane}: {error}");
         }
-        front.launches.record(Launch::new(
-            namespace,
-            address_id.clone(),
-            agent.alias.clone(),
-            pane,
-            now_ms(),
-        ));
+        front
+            .launches
+            .record(Launch::new(namespace, address_id.clone(), pane, now_ms()));
     }
     Ok((address_id, agent.alias))
 }
@@ -993,6 +1021,7 @@ mod tests {
             AgentRefusal::HerdrUnreachable,
             AgentRefusal::TabFailed,
             AgentRefusal::NameFailed,
+            AgentRefusal::NameUnconfirmed("coder".into()),
         ]
         .map(|refusal| refusal.reply());
         let folders = [

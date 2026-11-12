@@ -100,6 +100,11 @@ elif args[:2] == ['worktree', 'list']:
     else:
         sys.stderr.write('{"error":{"code":"not_git_worktree"}}')
         sys.exit(1)
+elif args[:2] == ['pane', 'report-metadata']:
+    if failing('report-metadata'):
+        sys.stderr.write('report-metadata failed')
+        sys.exit(1)
+    print('{}')
 elif args[:2] == ['pane', 'process-info']:
     print(json.dumps({'result': {'process_info': {'shell_pid': 42, 'foreground_process_group_id': 42, 'foreground_processes': []}}}))
 else:
@@ -872,6 +877,28 @@ fn an_agent_that_cannot_be_named_has_its_tab_closed_again() {
     );
 }
 
+#[test]
+fn an_agent_whose_name_was_saved_before_a_later_step_failed_keeps_its_tab() {
+    let f = fixture();
+    let server = Server::start(&f);
+    fail(&f, "report-metadata", true);
+    let response = server.add_agent(
+        "w1",
+        json!({"kind": "claude", "name": "coder", "persona": null}),
+    );
+    assert_eq!(response.status, 201, "{}", response.body);
+    assert_eq!(response.json()["alias"], "coder");
+    let created = creations(&f);
+    assert!(
+        !created.iter().any(|call| call[..2] == ["tab", "close"]),
+        "closing the tab of a named pane would use the name up: {created:?}"
+    );
+    assert!(
+        calls(&f).contains(&args(&["pane", "run", "w1:p4", "claude"])),
+        "the named pane still gets its agent"
+    );
+}
+
 fn snapshots(server: &Server, workspace: &str) -> std::sync::mpsc::Receiver<Value> {
     let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
     write!(
@@ -917,6 +944,55 @@ fn starting_card(frame: &Value) -> Option<Value> {
         .cloned()
 }
 
+/// Herdr starts reporting an agent session for the pane, as it does once a
+/// Claude reaches its prompt.
+fn report_session(f: &Fixture, pane_id: &str, session: &str) {
+    let mut state = read_state(f);
+    let pane = state["panes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|pane| pane["pane_id"] == pane_id)
+        .unwrap();
+    pane["agent"] = json!("claude");
+    pane["agent_status"] = json!("idle");
+    pane["agent_session"] = json!({"value": session});
+    write_state(f, &state);
+}
+
+fn named_sessions(f: &Fixture, address_id: &str, session: &str) -> i64 {
+    f.count(&format!(
+        "SELECT COUNT(*) FROM agent_session_observations WHERE worktree_id = 'w1' \
+         AND address_id = '{address_id}' AND agent_session_id = '{session}'"
+    ))
+}
+
+#[test]
+fn an_agent_started_in_a_channel_then_turned_off_never_turns_it_back_on() {
+    let f = fixture();
+    let server = Server::start(&f);
+    let response = server.add_agent(
+        "w1",
+        json!({"kind": "claude", "name": "coder", "persona": null}),
+    );
+    assert_eq!(response.status, 201, "{}", response.body);
+    let address_id = response.json()["address_id"].as_str().unwrap().to_owned();
+    let deactivated = || f.count("SELECT deactivated FROM worktrees WHERE worktree_id = 'w1'");
+    f.sql("UPDATE worktrees SET deactivated = 1 WHERE worktree_id = 'w1'");
+    report_session(&f, "w1:p4", "session-coder");
+    // The watcher looks every two seconds; three looks name a live launch.
+    thread::sleep(Duration::from_secs(6));
+    assert_eq!(deactivated(), 1, "naming the pane would activate the space");
+    assert_eq!(named_sessions(&f, &address_id, "session-coder"), 0);
+    f.sql("UPDATE worktrees SET deactivated = 0 WHERE worktree_id = 'w1'");
+    thread::sleep(Duration::from_secs(6));
+    assert_eq!(
+        named_sessions(&f, &address_id, "session-coder"),
+        0,
+        "the launch ended when the space was turned off"
+    );
+}
+
 #[test]
 fn an_agent_that_has_not_connected_needs_the_person_until_its_session_is_named() {
     let f = fixture();
@@ -952,22 +1028,9 @@ fn an_agent_that_has_not_connected_needs_the_person_until_its_session_is_named()
         card["summary"]["text"],
         "@coder hasn't connected yet. Open its pane. It may be asking you to trust the folder or to log in. A new Codex connects after its first prompt."
     );
-    let mut state = read_state(&f);
-    let pane = state["panes"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .find(|pane| pane["pane_id"] == "w1:p4")
-        .unwrap();
-    pane["agent"] = json!("claude");
-    pane["agent_status"] = json!("idle");
-    pane["agent_session"] = json!({"value": "session-coder"});
-    write_state(&f, &state);
+    report_session(&f, "w1:p4", "session-coder");
     wait_for("the reported session to be named", || {
-        f.count(&format!(
-            "SELECT COUNT(*) FROM agent_session_observations WHERE worktree_id = 'w1' \
-             AND address_id = '{address_id}' AND agent_session_id = 'session-coder'"
-        )) > 0
+        named_sessions(&f, &address_id, "session-coder") > 0
     });
     loop {
         let frame = frames
