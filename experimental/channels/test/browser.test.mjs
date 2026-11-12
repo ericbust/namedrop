@@ -13541,8 +13541,8 @@ const toPerson = (id, author, text = id) =>
     author,
     legs: [{ to: "human", stage: { stage: "delivered" } }],
   });
-function room(messages) {
-  const value = frame(1, "alpha");
+function room(messages, n = 1, name = "alpha") {
+  const value = frame(n, name);
   const [codex] = value.frame.participants;
   value.frame.participants = [
     { ...codex, address_id: SOUND_CODEX },
@@ -13557,11 +13557,16 @@ function room(messages) {
   value.frame.messages = messages;
   return value;
 }
-async function soundRoom(t, settings, options = {}) {
-  const ui = await open(t, (client) => replay(client, [room([])]), undefined, {
-    sounds: { default: "chime", muted: false, agents: {}, ...settings },
-    ...options,
-  });
+async function soundRoom(t, settings, { messages = [], ...options } = {}) {
+  const ui = await open(
+    t,
+    (client) => replay(client, [room(messages)]),
+    undefined,
+    {
+      sounds: { default: "chime", muted: false, agents: {}, ...settings },
+      ...options,
+    },
+  );
   await ui.live();
   const send = async (messages) => {
     ui.connections.at(-1).send("space", room(messages));
@@ -13736,4 +13741,58 @@ test("SOUNDS h: the agent picker saves the choice with the CSRF header, and prev
   assert.deepEqual(await heardSounds(ui.page, 1), [tune("pop")]);
   await ui.page.keyboard.press("Escape");
   assert.equal(await picker.evaluate((details) => details.open), false);
+});
+
+test("SOUNDS i: a first direct message from an agent that was not a peer when the page loaded plays", async (t) => {
+  let reads = 0;
+  let peers = [];
+  const { ui, unlock } = await soundRoom(
+    t,
+    { agents: { [SOUND_CLAUDE]: "knock" } },
+    {
+      directPeers: () => {
+        reads += 1;
+        return peers;
+      },
+    },
+  );
+  await unlock();
+  await until(() => reads >= 1, "the first directory read");
+  peers = [dmPeer(SOUND_CLAUDE, "dm-1")];
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("knock")]);
+});
+
+test("SOUNDS j: a first direct message from a peer that had no message when the page loaded plays", async (t) => {
+  let reads = 0;
+  let last = null;
+  const { ui, unlock } = await soundRoom(
+    t,
+    { agents: { [SOUND_CLAUDE]: "knock" } },
+    {
+      directPeers: () => {
+        reads += 1;
+        return [dmPeer(SOUND_CLAUDE, last)];
+      },
+    },
+  );
+  await unlock();
+  await until(() => reads >= 1, "the first directory read");
+  last = "dm-1";
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("knock")]);
+});
+
+test("SOUNDS k: a channel that appears after the page loaded plays for a new message to the person, not an old one", async (t) => {
+  const { ui, unlock } = await soundRoom(
+    t,
+    { agents: { [SOUND_CLAUDE]: "bell", [SOUND_CODEX]: "pop" } },
+    { messages: [{ ...toPerson("seen", SOUND_CLAUDE), at_ms: 500 }] },
+  );
+  await unlock();
+  const appear = async (n, name, messages) => {
+    ui.connections.at(-1).send("space", room(messages, n, name));
+    await ui.row(n).waitFor();
+  };
+  await appear(2, "beta", [{ ...toPerson("old", SOUND_CLAUDE), at_ms: 400 }]);
+  await appear(3, "gamma", [{ ...toPerson("new", SOUND_CODEX), at_ms: 600 }]);
+  assert.deepEqual(await heardSounds(ui.page, 1), [tune("pop")]);
 });

@@ -119,19 +119,20 @@ export function directSelection(): string | null {
 }
 // Agents with a new message to the person since the last directory read. The
 // first read hears nothing: it only learns where each conversation stands.
+// After it, a peer seen for the first time rings for any message it has.
 export function heardDirect(
   previous: readonly DirectPeer[] | null,
   next: readonly DirectPeer[],
 ): AgentKey[] {
   if (previous === null) return [];
-  const before = new Map(previous.map((peer) => [directKey(peer), peer]));
+  const before = new Map(
+    previous.map((peer) => [directKey(peer), peer.lastAgentMessageId]),
+  );
   const agents: AgentKey[] = [];
   for (const peer of next) {
-    const known = before.get(directKey(peer));
     if (
-      known === undefined ||
       peer.lastAgentMessageId === null ||
-      peer.lastAgentMessageId === known.lastAgentMessageId
+      peer.lastAgentMessageId === (before.get(directKey(peer)) ?? null)
     )
       continue;
     const key = agentKey(peer.addressId);

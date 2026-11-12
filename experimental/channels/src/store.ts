@@ -63,6 +63,7 @@ export function initialState({
     outbox: new Map(),
     drafts: new Map(),
     heard: nothingHeard,
+    watermark: null,
   };
 }
 export function bootState({
@@ -381,18 +382,23 @@ function hasActivity(a: Channel, b: Channel): boolean {
     )
   );
 }
-// Agents whose new messages in `next` are to the person, oldest first.
+// Agents whose new messages in `next` are to the person, oldest first. With
+// no `previous` snapshot, only messages newer than `watermark` are new.
 export function heardIn(
-  previous: Pick<Channel, "messages" | "latestMessages">,
+  previous: Pick<Channel, "messages" | "latestMessages"> | undefined,
   next: Pick<Channel, "latestMessages" | "members">,
+  watermark: number | null,
 ): AgentKey[] {
   const agents: AgentKey[] = [];
   const person = (id: AddressId | "human") =>
     id === "human" || next.members.get(id)?.kind.type === "human";
+  const fresh = (row: Message) =>
+    previous === undefined
+      ? watermark !== null && row.at > watermark
+      : !previous.latestMessages.has(row.id) && !previous.messages.has(row.id);
   for (const row of next.latestMessages.values()) {
     if (
-      previous.latestMessages.has(row.id) ||
-      previous.messages.has(row.id) ||
+      !fresh(row) ||
       row.progressNote ||
       isSystem(row) ||
       !agentAuthor(row.author, next.members) ||
@@ -403,6 +409,15 @@ export function heardIn(
     if (key !== null && !agents.includes(key)) agents.push(key);
   }
   return agents;
+}
+function newestAt(
+  watermark: number,
+  channel: Pick<Channel, "messages" | "latestMessages">,
+): number {
+  let newest = watermark;
+  for (const rows of [channel.messages, channel.latestMessages])
+    for (const row of rows.values()) newest = Math.max(newest, row.at);
+  return newest;
 }
 function clearUnread(
   unread: ReadonlySet<SpaceKey>,
@@ -433,7 +448,9 @@ function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
   const arrived = [...channels.keys()].some((key) => !state.channels.has(key));
   const selection = settle(state, channels, arrived);
   const unread = new Set([...state.unread].filter((key) => channels.has(key)));
+  let watermark = state.watermark ?? Number.NEGATIVE_INFINITY;
   for (const [key, channel] of channels) {
+    watermark = newestAt(watermark, channel);
     const previous = state.channels.get(key);
     if (
       previous &&
@@ -449,6 +466,7 @@ function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
     unread,
     outbox: settleOutbox(state.outbox, [...channels.values()]),
     viewKnown: state.viewKnown || channels.size > 0 || keys !== null,
+    watermark,
     sync: { kind: keys === null ? "fallback" : "live" },
     landing:
       keys !== null && state.landing.kind === "discovering"
@@ -592,7 +610,7 @@ function step(state: State, event: Event): State {
       const channels = new Map(state.channels);
       channels.set(channel.key, accumulated);
       const selection = settle(state, channels, previous === undefined);
-      const agents = previous ? heardIn(previous, accumulated) : [];
+      const agents = heardIn(previous, accumulated, state.watermark);
       let unread = state.unread;
       if (
         previous &&
@@ -611,6 +629,10 @@ function step(state: State, event: Event): State {
           agents.length === 0
             ? state.heard
             : { seq: state.heard.seq + 1, agents },
+        watermark:
+          state.watermark === null
+            ? null
+            : newestAt(state.watermark, accumulated),
       };
     }
     case "older":

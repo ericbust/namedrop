@@ -7,6 +7,7 @@ import {
   agentKey,
   burstTone,
   createPlayer,
+  nothingHeard,
   type PlayerEnv,
   parseSoundSettings,
   RECIPES,
@@ -142,15 +143,16 @@ type Row = {
   to: string[];
   kind?: string;
   progress_note?: boolean;
+  at?: number;
 };
-function frame(rows: Row[]) {
+function frame(rows: Row[], key = keyA) {
   return {
-    key: keyA,
+    key,
     frame: {
       wire: 1,
       generated_at_ms: 100,
       space: {
-        key: keyA,
+        key,
         workspace_id: "w1",
         display_name: "alpha",
         addressable_label: "alpha",
@@ -167,7 +169,7 @@ function frame(rows: Row[]) {
         message_id: row.id,
         thread_id: row.id,
         in_reply_to: null,
-        at_ms: 100 + n,
+        at_ms: row.at ?? 100 + n,
         author: row.author,
         kind: row.kind ?? "reply",
         progress_note: row.progress_note ?? false,
@@ -179,11 +181,18 @@ function frame(rows: Row[]) {
     },
   };
 }
-function apply(state: State, rows: Row[]): State {
-  const event = parseEvent("space", JSON.stringify(frame(rows)));
+function apply(state: State, rows: Row[], key = keyA): State {
+  const event = parseEvent("space", JSON.stringify(frame(rows, key)));
   assert.ok(event, "frame must parse");
   return reduce(state, event);
 }
+function ready(state: State, keys: string[]): State {
+  const event = parseEvent("ready", JSON.stringify({ keys }));
+  assert.ok(event, "ready must parse");
+  return reduce(state, event);
+}
+const keyB = "b".repeat(20);
+const keyC = "c".repeat(20);
 const before: Row = { id: "old", author: "claude", to: ["human"] };
 const loaded = apply(initialState(), [before]);
 
@@ -222,18 +231,62 @@ test("sounds: agent-to-agent traffic, the person's own posts, terminals, system 
   assert.equal(apply(loaded, [before, ...quiet]).heard, loaded.heard);
 });
 
-test("sounds: messages that arrive in a reconnect's replay stay silent", () => {
+test("sounds: messages that arrive in a reconnect's replay stay silent, in a new channel too", () => {
   let state = reduce(loaded, { type: "opened" });
   state = apply(state, [
     before,
     { id: "missed", author: "claude", to: ["human"] },
   ]);
-  const ready = parseEvent("ready", JSON.stringify({ keys: [keyA] }));
-  assert.ok(ready);
-  state = reduce(state, ready);
+  state = apply(
+    state,
+    [{ id: "elsewhere", author: "codex", to: ["human"] }],
+    keyB,
+  );
+  state = ready(state, [keyA, keyB]);
   assert.equal(state.sync.kind, "live");
   assert.ok(state.channels.get(keyA as SpaceKey)?.latestMessages.has("missed"));
+  assert.ok(
+    state.channels.get(keyB as SpaceKey)?.latestMessages.has("elsewhere"),
+  );
   assert.equal(state.heard, loaded.heard);
+});
+
+test("sounds: a channel that first appears after the first load rings for its new messages to the person, not its old ones", () => {
+  let state = reduce(initialState(), { type: "opened" });
+  state = apply(state, [{ ...before, at: 500 }]);
+  state = ready(state, [keyA]);
+  assert.equal(state.heard, nothingHeard);
+  state = apply(
+    state,
+    [{ id: "old", author: "claude", to: ["human"], at: 400 }],
+    keyB,
+  );
+  assert.ok(state.channels.has(keyB as SpaceKey));
+  assert.equal(state.heard, nothingHeard);
+  state = apply(
+    state,
+    [
+      { id: "aside", author: "claude", to: ["codex"], at: 600 },
+      { id: "new", author: "codex", to: ["human"], at: 601 },
+    ],
+    keyC,
+  );
+  assert.deepEqual(state.heard, { seq: 1, agents: ["codex"] });
+});
+
+test("sounds: the watermark moves with live frames, so a later channel's older message stays silent", () => {
+  let state = reduce(initialState(), { type: "opened" });
+  state = ready(apply(state, [{ ...before, at: 100 }]), [keyA]);
+  state = apply(state, [
+    { ...before, at: 100 },
+    { id: "a2a", author: "claude", to: ["codex"], at: 900 },
+  ]);
+  state = apply(
+    state,
+    [{ id: "late", author: "codex", to: ["human"], at: 800 }],
+    keyB,
+  );
+  assert.equal(state.heard, nothingHeard);
 });
 
 function peer(
@@ -257,7 +310,7 @@ function peer(
   };
 }
 
-test("sounds: a direct message is heard when an agent's last message changes after the first read", () => {
+test("sounds: after the first read, a direct message is heard when an agent's last message changes or a new peer brings one", () => {
   const first = [peer("claude", "m1"), peer("codex", null)];
   assert.deepEqual(heardDirect(null, first), []);
   assert.deepEqual(heardDirect(first, first), []);
@@ -265,7 +318,10 @@ test("sounds: a direct message is heard when an agent's last message changes aft
     heardDirect(first, [peer("claude", "m2"), peer("codex", "m3")]),
     ["claude", "codex"],
   );
-  assert.deepEqual(heardDirect(first, [...first, peer("new", "m4")]), []);
+  assert.deepEqual(
+    heardDirect(first, [...first, peer("new", "m4"), peer("quiet", null)]),
+    ["new"],
+  );
 });
 
 type Start = { freq: number; at: number };
