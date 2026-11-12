@@ -435,7 +435,8 @@ fn name_succeeds_with_a_warning_when_the_cosmetic_tab_label_cannot_be_applied() 
         Arc::clone(&saw_durable_intent),
     );
     space.on_apply(move |_, effect| {
-        if let Effect::RenameTab { label, .. } = effect
+        if let Effect::RenameTab { tab, label } = effect
+            && tab.as_str() == "tab-1"
             && label == "@reviewer"
         {
             *saw.lock().unwrap() = Connection::open(&database_path)
