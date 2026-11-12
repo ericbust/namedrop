@@ -755,6 +755,8 @@ def check_pane_exit(scratch):
         assert profile.in_pane("w:p", "echo out; (exit 3)", "probe", timeout=10) == (3, "out\n")
         long = "echo " + "x" * 2000
         assert profile.in_pane("w:p", long, "long", timeout=10) == (0, "x" * 2000 + "\n")
+        # A reused label runs the new command and reads its own exit code.
+        assert profile.in_pane("w:p", "(exit 5)", "probe", timeout=10) == (5, "")
     finally:
         for process in started:
             process.wait()
@@ -775,7 +777,9 @@ class PastingPanes:
         self.streams = {}
 
     def run(self, command):
+        assert command[:2] == ["herdr", "pane"], command
         verb, pane = command[2], command[3]
+        assert verb == "send-keys" or len(command) == 5, command
         if verb == "run":
             data = "\x1b[200~" + command[-1] + "\x1b[201~\r"
         elif verb == "send-text":
@@ -795,7 +799,9 @@ def check_launch_after_kill():
     profile = object.__new__(testbed.Profile)
     panes = PastingPanes()
     profile.state = {"workspace": "w1", "panes": {"claude": "w1:p2"}}
-    profile.herdr = lambda *args: {"panes": [{"pane_id": "w1:p2", "agent": None}]}
+    # Codex still runs in its own pane; only the killed claude pane is relaunched.
+    profile.herdr = lambda *args: {"panes": [{"pane_id": "w1:p2", "agent": None},
+                                             {"pane_id": "w1:p3", "agent": "codex"}]}
     profile.run = panes.run
     profile.save = lambda: None
     profile.launch("claude", "claude --resume 14c7")
