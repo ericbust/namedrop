@@ -261,6 +261,13 @@ impl Cli {
         }
     }
 
+    pub fn dashboard_idle(&self) -> Option<crate::dashboard::idle::Stop> {
+        match &self.command {
+            Command::Dashboard(args) => args.idle,
+            _ => None,
+        }
+    }
+
     pub fn dashboard_ui(&self) -> Option<&Path> {
         match &self.command {
             Command::Dashboard(args) => args.ui.as_deref(),
@@ -541,6 +548,10 @@ struct DashboardArgs {
     /// Open Channels through Tailscale Serve, or remove its owned handler with off.
     #[arg(long, num_args = 0..=1, default_missing_value = "on", value_parser = ["on", "off"])]
     tailscale: Option<String>,
+    /// Stop the server this long after the last tab closes, or never. Saved
+    /// until you change it. With Tailscale access on, the server never stops.
+    #[arg(long, value_name = "MINUTES|never")]
+    idle: Option<crate::dashboard::idle::Stop>,
     /// Print the URL without opening a browser.
     #[arg(long = "no-open")]
     no_open: bool,
@@ -826,6 +837,28 @@ mod tests {
             None
         );
         assert!(Cli::try_parse_from(["namedrop", "channels", "--tailscale", "anything"]).is_err());
+    }
+
+    #[test]
+    fn channels_idle_takes_minutes_or_never_and_nothing_else() {
+        use crate::dashboard::idle::Stop;
+        let idle = |args: &[&str]| {
+            Cli::try_parse_from([&["namedrop", "channels"], args].concat())
+                .map(|cli| cli.dashboard_idle())
+        };
+        assert_eq!(idle(&[]).unwrap(), None);
+        assert_eq!(idle(&["--idle", "never"]).unwrap(), Some(Stop::Never));
+        assert_eq!(
+            idle(&["--tailscale", "off", "--idle", "30"]).unwrap(),
+            Some(Stop::AfterMinutes(30.try_into().unwrap()))
+        );
+        for refused in ["0", "soon", "1.5"] {
+            let error = idle(&["--idle", refused]).unwrap_err().to_string();
+            assert!(
+                error.contains("`never` or a whole number of minutes"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

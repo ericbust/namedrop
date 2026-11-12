@@ -178,7 +178,8 @@ fn channels_prints_a_code_to_scan_for_a_person_and_the_same_json_for_a_program()
                 "status": "ok",
                 "operation": "dashboard",
                 "data": {"url": null, "space_key": null, "workspace_id": "w1", "server": null,
-                         "opened": false, "tailscale": true},
+                         "opened": false, "tailscale": true,
+                         "idle": {"stop_after_ms": null, "source": "tailscale"}},
             }),
             "{format:?}"
         );
@@ -199,6 +200,11 @@ fn channels_prints_a_code_to_scan_for_a_person_and_the_same_json_for_a_program()
     for shown in &link_only {
         assert!(draws_no_code(shown), "{shown:?}");
         printed_link(shown);
+        assert!(
+            shown.contains("The server keeps running while Tailscale access is on.")
+                && !shown.contains("The server stops"),
+            "{shown:?}"
+        );
     }
     let asks_for_width = |shown: &String| {
         shown.contains("This terminal is too narrow for a QR code to scan. Widen it to ")

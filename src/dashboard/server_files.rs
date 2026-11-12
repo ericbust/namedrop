@@ -53,6 +53,39 @@ impl UiSource {
 }
 
 const ENTRY_TTL: Duration = Duration::from_secs(10 * 60);
+const UI_REQUEST: &str = "ui-request.json";
+const BIND_FAILURE: &str = "bind-failed.json";
+
+impl UiSource {
+    /// Whether a server could serve this now.
+    pub fn usable(&self) -> bool {
+        match self {
+            Self::Embedded => true,
+            Self::Directory(path) => open_directory(path).is_ok(),
+        }
+    }
+}
+
+/// Left by a server that found its Tailscale backend port taken, and removed
+/// by the next server that binds it.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct BindFailure {
+    pub port: u16,
+    pub at_ms: i64,
+}
+
+impl BindFailure {
+    /// How long startup hooks leave a taken port alone before trying again.
+    pub const BACKOFF_MS: i64 = 60_000;
+
+    pub fn read(state: &Path) -> Option<Self> {
+        serde_json::from_slice(&fs::read(state.join("dashboard").join(BIND_FAILURE)).ok()?).ok()
+    }
+
+    pub fn backs_off(&self, port: u16, now_ms: i64) -> bool {
+        self.port == port && now_ms >= self.at_ms && now_ms - self.at_ms < Self::BACKOFF_MS
+    }
+}
 
 struct Successor {
     executable: PathBuf,
@@ -403,6 +436,37 @@ impl ServerFiles {
                 let _ = fs::remove_file(&temporary);
                 e.to_string()
             })
+    }
+
+    /// Asks the running server to hand off to a successor that serves `ui`.
+    pub fn request_ui(&self, ui: &UiSource) -> Result<(), String> {
+        let bytes = serde_json::to_vec(ui).map_err(|e| e.to_string())?;
+        self.write_atomic(UI_REQUEST, &bytes)
+    }
+
+    pub fn requested_ui(&self) -> Option<UiSource> {
+        serde_json::from_slice(&fs::read(self.dir.join(UI_REQUEST)).ok()?).ok()
+    }
+
+    pub fn take_ui_request(&self) -> Option<UiSource> {
+        let requested = self.requested_ui();
+        let _ = fs::remove_file(self.dir.join(UI_REQUEST));
+        requested
+    }
+
+    /// The server could not bind the port its Tailscale handler forwards to.
+    pub fn record_bind_failure(&self, port: u16) {
+        let failure = BindFailure {
+            port,
+            at_ms: super::hub::now_ms(),
+        };
+        if let Ok(bytes) = serde_json::to_vec(&failure) {
+            let _ = self.write_atomic(BIND_FAILURE, &bytes);
+        }
+    }
+
+    pub fn clear_bind_failure(&self) {
+        let _ = fs::remove_file(self.dir.join(BIND_FAILURE));
     }
 
     pub fn restarting(&self) -> bool {
