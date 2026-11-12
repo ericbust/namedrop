@@ -1,3 +1,4 @@
+#![cfg(feature = "test-support")]
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -17,8 +18,9 @@ use namedrop::{
     ResultSetCompletion, ResultSetOutcome, ResultSetStatus, StateNamespace, StateStore, ThreadId,
     complete_capability_profile, execute_integration_operation, execute_lifecycle_operation,
     execute_message_operation, install_integration_package, integration_package,
-    issue_registration_challenge, operation_catalog, package_directory,
-    trusted_delivery_instruction,
+    issue_registration_challenge,
+    mux::fake::{CHECKOUT_LISTINGS, FakeMux, StrictSpace, Takes},
+    operation_catalog, package_directory, trusted_delivery_instruction,
 };
 use std::{
     fs,
@@ -91,26 +93,22 @@ impl Drop for TestDirectory {
     }
 }
 
-struct FakeHerdr;
-
-impl HerdrCommandExecutor for FakeHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let stdout = match args {
-            ["workspace", "list"] => {
-                r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
-            }
-            ["worktree", "list", "--cwd", "/repo", "--json"] | ["worktree", "list", "--json"] => {
-                r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-            }
-            ["pane", "list", "--workspace", "workspace-1"] => {
-                r#"{"result":{"panes":[{"pane_id":"pane-agent","terminal_id":"terminal-agent","tab_id":"tab-1","workspace_id":"workspace-1","agent_session":{"value":"session-1"},"agent_status":"idle"}]}}"#
-            }
-            _ => return Err(format!("unexpected Herdr command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput {
-            stdout: stdout.to_owned(),
-        })
-    }
+/// The world the old `FakeHerdr` listed: one pane that reports a session but
+/// no agent kind. It answered the checkout listings and failed every other
+/// command, input and effects included.
+fn fake_herdr() -> StrictSpace {
+    let mux = FakeMux::world()
+        .endpoint("socket-a")
+        .space("workspace-1")
+        .checkout("/repo")
+        .unstamped()
+        .pane("pane-agent")
+        .terminal("terminal-agent")
+        .tab("tab-1")
+        .session("session-1")
+        .idle()
+        .build();
+    StrictSpace::new(mux, CHECKOUT_LISTINGS, Takes::nothing())
 }
 
 struct FixedClock;
@@ -175,7 +173,8 @@ fn setup_registered_address(directory: &TestDirectory) {
 fn runtime<'a>(
     directory: &'a TestDirectory,
     ids: &'a SequenceIds,
-) -> LifecycleRuntime<'a, FakeHerdr, FixedClock, SequenceIds> {
+    mux: &'a FakeMux,
+) -> LifecycleRuntime<'a, FakeMux, FixedClock, SequenceIds> {
     LifecycleRuntime {
         state_directory: directory.path(),
         home_directory: Some(directory.home()),
@@ -184,7 +183,7 @@ fn runtime<'a>(
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        mux: &FakeHerdr,
+        mux,
         clock: &FixedClock,
         ids,
     }
@@ -313,6 +312,7 @@ fn registration_challenge_rejects_the_reserved_package_attention_namespace() {
 fn restored_current_registration_collision_cannot_resolve_package_attention() {
     let directory = TestDirectory::new();
     let ids = SequenceIds(AtomicU64::new(1));
+    let herdr = fake_herdr();
     setup_registered_address(&directory);
     open_codex_package_attention(&directory);
     insert_restored_registration(
@@ -325,7 +325,7 @@ fn restored_current_registration_collision_cannot_resolve_package_attention() {
     execute_integration_operation(
         "register",
         register_input("nonce-reserved-current"),
-        &runtime(&directory, &ids),
+        &runtime(&directory, &ids, &herdr),
     )
     .unwrap();
 
@@ -336,6 +336,7 @@ fn restored_current_registration_collision_cannot_resolve_package_attention() {
 fn restored_superseded_registration_collision_cannot_resolve_package_attention() {
     let directory = TestDirectory::new();
     let ids = SequenceIds(AtomicU64::new(1));
+    let herdr = fake_herdr();
     let scope = space_namespace();
     setup_registered_address(&directory);
     open_codex_package_attention(&directory);
@@ -362,7 +363,7 @@ fn restored_superseded_registration_collision_cannot_resolve_package_attention()
     execute_integration_operation(
         "register",
         register_input("nonce-current"),
-        &runtime(&directory, &ids),
+        &runtime(&directory, &ids, &herdr),
     )
     .unwrap();
 
@@ -2028,7 +2029,8 @@ fn shared_registration_conformance_binds_a_nonce_to_the_exact_agent_session() {
         let directory = TestDirectory::new();
         setup_registered_address(&directory);
         let ids = SequenceIds(AtomicU64::new(1));
-        let runtime = runtime(&directory, &ids);
+        let herdr = fake_herdr();
+        let runtime = runtime(&directory, &ids, &herdr);
         let challenge = issue_registration_challenge(
             &PaneAddressId::new("address-agent"),
             agent_runtime,
@@ -2100,7 +2102,8 @@ fn malformed_registration_response_opens_attention_for_its_challenge() {
     let directory = TestDirectory::new();
     setup_registered_address(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
-    let runtime = runtime(&directory, &ids);
+    let herdr = fake_herdr();
+    let runtime = runtime(&directory, &ids, &herdr);
     let challenge = issue_registration_challenge(
         &PaneAddressId::new("address-agent"),
         AgentRuntime::Codex,
@@ -2139,7 +2142,8 @@ fn unbinding_a_pane_address_expires_its_exact_session_registration() {
     let directory = TestDirectory::new();
     setup_registered_address(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
-    let runtime = runtime(&directory, &ids);
+    let herdr = fake_herdr();
+    let runtime = runtime(&directory, &ids, &herdr);
     let challenge = issue_registration_challenge(
         &PaneAddressId::new("address-agent"),
         AgentRuntime::Codex,
@@ -2191,7 +2195,8 @@ fn unbinding_a_pane_address_invalidates_its_pending_challenge() {
     let directory = TestDirectory::new();
     setup_registered_address(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
-    let runtime = runtime(&directory, &ids);
+    let herdr = fake_herdr();
+    let runtime = runtime(&directory, &ids, &herdr);
     let challenge = issue_registration_challenge(
         &PaneAddressId::new("address-agent"),
         AgentRuntime::Codex,
@@ -2879,7 +2884,8 @@ fn registration_returns_the_full_generic_catalog_tool_block() {
     let directory = TestDirectory::new();
     setup_registered_address(&directory);
     let ids = SequenceIds(AtomicU64::new(1));
-    let runtime = runtime(&directory, &ids);
+    let herdr = fake_herdr();
+    let runtime = runtime(&directory, &ids, &herdr);
     let challenge = issue_registration_challenge(
         &PaneAddressId::new("address-agent"),
         AgentRuntime::Codex,
