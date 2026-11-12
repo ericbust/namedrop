@@ -1,11 +1,11 @@
 use crate::lifecycle::PaneLabel;
-use crate::mux::AgentState;
+use crate::mux::{AgentState, InputOutcome, Retry};
 use crate::store::LostSettle;
 use crate::{
     ActorKind, Clock, DeliveryAttemptId, DeliveryState, DiscoveredPane, DispatchCandidate,
     HerdrCommandExecutor, IdGenerator, InflightDeliveryAttempt, IntegrationToolInvocation,
-    LeaseDraft, LifecycleRuntime, MutationAttribution, PromptFailureKind, StateNamespace,
-    StateStore, StateTransaction, StoreError, collaboration_executable, discover_worktree,
+    LeaseDraft, LifecycleRuntime, MutationAttribution, StateNamespace, StateStore,
+    StateTransaction, StoreError, collaboration_executable, discover_worktree,
     store::WakeReadiness, tool_environment,
 };
 use serde::{Deserialize, Serialize};
@@ -768,10 +768,29 @@ where
             &second.binding_id,
             &leased.agent_session_id,
         );
-        let prompt_result = if second.pane_type == crate::PaneType::Terminal {
+        let outcome = if second.pane_type == crate::PaneType::Terminal {
             effects.run_terminal(runtime.mux, &owner, &prompt)
         } else {
-            effects.prompt(runtime.mux, &owner, &prompt)
+            let pane = second_discovery
+                .panes
+                .iter()
+                .find(|p| p.pane_id == second.pane_id)
+                .expect("live candidate checked");
+            let expect = pane.agent.as_ref().expect("live candidate checked");
+            let admit = if pane.accepts_prompt() {
+                crate::mux::Admit::Settled
+            } else {
+                crate::mux::Admit::BetweenTurns
+            };
+            effects.prompt(
+                runtime.mux,
+                &owner,
+                crate::mux::PromptRequest {
+                    expect,
+                    text: &prompt,
+                    admit,
+                },
+            )
         };
         let attribution = MutationAttribution::new(
             ActorKind::Plugin,
@@ -779,7 +798,7 @@ where
             runtime.clock.now_unix_ms(),
         );
         if second.pane_type == crate::PaneType::Terminal
-            && prompt_result.is_err()
+            && outcome != InputOutcome::Delivered
             && !matches!(
                 store
                     .transaction(|tx| tx.delivery_attempt_state(&namespace, &leased.attempt_id))
@@ -790,10 +809,8 @@ where
             // A runner's durable claim/result outranks a late transport error.
             continue;
         }
-        let prompt_result =
-            prompt_result.map_err(|error| runtime.mux.classify_prompt_failure(&error));
-        match prompt_result {
-            Ok(_) => {
+        match outcome {
+            InputOutcome::Delivered => {
                 store
                     .transaction(|transaction| {
                         if second.pane_type == crate::PaneType::Terminal {
@@ -825,7 +842,7 @@ where
                     .map_err(|error| error.to_string())?;
                 report.submitted.push(leased.attempt_id);
             }
-            Err(kind) if kind.is_temporary_pre_invocation() => {
+            InputOutcome::Declined(retry, _) => {
                 store
                     .transaction(|transaction| {
                         transaction.return_delivery_attempt_to_queue(
@@ -836,10 +853,9 @@ where
                     })
                     .map_err(|error| error.to_string())?;
                 report.requeued.push(leased.attempt_id);
-                report.retry_without_event |=
-                    kind == PromptFailureKind::TemporaryPreInvocationWithoutEvent;
+                report.retry_without_event |= retry == Retry::AfterDelay;
             }
-            Err(PromptFailureKind::DefinitiveNonRetryable) => {
+            InputOutcome::Refused(_) => {
                 store
                     .transaction(|transaction| {
                         transaction.transition_delivery_attempt(
@@ -853,7 +869,7 @@ where
                     .map_err(|error| error.to_string())?;
                 report.failed.push(leased.attempt_id);
             }
-            Err(_) => {
+            InputOutcome::Ambiguous(_) => {
                 store
                     .transaction(|transaction| {
                         transaction.transition_delivery_attempt(
@@ -1024,7 +1040,9 @@ where
             }
             return held;
         }
-        if batch == CLEAR_BATCHES || effects.delete_claude_code_input(runtime.mux, rows).is_err() {
+        if batch == CLEAR_BATCHES
+            || effects.delete_claude_code_input(runtime.mux, rows) != InputOutcome::Delivered
+        {
             break;
         }
         left = Some(typed.len());

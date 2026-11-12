@@ -1,7 +1,7 @@
 use crate::{
-    ActiveThreadResponse, AgentSessionId, DeliveryAttemptId, DeliveryState, HerdrCommandExecutor,
-    HerdrCommandOutput, PaneBindingId, StateNamespace, StateStore,
-    mux::{InputKind, PaneId},
+    ActiveThreadResponse, AgentSessionId, DeliveryAttemptId, DeliveryState, PaneBindingId,
+    StateNamespace, StateStore,
+    mux::{InputKind, InputOutcome, Key, MuxInput, PaneId, PromptRequest, Recipient},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -26,7 +26,7 @@ const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
 /// 2.1.322 does this in a real pane, and every version from 2.1.261 carries
 /// the same editing command. Its `chat:clearInput` key, Ctrl+L, only draws
 /// the screen again.
-const CLAUDE_CODE_DELETE_LINE: &str = "ctrl+u";
+const CLAUDE_CODE_DELETE_LINE: Key = Key::CtrlU;
 const MAX_MARKER: u64 = 8192;
 static NEXT_MARKER: AtomicU64 = AtomicU64::new(0);
 
@@ -145,12 +145,31 @@ pub(crate) struct PaneEffects {
     _lock: File,
     directory: File,
     marker: CString,
-    pane: String,
+    pane: PaneId,
 }
 
 /// Input for one pane, borrowed from the `PaneEffects` lock that guards it.
 /// Only this module can build one, so `MuxInput::deliver` cannot be reached
-/// around the lock.
+/// around the lock. Inside the crate the compiler enforces that through the
+/// private fields and constructor. Outside it, code can neither fill in the
+/// fields:
+///
+/// ```compile_fail
+/// use namedrop::mux::{InputKind, PaneId, PaneInput};
+/// let pane = PaneId::new("w1:p1");
+/// let _ = PaneInput {
+///     _lock: std::marker::PhantomData,
+///     pane: &pane,
+///     kind: InputKind::Line("ls"),
+/// };
+/// ```
+///
+/// nor call its constructor:
+///
+/// ```compile_fail
+/// use namedrop::mux::{InputKind, PaneInput};
+/// let _ = PaneInput::new(todo!(), InputKind::Line("ls"));
+/// ```
 pub struct PaneInput<'lock> {
     _lock: PhantomData<&'lock PaneEffects>,
     pane: &'lock PaneId,
@@ -158,6 +177,14 @@ pub struct PaneInput<'lock> {
 }
 
 impl<'lock> PaneInput<'lock> {
+    fn new(effects: &'lock PaneEffects, kind: InputKind<'lock>) -> Self {
+        Self {
+            _lock: PhantomData,
+            pane: &effects.pane,
+            kind,
+        }
+    }
+
     pub fn pane(&self) -> &PaneId {
         self.pane
     }
@@ -297,7 +324,7 @@ impl PaneEffects {
             _lock: lock,
             directory,
             marker: CString::new(format!("{key}.json")).map_err(io::Error::from)?,
-            pane: pane.into(),
+            pane: PaneId::new(pane),
         })
     }
 
@@ -313,7 +340,7 @@ impl PaneEffects {
                 &self.directory,
                 &temporary,
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-                &self.pane,
+                self.pane.as_str(),
             )?;
             file.write_all(&serde_json::to_vec(owner)?)?;
             file.sync_all()?;
@@ -339,7 +366,12 @@ impl PaneEffects {
     }
 
     fn ownership(&self, expected: &InputOwner) -> MarkerOwnership {
-        let file = match open_at(&self.directory, &self.marker, libc::O_RDONLY, &self.pane) {
+        let file = match open_at(
+            &self.directory,
+            &self.marker,
+            libc::O_RDONLY,
+            self.pane.as_str(),
+        ) {
             Ok(file) => file,
             Err(error) => {
                 return if error.kind() == io::ErrorKind::NotFound {
@@ -362,38 +394,56 @@ impl PaneEffects {
         }
     }
 
+    /// Records `owner` as the pane's input owner, then sends. A record that
+    /// fails sends nothing, and is held like any failure that cannot prove
+    /// the input never arrived.
+    fn owned_input(
+        &self,
+        mux: &impl MuxInput,
+        owner: &InputOwner,
+        kind: InputKind<'_>,
+    ) -> InputOutcome {
+        if let Err(error) = self.record(owner) {
+            return InputOutcome::Ambiguous(format!(
+                "could not record pane input ownership: {error}"
+            ));
+        }
+        mux.deliver(PaneInput::new(self, kind))
+    }
+
     pub(crate) fn prompt(
         &self,
-        herdr: &impl HerdrCommandExecutor,
+        mux: &impl MuxInput,
         owner: &InputOwner,
-        body: &str,
-    ) -> Result<HerdrCommandOutput, String> {
-        self.record(owner)
-            .map_err(|e| format!("could not record pane input ownership: {e}"))?;
-        herdr.execute(&["agent", "prompt", &self.pane, body])
+        request: PromptRequest<'_>,
+    ) -> InputOutcome {
+        self.owned_input(mux, owner, InputKind::Prompt(request))
     }
 
     /// Presses the key that deletes a line of Claude Code's prompt box,
     /// `presses` times. It types nothing, so the pane's input keeps its owner.
     pub(crate) fn delete_claude_code_input(
         &self,
-        herdr: &impl HerdrCommandExecutor,
+        mux: &impl MuxInput,
         presses: usize,
-    ) -> Result<HerdrCommandOutput, String> {
-        let mut command = vec!["agent", "send-keys", self.pane.as_str()];
-        command.resize(command.len() + presses, CLAUDE_CODE_DELETE_LINE);
-        herdr.execute(&command)
+    ) -> InputOutcome {
+        let keys = vec![CLAUDE_CODE_DELETE_LINE; presses];
+        mux.deliver(PaneInput::new(
+            self,
+            InputKind::Keys {
+                recipient: Recipient::Agent,
+                keys: &keys,
+            },
+        ))
     }
 
     pub(crate) fn run_terminal(
         &self,
-        herdr: &impl HerdrCommandExecutor,
+        mux: &impl MuxInput,
         owner: &InputOwner,
         command: &str,
-    ) -> Result<HerdrCommandOutput, String> {
-        self.record(owner)
-            .map_err(|e| format!("could not record pane input ownership: {e}"))?;
-        herdr.execute(&["pane", "run", &self.pane, command])
+    ) -> InputOutcome {
+        self.owned_input(mux, owner, InputKind::Line(command))
     }
 }
 
@@ -407,7 +457,7 @@ pub(crate) fn interrupt_if_current(
     state: &Path,
     namespace: &StateNamespace,
     responses: &[ActiveThreadResponse],
-    herdr: &(impl crate::mux::MuxRead + HerdrCommandExecutor),
+    herdr: &impl MuxInput,
     cwd: Option<&Path>,
 ) -> InterruptReport {
     let mut report = InterruptReport::default();
@@ -466,11 +516,19 @@ pub(crate) fn interrupt_if_current(
                     return Err("the stopped thread no longer owns its pane input".into());
                 }
             }
-            effects
-                .record(&owner)
-                .map_err(|error| format!("could not record pane input ownership: {error}"))?;
-            herdr.execute(&["agent", "send-keys", &effects.pane, "ctrl+c"])?;
-            Ok(())
+            match effects.owned_input(
+                herdr,
+                &owner,
+                InputKind::Keys {
+                    recipient: Recipient::Agent,
+                    keys: &[Key::CtrlC],
+                },
+            ) {
+                InputOutcome::Delivered => Ok(()),
+                InputOutcome::Declined(_, error)
+                | InputOutcome::Refused(error)
+                | InputOutcome::Ambiguous(error) => Err(error),
+            }
         })();
         match result {
             Ok(()) => report.interrupted_pane_ids.push(response.pane_id.clone()),
@@ -1022,8 +1080,8 @@ mod tests {
     }
 
     struct FakeInput(Mutex<Vec<String>>);
-    impl HerdrCommandExecutor for FakeInput {
-        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+    impl crate::HerdrCommandExecutor for FakeInput {
+        fn execute(&self, args: &[&str]) -> Result<crate::HerdrCommandOutput, String> {
             self.0.lock().unwrap().push(args.join(" "));
             Err("ambiguous transport failure".into())
         }
@@ -1045,9 +1103,9 @@ mod tests {
         gate.record(&delivery()).unwrap();
         assert_eq!(gate.ownership(&delivery()), MarkerOwnership::Match);
         let input = FakeInput(Mutex::new(Vec::new()));
-        assert!(
-            gate.prompt(&input, &InputOwner::Other, "doctor or registration")
-                .is_err()
+        assert_eq!(
+            gate.run_terminal(&input, &InputOwner::Other, "doctor or registration"),
+            InputOutcome::Ambiguous("ambiguous transport failure".into())
         );
         assert_eq!(input.0.lock().unwrap().len(), 1);
         assert!(
@@ -1062,7 +1120,11 @@ mod tests {
         assert_eq!(gate.ownership(&delivery()), MarkerOwnership::Reject);
         fs::remove_file(&marker).unwrap();
         fs::create_dir(&marker).unwrap();
-        assert!(gate.prompt(&input, &delivery(), "forbidden").is_err());
+        assert!(matches!(
+            gate.run_terminal(&input, &delivery(), "forbidden"),
+            InputOutcome::Ambiguous(error)
+                if error.starts_with("could not record pane input ownership: ")
+        ));
         assert_eq!(
             input.0.lock().unwrap().len(),
             1,
@@ -1099,56 +1161,81 @@ mod tests {
         assert!(!state.0.join("outside").exists());
     }
 
-    fn raw_input_paths(directory: &Path, owner: &Path) -> Vec<std::path::PathBuf> {
-        let mut violations = Vec::new();
-        for entry in fs::read_dir(directory).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                violations.extend(raw_input_paths(&path, owner));
-            } else if path.extension().is_some_and(|extension| extension == "rs") && path != owner {
-                let compact: String = fs::read_to_string(&path)
-                    .unwrap()
-                    .chars()
-                    .filter(|character| !character.is_whitespace())
-                    .collect();
-                if [
-                    r#".execute(&["agent","prompt""#,
-                    r#".execute(&["agent","send-keys""#,
-                    r#".execute(&["pane","run""#,
-                ]
-                .iter()
-                .any(|raw| compact.contains(raw))
-                {
-                    violations.push(path);
-                }
-            }
-        }
-        violations
+    fn author() -> crate::mux::fake::FakeMux {
+        crate::mux::fake::FakeMux::world()
+            .space("workspace-1")
+            .pane("pane")
+            .claude()
+            .session("session")
+            .idle()
+            .build()
     }
 
     #[test]
-    fn direct_literal_physical_input_calls_are_owned_here() {
-        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        assert_eq!(
-            raw_input_paths(&source, &source.join("pane_effects.rs")),
-            Vec::<std::path::PathBuf>::new()
-        );
-    }
-
-    #[test]
-    fn raw_input_check_detects_new_nested_files_and_formatting() {
+    fn a_prompt_reaches_the_multiplexer_only_through_its_pane_lock() {
+        use crate::mux::{
+            Admit, Depth, MuxRead, Scope,
+            fake::{Sent, SentInput},
+        };
         let state = State::new();
-        let nested = state.0.join("new/module");
-        fs::create_dir_all(&nested).unwrap();
-        let owner = state.0.join("pane_effects.rs");
-        let bypass = nested.join("input.rs");
-        for (kind, operation) in [("agent", "prompt"), ("agent", "send-keys"), ("pane", "run")] {
-            let source = format!("herdr.execute ( & [ \"{kind}\" ,\n \"{operation}\", pane ] )");
-            fs::write(&owner, &source).unwrap();
-            fs::write(&bypass, &source).unwrap();
-            assert_eq!(raw_input_paths(&state.0, &owner), vec![bypass.clone()]);
-        }
-        fs::write(&bypass, "effects.prompt(herdr, owner, body)").unwrap();
-        assert!(raw_input_paths(&state.0, &owner).is_empty());
+        let mux = author();
+        let expect = mux
+            .survey(Scope::All, Depth::Panes)
+            .unwrap()
+            .spaces
+            .remove(0)
+            .panes
+            .remove(0)
+            .agent
+            .unwrap();
+        let gate = PaneEffects::acquire(&state.0, "socket", "pane").unwrap();
+        let request = PromptRequest {
+            expect: &expect,
+            text: "hello",
+            admit: Admit::Settled,
+        };
+        assert_eq!(
+            gate.prompt(&mux, &delivery(), request),
+            InputOutcome::Delivered
+        );
+        assert_eq!(gate.ownership(&delivery()), MarkerOwnership::Match);
+        assert_eq!(
+            gate.prompt(&mux, &delivery(), request),
+            InputOutcome::Declined(
+                crate::mux::Retry::OnEvent,
+                "pane pane cannot take a prompt now".into()
+            ),
+            "the agent the first prompt started is working"
+        );
+        assert_eq!(
+            gate.delete_claude_code_input(&mux, 2),
+            InputOutcome::Delivered
+        );
+        assert_eq!(
+            gate.run_terminal(&mux, &InputOwner::Other, "ls"),
+            InputOutcome::Delivered
+        );
+        let pane = PaneId::new("pane");
+        assert_eq!(
+            mux.sent(),
+            [
+                Sent {
+                    pane: pane.clone(),
+                    input: SentInput::Prompt("hello".into()),
+                },
+                Sent {
+                    pane: pane.clone(),
+                    input: SentInput::Keys {
+                        recipient: Recipient::Agent,
+                        keys: vec![Key::CtrlU, Key::CtrlU],
+                    },
+                },
+                Sent {
+                    pane,
+                    input: SentInput::Line("ls".into()),
+                },
+            ]
+        );
+        assert_eq!(gate.ownership(&delivery()), MarkerOwnership::Reject);
     }
 }

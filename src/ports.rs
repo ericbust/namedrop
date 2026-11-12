@@ -3,36 +3,6 @@ pub struct HerdrCommandOutput {
     pub stdout: String,
 }
 
-/// Why a prompt submission failed, judged by one question only: **could the
-/// recipient already have the input?** Dispatch decides whether to requeue,
-/// fail or hold from this answer, so a code may only be classified as anything
-/// other than [`PromptFailureKind::AmbiguousInvocation`] when the host
-/// documents which side of that line it falls on.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PromptFailureKind {
-    /// The host refused the submission *before sending any input*, and the
-    /// refusal may pass. Nothing reached the recipient, so returning the
-    /// delivery to the queue cannot duplicate an invocation.
-    TemporaryPreInvocation,
-    /// The host refused input temporarily without a guaranteed wake event.
-    TemporaryPreInvocationWithoutEvent,
-    /// The host rejected the call itself — an identical retry cannot succeed.
-    DefinitiveNonRetryable,
-    /// It cannot be established that the input never arrived. The conservative
-    /// default, and the only safe answer for anything unrecognized: such work
-    /// is held for a human and is never resent automatically.
-    AmbiguousInvocation,
-}
-
-impl PromptFailureKind {
-    pub fn is_temporary_pre_invocation(self) -> bool {
-        matches!(
-            self,
-            Self::TemporaryPreInvocation | Self::TemporaryPreInvocationWithoutEvent
-        )
-    }
-}
-
 pub trait HerdrCommandExecutor {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String>;
 
@@ -55,8 +25,10 @@ pub trait HerdrCommandExecutor {
         Ok(output)
     }
 
-    fn classify_prompt_failure(&self, _error: &str) -> PromptFailureKind {
-        PromptFailureKind::AmbiguousInvocation
+    /// What a failed input command means for its input. Anything an executor
+    /// does not recognize may have reached the pane, so it is never resent.
+    fn input_failure(&self, error: String) -> crate::mux::InputOutcome {
+        crate::mux::InputOutcome::Ambiguous(error)
     }
 }
 

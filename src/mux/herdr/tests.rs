@@ -5,7 +5,7 @@ use crate::{
     AgentRuntime, AgentSessionId, HerdrCommandOutput, SpaceId, WorktreeId,
     mux::{
         Admit, AgentIdentity, AgentKind, AgentState, Badge, Checkout, Gone, Key, MuxEvent,
-        PaneFacts, PaneSlot, PopupScreen, PopupSpec, PromptRequest, Recipient, SessionClaim,
+        PaneFacts, PaneSlot, PopupScreen, PopupSpec, PromptRequest, Recipient, Retry, SessionClaim,
         StateTexts, Style, TerminalId, Wrap,
     },
 };
@@ -562,13 +562,34 @@ fn input_runs_today_s_command_for_each_kind() {
 #[test]
 fn herdr_error_codes_decide_the_input_outcome() {
     for (code, outcome) in [
-        ("agent_not_found", InputOutcome::Declined(Retry::OnEvent)),
-        ("pane_not_found", InputOutcome::Declined(Retry::OnEvent)),
-        ("agent_busy", InputOutcome::Declined(Retry::OnEvent)),
-        ("agent_blocked", InputOutcome::Declined(Retry::OnEvent)),
-        ("agent_not_ready", InputOutcome::Declined(Retry::AfterDelay)),
-        ("conflict", InputOutcome::Declined(Retry::AfterDelay)),
-        ("server_busy", InputOutcome::Declined(Retry::AfterDelay)),
+        (
+            "agent_not_found",
+            InputOutcome::Declined(Retry::OnEvent, error("agent_not_found")),
+        ),
+        (
+            "pane_not_found",
+            InputOutcome::Declined(Retry::OnEvent, error("pane_not_found")),
+        ),
+        (
+            "agent_busy",
+            InputOutcome::Declined(Retry::OnEvent, error("agent_busy")),
+        ),
+        (
+            "agent_blocked",
+            InputOutcome::Declined(Retry::OnEvent, error("agent_blocked")),
+        ),
+        (
+            "agent_not_ready",
+            InputOutcome::Declined(Retry::AfterDelay, error("agent_not_ready")),
+        ),
+        (
+            "conflict",
+            InputOutcome::Declined(Retry::AfterDelay, error("conflict")),
+        ),
+        (
+            "server_busy",
+            InputOutcome::Declined(Retry::AfterDelay, error("server_busy")),
+        ),
         (
             "invalid_request",
             InputOutcome::Refused(error("invalid_request")),
@@ -619,8 +640,8 @@ impl HerdrCommandExecutor for Legacy {
         }
     }
 
-    fn classify_prompt_failure(&self, _error: &str) -> PromptFailureKind {
-        PromptFailureKind::DefinitiveNonRetryable
+    fn input_failure(&self, error: String) -> InputOutcome {
+        InputOutcome::Refused(error)
     }
 }
 

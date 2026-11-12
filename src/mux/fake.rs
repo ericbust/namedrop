@@ -339,7 +339,10 @@ impl FakeMux {
             return outcome;
         }
         if self.lock().pane(pane).is_none() {
-            return InputOutcome::Declined(Retry::OnEvent);
+            return InputOutcome::Declined(
+                Retry::OnEvent,
+                format!("pane {} is gone", pane.as_str()),
+            );
         }
         let InputKind::Prompt(request) = kind else {
             self.record(pane, &kind);
@@ -359,7 +362,10 @@ impl FakeMux {
                 })
         };
         if !admitted {
-            return InputOutcome::Declined(Retry::OnEvent);
+            return InputOutcome::Declined(
+                Retry::OnEvent,
+                format!("pane {} cannot take a prompt now", pane.as_str()),
+            );
         }
         match self.type_prompt(pane, request.text) {
             Ok(()) => InputOutcome::Delivered,

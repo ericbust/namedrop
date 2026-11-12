@@ -47,17 +47,36 @@ pub fn emulate_prompt(
     pane: &PaneId,
     request: &PromptRequest<'_>,
 ) -> InputOutcome {
-    let Ok(mut tap) = channel.tap(pane) else {
-        return InputOutcome::Declined(Retry::AfterDelay);
+    let pane_name = pane.as_str();
+    let mut tap = match channel.tap(pane) {
+        Ok(tap) => tap,
+        Err(ChannelError(error)) => {
+            return InputOutcome::Declined(
+                Retry::AfterDelay,
+                format!("could not watch pane {pane_name}: {error}"),
+            );
+        }
     };
-    let Ok((agent, state)) = channel.facts(pane) else {
-        return InputOutcome::Declined(Retry::AfterDelay);
+    let (agent, state) = match channel.facts(pane) {
+        Ok(facts) => facts,
+        Err(ChannelError(error)) => {
+            return InputOutcome::Declined(
+                Retry::AfterDelay,
+                format!("could not read pane {pane_name}: {error}"),
+            );
+        }
     };
     if !admits(agent.as_ref(), state.as_ref(), request.expect) {
-        return InputOutcome::Declined(Retry::OnEvent);
+        return InputOutcome::Declined(
+            Retry::OnEvent,
+            format!("pane {pane_name} cannot take a prompt now"),
+        );
     }
     if tap.next_change(Duration::ZERO).is_some() {
-        return InputOutcome::Declined(Retry::OnEvent);
+        return InputOutcome::Declined(
+            Retry::OnEvent,
+            format!("pane {pane_name} changed status before the prompt"),
+        );
     }
     if let Err(ChannelError(error)) = channel.paste_submit(pane, request.text) {
         return InputOutcome::Ambiguous(format!(
@@ -232,9 +251,11 @@ mod tests {
         let agent = claude(reported("session-1"));
         for status in [Some("working"), Some("blocked"), Some("busy"), None] {
             let channel = channel(Some(agent.clone()), status, AfterPaste::StartsWorking);
-            assert_eq!(
-                prompt(&channel, &agent, Admit::Settled),
-                InputOutcome::Declined(Retry::OnEvent),
+            assert!(
+                matches!(
+                    prompt(&channel, &agent, Admit::Settled),
+                    InputOutcome::Declined(Retry::OnEvent, _)
+                ),
                 "{status:?}"
             );
             assert!(pasted(&channel).is_empty(), "{status:?}");
@@ -249,10 +270,10 @@ mod tests {
             Some("working"),
             AfterPaste::StartsWorking,
         );
-        assert_eq!(
+        assert!(matches!(
             prompt(&channel, &agent, Admit::BetweenTurns),
-            InputOutcome::Declined(Retry::OnEvent)
-        );
+            InputOutcome::Declined(Retry::OnEvent, _)
+        ));
         assert!(pasted(&channel).is_empty());
     }
 
@@ -275,9 +296,11 @@ mod tests {
             Some(claude(reported("session-1"))),
         ] {
             let channel = channel(found.clone(), Some("idle"), AfterPaste::StartsWorking);
-            assert_eq!(
-                prompt(&channel, &expected, Admit::Settled),
-                InputOutcome::Declined(Retry::OnEvent),
+            assert!(
+                matches!(
+                    prompt(&channel, &expected, Admit::Settled),
+                    InputOutcome::Declined(Retry::OnEvent, _)
+                ),
                 "{found:?}"
             );
             assert!(pasted(&channel).is_empty(), "{found:?}");
@@ -323,10 +346,10 @@ mod tests {
         let mut tap_fails = channel(Some(agent.clone()), Some("idle"), AfterPaste::StartsWorking);
         tap_fails.tap_fails = true;
         for channel in [facts_fail, tap_fails] {
-            assert_eq!(
+            assert!(matches!(
                 prompt(&channel, &agent, Admit::Settled),
-                InputOutcome::Declined(Retry::AfterDelay)
-            );
+                InputOutcome::Declined(Retry::AfterDelay, _)
+            ));
             assert!(pasted(&channel).is_empty());
         }
     }
@@ -336,10 +359,10 @@ mod tests {
         let agent = claude(reported("session-1"));
         let mut channel = channel(Some(agent.clone()), Some("idle"), AfterPaste::StartsWorking);
         channel.changes_after_facts = vec![AgentState::Working];
-        assert_eq!(
+        assert!(matches!(
             prompt(&channel, &agent, Admit::Settled),
-            InputOutcome::Declined(Retry::OnEvent)
-        );
+            InputOutcome::Declined(Retry::OnEvent, _)
+        ));
         assert!(pasted(&channel).is_empty());
     }
 }

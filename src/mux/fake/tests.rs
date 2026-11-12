@@ -194,10 +194,17 @@ fn a_settled_agent_takes_a_prompt_and_starts_working() {
 fn the_native_gate_declines_a_busy_or_absent_agent_before_typing() {
     let mux = author_and_reviewer();
     let reviewer = identity(&mux, "pane-reviewer");
-    for pane in ["pane-reviewer", "pane-shell", "pane-gone"] {
+    for (pane, reason) in [
+        (
+            "pane-reviewer",
+            "pane pane-reviewer cannot take a prompt now",
+        ),
+        ("pane-shell", "pane pane-shell cannot take a prompt now"),
+        ("pane-gone", "pane pane-gone is gone"),
+    ] {
         assert_eq!(
             prompt(&mux, pane, &reviewer, Admit::Settled),
-            InputOutcome::Declined(Retry::OnEvent),
+            InputOutcome::Declined(Retry::OnEvent, reason.into()),
             "{pane}"
         );
     }
@@ -221,7 +228,10 @@ fn the_emulated_gate_declines_between_turns_and_a_replaced_agent() {
     let reviewer = identity(&mux, "pane-reviewer");
     assert_eq!(
         prompt(&mux, "pane-reviewer", &reviewer, Admit::BetweenTurns),
-        InputOutcome::Declined(Retry::OnEvent)
+        InputOutcome::Declined(
+            Retry::OnEvent,
+            "pane pane-reviewer cannot take a prompt now".into()
+        )
     );
     let replaced = AgentIdentity {
         session: SessionClaim::Unreported {
@@ -231,7 +241,10 @@ fn the_emulated_gate_declines_between_turns_and_a_replaced_agent() {
     };
     assert_eq!(
         prompt(&mux, "pane-author", &replaced, Admit::Settled),
-        InputOutcome::Declined(Retry::OnEvent)
+        InputOutcome::Declined(
+            Retry::OnEvent,
+            "pane pane-author cannot take a prompt now".into()
+        )
     );
     assert!(mux.sent().is_empty());
 }

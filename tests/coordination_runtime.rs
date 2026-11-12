@@ -585,11 +585,11 @@ impl HerdrCommandExecutor for Fixture {
             stdout: stdout.to_string(),
         })
     }
-    fn classify_prompt_failure(&self, error: &str) -> PromptFailureKind {
+    fn input_failure(&self, error: String) -> namedrop::mux::InputOutcome {
         if error == "synthetic-preinvocation" {
-            PromptFailureKind::TemporaryPreInvocation
+            namedrop::mux::InputOutcome::Declined(namedrop::mux::Retry::OnEvent, error)
         } else {
-            PromptFailureKind::AmbiguousInvocation
+            namedrop::mux::InputOutcome::Ambiguous(error)
         }
     }
 }

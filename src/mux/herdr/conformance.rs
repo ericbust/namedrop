@@ -298,15 +298,24 @@ trait Subject: MuxRead + MuxAct {
     fn send(&self, pane: &PaneId, kind: InputKind<'_>) -> InputOutcome;
 }
 
+/// The fake and Herdr word a decline differently, so the suite compares only
+/// when it may be retried.
+fn unworded(outcome: InputOutcome) -> InputOutcome {
+    match outcome {
+        InputOutcome::Declined(retry, _) => InputOutcome::Declined(retry, String::new()),
+        outcome => outcome,
+    }
+}
+
 impl Subject for FakeMux {
     fn send(&self, pane: &PaneId, kind: InputKind<'_>) -> InputOutcome {
-        FakeMux::send(self, pane, kind)
+        unworded(FakeMux::send(self, pane, kind))
     }
 }
 
 impl Subject for HerdrMux<Wire> {
     fn send(&self, pane: &PaneId, kind: InputKind<'_>) -> InputOutcome {
-        HerdrMux::send(self, pane, kind)
+        unworded(HerdrMux::send(self, pane, kind))
     }
 }
 
@@ -508,7 +517,11 @@ fn a_settled_agent_takes_a_prompt_and_starts_working() {
 fn a_busy_blocked_absent_or_missing_agent_is_declined_before_any_input() {
     for pane in ["pane-reviewer", "pane-blocked", "pane-shell", "pane-gone"] {
         let (outcome, sent) = agree(world, |mux, world| (prompt(mux, pane), world.sent()));
-        assert_eq!(outcome, InputOutcome::Declined(Retry::OnEvent), "{pane}");
+        assert_eq!(
+            outcome,
+            InputOutcome::Declined(Retry::OnEvent, String::new()),
+            "{pane}"
+        );
         assert!(sent.is_empty(), "{pane}");
     }
 }
@@ -533,7 +546,7 @@ fn lines_and_keys_reach_their_pane() {
         (
             InputOutcome::Delivered,
             InputOutcome::Delivered,
-            InputOutcome::Declined(Retry::OnEvent)
+            InputOutcome::Declined(Retry::OnEvent, String::new())
         )
     );
     assert_eq!(sent.3.len(), 2);

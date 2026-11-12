@@ -203,32 +203,8 @@ impl HerdrCommandExecutor for ProcessHerdr {
         })
     }
 
-    fn classify_prompt_failure(&self, error: &str) -> crate::PromptFailureKind {
-        let code = serde_json::from_str::<serde_json::Value>(error)
-            .ok()
-            .and_then(|value| {
-                value
-                    .pointer("/error/code")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-            });
-        match code.as_deref() {
-            // `herdr agent prompt --help` (0.8.2): "If the agent is already
-            // blocked, submission is rejected with `agent_blocked` before any
-            // input is sent." Like `agent_busy`, the recipient never saw the
-            // prompt, so requeueing cannot duplicate an invocation.
-            Some("agent_not_found" | "pane_not_found" | "agent_busy" | "agent_blocked") => {
-                crate::PromptFailureKind::TemporaryPreInvocation
-            }
-            Some("agent_not_ready" | "conflict" | "server_busy") => {
-                crate::PromptFailureKind::TemporaryPreInvocationWithoutEvent
-            }
-            Some(
-                "invalid_request" | "invalid_args" | "invalid_input" | "unsupported"
-                | "unknown_command",
-            ) => crate::PromptFailureKind::DefinitiveNonRetryable,
-            _ => crate::PromptFailureKind::AmbiguousInvocation,
-        }
+    fn input_failure(&self, error: String) -> crate::mux::InputOutcome {
+        crate::mux::herdr::input_failure(error)
     }
 }
 

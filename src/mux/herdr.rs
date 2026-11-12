@@ -6,17 +6,17 @@ mod events;
 mod wire;
 
 pub use events::{decode_operation_input, decode_plugin_event};
+pub(crate) use wire::input_failure;
 
 use super::{
     Applied, Budget, Depth, Effect, Endpoint, InputKind, InputOutcome, MuxAct, MuxError, MuxInput,
-    MuxKind, MuxRead, PaneId, PaneInput, PaneProcess, Retry, Scope, Screen, ScreenRequest, Survey,
-    TabId,
+    MuxKind, MuxRead, PaneId, PaneInput, PaneProcess, Scope, Screen, ScreenRequest, Survey, TabId,
 };
-use crate::{HerdrCommandExecutor, PromptFailureKind};
+use crate::HerdrCommandExecutor;
 use std::{path::PathBuf, sync::atomic::AtomicBool};
 
 mod transport {
-    use crate::PromptFailureKind;
+    use crate::mux::InputOutcome;
 
     /// Runs one Herdr command and returns its stdout, or its error text.
     /// Public only inside this private module, so nothing outside the
@@ -24,8 +24,8 @@ mod transport {
     pub trait Transport: Send + Sync {
         fn run(&self, args: &[&str]) -> Result<String, String>;
 
-        fn prompt_failure(&self, error: &str) -> PromptFailureKind {
-            super::wire::prompt_failure(error)
+        fn input_failure(&self, error: String) -> InputOutcome {
+            super::wire::input_failure(error)
         }
     }
 }
@@ -70,16 +70,9 @@ impl<T: Transport> HerdrMux<T> {
             InputKind::Keys { recipient, keys } => wire::keys_args(pane, recipient, keys),
         };
         let args: Vec<_> = args.iter().map(String::as_str).collect();
-        let Err(error) = self.transport.run(&args) else {
-            return InputOutcome::Delivered;
-        };
-        match self.transport.prompt_failure(&error) {
-            PromptFailureKind::TemporaryPreInvocation => InputOutcome::Declined(Retry::OnEvent),
-            PromptFailureKind::TemporaryPreInvocationWithoutEvent => {
-                InputOutcome::Declined(Retry::AfterDelay)
-            }
-            PromptFailureKind::DefinitiveNonRetryable => InputOutcome::Refused(error),
-            PromptFailureKind::AmbiguousInvocation => InputOutcome::Ambiguous(error),
+        match self.transport.run(&args) {
+            Ok(_) => InputOutcome::Delivered,
+            Err(error) => self.transport.input_failure(error),
         }
     }
 }
@@ -160,8 +153,8 @@ impl<E: HerdrCommandExecutor + Sync> Transport for Legacy<'_, E> {
     }
 
     /// The executor's own classification, so a bridged fake keeps its answers.
-    fn prompt_failure(&self, error: &str) -> PromptFailureKind {
-        self.0.classify_prompt_failure(error)
+    fn input_failure(&self, error: String) -> InputOutcome {
+        self.0.input_failure(error)
     }
 }
 

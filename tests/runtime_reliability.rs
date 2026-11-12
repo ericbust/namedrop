@@ -778,7 +778,10 @@ fn timeout_overrides_are_bounded_and_cannot_disable_command_execution() {
 
 #[test]
 fn timeout_and_unknown_prompt_results_never_authorize_an_automatic_resend() {
-    use namedrop::{HerdrCommandExecutor, ProcessHerdr, PromptFailureKind};
+    use namedrop::{
+        HerdrCommandExecutor, ProcessHerdr,
+        mux::{InputOutcome, Retry},
+    };
     let herdr = ProcessHerdr::default();
     for error in [
         "Herdr command timed out after 10000 ms",
@@ -791,8 +794,8 @@ fn timeout_and_unknown_prompt_results_never_authorize_an_automatic_resend() {
         r#"{"error":{"code":"timeout"}}"#,
     ] {
         assert_eq!(
-            herdr.classify_prompt_failure(error),
-            PromptFailureKind::AmbiguousInvocation,
+            herdr.input_failure(error.to_owned()),
+            InputOutcome::Ambiguous(error.to_owned()),
             "{error}"
         );
     }
@@ -804,8 +807,8 @@ fn timeout_and_unknown_prompt_results_never_authorize_an_automatic_resend() {
         r#"{"error":{"code":"agent_blocked","message":"agent w1:p1 is blocked and requires interactive input"},"id":"cli:agent:prompt"}"#,
     ] {
         assert_eq!(
-            herdr.classify_prompt_failure(error),
-            PromptFailureKind::TemporaryPreInvocation,
+            herdr.input_failure(error.to_owned()),
+            InputOutcome::Declined(Retry::OnEvent, error.to_owned()),
             "{error}"
         );
     }
@@ -813,12 +816,15 @@ fn timeout_and_unknown_prompt_results_never_authorize_an_automatic_resend() {
 
 #[test]
 fn temporary_prompt_failures_only_request_polling_without_a_guaranteed_event() {
-    use namedrop::{HerdrCommandExecutor, ProcessHerdr, PromptFailureKind};
+    use namedrop::{
+        HerdrCommandExecutor, ProcessHerdr,
+        mux::{InputOutcome, Retry},
+    };
     let herdr = ProcessHerdr::default();
     for (codes, expected) in [
         (
             &["server_busy", "conflict", "agent_not_ready"][..],
-            PromptFailureKind::TemporaryPreInvocationWithoutEvent,
+            Retry::AfterDelay,
         ),
         (
             &[
@@ -827,18 +833,23 @@ fn temporary_prompt_failures_only_request_polling_without_a_guaranteed_event() {
                 "agent_not_found",
                 "pane_not_found",
             ][..],
-            PromptFailureKind::TemporaryPreInvocation,
+            Retry::OnEvent,
         ),
     ] {
         for code in codes {
-            let kind = herdr
-                .classify_prompt_failure(&serde_json::json!({"error": {"code": code}}).to_string());
-            assert_eq!(kind, expected, "{code}");
-            assert!(kind.is_temporary_pre_invocation());
+            let error = serde_json::json!({"error": {"code": code}}).to_string();
+            assert_eq!(
+                herdr.input_failure(error.clone()),
+                InputOutcome::Declined(expected, error),
+                "{code}"
+            );
         }
     }
-    assert!(!PromptFailureKind::AmbiguousInvocation.is_temporary_pre_invocation());
-    assert!(!PromptFailureKind::DefinitiveNonRetryable.is_temporary_pre_invocation());
+    let refused = serde_json::json!({"error": {"code": "invalid_input"}}).to_string();
+    assert_eq!(
+        herdr.input_failure(refused.clone()),
+        InputOutcome::Refused(refused)
+    );
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use crate::codex_app_server::ServedPanes;
 use crate::integration::pane_agent_runtime;
 use crate::lifecycle::{CollaborationSetup, terminal_safe_text};
-use crate::mux::AgentState;
+use crate::mux::{AgentState, InputOutcome};
 use crate::{
     AgentSessionId, AttentionSourceKind, Clock, HerdrCommandExecutor, IdGenerator,
     LifecycleRuntime, PaneAddressLifecycle, StateStore, discover_worktree,
@@ -757,26 +757,28 @@ where
         pane_id,
     )
     .map_err(|error| error.with_alias(alias.as_deref()).to_string())?;
-    let live = live_agent_session(runtime, space_id, pane_id)?;
+    let (live, expect) = live_agent_session(runtime, space_id, pane_id)?;
     if live.as_str() != expected_session_id {
         return Err("The pane changed session; nothing was sent.".to_owned());
     }
     let prompt = doctor_assistance_prompt(&report, pane_id, &live);
+    let request = crate::mux::PromptRequest {
+        expect: &expect,
+        text: &prompt,
+        admit: crate::mux::Admit::Settled,
+    };
     match effects.prompt(
         runtime.mux,
         &crate::pane_effects::InputOwner::Other,
-        &prompt,
+        request,
     ) {
-        Ok(_) => Ok(()),
-        Err(error)
-            if runtime
-                .mux
-                .classify_prompt_failure(&error)
-                .is_temporary_pre_invocation() =>
-        {
+        InputOutcome::Delivered => Ok(()),
+        InputOutcome::Declined(_, error) => {
             Err(format!("Not sent, the agent did not accept it: {error}"))
         }
-        Err(error) => Err(format!("Unconfirmed, do not assume it arrived: {error}")),
+        InputOutcome::Refused(error) | InputOutcome::Ambiguous(error) => {
+            Err(format!("Unconfirmed, do not assume it arrived: {error}"))
+        }
     }
 }
 
@@ -797,13 +799,13 @@ fn invoking_pane_is_served<M: crate::mux::Mux, C, I>(
         .is_some()
 }
 
-/// The Agent Session live in `pane_id` right now, or why Doctor must not
-/// prompt that pane at all.
+/// The Agent Session live in `pane_id` right now and the agent that holds it,
+/// or why Doctor must not prompt that pane at all.
 fn live_agent_session<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
     space_id: &str,
     pane_id: &str,
-) -> Result<AgentSessionId, String>
+) -> Result<(AgentSessionId, crate::mux::AgentIdentity), String>
 where
     M: crate::mux::Mux,
     C: Clock,
@@ -817,8 +819,10 @@ where
     if pane_agent_runtime(&pane).is_none() {
         return Err("The invoking pane is not a supported agent.".to_owned());
     }
-    pane.agent_session_id()
-        .cloned()
+    let session = pane.agent_session_id().cloned();
+    pane.agent
+        .zip(session)
+        .map(|(agent, session)| (session, agent))
         .ok_or_else(|| "No Herdr session identity for this pane now.".to_owned())
 }
 
