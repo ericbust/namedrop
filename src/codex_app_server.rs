@@ -555,6 +555,8 @@ mod tests {
 
     struct Herdr {
         foreground: BTreeMap<String, Vec<u32>>,
+        /// Panes whose reply names no shell, as Herdr can report a pane.
+        no_shell: Vec<&'static str>,
         calls: std::sync::Mutex<Vec<Vec<String>>>,
     }
     impl HerdrCommandExecutor for Herdr {
@@ -573,9 +575,10 @@ mod tests {
                         .iter()
                         .map(|pid| json!({"pid": pid}))
                         .collect::<Vec<_>>();
+                    let shell = (!self.no_shell.contains(pane)).then_some(1);
                     Ok(HerdrCommandOutput {
                         stdout: json!({"result": {"process_info": {
-                            "shell_pid": 1, "foreground_process_group_id": 2,
+                            "shell_pid": shell, "foreground_process_group_id": 2,
                             "foreground_processes": processes
                         }}})
                         .to_string(),
@@ -641,6 +644,7 @@ mod tests {
                 ("w1:p1".to_owned(), vec![in_process.pid()]),
                 ("w1:p2".to_owned(), vec![plain.pid()]),
             ]),
+            no_shell: Vec::new(),
             calls: Default::default(),
         };
         let only_in_process = served(&root, &herdr, &[pane("w1:p1", crate::AgentRuntime::Codex)]);
@@ -669,12 +673,29 @@ mod tests {
     }
 
     #[test]
+    fn an_in_process_pane_herdr_names_no_shell_for_stays_served() {
+        let root = Root::new();
+        let server = Process::server(&root.codex_home());
+        root.write("app-server-daemon/daemon.pid", &pid_record(server.pid()));
+        let in_process = Process::spawn(Command::new("sleep").arg0("--no-daemon").arg("30"));
+        let herdr = Herdr {
+            foreground: BTreeMap::from([("w1:p1".to_owned(), vec![in_process.pid()])]),
+            no_shell: vec!["w1:p1"],
+            calls: Default::default(),
+        };
+        let served = served(&root, &herdr, &[pane("w1:p1", crate::AgentRuntime::Codex)])
+            .expect("a reply without a shell proves nothing, so the pane stays served");
+        assert_eq!(served.pane_ids(), ["w1:p1"]);
+    }
+
+    #[test]
     fn panes_without_codex_read_nothing_and_ask_herdr_nothing() {
         let root = Root::new();
         let server = Process::server(&root.codex_home());
         root.write("app-server-daemon/daemon.pid", &pid_record(server.pid()));
         let herdr = Herdr {
             foreground: BTreeMap::new(),
+            no_shell: Vec::new(),
             calls: Default::default(),
         };
         assert!(
@@ -700,6 +721,7 @@ mod tests {
         fs::create_dir_all(root.codex_home().join("app-server-daemon")).unwrap();
         let herdr = Herdr {
             foreground: BTreeMap::new(),
+            no_shell: Vec::new(),
             calls: Default::default(),
         };
         assert!(served(&root, &herdr, &[pane("w1:p1", crate::AgentRuntime::Codex)]).is_none());

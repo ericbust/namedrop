@@ -147,14 +147,29 @@ fn copy_output(mut reader: impl Read, mut writer: impl Write) -> Result<String, 
 }
 
 pub(crate) fn shell_is_available(mux: &impl MuxRead, pane_id: &str) -> bool {
-    process_info(mux, pane_id).is_some_and(|p| {
-        p.shell_pid
-            .is_some_and(|pid| pid > 0 && Some(pid) == p.foreground_group)
-    })
+    process_info(mux, pane_id).is_some_and(|p| p.shell_pid > 0 && p.shell_pid == p.foreground_group)
 }
 
-fn process_info(mux: &impl MuxRead, pane_id: &str) -> Option<PaneProcess> {
-    mux.process(&PaneId::new(pane_id)).ok()
+/// A process reply that names both the shell and the foreground group. The
+/// terminal checks have always read a reply missing either as no reply.
+struct ShellProcess {
+    shell_pid: u32,
+    foreground_group: u32,
+    foreground_pids: Vec<u32>,
+}
+
+impl ShellProcess {
+    fn from_reply(process: PaneProcess) -> Option<Self> {
+        Some(Self {
+            shell_pid: process.shell_pid?,
+            foreground_group: process.foreground_group?,
+            foreground_pids: process.foreground_pids,
+        })
+    }
+}
+
+fn process_info(mux: &impl MuxRead, pane_id: &str) -> Option<ShellProcess> {
+    ShellProcess::from_reply(mux.process(&PaneId::new(pane_id)).ok()?)
 }
 
 /// A pane ID inherited from the environment only identifies this process when
@@ -172,7 +187,7 @@ pub fn verify_inherited_pane(
 ) -> Result<(), String> {
     let remedy = "Pass --herdr-pane <pane-id> to say which pane this command acts for.";
     let shell_pid = match mux.process(&PaneId::new(pane_id)) {
-        Ok(process) => process.shell_pid,
+        Ok(process) => ShellProcess::from_reply(process).map(|p| p.shell_pid),
         Err(MuxError::Protocol(_)) => None,
         Err(error) => {
             return Err(format!(
@@ -379,11 +394,9 @@ pub fn detect_pane_type<M: MuxRead, C, I>(
     }
     Ok(process_info(runtime.mux, &pane.pane_id)
         .is_some_and(|p| {
-            p.shell_pid.is_some_and(|pid| {
-                pid > 0
-                    && (Some(pid) == p.foreground_group
-                        || p.foreground_pids.contains(&std::process::id()))
-            })
+            p.shell_pid > 0
+                && (p.shell_pid == p.foreground_group
+                    || p.foreground_pids.contains(&std::process::id()))
         })
         .then_some(PaneType::Terminal))
 }

@@ -1,7 +1,7 @@
 use crate::integration::{onboard_settled_integrations, pane_agent_runtime};
 use crate::mux::{
-    AgentIdentity, AgentState, Applied, Depth, Effect, Gone, MuxAct, MuxError, MuxEvent, MuxRead,
-    PaneFacts, PaneId, PaneSlot, PopupScreen, PopupSpec, Scope, StateTexts, Survey, TabId,
+    AgentIdentity, AgentKind, AgentState, Applied, Depth, Effect, Gone, MuxAct, MuxError, MuxEvent,
+    MuxRead, PaneFacts, PaneId, PaneSlot, PopupScreen, PopupSpec, Scope, StateTexts, Survey, TabId,
     TerminalId, resolve_session,
 };
 use crate::{
@@ -51,6 +51,15 @@ impl DiscoveredPane {
         self.agent
             .as_ref()
             .and_then(|agent| resolve_session(&agent.session))
+    }
+
+    /// Whether the multiplexer names the agent running here, as Herdr's
+    /// agent word did. A pane that reports only a session is still an agent
+    /// pane, but it names no agent.
+    pub fn reports_kind(&self) -> bool {
+        self.agent
+            .as_ref()
+            .is_some_and(|agent| agent.kind != AgentKind::Unreported)
     }
 
     pub fn occupant_label(&self) -> Option<&str> {
@@ -249,9 +258,7 @@ where
                     "pane type is uncertain; choose --type terminal or --type agent".to_owned()
                 })?,
             };
-            if pane_type == crate::PaneType::Agent
-                && pane.agent.is_some()
-                && agent_runtime.is_none()
+            if pane_type == crate::PaneType::Agent && pane.reports_kind() && agent_runtime.is_none()
             {
                 return Err(
                     "the current pane must contain a recognized Codex or Claude session".to_owned(),
@@ -1399,7 +1406,7 @@ fn tab_label_owner<'a>(
 ) -> Option<&'a DiscoveredPane> {
     let mut candidates = panes.iter().filter(|pane| {
         pane.tab_id == tab_id
-            && (pane.agent.is_some()
+            && (pane.reports_kind()
                 || addresses.iter().any(|address| {
                     !address.retired && address.pane_id.as_deref() == Some(pane.pane_id.as_str())
                 }))

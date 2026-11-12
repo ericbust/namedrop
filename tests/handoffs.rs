@@ -67,6 +67,8 @@ struct FakeHerdr {
     source_working: std::sync::Mutex<bool>,
     terminal: std::sync::Mutex<bool>,
     shell_ready: std::sync::Mutex<bool>,
+    /// Herdr names no shell for the terminal pane.
+    shell_unreported: std::sync::Mutex<bool>,
     terminal_runs: std::sync::Mutex<Vec<String>>,
     worktree: String,
     /// Report this Space as not being a Git Worktree at all.
@@ -82,6 +84,7 @@ impl FakeHerdr {
             source_working: std::sync::Mutex::new(false),
             terminal: std::sync::Mutex::new(false),
             shell_ready: std::sync::Mutex::new(true),
+            shell_unreported: std::sync::Mutex::new(false),
             terminal_runs: std::sync::Mutex::new(vec![]),
             worktree: worktree.repo.display().to_string(),
             no_worktree: std::sync::Mutex::new(false),
@@ -122,6 +125,7 @@ impl FakeHerdr {
 impl HerdrCommandExecutor for FakeHerdr {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         let mut stdout = match args {
+            ["pane","process-info","--pane","pane-reviewer"] if *self.shell_unreported.lock().unwrap() => serde_json::json!({"result":{"process_info":{"shell_pid":null,"foreground_process_group_id":42,"foreground_processes":[{"pid":std::process::id()}]}}}).to_string(),
             ["pane","process-info","--pane","pane-reviewer"] => serde_json::json!({"result":{"process_info":{"shell_pid":42,"foreground_process_group_id":if *self.shell_ready.lock().unwrap(){42}else{43},"foreground_processes":[{"pid":std::process::id()}]}}}).to_string(),
             ["pane","run","pane-reviewer",command]=>{self.terminal_runs.lock().unwrap().push(command.to_string());"{}".to_owned()},
             // A Herdr pane exports HERDR_WORKSPACE_ID, so an installed session
@@ -411,6 +415,47 @@ fn terminal_command_returns_exit_output_once_and_waits_for_shell() {
     let run = herdr.terminal_runs.lock().unwrap().last().unwrap().clone();
     let id = run.split('\'').rev().nth(1).unwrap();
     assert_eq!(namedrop::execute_terminal(id, &terminal).unwrap(), 0);
+}
+
+#[test]
+fn the_terminal_runner_refuses_a_pane_herdr_names_no_shell_for() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let source = runtime(&directory, &herdr, &ids, "pane-source");
+    register("address-source", &source);
+    *herdr.terminal.lock().unwrap() = true;
+    let terminal = runtime(&directory, &herdr, &ids, "pane-reviewer");
+    namedrop::execute_lifecycle_operation(
+        "name",
+        serde_json::json!({"alias":"build","pane_type":"terminal"}),
+        &terminal,
+    )
+    .unwrap();
+    let sent = dispatch::message(
+        "send",
+        serde_json::json!({"request_id":"terminal-request","source":"@build exit 7","author_kind":"agent_session"}),
+        &source,
+    )
+    .unwrap();
+    let drain = namedrop::drain_mailboxes(&source).unwrap();
+    assert_eq!(drain.terminal_running.len(), 1);
+    let attempt = drain.terminal_running[0].as_str();
+
+    *herdr.shell_unreported.lock().unwrap() = true;
+    let refused = namedrop::execute_terminal(attempt, &terminal).unwrap_err();
+    assert!(refused.contains("foreground process group"), "{refused}");
+    let pending = execute_handoff_operation(
+        "handoff.results",
+        serde_json::json!({"message_id":sent["message_id"]}),
+        &source,
+    )
+    .unwrap();
+    assert_eq!(pending["complete"], false, "{pending}");
+
+    *herdr.shell_unreported.lock().unwrap() = false;
+    assert_eq!(namedrop::execute_terminal(attempt, &terminal).unwrap(), 7);
 }
 
 #[test]

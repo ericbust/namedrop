@@ -27,6 +27,20 @@ impl HerdrCommandExecutor for Shell {
     }
 }
 
+/// Herdr names the pane's shell but no foreground process group.
+struct ShellWithoutGroup(u64);
+impl HerdrCommandExecutor for ShellWithoutGroup {
+    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+        assert_eq!(args, ["pane", "process-info", "--pane", "wH:p1"]);
+        Ok(HerdrCommandOutput {
+            stdout: format!(
+                r#"{{"result":{{"process_info":{{"pane_id":"wH:p1","shell_pid":{},"foreground_process_group_id":null,"foreground_processes":[]}}}}}}"#,
+                self.0
+            ),
+        })
+    }
+}
+
 /// A live process that is certainly not an ancestor of this one.
 fn unrelated_process() -> std::process::Child {
     Command::new("sleep").arg("30").spawn().unwrap()
@@ -58,6 +72,17 @@ fn an_inherited_pane_herdr_cannot_describe_is_refused_with_herdr_s_own_reason() 
     let error = verify_inherited_pane(&Shell(None), "wH:p1", &[]).unwrap_err();
     assert!(error.contains("HERDR_PANE_ID=wH:p1"), "{error}");
     assert!(error.contains("pane not found"), "{error}");
+    assert!(error.contains("--herdr-pane"), "{error}");
+}
+
+#[test]
+fn an_inherited_pane_herdr_names_no_foreground_group_for_is_refused() {
+    let parent = u64::from(std::os::unix::process::parent_id());
+    let error = verify_inherited_pane(&ShellWithoutGroup(parent), "wH:p1", &[]).unwrap_err();
+    assert!(
+        error.contains("Herdr reports no shell for pane wH:p1"),
+        "{error}"
+    );
     assert!(error.contains("--herdr-pane"), "{error}");
 }
 
