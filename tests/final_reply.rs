@@ -4477,7 +4477,7 @@ fn a_pane_moved_to_another_workspace_loses_its_held_answer_only_once_it_closes()
             "pane-elsewhere".to_owned(),
             Some("session-reviewer".to_owned())
         )],
-        "workspace-2's drains must see the session the move took along"
+        "fixture precondition: the fixture lists the moved pane in workspace-2 until it closes"
     );
     let long_after = IDLE + 3 * UNBOUND_GRACE_MS;
     assert_eq!(space.observe_at(IDLE + UNBOUND_GRACE_MS), None);
@@ -4493,7 +4493,11 @@ fn a_pane_moved_to_another_workspace_loses_its_held_answer_only_once_it_closes()
 
     let closed = long_after + 1;
     space.moved_pane_closed_at(closed);
-    assert_eq!(space.workspace_2_panes(), []);
+    assert_eq!(
+        space.workspace_2_panes(),
+        [],
+        "fixture precondition: the fixture stops listing the moved pane once it closes"
+    );
     let lost_at = closed + UNBOUND_GRACE_MS;
     assert_eq!(space.observe_at(closed), Some(lost_at));
     assert!(!space.disposition_warning_ever_opened());
