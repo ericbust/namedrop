@@ -963,6 +963,358 @@ fn an_idle_exit_rotates_the_browser_session() {
     );
 }
 
+fn free_port() -> u16 {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// The record `namedrop channels --tailscale` leaves, without a real tailnet.
+fn record_tailscale(state: &Path, phase: &str, backend_port: u16) {
+    fs::create_dir_all(state.join("dashboard")).unwrap();
+    fs::write(
+        state.join("dashboard/tailscale.json"),
+        serde_json::json!({
+            "version": 1,
+            "state": phase,
+            "handler": {
+                "dns_name": "device.tail123.ts.net",
+                "https_port": 443,
+                "owner_login": "owner@example.com",
+                "backend_port": backend_port,
+            },
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_server_with_tailscale_access_outlives_the_idle_limit_and_a_local_one_stops() {
+    let directory = TestDirectory::new();
+    let tailnet_state = directory.path().join("tailnet/state");
+    let local_state = directory.path().join("local/state");
+    seed(&tailnet_state, "w1", &["a"]);
+    seed(&local_state, "w1", &["a"]);
+    let port = free_port();
+    record_tailscale(&tailnet_state, "enabled", port);
+
+    let mut tailnet = Server::start(&tailnet_state, Some(300));
+    assert_eq!(
+        tailnet.port, port,
+        "it serves the port the handler forwards to"
+    );
+    let mut local = Server::start_with(&local_state, Some(300), |child| {
+        assert!(
+            eventually(Duration::from_secs(3), || child.try_wait().unwrap()).is_some(),
+            "startup can be descheduled until after the server's idle exit"
+        );
+    });
+    assert!(
+        local.exits_within(Duration::from_secs(3)),
+        "a local server with no tab stops at its idle limit"
+    );
+    assert!(
+        !tailnet.exits_within(Duration::from_secs(2)),
+        "a server a Tailscale handler points at must outlive the same idle limit"
+    );
+
+    // What `namedrop channels --tailscale off` does last.
+    fs::remove_file(tailnet_state.join("dashboard/tailscale.json")).unwrap();
+    assert!(
+        tailnet.exits_within(Duration::from_secs(3)),
+        "with Tailscale access off the idle limit applies again"
+    );
+}
+
+fn channels(root: &Path, extra: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        .args(["--json", "--plugin-state"])
+        .arg(root.join("state"))
+        .args(["--herdr-socket", SOCKET, "--herdr-workspace", "w1"])
+        .args(["channels", "--no-open"])
+        .args(extra)
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("HERDR_WORKSPACE_ID")
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("HERDR_PLUGIN_STATE_DIR")
+        .env_remove("NAMEDROP_DASHBOARD_IDLE_MS")
+        .env("HERDR_BIN_PATH", root.join("herdr"))
+        .output()
+        .unwrap()
+}
+
+fn stop_servers(state: &Path, signal: &str) {
+    let _ = Command::new("pkill")
+        .args([
+            signal,
+            "-f",
+            &format!("{} dashboard-server", state.display()),
+        ])
+        .status();
+    assert!(
+        eventually(Duration::from_secs(5), || (live_servers(state) == 0)
+            .then_some(()))
+        .is_some()
+    );
+}
+
+#[test]
+fn the_idle_setting_is_saved_reported_and_kept_across_a_server_restart() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = TestDirectory::new();
+    let state = state(&directory);
+    let _stop = StopOnDrop(state.clone());
+    fake_herdr(directory.path());
+    let idle = |extra: &[&str]| {
+        let output = channels(directory.path(), extra);
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["data"]["idle"].clone()
+    };
+    let never = serde_json::json!({"stop_after_ms": null, "source": "setting"});
+
+    assert_eq!(
+        idle(&[]),
+        serde_json::json!({"stop_after_ms": 600_000, "source": "default"})
+    );
+    assert_eq!(idle(&["--idle", "never"]), never);
+    let setting = state.join("dashboard/idle");
+    assert_eq!(fs::read_to_string(&setting).unwrap(), "never");
+    assert_eq!(
+        fs::metadata(&setting).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(idle(&[]), never, "a later plain open keeps the setting");
+
+    stop_servers(&state, "-TERM");
+    assert_eq!(idle(&[]), never, "the setting outlives the server");
+
+    assert_eq!(
+        idle(&["--idle", "30"]),
+        serde_json::json!({"stop_after_ms": 1_800_000, "source": "setting"})
+    );
+    let refused = channels(directory.path(), &["--idle", "0"]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stdout)
+            .contains("`never` or a whole number of minutes, 1 or more"),
+        "{refused:?}"
+    );
+    assert_eq!(fs::read_to_string(&setting).unwrap(), "30");
+
+    record_tailscale(&state, "enabled", port_of_server(&state));
+    assert_eq!(
+        idle(&[]),
+        serde_json::json!({"stop_after_ms": null, "source": "tailscale"}),
+        "Tailscale access overrides a saved limit"
+    );
+}
+
+fn server_record(state: &Path) -> Option<serde_json::Value> {
+    serde_json::from_slice(&fs::read(state.join("dashboard/server.json")).ok()?).ok()
+}
+
+fn port_of_server(state: &Path) -> u16 {
+    server_record(state).unwrap()["port"].as_u64().unwrap() as u16
+}
+
+/// The command Herdr runs each time it starts.
+fn herdr_startup(root: &Path) {
+    let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        .arg("--plugin-state")
+        .arg(root.join("state"))
+        .args(["--herdr-socket", SOCKET, "--herdr-workspace", "w1"])
+        .arg("reconcile")
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("HERDR_WORKSPACE_ID")
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("HERDR_PLUGIN_STATE_DIR")
+        .env_remove("NAMEDROP_DASHBOARD_IDLE_MS")
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("HERDR_BIN_PATH", root.join("herdr"))
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("Could not start Channels again"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn herdr_startup_starts_the_server_again_only_while_tailscale_access_is_on() {
+    let directory = TestDirectory::new();
+    let state = state(&directory);
+    let _stop = StopOnDrop(state.clone());
+    fake_herdr(directory.path());
+    seed(&state, "w1", &["a"]);
+    let port = free_port();
+    let serving = |state: &Path| {
+        eventually(Duration::from_secs(10), || {
+            let record = server_record(state)?;
+            (record["port"] == port && TcpStream::connect(("127.0.0.1", port)).is_ok())
+                .then(|| record["pid"].as_u64().unwrap())
+        })
+    };
+    let stays_stopped = |why: &str| {
+        herdr_startup(directory.path());
+        thread::sleep(Duration::from_millis(500));
+        assert_eq!(live_servers(&state), 0, "{why}");
+    };
+
+    stays_stopped("local Channels is started by the person, not by Herdr");
+    record_tailscale(&state, "installing", port);
+    stays_stopped("a setup that never finished grants no access to serve");
+
+    record_tailscale(&state, "enabled", port);
+    herdr_startup(directory.path());
+    let first = serving(&state).expect("Herdr's startup starts the server on the handler's port");
+    let session = fs::read_to_string(state.join("dashboard/session")).unwrap();
+
+    herdr_startup(directory.path());
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(live_servers(&state), 1, "a running server is left alone");
+    assert_eq!(serving(&state), Some(first));
+
+    stop_servers(&state, "-KILL");
+    herdr_startup(directory.path());
+    let second = eventually(Duration::from_secs(10), || {
+        serving(&state).filter(|pid| *pid != first)
+    });
+    assert!(
+        second.is_some(),
+        "a killed server comes back on the same port"
+    );
+    assert_eq!(
+        fs::read_to_string(state.join("dashboard/session")).unwrap(),
+        session,
+        "a signed-in device stays signed in"
+    );
+}
+
+#[test]
+fn herdr_startup_leaves_the_server_to_a_tailscale_operation_in_progress() {
+    let directory = TestDirectory::new();
+    let state = state(&directory);
+    let _stop = StopOnDrop(state.clone());
+    fake_herdr(directory.path());
+    seed(&state, "w1", &["a"]);
+    let port = free_port();
+    record_tailscale(&state, "enabled", port);
+
+    // `namedrop channels --tailscale off` holds this lock from before it
+    // reads the record until after it removes it.
+    let operation = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(state.join("dashboard/tailscale.lock"))
+        .unwrap();
+    operation.lock().unwrap();
+    herdr_startup(directory.path());
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        live_servers(&state),
+        0,
+        "startup must not start a server while a removal may be taking the record away"
+    );
+    fs::remove_file(state.join("dashboard/tailscale.json")).unwrap();
+    drop(operation);
+
+    herdr_startup(directory.path());
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        live_servers(&state),
+        0,
+        "the record is gone, so nothing starts"
+    );
+
+    record_tailscale(&state, "enabled", port);
+    herdr_startup(directory.path());
+    assert!(
+        eventually(Duration::from_secs(10), || (live_servers(&state) == 1
+            && TcpStream::connect(("127.0.0.1", port)).is_ok())
+        .then_some(()))
+        .is_some(),
+        "with the lock free and the record enabled, startup starts the server"
+    );
+}
+
+#[test]
+fn herdr_startup_waits_a_minute_before_it_retries_a_port_another_program_holds() {
+    let directory = TestDirectory::new();
+    let state = state(&directory);
+    let _stop = StopOnDrop(state.clone());
+    fake_herdr(directory.path());
+    seed(&state, "w1", &["a"]);
+    let other_program = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = other_program.local_addr().unwrap().port();
+    record_tailscale(&state, "enabled", port);
+    let marker = state.join("dashboard/bind-failed.json");
+    let failure =
+        || -> Option<serde_json::Value> { serde_json::from_slice(&fs::read(&marker).ok()?).ok() };
+    let refused_starts = || {
+        fs::read_to_string(state.join("dashboard/server.log"))
+            .unwrap_or_default()
+            .matches("could not bind the owned Tailscale backend port")
+            .count()
+    };
+
+    herdr_startup(directory.path());
+    let noted = eventually(Duration::from_secs(10), failure)
+        .expect("the server that could not bind leaves a note");
+    assert_eq!(noted["port"], port);
+    assert_eq!(refused_starts(), 1);
+
+    for _ in 0..3 {
+        herdr_startup(directory.path());
+    }
+    thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        refused_starts(),
+        1,
+        "three more events inside the minute start no server"
+    );
+    assert_eq!(live_servers(&state), 0);
+
+    // The minute has passed and the port is still taken: one more try.
+    let mut old = noted.clone();
+    old["at_ms"] = (noted["at_ms"].as_i64().unwrap() - 61_000).into();
+    fs::write(&marker, old.to_string()).unwrap();
+    herdr_startup(directory.path());
+    assert!(
+        eventually(Duration::from_secs(10), || (refused_starts() == 2)
+            .then_some(()))
+        .is_some(),
+        "after the minute, startup tries once more"
+    );
+    assert!(
+        eventually(Duration::from_secs(5), || failure()
+            .filter(|now| now["at_ms"].as_i64() > old["at_ms"].as_i64()))
+        .is_some(),
+        "and the failed try starts a new minute"
+    );
+
+    // The other program is gone and the minute has passed.
+    drop(other_program);
+    fs::write(&marker, old.to_string()).unwrap();
+    herdr_startup(directory.path());
+    assert!(
+        eventually(Duration::from_secs(10), || (server_record(&state)?["port"]
+            == port
+            && TcpStream::connect(("127.0.0.1", port)).is_ok())
+        .then_some(()))
+        .is_some(),
+        "the server binds the freed port"
+    );
+    assert!(
+        eventually(Duration::from_secs(5), || (!marker.exists()).then_some(())).is_some(),
+        "a server that binds removes the note"
+    );
+}
+
 #[test]
 fn racing_opens_converge_on_one_server() {
     let directory = TestDirectory::new();

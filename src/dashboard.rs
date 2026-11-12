@@ -5,6 +5,7 @@ mod channel_service;
 mod coordination_review;
 mod http;
 mod hub;
+pub mod idle;
 mod images;
 mod observer_guard;
 mod reminders;
@@ -49,18 +50,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-const DEFAULT_IDLE: Duration = Duration::from_secs(10 * 60);
-
 pub fn open(
     runtime: &LifecycleRuntime<'_, impl HerdrCommandExecutor, impl Clock, impl IdGenerator>,
     open_browser: bool,
     ui_directory: Option<&Path>,
     tailscale: Option<bool>,
+    idle: Option<idle::Stop>,
 ) -> Result<Value, String> {
     if tailscale == Some(false) {
-        return disable_tailscale(runtime.state_directory);
+        return disable_tailscale(runtime.state_directory, idle);
     }
     let files = ServerFiles::at(runtime.state_directory)?;
+    if let Some(stop) = idle {
+        idle::save(&files, stop)?;
+    }
     let _tailscale_operation = tailscale
         .map(|_| tailscale::operation_lock(&files))
         .transpose()?;
@@ -98,15 +101,65 @@ pub fn open(
         "server": server,
         "opened": opened,
         "tailscale": tailscale == Some(true),
+        "idle": idle_policy(files.state()).json(),
     }))
 }
 
 /// Disable tailnet access without workspace discovery or starting a server.
-pub fn disable_tailscale(state: &Path) -> Result<Value, String> {
+pub fn disable_tailscale(state: &Path, idle: Option<idle::Stop>) -> Result<Value, String> {
     let files = ServerFiles::at(state)?;
+    if let Some(stop) = idle {
+        idle::save(&files, stop)?;
+    }
     let _operation = tailscale::operation_lock(&files)?;
     tailscale::disable(&files)?;
-    Ok(json!({"tailscale": "off"}))
+    Ok(json!({"tailscale": "off", "idle": idle_policy(state).json()}))
+}
+
+/// The rule a server on this state follows now. A record that is malformed or
+/// half removed still counts as owned, as it does for the server.
+pub(crate) fn idle_policy(state: &Path) -> idle::Policy {
+    idle::policy(
+        state,
+        !matches!(tailscale::read(state), Ok(None)),
+        idle::environment(),
+    )
+}
+
+/// Starts the server again when Tailscale access is on and no server holds
+/// the claim, as after a reboot, a Herdr restart or a crash. Herdr's startup
+/// command and its pane events call this, so with Tailscale access off it
+/// costs one failed file read.
+pub fn revive(state: &Path) -> Result<bool, String> {
+    if !matches!(
+        tailscale::read(state),
+        Ok(Some(tailscale::Ownership::Enabled(_)))
+    ) {
+        return Ok(false);
+    }
+    let files = ServerFiles::at(state)?;
+    // Under the lock a removal cannot take the record away between this
+    // read and the spawn. An operation that holds it settles the server.
+    let Some(_operation) = tailscale::try_operation_lock(&files)? else {
+        return Ok(false);
+    };
+    let Ok(Some(tailscale::Ownership::Enabled(handler))) = tailscale::read(state) else {
+        return Ok(false);
+    };
+    // A port another program holds fails every start, so wait before the next.
+    if server_files::BindFailure::read(state)
+        .is_some_and(|failure| failure.backs_off(handler.backend_port, hub::now_ms()))
+    {
+        return Ok(false);
+    }
+    let Some(_no_handoff) = files.handoff_reader()? else {
+        return Ok(false);
+    };
+    if files.claimed()? {
+        return Ok(false);
+    }
+    files.spawn(&files.info().map(|info| info.ui).unwrap_or_default())?;
+    Ok(true)
 }
 
 /// Idempotent: converges on the one live server whether it was already
@@ -120,9 +173,12 @@ fn ensure(
     let pinned_port = ownership
         .as_ref()
         .map(|record| record.handler().backend_port);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut deadline = Instant::now() + Duration::from_secs(5);
     let mut spawned = false;
     let mut waiting_for_matching_handoff = false;
+    // With Tailscale access on, a killed server comes back with the app it
+    // had, so the running server is asked to hand off to the requested one.
+    let mut switching = false;
     loop {
         let handoff_reader = files.handoff_reader()?;
         if handoff_reader.is_none() {
@@ -130,7 +186,8 @@ fn ensure(
             if let Some(info) = &active {
                 if &info.ui == ui {
                     waiting_for_matching_handoff = true;
-                } else if !waiting_for_matching_handoff || Instant::now() >= deadline {
+                } else if !(waiting_for_matching_handoff || switching) || Instant::now() >= deadline
+                {
                     return Err(format!(
                         "the dashboard server is running with {} and is restarting; retry when it finishes before requesting {}",
                         info.ui.setting(),
@@ -152,6 +209,23 @@ fn ensure(
                 if pinned_port.is_some_and(|port| port != info.port) {
                     return Err("Channels server port differs from its owned Tailscale target; turn Tailscale off before restarting it".to_owned());
                 }
+                if &info.ui != ui && pinned_port.is_some() {
+                    if !switching {
+                        files.request_ui(ui)?;
+                        switching = true;
+                        deadline = Instant::now() + Duration::from_secs(30);
+                    } else if Instant::now() >= deadline {
+                        return Err(format!(
+                            "the dashboard server did not switch from {} to {}; see {}",
+                            info.ui.setting(),
+                            ui.setting(),
+                            files.state().join("dashboard/server.log").display()
+                        ));
+                    }
+                    drop(handoff_reader);
+                    thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
                 if &info.ui != ui {
                     if phase == ServerPhase::Restarting {
                         return Err(format!(
@@ -167,7 +241,12 @@ fn ensure(
                         ui.setting()
                     ));
                 }
-                return Ok((if spawned { "started" } else { "running" }, info));
+                let server = match (spawned, switching) {
+                    (true, _) => "started",
+                    (false, true) => "restarted",
+                    (false, false) => "running",
+                };
+                return Ok((server, info));
             }
         } else if !spawned {
             files.spawn(ui)?;
@@ -318,7 +397,13 @@ fn run_server(
     let listener = bind(
         pinned.or_else(|| files.info().map(|info| info.port)),
         pinned.is_some(),
-    )?;
+    )
+    .inspect_err(|_| {
+        if let Some(port) = pinned {
+            files.record_bind_failure(port);
+        }
+    })?;
+    files.clear_bind_failure();
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let instance = server_files::random_hex(16)?;
     let mut channel_service = channel_service::ChannelService::start(state)?;
@@ -355,7 +440,7 @@ fn run_server(
     let accept_stop = stop.clone();
     let acceptor = thread::spawn(move || http::accept_loop(listener, front, accept_stop));
     eprintln!("dashboard: serving 127.0.0.1:{port}");
-    let verdict = hub::run(&files, &instance, idle(), commands);
+    let verdict = hub::run(&files, &instance, idle::environment(), commands);
     eprintln!("dashboard: stopping: {}", verdict.reason());
     restarting.store(true, Ordering::Release);
     {
@@ -368,7 +453,8 @@ fn run_server(
     match verdict {
         hub::Verdict::Handoff(_) => {
             restarting.store(true, Ordering::Release);
-            files.handoff(&ui, claim, || {
+            let next_ui = files.take_ui_request().unwrap_or_else(|| ui.clone());
+            files.handoff(&next_ui, claim, || {
                 stop.store(true, Ordering::Release);
                 TcpStream::connect_timeout(
                     &(Ipv4Addr::LOCALHOST, port).into(),
@@ -406,13 +492,6 @@ fn bind(preferred: Option<u16>, pinned: bool) -> Result<TcpListener, String> {
         }
     }
     TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| format!("could not listen: {e}"))
-}
-
-fn idle() -> Duration {
-    std::env::var("NAMEDROP_DASHBOARD_IDLE_MS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .map_or(DEFAULT_IDLE, Duration::from_millis)
 }
 
 #[cfg(test)]
