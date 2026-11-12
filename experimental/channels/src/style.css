@@ -3057,7 +3057,8 @@ body.resizing-panels * {
   margin: 0 auto var(--space-4);
 }
 
-/* A drawn diagram. A wide one scrolls in its own box, so the page never does. */
+/* A drawn diagram. One wider than its column is shown smaller to fit, and its
+   full size is one press away. */
 .diagram {
   max-width: 100%;
   margin: 6px 0;
@@ -3069,15 +3070,19 @@ body.resizing-panels * {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--bg-raised);
-  overflow: auto;
 }
 .diagram-view {
   display: block;
+  max-width: 100%;
   padding: 10px 12px;
   cursor: zoom-in;
 }
 .diagram img {
   display: block;
+  max-width: 100%;
+  height: auto;
+}
+.diagram-full img {
   max-width: none;
 }
 .diagram .diagram-box + pre {

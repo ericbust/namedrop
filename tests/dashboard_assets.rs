@@ -216,16 +216,41 @@ impl Response {
     }
 
     fn security(&self) -> BTreeMap<&str, &str> {
+        let mut headers = self.protection();
+        headers.insert("Cache-Control", self.headers["Cache-Control"].as_str());
+        headers
+    }
+
+    /// The security headers apart from caching, which differs by kind of file.
+    fn protection(&self) -> BTreeMap<&str, &str> {
         [
             "Content-Security-Policy",
             "X-Frame-Options",
             "X-Content-Type-Options",
             "Referrer-Policy",
-            "Cache-Control",
         ]
         .into_iter()
         .map(|name| (name, self.headers[name].as_str()))
         .collect()
+    }
+
+    /// A built-in file with a digest in its name is kept by the browser.
+    fn kept_for_good(&self, path: &str) {
+        let name = path.rsplit('/').next().unwrap();
+        let stem = name.rsplit_once('.').unwrap().0;
+        let (_, digest) = stem.split_at(stem.len().saturating_sub(9));
+        assert!(
+            digest.len() == 9
+                && digest.starts_with('-')
+                && digest[1..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'),
+            "{path} has no digest in its name, so it must not be cached for good"
+        );
+        assert_eq!(
+            self.headers["Cache-Control"], "private, max-age=31536000, immutable",
+            "{path}"
+        );
     }
 }
 
@@ -354,8 +379,13 @@ fn default_server_serves_built_channels_assets() {
                 "text/css; charset=utf-8"
             }
         );
-        assert_eq!(asset.security(), page.security());
+        assert_eq!(asset.protection(), page.protection());
+        asset.kept_for_good(path);
     }
+    assert_eq!(
+        page.headers["Cache-Control"], "no-store",
+        "the page names the current files, so it is never kept"
+    );
 }
 
 #[test]
@@ -397,7 +427,8 @@ fn the_page_names_its_diagram_code_and_the_server_serves_all_of_it_apart_from_th
             served.headers["Content-Type"], "text/javascript; charset=utf-8",
             "{path}"
         );
-        assert_eq!(served.security(), page.security(), "{path}");
+        assert_eq!(served.protection(), page.protection(), "{path}");
+        served.kept_for_good(&path);
         // A file that named the page's script would be renamed with every
         // change to the page, and all 92 would be committed again.
         let text = String::from_utf8_lossy(&stored);

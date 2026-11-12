@@ -17,7 +17,8 @@ export function draw(source: string, palette: Palette): Promise<Drawn | null> {
   const kept = drawings.get(key);
   if (kept) return kept;
   // Mermaid keeps one configuration, so drawings take turns.
-  const drawing = turn.then(() => drawNow(source, palette));
+  // The pause between two lets the page paint and take input.
+  const drawing = turn.then(pause).then(() => drawNow(source, palette));
   turn = drawing;
   drawings.set(key, drawing);
   if (drawings.size > KEPT) {
@@ -26,6 +27,8 @@ export function draw(source: string, palette: Palette): Promise<Drawn | null> {
   }
   return drawing;
 }
+
+const pause = () => new Promise<void>((resolve) => setTimeout(resolve));
 
 async function drawNow(
   source: string,

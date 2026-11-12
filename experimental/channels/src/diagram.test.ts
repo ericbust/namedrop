@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isDiagram, type Palette } from "./diagram.ts";
+import {
+  diagramBudget,
+  isDiagram,
+  MAX_DIAGRAM_SOURCE,
+  MAX_DIAGRAMS_PER_MESSAGE,
+  type Palette,
+} from "./diagram.ts";
 import {
   diagramConfig,
   drawingKey,
@@ -51,6 +57,7 @@ test("a diagram cannot change the settings that keep it safe or on the page's lo
     "securityLevel",
     "htmlLabels",
     "suppressErrorRendering",
+    "layout",
     "theme",
     "themeVariables",
     "themeCSS",
@@ -58,10 +65,25 @@ test("a diagram cannot change the settings that keep it safe or on the page's lo
     "fontFamily",
   ])
     assert.ok(config.secure.includes(locked), locked);
-  assert.ok(
-    !config.secure.includes("layout"),
-    "a diagram may still ask for another layout",
+  assert.equal(config.layout, "dagre");
+});
+
+test("a message draws its first eight diagrams of ten thousand characters or fewer", () => {
+  const refusal = diagramBudget();
+  const small = "graph TD\n  A --> B\n";
+  assert.equal(refusal("x".repeat(MAX_DIAGRAM_SOURCE)), null);
+  assert.equal(refusal("x".repeat(MAX_DIAGRAM_SOURCE + 1)), "size");
+  for (let drawn = 1; drawn < MAX_DIAGRAMS_PER_MESSAGE; drawn++)
+    assert.equal(refusal(small), null, `diagram ${drawn + 1}`);
+  assert.equal(refusal(small), "count", "the ninth");
+  assert.equal(
+    refusal("x".repeat(MAX_DIAGRAM_SOURCE + 1)),
+    "size",
+    "a block too large says so, whatever its place",
   );
+  assert.equal(diagramBudget()(small), null, "each message counts its own");
+  assert.equal(MAX_DIAGRAM_SOURCE, 10_000);
+  assert.equal(MAX_DIAGRAMS_PER_MESSAGE, 8);
 });
 
 test("the drawing takes its colors and font from the page", () => {

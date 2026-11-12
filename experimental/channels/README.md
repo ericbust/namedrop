@@ -519,7 +519,8 @@ shortened view cuts, and any `mermaid` fence in a one-line preview, is the label
 `src/diagramDraw.ts` draws. It imports Mermaid 12.3.0 (MIT) and DOMPurify 3.4.17
 (Apache-2.0 or MPL-2.0), configures Mermaid from `src/diagramConfig.ts`, renders
 into a hidden element so text can be measured, cleans the SVG and returns it as a
-`data:image/svg+xml` address with its size. The page shows that address in an
+`data:image/svg+xml` address with its size. Drawings take turns, with a pause
+between two so the page can paint and take input. The page shows that address in an
 `<img>`, which is why a drawing cannot run script or load anything. The page's
 colors are read from its CSS variables and converted to sRGB hex on a canvas,
 because Mermaid's theme engine does not read `oklch()`.
@@ -533,6 +534,18 @@ those files change only when Mermaid, DOMPurify, `src/diagramDraw.ts` or
 `src/diagramConfig.ts` change. Whatever `src/diagramDraw.ts` imports is built into those
 files, so keep its imports to `src/diagramConfig.ts` and types. `vite dev`
 imports the source directly.
+
+`diagramBudget()` in `src/diagram.ts` holds the two limits: a block over 10,000
+characters and a message's ninth diagram are shown as source with a note, and
+never reach the drawing code. `Diagram` draws only while it is on screen, and
+keeps its picture when the page's look changes until it is on screen again.
+
+The configuration locks `layout` to dagre. With that lock no diagram can reach
+Mermaid's ELK engine, so the diagram build replaces `elkjs` with
+`src/diagramNoElk.ts`, which saves 1.4 MB. Flowchart, sequence, class, state,
+ER, gantt, pie, git graph, mind map, timeline, journey, quadrant, requirement,
+C4, sankey, XY chart, block, packet, kanban and architecture diagrams all draw
+without it.
 
 Mermaid inserts a `<style>` element and style attributes while it draws, which
 the dashboard's `style-src 'self' 'unsafe-inline'` permits. The browser tests

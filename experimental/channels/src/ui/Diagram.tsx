@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { diagramCopy } from "../copy.ts";
-import type { Drawn, Palette } from "../diagram.ts";
+import type { DiagramRefusal, Drawn, Palette } from "../diagram.ts";
 import { Icon } from "./Icons.tsx";
 
 // Used when a browser cannot read one of the page's colors.
@@ -109,33 +109,68 @@ function draw(source: string, look: Palette): Promise<Drawn | null> {
   );
 }
 
+/** Whether any of the element is on screen, so only diagrams in view are drawn. */
+function useOnScreen(element: { readonly current: Element | null }): boolean {
+  const [onScreen, setOnScreen] = useState(false);
+  useEffect(() => {
+    const target = element.current;
+    if (!target) return;
+    // The last entry is the newest state when several arrive together.
+    const watch = new IntersectionObserver((entries) =>
+      setOnScreen(entries.at(-1)?.isIntersecting ?? false),
+    );
+    watch.observe(target);
+    return () => watch.disconnect();
+  }, [element]);
+  return onScreen;
+}
+
 /**
  * A fenced `mermaid` block. Until it is drawn, and when it cannot be, the
- * reader sees its source, as for any other code block.
+ * reader sees its source, as for any other code block. `refusal` says the
+ * block is over a limit and is not drawn at all.
  */
-export function Diagram({ source }: { source: string }) {
+export function Diagram({
+  source,
+  refusal = null,
+}: {
+  source: string;
+  refusal?: DiagramRefusal | null;
+}) {
   const look = useSyncExternalStore(watchPalette, readPalette);
-  const [picture, setPicture] = useState<Drawn | "failed" | null>(
-    () => made.get(madeKey(source, look)) ?? null,
-  );
+  const key = madeKey(source, look);
+  // The picture on show, and the look it was drawn for. After the page's
+  // look changes, a diagram keeps its old picture until it is in view again.
+  const [shown, setShown] = useState<{
+    key: string;
+    picture: Drawn | "failed";
+  } | null>(() => {
+    const kept = made.get(key);
+    return kept ? { key, picture: kept } : null;
+  });
   const [showSource, setShowSource] = useState(false);
   const [copied, setCopied] = useState(false);
+  const frame = useRef<HTMLElement>(null);
   const full = useRef<HTMLDialogElement>(null);
+  const onScreen = useOnScreen(frame);
+  const due = refusal === null && onScreen && shown?.key !== key;
   useEffect(() => {
+    if (!due) return;
     let current = true;
     void draw(source, look).then((result) => {
       if (result) keep(source, look, result);
-      if (current) setPicture(result ?? "failed");
+      if (current) setShown({ key, picture: result ?? "failed" });
     });
     return () => {
       current = false;
     };
-  }, [source, look]);
+  }, [due, source, look, key]);
   useEffect(() => {
     if (!copied) return;
     const timer = setTimeout(() => setCopied(false), 1500);
     return () => clearTimeout(timer);
   }, [copied]);
+  const picture = shown?.picture ?? null;
   const image = typeof picture === "object" ? picture : null;
   const copy = () => {
     void navigator.clipboard?.writeText(source).then(
@@ -145,8 +180,9 @@ export function Diagram({ source }: { source: string }) {
   };
   return (
     <figure
+      ref={frame}
       className="diagram"
-      data-state={image ? "drawn" : (picture ?? "drawing")}
+      data-state={image ? "drawn" : (refusal ?? picture ?? "drawing")}
     >
       {image && (
         <div className="diagram-box">
@@ -173,8 +209,12 @@ export function Diagram({ source }: { source: string }) {
         </pre>
       )}
       <figcaption>
-        {picture === "failed" && (
-          <span className="diagram-note">{diagramCopy.failed}</span>
+        {refusal !== null ? (
+          <span className="diagram-note">{diagramCopy.refused[refusal]}</span>
+        ) : (
+          picture === "failed" && (
+            <span className="diagram-note">{diagramCopy.failed}</span>
+          )
         )}
         {image && (
           <button

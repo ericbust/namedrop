@@ -19,6 +19,7 @@ const LOCKED = [
   "suppressErrorRendering",
   "maxEdges",
   "htmlLabels",
+  "layout",
   "theme",
   "themeVariables",
   "themeCSS",
@@ -38,8 +39,9 @@ export function diagramConfig(palette: Palette) {
     // A diagram that fails to parse is shown as its source, not as an error drawing.
     suppressErrorRendering: true,
     secure: LOCKED,
-    // Mermaid 12 lays out with ELK unless told otherwise, and ELK is 1.5 MB
-    // to load. Dagre draws the usual diagram well; a diagram can ask for ELK.
+    // Mermaid 12 lays out with ELK unless told otherwise. ELK is 1.5 MB to
+    // load and slow on a large graph, so layout is dagre and a diagram cannot
+    // ask for another.
     layout: "dagre",
     theme: "base",
     darkMode: isDark(palette),

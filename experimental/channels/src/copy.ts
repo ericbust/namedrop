@@ -516,6 +516,10 @@ export const diagramCopy = {
   copy: "Copy",
   copied: "Copied",
   failed: "Diagram could not be drawn",
+  refused: {
+    size: "Diagram is too large to draw",
+    count: "Only the first 8 diagrams in a message are drawn",
+  },
 };
 export const bodyCopy = {
   shortened: "Shortened by Namedrop.",

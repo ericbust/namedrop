@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { build, defineConfig, type Plugin } from "vite";
 
 // Mermaid is built on its own, apart from the page. In one build, Mermaid's
@@ -13,6 +14,13 @@ function diagramBundle(): Plugin {
       const built = await build({
         configFile: false,
         logLevel: "warn",
+        resolve: {
+          alias: {
+            "elkjs/lib/elk.bundled.js": fileURLToPath(
+              new URL("src/diagramNoElk.ts", import.meta.url),
+            ),
+          },
+        },
         build: {
           write: false,
           target: page.build?.target,

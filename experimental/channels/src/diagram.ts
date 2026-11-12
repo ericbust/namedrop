@@ -7,6 +7,23 @@ export function isDiagram(block: Code): boolean {
   return block.lang.toLowerCase() === "mermaid";
 }
 
+/** Past these, a block is shown as its source: Mermaid lays out on the page's
+ * own thread, so one heavy diagram stalls the tab and many stall it for long. */
+export const MAX_DIAGRAM_SOURCE = 10_000;
+export const MAX_DIAGRAMS_PER_MESSAGE = 8;
+export type DiagramRefusal = "size" | "count";
+
+/** Counts the diagrams one message draws, in the order they appear. */
+export function diagramBudget(): (source: string) => DiagramRefusal | null {
+  let drawn = 0;
+  return (source) => {
+    if (source.length > MAX_DIAGRAM_SOURCE) return "size";
+    if (drawn === MAX_DIAGRAMS_PER_MESSAGE) return "count";
+    drawn += 1;
+    return null;
+  };
+}
+
 /** The page's colors as sRGB hex, which is all Mermaid's theme engine reads. */
 export type Palette = {
   readonly page: string;

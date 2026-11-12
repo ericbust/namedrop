@@ -1,6 +1,6 @@
 import { Fragment, type ReactNode, useMemo } from "react";
 import { diagramCopy } from "../copy.ts";
-import { isDiagram } from "../diagram.ts";
+import { type DiagramRefusal, diagramBudget, isDiagram } from "../diagram.ts";
 import {
   type Align,
   type Block,
@@ -51,7 +51,11 @@ const diagramLabel = (block: Block) => (
 // flow and keeps the author's line breaks; only list, quote, code, heading and
 // table blocks become elements. `cut` says the message is shown shortened, so
 // a block may end before its source does.
-function blockNode(block: Block, tail: ReactNode, cut: boolean): ReactNode {
+type Draws = {
+  readonly cut: boolean;
+  readonly refusal: (source: string) => DiagramRefusal | null;
+};
+function blockNode(block: Block, tail: ReactNode, draws: Draws): ReactNode {
   switch (block.kind) {
     case "paragraph":
       return (
@@ -70,11 +74,14 @@ function blockNode(block: Block, tail: ReactNode, cut: boolean): ReactNode {
     case "code":
       // A whole diagram is drawn. One the shortened view cuts off is a label,
       // since half a diagram's source is neither a drawing nor worth reading.
-      if (isDiagram(block) && (block.closed || cut))
+      if (isDiagram(block) && (block.closed || draws.cut))
         return (
           <Fragment key={block.from}>
             {block.closed ? (
-              <Diagram source={codeText(block)} />
+              <Diagram
+                source={codeText(block)}
+                refusal={draws.refusal(codeText(block))}
+              />
             ) : (
               diagramLabel(block)
             )}
@@ -99,7 +106,7 @@ function blockNode(block: Block, tail: ReactNode, cut: boolean): ReactNode {
         >
           {block.items.map((item) => (
             <li key={item.from}>
-              {nested(item.blocks, item === last ? tail : null, cut)}
+              {nested(item.blocks, item === last ? tail : null, draws)}
             </li>
           ))}
         </List>
@@ -108,7 +115,7 @@ function blockNode(block: Block, tail: ReactNode, cut: boolean): ReactNode {
     case "quote":
       return (
         <blockquote key={block.from}>
-          {nested(block.blocks, tail, cut)}
+          {nested(block.blocks, tail, draws)}
         </blockquote>
       );
     case "table":
@@ -156,14 +163,14 @@ function Cells({
 function nested(
   blocks: readonly Block[],
   tail: ReactNode,
-  cut: boolean,
+  draws: Draws,
 ): ReactNode[] {
   return blocks.map((block, index) => {
     const previous = blocks[index - 1];
     const node = blockNode(
       block,
       index === blocks.length - 1 ? tail : null,
-      cut,
+      draws,
     );
     return previous?.kind === "paragraph" && block.kind === "paragraph" ? (
       <Fragment key={block.from}>
@@ -191,19 +198,14 @@ export function Markdown({
   const inside =
     last?.kind === "list" || last?.kind === "quote" || last?.kind === "heading";
   const out: ReactNode[] = [];
+  const draws = { cut: limit < source.length, refusal: diagramBudget() };
   let at = 0;
   let flowing = true;
   for (const block of blocks) {
     const paragraph = block.kind === "paragraph";
     if (paragraph && flowing)
       out.push(source.slice(at, Math.min(block.from, limit)));
-    out.push(
-      blockNode(
-        block,
-        inside && block === last ? tail : null,
-        limit < source.length,
-      ),
-    );
+    out.push(blockNode(block, inside && block === last ? tail : null, draws));
     at = block.to;
     flowing = paragraph;
   }

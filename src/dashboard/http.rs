@@ -57,6 +57,13 @@ const IMAGE_HEADERS: &str = concat!(
     protection_headers!(),
     "Cache-Control: private, max-age=2592000, immutable\r\n"
 );
+/// The built-in app's scripts and styles carry a digest of their bytes in
+/// their names, so a browser may keep one for good. The page that names them
+/// is never kept.
+const HASHED_ASSET_HEADERS: &str = concat!(
+    protection_headers!(),
+    "Cache-Control: private, max-age=31536000, immutable\r\n"
+);
 /// The composer sends a message's images together.
 const MAX_IMAGE_UPLOADS: usize = super::images::MAX_PER_MESSAGE;
 
@@ -505,6 +512,8 @@ struct ResolvedAsset {
     body: AssetBody,
     length: u64,
     is_index: bool,
+    /// Its name changes whenever its bytes do.
+    hashed: bool,
 }
 
 impl Assets {
@@ -523,6 +532,7 @@ impl Assets {
                     body: AssetBody::Embedded(bytes),
                     length: bytes.len() as u64,
                     is_index: path == "/index.html",
+                    hashed: path != "/index.html",
                 })
             }
             Self::Directory(path_root) => {
@@ -538,6 +548,8 @@ impl Assets {
                     body: AssetBody::File(file),
                     length: metadata.len(),
                     is_index,
+                    // A custom app's files are read fresh: their names promise nothing.
+                    hashed: false,
                 })
             }
         }
@@ -2445,9 +2457,14 @@ fn serve_asset(
     }
     write!(
         writer,
-        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n{SECURITY_HEADERS}{}{extra_headers}Connection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}{}{extra_headers}Connection: close\r\n\r\n",
         content_type(path),
         asset.length,
+        if asset.hashed {
+            HASHED_ASSET_HEADERS
+        } else {
+            SECURITY_HEADERS
+        },
         if asset.is_index {
             format!("X-Namedrop-Csrf: {}\r\n", csrf_token(&front.session))
         } else {

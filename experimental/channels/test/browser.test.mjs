@@ -13453,6 +13453,13 @@ async function diagramRoom(t, messages) {
 }
 const diagramOf = (ui, id) =>
   ui.page.locator(`main [data-message-id="${id}"] .diagram`);
+// A diagram is drawn once it is on screen, so this brings it there first.
+async function pictureOf(diagram) {
+  await diagram.scrollIntoViewIfNeeded();
+  const image = diagram.locator(".diagram-box img");
+  await image.waitFor();
+  return image;
+}
 // A message over 480 characters is shown shortened until this is pressed.
 const showWhole = (ui, id) =>
   ui.page
@@ -13482,6 +13489,45 @@ const wordsOf = (image) =>
       )
       .join(" | "),
   );
+// The page's text color as the hex a drawing holds.
+const textColor = (ui) =>
+  ui.page.evaluate(() => {
+    const canvas = document.createElement("canvas").getContext("2d");
+    canvas.fillStyle = getComputedStyle(
+      document.documentElement,
+    ).getPropertyValue("--text");
+    canvas.fillRect(0, 0, 1, 1);
+    return `#${[...canvas.getImageData(0, 0, 1, 1).data.slice(0, 3)].map((part) => part.toString(16).padStart(2, "0")).join("")}`;
+  });
+// How an element and the picture in it are laid out.
+const fitOf = (box) =>
+  box.evaluate((element) => {
+    const image = element.querySelector("img");
+    const shown = image.getBoundingClientRect();
+    const frame = element.getBoundingClientRect();
+    return {
+      box: element.clientWidth,
+      content: element.scrollWidth,
+      width: shown.width,
+      height: shown.height,
+      naturalWidth: image.naturalWidth,
+      naturalHeight: image.naturalHeight,
+      inside:
+        shown.left >= frame.left - 0.5 && shown.right <= frame.right + 0.5,
+      page: document.scrollingElement.scrollWidth,
+      viewport: document.documentElement.clientWidth,
+    };
+  });
+function assertFits(fit, what) {
+  assert.ok(fit.inside, `${what}: the whole picture is inside its box`);
+  assert.ok(fit.content <= fit.box, `${what}: its box does not scroll`);
+  assert.ok(fit.page <= fit.viewport, `${what}: the page does not scroll`);
+  const shape = fit.naturalWidth / fit.naturalHeight;
+  assert.ok(
+    Math.abs(fit.width / fit.height - shape) / shape < 0.02,
+    `${what}: the picture keeps its shape`,
+  );
+}
 async function diagramShots(ui, name) {
   const directory = process.env.DIAGRAM_SCREENSHOTS;
   if (!directory) return;
@@ -13500,8 +13546,7 @@ test("DIAGRAMS: a flowchart and a sequence diagram are drawn, with the source an
     [flow, ["Start", "Ready?", "Ship it", "Wait"]],
     [sequence, ["Alice", "Bob", "Are you there?", "Both agree"]],
   ]) {
-    const image = diagram.locator(".diagram-box img");
-    await image.waitFor();
+    const image = await pictureOf(diagram);
     assert.ok((await drawn(image)) > 50, "the picture is drawn");
     assert.equal(await image.getAttribute("alt"), "Diagram");
     const shown = await wordsOf(image);
@@ -13550,7 +13595,7 @@ test("DIAGRAMS: the drawing code loads only when a message holds a diagram", asy
   );
 
   const { ui, asked } = await diagramRoom(t, [fenced(FLOW)]);
-  await diagramOf(ui, "d1").locator(".diagram-box img").waitFor();
+  await pictureOf(diagramOf(ui, "d1"));
   const loaded = asked.filter((url) => url.includes("/diagram/"));
   assert.ok(loaded.length > 0, "the diagram's code was asked for");
   assert.ok(
@@ -13567,7 +13612,7 @@ test("DIAGRAMS: the drawing code loads only when a message holds a diagram", asy
     )
   ).reduce((sum, file) => sum + file.length, 0);
   t.diagnostic(`a flowchart loads ${loaded.length} files, ${bytes} bytes`);
-  assert.ok(bytes < 1_500_000, `a flowchart loads ${bytes} bytes`);
+  assert.ok(bytes < 1_000_000, `a flowchart loads ${bytes} bytes`);
   assert.ok(
     !loaded.some((url) => /elk|katex|cytoscape/.test(url)),
     `a flowchart loads no layout engine or math code it does not use: ${loaded}`,
@@ -13578,6 +13623,7 @@ test("DIAGRAMS: a diagram that cannot be drawn shows its source and a quiet note
   const broken = "flowchart TD\n  A[Start --> ???\n  }}}";
   const { ui } = await diagramRoom(t, [fenced(broken), fenced(FLOW)]);
   const failed = diagramOf(ui, "d1");
+  await failed.scrollIntoViewIfNeeded();
   await failed.locator(".diagram-note").waitFor();
   assert.equal(
     await failed.locator(".diagram-note").textContent(),
@@ -13594,7 +13640,7 @@ test("DIAGRAMS: a diagram that cannot be drawn shows its source and a quiet note
     !(await ui.page.locator("body").textContent()).includes("Syntax error"),
     "no error drawing or parser message reaches the page",
   );
-  await diagramOf(ui, "d2").locator(".diagram-box img").waitFor();
+  await pictureOf(diagramOf(ui, "d2"));
   assert.equal(
     await ui.page.locator(".diagram-stage > *").count(),
     0,
@@ -13605,7 +13651,7 @@ test("DIAGRAMS: a diagram that cannot be drawn shows its source and a quiet note
 
 test("DIAGRAMS: a diagram cannot run script, load anything remote, loosen its own settings or carry a link", async (t) => {
   const hostile = [
-    '%%{init: {"securityLevel": "loose", "htmlLabels": true, "theme": "forest", "themeCSS": "@import url(https://evil.example/a.css); .node rect { fill: url(https://evil.example/b.png) }"}}%%',
+    '%%{init: {"securityLevel": "loose", "htmlLabels": true, "layout": "elk", "theme": "forest", "themeCSS": "@import url(https://evil.example/a.css); .node rect { fill: url(https://evil.example/b.png) }"}}%%',
     "flowchart TD",
     '  A["<img src=https://evil.example/c.png onerror=window.pwned=1>"] --> B["<script>window.pwned=2</script>"]',
     '  B --> C["<a href=https://evil.example/d>click me</a>"]',
@@ -13621,10 +13667,13 @@ test("DIAGRAMS: a diagram cannot run script, load anything remote, loosen its ow
   });
   await showWhole(ui, "d1");
   const diagram = diagramOf(ui, "d1");
-  await diagram.locator(".diagram-box img, .diagram-note").first().waitFor();
-  await diagramOf(ui, "d2").locator(".diagram-box img").waitFor();
-  const image = diagram.locator(".diagram-box img");
-  assert.equal(await image.count(), 1, "the labels are drawn as text");
+  const image = await pictureOf(diagram);
+  const plain = await pictureOf(diagramOf(ui, "d2"));
+  assert.equal(
+    await diagram.locator(".diagram-note").count(),
+    0,
+    "the labels are drawn as text",
+  );
   const svg = await svgOf(image);
   for (const banned of [
     "<script",
@@ -13641,14 +13690,15 @@ test("DIAGRAMS: a diagram cannot run script, load anything remote, loosen its ow
     `a tag in a label is shown as its text: ${await wordsOf(image)}`,
   );
   // The page's own look, not the theme the diagram asked for.
-  assert.equal(
-    (await svgOf(diagramOf(ui, "d2").locator(".diagram-box img"))).includes(
-      "#cde498",
-    ),
-    false,
-  );
+  assert.equal((await svgOf(plain)).includes("#cde498"), false);
   assert.ok(!svg.includes("#cde498"), "the diagram cannot choose its theme");
+  assert.deepEqual(
+    asked.filter((url) => url.includes("/diagram/elk")),
+    [],
+    "nor the heavy layout engine",
+  );
 
+  await diagram.scrollIntoViewIfNeeded();
   await image.click();
   await ui.page.keyboard.press("Escape");
   await ui.page.waitForTimeout(300);
@@ -13672,21 +13722,75 @@ test("DIAGRAMS: a diagram cannot run script, load anything remote, loosen its ow
   );
 });
 
+test("DIAGRAMS: a block over 10,000 characters and a message's ninth diagram are shown as source, undrawn", async (t) => {
+  const edges = Array.from(
+    { length: 400 },
+    (_, n) => `  N${n}[Step number ${n}] --> N${n + 1}`,
+  ).join("\n");
+  const heavy = `flowchart TD\n${edges}`;
+  assert.ok(heavy.length > 10_000 && heavy.length < 50_000);
+  const large = await diagramRoom(t, [fenced(heavy)]);
+  await showWhole(large.ui, "d1");
+  const refused = diagramOf(large.ui, "d1");
+  await refused.locator(".diagram-note").waitFor();
+  assert.equal(
+    await refused.locator(".diagram-note").textContent(),
+    "Diagram is too large to draw",
+  );
+  assert.equal(await refused.locator("pre code").textContent(), `${heavy}\n`);
+  assert.equal(await refused.getByRole("button", { name: "Copy" }).count(), 1);
+  await refused.scrollIntoViewIfNeeded();
+  await large.ui.page.waitForTimeout(400);
+  assert.equal(await refused.locator("img").count(), 0);
+  assert.deepEqual(
+    large.asked.filter((url) => url.includes("/diagram/")),
+    [],
+    "a block over the limit never reaches the drawing code",
+  );
+
+  const ten = Array.from({ length: 10 }, (_, n) =>
+    fenced(
+      `flowchart LR\n  A${n}[Diagram ${n + 1}] --> B${n}`,
+      `Part ${n + 1}`,
+      "",
+    ),
+  ).join("\n");
+  const { ui } = await diagramRoom(t, [ten]);
+  await showWhole(ui, "d1");
+  const diagrams = diagramOf(ui, "d1");
+  assert.equal(await diagrams.count(), 10);
+  for (let nth = 0; nth < 8; nth++) {
+    const image = await pictureOf(diagrams.nth(nth));
+    assert.ok(
+      (await wordsOf(image)).includes(`Diagram ${nth + 1}`),
+      `diagram ${nth + 1} is drawn`,
+    );
+  }
+  for (const nth of [8, 9]) {
+    const over = diagrams.nth(nth);
+    await over.scrollIntoViewIfNeeded();
+    assert.equal(
+      await over.locator(".diagram-note").textContent(),
+      "Only the first 8 diagrams in a message are drawn",
+    );
+    assert.ok(
+      (await over.locator("pre code").textContent()).includes(
+        `Diagram ${nth + 1}`,
+      ),
+    );
+  }
+  await ui.page.waitForTimeout(400);
+  assert.equal((await diagrams.locator("img").count()) >= 8, true);
+  assert.equal(await diagrams.nth(8).locator("img").count(), 0);
+  assert.equal(await diagrams.nth(9).locator("img").count(), 0);
+  await diagramShots(ui, "caps");
+});
+
 test("DIAGRAMS: the drawing follows the page's light and dark look", async (t) => {
   const { ui } = await diagramRoom(t, [fenced(FLOW)]);
-  const image = diagramOf(ui, "d1").locator(".diagram-box img");
-  const textColor = () =>
-    ui.page.evaluate(() => {
-      const canvas = document.createElement("canvas").getContext("2d");
-      canvas.fillStyle = getComputedStyle(
-        document.documentElement,
-      ).getPropertyValue("--text");
-      canvas.fillRect(0, 0, 1, 1);
-      return `#${[...canvas.getImageData(0, 0, 1, 1).data.slice(0, 3)].map((part) => part.toString(16).padStart(2, "0")).join("")}`;
-    });
   await ui.page.emulateMedia({ colorScheme: "light" });
-  await image.waitFor();
-  const light = await textColor();
+  const image = await pictureOf(diagramOf(ui, "d1"));
+  const light = await textColor(ui);
   await eventually(
     async () => (await svgOf(image)).includes(light),
     "the light drawing",
@@ -13694,7 +13798,7 @@ test("DIAGRAMS: the drawing follows the page's light and dark look", async (t) =
   const lightSource = await image.getAttribute("src");
 
   await ui.page.emulateMedia({ colorScheme: "dark" });
-  const dark = await textColor();
+  const dark = await textColor(ui);
   assert.notEqual(dark, light);
   await eventually(
     async () => (await svgOf(image)).includes(dark),
@@ -13714,28 +13818,64 @@ test("DIAGRAMS: the drawing follows the page's light and dark look", async (t) =
   );
 });
 
-test("DIAGRAMS: at phone width a wide diagram scrolls in its own box, and a tap opens it full size", async (t) => {
+test("DIAGRAMS: a diagram is drawn when it comes on screen, and drawn again for a new look only then", async (t) => {
+  const filler = Array.from(
+    { length: 24 },
+    (_, n) => `note ${n + 1}\nwith a second line\nand a third`,
+  );
+  const { ui } = await diagramRoom(t, [
+    fenced(FLOW, "The first plan."),
+    ...filler,
+    fenced(SEQUENCE, "The last plan."),
+  ]);
+  await ui.page.emulateMedia({ colorScheme: "light" });
+  const far = diagramOf(ui, "d1");
+  const near = diagramOf(ui, `d${filler.length + 2}`);
+  const nearImage = await pictureOf(near);
+  await ui.page.waitForTimeout(400);
+  assert.equal(
+    await far.locator("img").count(),
+    0,
+    "a diagram far above the screen is not drawn yet",
+  );
+  const farImage = await pictureOf(far);
+  const light = await textColor(ui);
+  assert.ok((await svgOf(farImage)).includes(light));
+
+  await near.scrollIntoViewIfNeeded();
+  await ui.page.emulateMedia({ colorScheme: "dark" });
+  const dark = await textColor(ui);
+  await eventually(
+    async () => (await svgOf(nearImage)).includes(dark),
+    "the diagram on screen is drawn again",
+  );
+  await ui.page.waitForTimeout(400);
+  assert.ok(
+    (await svgOf(farImage)).includes(light),
+    "the one off screen keeps its picture and costs nothing",
+  );
+  await far.scrollIntoViewIfNeeded();
+  await eventually(
+    async () => (await svgOf(farImage)).includes(dark),
+    "and is drawn again once it is on screen",
+  );
+});
+
+test("DIAGRAMS: at phone width a wide diagram is shown smaller to fit, and a tap opens it full size", async (t) => {
   const wide = `flowchart LR\n${Array.from({ length: 14 }, (_, n) => `  N${n}[Step number ${n}] --> N${n + 1}[Step number ${n + 1}]`).join("\n")}`;
   const { ui } = await diagramRoom(t, [fenced(wide)]);
   await ui.page.setViewportSize({ width: 390, height: 800 });
   await showWhole(ui, "d1");
   const diagram = diagramOf(ui, "d1");
   const box = diagram.locator(".diagram-box");
-  const image = box.locator("img");
-  await image.waitFor();
-  const sizes = await box.evaluate((element) => ({
-    box: element.clientWidth,
-    content: element.scrollWidth,
-    page: document.scrollingElement.scrollWidth,
-    viewport: document.documentElement.clientWidth,
-    image: element.querySelector("img").getBoundingClientRect().width,
-    natural: element.querySelector("img").naturalWidth,
-  }));
-  assert.ok(sizes.natural > 1000, `the diagram is wide: ${sizes.natural}`);
-  assert.equal(sizes.image, sizes.natural, "it keeps its size");
-  assert.ok(sizes.content > sizes.box, "so its box scrolls");
-  assert.ok(sizes.box <= sizes.viewport);
-  assert.ok(sizes.page <= sizes.viewport, "and the page does not");
+  await pictureOf(diagram);
+  const fit = await fitOf(box);
+  assert.ok(
+    fit.naturalWidth > 1000,
+    `the diagram is wide: ${fit.naturalWidth}`,
+  );
+  assert.ok(fit.width < fit.box, "it is shown smaller than its box");
+  assertFits(fit, "at 390 px");
   await diagramShots(ui, "phone");
 
   const full = diagram.locator("dialog.diagram-full");
@@ -13746,6 +13886,7 @@ test("DIAGRAMS: at phone width a wide diagram scrolls in its own box, and a tap 
   await eventually(() => full.evaluate((dialog) => dialog.open), "full size");
   const shown = await full.evaluate((dialog) => {
     const image = dialog.querySelector("img");
+    const scroll = dialog.querySelector(".diagram-full-scroll");
     const pane = dialog
       .querySelector(".diagram-full-pane")
       .getBoundingClientRect();
@@ -13753,11 +13894,13 @@ test("DIAGRAMS: at phone width a wide diagram scrolls in its own box, and a tap 
       image: image.getBoundingClientRect().width,
       natural: image.naturalWidth,
       pane: pane.width,
+      scrolls: scroll.scrollWidth > scroll.clientWidth,
       viewport: document.documentElement.clientWidth,
       page: document.scrollingElement.scrollWidth,
     };
   });
   assert.equal(shown.image, shown.natural, "full size");
+  assert.ok(shown.scrolls, "which scrolls inside the full-size view");
   assert.ok(shown.pane <= shown.viewport, "inside the screen");
   assert.ok(shown.page <= shown.viewport);
   await diagramShots(ui, "phone-full");
@@ -13793,13 +13936,14 @@ test("DIAGRAMS: a shortened message shows a label for a diagram it cuts, and the
     "half a diagram's source is not shown",
   );
   await row.getByRole("button", { name: "Show more" }).click();
-  await row.locator(".diagram-box img").waitFor();
+  await pictureOf(row.locator(".diagram"));
   assert.equal(await label.count(), 0);
 });
 
-test("DIAGRAMS: an agent's answer shows as the word Diagram in the reply preview and as a drawing in its thread", async (t) => {
+test("DIAGRAMS: an agent's answer shows as the word Diagram in the reply preview and fits the thread pane as a drawing", async (t) => {
   const value = replyRows();
-  value.frame.messages[1].body.text = fenced(FLOW, "Here is the plan.");
+  const wide = `flowchart LR\n${Array.from({ length: 6 }, (_, n) => `  S${n}[Step number ${n}] --> S${n + 1}[Step number ${n + 1}]`).join("\n")}`;
+  value.frame.messages[1].body.text = fenced(wide, "Here is the plan.");
   const ui = await open(t, (client) => replay(client, [value]), undefined, {
     inlineStyles: true,
   });
@@ -13817,19 +13961,22 @@ test("DIAGRAMS: an agent's answer shows as the word Diagram in the reply preview
 
   await preview.click();
   const pane = ui.page.locator("aside.thread");
-  const image = pane.locator('[data-message-id="answer"] .diagram-box img');
-  await image.waitFor();
+  const diagram = pane.locator('[data-message-id="answer"] .diagram');
+  const image = await pictureOf(diagram);
   assert.ok((await drawn(image)) > 50);
+  const fit = await fitOf(diagram.locator(".diagram-box"));
+  assert.ok(
+    fit.naturalWidth > fit.box,
+    `the diagram is wider than the thread column: ${fit.naturalWidth} > ${fit.box}`,
+  );
+  assertFits(fit, "in the thread pane");
   const sizes = await pane.evaluate((thread) => ({
     pane: thread.clientWidth,
     content: thread.scrollWidth,
-    page: document.scrollingElement.scrollWidth,
-    viewport: document.documentElement.clientWidth,
   }));
   assert.ok(
     sizes.content <= sizes.pane,
     "the thread pane does not scroll sideways",
   );
-  assert.ok(sizes.page <= sizes.viewport);
   await diagramShots(ui, "thread");
 });
