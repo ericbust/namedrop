@@ -1548,6 +1548,123 @@ fn input_refuses_wrong_binding_changed_session_and_offline_pane() {
     )));
 }
 
+/// Takes the pane lock a delivery takes before it types into `pane`.
+fn hold_pane_lock(f: &Fixture, pane: &str) -> fs::File {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let directory = f.state.join("pane-effects");
+    fs::create_dir_all(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let key = namedrop::lower_hex(&Sha256::digest(
+        serde_json::to_vec(&("socket-a", pane)).unwrap(),
+    ));
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(directory.join(format!("{key}.lock")))
+        .unwrap();
+    // SAFETY: flock borrows the descriptor this test owns.
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    lock
+}
+
+fn sent_inputs(f: &Fixture) -> Vec<Value> {
+    invocations(f)
+        .into_iter()
+        .filter(|call| {
+            matches!(
+                call["args"][1].as_str(),
+                Some("run" | "send-text" | "send-keys")
+            )
+        })
+        .map(|call| call["args"].clone())
+        .collect()
+}
+
+#[test]
+fn input_while_a_delivery_holds_the_pane_answers_busy_at_once_and_sends_nothing() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let target = input_path("socket-a", "w1", "lead");
+    let continuity = live_continuity(&server, &path("socket-a", "w1", "lead"));
+    let delivering = hold_pane_lock(&f, "pane-1-lead");
+    for body in [
+        json!({"kind":"key","key":"Ctrl-C","continuity":continuity}),
+        json!({"kind":"text","text":"stop that","continuity":continuity}),
+    ] {
+        let started = Instant::now();
+        let response = post_input(&server, &target, &body);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "input waited {:?} for the delivery's pane lock",
+            started.elapsed()
+        );
+        assert_eq!(response.status, 409, "{body}");
+        assert_eq!(
+            response.body,
+            "Namedrop is typing into this pane right now, so nothing was sent.\n"
+        );
+    }
+    assert_eq!(sent_inputs(&f), Vec::<Value>::new());
+    drop(delivering);
+    assert_eq!(
+        post_input(
+            &server,
+            &target,
+            &json!({"kind":"text","text":"stop that","continuity":continuity})
+        )
+        .status,
+        204
+    );
+    assert_eq!(
+        sent_inputs(&f),
+        vec![json!(["pane", "run", "pane-1-lead", "stop that"])]
+    );
+}
+
+#[test]
+fn refused_keys_never_land_later_and_resent_keys_keep_their_order() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let target = input_path("socket-a", "w1", "lead");
+    let continuity = live_continuity(&server, &path("socket-a", "w1", "lead"));
+    let key = |key: &str| {
+        post_input(
+            &server,
+            &target,
+            &json!({"kind":"key","key":key,"continuity":continuity}),
+        )
+        .status
+    };
+    assert_eq!(key("ArrowUp"), 204);
+    let delivering = hold_pane_lock(&f, "pane-1-lead");
+    assert_eq!(key("ArrowDown"), 409);
+    assert_eq!(key("Enter"), 409);
+    drop(delivering);
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        sent_inputs(&f),
+        vec![json!(["pane", "send-keys", "pane-1-lead", "up"])],
+        "a refused key reached the pane after the lock was free"
+    );
+    assert_eq!(key("ArrowDown"), 204);
+    assert_eq!(key("Enter"), 204);
+    assert_eq!(
+        sent_inputs(&f),
+        vec![
+            json!(["pane", "send-keys", "pane-1-lead", "up"]),
+            json!(["pane", "send-keys", "pane-1-lead", "down"]),
+            json!(["pane", "send-keys", "pane-1-lead", "enter"]),
+        ]
+    );
+}
+
 #[test]
 fn input_rejects_oversize_control_text_and_unknown_keys() {
     let f = Fixture::new();

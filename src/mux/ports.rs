@@ -64,6 +64,46 @@ pub trait Mux: MuxAct + MuxInput {}
 
 impl<T: MuxAct + MuxInput + ?Sized> Mux for T {}
 
+/// A connection a `MuxConnector` made serves wherever a `Mux` does, such as in
+/// a `LifecycleRuntime`.
+impl MuxRead for Arc<dyn Mux> {
+    fn endpoint(&self) -> &Endpoint {
+        (**self).endpoint()
+    }
+
+    fn survey(&self, scope: Scope<'_>, depth: Depth) -> Result<Survey, MuxError> {
+        (**self).survey(scope, depth)
+    }
+
+    fn screen(&self, pane: &PaneId, request: ScreenRequest) -> Result<Screen, MuxError> {
+        (**self).screen(pane, request)
+    }
+
+    fn process(&self, pane: &PaneId) -> Result<PaneProcess, MuxError> {
+        (**self).process(pane)
+    }
+
+    fn tab_label(&self, tab: &TabId) -> Result<Option<String>, MuxError> {
+        (**self).tab_label(tab)
+    }
+
+    fn integration_root(&self) -> Result<Option<PathBuf>, MuxError> {
+        (**self).integration_root()
+    }
+}
+
+impl MuxAct for Arc<dyn Mux> {
+    fn apply(&self, effect: &Effect) -> Result<Applied, MuxError> {
+        (**self).apply(effect)
+    }
+}
+
+impl MuxInput for Arc<dyn Mux> {
+    fn deliver(&self, input: PaneInput<'_>) -> InputOutcome {
+        (**self).deliver(input)
+    }
+}
+
 pub trait MuxConnector: Send + Sync {
     /// Every command the connection runs keeps to `budget`, and stops once
     /// `cancelled` is set.

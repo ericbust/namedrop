@@ -296,7 +296,8 @@ fn run_server(
     )?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let instance = server_files::random_hex(16)?;
-    let mut channel_service = channel_service::ChannelService::start(state)?;
+    let mux: Arc<dyn MuxConnector> = Arc::new(HerdrConnector);
+    let mut channel_service = channel_service::ChannelService::start(state, mux.clone())?;
     files.publish(
         &claim,
         &ServerInfo {
@@ -311,7 +312,6 @@ fn run_server(
     let mutations = Arc::new(std::sync::Mutex::new(()));
     let restarting = Arc::new(AtomicBool::new(false));
     let control_effects = thread_controls::ControlEffects::default();
-    let mux: Arc<dyn MuxConnector> = Arc::new(HerdrConnector);
     let front = Arc::new(http::Front {
         mux: mux.clone(),
         port,

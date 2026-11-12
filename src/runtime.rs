@@ -36,8 +36,22 @@ impl Default for ProcessHerdr {
     }
 }
 
+/// The terminal `ps` names as `pid`'s controlling TTY, read within `timeout`.
+/// Not a Herdr read. It borrows `ProcessHerdr`'s bounded runner.
+pub(crate) fn controlling_tty(pid: u64, timeout: Duration) -> Option<String> {
+    ProcessHerdr::for_binary("/bin/ps")
+        .execute_bounded(
+            &["-p", &pid.to_string(), "-o", "tty="],
+            timeout,
+            &AtomicBool::new(false),
+            1024,
+        )
+        .ok()
+        .map(|output| output.stdout.trim().to_owned())
+}
+
 impl ProcessHerdr {
-    pub(crate) fn for_binary(binary: &str) -> Self {
+    fn for_binary(binary: &str) -> Self {
         Self {
             binary: binary.to_owned(),
             ..Self::default()
