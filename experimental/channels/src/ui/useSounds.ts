@@ -48,12 +48,16 @@ export function useSounds(
   const current = useRef(settings);
   current.current = settings;
   const loading = useRef<AbortController | null>(null);
+  // Every load and save takes the next number; only the latest request's
+  // answer is shown, so a late answer never brings back an older choice.
+  const latest = useRef(0);
   const refresh = useCallback(() => {
+    const request = ++latest.current;
     loading.current?.abort();
     const controller = new AbortController();
     loading.current = controller;
     void poster.sounds(controller.signal).then((next) => {
-      if (!controller.signal.aborted && next !== null) setSettings(next);
+      if (request === latest.current && next !== null) setSettings(next);
     });
   }, [poster]);
   useEffect(() => {
@@ -95,9 +99,11 @@ export function useSounds(
   useEffect(() => ring(direct), [ring, direct]);
   const change = useCallback(
     async (change: SoundChange) => {
+      const request = ++latest.current;
       loading.current?.abort();
       setSettings((settings) => settings && applyChange(settings, change));
       const saved = await poster.changeSound(change);
+      if (request !== latest.current) return saved.kind;
       if (saved.kind === "saved") setSettings(saved.settings);
       else refresh();
       return saved.kind;

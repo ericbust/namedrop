@@ -110,6 +110,7 @@ function postRoute(onPost) {
   const soundPosts = [];
   let soundState = { default: "chime", muted: false, agents: {} };
   let soundRefusal = null;
+  let soundDelay = () => null;
   const authorized = (req) =>
     (req.headers.cookie ?? "")
       .split(/;\s*/)
@@ -155,6 +156,10 @@ function postRoute(onPost) {
     refuseSounds(status) {
       soundRefusal = status;
     },
+    // `delay(post)` returns a promise to hold that post's answer, or null.
+    delaySounds(delay) {
+      soundDelay = delay;
+    },
     // Mirrors /api/sounds: GET reads the settings; POST takes one change with
     // the CSRF header and answers with the settings it leaves.
     async sounds(req, res) {
@@ -179,7 +184,9 @@ function postRoute(onPost) {
         else agents[change.agent] = change.sound;
         soundState = { ...soundState, agents };
       } else return sendJson(res, 400, {});
-      sendJson(res, 200, soundState);
+      const answer = soundState;
+      await soundDelay(post);
+      sendJson(res, 200, answer);
     },
     cookie: `${COOKIE}=${session.secret}; Path=/; HttpOnly; SameSite=Strict`,
     rotate() {
@@ -13864,4 +13871,45 @@ test("SOUNDS m: a refused save says why and the picker shows the saved choice ag
   await pop.check();
   await alert.waitFor({ state: "detached" });
   await picker.locator("summary").getByText("Pop").waitFor();
+});
+
+test("SOUNDS n: when two saves answer out of order, the picker keeps the later choice", async (t) => {
+  const { ui } = await soundRoom(
+    t,
+    {},
+    {
+      path: `/?dm=${key(1)}/${encodeURIComponent(SOUND_CLAUDE)}`,
+      directPeers: () => [dmPeer(SOUND_CLAUDE, null)],
+    },
+  );
+  let release = () => {};
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  ui.posts.delaySounds((post) => (post.body.sound === "pop" ? held : null));
+  const picker = ui.page.locator(".dm-header .sound-picker");
+  await picker.locator("summary").click();
+  const group = picker.getByRole("group", { name: "Sound for @claude" });
+  const bell = group.getByRole("radio", { name: "Bell", exact: true });
+  await group.getByRole("radio", { name: "Pop", exact: true }).check();
+  await until(() => ui.posts.soundPosts.length === 1, "the first save");
+  const second = ui.page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      response.request().postData()?.includes('"bell"'),
+  );
+  await bell.check();
+  await second;
+  const first = ui.page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      response.request().postData()?.includes('"pop"'),
+  );
+  release();
+  await first;
+  await ui.page.evaluate(
+    () => new Promise((resolve) => setTimeout(resolve, 100)),
+  );
+  assert.equal(await bell.isChecked(), true);
+  await picker.locator("summary").getByText("Bell").waitFor();
 });
