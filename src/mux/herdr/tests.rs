@@ -1234,6 +1234,93 @@ fn a_scripted_connection_within_a_budget_runs_the_same_command() {
     assert_eq!(calls(&mux), ["tab get tab1"]);
 }
 
+/// A command, its timeout and output cap, and the address of its flag.
+type Run = (String, Duration, usize, Option<usize>);
+
+/// Records the budget and the flag each command runs within, and answers a
+/// tab label.
+#[derive(Default)]
+struct Budgeted {
+    runs: Mutex<Vec<Run>>,
+}
+
+impl Transport for Budgeted {
+    fn run(&self, args: &[&str]) -> Result<String, String> {
+        self.run_within(args, Budget::ADAPTER_DEFAULT, None)
+    }
+
+    fn run_within(
+        &self,
+        args: &[&str],
+        budget: Budget,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<String, String> {
+        self.runs.lock().unwrap().push((
+            args.join(" "),
+            budget.timeout,
+            budget.max_output_bytes,
+            cancelled.map(address),
+        ));
+        Ok(json!({"result": {"label": "build"}}).to_string())
+    }
+}
+
+fn address(flag: &AtomicBool) -> usize {
+    flag as *const AtomicBool as usize
+}
+
+#[test]
+fn a_budget_within_a_budget_keeps_the_tighter_limit_of_each_and_the_narrowest_flag() {
+    let mux = HerdrMux::new(Budgeted::default(), "socket-a");
+    let wide = AtomicBool::new(false);
+    let reads = mux.within(Allowance::each(
+        || {
+            Ok(Budget {
+                timeout: Duration::from_millis(700),
+                max_output_bytes: 1 << 20,
+            })
+        },
+        &wide,
+    ));
+    let tab = TabId::new("tab1");
+    let inner = reads.within(Allowance::fixed(Budget {
+        timeout: Duration::from_secs(2),
+        max_output_bytes: 4096,
+    }));
+    inner.tab_label(&tab).unwrap();
+    let narrow = AtomicBool::new(false);
+    let narrowest = inner.within(Allowance::each(
+        || {
+            Ok(Budget {
+                timeout: Duration::from_millis(300),
+                max_output_bytes: 1 << 30,
+            })
+        },
+        &narrow,
+    ));
+    narrowest.tab_label(&tab).unwrap();
+    let ran = |timeout_ms, flag| {
+        (
+            "tab get tab1".to_owned(),
+            Duration::from_millis(timeout_ms),
+            4096,
+            Some(address(flag)),
+        )
+    };
+    assert_eq!(
+        *mux.transport.runs.lock().unwrap(),
+        [ran(700, &wide), ran(300, &narrow)]
+    );
+    // A command watches one flag, so a wider flag that is already set
+    // refuses the command before it starts.
+    wide.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        narrowest.tab_label(&tab),
+        Err(MuxError::Unavailable("Herdr read cancelled".to_owned()))
+    );
+    assert_eq!(mux.transport.runs.lock().unwrap().len(), 2);
+}
+
 fn pane_event(pane: &str, workspace: &str, tab: &str) -> serde_json::Value {
     json!({
         "pane_id": pane, "workspace_id": workspace, "terminal_id": "t1", "tab_id": tab,
