@@ -106,6 +106,7 @@ export const SOUND_NAMES: Readonly<Record<SoundId, string>> = {
 const VOLUME = 0.25;
 const GAP_MS = 1000;
 const LOCK = "namedrop:channel-sound";
+const HOLD = "namedrop:channel-sound-hold";
 const RECORD_KEY = "namedrop:channel-sound";
 const KEPT_IDS = 200;
 
@@ -223,6 +224,12 @@ function mergeRecords(a: RingRecord, b: RingRecord): RingRecord {
     ids: [...new Set([...a.ids, ...b.ids])].slice(-KEPT_IDS),
   };
 }
+function remember(
+  kept: readonly string[],
+  ids: readonly string[],
+): readonly string[] {
+  return [...kept.filter((id) => !ids.includes(id)), ...ids].slice(-KEPT_IDS);
+}
 // Arrivals already recorded never ring again. New ones ring unless a sound
 // played less than a second ago; either way their ids are recorded. A clock
 // that moved back does not silence sounds until it catches up.
@@ -233,9 +240,7 @@ export function nextRing(
 ): { play: boolean; record: RingRecord } {
   if (ids.every((id) => record.ids.includes(id)))
     return { play: false, record };
-  const kept = [...record.ids.filter((id) => !ids.includes(id)), ...ids].slice(
-    -KEPT_IDS,
-  );
+  const kept = remember(record.ids, ids);
   const since = now - record.lastAt;
   return since >= 0 && since < GAP_MS
     ? { play: false, record: { ...record, ids: kept } }
@@ -250,6 +255,7 @@ export type PlayerEnv = Readonly<{
   storage: Pick<Storage, "getItem" | "setItem">;
   // Wall-clock milliseconds, the clock every tab shares.
   now(): number;
+  wait(ms: number): Promise<void>;
 }>;
 // Audio stays `locked` until a gesture resumes a context; a browser can
 // suspend it again later, which locks it until the next gesture.
@@ -296,6 +302,7 @@ export function browserPlayerEnv(): PlayerEnv {
       setItem: (key, value) => localStorage.setItem(key, value),
     },
     now: () => Date.now(),
+    wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   };
 }
 
@@ -353,20 +360,47 @@ export function createPlayer(env: PlayerEnv) {
     ring(tone: Tone, ids: readonly string[]): void {
       if (state.kind !== "ready") return;
       const audio = state.context;
-      const decide = () => {
-        let shared = noRings;
+      const { locks } = env;
+      // Decides by the record the tabs share; null when storage throws.
+      const shared = (): boolean | null => {
         try {
-          shared = parseRingRecord(env.storage.getItem(RECORD_KEY));
-        } catch {}
-        const next = nextRing(mergeRecords(shared, rung), ids, env.now());
-        rung = next.record;
-        try {
-          env.storage.setItem(RECORD_KEY, JSON.stringify(rung));
-        } catch {}
-        if (next.play) schedule(audio, tone);
+          const stored = parseRingRecord(env.storage.getItem(RECORD_KEY));
+          const next = nextRing(mergeRecords(stored, rung), ids, env.now());
+          env.storage.setItem(RECORD_KEY, JSON.stringify(next.record));
+          rung = next.record;
+          return next.play;
+        } catch {
+          return null;
+        }
       };
-      if (env.locks === null) decide();
-      else void env.locks.request(LOCK, decide);
+      const alone = (): boolean => {
+        const next = nextRing(rung, ids, env.now());
+        rung = next.record;
+        return next.play;
+      };
+      if (locks === null) {
+        if (shared() ?? alone()) schedule(audio, tone);
+        return;
+      }
+      void locks.request(LOCK, () => {
+        const play = shared();
+        if (play !== null) {
+          if (play) schedule(audio, tone);
+          return;
+        }
+        // Without storage the tabs share no record, so the tab that takes
+        // the hold rings and keeps it for a second while the others stay
+        // quiet and record the ids as heard.
+        void locks.request(HOLD, { ifAvailable: true }, async (hold) => {
+          if (hold === null) {
+            rung = { ...rung, ids: remember(rung.ids, ids) };
+            return;
+          }
+          if (!alone()) return;
+          schedule(audio, tone);
+          await env.wait(GAP_MS);
+        });
+      });
     },
   };
 }

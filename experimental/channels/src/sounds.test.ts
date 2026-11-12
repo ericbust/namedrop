@@ -398,16 +398,41 @@ function fakeAudio(starts: Start[]) {
   };
   return context;
 }
-// Web Locks as a browser runs them: each request waits for the one before.
+// Web Locks as a browser runs them: a request waits for the one before it
+// on the same name, and one made `ifAvailable` gets null while it is held.
+type Callback = (lock: { name: string } | null) => unknown;
 function fakeLocks() {
-  let tail = Promise.resolve();
+  const tails = new Map<string, Promise<unknown>>();
+  const held = new Set<string>();
+  const grant = (name: string, callback: Callback) => {
+    held.add(name);
+    return Promise.resolve(callback({ name })).finally(() => held.delete(name));
+  };
   return {
-    request(_: string, callback: () => void) {
-      const run = tail.then(callback);
-      tail = run;
+    request(
+      name: string,
+      ...args: [Callback] | [{ ifAvailable?: boolean }, Callback]
+    ) {
+      const [options, callback] = args.length === 1 ? [{}, args[0]] : args;
+      if (options.ifAvailable && held.has(name))
+        return Promise.resolve().then(() => callback(null));
+      if (options.ifAvailable) held.add(name);
+      const run = (tails.get(name) ?? Promise.resolve()).then(() =>
+        grant(name, callback),
+      );
+      tails.set(name, run);
       return run;
     },
   };
+}
+// A wall clock every tab reads, with the timers `wait` sets.
+type Clock = { now: number; timers: { at: number; fire(): void }[] };
+const newClock = (): Clock => ({ now: 0, timers: [] });
+function tick(clock: Clock, ms: number) {
+  clock.now += ms;
+  const due = clock.timers.filter((timer) => timer.at <= clock.now);
+  clock.timers = clock.timers.filter((timer) => timer.at > clock.now);
+  for (const timer of due) timer.fire();
 }
 function fakeStorage() {
   const items = new Map<string, string>();
@@ -427,7 +452,7 @@ const brokenStorage = {
 function harness({
   locks = null as ReturnType<typeof fakeLocks> | null,
   storage = fakeStorage() as PlayerEnv["storage"],
-  clock = { now: 0 },
+  clock = newClock(),
 } = {}) {
   const starts: Start[] = [];
   const audio = fakeAudio(starts);
@@ -436,6 +461,10 @@ function harness({
     locks,
     storage,
     now: () => clock.now,
+    wait: (ms: number) =>
+      new Promise<void>((fire) =>
+        clock.timers.push({ at: clock.now + ms, fire }),
+      ),
   } as unknown as PlayerEnv;
   const player = createPlayer(env);
   return {
@@ -444,7 +473,7 @@ function harness({
     plays: () => starts.length,
     firsts: () => starts.map((start) => start.freq),
     advance(ms: number) {
-      clock.now += ms;
+      tick(clock, ms);
     },
   };
 }
@@ -486,14 +515,14 @@ test("sounds: one tab rings at most once a second, and never twice for one messa
 test("sounds: tabs that share storage and a lock ring once for a message, whenever each hears it", async () => {
   const locks = fakeLocks();
   const storage = fakeStorage();
-  const clock = { now: 0 };
+  const clock = newClock();
   const tabs = [0, 1, 2].map(() => harness({ locks, storage, clock }));
   for (const tab of tabs) tab.player.unlock();
   await settle();
   for (const tab of tabs) {
     tab.player.ring("chime", ["dm-1"]);
     await settle();
-    clock.now += 1500;
+    tick(clock, 1500);
   }
   const plays = () => tabs.reduce((sum, tab) => sum + tab.plays(), 0);
   assert.equal(plays(), notes("chime"));
@@ -501,6 +530,39 @@ test("sounds: tabs that share storage and a lock ring once for a message, whenev
   tabs[0]?.player.ring("ping", ["dm-3"]);
   await settle();
   assert.equal(plays(), notes("chime") + notes("ping"));
+});
+
+test("sounds: with storage blocked, tabs that share locks ring once for a message they hear together", async () => {
+  const locks = fakeLocks();
+  const clock = newClock();
+  const tabs = [0, 1, 2].map(() =>
+    harness({ locks, storage: brokenStorage, clock }),
+  );
+  for (const tab of tabs) tab.player.unlock();
+  await settle();
+  const plays = () => tabs.reduce((sum, tab) => sum + tab.plays(), 0);
+  for (const tab of tabs) tab.player.ring("chime", ["dm-1"]);
+  await settle();
+  assert.equal(plays(), notes("chime"));
+  tick(clock, 500);
+  tabs[1]?.player.ring("ping", ["dm-2"]);
+  await settle();
+  assert.equal(plays(), notes("chime"), "the hold lasts a second");
+  tick(clock, 1000);
+  await settle();
+  tabs[2]?.player.ring("ping", ["dm-3"]);
+  await settle();
+  assert.equal(plays(), notes("chime") + notes("ping"));
+  tick(clock, 2000);
+  await settle();
+  tabs[2]?.player.ring("ping", ["dm-3"]);
+  tabs[1]?.player.ring("ping", ["dm-2"]);
+  await settle();
+  assert.equal(
+    plays(),
+    notes("chime") + notes("ping"),
+    "a tab never rings an id it heard twice",
+  );
 });
 
 test("sounds: without storage or locks, a tab still rings once per message and once a second", async () => {
