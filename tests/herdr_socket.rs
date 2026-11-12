@@ -1,7 +1,8 @@
 //! Which Herdr server a command talks to. Every `herdr` the CLI starts
 //! inherits `HERDR_SOCKET_PATH` unless `--herdr-socket` names one, and the
 //! session's socket is the flag's, the environment's, or the one `status
-//! server` reports, in that order.
+//! server` reports, in that order. The mailbox wake hook takes no flag, so
+//! its `herdr` inherits the variable too.
 
 #[path = "support/executable.rs"]
 mod executable;
@@ -14,8 +15,9 @@ use std::{
 };
 
 /// Logs each command with the socket it was given, and answers one pane, a
-/// popup, and `status server` with the socket in `$ROOT/served`, or fails it
-/// when that file is missing.
+/// popup, `status server` with the socket in `$ROOT/served`, or fails it
+/// when that file is missing, and workspace w1 with a checkout at
+/// `$CHECKOUT`, or `/repo`.
 const HERDR: &str = r#"#!/bin/sh
 printf 'socket<%s> %s\n' "${HERDR_SOCKET_PATH-unset}" "$*" >> "$ROOT/calls"
 case "$1 $2" in
@@ -23,7 +25,9 @@ case "$1 $2" in
   [ -f "$ROOT/served" ] || { echo 'no server is running' >&2; exit 1; }
   printf 'running: yes\nsocket: %s\n' "$(cat "$ROOT/served")" ;;
 "worktree list")
-  printf '%s\n' '{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"w1"}]}}' ;;
+  printf '{"result":{"worktrees":[{"path":"%s","open_workspace_id":"w1"}]}}\n' "${CHECKOUT:-/repo}" ;;
+"workspace list")
+  printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1"}]}}' ;;
 "pane list")
   printf '%s\n' '{"result":{"panes":[{"pane_id":"p1","terminal_id":"t1","tab_id":"tab1","workspace_id":"w1","agent":"codex","agent_session":{"value":"session-1"},"agent_status":"idle"}]}}' ;;
 "plugin pane")
@@ -48,9 +52,9 @@ impl Fixture {
         Self(root)
     }
 
-    /// Opens the Doctor popup from pane p1, so the session's socket shows in
-    /// the popup's `HERDR_SOCKET_PATH`.
-    fn launch(&self, flag: Option<&str>, inherited: Option<&str>) -> Vec<String> {
+    /// `namedrop` with this fixture's `herdr`, state, and home, and no Herdr
+    /// pane, workspace, or socket of its own.
+    fn namedrop(&self, inherited: Option<&str>) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
         command
             .env("ROOT", &self.0)
@@ -67,6 +71,13 @@ impl Fixture {
         if let Some(socket) = inherited {
             command.env("HERDR_SOCKET_PATH", socket);
         }
+        command
+    }
+
+    /// Opens the Doctor popup from pane p1, so the session's socket shows in
+    /// the popup's `HERDR_SOCKET_PATH`.
+    fn launch(&self, flag: Option<&str>, inherited: Option<&str>) -> Vec<String> {
+        let mut command = self.namedrop(inherited);
         if let Some(socket) = flag {
             command.args(["--herdr-socket", socket]);
         }
@@ -76,6 +87,10 @@ impl Fixture {
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
+        self.calls()
+    }
+
+    fn calls(&self) -> Vec<String> {
         fs::read_to_string(self.0.join("calls"))
             .unwrap()
             .lines()
@@ -157,5 +172,40 @@ fn the_socket_flag_wins_over_the_inherited_one_for_every_command() {
         "/run/flag.sock",
         false,
         "/run/flag.sock",
+    );
+}
+
+#[test]
+fn the_mailbox_wake_hook_finds_its_space_on_the_inherited_socket() {
+    let f = Fixture::new();
+    let checkout = f.0.join("checkout");
+    fs::create_dir(&checkout).unwrap();
+    let checkout = checkout.canonicalize().unwrap();
+    let output = f
+        .namedrop(Some("/run/inherited.sock"))
+        .env("CHECKOUT", &checkout)
+        .current_dir(&checkout)
+        .args(["hook", "mailbox-wake", "--state-directory"])
+        .arg(f.0.join("state"))
+        .output()
+        .unwrap();
+    let calls = f.calls();
+    assert!(output.status.success(), "{output:?} {calls:#?}");
+    assert_eq!(
+        calls.first().map(String::as_str),
+        Some(
+            format!(
+                "socket</run/inherited.sock> worktree list --cwd {} --json",
+                checkout.display()
+            )
+            .as_str()
+        ),
+        "{calls:#?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|call| call.starts_with("socket</run/inherited.sock> ")),
+        "{calls:#?}"
     );
 }

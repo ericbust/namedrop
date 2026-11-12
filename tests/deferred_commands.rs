@@ -124,11 +124,14 @@ impl Fixture {
         executable::write_executable(
             &herdr,
             r#"#!/usr/bin/env python3
-import json, sys
+import json, os, sys
 from pathlib import Path
 root = Path(__file__).parent
 args = sys.argv[1:]
 with (root / 'herdr-calls').open('a') as f: f.write(json.dumps(args) + '\n')
+parent = Path(f'/proc/{os.getppid()}/cmdline').read_bytes().split(b'\0')
+role = parent[1].decode() if len(parent) > 1 else ''
+with (root / 'herdr-sockets').open('a') as f: f.write(json.dumps([role, os.environ.get('HERDR_SOCKET_PATH'), ' '.join(args[:2])]) + '\n')
 if args[:2] == ['--socket', str(root / 'herdr.sock')]: args = args[2:]
 if args[:2] == ['worktree','list'] and (root / 'discovery-error').exists():
     error = (root / 'discovery-error').read_text()
@@ -220,17 +223,7 @@ else: print('{}')
     }
 
     fn clock(&self) -> Worker {
-        Worker(
-            self.command()
-                .arg("reminder-clock")
-                .arg(self.directory.path())
-                .arg(&self.socket)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
-        )
+        self.background("reminder-clock", None)
     }
 
     /// The full result, which carries the spool fields these tests inspect.
@@ -339,9 +332,19 @@ else: print('{}')
     }
 
     fn worker(&self) -> Worker {
+        self.background("--deferred-worker", None)
+    }
+
+    /// `namedrop <role> <state> <socket>` in the background, inheriting
+    /// `HERDR_SOCKET_PATH` when `inherited` names one.
+    fn background(&self, role: &str, inherited: Option<&str>) -> Worker {
+        let mut command = self.command();
+        if let Some(socket) = inherited {
+            command.env("HERDR_SOCKET_PATH", socket);
+        }
         Worker(
-            self.command()
-                .arg("--deferred-worker")
+            command
+                .arg(role)
                 .arg(self.directory.path())
                 .arg(&self.socket)
                 .stdin(Stdio::null())
@@ -350,6 +353,37 @@ else: print('{}')
                 .spawn()
                 .unwrap(),
         )
+    }
+
+    /// Each `herdr` command a `namedrop <role>` process ran, as its first two
+    /// arguments and the `HERDR_SOCKET_PATH` it ran with.
+    fn herdr_sockets(&self, role: &str) -> Vec<(String, Option<String>)> {
+        fs::read_to_string(self.directory.path().join("herdr-sockets"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| {
+                let (parent, socket, command): (String, Option<String>, String) =
+                    serde_json::from_str(line).unwrap();
+                (parent == role).then_some((command, socket))
+            })
+            .collect()
+    }
+
+    /// Every command a `namedrop <role>` process ran used the stored
+    /// namespace's socket, and they included `command`.
+    fn assert_ran_on_the_stored_socket(&self, role: &str, command: &str) {
+        let calls = self.herdr_sockets(role);
+        assert!(
+            calls.iter().any(|(ran, _)| ran == command),
+            "{role} never ran {command}: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|(_, socket)| socket.as_deref() == Some(self.socket.as_str())),
+            "{role} ran herdr off {}: {calls:?}",
+            self.socket
+        );
     }
 
     fn spool(&self) -> PathBuf {
@@ -1780,4 +1814,51 @@ fn a_queued_reply_naming_another_agents_attempt_warns_nobody() {
     wait_for(|| receipt.exists());
     let warnings = open_warnings(&fixture, &attempt);
     assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// The worker runs each queued command in a `--deferred-execute` child, on
+/// the socket stored with its caller's namespace, whatever
+/// `HERDR_SOCKET_PATH` the worker inherited.
+#[test]
+fn the_worker_runs_herdr_on_the_caller_s_stored_socket() {
+    let fixture = Fixture::new();
+    let pending = response(fixture.sandbox_command(&["send"], send("socket-id", "hello")));
+    let receipt = PathBuf::from(pending["data"]["receipt"].as_str().unwrap());
+    let _worker = fixture.background("--deferred-worker", Some("/run/inherited.sock"));
+    wait_for(|| receipt.exists());
+    fixture.assert_ran_on_the_stored_socket("--deferred-execute", "pane list");
+}
+
+/// The clock reaches each reminder's space on the socket stored with it,
+/// whatever `HERDR_SOCKET_PATH` it inherited.
+#[test]
+fn the_clock_runs_herdr_on_the_reminder_s_stored_socket() {
+    let f = Fixture::new();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(f.directory.path().join("reminder-clock.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let reminder = f.reminder("socket", "1m");
+    let connection =
+        rusqlite::Connection::open(f.directory.path().join("namedrop.sqlite3")).unwrap();
+    let id = reminder["reminder_id"].as_str().unwrap();
+    let due = SystemClock.now_unix_ms() - 1;
+    connection.execute("UPDATE reminders SET due_at_ms=?2,state_json=json_set(state_json,'$.due_at_ms',?2) WHERE reminder_id=?1",rusqlite::params![id,due as i64]).unwrap();
+    lock.unlock().unwrap();
+    let _clock = f.background("reminder-clock", Some("/run/inherited.sock"));
+    wait_for(|| {
+        connection
+            .query_row(
+                "SELECT state FROM reminders WHERE reminder_id=?1",
+                [id],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+            != "scheduled"
+    });
+    f.assert_ran_on_the_stored_socket("reminder-clock", "worktree list");
 }
