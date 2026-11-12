@@ -3,21 +3,14 @@
 //! so the size cap holds while it runs.
 
 use super::transport::{Transport, narrowest, tighter};
-use crate::{mux::Budget, runtime::stop_process_group};
+use crate::{mux::Budget, runtime::output_bounded};
 use std::{
-    env, fs,
-    io::{Read, Seek, SeekFrom},
-    os::unix::{fs::OpenOptionsExt, process::CommandExt},
-    process::{Command, Output, Stdio},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-    thread,
-    time::{Duration, Instant},
+    env,
+    process::Command,
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
 };
 
-static NEXT_HERDR_OUTPUT_FILE: AtomicU64 = AtomicU64::new(1);
 const DEFAULT_HERDR_TIMEOUT_MS: u64 = 10_000;
 const MAX_HERDR_TIMEOUT_MS: u64 = 60_000;
 
@@ -52,128 +45,6 @@ impl Process {
             cancelled,
         }
     }
-
-    fn output_file(&self, stream: &str) -> Result<fs::File, String> {
-        for _ in 0..16 {
-            let path = env::temp_dir().join(format!(
-                ".namedrop-herdr-{stream}-{}-{}",
-                std::process::id(),
-                NEXT_HERDR_OUTPUT_FILE.fetch_add(1, Ordering::Relaxed)
-            ));
-            match fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&path)
-            {
-                Ok(file) => {
-                    fs::remove_file(&path).map_err(|error| {
-                        format!("failed to secure Herdr command output: {error}")
-                    })?;
-                    return Ok(file);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => {
-                    return Err(format!("failed to capture Herdr command output: {error}"));
-                }
-            }
-        }
-        Err("failed to reserve Herdr command output".to_owned())
-    }
-
-    fn read_output(
-        &self,
-        mut file: fs::File,
-        stream: &str,
-        max_output_bytes: usize,
-    ) -> Result<Vec<u8>, String> {
-        file.seek(SeekFrom::Start(0))
-            .map_err(|error| format!("failed to read Herdr command {stream}: {error}"))?;
-        let mut bytes = Vec::new();
-        file.take(max_output_bytes.saturating_add(1) as u64)
-            .read_to_end(&mut bytes)
-            .map_err(|error| format!("failed to read Herdr command {stream}: {error}"))?;
-        if bytes.len() > max_output_bytes {
-            return Err("Herdr read exceeded its output limit".to_owned());
-        }
-        Ok(bytes)
-    }
-
-    fn output_bounded(
-        &self,
-        args: &[&str],
-        timeout: Duration,
-        cancelled: &AtomicBool,
-        max_output_bytes: usize,
-    ) -> Result<Output, String> {
-        if cancelled.load(Ordering::Relaxed) {
-            return Err("Herdr read cancelled".to_owned());
-        }
-        let mut command = Command::new(&self.binary);
-        command.args(args).process_group(0);
-        if let Some(socket) = &self.socket {
-            command.env("HERDR_SOCKET_PATH", socket);
-        }
-        let timeout = timeout.min(self.timeout);
-        let stdout = self.output_file("stdout")?;
-        let stderr = self.output_file("stderr")?;
-        let mut child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout.try_clone().map_err(|error| {
-                format!("failed to capture Herdr command stdout: {error}")
-            })?))
-            .stderr(Stdio::from(stderr.try_clone().map_err(|error| {
-                format!("failed to capture Herdr command stderr: {error}")
-            })?))
-            .spawn()
-            .map_err(|error| format!("failed to run {}: {error}", self.binary))?;
-        let deadline = Instant::now() + timeout;
-        let status = loop {
-            let oversized = [&stdout, &stderr].iter().any(|file| {
-                file.metadata()
-                    .map(|meta| meta.len() > max_output_bytes as u64)
-                    .unwrap_or(true)
-            });
-            if cancelled.load(Ordering::Relaxed) || oversized {
-                stop_process_group(&mut child);
-                return Err(if oversized {
-                    "Herdr read exceeded its output limit"
-                } else {
-                    "Herdr read cancelled"
-                }
-                .to_owned());
-            }
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|error| format!("failed to wait for {}: {error}", self.binary))?
-            {
-                break status;
-            }
-            if Instant::now() >= deadline {
-                stop_process_group(&mut child);
-                return Err(format!(
-                    "Herdr command timed out after {} ms",
-                    timeout.as_millis()
-                ));
-            }
-            thread::sleep(Duration::from_millis(5));
-        };
-        if [&stdout, &stderr].iter().any(|file| {
-            file.metadata()
-                .map(|meta| meta.len() > max_output_bytes as u64)
-                .unwrap_or(true)
-        }) {
-            return Err("Herdr read exceeded its output limit".to_owned());
-        }
-        let stdout = self.read_output(stdout, "stdout", max_output_bytes)?;
-        let stderr = self.read_output(stderr, "stderr", max_output_bytes)?;
-        Ok(Output {
-            status,
-            stdout,
-            stderr,
-        })
-    }
 }
 
 impl Transport for Process {
@@ -189,8 +60,17 @@ impl Transport for Process {
     ) -> Result<String, String> {
         let budget = tighter(self.budget, budget);
         let cancelled = narrowest(cancelled, Some(&self.cancelled))?.unwrap_or(&self.cancelled);
-        let output =
-            self.output_bounded(args, budget.timeout, cancelled, budget.max_output_bytes)?;
+        let mut command = Command::new(&self.binary);
+        command.args(args);
+        if let Some(socket) = &self.socket {
+            command.env("HERDR_SOCKET_PATH", socket);
+        }
+        let output = output_bounded(
+            command,
+            budget.timeout.min(self.timeout),
+            cancelled,
+            budget.max_output_bytes,
+        )?;
         if !output.status.success() {
             return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
         }
@@ -205,7 +85,16 @@ mod tests {
         Allowance, Endpoint, MuxError, MuxKind, MuxRead, PaneId, ScreenRequest, Style, TabId, Wrap,
         herdr::HerdrMux,
     };
-    use std::{path::PathBuf, sync::Mutex};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{
+            Mutex,
+            atomic::{AtomicU64, Ordering},
+        },
+        thread,
+        time::Instant,
+    };
 
     /// Logs each command with the socket it was given, then sleeps when the
     /// mode file says `sleep`, prints that many bytes when it holds a number,

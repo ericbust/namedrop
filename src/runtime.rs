@@ -1,45 +1,156 @@
 use crate::{Clock, IdGenerator};
 use std::{
-    os::unix::process::CommandExt,
-    process::{Child, Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    env, fs,
+    io::{Read, Seek, SeekFrom},
+    os::unix::{fs::OpenOptionsExt, process::CommandExt},
+    process::{Child, Command, Output, Stdio},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+static NEXT_OUTPUT_FILE: AtomicU64 = AtomicU64::new(1);
+
 /// The terminal `ps` names as `pid`'s controlling TTY, or `None` when `ps`
 /// fails, writes more than 1 KiB to either stream, or outlives `timeout`.
 pub(crate) fn controlling_tty(pid: u64, timeout: Duration) -> Option<String> {
-    const MAX_OUTPUT_BYTES: usize = 1024;
-    let mut child = Command::new("/bin/ps")
-        .args(["-p", &pid.to_string(), "-o", "tty="])
-        .process_group(0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
-            _ => {
-                stop_process_group(&mut child);
-                return None;
-            }
-        }
-    }
-    let output = child.wait_with_output().ok()?;
-    if !output.status.success()
-        || output.stdout.len() > MAX_OUTPUT_BYTES
-        || output.stderr.len() > MAX_OUTPUT_BYTES
-    {
+    let mut ps = Command::new("/bin/ps");
+    ps.args(["-p", &pid.to_string(), "-o", "tty="]);
+    short_answer(ps, timeout)
+}
+
+/// `command`'s trimmed stdout, or `None` when it fails, writes more than
+/// 1 KiB to either stream, or outlives `timeout`.
+fn short_answer(command: Command, timeout: Duration) -> Option<String> {
+    let output = output_bounded(command, timeout, &AtomicBool::new(false), 1024).ok()?;
+    if !output.status.success() {
         return None;
     }
     String::from_utf8(output.stdout)
         .ok()
-        .map(|tty| tty.trim().to_owned())
+        .map(|answer| answer.trim().to_owned())
+}
+
+/// Runs `command` in a process group of its own with stdin closed, and stops
+/// the group once `cancelled` is set, `timeout` passes, or either stream
+/// passes `max_output_bytes`. Output goes to unlinked private files, not
+/// pipes. On macOS a child that another thread starts while a new pipe is
+/// still inheritable keeps its write end open, so reading a pipe to its end
+/// waits for that child. The error texts are the ones the Herdr adapter
+/// classifies.
+pub(crate) fn output_bounded(
+    mut command: Command,
+    timeout: Duration,
+    cancelled: &AtomicBool,
+    max_output_bytes: usize,
+) -> Result<Output, String> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("Herdr read cancelled".to_owned());
+    }
+    let program = command.get_program().to_string_lossy().into_owned();
+    let stdout = output_file("stdout")?;
+    let stderr = output_file("stderr")?;
+    let mut child = command
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout.try_clone().map_err(|error| {
+            format!("failed to capture Herdr command stdout: {error}")
+        })?))
+        .stderr(Stdio::from(stderr.try_clone().map_err(|error| {
+            format!("failed to capture Herdr command stderr: {error}")
+        })?))
+        .spawn()
+        .map_err(|error| format!("failed to run {program}: {error}"))?;
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        let oversized = [&stdout, &stderr].iter().any(|file| {
+            file.metadata()
+                .map(|meta| meta.len() > max_output_bytes as u64)
+                .unwrap_or(true)
+        });
+        if cancelled.load(Ordering::Relaxed) || oversized {
+            stop_process_group(&mut child);
+            return Err(if oversized {
+                "Herdr read exceeded its output limit"
+            } else {
+                "Herdr read cancelled"
+            }
+            .to_owned());
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("failed to wait for {program}: {error}"))?
+        {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            stop_process_group(&mut child);
+            return Err(format!(
+                "Herdr command timed out after {} ms",
+                timeout.as_millis()
+            ));
+        }
+        thread::sleep(Duration::from_millis(5));
+    };
+    if [&stdout, &stderr].iter().any(|file| {
+        file.metadata()
+            .map(|meta| meta.len() > max_output_bytes as u64)
+            .unwrap_or(true)
+    }) {
+        return Err("Herdr read exceeded its output limit".to_owned());
+    }
+    let stdout = read_output(stdout, "stdout", max_output_bytes)?;
+    let stderr = read_output(stderr, "stderr", max_output_bytes)?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn output_file(stream: &str) -> Result<fs::File, String> {
+    for _ in 0..16 {
+        let path = env::temp_dir().join(format!(
+            ".namedrop-herdr-{stream}-{}-{}",
+            std::process::id(),
+            NEXT_OUTPUT_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(file) => {
+                fs::remove_file(&path)
+                    .map_err(|error| format!("failed to secure Herdr command output: {error}"))?;
+                return Ok(file);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!("failed to capture Herdr command output: {error}"));
+            }
+        }
+    }
+    Err("failed to reserve Herdr command output".to_owned())
+}
+
+fn read_output(
+    mut file: fs::File,
+    stream: &str,
+    max_output_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| format!("failed to read Herdr command {stream}: {error}"))?;
+    let mut bytes = Vec::new();
+    file.take(max_output_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read Herdr command {stream}: {error}"))?;
+    if bytes.len() > max_output_bytes {
+        return Err("Herdr read exceeded its output limit".to_owned());
+    }
+    Ok(bytes)
 }
 
 pub struct SystemClock;
@@ -100,7 +211,6 @@ pub(crate) fn stop_process_group(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{env, fs};
 
     #[test]
     fn stopping_a_child_kills_its_whole_process_group_and_nothing_else() {
