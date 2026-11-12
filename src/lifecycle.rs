@@ -1614,7 +1614,7 @@ fn parse_input<T: for<'de> Deserialize<'de>>(input: Value) -> Result<T, String> 
 
 /// Blank text is how Generic is chosen, so an emptied editor field and a
 /// deliberate clear are the same input rather than two shapes to keep in step.
-fn normalize_persona(description: &str) -> Option<String> {
+pub(crate) fn normalize_persona(description: &str) -> Option<String> {
     let trimmed = description.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
