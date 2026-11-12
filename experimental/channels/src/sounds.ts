@@ -24,10 +24,13 @@ export type SoundChange =
   | { kind: "default"; sound: SoundId }
   | { kind: "muted"; muted: boolean }
   | { kind: "agent"; agent: AgentKey; sound: SoundId | null };
-// Agent keys whose new messages to the person arrived in one update, oldest
-// first. `seq` grows by one per update that heard any.
-export type Heard = Readonly<{ seq: number; agents: readonly AgentKey[] }>;
-export const nothingHeard: Heard = { seq: 0, agents: [] };
+// A new message to the person: its author, and the id that keeps it from
+// ringing twice. A direct message's id is its peer's last agent message id.
+export type Arrival = Readonly<{ agent: AgentKey; id: string }>;
+// The arrivals of one update, oldest first. `seq` grows by one per update
+// that heard any.
+export type Heard = Readonly<{ seq: number; arrivals: readonly Arrival[] }>;
+export const nothingHeard: Heard = { seq: 0, arrivals: [] };
 
 export type Note = Readonly<{
   at: number;
@@ -98,6 +101,8 @@ export const SOUND_NAMES: Readonly<Record<SoundId, string>> = {
 const VOLUME = 0.25;
 const GAP_MS = 1000;
 const LOCK = "namedrop:channel-sound";
+const RECORD_KEY = "namedrop:channel-sound";
+const KEPT_IDS = 200;
 
 const AGENT_KEY = /^[A-Za-z0-9_-]{1,128}$/;
 export function agentKey(id: AddressId | string): AgentKey | null {
@@ -183,12 +188,63 @@ type Audio = Pick<
   | "createOscillator"
   | "addEventListener"
 >;
+// What this browser has rung, shared by its tabs: the time of the last sound
+// and the ids of the latest arrivals, rung or not.
+export type RingRecord = Readonly<{ lastAt: number; ids: readonly string[] }>;
+export const noRings: RingRecord = {
+  lastAt: Number.NEGATIVE_INFINITY,
+  ids: [],
+};
+export function parseRingRecord(text: string | null): RingRecord {
+  try {
+    const raw: unknown = JSON.parse(text ?? "null");
+    if (typeof raw !== "object" || raw === null) return noRings;
+    const { lastAt, ids } = raw as Record<string, unknown>;
+    return {
+      lastAt: Number.isFinite(lastAt)
+        ? (lastAt as number)
+        : Number.NEGATIVE_INFINITY,
+      ids: Array.isArray(ids)
+        ? ids.filter((id): id is string => typeof id === "string")
+        : [],
+    };
+  } catch {
+    return noRings;
+  }
+}
+function mergeRecords(a: RingRecord, b: RingRecord): RingRecord {
+  return {
+    lastAt: Math.max(a.lastAt, b.lastAt),
+    ids: [...new Set([...a.ids, ...b.ids])].slice(-KEPT_IDS),
+  };
+}
+// Arrivals already recorded never ring again. New ones ring unless a sound
+// played less than a second ago; either way their ids are recorded. A clock
+// that moved back does not silence sounds until it catches up.
+export function nextRing(
+  record: RingRecord,
+  ids: readonly string[],
+  now: number,
+): { play: boolean; record: RingRecord } {
+  if (ids.every((id) => record.ids.includes(id)))
+    return { play: false, record };
+  const kept = [...record.ids.filter((id) => !ids.includes(id)), ...ids].slice(
+    -KEPT_IDS,
+  );
+  const since = now - record.lastAt;
+  return since >= 0 && since < GAP_MS
+    ? { play: false, record: { ...record, ids: kept } }
+    : { play: true, record: { lastAt: now, ids: kept } };
+}
+
 type Locks = Pick<LockManager, "request">;
 export type PlayerEnv = Readonly<{
   audio: (() => Audio) | null;
   locks: Locks | null;
+  // Any call may throw, as localStorage does when site data is blocked.
+  storage: Pick<Storage, "getItem" | "setItem">;
+  // Wall-clock milliseconds, the clock every tab shares.
   now(): number;
-  wait(ms: number): Promise<void>;
 }>;
 // Audio stays `locked` until a gesture resumes a context; a browser can
 // suspend it again later, which locks it until the next gesture.
@@ -230,8 +286,11 @@ export function browserPlayerEnv(): PlayerEnv {
     audio: typeof AudioContext === "function" ? () => new AudioContext() : null,
     locks:
       typeof navigator.locks?.request === "function" ? navigator.locks : null,
-    now: () => performance.now(),
-    wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    storage: {
+      getItem: (key) => localStorage.getItem(key),
+      setItem: (key, value) => localStorage.setItem(key, value),
+    },
+    now: () => Date.now(),
   };
 }
 
@@ -240,7 +299,9 @@ export function createPlayer(env: PlayerEnv) {
     env.audio === null
       ? { kind: "unavailable" }
       : { kind: "locked", context: null };
-  let last = Number.NEGATIVE_INFINITY;
+  // This tab's own record: it stands in when storage throws, and keeps this
+  // tab from ringing one id twice whatever storage holds.
+  let rung = noRings;
   const listeners = new Set<() => void>();
   const move = (next: PlayerState) => {
     state = next;
@@ -282,22 +343,25 @@ export function createPlayer(env: PlayerEnv) {
       const audio = context();
       if (audio !== null) schedule(audio, tone);
     },
-    // One sound per second, across this browser's tabs when it can tell.
-    ring(tone: Tone): void {
+    // One sound per arrival and at most one a second, across this
+    // browser's tabs: the lock makes each check and record atomic.
+    ring(tone: Tone, ids: readonly string[]): void {
       if (state.kind !== "ready") return;
       const audio = state.context;
-      if (env.locks === null) {
-        const now = env.now();
-        if (now - last < GAP_MS) return;
-        last = now;
-        schedule(audio, tone);
-        return;
-      }
-      void env.locks.request(LOCK, { ifAvailable: true }, async (lock) => {
-        if (lock === null) return;
-        schedule(audio, tone);
-        await env.wait(GAP_MS);
-      });
+      const decide = () => {
+        let shared = noRings;
+        try {
+          shared = parseRingRecord(env.storage.getItem(RECORD_KEY));
+        } catch {}
+        const next = nextRing(mergeRecords(shared, rung), ids, env.now());
+        rung = next.record;
+        try {
+          env.storage.setItem(RECORD_KEY, JSON.stringify(rung));
+        } catch {}
+        if (next.play) schedule(audio, tone);
+      };
+      if (env.locks === null) decide();
+      else void env.locks.request(LOCK, decide);
     },
   };
 }

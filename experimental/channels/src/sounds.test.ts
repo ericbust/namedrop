@@ -7,8 +7,11 @@ import {
   agentKey,
   burstTone,
   createPlayer,
+  nextRing,
+  noRings,
   nothingHeard,
   type PlayerEnv,
+  parseRingRecord,
   parseSoundSettings,
   RECIPES,
   type SoundSettings,
@@ -197,7 +200,7 @@ const before: Row = { id: "old", author: "claude", to: ["human"] };
 const loaded = apply(initialState(), [before]);
 
 test("sounds: the first load of a channel hears nothing, even an agent's message to the person", () => {
-  assert.deepEqual(loaded.heard, { seq: 0, agents: [] });
+  assert.deepEqual(loaded.heard, nothingHeard);
 });
 
 test("sounds: an agent's new message to the person is heard once, by its author", () => {
@@ -205,7 +208,10 @@ test("sounds: an agent's new message to the person is heard once, by its author"
     before,
     { id: "answer", author: "claude", to: ["human", "codex"] },
   ]);
-  assert.deepEqual(next.heard, { seq: 1, agents: ["claude"] });
+  assert.deepEqual(next.heard, {
+    seq: 1,
+    arrivals: [{ agent: "claude", id: "answer" }],
+  });
   const again = apply(next, [
     before,
     { id: "answer", author: "claude", to: ["human", "codex"] },
@@ -214,7 +220,10 @@ test("sounds: an agent's new message to the person is heard once, by its author"
   const envoy = apply(next, [
     { id: "far", author: "envoy:w2:pane-address-7-8-9", to: ["you-too"] },
   ]);
-  assert.deepEqual(envoy.heard, { seq: 2, agents: ["pane-address-7-8-9"] });
+  assert.deepEqual(envoy.heard, {
+    seq: 2,
+    arrivals: [{ agent: "pane-address-7-8-9", id: "far" }],
+  });
 });
 
 test("sounds: agent-to-agent traffic, the person's own posts, terminals, system kinds and progress notes stay silent", () => {
@@ -271,7 +280,10 @@ test("sounds: a channel that first appears after the first load rings for its ne
     ],
     keyC,
   );
-  assert.deepEqual(state.heard, { seq: 1, agents: ["codex"] });
+  assert.deepEqual(state.heard, {
+    seq: 1,
+    arrivals: [{ agent: "codex", id: "new" }],
+  });
 });
 
 test("sounds: the watermark moves with live frames, so a later channel's older message stays silent", () => {
@@ -316,11 +328,14 @@ test("sounds: after the first read, a direct message is heard when an agent's la
   assert.deepEqual(heardDirect(first, first), []);
   assert.deepEqual(
     heardDirect(first, [peer("claude", "m2"), peer("codex", "m3")]),
-    ["claude", "codex"],
+    [
+      { agent: "claude", id: "m2" },
+      { agent: "codex", id: "m3" },
+    ],
   );
   assert.deepEqual(
     heardDirect(first, [...first, peer("new", "m4"), peer("quiet", null)]),
-    ["new"],
+    [{ agent: "new", id: "m4" }],
   );
 });
 
@@ -380,34 +395,44 @@ function fakeAudio(starts: Start[]) {
   };
   return context;
 }
+// Web Locks as a browser runs them: each request waits for the one before.
 function fakeLocks() {
-  const held = new Set<string>();
+  let tail = Promise.resolve();
   return {
-    async request(
-      name: string,
-      _: LockOptions,
-      callback: (lock: Lock | null) => Promise<void>,
-    ) {
-      if (held.has(name)) return callback(null);
-      held.add(name);
-      try {
-        return await callback({ name, mode: "exclusive" });
-      } finally {
-        held.delete(name);
-      }
+    request(_: string, callback: () => void) {
+      const run = tail.then(callback);
+      tail = run;
+      return run;
     },
   };
 }
-function harness({ locks = null as ReturnType<typeof fakeLocks> | null } = {}) {
+function fakeStorage() {
+  const items = new Map<string, string>();
+  return {
+    getItem: (key: string) => items.get(key) ?? null,
+    setItem: (key: string, value: string) => void items.set(key, value),
+  };
+}
+const brokenStorage = {
+  getItem(): string | null {
+    throw new Error("storage is blocked");
+  },
+  setItem() {
+    throw new Error("storage is blocked");
+  },
+};
+function harness({
+  locks = null as ReturnType<typeof fakeLocks> | null,
+  storage = fakeStorage() as PlayerEnv["storage"],
+  clock = { now: 0 },
+} = {}) {
   const starts: Start[] = [];
   const audio = fakeAudio(starts);
-  const waits: (() => void)[] = [];
-  let now = 0;
   const env = {
     audio: () => audio,
     locks,
-    now: () => now,
-    wait: () => new Promise<void>((resolve) => waits.push(resolve)),
+    storage,
+    now: () => clock.now,
   } as unknown as PlayerEnv;
   const player = createPlayer(env);
   return {
@@ -416,8 +441,7 @@ function harness({ locks = null as ReturnType<typeof fakeLocks> | null } = {}) {
     plays: () => starts.length,
     firsts: () => starts.map((start) => start.freq),
     advance(ms: number) {
-      now += ms;
-      for (const release of waits.splice(0)) release();
+      clock.now += ms;
     },
   };
 }
@@ -427,57 +451,127 @@ const notes = (tone: keyof typeof RECIPES) => RECIPES[tone].length;
 test("sounds: nothing rings until a gesture unlocks audio, and a suspended context locks it again", async () => {
   const h = harness();
   assert.equal(h.player.kind(), "locked");
-  h.player.ring("pop");
+  h.player.ring("pop", ["m1"]);
   assert.equal(h.plays(), 0);
   h.player.unlock();
   await settle();
   assert.equal(h.player.kind(), "ready");
-  h.player.ring("pop");
+  h.player.ring("pop", ["m1"]);
   assert.deepEqual(h.firsts(), [RECIPES.pop[0]?.freq]);
   h.audio.suspend();
   assert.equal(h.player.kind(), "locked");
   h.advance(5000);
-  h.player.ring("pop");
+  h.player.ring("pop", ["m2"]);
   assert.equal(h.plays(), notes("pop"));
 });
 
-test("sounds: one tab rings at most once a second", async () => {
+test("sounds: one tab rings at most once a second, and never twice for one message", async () => {
   const h = harness();
   h.player.unlock();
   await settle();
-  h.player.ring("knock");
+  h.player.ring("knock", ["m1"]);
   h.advance(500);
-  h.player.ring("bell");
+  h.player.ring("bell", ["m2"]);
   assert.equal(h.plays(), notes("knock"));
   h.advance(500);
-  h.player.ring("bell");
+  h.player.ring("bell", ["m2"]);
+  assert.equal(h.plays(), notes("knock"), "m2 was recorded in the burst");
+  h.player.ring("bell", ["m2", "m3"]);
   assert.equal(h.plays(), notes("knock") + notes("bell"));
 });
 
-test("sounds: tabs that share a lock ring once a second between them", async () => {
+test("sounds: tabs that share storage and a lock ring once for a message, whenever each hears it", async () => {
   const locks = fakeLocks();
-  const a = harness({ locks });
-  const b = harness({ locks });
-  for (const tab of [a, b]) tab.player.unlock();
+  const storage = fakeStorage();
+  const clock = { now: 0 };
+  const tabs = [0, 1, 2].map(() => harness({ locks, storage, clock }));
+  for (const tab of tabs) tab.player.unlock();
   await settle();
-  a.player.ring("chime");
+  for (const tab of tabs) {
+    tab.player.ring("chime", ["dm-1"]);
+    await settle();
+    clock.now += 1500;
+  }
+  const plays = () => tabs.reduce((sum, tab) => sum + tab.plays(), 0);
+  assert.equal(plays(), notes("chime"));
+  tabs[2]?.player.ring("ping", ["dm-2"]);
+  tabs[0]?.player.ring("ping", ["dm-3"]);
   await settle();
-  b.player.ring("chime");
-  a.player.ring("chime");
-  await settle();
-  assert.equal(a.plays() + b.plays(), notes("chime"));
-  a.advance(1000);
-  await settle();
-  b.player.ring("ping");
-  await settle();
-  assert.equal(b.plays(), notes("ping"));
+  assert.equal(plays(), notes("chime") + notes("ping"));
+});
+
+test("sounds: without storage or locks, a tab still rings once per message and once a second", async () => {
+  for (const locks of [null, fakeLocks()]) {
+    const h = harness({ locks, storage: brokenStorage });
+    h.player.unlock();
+    await settle();
+    h.player.ring("pop", ["m1"]);
+    await settle();
+    h.advance(500);
+    h.player.ring("pop", ["m2"]);
+    await settle();
+    h.advance(2000);
+    h.player.ring("pop", ["m1"]);
+    h.player.ring("pop", ["m2"]);
+    await settle();
+    assert.equal(h.plays(), notes("pop"), String(locks));
+    h.player.ring("pop", ["m3"]);
+    await settle();
+    assert.equal(h.plays(), notes("pop") * 2, String(locks));
+  }
+});
+
+test("sounds: the shared record skips known arrivals, holds new ones inside a second, and keeps the latest 200 ids", () => {
+  const first = nextRing(noRings, ["a"], 10_000);
+  assert.deepEqual(first, {
+    play: true,
+    record: { lastAt: 10_000, ids: ["a"] },
+  });
+  assert.deepEqual(nextRing(first.record, ["a"], 20_000), {
+    play: false,
+    record: first.record,
+  });
+  const held = nextRing(first.record, ["a", "b"], 10_999);
+  assert.deepEqual(held, {
+    play: false,
+    record: { lastAt: 10_000, ids: ["a", "b"] },
+  });
+  assert.deepEqual(nextRing(held.record, ["c"], 11_000), {
+    play: true,
+    record: { lastAt: 11_000, ids: ["a", "b", "c"] },
+  });
+  assert.equal(
+    nextRing(first.record, ["d"], 9_000).play,
+    true,
+    "a clock that moved back still rings",
+  );
+  let record = noRings;
+  for (let n = 0; n < 250; n += 1)
+    record = nextRing(record, [`m${n}`], n * 2000).record;
+  assert.equal(record.ids.length, 200);
+  assert.equal(record.ids[0], "m50");
+  assert.equal(nextRing(record, ["m49"], 600_000).play, true);
+  assert.equal(nextRing(record, ["m249"], 600_000).play, false);
+});
+
+test("sounds: a stored record that is missing or damaged reads as empty", () => {
+  for (const text of [null, "", "not json", "[]", "7", "null"])
+    assert.deepEqual(parseRingRecord(text), noRings, String(text));
+  assert.deepEqual(
+    parseRingRecord(JSON.stringify({ lastAt: 5, ids: ["a", 3, "b"] })),
+    { lastAt: 5, ids: ["a", "b"] },
+  );
+  assert.deepEqual(
+    parseRingRecord(JSON.stringify({ lastAt: "soon", ids: "a" })),
+    noRings,
+  );
 });
 
 test("sounds: a preview plays right away, whatever the limit", async () => {
   const h = harness();
   h.player.unlock();
   await settle();
-  h.player.ring("soft");
+  h.player.ring("soft", ["m1"]);
   h.player.preview("marimba");
   assert.equal(h.plays(), notes("soft") + notes("marimba"));
 });

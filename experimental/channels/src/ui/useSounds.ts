@@ -78,8 +78,15 @@ export function useSounds(
   }, [kind, player]);
   const ring = useCallback(
     (heard: Heard) => {
-      const tone = burstTone(current.current, heard.agents);
-      if (tone !== null) player.ring(tone);
+      const tone = burstTone(
+        current.current,
+        heard.arrivals.map((arrival) => arrival.agent),
+      );
+      if (tone !== null)
+        player.ring(
+          tone,
+          heard.arrivals.map((arrival) => arrival.id),
+        );
     },
     [player],
   );

@@ -8,7 +8,7 @@ import type {
   SafeText,
   SpaceKey,
 } from "./model.ts";
-import { type AgentKey, agentKey } from "./sounds.ts";
+import { type Arrival, agentKey } from "./sounds.ts";
 
 export type DirectPeer = {
   spaceKey: SpaceKey;
@@ -123,20 +123,17 @@ export function directSelection(): string | null {
 export function heardDirect(
   previous: readonly DirectPeer[] | null,
   next: readonly DirectPeer[],
-): AgentKey[] {
+): Arrival[] {
   if (previous === null) return [];
   const before = new Map(
     previous.map((peer) => [directKey(peer), peer.lastAgentMessageId]),
   );
-  const agents: AgentKey[] = [];
+  const arrivals: Arrival[] = [];
   for (const peer of next) {
-    if (
-      peer.lastAgentMessageId === null ||
-      peer.lastAgentMessageId === (before.get(directKey(peer)) ?? null)
-    )
-      continue;
-    const key = agentKey(peer.addressId);
-    if (key !== null && !agents.includes(key)) agents.push(key);
+    const id = peer.lastAgentMessageId;
+    if (id === null || id === (before.get(directKey(peer)) ?? null)) continue;
+    const agent = agentKey(peer.addressId);
+    if (agent !== null) arrivals.push({ agent, id });
   }
-  return agents;
+  return arrivals;
 }

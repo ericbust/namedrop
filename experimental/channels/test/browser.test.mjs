@@ -356,6 +356,50 @@ function screenRoute(onScreen) {
     },
   };
 }
+// Records each note a page plays: its first frequency and its start.
+function recordNotes() {
+  window.played = [];
+  const param = () => ({
+    value: 0,
+    first: null,
+    setValueAtTime(value) {
+      this.first ??= value;
+      return this;
+    },
+    linearRampToValueAtTime() {
+      return this;
+    },
+    exponentialRampToValueAtTime() {
+      return this;
+    },
+  });
+  const node = () => ({ connect: (target) => target });
+  window.AudioContext = class {
+    state = "suspended";
+    destination = {};
+    get currentTime() {
+      return performance.now() / 1000;
+    }
+    addEventListener() {}
+    resume() {
+      this.state = "running";
+      return Promise.resolve();
+    }
+    createGain() {
+      return { ...node(), gain: param() };
+    }
+    createOscillator() {
+      const frequency = param();
+      return {
+        ...node(),
+        type: "sine",
+        frequency,
+        start: (at) => window.played.push({ freq: frequency.first, at }),
+        stop() {},
+      };
+    }
+  };
+}
 async function open(
   t,
   onConnect,
@@ -548,50 +592,7 @@ async function open(
   const page = await browser.newPage();
   page.setDefaultTimeout(5000);
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.addInitScript(() => {
-    // Records each note the page plays: its first frequency and its start.
-    window.played = [];
-    const param = () => ({
-      value: 0,
-      first: null,
-      setValueAtTime(value) {
-        this.first ??= value;
-        return this;
-      },
-      linearRampToValueAtTime() {
-        return this;
-      },
-      exponentialRampToValueAtTime() {
-        return this;
-      },
-    });
-    const node = () => ({ connect: (target) => target });
-    window.AudioContext = class {
-      state = "suspended";
-      destination = {};
-      get currentTime() {
-        return performance.now() / 1000;
-      }
-      addEventListener() {}
-      resume() {
-        this.state = "running";
-        return Promise.resolve();
-      }
-      createGain() {
-        return { ...node(), gain: param() };
-      }
-      createOscillator() {
-        const frequency = param();
-        return {
-          ...node(),
-          type: "sine",
-          frequency,
-          start: (at) => window.played.push({ freq: frequency.first, at }),
-          stop() {},
-        };
-      }
-    };
-  });
+  await page.addInitScript(recordNotes);
   await page.addInitScript((observeLanding) => {
     window.cspErrors = [];
     window.initialHistoryLength = history.length;
@@ -13795,4 +13796,36 @@ test("SOUNDS k: a channel that appears after the page loaded plays for a new mes
   await appear(2, "beta", [{ ...toPerson("old", SOUND_CLAUDE), at_ms: 400 }]);
   await appear(3, "gamma", [{ ...toPerson("new", SOUND_CODEX), at_ms: 600 }]);
   assert.deepEqual(await heardSounds(ui.page, 1), [tune("pop")]);
+});
+
+test("SOUNDS l: one direct message plays once across three tabs, whenever each tab hears it", async (t) => {
+  const { ui } = await soundRoom(t, { agents: { [SOUND_CLAUDE]: "knock" } });
+  const context = await browser.newContext();
+  t.after(() => context.close());
+  const tabs = [];
+  for (let n = 0; n < 3; n += 1) {
+    const page = await context.newPage();
+    page.setDefaultTimeout(5000);
+    await page.addInitScript(recordNotes);
+    const tab = { page, last: "dm-1", served: [] };
+    await page.route("**/api/direct-messages", (route) => {
+      tab.served.push(tab.last);
+      return route.fulfill({
+        json: { peers: [dmPeer(SOUND_CLAUDE, tab.last)] },
+      });
+    });
+    await page.goto(ui.page.url());
+    await page.locator(".sound-chip").waitFor();
+    await page.keyboard.press("Shift");
+    await page.locator(".sound-chip").waitFor({ state: "detached" });
+    await until(() => tab.served.length >= 1, "the tab's first read");
+    tabs.push(tab);
+  }
+  for (const tab of tabs) {
+    tab.last = "dm-2";
+    await until(() => tab.served.includes("dm-2"), "the tab reads the message");
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+  }
+  const heard = await Promise.all(tabs.map((tab) => sounds(tab.page)));
+  assert.deepEqual(heard.flat(), [tune("knock")]);
 });

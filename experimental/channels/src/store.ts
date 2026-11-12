@@ -32,7 +32,7 @@ import type {
   TerminalRun,
 } from "./model.ts";
 import { samePeek } from "./peek.ts";
-import { type AgentKey, agentKey, nothingHeard } from "./sounds.ts";
+import { type Arrival, agentKey, nothingHeard } from "./sounds.ts";
 import { ENVOY } from "./wire.ts";
 
 export const channelCollator = new Intl.Collator();
@@ -382,14 +382,14 @@ function hasActivity(a: Channel, b: Channel): boolean {
     )
   );
 }
-// Agents whose new messages in `next` are to the person, oldest first. With
-// no `previous` snapshot, only messages newer than `watermark` are new.
+// New messages in `next` from agents to the person, oldest first. With no
+// `previous` snapshot, only messages newer than `watermark` are new.
 export function heardIn(
   previous: Pick<Channel, "messages" | "latestMessages"> | undefined,
   next: Pick<Channel, "latestMessages" | "members">,
   watermark: number | null,
-): AgentKey[] {
-  const agents: AgentKey[] = [];
+): Arrival[] {
+  const arrivals: Arrival[] = [];
   const person = (id: AddressId | "human") =>
     id === "human" || next.members.get(id)?.kind.type === "human";
   const fresh = (row: Message) =>
@@ -405,10 +405,10 @@ export function heardIn(
       !row.legs.some((leg) => person(leg.to))
     )
       continue;
-    const key = agentKey(row.author);
-    if (key !== null && !agents.includes(key)) agents.push(key);
+    const agent = agentKey(row.author);
+    if (agent !== null) arrivals.push({ agent, id: row.id });
   }
-  return agents;
+  return arrivals;
 }
 function newestAt(
   watermark: number,
@@ -610,7 +610,7 @@ function step(state: State, event: Event): State {
       const channels = new Map(state.channels);
       channels.set(channel.key, accumulated);
       const selection = settle(state, channels, previous === undefined);
-      const agents = heardIn(previous, accumulated, state.watermark);
+      const arrivals = heardIn(previous, accumulated, state.watermark);
       let unread = state.unread;
       if (
         previous &&
@@ -626,9 +626,9 @@ function step(state: State, event: Event): State {
         outbox: settleOutbox(state.outbox, [accumulated]),
         viewKnown: true,
         heard:
-          agents.length === 0
+          arrivals.length === 0
             ? state.heard
-            : { seq: state.heard.seq + 1, agents },
+            : { seq: state.heard.seq + 1, arrivals },
         watermark:
           state.watermark === null
             ? null

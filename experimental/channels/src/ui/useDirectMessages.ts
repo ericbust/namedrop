@@ -100,10 +100,10 @@ export function useDirectMessages(
         if (!response.ok) throw new Error("Directory unavailable");
         const next = parseDirectPeers(await response.json());
         if (!signal.aborted) {
-          const agents = heardDirect(lastRead.current, next);
+          const arrivals = heardDirect(lastRead.current, next);
           lastRead.current = next;
-          if (agents.length > 0)
-            setHeard((heard) => ({ seq: heard.seq + 1, agents }));
+          if (arrivals.length > 0)
+            setHeard((heard) => ({ seq: heard.seq + 1, arrivals }));
           setPeers(next);
           setDirectoryError(false);
         }
