@@ -26,16 +26,6 @@ pub(super) enum SkillRuntime {
     Codex,
 }
 
-impl SkillRuntime {
-    pub(super) fn parse(value: &str) -> Option<Self> {
-        match value {
-            "claude" => Some(Self::Claude),
-            "codex" => Some(Self::Codex),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum SkillSource {

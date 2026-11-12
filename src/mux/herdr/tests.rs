@@ -130,6 +130,8 @@ fn a_space_with_panes_is_one_worktree_listing_and_one_pane_listing() {
             }),
             state: Some(AgentState::Idle),
             idle_label: Some("@author ready".into()),
+            viewport_rows: None,
+            reports_session: true,
         }
     );
     assert_eq!(view.panes[1].title.as_deref(), Some("zsh"));
@@ -244,6 +246,69 @@ fn every_pane_is_one_pane_list_grouped_by_space() {
             ))
             .collect::<Vec<_>>(),
         [("w1", vec!["p1", "p3"]), ("w2", vec!["p2"])]
+    );
+}
+
+#[test]
+fn one_space_s_panes_are_one_pane_list_for_that_space() {
+    let mux = herdr(|_| {
+        Ok(json!({"result": {"panes": [
+            {"pane_id": "p1", "terminal_id": "t1", "tab_id": "tab1", "workspace_id": "w1",
+             "agent_session": null, "scroll": {"viewport_rows": 40}},
+            {"pane_id": "p2", "terminal_id": "t2", "tab_id": "tab1", "workspace_id": "w1",
+             "scroll": {"viewport_rows": "40"}},
+            {"pane_id": "p3", "terminal_id": "t3", "tab_id": "tab1", "workspace_id": "w1",
+             "agent_session": {"value": "s3"}},
+        ]}})
+        .to_string())
+    });
+    for depth in [Depth::Spaces, Depth::Panes] {
+        let spaces = mux
+            .survey(Scope::PanesOf(&space("w1")), depth)
+            .unwrap()
+            .spaces;
+        let [view] = spaces.as_slice() else {
+            panic!("one space: {spaces:?}");
+        };
+        assert_eq!(view.id, space("w1"));
+        assert_eq!(
+            (&view.label, &view.checkout, &view.worktree),
+            (&None, &None, &None)
+        );
+        assert_eq!(
+            view.panes
+                .iter()
+                .map(|pane| (pane.id.as_str(), pane.viewport_rows, pane.reports_session))
+                .collect::<Vec<_>>(),
+            [
+                ("p1", Some(40), true),
+                ("p2", None, false),
+                ("p3", None, true)
+            ]
+        );
+        assert_eq!(
+            view.panes[0].agent, None,
+            "a null session is still a free pane"
+        );
+    }
+    assert_eq!(
+        calls(&mux),
+        ["pane list --workspace w1", "pane list --workspace w1"]
+    );
+}
+
+#[test]
+fn an_unreadable_shell_pid_is_no_shell_beside_a_readable_tty() {
+    let mux = herdr(|_| {
+        Ok(
+            json!({"result": {"process_info": {"tty": "/dev/pts/3", "shell_pid": "bad"}}})
+                .to_string(),
+        )
+    });
+    let process = mux.process(&PaneId::new("p1")).unwrap();
+    assert_eq!(
+        (process.shell_pid, process.tty),
+        (None, Some("/dev/pts/3".into()))
     );
 }
 
@@ -419,6 +484,8 @@ fn target() -> PaneFacts {
         }),
         state: None,
         idle_label: None,
+        viewport_rows: None,
+        reports_session: true,
     }
 }
 

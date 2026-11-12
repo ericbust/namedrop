@@ -1,18 +1,15 @@
 use super::{HistoryStore, Status};
 use crate::{
-    HerdrCommandExecutor, ProcessHerdr,
+    AgentRuntime,
     dashboard::{
         skills::{Skill, SkillCatalog, SkillRuntime},
         snapshot::SpaceKey,
     },
+    mux::{AgentKind, Budget, Depth, MuxConnector, MuxError, PaneFacts, Scope, Survey},
     store::dashboard::{LiveBinding, LiveMember},
 };
-use serde::{Deserialize, Serialize};
-use std::{
-    path::Path,
-    sync::{Mutex, atomic::AtomicBool},
-    time::Duration,
-};
+use serde::Serialize;
+use std::{path::Path, sync::Mutex, time::Duration};
 
 #[derive(Serialize)]
 pub(super) struct Reply {
@@ -20,50 +17,39 @@ pub(super) struct Reply {
     skills: Vec<Skill>,
 }
 
-#[derive(Deserialize)]
-struct Envelope {
-    result: Panes,
-}
-#[derive(Deserialize)]
-struct Panes {
-    panes: Vec<Pane>,
-}
-#[derive(Deserialize)]
-struct Pane {
-    pane_id: String,
-    workspace_id: String,
-    agent: Option<String>,
-    cwd: Option<String>,
-    agent_session: Option<Session>,
-}
-impl Pane {
-    fn runtime(&self, kind: crate::PaneType) -> Option<SkillRuntime> {
-        match kind {
-            crate::PaneType::Agent => self.agent.as_deref().and_then(SkillRuntime::parse),
-            crate::PaneType::Terminal => None,
-        }
+fn runtime(pane: &PaneFacts, kind: crate::PaneType) -> Option<SkillRuntime> {
+    match kind {
+        crate::PaneType::Agent => match pane.agent.as_ref().map(|agent| &agent.kind) {
+            Some(AgentKind::Known(AgentRuntime::ClaudeCode)) => Some(SkillRuntime::Claude),
+            Some(AgentKind::Known(AgentRuntime::Codex)) => Some(SkillRuntime::Codex),
+            _ => None,
+        },
+        crate::PaneType::Terminal => None,
     }
 }
 
-#[derive(Deserialize)]
-struct Session {
-    value: String,
-}
-
-fn current(binding: &LiveBinding, output: &str) -> Result<Pane, Status> {
-    let reply: Envelope = serde_json::from_str(output).map_err(|_| Status::Unavailable)?;
-    let mut matching = reply.result.panes.into_iter().filter(|pane| {
-        pane.pane_id == binding.pane_id && pane.workspace_id == binding.namespace.space_id.as_str()
-    });
+fn current(binding: &LiveBinding, survey: Result<Survey, MuxError>) -> Result<PaneFacts, Status> {
+    let survey = survey.map_err(|_| Status::Unavailable)?;
+    let mut matching = survey
+        .spaces
+        .into_iter()
+        .flat_map(|space| space.panes)
+        .filter(|pane| {
+            pane.id.as_str() == binding.pane_id && pane.space == binding.namespace.space_id
+        });
     let pane = matching.next().ok_or(Status::Gone)?;
     if matching.next().is_some() {
         return Err(Status::Unavailable);
     }
+    let actual = pane
+        .agent
+        .as_ref()
+        .and_then(|agent| crate::mux::resolve_session(&agent.session));
     if binding
         .agent_session_id
         .as_ref()
-        .zip(pane.agent_session.as_ref())
-        .is_some_and(|(recorded, actual)| recorded.as_str() != actual.value)
+        .zip(actual)
+        .is_some_and(|(recorded, actual)| recorded != actual)
     {
         return Err(Status::Gone);
     }
@@ -71,6 +57,7 @@ fn current(binding: &LiveBinding, output: &str) -> Result<Pane, Status> {
 }
 
 pub(super) fn read(
+    mux: &dyn MuxConnector,
     history: &Mutex<HistoryStore>,
     state: &Path,
     key: &SpaceKey,
@@ -89,22 +76,19 @@ pub(super) fn read(
             LiveMember::Bound { binding, .. } => binding,
         }
     };
-    let output = ProcessHerdr::default()
-        .with_socket(Some(binding.namespace.session_socket_id.clone()))
-        .execute_bounded(
-            &[
-                "pane",
-                "list",
-                "--workspace",
-                binding.namespace.space_id.as_str(),
-            ],
-            Duration::from_millis(500),
-            &AtomicBool::new(false),
-            2 * 1024 * 1024,
+    let budget = Budget {
+        timeout: Duration::from_millis(500),
+        max_output_bytes: 2 * 1024 * 1024,
+    };
+    let survey = mux
+        .connect(
+            &binding.namespace.session_socket_id,
+            budget,
+            Default::default(),
         )
-        .map_err(|_| Status::Unavailable)?;
-    let pane = current(&binding, &output.stdout)?;
-    let runtime = pane.runtime(binding.pane_type);
+        .and_then(|herdr| herdr.survey(Scope::PanesOf(&binding.namespace.space_id), Depth::Panes));
+    let pane = current(&binding, survey)?;
+    let runtime = runtime(&pane, binding.pane_type);
     let skills = runtime
         .zip(pane.cwd.as_deref())
         .map_or_else(Vec::new, |(runtime, cwd)| {
@@ -116,20 +100,58 @@ pub(super) fn read(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AgentSessionId, PaneBindingId, PaneType, StateNamespace};
+    use crate::{
+        AgentSessionId, PaneBindingId, PaneType, SpaceId, StateNamespace,
+        mux::{
+            AgentIdentity, PaneId, SessionClaim, SpaceView, TabId, TerminalId,
+            herdr::HerdrConnector,
+        },
+    };
     use serde_json::json;
+
+    fn pane(space: &str, kind: Option<AgentKind>, session: Option<&str>) -> PaneFacts {
+        PaneFacts {
+            id: PaneId::new("pane"),
+            terminal: TerminalId::new("terminal"),
+            tab: TabId::new("tab"),
+            space: SpaceId::new(space),
+            cwd: Some("/fixture".into()),
+            title: None,
+            agent: kind.map(|kind| AgentIdentity {
+                kind,
+                label: None,
+                session: session.map_or(SessionClaim::None, |session| {
+                    SessionClaim::Reported(AgentSessionId::new(session))
+                }),
+            }),
+            state: None,
+            idle_label: None,
+            viewport_rows: None,
+            reports_session: true,
+        }
+    }
+
+    fn survey(panes: Vec<PaneFacts>) -> Result<Survey, MuxError> {
+        Ok(Survey {
+            spaces: vec![SpaceView {
+                id: SpaceId::new("w1"),
+                label: None,
+                number: None,
+                checkout: None,
+                worktree: None,
+                panes,
+            }],
+        })
+    }
 
     #[test]
     fn unsupported_agents_and_terminals_have_no_skill_runtime() {
-        let mut pane: Pane =
-            serde_json::from_value(json!({"pane_id":"pane","workspace_id":"w1","agent":"codex"}))
-                .unwrap();
-        assert_eq!(pane.runtime(PaneType::Agent), Some(SkillRuntime::Codex));
-        assert_eq!(pane.runtime(PaneType::Terminal), None);
-        pane.agent = Some("other-agent".into());
-        assert_eq!(pane.runtime(PaneType::Agent), None);
-        pane.agent = None;
-        assert_eq!(pane.runtime(PaneType::Agent), None);
+        let codex = pane("w1", Some(AgentKind::Known(AgentRuntime::Codex)), None);
+        assert_eq!(runtime(&codex, PaneType::Agent), Some(SkillRuntime::Codex));
+        assert_eq!(runtime(&codex, PaneType::Terminal), None);
+        let other = pane("w1", Some(AgentKind::Other("other-agent".into())), None);
+        assert_eq!(runtime(&other, PaneType::Agent), None);
+        assert_eq!(runtime(&pane("w1", None, None), PaneType::Agent), None);
         assert_eq!(
             serde_json::to_value(Reply {
                 runtime: None,
@@ -171,16 +193,16 @@ mod tests {
         let history = Mutex::new(HistoryStore::Unopened);
         let catalog = SkillCatalog::default();
         assert!(matches!(
-            read(&history, &state, &key, "missing", &catalog),
+            read(&HerdrConnector, &history, &state, &key, "missing", &catalog),
             Err(Status::NotFound)
         ));
         assert!(matches!(
-            read(&history, &state, &key, "ended", &catalog),
+            read(&HerdrConnector, &history, &state, &key, "ended", &catalog),
             Err(Status::Gone)
         ));
         let wrong = SpaceKey::of(&StateNamespace::for_space("other-socket", "test-workspace"));
         assert!(matches!(
-            read(&history, &state, &wrong, "ended", &catalog),
+            read(&HerdrConnector, &history, &state, &wrong, "ended", &catalog),
             Err(Status::NotFound)
         ));
         drop(history);
@@ -197,33 +219,32 @@ mod tests {
             pane_type: PaneType::Agent,
             agent_session_id: Some(AgentSessionId::new("session")),
         };
-        let pane = json!({"pane_id":"pane","workspace_id":"w1","agent":"codex","cwd":"/fixture","agent_session":{"value":"session"}});
-        let reply = |panes: Vec<serde_json::Value>| json!({"result":{"panes":panes}}).to_string();
+        let codex = Some(AgentKind::Known(AgentRuntime::Codex));
+        let found = pane("w1", codex.clone(), Some("session"));
         assert_eq!(
-            current(&binding, &reply(vec![pane.clone()]))
-                .unwrap()
-                .agent
-                .as_deref(),
-            Some("codex")
+            current(&binding, survey(vec![found.clone()])).ok(),
+            Some(found.clone())
         );
-        let mut wrong = pane.clone();
-        wrong["workspace_id"] = json!("w2");
         assert!(matches!(
-            current(&binding, &reply(vec![wrong])),
-            Err(Status::Gone)
-        ));
-        let mut wrong = pane.clone();
-        wrong["agent_session"]["value"] = json!("replacement");
-        assert!(matches!(
-            current(&binding, &reply(vec![wrong])),
+            current(
+                &binding,
+                survey(vec![pane("w2", codex.clone(), Some("session"))])
+            ),
             Err(Status::Gone)
         ));
         assert!(matches!(
-            current(&binding, &reply(vec![pane.clone(), pane])),
+            current(
+                &binding,
+                survey(vec![pane("w1", codex, Some("replacement"))])
+            ),
+            Err(Status::Gone)
+        ));
+        assert!(matches!(
+            current(&binding, survey(vec![found.clone(), found])),
             Err(Status::Unavailable)
         ));
         assert!(matches!(
-            current(&binding, "garbage"),
+            current(&binding, Err(MuxError::Protocol("garbage".into()))),
             Err(Status::Unavailable)
         ));
     }

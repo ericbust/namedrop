@@ -442,10 +442,10 @@ fn a_connection_to_the_fake_endpoint_shares_its_world() {
         max_output_bytes: 1024,
     };
     assert!(matches!(
-        mux.connect("socket-b", budget),
+        mux.connect("socket-b", budget, Arc::default()),
         Err(MuxError::Unavailable(_))
     ));
-    let connected = mux.connect("socket-a", budget).unwrap();
+    let connected = mux.connect("socket-a", budget, Arc::default()).unwrap();
     connected.apply(&Effect::ReloadKeybindings).unwrap();
     assert_eq!(mux.effects(), [Effect::ReloadKeybindings]);
 }

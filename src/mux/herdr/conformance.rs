@@ -64,6 +64,7 @@ fn pane_json(pane: &FakePane) -> Value {
         "agent_session": session,
         "agent_status": facts.state.as_ref().map(AgentState::as_str),
         "state_labels": facts.idle_label.as_ref().map(|idle| json!({"idle": idle})),
+        "scroll": facts.viewport_rows.map(|rows| json!({"viewport_rows": rows})),
     })
 }
 
@@ -347,6 +348,7 @@ fn world() -> WorldBuilder {
         .idle()
         .idle_label("@author ready")
         .title("@author")
+        .viewport_rows(40)
         .cwd("/repo")
         .screen("one\ntwo\nthree")
         .process(PaneProcess {
@@ -386,6 +388,8 @@ fn every_scope_and_depth_reports_the_same_survey() {
         for scope in [
             Scope::Space(&one),
             Scope::Space(&two),
+            Scope::PanesOf(&one),
+            Scope::PanesOf(&two),
             Scope::CheckoutOf(Path::new("/repo")),
             Scope::All,
         ] {
@@ -411,6 +415,10 @@ fn a_survey_carries_the_agent_identity_status_and_idle_label() {
         Some(&AgentKind::Known(AgentRuntime::ClaudeCode))
     );
     assert_eq!(author.idle_label.as_deref(), Some("@author ready"));
+    assert_eq!(
+        (author.viewport_rows, author.reports_session),
+        (Some(40), true)
+    );
     let orphan = agree(world, |mux, _| {
         survey(
             mux,

@@ -1,7 +1,11 @@
 use super::hub::{Frame, HubCommand, SpaceEvent, Subscription};
 use super::server_files::{ServerFiles, Token, UiSource, open_directory};
 use super::snapshot::{self, SpaceKey};
-use crate::{HerdrCommandExecutor, ProcessHerdr, StateStore, store::dashboard::ScreenPane};
+use crate::{
+    ProcessHerdr, StateStore,
+    mux::{Budget, Gone, MuxConnector, MuxError, ScreenRequest, Style, Wrap},
+    store::dashboard::ScreenPane,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -48,6 +52,8 @@ base-uri 'none'; form-action 'none'\r\nX-Frame-Options: DENY\r\n\
 X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCache-Control: no-store\r\n";
 
 pub(crate) struct Front {
+    /// Every multiplexer read the HTTP threads make connects through this.
+    pub mux: Arc<dyn MuxConnector>,
     pub port: u16,
     pub files: ServerFiles,
     pub token: Token,
@@ -183,7 +189,7 @@ impl ScreenReads {
             .map_err(|_| Status::Unavailable)
     }
 
-    fn read(&self, target: ScreenTarget) -> ScreenResult {
+    fn read(&self, mux: &dyn MuxConnector, target: ScreenTarget) -> ScreenResult {
         let (flight, leader) = {
             let mut flights = self.flights.lock().map_err(|_| Status::Unavailable)?;
             match flights.get(&target) {
@@ -202,7 +208,7 @@ impl ScreenReads {
                 flight: &flight,
                 pending: true,
             };
-            let result = read_screen(&target);
+            let result = read_screen(mux, &target);
             completion.publish(result.clone());
             result
         } else {
@@ -278,37 +284,24 @@ fn resolve_screen(
     }
 }
 
-fn read_screen(target: &ScreenTarget) -> ScreenResult {
-    let output = ProcessHerdr::default()
-        .with_socket(Some(target.socket.clone()))
-        .execute_bounded(
-            &[
-                "pane",
-                "read",
-                &target.pane,
-                "--source",
-                "recent-unwrapped",
-                "--lines",
-                "200",
-            ],
-            Duration::from_secs(3),
-            &AtomicBool::new(false),
-            1024 * 1024,
-        )
-        .map_err(|error| {
-            if serde_json::from_str::<serde_json::Value>(&error)
-                .ok()
-                .is_some_and(|value| {
-                    value.pointer("/error/code").and_then(|code| code.as_str())
-                        == Some("pane_not_found")
-                })
-            {
-                Status::Gone
-            } else {
-                Status::Unavailable
-            }
+fn read_screen(mux: &dyn MuxConnector, target: &ScreenTarget) -> ScreenResult {
+    let budget = Budget {
+        timeout: Duration::from_secs(3),
+        max_output_bytes: 1024 * 1024,
+    };
+    let request = ScreenRequest {
+        lines: 200,
+        wrap: Wrap::Joined,
+        style: Style::Plain,
+    };
+    let output = mux
+        .connect(&target.socket, budget, Arc::default())
+        .and_then(|herdr| herdr.screen(&crate::mux::PaneId::new(&target.pane), request))
+        .map_err(|error| match error {
+            MuxError::Gone(Gone::Pane, _) => Status::Gone,
+            _ => Status::Unavailable,
         })?;
-    let clean = strip_terminal_sequences(&output.stdout);
+    let clean = strip_terminal_sequences(&output.text);
     let safe = snapshot::SafeText::from_untrusted(&clean, usize::MAX).text;
     Ok(newest_screen_text(&safe).into())
 }
@@ -1361,11 +1354,16 @@ fn serve_connection(
                             live_spaces
                                 .entry(peer.space_key.clone())
                                 .or_insert_with(|| {
-                                    let herdr = ProcessHerdr::default().with_socket(Some(
-                                        peer.namespace.session_socket_id.clone(),
-                                    ));
+                                    let herdr = front
+                                        .mux
+                                        .connect(
+                                            &peer.namespace.session_socket_id,
+                                            Budget::ADAPTER_DEFAULT,
+                                            Arc::default(),
+                                        )
+                                        .ok()?;
                                     crate::discover_worktree_for_workspace(
-                                        &herdr,
+                                        &*herdr,
                                         peer.namespace.space_id.as_str(),
                                     )
                                     .ok()
@@ -1717,6 +1715,7 @@ fn serve_connection(
         }
         Ok(Route::Skills { key, address_id }) => {
             match skills_api::read(
+                &*front.mux,
                 history_store,
                 front.files.state(),
                 &key,
@@ -1751,7 +1750,7 @@ fn serve_connection(
                     let mut guard = history_store.lock().map_err(|_| Status::Unavailable)?;
                     resolve_screen(&mut guard, front.files.state(), &key, &address_id)?
                 };
-                screens.read(target)
+                screens.read(&*front.mux, target)
             })();
             match result {
                 Ok(text) => respond(
@@ -2712,7 +2711,11 @@ mod screen_regression_tests {
         let follower = {
             let reads = reads.clone();
             let target = target.clone();
-            thread::spawn(move || sender.send(reads.read(target)).unwrap())
+            thread::spawn(move || {
+                sender
+                    .send(reads.read(&crate::mux::herdr::HerdrConnector, target))
+                    .unwrap()
+            })
         };
         let outcome = receiver.recv_timeout(Duration::from_secs(5));
         let elapsed = started.elapsed();

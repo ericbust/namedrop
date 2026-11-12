@@ -27,6 +27,15 @@ pub struct Budget {
     pub max_output_bytes: usize,
 }
 
+impl Budget {
+    /// No limit but the adapter's own: a Herdr command still stops after
+    /// `NAMEDROP_HERDR_TIMEOUT_MS`.
+    pub const ADAPTER_DEFAULT: Self = Self {
+        timeout: Duration::MAX,
+        max_output_bytes: usize::MAX,
+    };
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AgentState {
     Idle,
@@ -122,6 +131,12 @@ pub struct PaneFacts {
     pub state: Option<AgentState>,
     /// The text the multiplexer shows for this pane while its agent is idle.
     pub idle_label: Option<String>,
+    /// The rows of the pane's visible screen, when the multiplexer reports them.
+    pub viewport_rows: Option<u64>,
+    /// Whether the multiplexer said anything about this pane's agent session.
+    /// When it did, a missing session means none runs. When it did not, a
+    /// missing session means nothing is known.
+    pub reports_session: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -161,6 +176,9 @@ pub enum Scope<'a> {
     /// One space, with its checkout and `worktree` key resolved. A
     /// `Depth::Spaces` survey reads only the space's label and stamped checkout.
     Space(&'a SpaceId),
+    /// One space's panes alone, as `All` with `Depth::Panes` reads them: no
+    /// label, checkout, or `worktree` key. Either depth reads the panes.
+    PanesOf(&'a SpaceId),
     /// The one space that holds this checkout. More than one, or none, is an
     /// error.
     CheckoutOf(&'a Path),

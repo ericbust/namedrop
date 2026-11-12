@@ -6,6 +6,7 @@ use super::{
 };
 use crate::{
     HerdrCommandExecutor, ProcessHerdr, StateStore,
+    mux::{Budget, Depth, MuxConnector, PaneId, Scope, ScreenRequest, Style, Wrap},
     store::dashboard::{LiveBinding, LiveMember},
 };
 use serde::{Deserialize, Serialize};
@@ -51,11 +52,17 @@ struct HistoryReader {
 }
 
 impl HistoryReader {
-    fn start(binding: &LiveBinding) -> io::Result<Self> {
-        let socket = binding.namespace.session_socket_id.clone();
-        let pane = binding.pane_id.clone();
+    fn start(mux: &dyn MuxConnector, binding: &LiveBinding) -> io::Result<Self> {
+        let pane = PaneId::new(&binding.pane_id);
         let stop = Arc::new(AtomicBool::new(false));
         let cancelled = Arc::clone(&stop);
+        let budget = Budget {
+            timeout: Duration::from_secs(20),
+            max_output_bytes: ENCODED_LIMIT,
+        };
+        let herdr = mux
+            .connect(&binding.namespace.session_socket_id, budget, stop.clone())
+            .map_err(|error| io::Error::other(error.to_string()))?;
         let (sender, receiver) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
             .name("peek-history".into())
@@ -63,26 +70,16 @@ impl HistoryReader {
                 let mut last = None;
                 while !cancelled.load(Ordering::Acquire) {
                     // ANSI reads are passive and do not scroll the source application.
-                    let result = ProcessHerdr::default()
-                        .with_socket(Some(socket.clone()))
-                        .execute_bounded(
-                            &[
-                                "pane",
-                                "read",
-                                &pane,
-                                "--source",
-                                "recent-unwrapped",
-                                "--lines",
-                                "2200",
-                                "--format",
-                                "ansi",
-                            ],
-                            Duration::from_secs(20),
-                            &cancelled,
-                            ENCODED_LIMIT,
-                        );
+                    let result = herdr.screen(
+                        &pane,
+                        ScreenRequest {
+                            lines: 2200,
+                            wrap: Wrap::Joined,
+                            style: Style::Ansi,
+                        },
+                    );
                     if let Ok(output) = result {
-                        let clean = strip_terminal_sequences(&output.stdout);
+                        let clean = strip_terminal_sequences(&output.text);
                         let safe = snapshot::SafeText::from_untrusted(&clean, usize::MAX).text;
                         let text = newest_history(&safe);
                         if !text.is_empty()
@@ -288,7 +285,7 @@ impl NativeIdentity {
 
 struct NativePane {
     identity: NativeIdentity,
-    source_rows: Option<serde_json::Value>,
+    source_rows: Option<u64>,
 }
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct SourceViewport {
@@ -385,26 +382,23 @@ fn shell_tty(pid: u64, budget: Duration) -> Option<PathBuf> {
     tty_path(result.stdout.trim())
 }
 
-fn source_tty(binding: &LiveBinding, budget: Duration) -> Option<PathBuf> {
+fn source_tty(mux: &dyn MuxConnector, binding: &LiveBinding, budget: Duration) -> Option<PathBuf> {
     if budget.is_zero() {
         return None;
     }
     let started = Instant::now();
-    let result = ProcessHerdr::default()
-        .with_socket(Some(binding.namespace.session_socket_id.clone()))
-        .execute_bounded(
-            &["pane", "process-info", "--pane", &binding.pane_id],
-            budget.min(Duration::from_millis(150)),
-            &AtomicBool::new(false),
-            ENCODED_LIMIT,
-        );
-    let result = result.ok()?;
-    let reply = serde_json::from_str::<serde_json::Value>(&result.stdout).ok()?;
-    let info = reply.pointer("/result/process_info")?;
-    if let Some(value) = info.get("tty").filter(|value| !value.is_null()) {
-        tty_path(value.as_str()?)
-    } else if let Some(value) = info.get("shell_pid").filter(|value| !value.is_null()) {
-        shell_tty(value.as_u64()?, budget.saturating_sub(started.elapsed()))
+    let limits = Budget {
+        timeout: budget.min(Duration::from_millis(150)),
+        max_output_bytes: ENCODED_LIMIT,
+    };
+    let process = mux
+        .connect(&binding.namespace.session_socket_id, limits, Arc::default())
+        .and_then(|herdr| herdr.process(&PaneId::new(&binding.pane_id)))
+        .ok()?;
+    if let Some(tty) = process.tty {
+        tty_path(tty.to_str()?)
+    } else if let Some(pid) = process.shell_pid {
+        shell_tty(u64::from(pid), budget.saturating_sub(started.elapsed()))
     } else {
         None
     }
@@ -424,6 +418,7 @@ impl TtyDiscovery {
 
     fn viewport(
         &mut self,
+        mux: &dyn MuxConnector,
         pane: &NativePane,
         binding: &LiveBinding,
         budget: Duration,
@@ -435,18 +430,13 @@ impl TtyDiscovery {
             self.path = None;
         }
         if self.begin_probe(Instant::now(), budget)
-            && let Some(path) = source_tty(binding, budget)
+            && let Some(path) = source_tty(mux, binding, budget)
             && let Some(viewport) = tty_viewport(&path)
         {
             self.path = Some(path);
             return viewport;
         }
-        SourceViewport::bounded(
-            None,
-            pane.source_rows
-                .as_ref()
-                .and_then(serde_json::Value::as_u64),
-        )
+        SourceViewport::bounded(None, pane.source_rows)
     }
 
     fn begin_probe(&mut self, now: Instant, budget: Duration) -> bool {
@@ -456,28 +446,6 @@ impl TtyDiscovery {
         self.next_probe = now + Duration::from_secs(1);
         true
     }
-}
-
-#[derive(Deserialize)]
-struct PaneReply {
-    result: PaneResult,
-}
-#[derive(Deserialize)]
-struct PaneResult {
-    panes: Vec<Pane>,
-}
-#[derive(Deserialize)]
-struct Pane {
-    pane_id: String,
-    workspace_id: String,
-    terminal_id: String,
-    agent_session: Option<Session>,
-    agent_status: Option<String>,
-    scroll: Option<serde_json::Value>,
-}
-#[derive(Deserialize)]
-struct Session {
-    value: String,
 }
 
 fn recorded(store: &mut StateStore, key: &SpaceKey, address: &str) -> Result<LiveBinding, Status> {
@@ -491,44 +459,47 @@ fn recorded(store: &mut StateStore, key: &SpaceKey, address: &str) -> Result<Liv
     }
 }
 
-fn native(binding: &LiveBinding, budget: Duration) -> Result<NativePane, Status> {
-    let result = ProcessHerdr::default()
-        .with_socket(Some(binding.namespace.session_socket_id.clone()))
-        .execute_bounded(
-            &[
-                "pane",
-                "list",
-                "--workspace",
-                binding.namespace.space_id.as_str(),
-            ],
-            budget.min(Duration::from_millis(500)),
-            &AtomicBool::new(false),
-            ENCODED_LIMIT,
-        )
+fn native(
+    mux: &dyn MuxConnector,
+    binding: &LiveBinding,
+    budget: Duration,
+) -> Result<NativePane, Status> {
+    let limits = Budget {
+        timeout: budget.min(Duration::from_millis(500)),
+        max_output_bytes: ENCODED_LIMIT,
+    };
+    let survey = mux
+        .connect(&binding.namespace.session_socket_id, limits, Arc::default())
+        .and_then(|herdr| herdr.survey(Scope::PanesOf(&binding.namespace.space_id), Depth::Panes))
         .map_err(|_| Status::Unavailable)?;
-    let reply: PaneReply = serde_json::from_str(&result.stdout).map_err(|_| Status::Unavailable)?;
-    let mut matching = reply.result.panes.into_iter().filter(|pane| {
-        pane.pane_id == binding.pane_id && pane.workspace_id == binding.namespace.space_id.as_str()
-    });
+    let mut matching = survey
+        .spaces
+        .into_iter()
+        .flat_map(|space| space.panes)
+        .filter(|pane| {
+            pane.id.as_str() == binding.pane_id && pane.space == binding.namespace.space_id
+        });
     let pane = matching.next().ok_or(Status::Gone)?;
+    let terminal = pane.terminal.as_str();
     if matching.next().is_some()
-        || pane.terminal_id.is_empty()
-        || pane.terminal_id.len() > 512
-        || pane.terminal_id.starts_with('-')
-        || pane
-            .terminal_id
+        || terminal.is_empty()
+        || terminal.len() > 512
+        || terminal.starts_with('-')
+        || terminal
             .chars()
             .any(|c| c.is_control() || c.is_whitespace())
     {
         return Err(Status::Unavailable);
     }
     let identity = NativeIdentity {
-        terminal: pane.terminal_id,
+        terminal: terminal.to_owned(),
         session: pane
-            .agent_session
-            .map(|s| s.value)
+            .agent
+            .as_ref()
+            .and_then(|agent| crate::mux::resolve_session(&agent.session))
+            .map(|session| session.as_str().to_owned())
             .filter(|s| !s.is_empty()),
-        status: pane.agent_status,
+        status: pane.state.as_ref().map(|state| state.as_str().to_owned()),
     };
     if binding
         .agent_session_id
@@ -540,9 +511,7 @@ fn native(binding: &LiveBinding, budget: Duration) -> Result<NativePane, Status>
     }
     Ok(NativePane {
         identity,
-        source_rows: pane
-            .scroll
-            .and_then(|scroll| scroll.get("viewport_rows").cloned()),
+        source_rows: pane.viewport_rows,
     })
 }
 
@@ -651,9 +620,15 @@ struct Observation {
     deadline: Option<Instant>,
 }
 impl Observation {
-    fn open(binding: &LiveBinding, pane: &NativePane, deadline: Instant) -> Result<Self, Status> {
+    fn open(
+        mux: &dyn MuxConnector,
+        binding: &LiveBinding,
+        pane: &NativePane,
+        deadline: Instant,
+    ) -> Result<Self, Status> {
         let mut tty = TtyDiscovery::new();
         let viewport = tty.viewport(
+            mux,
             pane,
             binding,
             deadline.saturating_duration_since(Instant::now()),
@@ -675,6 +650,7 @@ impl Observation {
 
     fn reconcile(
         &mut self,
+        mux: &dyn MuxConnector,
         binding: &LiveBinding,
         identity: &NativeIdentity,
         pane: NativePane,
@@ -684,6 +660,7 @@ impl Observation {
         }
         let deadline = self.deadline.unwrap_or_else(|| Instant::now() + STARTUP);
         let viewport = self.tty.viewport(
+            mux,
             &pane,
             binding,
             deadline.saturating_duration_since(Instant::now()),
@@ -1029,7 +1006,8 @@ impl LivePeeks {
         if binding.pane_type != crate::PaneType::Agent || binding.agent_session_id.is_none() {
             return Err(Status::Gone);
         }
-        let identity = native(&binding, Duration::from_millis(500))?.identity;
+        let mux = &*front.mux;
+        let identity = native(mux, &binding, Duration::from_millis(500))?.identity;
         if !identity.accepts_input() {
             return Err(Status::Gone);
         }
@@ -1050,7 +1028,7 @@ impl LivePeeks {
         match post {
             InputPost::Text { text, .. } => {
                 let current = recorded(&mut store, key, address)?;
-                let updated = native(&binding, Duration::from_millis(500))?.identity;
+                let updated = native(mux, &binding, Duration::from_millis(500))?.identity;
                 if current != binding || updated != identity || !updated.accepts_input() {
                     return Err(Status::Gone);
                 }
@@ -1093,7 +1071,11 @@ impl LivePeeks {
                 .set_busy_timeout(Duration::from_millis(100))
                 .map_err(|_| Status::Unavailable)?;
             let binding = recorded(&mut store, key, address)?;
-            let pane = native(&binding, STARTUP.saturating_sub(started.elapsed()))?;
+            let pane = native(
+                &*front.mux,
+                &binding,
+                STARTUP.saturating_sub(started.elapsed()),
+            )?;
             let continuity = continuity(front, address, &binding, &pane.identity);
             if expected.is_some_and(|value| value != continuity) {
                 return Err(Status::Gone);
@@ -1104,7 +1086,8 @@ impl LivePeeks {
             Ok(value) => value,
             Err(status) => return respond_status(&mut socket, status),
         };
-        let mut observation = match Observation::open(&binding, &pane, started + STARTUP) {
+        let mux = &*front.mux;
+        let mut observation = match Observation::open(mux, &binding, &pane, started + STARTUP) {
             Ok(observation) => observation,
             Err(status) => return respond_status(&mut socket, status),
         };
@@ -1170,8 +1153,8 @@ impl LivePeeks {
                 if current != binding {
                     return Err(Status::Gone);
                 }
-                let current = native(&binding, STARTUP.saturating_sub(started.elapsed()))?;
-                observation.reconcile(&binding, &identity, current)
+                let current = native(mux, &binding, STARTUP.saturating_sub(started.elapsed()))?;
+                observation.reconcile(mux, &binding, &identity, current)
             });
             match rechecked {
                 Ok(true) => continue,
@@ -1204,7 +1187,7 @@ impl LivePeeks {
             }
         };
         let history = (!ending)
-            .then(|| HistoryReader::start(&binding).ok())
+            .then(|| HistoryReader::start(mux, &binding).ok())
             .flatten();
         let mut native_checked = Instant::now();
         let mut last_heartbeat = Instant::now();
@@ -1236,9 +1219,9 @@ impl LivePeeks {
                         || history_text.is_some())
                 {
                     native_checked = Instant::now();
-                    match native(&binding, Duration::from_millis(500))
-                        .and_then(|current| observation.reconcile(&binding, &identity, current))
-                    {
+                    match native(mux, &binding, Duration::from_millis(500)).and_then(|current| {
+                        observation.reconcile(mux, &binding, &identity, current)
+                    }) {
                         Ok(_) => {}
                         Err(Status::Unavailable) => {
                             final_event = Some(Event::Unavailable {
