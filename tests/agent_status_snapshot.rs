@@ -770,9 +770,10 @@ fn excerpts_are_redacted_quoted_and_bounded_to_recent_output() {
     herdr.set_excerpt(
         "pane-lead",
         // Herdr prints only the 40 lines read, so the filler fits in them and
-        // still outgrows the 2 KiB excerpt.
+        // still outgrows the 2 KiB excerpt. The secret and the escape sequence
+        // sit in the kept tail, where only redaction and quoting remove them.
         &format!(
-            "AWS_SECRET_ACCESS_KEY=do-not-share\n\u{1b}[31mred\u{1b}[0m\n{}\nlast line here\n",
+            "{}\nAWS_SECRET_ACCESS_KEY=do-not-share\n\u{1b}[31mred\u{1b}[0m\nlast line here\n",
             format!("{}\n", "filler line ".repeat(16)).repeat(36)
         ),
     );
@@ -794,6 +795,8 @@ fn excerpts_are_redacted_quoted_and_bounded_to_recent_output() {
     .unwrap();
 
     let excerpt = row(&snapshot, "pane-lead")["excerpt"].as_str().unwrap();
+    assert!(excerpt.contains("AWS_SECRET_ACCESS_KEY="), "{excerpt}");
+    assert!(excerpt.contains("[31mred"), "{excerpt}");
     assert!(!excerpt.contains("do-not-share"), "{excerpt}");
     assert!(
         excerpt.len() <= 2_048,
