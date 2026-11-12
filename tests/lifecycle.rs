@@ -17,7 +17,8 @@ use namedrop::{
     discover_worktree_for_workspace, execute_lifecycle_operation, execute_message_operation,
     locate_agent_session_pane,
     mux::{
-        AgentKind, AgentState, Depth, Effect, InputOutcome, MuxError, TabId,
+        AgentKind, AgentState, Depth, Effect, InputOutcome, MuxError, PopupScreen, PopupSpec,
+        SessionClaim, TabId,
         fake::{
             CHECKOUT_LISTINGS, EVERY_LISTING, FakeMux, Listing, Read, ScopeKind, SentInput,
             StrictSpace, Surveyed, Takes, WorldBuilder,
@@ -2119,38 +2120,8 @@ fn agent_status_events_replace_and_clear_the_current_occupant() {
     use std::sync::Mutex;
 
     struct DynamicHerdr {
-        occupant: Mutex<Option<(&'static str, &'static str)>>,
-    }
-    impl HerdrCommandExecutor for DynamicHerdr {
-        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-            let stdout = match args {
-                ["workspace", "list"] => {
-                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
-                        .to_owned()
-                }
-                ["worktree", "list", "--cwd", "/repo", "--json"]
-                | ["worktree", "list", "--json"]
-                | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
-                    r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-                        .to_owned()
-                }
-                ["pane", "list", "--workspace", "workspace-1"] => {
-                    let occupant = *self.occupant.lock().unwrap();
-                    match occupant {
-                        Some((session, status)) => format!(
-                            r#"{{"result":{{"panes":[{{"pane_id":"pane-live","terminal_id":"terminal-live","tab_id":"tab-live","workspace_id":"workspace-1","label":"Main","agent":"codex","display_agent":"Codex","agent_session":{{"value":"{session}"}},"agent_status":"{status}"}}]}}}}"#
-                        ),
-                        None => {
-                            r#"{"result":{"panes":[{"pane_id":"pane-live","terminal_id":"terminal-live","tab_id":"tab-live","workspace_id":"workspace-1","label":"Main","agent_session":null,"agent_status":null}]}}"#
-                            .to_owned()
-                        }
-                    }
-                }
-                ["pane", "report-metadata", "pane-live", ..] => String::new(),
-                _ => return Err(format!("unexpected Herdr command: {args:?}")),
-            };
-            Ok(HerdrCommandOutput { stdout })
-        }
+        occupant: Arc<Mutex<Option<(&'static str, &'static str)>>>,
+        space: StrictSpace,
     }
     struct FixedClock;
     impl Clock for FixedClock {
@@ -2164,9 +2135,48 @@ fn agent_status_events_replace_and_clear_the_current_occupant() {
             format!("{kind}-{}", self.0.fetch_add(1, Ordering::Relaxed))
         }
     }
-    let herdr = DynamicHerdr {
-        occupant: Mutex::new(Some(("session-1", "working"))),
-    };
+    let space = lifecycle_space(
+        repo_world()
+            .pane("pane-live")
+            .terminal("terminal-live")
+            .tab("tab-live")
+            .title("Main")
+            .codex()
+            .agent_label("Codex")
+            .session("session-1")
+            .working()
+            .build(),
+        true,
+        Takes::nothing()
+            .input(|attempt| {
+                attempt.pane.as_str() == "pane-live"
+                    && matches!(attempt.input, SentInput::Prompt(_))
+            })
+            .effect(metadata_of("pane-live")),
+    );
+    // The old fake failed the registration prompt, which a legacy executor
+    // reports as possibly typed.
+    space.answer(
+        "pane-live",
+        InputOutcome::Ambiguous("unexpected Herdr command: agent prompt".to_owned()),
+    );
+    let occupant = Arc::new(Mutex::new(Some(("session-1", "working"))));
+    let current = Arc::clone(&occupant);
+    space.on_read(move |mux, _| {
+        match *current.lock().unwrap() {
+            Some((session, status)) => {
+                mux.set_session("pane-live", session);
+                mux.set_state("pane-live", AgentState::parse(status));
+            }
+            None => {
+                mux.clear_session("pane-live");
+                mux.set_agent("pane-live", None);
+                mux.clear_state("pane-live");
+            }
+        }
+        Ok(())
+    });
+    let herdr = DynamicHerdr { occupant, space };
     let directory = TestDirectory::new();
     let ids = SequenceIds(AtomicU64::new(1));
     let runtime = namedrop::LifecycleRuntime {
@@ -2177,7 +2187,7 @@ fn agent_status_events_replace_and_clear_the_current_occupant() {
         workspace_id: None,
         current_pane_id: Some("pane-live"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr.space,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -2244,57 +2254,8 @@ fn tab_close_cancels_outstanding_delivery_and_removes_every_attached_mention() {
     use std::sync::Mutex;
 
     struct ClosingTabHerdr {
-        open: Mutex<bool>,
-    }
-    impl HerdrCommandExecutor for ClosingTabHerdr {
-        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-            let stdout = match args {
-                ["workspace", "list"] => {
-                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
-                        .to_owned()
-                }
-                ["worktree", "list", "--cwd", "/repo", "--json"]
-                | ["worktree", "list", "--json"]
-                | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
-                    r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-                        .to_owned()
-                }
-                ["pane", "list", "--workspace", "workspace-1"] => {
-                    if *self.open.lock().unwrap() {
-                        serde_json::json!({
-                            "result": {"panes": [
-                                {
-                                    "pane_id": "pane-lead",
-                                    "terminal_id": "terminal-lead",
-                                    "tab_id": "tab-collaboration",
-                                    "workspace_id": "workspace-1",
-                                    "agent": "codex",
-                                    "agent_session": {"value": "session-lead"},
-                                    "agent_status": "idle"
-                                },
-                                {
-                                    "pane_id": "pane-reviewer",
-                                    "terminal_id": "terminal-reviewer",
-                                    "tab_id": "tab-collaboration",
-                                    "workspace_id": "workspace-1",
-                                    "agent": "claude",
-                                    "agent_session": {"value": "session-reviewer"},
-                                    "agent_status": "idle"
-                                }
-                            ]}
-                        })
-                        .to_string()
-                    } else {
-                        r#"{"result":{"panes":[]}}"#.to_owned()
-                    }
-                }
-                ["agent", "prompt", _, _] | ["pane", "report-metadata", ..] => {
-                    "{}".to_owned()
-                }
-                _ => return Err(format!("unexpected Herdr command: {args:?}")),
-            };
-            Ok(HerdrCommandOutput { stdout })
-        }
+        open: Arc<Mutex<bool>>,
+        space: StrictSpace,
     }
     struct ClosingTabClock;
     impl Clock for ClosingTabClock {
@@ -2310,9 +2271,40 @@ fn tab_close_cancels_outstanding_delivery_and_removes_every_attached_mention() {
     }
 
     let directory = TestDirectory::new();
-    let herdr = ClosingTabHerdr {
-        open: Mutex::new(true),
-    };
+    let space = lifecycle_space(
+        repo_world()
+            .pane("pane-lead")
+            .terminal("terminal-lead")
+            .tab("tab-collaboration")
+            .codex()
+            .session("session-lead")
+            .idle()
+            .pane("pane-reviewer")
+            .terminal("terminal-reviewer")
+            .tab("tab-collaboration")
+            .claude()
+            .session("session-reviewer")
+            .idle()
+            .build(),
+        true,
+        Takes::prompts_and_metadata(),
+    );
+    for pane in ["pane-lead", "pane-reviewer"] {
+        space.answer(pane, InputOutcome::Delivered);
+    }
+    let open = Arc::new(Mutex::new(true));
+    let listed = Arc::clone(&open);
+    space.on_read(move |mux, _| {
+        for pane in ["pane-lead", "pane-reviewer"] {
+            if *listed.lock().unwrap() {
+                mux.show_pane(pane);
+            } else {
+                mux.hide_pane(pane);
+            }
+        }
+        Ok(())
+    });
+    let herdr = ClosingTabHerdr { open, space };
     let ids = ClosingTabIds(AtomicU64::new(1));
     let runtime = LifecycleRuntime {
         state_directory: directory.path(),
@@ -2322,7 +2314,7 @@ fn tab_close_cancels_outstanding_delivery_and_removes_every_attached_mention() {
         workspace_id: None,
         current_pane_id: Some("pane-lead"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr.space,
         clock: &ClosingTabClock,
         ids: &ids,
     };
@@ -2485,70 +2477,9 @@ fn agent_status_event_reconciles_every_replaced_session_before_onboarding() {
     use std::sync::Mutex;
 
     struct ReplacedSessionsHerdr {
-        sessions: Mutex<(&'static str, &'static str)>,
-        prompts: Mutex<Vec<(String, String)>>,
-    }
-    impl HerdrCommandExecutor for ReplacedSessionsHerdr {
-        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-            let stdout = match args {
-                ["workspace", "list"] => {
-                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
-                        .to_owned()
-                }
-                ["worktree", "list", "--cwd", "/repo", "--json"]
-                | ["worktree", "list", "--json"]
-                | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
-                    r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-                        .to_owned()
-                }
-                ["pane", "list", "--workspace", "workspace-1"] => {
-                    let (first, second) = *self.sessions.lock().unwrap();
-                    serde_json::json!({
-                        "result": {"panes": [
-                            {
-                                "pane_id": "pane-first",
-                                "terminal_id": "terminal-first",
-                                "tab_id": "tab-1",
-                                "workspace_id": "workspace-1",
-                                "agent": "codex",
-                                "display_agent": "Codex",
-                                "agent_session": {"value": first},
-                                "agent_status": "idle"
-                            },
-                            {
-                                "pane_id": "pane-second",
-                                "terminal_id": "terminal-second",
-                                "tab_id": "tab-1",
-                                "workspace_id": "workspace-1",
-                                "agent": "claude",
-                                "display_agent": "Claude Code",
-                                "agent_session": {"value": second},
-                                "agent_status": "idle"
-                            },
-                            {
-                                "pane_id": "pane-author",
-                                "terminal_id": "terminal-author",
-                                "tab_id": "tab-1",
-                                "workspace_id": "workspace-1",
-                                "agent_session": null,
-                                "agent_status": "unknown"
-                            }
-                        ]}
-                    })
-                    .to_string()
-                }
-                ["agent", "prompt", pane_id, prompt] => {
-                    self.prompts
-                        .lock()
-                        .unwrap()
-                        .push(((*pane_id).to_owned(), (*prompt).to_owned()));
-                    String::new()
-                }
-                ["pane", "report-metadata", ..] => String::new(),
-                _ => return Err(format!("unexpected Herdr command: {args:?}")),
-            };
-            Ok(HerdrCommandOutput { stdout })
-        }
+        sessions: Arc<Mutex<(&'static str, &'static str)>>,
+        prompts: Arc<Mutex<Vec<(String, String)>>>,
+        space: StrictSpace,
     }
     struct FixedClock;
     impl Clock for FixedClock {
@@ -2565,9 +2496,54 @@ fn agent_status_event_reconciles_every_replaced_session_before_onboarding() {
         }
     }
 
+    let space = lifecycle_space(
+        repo_world()
+            .pane("pane-first")
+            .terminal("terminal-first")
+            .tab("tab-1")
+            .codex()
+            .agent_label("Codex")
+            .session("first-1")
+            .idle()
+            .pane("pane-second")
+            .terminal("terminal-second")
+            .tab("tab-1")
+            .claude()
+            .agent_label("Claude Code")
+            .session("second-1")
+            .idle()
+            .pane("pane-author")
+            .terminal("terminal-author")
+            .tab("tab-1")
+            .state(AgentState::parse("unknown"))
+            .build(),
+        true,
+        Takes::prompts_and_metadata(),
+    );
+    for pane in ["pane-first", "pane-second", "pane-author"] {
+        space.answer(pane, InputOutcome::Delivered);
+    }
+    let sessions = Arc::new(Mutex::new(("first-1", "second-1")));
+    let current = Arc::clone(&sessions);
+    space.on_read(move |mux, _| {
+        let (first, second) = *current.lock().unwrap();
+        mux.set_session("pane-first", first);
+        mux.set_session("pane-second", second);
+        Ok(())
+    });
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let sent = Arc::clone(&prompts);
+    space.on_input(move |_, attempt| {
+        if let SentInput::Prompt(prompt) = &attempt.input {
+            sent.lock()
+                .unwrap()
+                .push((attempt.pane.as_str().to_owned(), prompt.clone()));
+        }
+    });
     let herdr = ReplacedSessionsHerdr {
-        sessions: Mutex::new(("first-1", "second-1")),
-        prompts: Mutex::new(Vec::new()),
+        sessions,
+        prompts,
+        space,
     };
     let directory = TestDirectory::new();
     let ids = SequenceIds(AtomicU64::new(1));
@@ -2579,7 +2555,7 @@ fn agent_status_event_reconciles_every_replaced_session_before_onboarding() {
         workspace_id: None,
         current_pane_id: Some("pane-first"),
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr.space,
         clock: &FixedClock,
         ids: &ids,
     };
@@ -2666,77 +2642,37 @@ fn agent_status_event_reconciles_every_replaced_session_before_onboarding() {
 }
 
 /// Two supported agent panes and one ordinary shell pane.
-struct SetupHerdr {
-    prompts: std::sync::Mutex<Vec<String>>,
-}
-
-impl SetupHerdr {
-    fn new() -> Self {
-        Self {
-            prompts: std::sync::Mutex::new(Vec::new()),
-        }
+fn setup_herdr() -> StrictSpace {
+    let space = lifecycle_space(
+        repo_world()
+            .pane("pane-claude")
+            .terminal("terminal-claude")
+            .tab("tab-claude")
+            .title("Planning")
+            .claude()
+            .agent_label("Claude Code")
+            .session("session-claude")
+            .idle()
+            .pane("pane-codex")
+            .terminal("terminal-codex")
+            .tab("tab-codex")
+            .title("Implementation")
+            .codex()
+            .agent_label("Codex")
+            .session("session-codex")
+            .working()
+            .pane("pane-shell")
+            .terminal("terminal-shell")
+            .tab("tab-shell")
+            .title("Shell")
+            .build(),
+        true,
+        Takes::prompts_and_metadata(),
+    );
+    for pane in ["pane-claude", "pane-codex", "pane-shell"] {
+        space.answer(pane, InputOutcome::Delivered);
     }
-}
-
-impl HerdrCommandExecutor for SetupHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let stdout = match args {
-            ["workspace", "list"] => {
-                r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#.to_owned()
-            }
-            ["worktree", "list", "--cwd", "/repo", "--json"]
-            | ["worktree", "list", "--json"]
-            | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
-                r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-                    .to_owned()
-            }
-            ["pane", "list", "--workspace", "workspace-1"] => serde_json::json!({
-                "result": {
-                    "panes": [
-                        {
-                            "pane_id": "pane-claude",
-                            "terminal_id": "terminal-claude",
-                            "tab_id": "tab-claude",
-                            "workspace_id": "workspace-1",
-                            "label": "Planning",
-                            "agent": "claude",
-                            "display_agent": "Claude Code",
-                            "agent_session": {"value": "session-claude"},
-                            "agent_status": "idle"
-                        },
-                        {
-                            "pane_id": "pane-codex",
-                            "terminal_id": "terminal-codex",
-                            "tab_id": "tab-codex",
-                            "workspace_id": "workspace-1",
-                            "label": "Implementation",
-                            "agent": "codex",
-                            "display_agent": "Codex",
-                            "agent_session": {"value": "session-codex"},
-                            "agent_status": "working"
-                        },
-                        {
-                            "pane_id": "pane-shell",
-                            "terminal_id": "terminal-shell",
-                            "tab_id": "tab-shell",
-                            "workspace_id": "workspace-1",
-                            "label": "Shell",
-                            "agent_session": null,
-                            "agent_status": null
-                        }
-                    ]
-                }
-            })
-            .to_string(),
-            ["agent", "prompt", _, prompt] => {
-                self.prompts.lock().unwrap().push((*prompt).to_owned());
-                "{}".to_owned()
-            }
-            ["pane", "report-metadata", ..] => "{}".to_owned(),
-            _ => return Err(format!("unexpected Herdr command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput { stdout })
-    }
+    space
 }
 
 struct FixedSetupClock;
@@ -2756,7 +2692,7 @@ impl IdGenerator for SetupIds {
 #[test]
 fn remove_unbinds_retires_and_releases_every_alias_atomically() {
     let directory = TestDirectory::new();
-    let herdr = SetupHerdr::new();
+    let herdr = setup_herdr();
     let ids = SetupIds(AtomicU64::new(1));
     let runtime = namedrop::LifecycleRuntime {
         state_directory: directory.path(),
@@ -2766,7 +2702,7 @@ fn remove_unbinds_retires_and_releases_every_alias_atomically() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        mux: &herdr,
+        mux: &*herdr,
         clock: &FixedSetupClock,
         ids: &ids,
     };
@@ -3073,87 +3009,106 @@ fn a_native_agent_without_a_session_shows_a_connect_hint_until_it_registers() {
     );
 }
 
-/// A space whose agent panes can appear after activation, recording every
-/// Herdr command so tests can count tour popups.
+/// A space whose agent panes can appear after activation, and which opens
+/// every tour popup, so tests can count them.
 struct TourHerdr {
-    agents: std::sync::Mutex<bool>,
+    agents: Arc<Mutex<bool>>,
     /// The shell pane reports a session but no agent word.
-    session_only_shell: std::sync::Mutex<bool>,
-    commands: std::sync::Mutex<Vec<Vec<String>>>,
+    session_only_shell: Arc<Mutex<bool>>,
+    space: StrictSpace,
 }
 
 impl TourHerdr {
     fn new(agents: bool) -> Self {
+        let mux = repo_world()
+            .pane("pane-shell")
+            .tab("tab-pane-shell")
+            .reports_session(false)
+            .pane("pane-a")
+            .tab("tab-pane-a")
+            .reports_session(false)
+            .pane("pane-b")
+            .tab("tab-pane-b")
+            .reports_session(false)
+            .build();
+        let agents = Arc::new(Mutex::new(agents));
+        let session_only_shell = Arc::new(Mutex::new(false));
+        let (listed, shell) = (Arc::clone(&agents), Arc::clone(&session_only_shell));
+        mux.on_read(move |mux, read| {
+            if let Read::TabLabel(tab) = read {
+                mux.set_tab_label(tab.as_str(), Some("Main"));
+            }
+            if *listed.lock().unwrap() {
+                for pane in ["pane-a", "pane-b"] {
+                    mux.set_agent(pane, Some(AgentKind::Known(AgentRuntime::Codex)));
+                    mux.set_session(pane, &format!("session-{pane}"));
+                    mux.set_state(pane, AgentState::Idle);
+                }
+            }
+            if *shell.lock().unwrap() {
+                mux.set_session("pane-shell", "session-pane-shell");
+            }
+            Ok(())
+        });
+        let failed =
+            |effect: &Effect| matches!(effect, Effect::ReloadKeybindings | Effect::Notify { .. });
+        mux.on_apply(move |_, effect| {
+            if failed(effect) {
+                return Err(MuxError::Unavailable(format!(
+                    "unexpected Herdr command: {effect:?}"
+                )));
+            }
+            Ok(())
+        });
+        let takes = Takes::nothing().effect(move |effect| {
+            failed(effect)
+                || matches!(
+                    effect,
+                    Effect::Identify { .. }
+                        | Effect::Badges { .. }
+                        | Effect::RenameTab { .. }
+                        | Effect::OpenPopup(_)
+                )
+        });
+        let mut surveys = CHECKOUT_LISTINGS.to_vec();
+        surveys.push((ScopeKind::Space, Depth::Panes));
         Self {
-            agents: std::sync::Mutex::new(agents),
-            session_only_shell: std::sync::Mutex::new(false),
-            commands: std::sync::Mutex::new(Vec::new()),
+            agents,
+            session_only_shell,
+            space: StrictSpace::new(mux, &surveys, takes),
         }
     }
 
     fn popup_opens(&self) -> Vec<Vec<String>> {
-        self.commands
-            .lock()
-            .unwrap()
+        self.space
+            .attempted_effects()
             .iter()
-            .filter(|command| command.starts_with(&["plugin".to_owned(), "pane".to_owned()]))
-            .cloned()
+            .filter_map(|effect| match effect {
+                Effect::OpenPopup(popup) => Some(popup_names(popup)),
+                _ => None,
+            })
             .collect()
     }
 }
 
-impl HerdrCommandExecutor for TourHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        self.commands
-            .lock()
-            .unwrap()
-            .push(args.iter().map(|argument| (*argument).to_owned()).collect());
-        let pane = |id: &str, agent: bool| {
-            let mut pane = serde_json::json!({
-                "pane_id": id,
-                "terminal_id": format!("terminal-{id}"),
-                "tab_id": format!("tab-{id}"),
-                "workspace_id": "workspace-1",
-            });
-            if agent {
-                pane["agent"] = serde_json::json!("codex");
-                pane["display_agent"] = serde_json::json!("Codex");
-                pane["agent_session"] = serde_json::json!({"value": format!("session-{id}")});
-                pane["agent_status"] = serde_json::json!("idle");
-            }
-            pane
-        };
-        let stdout = match args {
-            ["workspace", "list"] => {
-                r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#.to_owned()
-            }
-            ["worktree", "list", "--cwd", "/repo", "--json"]
-            | ["worktree", "list", "--json"]
-            | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
-                r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-                    .to_owned()
-            }
-            ["pane", "list", "--workspace", "workspace-1"] => {
-                let agents = *self.agents.lock().unwrap();
-                let mut shell = pane("pane-shell", false);
-                if *self.session_only_shell.lock().unwrap() {
-                    shell["agent"] = serde_json::Value::Null;
-                    shell["agent_session"] = serde_json::json!({"value": "session-pane-shell"});
-                }
-                serde_json::json!({"result": {"panes": [
-                    shell,
-                    pane("pane-a", agents),
-                    pane("pane-b", agents),
-                ]}})
-                .to_string()
-            }
-            ["pane", "report-metadata", ..] | ["tab", "rename", ..] => "{}".to_owned(),
-            ["tab", "get", _] => r#"{"result":{"label":"Main"}}"#.to_owned(),
-            ["plugin", "pane", "open", ..] => r#"{"result":{"pane_id":"popup"}}"#.to_owned(),
-            _ => return Err(format!("unexpected Herdr command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput { stdout })
-    }
+/// What a popup names: its screen, then the values of the
+/// `NAMEDROP_TARGET_WORKSPACE`, `_PANE`, `_TERMINAL`, and `_SESSION`,
+/// `HERDR_PLUGIN_STATE_DIR`, and `HERDR_SOCKET_PATH` that the adapter's argv
+/// pin in `src/mux/herdr/tests.rs` passes to `plugin pane open`.
+fn popup_names(popup: &PopupSpec) -> Vec<String> {
+    let session = match popup.target.agent.as_ref().map(|agent| &agent.session) {
+        Some(SessionClaim::Reported(session)) => session.as_str(),
+        _ => "",
+    };
+    vec![
+        format!("{:?}", popup.screen),
+        popup.target.space.as_str().to_owned(),
+        popup.target.id.as_str().to_owned(),
+        popup.target.terminal.as_str().to_owned(),
+        session.to_owned(),
+        popup.state_dir.display().to_string(),
+        popup.socket.clone(),
+    ]
 }
 
 struct TourClock;
@@ -3175,7 +3130,7 @@ fn tour_runtime<'a>(
     directory: &'a TestDirectory,
     herdr: &'a TourHerdr,
     ids: &'a TourIds,
-) -> LifecycleRuntime<'a, TourHerdr, TourClock, TourIds> {
+) -> LifecycleRuntime<'a, FakeMux, TourClock, TourIds> {
     LifecycleRuntime {
         state_directory: directory.path(),
         home_directory: Some(directory.home()),
@@ -3184,43 +3139,22 @@ fn tour_runtime<'a>(
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        mux: herdr,
+        mux: &herdr.space,
         clock: &TourClock,
         ids,
     }
 }
 
 fn expected_tour_open(directory: &TestDirectory, pane: &str) -> Vec<String> {
-    [
-        "plugin",
-        "pane",
-        "open",
-        "--plugin",
-        "namedrop",
-        "--entrypoint",
-        "tour",
-        "--placement",
-        "popup",
-        "--width",
-        "72",
-        "--height",
-        "24",
-        "--env",
-        "NAMEDROP_TARGET_WORKSPACE=workspace-1",
-        "--env",
-        &format!("NAMEDROP_TARGET_PANE={pane}"),
-        "--env",
-        &format!("NAMEDROP_TARGET_TERMINAL=terminal-{pane}"),
-        "--env",
-        &format!("NAMEDROP_TARGET_SESSION=session-{pane}"),
-        "--env",
-        &format!("HERDR_PLUGIN_STATE_DIR={}", directory.path().display()),
-        "--env",
-        "HERDR_SOCKET_PATH=socket-a",
-        "--focus",
+    vec![
+        format!("{:?}", PopupScreen::Tour),
+        "workspace-1".to_owned(),
+        pane.to_owned(),
+        format!("terminal-{pane}"),
+        format!("session-{pane}"),
+        directory.path().display().to_string(),
+        "socket-a".to_owned(),
     ]
-    .map(str::to_owned)
-    .to_vec()
 }
 
 fn agent_event(event_type: &str, pane: &str) -> serde_json::Value {
@@ -3266,7 +3200,7 @@ fn first_agent_detection_opens_the_tour_once() {
             "shown": true,
             "presentation_id": "welcome-1",
             "pane_id": "pane-b",
-            "popup": {"result": {"pane_id": "popup"}},
+            "popup": {"opened_for": "pane-b"},
         })
     );
     assert_eq!(
