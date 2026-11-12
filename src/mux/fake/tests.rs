@@ -1638,6 +1638,12 @@ fn a_narrowed_read_stops_once_its_flag_or_a_wider_one_is_set() {
         cancelled
     );
     assert_eq!(*ran.lock().unwrap(), 0, "no cancelled read is answered");
+    assert!(
+        mux.budgeted_reads()
+            .iter()
+            .all(|(_, budgets)| budgets.len() == 1),
+        "each refused command was handed its budget first"
+    );
     assert_eq!(
         mux.within(Allowance::each(budget, &open))
             .integration_root(),

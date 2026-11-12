@@ -1203,7 +1203,7 @@ impl Within<'_> {
     /// The budget for the next command, the tightest of every narrowing and
     /// of the connection's own. The narrowest is asked first, as in the
     /// adapter, so its error wins.
-    fn ask(&self) -> Result<Budget, MuxError> {
+    fn budget(&self) -> Result<Budget, MuxError> {
         let mut budget = self.base.budget().unwrap_or(Budget::ADAPTER_DEFAULT);
         let mut narrowing = Some(self);
         while let Some(within) = narrowing {
@@ -1212,6 +1212,16 @@ impl Within<'_> {
                 timeout: budget.timeout.min(asked.timeout),
                 max_output_bytes: budget.max_output_bytes.min(asked.max_output_bytes),
             };
+            narrowing = within.wider;
+        }
+        Ok(budget)
+    }
+
+    /// Refuses a command once any narrowing's flag, or the connection's own,
+    /// is set, as a Herdr command handed its budget refuses to start.
+    fn refuse_if_cancelled(&self) -> Result<(), MuxError> {
+        let mut narrowing = Some(self);
+        while let Some(within) = narrowing {
             if within
                 .allowance
                 .cancelled()
@@ -1224,19 +1234,20 @@ impl Within<'_> {
         if self.base.cancelled() {
             return Err(MuxError::Unavailable(CANCELLED.to_owned()));
         }
-        Ok(budget)
+        Ok(())
     }
 
-    /// Asks the first command's budget, logs the read, answers it through a
-    /// handle that holds that budget, then asks the budgets of the read's
-    /// other commands. A failed ask fails the read with the answer dropped.
+    /// Asks the first command's budget and logs the read with it, refuses
+    /// it if cancelled, answers it through a handle that holds that budget,
+    /// then does the same for each of the read's other commands. A failed
+    /// ask or a refusal fails the read, with the answer dropped.
     fn read<T>(
         &self,
         read: Read,
         answer: impl FnOnce(&FakeMux) -> Result<T, MuxError>,
     ) -> Result<T, MuxError> {
         let commands = commands(&read);
-        let first = self.ask();
+        let first = self.budget();
         let index = {
             let mut world = self.base.lock();
             let asked = first
@@ -1245,9 +1256,11 @@ impl Within<'_> {
             world.reads.push((read, asked));
             world.reads.len() - 1
         };
+        let first = first?;
+        self.refuse_if_cancelled()?;
         let handle = FakeMux {
             connection: Some(Connection {
-                budget: first?,
+                budget: first,
                 cancelled: self
                     .base
                     .connection
@@ -1260,8 +1273,9 @@ impl Within<'_> {
         let answered = answer(&handle);
         drop(handle);
         for _ in 1..commands {
-            let budget = self.ask()?;
+            let budget = self.budget()?;
             self.base.lock().reads[index].1.push(budget);
+            self.refuse_if_cancelled()?;
         }
         answered
     }
