@@ -185,7 +185,7 @@ test("New channel and Add agent forms, with an error each, at desktop light and 
   }
   async function addAgent(opened) {
     await opened
-      .locator(".members")
+      .locator(".member-row")
       .getByRole("button", { name: "Add agent" })
       .click();
     const form = opened.getByRole("form", { name: "Add agent" });
