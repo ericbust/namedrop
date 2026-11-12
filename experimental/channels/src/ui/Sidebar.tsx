@@ -540,19 +540,7 @@ export function Sidebar({
             </ul>
           </nav>
         )}
-        <nav
-          aria-label="Channel list"
-          className="nav-section channels-navigation"
-          onKeyDown={(event) => {
-            // Arrows and Home and End move the caret in the form's fields.
-            if ((event.target as Element).closest(".create-form")) return;
-            if (!arrangeKey(event)) move(event);
-          }}
-          onDragLeave={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget as Node))
-              setDrop(null);
-          }}
-        >
+        <div className="nav-section channels-section">
           <p className="nav-label">
             Channels
             <span className="nav-label-end">
@@ -598,85 +586,97 @@ export function Sidebar({
               }}
             />
           )}
-          {channels.length === 0 && connection !== "live" ? (
-            <div className="skeleton" aria-hidden="true">
-              <div className="skeleton-row" />
-              <div className="skeleton-row" />
-              <div className="skeleton-row" />
-            </div>
-          ) : grouped ? (
-            <ul className="channel-groups">
-              {groups.map((group, index) => {
-                const closed = collapsed.has(group.key);
-                const list = `${baseId}-group-${index}`;
-                return (
-                  <li
-                    key={group.key}
-                    className={`channel-group${dropClass("group", group.key)}`}
-                    draggable
-                    onDragStart={(event) => {
-                      if (event.target !== event.currentTarget) return;
-                      dragging.current = { kind: "group", key: group.key };
-                      event.dataTransfer.effectAllowed = "move";
-                      event.dataTransfer.setData("text/plain", group.name);
-                    }}
-                    onDragOver={(event) => {
-                      if (dragging.current?.kind !== "group") return;
-                      over(event, "group", group.key);
-                    }}
-                    onDrop={(event) => {
-                      if (dragging.current?.kind !== "group") return;
-                      event.preventDefault();
-                      dropped();
-                    }}
-                    onDragEnd={endDrag}
-                  >
-                    <button
-                      type="button"
-                      className="group-header"
-                      data-group-key={group.key}
-                      aria-expanded={!closed}
-                      aria-controls={list}
-                      tabIndex={tabStop === `group:${group.key}` ? 0 : -1}
-                      onClick={() =>
-                        arrange(toggleCollapsed(layout, group.key))
-                      }
+          <nav
+            aria-label="Channel list"
+            className="channels-navigation"
+            onKeyDown={(event) => {
+              if (!arrangeKey(event)) move(event);
+            }}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node))
+                setDrop(null);
+            }}
+          >
+            {channels.length === 0 && connection !== "live" ? (
+              <div className="skeleton" aria-hidden="true">
+                <div className="skeleton-row" />
+                <div className="skeleton-row" />
+                <div className="skeleton-row" />
+              </div>
+            ) : grouped ? (
+              <ul className="channel-groups">
+                {groups.map((group, index) => {
+                  const closed = collapsed.has(group.key);
+                  const list = `${baseId}-group-${index}`;
+                  return (
+                    <li
+                      key={group.key}
+                      className={`channel-group${dropClass("group", group.key)}`}
+                      draggable
+                      onDragStart={(event) => {
+                        if (event.target !== event.currentTarget) return;
+                        dragging.current = { kind: "group", key: group.key };
+                        event.dataTransfer.effectAllowed = "move";
+                        event.dataTransfer.setData("text/plain", group.name);
+                      }}
+                      onDragOver={(event) => {
+                        if (dragging.current?.kind !== "group") return;
+                        over(event, "group", group.key);
+                      }}
+                      onDrop={(event) => {
+                        if (dragging.current?.kind !== "group") return;
+                        event.preventDefault();
+                        dropped();
+                      }}
+                      onDragEnd={endDrag}
                     >
-                      <Icon name="chevron" className="chevron" />
-                      <span className="group-name">{group.name}</span>
-                      {closed &&
-                        (group.needsYou > 0 ? (
-                          <span
-                            className="dot dot-alert"
-                            role="img"
-                            aria-label={sidebarCopy.needYou(group.needsYou)}
-                          />
-                        ) : (
-                          group.unread && (
+                      <button
+                        type="button"
+                        className="group-header"
+                        data-group-key={group.key}
+                        aria-expanded={!closed}
+                        aria-controls={list}
+                        tabIndex={tabStop === `group:${group.key}` ? 0 : -1}
+                        onClick={() =>
+                          arrange(toggleCollapsed(layout, group.key))
+                        }
+                      >
+                        <Icon name="chevron" className="chevron" />
+                        <span className="group-name">{group.name}</span>
+                        {closed &&
+                          (group.needsYou > 0 ? (
                             <span
-                              className="dot dot-unread"
+                              className="dot dot-alert"
                               role="img"
-                              aria-label={sidebarCopy.unread}
+                              aria-label={sidebarCopy.needYou(group.needsYou)}
                             />
-                          )
-                        ))}
-                      <span className="count">{group.channels.length}</span>
-                    </button>
-                    <ul id={list}>
-                      {shown(group).map((channel) => row(channel, group))}
-                    </ul>
-                  </li>
-                );
-              })}
-            </ul>
-          ) : (
-            <ul>
-              {groups.flatMap((group) =>
-                group.channels.map((channel) => row(channel, group)),
-              )}
-            </ul>
-          )}
-        </nav>
+                          ) : (
+                            group.unread && (
+                              <span
+                                className="dot dot-unread"
+                                role="img"
+                                aria-label={sidebarCopy.unread}
+                              />
+                            )
+                          ))}
+                        <span className="count">{group.channels.length}</span>
+                      </button>
+                      <ul id={list}>
+                        {shown(group).map((channel) => row(channel, group))}
+                      </ul>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <ul>
+                {groups.flatMap((group) =>
+                  group.channels.map((channel) => row(channel, group)),
+                )}
+              </ul>
+            )}
+          </nav>
+        </div>
         {directMessages}
       </div>
       <footer className="sidebar-footer">

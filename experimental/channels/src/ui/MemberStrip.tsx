@@ -267,11 +267,11 @@ export function MemberStrip({
   const open = adding && canAdd;
   return (
     <>
-      <div className="members">
+      <div className="member-row">
         {sorted.length === 0 ? (
           <p className="member-note">No members yet</p>
         ) : (
-          <ul className="member-list" aria-label="Members" ref={list}>
+          <ul className="members" aria-label="Members" ref={list}>
             {shown.map((member) => (
               <li key={member.id} data-address-id={member.id}>
                 <Chip member={member} />
@@ -296,12 +296,13 @@ export function MemberStrip({
             ref={addButton}
             type="button"
             className="member member-add"
+            title={createCopy.addAgent}
             aria-expanded={open}
             aria-controls={open ? formId : undefined}
             onClick={() => (open ? closeForm() : setAdding(true))}
           >
             <Icon name="plus" className="icon-14" />
-            {createCopy.addAgent}
+            <span className="member-add-label">{createCopy.addAgent}</span>
           </button>
         )}
       </div>

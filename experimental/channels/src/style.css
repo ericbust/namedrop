@@ -632,7 +632,7 @@ a:hover {
   color: var(--held-text);
 }
 
-.members {
+.member-row {
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
@@ -640,7 +640,7 @@ a:hover {
   border-bottom: 1px solid var(--line);
   flex: none;
 }
-.member-list {
+.members {
   display: flex;
   flex: 1;
   flex-wrap: wrap;
@@ -2750,7 +2750,7 @@ code.inline {
     border-left: 0;
   }
   .channel-header,
-  .members,
+  .member-row,
   .activity-list,
   .composer,
   .reconnect {
@@ -3129,6 +3129,23 @@ body.resizing-panels * {
     padding-inline: var(--space-4);
   }
 }
+/* Where the strip is tight the chip keeps only its +, so the strip's lines
+   hold agents; its name stays for assistive tech and as its tooltip. */
+@media (max-width: 860px), (max-height: 560px) {
+  .member-add {
+    justify-content: center;
+    width: 28px;
+    padding: 0;
+  }
+  .member-add-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
 .create-field {
   display: flex;
   flex-direction: column;
@@ -3320,7 +3337,7 @@ body.resizing-panels * {
 /* A phone, or any touch screen: 44px targets, and 16px text so iOS doesn't
    zoom into a field. */
 @media (max-width: 600px), (pointer: coarse) {
-  .channels-navigation .nav-label {
+  .channels-section .nav-label {
     height: 44px;
   }
   .new-channel-button {
@@ -3331,7 +3348,7 @@ body.resizing-panels * {
   .member-add::after {
     content: "";
     position: absolute;
-    inset: -9px -3px;
+    inset: -9px -8px;
   }
   .create-form input[type="text"],
   .create-alias {

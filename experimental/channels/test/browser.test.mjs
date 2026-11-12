@@ -10733,7 +10733,7 @@ test("UI-R4 L1: on a phone or a short narrow window, the thread and the screen t
     }
     const chip = main
       .getByRole("list", { name: "Members" })
-      .getByRole("button", { name: /@codex/ });
+      .getByRole("button", { name: /@claude/ });
     await chip.click();
     await drawer(ui).waitFor();
     assert.equal(await main.isVisible(), false, `the screen fills ${at}`);
@@ -13483,7 +13483,7 @@ const newChannelButton = (ui) =>
 const newChannelForm = (ui) =>
   ui.page.getByRole("form", { name: "New channel" });
 const addAgentButton = (ui) =>
-  ui.page.locator(".members").getByRole("button", { name: "Add agent" });
+  ui.page.locator(".member-row").getByRole("button", { name: "Add agent" });
 const addAgentForm = (ui) => ui.page.getByRole("form", { name: "Add agent" });
 const activeIs = (locator) =>
   locator.evaluate((element) => element === document.activeElement);
@@ -13507,9 +13507,14 @@ test("CREATE: + opens the New channel form in place with focus on Name, and Esca
   await form.waitFor();
   assert.equal(await plus.getAttribute("aria-expanded"), "true");
   assert.equal(
-    await ui.channels.locator("form").count(),
+    await ui.page.locator(".sidebar .channels-section form").count(),
     1,
-    "the form sits in the Channels list",
+    "the form sits in the Channels section",
+  );
+  assert.equal(
+    await ui.channels.getByRole("button").count(),
+    1,
+    "the Channel list holds only channel rows",
   );
   assert.ok(await activeIs(form.getByLabel("Name", { exact: true })));
   await form.getByLabel("Name", { exact: true }).fill("half typed");
@@ -14042,11 +14047,16 @@ test("CREATE and ADD AGENT at 390x844: the New channel form works inside the dra
     );
   const hit = await addAgentButton(ui).evaluate((element) => {
     const after = getComputedStyle(element, "::after");
-    return (
-      element.getBoundingClientRect().height - 2 * Number.parseFloat(after.top)
-    );
+    const box = element.getBoundingClientRect();
+    return {
+      height: box.height - 2 * Number.parseFloat(after.top),
+      width: box.width - 2 * Number.parseFloat(after.left),
+    };
   });
-  assert.ok(hit >= 44, `Add agent's touch area is ${hit}px tall`);
+  assert.ok(
+    hit.height >= 44 && hit.width >= 44,
+    `Add agent's touch area is ${JSON.stringify(hit)}`,
+  );
   await add.getByLabel("Name", { exact: true }).fill("Bad Name");
   await add.getByRole("alert").waitFor();
   assert.ok(

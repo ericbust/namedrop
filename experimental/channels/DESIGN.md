@@ -389,7 +389,9 @@ the button reads "Creating…" or "Adding…" and the fields keep their text.
   opens under the strip on `--bg-raised`: Kind as three pill radios (Claude Code
   first and chosen), Name after a fixed @, checked as you type against the name
   rule and the names in the channel, and an optional Persona. The new agent
-  arrives in the strip through the event stream.
+  arrives in the strip through the event stream. Under 860px wide, or
+  under 560px tall, the chip shows only its +, so the strip's lines hold
+  agents; its name stays "Add agent" for assistive tech and as its tooltip.
 - **Phone and touch.** Under 600px wide, or on a touch screen, fields are 44px
   tall at 16px text so iOS doesn't zoom, and every button and pill is 44px tall.
   The New channel form lives in the drawer, near its top.
@@ -625,17 +627,17 @@ included, at 844 by 300 and in a 390 by 460 window at 125 percent zoom (312 by
 368 CSS pixels). A longer card scrolls inside. See App shell for each layout.
 Announce new items through a polite live region.
 
-| `source`                                | Title                                                                                                | Hint                                                            |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `agent_status`                          | the server summary, which is already short, such as "@claude is waiting on an approval or question." | Answer it in its pane in Herdr.                                 |
-| `agent_disposition`, `delivery_attempt` | Unanswered request                                                                                   | An agent ended its turn without replying.                       |
-| `automatic_reply_limit`                 | Reply limit reached                                                                                  | Continue or stop this thread from its pane.                     |
-| `coordination`                          | Coordination needs a decision                                                                        | Read the report, then answer the lead.                          |
-| `context_grant`                         | Shared context failed                                                                                | Namedrop couldn't capture it. Ask the sender to share it again. |
-| `pane_binding`                          | An agent's pane changed                                                                              | Name the pane again to reconnect it.                            |
-| `integration_registration`              | Agent setup incomplete                                                                               | Start a new session in that pane.                               |
-| `agent_start`                           | "@reviewer hasn't connected yet", named from its pane when the item names no agent                    | Open its pane. It may be asking you to trust the folder or to log in. A new Codex connects after its first prompt. |
-| `unknown`                               | Something needs you                                                                                  | Open Details for the full message.                              |
+| `source`                                | Title                                                                                                | Hint                                                                                                               |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `agent_status`                          | the server summary, which is already short, such as "@claude is waiting on an approval or question." | Answer it in its pane in Herdr.                                                                                    |
+| `agent_disposition`, `delivery_attempt` | Unanswered request                                                                                   | An agent ended its turn without replying.                                                                          |
+| `automatic_reply_limit`                 | Reply limit reached                                                                                  | Continue or stop this thread from its pane.                                                                        |
+| `coordination`                          | Coordination needs a decision                                                                        | Read the report, then answer the lead.                                                                             |
+| `context_grant`                         | Shared context failed                                                                                | Namedrop couldn't capture it. Ask the sender to share it again.                                                    |
+| `pane_binding`                          | An agent's pane changed                                                                              | Name the pane again to reconnect it.                                                                               |
+| `integration_registration`              | Agent setup incomplete                                                                               | Start a new session in that pane.                                                                                  |
+| `agent_start`                           | "@reviewer hasn't connected yet", named from its pane when the item names no agent                   | Open its pane. It may be asking you to trust the folder or to log in. A new Codex connects after its first prompt. |
+| `unknown`                               | Something needs you                                                                                  | Open Details for the full message.                                                                                 |
 
 Never cut the server's summary mid-word into the visible line. When an
 `agent_status` summary is longer than 90 characters, use the `unknown` title and
