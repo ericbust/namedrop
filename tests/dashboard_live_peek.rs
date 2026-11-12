@@ -1549,6 +1549,52 @@ fn input_refuses_wrong_binding_changed_session_and_offline_pane() {
 }
 
 #[test]
+fn input_reaches_a_named_agent_whose_session_has_not_connected() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    f.db()
+        .execute(
+            "DELETE FROM agent_session_observations WHERE address_id = ?1",
+            [xws::address_id("w1", "lead")],
+        )
+        .unwrap();
+    let mut responses = responses(&f);
+    let mut panes: Value =
+        serde_json::from_str(responses["pane list --workspace w1"].as_str().unwrap()).unwrap();
+    let pane = panes["result"]["panes"][0].as_object_mut().unwrap();
+    pane.remove("agent_session");
+    pane.insert("agent_status".into(), json!("blocked"));
+    responses["pane list --workspace w1"] = json!(panes.to_string());
+    store_responses(&f, &responses);
+    let target = input_path("socket-a", "w1", "lead");
+    let continuity = live_continuity(&server, &path("socket-a", "w1", "lead"));
+    let body = json!({"kind":"key","key":"Enter","continuity":continuity});
+    assert_eq!(post_input(&server, &target, &body).status, 204);
+    panes["result"]["panes"][0]["agent_session"] = json!({"value":"unrecorded-session"});
+    responses["pane list --workspace w1"] = json!(panes.to_string());
+    store_responses(&f, &responses);
+    assert_eq!(
+        post_input(&server, &target, &body).status,
+        410,
+        "a session Namedrop hasn't recorded is not the pane the person opened"
+    );
+    let sends: Vec<_> = invocations(&f)
+        .into_iter()
+        .filter(|call| {
+            matches!(
+                call["args"][1].as_str(),
+                Some("run" | "send-text" | "send-keys")
+            )
+        })
+        .map(|call| call["args"].clone())
+        .collect();
+    assert_eq!(
+        sends,
+        vec![json!(["pane", "send-keys", "pane-1-lead", "enter"])]
+    );
+}
+
+#[test]
 fn input_rejects_oversize_control_text_and_unknown_keys() {
     let f = Fixture::new();
     let server = Server::start(&f);

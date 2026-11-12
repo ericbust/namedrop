@@ -1026,7 +1026,9 @@ impl LivePeeks {
             .set_busy_timeout(Duration::from_millis(100))
             .map_err(|_| Status::Unavailable)?;
         let binding = recorded(&mut store, key, address)?;
-        if binding.pane_type != crate::PaneType::Agent || binding.agent_session_id.is_none() {
+        // An agent that hasn't connected has no session on either side; its
+        // first-run screens are answered here, so it takes input too.
+        if binding.pane_type != crate::PaneType::Agent {
             return Err(Status::Gone);
         }
         let identity = native(&binding, Duration::from_millis(500))?.identity;
