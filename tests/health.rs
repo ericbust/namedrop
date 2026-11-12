@@ -1402,6 +1402,39 @@ fn issues_with<'a>(report: &'a HealthReport, code: &str) -> Vec<&'a HealthIssue>
 }
 
 #[test]
+fn doctor_shows_a_saved_channels_idle_setting_as_information() {
+    let f = Fixture::new();
+    if update_profile::isolate(&f.root, &f.home) {
+        return;
+    }
+    f.register();
+    let baseline = diagnose_collaboration(&f.runtime());
+    assert!(issues_with(&baseline, "ND-CHANNELS-001").is_empty());
+
+    fs::create_dir_all(f.root.join("dashboard")).unwrap();
+    fs::write(f.root.join("dashboard/idle"), "never").unwrap();
+    let report = diagnose_collaboration(&f.runtime());
+    assert_eq!(report.status, baseline.status);
+    let shown = issues_with(&report, "ND-CHANNELS-001");
+    let [setting] = shown[..] else {
+        panic!("{shown:?}");
+    };
+    assert_eq!(setting.severity, HealthSeverity::Info);
+    assert_eq!(
+        setting.explanation,
+        "The server keeps running with no tab open, as set with `--idle never`."
+    );
+    assert_eq!(
+        setting.diagnostic["idle"],
+        json!({"stop_after_ms": null, "source": "setting"})
+    );
+    assert_eq!(
+        setting.repair.prompt,
+        "Run `namedrop channels --idle <minutes|never>` to change it."
+    );
+}
+
+#[test]
 fn doctor_reports_a_shared_codex_app_server_once_with_only_its_remedy() {
     let f = Fixture::new();
     let codex_home = f.home.join(".codex");

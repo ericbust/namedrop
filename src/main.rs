@@ -231,7 +231,7 @@ fn main() -> ExitCode {
         let result = selected_state
             .as_deref()
             .ok_or_else(|| "HERDR_PLUGIN_STATE_DIR or --plugin-state is required".to_owned())
-            .and_then(namedrop::dashboard::disable_tailscale);
+            .and_then(|state| namedrop::dashboard::disable_tailscale(state, cli.dashboard_idle()));
         return finish(
             "dashboard",
             result,
@@ -289,6 +289,9 @@ fn main() -> ExitCode {
         && let Some(state) = selected_state.as_deref()
     {
         namedrop::update_check::start(state, SystemClock.now_unix_ms());
+        if let Err(error) = namedrop::dashboard::revive(state) {
+            eprintln!("Could not start Channels again for Tailscale access: {error}");
+        }
     }
     if let Some(attempt) = cli.terminal_attempt() {
         let result = with_runtime_options(&cli.runtime, |runtime| {
@@ -316,6 +319,7 @@ fn main() -> ExitCode {
                     open_browser,
                     cli.dashboard_ui(),
                     cli.dashboard_tailscale(),
+                    cli.dashboard_idle(),
                 )
             }),
         );

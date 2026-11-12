@@ -5,6 +5,7 @@ mod channel_service;
 mod coordination_review;
 mod http;
 mod hub;
+pub mod idle;
 mod images;
 mod observer_guard;
 mod reminders;
@@ -48,18 +49,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-const DEFAULT_IDLE: Duration = Duration::from_secs(10 * 60);
-
 pub fn open(
     runtime: &LifecycleRuntime<'_, impl HerdrCommandExecutor, impl Clock, impl IdGenerator>,
     open_browser: bool,
     ui_directory: Option<&Path>,
     tailscale: Option<bool>,
+    idle: Option<idle::Stop>,
 ) -> Result<Value, String> {
     if tailscale == Some(false) {
-        return disable_tailscale(runtime.state_directory);
+        return disable_tailscale(runtime.state_directory, idle);
     }
     let files = ServerFiles::at(runtime.state_directory)?;
+    if let Some(stop) = idle {
+        idle::save(&files, stop)?;
+    }
     let _tailscale_operation = tailscale
         .map(|_| tailscale::operation_lock(&files))
         .transpose()?;
@@ -97,15 +100,51 @@ pub fn open(
         "server": server,
         "opened": opened,
         "tailscale": tailscale == Some(true),
+        "idle": idle_policy(files.state()).json(),
     }))
 }
 
 /// Disable tailnet access without workspace discovery or starting a server.
-pub fn disable_tailscale(state: &Path) -> Result<Value, String> {
+pub fn disable_tailscale(state: &Path, idle: Option<idle::Stop>) -> Result<Value, String> {
     let files = ServerFiles::at(state)?;
+    if let Some(stop) = idle {
+        idle::save(&files, stop)?;
+    }
     let _operation = tailscale::operation_lock(&files)?;
     tailscale::disable(&files)?;
-    Ok(json!({"tailscale": "off"}))
+    Ok(json!({"tailscale": "off", "idle": idle_policy(state).json()}))
+}
+
+/// The rule a server on this state follows now. A record that is malformed or
+/// half removed still counts as owned, as it does for the server.
+pub(crate) fn idle_policy(state: &Path) -> idle::Policy {
+    idle::policy(
+        state,
+        !matches!(tailscale::read(state), Ok(None)),
+        idle::environment(),
+    )
+}
+
+/// Starts the server again when Tailscale access is on and no server holds
+/// the claim, as after a reboot, a Herdr restart or a crash. Herdr's startup
+/// command and its pane events call this, so with Tailscale access off it
+/// costs one failed file read.
+pub fn revive(state: &Path) -> Result<bool, String> {
+    if !matches!(
+        tailscale::read(state),
+        Ok(Some(tailscale::Ownership::Enabled(_)))
+    ) {
+        return Ok(false);
+    }
+    let files = ServerFiles::at(state)?;
+    let Some(_no_handoff) = files.handoff_reader()? else {
+        return Ok(false);
+    };
+    if files.claimed()? {
+        return Ok(false);
+    }
+    files.spawn(&files.info().map(|info| info.ui).unwrap_or_default())?;
+    Ok(true)
 }
 
 /// Idempotent: converges on the one live server whether it was already
@@ -354,7 +393,7 @@ fn run_server(
     let accept_stop = stop.clone();
     let acceptor = thread::spawn(move || http::accept_loop(listener, front, accept_stop));
     eprintln!("dashboard: serving 127.0.0.1:{port}");
-    let verdict = hub::run(&files, &instance, idle(), commands);
+    let verdict = hub::run(&files, &instance, idle::environment(), commands);
     eprintln!("dashboard: stopping: {}", verdict.reason());
     restarting.store(true, Ordering::Release);
     {
@@ -405,13 +444,6 @@ fn bind(preferred: Option<u16>, pinned: bool) -> Result<TcpListener, String> {
         }
     }
     TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).map_err(|e| format!("could not listen: {e}"))
-}
-
-fn idle() -> Duration {
-    std::env::var("NAMEDROP_DASHBOARD_IDLE_MS")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .map_or(DEFAULT_IDLE, Duration::from_millis)
 }
 
 #[cfg(test)]

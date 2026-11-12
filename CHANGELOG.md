@@ -2,6 +2,18 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.8.1] - 2026-11-12
+
+### Fixed
+
+- The Channels link on your phone comes back by itself after the machine restarts. With tailnet access on, the Channels server was gone after a restart, a Herdr restart or a crash, and the link failed until someone ran `namedrop channels` again. Herdr now starts the server again when Herdr starts, and when a pane opens, moves or closes. It comes back on the same port, and a device that was signed in stays signed in. Herdr has to be running, so after a restart with nobody logged in the link stays down until you open Herdr.
+- `namedrop channels` no longer says the server stops after 10 minutes when it doesn't. With tailnet access on, the server has kept running with no tab open since 1.5.0, but the command still printed "The server stops 10 minutes after the last tab closes". It now prints the rule in force, such as "The server keeps running while Tailscale access is on."
+- Doctor reports a tailnet link whose server is not running (ND-TAILSCALE-001), and gives the command that starts it, `namedrop channels --no-open`. Before, it reported the link as configured while it was down.
+
+### Added
+
+- `namedrop channels --idle <minutes>` sets how long the server keeps running after the last tab closes, and `--idle never` keeps it running. The setting is saved and applies until you change it, across restarts and updates. Without it, the server stops after 10 minutes, as before. The setting has no effect while tailnet access is on, where the server never stops for idleness. Doctor shows a saved setting as ND-CHANNELS-001.
+
 ## [1.8.0] - 2026-11-11
 
 ### Added

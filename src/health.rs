@@ -79,9 +79,10 @@ where
 {
     let mut report = diagnose_space(runtime);
     if let Some(diagnostic) = crate::dashboard::tailscale::diagnose(runtime.state_directory) {
+        let idle = crate::dashboard::idle_policy(runtime.state_directory);
         let explanation = match (&diagnostic.url, &diagnostic.problem) {
             (Some(url), Some(problem)) => format!("{url}: {problem}"),
-            (Some(url), None) => url.clone(),
+            (Some(url), None) => format!("{url}. {}", idle.sentence()),
             (None, Some(problem)) => problem.clone(),
             (None, None) => unreachable!(),
         };
@@ -100,17 +101,36 @@ where
             },
             &explanation,
             HealthRepairKind::HumanDecision,
-            if problem {
+            if diagnostic.stopped {
+                "Run `namedrop channels --no-open` to start the server again on the same port. Devices that are signed in stay signed in. Herdr also starts it when Herdr starts."
+            } else if problem {
                 "Run `namedrop channels --tailscale off`, then `namedrop channels --tailscale` to configure access again."
             } else {
                 "Run `namedrop channels --tailscale --no-open` for a one-time sign-in link."
             },
         );
-        check.diagnostic =
-            serde_json::json!({"url": diagnostic.url, "problem": diagnostic.problem});
+        check.diagnostic = serde_json::json!({
+            "url": diagnostic.url,
+            "problem": diagnostic.problem,
+            "idle": idle.json(),
+        });
         report.issues.push(check);
         if problem && report.status == HealthStatus::Healthy {
             report.status = HealthStatus::NeedsAttention;
+        }
+    } else {
+        let idle = crate::dashboard::idle_policy(runtime.state_directory);
+        if idle.source == crate::dashboard::idle::Source::Setting {
+            let mut check = issue(
+                "ND-CHANNELS-001",
+                HealthSeverity::Info,
+                "Channels has a saved idle setting.",
+                &idle.sentence(),
+                HealthRepairKind::HumanDecision,
+                "Run `namedrop channels --idle <minutes|never>` to change it.",
+            );
+            check.diagnostic = serde_json::json!({"idle": idle.json()});
+            report.issues.push(check);
         }
     }
     report

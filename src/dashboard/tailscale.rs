@@ -543,6 +543,20 @@ fn disable_with(files: &ServerFiles, cli: &Cli<'_>) -> Result<(), String> {
 pub(crate) struct Diagnostic {
     pub url: Option<String>,
     pub problem: Option<String>,
+    /// The handler is intact and only the server behind it is gone, so
+    /// starting Channels again repairs the link.
+    pub stopped: bool,
+}
+
+const STOPPED: &str = "the Channels server is not running, so the tailnet link fails";
+
+/// Nothing accepts connections on the port the handler forwards to.
+fn stopped(port: u16) -> bool {
+    std::net::TcpStream::connect_timeout(
+        &(std::net::Ipv4Addr::LOCALHOST, port).into(),
+        Duration::from_millis(500),
+    )
+    .is_err()
 }
 
 pub(crate) fn diagnose(state: &Path) -> Option<Diagnostic> {
@@ -557,6 +571,7 @@ fn diagnose_with(state: &Path, cli: &Cli<'_>) -> Option<Diagnostic> {
             return Some(Diagnostic {
                 url: None,
                 problem: Some(problem),
+                stopped: false,
             });
         }
     };
@@ -600,11 +615,16 @@ fn diagnose_with(state: &Path, cli: &Cli<'_>) -> Option<Diagnostic> {
                     .to_owned(),
             );
         }
+        if stopped(handler.backend_port) {
+            return Err(STOPPED.to_owned());
+        }
         Ok(())
     };
+    let problem = inspect().err();
     Some(Diagnostic {
         url: Some(handler.origin()),
-        problem: inspect().err(),
+        stopped: problem.as_deref() == Some(STOPPED),
+        problem,
     })
 }
 
@@ -917,12 +937,17 @@ mod tests {
         assert!(!absent.exists());
     }
     #[test]
-    fn diagnostics_report_url_incomplete_missing_funnel_foreign_and_stale_target() {
-        let fixture = Fixture::new(own_config(&handler()));
-        let owned = handler();
+    fn diagnostics_report_url_incomplete_missing_funnel_foreign_stale_target_and_a_stopped_server()
+    {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let owned = OwnedHandler {
+            backend_port: listener.local_addr().unwrap().port(),
+            ..handler()
+        };
+        let fixture = Fixture::new(own_config(&owned));
         let server = super::super::server_files::ServerInfo {
             pid: 1,
-            port: 1234,
+            port: owned.backend_port,
             instance: "test".into(),
             started_at_ms: 0,
             ui: super::super::server_files::UiSource::Embedded,
@@ -938,6 +963,7 @@ mod tests {
             Some("https://device.tail123.ts.net")
         );
         assert!(diagnostic.problem.is_none());
+        assert!(!diagnostic.stopped);
         for (config, expected) in [
             (json!({}), "missing"),
             (
@@ -973,6 +999,14 @@ mod tests {
                 .unwrap();
             assert!(problem.contains(expected), "{problem}");
         }
+        fixture.put("serve.json", own_config(&owned));
+        drop(listener);
+        let stopped = diagnose_with(fixture.files.state(), &fixture.cli()).unwrap();
+        assert!(stopped.stopped);
+        assert_eq!(
+            stopped.problem.as_deref(),
+            Some("the Channels server is not running, so the tailnet link fails")
+        );
         write(&fixture.files, &Ownership::Installing(owned)).unwrap();
         assert!(
             diagnose_with(fixture.files.state(), &fixture.cli())
