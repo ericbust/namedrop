@@ -65,13 +65,13 @@ pub(super) fn launch(options: &RuntimeOptions, mode: UiMode) -> Result<serde_jso
         if mode == UiMode::Tour {
             return tour::open_popup(runtime, &origin);
         }
-        let terminal = origin.terminal_id;
         // The popup carries the Agent Session it was opened for, so asking for
         // help later cannot reach a replacement session in the same pane.
         let session = origin
-            .agent_session_id
+            .agent_session_id()
             .map(|id| id.as_str().to_owned())
             .unwrap_or_default();
+        let terminal = origin.terminal_id;
         let args = [
             "plugin".to_owned(),
             "pane".to_owned(),
@@ -363,7 +363,7 @@ fn name_prompt(
                 .map_err(|e| e.to_string())?,
             None => None,
         };
-        persona_editor(&alias, saved.as_deref(), &origin.agent.unwrap_or_default())?
+        persona_editor(&alias, saved.as_deref(), &persona_host(&origin))?
     } else {
         Persona::Keep
     };
@@ -714,7 +714,7 @@ fn manage_prompt(
                     // The saved persona stays until a replacement is accepted
                     // here, so a rename alone never redefines the agent.
                     clear_screen();
-                    let host = target_pane(runtime)?.agent.unwrap_or_default();
+                    let host = persona_host(&target_pane(runtime)?);
                     follow_up = persona_editor(&alias, address.persona.as_deref(), &host)?
                         .description()
                         .map(|description| {
@@ -728,7 +728,7 @@ fn manage_prompt(
             }
             b'p' if is_agent => {
                 clear_screen();
-                let host = target_pane(runtime)?.agent.unwrap_or_default();
+                let host = persona_host(&target_pane(runtime)?);
                 let choice = persona_editor(&address.alias, address.persona.as_deref(), &host)?;
                 let Some(description) = choice.description() else {
                     notice = if choice == Persona::Cancel {
@@ -1036,6 +1036,18 @@ impl Editor {
         lines.extend(hints.iter().map(|hint| (Tone::Keys, (*hint).to_owned())));
         lines
     }
+}
+
+/// The CLI a pane runs, as the persona worker names it. A pane whose agent kind
+/// is unreported has none.
+fn persona_host(pane: &namedrop::DiscoveredPane) -> String {
+    match pane.agent.as_ref().map(|agent| &agent.kind) {
+        Some(namedrop::mux::AgentKind::Known(namedrop::AgentRuntime::ClaudeCode)) => "claude",
+        Some(namedrop::mux::AgentKind::Known(namedrop::AgentRuntime::Codex)) => "codex",
+        Some(namedrop::mux::AgentKind::Other(word)) => word,
+        Some(namedrop::mux::AgentKind::Unreported) | None => "",
+    }
+    .to_owned()
 }
 
 /// Edits one agent's persona, asking an isolated worker for a suggestion in the

@@ -1,4 +1,5 @@
 use crate::lifecycle::PaneLabel;
+use crate::mux::AgentState;
 use crate::store::LostSettle;
 use crate::{
     ActorKind, Clock, DeliveryAttemptId, DeliveryState, DiscoveredPane, DispatchCandidate,
@@ -265,7 +266,7 @@ pub(crate) fn reconcile_delivery_state(
                 && pane.is_some_and(|p| {
                     p.terminal_id == terminal_id
                         && p.agent.is_none()
-                        && p.agent_session_id.is_none()
+                        && p.agent_session_id().is_none()
                 });
             if !same
                 || (started.is_none()
@@ -319,10 +320,7 @@ pub(crate) fn reconcile_delivery_state(
             Observation::Unchanged => {}
         }
     }
-    for session in panes
-        .iter()
-        .filter_map(|pane| pane.agent_session_id.as_ref())
-    {
+    for session in panes.iter().filter_map(|pane| pane.agent_session_id()) {
         for attempt in crate::final_reply::open_claims(state_directory, namespace, session) {
             if let Some(due_at_ms) =
                 transaction.judge_awaiting_stop(namespace, &attempt, attribution)?
@@ -358,10 +356,8 @@ fn observe_agent_attempt(
     now_ms: u64,
 ) -> Observation {
     let same_session = attempt.binding_active
-        && pane.and_then(|pane| pane.agent_session_id.as_ref()) == Some(&attempt.agent_session_id);
-    let session_is_settled = pane
-        .and_then(|pane| pane.agent_status.as_deref())
-        .is_some_and(|status| matches!(status, "idle" | "done"));
+        && pane.and_then(|pane| pane.agent_session_id()) == Some(&attempt.agent_session_id);
+    let session_is_settled = pane.is_some_and(DiscoveredPane::accepts_prompt);
     let grace_due_at_ms = attempt
         .created_at_ms
         .saturating_add(ACKNOWLEDGEMENT_GRACE_MS);
@@ -955,9 +951,9 @@ where
         return Reach::Gone;
     };
     let present = if candidate.pane_type == crate::PaneType::Terminal {
-        pane.agent.is_none() && pane.agent_session_id.is_none()
+        pane.agent.is_none()
     } else {
-        pane.agent_session_id.as_ref() == Some(&candidate.agent_session_id)
+        pane.agent_session_id() == Some(&candidate.agent_session_id)
     };
     if !present {
         return Reach::Gone;
@@ -1086,9 +1082,9 @@ fn opening(
     pane: &DiscoveredPane,
     phase: impl FnOnce() -> Option<crate::turn_phase::TurnPhase>,
 ) -> Opening {
-    match pane.agent_status.as_deref() {
-        Some("idle" | "done") => Opening::Settled,
-        Some("working")
+    match &pane.agent_status {
+        Some(status) if status.accepts_prompt() => Opening::Settled,
+        Some(AgentState::Working)
             if crate::integration::pane_agent_runtime(pane)
                 == Some(crate::AgentRuntime::ClaudeCode)
                 && matches!(phase(), Some(crate::turn_phase::TurnPhase::Stopped { .. })) =>
@@ -1103,7 +1099,7 @@ fn opening(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum AgentWait {
     /// Herdr's status for the pane, which is not idle or done.
-    Status(Option<String>),
+    Status(Option<AgentState>),
     /// The agent's prompt box holds a draft the person hasn't sent. Herdr
     /// types at the cursor, so a prompt typed now would be sent inside it.
     Draft(crate::AgentRuntime),
@@ -1126,7 +1122,7 @@ where
     C: Clock,
 {
     let phase = || {
-        pane.agent_session_id.as_ref().and_then(|session| {
+        pane.agent_session_id().and_then(|session| {
             crate::turn_phase::read(
                 runtime.state_directory,
                 runtime.session_socket_id,
@@ -1139,10 +1135,7 @@ where
         return Some(AgentWait::Status(pane.agent_status.clone()));
     }
     let agent = crate::integration::pane_agent_runtime(pane)?;
-    let session = pane
-        .agent_session_id
-        .as_ref()
-        .map(|session| session.as_str());
+    let session = pane.agent_session_id().map(|session| session.as_str());
     match read_prompt_box(runtime, &pane.pane_id, agent, session) {
         PromptBox::Empty => None,
         PromptBox::Draft => Some(AgentWait::Draft(agent)),
@@ -1688,10 +1681,12 @@ mod observation_tests {
             workspace_id: "workspace-1".to_owned(),
             cwd: None,
             pane_label: None,
-            agent_session_id: Some(AgentSessionId::new(session)),
-            agent: None,
-            occupant_label: None,
-            agent_status: Some(status.to_owned()),
+            agent: Some(crate::mux::AgentIdentity {
+                kind: crate::mux::AgentKind::Unreported,
+                label: None,
+                session: crate::mux::SessionClaim::Reported(AgentSessionId::new(session)),
+            }),
+            agent_status: Some(AgentState::parse(status)),
             idle_state_label: None,
         }
     }

@@ -406,7 +406,7 @@ impl StateTransaction<'_> {
             .pane_id
             .as_deref()
             .and_then(|pane_id| panes.iter().find(|pane| pane.pane_id == pane_id))
-            .filter(|pane| pane.agent.is_none() && pane.agent_session_id.is_none())
+            .filter(|pane| pane.agent.is_none())
             .ok_or_else(|| {
                 StoreError::invalid_input(format!(
                     "@{} is not bound to a live shell pane",

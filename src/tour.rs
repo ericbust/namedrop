@@ -427,8 +427,7 @@ where
     M: crate::mux::Mux + HerdrCommandExecutor,
 {
     let session = target
-        .agent_session_id
-        .as_ref()
+        .agent_session_id()
         .map(|id| id.as_str())
         .unwrap_or_default();
     let args = popup_open_args(

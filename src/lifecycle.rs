@@ -1,6 +1,7 @@
 use crate::integration::{onboard_settled_integrations, pane_agent_runtime};
 use crate::mux::{
-    AgentKind, Depth, Gone, MuxError, MuxRead, PaneFacts, Scope, SessionClaim, Survey, TabId,
+    AgentIdentity, AgentState, Depth, Gone, MuxError, MuxRead, PaneFacts, Scope, Survey, TabId,
+    resolve_session,
 };
 use crate::{
     ActorKind, AgentSessionId, AttentionItemRecord, Clock, HerdrCommandExecutor, IdGenerator,
@@ -37,12 +38,29 @@ pub struct DiscoveredPane {
     pub workspace_id: String,
     pub cwd: Option<String>,
     pub pane_label: Option<String>,
-    pub agent_session_id: Option<AgentSessionId>,
-    pub agent: Option<String>,
-    pub occupant_label: Option<String>,
-    pub agent_status: Option<String>,
+    /// `None` exactly when the pane is a free terminal.
+    pub agent: Option<AgentIdentity>,
+    pub agent_status: Option<AgentState>,
     /// The label Herdr currently shows for this pane while it is idle.
     pub idle_state_label: Option<String>,
+}
+
+impl DiscoveredPane {
+    pub fn agent_session_id(&self) -> Option<&AgentSessionId> {
+        self.agent
+            .as_ref()
+            .and_then(|agent| resolve_session(&agent.session))
+    }
+
+    pub fn occupant_label(&self) -> Option<&str> {
+        self.agent.as_ref()?.label.as_deref()
+    }
+
+    pub fn accepts_prompt(&self) -> bool {
+        self.agent_status
+            .as_ref()
+            .is_some_and(AgentState::accepts_prompt)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -313,7 +331,7 @@ where
                 );
             }
             let registration_required = pane_type == crate::PaneType::Agent;
-            let agent_session_id = pane.agent_session_id.as_ref();
+            let agent_session_id = pane.agent_session_id();
             let was_activated = store
                 .transaction(|transaction| transaction.worktree_state(&namespace))
                 .map_err(|error| error.to_string())?
@@ -488,7 +506,7 @@ where
                 "registration_required": registration_required,
                 "registered": registered,
                 "ready": if pane_type == crate::PaneType::Terminal {
-                    pane.agent.is_none() && pane.agent_session_id.is_none()
+                    pane.agent.is_none()
                         && crate::detect_pane_type(runtime)? == Some(crate::PaneType::Terminal)
                 } else { registered && agent_runtime.is_none_or(|runtime| !reconciliation.installation.failed(runtime)) },
                 "readiness_scope": if pane_type == crate::PaneType::Terminal {"terminal shell availability; rechecked before execution"} else {"package_and_registration_only; runtime hooks remain unverified"},
@@ -973,7 +991,7 @@ where
                                     pane.pane_id == binding.pane_id
                                         && address.is_some_and(|address| {
                                             address.agent_session_id.as_ref()
-                                                == pane.agent_session_id.as_ref()
+                                                == pane.agent_session_id()
                                         })
                                 });
                                 if binding.tab_id.as_deref() == Some(tab_id.as_str())
@@ -1206,7 +1224,7 @@ impl PaneLabel {
     ) -> Self {
         if served.is_some_and(|served| served.serves(&pane.pane_id)) {
             Self::SharedAppServer
-        } else if pane.agent.is_some() && pane.agent_session_id.is_none() {
+        } else if pane.agent.is_some() && pane.agent_session_id().is_none() {
             Self::AwaitingSession
         } else {
             Self::Ready
@@ -1852,7 +1870,7 @@ pub fn locate_agent_session_pane(
     mux: &impl MuxRead,
     agent_session_id: &str,
 ) -> Option<(String, String)> {
-    let wanted = SessionClaim::Reported(AgentSessionId::new(agent_session_id));
+    let wanted = crate::mux::SessionClaim::Reported(AgentSessionId::new(agent_session_id));
     let survey = mux.survey(Scope::All, Depth::Panes).ok()?;
     let mut matches = survey
         .spaces
@@ -1920,17 +1938,6 @@ fn surveyed(survey: Result<Survey, MuxError>) -> Result<DiscoveredWorktree, MuxE
 }
 
 fn discovered_pane(pane: PaneFacts) -> DiscoveredPane {
-    let (agent, occupant_label, agent_session_id) = match pane.agent {
-        None => (None, None, None),
-        Some(identity) => (
-            agent_word(&identity.kind),
-            identity.label,
-            match identity.session {
-                SessionClaim::Reported(session) => Some(session),
-                SessionClaim::Unreported { .. } | SessionClaim::None => None,
-            },
-        ),
-    };
     DiscoveredPane {
         pane_id: pane.id.as_str().to_owned(),
         terminal_id: pane.terminal.as_str().to_owned(),
@@ -1938,22 +1945,9 @@ fn discovered_pane(pane: PaneFacts) -> DiscoveredPane {
         workspace_id: pane.space.as_str().to_owned(),
         cwd: pane.cwd,
         pane_label: pane.title,
-        agent_session_id,
-        agent,
-        occupant_label,
-        agent_status: pane.state.map(|state| state.as_str().to_owned()),
+        agent: pane.agent,
+        agent_status: pane.state,
         idle_state_label: pane.idle_label,
-    }
-}
-
-/// The word `DiscoveredPane.agent` held before the port existed. Removed when
-/// `DiscoveredPane` holds an `AgentIdentity`.
-fn agent_word(kind: &AgentKind) -> Option<String> {
-    match kind {
-        AgentKind::Known(crate::AgentRuntime::ClaudeCode) => Some("claude".to_owned()),
-        AgentKind::Known(crate::AgentRuntime::Codex) => Some("codex".to_owned()),
-        AgentKind::Other(word) => Some(word.clone()),
-        AgentKind::Unreported => None,
     }
 }
 
@@ -1986,7 +1980,7 @@ pub(crate) fn load_collaboration_setup_from_store(
                 if let Some(agent_session_id) = &address.agent_session_id
                     && discovered.panes.iter().any(|pane| {
                         address.pane_id.as_deref() == Some(pane.pane_id.as_str())
-                            && pane.agent_session_id.as_ref() == Some(agent_session_id)
+                            && pane.agent_session_id() == Some(agent_session_id)
                             && pane_agent_runtime(pane).is_some()
                     })
                     && transaction
@@ -2066,8 +2060,8 @@ pub fn reconcile_discovered_panes(
             &pane.tab_id,
         )?;
         let session_id = pane
-            .agent_session_id
-            .clone()
+            .agent_session_id()
+            .cloned()
             .unwrap_or_else(|| AgentSessionId::new(""));
         transaction.observe_agent_session(
             namespace,
@@ -2078,7 +2072,9 @@ pub fn reconcile_discovered_panes(
             ),
             &binding.address_id,
             &session_id,
-            pane.agent_status.as_deref().unwrap_or("empty"),
+            pane.agent_status
+                .as_ref()
+                .map_or("empty", AgentState::as_str),
             attribution,
         )?;
     }
@@ -2104,10 +2100,12 @@ fn observe_discovered_occupant(
         &format!("{}-{}", ids.next_id("observation"), address_id.as_str()),
         address_id,
         &pane
-            .agent_session_id
-            .clone()
+            .agent_session_id()
+            .cloned()
             .unwrap_or_else(|| AgentSessionId::new("")),
-        pane.agent_status.as_deref().unwrap_or("empty"),
+        pane.agent_status
+            .as_ref()
+            .map_or("empty", AgentState::as_str),
         attribution,
     )
 }
@@ -2122,7 +2120,7 @@ fn enrich_record(
         .and_then(|pane_id| panes.iter().find(|pane| &pane.pane_id == pane_id))
     {
         record.pane_label.clone_from(&pane.pane_label);
-        record.occupant_label.clone_from(&pane.occupant_label);
+        record.occupant_label = pane.occupant_label().map(str::to_owned);
     }
     record
 }
@@ -2200,7 +2198,7 @@ fn reconcile_compacted_pane_bindings(
         }
         let mut matches = panes
             .iter()
-            .filter(|pane| pane.agent_session_id.as_ref() == Some(expected_session));
+            .filter(|pane| pane.agent_session_id() == Some(expected_session));
         let Some(replacement) = matches.next() else {
             continue;
         };

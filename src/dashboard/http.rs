@@ -1390,10 +1390,7 @@ fn serve_connection(
                                 {
                                     peer.runtime = runtime.as_str().to_owned();
                                 }
-                                peer.presence = if matches!(
-                                    pane.agent_status.as_deref(),
-                                    Some("idle" | "done")
-                                ) {
+                                peer.presence = if pane.accepts_prompt() {
                                     "idle"
                                 } else {
                                     "working"

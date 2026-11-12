@@ -11,10 +11,11 @@ mod xws;
 use namedrop::dashboard::snapshot::{
     Activity, DashboardSnapshot, LegStage, Participant, SpaceHealth, SpaceKey, SpaceState, build,
 };
+use namedrop::mux::{AgentIdentity, AgentKind, AgentState, SessionClaim};
 use namedrop::{
-    ActorKind, AgentSessionId, ContextGrantDraft, ContextGrantId, ContextSnapshotId, DeliveryId,
-    DeliveryState, LeaseDraft, MessageDraft, MessageId, MessageRecipientDraft, MutationAttribution,
-    PaneAddressId, PaneBindingId, StateNamespace, StateStore, ThreadId,
+    ActorKind, AgentRuntime, AgentSessionId, ContextGrantDraft, ContextGrantId, ContextSnapshotId,
+    DeliveryId, DeliveryState, LeaseDraft, MessageDraft, MessageId, MessageRecipientDraft,
+    MutationAttribution, PaneAddressId, PaneBindingId, StateNamespace, StateStore, ThreadId,
 };
 use support::{TestDirectory, address};
 
@@ -423,10 +424,14 @@ fn discovered_pane(
         workspace_id: space.into(),
         cwd: None,
         pane_label: None,
-        agent_session_id: Some(AgentSessionId::new(format!("session-{space}-{alias}"))),
-        agent: Some("claude".into()),
-        occupant_label: None,
-        agent_status: Some(status.into()),
+        agent: Some(AgentIdentity {
+            kind: AgentKind::Known(AgentRuntime::ClaudeCode),
+            label: None,
+            session: SessionClaim::Reported(AgentSessionId::new(format!(
+                "session-{space}-{alias}"
+            ))),
+        }),
+        agent_status: Some(AgentState::parse(status)),
         idle_state_label: None,
     }
 }

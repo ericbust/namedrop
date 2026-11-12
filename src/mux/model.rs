@@ -63,6 +63,13 @@ impl AgentState {
     }
 }
 
+/// Serializes as the multiplexer's word, so JSON output is unchanged.
+impl Serialize for AgentState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AgentKind {
     Known(AgentRuntime),
@@ -87,6 +94,15 @@ pub enum SessionClaim {
         incarnation: Incarnation,
     },
     None,
+}
+
+/// The session a claim binds to. Only a reported session resolves until a
+/// multiplexer that reports none records its own binding.
+pub fn resolve_session(claim: &SessionClaim) -> Option<&AgentSessionId> {
+    match claim {
+        SessionClaim::Reported(session) => Some(session),
+        SessionClaim::Unreported { .. } | SessionClaim::None => None,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -220,6 +236,29 @@ mod tests {
             assert_eq!(parsed, state, "{status:?}");
             assert_eq!(parsed.as_str(), status);
         }
+    }
+
+    #[test]
+    fn only_a_reported_session_resolves() {
+        let session = AgentSessionId::new("session-1");
+        assert_eq!(
+            resolve_session(&SessionClaim::Reported(session.clone())),
+            Some(&session)
+        );
+        let unreported = SessionClaim::Unreported {
+            incarnation: Incarnation("pid-1".into()),
+        };
+        assert_eq!(resolve_session(&unreported), None);
+        assert_eq!(resolve_session(&SessionClaim::None), None);
+    }
+
+    #[test]
+    fn agent_state_serializes_as_the_multiplexer_word() {
+        assert_eq!(
+            serde_json::to_value([AgentState::Done, AgentState::Unknown("unknown".into())])
+                .unwrap(),
+            serde_json::json!(["done", "unknown"])
+        );
     }
 
     #[test]

@@ -446,9 +446,14 @@ fn readiness(address: &PaneAddressRecord, registered: bool, paused: bool) -> &'s
     }
     match address.lifecycle {
         PaneAddressLifecycle::Occupied => {
-            match address.agent_status.as_deref().unwrap_or("unknown") {
-                "idle" | "done" => "available now",
-                _ => "busy; work queues until its session settles",
+            if address
+                .agent_status
+                .as_deref()
+                .is_some_and(|status| crate::mux::AgentState::parse(status).accepts_prompt())
+            {
+                "available now"
+            } else {
+                "busy; work queues until its session settles"
             }
         }
         PaneAddressLifecycle::Empty => "no session in its pane; work queues",

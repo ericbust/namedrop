@@ -209,6 +209,15 @@ Record each accepted deviation here, with its source, before the next commit sta
 - **A process reply Herdr cannot parse still reads as "no shell".** `verify_inherited_pane` treats `MuxError::Protocol` as a missing shell, as the old parser's `None` did, so the two messages a person can see stay split exactly as before.
 - **The dashboard reads stay inline.** `live_peek`, `http`, `hub`, and `skills_api` still call `execute_bounded` on their own `ProcessHerdr`, so `execute_bounded` and its `ProcessHerdr` tests stay until commit 11 moves them behind `MuxConnector`.
 
+**Commit 7** (`refactor(mux): type agent status and identity on discovered panes`).
+
+- **`SessionClaim` already existed.** Commit 1 added it with `AgentIdentity`, so this commit adds only `resolve_session`, a free function in `mux/model.rs` that returns the session of a `Reported` claim and `None` for the other two arms.
+- **`DiscoveredPane` keeps no copy of the identity.** Its `agent_session_id` and `occupant_label` fields are gone. The methods `agent_session_id()` (through `resolve_session`), `occupant_label()`, and `accepts_prompt()` read them from `agent: Option<AgentIdentity>` and `agent_status: Option<AgentState>`. The field names `agent` and `agent_status` stay, so the diff stays at the readers.
+- **A free terminal pane is `agent.is_none()`.** Every "no agent word and no session" check collapses to it, because the adapter returns `None` exactly when Herdr reports neither.
+- **`AgentState` serializes as its word.** A hand-written `Serialize` prints `as_str()`, so the `agent_status` fields in the status, health, and handoff JSON are unchanged. `AgentWait::Status` holds an `AgentState`, and health matches `Blocked` and `Working` as variants.
+- **The `"idle" | "done"` rule on stored statuses also goes through `accepts_prompt`.** The recipient outlook, persona readiness, and direct-message presence read `PaneAddressRecord.agent_status`, a stored string, so they call `AgentState::parse(status).accepts_prompt()`. The stored observation keeps Herdr's word.
+- **The persona worker still needs a CLI name.** `naming_ui::persona_host` turns the identity into `claude`, `codex`, the reported word for any other agent, or an empty string for an unreported kind, which is what `agent.unwrap_or_default()` passed before. It is the one place outside the adapter that names an agent by word, and it names the CLI the worker runs, not Herdr's field.
+
 ## Open questions and risks
 
 - Is a dashboard key that reports busy during a delivery acceptable, or should it wait a short fixed time? Commit 12 decides.

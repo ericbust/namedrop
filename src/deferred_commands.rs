@@ -751,7 +751,7 @@ fn validate_live_caller<E: crate::mux::MuxRead>(
         .panes
         .iter()
         .find(|pane| pane.pane_id == caller.pane)
-        .and_then(|pane| pane.agent_session_id.as_ref())
+        .and_then(|pane| pane.agent_session_id())
         != Some(&caller.session)
     {
         return Err("deferred command does not match the live native Agent Session".into());

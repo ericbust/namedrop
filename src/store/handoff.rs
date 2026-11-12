@@ -75,11 +75,11 @@ impl StateTransaction<'_> {
         if address.pane_type == crate::PaneType::Terminal {
             if live.is_none() {
                 constraints.push("recipient_disconnected");
-            } else if live.is_some_and(|p| p.agent.is_some() || p.agent_session_id.is_some()) {
+            } else if live.is_some_and(|p| p.agent.is_some()) {
                 constraints.push("terminal_contains_agent");
             }
         } else {
-            match live.and_then(|p| p.agent_session_id.as_ref()) {
+            match live.and_then(|p| p.agent_session_id()) {
                 None => constraints.push("recipient_disconnected"),
                 Some(session) if address.agent_session_id.as_ref() != Some(session) => {
                     constraints.push("session_changed")
@@ -92,10 +92,7 @@ impl StateTransaction<'_> {
                         }
                         Some(_) => (),
                     }
-                    if !matches!(
-                        live.and_then(|p| p.agent_status.as_deref()),
-                        Some("idle" | "done")
-                    ) {
+                    if !live.is_some_and(crate::DiscoveredPane::accepts_prompt) {
                         constraints.push("recipient_busy_or_unknown");
                     }
                 }
@@ -112,7 +109,7 @@ impl StateTransaction<'_> {
         Ok(
             json!({"address_id":address_id,"alias":address.alias,"pane_id":address.pane_id,
             "pane_type":address.pane_type,
-            "agent_session_id":live.and_then(|p|p.agent_session_id.as_ref()),"agent_status":live.and_then(|p|p.agent_status.as_ref()),
+            "agent_session_id":live.and_then(|p|p.agent_session_id()),"agent_status":live.and_then(|p|p.agent_status.as_ref()),
             "constraints":constraints,"earlier_deliveries":ahead,
             "delivery_expectation":if !constraints.is_empty(){"queued until constraints clear"}else if address.pane_type==crate::PaneType::Terminal {"command executes after dispatch verifies an available shell"}else{"eligible after dispatch revalidates a settled session"}}),
         )
