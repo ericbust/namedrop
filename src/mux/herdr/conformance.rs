@@ -666,41 +666,31 @@ fn a_pane_that_reports_another_space_agrees_in_every_survey() {
         });
         (found, grouped)
     });
-    let failed: Vec<_> = found
+    for (scope, result) in &found {
+        if scope.contains("workspace-9") {
+            assert_eq!(
+                result.clone().map(|_| ()),
+                Err(Some(Gone::Space)),
+                "{scope}"
+            );
+        } else {
+            assert!(result.is_ok(), "{scope}: {result:?}");
+        }
+    }
+    let grouped = grouped.unwrap();
+    let grouped: Vec<(&str, Vec<&str>)> = grouped
         .iter()
-        .filter(|(_, result)| result.is_err())
-        .map(|(scope, result)| (scope.as_str(), result.clone().map(|_| ())))
+        .map(|(space, panes)| (space.as_str(), panes.iter().map(String::as_str).collect()))
         .collect();
     assert_eq!(
-        failed.len(),
-        4,
-        "only workspace-9, which no space is, fails: {failed:?}"
-    );
-    assert!(
-        failed
-            .iter()
-            .all(|(scope, result)| scope.contains("workspace-9")
-                && *result == Err(Some(Gone::Space))),
-        "{failed:?}"
-    );
-    let owned = |id: &str, panes: &[&str]| {
-        (
-            id.to_owned(),
-            panes
-                .iter()
-                .map(|&pane| pane.to_owned())
-                .collect::<Vec<_>>(),
-        )
-    };
-    assert_eq!(
-        grouped.unwrap(),
+        grouped,
         [
-            owned(
+            (
                 "workspace-1",
-                &["pane-author", "pane-blocked", "pane-orphan"]
+                vec!["pane-author", "pane-blocked", "pane-orphan"]
             ),
-            owned("workspace-9", &["pane-reviewer"]),
-            owned("workspace-2", &["pane-shell"]),
+            ("workspace-9", vec!["pane-reviewer"]),
+            ("workspace-2", vec!["pane-shell"]),
         ],
         "`pane list` groups panes by the space each reports, first seen first"
     );
