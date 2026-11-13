@@ -848,6 +848,14 @@ What the review found that this round does not change:
 
 - **`shell_of` reads an idle launcher as an available shell.** A launcher that does not `exec` its agent, such as `bash wrap.sh`, is a shell by its executable. Once its agent exits and it waits in `read`, it is the foreground and alone in its group, so `shell_of` names it, and a terminal `Line` could then be typed into the script's `read` (inferred, not run). Herdr's shell check has the same gap. It stays open for both until a binding or the hook can say the shell is a launcher.
 
+Commits 12, 13, and 13a follow on `exp/rex-adapter-4`.
+
+- **12. Kind-aware writers** (`feat(locator): write the neutral names for a Rex endpoint`). `Name::of` maps an endpoint's kind to the set of names Namedrop writes, Herdr's for Herdr and the neutral ones for Rex. `Locator::pass` takes the kind, writes that set's name and clears the other's, the state directory included, so a Rex daemon gets `NAMEDROP_STATE_DIR` and a Rex endpoint never becomes `HERDR_SOCKET_PATH`. `tool_environment` writes the envelope's keys from the endpoint's kind, so every line rendered from a Rex envelope passes `--endpoint`, `--space`, and `--pane`, and `registration_command`, `runner_command`, and Doctor's repair line do the same. The Codex registration sentence names `NAMEDROP_STATE_DIR` for Rex. A differential run of the base and this build over a script `herdr` gave the same registration, reply, terminal, and Doctor lines, envelope, and daemon environments.
+
+What the design did not say, found while building 12:
+
+- **The unrendered-line sentence follows the envelope, not the endpoint.** It names, for each location, the flag the delivery's lines pass, which is the flag of the envelope key that holds the value, and Herdr's for a key the envelope lacks. So an envelope with no location keys keeps today's sentence, and the sentence always matches the lines beside it.
+
 ## Next implementation step
 
 Step 3 is done (see [Step 3: neutral names](#step-3-neutral-names)). Next is step 4 of the [plan](PLAN.md): write the Rex adapter. Start with [Left for step 4](#left-for-step-4) and the step 4 items under [Open questions and risks](#open-questions-and-risks).

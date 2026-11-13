@@ -2288,9 +2288,10 @@ pub(super) fn wake_mailboxes_after_send(
     }
     for space in spaces {
         let mut command = Command::new(crate::runtime_executable()?);
-        Locator::StateDir.pass(&mut command, state);
-        Locator::Endpoint.pass(&mut command, &namespace.session_socket_id);
-        Locator::Space.pass(&mut command, space.as_str());
+        let kind = crate::mux::Endpoint::parse(&namespace.session_socket_id).kind;
+        Locator::StateDir.pass(&mut command, kind, state);
+        Locator::Endpoint.pass(&mut command, kind, &namespace.session_socket_id);
+        Locator::Space.pass(&mut command, kind, space.as_str());
         Locator::Pane.clear(&mut command);
         let mut child = command
             .args(["hook", "mailbox-wake", "--state-directory"])

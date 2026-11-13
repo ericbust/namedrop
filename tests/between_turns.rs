@@ -966,6 +966,11 @@ fn a_rex_screen_fault_holds_mail_to_an_idle_agent_until_a_read_works() {
         let (delivered, typed) = fixture.recheck(&still);
         assert_eq!(typed.len(), 1, "{fault:?}: {typed:?}");
         assert!(delivered.draft_held.is_empty(), "{fault:?}: {delivered:?}");
+        assert!(
+            typed[0].contains(" --endpoint 'rex:/tmp/nd-test-rex.sock' --space ")
+                && !typed[0].contains("--herdr-"),
+            "the pointer's line names the Rex endpoint with the neutral flags: {typed:?}"
+        );
     }
 }
 
@@ -979,4 +984,8 @@ fn a_herdr_screen_read_that_fails_still_delivers_to_an_idle_agent() {
     let (report, typed) = fixture.drain_report();
     assert_eq!(typed.len(), 1, "{typed:?}");
     assert!(report.draft_held.is_empty(), "{report:?}");
+    assert!(
+        typed[0].contains(" --herdr-socket 'socket-a' --herdr-workspace "),
+        "{typed:?}"
+    );
 }

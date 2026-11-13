@@ -730,9 +730,10 @@ fn schedule_mailbox_workers(
             )
             .map_err(|error| error.to_string())?;
             let mut worker = status_worker_command()?;
-            Locator::StateDir.pass(&mut worker, state_directory);
-            Locator::Endpoint.pass(&mut worker, socket_id);
-            Locator::Space.pass(&mut worker, &space);
+            let kind = namedrop::mux::Endpoint::parse(socket_id).kind;
+            Locator::StateDir.pass(&mut worker, kind, state_directory);
+            Locator::Endpoint.pass(&mut worker, kind, socket_id);
+            Locator::Space.pass(&mut worker, kind, &space);
             let worker = worker.spawn().map_err(|error| error.to_string())?;
             workers.push((space.clone(), worker));
             Ok(())

@@ -595,3 +595,114 @@ fn an_armed_direct_message_or_channel_rule_never_asks_for_the_bound_reply() {
         assert!(trusted_delivery_instruction(&control).contains("bound reply"));
     }
 }
+
+/// What Namedrop writes for a Rex endpoint uses the neutral names: the
+/// envelope's keys, the registration line and its Codex sentence, every
+/// rendered line, and the unrendered-line sentence. A Herdr endpoint keeps
+/// Herdr's, byte for byte.
+#[test]
+fn a_rex_endpoint_s_envelope_and_lines_use_the_neutral_names() {
+    let state = Path::new("/state dir");
+    let herdr = tool_environment(state, "/tmp/h.sock", "w1", "w1:p1");
+    assert_eq!(
+        herdr,
+        BTreeMap::from([
+            ("HERDR_PANE_ID".to_owned(), "w1:p1".to_owned()),
+            ("HERDR_PLUGIN_STATE_DIR".to_owned(), "/state dir".to_owned()),
+            ("HERDR_SOCKET_PATH".to_owned(), "/tmp/h.sock".to_owned()),
+            ("HERDR_WORKSPACE_ID".to_owned(), "w1".to_owned()),
+        ])
+    );
+    let rex = tool_environment(state, "rex:/tmp/r.sock", "s1", "b1");
+    assert_eq!(
+        rex,
+        BTreeMap::from([
+            ("NAMEDROP_ENDPOINT".to_owned(), "rex:/tmp/r.sock".to_owned()),
+            ("NAMEDROP_PANE_ID".to_owned(), "b1".to_owned()),
+            ("NAMEDROP_SPACE_ID".to_owned(), "s1".to_owned()),
+            ("NAMEDROP_STATE_DIR".to_owned(), "/state dir".to_owned()),
+        ])
+    );
+
+    let executable = Path::new("/bin/namedrop");
+    let register = |endpoint, space, pane| {
+        registration_command(
+            state,
+            endpoint,
+            space,
+            pane,
+            executable,
+            AgentRuntime::Codex,
+            "n1",
+        )
+        .unwrap()
+    };
+    let input = shell_single_quote(
+        &json!({
+            "runtime": AgentRuntime::Codex,
+            "protocol_version": INTEGRATION_PROTOCOL_VERSION,
+            "nonce": "n1",
+            "capabilities": complete_capability_profile(),
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        register("/tmp/h.sock", "w1", "w1:p1"),
+        format!(
+            "'/bin/namedrop' --plugin-state '/state dir' register --herdr-socket '/tmp/h.sock' --herdr-workspace 'w1' --herdr-pane 'w1:p1' --input-json {input}"
+        )
+    );
+    assert_eq!(
+        register("rex:/tmp/r.sock", "s1", "b1"),
+        format!(
+            "'/bin/namedrop' --plugin-state '/state dir' register --endpoint 'rex:/tmp/r.sock' --space 's1' --pane 'b1' --input-json {input}"
+        )
+    );
+    let sentence = |endpoint| {
+        registration_prompt(
+            state,
+            endpoint,
+            "s1",
+            "b1",
+            executable,
+            AgentRuntime::Codex,
+            "n1",
+        )
+        .unwrap()
+    };
+    assert!(
+        sentence("/tmp/h.sock").contains(" This command writes to HERDR_PLUGIN_STATE_DIR outside")
+    );
+    assert!(
+        sentence("rex:/tmp/r.sock").contains(" This command writes to NAMEDROP_STATE_DIR outside")
+    );
+
+    let control = |environment: &BTreeMap<String, String>| {
+        json!({"tool":{
+            "executable":"/bin/namedrop","environment":environment,"input_flag":"--input-json",
+            "operations":[
+                {"token":"reply","argv":["reply"],"input":{}},
+                {"token":"reminder.set","argv":["reminder","set"],"input":{}}
+            ]
+        }})
+    };
+    let herdr_guidance = guidance_of(&control(&herdr)).unwrap();
+    assert!(herdr_guidance.contains(
+        "its argv, `--herdr-socket`, `--herdr-workspace`, `--herdr-pane`, then the input flag"
+    ));
+    assert!(herdr_guidance.contains(
+        "reply: '/bin/namedrop' --plugin-state '/state dir' reply --herdr-socket '/tmp/h.sock' --herdr-workspace 'w1' --herdr-pane 'w1:p1' --input-json '{}'"
+    ));
+    let rex_guidance = guidance_of(&control(&rex)).unwrap();
+    assert!(
+        rex_guidance.contains("its argv, `--endpoint`, `--space`, `--pane`, then the input flag"),
+        "{rex_guidance}"
+    );
+    assert!(
+        rex_guidance.contains(
+            "reply: '/bin/namedrop' --plugin-state '/state dir' reply --endpoint 'rex:/tmp/r.sock' --space 's1' --pane 'b1' --input-json '{}'"
+        ),
+        "{rex_guidance}"
+    );
+    assert!(!rex_guidance.contains("herdr"), "{rex_guidance}");
+}

@@ -16,15 +16,16 @@ pub(crate) fn runner_command<M, C, I>(
     attempt: &DeliveryAttemptId,
 ) -> Result<String, String> {
     let quote = |s: &str| format!("'{}'", s.replace('\'', "'\"'\"'"));
+    let name = Name::for_endpoint(runtime.session_socket_id);
     Ok([
         crate::collaboration_executable()?,
         "--plugin-state".to_owned(),
         runtime.state_directory.display().to_string(),
-        "--herdr-socket".to_owned(),
+        Locator::Endpoint.flag_for(name).to_owned(),
         runtime.session_socket_id.to_owned(),
-        "--herdr-workspace".to_owned(),
+        Locator::Space.flag_for(name).to_owned(),
         workspace.to_owned(),
-        "--herdr-pane".to_owned(),
+        Locator::Pane.flag_for(name).to_owned(),
         pane.to_owned(),
         "terminal-execute".to_owned(),
         attempt.as_str().to_owned(),
@@ -432,4 +433,47 @@ pub fn default_pane_type<M: MuxRead, C, I>(
         return Ok(Some(kind));
     }
     detect_pane_type(runtime)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ProcessIds, SystemClock, mux::fake::FakeMux};
+    use std::path::Path;
+
+    /// The line a terminal attempt types names its location with the flags of
+    /// the endpoint's kind: Herdr's for Herdr, as before, and the neutral
+    /// ones for Rex.
+    #[test]
+    fn a_runner_line_passes_its_location_with_the_flags_of_the_endpoint_s_kind() {
+        let mux = FakeMux::world().build();
+        let ids = ProcessIds::default();
+        let line = |endpoint: &str| {
+            let runtime = LifecycleRuntime {
+                state_directory: Path::new("/state"),
+                home_directory: None,
+                agent_config: Default::default(),
+                cwd: Path::new("/repo"),
+                workspace_id: None,
+                current_pane_id: None,
+                session_socket_id: endpoint,
+                mux: &mux,
+                clock: &SystemClock,
+                ids: &ids,
+            };
+            let line = runner_command(&runtime, "s1", "p1", &DeliveryAttemptId::new("a1")).unwrap();
+            let executable = crate::collaboration_executable().unwrap();
+            line.strip_prefix(&format!("'{executable}' "))
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(
+            line("/tmp/h.sock"),
+            "'--plugin-state' '/state' '--herdr-socket' '/tmp/h.sock' '--herdr-workspace' 's1' '--herdr-pane' 'p1' 'terminal-execute' 'a1'"
+        );
+        assert_eq!(
+            line("rex:/tmp/r.sock"),
+            "'--plugin-state' '/state' '--endpoint' 'rex:/tmp/r.sock' '--space' 's1' '--pane' 'p1' 'terminal-execute' 'a1'"
+        );
+    }
 }

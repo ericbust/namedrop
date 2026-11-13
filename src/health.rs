@@ -1,6 +1,7 @@
 use crate::codex_app_server::ServedPanes;
 use crate::integration::pane_agent_runtime;
 use crate::lifecycle::{CollaborationSetup, terminal_safe_text};
+use crate::locator::{Locator, Name};
 use crate::mux::{AgentState, InputOutcome};
 use crate::{
     AgentSessionId, AttentionSourceKind, Clock, IdGenerator, LifecycleRuntime,
@@ -1302,14 +1303,15 @@ fn add_operation<M, C, I>(
         } else {
             command.extend(["--input-json".into(), input.to_string()]);
         }
+        let name = Name::for_endpoint(runtime.session_socket_id);
         command.extend([
-            "--herdr-socket".into(),
+            Locator::Endpoint.flag_for(name).into(),
             runtime.session_socket_id.to_owned(),
-            "--herdr-workspace".into(),
+            Locator::Space.flag_for(name).into(),
             space_id.to_owned(),
         ]);
         if let Some(pane_id) = pane_id {
-            command.extend(["--herdr-pane".into(), pane_id.to_owned()]);
+            command.extend([Locator::Pane.flag_for(name).into(), pane_id.to_owned()]);
         }
         issue.repair.command = Some(command);
     }
@@ -1420,5 +1422,82 @@ mod tests {
         let rendered = render_health_report_to_text(&report);
         assert!(rendered.contains(r"builder\n\u{1b}[2J is not ready."));
         assert!(!rendered.contains('\u{1b}'));
+    }
+
+    /// A repair line names its location with the flags of the endpoint's
+    /// kind: Herdr's for Herdr, as before, and the neutral ones for Rex.
+    #[test]
+    fn a_repair_line_passes_its_location_with_the_flags_of_the_endpoint_s_kind() {
+        let mux = crate::mux::fake::FakeMux::world().build();
+        let ids = crate::ProcessIds::default();
+        let line = |endpoint: &str| {
+            let runtime = LifecycleRuntime {
+                state_directory: std::path::Path::new("/state"),
+                home_directory: None,
+                agent_config: Default::default(),
+                cwd: std::path::Path::new("/repo"),
+                workspace_id: None,
+                current_pane_id: None,
+                session_socket_id: endpoint,
+                mux: &mux,
+                clock: &crate::SystemClock,
+                ids: &ids,
+            };
+            let mut paused = issue(
+                "ND-SPACE-001",
+                HealthSeverity::Blocked,
+                "",
+                "",
+                HealthRepairKind::ProductAction,
+                "",
+            );
+            add_operation(
+                &mut paused,
+                &runtime,
+                "s1",
+                "worktree.resume",
+                serde_json::json!({}),
+                Some("p1"),
+            );
+            paused.repair.command.unwrap().split_off(1)
+        };
+        let head = [
+            "--plugin-state",
+            "/state",
+            "space",
+            "resume",
+            "--input-json",
+            "{}",
+        ];
+        assert_eq!(
+            line("/tmp/h.sock"),
+            [
+                &head[..],
+                &[
+                    "--herdr-socket",
+                    "/tmp/h.sock",
+                    "--herdr-workspace",
+                    "s1",
+                    "--herdr-pane",
+                    "p1"
+                ]
+            ]
+            .concat()
+        );
+        assert_eq!(
+            line("rex:/tmp/r.sock"),
+            [
+                &head[..],
+                &[
+                    "--endpoint",
+                    "rex:/tmp/r.sock",
+                    "--space",
+                    "s1",
+                    "--pane",
+                    "p1"
+                ]
+            ]
+            .concat()
+        );
     }
 }
