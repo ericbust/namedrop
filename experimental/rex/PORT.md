@@ -856,6 +856,15 @@ What the design did not say, found while building 12:
 
 - **The unrendered-line sentence follows the envelope, not the endpoint.** It names, for each location, the flag the delivery's lines pass, which is the flag of the envelope key that holds the value, and Herdr's for a key the envelope lacks. So an envelope with no location keys keeps today's sentence, and the sentence always matches the lines beside it.
 
+- **13. `daemon::command`** (`feat(daemon): start every background process through one door`). `src/daemon.rs` holds `Scope`, `command`, and `scrub`. The status worker (both its starts), the deferred worker and executor, the reminder clock, the dashboard server, and the dashboard's mailbox wake start through `command`, and the Stop worker through `scrub`, which drops the Rex claim, the 13 agent session markers, `CLAUDE_SESSION_ID`, and both multiplexer timeouts. The summary worker's scrub drops `REX_*` too. A boundary test lists every production `Command::new` whose program is not a string literal, and fails on one it does not list as it is: the door, the scrubbed Stop worker, the four exceptions (the runtime re-exec, which is two sites, the clock's re-exec, the dashboard's `--help` probe, and live peek's observer guard), and seven other programs. A differential run of the base and this build over a script `herdr` gave the same report once the scrubbed names were taken out of every recorded environment.
+
+What the design did not say, found while building 13:
+
+- **A scope carries no state directory.** The status worker and the dashboard's mailbox wake read theirs from the environment, so their callers pass it with `Locator::pass` for the endpoint's kind after `command`. The other daemons take it as an argument, so an inherited `HERDR_PLUGIN_STATE_DIR` is never read by them.
+- **The status hook's worker now gets its scope explicitly.** It inherited the plugin process's names before. Under Herdr the values are the same ones, read through `Locator`, so its environment differs only by the scrub.
+- **The Herdr daemons lose inherited names they never read.** The measured change under Herdr is the agent markers a pane's process passes on (`CODEX_SESSION_ID`, `CLAUDE_CODE_SESSION_ID`), which the status worker and the dashboard server carried before. The deferred worker and executor also lose an inherited space and pane and get their endpoint as `HERDR_SOCKET_PATH`, which their arguments already carry.
+- **The boundary is a closed registry, not a search for self-spawns.** Which variable names Namedrop's executable cannot be read from text, so every production spawn of a program named by an expression is listed with what it is, and a new one fails until it is classified. The scan empties literals and comments and cuts `#[cfg(test)]` items and test-only files first.
+
 ## Next implementation step
 
 Step 3 is done (see [Step 3: neutral names](#step-3-neutral-names)). Next is step 4 of the [plan](PLAN.md): write the Rex adapter. Start with [Left for step 4](#left-for-step-4) and the step 4 items under [Open questions and risks](#open-questions-and-risks).

@@ -21,7 +21,7 @@ use std::{
     io::{self, IsTerminal, Read, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    process::{Command, ExitCode, Stdio},
+    process::{Command, ExitCode},
     sync::Arc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -729,12 +729,9 @@ fn schedule_mailbox_workers(
                 &serde_json::json!({"operation":"mailbox-wake"}),
             )
             .map_err(|error| error.to_string())?;
-            let mut worker = status_worker_command()?;
-            let kind = namedrop::mux::Endpoint::parse(socket_id).kind;
-            Locator::StateDir.pass(&mut worker, kind, state_directory);
-            Locator::Endpoint.pass(&mut worker, kind, socket_id);
-            Locator::Space.pass(&mut worker, kind, &space);
-            let worker = worker.spawn().map_err(|error| error.to_string())?;
+            let worker = status_worker_command(state_directory, socket_id, &space)?
+                .spawn()
+                .map_err(|error| error.to_string())?;
             workers.push((space.clone(), worker));
             Ok(())
         })();
@@ -1086,20 +1083,21 @@ fn run_agent_status_changed_hook() -> ExitCode {
             return ExitCode::from(65);
         }
     };
-    let directory = match agent_status_reconciliation_directory() {
-        Ok(directory) => directory,
+    let (state_directory, socket_id, space_id) = match agent_status_reconciliation_scope() {
+        Ok(scope) => scope,
         Err(error) => {
             eprintln!("could not queue Namedrop reconciliation: {error}");
             return ExitCode::from(65);
         }
     };
+    let directory = reconciliation_directory(&state_directory, &socket_id, &space_id);
     if let Err(error) = create_reconciliation_directory(&directory).and_then(|()| {
         queue_agent_status_reconciliation(&directory, &input).map_err(|error| error.to_string())
     }) {
         eprintln!("could not queue Namedrop reconciliation: {error}");
         return ExitCode::from(65);
     }
-    match status_worker_command()
+    match status_worker_command(&state_directory, &socket_id, &space_id)
         .and_then(|mut command| command.spawn().map_err(|error| error.to_string()))
     {
         Ok(_) => ExitCode::SUCCESS,
@@ -1110,23 +1108,29 @@ fn run_agent_status_changed_hook() -> ExitCode {
     }
 }
 
-fn status_worker_command() -> Result<Command, String> {
-    use std::os::unix::process::CommandExt;
-    let mut command = Command::new(namedrop::runtime_executable()?);
+/// The worker reconciles a whole space and outlives the hook that started it,
+/// so it is nobody's pane and gets only its space's location.
+fn status_worker_command(
+    state_directory: &Path,
+    socket_id: &str,
+    space_id: &str,
+) -> Result<Command, String> {
+    let endpoint = namedrop::mux::Endpoint::parse(socket_id);
+    let space = namedrop::SpaceId::new(space_id);
+    let mut command = namedrop::daemon::command(
+        &namedrop::runtime_executable()?,
+        namedrop::daemon::Scope::Space(&endpoint, &space),
+    );
     command
         .args(["hook", "agent-status-worker"])
-        .process_group(0)
-        .env("NAMEDROP_HERDR_TIMEOUT_MS", "10000")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // The worker reconciles a whole space and outlives the hook that started
-    // it, so it is nobody's pane; the hook's pane must not become its identity.
-    Locator::Pane.clear(&mut command);
+        .env("NAMEDROP_HERDR_TIMEOUT_MS", "10000");
+    Locator::StateDir.pass(&mut command, endpoint.kind, state_directory);
     Ok(command)
 }
 
-fn agent_status_reconciliation_directory() -> Result<PathBuf, String> {
+/// The state directory, endpoint, and space a status hook queues its event
+/// for, from the names the plugin process inherited.
+fn agent_status_reconciliation_scope() -> Result<(PathBuf, String, String), String> {
     let required = |locator: Locator| {
         format!(
             "{} or {} is required",
@@ -1144,11 +1148,7 @@ fn agent_status_reconciliation_directory() -> Result<PathBuf, String> {
     let space_id = Locator::Space
         .env()
         .ok_or_else(|| required(Locator::Space))?;
-    Ok(reconciliation_directory(
-        &state_directory,
-        &socket_id,
-        &space_id,
-    ))
+    Ok((state_directory, socket_id, space_id))
 }
 
 fn reconciliation_directory(state_directory: &Path, socket_id: &str, space_id: &str) -> PathBuf {
@@ -1232,8 +1232,8 @@ fn run_agent_status_worker() -> ExitCode {
     {
         let _ = env::set_current_dir(state);
     }
-    let directory = match agent_status_reconciliation_directory() {
-        Ok(directory) => directory,
+    let directory = match agent_status_reconciliation_scope() {
+        Ok((state, socket, space)) => reconciliation_directory(&state, &socket, &space),
         Err(_) => return ExitCode::SUCCESS,
     };
     let lock = match fs::OpenOptions::new()
@@ -2623,4 +2623,71 @@ fn write_result(result: &CommandResult, exit_code: u8, format: ResultFormat) -> 
         return ExitCode::from(74);
     }
     ExitCode::from(exit_code)
+}
+
+#[cfg(test)]
+mod status_worker_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn location(command: &Command) -> BTreeMap<String, Option<String>> {
+        command
+            .get_envs()
+            .filter(|(key, _)| {
+                let key = key.to_string_lossy();
+                key.starts_with("HERDR_") || key.starts_with("NAMEDROP_")
+            })
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
+    }
+
+    /// The worker gets its state directory, endpoint, and space under the
+    /// names of its endpoint's kind, the CLI's Herdr timeout, and no pane.
+    #[test]
+    fn the_status_worker_gets_its_space_under_its_endpoint_s_names() {
+        let state = Path::new("/state");
+        let herdr = status_worker_command(state, "/run/h.sock", "w1").unwrap();
+        assert_eq!(
+            location(&herdr),
+            BTreeMap::from(
+                [
+                    ("HERDR_PANE_ID", None),
+                    ("HERDR_PLUGIN_STATE_DIR", Some("/state")),
+                    ("HERDR_SOCKET_PATH", Some("/run/h.sock")),
+                    ("HERDR_WORKSPACE_ID", Some("w1")),
+                    ("NAMEDROP_ENDPOINT", None),
+                    ("NAMEDROP_HERDR_TIMEOUT_MS", Some("10000")),
+                    ("NAMEDROP_PANE_ID", None),
+                    ("NAMEDROP_REX_TIMEOUT_MS", None),
+                    ("NAMEDROP_SPACE_ID", None),
+                    ("NAMEDROP_STATE_DIR", None),
+                ]
+                .map(|(key, value)| (key.to_owned(), value.map(str::to_owned)))
+            )
+        );
+        let rex = status_worker_command(state, "rex:/tmp/r.sock", "s1").unwrap();
+        assert_eq!(
+            location(&rex),
+            BTreeMap::from(
+                [
+                    ("HERDR_PANE_ID", None),
+                    ("HERDR_PLUGIN_STATE_DIR", None),
+                    ("HERDR_SOCKET_PATH", None),
+                    ("HERDR_WORKSPACE_ID", None),
+                    ("NAMEDROP_ENDPOINT", Some("rex:/tmp/r.sock")),
+                    ("NAMEDROP_HERDR_TIMEOUT_MS", Some("10000")),
+                    ("NAMEDROP_PANE_ID", None),
+                    ("NAMEDROP_REX_TIMEOUT_MS", None),
+                    ("NAMEDROP_SPACE_ID", Some("s1")),
+                    ("NAMEDROP_STATE_DIR", Some("/state")),
+                ]
+                .map(|(key, value)| (key.to_owned(), value.map(str::to_owned)))
+            )
+        );
+    }
 }

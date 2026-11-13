@@ -4,7 +4,7 @@ use std::{
     fs,
     os::unix::{fs::OpenOptionsExt, process::CommandExt},
     path::Path,
-    process::{Command, Stdio},
+    process::Command,
     thread,
     time::Duration,
 };
@@ -145,23 +145,15 @@ pub fn ensure_clock(state: &Path, socket: Option<&str>) -> Result<(), String> {
     let socket = socket
         .or(persisted_socket.as_deref())
         .ok_or("pending reminders have no Herdr socket")?;
-    let executable = selected_executable(state)?;
-    let mut command = Command::new(executable);
-    command
-        .args(["reminder-clock"])
-        .arg(state)
-        .arg(socket)
-        .env_remove("CLAUDE_CODE_SESSION_ID")
-        .env_remove("CODEX_SESSION_ID")
-        .env_remove("CLAUDE_SESSION_ID")
-        .env_remove("CODEX_THREAD_ID")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0);
-    crate::locator::Locator::Pane.clear(&mut command);
-    crate::locator::Locator::Space.clear(&mut command);
-    command.spawn().map_err(|e| e.to_string())?;
+    crate::daemon::command(
+        &selected_executable(state)?,
+        crate::daemon::Scope::Endpoint(&crate::mux::Endpoint::parse(socket)),
+    )
+    .args(["reminder-clock"])
+    .arg(state)
+    .arg(socket)
+    .spawn()
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
