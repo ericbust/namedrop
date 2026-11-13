@@ -6,10 +6,12 @@ import {
   directComposer,
   directKey,
   directPath,
+  heardDirect,
   mergeDirectHistory,
 } from "../direct-messages.ts";
 import type { Channel, Draft, DraftKey, Outgoing, SpaceKey } from "../model.ts";
 import type { createPoster } from "../send.ts";
+import { type Heard, nothingHeard } from "../sounds.ts";
 import { draftKey, sameComposer } from "../store.ts";
 import { parseDirectHistory, parseDirectPeers } from "../wire.ts";
 
@@ -65,6 +67,8 @@ export function useDirectMessages(
     [directoryPeers, channels],
   );
   const [directoryError, setDirectoryError] = useState(false);
+  const [heard, setHeard] = useState<Heard>(nothingHeard);
+  const lastRead = useRef<readonly DirectPeer[] | null>(null);
   const [histories, setHistories] = useState<
     ReadonlyMap<string, DirectHistory>
   >(new Map());
@@ -96,6 +100,10 @@ export function useDirectMessages(
         if (!response.ok) throw new Error("Directory unavailable");
         const next = parseDirectPeers(await response.json());
         if (!signal.aborted) {
+          const arrivals = heardDirect(lastRead.current, next);
+          lastRead.current = next;
+          if (arrivals.length > 0)
+            setHeard((heard) => ({ seq: heard.seq + 1, arrivals }));
           setPeers(next);
           setDirectoryError(false);
         }
@@ -319,6 +327,7 @@ export function useDirectMessages(
     peers,
     selectedPeer,
     directoryError,
+    heard,
     history,
     drafts,
     outbox,

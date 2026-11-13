@@ -5,7 +5,7 @@ use crate::{HerdrCommandExecutor, ProcessHerdr, StateStore, store::dashboard::Sc
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::CString,
     fs::File,
     io::{self, BufRead, BufReader, Read, Write},
@@ -690,6 +690,8 @@ enum Route {
     Session,
     ImageUpload,
     Image(super::images::Name),
+    Sounds,
+    ChangeSounds,
     Send(SpaceKey),
     DirectMessages,
     DirectHistory {
@@ -842,6 +844,15 @@ fn route(
         return super::images::Name::parse(name)
             .map(Route::Image)
             .ok_or(Status::NotFound);
+    }
+    if path == "/api/sounds" {
+        authenticate_session(request, port, session)?;
+        if request.method == "POST" {
+            authenticate_mutation(request, session, &origin)?;
+            return Ok(Route::ChangeSounds);
+        }
+        authenticate_provenance(request, &origin)?;
+        return Ok(Route::Sounds);
     }
     if path == "/api/direct-messages" && request.method == "GET" {
         authenticate_session(request, port, session)?;
@@ -1390,6 +1401,12 @@ fn serve_connection(
         ),
         Ok(Route::ImageUpload) => upload_image(&mut reader, &mut writer, front, &request),
         Ok(Route::Image(name)) => serve_image(&mut writer, front, &name),
+        Ok(Route::Sounds) => {
+            respond_sounds(&mut writer, "200 OK", &super::sounds::read(&front.files))
+        }
+        Ok(Route::ChangeSounds) => {
+            change_sounds(&mut reader, &mut writer, front, history_store, &request)
+        }
         Ok(Route::DirectMessages) => {
             let result = (|| {
                 let mut guard = history_store.lock().map_err(|_| Status::Unavailable)?;
@@ -2364,6 +2381,64 @@ impl Drop for UploadPermit<'_> {
     }
 }
 
+fn change_sounds(
+    reader: &mut impl Read,
+    writer: &mut TcpStream,
+    front: &Front,
+    history_store: &Mutex<HistoryStore>,
+    request: &Request,
+) -> io::Result<()> {
+    let change = match read_json_body::<super::sounds::Change>(reader, request) {
+        Ok(change) => change,
+        Err(status) => return respond_status(writer, status),
+    };
+    let known = known_agents(front, history_store);
+    let _admitted = match front.admit_mutation() {
+        Ok(guard) => guard,
+        Err(status) => return respond_status(writer, status),
+    };
+    let stored = super::sounds::read(&front.files);
+    let settings = match stored.clone().change(change, known.as_ref()) {
+        Ok(changed) => changed,
+        Err(super::sounds::Rejected::TooManyAgents) => {
+            return respond_status(writer, Status::BadRequest);
+        }
+        Err(super::sounds::Rejected::Stale) => {
+            return respond_sounds(writer, "409 Conflict", &stored);
+        }
+    };
+    if super::sounds::write(&front.files, &settings).is_err() {
+        return respond_status(writer, Status::Unavailable);
+    }
+    respond_sounds(writer, "200 OK", &settings)
+}
+
+/// The pane addresses of the agents the person can message today, or `None`
+/// when the listing fails, so no pick is dropped on a guess.
+fn known_agents(front: &Front, history_store: &Mutex<HistoryStore>) -> Option<HashSet<String>> {
+    let mut guard = history_store.lock().ok()?;
+    let peers = guard
+        .store(front.files.state())
+        .ok()?
+        .direct_message_peers()
+        .ok()?;
+    Some(peers.into_iter().map(|peer| peer.address_id).collect())
+}
+
+fn respond_sounds(
+    writer: &mut TcpStream,
+    status: &str,
+    settings: &super::sounds::Settings,
+) -> io::Result<()> {
+    respond(
+        writer,
+        status,
+        "application/json",
+        "",
+        &serde_json::to_vec(settings).expect("sound settings serialize"),
+    )
+}
+
 /// Stores the posted bytes when they are one of the four image types, and
 /// answers with the line a message carries for the image.
 fn upload_image(
@@ -2944,6 +3019,62 @@ mod skill_route_tests {
 }
 
 #[cfg(test)]
+mod sound_route_tests {
+    use super::*;
+
+    #[test]
+    fn sounds_need_session_and_provenance_and_changes_also_need_csrf() {
+        let state = std::env::temp_dir().join(format!(
+            "namedrop-sound-route-{}",
+            super::super::server_files::random_hex(12).unwrap()
+        ));
+        let files = ServerFiles::at(&state).unwrap();
+        let token = files.token().unwrap();
+        let session = files.session().unwrap();
+        let routes = |request: &Request| route(request, 1234, &token, &session, false, None);
+        let mut request = Request {
+            method: "GET".into(),
+            path: "/api/sounds".into(),
+            query: None,
+            headers: vec![("host".into(), "127.0.0.1:1234".into())],
+        };
+        assert!(matches!(routes(&request), Err(Status::Unauthorized)));
+        request.headers.push((
+            "cookie".into(),
+            format!("{}={}", cookie_name(1234), session.as_str()),
+        ));
+        for (name, value) in [
+            ("origin", "https://other.invalid"),
+            ("sec-fetch-site", "same-site"),
+        ] {
+            request.headers.push((name.into(), value.into()));
+            assert!(matches!(routes(&request), Err(Status::Forbidden)), "{name}");
+            request.headers.pop();
+        }
+        assert!(matches!(routes(&request), Ok(Route::Sounds)));
+        request.method = "POST".into();
+        assert!(matches!(routes(&request), Err(Status::Forbidden)));
+        request
+            .headers
+            .push(("x-namedrop-csrf".into(), csrf_token(&session)));
+        assert!(matches!(routes(&request), Ok(Route::ChangeSounds)));
+        request
+            .headers
+            .push(("origin".into(), "https://other.invalid".into()));
+        assert!(matches!(routes(&request), Err(Status::Forbidden)));
+        request.headers.pop();
+        for method in ["PUT", "DELETE", "PATCH"] {
+            request.method = method.into();
+            assert!(
+                matches!(routes(&request), Err(Status::MethodNotAllowed)),
+                "{method}"
+            );
+        }
+        std::fs::remove_dir_all(state).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod reminder_route_tests {
     use super::*;
 
@@ -3141,6 +3272,7 @@ mod tailnet_route_tests {
             "/api/events",
             "/api/spaces",
             "/api/direct-messages",
+            "/api/sounds",
             "/api/images/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png",
             "/w/0123456789abcdef0123",
             "/w/0123456789abcdef0123/events",
@@ -3230,7 +3362,11 @@ mod tailnet_route_tests {
                 None,
             ),
         ] {
-            for path in ["/w/0123456789abcdef0123/messages", "/api/images"] {
+            for path in [
+                "/w/0123456789abcdef0123/messages",
+                "/api/images",
+                "/api/sounds",
+            ] {
                 let mut request = request(&host, login, Some(&origin));
                 request.method = "POST".into();
                 request.path = path.into();
@@ -3251,10 +3387,10 @@ mod tailnet_route_tests {
                     .push(("x-namedrop-csrf".into(), csrf_token(&session)));
                 let routed = route(&request, 1234, &token, &session, false, policy);
                 assert!(
-                    if path == "/api/images" {
-                        matches!(routed, Ok(Route::ImageUpload))
-                    } else {
-                        matches!(routed, Ok(Route::Send(_)))
+                    match path {
+                        "/api/images" => matches!(routed, Ok(Route::ImageUpload)),
+                        "/api/sounds" => matches!(routed, Ok(Route::ChangeSounds)),
+                        _ => matches!(routed, Ok(Route::Send(_))),
                     },
                     "{path}"
                 );

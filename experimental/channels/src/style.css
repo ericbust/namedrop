@@ -1710,6 +1710,175 @@ button.member:not(.more):hover {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.sound-picker {
+  position: relative;
+  flex-shrink: 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+.sound-picker > summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 32px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  list-style: none;
+  white-space: nowrap;
+}
+.sound-picker > summary::-webkit-details-marker {
+  display: none;
+}
+.sound-picker > summary:hover,
+.sound-picker[open] > summary {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.sound-picker > summary:focus-visible,
+.sound-preview:focus-visible,
+.sound-chip:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.sound-menu {
+  position: absolute;
+  z-index: 10;
+  right: 0;
+  top: calc(100% + var(--space-1));
+  width: min(260px, 75vw);
+  max-height: min(420px, 70vh);
+  overflow: auto;
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-pop);
+  color: var(--text);
+}
+.sound-menu fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.sound-menu legend {
+  padding: var(--space-1) 0 var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.sound-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 32px;
+}
+.sound-row label,
+.sound-mute {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+  min-height: 32px;
+  cursor: pointer;
+}
+.sound-menu input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+.sound-mute {
+  margin-bottom: var(--space-2);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--line);
+}
+.sound-preview {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  flex: none;
+}
+.sound-preview:hover {
+  background: var(--bg-hover);
+  color: var(--accent-text);
+}
+.sound-note {
+  margin: var(--space-2) 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.sound-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  height: 24px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sound-chip:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.sidebar-footer {
+  position: relative;
+}
+.connection-status {
+  white-space: nowrap;
+}
+/* The chip floats over the list's end, so the footer keeps one row. */
+.sidebar-footer .sound-chip {
+  position: absolute;
+  left: var(--space-3);
+  bottom: calc(100% + var(--space-2));
+  max-width: calc(100% - var(--space-6));
+  background: var(--bg);
+  box-shadow: var(--shadow-pop);
+}
+.sidebar-footer .sound-chip:hover {
+  background: var(--bg-hover);
+}
+.sidebar-footer .sound-picker {
+  position: static;
+  margin-left: auto;
+  font-size: var(--text-xs);
+}
+.sidebar-footer .sound-picker > summary {
+  min-height: 28px;
+  margin-right: calc(-1 * var(--space-2));
+}
+.sidebar-footer .sound-menu {
+  top: auto;
+  bottom: calc(100% + var(--space-1));
+  left: var(--space-2);
+  right: var(--space-2);
+  width: auto;
+  font-size: var(--text-sm);
+}
+.dm-header,
+.peek-head {
+  position: relative;
+}
+.dm-header .sound-picker,
+.peek-head .sound-picker {
+  position: static;
+}
+.dm-header .sound-menu,
+.peek-head .sound-menu {
+  right: var(--space-3);
+  top: calc(100% - var(--space-1));
+  width: min(260px, calc(100% - var(--space-6)));
+}
 .thread-head {
   position: relative;
 }
@@ -1981,6 +2150,23 @@ button.member:not(.more):hover {
 }
 .peek-head-space {
   margin-left: auto;
+}
+.peek-head .agent-sound {
+  margin-left: auto;
+}
+/* The drawer header keeps its room for the name: the picker, and on a phone
+   Refresh, show only their icons, and the labels stay for screen readers. */
+.peek-head .sound-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.peek-head .agent-sound + .peek-refresh,
+.peek-head .agent-sound + .peek-head-space {
+  margin-left: 0;
 }
 .peek-expand {
   flex: none;
@@ -2824,6 +3010,14 @@ code.inline {
 /* A phone has no room for a sidebar column: the sidebar becomes a drawer over
    the channel. */
 @media (max-width: 600px) {
+  .peek-refresh-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
   .app-shell,
   .app-shell.has-slot {
     grid-template-columns: minmax(0, 1fr);

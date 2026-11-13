@@ -3192,6 +3192,158 @@ else:
     }
 
     #[test]
+    fn sound_choices_change_one_field_at_a_time_and_survive_a_restart() {
+        let f = Fixture::new();
+        let file = f.state.join("dashboard/sounds.json");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(
+            &file,
+            json!({"version": 1, "default": "chime", "muted": false,
+                   "agents": {"pane-address-9-9-9": "knock"}})
+            .to_string(),
+        )
+        .unwrap();
+        let server = Server::start(&f, None);
+        let read = |server: &Server| {
+            let response = server.request(
+                "GET",
+                "/api/sounds",
+                &[("Cookie", server.cookie.as_str())],
+                "",
+            );
+            assert_eq!(response.status, 200, "{}", response.body);
+            assert!(
+                response
+                    .head
+                    .lines()
+                    .any(|line| line == "Content-Type: application/json"),
+                "{}",
+                response.head
+            );
+            serde_json::from_str::<Value>(&response.body).unwrap()
+        };
+        let gone = "pane-address-9-9-9";
+        assert_eq!(
+            read(&server),
+            json!({"default": "chime", "muted": false, "agents": {gone: "knock"}}),
+            "the page sees every stored pick, as a save compares against them"
+        );
+        let stored = fs::read(&file).unwrap();
+        let stale = json!({"kind": "agent", "agent": gone, "sound": "pop", "was": null});
+        let response = server.post("/api/sounds", &stale.to_string(), &[]);
+        assert_eq!(response.status, 409, "{}", response.body);
+        assert_eq!(
+            serde_json::from_str::<Value>(&response.body).unwrap(),
+            json!({"default": "chime", "muted": false, "agents": {gone: "knock"}}),
+        );
+        assert_eq!(fs::read(&file).unwrap(), stored, "a stale change");
+        let clear = json!({"kind": "agent", "agent": gone, "sound": null, "was": "knock"});
+        let response = server.post("/api/sounds", &clear.to_string(), &[]);
+        assert_eq!(response.status, 200, "{}", response.body);
+        let (lead, tester) = ("address-w1-lead", "address-w2-tester");
+        // A channel member that is not a direct message peer keeps its pick.
+        let member = "pane-address-1-2-3";
+        for (change, expected) in [
+            (
+                json!({"kind": "default", "sound": "bell", "was": "chime"}),
+                json!({"default": "bell", "muted": false, "agents": {}}),
+            ),
+            (
+                json!({"kind": "muted", "muted": true, "was": false}),
+                json!({"default": "bell", "muted": true, "agents": {}}),
+            ),
+            (
+                json!({"kind": "agent", "agent": lead, "sound": "pop", "was": null}),
+                json!({"default": "bell", "muted": true, "agents": {lead: "pop"}}),
+            ),
+            (
+                json!({"kind": "agent", "agent": member,
+                       "sound": "soft", "was": null}),
+                json!({"default": "bell", "muted": true,
+                       "agents": {lead: "pop", member: "soft"}}),
+            ),
+            (
+                json!({"kind": "agent", "agent": tester, "sound": "none", "was": null}),
+                json!({"default": "bell", "muted": true,
+                       "agents": {lead: "pop", member: "soft", tester: "none"}}),
+            ),
+            (
+                json!({"kind": "agent", "agent": lead, "sound": null, "was": "pop"}),
+                json!({"default": "bell", "muted": true,
+                       "agents": {member: "soft", tester: "none"}}),
+            ),
+        ] {
+            let response = server.post("/api/sounds", &change.to_string(), &[]);
+            assert_eq!(response.status, 200, "{change}: {}", response.body);
+            assert_eq!(
+                serde_json::from_str::<Value>(&response.body).unwrap(),
+                expected,
+                "{change}"
+            );
+            assert_eq!(read(&server), expected, "{change}");
+        }
+        let settled = read(&server);
+        let stored = fs::read(&file).unwrap();
+        let same = json!({"kind": "agent", "agent": tester, "sound": "none", "was": "none"});
+        assert_eq!(
+            server.post("/api/sounds", &same.to_string(), &[]).status,
+            200
+        );
+        assert_eq!(
+            fs::read(&file).unwrap(),
+            stored,
+            "a change to the same value"
+        );
+        for stale in [
+            json!({"kind": "agent", "agent": tester, "sound": "none", "was": null}),
+            json!({"kind": "default", "sound": "ping", "was": "chime"}),
+            json!({"kind": "muted", "muted": false, "was": false}),
+        ] {
+            let response = server.post("/api/sounds", &stale.to_string(), &[]);
+            assert_eq!(response.status, 409, "{stale}: {}", response.body);
+            assert_eq!(
+                serde_json::from_str::<Value>(&response.body).unwrap(),
+                settled,
+                "{stale}"
+            );
+            assert_eq!(fs::read(&file).unwrap(), stored, "{stale}");
+        }
+        assert_eq!(read(&server), settled, "stale changes");
+
+        let unmute = json!({"kind": "muted", "muted": false, "was": true}).to_string();
+        let without_csrf = [
+            ("Cookie", server.cookie.as_str()),
+            ("Content-Type", "application/json"),
+        ];
+        for (method, headers, body, expected) in [
+            ("POST", without_csrf.as_slice(), unmute.as_str(), 403),
+            ("GET", &[], "", 401),
+            ("PUT", &[], unmute.as_str(), 405),
+        ] {
+            let response = server.request(method, "/api/sounds", headers, body);
+            assert_eq!(response.status, expected, "{method} {headers:?}");
+        }
+        let cross_site = server.post("/api/sounds", &unmute, &[("Sec-Fetch-Site", "cross-site")]);
+        assert_eq!(cross_site.status, 403);
+        for body in [
+            "not json".to_owned(),
+            json!({"kind": "default", "sound": "trumpet", "was": "bell"}).to_string(),
+            json!({"kind": "default", "sound": "ping"}).to_string(),
+            json!({"kind": "agent", "agent": "pane/address", "sound": "pop", "was": null})
+                .to_string(),
+            json!({"kind": "muted", "muted": false, "was": true, "agent": "pane-address-1-2-3"})
+                .to_string(),
+        ] {
+            assert_eq!(server.post("/api/sounds", &body, &[]).status, 400, "{body}");
+        }
+        assert_eq!(fs::read(&file).unwrap(), stored, "refused changes");
+
+        drop(server);
+        let server = Server::start(&f, None);
+        assert_eq!(read(&server), settled);
+    }
+
+    #[test]
     fn csrf_origin_host_and_framing_refuse_before_any_database_is_opened() {
         let mut f = Fixture::new();
         let empty_state = f.root.join("empty-state");

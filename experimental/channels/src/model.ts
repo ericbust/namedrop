@@ -1,3 +1,5 @@
+import type { Heard } from "./sounds.ts";
+
 export type SpaceKey = string & { readonly __brand: "SpaceKey" };
 export type AddressId = string & { readonly __brand: "AddressId" };
 
@@ -391,6 +393,11 @@ export type State = {
   nextRequestId: number;
   outbox: ReadonlyMap<string, Outgoing>;
   drafts: ReadonlyMap<DraftKey, Draft>;
+  heard: Heard;
+  // The newest message time when the first replay finished; null before
+  // then, so the first load never rings. A channel first seen later rings
+  // for its messages newer than this.
+  loadedAt: number | null;
 };
 export type PeekableKind = Exclude<MemberKind["type"], "human">;
 export type PeekTarget = Readonly<{

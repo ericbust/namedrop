@@ -357,6 +357,30 @@ A frame's message row lists its images in `images` and leaves their lines out of
 `body`. A message with images needs words too, so Send stays off until there are
 some.
 
+Sounds are synthesized with Web Audio from the recipe table in `src/sounds.ts`,
+so the page fetches no audio and the CSP stays `default-src 'none'`. The reducer
+sets `State.heard` (a sequence number and arrivals, each an agent key and a
+message id) from `heardIn()` in `src/store.ts`: new messages by an agent with a
+leg to the person, without system kinds or progress notes. A live `space` frame
+and the end of a reconnect's replay compare with the channel's earlier
+snapshot. A channel with none counts only messages newer than `State.loadedAt`,
+the newest message time when the first replay finished, so the first load
+never rings.
+Direct messages come from `heardDirect()` in `src/direct-messages.ts`, a changed
+`lastAgentMessageId` after the first poll. `useSounds` in `src/ui/useSounds.ts`
+loads `GET /api/sounds`, posts each change to `POST /api/sounds` with the
+`X-Namedrop-Csrf` header, and rings through `createPlayer()`. Each change
+carries `was`, the value the page showed before it, and saves go one at a time
+per tab. The server answers `409 Conflict` with its settings when the stored
+value is no longer `was`, and the page shows those settings. The player stays
+`locked` until a pointer or key event on the page. Inside the queued Web Lock
+`namedrop:channel-sound` it checks and updates a ring record in localStorage
+that the tabs share: the last sound's time and the latest 200 message ids. A
+known id never rings, and a new one rings unless a sound played under a second
+ago. When storage throws, the tab that gets `namedrop:channel-sound-hold` with
+`ifAvailable` rings and holds it for a second, and the others stay quiet.
+Without Web Locks, each tab decides alone.
+
 ## Direct messages and reminders
 
 **Direct messages** lists Namedrop agents across workspaces, with a channel label
