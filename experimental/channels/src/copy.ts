@@ -798,6 +798,7 @@ export const createCopy = {
   personaPlaceholder: "Reviews changes before they merge",
   add: "Add",
   adding: "Adding…",
+  opensIn: "Opens in",
   channelNameMissing: "Give the channel a name.",
   channelNameLong: "A channel name can be up to 64 characters.",
   channelNameHidden:

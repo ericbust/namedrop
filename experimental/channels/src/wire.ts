@@ -795,6 +795,11 @@ export function parseFolders(raw: unknown): readonly string[] {
     (folder): folder is string => typeof folder === "string" && folder !== "",
   );
 }
+// A channel whose folder isn't known answers null.
+export function parseChannelFolder(raw: unknown): string | null {
+  const folder = record(raw).folder;
+  return typeof folder === "string" && folder !== "" ? folder : null;
+}
 export function parseCreatedChannel(raw: unknown): CreatedChannel {
   const item = record(raw);
   return {

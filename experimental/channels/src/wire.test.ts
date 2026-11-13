@@ -4,6 +4,7 @@ import { test } from "node:test";
 import type { Alias, Message } from "./model.ts";
 import {
   parseAddedAgent,
+  parseChannelFolder,
   parseCreatedChannel,
   parseDeliverAnswer,
   parseEvent,
@@ -632,4 +633,9 @@ test("create answers: a new channel needs a real space key and workspace id, and
   assert.throws(() => parseAddedAgent({ address_id: "", alias: "rev" }));
   assert.deepEqual(parseFolders({ folders: [] }), []);
   assert.throws(() => parseFolders({ folders: "/home" }));
+  assert.equal(parseChannelFolder({ folder: "/srv/web" }), "/srv/web");
+  assert.equal(parseChannelFolder({ folder: null }), null);
+  assert.equal(parseChannelFolder({ folder: "" }), null);
+  assert.equal(parseChannelFolder({}), null);
+  assert.throws(() => parseChannelFolder("/srv/web"));
 });

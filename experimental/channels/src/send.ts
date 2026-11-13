@@ -20,6 +20,7 @@ import type {
 import { type ReminderConversation, reminderPath } from "./reminders.ts";
 import {
   parseAddedAgent,
+  parseChannelFolder,
   parseCreatedChannel,
   parseDeliverAnswer,
   parseFolders,
@@ -157,6 +158,22 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
         return response.ok ? parseFolders(await response.json()) : [];
       } catch {
         return [];
+      }
+    },
+    // Where the channel's next agent opens. The form only shows it, so a
+    // folder that can't be read is no folder to show.
+    async channelFolder(
+      key: SpaceKey,
+      signal: AbortSignal,
+    ): Promise<string | null> {
+      try {
+        const response = await fetcher(`/w/${key}/folder`, {
+          credentials: "same-origin",
+          signal,
+        });
+        return response.ok ? parseChannelFolder(await response.json()) : null;
+      } catch {
+        return null;
       }
     },
     async createChannel(

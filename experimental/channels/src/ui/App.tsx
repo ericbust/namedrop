@@ -1193,7 +1193,12 @@ export function App() {
                   members={channel.members}
                   addAgent={
                     channel.state === "active"
-                      ? (request) => poster.addAgent(channel.key, request)
+                      ? {
+                          add: (request) =>
+                            poster.addAgent(channel.key, request),
+                          folder: (signal) =>
+                            poster.channelFolder(channel.key, signal),
+                        }
                       : null
                   }
                 />

@@ -105,6 +105,8 @@ test("New channel and Add agent forms, with an error each, at desktop light and 
       return json(res, { peers: [] });
     if (/^\/w\/[^/]+\/folders$/.test(url.pathname))
       return json(res, { folders });
+    if (/^\/w\/[^/]+\/folder$/.test(url.pathname))
+      return json(res, { folder: folders[0] });
     const create = /^\/w\/[^/]+\/(channels|agents)$/.exec(url.pathname)?.[1];
     if (req.method === "POST" && create !== undefined) {
       const [status, body] = answers[create].shift();

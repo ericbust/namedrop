@@ -698,6 +698,23 @@ test("folders: reads the recent folders, and any failure is an empty list", asyn
   assert.deepEqual(await poster.folders(key, press), []);
   assert.deepEqual(await poster.folders(key, press), []);
   assert.equal(server.seen[0]?.url, `/w/${key}/folders`);
+});
+
+test("channelFolder: reads where the next agent opens, and any failure is no folder", async () => {
+  const answers = [
+    json(200, { folder: "/home/x/proj" }),
+    json(200, { folder: null }),
+    json(404, { error: "This channel's workspace is closed." }),
+    json(200, { folder: 7 }),
+  ];
+  const server = fakeServer(() => answers.shift() ?? json(404, {}));
+  const poster = createPoster(server.fetcher);
+  assert.equal(await poster.channelFolder(key, press), "/home/x/proj");
+  assert.equal(await poster.channelFolder(key, press), null);
+  assert.equal(await poster.channelFolder(key, press), null);
+  assert.equal(await poster.channelFolder(key, press), null);
+  assert.equal(server.seen[0]?.url, `/w/${key}/folder`);
+  assert.equal(server.seen[0]?.init?.method ?? "GET", "GET");
   assert.equal(server.seen[0]?.init?.credentials, "same-origin");
   assert.equal(server.seen[0]?.init?.method, undefined);
 });

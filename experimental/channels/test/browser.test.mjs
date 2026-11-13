@@ -373,6 +373,7 @@ async function open(
     inlineStyles = false,
     onSkills = () => ({ runtime: null, skills: [] }),
     onFolders = () => ({ status: 200, body: { folders: [] } }),
+    onFolder = () => ({ status: 200, body: { folder: null } }),
     onCreateChannel = () => ({
       status: 500,
       body: { error: "Herdr couldn't create the workspace. Try again." },
@@ -444,6 +445,11 @@ async function open(
       skillRequests.push(target);
       const catalog = await onSkills(target);
       return sendJson(res, 200, catalog);
+    }
+    const folder = /^\/w\/([^/]+)\/folder$/.exec(url.pathname)?.[1];
+    if (req.method === "GET" && folder !== undefined) {
+      const { status, body } = await onFolder(folder);
+      return sendJson(res, status, body);
     }
     const folders = /^\/w\/([^/]+)\/folders$/.exec(url.pathname)?.[1];
     if (req.method === "GET" && folders !== undefined) {
@@ -14543,11 +14549,29 @@ test("ADD AGENT: Add posts the kind, bare name and persona, the form closes, and
         status: 201,
         body: { address_id: "pane-address-new", alias: "reviewer" },
       }),
+      onFolder: (asked) => ({
+        status: 200,
+        body: {
+          folder:
+            asked === key(1) ? "/home/person/projects/a-long-name/alpha" : null,
+        },
+      }),
     },
   );
   await ui.live();
   await addAgentButton(ui).click();
   const form = addAgentForm(ui);
+  const opensIn = form.locator(".create-opens-in");
+  await opensIn.waitFor();
+  assert.equal(
+    (await opensIn.innerText()).replace(/\s+/g, " "),
+    "Opens in /home/person/projects/a-long-name/alpha",
+    "the form says where the agent will open",
+  );
+  assert.equal(
+    await opensIn.locator(".create-folder").getAttribute("title"),
+    "/home/person/projects/a-long-name/alpha",
+  );
   await form.getByRole("radio", { name: "Codex" }).check();
   await form.getByLabel("Name", { exact: true }).fill("@reviewer");
   assert.equal(

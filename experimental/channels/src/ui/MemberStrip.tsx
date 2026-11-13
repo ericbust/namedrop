@@ -10,7 +10,7 @@ import { createCopy, presenceWord, runtimeName } from "../copy.ts";
 import { takenNames } from "../create.ts";
 import type { Activity, ChannelSnapshot, Member } from "../model.ts";
 import { peekTarget } from "../peek.ts";
-import { AddAgentForm, type AddAgentRequest } from "./AddAgent.tsx";
+import { AddAgentForm, type AgentAdder } from "./AddAgent.tsx";
 import { Avatar } from "./Avatar.tsx";
 import { Icon } from "./Icons.tsx";
 import { useShortWindow } from "./measure.ts";
@@ -206,7 +206,7 @@ export function MemberStrip({
   addAgent,
 }: {
   members: ChannelSnapshot["members"];
-  addAgent: AddAgentRequest | null;
+  addAgent: AgentAdder | null;
 }) {
   const sorted = useMemo(() => sortedMembers(members), [members]);
   const [adding, setAdding] = useState(false);
@@ -310,7 +310,7 @@ export function MemberStrip({
         <AddAgentForm
           id={formId}
           taken={taken}
-          add={addAgent}
+          adder={addAgent}
           onClose={closeForm}
         />
       )}

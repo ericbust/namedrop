@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createCopy } from "../copy.ts";
 import {
   type AgentDraft,
@@ -10,19 +10,33 @@ import {
 } from "../create.ts";
 import { CreateForm, useCreateForm } from "./CreateForm.tsx";
 
-export type AddAgentRequest = (request: AgentRequest) => Promise<AgentResult>;
+// `folder` reads where the channel's next agent opens.
+export type AgentAdder = {
+  add: (request: AgentRequest) => Promise<AgentResult>;
+  folder: (signal: AbortSignal) => Promise<string | null>;
+};
 
 export function AddAgentForm({
   id,
   taken,
-  add,
+  adder,
   onClose,
 }: {
   id: string;
   taken: ReadonlySet<string>;
-  add: AddAgentRequest;
+  adder: AgentAdder;
   onClose: () => void;
 }) {
+  const [folder, setFolder] = useState<string | null>(null);
+  // The form asks once, as it opens: the adder is made anew on every render.
+  const asked = useRef(adder);
+  useEffect(() => {
+    const request = new AbortController();
+    void asked.current.folder(request.signal).then((found) => {
+      if (!request.signal.aborted) setFolder(found);
+    });
+    return () => request.abort();
+  }, []);
   const [draft, setDraft] = useState<AgentDraft>({
     kind: "claude",
     name: "",
@@ -50,7 +64,7 @@ export function AddAgentForm({
       onCancel={onClose}
       onSubmit={() =>
         submit(agentRequest(draft, taken), async (request) => {
-          const result = await add(request);
+          const result = await adder.add(request);
           if (result.kind !== "created") return result;
           onClose();
           return null;
@@ -110,6 +124,14 @@ export function AddAgentForm({
           />
         </label>
       </div>
+      {folder !== null && (
+        <p className="create-opens-in">
+          <span>{createCopy.opensIn}</span>
+          <span className="create-folder" title={folder}>
+            <bdi>{folder}</bdi>
+          </span>
+        </p>
+      )}
     </CreateForm>
   );
 }
