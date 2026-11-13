@@ -208,9 +208,11 @@ def down(profile):
     try:
         lane.stop()
     finally:
-        profile.stop_server()
-        profile.run(["codex", "app-server", "daemon", "stop"], check=False)
-        profile.kill_leftovers()
+        try:
+            profile.stop_server()
+        finally:
+            profile.run(["codex", "app-server", "daemon", "stop"], check=False)
+            profile.kill_leftovers()
     profile.state.pop("rex_live_session", None)
     profile.state.pop("rex_live_blocks", None)
     profile.save()

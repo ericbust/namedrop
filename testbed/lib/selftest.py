@@ -1030,7 +1030,22 @@ def check_rex_live_down_after_a_failed_stop(scratch):
         except RuntimeError as error:
             assert str(error) == "the scratch Rex socket remains", error
     assert stopped == ["herdr", "codex", "leftovers"], stopped
-    return "Rex live down: a failed Rex stop still stops the profile's Herdr and leftovers"
+
+    def failing_herdr_stop():
+        stopped.append("herdr")
+        raise RuntimeError("the profile socket remains")
+
+    stopped.clear()
+    profile.stop_server = failing_herdr_stop
+    with patch.object(rex_live.Lane, "stop", lambda lane: None):
+        try:
+            rex_live.down(profile)
+            raise AssertionError("a failed Herdr stop passed")
+        except RuntimeError as error:
+            assert str(error) == "the profile socket remains", error
+    assert stopped == ["herdr", "codex", "leftovers"], stopped
+    return ("Rex live down: a failed Rex or Herdr stop still stops Codex's daemon and the "
+            "leftovers")
 
 
 def run(kit):
