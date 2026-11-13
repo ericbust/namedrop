@@ -13,6 +13,12 @@ Each release is a section here, newest first. The GitHub release for a version u
 - Any open Channels tab plays the sound, a background tab too. A browser plays sound only after you click once on the page, so until then a small "Click to turn on sounds" note shows at the bottom of the sidebar.
 - The sounds are made in the page with the browser's Web Audio, so Channels loads no audio files.
 
+## [1.9.1] - 2026-11-12
+
+### Fixed
+
+- A wide diagram in Channels stays readable. A diagram wider than its column was always shrunk to fit, so a long left-to-right flowchart came out about 45 px tall in the thread pane or on a phone. A diagram is now shrunk only down to 0.7 of its drawn size, where its labels are about 10 px. A wider one keeps that size and scrolls sideways inside its own box, by swipe, scrollbar or the arrow keys. The page itself does not scroll sideways, and a click or tap still opens the diagram full size.
+
 ## [1.9.0] - 2026-11-12
 
 ### Added

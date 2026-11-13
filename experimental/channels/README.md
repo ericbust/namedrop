@@ -564,6 +564,12 @@ characters and a message's ninth diagram are shown as source with a note, and
 never reach the drawing code. `Diagram` draws only while it is on screen, and
 keeps its picture when the page's look changes until it is on screen again.
 
+The stylesheet fits a picture to its column. `MIN_DIAGRAM_SCALE` in
+`src/diagram.ts` is the smallest share of its drawn size a picture is fitted
+to: 0.7, where the drawing's 14 px labels are about 10 px. `Diagram` sets that
+width as the image's `min-width`, and `.diagram-box` scrolls sideways when the
+picture is wider than the column at that size.
+
 The configuration locks `layout` to dagre. With that lock no diagram can reach
 Mermaid's ELK engine, so the diagram build replaces `elkjs` with
 `src/diagramNoElk.ts`, which saves 1.4 MB. Flowchart, sequence, class, state,
