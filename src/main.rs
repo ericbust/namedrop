@@ -1418,7 +1418,7 @@ fn retryable_queue_scan(error: &io::Error) -> bool {
 fn run_agent_status_worker(inherited: &dyn Inherited) -> ExitCode {
     // The hook that starts the worker runs in a pane's directory, which can be
     // removed while the worker lives; every reconcile reads the current one.
-    if let Some(state) = Locator::StateDir.env_os().map(PathBuf::from)
+    if let Some(state) = locator::inherited_state_directory()
         && state.is_absolute()
     {
         let _ = env::set_current_dir(state);
@@ -1556,7 +1556,7 @@ fn run_agent_status_worker_queue(
             // The worker can wait out retries for days, so it holds the
             // command gate only while it reconciles, and an update between
             // units hands the queue to the runtime it selected.
-            let _gate = match Locator::StateDir.env_os().map(PathBuf::from) {
+            let _gate = match locator::inherited_state_directory() {
                 Some(state) => {
                     let gate = namedrop::runtime_command_guard(&state, None)?;
                     namedrop::runtime_reexec_if_replaced(&state)?;

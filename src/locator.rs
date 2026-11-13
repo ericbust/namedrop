@@ -84,22 +84,6 @@ impl Locator {
         .map(|value| (name, value))
     }
 
-    /// The value this process inherited, and which name held it. A value that
-    /// is not Unicode counts as unset.
-    pub fn inherited(self) -> Option<(Name, String)> {
-        let (name, value) = self.resolve(|name| env::var_os(name))?;
-        Some((name, value.into_string().ok()?))
-    }
-
-    pub fn env(self) -> Option<String> {
-        self.inherited().map(|(_, value)| value)
-    }
-
-    pub fn env_os(self) -> Option<OsString> {
-        self.resolve(|name| env::var_os(name))
-            .map(|(_, value)| value)
-    }
-
     /// The value a `collab/v1` tool environment carries, and the flag that
     /// passes it on.
     pub fn in_envelope(self, environment: &Map<String, Value>) -> Option<(&'static str, &str)> {
@@ -128,6 +112,15 @@ impl Locator {
             .env_remove(self.herdr_var())
             .env_remove(self.neutral_var());
     }
+}
+
+/// The state directory a worker inherited from the hook or command that
+/// started it. The endpoint, space, and pane have no such reader: only
+/// `mux::home` reads them, from its `Inherited`.
+pub fn inherited_state_directory() -> Option<PathBuf> {
+    Locator::StateDir
+        .resolve(|name| env::var_os(name))
+        .map(|(_, value)| PathBuf::from(value))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

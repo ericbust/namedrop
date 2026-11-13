@@ -805,7 +805,10 @@ mod this_process_boundary {
 /// Only `mux::home` and `locator` read where a process runs. Every other
 /// production reader of the endpoint, space, or pane takes it from the home,
 /// so a Rex block never reads a stale Herdr name and a Herdr pane never reads
-/// a neutral one.
+/// a neutral one. `Locator` has no method that reads the environment, so the
+/// compiler holds that form. This scan is a tripwire for a literal read of one
+/// of the six names; it cannot see a name passed as a value, such as
+/// `env::var(Locator::Pane.herdr_var())`, or a search of `env::vars()`.
 mod identity_boundary {
     use std::{fs, path::Path};
 
@@ -821,11 +824,6 @@ mod identity_boundary {
     /// the readers, as `file: read`.
     fn breaches(src: &Path) -> Vec<String> {
         let mut reads = Vec::new();
-        for locator in ["Endpoint", "Space", "Pane"] {
-            for method in ["env", "env_os", "inherited"] {
-                reads.push(format!("Locator::{locator}.{method}("));
-            }
-        }
         for name in [
             "HERDR_SOCKET_PATH",
             "HERDR_WORKSPACE_ID",
@@ -867,7 +865,7 @@ mod identity_boundary {
         let write = |file: &str, text: &str| fs::write(root.join(file), text).unwrap();
         write(
             "locator.rs",
-            "fn a() { Locator::Pane.env(); std::env::var_os(\"HERDR_PANE_ID\"); }",
+            "fn a() { std::env::var_os(\"HERDR_PANE_ID\"); }",
         );
         write(
             "dashboard/observer_guard.rs",
@@ -875,18 +873,17 @@ mod identity_boundary {
         );
         write(
             "mux/herdr/process.rs",
-            "// env::var(\"HERDR_PANE_ID\")\nconst TEXT: &str = \"Locator::Space.env()\";\n#[cfg(test)]\nmod tests {\n    fn t() { let socket = env::var(\"HERDR_SOCKET_PATH\"); }\n}\n",
+            "// env::var(\"HERDR_PANE_ID\")\nconst TEXT: &str = \"env::var(\\\"HERDR_PANE_ID\\\")\";\n#[cfg(test)]\nmod tests {\n    fn t() { let socket = env::var(\"HERDR_SOCKET_PATH\"); }\n}\n",
         );
-        write("mux/herdr/tests.rs", "fn t() { Locator::Endpoint.env(); }");
+        write(
+            "mux/herdr/tests.rs",
+            "fn t() { env::var(\"HERDR_SOCKET_PATH\"); }",
+        );
         assert_eq!(breaches(&root), Vec::<String>::new());
         for (source, caught) in [
             (
                 "fn a() { let pane = std::env::var(\"HERDR_PANE_ID\"); }",
                 "planted.rs: var(\"HERDR_PANE_ID\"",
-            ),
-            (
-                "fn a() { let space = crate::locator::Locator::Space\n        .inherited(); }",
-                "planted.rs: Locator::Space.inherited(",
             ),
             (
                 "fn a() { env::var_os(\n    \"NAMEDROP_ENDPOINT\",\n); }",
