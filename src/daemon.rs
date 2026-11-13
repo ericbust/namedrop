@@ -25,32 +25,45 @@ pub enum Scope<'a> {
     None,
 }
 
+/// Who starts a daemon, which decides whether it keeps the multiplexer
+/// timeouts, `NAMEDROP_HERDR_TIMEOUT_MS` and `NAMEDROP_REX_TIMEOUT_MS`, that
+/// its starter holds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Starter {
+    /// Any process but the Stop hook's front end. A timeout it holds is one a
+    /// person set, so the daemon keeps it.
+    Caller,
+    /// The Stop hook's front end, whose wrapper caps every request at 250 ms
+    /// for the hook's own deadline. Its daemons drop both timeouts.
+    StopHook,
+}
+
 /// What a daemon never inherits: the Rex claim, which says which block the
-/// starting process ran in, the agent session markers, which say which agent
-/// ran it, and the per-command multiplexer timeouts its hook set for itself.
-/// `REX_BIN_DIR`, `REX_HOME`, and `REX_RUNTIME_DIR` stay, because they say how
-/// to run `rex`, not where this process runs.
-const SCRUBBED: [&str; 7] = [
+/// starting process ran in, and the agent session markers, which say which
+/// agent ran it. `REX_BIN_DIR`, `REX_HOME`, and `REX_RUNTIME_DIR` stay,
+/// because they say how to run `rex`, not where this process runs.
+const SCRUBBED: [&str; 5] = [
     "REX_BLOCK",
     "REX_SESSION",
     "REX_CLIENT",
     "REX_SERVER",
     "CLAUDE_SESSION_ID",
-    "NAMEDROP_HERDR_TIMEOUT_MS",
-    "NAMEDROP_REX_TIMEOUT_MS",
 ];
+
+/// The multiplexer timeouts, which a daemon of [`Starter::StopHook`] drops.
+const TIMEOUTS: [&str; 2] = ["NAMEDROP_HERDR_TIMEOUT_MS", "NAMEDROP_REX_TIMEOUT_MS"];
 
 /// A detached background Namedrop process: its own process group, null stdio,
 /// the scrub, and `scope` passed under the names of its endpoint's kind. Each
 /// location name the scope leaves out is cleared under both sets.
-pub fn command(executable: &Path, scope: Scope<'_>) -> Command {
+pub fn command(executable: &Path, scope: Scope<'_>, starter: Starter) -> Command {
     let mut command = Command::new(executable);
     command
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    scrub(&mut command);
+    scrub(&mut command, starter);
     let (endpoint, space) = match scope {
         Scope::Endpoint(endpoint) => (Some(endpoint), None),
         Scope::Space(endpoint, space) => (Some(endpoint), Some(space)),
@@ -70,8 +83,16 @@ pub fn command(executable: &Path, scope: Scope<'_>) -> Command {
 
 /// The scrub alone, for the Stop worker, which stays in its hook's process
 /// group and takes its location from what the hook hands it.
-pub fn scrub(command: &mut Command) {
-    for name in SCRUBBED.into_iter().chain(AGENT_SESSION_MARKERS) {
+pub fn scrub(command: &mut Command, starter: Starter) {
+    let timeouts = match starter {
+        Starter::Caller => &[][..],
+        Starter::StopHook => &TIMEOUTS[..],
+    };
+    for name in SCRUBBED
+        .into_iter()
+        .chain(AGENT_SESSION_MARKERS)
+        .chain(timeouts.iter().copied())
+    {
         command.env_remove(name);
     }
 }
@@ -94,7 +115,7 @@ mod tests {
             .collect()
     }
 
-    /// The scrub's names, each removed.
+    /// The scrub's names for a starter other than the Stop hook, each removed.
     fn scrubbed() -> BTreeMap<String, Option<String>> {
         SCRUBBED
             .into_iter()
@@ -113,37 +134,79 @@ mod tests {
         environment
     }
 
+    const TIMEOUT_NAMES: [&str; 2] = ["NAMEDROP_HERDR_TIMEOUT_MS", "NAMEDROP_REX_TIMEOUT_MS"];
+
+    /// The scrub drops the Rex claim and the agent markers, and keeps the
+    /// timeouts a caller holds, which a person set. Only a daemon of the Stop
+    /// hook drops them, because its wrapper's 250 ms is for the hook alone.
     #[test]
-    fn the_scrub_drops_the_rex_claim_the_agent_markers_and_the_timeouts_only() {
-        let mut command = Command::new("true");
-        scrub(&mut command);
-        let environment = child_environment(&command);
-        for name in [
-            "REX_BLOCK",
-            "REX_SESSION",
-            "REX_CLIENT",
-            "REX_SERVER",
-            "CLAUDE_CODE_SESSION_ID",
-            "CODEX_SESSION_ID",
-            "CODEX_THREAD_ID",
-            "CLAUDE_SESSION_ID",
-            "NAMEDROP_HERDR_TIMEOUT_MS",
-            "NAMEDROP_REX_TIMEOUT_MS",
-        ] {
-            assert_eq!(environment.get(name), Some(&None), "{name}");
+    fn the_scrub_drops_the_rex_claim_and_the_agent_markers_and_the_timeouts_only_for_the_stop_hook()
+    {
+        for (starter, timeouts) in [(Starter::Caller, false), (Starter::StopHook, true)] {
+            let mut command = Command::new("true");
+            scrub(&mut command, starter);
+            let environment = child_environment(&command);
+            for name in [
+                "REX_BLOCK",
+                "REX_SESSION",
+                "REX_CLIENT",
+                "REX_SERVER",
+                "CLAUDE_CODE_SESSION_ID",
+                "CODEX_SESSION_ID",
+                "CODEX_THREAD_ID",
+                "CLAUDE_SESSION_ID",
+            ] {
+                assert_eq!(environment.get(name), Some(&None), "{starter:?} {name}");
+            }
+            for name in TIMEOUT_NAMES {
+                assert_eq!(
+                    environment.get(name),
+                    timeouts.then_some(&None),
+                    "{starter:?} {name}"
+                );
+            }
+            for kept in [
+                "REX_BIN_DIR",
+                "REX_HOME",
+                "REX_RUNTIME_DIR",
+                "HERDR_SOCKET_PATH",
+                "HERDR_WORKSPACE_ID",
+                "HERDR_PANE_ID",
+                "HERDR_PLUGIN_STATE_DIR",
+            ] {
+                assert!(!environment.contains_key(kept), "{kept}");
+            }
+            assert_eq!(
+                environment.len(),
+                if timeouts { 20 } else { 18 },
+                "{environment:?}"
+            );
         }
-        for kept in [
-            "REX_BIN_DIR",
-            "REX_HOME",
-            "REX_RUNTIME_DIR",
-            "HERDR_SOCKET_PATH",
-            "HERDR_WORKSPACE_ID",
-            "HERDR_PANE_ID",
-            "HERDR_PLUGIN_STATE_DIR",
+    }
+
+    /// Whatever its scope, a daemon keeps a caller's timeouts and drops the
+    /// Stop hook's.
+    #[test]
+    fn a_daemon_keeps_its_caller_s_timeouts_and_drops_the_stop_hook_s() {
+        let endpoint = Endpoint::parse("/run/h.sock");
+        let space = SpaceId::new("w1");
+        for scope in [
+            Scope::Space(&endpoint, &space),
+            Scope::Endpoint(&endpoint),
+            Scope::None,
         ] {
-            assert!(!environment.contains_key(kept), "{kept}");
+            let caller =
+                child_environment(&command(Path::new("/bin/namedrop"), scope, Starter::Caller));
+            let stop = child_environment(&command(
+                Path::new("/bin/namedrop"),
+                scope,
+                Starter::StopHook,
+            ));
+            for name in TIMEOUT_NAMES {
+                assert!(!caller.contains_key(name), "{scope:?} {name}");
+                assert_eq!(stop.get(name), Some(&None), "{scope:?} {name}");
+            }
         }
-        assert_eq!(environment.len(), 20, "{environment:?}");
     }
 
     /// Under Herdr a daemon gets today's Herdr names for its scope, the neutral
@@ -184,7 +247,7 @@ mod tests {
             ),
         ];
         for (scope, location) in cases {
-            let command = command(Path::new("/bin/namedrop"), scope);
+            let command = command(Path::new("/bin/namedrop"), scope, Starter::Caller);
             assert_eq!(
                 child_environment(&command),
                 with(&[&location[..], &pane[..]].concat()),
@@ -221,7 +284,7 @@ mod tests {
             ),
         ];
         for (scope, location) in cases {
-            let command = command(Path::new("/bin/namedrop"), scope);
+            let command = command(Path::new("/bin/namedrop"), scope, Starter::Caller);
             assert_eq!(
                 child_environment(&command),
                 with(&[&location[..], &pane[..]].concat()),
@@ -246,7 +309,7 @@ mod tests {
         .unwrap();
         fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let endpoint = Endpoint::parse("/run/h.sock");
-        let status = command(&script, Scope::Endpoint(&endpoint))
+        let status = command(&script, Scope::Endpoint(&endpoint), Starter::Caller)
             .env("PATH", "/usr/bin:/bin")
             .status()
             .unwrap();
@@ -267,7 +330,8 @@ mod tests {
     enum Spawn {
         /// `daemon::command` itself.
         Door,
-        /// Namedrop's own executable, scrubbed by the next statement.
+        /// The Stop worker, scrubbed of the Stop hook's timeouts by the next
+        /// statement.
         Scrubbed,
         /// Namedrop's own executable on purpose, outside the door.
         Exception(&'static str),
@@ -512,8 +576,9 @@ mod tests {
                             .map(|(_, next)| next);
                         if kind == Spawn::Scrubbed
                             && !next.is_some_and(|next| {
-                                next.starts_with("namedrop::daemon::scrub(&mut")
-                                    || next.starts_with("crate::daemon::scrub(&mut")
+                                next.starts_with(
+                                    "namedrop::daemon::scrub(&mutcommand,namedrop::daemon::Starter::StopHook)",
+                                )
                             })
                         {
                             breaches.push(format!("{name} does not scrub {call}"));
@@ -585,16 +650,22 @@ mod tests {
         fs::remove_file(&planted).unwrap();
         let stop = root.join("stop_hook.rs");
         let source = fs::read_to_string(&stop).unwrap();
-        fs::write(
-            &stop,
-            source.replace("namedrop::daemon::scrub(&mut command);", ""),
-        )
-        .unwrap();
-        assert!(
-            self_spawn_breaches(&root)
-                .contains(&"stop_hook.rs does not scrub Command::new(executable)".to_owned()),
-            "an unscrubbed Stop worker was not caught"
-        );
+        let scrub = "namedrop::daemon::scrub(&mut command, namedrop::daemon::Starter::StopHook);";
+        assert!(source.contains(scrub));
+        for (unscrubbed, what) in [
+            ("", "an unscrubbed Stop worker"),
+            (
+                "namedrop::daemon::scrub(&mut command, namedrop::daemon::Starter::Caller);",
+                "a Stop worker that keeps the Stop hook's timeouts",
+            ),
+        ] {
+            fs::write(&stop, source.replace(scrub, unscrubbed)).unwrap();
+            assert!(
+                self_spawn_breaches(&root)
+                    .contains(&"stop_hook.rs does not scrub Command::new(executable)".to_owned()),
+                "{what} was not caught"
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }

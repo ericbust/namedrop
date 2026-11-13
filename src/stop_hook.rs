@@ -114,7 +114,7 @@ pub fn run(state: &Path) {
     // travel in `CapturedStop`. The scrub also drops the front end's short
     // timeouts, which are for its own deadline, not a settle's.
     let mut command = Command::new(executable);
-    namedrop::daemon::scrub(&mut command);
+    namedrop::daemon::scrub(&mut command, namedrop::daemon::Starter::StopHook);
     let Ok(mut child) = command
         .args(["hook", "stop-worker", "--state-directory"])
         .arg(state)

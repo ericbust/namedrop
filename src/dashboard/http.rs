@@ -2288,6 +2288,7 @@ pub(super) fn wake_mailboxes_after_send(
         let mut command = crate::daemon::command(
             &crate::runtime_executable()?,
             crate::daemon::Scope::Space(&endpoint, &space),
+            crate::daemon::Starter::Caller,
         );
         Locator::StateDir.pass(&mut command, endpoint.kind, state);
         let mut child = command

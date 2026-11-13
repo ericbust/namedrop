@@ -460,6 +460,7 @@ pub fn ensure_worker(state: &Path, socket: &str) -> Result<(), String> {
     crate::daemon::command(
         &launcher(state)?,
         crate::daemon::Scope::Endpoint(&crate::mux::Endpoint::parse(socket)),
+        crate::daemon::Starter::Caller,
     )
     .args([
         "--deferred-worker",
@@ -540,6 +541,7 @@ pub fn run_worker(state: &Path, socket: &str) -> Result<(), String> {
             let mut child = crate::daemon::command(
                 &launcher(state)?,
                 crate::daemon::Scope::Endpoint(&crate::mux::Endpoint::parse(socket)),
+                crate::daemon::Starter::Caller,
             )
             .arg("--deferred-execute")
             .arg(state)
@@ -829,6 +831,7 @@ fn recover_committed<M: crate::mux::Mux, C: Clock, I: IdGenerator>(
                 let _ = crate::reminder::ensure_clock(
                     runtime.state_directory,
                     Some(runtime.session_socket_id),
+                    crate::daemon::Starter::Caller,
                 );
             }
             Ok(recovered.map(|r| json!(r)))

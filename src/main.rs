@@ -7,6 +7,7 @@ mod stop_hook;
 use namedrop::{
     Clock, CommandResult, LifecycleRuntime, ProcessIds, SystemClock, agent_result_view,
     cli::{Cli, ResultFormat, RuntimeOptions},
+    daemon::Starter,
     describe_operations, diagnose_collaboration, execute_context_operation,
     execute_control_operation, execute_group_operation, execute_handoff_operation,
     execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
@@ -158,16 +159,16 @@ fn main() -> ExitCode {
         }
     };
     if let Some((state, host)) = cli.subagent_hook() {
-        let _ = namedrop::reminder::ensure_clock(state, None);
+        let _ = namedrop::reminder::ensure_clock(state, None, Starter::Caller);
         return run_subagent_hook(state, host);
     }
     if let Some(state_directory) = cli.stop_hook_state_directory() {
-        let _ = namedrop::reminder::ensure_clock(state_directory, None);
+        let _ = namedrop::reminder::ensure_clock(state_directory, None, Starter::StopHook);
         stop_hook::run(state_directory);
         return ExitCode::SUCCESS;
     }
     if let Some(state_directory) = cli.stop_worker_state_directory() {
-        let _ = namedrop::reminder::ensure_clock(state_directory, None);
+        let _ = namedrop::reminder::ensure_clock(state_directory, None, Starter::Caller);
         stop_hook::run_worker(state_directory);
         return ExitCode::SUCCESS;
     }
@@ -196,7 +197,7 @@ fn main() -> ExitCode {
     if cli.is_agent_status_worker_hook() {
         if let Some(state) = selected_state.as_deref() {
             let socket = Locator::Endpoint.env();
-            let _ = namedrop::reminder::ensure_clock(state, socket.as_deref());
+            let _ = namedrop::reminder::ensure_clock(state, socket.as_deref(), Starter::Caller);
         }
         return run_agent_status_worker();
     }
@@ -248,7 +249,7 @@ fn main() -> ExitCode {
             .endpoint
             .clone()
             .or_else(|| Locator::Endpoint.env());
-        let _ = namedrop::reminder::ensure_clock(state, socket.as_deref());
+        let _ = namedrop::reminder::ensure_clock(state, socket.as_deref(), Starter::Caller);
     }
     if cli.is_dashboard_server() {
         let Some(state) = selected_state else {
@@ -1120,6 +1121,7 @@ fn status_worker_command(
     let mut command = namedrop::daemon::command(
         &namedrop::runtime_executable()?,
         namedrop::daemon::Scope::Space(&endpoint, &space),
+        Starter::Caller,
     );
     command
         .args(["hook", "agent-status-worker"])
@@ -2647,7 +2649,8 @@ mod status_worker_tests {
     }
 
     /// The worker gets its state directory, endpoint, and space under the
-    /// names of its endpoint's kind, the CLI's Herdr timeout, and no pane.
+    /// names of its endpoint's kind, the CLI's Herdr timeout, and no pane. It
+    /// keeps the Rex timeout its starter holds.
     #[test]
     fn the_status_worker_gets_its_space_under_its_endpoint_s_names() {
         let state = Path::new("/state");
@@ -2663,7 +2666,6 @@ mod status_worker_tests {
                     ("NAMEDROP_ENDPOINT", None),
                     ("NAMEDROP_HERDR_TIMEOUT_MS", Some("10000")),
                     ("NAMEDROP_PANE_ID", None),
-                    ("NAMEDROP_REX_TIMEOUT_MS", None),
                     ("NAMEDROP_SPACE_ID", None),
                     ("NAMEDROP_STATE_DIR", None),
                 ]
@@ -2682,7 +2684,6 @@ mod status_worker_tests {
                     ("NAMEDROP_ENDPOINT", Some("rex:/tmp/r.sock")),
                     ("NAMEDROP_HERDR_TIMEOUT_MS", Some("10000")),
                     ("NAMEDROP_PANE_ID", None),
-                    ("NAMEDROP_REX_TIMEOUT_MS", None),
                     ("NAMEDROP_SPACE_ID", Some("s1")),
                     ("NAMEDROP_STATE_DIR", Some("/state")),
                 ]

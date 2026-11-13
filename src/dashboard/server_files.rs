@@ -528,7 +528,11 @@ impl ServerFiles {
         claim: Option<&SingletonLock>,
     ) -> Result<std::process::Child, String> {
         let log = self.server_log()?;
-        let mut command = crate::daemon::command(executable, crate::daemon::Scope::None);
+        let mut command = crate::daemon::command(
+            executable,
+            crate::daemon::Scope::None,
+            crate::daemon::Starter::Caller,
+        );
         command
             .arg("--plugin-state")
             .arg(&self.state)
