@@ -6,7 +6,8 @@
 //! One rule holds everywhere. An explicit flag wins for its own value. The
 //! endpoint, space, and pane otherwise come from one set of names, chosen once
 //! by [`home`]: Herdr's under Herdr, the neutral ones elsewhere. The state
-//! directory comes from `HERDR_PLUGIN_STATE_DIR`, then `NAMEDROP_STATE_DIR`.
+//! directory comes from `HERDR_PLUGIN_STATE_DIR` when it is set, and otherwise
+//! from the same set, so under Herdr `NAMEDROP_STATE_DIR` is ignored.
 
 use serde_json::{Map, Value};
 use std::{
@@ -127,7 +128,8 @@ pub enum Name {
     Neutral,
 }
 
-/// The names the endpoint, space, and pane all come from: Herdr's when
+/// The names the endpoint, space, pane, and (without `HERDR_PLUGIN_STATE_DIR`)
+/// state directory come from: Herdr's when
 /// `lookup` holds any of `HERDR_SOCKET_PATH`, `HERDR_WORKSPACE_ID`, or
 /// `HERDR_PANE_ID`, even empty, and the neutral ones otherwise. Herdr names
 /// every pane and plugin process afresh, so under Herdr a neutral name

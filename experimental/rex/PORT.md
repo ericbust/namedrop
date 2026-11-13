@@ -627,13 +627,13 @@ The cost is that in a pane with any stale Herdr name, Herdr's set wins over ever
 4. `5a444c0` `feat(locator): default the state directory where Herdr names none`. The fix round removes the default again.
 5. `19861f8` `docs(rex): record step 3, the neutral names`.
 
-The [fix round](#fix-round) adds four more.
+The [fix round](#fix-round) adds six more.
 
 ### Evidence
 
 This evidence was measured at `19861f8`, before the fix round. Where the fix round changed a rule, the [fix round](#fix-round) has the current tests and numbers.
 
-**Tests.** `tests/herdr_socket.rs` runs `ui launch doctor` and the mailbox wake hook over a script `herdr` that logs the socket each command ran with. A neutral endpoint reaches every command and is the session's. `HERDR_SOCKET_PATH` outranks it. `--endpoint`, `--space`, and `--pane` do what the Herdr flags do, and both spellings of one flag are a usage error. `HERDR_WORKSPACE_ID` outranks `NAMEDROP_SPACE_ID`. An inherited `NAMEDROP_PANE_ID` is verified, and the refusal names it and `--pane`. The state directory follows the location's set: under Herdr the popup gets `HERDR_PLUGIN_STATE_DIR`, and with no `HERDR_PLUGIN_STATE_DIR` the command refuses and runs no `herdr` although `NAMEDROP_STATE_DIR` is set; with only neutral names the popup gets `NAMEDROP_STATE_DIR`. Unit tests in `src/locator.rs` pin each rule, `Location::from_envelope` reads both key sets, and the managed-rules test renders every automatic operation from both key sets and matches each line against Claude Code's installed rules.
+**Tests.** `tests/herdr_socket.rs` runs `ui launch doctor` and the mailbox wake hook over a script `herdr` that logs the socket each command ran with. A neutral endpoint reaches every command and is the session's. `HERDR_SOCKET_PATH` outranks it. `--endpoint`, `--space`, and `--pane` do what the Herdr flags do, and both spellings of one flag are a usage error. `HERDR_WORKSPACE_ID` outranks `NAMEDROP_SPACE_ID`. An inherited `NAMEDROP_PANE_ID` is verified, and the refusal names it and `--pane`. `HERDR_PLUGIN_STATE_DIR` outranks `NAMEDROP_STATE_DIR`, as the popup's `HERDR_PLUGIN_STATE_DIR` shows. Outside Herdr the popup gets the default directory, and under Herdr the command refuses and runs no `herdr`. Unit tests in `src/locator.rs` pin each rule, `Location::from_envelope` reads both key sets, and the managed-rules test renders every automatic operation from both key sets and matches each line against Claude Code's installed rules.
 
 **Mutations.** `mutate.py`, a scratch harness, copied the tree, made one edit, and ran the locator, final-reply, and managed-rules lib tests and `tests/herdr_socket.rs`. Each row is the failing test count on the final tree.
 
@@ -673,12 +673,14 @@ A review of `19861f8` found no change for a Herdr process with today's variables
 6. `fdc9dd9` `fix(locator): drop the default state directory until step 4`. See [State directory](#state-directory).
 7. `7bdc202` `fix(locator): resolve the endpoint, space and pane as one set of names`. See [Precedence](#precedence).
 8. `42c1198` `test: run the hook and worker readers under the neutral names alone`.
-9. This record.
+9. `82cd9c2` `docs(rex): record the step 3 fix round`.
+10. `17c580d` `fix(locator): read the state directory from the location's set of names`. A second review found that the separate state-directory rule let an inherited `NAMEDROP_STATE_DIR` reach Herdr panes; see [Precedence](#precedence). The live testbed passed `PASS 10/10 in 2m29s` at this commit.
+11. This correction of the record.
 
 **Tests.**
 
 - `src/locator.rs` sets each Herdr location name, set and empty, beside all four neutral names, and gets only that Herdr value, and no state directory. `HERDR_PLUGIN_STATE_DIR` alone selects no set. An envelope with `HERDR_SOCKET_PATH` and `NAMEDROP_PANE_ID` gives no pane. `Location::from_envelope` reads a Herdr envelope with every neutral key beside it as Herdr's, and `HERDR_WORKSPACE_ID` with a neutral endpoint and pane as no location.
-- `tests/herdr_socket.rs` has the review's three cases. `doctor` under `HERDR_SOCKET_PATH` with `NAMEDROP_PANE_ID=block:outer` succeeds and runs only `worktree list` and `pane list`. The mailbox wake hook with `NAMEDROP_SPACE_ID=w9` finds its space from its directory and never names `w9`. `HERDR_WORKSPACE_ID` or `HERDR_PANE_ID` beside `NAMEDROP_ENDPOINT` runs every `herdr` with no socket, and the session is the server's. The space and pane tests read the neutral names only where no Herdr name is set. With no state directory, Doctor refuses and runs no `herdr`, inside Herdr and out, and `dashboard-server` exits 64. Each command there now fails the test after 20 s instead of hanging it, because the per-value rule made the mailbox wake hook retry forever.
+- `tests/herdr_socket.rs` has the review's three cases. `doctor` under `HERDR_SOCKET_PATH` with `NAMEDROP_PANE_ID=block:outer` succeeds and runs only `worktree list` and `pane list`. The mailbox wake hook with `NAMEDROP_SPACE_ID=w9` finds its space from its directory and never names `w9`. `HERDR_WORKSPACE_ID` or `HERDR_PANE_ID` beside `NAMEDROP_ENDPOINT` runs every `herdr` with no socket, and the session is the server's. The space and pane tests read the neutral names only where no Herdr name is set. With no state directory, Doctor refuses and runs no `herdr`, inside Herdr and out, and `dashboard-server` exits 64. Each command there now fails the test after 20 s instead of hanging it, because the per-value rule made the mailbox wake hook retry forever. The state directory follows the location's set: under Herdr the popup gets `HERDR_PLUGIN_STATE_DIR`, and with no `HERDR_PLUGIN_STATE_DIR` the command refuses and runs no `herdr` although `NAMEDROP_STATE_DIR` is set; with only neutral names the popup gets `NAMEDROP_STATE_DIR`.
 - Reader sites run as a host runs them, with no Herdr location name. In `tests/runtime_reliability.rs` the status hook queues its event under the neutral names, and the worker it starts reconciles the space as nobody's pane, although the hook carries a `NAMEDROP_PANE_ID` whose shell is not an ancestor. The gate and removed-directory tests also run the worker under the neutral names. In `tests/final_reply.rs` the installed Stop hook settles a delivery from the final answer, and the prompt hook records the turn's start. In `tests/subagents.rs` the subagent hook records a start. In `tests/deferred_commands.rs` (Linux) a sandboxed send queues and the worker answers it.
 
 **Mutations and reverts.** `fix/mutate.py`, a scratch harness, copies a snapshot of the tree for each mutation, applies exact replacements, and runs the named tests. A baseline run with no edit passed every target first.
@@ -691,8 +693,8 @@ A review of `19861f8` found no change for a Herdr process with today's variables
 | `home` reads only `HERDR_SOCKET_PATH` | 4 lib, 1 `herdr_socket` |
 | `home` ignores `HERDR_PANE_ID` | 4 lib, 1 `herdr_socket` |
 | An empty Herdr name counts as unset | 2 lib |
-| The state directory under the set rule | 1 lib, 1 `herdr_socket` |
-| `home` always chooses Herdr's set | 5 lib, 4 `herdr_socket` |
+| The state directory resolved on its own again (before `17c580d`) | 1 lib, 1 `herdr_socket` |
+| `home` always chooses Herdr's set | 5 lib, 5 `herdr_socket` |
 | The status queue's scope reads Herdr's names only | 3 `runtime_reliability` |
 | The status worker's directory reads `HERDR_PLUGIN_STATE_DIR` only | 1 `runtime_reliability` |
 | The status worker's gate reads `HERDR_PLUGIN_STATE_DIR` only | 1 `runtime_reliability` |
