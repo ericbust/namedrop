@@ -23,6 +23,7 @@ import tempfile
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import rex_lane
 import source as sources
 
 KIT = Path(__file__).resolve().parent.parent
@@ -349,14 +350,21 @@ class Profile:
             fail("profile socket exists but cannot be reached; inspect it before retrying: " +
                  str(self.socket))
         log = self.dir / "logs/server.log"
-        command = env_command(self.env, ["herdr", "server"])
         say("Starting the profile's Herdr server on " + str(self.socket))
-        with log.open("a") as output:
-            process = subprocess.Popen(command, cwd=str(self.dir), stdout=output,
-                                       stderr=subprocess.STDOUT, start_new_session=True)
+        lane = rex_lane.Lane(self, fail, say) if self.state.get("inside_rex") else None
+        if lane:
+            lane.start_herdr(sys.executable, log)
+            process = None
+        else:
+            with log.open("a") as output:
+                process = subprocess.Popen(env_command(self.env, ["herdr", "server"]),
+                                           cwd=str(self.dir), stdout=output,
+                                           stderr=subprocess.STDOUT, start_new_session=True)
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             if self.running():
+                if lane:
+                    say(lane.prove_herdr_in_block())
                 # Restored panes come back as new shells: agents must start again and
                 # naming again restores the pane titles.
                 for key in list(self.state):
@@ -364,7 +372,7 @@ class Profile:
                         del self.state[key]
                 self.save()
                 return
-            if process.poll() is not None:
+            if process and process.poll() is not None:
                 fail("profile server exited ({})\n{}".format(process.returncode, log.read_text()))
             time.sleep(0.1)
         fail("profile server did not become ready\n" + log.read_text())
@@ -380,6 +388,7 @@ class Profile:
             say("Stopped the server of " + self.name)
         else:
             say("Server already stopped: " + self.name)
+        rex_lane.Lane(self, fail, say).stop()
         self.kill_leftovers()
 
     def leftover_pids(self):
@@ -872,7 +881,11 @@ def cmd_test(args):
     profile.create()
     if created:
         profile.state["purpose"] = "test"
-        profile.save()
+    if profile.state.get("inside_rex", False) != args.inside_rex and profile.running():
+        fail("profile {} runs its server {} Rex; pass --fresh to change lanes".format(
+            profile.name, "inside" if profile.state.get("inside_rex") else "outside"))
+    profile.state["inside_rex"] = args.inside_rex
+    profile.save()
     sys.exit(0 if livetest.run(profile, request, args.codex, args.keep, lane) else 1)
 
 
@@ -1066,6 +1079,8 @@ def main():
     test.add_argument("--codex", choices=("plain", "no-daemon"),
                       help="how Codex starts (default: plain on Namedrop 1.2.0 and later)")
     test.add_argument("--keep", action="store_true", help="keep the profile after a pass")
+    test.add_argument("--inside-rex", action="store_true",
+                      help="run the profile's Herdr server in a block of a scratch Rex server")
     lanes = test.add_mutually_exclusive_group()
     lanes.add_argument("--daily-use", action="store_true",
                        help="run the scripted daily-use lane instead of CHECKLIST.md")

@@ -9,11 +9,13 @@ from pathlib import Path
 import re
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import urllib.error
 from unittest.mock import patch
 
 import livetest as live
+import rex_lane
 import source as sources
 import selftest_daily
 import testbed
@@ -204,6 +206,22 @@ def check_profile_safety(scratch):
         profile = testbed.Profile("fresh")
         assert len(os.fsencode(str(profile.socket))) < 100
     return "profile safety: refuses real config dirs, unmarked dirs and path names"
+
+
+def check_rex_lane(scratch):
+    environment = scratch / "rex-lane-environment.json"
+    environment.write_text(json.dumps({"HOME": str(scratch), "PATH": "/usr/bin:/bin"}))
+    log = scratch / "rex-lane.log"
+    inherited = {"REX_BLOCK": "block:b", "REX_SERVER": "unix:///s.sock", "HERDR_PANE_ID": "outer",
+                 "HOME": "/real/home", "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+    lane = Path(rex_lane.__file__)
+    subprocess.run([sys.executable, "-I", str(lane), "exec", str(environment), str(log), "--",
+                    "env"], env=inherited, check=True)
+    seen = sorted(log.read_text().splitlines())
+    assert seen == ["HOME=" + str(scratch), "PATH=/usr/bin:/bin", "REX_BLOCK=block:b",
+                    "REX_SERVER=unix:///s.sock"], seen
+    assert len(os.fsencode(str(rex_lane.socket_for(scratch / "profiles/example")))) < 100
+    return "Rex lane: Herdr gets the profile's environment and the block's REX_* names, nothing else"
 
 
 def check_syntax(kit):
@@ -837,6 +855,7 @@ def run(kit):
                   ("Codex config", lambda: check_codex_settings(base)),
                   ("seed", lambda: check_seed(kit, base)),
                   ("profile safety", lambda: check_profile_safety(base)),
+                  ("Rex lane", lambda: check_rex_lane(base)),
                   ("syntax", lambda: check_syntax(kit)),
                   ("screens", check_screens),
                   ("transcripts", check_transcripts),
