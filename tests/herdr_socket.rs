@@ -419,19 +419,23 @@ fn an_inherited_pane_is_verified_under_the_names_in_use() {
 }
 
 #[test]
-fn the_state_directory_comes_from_the_herdr_name_then_the_neutral_one() {
-    let state_of = |herdr: bool| {
+fn the_state_directory_follows_the_same_set_of_names_as_the_location() {
+    let required = "--plugin-state, HERDR_PLUGIN_STATE_DIR or NAMEDROP_STATE_DIR is required";
+    let launch = |herdr: Option<&str>, herdr_state: bool| {
         let f = Fixture::new();
         let neutral = f.0.join("neutral-state");
-        let mut command = f.namedrop(Some("/run/inherited.sock"));
+        let mut command = f.namedrop(herdr);
         command.env("NAMEDROP_STATE_DIR", &neutral);
-        if !herdr {
+        if herdr.is_none() {
+            command.env("NAMEDROP_ENDPOINT", "/run/neutral.sock");
+        }
+        if !herdr_state {
             command.env_remove("HERDR_PLUGIN_STATE_DIR");
         }
-        let (output, calls) =
-            f.launch_doctor(command, &["--herdr-workspace", "w1", "--herdr-pane", "p1"]);
-        assert!(output.status.success(), "{output:?}");
-        let expected = if herdr { f.0.join("state") } else { neutral };
+        let (output, calls) = f.launch_doctor(command, &["--space", "w1", "--pane", "p1"]);
+        (f, neutral, output, calls)
+    };
+    let popup_state = |calls: &[String], expected: &std::path::Path| {
         let popup = calls.last().unwrap();
         assert!(
             popup.contains(&format!(
@@ -441,8 +445,22 @@ fn the_state_directory_comes_from_the_herdr_name_then_the_neutral_one() {
             "{calls:#?}"
         );
     };
-    state_of(true);
-    state_of(false);
+
+    let (f, _, output, calls) = launch(Some("/run/inherited.sock"), true);
+    assert!(output.status.success(), "{output:?}");
+    popup_state(&calls, &f.0.join("state"));
+
+    let (_, _, output, calls) = launch(Some("/run/inherited.sock"), false);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(required),
+        "{output:?}"
+    );
+    assert!(calls.is_empty(), "{calls:#?}");
+
+    let (_, neutral, output, calls) = launch(None, false);
+    assert!(output.status.success(), "{output:?}");
+    popup_state(&calls, &neutral);
 }
 
 /// With no state directory named, a command refuses and runs no `herdr`,

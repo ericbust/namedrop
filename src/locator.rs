@@ -71,8 +71,7 @@ impl Locator {
     pub fn resolve<V: AsRef<OsStr>>(self, lookup: impl Fn(&str) -> Option<V>) -> Option<(Name, V)> {
         let name = match self {
             Self::StateDir if lookup(self.herdr_var()).is_some() => Name::Herdr,
-            Self::StateDir => Name::Neutral,
-            Self::Endpoint | Self::Space | Self::Pane => home(&lookup),
+            Self::StateDir | Self::Endpoint | Self::Space | Self::Pane => home(&lookup),
         };
         let value = lookup(self.var(name));
         match name {
@@ -222,11 +221,7 @@ mod tests {
                     let expected = (locator == herdr).then(|| (Name::Herdr, value.to_owned()));
                     assert_eq!(resolved(locator, &pairs), expected, "{herdr:?} {locator:?}");
                 }
-                assert_eq!(
-                    resolved(Locator::StateDir, &pairs),
-                    Some((Name::Neutral, "/n".to_owned())),
-                    "{herdr:?}"
-                );
+                assert_eq!(resolved(Locator::StateDir, &pairs), None, "{herdr:?}");
             }
         }
         let state = [("HERDR_PLUGIN_STATE_DIR", "/h")];
