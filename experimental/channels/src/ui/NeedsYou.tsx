@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { responderOf, responseAbsence } from "../attention.ts";
-import { attentionCopy, relativeAge } from "../copy.ts";
+import { dismissal, type ThreadControl, threadControl } from "../control.ts";
+import { attentionCopy, relativeAge, threadControlCopy } from "../copy.ts";
 import type {
   Attention,
   ChannelSnapshot,
@@ -11,6 +12,7 @@ import {
   AttentionActions,
   type ControlThread,
   type FocusAttention,
+  failureCopy,
 } from "./AttentionActions.tsx";
 import {
   HandoffGroup,
@@ -112,6 +114,109 @@ function Item({
     </li>
   );
 }
+const idle: ThreadControl = { kind: "idle" };
+/** Dismisses every card of the list, after one confirmation. */
+function DismissAll({
+  channel,
+  ids,
+  onControl,
+}: {
+  channel: ChannelSnapshot;
+  ids: readonly string[];
+  onControl: ControlThread;
+}) {
+  const [control, setControl] = useState(idle);
+  const ask = useRef<HTMLButtonElement>(null);
+  const confirm = useRef<HTMLButtonElement>(null);
+  const shown = useRef(control.kind);
+  const press = useRef<AbortController | null>(null);
+  useEffect(() => () => press.current?.abort(), []);
+  useLayoutEffect(() => {
+    const before = shown.current;
+    shown.current = control.kind;
+    if (before === control.kind) return;
+    if (control.kind === "confirming") confirm.current?.focus();
+    else if (before === "confirming" && control.kind !== "pending")
+      ask.current?.focus();
+  });
+  const busy = control.kind === "pending";
+  const start = () => {
+    const next = threadControl(control, { type: "start", action: "dismiss" });
+    if (next === control) return;
+    setControl(next);
+    press.current?.abort();
+    press.current = new AbortController();
+    const { signal } = press.current;
+    void onControl(
+      channel.key,
+      { kind: "attention", ids, action: "dismiss" },
+      signal,
+    ).then((result) => {
+      if (signal.aborted) return;
+      // A card that arrived meanwhile stays, and so does this row.
+      setControl((now) =>
+        result.kind === "failed"
+          ? threadControl(now, { type: "failed", status: result.status })
+          : idle,
+      );
+    });
+  };
+  const cancel = () =>
+    setControl((now) => threadControl(now, { type: "cancel" }));
+  return (
+    <>
+      {control.kind === "confirming" || busy ? (
+        <>
+          <span className="attention-confirm">
+            {threadControlCopy.confirmDismissAll(ids.length)}
+          </span>
+          <button
+            ref={confirm}
+            type="button"
+            className="text-button confirm-stop"
+            aria-disabled={busy}
+            onClick={start}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape") return;
+              event.preventDefault();
+              cancel();
+            }}
+          >
+            {busy
+              ? threadControlCopy.dismiss.pending
+              : threadControlCopy.dismissAll}
+          </button>
+          <button
+            type="button"
+            className="text-button"
+            aria-disabled={busy}
+            onClick={cancel}
+          >
+            {threadControlCopy.cancel}
+          </button>
+        </>
+      ) : (
+        <button
+          ref={ask}
+          type="button"
+          className="text-button"
+          onClick={() =>
+            setControl((now) =>
+              threadControl(now, { type: "ask", action: "dismiss" }),
+            )
+          }
+        >
+          {threadControlCopy.dismissAll}
+        </button>
+      )}
+      {control.kind === "failed" && (
+        <span className="attention-failure" role="alert">
+          {failureCopy("dismiss", control.status)}
+        </span>
+      )}
+    </>
+  );
+}
 export function NeedsYou({
   channel,
   directory,
@@ -132,6 +237,8 @@ export function NeedsYou({
   // Handoff warnings share one collapsible row; everything else stays in view.
   const handoffs = items.filter(isHandoff);
   const others = items.filter((item) => !isHandoff(item));
+  const dismissable = items.flatMap((item) => dismissal(item) ?? []);
+  const more = !all && others.length > SHOWN;
   return (
     <>
       <p className="sr-only" aria-live="polite">
@@ -163,15 +270,24 @@ export function NeedsYou({
               />
             )}
           </ul>
-          {!all && others.length > SHOWN && (
+          {(more || dismissable.length > 1) && (
             <div className="attention-more">
-              <button
-                type="button"
-                className="text-button"
-                onClick={() => setAll(true)}
-              >
-                Show {others.length - SHOWN} more
-              </button>
+              {more && (
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => setAll(true)}
+                >
+                  Show {others.length - SHOWN} more
+                </button>
+              )}
+              {dismissable.length > 1 && (
+                <DismissAll
+                  channel={channel}
+                  ids={dismissable}
+                  onControl={onControl}
+                />
+              )}
             </div>
           )}
         </section>

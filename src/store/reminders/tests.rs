@@ -1685,7 +1685,7 @@ fn reminder_operator_wakes_keep_dm_and_channel_reply_routes() {
             assert!(
                 StateStore::open(&f.state)
                     .unwrap()
-                    .direct_message_peers()
+                    .direct_message_peers(0)
                     .unwrap()
                     .iter()
                     .all(|p| p.last_agent_message_id.is_none())
@@ -1709,7 +1709,7 @@ fn reminder_operator_wakes_keep_dm_and_channel_reply_routes() {
             assert!(
                 StateStore::open(&f.state)
                     .unwrap()
-                    .direct_message_peers()
+                    .direct_message_peers(0)
                     .unwrap()
                     .iter()
                     .any(|p| p.last_agent_message_id.is_some())

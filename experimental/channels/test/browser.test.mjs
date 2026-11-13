@@ -542,7 +542,7 @@ async function open(
       );
     }
     if (
-      /^\/w\/[^/]+\/(threads\/[^/]+\/(continue|stop)|attempts\/[^/]+\/dismiss)$/.test(
+      /^\/w\/[^/]+\/(threads\/[^/]+\/(continue|stop)|attention\/dismiss)$/.test(
         url.pathname,
       )
     )
@@ -7507,6 +7507,7 @@ test("CH-fix-2 item 3: Allow 10 more replies posts continue with the CSRF header
     allowCopy.label,
     stopCopy.label,
     "Details",
+    threadControlCopy.dismiss.label,
   ]);
   assert.equal(await limit.allow.getAttribute("title"), allowCopy.title);
   assert.equal(await limit.stop.getAttribute("title"), stopCopy.title);
@@ -7648,12 +7649,12 @@ test("a lost answer's Dismiss asks once, posts the confirmation, and the card go
   await dismiss.click();
   await confirm.click();
   await until(() => ui.posts.controls.length === 1, "the dismiss POST");
-  assert.equal(
-    ui.posts.controls[0].path,
-    `/w/${key(1)}/attempts/attempt-1/dismiss`,
-  );
+  assert.equal(ui.posts.controls[0].path, `/w/${key(1)}/attention/dismiss`);
   assert.equal(ui.posts.controls[0].csrf, "csrf-1");
-  assert.deepEqual(JSON.parse(ui.posts.controls[0].body), { confirmed: true });
+  assert.deepEqual(JSON.parse(ui.posts.controls[0].body), {
+    confirmed: true,
+    ids: ["attention-agent-disposition-attempt-1"],
+  });
   value.frame.attention = [];
   value.frame.health = { level: "calm" };
   ui.connections[0].send("space", value);
@@ -7664,34 +7665,129 @@ test("a lost answer's Dismiss asks once, posts the confirmation, and the card go
   );
 });
 
-test("a refused Dismiss says the agent can still answer and the button comes back", async (t) => {
-  const ui = await open(
-    t,
-    (client) => replay(client, [lostAnswer()]),
-    undefined,
+// One card of each kind the person could not dismiss before: a request whose
+// agent can still answer, a terminal reply, and a coordination.
+function stuckWarnings() {
+  const value = lostAnswer();
+  value.frame.attention[0].answer_lost = null;
+  value.frame.attention.push(
     {
-      onControl: () => ({ status: 409 }),
+      attention_id: "terminal-relay:reply-1",
+      source_kind: "terminal_relay",
+      source_id: "reply-1",
+      summary: { text: "A terminal reply needs you.", truncated: false },
+      opened_at_ms: Date.now() - 50_000,
+      subject_alias: "codex",
+    },
+    {
+      attention_id: "coordination-attention:c1",
+      source_kind: "coordination",
+      source_id: "c1",
+      coordination_id: "c1",
+      summary: { text: "A coordination needs a decision.", truncated: false },
+      opened_at_ms: Date.now() - 40_000,
     },
   );
+  value.frame.health = { level: "needs_you", items: 3 };
+  return value;
+}
+
+test("a card whose agent can still answer, a terminal reply and a coordination each have a Dismiss that asks once and names only its card", async (t) => {
+  const value = stuckWarnings();
+  const ui = await open(t, (client) => replay(client, [value]));
   await ui.live();
-  const item = ui.page
+  const items = ui.page
     .getByRole("region", { name: "Attention needed" })
     .locator(".attention-item");
-  await item
-    .getByRole("button", { name: threadControlCopy.dismiss.label, exact: true })
+  await items.nth(2).waitFor();
+  assert.equal(await items.count(), 3);
+  const ids = value.frame.attention.map((card) => card.attention_id);
+  for (const [index, id] of ids.entries()) {
+    const item = items.nth(index);
+    await item
+      .getByRole("button", {
+        name: threadControlCopy.dismiss.label,
+        exact: true,
+      })
+      .click();
+    assert.equal(
+      await item.locator(".attention-confirm").textContent(),
+      threadControlCopy.confirmDismissWarning,
+      id,
+    );
+    assert.equal(
+      ui.posts.controls.length,
+      index,
+      `${id}: the first click sends nothing`,
+    );
+    await item
+      .getByRole("button", {
+        name: threadControlCopy.confirmDismiss,
+        exact: true,
+      })
+      .click();
+    await until(() => ui.posts.controls.length === index + 1, `${id}'s POST`);
+    assert.equal(
+      ui.posts.controls[index].path,
+      `/w/${key(1)}/attention/dismiss`,
+    );
+    assert.deepEqual(JSON.parse(ui.posts.controls[index].body), {
+      confirmed: true,
+      ids: [id],
+    });
+  }
+});
+
+test("Dismiss all asks once, posts every card's id, and the list goes", async (t) => {
+  const value = stuckWarnings();
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const list = ui.page.getByRole("region", { name: "Attention needed" });
+  const all = list.getByRole("button", {
+    name: threadControlCopy.dismissAll,
+    exact: true,
+  });
+  await all.click();
+  assert.equal(
+    await list.locator(".attention-more .attention-confirm").textContent(),
+    threadControlCopy.confirmDismissAll(3),
+  );
+  assert.equal(await focusedText(ui), threadControlCopy.dismissAll);
+  assert.equal(ui.posts.controls.length, 0, "the first click sends nothing");
+  await ui.page.keyboard.press("Escape");
+  await list
+    .locator(".attention-more .attention-confirm")
+    .waitFor({ state: "detached" });
+  assert.equal(await focusedText(ui), threadControlCopy.dismissAll);
+  assert.equal(ui.posts.controls.length, 0, "Escape sends nothing");
+  await all.click();
+  await list
+    .locator(".attention-more")
+    .getByRole("button", { name: threadControlCopy.dismissAll, exact: true })
     .click();
-  await item
-    .getByRole("button", {
-      name: threadControlCopy.confirmDismiss,
-      exact: true,
-    })
-    .click();
-  const alert = item.getByRole("alert");
-  await alert.waitFor();
-  assert.equal(await alert.textContent(), threadControlCopy.stillAnswerable);
-  await item
-    .getByRole("button", { name: threadControlCopy.dismiss.label, exact: true })
-    .waitFor();
+  await until(() => ui.posts.controls.length === 1, "the dismiss POST");
+  assert.equal(ui.posts.controls[0].path, `/w/${key(1)}/attention/dismiss`);
+  assert.deepEqual(JSON.parse(ui.posts.controls[0].body), {
+    confirmed: true,
+    ids: value.frame.attention.map((card) => card.attention_id),
+  });
+  value.frame.attention = [];
+  value.frame.health = { level: "calm" };
+  ui.connections[0].send("space", value);
+  await list.waitFor({ state: "detached" });
+});
+
+test("one card alone has its own Dismiss and no Dismiss all", async (t) => {
+  const ui = await open(t, (client) => replay(client, [lostAnswer()]));
+  await ui.live();
+  const list = ui.page.getByRole("region", { name: "Attention needed" });
+  await list.locator(".attention-item").waitFor();
+  assert.equal(
+    await list
+      .getByRole("button", { name: threadControlCopy.dismissAll, exact: true })
+      .count(),
+    0,
+  );
 });
 
 test("a Dismiss with nothing left to dismiss says it was already cleared, and the card goes on the next update", async (t) => {
@@ -12591,7 +12687,7 @@ test("INTEG-EXP4: the sidebar names the handoff decision count, and a handoff ca
   const card = ui.page.locator('[data-coordination-id="c-0"]');
   assert.deepEqual(
     await card.locator(".attention-actions button").allTextContents(),
-    ["Ask @codex to review", "Details"],
+    ["Ask @codex to review", "Details", "Dismiss"],
   );
   const handoffsOnly = handoffFrame(3);
   handoffsOnly.frame.attention.shift();

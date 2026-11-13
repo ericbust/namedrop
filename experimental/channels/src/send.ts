@@ -274,8 +274,8 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
         const response = await postWithTokenRetry(
           target.kind === "thread"
             ? `/w/${key}/threads/${encodeURIComponent(target.threadId)}/${target.action}`
-            : `/w/${key}/attempts/${encodeURIComponent(target.attemptId)}/dismiss`,
-          target.kind === "thread" ? {} : { confirmed: true },
+            : `/w/${key}/attention/dismiss`,
+          target.kind === "thread" ? {} : { confirmed: true, ids: target.ids },
           signal,
         );
         return response.ok

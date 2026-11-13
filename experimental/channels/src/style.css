@@ -966,6 +966,10 @@ button.member:not(.more):hover {
   color: var(--failed-text);
 }
 .attention-more {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--space-3);
   padding: 6px 14px 6px 40px;
 }
 /* Handoff warnings fold into one row so they never push other items away. */

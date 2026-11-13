@@ -218,8 +218,9 @@ test("a reply-limit item the browser can continue or stop says why the agents pa
       "Continue or stop this thread from its pane.",
       JSON.stringify(extra),
     );
-  const { status, ...words } = threadControlCopy;
+  const { status, confirmDismissAll, ...words } = threadControlCopy;
   assert.equal(status(404), "HTTP 404");
+  assert.equal(confirmDismissAll(4), "Dismiss all 4? Nothing else changes.");
   assert.deepEqual(words, {
     continue: {
       label: "Allow 10 more replies",
@@ -236,17 +237,18 @@ test("a reply-limit item the browser can continue or stop says why the agents pa
     dismiss: {
       label: "Dismiss",
       pending: "Dismissing…",
-      title: "Removes this card. The request stays in the thread as ended.",
+      title: "Removes this card. Nothing is sent.",
       failed: "Couldn't dismiss it. Try again.",
     },
     confirm: "Stop this thread for good?",
     confirmStop: "Stop",
     confirmDismissQuestion: "Dismiss this? Its answer can't arrive.",
+    confirmDismissWarning: "Dismiss this? Nothing else changes.",
     confirmDismiss: "Dismiss",
+    dismissAll: "Dismiss all",
     cancel: "Cancel",
     gone: "This thread is no longer in this workspace.",
-    requestGone: "This request is no longer in this workspace.",
-    stillAnswerable: "The agent can still answer this, so it stays.",
+    requestGone: "This is no longer in this workspace.",
     nothingToDismiss:
       "This was already cleared. The card goes away on the next update.",
   });

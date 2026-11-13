@@ -14,6 +14,7 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params, types::Type,
 };
 use serde::Serialize;
+use std::collections::HashMap;
 use std::{
     collections::HashSet,
     error::Error,
@@ -106,6 +107,8 @@ mod coordination_bridge;
 mod coordination_ownership;
 pub(crate) mod coordination_review;
 pub mod dashboard;
+#[cfg(test)]
+mod dismissal_tests;
 mod missing_disposition;
 pub(crate) use missing_disposition::{LostSettle, SessionGone};
 mod operator;
@@ -6936,6 +6939,141 @@ impl StateTransaction<'_> {
         Ok(!acknowledged || resolved)
     }
 
+    /// Records that the person dismissed an attention item, and says whether
+    /// there was one to dismiss. A warning that nobody can answer is closed
+    /// as `delivery acknowledge` closes it. Any other item stays as its
+    /// source left it, so a late answer still arrives and closes it, and it
+    /// is no longer shown as needing the person. It records no disposition
+    /// and resends nothing.
+    pub fn dismiss_attention_item(
+        &mut self,
+        namespace: &StateNamespace,
+        item_id: &str,
+        by: &MutationAttribution,
+    ) -> Result<bool, StoreError> {
+        if by.actor_kind != ActorKind::Human {
+            return Err(StoreError::invalid_input(
+                "only a human may dismiss an attention item",
+            ));
+        }
+        let stored = self
+            .transaction
+            .query_row(
+                "SELECT source_kind, source_id, opened_at_ms FROM attention_items
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2
+                   AND attention_item_id = ?3 AND resolved_at_ms IS NULL",
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    item_id
+                ],
+                |row| {
+                    Ok((
+                        parse_attention_source_kind(row.get(0)?)?,
+                        row.get::<_, String>(1)?,
+                        from_i64(row.get(2)?)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let opened_at_ms = match &stored {
+            Some((crate::AttentionSourceKind::AgentDisposition, attempt, opened_at_ms)) => {
+                match self.acknowledge_disposition_attention(
+                    namespace,
+                    &crate::DeliveryAttemptId::new(attempt.as_str()),
+                    by,
+                ) {
+                    Ok(_) => return Ok(true),
+                    // Its agent can still answer, so the request stays owed.
+                    Err(error) if error.kind() == StoreErrorKind::InvalidInput => *opened_at_ms,
+                    Err(error) => return Err(error),
+                }
+            }
+            Some((_, _, opened_at_ms)) => *opened_at_ms,
+            // An agent waiting in its pane has a card and no stored item.
+            None => match item_id.strip_prefix(AGENT_STATUS_ITEM_PREFIX) {
+                Some(address)
+                    if self
+                        .transaction
+                        .query_row(
+                            "SELECT 1 FROM pane_addresses
+                             WHERE session_socket_id = ?1 AND worktree_id = ?2
+                               AND address_id = ?3",
+                            params![
+                                namespace.session_socket_id,
+                                namespace.space_id.as_str(),
+                                address
+                            ],
+                            |_| Ok(()),
+                        )
+                        .optional()?
+                        .is_some() =>
+                {
+                    0
+                }
+                _ => return Ok(false),
+            },
+        };
+        if let Some((kind, _, _)) = &stored
+            && attention_dismissed(
+                &self.attention_dismissals(namespace)?,
+                item_id,
+                Some(*kind),
+                opened_at_ms,
+            )
+        {
+            return Ok(false);
+        }
+        // The dismissal holds from when the item opened, whatever the clocks say.
+        let at = by.occurred_at_ms.max(opened_at_ms);
+        self.append_transition(
+            namespace,
+            TransitionEntityKind::AttentionItem,
+            item_id,
+            TransitionKind::Acknowledged,
+            &MutationAttribution::new(ActorKind::Human, by.actor_id.clone(), at),
+        )?;
+        Ok(true)
+    }
+
+    /// When the person last dismissed each attention item of the space.
+    pub fn attention_dismissals(
+        &self,
+        namespace: &StateNamespace,
+    ) -> Result<HashMap<String, u64>, StoreError> {
+        let mut statement = self.transaction.prepare_cached(
+            "SELECT entity_id, MAX(occurred_at_ms) FROM transition_facts
+             WHERE session_socket_id = ?1 AND worktree_id = ?2
+               AND entity_kind = 'attention_item' AND transition_kind = 'acknowledged'
+               AND actor_kind = 'human'
+             GROUP BY entity_id",
+        )?;
+        statement
+            .query_map(namespace_params(namespace), |row| {
+                Ok((row.get::<_, String>(0)?, from_i64(row.get(1)?)?))
+            })?
+            .collect::<Result<_, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// The open attention items the person has not dismissed.
+    pub fn attention_items_needing_the_person(
+        &self,
+        namespace: &StateNamespace,
+    ) -> Result<Vec<crate::AttentionItemRecord>, StoreError> {
+        let dismissals = self.attention_dismissals(namespace)?;
+        let mut items = self.unresolved_attention_items(namespace)?;
+        items.retain(|item| {
+            !attention_dismissed(
+                &dismissals,
+                item.id.as_str(),
+                Some(item.source_kind),
+                item.opened_at_ms,
+            )
+        });
+        Ok(items)
+    }
+
     fn complete_result_set_for_delivery(
         &mut self,
         namespace: &StateNamespace,
@@ -7910,6 +8048,25 @@ fn parse_actor_kind(value: String) -> rusqlite::Result<ActorKind> {
         "system" => Ok(ActorKind::System),
         _ => Err(invalid_text("actor kind", value)),
     }
+}
+
+/// The id of the card Channels shows for an agent waiting in its pane.
+pub(crate) const AGENT_STATUS_ITEM_PREFIX: &str = "agent-status-";
+
+/// Whether the person dismissed the item since it opened. An item its source
+/// closed and opened again is a new warning, and shows again. A request is
+/// asked once, so its warning stays dismissed however often it is judged
+/// again. An agent waiting in its pane has no stored item and no kind.
+pub(crate) fn attention_dismissed(
+    dismissals: &HashMap<String, u64>,
+    item_id: &str,
+    source_kind: Option<crate::AttentionSourceKind>,
+    opened_at_ms: u64,
+) -> bool {
+    dismissals.get(item_id).is_some_and(|dismissed_at_ms| {
+        source_kind == Some(crate::AttentionSourceKind::AgentDisposition)
+            || *dismissed_at_ms >= opened_at_ms
+    })
 }
 
 fn parse_attention_source_kind(value: String) -> rusqlite::Result<crate::AttentionSourceKind> {

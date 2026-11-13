@@ -601,6 +601,7 @@ test("attention actions show historical evidence and safe responses for every so
           : source === "coordination"
             ? "Message @codex"
             : "Reply to @codex",
+        "Dismiss",
       ],
       source,
     );
@@ -631,7 +632,7 @@ test("attention actions show historical evidence and safe responses for every so
   assert.doesNotMatch(local, /Namedrop setup|Namedrop Doctor/);
 });
 
-test("a lost answer's card offers Dismiss, and a card whose agent can still answer does not", async () => {
+test("every card offers Dismiss, a lost answer's and one whose agent can still answer", async () => {
   const { AttentionActions } = await load<
     typeof import("./ui/AttentionActions.tsx")
   >("/src/ui/AttentionActions.tsx");
@@ -683,7 +684,11 @@ test("a lost answer's card offers Dismiss, and a card whose agent can still answ
       ["Show message", "Reply to @codex", "Dismiss"],
       cause,
     );
-  assert.deepEqual(shown(null), ["Show message", "Reply to @codex"]);
+  assert.deepEqual(
+    shown(null),
+    ["Show message", "Reply to @codex", "Dismiss"],
+    "an agent that can still answer",
+  );
 });
 
 test("a Needs-you item keeps Show message, its response and Details on one action row, and its hint says where to answer", async () => {
@@ -747,11 +752,35 @@ test("a Needs-you item keeps Show message, its response and Details on one actio
   assert.deepEqual(
     rows.map((found) => found.map(([, row]) => buttons(row ?? ""))),
     [
-      [["Show message", "See @worker's screen", "Details"]],
-      [["Show message", "Reply to @worker", "Details"]],
-      [["Details"]],
+      [["Show message", "See @worker's screen", "Details", "Dismiss"]],
+      [["Show message", "Reply to @worker", "Details", "Dismiss"]],
+      [["Details", "Dismiss"]],
     ],
   );
+  const whole = (count: number) => {
+    const all = value.frame.attention;
+    value.frame.attention = all.slice(0, count);
+    const { channel } = space(value);
+    const markup = renderToStaticMarkup(
+      createElement(
+        PeekContext,
+        { value: { scope: channel.key, open() {} } },
+        createElement(NeedsYou, {
+          channel,
+          directory: { members: channel.members, homes: new Map() },
+          onFocus() {},
+          onControl,
+          onReview,
+        }),
+      ),
+    );
+    value.frame.attention = all;
+    return buttons(
+      markup.match(/<div class="attention-more">(.*?)<\/div>/s)?.[1] ?? "",
+    );
+  };
+  assert.deepEqual(whole(3), ["Dismiss all"], "one button clears the list");
+  assert.deepEqual(whole(1), [], "one card has its own Dismiss only");
   const hint = (inner: string) =>
     inner.match(/<p class="attention-hint"( title="[^"]*")?>(.*?)<\/p>/s);
   assert.deepEqual(hint(items[0] ?? "")?.slice(1), [

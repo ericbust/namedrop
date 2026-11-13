@@ -969,9 +969,19 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
         .iter()
         .filter(|p| p.activity == Activity::Working)
         .count();
+    let dismissed = |id: &str, kind: Option<crate::AttentionSourceKind>, opened_at_ms: u64| {
+        crate::store::attention_dismissed(&rows.dismissals, id, kind, opened_at_ms)
+    };
     let mut attention: Vec<AttentionCard> = rows
         .attention
         .iter()
+        .filter(|item| {
+            !dismissed(
+                item.item.id.as_str(),
+                Some(item.item.source_kind),
+                item.item.opened_at_ms,
+            ) && attention_expires_at(item).is_none_or(|expiry| now_ms < expiry)
+        })
         .map(|item| AttentionCard {
             attention_id: item.item.id.as_str().to_owned(),
             source_id: item.item.source_id.clone(),
@@ -999,8 +1009,21 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
         })
         .collect();
     attention.extend(rows.addresses.iter().filter_map(|address| {
-        blocked_on_user_at(address).map(|opened_at_ms| AttentionCard {
-            attention_id: format!("agent-status-{}", address.address_id),
+        let opened_at_ms = blocked_on_user_at(address)?;
+        let attention_id = format!(
+            "{}{}",
+            crate::store::AGENT_STATUS_ITEM_PREFIX,
+            address.address_id
+        );
+        if dismissed(
+            &attention_id,
+            None,
+            u64::try_from(opened_at_ms).unwrap_or(0),
+        ) {
+            return None;
+        }
+        Some(AttentionCard {
+            attention_id,
             source_id: address.address_id.clone(),
             thread_id: None,
             actions: Vec::new(),
@@ -1222,6 +1245,16 @@ fn threads(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<ThreadChip> {
 }
 
 const CLOSED_MEMBER_RETENTION_MS: i64 = 5 * 60 * 1_000;
+
+/// When Channels stops showing a stored warning as needing the person.
+pub(crate) fn attention_expires_at(item: &rows::AttentionRow) -> Option<i64> {
+    i64::try_from(
+        item.item
+            .opened_at_ms
+            .saturating_add(rows::ATTENTION_SHOWN_FOR_MS),
+    )
+    .ok()
+}
 
 pub(crate) fn closed_member_expires_at(address: &rows::AddressRow) -> Option<i64> {
     address

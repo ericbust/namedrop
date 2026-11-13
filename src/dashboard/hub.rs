@@ -1093,6 +1093,11 @@ impl Hub<'_> {
                     .addresses
                     .iter()
                     .filter_map(snapshot::closed_member_expires_at)
+                    .chain(
+                        rows.attention
+                            .iter()
+                            .filter_map(snapshot::attention_expires_at),
+                    )
                     .filter(|expiry| *expiry > now)
                     .min();
                 let mut snapshot = snapshot::build(&rows, label.as_deref(), now);
