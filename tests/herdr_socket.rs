@@ -365,6 +365,41 @@ fn the_state_directory_comes_from_the_herdr_name_then_the_neutral_one() {
     state_of(false);
 }
 
+/// With no state directory named, a command outside Herdr uses Namedrop's
+/// own default, and one under Herdr still refuses, because Herdr's plugin
+/// directory is the only one its panes share.
+#[test]
+fn the_default_state_directory_is_used_only_where_herdr_names_none() {
+    let f = Fixture::new();
+    let mut command = f.namedrop(None);
+    command
+        .env_remove("HERDR_PLUGIN_STATE_DIR")
+        .env_remove("XDG_STATE_HOME")
+        .env("NAMEDROP_ENDPOINT", "/run/neutral.sock");
+    let (output, calls) = f.launch_doctor(command, &["--space", "w1", "--pane", "p1"]);
+    assert!(output.status.success(), "{output:?}");
+    let default = f.0.join("home/.local/state/namedrop");
+    assert!(
+        calls.last().unwrap().contains(&format!(
+            " --env HERDR_PLUGIN_STATE_DIR={} ",
+            default.display()
+        )),
+        "{calls:#?}"
+    );
+
+    let f = Fixture::new();
+    let mut command = f.namedrop(Some("/run/inherited.sock"));
+    command.env_remove("HERDR_PLUGIN_STATE_DIR");
+    let (output, calls) = f.launch_doctor(command, &["--space", "w1", "--pane", "p1"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("--plugin-state, HERDR_PLUGIN_STATE_DIR or NAMEDROP_STATE_DIR is required"),
+        "{output:?}"
+    );
+    assert!(calls.is_empty(), "{calls:#?}");
+}
+
 #[test]
 fn the_mailbox_wake_hook_runs_herdr_on_a_neutral_endpoint() {
     let f = Fixture::new();
