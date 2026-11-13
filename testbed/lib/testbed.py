@@ -434,10 +434,15 @@ class Profile:
                          "# Source this file to enter a shell with only the testbed environment.\n" +
                          "testbed_shell() {\n  " + shlex.join(self.shell_command()) + ";\n}\n"
                          "testbed_shell\n")
+        bashrc = self.dir / "home/.bashrc"
+        prompt = "export PS1='{}'\n".format(SHELL_PS1.format(self.name))
         # A pane's login shell runs /etc/profile, whose path_helper puts the system directories
         # ahead of bin, where another claude can sign in some other way.
-        write_if_changed(self.dir / "home/.bashrc", "export PS1='{}'\nPATH={}:$PATH\n".format(
-            SHELL_PS1.format(self.name), shlex.quote(str(self.dir / "bin"))))
+        head = prompt + "PATH={}:$PATH\n".format(shlex.quote(str(self.dir / "bin")))
+        kept = bashrc.read_text() if bashrc.exists() else ""
+        if not kept.startswith(head):
+            # Namedrop's activation appends its own lines, which stay.
+            write_if_changed(bashrc, head + kept.removeprefix(prompt))
         bash_profile = self.dir / "home/.bash_profile"
         if not bash_profile.exists():
             write_if_changed(bash_profile, 'if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi\n')

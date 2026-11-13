@@ -1166,6 +1166,9 @@ def check_claude_login(scratch):
                                 str(profile.dir / "home/.bashrc")], capture_output=True, text=True,
                                env={"PATH": "{}:/usr/bin:/bin".format(elsewhere)})
         assert found.stdout.strip() == str(profile.dir / "bin/claude"), found
+        bashrc = profile.dir / "home/.bashrc"
+        bashrc.write_text("export PS1='{}'\n# activation's line\n".format(
+            testbed.SHELL_PS1.format(profile.name)))
 
         organization["status"] = 401
         rejected = refusal(lambda: prepared("test-stale-login"))
@@ -1235,6 +1238,8 @@ def check_claude_login(scratch):
             assert "./testbed stop" in refusal(lambda: prepared("test-default-login"))
             organization.update(organization_type="claude_max", name="me@example.com's Organization")
             prepared("test-stale-login")
+        assert bashrc.read_text().endswith("$PATH\n# activation's line\n"), bashrc.read_text()
+        assert bashrc.read_text().count("PATH=") == 1, bashrc.read_text()
     return ("Claude login: a token run sets the token, with or without a trailing newline, only "
             "inside Claude Code's launch and drops the default login's links; the profile's bashrc "
             "puts its claude first; no token, a rejected token, an unnamed organization, a token "
