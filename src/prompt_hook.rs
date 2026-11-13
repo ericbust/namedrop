@@ -25,12 +25,12 @@ pub struct Prompted {
 }
 
 /// Records that a Claude Code prompt starts a turn, from the hook's input and
-/// environment alone, before anything asks Herdr: a Herdr error must not leave
+/// its home's endpoint, before anything asks Herdr: a Herdr error must not leave
 /// the last Stop newest while the turn runs. A Claude Code prompt carries a
 /// prompt id and no turn id. A prompt another plugin's hook blocks or stops
 /// still counts as a started turn, so its mail waits for the next Stop or for
 /// the background agents.
-pub fn record(state: &Path, input: &str) -> Option<Prompted> {
+pub fn record(state: &Path, endpoint: Option<&str>, input: &str) -> Option<Prompted> {
     let input: PromptInput = serde_json::from_str(input).ok()?;
     if input.hook_event_name != "UserPromptSubmit"
         || input.prompt_id.is_none()
@@ -39,7 +39,7 @@ pub fn record(state: &Path, input: &str) -> Option<Prompted> {
         return None;
     }
     let prompted = Prompted {
-        socket: namedrop::locator::Locator::Endpoint.env()?,
+        socket: endpoint?.to_owned(),
         session: input.session_id.filter(|id| !id.is_empty())?,
         at_ms: SystemClock.now_unix_ms(),
         prompt: input.prompt.unwrap_or_default(),

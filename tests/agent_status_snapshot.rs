@@ -37,12 +37,6 @@ use std::{
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
-/// `collect_agent_status` reads `HERDR_PANE_ID` to learn which pane the panel
-/// itself occupies. The process environment is global, so every collection in
-/// this binary runs under this lock and nothing else here reads the
-/// environment; that keeps the `set_var` calls below free of a concurrent read.
-static ENVIRONMENT: Mutex<()> = Mutex::new(());
-
 struct TestDirectory {
     root: PathBuf,
     repo: PathBuf,
@@ -613,9 +607,7 @@ fn register(
     .unwrap();
 }
 
-/// Every collection in this binary goes through here so the panel's own pane,
-/// which `collect_agent_status` reads from the environment, is set under one
-/// lock rather than concurrently with another test's reading.
+/// A collection by the panel in `panel_pane`.
 fn collect(
     runtime: &LifecycleRuntime<'_, FakeMux, TestClock, SequenceIds>,
     expected_terminal: &str,
@@ -623,20 +615,13 @@ fn collect(
     panel_pane: Option<&str>,
     cancelled: &AtomicBool,
 ) -> Result<Value, String> {
-    let _guard = ENVIRONMENT
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    // SAFETY: the lock above is held by every reader of the environment in this
-    // test binary, so no other thread can read it while it is written here.
-    unsafe {
-        match panel_pane {
-            Some(pane_id) => std::env::set_var("HERDR_PANE_ID", pane_id),
-            None => std::env::remove_var("HERDR_PANE_ID"),
-        }
-    }
-    let collected = collect_agent_status(runtime, expected_terminal, expected_session, cancelled);
-    unsafe { std::env::remove_var("HERDR_PANE_ID") };
-    collected
+    collect_agent_status(
+        runtime,
+        expected_terminal,
+        expected_session,
+        panel_pane,
+        cancelled,
+    )
 }
 
 fn pane_ids(snapshot: &Value) -> Vec<String> {

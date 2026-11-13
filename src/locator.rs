@@ -14,7 +14,8 @@ use serde_json::{Map, Value};
 use std::{
     env,
     ffi::{OsStr, OsString},
-    path::PathBuf,
+    fs, io,
+    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -70,7 +71,10 @@ impl Locator {
     /// The value `lookup` gives, and which name gave it. A Herdr value counts
     /// even when empty, as it always has; an empty neutral value counts as
     /// unset.
-    pub fn resolve<V: AsRef<OsStr>>(self, lookup: impl Fn(&str) -> Option<V>) -> Option<(Name, V)> {
+    pub(crate) fn resolve<V: AsRef<OsStr>>(
+        self,
+        lookup: impl Fn(&str) -> Option<V>,
+    ) -> Option<(Name, V)> {
         let name = match self {
             Self::StateDir if lookup(self.herdr_var()).is_some() => Name::Herdr,
             Self::StateDir | Self::Endpoint | Self::Space | Self::Pane => home(&lookup),
@@ -83,22 +87,6 @@ impl Locator {
         .map(|value| (name, value))
     }
 
-    /// The value this process inherited, and which name held it. A value that
-    /// is not Unicode counts as unset.
-    pub fn inherited(self) -> Option<(Name, String)> {
-        let (name, value) = self.resolve(|name| env::var_os(name))?;
-        Some((name, value.into_string().ok()?))
-    }
-
-    pub fn env(self) -> Option<String> {
-        self.inherited().map(|(_, value)| value)
-    }
-
-    pub fn env_os(self) -> Option<OsString> {
-        self.resolve(|name| env::var_os(name))
-            .map(|(_, value)| value)
-    }
-
     /// The value a `collab/v1` tool environment carries, and the flag that
     /// passes it on.
     pub fn in_envelope(self, environment: &Map<String, Value>) -> Option<(&'static str, &str)> {
@@ -106,12 +94,12 @@ impl Locator {
             .map(|(name, value)| (self.flag_for(name), value))
     }
 
-    /// Gives a child process `value` under the name of `kind`'s set and
-    /// clears the other: Herdr's name, which a Herdr connection inherits, for
-    /// a Herdr endpoint, and the neutral name for a Rex one, so a Rex
-    /// endpoint never becomes `HERDR_SOCKET_PATH`.
-    pub fn pass(self, command: &mut Command, kind: MuxKind, value: impl AsRef<OsStr>) {
-        let (name, other) = match Name::of(kind) {
+    /// Gives a child process `value` under its name in `set` and clears the
+    /// other. For an endpoint's kind, [`Name::of`] gives Herdr's name, which a
+    /// Herdr connection inherits, for Herdr, and the neutral name for Rex, so
+    /// a Rex endpoint never becomes `HERDR_SOCKET_PATH`.
+    pub fn pass(self, command: &mut Command, set: Name, value: impl AsRef<OsStr>) {
+        let (name, other) = match set {
             Name::Herdr => (Name::Herdr, Name::Neutral),
             Name::Neutral => (Name::Neutral, Name::Herdr),
         };
@@ -127,6 +115,15 @@ impl Locator {
             .env_remove(self.herdr_var())
             .env_remove(self.neutral_var());
     }
+}
+
+/// The state directory a worker inherited from the hook or command that
+/// started it. The endpoint, space, and pane have no such reader: only
+/// `mux::home` reads them, from its `Inherited`.
+pub fn inherited_state_directory() -> Option<PathBuf> {
+    Locator::StateDir
+        .resolve(|name| env::var_os(name))
+        .map(|(_, value)| PathBuf::from(value))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -170,11 +167,81 @@ pub fn home<V>(lookup: impl Fn(&str) -> Option<V>) -> Name {
     }
 }
 
-/// The state directory: `flag`, then the inherited one. With neither, there
-/// is no default: under Herdr a default could only be a second database
-/// beside the plugin's, so step 4 adds one once the home is known to be Rex.
-pub fn state_directory(flag: Option<PathBuf>) -> Option<PathBuf> {
-    flag.or_else(|| Locator::StateDir.env_os().map(PathBuf::from))
+/// The state directory for a home of `kind`, from `flag`, then what `lookup`
+/// holds.
+///
+/// - Herdr: step 3's rule, with no default: `HERDR_PLUGIN_STATE_DIR`, else
+///   the directory of the location's set of names, so a Herdr set never reads
+///   `NAMEDROP_STATE_DIR`. A default could only be a second database beside
+///   the plugin's.
+/// - Rex: `NAMEDROP_STATE_DIR`, then the install record, then
+///   `$XDG_STATE_HOME/namedrop` or `$HOME/.local/state/namedrop`. Never
+///   `HERDR_PLUGIN_STATE_DIR`, which a Rex daemon may still inherit.
+pub fn state_directory(
+    flag: Option<PathBuf>,
+    kind: MuxKind,
+    lookup: impl Fn(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
+    flag.or_else(|| match kind {
+        MuxKind::Herdr => Locator::StateDir
+            .resolve(&lookup)
+            .map(|(_, value)| PathBuf::from(value)),
+        MuxKind::Rex => {
+            let set = |name: &str| lookup(name).filter(|value| !value.is_empty());
+            let absolute = |name: &str| {
+                set(name)
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_absolute())
+            };
+            set(Locator::StateDir.neutral_var())
+                .map(PathBuf::from)
+                .or_else(|| {
+                    let config = absolute("XDG_CONFIG_HOME")
+                        .or_else(|| absolute("HOME").map(|home| home.join(".config")))?;
+                    read_install_record(&install_record(&config))
+                })
+                .or_else(|| {
+                    absolute("XDG_STATE_HOME")
+                        .or_else(|| absolute("HOME").map(|home| home.join(".local/state")))
+                        .map(|state| state.join("namedrop"))
+                })
+        }
+    })
+}
+
+/// The install record under a config directory, `$XDG_CONFIG_HOME` or
+/// `$HOME/.config`: one line holding the state directory the installer bakes
+/// into the hook wrappers, so a Rex block's CLI opens the directory its hooks
+/// write.
+pub fn install_record(config: &Path) -> PathBuf {
+    config.join("namedrop/state-directory")
+}
+
+/// The record's absolute directory. A missing, unreadable, or relative
+/// record is none.
+pub fn read_install_record(record: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(record).ok()?;
+    let directory = PathBuf::from(text.strip_suffix('\n').unwrap_or(&text));
+    directory.is_absolute().then_some(directory)
+}
+
+/// Writes the record through a temporary file and a rename, so a reader sees
+/// the old line or the new one. An unchanged record is not written.
+pub fn write_install_record(record: &Path, state: &Path) -> io::Result<()> {
+    if read_install_record(record).as_deref() == Some(state) {
+        return Ok(());
+    }
+    let parent = record
+        .parent()
+        .ok_or_else(|| io::Error::other("the install record has no directory"))?;
+    fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(".state-directory.{}.tmp", std::process::id()));
+    let mut line = state.as_os_str().to_owned();
+    line.push("\n");
+    fs::write(&temporary, line.as_encoded_bytes())?;
+    fs::rename(&temporary, record).inspect_err(|_| {
+        let _ = fs::remove_file(&temporary);
+    })
 }
 
 #[cfg(test)]
@@ -316,7 +383,7 @@ mod tests {
     #[test]
     fn a_herdr_child_gets_the_herdr_name_and_loses_the_neutral_one() {
         let mut command = Command::new("true");
-        Locator::Space.pass(&mut command, MuxKind::Herdr, "w2");
+        Locator::Space.pass(&mut command, Name::of(MuxKind::Herdr), "w2");
         Locator::Pane.clear(&mut command);
         assert_eq!(
             child_environment(&command),
@@ -338,7 +405,7 @@ mod tests {
             (Locator::Space, "s1"),
             (Locator::Pane, "b1"),
         ] {
-            locator.pass(&mut command, MuxKind::Rex, value);
+            locator.pass(&mut command, Name::of(MuxKind::Rex), value);
         }
         assert_eq!(
             child_environment(&command),
@@ -366,5 +433,110 @@ mod tests {
         ] {
             assert_eq!(Name::for_endpoint(value), name, "{value:?}");
         }
+    }
+
+    fn state(kind: MuxKind, pairs: &[(&str, &str)]) -> Option<PathBuf> {
+        state_directory(None, kind, env(pairs))
+    }
+
+    #[test]
+    fn a_herdr_home_reads_step_3_s_state_directory_with_no_default() {
+        let home = [("HOME", "/home/u"), ("XDG_STATE_HOME", "/home/u/state")];
+        assert_eq!(state(MuxKind::Herdr, &home), None);
+        assert_eq!(
+            state_directory(Some("/flag".into()), MuxKind::Herdr, env(&home)),
+            Some("/flag".into())
+        );
+        let herdr = [
+            ("HERDR_SOCKET_PATH", "/h.sock"),
+            ("NAMEDROP_STATE_DIR", "/n"),
+            ("HOME", "/home/u"),
+        ];
+        assert_eq!(
+            state(MuxKind::Herdr, &herdr),
+            None,
+            "a Herdr set never reads NAMEDROP_STATE_DIR"
+        );
+        let mut plugin = herdr.to_vec();
+        plugin.push(("HERDR_PLUGIN_STATE_DIR", "/p"));
+        assert_eq!(state(MuxKind::Herdr, &plugin), Some("/p".into()));
+        assert_eq!(
+            state(MuxKind::Herdr, &[("NAMEDROP_STATE_DIR", "/n")]),
+            Some("/n".into()),
+            "the neutral set reads its own name, as on 17c580d"
+        );
+    }
+
+    #[test]
+    fn a_rex_home_reads_its_variable_then_the_install_record_then_a_default() {
+        let root = std::env::temp_dir().join(format!("nd-locator-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let home = root.join("home");
+        let home = home.to_str().unwrap();
+        let default = [("HOME", home), ("HERDR_PLUGIN_STATE_DIR", "/herdr")];
+        assert_eq!(
+            state(MuxKind::Rex, &default),
+            Some(Path::new(home).join(".local/state/namedrop")),
+            "never HERDR_PLUGIN_STATE_DIR"
+        );
+        let xdg = [("HOME", home), ("XDG_STATE_HOME", "/xdg/state")];
+        assert_eq!(
+            state(MuxKind::Rex, &xdg),
+            Some("/xdg/state/namedrop".into())
+        );
+
+        let record = install_record(&Path::new(home).join(".config"));
+        write_install_record(&record, Path::new("/recorded")).unwrap();
+        assert_eq!(state(MuxKind::Rex, &xdg), Some("/recorded".into()));
+        let config = root.join("config");
+        let elsewhere = [
+            ("HOME", home),
+            ("XDG_CONFIG_HOME", config.to_str().unwrap()),
+        ];
+        assert_eq!(
+            state(MuxKind::Rex, &elsewhere),
+            Some(Path::new(home).join(".local/state/namedrop")),
+            "the record is read from XDG_CONFIG_HOME when it is set"
+        );
+        write_install_record(&install_record(&config), Path::new("/configured")).unwrap();
+        assert_eq!(state(MuxKind::Rex, &elsewhere), Some("/configured".into()));
+
+        let mut named = xdg.to_vec();
+        named.push(("NAMEDROP_STATE_DIR", "/n"));
+        assert_eq!(state(MuxKind::Rex, &named), Some("/n".into()));
+        assert_eq!(
+            state_directory(Some("/flag".into()), MuxKind::Rex, env(&named)),
+            Some("/flag".into())
+        );
+        fs::write(&record, "relative/state\n").unwrap();
+        assert_eq!(
+            state(MuxKind::Rex, &xdg),
+            Some("/xdg/state/namedrop".into()),
+            "a relative record is no record"
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_install_record_round_trips_and_is_not_rewritten_unchanged() {
+        use std::os::unix::fs::MetadataExt;
+        let root = std::env::temp_dir().join(format!("nd-record-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let record = install_record(&root);
+        assert_eq!(read_install_record(&record), None);
+        write_install_record(&record, Path::new("/state/a b")).unwrap();
+        assert_eq!(fs::read_to_string(&record).unwrap(), "/state/a b\n");
+        assert_eq!(read_install_record(&record), Some("/state/a b".into()));
+        let inode = fs::metadata(&record).unwrap().ino();
+        write_install_record(&record, Path::new("/state/a b")).unwrap();
+        assert_eq!(fs::metadata(&record).unwrap().ino(), inode);
+        write_install_record(&record, Path::new("/state/c")).unwrap();
+        assert_eq!(read_install_record(&record), Some("/state/c".into()));
+        assert_eq!(
+            fs::read_dir(record.parent().unwrap()).unwrap().count(),
+            1,
+            "no temporary file is left"
+        );
+        fs::remove_dir_all(&root).unwrap();
     }
 }

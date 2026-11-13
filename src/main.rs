@@ -14,7 +14,10 @@ use namedrop::{
     execute_session_start_hook, execute_user_prompt_submit_hook, is_context_operation,
     is_control_operation, is_integration_operation, is_lifecycle_operation, is_message_operation,
     locator::{self, Locator, Name},
-    mux::{Budget, Mux},
+    mux::{
+        Budget, Mux,
+        home::{self, Home, Inherited, Location},
+    },
     render_command_result_to_text, render_command_result_to_text_within, validate_message_input,
 };
 use std::{
@@ -32,6 +35,7 @@ use std::{
 type Runtime<'a> = LifecycleRuntime<'a, Arc<dyn Mux>, SystemClock, ProcessIds>;
 
 fn main() -> ExitCode {
+    let inherited: &dyn Inherited = &namedrop::mux::home::ThisProcess;
     if env::args_os().skip(1).eq(["--runtime-info"]) {
         println!("{}", include_str!("../runtime.json").trim());
         return ExitCode::SUCCESS;
@@ -61,7 +65,9 @@ fn main() -> ExitCode {
                     Path::new(state),
                     &socket.to_string_lossy(),
                     &key.to_string_lossy(),
-                    schedule_dispatch,
+                    |operation, data, options| {
+                        schedule_dispatch(operation, data, options, inherited)
+                    },
                 )
             }
             _ => Err("invalid deferred command arguments".into()),
@@ -160,16 +166,16 @@ fn main() -> ExitCode {
     };
     if let Some((state, host)) = cli.subagent_hook() {
         let _ = namedrop::reminder::ensure_clock(state, None, Starter::Caller);
-        return run_subagent_hook(state, host);
+        return run_subagent_hook(state, host, inherited);
     }
     if let Some(state_directory) = cli.stop_hook_state_directory() {
         let _ = namedrop::reminder::ensure_clock(state_directory, None, Starter::StopHook);
-        stop_hook::run(state_directory);
+        stop_hook::run(state_directory, inherited);
         return ExitCode::SUCCESS;
     }
     if let Some(state_directory) = cli.stop_worker_state_directory() {
         let _ = namedrop::reminder::ensure_clock(state_directory, None, Starter::Caller);
-        stop_hook::run_worker(state_directory);
+        stop_hook::run_worker(state_directory, inherited);
         return ExitCode::SUCCESS;
     }
     if let Some((terminal, rows, cols)) = cli.dashboard_observer() {
@@ -191,15 +197,15 @@ fn main() -> ExitCode {
             cli.session_start_hook_state_directory()
                 .map(Path::to_path_buf)
         })
-        .or_else(|| locator::state_directory(None));
+        .or_else(|| state_directory(&cli.runtime, inherited));
     // The status worker outlives the hook that starts it and takes the
     // command gate itself, around each event it reconciles.
     if cli.is_agent_status_worker_hook() {
         if let Some(state) = selected_state.as_deref() {
-            let socket = Locator::Endpoint.env();
+            let socket = endpoint_of(location(&RuntimeOptions::default(), inherited));
             let _ = namedrop::reminder::ensure_clock(state, socket.as_deref(), Starter::Caller);
         }
-        return run_agent_status_worker();
+        return run_agent_status_worker(inherited);
     }
     // A dashboard successor started mid-update waits a bounded time rather
     // than parking forever behind a stuck migration.
@@ -248,7 +254,7 @@ fn main() -> ExitCode {
             .runtime
             .endpoint
             .clone()
-            .or_else(|| Locator::Endpoint.env());
+            .or_else(|| endpoint_of(location(&cli.runtime, inherited)));
         let _ = namedrop::reminder::ensure_clock(state, socket.as_deref(), Starter::Caller);
     }
     if cli.is_dashboard_server() {
@@ -279,16 +285,16 @@ fn main() -> ExitCode {
     };
 
     if let Some(state_directory) = cli.user_prompt_submit_hook_state_directory() {
-        return run_context_hook(state_directory, execute_user_prompt_submit_hook);
+        return run_context_hook(state_directory, inherited, execute_user_prompt_submit_hook);
     }
     if let Some(state_directory) = cli.session_start_hook_state_directory() {
-        return run_context_hook(state_directory, execute_session_start_hook);
+        return run_context_hook(state_directory, inherited, execute_session_start_hook);
     }
     if let Some(state_directory) = cli.mailbox_wake_hook_state_directory() {
-        return run_mailbox_wake_hook(state_directory);
+        return run_mailbox_wake_hook(state_directory, inherited);
     }
     if cli.is_agent_status_changed_hook() {
-        return run_agent_status_changed_hook();
+        return run_agent_status_changed_hook(inherited);
     }
     if matches!(cli.operation(), "reconcile" | "event.pane-lifecycle")
         && let Some(state) = selected_state.as_deref()
@@ -296,11 +302,11 @@ fn main() -> ExitCode {
         namedrop::update_check::start(state, SystemClock.now_unix_ms());
     }
     if let Some(attempt) = cli.terminal_attempt() {
-        let result = with_runtime_options(&cli.runtime, |runtime| {
+        let result = with_runtime_options(&cli.runtime, inherited, |runtime| {
             namedrop::execute_terminal(attempt, runtime)
         });
         if result.is_ok()
-            && let Err(error) = wake_mailboxes(&cli.runtime)
+            && let Err(error) = wake_mailboxes(&cli.runtime, inherited)
         {
             eprintln!("Result saved; could not wake delivery: {error}");
         }
@@ -315,7 +321,7 @@ fn main() -> ExitCode {
     if let Some(open_browser) = cli.dashboard_open_browser() {
         return finish(
             "dashboard",
-            with_runtime_options(&cli.runtime, |runtime| {
+            with_runtime_options(&cli.runtime, inherited, |runtime| {
                 namedrop::dashboard::open(
                     runtime,
                     open_browser,
@@ -329,13 +335,19 @@ fn main() -> ExitCode {
         return finish("ui.install-shortcuts", naming_ui::install_shortcuts(config));
     }
     if cli.is_reset_tour() {
-        return finish("ui.reset-tour", naming_ui::reset_tour(&cli.runtime));
+        return finish(
+            "ui.reset-tour",
+            naming_ui::reset_tour(&cli.runtime, inherited),
+        );
     }
     if let Some((launch, mode)) = cli.naming_ui() {
         return if launch {
-            finish("ui.launch", naming_ui::launch(&cli.runtime, mode))
+            finish(
+                "ui.launch",
+                naming_ui::launch(&cli.runtime, inherited, mode),
+            )
         } else {
-            naming_ui::run(&cli.runtime, mode)
+            naming_ui::run(&cli.runtime, inherited, mode)
         };
     }
     if let Some(alias) = cli.agent_name() {
@@ -343,7 +355,7 @@ fn main() -> ExitCode {
         // Absent stays null, which preserves the saved persona; `--generic`
         // sends the blank description that clears it.
         let persona = cli.name_persona().map(str::to_owned);
-        let kind = match choose_name_type(&cli) {
+        let kind = match choose_name_type(&cli, inherited) {
             Ok(kind) => kind,
             Err(error) => return finish("name", Err(error)),
         };
@@ -353,6 +365,7 @@ fn main() -> ExitCode {
                 "name",
                 serde_json::json!({"alias": alias,"pane_type":kind,"persona":persona}),
                 &cli.runtime,
+                inherited,
             ),
         );
     }
@@ -396,17 +409,17 @@ fn main() -> ExitCode {
                 64,
             );
         }
-        let report =
-            match with_runtime_options(&cli.runtime, |runtime| Ok(diagnose_collaboration(runtime)))
-            {
-                Ok(report) => report,
-                Err(error) => {
-                    return write_result(
-                        &CommandResult::rejected(operation, "operation_failed", error),
-                        2,
-                    );
-                }
-            };
+        let report = match with_runtime_options(&cli.runtime, inherited, |runtime| {
+            Ok(diagnose_collaboration(runtime))
+        }) {
+            Ok(report) => report,
+            Err(error) => {
+                return write_result(
+                    &CommandResult::rejected(operation, "operation_failed", error),
+                    2,
+                );
+            }
+        };
         let exit_code = match report.status {
             namedrop::HealthStatus::Healthy => 0,
             namedrop::HealthStatus::NeedsAttention => 1,
@@ -421,7 +434,7 @@ fn main() -> ExitCode {
         };
     }
 
-    match run_bound_operation(operation, input, &cli.runtime) {
+    match run_bound_operation(operation, input, &cli.runtime, inherited) {
         Ran::Refused(error) => {
             write_result(&CommandResult::invalid_request(input_error(error)), 64)
         }
@@ -445,9 +458,10 @@ fn run_bound_operation(
     operation: &'static str,
     input: serde_json::Value,
     options: &RuntimeOptions,
+    inherited: &dyn Inherited,
 ) -> Ran {
     let input = if operation == "reply" {
-        let state = locator::state_directory(options.plugin_state.clone());
+        let state = state_directory(options, inherited);
         match namedrop::expand_attempt_reply(input, state.as_deref()) {
             Ok(input) => input,
             Err(error) => return Ran::Refused(error),
@@ -461,7 +475,9 @@ fn run_bound_operation(
         return Ran::Refused(error);
     }
 
-    if let Some(result) = namedrop::deferred_commands::try_defer(operation, &input, options) {
+    if let Some(result) =
+        namedrop::deferred_commands::try_defer(operation, &input, options, inherited)
+    {
         return Ran::Finished(result);
     }
 
@@ -475,31 +491,47 @@ fn run_bound_operation(
             | "handoff.results"
             | "handoff.preview"
     ) {
-        run_operation(operation, input, OperationKind::Handoff, options)
+        run_operation(operation, input, OperationKind::Handoff, options, inherited)
     } else if operation.starts_with("reminder.") {
-        run_operation(operation, input, OperationKind::Reminder, options)
+        run_operation(
+            operation,
+            input,
+            OperationKind::Reminder,
+            options,
+            inherited,
+        )
     } else if matches!(operation, "group.list" | "group.set" | "group.remove") {
-        run_operation(operation, input, OperationKind::Group, options)
+        run_operation(operation, input, OperationKind::Group, options, inherited)
     } else if is_control_operation(operation) {
-        run_operation(operation, input, OperationKind::Control, options)
+        run_operation(operation, input, OperationKind::Control, options, inherited)
     } else if is_context_operation(operation) {
-        run_operation(operation, input, OperationKind::Context, options)
+        run_operation(operation, input, OperationKind::Context, options, inherited)
     } else if is_integration_operation(operation) {
-        run_operation(operation, input, OperationKind::Integration, options)
+        run_operation(
+            operation,
+            input,
+            OperationKind::Integration,
+            options,
+            inherited,
+        )
     } else if is_message_operation(operation) {
-        run_operation(operation, input, OperationKind::Message, options)
+        run_operation(operation, input, OperationKind::Message, options, inherited)
     } else if is_lifecycle_operation(operation) {
-        run_lifecycle(operation, input, options)
+        run_lifecycle(operation, input, options, inherited)
     } else {
         Err(format!("unsupported operation: {operation}"))
     };
     Ran::Finished(result.map(|mut data| {
-        schedule_dispatch(operation, &mut data, options);
+        schedule_dispatch(operation, &mut data, options, inherited);
         data
     }))
 }
 
-fn run_subagent_hook(state: &Path, host: namedrop::AgentRuntime) -> ExitCode {
+fn run_subagent_hook(
+    state: &Path,
+    host: namedrop::AgentRuntime,
+    inherited: &dyn Inherited,
+) -> ExitCode {
     if thread::Builder::new()
         .spawn(|| {
             thread::sleep(Duration::from_secs(5));
@@ -524,13 +556,14 @@ fn run_subagent_hook(state: &Path, host: namedrop::AgentRuntime) -> ExitCode {
     else {
         return ExitCode::SUCCESS;
     };
-    let identity = Locator::Endpoint
-        .env()
-        .zip(Locator::Space.env())
-        .zip(Locator::Pane.env())
-        .and_then(|((socket, workspace), pane)| {
-            namedrop::subagent::ParentIdentity::new(&socket, &workspace, &pane, &session)
-        });
+    let identity = location(&RuntimeOptions::default(), inherited).and_then(|location| {
+        namedrop::subagent::ParentIdentity::new(
+            &location.endpoint?.key,
+            location.space?.as_str(),
+            location.pane?.as_str(),
+            &session,
+        )
+    });
     if let Some(parent) = identity {
         let _ = namedrop::subagent::record(
             state,
@@ -546,7 +579,12 @@ fn run_subagent_hook(state: &Path, host: namedrop::AgentRuntime) -> ExitCode {
 /// process, dispatches what they queued after the command has answered, so the
 /// caller never waits on the recipient's settle delay or prompt. When no worker
 /// can start, the command drains before it answers, so delivery still happens.
-fn schedule_dispatch(operation: &str, data: &mut serde_json::Value, options: &RuntimeOptions) {
+fn schedule_dispatch(
+    operation: &str,
+    data: &mut serde_json::Value,
+    options: &RuntimeOptions,
+    inherited: &dyn Inherited,
+) {
     let hands_off = matches!(
         operation,
         "send" | "reply" | "complete" | namedrop::final_reply::STOP_NO_REPLY
@@ -554,7 +592,7 @@ fn schedule_dispatch(operation: &str, data: &mut serde_json::Value, options: &Ru
     if !hands_off && !needs_mailbox_watcher(data) {
         return;
     }
-    let woken = wake_mailboxes(options);
+    let woken = wake_mailboxes(options, inherited);
     if let Err(error) = &woken {
         eprintln!("Command queued; could not start shell watcher: {error}");
     }
@@ -567,7 +605,9 @@ fn schedule_dispatch(operation: &str, data: &mut serde_json::Value, options: &Ru
     };
     data["dispatch"] = serde_json::json!("waiting");
     data["dispatch_error"] = serde_json::json!(error);
-    if let Err(error) = with_runtime_options(options, |runtime| drain_inline(data, runtime)) {
+    if let Err(error) =
+        with_runtime_options(options, inherited, |runtime| drain_inline(data, runtime))
+    {
         data["drain"] = serde_json::json!({"error": error});
     }
 }
@@ -591,8 +631,8 @@ fn drain_inline(data: &mut serde_json::Value, runtime: &Runtime<'_>) -> Result<(
     Ok(())
 }
 
-fn wake_mailboxes(options: &RuntimeOptions) -> Result<(), String> {
-    with_runtime_options(options, wake_runtime_mailboxes)
+fn wake_mailboxes(options: &RuntimeOptions, inherited: &dyn Inherited) -> Result<(), String> {
+    with_runtime_options(options, inherited, wake_runtime_mailboxes)
 }
 
 fn drain_report(result: &serde_json::Value) -> Result<namedrop::DrainReport, String> {
@@ -754,11 +794,14 @@ fn schedule_mailbox_workers(
     }
 }
 
-fn choose_name_type(cli: &Cli) -> Result<Option<namedrop::PaneType>, String> {
+fn choose_name_type(
+    cli: &Cli,
+    inherited: &dyn Inherited,
+) -> Result<Option<namedrop::PaneType>, String> {
     if cli.name_pane_type().is_some() || !io::stdin().is_terminal() || !io::stderr().is_terminal() {
         return Ok(cli.name_pane_type());
     }
-    let default = with_runtime_options(&cli.runtime, namedrop::default_pane_type)?;
+    let default = with_runtime_options(&cli.runtime, inherited, namedrop::default_pane_type)?;
     loop {
         eprint!(
             "Pane type: terminal / agent{}: ",
@@ -823,6 +866,7 @@ fn run_lifecycle(
     operation: &'static str,
     mut input: serde_json::Value,
     options: &RuntimeOptions,
+    inherited: &dyn Inherited,
 ) -> Result<serde_json::Value, String> {
     if matches!(
         operation,
@@ -832,7 +876,13 @@ fn run_lifecycle(
     {
         input = plugin_event_input(operation, &event)?;
     }
-    run_operation(operation, input, OperationKind::Lifecycle, options)
+    run_operation(
+        operation,
+        input,
+        OperationKind::Lifecycle,
+        options,
+        inherited,
+    )
 }
 
 fn plugin_event_input(operation: &str, serialized: &str) -> Result<serde_json::Value, String> {
@@ -858,8 +908,9 @@ fn run_operation(
     input: serde_json::Value,
     kind: OperationKind,
     options: &RuntimeOptions,
+    inherited: &dyn Inherited,
 ) -> Result<serde_json::Value, String> {
-    with_runtime_options(options, |runtime| {
+    with_runtime_options(options, inherited, |runtime| {
         let result = match kind {
             OperationKind::Reminder => {
                 namedrop::execute_reminder_operation(operation, input, runtime)
@@ -892,6 +943,7 @@ fn run_operation(
 
 fn with_runtime_at<T>(
     state_directory: &Path,
+    inherited: &dyn Inherited,
     action: impl FnOnce(&Runtime<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
     with_runtime_options(
@@ -899,30 +951,101 @@ fn with_runtime_at<T>(
             plugin_state: Some(state_directory.to_path_buf()),
             ..Default::default()
         },
+        inherited,
         action,
     )
 }
 
+/// The runtime of the multiplexer this process runs in: the Herdr body as it
+/// always ran, or a Rex place from the home.
 fn with_runtime_options<T>(
     options: &RuntimeOptions,
+    inherited: &dyn Inherited,
     action: impl FnOnce(&Runtime<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
+    let home = home::resolve(&options.flags(), inherited)?;
     let state_directory =
-        locator::state_directory(options.plugin_state.clone()).ok_or_else(state_required)?;
+        locator::state_directory(options.plugin_state.clone(), home.kind(), |name| {
+            inherited.var(name)
+        })
+        .ok_or_else(state_required)?;
+    let place = match home {
+        Home::Herdr => {
+            let location = home
+                .location(inherited)
+                .expect("a Herdr home has a location");
+            return with_herdr_runtime(options, &location, &state_directory, action);
+        }
+        Home::Rex(place) => place,
+        Home::RexDeferred(_) => {
+            return Err("a deferred Rex place runs no command of its own".to_owned());
+        }
+    };
+    let directories = namedrop::InheritedDirectories::from_environment();
+    let cwd = env::current_dir().map_err(|error| error.to_string())?;
+    let mux = namedrop::mux::connect(
+        &state_directory,
+        &place.endpoint,
+        Budget::ADAPTER_DEFAULT,
+        Arc::default(),
+    )
+    .map_err(|error| error.to_string())?;
+    let clock = SystemClock;
+    let ids = ProcessIds::default();
+    action(&LifecycleRuntime {
+        state_directory: &state_directory,
+        home_directory: directories.home(),
+        agent_config: directories.agent_config(),
+        cwd: &cwd,
+        workspace_id: place.space.as_ref().map(namedrop::SpaceId::as_str),
+        current_pane_id: place.pane.as_ref().map(namedrop::mux::PaneId::as_str),
+        session_socket_id: &place.endpoint.key,
+        mux: &mux,
+        clock: &clock,
+        ids: &ids,
+    })
+}
+
+/// The state directory of the home this process runs in. A home that cannot
+/// be resolved reads Herdr's order, and the command reports the home's error
+/// when it builds its runtime.
+fn state_directory(options: &RuntimeOptions, inherited: &dyn Inherited) -> Option<PathBuf> {
+    let kind = home::resolve(&options.flags(), inherited)
+        .map_or(namedrop::mux::MuxKind::Herdr, |home| home.kind());
+    locator::state_directory(options.plugin_state.clone(), kind, |name| {
+        inherited.var(name)
+    })
+}
+
+fn with_herdr_runtime<T>(
+    options: &RuntimeOptions,
+    location: &Location,
+    state_directory: &Path,
+    action: impl FnOnce(&Runtime<'_>) -> Result<T, String>,
+) -> Result<T, String> {
     let directories = namedrop::InheritedDirectories::from_environment();
     let cwd = env::current_dir().map_err(|error| error.to_string())?;
     let herdr = namedrop::mux::herdr::connect(
-        connection_endpoint(options.endpoint.clone()).as_deref(),
+        connection_endpoint(options.endpoint.clone(), location).as_deref(),
         Budget::ADAPTER_DEFAULT,
         Arc::default(),
     );
-    let mut workspace_id = options.space.clone().or_else(|| Locator::Space.env());
+    let mut workspace_id = options.space.clone().or_else(|| {
+        location
+            .space
+            .as_ref()
+            .map(|space| space.as_str().to_owned())
+    });
     // An explicit --pane is the caller's assertion. An inherited pane ID can
     // be stale: a daemon keeps the variables of the pane it started in, so it
     // only counts when this process still runs under that pane's shell.
     let mut pane_id = match options.pane.clone() {
         Some(pane) => Some(pane),
-        None => match Locator::Pane.inherited() {
+        None => match location
+            .pane
+            .as_ref()
+            .map(|pane| (location.names, pane.as_str()))
+        {
             Some((name, pane)) => {
                 let sessions: Vec<String> = ["CODEX_SESSION_ID", "CLAUDE_CODE_SESSION_ID"]
                     .into_iter()
@@ -930,8 +1053,8 @@ fn with_runtime_options<T>(
                     .filter(|session| !session.is_empty())
                     .collect();
                 let sessions: Vec<&str> = sessions.iter().map(String::as_str).collect();
-                namedrop::verify_inherited_pane(&herdr, name, &pane, &sessions)?;
-                Some(pane)
+                namedrop::verify_inherited_pane(&herdr, name, pane, &sessions)?;
+                Some(pane.to_owned())
             }
             None => None,
         },
@@ -953,11 +1076,11 @@ fn with_runtime_options<T>(
         workspace_id = Some(space);
         pane_id = pane_id.or(Some(pane));
     }
-    let socket_id = session_socket_id(options.endpoint.clone());
+    let socket_id = session_socket_id(options.endpoint.clone(), location);
     let clock = SystemClock;
     let ids = ProcessIds::default();
     action(&LifecycleRuntime {
-        state_directory: &state_directory,
+        state_directory,
         home_directory: directories.home(),
         agent_config: directories.agent_config(),
         cwd: &cwd,
@@ -975,13 +1098,19 @@ fn with_runtime_options<T>(
 /// cannot run must not interrupt the person's turn.
 fn run_context_hook(
     state_directory: &Path,
+    inherited: &dyn Inherited,
     execute: fn(&str, &Runtime<'_>) -> Option<serde_json::Value>,
 ) -> ExitCode {
     let mut input = String::new();
     if io::stdin().read_to_string(&mut input).is_err() {
         return ExitCode::SUCCESS;
     }
-    let prompted = prompt_hook::record(state_directory, &input);
+    let location = location(&RuntimeOptions::default(), inherited);
+    let prompted = prompt_hook::record(
+        state_directory,
+        endpoint_of(location.clone()).as_deref(),
+        &input,
+    );
     namedrop::forget_shown_roster(&input, state_directory);
     namedrop::record_hook_run(
         &input,
@@ -989,7 +1118,7 @@ fn run_context_hook(
         env::var_os("PLUGIN_ROOT").as_deref().map(Path::new),
     );
     let mut output = namedrop::execute_codex_app_server_hook(&input).or_else(|| {
-        with_runtime_at(state_directory, |runtime| {
+        with_runtime_at(state_directory, inherited, |runtime| {
             let _ = namedrop::deferred_commands::ensure_worker(
                 runtime.state_directory,
                 runtime.session_socket_id,
@@ -1014,17 +1143,47 @@ fn run_context_hook(
     {
         prompted.blocked(state_directory);
     }
+    if output.as_ref().is_some_and(|output| {
+        output["decision"] == "block" && output["reason"] == namedrop::MESSAGE_SENT
+    }) && let Err(error) = start_mailbox_wake(state_directory, location.as_ref())
+    {
+        eprintln!("could not wake Namedrop delivery: {error}");
+    }
     if let Some(output) = output {
         let _ = serde_json::to_writer(io::stdout().lock(), &output);
     }
     ExitCode::SUCCESS
 }
 
+/// The wake after a prompt sent a mention. It outlives the hook, so it gets
+/// the hook's endpoint and space through the daemon door rather than proving
+/// a block or pane of its own. Without a space it discovers one from its
+/// directory, and without an endpoint it uses Herdr's default socket, as the
+/// wake the wrapper backgrounded did.
+fn start_mailbox_wake(state: &Path, location: Option<&Location>) -> Result<(), String> {
+    let executable = namedrop::runtime_executable()?;
+    use namedrop::daemon::Scope;
+    let endpoint = location.and_then(|location| location.endpoint.as_ref());
+    let space = location.and_then(|location| location.space.as_ref());
+    let scope = match (endpoint, space, location) {
+        (Some(endpoint), Some(space), _) => Scope::Space(endpoint, space),
+        (Some(endpoint), None, _) => Scope::Endpoint(endpoint),
+        (None, Some(space), Some(location)) => Scope::SpaceAlone(location.names, space),
+        (None, _, _) => Scope::None,
+    };
+    namedrop::daemon::command(&executable, scope, Starter::Caller)
+        .args(["hook", "mailbox-wake", "--state-directory"])
+        .arg(state)
+        .spawn()
+        .map(drop)
+        .map_err(|error| error.to_string())
+}
+
 /// The socket that scopes this session's state: the caller's, the pane's, or
 /// the one the running Herdr server reports.
-fn session_socket_id(explicit: Option<String>) -> String {
+fn session_socket_id(explicit: Option<String>, location: &Location) -> String {
     explicit
-        .or_else(|| Locator::Endpoint.env())
+        .or_else(|| endpoint_of(Some(location.clone())))
         .or_else(namedrop::mux::herdr::server_socket)
         .unwrap_or_else(|| "default".to_owned())
 }
@@ -1032,11 +1191,23 @@ fn session_socket_id(explicit: Option<String>) -> String {
 /// The socket a Herdr connection names: the caller's, or `NAMEDROP_ENDPOINT`
 /// outside Herdr. Under Herdr each `herdr` command inherits
 /// `HERDR_SOCKET_PATH`, or Herdr's default, as it always has.
-fn connection_endpoint(explicit: Option<String>) -> Option<String> {
-    explicit.or_else(|| match Locator::Endpoint.inherited() {
-        Some((Name::Neutral, endpoint)) => Some(endpoint),
-        _ => None,
+fn connection_endpoint(explicit: Option<String>, location: &Location) -> Option<String> {
+    explicit.or_else(|| match location.names {
+        Name::Neutral => endpoint_of(Some(location.clone())),
+        Name::Herdr => None,
     })
+}
+
+/// The location of the home `options` and this process name, or `None`
+/// when the home cannot be resolved or is a deferral.
+fn location(options: &RuntimeOptions, inherited: &dyn Inherited) -> Option<Location> {
+    home::resolve(&options.flags(), inherited)
+        .ok()?
+        .location(inherited)
+}
+
+fn endpoint_of(location: Option<Location>) -> Option<String> {
+    location?.endpoint.map(|endpoint| endpoint.key)
 }
 
 fn state_required() -> String {
@@ -1047,16 +1218,32 @@ fn state_required() -> String {
 /// sent. Its hook shell has exited by the time it runs, so it is nobody's
 /// pane: it reconciles the whole space and takes no identity from the pane
 /// ID it inherited, which no session ID vouches for under Codex.
-fn run_mailbox_wake_hook(state_directory: &Path) -> ExitCode {
+fn run_mailbox_wake_hook(state_directory: &Path, inherited: &dyn Inherited) -> ExitCode {
     let wake = || -> Result<(), String> {
+        let home = home::resolve(&home::Flags::default(), inherited)?;
+        if let Home::Rex(place) = &home {
+            let space = place
+                .space
+                .as_ref()
+                .ok_or("a Rex mailbox wake needs the space its starter gave it")?;
+            return schedule_mailbox_workers(
+                state_directory,
+                &place.endpoint.key,
+                space.as_str(),
+                true,
+            );
+        }
+        let location = home
+            .location(inherited)
+            .ok_or("a deferred Rex place wakes no mailbox")?;
         let herdr = namedrop::mux::herdr::connect(
-            connection_endpoint(None).as_deref(),
+            connection_endpoint(None, &location).as_deref(),
             Budget::ADAPTER_DEFAULT,
             Arc::default(),
         );
-        let socket_id = session_socket_id(None);
-        let space_id = match Locator::Space.env() {
-            Some(space_id) => space_id,
+        let socket_id = session_socket_id(None, &location);
+        let space_id = match location.space {
+            Some(space_id) => space_id.as_str().to_owned(),
             None => {
                 let cwd = env::current_dir().map_err(|error| error.to_string())?;
                 namedrop::discover_worktree(&herdr, &cwd)?.workspace_id
@@ -1073,7 +1260,7 @@ fn run_mailbox_wake_hook(state_directory: &Path) -> ExitCode {
     }
 }
 
-fn run_agent_status_changed_hook() -> ExitCode {
+fn run_agent_status_changed_hook(inherited: &dyn Inherited) -> ExitCode {
     let input = match env::var("HERDR_PLUGIN_EVENT_JSON")
         .map_err(|_| "HERDR_PLUGIN_EVENT_JSON is required for an event hook".to_owned())
         .and_then(|event| plugin_event_input("event.agent-status-changed", &event))
@@ -1084,7 +1271,8 @@ fn run_agent_status_changed_hook() -> ExitCode {
             return ExitCode::from(65);
         }
     };
-    let (state_directory, socket_id, space_id) = match agent_status_reconciliation_scope() {
+    let (state_directory, socket_id, space_id) = match agent_status_reconciliation_scope(inherited)
+    {
         Ok(scope) => scope,
         Err(error) => {
             eprintln!("could not queue Namedrop reconciliation: {error}");
@@ -1126,13 +1314,15 @@ fn status_worker_command(
     command
         .args(["hook", "agent-status-worker"])
         .env("NAMEDROP_HERDR_TIMEOUT_MS", "10000");
-    Locator::StateDir.pass(&mut command, endpoint.kind, state_directory);
+    Locator::StateDir.pass(&mut command, Name::of(endpoint.kind), state_directory);
     Ok(command)
 }
 
 /// The state directory, endpoint, and space a status hook queues its event
-/// for, from the names the plugin process inherited.
-fn agent_status_reconciliation_scope() -> Result<(PathBuf, String, String), String> {
+/// for, and its worker serves, from the home of the process.
+fn agent_status_reconciliation_scope(
+    inherited: &dyn Inherited,
+) -> Result<(PathBuf, String, String), String> {
     let required = |locator: Locator| {
         format!(
             "{} or {} is required",
@@ -1140,15 +1330,14 @@ fn agent_status_reconciliation_scope() -> Result<(PathBuf, String, String), Stri
             locator.neutral_var()
         )
     };
-    let state_directory = Locator::StateDir
-        .env_os()
-        .map(PathBuf::from)
+    let home = home::resolve(&home::Flags::default(), inherited)?;
+    let state_directory = locator::state_directory(None, home.kind(), |name| inherited.var(name))
         .ok_or_else(|| required(Locator::StateDir))?;
-    let socket_id = Locator::Endpoint
-        .env()
-        .ok_or_else(|| required(Locator::Endpoint))?;
-    let space_id = Locator::Space
-        .env()
+    let location = home.location(inherited);
+    let socket_id = endpoint_of(location.clone()).ok_or_else(|| required(Locator::Endpoint))?;
+    let space_id = location
+        .and_then(|location| location.space)
+        .map(|space| space.as_str().to_owned())
         .ok_or_else(|| required(Locator::Space))?;
     Ok((state_directory, socket_id, space_id))
 }
@@ -1226,15 +1415,15 @@ fn retryable_queue_scan(error: &io::Error) -> bool {
     )
 }
 
-fn run_agent_status_worker() -> ExitCode {
+fn run_agent_status_worker(inherited: &dyn Inherited) -> ExitCode {
     // The hook that starts the worker runs in a pane's directory, which can be
     // removed while the worker lives; every reconcile reads the current one.
-    if let Some(state) = Locator::StateDir.env_os().map(PathBuf::from)
+    if let Some(state) = locator::inherited_state_directory()
         && state.is_absolute()
     {
         let _ = env::set_current_dir(state);
     }
-    let directory = match agent_status_reconciliation_scope() {
+    let directory = match agent_status_reconciliation_scope(inherited) {
         Ok((state, socket, space)) => reconciliation_directory(&state, &socket, &space),
         Err(_) => return ExitCode::SUCCESS,
     };
@@ -1252,7 +1441,13 @@ fn run_agent_status_worker() -> ExitCode {
     if lock.try_lock().is_err() {
         return ExitCode::SUCCESS;
     }
-    run_agent_status_worker_queue(&directory, lock, None, pending_agent_status_reconciliations)
+    run_agent_status_worker_queue(
+        &directory,
+        lock,
+        None,
+        inherited,
+        pending_agent_status_reconciliations,
+    )
 }
 
 enum ReconciliationWork {
@@ -1348,6 +1543,7 @@ fn run_agent_status_worker_queue(
     directory: &Path,
     lock: fs::File,
     deadline: Option<Instant>,
+    inherited: &dyn Inherited,
     scan: impl FnMut(&Path) -> io::Result<Vec<PathBuf>>,
 ) -> ExitCode {
     run_agent_status_worker_queue_with_io(
@@ -1360,7 +1556,7 @@ fn run_agent_status_worker_queue(
             // The worker can wait out retries for days, so it holds the
             // command gate only while it reconciles, and an update between
             // units hands the queue to the runtime it selected.
-            let _gate = match Locator::StateDir.env_os().map(PathBuf::from) {
+            let _gate = match locator::inherited_state_directory() {
                 Some(state) => {
                     let gate = namedrop::runtime_command_guard(&state, None)?;
                     namedrop::runtime_reexec_if_replaced(&state)?;
@@ -1369,7 +1565,7 @@ fn run_agent_status_worker_queue(
                 None => None,
             };
             if input == serde_json::json!({"operation":"mailbox-wake"}) {
-                with_runtime_options(&RuntimeOptions::default(), |runtime| {
+                with_runtime_options(&RuntimeOptions::default(), inherited, |runtime| {
                     namedrop::drain_mailboxes(runtime).and_then(|report| {
                         serde_json::to_value(report).map_err(|error| error.to_string())
                     })
@@ -1377,7 +1573,7 @@ fn run_agent_status_worker_queue(
             } else if input["operation"] == "draft-recheck" {
                 let held = serde_json::from_value(input["held"].clone())
                     .map_err(|error| format!("invalid operation input: {error}"))?;
-                with_runtime_options(&RuntimeOptions::default(), |runtime| {
+                with_runtime_options(&RuntimeOptions::default(), inherited, |runtime| {
                     namedrop::recheck_drafts(runtime, held).and_then(|report| {
                         serde_json::to_value(report).map_err(|error| error.to_string())
                     })
@@ -1387,6 +1583,7 @@ fn run_agent_status_worker_queue(
                     "event.agent-status-changed",
                     input,
                     &RuntimeOptions::default(),
+                    inherited,
                 )
             }
         },
@@ -1638,6 +1835,37 @@ fn wait_for_marker_or_deadline(
 #[cfg(test)]
 mod worker_shutdown_tests {
     use super::*;
+
+    /// A process with no location names, which resolves the Herdr home
+    /// without reading the real environment or any socket.
+    struct Unclaimed;
+
+    impl Inherited for Unclaimed {
+        fn var(&self, _name: &str) -> Option<std::ffi::OsString> {
+            None
+        }
+
+        fn id(&self) -> u32 {
+            0
+        }
+
+        fn ancestors(&self) -> Vec<u32> {
+            Vec::new()
+        }
+
+        fn peer(&self, _socket: &Path) -> io::Result<u32> {
+            Err(io::ErrorKind::NotFound.into())
+        }
+
+        fn claimed(
+            &self,
+            _socket: &Path,
+            _session: &str,
+            _block: &str,
+        ) -> Result<home::Claimed, String> {
+            Err("no Rex claim".to_owned())
+        }
+    }
 
     #[test]
     fn eventless_rejections_keep_terminal_requests_on_the_short_retry() {
@@ -2134,15 +2362,21 @@ mod worker_shutdown_tests {
             fs::write(&later, b"invalid marker").unwrap();
             let mut scans = 0;
             assert_eq!(
-                run_agent_status_worker_queue(&queue.0, queue.lock(), None, |directory| {
-                    scans += 1;
-                    assert!(scans < 10, "poisoned marker caused a rescan loop");
-                    let pending = pending_agent_status_reconciliations(directory)?;
-                    if scans == 1 && name == "removed" {
-                        fs::remove_file(&marker).unwrap();
+                run_agent_status_worker_queue(
+                    &queue.0,
+                    queue.lock(),
+                    None,
+                    &Unclaimed,
+                    |directory| {
+                        scans += 1;
+                        assert!(scans < 10, "poisoned marker caused a rescan loop");
+                        let pending = pending_agent_status_reconciliations(directory)?;
+                        if scans == 1 && name == "removed" {
+                            fs::remove_file(&marker).unwrap();
+                        }
+                        Ok(pending)
                     }
-                    Ok(pending)
-                }),
+                ),
                 ExitCode::SUCCESS
             );
             assert!(!later.exists(), "{name} marker stranded later queue work");
@@ -2297,7 +2531,7 @@ mod worker_shutdown_tests {
             let lock = queue.lock();
             let mut scans = 0;
             assert_eq!(
-                run_agent_status_worker_queue(&queue.0, lock, None, |_| {
+                run_agent_status_worker_queue(&queue.0, lock, None, &Unclaimed, |_| {
                     scans += 1;
                     if scans == 1 {
                         Err(io::Error::from_raw_os_error(errno))
@@ -2327,7 +2561,7 @@ mod worker_shutdown_tests {
             let observer = fs::File::open(queue.0.join("worker.lock")).unwrap();
             let mut scans = 0;
             assert_eq!(
-                run_agent_status_worker_queue(&queue.0, lock, None, |directory| {
+                run_agent_status_worker_queue(&queue.0, lock, None, &Unclaimed, |directory| {
                     scans += 1;
                     if scans == 2 {
                         observer
@@ -2360,7 +2594,7 @@ mod worker_shutdown_tests {
         let successor = fs::File::open(queue.0.join("worker.lock")).unwrap();
         let mut scans = 0;
         assert_eq!(
-            run_agent_status_worker_queue(&queue.0, lock, None, |directory| {
+            run_agent_status_worker_queue(&queue.0, lock, None, &Unclaimed, |directory| {
                 scans += 1;
                 if scans == 2 {
                     successor
@@ -2404,7 +2638,7 @@ mod worker_shutdown_tests {
             let lock = queue.lock();
             let mut scans = 0;
             assert_eq!(
-                run_agent_status_worker_queue(&queue.0, lock, None, |_| {
+                run_agent_status_worker_queue(&queue.0, lock, None, &Unclaimed, |_| {
                     scans += 1;
                     if scans == 2 {
                         Err(io::Error::from_raw_os_error(errno))

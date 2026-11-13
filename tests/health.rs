@@ -477,6 +477,49 @@ fn doctor_checks_current_package_files_and_preserves_the_exact_error_read_only()
     assert_eq!(fs::read(f.root.join("namedrop.sqlite3")).unwrap(), database);
 }
 
+/// The installer records the directory its wrappers bake, and Doctor
+/// reports a record that names another, because a Rex block's CLI would read
+/// a directory its hooks never write.
+#[test]
+fn doctor_reports_an_install_record_that_differs_from_the_wrappers() {
+    let f = Fixture::new();
+    f.register();
+    let record = f.home.join(".config/namedrop/state-directory");
+    assert_eq!(
+        fs::read_to_string(&record).unwrap(),
+        format!("{}\n", f.root.display())
+    );
+    let codes = |report: &HealthReport| {
+        report
+            .issues
+            .iter()
+            .map(|issue| issue.code.clone())
+            .collect::<Vec<_>>()
+    };
+    let report = diagnose_collaboration(&f.runtime());
+    assert!(
+        !codes(&report).contains(&"ND-INTEGRATION-002".to_owned()),
+        "{report:?}"
+    );
+    fs::write(&record, "/elsewhere/namedrop\n").unwrap();
+    let report = diagnose_collaboration(&f.runtime());
+    let issue = report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "ND-INTEGRATION-002")
+        .unwrap_or_else(|| panic!("{report:?}"));
+    assert!(
+        issue.explanation.contains("/elsewhere/namedrop"),
+        "{issue:?}"
+    );
+    assert_eq!(issue.repair.operation.as_deref(), Some("activate"));
+    fs::remove_file(&record).unwrap();
+    assert!(
+        !codes(&diagnose_collaboration(&f.runtime())).contains(&"ND-INTEGRATION-002".to_owned()),
+        "no record, as before an install that writes one, is not reported"
+    );
+}
+
 #[test]
 fn doctor_reports_missing_stale_and_nonexecutable_subagent_hooks() {
     use std::os::unix::fs::PermissionsExt;

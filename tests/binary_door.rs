@@ -1,5 +1,6 @@
 //! Every test reaches Namedrop's binary through `tests/support/binary.rs`,
-//! which keeps a Rex block's claim from every process a test starts. This
+//! which keeps a Rex block's claim and the developer's config from every
+//! process a test starts. This
 //! reads every file under `tests/` and fails when the binary's Cargo name
 //! appears anywhere else, and when a Rust file starts a program with
 //! `Command::new` that is not a plain utility named by a literal, because
@@ -27,6 +28,9 @@ const DOOR: &str = "support/binary.rs";
 /// The spawn call, spelled so that this file's planted sources do not read
 /// as its own spawns.
 const NEW: &str = concat!("Command::", "new(");
+/// A renamed import of `Command`, compacted, which would hide a spawn from
+/// `NEW`. Spelled so that this file does not hold it.
+const RENAMED: &str = concat!("Command", "as");
 
 /// Programs a test may start with `Command::new` by name, because none of
 /// them runs another program.
@@ -65,7 +69,8 @@ fn breaches(root: &Path) -> Vec<String> {
 }
 
 /// Each `Command::new` under `root` whose program is neither a utility
-/// named by a literal nor listed in `SPAWNS`, as `file: program`.
+/// named by a literal nor listed in `SPAWNS`, as `file: program`, and each
+/// file that renames `Command`.
 fn spawns(root: &Path) -> Vec<String> {
     let mut found = Vec::new();
     files(root, &mut found);
@@ -80,7 +85,17 @@ fn spawns(root: &Path) -> Vec<String> {
             .unwrap()
             .split_whitespace()
             .collect();
-        for (at, _) in text.match_indices(NEW) {
+        let identifier = |c: char| c.is_alphanumeric() || c == '_';
+        for (at, _) in text.match_indices(RENAMED) {
+            if !text[..at].ends_with(|c: char| identifier(c) || c == '"') {
+                breaches.push(format!("{name} renames Command"));
+            }
+        }
+        // `SlashCommand::new` is another type.
+        for (at, _) in text
+            .match_indices(NEW)
+            .filter(|(at, _)| !text[..*at].ends_with(identifier))
+        {
             let mut depth = 1;
             let start = at + NEW.len();
             let end = text[start..]
@@ -115,21 +130,60 @@ fn removed(command: &Command) -> BTreeMap<String, bool> {
 }
 
 #[test]
-fn every_door_removes_the_rex_claim() {
-    let claim = BTreeMap::from(
-        ["REX_BLOCK", "REX_CLIENT", "REX_SERVER", "REX_SESSION"]
-            .map(|name| (name.to_owned(), true)),
+fn every_door_removes_the_rex_claim_and_the_config_roots_and_replaces_home() {
+    let mut isolation = BTreeMap::from(
+        [
+            "REX_BLOCK",
+            "REX_CLIENT",
+            "REX_SERVER",
+            "REX_SESSION",
+            "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
+            "CLAUDE_CONFIG_DIR",
+            "CODEX_HOME",
+            "HERDR_CONFIG_PATH",
+            "HERDR_PLUGIN_STATE_DIR",
+            "NAMEDROP_STATE_DIR",
+        ]
+        .map(|name| (name.to_owned(), true)),
     );
-    assert_eq!(removed(&binary::namedrop()), claim);
-    assert_eq!(removed(&binary::command("/bin/sh")), claim);
+    isolation.insert("HOME".to_owned(), false);
+    assert_eq!(removed(&binary::namedrop()), isolation);
+    assert_eq!(removed(&binary::command("/bin/sh")), isolation);
     let mut built = Command::new("true");
-    assert_eq!(removed(binary::without_rex(&mut built)), claim);
+    assert_eq!(removed(binary::isolated(&mut built)), isolation);
+    let home = binary::scratch_home();
+    assert!(
+        home.ends_with(format!(
+            "door/{}/every_door_removes_the_rex_claim_and_the_config_roots_and_replaces_home",
+            std::process::id()
+        )),
+        "{}",
+        home.display()
+    );
     let output = binary::command("/bin/sh")
-        .args(["-c", "echo ${REX_BLOCK-unset} ${REX_SERVER-unset}"])
+        .args([
+            "-c",
+            "echo ${REX_BLOCK-unset} ${REX_SERVER-unset} ${XDG_CONFIG_HOME-unset} $HOME",
+        ])
         .env("REX_BIN_DIR", "/kept")
         .output()
         .unwrap();
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "unset unset\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("unset unset unset {}\n", home.display())
+    );
+    let output = binary::command("/bin/sh")
+        .args(["-c", "echo $HOME $XDG_CONFIG_HOME"])
+        .env("HOME", "/own/home")
+        .env("XDG_CONFIG_HOME", "/own/config")
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "/own/home /own/config\n",
+        "a test's own home and root replace the door's"
+    );
 }
 
 #[test]
@@ -171,7 +225,7 @@ fn a_spawn_of_another_program_is_caught() {
     fs::write(
         root.join("quiet.rs"),
         format!(
-            "{NEW}\"git\").arg(\"status\"); {NEW}\n    \"sleep\",\n).arg(\"1\"); crate::binary::command(\"/bin/sh\");"
+            "{NEW}\"git\").arg(\"status\"); {NEW}\n    \"sleep\",\n).arg(\"1\"); crate::binary::command(\"/bin/sh\"); Slash{NEW}text); let note = \"Command as typed\";"
         ),
     )
     .unwrap();
@@ -189,6 +243,13 @@ fn a_spawn_of_another_program_is_caught() {
         (
             format!("std::process::{NEW}&script).status()"),
             "planted.rs: &script",
+        ),
+        (
+            format!(
+                "use std::process::{} Spawn; let child = Spawn::new(script);",
+                concat!("Command", " as")
+            ),
+            "planted.rs renames Command",
         ),
     ] {
         fs::write(root.join("planted.rs"), &source).unwrap();

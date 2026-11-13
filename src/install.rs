@@ -106,6 +106,8 @@ const CODEX_SNAPSHOT_FILES: [&str; 4] = [
 pub struct AgentConfigDirectories<'a> {
     pub claude: Option<&'a Path>,
     pub codex: Option<&'a Path>,
+    /// `XDG_CONFIG_HOME`, which holds the install record.
+    pub config: Option<&'a Path>,
 }
 impl AgentConfigDirectories<'_> {
     pub(crate) fn claude(self, home: &Path) -> PathBuf {
@@ -118,6 +120,16 @@ impl AgentConfigDirectories<'_> {
             .map(Path::to_owned)
             .unwrap_or_else(|| home.join(".codex"))
     }
+    /// Where the installer records the state directory it bakes into the
+    /// hook wrappers.
+    pub(crate) fn install_record(self, home: &Path) -> PathBuf {
+        crate::locator::install_record(
+            &self
+                .config
+                .map(Path::to_owned)
+                .unwrap_or_else(|| home.join(".config")),
+        )
+    }
 }
 
 /// The home and agent config directories a process inherited. The CLI and
@@ -127,6 +139,7 @@ pub struct InheritedDirectories {
     home: Option<PathBuf>,
     claude: Option<PathBuf>,
     codex: Option<PathBuf>,
+    config: Option<PathBuf>,
 }
 impl InheritedDirectories {
     pub fn from_environment() -> Self {
@@ -136,6 +149,9 @@ impl InheritedDirectories {
                 .filter(|path| path.is_absolute()),
             claude: std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
             codex: std::env::var_os("CODEX_HOME").map(PathBuf::from),
+            config: std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute()),
         }
     }
     pub fn home(&self) -> Option<&Path> {
@@ -145,6 +161,7 @@ impl InheritedDirectories {
         AgentConfigDirectories {
             claude: self.claude.as_deref(),
             codex: self.codex.as_deref(),
+            config: self.config.as_deref(),
         }
     }
 }
@@ -465,6 +482,15 @@ fn install_integration_package_with_config(
             claude_permissions::REPAIR_GUIDANCE
         );
     }
+    // Only a Rex block's CLI reads the record, so Herdr's install never
+    // fails for it.
+    let record = config.install_record(root);
+    if let Err(error) = crate::locator::write_install_record(&record, state_directory) {
+        eprintln!(
+            "Namedrop could not record its state directory in {}: {error}",
+            record.display()
+        );
+    }
     Ok(directory)
 }
 
@@ -591,6 +617,29 @@ pub(crate) fn inspect_integration_package(
         claude_permissions::inspect(&config.claude(home), &executable, state)?;
     }
     Ok(())
+}
+
+/// The state directory the install record names, when an installed
+/// SessionStart wrapper bakes another one. Doctor reports it, because a Rex
+/// block's CLI would then open a directory its hooks never write.
+pub(crate) fn install_record_mismatch(
+    home: &Path,
+    config: AgentConfigDirectories<'_>,
+) -> Option<(PathBuf, PathBuf)> {
+    let record = config.install_record(home);
+    let recorded = crate::locator::read_install_record(&record)?;
+    let baked = format!(
+        "--state-directory {}",
+        shell_single_quote(recorded.to_str()?)
+    );
+    [AgentRuntime::Codex, AgentRuntime::ClaudeCode]
+        .into_iter()
+        .filter_map(|runtime| {
+            fs::read_to_string(package_directory(home, runtime).join(SESSION_START_SCRIPT_FILE))
+                .ok()
+        })
+        .any(|wrapper| !wrapper.contains(&baked))
+        .then_some((record, recorded))
 }
 
 fn inspect_installed_file(path: &Path, expected: &str, mode: Option<u32>) -> Result<(), String> {
@@ -1138,7 +1187,7 @@ fn stop_script(executable: &Path, state_directory: &Path) -> Result<String, Stri
             .ok_or("hook state path is not UTF-8")?,
     );
     Ok(format!(
-        "#!/bin/sh\nexec >/dev/null 2>&1\nNAMEDROP_HERDR_TIMEOUT_MS=250 {executable} hook stop --state-directory {state} <&0 >/dev/null 2>&1\nexit 0\n"
+        "#!/bin/sh\nexec >/dev/null 2>&1\nNAMEDROP_HERDR_TIMEOUT_MS=250 NAMEDROP_REX_TIMEOUT_MS=250 {executable} hook stop --state-directory {state} <&0 >/dev/null 2>&1\nexit 0\n"
     ))
 }
 
@@ -1180,9 +1229,7 @@ fn hook_script(
         safe_context.push_str(&forward_marked_context("UserPromptSubmit", marker));
     }
     Ok(format!(
-        "#!/bin/sh\noutput=$({} hook user-prompt-submit --state-directory {} 2>/dev/null) || exit 0\nif [ \"$output\" = '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ]; then\n  {} hook mailbox-wake --state-directory {} </dev/null >/dev/null 2>&1 &\n  printf '%s' \"$output\"\n  exit 0\nfi\n{}exit 0\n",
-        shell_single_quote(executable),
-        shell_single_quote(state_directory),
+        "#!/bin/sh\noutput=$({} hook user-prompt-submit --state-directory {} 2>/dev/null) || exit 0\nif [ \"$output\" = '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ]; then\n  printf '%s' \"$output\"\n  exit 0\nfi\n{}exit 0\n",
         shell_single_quote(executable),
         shell_single_quote(state_directory),
         safe_context,
@@ -1491,6 +1538,85 @@ fn conflict(path: &Path, reason: &str) -> String {
 mod permission_tests {
     use super::*;
     use crate::StateNamespace;
+
+    /// The UserPromptSubmit wrapper is the one before commit 16 without the
+    /// line that backgrounded `hook mailbox-wake`: the hook starts the wake.
+    #[test]
+    fn the_prompt_wrapper_starts_no_wake_of_its_own() {
+        for runtime in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+            let wrapper = HookScript::Prompt
+                .render(runtime, Path::new("/x/namedrop"), Path::new("/s"))
+                .unwrap();
+            assert!(
+                wrapper.starts_with(concat!(
+                    "#!/bin/sh\n",
+                    "output=$('/x/namedrop' hook user-prompt-submit --state-directory '/s' 2>/dev/null) || exit 0\n",
+                    "if [ \"$output\" = '{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}' ]; then\n",
+                    "  printf '%s' \"$output\"\n",
+                    "  exit 0\n",
+                    "fi\n",
+                )),
+                "{wrapper}"
+            );
+            assert!(!wrapper.contains("mailbox-wake"), "{wrapper}");
+        }
+    }
+
+    /// The Stop wrapper holds the hook to its 250 ms under either multiplexer,
+    /// and installing a package records the directory its wrappers bake.
+    #[test]
+    fn the_stop_wrapper_caps_both_multiplexers_and_the_install_is_recorded() {
+        let root =
+            std::env::temp_dir().join(format!("namedrop-stop-wrapper-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (home, state) = (root.join("home"), root.join("state"));
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        let recorder = root.join("namedrop");
+        fs::write(
+            &recorder,
+            "#!/bin/sh\nenv | grep _TIMEOUT_MS= | sort > \"$0.env\"\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&recorder, fs::Permissions::from_mode(0o755)).unwrap();
+        let package =
+            install_integration_package(&home, AgentRuntime::ClaudeCode, &recorder, &state)
+                .unwrap();
+        let status = std::process::Command::new("/bin/sh")
+            .arg(package.join(STOP_SCRIPT_FILE))
+            .env_remove("NAMEDROP_HERDR_TIMEOUT_MS")
+            .env_remove("NAMEDROP_REX_TIMEOUT_MS")
+            .stdin(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            fs::read_to_string(root.join("namedrop.env")).unwrap(),
+            "NAMEDROP_HERDR_TIMEOUT_MS=250\nNAMEDROP_REX_TIMEOUT_MS=250\n"
+        );
+        assert_eq!(
+            crate::locator::read_install_record(&home.join(".config/namedrop/state-directory")),
+            Some(state.clone())
+        );
+        assert_eq!(
+            install_record_mismatch(&home, AgentConfigDirectories::default()),
+            None
+        );
+        crate::locator::write_install_record(
+            &home.join(".config/namedrop/state-directory"),
+            Path::new("/elsewhere"),
+        )
+        .unwrap();
+        assert_eq!(
+            install_record_mismatch(&home, AgentConfigDirectories::default()),
+            Some((
+                home.join(".config/namedrop/state-directory"),
+                PathBuf::from("/elsewhere")
+            ))
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     /// Codex hashes every byte of the plugin, so a byte outside the revision could
     /// strand a running session with no new version to show for it.

@@ -44,8 +44,11 @@ pub(super) fn install_shortcuts(config: Option<&Path>) -> Result<serde_json::Val
 
 /// Clears the once-only marker so the current tour opens again the next time
 /// Namedrop sees an agent pane.
-pub(super) fn reset_tour(options: &RuntimeOptions) -> Result<serde_json::Value, String> {
-    with_runtime_options(options, |runtime| {
+pub(super) fn reset_tour(
+    options: &RuntimeOptions,
+    inherited: &dyn Inherited,
+) -> Result<serde_json::Value, String> {
+    with_runtime_options(options, inherited, |runtime| {
         let cleared = tour::reset(runtime.state_directory, tour::CURRENT_ID)?;
         Ok(serde_json::json!({
             "presentation_id": tour::CURRENT_ID,
@@ -54,8 +57,12 @@ pub(super) fn reset_tour(options: &RuntimeOptions) -> Result<serde_json::Value, 
     })
 }
 
-pub(super) fn launch(options: &RuntimeOptions, mode: UiMode) -> Result<serde_json::Value, String> {
-    with_runtime_options(options, |runtime| {
+pub(super) fn launch(
+    options: &RuntimeOptions,
+    inherited: &dyn Inherited,
+    mode: UiMode,
+) -> Result<serde_json::Value, String> {
+    with_runtime_options(options, inherited, |runtime| {
         let workspace = runtime
             .workspace_id
             .ok_or("This popup requires an active Herdr space")?;
@@ -101,11 +108,16 @@ fn target_terminal(runtime: &Runtime<'_>) -> Result<String, String> {
     target_pane(runtime).map(|pane| pane.terminal_id)
 }
 
-pub(super) fn run(options: &RuntimeOptions, mode: UiMode) -> ExitCode {
+pub(super) fn run(options: &RuntimeOptions, inherited: &dyn Inherited, mode: UiMode) -> ExitCode {
     if mode == UiMode::Status {
-        return crate::agent_status_ui::run(options);
+        let observing = super::location(options, inherited).and_then(|location| location.pane);
+        return crate::agent_status_ui::run(
+            options,
+            inherited,
+            observing.as_ref().map(PaneId::as_str),
+        );
     }
-    match run_prompt(options, mode) {
+    match run_prompt(options, inherited, mode) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // Keep actionable errors visible instead of closing the popup immediately.
@@ -118,7 +130,11 @@ pub(super) fn run(options: &RuntimeOptions, mode: UiMode) -> ExitCode {
     }
 }
 
-fn run_prompt(options: &RuntimeOptions, mode: UiMode) -> Result<(), String> {
+fn run_prompt(
+    options: &RuntimeOptions,
+    inherited: &dyn Inherited,
+    mode: UiMode,
+) -> Result<(), String> {
     let workspace = env::var("NAMEDROP_TARGET_WORKSPACE")
         .map_err(|_| "This popup is missing its invoking space")?;
     let pane =
@@ -127,7 +143,7 @@ fn run_prompt(options: &RuntimeOptions, mode: UiMode) -> Result<(), String> {
         .map_err(|_| "This popup is missing its invoking terminal")?;
     // Empty when the pane held no agent session as the popup opened.
     let session = env::var("NAMEDROP_TARGET_SESSION").unwrap_or_default();
-    with_runtime_options(options, |runtime| {
+    with_runtime_options(options, inherited, |runtime| {
         let targeted = LifecycleRuntime {
             workspace_id: Some(&workspace),
             current_pane_id: Some(&pane),

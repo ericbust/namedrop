@@ -199,3 +199,63 @@ fn a_server_whose_primary_listener_is_not_a_unix_socket_is_refused() {
         script.join().unwrap();
     }
 }
+
+#[test]
+fn a_peer_probe_names_the_listener_and_sends_nothing() {
+    use std::io::Read;
+    let scratch = Scratch::new("probe");
+    let socket = scratch.0.join("s.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    assert_eq!(
+        peer_within(&socket, Duration::from_millis(20)).unwrap(),
+        std::process::id()
+    );
+    let (mut accepted, _) = listener.accept().unwrap();
+    let mut sent = Vec::new();
+    accepted.read_to_end(&mut sent).unwrap();
+    assert_eq!(sent, b"", "the probe closes without a byte");
+}
+
+#[test]
+fn a_peer_probe_reports_why_it_found_no_listener() {
+    let scratch = Scratch::new("absent");
+    let errno = |socket: &Path| {
+        peer_within(socket, Duration::from_millis(20))
+            .unwrap_err()
+            .raw_os_error()
+    };
+    assert_eq!(errno(&scratch.0.join("missing.sock")), Some(libc::ENOENT));
+    let stale = scratch.0.join("stale.sock");
+    drop(UnixListener::bind(&stale).unwrap());
+    assert_eq!(errno(&stale), Some(libc::ECONNREFUSED));
+    let long = scratch.0.join("x".repeat(120));
+    assert_eq!(
+        peer_within(&long, Duration::from_millis(20))
+            .unwrap_err()
+            .kind(),
+        stdio::ErrorKind::InvalidInput
+    );
+}
+
+/// A listener whose queue is full answers at once, so a busy server never
+/// holds a probe for its 20 ms.
+#[test]
+fn a_peer_probe_of_a_full_listener_fails_at_once() {
+    use std::os::fd::AsRawFd;
+    let scratch = Scratch::new("full");
+    let socket = scratch.0.join("s.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    // SAFETY: listen on a socket this test bound only shrinks its queue.
+    assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
+    let full = (0..64).find_map(|_| {
+        let started = Instant::now();
+        let answer = peer_within(&socket, Duration::from_millis(20));
+        assert!(started.elapsed() < Duration::from_millis(100));
+        answer.err()
+    });
+    let errno = full.expect("the queue never filled").raw_os_error();
+    assert!(
+        matches!(errno, Some(libc::ECONNREFUSED | libc::EAGAIN)),
+        "{errno:?}"
+    );
+}

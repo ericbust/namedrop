@@ -10,7 +10,7 @@ use namedrop::{
     LifecycleRuntime,
     cli::RuntimeOptions,
     discover_worktree_for_workspace,
-    mux::{Allowance, Budget, MuxRead},
+    mux::{Allowance, Budget, MuxRead, home::Inherited},
 };
 use serde_json::Value;
 use std::{
@@ -59,8 +59,13 @@ const MAX_IDENTITY_OUTPUT_BYTES: usize = 512 * 1_024;
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub(super) fn run(options: &RuntimeOptions) -> ExitCode {
-    match run_popup(options) {
+/// `observing_pane` is the pane the panel itself occupies, from its home.
+pub(super) fn run(
+    options: &RuntimeOptions,
+    inherited: &dyn Inherited,
+    observing_pane: Option<&str>,
+) -> ExitCode {
+    match run_popup(options, inherited, observing_pane) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // Keep actionable errors visible instead of closing immediately.
@@ -76,7 +81,11 @@ pub(super) fn run(options: &RuntimeOptions) -> ExitCode {
     }
 }
 
-fn run_popup(options: &RuntimeOptions) -> Result<(), String> {
+fn run_popup(
+    options: &RuntimeOptions,
+    inherited: &dyn Inherited,
+    observing_pane: Option<&str>,
+) -> Result<(), String> {
     let workspace = env::var("NAMEDROP_TARGET_WORKSPACE")
         .map_err(|_| "This popup is missing its invoking space")?;
     let pane =
@@ -93,14 +102,20 @@ fn run_popup(options: &RuntimeOptions) -> Result<(), String> {
     // the error path above. Polling, not blocking: a slow pass must never hold
     // the keyboard.
     let _input_mode = InputMode::polling()?;
-    super::with_runtime_options(options, |runtime| {
+    super::with_runtime_options(options, inherited, |runtime| {
         let targeted = LifecycleRuntime {
             workspace_id: Some(&workspace),
             current_pane_id: Some(&pane),
             ..*runtime
         };
         let collect = |cancelled: &AtomicBool| {
-            namedrop::collect_agent_status(&targeted, &terminal, session.as_deref(), cancelled)
+            namedrop::collect_agent_status(
+                &targeted,
+                &terminal,
+                session.as_deref(),
+                observing_pane,
+                cancelled,
+            )
         };
         let summarize = |snapshot: &Value, cancelled: &AtomicBool| {
             namedrop::summarize_agent_status(snapshot, cancelled)

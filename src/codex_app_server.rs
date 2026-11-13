@@ -489,11 +489,13 @@ mod tests {
         let config = AgentConfigDirectories {
             claude: None,
             codex: Some(relative),
+            config: None,
         };
         assert_eq!(observe(Some(&root.0), config), CodexAppServer::InProcess);
         let empty = AgentConfigDirectories {
             claude: None,
             codex: Some(Path::new("")),
+            config: None,
         };
         assert_eq!(observe(Some(&root.0), empty), CodexAppServer::InProcess);
     }

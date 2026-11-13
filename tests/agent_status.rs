@@ -39,6 +39,7 @@ mod popup_input;
 #[allow(dead_code)]
 fn with_runtime_options<T>(
     _options: &namedrop::cli::RuntimeOptions,
+    _inherited: &dyn namedrop::mux::home::Inherited,
     _action: impl FnOnce(
         &namedrop::LifecycleRuntime<
             '_,
@@ -209,8 +210,14 @@ fn live_origin_probe() {
     };
     let cancelled = AtomicBool::new(false);
     let started = Instant::now();
-    let mut snapshot =
-        collect_agent_status(&runtime, &origin.terminal_id, session, &cancelled).unwrap();
+    let mut snapshot = collect_agent_status(
+        &runtime,
+        &origin.terminal_id,
+        session,
+        env::var("HERDR_PANE_ID").ok().as_deref(),
+        &cancelled,
+    )
+    .unwrap();
     let facts_ms = started.elapsed().as_millis();
     if env::var("NAMEDROP_VERIFY_FACTS_ONLY").as_deref() == Ok("1") {
         assert_eq!(snapshot["handoffs_available"], true, "{snapshot}");

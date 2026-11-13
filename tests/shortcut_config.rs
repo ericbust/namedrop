@@ -6,7 +6,7 @@ mod cleanup;
 use std::fs;
 
 #[test]
-fn xdg_config_home_applies_only_to_this_users_own_home() {
+fn xdg_config_home_and_herdr_config_path_apply_only_to_this_users_own_home() {
     let root =
         std::env::temp_dir().join(format!("namedrop-shortcut-config-{}", std::process::id()));
     let _cleanup = cleanup::FixtureDirectory(root.clone());
@@ -40,4 +40,19 @@ fn xdg_config_home_applies_only_to_this_users_own_home() {
     unsafe { std::env::set_var("XDG_CONFIG_HOME", "relative/config") };
     let report = namedrop::install_shortcuts(None, Some(&home)).unwrap();
     assert_eq!(report["path"], default.to_str().unwrap());
+
+    // HERDR_CONFIG_PATH belongs to this user too: another home never uses
+    // it, and the process's own home does.
+    let named = root.join("named.toml");
+    fs::remove_file(&default).unwrap();
+    unsafe {
+        std::env::set_var("HERDR_CONFIG_PATH", &named);
+        std::env::set_var("HOME", root.join("someone-else"));
+    }
+    let report = namedrop::install_shortcuts(None, Some(&home)).unwrap();
+    assert_eq!(report["path"], default.to_str().unwrap());
+    assert!(!named.exists());
+    unsafe { std::env::set_var("HOME", &home) };
+    let report = namedrop::install_shortcuts(None, Some(&home)).unwrap();
+    assert_eq!(report["path"], named.to_str().unwrap());
 }

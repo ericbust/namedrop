@@ -28,7 +28,8 @@ pub(crate) trait LocalProcesses: Send + Sync {
     /// zombies, or `None` when the group cannot be listed. Read members with
     /// `members`.
     fn list_group(&self, group: u32) -> Option<Vec<u32>>;
-    #[cfg(test)]
+    /// The parent, read with the short call that also reads root's
+    /// processes, such as the `login` under a Rex block's shell.
     fn parent(&self, pid: u32) -> Option<u32>;
     #[cfg(test)]
     fn executable(&self, pid: u32) -> Option<std::path::PathBuf>;
@@ -72,7 +73,6 @@ impl LocalProcesses for ThisMachine {
         platform::group(group)
     }
 
-    #[cfg(test)]
     fn parent(&self, pid: u32) -> Option<u32> {
         platform::parent(pid)
     }
@@ -108,7 +108,6 @@ mod platform {
         }
     }
 
-    #[cfg(test)]
     pub(super) fn parent(pid: u32) -> Option<u32> {
         let short = info::<libc::proc_bsdshortinfo>(pid, libc::PROC_PIDT_SHORTBSDINFO)?;
         (short.pbsi_ppid != 0).then_some(short.pbsi_ppid)
@@ -174,7 +173,6 @@ mod platform {
 
     struct Stat {
         state: char,
-        #[cfg(test)]
         parent: u32,
         group: u32,
         start_ticks: u64,
@@ -193,7 +191,6 @@ mod platform {
                 .first()
                 .and_then(|state| state.chars().next())
                 .ok_or_else(malformed)?,
-            #[cfg(test)]
             parent: number(1).ok_or_else(malformed)?,
             group: number(2).ok_or_else(malformed)?,
             // Field 22 of the line, counting pid as 1.
@@ -224,7 +221,6 @@ mod platform {
         }
     }
 
-    #[cfg(test)]
     pub(super) fn parent(pid: u32) -> Option<u32> {
         let parent = stat(pid).ok()?.parent;
         (parent != 0).then_some(parent)
@@ -264,7 +260,6 @@ mod platform {
         LocalRead::Unreadable
     }
 
-    #[cfg(test)]
     pub(super) fn parent(_pid: u32) -> Option<u32> {
         None
     }

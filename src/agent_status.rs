@@ -98,6 +98,7 @@ pub fn collect_agent_status<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
     expected_terminal: &str,
     expected_session: Option<&str>,
+    observing_pane: Option<&str>,
     cancelled: &AtomicBool,
 ) -> Result<Value, String>
 where
@@ -134,13 +135,7 @@ where
     )?;
 
     let mut warnings = Vec::new();
-    let observing_pane = crate::locator::Locator::Pane.env();
-    let visible = visible_panes(
-        &discovered,
-        origin,
-        observing_pane.as_deref(),
-        &mut warnings,
-    );
+    let visible = visible_panes(&discovered, origin, observing_pane, &mut warnings);
 
     let (addresses, handoffs) =
         read_state(runtime, &discovered, origin, &collection, &mut warnings);

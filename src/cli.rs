@@ -69,6 +69,17 @@ pub struct RuntimeOptions {
     pub pane: Option<String>,
 }
 
+impl RuntimeOptions {
+    /// The location flags, for choosing the home.
+    pub fn flags(&self) -> crate::mux::home::Flags<'_> {
+        crate::mux::home::Flags {
+            endpoint: self.endpoint.as_deref(),
+            space: self.space.as_deref(),
+            pane: self.pane.as_deref(),
+        }
+    }
+}
+
 impl Cli {
     pub fn subagent_hook(&self) -> Option<(&Path, crate::AgentRuntime)> {
         match &self.command {

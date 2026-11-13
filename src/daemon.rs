@@ -5,7 +5,7 @@
 
 use crate::AGENT_SESSION_MARKERS;
 use crate::SpaceId;
-use crate::locator::Locator;
+use crate::locator::{Locator, Name};
 use crate::mux::Endpoint;
 use std::{
     os::unix::process::CommandExt,
@@ -21,6 +21,10 @@ pub enum Scope<'a> {
     Endpoint(&'a Endpoint),
     /// The status worker and the dashboard's mailbox wake.
     Space(&'a Endpoint, &'a SpaceId),
+    /// The prompt hook's mailbox wake when its home named a space and no
+    /// endpoint, as a Herdr pane on Herdr's default socket. The space keeps
+    /// the set of names the hook read it under.
+    SpaceAlone(Name, &'a SpaceId),
     /// The dashboard server.
     None,
 }
@@ -66,15 +70,18 @@ pub fn command(executable: &Path, scope: Scope<'_>, starter: Starter) -> Command
     scrub(&mut command, starter);
     let (endpoint, space) = match scope {
         Scope::Endpoint(endpoint) => (Some(endpoint), None),
-        Scope::Space(endpoint, space) => (Some(endpoint), Some(space)),
+        Scope::Space(endpoint, space) => (Some(endpoint), Some((Name::of(endpoint.kind), space))),
+        Scope::SpaceAlone(set, space) => (None, Some((set, space))),
         Scope::None => (None, None),
     };
     match endpoint {
-        Some(endpoint) => Locator::Endpoint.pass(&mut command, endpoint.kind, &endpoint.key),
+        Some(endpoint) => {
+            Locator::Endpoint.pass(&mut command, Name::of(endpoint.kind), &endpoint.key)
+        }
         None => Locator::Endpoint.clear(&mut command),
     }
-    match endpoint.zip(space) {
-        Some((endpoint, space)) => Locator::Space.pass(&mut command, endpoint.kind, space.as_str()),
+    match space {
+        Some((set, space)) => Locator::Space.pass(&mut command, set, space.as_str()),
         None => Locator::Space.clear(&mut command),
     }
     Locator::Pane.clear(&mut command);
@@ -98,7 +105,7 @@ pub fn scrub(command: &mut Command, starter: Starter) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::mux::herdr::boundary::{call_at, compact, rust_sources};
     use std::{collections::BTreeMap, fs};
@@ -193,6 +200,7 @@ mod tests {
         for scope in [
             Scope::Space(&endpoint, &space),
             Scope::Endpoint(&endpoint),
+            Scope::SpaceAlone(Name::Herdr, &space),
             Scope::None,
         ] {
             let caller =
@@ -256,6 +264,48 @@ mod tests {
         }
     }
 
+    /// A hook whose home named a space and no endpoint, as a Herdr pane on
+    /// Herdr's default socket, gives its wake that space under the set of
+    /// names that held it and no endpoint, as the wake the wrapper backgrounded
+    /// inherited them.
+    #[test]
+    fn a_space_without_an_endpoint_keeps_the_set_of_names_that_held_it() {
+        let space = SpaceId::new("w1");
+        let pane = [("HERDR_PANE_ID", None), ("NAMEDROP_PANE_ID", None)];
+        let cases = [
+            (
+                Name::Herdr,
+                [
+                    ("HERDR_SOCKET_PATH", None),
+                    ("NAMEDROP_ENDPOINT", None),
+                    ("HERDR_WORKSPACE_ID", Some("w1")),
+                    ("NAMEDROP_SPACE_ID", None),
+                ],
+            ),
+            (
+                Name::Neutral,
+                [
+                    ("HERDR_SOCKET_PATH", None),
+                    ("NAMEDROP_ENDPOINT", None),
+                    ("HERDR_WORKSPACE_ID", None),
+                    ("NAMEDROP_SPACE_ID", Some("w1")),
+                ],
+            ),
+        ];
+        for (set, location) in cases {
+            let command = command(
+                Path::new("/bin/namedrop"),
+                Scope::SpaceAlone(set, &space),
+                Starter::Caller,
+            );
+            assert_eq!(
+                child_environment(&command),
+                with(&[&location[..], &pane[..]].concat()),
+                "{set:?}"
+            );
+        }
+    }
+
     /// Under Rex a daemon gets its scope under the neutral names and no Herdr
     /// location name at all, so a stale outer Herdr cannot redirect it.
     #[test]
@@ -299,9 +349,16 @@ mod tests {
     /// its scope.
     #[test]
     fn a_daemon_runs_in_its_own_group_with_null_stdio_and_without_the_rex_claim() {
+        struct Removed(std::path::PathBuf);
+        impl Drop for Removed {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
         let directory =
             std::env::temp_dir().join(format!("namedrop-daemon-{}", std::process::id()));
         fs::create_dir_all(&directory).unwrap();
+        let _removed = Removed(directory.clone());
         let script = directory.join("record");
         fs::write(
             &script,
@@ -332,7 +389,6 @@ mod tests {
             names.trim(),
             "stdio<null null null> rex<unset> pane<unset> socket</run/h.sock>"
         );
-        fs::remove_dir_all(directory).unwrap();
     }
 
     /// What a production spawn of a program named by an expression is for.
@@ -555,7 +611,7 @@ mod tests {
 
     /// The files under `src` that build into production, each with its
     /// compacted production code.
-    fn production_files(src: &Path) -> Vec<(String, String)> {
+    pub(crate) fn production_files(src: &Path) -> Vec<(String, String)> {
         let mut files = Vec::new();
         rust_sources(src, &mut files);
         files.sort();
@@ -621,12 +677,17 @@ mod tests {
                     breaches.push(format!("{name} aliases Command"));
                 }
             }
+            // `SlashCommand::new` and `PaneCommand::new_line` are other types.
+            let starts = |at: usize| !text[..at].ends_with(identifier);
             for (at, _) in text.match_indices("Command::new") {
-                if !text[at + "Command::new".len()..].starts_with('(') {
+                if starts(at) && !text[at + "Command::new".len()..].starts_with('(') {
                     breaches.push(format!("{name} takes Command::new as a function"));
                 }
             }
-            for (at, _) in text.match_indices("Command::new(") {
+            for (at, _) in text
+                .match_indices("Command::new(")
+                .filter(|(at, _)| starts(*at))
+            {
                 let call = call_at(&text[at..], "Command::new(");
                 if call
                     .strip_prefix("Command::new(\"")
@@ -677,6 +738,41 @@ mod tests {
             breaches.is_empty(),
             "Start a background Namedrop process with `daemon::command`, or `daemon::scrub` for one that stays in its hook's group, so it takes no identity from its starter. Another program gets an entry in `SPAWNS`:\n{}",
             breaches.join("\n")
+        );
+    }
+
+    /// Each production file outside this one that names `StopHook`, with how
+    /// often, and whether `main.rs` names it only for the Stop front end's
+    /// clock.
+    fn stop_hook_starters(src: &Path) -> (Vec<(String, usize)>, bool) {
+        let files = production_files(src);
+        let front_end = files.iter().any(|(name, text)| {
+            name == "main.rs"
+                && text.contains(
+                    "ifletSome(state_directory)=cli.stop_hook_state_directory(){let_=namedrop::reminder::ensure_clock(state_directory,None,Starter::StopHook);stop_hook::run(state_directory,inherited);",
+                )
+        });
+        let sites = files
+            .into_iter()
+            .filter(|(name, _)| name != "daemon.rs")
+            .map(|(name, text)| (name, text.matches("StopHook").count()))
+            .filter(|(_, count)| *count > 0)
+            .collect();
+        (sites, front_end)
+    }
+
+    /// Only the Stop hook's front end starts a daemon as `Starter::StopHook`:
+    /// its clock in `main.rs` and its worker in `stop_hook.rs`. Any other
+    /// daemon started that way would lose a timeout a person set.
+    #[test]
+    fn only_the_stop_hook_s_front_end_passes_the_stop_hook_starter() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        assert_eq!(
+            stop_hook_starters(&src),
+            (
+                vec![("main.rs".to_owned(), 1), ("stop_hook.rs".to_owned(), 1)],
+                true
+            )
         );
     }
 
@@ -743,7 +839,7 @@ mod tests {
             assert!(found.contains(&caught.to_owned()), "{source}: {found:?}");
         }
         fs::remove_file(&planted).unwrap();
-        fs::write(&planted, "// Command::new(launcher)\nconst TEXT: [&str; 2] = [\"Command::new(launcher)\", \"Command as typed\"];\nfn status() { Command::new(\"git\").arg(\"status\").status(); }\n#[cfg(test)]\nmod tests { fn spawn() { Command::new(launcher); Command::new(\"namedrop\"); } }\n").unwrap();
+        fs::write(&planted, "// Command::new(launcher)\nconst TEXT: [&str; 2] = [\"Command::new(launcher)\", \"Command as typed\"];\nfn status() { Command::new(\"git\").arg(\"status\").status(); }\nfn other() { SlashCommand::new(launcher); PaneCommand::new_line(launcher); }\n#[cfg(test)]\nmod tests { fn spawn() { Command::new(launcher); Command::new(\"namedrop\"); } }\n").unwrap();
         assert_eq!(
             self_spawn_breaches(&root),
             Vec::<String>::new(),

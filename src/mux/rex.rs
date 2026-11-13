@@ -17,6 +17,7 @@ use super::{
     Allowance, Applied, Budget, Depth, Effect, Endpoint, Gone, InputKind, InputOutcome, Key,
     MuxAct, MuxError, MuxInput, MuxRead, PaneFacts, PaneId, PaneInput, PaneProcess, PromptRequest,
     Retry, Scope, Screen, ScreenRequest, SpaceView, Style, Survey, TabId, TerminalId, Wrap, gate,
+    home::Claimed,
     narrowest,
     processes::{LocalProcesses, LocalRead, members},
 };
@@ -56,6 +57,48 @@ pub(super) fn connect(
         state,
         local,
     )))
+}
+
+/// One non-blocking connect to `socket` that reads its peer pid and closes,
+/// for the home's probe.
+pub(crate) fn peer_within(socket: &Path, within: Duration) -> std::io::Result<u32> {
+    local::peer_within(socket, within)
+}
+
+/// What the Rex server at `socket` says about `block` of `session`, over one
+/// connection that proves the server local.
+pub(crate) fn claimed(socket: &Path, session: &str, block: &str) -> Result<Claimed, String> {
+    let wire = Socket::new(socket.to_owned(), Budget::ADAPTER_DEFAULT, Arc::default());
+    claimed_over(&wire, socket, session, block).map_err(|error| error.to_string())
+}
+
+/// `server.status` for the local proof, `session.attach`, and the block's
+/// `process`, on one connection.
+fn claimed_over(
+    wire: &impl Wire,
+    dial: &Path,
+    session: &str,
+    block: &str,
+) -> Result<Claimed, MuxError> {
+    let (control, peer) = wire
+        .open(Narrower::none())
+        .map_err(|fault| mux_error(fault, Gone::Pane))?;
+    let mut call = Call {
+        control,
+        host: None,
+    };
+    let server = local::prove_local(dial, &mut *call.control, peer)
+        .map_err(|fault| mux_error(fault, Gone::Pane))?;
+    call.attach(session)?;
+    let process: ProcessReply = wire::parse(call.block(session, block, "process", json!({}))?)?;
+    let child = process
+        .child
+        .ok_or_else(|| MuxError::Protocol(format!("Rex named no child process for {block}")))?;
+    Ok(Claimed {
+        endpoint: server.endpoint,
+        server: server.pid,
+        child: child.pid,
+    })
 }
 
 /// The Unix socket a `rex:` endpoint names, dialed afresh for each port call.
