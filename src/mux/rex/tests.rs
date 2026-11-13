@@ -985,6 +985,12 @@ fn a_detached_block_is_found_in_the_block_list() {
 }
 
 fn screen_script(content: &'static str) -> Script {
+    screen_in_parts(content, usize::MAX)
+}
+
+/// A screen whose every `blob_read` returns at most `part` bytes, with
+/// `eof` only on the one that reaches the end.
+fn screen_in_parts(content: &'static str, part: usize) -> Script {
     Script::new(move |request, _| match request.short() {
         "server.status" => Ok(status(PEER)),
         "target.resolve" => Ok(
@@ -997,7 +1003,11 @@ fn screen_script(content: &'static str) -> Script {
             let args = &request.payload["args"];
             assert_eq!(args["id"], 7);
             let offset = usize::try_from(args["offset"].as_u64().unwrap()).unwrap();
-            Ok(json!({"id": 7, "data": &content[offset..], "total": content.len(), "eof": true}))
+            let end = content.len().min(offset.saturating_add(part));
+            Ok(
+                json!({"id": 7, "data": &content[offset..end], "total": content.len(),
+                      "eof": end == content.len()}),
+            )
         }
         _ => Err(rex_error("not_found")),
     })
@@ -1050,6 +1060,32 @@ fn a_screen_read_from_inside_a_long_result_drops_the_cut_line() {
         rex.screen(&PaneId::new("block:b"), ansi(60)).unwrap().text,
         "second\nthird"
     );
+}
+
+#[test]
+fn a_screen_read_that_stops_short_of_the_end_reads_on() {
+    let state = State::new();
+    let parts = rex(
+        screen_in_parts("old\r\nfirst\r\n> box", 4),
+        &state,
+        Local::default(),
+    );
+    assert_eq!(
+        parts.screen(&PaneId::new("block:b"), ansi(2)).unwrap().text,
+        "first\n> box"
+    );
+    let reads = parts
+        .wire
+        .calls()
+        .iter()
+        .filter(|call| call.starts_with("blob_read"))
+        .count();
+    assert_eq!(reads, 5);
+    let stalled = rex(screen_in_parts("old\r\nlast", 0), &state, Local::default());
+    assert!(matches!(
+        stalled.screen(&PaneId::new("block:b"), ansi(2)),
+        Err(MuxError::Protocol(why)) if why.contains("stopped before the end")
+    ));
 }
 
 #[test]

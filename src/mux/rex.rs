@@ -462,7 +462,8 @@ impl<W: Wire> MuxRead for RexMux<W> {
     }
 
     /// `format` with a one-byte limit names the whole result's `id` and
-    /// `total`, and one `blob_read` takes its tail.
+    /// `total`, and `blob_read` takes its tail, read on until `eof`, because
+    /// a read can stop short of the end.
     fn screen(&self, pane: &PaneId, request: ScreenRequest) -> Result<Screen, MuxError> {
         let mut call = self.call()?;
         let block = pane.as_str();
@@ -481,13 +482,26 @@ impl<W: Wire> MuxRead for RexMux<W> {
             });
         };
         let offset = total.saturating_sub(SCREEN_TAIL);
-        let args = json!({"id": id, "offset": offset, "max_bytes": BLOB_READ_MAX});
-        let tail = call.block(&session, block, "blob_read", args)?;
-        let data = tail["data"]
-            .as_str()
-            .ok_or_else(|| MuxError::Protocol(format!("Rex's blob_read holds no data: {tail}")))?;
+        let mut data = String::new();
+        loop {
+            let at = offset + data.len() as u64;
+            let args = json!({"id": id, "offset": at, "max_bytes": BLOB_READ_MAX});
+            let tail = call.block(&session, block, "blob_read", args)?;
+            let part = tail["data"].as_str().ok_or_else(|| {
+                MuxError::Protocol(format!("Rex's blob_read holds no data: {tail}"))
+            })?;
+            data.push_str(part);
+            if tail["eof"] == true {
+                break;
+            }
+            if part.is_empty() {
+                return Err(MuxError::Protocol(format!(
+                    "Rex's blob_read stopped before the end of the screen: {tail}"
+                )));
+            }
+        }
         Ok(Screen {
-            text: screen_lines(data, offset, request)?,
+            text: screen_lines(&data, offset, request)?,
         })
     }
 
