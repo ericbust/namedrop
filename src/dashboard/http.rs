@@ -2742,7 +2742,7 @@ mod screen_regression_tests {
             let target = target.clone();
             thread::spawn(move || {
                 sender
-                    .send(reads.read(&crate::mux::herdr::HerdrConnector, target))
+                    .send(reads.read(&crate::mux::Connector, target))
                     .unwrap()
             })
         };

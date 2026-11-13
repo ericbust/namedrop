@@ -130,10 +130,23 @@ testbed/testbed test --link . --fresh --yes --inside-rex
 
 It runs the same checklist with the profile's Herdr server as the program of a block on a
 scratch Rex server, which it starts under `env -i` with `REX_SERVER` naming itself and stops
-after the run. Herdr, its panes, its plugin processes and every agent and hook then carry the
+after the run. A failed run deletes its profile too, and keeps the profile's logs in
+`~/.namedrop-testbed/reports/<profile>-<time>-failed/`. Herdr, its panes, its plugin processes and every agent and hook then carry the
 block's `REX_BLOCK`, `REX_SESSION` and `REX_SERVER`, which every other lane's clean environment
 drops. The build step's line says which Rex block runs the Herdr server. Run it beside the
 checklist run for any change to how Namedrop decides which multiplexer it runs in. It needs `rex` on `PATH`.
+
+### Agents in Rex
+
+```sh
+testbed/testbed rex up --link . --fresh --yes
+testbed/testbed rex down --link .
+```
+
+`rex up` gives the Rex adapter's live checks Claude Code and Codex in blocks of a scratch Rex
+server, with no Herdr names and with hooks baked to the profile's state directory, and prints the
+server and block IDs. It is not a checklist run and has no PASS line. See `testbed/README.md`,
+"The Rex lane".
 
 ## Read the result
 

@@ -1,5 +1,5 @@
 use super::*;
-use std::io::Cursor;
+use std::{cell::Cell, io::Cursor};
 
 const ANSWER: &str = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
                       Connection: Upgrade\r\nsec-websocket-protocol: rex.control.v1\r\n\r\n";
@@ -9,6 +9,7 @@ struct Pipe {
     to_server: Vec<u8>,
     byte_at_a_time_from: Option<u64>,
     timed_out: bool,
+    writes_time_out: Cell<bool>,
 }
 
 impl Read for Pipe {
@@ -32,6 +33,9 @@ impl Read for Pipe {
 
 impl Write for Pipe {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.writes_time_out.get() {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
         self.to_server.extend_from_slice(bytes);
         Ok(bytes.len())
     }
@@ -66,11 +70,14 @@ fn server(frames: &[Vec<u8>]) -> Pipe {
         to_server: Vec::new(),
         byte_at_a_time_from: None,
         timed_out: false,
+        writes_time_out: Cell::new(false),
     }
 }
 
 fn connect(pipe: Pipe) -> WebSocket<Pipe> {
-    WebSocket::connect(pipe, "/api/control", "rex.control.v1", 1 << 20).unwrap()
+    let mut socket = WebSocket::connect(pipe, "/api/control", "rex.control.v1", 1 << 20).unwrap();
+    socket.upgrade().unwrap();
+    socket
 }
 
 fn client_frames(socket: &WebSocket<Pipe>) -> Vec<(u8, Vec<u8>, u8, [u8; 4])> {
@@ -147,7 +154,9 @@ fn an_answer_that_is_not_an_upgrade_to_the_subprotocol_is_refused() {
             from_server: Cursor::new(answer.as_bytes().to_vec()),
             ..server(&[])
         };
-        match WebSocket::connect(pipe, "/api/control", "rex.control.v1", 1 << 20) {
+        let mut socket =
+            WebSocket::connect(pipe, "/api/control", "rex.control.v1", 1 << 20).unwrap();
+        match socket.upgrade() {
             Err(WsError::Protocol(error)) => assert_eq!(error, said),
             Err(error) => panic!("{answer:?}: {error:?}"),
             Ok(_) => panic!("{answer:?} was taken for an upgrade"),
@@ -157,10 +166,40 @@ fn an_answer_that_is_not_an_upgrade_to_the_subprotocol_is_refused() {
         from_server: Cursor::new(b"HTTP/1.1 101 Switching".to_vec()),
         ..server(&[])
     };
+    let mut socket = WebSocket::connect(cut, "/api/control", "rex.control.v1", 1 << 20).unwrap();
     assert!(matches!(
-        WebSocket::connect(cut, "/api/control", "rex.control.v1", 1 << 20),
+        socket.upgrade(),
         Err(WsError::Closed { code: None, .. })
     ));
+}
+
+#[test]
+fn an_upgrade_answer_read_across_timeouts_is_taken_whole_and_nothing_is_sent_before_it() {
+    let mut pipe = server(&[frame(true, TEXT, b"hi")]);
+    pipe.byte_at_a_time_from = Some(0);
+    let mut socket = WebSocket::connect(pipe, "/api/control", "rex.control.v1", 1 << 20).unwrap();
+    socket.close(1000).unwrap();
+    let mut timeouts = 0;
+    while let Err(error) = socket.upgrade() {
+        assert!(
+            matches!(&error, WsError::Io(error) if error.kind() == io::ErrorKind::WouldBlock),
+            "{error:?}"
+        );
+        timeouts += 1;
+    }
+    assert!(timeouts >= ANSWER.len(), "{timeouts}");
+    let message = loop {
+        match socket.recv() {
+            Ok(message) => break message,
+            Err(WsError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("{error:?}"),
+        }
+    };
+    assert_eq!(message, Message::Text("hi".into()));
+    assert!(
+        client_frames(&socket).is_empty(),
+        "no close before the upgrade was answered"
+    );
 }
 
 #[test]
@@ -217,6 +256,16 @@ fn a_fragmented_message_arrives_whole_and_a_ping_between_its_fragments_is_answer
 }
 
 #[test]
+fn a_pong_that_cannot_be_sent_ends_the_connection_instead_of_reading_as_a_timeout() {
+    let mut socket = connect(server(&[frame(true, PING, b"there?")]));
+    socket.stream().writes_time_out.set(true);
+    assert!(matches!(
+        socket.recv(),
+        Err(WsError::Closed { code: None, reason }) if reason == "the pong could not be sent"
+    ));
+}
+
+#[test]
 fn a_close_frame_is_answered_once_and_reported_with_its_code() {
     let mut payload = 1001u16.to_be_bytes().to_vec();
     payload.extend_from_slice(b"keepalive timeout");
@@ -265,6 +314,15 @@ fn a_message_over_the_limit_is_refused_by_its_header_before_its_payload_arrives(
         1024,
     )
     .unwrap();
+    assert!(matches!(socket.recv(), Err(WsError::TooLarge)));
+}
+
+#[test]
+fn a_frame_over_the_allowance_is_refused_by_its_header_before_its_payload_arrives() {
+    let mut header = vec![0x80 | TEXT, 126];
+    header.extend_from_slice(&600u16.to_be_bytes());
+    let mut socket = connect(server(&[header]));
+    socket.set_allowance(100);
     assert!(matches!(socket.recv(), Err(WsError::TooLarge)));
 }
 

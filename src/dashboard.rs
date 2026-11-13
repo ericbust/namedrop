@@ -28,7 +28,7 @@ pub fn run_observer_guard(
 
 use crate::{
     Clock, IdGenerator, LifecycleRuntime, StateNamespace,
-    mux::{Depth, MuxConnector, MuxRead, Scope, herdr::HerdrConnector},
+    mux::{Connector, Depth, MuxConnector, MuxRead, Scope},
 };
 use serde_json::{Value, json};
 use server_files::{ServerFiles, ServerInfo, Token, UiSource};
@@ -296,7 +296,7 @@ fn run_server(
     )?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let instance = server_files::random_hex(16)?;
-    let mux: Arc<dyn MuxConnector> = Arc::new(HerdrConnector);
+    let mux: Arc<dyn MuxConnector> = Arc::new(Connector);
     let mut channel_service = channel_service::ChannelService::start(state, mux.clone())?;
     files.publish(
         &claim,

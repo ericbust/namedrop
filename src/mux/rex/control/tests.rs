@@ -4,12 +4,12 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-struct Server {
-    stream: UnixStream,
+pub(in crate::mux::rex) struct Server {
+    pub stream: UnixStream,
 }
 
 impl Server {
-    fn upgrade(stream: UnixStream) -> Self {
+    pub fn upgrade(stream: UnixStream) -> Self {
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
@@ -56,7 +56,7 @@ impl Server {
         Some((head[0] & 0x0F, payload))
     }
 
-    fn message(&mut self) -> Value {
+    pub fn message(&mut self) -> Value {
         let (opcode, payload) = self.next_client_frame().expect("the client sent a message");
         assert_eq!(opcode, 0x1, "a text message");
         serde_json::from_slice(&payload).unwrap()
@@ -86,11 +86,11 @@ impl Server {
         self.stream.write_all(&frame).is_ok()
     }
 
-    fn send(&mut self, message: Value) {
+    pub fn send(&mut self, message: Value) {
         self.send_frame(0x1, message.to_string().as_bytes());
     }
 
-    fn welcome(&mut self) -> Value {
+    pub fn welcome(&mut self) -> Value {
         let hello = self.message();
         self.send(json!({
             "type": "welcome",
@@ -102,7 +102,7 @@ impl Server {
         hello
     }
 
-    fn close_code(&mut self) -> Option<u16> {
+    pub fn close_code(&mut self) -> Option<u16> {
         let (opcode, payload) = self.next_client_frame()?;
         assert_eq!(opcode, 0x8, "the client sent nothing but its close");
         Some(u16::from_be_bytes([payload[0], payload[1]]))
@@ -479,4 +479,214 @@ fn the_4_mib_count_spans_every_request_on_the_connection() {
     );
     drop(connection);
     server.join().unwrap();
+}
+
+#[test]
+fn a_zero_wait_reads_an_event_that_has_already_arrived() {
+    let (client, server) = scripted(|server| {
+        server.welcome();
+        server.send(
+            json!({"type": "event", "seq": 3, "payload": {"type": "program_status_changed"}}),
+        );
+        server.close_code()
+    });
+    let cancelled = AtomicBool::new(false);
+    let mut connection = open(client, DEFAULT, &cancelled).unwrap();
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        connection
+            .next_event(Duration::ZERO)
+            .map(|event| event.map(|event| event.seq)),
+        Ok(Some(3))
+    );
+    let started = Instant::now();
+    assert_eq!(connection.next_event(Duration::ZERO), Ok(None));
+    assert!(
+        started.elapsed() < Duration::from_millis(5),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(connection);
+    assert_eq!(server.join().unwrap(), Some(1000));
+}
+
+#[test]
+fn a_wait_of_duration_max_waits_for_the_event() {
+    let (client, server) = scripted(|server| {
+        server.welcome();
+        thread::sleep(Duration::from_millis(50));
+        server.send(json!({"type": "event", "seq": 4, "payload": {"type": "bell"}}));
+        server.close_code()
+    });
+    let cancelled = AtomicBool::new(false);
+    let mut connection = open(client, DEFAULT, &cancelled).unwrap();
+    assert_eq!(
+        connection
+            .next_event(Duration::MAX)
+            .map(|event| event.map(|event| event.seq)),
+        Ok(Some(4))
+    );
+    drop(connection);
+    assert_eq!(server.join().unwrap(), Some(1000));
+}
+
+/// A server that reads the upgrade request, answers it after `answer_after`
+/// when that is `Some`, and never sends a welcome. It returns what it read.
+fn slow_upgrade(answer_after: Option<Duration>) -> (UnixStream, JoinHandle<Vec<u8>>) {
+    let (client, mut server) = UnixStream::pair().unwrap();
+    let thread = thread::spawn(move || {
+        let mut head = Vec::new();
+        let mut byte = [0];
+        while !head.ends_with(b"\r\n\r\n") && server.read_exact(&mut byte).is_ok() {
+            head.push(byte[0]);
+        }
+        if let Some(after) = answer_after {
+            thread::sleep(after);
+            let _ = server.write_all(
+                b"HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Protocol: rex.control.v1\r\n\r\n",
+            );
+        }
+        let mut rest = Vec::new();
+        let _ = server.read_to_end(&mut rest);
+        head.extend(rest);
+        head
+    });
+    (client, thread)
+}
+
+#[test]
+fn a_cancel_during_the_upgrade_stops_the_open_within_50_ms() {
+    let (client, server) = slow_upgrade(None);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let setter = {
+        let cancelled = Arc::clone(&cancelled);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            cancelled.store(true, Ordering::SeqCst);
+            Instant::now()
+        })
+    };
+    let long = || Ok(budget(1500, usize::MAX));
+    let opened = open(client, &long, &cancelled).map(|_| ());
+    let stopped = Instant::now();
+    assert_eq!(opened, Err(Fault::Cancelled));
+    let late = stopped.saturating_duration_since(setter.join().unwrap());
+    assert!(late < Duration::from_millis(50), "{late:?}");
+    server.join().unwrap();
+}
+
+#[test]
+fn an_open_with_a_zero_timeout_fails_at_once_and_sends_nothing() {
+    let (client, server) = slow_upgrade(None);
+    let cancelled = AtomicBool::new(false);
+    let zero = || Ok(budget(0, usize::MAX));
+    let started = Instant::now();
+    assert_eq!(
+        open(client, &zero, &cancelled).map(|_| ()),
+        Err(Fault::Timeout(Duration::ZERO))
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(server.join().unwrap(), b"");
+}
+
+#[test]
+fn the_upgrade_and_the_welcome_share_one_timeout() {
+    let (client, server) = slow_upgrade(Some(Duration::from_millis(250)));
+    let cancelled = AtomicBool::new(false);
+    let short = || Ok(budget(300, usize::MAX));
+    let started = Instant::now();
+    assert_eq!(
+        open(client, &short, &cancelled).map(|_| ()),
+        Err(Fault::Timeout(Duration::from_millis(300)))
+    );
+    let waited = started.elapsed();
+    assert!(
+        (Duration::from_millis(300)..Duration::from_millis(450)).contains(&waited),
+        "{waited:?}, where a fresh timeout for the welcome would take 550 ms"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn a_request_after_a_write_timed_out_fails_closed_without_writing() {
+    let (client, server) = scripted(|server| {
+        server.welcome();
+        thread::sleep(Duration::from_millis(600));
+        let mut bytes = Vec::new();
+        let _ = server.stream.read_to_end(&mut bytes);
+        bytes.len()
+    });
+    let cancelled = AtomicBool::new(false);
+    let short = || Ok(budget(150, usize::MAX));
+    let mut connection = open(client, &short, &cancelled).unwrap();
+    let paste = json!({"type": "paste", "text": "p".repeat(900 * 1024)});
+    assert_eq!(
+        connection.request("block.event", Some(paste)),
+        Err(Fault::Timeout(Duration::from_millis(150)))
+    );
+    let broke = || Fault::Closed("the connection broke on an earlier request".into());
+    let started = Instant::now();
+    assert_eq!(connection.request("server.status", None), Err(broke()));
+    assert_eq!(
+        connection.next_event(Duration::from_millis(100)),
+        Err(broke())
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(5),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(connection);
+    let held = server.join().unwrap();
+    assert!(held < 900 * 1024, "the paste was cut short: {held} bytes");
+}
+
+extern "C" fn interrupt(_: libc::c_int) {}
+
+#[test]
+fn a_read_interrupted_by_a_signal_is_retried() {
+    // SAFETY: the handler does nothing, and no other test uses SIGUSR2.
+    // Without SA_RESTART, the signal ends a blocked read with EINTR.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = interrupt as *const () as libc::sighandler_t;
+        libc::sigemptyset(&mut action.sa_mask);
+        assert_eq!(
+            libc::sigaction(libc::SIGUSR2, &action, std::ptr::null_mut()),
+            0
+        );
+    }
+    let (client, server) = scripted(|server| {
+        server.welcome();
+        let request = server.message();
+        thread::sleep(Duration::from_millis(300));
+        server.send(
+            json!({"type": "response", "id": request["id"], "seq": 0, "payload": {"pid": 1}}),
+        );
+        server.close_code()
+    });
+    let (thread_id, reader) = std::sync::mpsc::channel();
+    let requester = thread::spawn(move || {
+        let cancelled = AtomicBool::new(false);
+        let mut connection = open(client, DEFAULT, &cancelled).unwrap();
+        // SAFETY: pthread_self has no preconditions.
+        thread_id
+            .send(unsafe { libc::pthread_self() } as usize)
+            .unwrap();
+        connection
+            .request("server.status", None)
+            .map(|reply| reply.payload)
+    });
+    let target = reader.recv().unwrap() as libc::pthread_t;
+    for _ in 0..20 {
+        thread::sleep(Duration::from_millis(10));
+        // SAFETY: the requester thread runs until it is joined below.
+        unsafe { libc::pthread_kill(target, libc::SIGUSR2) };
+    }
+    assert_eq!(requester.join().unwrap(), Ok(json!({"pid": 1})));
+    assert_eq!(server.join().unwrap(), Some(1000));
 }

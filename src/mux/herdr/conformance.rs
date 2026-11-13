@@ -2,7 +2,7 @@
 //! transport that answers Herdr commands from a fake world, so the fake
 //! cannot drift from what the adapter reads and does.
 
-use super::{HerdrConnector, HerdrMux, transport::Transport};
+use super::{HerdrMux, transport::Transport};
 use crate::{
     AgentRuntime, SpaceId,
     mux::{
@@ -709,7 +709,7 @@ fn a_read_on_a_cancelled_connection_is_refused_before_it_starts() {
     };
     let fake = world().endpoint("socket-a").build();
     let from_fake = read(&fake);
-    let from_herdr = read(&HerdrConnector);
+    let from_herdr = read(&crate::mux::Connector);
     assert_eq!(from_fake, from_herdr, "FakeMux and HerdrMux disagree");
     let refused = MuxError::Unavailable("Herdr read cancelled".to_owned());
     assert_eq!(

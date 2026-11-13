@@ -27,6 +27,42 @@ pub enum MuxKind {
     Rex,
 }
 
+/// What starts a Rex endpoint's key: `rex:` and the absolute path of the
+/// server's primary Unix socket, as the server reports it. No Herdr value
+/// starts so, because Herdr values are absolute paths, `default`, or empty.
+pub const REX_SCHEME: &str = "rex:";
+
+impl Endpoint {
+    /// The one reader of an endpoint value: a `session_socket_id`, an
+    /// envelope's `NAMEDROP_ENDPOINT` or `HERDR_SOCKET_PATH`, or the
+    /// `--endpoint` field, which `--herdr-socket` also fills. The name that
+    /// carried the value never decides its kind.
+    pub fn parse(value: &str) -> Self {
+        let kind = if value.starts_with(REX_SCHEME) {
+            MuxKind::Rex
+        } else {
+            MuxKind::Herdr
+        };
+        Self {
+            kind,
+            key: value.to_owned(),
+        }
+    }
+
+    /// The socket a liveness probe connects to: a Herdr key as it is, or the
+    /// absolute path after `rex:`, and `None` for a Rex key with no such path.
+    pub fn unix_socket(&self) -> Option<&Path> {
+        match self.kind {
+            MuxKind::Herdr => Some(Path::new(&self.key)),
+            MuxKind::Rex => self
+                .key
+                .strip_prefix(REX_SCHEME)
+                .map(Path::new)
+                .filter(|path| path.is_absolute()),
+        }
+    }
+}
+
 /// Limits fixed when a connection is made, so no port method takes one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Budget {
@@ -361,5 +397,22 @@ mod tests {
             .filter(|status| AgentState::parse(status).accepts_prompt())
             .collect();
         assert_eq!(accepting, ["idle", "done"]);
+    }
+
+    #[test]
+    fn an_endpoint_is_rex_only_when_it_starts_with_rex_and_keeps_its_value() {
+        for (value, kind, socket) in [
+            ("", MuxKind::Herdr, Some("")),
+            ("default", MuxKind::Herdr, Some("default")),
+            ("/tmp/h.sock", MuxKind::Herdr, Some("/tmp/h.sock")),
+            ("/tmp/rex:h.sock", MuxKind::Herdr, Some("/tmp/rex:h.sock")),
+            ("rex:/tmp/r.sock", MuxKind::Rex, Some("/tmp/r.sock")),
+            ("rex:tmp/r.sock", MuxKind::Rex, None),
+            ("rex:", MuxKind::Rex, None),
+        ] {
+            let endpoint = Endpoint::parse(value);
+            assert_eq!((endpoint.kind, endpoint.key.as_str()), (kind, value));
+            assert_eq!(endpoint.unix_socket(), socket.map(Path::new), "{value:?}");
+        }
     }
 }

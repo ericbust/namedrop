@@ -43,11 +43,15 @@ pub(super) struct WebSocket<S> {
     /// Frame bytes left to consume, headers included.
     allowance: usize,
     close_sent: bool,
+    /// The subprotocol asked for, until the server's answer to the upgrade is read.
+    upgrade: Option<String>,
 }
 
 impl<S: Read + Write> WebSocket<S> {
-    /// Skips the `Sec-WebSocket-Accept` check, which needs SHA-1, which no
-    /// dependency provides. The Rex adapter dials only a Unix socket on this machine.
+    /// Sends the upgrade request. `upgrade`, or the first `recv` or
+    /// `send_text`, reads the answer. Skips the `Sec-WebSocket-Accept` check,
+    /// which needs SHA-1, which no dependency provides. The Rex adapter dials
+    /// only a Unix socket on this machine.
     pub(super) fn connect(
         mut stream: S,
         path: &str,
@@ -62,19 +66,23 @@ impl<S: Read + Write> WebSocket<S> {
         );
         stream.write_all(request.as_bytes())?;
         stream.flush()?;
-        let mut socket = Self {
+        Ok(Self {
             stream,
             buffer: Vec::new(),
             fragmented: None,
             max_message,
             allowance: usize::MAX,
             close_sent: false,
-        };
-        socket.read_upgrade(protocol)?;
-        Ok(socket)
+            upgrade: Some(protocol.to_owned()),
+        })
     }
 
-    fn read_upgrade(&mut self, protocol: &str) -> Result<(), WsError> {
+    /// Reads the server's answer to the upgrade, once. A read that times out
+    /// keeps what it read, so the next call resumes it.
+    pub(super) fn upgrade(&mut self) -> Result<(), WsError> {
+        let Some(protocol) = self.upgrade.clone() else {
+            return Ok(());
+        };
         let end = loop {
             if let Some(end) = self.buffer.windows(4).position(|w| w == b"\r\n\r\n") {
                 break end;
@@ -102,11 +110,12 @@ impl<S: Read + Write> WebSocket<S> {
                     .then(|| value.trim().to_owned())
             })
         };
-        if header("Sec-WebSocket-Protocol").as_deref() != Some(protocol) {
+        if header("Sec-WebSocket-Protocol").as_deref() != Some(protocol.as_str()) {
             return Err(WsError::Protocol(format!(
                 "the server did not accept the {protocol} subprotocol"
             )));
         }
+        self.upgrade = None;
         Ok(())
     }
 
@@ -123,11 +132,14 @@ impl<S: Read + Write> WebSocket<S> {
     }
 
     pub(super) fn send_text(&mut self, text: &str) -> Result<(), WsError> {
+        self.upgrade()?;
         self.write_frame(TEXT, text.as_bytes())
     }
 
+    /// Sends nothing before the upgrade is answered, because no WebSocket
+    /// exists yet to close.
     pub(super) fn close(&mut self, code: u16) -> Result<(), WsError> {
-        if self.close_sent {
+        if self.close_sent || self.upgrade.is_some() {
             return Ok(());
         }
         self.close_sent = true;
@@ -135,13 +147,22 @@ impl<S: Read + Write> WebSocket<S> {
     }
 
     pub(super) fn recv(&mut self) -> Result<Message, WsError> {
+        self.upgrade()?;
         loop {
             let Some(frame) = self.take_frame()? else {
                 self.fill()?;
                 continue;
             };
             match frame.opcode {
-                PING => self.write_frame(PONG, &frame.payload)?,
+                // A failed write may have sent part of the pong, so it ends
+                // the connection rather than reading as a read that timed out.
+                PING => {
+                    self.write_frame(PONG, &frame.payload)
+                        .map_err(|_| WsError::Closed {
+                            code: None,
+                            reason: "the pong could not be sent".into(),
+                        })?;
+                }
                 PONG => {}
                 CLOSE => {
                     let code = frame

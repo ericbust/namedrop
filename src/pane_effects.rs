@@ -1380,6 +1380,17 @@ mod tests {
     }
 
     #[test]
+    fn a_rex_endpoint_and_a_herdr_socket_at_the_same_path_lock_a_pane_apart() {
+        let state = State::new();
+        let _held = DashboardPane::try_acquire(&state.0, "/tmp/h.sock", "pane").unwrap();
+        assert!(matches!(
+            DashboardPane::try_acquire(&state.0, "/tmp/h.sock", "pane"),
+            Err(AcquireError::Contended)
+        ));
+        assert!(DashboardPane::try_acquire(&state.0, "rex:/tmp/h.sock", "pane").is_ok());
+    }
+
+    #[test]
     fn a_dashboard_key_never_waits_behind_a_delivery_and_keeps_its_owner() {
         use crate::mux::fake::{Sent, SentInput};
         let state = State::new();

@@ -589,15 +589,7 @@ class Profile:
                 fail("workspace has no root shell pane")
             panes["shell"] = live[0]["pane_id"]
             self.save()
-        if not self.state.get("activated"):
-            helper = Path(self.state["plugin_root"]) / "scripts/setup.sh"
-            code, text = self.in_pane(panes["shell"], "sh " + shlex.quote(str(helper)) + " activate",
-                                      "activate")
-            print(text, end="", flush=True)
-            if code:
-                fail("Namedrop activation failed; see " + str(self.dir / "logs/activate.log"))
-            self.state["activated"] = True
-            self.save()
+        self.activate(panes["shell"])
         wanted = [spec for spec in PANES if spec.kind == "terminal" or spec.alias in agents]
         for spec in PANES:
             if spec in wanted or spec.kind == "terminal":
@@ -636,6 +628,19 @@ class Profile:
         for spec in wanted:
             if spec.kind == "agent":
                 self.launch(spec.alias, os.environ.get(spec.variable, spec.default))
+
+    def activate(self, pane):
+        """Activates Namedrop from `pane`, which installs its Claude Code and Codex packages into
+        the profile with hook wrappers baked to the profile's state directory."""
+        if self.state.get("activated"):
+            return
+        helper = Path(self.state["plugin_root"]) / "scripts/setup.sh"
+        code, text = self.in_pane(pane, "sh " + shlex.quote(str(helper)) + " activate", "activate")
+        print(text, end="", flush=True)
+        if code:
+            fail("Namedrop activation failed; see " + str(self.dir / "logs/activate.log"))
+        self.state["activated"] = True
+        self.save()
 
     def type_line(self, pane, text):
         """Type `text` and Enter into `pane` in one request.
@@ -886,7 +891,68 @@ def cmd_test(args):
             profile.name, "inside" if profile.state.get("inside_rex") else "outside"))
     profile.state["inside_rex"] = args.inside_rex
     profile.save()
-    sys.exit(0 if livetest.run(profile, request, args.codex, args.keep, lane) else 1)
+    passed = run_test(profile, lambda: livetest.run(profile, request, args.codex, args.keep, lane))
+    sys.exit(0 if passed else 1)
+
+
+def run_test(profile, run):
+    """run() for cmd_test. On the --inside-rex lane, a run that fails or raises leaves no server
+    behind: the profile is deleted, and its logs are kept under reports/."""
+    passed = False
+    try:
+        passed = run()
+    finally:
+        if profile.state.get("inside_rex") and not passed:
+            discard_failed(profile)
+    return passed
+
+
+def discard_failed(profile):
+    if not profile.dir.exists():
+        return
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    kept = testbed_home() / "reports" / "{}-{}-failed".format(profile.name, stamp)
+    if (profile.dir / "logs").is_dir():
+        shutil.copytree(str(profile.dir / "logs"), str(kept), symlinks=True)
+    try:
+        profile.stop_server()
+    except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+        say("Stopping the profile's Herdr server failed: {}".format(error))
+        rex_lane.Lane(profile, fail, say).stop()
+        profile.kill_leftovers()
+    rex_lane.remove_stale(profile.socket)
+    profile.owned()
+    shutil.rmtree(str(profile.dir))
+    say("Deleted profile {} after the failed run. Its logs are in {}".format(profile.name, kept))
+
+
+def cmd_rex(args):
+    import rex_live
+    profile, request = profile_for(args, prefix="rex-")
+    if args.action == "down":
+        profile.owned()
+        with profile.locked():
+            rex_live.down(profile)
+        return
+    agents = chosen_agents(args.agents, profile.state.get("agents"))
+    profile.create()
+    if profile.state.get("inside_rex"):
+        fail("profile {} belongs to the --inside-rex lane".format(profile.name))
+    profile.state.update(purpose="rex", agents=list(agents))
+    profile.save()
+    with profile.locked():
+        lane, session, blocks = rex_live.up(profile, request, agents)
+    say("\nReady: profile {}, Namedrop {} from {}, Rex server {}.".format(
+        profile.name, profile.namedrop_version(), sources.describe(profile.state["source"]),
+        lane.server))
+    say("State directory: {}\nSession {}: {}".format(
+        rex_live.state_directory(profile), session,
+        ", ".join("@{} {}".format(alias, block) for alias, block in sorted(blocks.items()))))
+    say("Start more agents in their own sessions with:")
+    for command in rex_live.AGENTS.values():
+        say("  " + lane.command_line("new", "--shell", "none", "-c", str(profile.repo), "--",
+                                     *command))
+    say("Stop it with: ./testbed rex down --profile " + profile.name)
 
 
 def cmd_status(args):
@@ -1088,6 +1154,13 @@ def main():
                        help="activate --link over the previous release with deliveries open")
     test.add_argument("--upgrade-from", metavar="REF",
                       help="the release --upgrade-check starts from (default: the newest v* tag below --link)")
+    rex = command("rex", cmd_rex, "run Claude Code and Codex in blocks of a scratch Rex server",
+                  profile="profile name starting with rex- (default: rex- and the source)")
+    rex.add_argument("action", choices=("up", "down"),
+                     help="up builds, installs and starts the agents; down stops every session "
+                          "and the server")
+    add_source_options(rex)
+    rex.add_argument("--agents", help="comma-separated agents (default: claude,codex)")
     command("attach", cmd_attach, "open the profile's Herdr from a plain terminal")
     command("status", cmd_status, "show the server, plugin, names and doctor")
     command("stop", cmd_stop, "stop the profile's server and keep its files")

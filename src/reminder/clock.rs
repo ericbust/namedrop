@@ -228,8 +228,8 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
                 &SystemClock,
                 &ProcessIds::default(),
                 |ns| {
-                    crate::mux::herdr::connect(
-                        Some(&ns.session_socket_id),
+                    crate::mux::connect(
+                        &crate::mux::Endpoint::parse(&ns.session_socket_id),
                         Budget::ADAPTER_DEFAULT,
                         Default::default(),
                     )
@@ -276,7 +276,7 @@ pub(crate) fn cycle_with<E, C, I>(
     state: &Path,
     clock: &C,
     ids: &I,
-    mut herdr_for: impl FnMut(&crate::StateNamespace) -> E,
+    mut herdr_for: impl FnMut(&crate::StateNamespace) -> Result<E, crate::mux::MuxError>,
     catch_up: &mut CatchUp,
 ) -> Result<bool, String>
 where
@@ -289,7 +289,9 @@ where
     let remaining = catch_up.0.get_or_insert(plan.catch_up);
     let mut drains = remaining.clone();
     for ns in plan.due {
-        let herdr = herdr_for(&ns);
+        let Ok(herdr) = herdr_for(&ns) else {
+            continue;
+        };
         let live = match crate::lifecycle::discover_reminder_workspace(state, &ns, &herdr) {
             Ok(live) => live,
             Err(error)
@@ -318,20 +320,22 @@ where
         }
     }
     for ns in drains {
-        let herdr = herdr_for(&ns);
-        let runtime = LifecycleRuntime {
-            state_directory: state,
-            home_directory: None,
-            agent_config: crate::AgentConfigDirectories::default(),
-            cwd: state,
-            workspace_id: Some(ns.space_id.as_str()),
-            current_pane_id: None,
-            session_socket_id: &ns.session_socket_id,
-            mux: &herdr,
-            clock,
-            ids,
-        };
-        let result = crate::drain_mailboxes(&runtime);
+        let result = herdr_for(&ns)
+            .map_err(|error| error.to_string())
+            .and_then(|herdr| {
+                crate::drain_mailboxes(&LifecycleRuntime {
+                    state_directory: state,
+                    home_directory: None,
+                    agent_config: crate::AgentConfigDirectories::default(),
+                    cwd: state,
+                    workspace_id: Some(ns.space_id.as_str()),
+                    current_pane_id: None,
+                    session_socket_id: &ns.session_socket_id,
+                    mux: &herdr,
+                    clock,
+                    ids,
+                })
+            });
         #[cfg(test)]
         crate::work_counters::drain_result(&result);
         if result.as_ref().err().is_none_or(|error| {
