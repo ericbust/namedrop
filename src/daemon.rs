@@ -299,9 +299,16 @@ mod tests {
     /// its scope.
     #[test]
     fn a_daemon_runs_in_its_own_group_with_null_stdio_and_without_the_rex_claim() {
+        struct Removed(std::path::PathBuf);
+        impl Drop for Removed {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
         let directory =
             std::env::temp_dir().join(format!("namedrop-daemon-{}", std::process::id()));
         fs::create_dir_all(&directory).unwrap();
+        let _removed = Removed(directory.clone());
         let script = directory.join("record");
         fs::write(
             &script,
@@ -332,7 +339,6 @@ mod tests {
             names.trim(),
             "stdio<null null null> rex<unset> pane<unset> socket</run/h.sock>"
         );
-        fs::remove_dir_all(directory).unwrap();
     }
 
     /// What a production spawn of a program named by an expression is for.
@@ -621,12 +627,17 @@ mod tests {
                     breaches.push(format!("{name} aliases Command"));
                 }
             }
+            // `SlashCommand::new` and `PaneCommand::new_line` are other types.
+            let starts = |at: usize| !text[..at].ends_with(identifier);
             for (at, _) in text.match_indices("Command::new") {
-                if !text[at + "Command::new".len()..].starts_with('(') {
+                if starts(at) && !text[at + "Command::new".len()..].starts_with('(') {
                     breaches.push(format!("{name} takes Command::new as a function"));
                 }
             }
-            for (at, _) in text.match_indices("Command::new(") {
+            for (at, _) in text
+                .match_indices("Command::new(")
+                .filter(|(at, _)| starts(*at))
+            {
                 let call = call_at(&text[at..], "Command::new(");
                 if call
                     .strip_prefix("Command::new(\"")
@@ -677,6 +688,41 @@ mod tests {
             breaches.is_empty(),
             "Start a background Namedrop process with `daemon::command`, or `daemon::scrub` for one that stays in its hook's group, so it takes no identity from its starter. Another program gets an entry in `SPAWNS`:\n{}",
             breaches.join("\n")
+        );
+    }
+
+    /// Each production file outside this one that names `StopHook`, with how
+    /// often, and whether `main.rs` names it only for the Stop front end's
+    /// clock.
+    fn stop_hook_starters(src: &Path) -> (Vec<(String, usize)>, bool) {
+        let files = production_files(src);
+        let front_end = files.iter().any(|(name, text)| {
+            name == "main.rs"
+                && text.contains(
+                    "ifletSome(state_directory)=cli.stop_hook_state_directory(){let_=namedrop::reminder::ensure_clock(state_directory,None,Starter::StopHook);stop_hook::run(state_directory);",
+                )
+        });
+        let sites = files
+            .into_iter()
+            .filter(|(name, _)| name != "daemon.rs")
+            .map(|(name, text)| (name, text.matches("StopHook").count()))
+            .filter(|(_, count)| *count > 0)
+            .collect();
+        (sites, front_end)
+    }
+
+    /// Only the Stop hook's front end starts a daemon as `Starter::StopHook`:
+    /// its clock in `main.rs` and its worker in `stop_hook.rs`. Any other
+    /// daemon started that way would lose a timeout a person set.
+    #[test]
+    fn only_the_stop_hook_s_front_end_passes_the_stop_hook_starter() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        assert_eq!(
+            stop_hook_starters(&src),
+            (
+                vec![("main.rs".to_owned(), 1), ("stop_hook.rs".to_owned(), 1)],
+                true
+            )
         );
     }
 
@@ -743,7 +789,7 @@ mod tests {
             assert!(found.contains(&caught.to_owned()), "{source}: {found:?}");
         }
         fs::remove_file(&planted).unwrap();
-        fs::write(&planted, "// Command::new(launcher)\nconst TEXT: [&str; 2] = [\"Command::new(launcher)\", \"Command as typed\"];\nfn status() { Command::new(\"git\").arg(\"status\").status(); }\n#[cfg(test)]\nmod tests { fn spawn() { Command::new(launcher); Command::new(\"namedrop\"); } }\n").unwrap();
+        fs::write(&planted, "// Command::new(launcher)\nconst TEXT: [&str; 2] = [\"Command::new(launcher)\", \"Command as typed\"];\nfn status() { Command::new(\"git\").arg(\"status\").status(); }\nfn other() { SlashCommand::new(launcher); PaneCommand::new_line(launcher); }\n#[cfg(test)]\nmod tests { fn spawn() { Command::new(launcher); Command::new(\"namedrop\"); } }\n").unwrap();
         assert_eq!(
             self_spawn_breaches(&root),
             Vec::<String>::new(),

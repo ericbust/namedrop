@@ -27,6 +27,9 @@ const DOOR: &str = "support/binary.rs";
 /// The spawn call, spelled so that this file's planted sources do not read
 /// as its own spawns.
 const NEW: &str = concat!("Command::", "new(");
+/// A renamed import of `Command`, compacted, which would hide a spawn from
+/// `NEW`. Spelled so that this file does not hold it.
+const RENAMED: &str = concat!("Command", "as");
 
 /// Programs a test may start with `Command::new` by name, because none of
 /// them runs another program.
@@ -65,7 +68,8 @@ fn breaches(root: &Path) -> Vec<String> {
 }
 
 /// Each `Command::new` under `root` whose program is neither a utility
-/// named by a literal nor listed in `SPAWNS`, as `file: program`.
+/// named by a literal nor listed in `SPAWNS`, as `file: program`, and each
+/// file that renames `Command`.
 fn spawns(root: &Path) -> Vec<String> {
     let mut found = Vec::new();
     files(root, &mut found);
@@ -80,7 +84,17 @@ fn spawns(root: &Path) -> Vec<String> {
             .unwrap()
             .split_whitespace()
             .collect();
-        for (at, _) in text.match_indices(NEW) {
+        let identifier = |c: char| c.is_alphanumeric() || c == '_';
+        for (at, _) in text.match_indices(RENAMED) {
+            if !text[..at].ends_with(|c: char| identifier(c) || c == '"') {
+                breaches.push(format!("{name} renames Command"));
+            }
+        }
+        // `SlashCommand::new` is another type.
+        for (at, _) in text
+            .match_indices(NEW)
+            .filter(|(at, _)| !text[..*at].ends_with(identifier))
+        {
             let mut depth = 1;
             let start = at + NEW.len();
             let end = text[start..]
@@ -171,7 +185,7 @@ fn a_spawn_of_another_program_is_caught() {
     fs::write(
         root.join("quiet.rs"),
         format!(
-            "{NEW}\"git\").arg(\"status\"); {NEW}\n    \"sleep\",\n).arg(\"1\"); crate::binary::command(\"/bin/sh\");"
+            "{NEW}\"git\").arg(\"status\"); {NEW}\n    \"sleep\",\n).arg(\"1\"); crate::binary::command(\"/bin/sh\"); Slash{NEW}text); let note = \"Command as typed\";"
         ),
     )
     .unwrap();
@@ -189,6 +203,13 @@ fn a_spawn_of_another_program_is_caught() {
         (
             format!("std::process::{NEW}&script).status()"),
             "planted.rs: &script",
+        ),
+        (
+            format!(
+                "use std::process::{} Spawn; let child = Spawn::new(script);",
+                concat!("Command", " as")
+            ),
+            "planted.rs renames Command",
         ),
     ] {
         fs::write(root.join("planted.rs"), &source).unwrap();
