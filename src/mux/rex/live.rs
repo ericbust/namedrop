@@ -184,3 +184,108 @@ fn a_survey_of_a_scratch_server_shows_the_agent_and_which_blocks_have_a_shell() 
     let python = panes(&rex, "nd-live-python").remove(0);
     assert_eq!(rex.process(&python.id).unwrap().shell_pid, None);
 }
+
+fn block_from(variable: &str) -> crate::mux::PaneId {
+    crate::mux::PaneId::new(
+        std::env::var(variable).unwrap_or_else(|_| panic!("set {variable} to a block ID")),
+    )
+}
+
+fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    while !done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what} did not happen"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+/// `NAMEDROP_REX_LIVE_SHELL` names a block with zsh at its prompt.
+#[test]
+#[ignore = "run with NAMEDROP_REX_LIVE, NAMEDROP_REX_LIVE_SHELL, and -- --ignored --test-threads=1"]
+fn a_line_typed_into_a_scratch_shell_runs_there() {
+    use crate::mux::InputKind;
+    let rex = live_rex();
+    let shell = block_from("NAMEDROP_REX_LIVE_SHELL");
+    let marker = std::env::temp_dir().join(format!("nd-rex-live-line-{}", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+    let line = format!("echo typed-by-namedrop > {}", marker.display());
+    assert_eq!(
+        rex.send(&shell, InputKind::Line(&line)),
+        crate::mux::InputOutcome::Delivered
+    );
+    wait_for("the line", || marker.exists());
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap(),
+        "typed-by-namedrop\n"
+    );
+    std::fs::remove_file(&marker).unwrap();
+}
+
+/// `NAMEDROP_REX_LIVE_CLAUDE` names a block running Claude Code, idle at its
+/// prompt. No hook binds it before commit 17, so the test writes the binding
+/// a hook would write.
+#[test]
+#[ignore = "run with NAMEDROP_REX_LIVE, NAMEDROP_REX_LIVE_CLAUDE, and -- --ignored --test-threads=1"]
+fn a_prompt_reaches_a_scratch_claude_code_through_the_gate() {
+    use crate::mux::{
+        Depth, InputKind, InputOutcome, MuxRead, PromptRequest, Scope, ScreenRequest, SessionClaim,
+        Style, Wrap,
+    };
+    let rex = live_rex();
+    let block = block_from("NAMEDROP_REX_LIVE_CLAUDE");
+    let pane = |rex: &super::RexMux<super::Socket>| {
+        let spaces = rex.survey(Scope::All, Depth::Panes).unwrap().spaces;
+        spaces
+            .into_iter()
+            .flat_map(|space| space.panes)
+            .find(|pane| pane.id == block)
+            .expect("the survey lists the block")
+    };
+    let found = pane(&rex);
+    let agent = found.agent.expect("Claude Code reports itself");
+    let SessionClaim::Unreported { incarnation } = agent.session else {
+        panic!("an unbound agent is unreported: {agent:?}");
+    };
+    let binding = super::binding::Binding {
+        block: block.as_str().to_owned(),
+        endpoint: rex.endpoint.key.clone(),
+        space: found.space.as_str().to_owned(),
+        foreground: incarnation.0.clone(),
+        agent: incarnation.0,
+        runtime: "claude-code".into(),
+        session: "live-session".into(),
+        bound_at_ms: 0,
+    };
+    let path = rex.bindings.path(block.as_str()).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&binding).unwrap()).unwrap();
+    let expect = pane(&rex).agent.expect("the bound agent");
+    assert!(
+        matches!(&expect.session, SessionClaim::Reported(session) if session.as_str() == "live-session")
+    );
+    let outcome = rex.send(
+        &block,
+        InputKind::Prompt(PromptRequest {
+            expect: &expect,
+            text: "Reply with exactly the word pong.\nNothing else.",
+        }),
+    );
+    assert_eq!(outcome, InputOutcome::Delivered);
+    let screen = ScreenRequest {
+        lines: 40,
+        wrap: Wrap::AsDrawn,
+        style: Style::Plain,
+    };
+    wait_for("Claude Code's answer", || {
+        rex.screen(&block, screen).is_ok_and(|screen| {
+            screen
+                .text
+                .lines()
+                .any(|line| line.contains("pong") && !line.contains("word pong"))
+        })
+    });
+    std::fs::remove_file(path).unwrap();
+}

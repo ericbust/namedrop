@@ -81,12 +81,27 @@ pub(super) struct Events {
     later: Vec<Value>,
 }
 
+impl Events {
+    /// Queued before the server started the request, so the reply's `seq`
+    /// counts it.
+    pub fn earlier(&mut self, event: Value) {
+        self.earlier.push(event);
+    }
+
+    /// Queued after the server started the request.
+    pub fn later(&mut self, event: Value) {
+        self.later.push(event);
+    }
+}
+
 type Handler = dyn Fn(&Request, &mut Events) -> Result<Value, Fault> + Send + Sync;
 
 /// A Rex server that answers each request with `handler` and records it.
 pub(super) struct Script {
     handler: Box<Handler>,
     pub peer: AtomicU32,
+    /// What `Wire::timeout` answers, in milliseconds.
+    pub timeout_ms: AtomicU32,
     log: Mutex<Vec<String>>,
     opened: AtomicU32,
 }
@@ -98,9 +113,15 @@ impl Script {
         Self {
             handler: Box::new(handler),
             peer: AtomicU32::new(PEER),
+            timeout_ms: AtomicU32::new(30_000),
             log: Mutex::default(),
             opened: AtomicU32::new(0),
         }
+    }
+
+    /// What the handler answers, for a script that wraps another.
+    pub fn answer(&self, request: &Request, events: &mut Events) -> Result<Value, Fault> {
+        (self.handler)(request, events)
     }
 
     pub fn calls(&self) -> Vec<String> {
@@ -166,6 +187,12 @@ impl Wire for Script {
             queued: VecDeque::new(),
         };
         Ok((Box::new(control), self.peer.load(Ordering::Relaxed)))
+    }
+
+    fn timeout(&self) -> Result<Duration, String> {
+        Ok(Duration::from_millis(u64::from(
+            self.timeout_ms.load(Ordering::Relaxed),
+        )))
     }
 }
 
@@ -344,11 +371,16 @@ impl Drop for State {
 }
 
 pub(super) fn rex<W: Wire>(wire: W, state: &State, local: Local) -> RexMux<W> {
+    rex_shared(wire, state, Arc::new(local))
+}
+
+/// `rex` with processes the test keeps a handle on, to change them mid-call.
+pub(super) fn rex_shared<W: Wire>(wire: W, state: &State, local: Arc<Local>) -> RexMux<W> {
     RexMux::new(
         wire,
         Endpoint::parse(&format!("rex:{SOCKET}")),
         &state.0,
-        Arc::new(local),
+        local,
     )
 }
 

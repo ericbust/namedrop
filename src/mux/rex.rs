@@ -5,6 +5,7 @@
 
 mod agent;
 mod binding;
+mod channel;
 mod control;
 #[cfg(test)]
 mod live;
@@ -13,8 +14,10 @@ pub(crate) mod wire;
 mod ws;
 
 use super::{
-    Allowance, Budget, Depth, Endpoint, Gone, MuxError, MuxRead, PaneFacts, PaneId, PaneProcess,
-    Scope, Screen, ScreenRequest, SpaceView, Style, Survey, TabId, TerminalId, Wrap, narrowest,
+    Allowance, Applied, Budget, Depth, Effect, Endpoint, Gone, InputKind, InputOutcome, Key,
+    MuxAct, MuxError, MuxInput, MuxRead, PaneFacts, PaneId, PaneInput, PaneProcess, PromptRequest,
+    Retry, Scope, Screen, ScreenRequest, SpaceView, Style, Survey, TabId, TerminalId, Wrap, gate,
+    narrowest,
     processes::{LocalProcesses, LocalRead, members},
 };
 use crate::{SpaceId, WorktreeId};
@@ -61,6 +64,10 @@ impl Wire for Socket {
         })?;
         Ok((Box::new(Connection::open(stream, limits)?), peer))
     }
+
+    fn timeout(&self) -> Result<Duration, String> {
+        Ok(self.budget.timeout)
+    }
 }
 
 /// A wire whose every request is held to `allowance` as well.
@@ -80,6 +87,10 @@ impl<W: Wire> Wire for Within<'_, W> {
             budget: Box::new(move || Ok(self.allowance.budget()?.tighter(ask()?))),
             cancelled,
         })
+    }
+
+    fn timeout(&self) -> Result<Duration, String> {
+        Ok(self.allowance.budget()?.timeout.min(self.wire.timeout()?))
     }
 }
 
@@ -474,6 +485,158 @@ impl<W: Wire> MuxRead for RexMux<W> {
             local: Arc::clone(&self.local),
             proven: Arc::clone(&self.proven),
         })
+    }
+}
+
+/// Why typing into a block cannot start, in the words of the outcome that
+/// leaves the input untyped.
+fn untyped(error: MuxError) -> InputOutcome {
+    match error {
+        MuxError::Gone(_, text) => InputOutcome::Declined(Retry::OnEvent, text),
+        error => InputOutcome::Declined(Retry::AfterDelay, error.to_string()),
+    }
+}
+
+impl<W: Wire> RexMux<W> {
+    /// A connection attached to the block's session, refused for a block
+    /// on another machine, whose pids name nothing here.
+    fn typing_call(&self, block: &str) -> Result<(Call<'_>, String), InputOutcome> {
+        let mut call = self.call().map_err(untyped)?;
+        let (session, view) = call.attach_block(block).map_err(untyped)?;
+        let host = call.block_host(&session, &view, block).map_err(untyped)?;
+        if host.is_none() || host != call.host {
+            return Err(InputOutcome::Refused(format!(
+                "block {block} runs on another machine, and Namedrop types only into blocks on \
+                 this one"
+            )));
+        }
+        Ok((call, session))
+    }
+
+    fn prompt(&self, pane: &PaneId, request: &PromptRequest<'_>) -> InputOutcome {
+        let needed = gate::CONFIRM_WINDOW + Duration::from_secs(1);
+        match self.wire.timeout() {
+            Err(error) => return InputOutcome::Declined(Retry::AfterDelay, error),
+            Ok(timeout) if timeout < needed => {
+                return InputOutcome::Declined(
+                    Retry::AfterDelay,
+                    format!(
+                        "a prompt needs {}s to confirm, and this connection allows {}ms",
+                        needed.as_secs(),
+                        timeout.as_millis()
+                    ),
+                );
+            }
+            Ok(_) => {}
+        }
+        let (call, session) = match self.typing_call(pane.as_str()) {
+            Ok(typing) => typing,
+            Err(outcome) => return outcome,
+        };
+        let channel = channel::RexChannel::new(
+            call,
+            session,
+            pane.as_str().to_owned(),
+            &*self.local,
+            &self.bindings,
+        );
+        gate::emulate_prompt(&channel, pane, request)
+    }
+
+    /// Input with no confirmation: each `block.event` in turn. A Rex error
+    /// on the first one typed nothing. Any other failure may have typed.
+    fn type_events(&self, pane: &PaneId, events: Vec<Value>) -> InputOutcome {
+        let block = pane.as_str();
+        let (mut call, session) = match self.typing_call(block) {
+            Ok(typing) => typing,
+            Err(outcome) => return outcome,
+        };
+        for (index, event) in events.into_iter().enumerate() {
+            let payload = json!({"session_id": session, "block_id": block, "event": event});
+            match call.control.request("block.event", Some(payload)) {
+                Ok(_) => {}
+                Err(fault @ Fault::Rex { .. }) if index == 0 => {
+                    return InputOutcome::Refused(mux_error(fault, Gone::Pane).to_string());
+                }
+                Err(fault) => {
+                    return InputOutcome::Ambiguous(format!(
+                        "input may have reached block {block}: {}",
+                        mux_error(fault, Gone::Pane)
+                    ));
+                }
+            }
+        }
+        InputOutcome::Delivered
+    }
+}
+
+impl<W: Wire> MuxInput for RexMux<W> {
+    fn deliver(&self, input: PaneInput<'_>) -> InputOutcome {
+        self.send(input.pane(), input.kind())
+    }
+}
+
+impl<W: Wire> RexMux<W> {
+    /// `MuxInput::deliver` minus the lock token.
+    fn send(&self, pane: &PaneId, kind: InputKind<'_>) -> InputOutcome {
+        match kind {
+            InputKind::Prompt(request) => self.prompt(pane, &request),
+            // Rewriting a multi-line command into one line would run
+            // something other than what was asked.
+            InputKind::Line(line) if line.contains(['\n', '\r']) => InputOutcome::Refused(format!(
+                "a terminal line for block {} holds a line break",
+                pane.as_str()
+            )),
+            InputKind::Line(line) => self.type_events(
+                pane,
+                vec![
+                    json!({"type": "paste", "payload": {"text": channel::one_line(line)}}),
+                    json!({"type": "key", "payload": channel::key_payload(Key::Enter)}),
+                ],
+            ),
+            InputKind::Keys { keys, .. } => self.type_events(
+                pane,
+                keys.iter()
+                    .map(|key| json!({"type": "key", "payload": channel::key_payload(*key)}))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl<W: Wire> MuxAct for RexMux<W> {
+    /// `Identify` labels the block `@alias`, and `RenameTab` labels the
+    /// window. Rex shows no badges, notifications, or popups yet, and has no
+    /// keybindings to reload.
+    fn apply(&self, effect: &Effect) -> Result<Applied, MuxError> {
+        match effect {
+            Effect::Identify { pane, alias, .. } => {
+                let mut call = self.call()?;
+                let (session, _) = call.attach_block(pane.as_str())?;
+                let label = json!({"session_id": session, "block_id": pane.as_str(),
+                                   "label": format!("@{alias}")});
+                call.request("session.set_block_label", label, Gone::Pane)?;
+                Ok(Applied::Done)
+            }
+            Effect::RenameTab { tab, label } => {
+                let mut call = self.call()?;
+                let session = call
+                    .resolve("window", tab.as_str(), Gone::Tab)?
+                    .session_id
+                    .ok_or_else(|| {
+                        MuxError::Protocol(format!("Rex named no session for {}", tab.as_str()))
+                    })?;
+                call.attach(&session)?;
+                let label =
+                    json!({"session_id": session, "window_id": tab.as_str(), "label": label});
+                call.request("session.set_window_label", label, Gone::Tab)?;
+                Ok(Applied::Done)
+            }
+            Effect::Badges { .. }
+            | Effect::Notify { .. }
+            | Effect::OpenPopup(_)
+            | Effect::ReloadKeybindings => Ok(Applied::Unsupported),
+        }
     }
 }
 

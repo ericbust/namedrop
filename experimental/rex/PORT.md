@@ -812,6 +812,15 @@ What the design did not say, found while building 9:
 - **The fixtures' agent is a stand-in.** A Python program that reports `claude-code` with OSC 7501 played the agent, so the replies are Rex's own and the owner names are the stand-in's. The zombie fixture is its launcher that never reaps it.
 - **The incarnation is read where liveness is read.** `LocalProcesses::read` returns it, so the design's separate `binding::incarnation` is not needed.
 
+- **10. Input and effects** (`feat(rex): type into blocks through the gate and apply effects`). `rex/channel.rs` is the gate's channel on one connection: the facts' `program_status` sets the tap's boundary, the paste turns every control character into a space, one read of what the connection holds and a second `process` follow it, and the Enter goes only when no change for the block was queued after the facts and before the paste, the foreground is the facts' pid, and the process the facts admitted still lives with its start time in the foreground's group. The tap reports a status change at or below the paste's acknowledgement as `Program`. A prompt declines before it connects when the connection's timeout is shorter than the confirm window and 1 s. A `Line` with `\n` or `\r` is refused before any byte, and a `Line` or `Keys` goes as `block.event`s with no confirmation. A block on another machine is refused every input. `Identify` labels the block `@alias`, `RenameTab` labels the window, and the other effects are `Unsupported`. `RexMux` implements `Mux`, still `#[cfg(test)]` until commit 11.
+
+What the design did not say, found while building 10:
+
+- **The key payloads, measured.** On a scratch block running `stty raw -echo; od -c`, `escape` (code 27, no text) wrote `033`, `arrow_up` and `arrow_down` wrote `033 [ A` and `033 [ B`, `enter` with text `\r` wrote `\r`, and Ctrl-C and Ctrl-U wrote `003` and `025`. Rex writes the bytes from the key, so Escape needs no text.
+- **The re-read watches the process the facts admitted.** That is the bound agent behind a launcher, and the foreground itself when the agent is the foreground or no binding names it, so an `Unreported` agent the caller expected is checked too.
+- **The confirm check reads the call's budget, not `NAMEDROP_REX_TIMEOUT_MS`.** That variable caps each request, and its 5 s default is shorter than the 6 s the check needs, so counting it declined every prompt on the live lane. A Stop worker's 250 ms therefore holds each of its requests to 250 ms and does not decline its prompts, which the design's daemon table assumed it would.
+- **A paste error is `Ambiguous` even when Rex answered it,** because the gate owns that rule. A `Line` or `Keys` whose first `block.event` Rex refuses is `Refused`, because those have no gate.
+
 ## Next implementation step
 
 Step 3 is done (see [Step 3: neutral names](#step-3-neutral-names)). Next is step 4 of the [plan](PLAN.md): write the Rex adapter. Start with [Left for step 4](#left-for-step-4) and the step 4 items under [Open questions and risks](#open-questions-and-risks).

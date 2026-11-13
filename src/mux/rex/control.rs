@@ -50,6 +50,10 @@ pub(super) trait Wire: Send + Sync {
     /// The connection and the pid of the process at its other end. Each
     /// request is held to `narrower` as well as to the wire's own budget.
     fn open<'a>(&'a self, narrower: Narrower<'a>) -> Result<(Box<dyn Control + 'a>, u32), Fault>;
+    /// The timeout of the budget now, for a caller that must know before it
+    /// starts whether a whole call fits. `NAMEDROP_REX_TIMEOUT_MS` caps each
+    /// request, not the call, so it is not part of it.
+    fn timeout(&self) -> Result<Duration, String>;
 }
 
 /// What a `within` adds to a wire's limits. Its budget is asked for before
@@ -72,6 +76,10 @@ impl Narrower<'_> {
 impl<W: Wire + ?Sized> Wire for &W {
     fn open<'a>(&'a self, narrower: Narrower<'a>) -> Result<(Box<dyn Control + 'a>, u32), Fault> {
         (**self).open(narrower)
+    }
+
+    fn timeout(&self) -> Result<Duration, String> {
+        (**self).timeout()
     }
 }
 
@@ -401,7 +409,7 @@ fn request_budget(limits: &Limits<'_>, cap: Duration) -> Result<Budget, Fault> {
 }
 
 /// The most any one request may take: `NAMEDROP_REX_TIMEOUT_MS`, or 5 s.
-pub(super) fn request_timeout_cap() -> Duration {
+fn request_timeout_cap() -> Duration {
     timeout_cap(std::env::var("NAMEDROP_REX_TIMEOUT_MS").ok().as_deref())
 }
 
