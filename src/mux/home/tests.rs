@@ -56,6 +56,7 @@ impl Scripted {
             endpoint: Endpoint::parse(CANONICAL),
             server,
             child,
+            caller: Caller::default(),
         }));
         self
     }
@@ -99,11 +100,18 @@ impl Inherited for Scripted {
     }
 }
 
+/// The place of `BLOCK`, verified for a process whose ancestors are a
+/// plain block's.
 fn rex_place() -> Home {
+    rex_place_under(&[110, SERVER, 1])
+}
+
+fn rex_place_under(ancestors: &[u32]) -> Home {
     Home::Rex(Place {
         endpoint: Endpoint::parse(CANONICAL),
         space: Some(SpaceId::new(SESSION)),
         pane: Some(PaneId::new(BLOCK)),
+        caller: Some(Box::new(Caller::default().of(ancestors.to_vec()))),
     })
 }
 
@@ -160,7 +168,7 @@ fn every_row_of_the_home_table_picks_its_home() {
                 .peer(REX, Ok(SERVER))
                 .peer(HERDR, Ok(HERDR_SERVER))
                 .child(SERVER, 110),
-            Ok(rex_place()),
+            Ok(rex_place_under(&[110, SERVER, 120, HERDR_SERVER, 1])),
         ),
         (
             "a Rex block whose HERDR_SOCKET_PATH names a live Herdr elsewhere",
@@ -319,7 +327,7 @@ fn every_row_of_the_home_table_picks_its_home() {
                 .ancestors(&[SERVER, 1])
                 .peer(REX, Ok(SERVER))
                 .child(SERVER, 110),
-            Ok(rex_place()),
+            Ok(rex_place_under(&[SERVER, 1])),
         ),
         (
             "a claim answered by a server that is not the ancestor probed",
@@ -472,6 +480,7 @@ fn an_explicit_endpoint_decides_by_its_kind_with_no_probe() {
             endpoint: Endpoint::parse("rex:/tmp/r.sock"),
             space: Some(SpaceId::new("session:s")),
             pane: Some(PaneId::new("block:b")),
+            caller: None,
         }))
     );
     assert_eq!(block.probed(), Vec::<PathBuf>::new());
@@ -490,6 +499,7 @@ fn a_flag_names_its_own_value_in_a_claimed_place() {
             endpoint: Endpoint::parse(CANONICAL),
             space: Some(SpaceId::new(SESSION)),
             pane: Some(PaneId::new("block:flag")),
+            caller: Some(Box::new(Caller::default().of(vec![110, SERVER, 1]))),
         }))
     );
 }
@@ -508,6 +518,7 @@ fn without_a_rex_claim_the_set_of_names_decides() {
             endpoint: Endpoint::parse("rex:/tmp/r.sock"),
             space: Some(SpaceId::new("session:s")),
             pane: None,
+            caller: None,
         }))
     );
     assert_eq!(resolved(&neutral("/tmp/h.sock")), Ok(Home::Herdr));
@@ -522,6 +533,7 @@ fn without_a_rex_claim_the_set_of_names_decides() {
             endpoint: Endpoint::parse("rex:/tmp/r.sock"),
             space: Some(SpaceId::new("session:s")),
             pane: None,
+            caller: None,
         })),
         "a claim needs both REX_BLOCK and REX_SESSION"
     );

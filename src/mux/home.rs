@@ -5,14 +5,12 @@
 //! about Herdr is resolved as Herdr, so every Herdr process keeps today's
 //! path. Everything else reads step 3's set of names.
 
-use super::{
-    Endpoint, MuxKind, PaneId,
-    processes::{LocalProcesses, ThisMachine},
-};
+use super::{Endpoint, MuxKind, PaneId, processes::ThisMachine, rex::Caller};
 use crate::{
     SpaceId,
     locator::{Locator, Name},
 };
+use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsString,
     io,
@@ -37,6 +35,32 @@ pub struct Place {
     pub endpoint: Endpoint,
     pub space: Option<SpaceId>,
     pub pane: Option<PaneId>,
+    /// What the verifying read showed about the caller's block. Present only
+    /// when an inherited `REX_BLOCK` verified, so only then can a hook bind.
+    pub(crate) caller: Option<Box<Caller>>,
+}
+
+/// Why a hook did not bind its session to its block: the conditions of
+/// `Place::bind_session` in order, or a write that failed.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BindRefused {
+    /// The hook's agent is not in the foreground's process group.
+    NotInGroup,
+    /// Something other than shells lies between the foreground and the
+    /// hook's agent, or the foreground runs the agent's own executable.
+    Launcher,
+    /// The foreground's status record names another runtime.
+    Runtime,
+    /// The foreground or the hook's agent is not a live process here.
+    NotAlive,
+    /// The block's binding already names the foreground as its agent.
+    AlreadyBound,
+    /// A Claude Code in print mode behind the foreground.
+    NestedPrintMode,
+    /// The place came from flags or names, not a verified block.
+    NoCaller,
+    Io(String),
 }
 
 impl Home {
@@ -116,6 +140,9 @@ pub struct Claimed {
     pub server: u32,
     /// The block's child process.
     pub child: u32,
+    /// The block's foreground and its status record, read on the same
+    /// connection.
+    pub(crate) caller: Caller,
 }
 
 /// What this process inherited: its environment, its ancestors, and what a
@@ -149,16 +176,7 @@ impl Inherited for ThisProcess {
     }
 
     fn ancestors(&self) -> Vec<u32> {
-        let mut ancestors = Vec::new();
-        let mut pid = std::process::id();
-        while let Some(parent) = ThisMachine.parent(pid) {
-            if ancestors.len() == 64 || ancestors.contains(&parent) {
-                break;
-            }
-            ancestors.push(parent);
-            pid = parent;
-        }
-        ancestors
+        super::processes::ancestors(&ThisMachine, std::process::id())
     }
 
     fn peer(&self, socket: &Path) -> io::Result<u32> {
@@ -323,26 +341,28 @@ fn percent_decoded(text: &str) -> String {
 ///    set, else the neutral set, whose `NAMEDROP_ENDPOINT` is parsed for its
 ///    kind.
 pub fn resolve(flags: &Flags<'_>, inherited: &dyn Inherited) -> Result<Home, String> {
-    let place = |endpoint: Endpoint, space: Option<String>, pane: Option<String>| {
-        Home::Rex(Place {
-            endpoint,
-            space: flags.space.map(SpaceId::new).or(space.map(SpaceId::new)),
-            pane: flags.pane.map(PaneId::new).or(pane.map(PaneId::new)),
-        })
+    let place = |endpoint: Endpoint, space: Option<String>, pane: Option<String>| Place {
+        endpoint,
+        space: flags.space.map(SpaceId::new).or(space.map(SpaceId::new)),
+        pane: flags.pane.map(PaneId::new).or(pane.map(PaneId::new)),
+        caller: None,
     };
     if let Some(endpoint) = flags.endpoint {
         let endpoint = Endpoint::parse(endpoint);
         return Ok(match endpoint.kind {
             MuxKind::Herdr => Home::Herdr,
-            MuxKind::Rex => place(endpoint, None, None),
+            MuxKind::Rex => Home::Rex(place(endpoint, None, None)),
         });
     }
     if let (Some(block), Some(session)) =
         (set(inherited, "REX_BLOCK"), set(inherited, "REX_SESSION"))
     {
         return nearest(inherited, &session, &block).map(|claimed| {
-            claimed.map_or(Home::Herdr, |endpoint| {
-                place(endpoint, Some(session), Some(block))
+            claimed.map_or(Home::Herdr, |(endpoint, caller)| {
+                Home::Rex(Place {
+                    caller: Some(Box::new(caller)),
+                    ..place(endpoint, Some(session), Some(block))
+                })
             })
         });
     }
@@ -356,11 +376,11 @@ pub fn resolve(flags: &Flags<'_>, inherited: &dyn Inherited) -> Result<Home, Str
                         .resolve(lookup)
                         .and_then(|(_, value)| value.into_string().ok())
                 };
-                return Ok(place(
+                return Ok(Home::Rex(place(
                     endpoint,
                     neutral(Locator::Space),
                     neutral(Locator::Pane),
-                ));
+                )));
             }
             Ok(Home::Herdr)
         }
@@ -368,13 +388,13 @@ pub fn resolve(flags: &Flags<'_>, inherited: &dyn Inherited) -> Result<Home, Str
     }
 }
 
-/// The verified Rex endpoint when Rex's server is the nearest ancestor, and
-/// `None` when the home is Herdr.
+/// The verified Rex endpoint and what it showed of the caller's block when
+/// Rex's server is the nearest ancestor, and `None` when the home is Herdr.
 fn nearest(
     inherited: &dyn Inherited,
     session: &str,
     block: &str,
-) -> Result<Option<Endpoint>, String> {
+) -> Result<Option<(Endpoint, Caller)>, String> {
     let ancestors = inherited.ancestors();
     let rex = rex_claim(inherited);
     let rex_probe = rex
@@ -417,7 +437,7 @@ fn nearest(
                     claimed.child
                 ));
             }
-            Ok(Some(claimed.endpoint))
+            Ok(Some((claimed.endpoint, claimed.caller.of(ancestors))))
         }
     }
 }

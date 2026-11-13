@@ -642,6 +642,22 @@ pub(crate) fn install_record_mismatch(
         .then_some((record, recorded))
 }
 
+/// Each installed SessionStart or UserPromptSubmit wrapper that passes no
+/// `--runtime`, as one installed before the flag existed. Its hooks never
+/// bind a session in a Rex block, so Doctor names them there.
+pub(crate) fn wrappers_without_runtime(home: &Path) -> Vec<PathBuf> {
+    [AgentRuntime::Codex, AgentRuntime::ClaudeCode]
+        .into_iter()
+        .flat_map(|runtime| {
+            [SESSION_START_SCRIPT_FILE, HOOK_SCRIPT_FILE]
+                .map(|file| package_directory(home, runtime).join(file))
+        })
+        .filter(|path| {
+            fs::read_to_string(path).is_ok_and(|wrapper| !wrapper.contains(" --runtime "))
+        })
+        .collect()
+}
+
 fn inspect_installed_file(path: &Path, expected: &str, mode: Option<u32>) -> Result<(), String> {
     let actual =
         fs::read(path).map_err(|error| conflict(path, &format!("cannot be read: {error}")))?;
@@ -1229,9 +1245,10 @@ fn hook_script(
         safe_context.push_str(&forward_marked_context("UserPromptSubmit", marker));
     }
     Ok(format!(
-        "#!/bin/sh\noutput=$({} hook user-prompt-submit --state-directory {} 2>/dev/null) || exit 0\nif [ \"$output\" = '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ]; then\n  printf '%s' \"$output\"\n  exit 0\nfi\n{}exit 0\n",
+        "#!/bin/sh\noutput=$({} hook user-prompt-submit --state-directory {} --runtime {} 2>/dev/null) || exit 0\nif [ \"$output\" = '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ]; then\n  printf '%s' \"$output\"\n  exit 0\nfi\n{}exit 0\n",
         shell_single_quote(executable),
         shell_single_quote(state_directory),
+        runtime.as_str(),
         safe_context,
     ))
 }
@@ -1275,9 +1292,10 @@ fn session_start_script(
     };
     let update_notice = forward_update_notice(runtime);
     Ok(format!(
-        "#!/bin/sh\noutput=$({} hook session-start --state-directory {} 2>/dev/null) || exit 0\n{app_server_notice}{}{update_notice}exit 0\n",
+        "#!/bin/sh\noutput=$({} hook session-start --state-directory {} --runtime {} 2>/dev/null) || exit 0\n{app_server_notice}{}{update_notice}exit 0\n",
         shell_single_quote(executable),
         shell_single_quote(state_directory),
+        runtime.as_str(),
         forward_marked_context("SessionStart", crate::persona::POLICY_MARKER),
     ))
 }
@@ -1541,24 +1559,35 @@ mod permission_tests {
 
     /// The UserPromptSubmit wrapper is the one before commit 16 without the
     /// line that backgrounded `hook mailbox-wake`: the hook starts the wake.
+    /// It and the SessionStart wrapper name their runtime, which only a Rex
+    /// block's bind reads.
     #[test]
-    fn the_prompt_wrapper_starts_no_wake_of_its_own() {
+    fn the_context_wrappers_name_their_runtime_and_start_no_wake() {
         for runtime in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
             let wrapper = HookScript::Prompt
                 .render(runtime, Path::new("/x/namedrop"), Path::new("/s"))
                 .unwrap();
-            assert!(
-                wrapper.starts_with(concat!(
+            let prompt = format!(
+                concat!(
                     "#!/bin/sh\n",
-                    "output=$('/x/namedrop' hook user-prompt-submit --state-directory '/s' 2>/dev/null) || exit 0\n",
-                    "if [ \"$output\" = '{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}' ]; then\n",
+                    "output=$('/x/namedrop' hook user-prompt-submit --state-directory '/s' --runtime {} 2>/dev/null) || exit 0\n",
+                    "if [ \"$output\" = '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ]; then\n",
                     "  printf '%s' \"$output\"\n",
                     "  exit 0\n",
                     "fi\n",
-                )),
-                "{wrapper}"
+                ),
+                runtime.as_str()
             );
+            assert!(wrapper.starts_with(&prompt), "{wrapper}");
             assert!(!wrapper.contains("mailbox-wake"), "{wrapper}");
+            let session = HookScript::Session
+                .render(runtime, Path::new("/x/namedrop"), Path::new("/s"))
+                .unwrap();
+            let start = format!(
+                "#!/bin/sh\noutput=$('/x/namedrop' hook session-start --state-directory '/s' --runtime {} 2>/dev/null) || exit 0\n",
+                runtime.as_str()
+            );
+            assert!(session.starts_with(&start), "{session}");
         }
     }
 
