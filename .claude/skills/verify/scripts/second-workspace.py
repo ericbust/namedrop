@@ -19,13 +19,17 @@ import time
 from pathlib import Path
 
 profile = Path(os.environ.get('TESTBED_HOME', Path.home() / '.namedrop-testbed')) / 'profiles' / sys.argv[1]
+if 'claude_account' not in json.loads((profile / 'state.json').read_text()):
+    sys.exit(f'{profile.name} has no accepted Claude Code account check; run '
+             f'testbed/testbed up --profile {profile.name} first')
 env_line = re.search(r'env -i (.*) /bin/bash --noprofile', (profile / 'env.sh').read_text()).group(1)
 base_env = ['env', '-i', *shlex.split(env_line)]
 saved = json.loads((profile / 'state.json').read_text())
 setup_sh = Path(saved['plugin_root']) / 'scripts/setup.sh'
 repo = profile / 'beta'
 # Under `--codex no-daemon` a plain `codex` would start the shared app-server and add ND-SESSION-003.
-AGENTS = {'lead': 'claude', 'codex': 'codex --no-daemon'}
+# The profile's claude, named in full: a pane's login shell may put another claude first on PATH.
+AGENTS = {'lead': shlex.quote(str(profile / 'bin/claude')), 'codex': 'codex --no-daemon'}
 
 
 def run(*argv, cwd=None):

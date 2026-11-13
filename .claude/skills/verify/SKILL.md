@@ -52,6 +52,23 @@ warning (`ND-SESSION-003`), runs the two commands Doctor gives as the fix, and c
 the warning clears. `--codex no-daemon` skips that arc. `--keep` leaves the profile
 running after a pass so you can probe further.
 
+Claude Code signs in with the token in `~/.namedrop-testbed/claude-oauth-token`, never
+with this machine's default login. With no token file the run refuses before anything
+starts and prints how to make one (`claude setup-token` under the account to bill, saved
+with `chmod 600`); [testbed/README.md](../../../testbed/README.md#the-claude-code-account)
+has the steps. Do not create the token yourself and do not pass `--claude-default-login`
+unless the user asks for it; report the refusal instead. The report's second line names
+the account. For a `claude setup-token` token it always reads `plan and organization
+unreadable with this token's scope, signed in with the testbed token`: such a token cannot
+read its own plan, and Claude Code cannot name its account, so the user confirms the
+account once by checking that usage shows on the personal account. The plan check runs
+only for a token with the profile scope or the default login; there a team or enterprise
+account refuses unless `--claude-org NAME` names its organization, and you pass that only
+when the user named the organization. A refusal that says the token was rejected (HTTP
+401) means the user must create a new token; report it. Every lane, `rex up` and the probe
+scripts below start Claude Code by the profile's full path, `PROFILE/bin/claude`, so they
+use the same token.
+
 What the run asserts, step by step: build and names; first-run screens cleared; the Codex
 server state (and the fix in plain mode); `namedrop address list` and `doctor` clean; the
 hooks loaded (the policy text once per session and the roster on the first turn, in both
@@ -282,7 +299,9 @@ export TESTBED_HOME="${TESTBED_HOME:-$HOME/.namedrop-testbed}"
 testbed/testbed up --link "$PWD" --fresh --yes
 ```
 
-Use `--no-launch` for lanes that do not prompt real agents. Do not use
+Use `--no-launch` for lanes that do not prompt real agents. `up` still checks the Claude
+Code account, so it needs the token file; add `--agents codex` when the lane needs no
+Claude Code. Do not use
 `testbed/testbed attach`. The profile is `link-<checkout basename>`.
 Read its generated `env.sh` to build the wrapper below. The socket assertion runs
 before the first Herdr command. Keep all Herdr and Namedrop calls inside `tb`.

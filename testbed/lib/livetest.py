@@ -64,7 +64,9 @@ SCREENS = (
            "Claude exited to its shell; see the capture"),
     Screen("claude", "login", r"Select login method|Paste code here|Not logged in · Run /login", (),
            FATAL, None,
-           "Claude is not logged in; run ./testbed shell --profile {profile}, then claude auth login"),
+           "Claude is not logged in. The testbed token was rejected; create a new one with claude "
+           "setup-token (testbed/README.md, The Claude Code account). A --claude-default-login "
+           "profile signs in with ./testbed shell --profile {profile}, then claude auth login"),
     Screen("claude", "theme", r"Choose the text style that looks best", ("enter",), ANSWER, None, ""),
     Screen("claude", "security-notes", r"Security notes:", ("enter",), ANSWER, None, ""),
     Screen("claude", "terminal-setup", r"Use Claude Code's terminal setup\?", ("esc",), ANSWER,
@@ -249,8 +251,10 @@ class StepResult(namedtuple("StepResult", "step checks seconds")):
         return "ok" if self.checks and all(check.ok for check in self.checks) else "FAIL"
 
 
-class Report(namedtuple("Report", "profile mode feats results compat evidence archived")):
-    """compat is None unless every step passed: a failed run is never recorded as tested."""
+class Report(namedtuple("Report", "profile mode feats results compat evidence archived account",
+                        defaults=(None,))):
+    """compat is None unless every step passed: a failed run is never recorded as tested. account
+    is the Claude Code account line the build step recorded."""
 
     @property
     def passed(self):
@@ -270,6 +274,7 @@ def report_json(report):
     return {
         "passed": report.passed,
         "profile": report.profile,
+        "claude_account": report.account,
         "mode": report.mode.name if report.mode else None,
         "namedrop": version_text(report.feats) if report.feats else None,
         "compat": report.compat,
@@ -291,7 +296,8 @@ def render(report):
     width = max(len(result.step.title) for result in report.results)
     lines = ["./testbed test: {}, Namedrop {}, Codex {}".format(
         report.profile, version_text(report.feats) if report.feats else "unknown",
-        report.mode.name if report.mode else "unknown")]
+        report.mode.name if report.mode else "unknown"),
+        "Claude Code account: " + (report.account or "not checked")]
     indent = " " * (10 + width)
     for number, result in enumerate(report.results, 1):
         head = "{:<4} {:>2} {:<{}}  ".format(result.status, number, result.step.title, width)
@@ -1445,7 +1451,8 @@ def run(profile, request, codex, keep, lane=None):
             except KeyboardInterrupt:
                 results.append(StepResult(Step("interrupted", "interrupted", "", None, ""),
                                           (Check("run", False, "interrupted with Ctrl-C"),), 0))
-        report = Report(profile.name, mode, feats, tuple(results), None, evidence, None)
+        report = Report(profile.name, mode, feats, tuple(results), None, evidence, None,
+                        profile.state.get("claude_account"))
         if report.passed:
             report = report._replace(
                 compat=testbed.compat_line(profile, models_seen(r)) + " " + outcome_sentence(results),

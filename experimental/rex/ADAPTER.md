@@ -34,7 +34,7 @@ The fourth review found revision 4 ready to implement once these items were patc
 | 4 | Medium-low. "`port_ansi` `None` makes delivery read `Unseen` instead of guessing" is wrong, because `Unseen` with `idle` or `done` delivers | Corrected, and decided. A Rex screen fault (a read error, or `port_ansi` answering `None`) holds the mail and retries instead of delivering. Herdr's rule does not change. Lands in commit 11. That an agent can report `done` over a dialog Namedrop does not recognize is shared with Herdr and recorded under [Open questions and risks](#open-questions-and-risks) |
 | 5 | Low. `shell_of` accepts a non-interactive shell | Fixed. When the candidate shell is the foreground, `shell_of` reports no shell if the foreground's process group has any other member |
 | 6 | Low. A stale record refuses the bind | Fixed. A record whose owner is not the foreground counts as absent in condition 3, as the survey reads it |
-| 7 | Doc facts | Corrected. Codex 0.163.0 has no `mcp-server` command. A record existed at SessionStart in 5 of 6 of review 4's runs, so the text says a record may not exist. The probe recipe links `Library/Keychains` into the scratch `HOME` for Claude Code on macOS. Rex requires `updated_at` on a status record, and the fixtures carry it |
+| 7 | Doc facts | Corrected. Codex 0.163.0 has no `mcp-server` command. A record existed at SessionStart in 5 of 6 of review 4's runs, so the text says a record may not exist. The probe recipe passes Claude Code its login explicitly in the scratch `HOME`, now the testbed's token through a wrapper and never a `Library/Keychains` link. Rex requires `updated_at` on a status record, and the fixtures carry it |
 | 8 | Plan wording | Corrected. Commit 15 tests that a Herdr set of names ignores `NAMEDROP_STATE_DIR`. Commit 16's live check uses a terminal recipient, because an agent recipient needs commit 17's binding |
 | 9 | Part 2, record only. The pointer's `@bob@laptop` can name another machine on B | Recorded under [Open questions and risks](#open-questions-and-risks) |
 
@@ -1660,16 +1660,20 @@ Review 4 ran its own probes, and this patch did not re-run them. The last item w
 
 ### Reproduce the probes
 
-Run these from a Rex terminal. The server's own `curl --unix-socket "$HOME/Library/Application Support/rex/server.sock" http://localhost/llms.txt` documents every message. Keep scratch socket paths under 104 bytes, and Herdr's shorter still. Give every scratch server its own `HOME`. Under the real `HOME`, a scratch server writes `servers/<sha256 of its listen URL>/start.lock` into the user's Rex directory. An agent in a scratch server's block then needs its login passed explicitly, as `CLAUDE_CONFIG_DIR` or `CODEX_HOME`. Claude Code on macOS also keeps its login in the login keychain, so link `Library/Keychains` into the scratch `HOME`, as the testbed's `auth_links` does (`testbed/lib/testbed.py:318-323`).
+Run these from a Rex terminal. The server's own `curl --unix-socket "$HOME/Library/Application Support/rex/server.sock" http://localhost/llms.txt` documents every message. Keep scratch socket paths under 104 bytes, and Herdr's shorter still. Give every scratch server its own `HOME`. Under the real `HOME`, a scratch server writes `servers/<sha256 of its listen URL>/start.lock` into the user's Rex directory. An agent in a scratch server's block then needs its login passed explicitly. Codex takes `CODEX_HOME`. Claude Code signs in only with the testbed's token, through a `claude` wrapper that reads the token file when Claude Code starts, as a testbed profile's `bin/claude` does. Start the wrapper by its full path with `--shell none`, because a login shell can put another `claude` ahead of it on `PATH` ([testbed/README.md](../../testbed/README.md#the-claude-code-account)). Never pass `CLAUDE_CONFIG_DIR` naming your own config, and never link `Library/Keychains` into the scratch `HOME`: either one signs Claude Code in with this machine's default login.
 
 ```sh
-# A scratch server whose blocks know it.
-X=$(mktemp -d /tmp/ndrex.XXXX); mkdir -p "$X/cfg" "$X/home"; : > "$X/cfg/init.lua"
-[ "$(uname)" = Darwin ] && mkdir -p "$X/home/Library" && ln -s "$HOME/Library/Keychains" "$X/home/Library/Keychains"
-env -i HOME="$X/home" USER="$USER" SHELL=/bin/zsh PATH=/usr/bin:/bin REX_SERVER="unix://$X/s.sock" \
-	CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" \
+# A scratch server whose blocks know it. Its Claude Code signs in with the testbed token only.
+X=$(mktemp -d /tmp/ndrex.XXXX); mkdir -p "$X/cfg" "$X/home" "$X/bin" "$X/claude"; : > "$X/cfg/init.lua"
+T="${NAMEDROP_TESTBED_CLAUDE_TOKEN_FILE:-${TESTBED_HOME:-$HOME/.namedrop-testbed}/claude-oauth-token}"
+test -s "$T" || echo "no Claude Code token at $T: see testbed/README.md" >&2
+ln -s "$(command -v claude)" "$X/claude/claude"   # the link keeps the process named claude
+printf '#!/bin/sh\nCLAUDE_CODE_OAUTH_TOKEN=$(cat %s) || exit 1\nexport CLAUDE_CODE_OAUTH_TOKEN\nexec %s "$@"\n' \
+	"'$T'" "'$X/claude/claude'" > "$X/bin/claude"; chmod 700 "$X/bin/claude"
+env -i HOME="$X/home" USER="$USER" SHELL=/bin/zsh PATH="$X/bin:/usr/bin:/bin" REX_SERVER="unix://$X/s.sock" \
 	"$(command -v rex)" server run --listen "unix://$X/s.sock" --state-dir "$X/state" --config "$X/cfg/init.lua" &
-created=$(rex -S "unix://$X/s.sock" --autostart=false new nd-probe -c "$PWD" --json -- claude --model haiku)
+# --shell none and the wrapper's full path: a login shell may put another claude ahead of "$X/bin".
+created=$(rex -S "unix://$X/s.sock" --autostart=false new nd-probe --shell none -c "$PWD" --json -- "$X/bin/claude" --model haiku)
 S=$(printf '%s' "$created" | jq -er .session_id)
 B=$(printf '%s' "$created" | jq -er '.initial_windows[0].block_ids[0]')
 rex -S "unix://$X/s.sock" --autostart=false block call -s "$S" -b "$B" process | jq -c '{child, foreground, ancestors}'

@@ -2,18 +2,22 @@
 
 import ast
 import contextlib
+import http.server
 import io
 import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import socket
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.error
+import urllib.request
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -985,6 +989,7 @@ class PastingPanes:
 def check_launch_after_kill():
     profile = object.__new__(testbed.Profile)
     panes = PastingPanes()
+    profile.dir = Path("/profiles/test one")
     profile.state = {"workspace": "w1", "panes": {"claude": "w1:p2"}}
     # Codex still runs in its own pane; only the killed claude pane is relaunched.
     profile.herdr = lambda *args: {"panes": [{"pane_id": "w1:p2", "agent": None},
@@ -992,9 +997,14 @@ def check_launch_after_kill():
     profile.run = panes.run
     profile.save = lambda: None
     profile.launch("claude", "claude --resume 14c7")
-    assert panes.lines("w1:p2") == (["claude --resume 14c7"], ""), panes.streams
+    assert panes.lines("w1:p2") == (["'/profiles/test one/bin/claude' --resume 14c7"], ""), \
+        panes.streams
     assert set(panes.streams) == {"w1:p2"}, panes.streams
     assert profile.state.get("launched_claude") is True, profile.state
+    for other in ("/usr/local/bin/claude --resume 14c7", "env claude", "claude; claude"):
+        assert "must start with claude" in refusal(lambda: profile.launch("claude", other)), other
+    assert panes.lines("w1:p2")[0] == ["'/profiles/test one/bin/claude' --resume 14c7"], \
+        "a refused launch command was typed"
     running = object.__new__(testbed.Profile)
     untouched = PastingPanes()
     running.state = {"workspace": "w1", "panes": {"claude": "w1:p2"}}
@@ -1003,7 +1013,18 @@ def check_launch_after_kill():
     running.save = lambda: None
     running.launch("claude", "claude --resume 14c7")
     assert untouched.streams == {}, untouched.streams
-    return "launch: a pane left in bracketed paste gets the command with no paste markers; a running agent gets nothing"
+    started = []
+    rex_profile = Path("/profiles/rex one")
+    lane = SimpleNamespace(profile=SimpleNamespace(dir=rex_profile, repo=rex_profile / "repo",
+                                                   state={}, save=lambda: None),
+                           rex=lambda *argv: started.append(argv) or SimpleNamespace(
+                               stdout=json.dumps({"block_ids": ["b7"]})))
+    rex_live.start_agent(lane, "s1", {"shell": "b1"}, "claude")
+    program = started[0][started[0].index("--") + 1]
+    assert program == "/profiles/rex one/bin/claude", started
+    return ("launch: a pane left in bracketed paste gets the command with no paste markers; a "
+            "running agent gets nothing; Claude Code starts by the profile's full bin/claude path "
+            "in a Herdr pane and a Rex block, and any other @claude command is refused")
 
 
 def check_checklist_prompts(kit):
@@ -1048,6 +1069,346 @@ def check_rex_live_down_after_a_failed_stop(scratch):
             "leftovers")
 
 
+STUB_CLAUDE = """#!/bin/sh
+here={here}
+printf '%s\\n' "$*" >> "$here/argv"
+printf '%s' "${{CLAUDE_CODE_OAUTH_TOKEN-unset}}" > "$here/token-seen"
+if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] && [ ! -f "$here/ignores-token" ]; then
+  echo '{{"loggedIn": true, "authMethod": "oauth_token"}}'
+else
+  cat "$here/status.json"
+fi
+"""
+
+
+def refusal(action):
+    try:
+        action()
+    except RuntimeError as error:
+        return str(error)
+    raise AssertionError("the run was not refused")
+
+
+def check_claude_login(scratch):
+    base = scratch / "claude-login"
+    real_home = base / "real-home"
+    credentials = real_home / ".claude/.credentials.json"
+    keychains = real_home / "Library/Keychains"
+    keychains.mkdir(parents=True)
+    credentials.parent.mkdir(parents=True)
+    credentials.write_text("{}")
+    stub_dir = base / "stub"
+    stub_dir.mkdir()
+    stub = stub_dir / "claude"
+    stub.write_text(STUB_CLAUDE.format(here=shlex.quote(str(stub_dir))))
+    stub.chmod(0o755)
+    (stub_dir / "status.json").write_text(json.dumps(
+        {"loggedIn": True, "authMethod": "claude.ai", "orgName": "Acme", "subscriptionType": "team"}))
+    token, token_file = "sk-ant-oat01-selftest", base / "token"
+    tools = {"claude": str(stub), "codex": "/usr/bin/true", "herdr": "/usr/bin/true",
+             "git": "/usr/bin/true", "cargo": "/usr/bin/true"}
+    organization, looked_up = {}, []
+
+    def urlopen(request, timeout=None):
+        looked_up.append(request.get_header("Authorization"))
+        if "status" in organization:
+            raise urllib.error.HTTPError(request.full_url, organization["status"], "", {},
+                                         io.BytesIO(organization.get("body", b"")))
+        return FakeResponse(json.dumps({"organization": organization}).encode())
+
+    def prepared(name, default_login=False, org=None, agents=("claude",)):
+        profile = testbed.Profile(name)
+        profile.create()
+        profile.login = testbed.claude_login(default_login, org)
+        with contextlib.redirect_stdout(io.StringIO()):
+            profile.prepare(agents)
+        return profile
+
+    def calls():
+        argv = stub_dir / "argv"
+        return argv.read_text().splitlines() if argv.exists() else []
+
+    def entered(command, name):
+        with patch.dict(os.environ), patch.object(os, "execvp", lambda *args: None), \
+                patch.object(testbed.Profile, "running", lambda self: True), \
+                patch.object(testbed.Profile, "reset", lambda self: None), \
+                contextlib.redirect_stdout(io.StringIO()):
+            os.environ.pop("HERDR_PANE_ID", None)
+            command(SimpleNamespace(profile=name))
+
+    def all_refuse(name):
+        for command in (testbed.cmd_attach, testbed.cmd_shell, testbed.cmd_reset):
+            assert "account check" in refusal(lambda: entered(command, name)), command.__name__
+
+    environment = {"TESTBED_HOME": str(base / "testbed"),
+                   testbed.CLAUDE_TOKEN_FILE_VARIABLE: str(token_file)}
+    with patch.dict(os.environ, environment), patch.object(Path, "home", lambda: real_home), \
+            patch.object(testbed, "host_tools", lambda herdr_bin=None: dict(tools)), \
+            patch.object(testbed.OAUTH_OPENER, "open", urlopen):
+        token_file.write_text(token)
+        token_file.chmod(0o600)
+        stale = testbed.Profile("test-stale-login")
+        stale.create()
+        links = [(credentials, stale.dir / "home/.claude/.credentials.json")]
+        if sys.platform == "darwin":
+            links.append((keychains, stale.dir / "home/Library/Keychains"))
+        reachable = [(stub, stale.dir / "bin/claude")] + links
+        # An older testbed's codex-only profile, which still links the default login and claude.
+        stale.state.update(tools={"claude": str(stub)}, agents=["codex"],
+                           toolchain=testbed.host_toolchain())
+        stale.save()
+        for kept in (reachable, reachable[:1], links):
+            for target, link in reachable:
+                if link.is_symlink():
+                    link.unlink()
+                if (target, link) in kept:
+                    link.parent.mkdir(parents=True, exist_ok=True)
+                    link.symlink_to(target)
+            all_refuse("test-stale-login")
+        organization.update(organization_type="claude_max", name="me@example.com's Organization")
+        profile = prepared("test-stale-login")
+        profile.require_claude_login()
+        for _, link in links:
+            assert not link.is_symlink() and not link.exists(), "a default login link stayed: " + str(link)
+        assert (stub_dir / "token-seen").read_text() == token, "Claude Code started without the token"
+        assert calls() == ["auth status --json"], calls()
+        assert looked_up == ["Bearer " + token], looked_up
+        for command in (testbed.cmd_attach, testbed.cmd_shell, testbed.cmd_reset):
+            entered(command, "test-stale-login")
+        assert profile.state["claude_account"] == ("max plan, personal account, signed in with the "
+                                                   "testbed token"), profile.state["claude_account"]
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in profile.env
+        for kept in ("env.sh", "state.json"):
+            assert token not in (profile.dir / kept).read_text(), "the token is in " + kept
+        assert os.readlink(profile.dir / "bin/claude") == str(profile.dir / "libexec/claude-with-token")
+        elsewhere = base / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "claude").symlink_to(stub)
+        found = subprocess.run(["/bin/bash", "-c", '. "$1" && command -v claude', "bash",
+                                str(profile.dir / "home/.bashrc")], capture_output=True, text=True,
+                               env={"PATH": "{}:/usr/bin:/bin".format(elsewhere)})
+        assert found.stdout.strip() == str(profile.dir / "bin/claude"), found
+        bashrc = profile.dir / "home/.bashrc"
+        bashrc.write_text("export PS1='{}'\n# activation's line\n".format(
+            testbed.SHELL_PS1.format(profile.name)))
+
+        organization["status"] = 401
+        rejected = refusal(lambda: prepared("test-stale-login"))
+        assert "claude setup-token" in rejected and token not in rejected, rejected
+        all_refuse("test-stale-login")
+        for status in (500, 302, 403):
+            organization["status"] = status
+            assert "HTTP {}".format(status) in refusal(lambda: prepared("test-stale-login"))
+        organization["body"] = json.dumps({"type": "error", "error": {
+            "type": "permission_error", "message": "OAuth token does not meet scope requirement"}}).encode()
+        scoped = prepared("test-scoped-token")
+        assert "unreadable with this token's scope" in scoped.state["claude_account"], scoped.state
+        organization.clear()
+
+        before = calls()
+        codex_only = prepared("test-stale-login", agents=("codex",))
+        assert calls() == before, "a run without Claude Code started it"
+        assert not (codex_only.dir / "bin/claude").is_symlink(), "a run without Claude Code kept claude"
+        codex_only.require_claude_login()
+        organization["status"] = 401
+        refusal(lambda: prepared("test-stale-login"))
+        all_refuse("test-stale-login")
+        organization.clear()
+
+        organization.update(organization_type="claude_team", name="Acme")
+        token_file.write_text(token + "\n")
+        assert "--claude-org" in refusal(lambda: prepared("test-team-token"))
+        assert "./testbed up" in refusal(testbed.Profile("test-team-token").require_claude_login)
+        team = prepared("test-team-token", org="Acme")
+        assert team.state["claude_account"].startswith("team plan, organization Acme"), team.state
+        team.require_claude_login()
+        assert (stub_dir / "token-seen").read_text() == token, "a trailing newline reached the token"
+
+        organization.clear()
+        organization.update(organization_type="claude_free", name="me@example.com's Organization")
+        unknown = refusal(lambda: prepared("test-unknown-plan"))
+        assert "--claude-org" in unknown and "example.com" not in unknown, unknown
+        organization.clear()
+
+        token_file.write_text(token + "\n" + token + "-second\n")
+        malformed = refusal(lambda: prepared("test-two-line-token"))
+        assert "one line" in malformed and token not in malformed, malformed
+        token_file.write_text(token + "\n")
+
+        (stub_dir / "ignores-token").write_text("")
+        assert "not the testbed token" in refusal(lambda: prepared("test-ignored-token"))
+        (stub_dir / "ignores-token").unlink()
+
+        token_file.chmod(0o640)
+        assert "chmod 600" in refusal(lambda: prepared("test-shared-token"))
+        token_file.unlink()
+        before = calls()
+        missing = refusal(lambda: prepared("test-missing-token"))
+        assert "claude setup-token" in missing and str(token_file) in missing, missing
+        assert calls() == before, "Claude Code started with no token"
+        codex_default = prepared("test-codex-default", default_login=True, agents=("codex",))
+        assert calls() == before, "a run without Claude Code started it"
+        for _, link in codex_default.default_login_links():
+            assert not link.is_symlink(), "a run without Claude Code linked the default login"
+        codex_default.require_claude_login()
+
+        assert "--claude-org" in refusal(lambda: prepared("test-default-login", default_login=True))
+        refused = testbed.Profile("test-default-login")
+        assert not (refused.dir / "home/.claude/.credentials.json").is_symlink(), \
+            "a refused default login kept its link"
+        assert "./testbed up" in refusal(refused.require_claude_login)
+        default = prepared("test-default-login", default_login=True, org="Acme")
+        assert os.readlink(default.dir / "home/.claude/.credentials.json") == str(credentials)
+        assert (stub_dir / "token-seen").read_text() == "unset"
+        assert default.state["claude_account"].endswith("signed in with the default login"), default.state
+        token_file.write_text(token + "\n")
+        token_file.chmod(0o600)
+        with patch.object(testbed.Profile, "running", lambda self: True):
+            assert "./testbed stop" in refusal(lambda: prepared("test-default-login"))
+            organization.update(organization_type="claude_max", name="me@example.com's Organization")
+            prepared("test-stale-login")
+        assert bashrc.read_text().endswith("$PATH\n# activation's line\n"), bashrc.read_text()
+        assert bashrc.read_text().count("PATH=") == 1, bashrc.read_text()
+    return ("Claude login: a token run sets the token, with or without a trailing newline, only "
+            "inside Claude Code's launch and drops the default login's links; the profile's bashrc "
+            "puts its claude first; no token, a rejected token, an unnamed organization, a token "
+            "Claude Code ignores, a shared or malformed token file, or a login switch under a "
+            "running server refuses; only a 403 permission_error reads as an unreadable account; "
+            "attach, shell and reset refuse a refused check or an older profile that reaches Claude "
+            "Code; a run without Claude Code gets none and needs no check; --claude-default-login "
+            "links the login only for Claude Code")
+
+
+def check_token_redirect(scratch):
+    seen = []
+
+    class Elsewhere(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps({"organization": {"organization_type": "claude_max"}}).encode())
+
+        def log_message(self, *args):
+            pass
+
+    class Redirecting(Elsewhere):
+        def do_GET(self):
+            self.send_response(302)
+            self.send_header("Location", "http://localhost:{}/profile".format(
+                elsewhere.server_port))
+            self.end_headers()
+
+    elsewhere = http.server.HTTPServer(("127.0.0.1", 0), Elsewhere)
+    redirecting = http.server.HTTPServer(("127.0.0.1", 0), Redirecting)
+    for server in (elsewhere, redirecting):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    token_file = scratch / "redirect-token"
+    token_file.write_text("dummy-not-a-token\n")
+    url = "http://127.0.0.1:{}/api/oauth/profile".format(redirecting.server_port)
+    # The opener took its proxies from the environment at import; no_proxy, read per request,
+    # keeps these loopback requests off them.
+    loopback = {"no_proxy": "127.0.0.1,localhost", "NO_PROXY": "127.0.0.1,localhost"}
+    try:
+        with patch.dict(os.environ, loopback), patch.object(testbed, "OAUTH_PROFILE_URL", url):
+            assert "HTTP 302" in refusal(lambda: testbed.token_account(token_file))
+    finally:
+        for server in (elsewhere, redirecting):
+            server.shutdown()
+            server.server_close()
+    assert seen == [], "the token followed a redirect to another host: {!r}".format(seen)
+    return "token lookup: a redirect stops the run, and the token never reaches the host it names"
+
+
+def check_rex_up_lines(scratch):
+    def up(profile, request, agents):
+        profile.state.update(source={"kind": "ref", "repo": REPO, "ref": "main"},
+                             toolchain=testbed.host_toolchain(), rex_bin="/usr/bin/true")
+        return rex_live.Lane(profile, testbed.fail, lambda message: None), "s1", {}
+
+    args = SimpleNamespace(action="up", profile="rex-lines", agents=None, repo=REPO, ref="main",
+                           pr=None, link=None, fresh=False, yes=False, claude_default_login=False,
+                           claude_org=None)
+    printed = io.StringIO()
+    with patch.dict(os.environ, {"TESTBED_HOME": str(scratch / "rex-up-lines")}), \
+            patch.object(rex_live, "up", up), \
+            patch.object(testbed.Profile, "namedrop_version", lambda self: "1.0.0"), \
+            contextlib.redirect_stdout(printed):
+        testbed.cmd_rex(args)
+        bin_claude = str(testbed.Profile("rex-lines").dir / "bin/claude")
+    lines = printed.getvalue().split("Start more agents in their own sessions with:\n")[1]
+    started = [words[words.index("--") + 1:] for words in map(shlex.split, lines.splitlines())
+               if "--" in words]
+    assert started == [[bin_claude], ["codex", "--no-daemon"]], started
+    return "rex up lines: the printed Claude Code start names the profile's wrapper in full"
+
+
+FAKE_HERDR = """#!{python}
+import json, os, signal, subprocess, sys
+args = sys.argv[1:]
+def answer(result):
+    print(json.dumps({{"result": result}}))
+if args[:2] == ["pane", "run"]:
+    if args[3].startswith("{{ "):
+        subprocess.run(["/bin/sh", "-c", args[3]])
+    else:
+        with open({launches!r}, "a") as handle:
+            handle.write(args[3] + "\\n")
+        os.kill(os.getppid(), signal.SIGTERM)
+elif args[:2] == ["workspace", "list"]:
+    answer({{"workspaces": []}})
+elif args[:2] == ["workspace", "create"]:
+    answer({{"workspace": {{"workspace_id": "w2"}}}})
+elif args[:2] == ["pane", "list"]:
+    answer({{"panes": [{{"pane_id": "p1"}}, {{"pane_id": "p2"}}, {{"pane_id": "p3"}}]}})
+elif args[:2] == ["pane", "split"]:
+    answer({{"pane": {{"pane_id": "p" + str(int(args[2][1:]) + 1)}}}})
+elif args[:2] == ["plugin", "config-dir"]:
+    print({config!r})
+"""
+
+
+def check_probe_launches(kit, scratch):
+    """Runs each verify probe that starts Claude Code against a fake Herdr, which records the
+    probe's first agent launch and stops the probe there."""
+    home = scratch / "probe-home"
+    profile = home / ".namedrop-testbed/profiles/test-probe"
+    plugin = scratch / "probe-plugin"
+    for directory in ("bin", "home/.claude", "codex", "logs", "repo",
+                      "state/herdr/plugins/namedrop/runtime"):
+        (profile / directory).mkdir(parents=True)
+    (plugin / "scripts").mkdir(parents=True)
+    executables = {
+        plugin / "scripts/setup.sh": "#!/bin/sh\n",
+        profile / "bin/namedrop": "#!/bin/sh\n",
+        profile / "state/herdr/plugins/namedrop/runtime/namedrop":
+            "#!/bin/sh\necho '{\"data\": {\"status\": \"healthy\", \"issues\": []}}'\n",
+        profile / "bin/herdr": FAKE_HERDR.format(python=sys.executable,
+                                                launches=str(profile / "launches"),
+                                                config=str(scratch / "probe-config"))}
+    for path, text in executables.items():
+        path.write_text(text)
+        path.chmod(0o755)
+    for name in ("AGENTS.md", "CLAUDE.md", "README.md"):
+        (profile / "repo" / name).write_text("seed\n")
+    (profile / "home/.claude.json").write_text("{}")
+    (profile / "codex/config.toml").write_text("")
+    (profile / "state.json").write_text(json.dumps({
+        "claude_account": "max plan, personal account", "plugin_root": str(plugin),
+        "panes": {"claude": "p1", "codex": "p2"}, "workspace": "w1"}))
+    env = {"PATH": "{}:/usr/bin:/bin".format(profile / "bin"), "HOME": str(profile / "home")}
+    (profile / "env.sh").write_text("testbed_shell() {{\n  {} /bin/bash --noprofile -i;\n}}\n".format(
+        shlex.join(testbed.env_command(env, []))))
+    scripts = kit.parent / ".claude/skills/verify/scripts"
+    for probe in ("second-workspace.py", "update-notice-probe.py"):
+        (profile / "launches").unlink(missing_ok=True)
+        subprocess.run([sys.executable, str(scripts / probe), profile.name], capture_output=True,
+                       timeout=60, env={"HOME": str(home), "PATH": os.environ["PATH"]})
+        launches = (profile / "launches").read_text().splitlines()
+        assert launches and shlex.split(launches[0])[0] == str(profile / "bin/claude"), (probe, launches)
+    return "verify probes: second-workspace and update-notice start Claude Code by the profile's path"
+
+
 def run(kit):
     passed = True
     with tempfile.TemporaryDirectory(prefix="nd-tb-selftest-") as scratch:
@@ -1059,6 +1420,10 @@ def run(kit):
                   ("Codex config", lambda: check_codex_settings(base)),
                   ("seed", lambda: check_seed(kit, base)),
                   ("profile safety", lambda: check_profile_safety(base)),
+                  ("Claude login", lambda: check_claude_login(base)),
+                  ("token redirect", lambda: check_token_redirect(base)),
+                  ("rex up lines", lambda: check_rex_up_lines(base)),
+                  ("verify probes", lambda: check_probe_launches(kit, base)),
                   ("Rex lane", lambda: check_rex_lane(base)),
                   ("Rex lane cleanup", lambda: check_rex_lane_cleanup(base)),
                   ("Rex live hooks", lambda: check_rex_live_hooks(base)),

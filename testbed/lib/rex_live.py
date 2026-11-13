@@ -96,6 +96,15 @@ def hook_log(profile):
     return profile.dir / "logs/claude-hooks.log"
 
 
+def agent_command(profile, agent):
+    """The agent's command, with the profile's claude named in full, because a block's shell can
+    put another claude ahead of the profile's bin."""
+    command = AGENTS[agent]
+    if agent == "claude":
+        return (str(profile.dir / "bin/claude"),) + command[1:]
+    return command
+
+
 def start_agent(lane, session, blocks, agent):
     if agent in blocks:
         return blocks[agent]
@@ -103,8 +112,9 @@ def start_agent(lane, session, blocks, agent):
     # them; its own hook log shows they ran.
     if agent == "claude" and hook_log(lane.profile).exists():
         hook_log(lane.profile).unlink()
-    command = AGENTS[agent] + (("--debug=hooks", "--debug-file", str(hook_log(lane.profile)))
-                               if agent == "claude" else ())
+    command = agent_command(lane.profile, agent)
+    if agent == "claude":
+        command += ("--debug=hooks", "--debug-file", str(hook_log(lane.profile)))
     created = json.loads(lane.rex("split", "-s", session, "-b", blocks["shell"], "--label", agent,
                                   "--shell", "none", "--focus=false", "-c", str(lane.profile.repo),
                                   "--json", "--", *command).stdout)

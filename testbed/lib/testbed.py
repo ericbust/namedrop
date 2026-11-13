@@ -10,6 +10,7 @@ import contextlib
 import datetime
 import fcntl
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,8 @@ import signal
 import subprocess
 import tempfile
 import time
+import urllib.error
+import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rex_lane
@@ -112,6 +115,132 @@ def clean_environment(base, socket, toolchain):
         "HERDR_CONFIG_PATH": str(base / "config/herdr/config.toml"),
         "RUSTUP_HOME": toolchain["RUSTUP_HOME"], "CARGO_HOME": toolchain["CARGO_HOME"],
     }
+
+
+CLAUDE_TOKEN_FILE_VARIABLE = "NAMEDROP_TESTBED_CLAUDE_TOKEN_FILE"
+# Claude Code's own map of an OAuth profile's organization_type to its subscription type.
+CLAUDE_PLANS = {"claude_max": "max", "claude_pro": "pro", "claude_team": "team",
+                "claude_enterprise": "enterprise"}
+PERSONAL_PLANS = frozenset(("max", "pro"))
+OAUTH_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
+TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9._~+/=-]+$")
+# A token from `claude setup-token` holds only the user:inference scope, and the profile endpoint
+# refuses it with 403 permission_error. A revoked or mistyped token gets 401 instead.
+SCOPE_REFUSAL = 403
+REJECTED_TOKEN = 401
+
+ClaudeLogin = namedtuple("ClaudeLogin", "token_file default_login org")
+"""How a run signs Claude Code in. default_login allows the machine's own login when token_file
+is missing; org is the organization --claude-org allows."""
+
+
+def claude_login(default_login=False, org=None):
+    named = os.environ.get(CLAUDE_TOKEN_FILE_VARIABLE)
+    token_file = Path(named).expanduser() if named else testbed_home() / "claude-oauth-token"
+    return ClaudeLogin(token_file.absolute(), default_login, org)
+
+
+def missing_token(token_file):
+    return ("no Claude Code token at {0}. The testbed signs Claude Code in with a token, never "
+            "with this machine's default login. Create one under the account to bill:\n"
+            "  claude setup-token\n"
+            "  mkdir -p {1} && (umask 077 && read -rs token && printf '%s\\n' \"$token\" > {0})\n"
+            "  chmod 600 {0}\n"
+            "Paste the token at the silent prompt. {2} names another file. To use the default "
+            "login instead, pass --claude-default-login.").format(
+                shlex.quote(str(token_file)), shlex.quote(str(token_file.parent)),
+                CLAUDE_TOKEN_FILE_VARIABLE)
+
+
+def claude_auth(login):
+    """"token" when the token file signs Claude Code in, or "default" for the machine's login."""
+    if login.token_file.exists():
+        mode = login.token_file.stat()
+        if not login.token_file.is_file() or not mode.st_size:
+            fail("the Claude Code token file is empty or not a file: " + str(login.token_file))
+        if mode.st_mode & 0o077:
+            fail("other users can read the Claude Code token; run chmod 600 " +
+                 shlex.quote(str(login.token_file)))
+        read_token(login.token_file)
+        return "token"
+    if login.default_login:
+        return "default"
+    fail(missing_token(login.token_file))
+
+
+def token_wrapper(token_file, program):
+    """A `claude` that reads the token inside the launch, so it is never on a command line, in
+    env.sh, or in the profile's state."""
+    return ("#!/bin/sh\n"
+            "token_file={0}\n"
+            'if [ ! -s "$token_file" ]; then\n'
+            '  echo "testbed: no Claude Code token at $token_file" >&2\n'
+            "  exit 1\n"
+            "fi\n"
+            'CLAUDE_CODE_OAUTH_TOKEN=$(cat "$token_file") || exit 1\n'
+            "export CLAUDE_CODE_OAUTH_TOKEN\n"
+            'exec {1} "$@"\n').format(shlex.quote(str(token_file)), shlex.quote(str(program)))
+
+
+def read_token(token_file):
+    """The token, as the wrapper's $(cat) passes it: trailing newlines dropped, nothing else. One
+    token on one line, so no error message can echo it from a malformed header."""
+    token = token_file.read_text().rstrip("\n")
+    if not TOKEN_PATTERN.match(token):
+        fail("the Claude Code token file must hold the token alone on one line: " + str(token_file))
+    return token
+
+
+class NoRedirects(urllib.request.HTTPRedirectHandler):
+    """urllib sends a request's headers, Authorization included, to whatever host a redirect
+    names. A redirect reaches the caller as an HTTPError instead."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+OAUTH_OPENER = urllib.request.build_opener(NoRedirects)
+
+
+def token_account(token_file):
+    """The plan and organization name of the token's account, or None when the endpoint refuses
+    the token's scope. Claude Code's `auth status` shows neither for a token, only its authMethod,
+    so this asks the OAuth profile endpoint Claude Code itself reads."""
+    request = urllib.request.Request(OAUTH_PROFILE_URL, headers={
+        "Authorization": "Bearer " + read_token(token_file),
+        "Content-Type": "application/json", "User-Agent": "namedrop-testbed"})
+    try:
+        with OAUTH_OPENER.open(request, timeout=20) as response:
+            profile = json.loads(response.read().decode())
+    except urllib.error.HTTPError as error:
+        if error.code == SCOPE_REFUSAL and b'"permission_error"' in error.read():
+            return None
+        if error.code == REJECTED_TOKEN:
+            fail("the testbed token was rejected (HTTP 401 from {}); create a new one with "
+                 "claude setup-token and save it to {}".format(OAUTH_PROFILE_URL, token_file))
+        fail("the Claude Code token's account lookup at {} answered HTTP {}".format(
+            OAUTH_PROFILE_URL, error.code))
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as error:
+        fail("could not look up the Claude Code token's account at {} ({})".format(
+            OAUTH_PROFILE_URL, type(error).__name__))
+    organization = profile.get("organization") if isinstance(profile, dict) else None
+    if not isinstance(organization, dict):
+        organization = {}
+    return CLAUDE_PLANS.get(organization.get("organization_type")), organization.get("name")
+
+
+def account_line(plan, org, allowed):
+    """The report's account line. A personal plan's organization is named after its email, so its
+    name is never shown; any other plan runs only when --claude-org names its organization."""
+    if plan in PERSONAL_PLANS:
+        return "{} plan, personal account".format(plan)
+    if not org or org != allowed:
+        shown = "organization {!r}".format(org) if plan in CLAUDE_PLANS.values() else (
+            "an organization whose name is not shown, because a personal organization's name holds "
+            "its email" if org else "no organization")
+        fail("Claude Code is signed in to the {} plan of {}. A run that bills an organization needs "
+             "--claude-org naming it.".format(plan or "unknown", shown))
+    return "{} plan, organization {} (allowed by --claude-org)".format(plan or "unknown", org)
 
 
 def env_command(env, command):
@@ -229,6 +358,7 @@ class Profile:
             fail("profile state must not be a symlink")
         self.state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
         self.repo = self.dir / "repo"
+        self.login = claude_login()
 
     @property
     def env(self):
@@ -275,17 +405,43 @@ class Profile:
         missing = [name for name in REQUIRED_TOOLS + tuple(agents) if name not in tools]
         if missing:
             fail("required executables are missing from PATH: " + ", ".join(missing))
+        # A profile has Claude Code, and a login for it, only when its run starts Claude Code.
+        auth = claude_auth(self.login) if "claude" in agents else None
+        if "claude" in self.state.get("tools", {}) and self.state.get("claude_auth", "legacy") != auth \
+                and self.running():
+            # A Claude Code already running keeps its login, and launch never restarts it.
+            fail("profile {} runs Claude Code, which keeps the login it started with. Run ./testbed "
+                 "stop --profile {} first; the next start launches Claude Code again.".format(
+                     self.name, self.name))
+        self.state.pop("claude_account", None)
+        if auth == "token":
+            tools["claude"] = self.claude_wrapper(tools["claude"])
+        elif auth is None:
+            tools.pop("claude", None)
         link_tools(self.dir / "bin", tools)
-        self.state.update(tools=tools, toolchain=host_toolchain(), herdr_bin=herdr_bin)
+        self.state.update(tools=tools, toolchain=host_toolchain(), herdr_bin=herdr_bin,
+                          claude_auth=auth, agents=list(agents))
         self.save()
-        self.auth_links()
+        self.auth_links(auth)
+        if auth:
+            try:
+                self.check_claude_account(auth)
+            except BaseException:
+                self.auth_links(None)
+                raise
         write_if_changed(self.dir / "env.sh",
                          "# Source this file to enter a shell with only the testbed environment.\n" +
                          "testbed_shell() {\n  " + shlex.join(self.shell_command()) + ";\n}\n"
                          "testbed_shell\n")
         bashrc = self.dir / "home/.bashrc"
-        if not bashrc.exists():
-            write_if_changed(bashrc, "export PS1='{}'\n".format(SHELL_PS1.format(self.name)))
+        prompt = "export PS1='{}'\n".format(SHELL_PS1.format(self.name))
+        # A pane's login shell runs /etc/profile, whose path_helper puts the system directories
+        # ahead of bin, where another claude can sign in some other way.
+        head = prompt + "PATH={}:$PATH\n".format(shlex.quote(str(self.dir / "bin")))
+        kept = bashrc.read_text() if bashrc.exists() else ""
+        if not kept.startswith(head):
+            # Namedrop's activation appends its own lines, which stay.
+            write_if_changed(bashrc, head + kept.removeprefix(prompt))
         bash_profile = self.dir / "home/.bash_profile"
         if not bash_profile.exists():
             write_if_changed(bash_profile, 'if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi\n')
@@ -315,16 +471,88 @@ class Profile:
                 return None
             fail("Herdr returned unexpected JSON for " + shlex.join(args) + ": " + result.stdout)
 
-    def auth_links(self):
+    def require_claude_login(self):
+        """Refuses a profile that can start Claude Code when no account check accepted it: one whose
+        check refused it, or an older testbed's profile, which links the default login and an
+        unwrapped claude whatever its agents."""
+        reachable = [self.dir / "bin/claude"] + [link for _, link in self.default_login_links()]
+        if "claude_account" not in self.state and any(path.is_symlink() for path in reachable):
+            fail("profile {0} can start Claude Code with no accepted account check. Run ./testbed "
+                 "up --profile {0} first, or add --agents codex for a profile without Claude "
+                 "Code.".format(self.name))
+
+    def claude_wrapper(self, program):
+        """Installs the token wrapper and returns its path. The wrapper starts Claude Code through
+        a link named claude, so the process keeps that name."""
+        libexec = self.dir / "libexec"
+        if libexec.is_symlink():
+            fail("profile directory must not be a symlink: " + str(libexec))
+        libexec.mkdir(exist_ok=True, mode=0o700)
+        link_tools(libexec, {"claude": program})
+        wrapper = libexec / "claude-with-token"
+        write_if_changed(wrapper, token_wrapper(self.login.token_file, libexec / "claude"))
+        wrapper.chmod(0o700)
+        return str(wrapper)
+
+    def check_claude_account(self, auth):
+        """Asks the profile's Claude Code which account it signs in to, before any prompt, and
+        records the report's account line. Refuses an organization --claude-org does not name."""
+        try:
+            result = subprocess.run(env_command(self.env, ["claude", "auth", "status", "--json"]),
+                                    cwd=str(self.dir), text=True, capture_output=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            fail("claude auth status did not answer in 60 seconds in profile " + self.name)
+        try:
+            status = json.loads(result.stdout)
+        except ValueError:
+            status = {}
+        if not status.get("loggedIn"):
+            fail("Claude Code in profile {} is not signed in (claude auth status exited {}): {}".format(
+                self.name, result.returncode, (result.stderr or result.stdout).strip()[-500:]))
+        method = status.get("authMethod")
+        if auth == "token":
+            if method != "oauth_token":
+                fail("Claude Code in profile {} signs in with {}, not the testbed token".format(
+                    self.name, method))
+            account = token_account(self.login.token_file)
+            if account is None:
+                self.state["claude_account"] = ("plan and organization unreadable with this token's "
+                                                "scope, signed in with the testbed token")
+                self.save()
+                return
+            plan, org = account
+        else:
+            plan, org = status.get("subscriptionType"), status.get("orgName")
+        self.state["claude_account"] = "{}, signed in with {}".format(
+            account_line(plan, org, self.login.org),
+            "the testbed token" if auth == "token" else "the default login")
+        self.save()
+
+    def default_login_links(self):
+        """The (target, link) pairs that give the profile's Claude Code this machine's login."""
         real_home = Path.home()
-        claude = [(real_home / ".claude/.credentials.json", self.dir / "home/.claude/.credentials.json")]
+        links = [(real_home / ".claude/.credentials.json", self.dir / "home/.claude/.credentials.json")]
         if sys.platform == "darwin":
             # Claude Code on macOS keeps its login in the credentials file or the login keychain.
-            claude.append((real_home / "Library/Keychains", self.dir / "home/Library/Keychains"))
+            links.append((real_home / "Library/Keychains", self.dir / "home/Library/Keychains"))
+        return links
+
+    def auth_links(self, claude_auth):
+        """Links the Codex login, and the default Claude Code login only when the run asked for it.
+        Otherwise a Claude link an earlier run made is removed."""
+        real_home = Path.home()
+        claude = self.default_login_links()
         logins = [("Codex", "codex login",
                    [(Path(os.environ.get("CODEX_HOME", str(real_home / ".codex"))) / "auth.json",
-                     self.dir / "codex/auth.json")]),
-                  ("Claude", "claude auth login", claude)]
+                     self.dir / "codex/auth.json")])]
+        if claude_auth == "default":
+            logins.append(("Claude", "claude auth login", claude))
+        else:
+            for target, destination in claude:
+                if destination.is_symlink():
+                    if os.readlink(destination) != str(target):
+                        fail("unexpected authentication link: " + str(destination))
+                    destination.unlink()
         for label, login, links in logins:
             linked = False
             for target, destination in links:
@@ -658,6 +886,13 @@ class Profile:
             return
         if not command.strip():
             fail("the launch command for @{} must not be empty".format(alias))
+        if alias == "claude":
+            words = shlex.split(command)
+            if words[0] != "claude":
+                fail("the launch command for @claude must start with claude, the profile's command "
+                     "that signs in with the testbed token: " + command)
+            # The pane's PATH may not start with bin, so the profile's claude is named in full.
+            command = shlex.join([str(self.dir / "bin/claude")] + words[1:])
         # No exec: when the CLI exits, the pane keeps its shell and the error stays
         # on screen, and the next `up` sees no agent in the pane and starts it again.
         self.type_line(pane, command)
@@ -714,7 +949,7 @@ class Profile:
         if "source" not in self.state:
             self.state["source"] = self.resolve(request)
             self.save()
-        self.state.update(agents=list(agents), launch=launch)
+        self.state["launch"] = launch
         self.save()
         self.start_server()
         self.install_plugin(self.state["source"])
@@ -832,6 +1067,7 @@ def profile_for(args, prefix=""):
     elif saved and sources.identity(saved) != sources.identity(request):
         fail("profile {} was installed from {}; pass --fresh or another --profile".format(
             name, sources.describe(saved)))
+    profile.login = claude_login(args.claude_default_login, args.claude_org)
     return profile, request
 
 
@@ -845,6 +1081,11 @@ def add_source_options(parser):
     parser.add_argument("--fresh", action="store_true",
                         help="destroy this profile first and install the same source again")
     parser.add_argument("--yes", action="store_true", help="skip the --fresh confirmation")
+    parser.add_argument("--claude-default-login", action="store_true",
+                        help="when no Claude Code token file exists, use this machine's default "
+                             "Claude Code login")
+    parser.add_argument("--claude-org", metavar="NAME",
+                        help="allow Claude Code to bill this team or enterprise organization")
 
 
 def cmd_up(args):
@@ -856,6 +1097,8 @@ def cmd_up(args):
         profile.up(request, agents, not args.no_launch)
     say("\nReady: profile {}, Namedrop {} from {}.".format(
         name, profile.namedrop_version(), sources.describe(profile.state["source"])))
+    if "claude_account" in profile.state:
+        say("Claude Code account: " + profile.state["claude_account"])
     say("Next:\n  1. From a plain terminal outside Herdr, run: ./testbed attach --profile " + name)
     if args.no_launch:
         say("  2. The agent CLIs are not running. To start them, run: ./testbed up --profile " + name)
@@ -948,13 +1191,15 @@ def cmd_rex(args):
     say("\nReady: profile {}, Namedrop {} from {}, Rex server {}.".format(
         profile.name, profile.namedrop_version(), sources.describe(profile.state["source"]),
         lane.server))
+    if "claude_account" in profile.state:
+        say("Claude Code account: " + profile.state["claude_account"])
     say("State directory: {}\nSession {}: {}".format(
         rex_live.state_directory(profile), session,
         ", ".join("@{} {}".format(alias, block) for alias, block in sorted(blocks.items()))))
     say("Start more agents in their own sessions with:")
-    for command in rex_live.AGENTS.values():
+    for agent in agents:
         say("  " + lane.command_line("new", "--shell", "none", "-c", str(profile.repo), "--",
-                                     *command))
+                                     *rex_live.agent_command(profile, agent)))
     say("Stop it with: ./testbed rex down --profile " + profile.name)
 
 
@@ -1061,6 +1306,7 @@ def cmd_stop(args):
 def cmd_reset(args):
     profile = chosen_profile(args.profile)
     profile.owned()
+    profile.require_claude_login()
     with profile.locked():
         profile.reset()
     say("Reset {}: the seed repo is restored and the panes are new.".format(profile.name))
@@ -1075,6 +1321,7 @@ def cmd_attach(args):
         fail("attach must run from a plain terminal window, outside an existing Herdr pane")
     profile = chosen_profile(args.profile)
     profile.owned()
+    profile.require_claude_login()
     if not profile.running():
         fail("the server is stopped; run ./testbed up --profile {} first".format(profile.name))
     os.execvp("env", env_command(profile.env, ["herdr"]))
@@ -1083,6 +1330,7 @@ def cmd_attach(args):
 def cmd_shell(args):
     profile = chosen_profile(args.profile)
     profile.owned()
+    profile.require_claude_login()
     say("Entering the clean environment of {}. Run exit to leave.".format(profile.name))
     os.execvp("env", profile.shell_command())
 
