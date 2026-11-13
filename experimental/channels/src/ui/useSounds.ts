@@ -59,9 +59,13 @@ export function useSounds(
     loading.current?.abort();
     const controller = new AbortController();
     loading.current = controller;
-    void poster.sounds(controller.signal).then((next) => {
-      if (request === latest.current && next !== null) setSettings(next);
-    });
+    // A load waits behind this tab's queued saves, so it reads what they
+    // stored instead of the value from before them.
+    void saving.current
+      .then(() => poster.sounds(controller.signal))
+      .then((next) => {
+        if (request === latest.current && next !== null) setSettings(next);
+      });
   }, [poster]);
   useEffect(() => {
     refresh();

@@ -13937,6 +13937,47 @@ test("SOUNDS n: two quick picks reach the server one at a time, and it keeps the
   await picker.locator("summary").getByText("Bell").waitFor();
 });
 
+test("SOUNDS p: reopening the picker while saves wait shows the pick the server keeps", async (t) => {
+  const { ui } = await soundRoom(
+    t,
+    {},
+    {
+      path: `/?dm=${key(1)}/${encodeURIComponent(SOUND_CLAUDE)}`,
+      directPeers: () => [dmPeer(SOUND_CLAUDE, null)],
+    },
+  );
+  let release = () => {};
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  ui.posts.delaySounds((post) => (post.body.sound === "pop" ? held : null));
+  const picker = ui.page.locator(".dm-header .sound-picker");
+  const summary = picker.locator("summary");
+  await summary.click();
+  const group = picker.getByRole("group", { name: "Sound for @claude" });
+  const bell = group.getByRole("radio", { name: "Bell", exact: true });
+  await group.getByRole("radio", { name: "Pop", exact: true }).check();
+  await until(() => ui.posts.soundPosts.length === 1, "the first save");
+  await bell.check();
+  await summary.click();
+  await summary.click();
+  await group.waitFor();
+  release();
+  await until(
+    () => ui.posts.savedSounds().agents[SOUND_CLAUDE] === "bell",
+    "the server keeps the later pick",
+  );
+  await eventually(async () => await bell.isChecked(), "the kept pick");
+  await summary.getByText("Bell").waitFor();
+  await group.getByRole("radio", { name: "Knock", exact: true }).check();
+  await until(() => ui.posts.soundPosts.length === 3, "the next pick");
+  assert.equal(ui.posts.soundPosts[2].body.was, "bell");
+  await until(
+    () => ui.posts.savedSounds().agents[SOUND_CLAUDE] === "knock",
+    "the next pick saves without a conflict",
+  );
+});
+
 test("SOUNDS o: a pick another window changed first shows the saved choice and says so", async (t) => {
   const { ui } = await soundRoom(
     t,
