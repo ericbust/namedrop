@@ -1616,8 +1616,8 @@ impl MuxRead for Within<'_> {
     }
 }
 
-/// What a command cancelled before it started answers, in the words of
-/// `ProcessHerdr` and of a legacy executor's `execute_bounded`.
+/// What a command cancelled before it started answers, in the words of the
+/// Herdr adapter's process transport.
 const CANCELLED: &str = "Herdr read cancelled";
 
 struct Channel<'a>(&'a FakeMux);

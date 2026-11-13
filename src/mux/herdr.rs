@@ -1,30 +1,32 @@
-//! The Herdr adapter: the only place meant to hold Herdr arguments, JSON,
-//! error codes, and plugin events. Until the callers move to the port, the
-//! code it copies also stays where it was.
+//! The Herdr adapter: the only place that holds Herdr arguments, JSON, error
+//! codes, and plugin events. Namedrop runs Herdr through it, except for the
+//! live-peek observer in `dashboard/observer_guard.rs`, which starts `herdr
+//! terminal session observe` until step 4 moves it here, and the update
+//! check, whose embedded `scripts/check-update.py` runs `herdr plugin list`.
 
 mod events;
+mod process;
 mod wire;
 
 pub use events::{decode_operation_input, plugin_event_data};
-pub(crate) use wire::input_failure;
 
 use super::{
     Allowance, Applied, Budget, Depth, Effect, Endpoint, InputKind, InputOutcome, Mux, MuxAct,
     MuxConnector, MuxError, MuxInput, MuxKind, MuxRead, PaneId, PaneInput, PaneProcess, Scope,
     Screen, ScreenRequest, SpaceView, Survey, TabId,
 };
-use crate::{HerdrCommandExecutor, ProcessHerdr};
+use process::Process;
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
 };
 
 mod transport {
-    use crate::mux::{Allowance, Budget, InputOutcome};
+    use crate::mux::{Allowance, Budget};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// What a command that was cancelled before it started answers, in the
-    /// words `ProcessHerdr` uses.
+    /// words the process transport uses.
     pub const CANCELLED: &str = "Herdr read cancelled";
 
     /// Runs one Herdr command and returns its stdout, or its error text.
@@ -48,10 +50,6 @@ mod transport {
             }
             self.run(args)
         }
-
-        fn input_failure(&self, error: String) -> InputOutcome {
-            super::wire::input_failure(error)
-        }
     }
 
     impl<T: Transport + ?Sized> Transport for &T {
@@ -66,10 +64,6 @@ mod transport {
             cancelled: Option<&AtomicBool>,
         ) -> Result<String, String> {
             (**self).run_within(args, budget, cancelled)
-        }
-
-        fn input_failure(&self, error: String) -> InputOutcome {
-            (**self).input_failure(error)
         }
     }
 
@@ -95,10 +89,6 @@ mod transport {
             let budget = tighter(self.allowance.budget()?, budget);
             let cancelled = narrowest(cancelled, self.allowance.cancelled())?;
             self.transport.run_within(args, budget, cancelled)
-        }
-
-        fn input_failure(&self, error: String) -> InputOutcome {
-            self.transport.input_failure(error)
         }
     }
 
@@ -126,7 +116,7 @@ mod transport {
     }
 }
 
-use transport::{Transport, Within, narrowest, tighter};
+use transport::{Transport, Within};
 
 pub(crate) struct HerdrMux<T> {
     transport: T,
@@ -169,7 +159,7 @@ impl<T: Transport> HerdrMux<T> {
         let args: Vec<_> = args.iter().map(String::as_str).collect();
         match self.transport.run(&args) {
             Ok(_) => InputOutcome::Delivered,
-            Err(error) => self.transport.input_failure(error),
+            Err(error) => wire::input_failure(error),
         }
     }
 }
@@ -270,142 +260,32 @@ impl MuxConnector for HerdrConnector {
         budget: Budget,
         cancelled: Arc<AtomicBool>,
     ) -> Result<Arc<dyn Mux>, MuxError> {
-        Ok(Arc::new(HerdrMux {
-            transport: Process {
-                herdr: ProcessHerdr::default().with_socket(Some(socket.to_owned())),
-                budget,
-                cancelled,
-            },
-            endpoint: Endpoint {
-                kind: MuxKind::Herdr,
-                key: socket.to_owned(),
-            },
-        }))
+        Ok(connect(Some(socket), budget, cancelled))
     }
 }
 
-/// The `herdr` process, each command run within the connection's budget.
-struct Process {
-    herdr: ProcessHerdr,
-    budget: Budget,
-    cancelled: Arc<AtomicBool>,
+/// The one way to make a Herdr connection. Each command runs the `herdr`
+/// that `HERDR_BIN_PATH` names, within `budget`, until `cancelled` is set.
+/// With no `socket`, each command inherits `HERDR_SOCKET_PATH`, or Herdr's
+/// own default, and the endpoint's key is empty.
+pub fn connect(socket: Option<&str>, budget: Budget, cancelled: Arc<AtomicBool>) -> Arc<dyn Mux> {
+    Arc::new(HerdrMux {
+        transport: Process::new(socket, budget, cancelled),
+        endpoint: Endpoint {
+            kind: MuxKind::Herdr,
+            key: socket.unwrap_or_default().to_owned(),
+        },
+    })
 }
 
-impl Transport for Process {
-    fn run(&self, args: &[&str]) -> Result<String, String> {
-        self.run_within(args, self.budget, None)
-    }
-
-    fn run_within(
-        &self,
-        args: &[&str],
-        budget: Budget,
-        cancelled: Option<&AtomicBool>,
-    ) -> Result<String, String> {
-        let budget = tighter(self.budget, budget);
-        let cancelled = narrowest(cancelled, Some(&self.cancelled))?.unwrap_or(&self.cancelled);
-        self.herdr
-            .execute_bounded(args, budget.timeout, cancelled, budget.max_output_bytes)
-            .map(|output| output.stdout)
-    }
+/// The socket of the Herdr server a command reaches with no socket of its
+/// own, as `status server` reports it, or `None` when it reports none.
+pub fn server_socket() -> Option<String> {
+    wire::server_socket(&Process::new(None, Budget::ADAPTER_DEFAULT, Arc::default()))
 }
 
-/// Temporary: every legacy executor, `ProcessHerdr` and the test fakes alike,
-/// is a `Mux` through this transport, so callers and fakes can move to the
-/// port one commit at a time. Deleted with `HerdrCommandExecutor`.
-struct Legacy<'a, E>(&'a E);
-
-impl<E: HerdrCommandExecutor + Sync> Transport for Legacy<'_, E> {
-    fn run(&self, args: &[&str]) -> Result<String, String> {
-        self.0.execute(args).map(|output| output.stdout)
-    }
-
-    /// `execute_bounded`, never cancelled unless the read names a flag,
-    /// since a legacy executor has no flag of its own.
-    fn run_within(
-        &self,
-        args: &[&str],
-        budget: Budget,
-        cancelled: Option<&AtomicBool>,
-    ) -> Result<String, String> {
-        self.0
-            .execute_bounded(
-                args,
-                budget.timeout,
-                cancelled.unwrap_or(&AtomicBool::new(false)),
-                budget.max_output_bytes,
-            )
-            .map(|output| output.stdout)
-    }
-
-    /// The executor's own classification, so a bridged fake keeps its answers.
-    fn input_failure(&self, error: String) -> InputOutcome {
-        self.0.input_failure(error)
-    }
-}
-
-/// A legacy executor's endpoint when it names none: an empty key.
-static LEGACY_ENDPOINT: Endpoint = Endpoint {
-    kind: MuxKind::Herdr,
-    key: String::new(),
-};
-
-/// Deleted with the bridge, when a connector fixes the endpoint instead.
-fn bridge<E: HerdrCommandExecutor + Sync>(executor: &E) -> HerdrMux<Legacy<'_, E>> {
-    HerdrMux {
-        transport: Legacy(executor),
-        endpoint: LEGACY_ENDPOINT.clone(),
-    }
-}
-
-impl<E: HerdrCommandExecutor + Send + Sync> MuxRead for E {
-    fn endpoint(&self) -> &Endpoint {
-        &LEGACY_ENDPOINT
-    }
-
-    fn survey(&self, scope: Scope<'_>, depth: Depth) -> Result<Survey, MuxError> {
-        bridge(self).survey(scope, depth)
-    }
-
-    fn screen(&self, pane: &PaneId, request: ScreenRequest) -> Result<Screen, MuxError> {
-        bridge(self).screen(pane, request)
-    }
-
-    fn process(&self, pane: &PaneId) -> Result<PaneProcess, MuxError> {
-        bridge(self).process(pane)
-    }
-
-    fn tab_label(&self, tab: &TabId) -> Result<Option<String>, MuxError> {
-        bridge(self).tab_label(tab)
-    }
-
-    fn integration_root(&self) -> Result<Option<PathBuf>, MuxError> {
-        bridge(self).integration_root()
-    }
-
-    fn within<'a>(&'a self, allowance: Allowance<'a>) -> Box<dyn MuxRead + 'a> {
-        Box::new(HerdrMux {
-            transport: Within {
-                transport: Legacy(self),
-                allowance,
-            },
-            endpoint: LEGACY_ENDPOINT.clone(),
-        })
-    }
-}
-
-impl<E: HerdrCommandExecutor + Send + Sync> MuxAct for E {
-    fn apply(&self, effect: &Effect) -> Result<Applied, MuxError> {
-        bridge(self).apply(effect)
-    }
-}
-
-impl<E: HerdrCommandExecutor + Send + Sync> MuxInput for E {
-    fn deliver(&self, input: PaneInput<'_>) -> InputOutcome {
-        bridge(self).deliver(input)
-    }
-}
-
+#[cfg(test)]
+pub(crate) mod boundary;
 #[cfg(test)]
 mod conformance;
 #[cfg(test)]

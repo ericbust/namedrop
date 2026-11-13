@@ -6,8 +6,11 @@ string_id!(PaneId);
 string_id!(TabId);
 string_id!(TerminalId);
 
-/// The multiplexer server a port talks to. For Herdr, `key` is the stored
-/// `session_socket_id`, byte for byte.
+/// The multiplexer server a port talks to. For Herdr, `key` is the socket a
+/// connection gives each command, byte for byte: the stored
+/// `session_socket_id` for a connection made from one. A connection with no
+/// socket of its own, such as the CLI's without `--herdr-socket`, has an
+/// empty key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Endpoint {
     pub kind: MuxKind,

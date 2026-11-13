@@ -694,6 +694,7 @@ fn acquire_flock(fd: RawFd, timeout: Duration) -> Result<(), AcquireError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mux::herdr::boundary::{call_at, compact, rust_sources};
     use std::{
         fs,
         io::BufRead,
@@ -1559,32 +1560,6 @@ mod tests {
         );
     }
 
-    /// Source with whitespace and string conversions removed, so
-    /// `"pane" .to_owned(), String::from("run")` reads as `"pane","run"`.
-    fn compact(source: &str) -> String {
-        let mut text = [".to_owned()", ".to_string()", ".into()"].iter().fold(
-            source.split_whitespace().collect::<String>(),
-            |text, conversion| text.replace(conversion, ""),
-        );
-        while let Some(at) = text.find("String::from(") {
-            let call = call_at(&text[at..], "String::from(");
-            let argument = call["String::from(".len()..call.len() - 1].to_owned();
-            text.replace_range(at..at + call.len(), &argument);
-        }
-        text
-    }
-
-    fn rust_sources(directory: &Path, found: &mut Vec<std::path::PathBuf>) {
-        for entry in fs::read_dir(directory).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                rust_sources(&path, found);
-            } else if path.extension().is_some_and(|extension| extension == "rs") {
-                found.push(path);
-            }
-        }
-    }
-
     /// Herdr arguments that type into a pane.
     const INPUT_VERBS: &[&str] = &[
         r#""agent","prompt""#,
@@ -1613,85 +1588,13 @@ mod tests {
             .collect()
     }
 
-    /// Files under `src` that name a Herdr input verb, other than the Herdr
-    /// adapter and this module. Until commit 16 makes the transport private
-    /// to `mux/herdr/`, only these two may build the arguments that type.
-    fn raw_input_outside_the_adapter(src: &Path) -> Vec<String> {
-        let mut files = Vec::new();
-        rust_sources(src, &mut files);
-        files.sort();
-        let owners = [src.join("mux/herdr.rs"), src.join("pane_effects.rs")];
-        files
-            .iter()
-            .filter(|file| !file.starts_with(src.join("mux/herdr")) && !owners.contains(file))
-            .flat_map(|file| {
-                input_verbs(&fs::read_to_string(file).unwrap())
-                    .into_iter()
-                    .map(move |verb| format!("{} names {verb}", file.display()))
-            })
-            .collect()
-    }
-
-    #[test]
-    fn direct_literal_physical_input_calls_are_owned_here() {
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        assert_eq!(raw_input_outside_the_adapter(&src), Vec::<String>::new());
-    }
-
-    #[test]
-    fn raw_input_check_detects_new_nested_files_and_formatting() {
-        let state = State::new();
-        for directory in ["mux/herdr", "new/module"] {
-            fs::create_dir_all(state.0.join(directory)).unwrap();
-        }
-        let bypass = state.0.join("new/module/input.rs");
-        for (kind, operation) in [
-            ("agent", "prompt"),
-            ("pane", "run"),
-            ("pane", "send-keys"),
-            ("agent", "send-keys"),
-            ("pane", "send-text"),
-        ] {
-            for source in [
-                format!("herdr.execute ( & [ \"{kind}\" ,\n \"{operation}\", pane ] )"),
-                format!("vec![\"{kind}\".to_owned(),\n \"{operation}\".to_owned(), pane]"),
-                format!("Command::new(bin).arg(\"{kind}\")\n .arg(\"{operation}\").arg(pane)"),
-                format!("vec![String::from(\"{kind}\"), String::from(\"{operation}\"), pane]"),
-            ] {
-                for owner in ["pane_effects.rs", "mux/herdr.rs", "mux/herdr/wire.rs"] {
-                    fs::write(state.0.join(owner), &source).unwrap();
-                }
-                fs::write(&bypass, &source).unwrap();
-                let found = raw_input_outside_the_adapter(&state.0);
-                assert_eq!(found.len(), 1, "{source}: {found:?}");
-                assert!(
-                    found[0].starts_with(&bypass.display().to_string()),
-                    "{found:?}"
-                );
-            }
-        }
-        fs::write(
-            &bypass,
-            "match args { [\"agent\", \"prompt\", pane, _] => {} [\"pane\", \"run\", ..] | [\"pane\", \"send-keys\", ..] => {} _ => {} }\neffects.prompt(herdr, owner, body)",
-        )
-        .unwrap();
-        assert_eq!(
-            raw_input_outside_the_adapter(&state.0),
-            Vec::<String>::new()
-        );
-    }
-
     /// Text that would let dashboard code type into a pane around
     /// `DashboardPane`, and the one dashboard file each may appear in. The
     /// dashboard is a sibling of the delivery code in this crate, so no
-    /// visibility can hide `PaneEffects` or `InputOwner` from it alone, and
-    /// until the Herdr transport is private to `mux/herdr/` the compiler
-    /// cannot stop it naming that either.
+    /// visibility can hide `PaneEffects` or `InputOwner` from it alone. The
+    /// Herdr transport is private to `mux/herdr/`, so the compiler stops the
+    /// dashboard naming that.
     const DASHBOARD_RAW: &[(&str, Option<&str>)] = &[
-        ("ProcessHerdr", None),
-        ("HerdrCommandExecutor", None),
-        ("execute_bounded", None),
-        (".execute(", None),
         ("PaneEffects", None),
         ("InputOwner", None),
         ("HERDR_BIN_PATH", Some("observer_guard.rs")),
@@ -1791,23 +1694,6 @@ mod tests {
         ".arg(cols)",
     ];
 
-    /// The call at the start of `text`, with its argument list when it has
-    /// one.
-    fn call_at<'a>(text: &'a str, call: &str) -> &'a str {
-        let mut depth = 0;
-        let name = call.trim_end_matches('(').len();
-        for (at, character) in text.char_indices().skip(name) {
-            match character {
-                '(' => depth += 1,
-                ')' if depth == 1 => return &text[..=at],
-                ')' => depth -= 1,
-                _ if depth == 0 => return &text[..at],
-                _ => {}
-            }
-        }
-        text
-    }
-
     fn calls<'a>(text: &'a str, call: &str) -> Vec<&'a str> {
         text.match_indices(call)
             .map(|(at, _)| call_at(&text[at..], call))
@@ -1905,10 +1791,6 @@ mod tests {
             (
                 r#"Command::new("herdr").args(["pane", "send-keys", pane, "enter"])"#,
                 r#"names "herdr""#,
-            ),
-            (
-                r#"ProcessHerdr::for_binary(bin).execute(&["pane", "send-keys", pane])"#,
-                "names ProcessHerdr",
             ),
             (
                 "PaneEffects::acquire(state, socket, pane)?.run_terminal(&herdr, &owner, text)",

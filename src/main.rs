@@ -5,14 +5,14 @@ mod popup_input;
 mod prompt_hook;
 mod stop_hook;
 use namedrop::{
-    Clock, CommandResult, HerdrCommandExecutor, LifecycleRuntime, ProcessHerdr, ProcessIds,
-    SystemClock, agent_result_view,
+    Clock, CommandResult, LifecycleRuntime, ProcessIds, SystemClock, agent_result_view,
     cli::{Cli, ResultFormat, RuntimeOptions},
     describe_operations, diagnose_collaboration, execute_context_operation,
     execute_control_operation, execute_group_operation, execute_handoff_operation,
     execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
     execute_session_start_hook, execute_user_prompt_submit_hook, is_context_operation,
     is_control_operation, is_integration_operation, is_lifecycle_operation, is_message_operation,
+    mux::{Budget, Mux},
     render_command_result_to_text, render_command_result_to_text_within, validate_message_input,
 };
 use std::{
@@ -21,9 +21,13 @@ use std::{
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
+    sync::Arc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+/// The runtime every command builds: Herdr, the system clock, and process IDs.
+type Runtime<'a> = LifecycleRuntime<'a, Arc<dyn Mux>, SystemClock, ProcessIds>;
 
 fn main() -> ExitCode {
     if env::args_os().skip(1).eq(["--runtime-info"]) {
@@ -571,10 +575,7 @@ fn schedule_dispatch(operation: &str, data: &mut serde_json::Value, options: &Ru
 
 /// Drains every space a mailbox worker would have: this one into `drain`, the
 /// others into `drains` by space id.
-fn drain_inline(
-    data: &mut serde_json::Value,
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-) -> Result<(), String> {
+fn drain_inline(data: &mut serde_json::Value, runtime: &Runtime<'_>) -> Result<(), String> {
     let here = current_space(runtime)?;
     for space in namedrop::spaces_to_wake(runtime.state_directory, runtime.session_socket_id, &here)
     {
@@ -697,9 +698,7 @@ mod drain_report_tests {
     }
 }
 
-fn wake_runtime_mailboxes(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-) -> Result<(), String> {
+fn wake_runtime_mailboxes(runtime: &Runtime<'_>) -> Result<(), String> {
     schedule_mailbox_workers(
         runtime.state_directory,
         runtime.session_socket_id,
@@ -708,9 +707,7 @@ fn wake_runtime_mailboxes(
     )
 }
 
-fn current_space(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-) -> Result<String, String> {
+fn current_space(runtime: &Runtime<'_>) -> Result<String, String> {
     match runtime.workspace_id {
         Some(id) => Ok(id.to_owned()),
         None => Ok(namedrop::discover_worktree(runtime.mux, runtime.cwd)?.workspace_id),
@@ -899,9 +896,7 @@ fn run_operation(
 
 fn with_runtime_at<T>(
     state_directory: &Path,
-    action: impl FnOnce(
-        &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-    ) -> Result<T, String>,
+    action: impl FnOnce(&Runtime<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
     with_runtime_options(
         &RuntimeOptions {
@@ -914,9 +909,7 @@ fn with_runtime_at<T>(
 
 fn with_runtime_options<T>(
     options: &RuntimeOptions,
-    action: impl FnOnce(
-        &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-    ) -> Result<T, String>,
+    action: impl FnOnce(&Runtime<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
     let state_directory = options
         .plugin_state
@@ -925,7 +918,11 @@ fn with_runtime_options<T>(
         .ok_or_else(|| "HERDR_PLUGIN_STATE_DIR or --plugin-state is required".to_owned())?;
     let directories = namedrop::InheritedDirectories::from_environment();
     let cwd = env::current_dir().map_err(|error| error.to_string())?;
-    let herdr = ProcessHerdr::default().with_socket(options.herdr_socket.clone());
+    let herdr = namedrop::mux::herdr::connect(
+        options.herdr_socket.as_deref(),
+        Budget::ADAPTER_DEFAULT,
+        Arc::default(),
+    );
     let mut workspace_id = options
         .herdr_workspace
         .clone()
@@ -967,7 +964,7 @@ fn with_runtime_options<T>(
         workspace_id = Some(space);
         pane_id = pane_id.or(Some(pane));
     }
-    let socket_id = session_socket_id(options.herdr_socket.clone(), &herdr);
+    let socket_id = session_socket_id(options.herdr_socket.clone());
     let clock = SystemClock;
     let ids = ProcessIds::default();
     action(&LifecycleRuntime {
@@ -989,10 +986,7 @@ fn with_runtime_options<T>(
 /// cannot run must not interrupt the person's turn.
 fn run_context_hook(
     state_directory: &Path,
-    execute: fn(
-        &str,
-        &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-    ) -> Option<serde_json::Value>,
+    execute: fn(&str, &Runtime<'_>) -> Option<serde_json::Value>,
 ) -> ExitCode {
     let mut input = String::new();
     if io::stdin().read_to_string(&mut input).is_err() {
@@ -1039,21 +1033,11 @@ fn run_context_hook(
 
 /// The socket that scopes this session's state: the caller's, the pane's, or
 /// the one the running Herdr server reports.
-fn session_socket_id(explicit: Option<String>, herdr: &ProcessHerdr) -> String {
+fn session_socket_id(explicit: Option<String>) -> String {
     explicit
         .or_else(|| env::var("HERDR_SOCKET_PATH").ok())
-        .unwrap_or_else(|| {
-            herdr
-                .execute(&["status", "server"])
-                .ok()
-                .and_then(|output| {
-                    output
-                        .stdout
-                        .lines()
-                        .find_map(|line| line.strip_prefix("socket: ").map(str::to_owned))
-                })
-                .unwrap_or_else(|| "default".to_owned())
-        })
+        .or_else(namedrop::mux::herdr::server_socket)
+        .unwrap_or_else(|| "default".to_owned())
 }
 
 /// The wake the user-prompt-submit wrapper backgrounds once a mention was
@@ -1062,8 +1046,8 @@ fn session_socket_id(explicit: Option<String>, herdr: &ProcessHerdr) -> String {
 /// HERDR_PANE_ID it inherited, which no session ID vouches for under Codex.
 fn run_mailbox_wake_hook(state_directory: &Path) -> ExitCode {
     let wake = || -> Result<(), String> {
-        let herdr = ProcessHerdr::default();
-        let socket_id = session_socket_id(None, &herdr);
+        let herdr = namedrop::mux::herdr::connect(None, Budget::ADAPTER_DEFAULT, Arc::default());
+        let socket_id = session_socket_id(None);
         let space_id = match env::var("HERDR_WORKSPACE_ID") {
             Ok(space_id) => space_id,
             Err(_) => {

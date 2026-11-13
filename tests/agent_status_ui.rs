@@ -33,7 +33,7 @@ fn with_runtime_options<T>(
     _action: impl FnOnce(
         &namedrop::LifecycleRuntime<
             '_,
-            namedrop::ProcessHerdr,
+            std::sync::Arc<dyn namedrop::mux::Mux>,
             namedrop::SystemClock,
             namedrop::ProcessIds,
         >,
