@@ -235,8 +235,11 @@ def check_rex_lane(scratch):
                         joined("namedrop", 41), "not json", joined("namedrop", 42)])
     assert rex_lane.namedrop_clients(events) == [41, 42], rex_lane.namedrop_clients(events)
     assert rex_lane.namedrop_clients(joined("rex", 7)) == []
+    assert rex_lane.joined(events, 7) and rex_lane.joined(events, 41)
+    assert not rex_lane.joined(events, 8) and not rex_lane.joined("", 7)
     return ("Rex lane: Herdr gets the profile's environment and the block's REX_* names, nothing "
-            "else, and Namedrop clients of the scratch server are found in its event log")
+            "else, and Namedrop clients of the scratch server, and the lane's own, are found in its "
+            "event log")
 
 
 def check_rex_lane_cleanup(scratch):
@@ -323,6 +326,31 @@ def check_rex_live_hooks(scratch):
         assert "does not pass --state-directory" in str(error), error
     return ("Rex live lane: blocks get no Herdr names, and a hook counts once its agent ran it "
             "from a script baked to the profile's state directory")
+
+
+def check_rex_events_log(scratch):
+    if not shutil.which("rex"):
+        return "Rex events log: skipped, rex is not on PATH"
+    with patch.dict(os.environ, {"TESTBED_HOME": str(scratch / "rex-events")}):
+        profile = testbed.Profile("test-rex-events")
+        profile.create()
+        for name in ("home", "logs"):
+            (profile.dir / name).mkdir(mode=0o700)
+        profile.state.update(purpose="test", inside_rex=True, toolchain=testbed.host_toolchain())
+        profile.save()
+        lane = rex_lane.Lane(profile, testbed.fail, lambda message: None)
+        try:
+            lane.start_server()
+            assert not lane.logged_own_join(timeout=1), "a lane with no logger saw its own rex"
+            lane.events_log().write_text("")
+            assert not lane.logged_own_join(timeout=1), "an empty log saw the lane's own rex"
+            lane.start_events_log()
+            # The logger subscribes a moment after it starts.
+            assert any(lane.logged_own_join(timeout=1) for _ in range(10)), \
+                "the live logger missed the lane's own rex"
+        finally:
+            lane.stop()
+    return "Rex events log: only a live logger shows the lane's own rex join"
 
 
 @contextlib.contextmanager
@@ -1433,6 +1461,7 @@ def run(kit):
                   ("verify probes", lambda: check_probe_launches(kit, base)),
                   ("Rex lane", lambda: check_rex_lane(base)),
                   ("Rex lane cleanup", lambda: check_rex_lane_cleanup(base)),
+                  ("Rex events log", lambda: check_rex_events_log(base)),
                   ("Rex live hooks", lambda: check_rex_live_hooks(base)),
                   ("Rex live up and down", lambda: check_rex_live_up_and_down(base)),
                   ("Rex live down", lambda: check_rex_live_down_after_a_failed_stop(base)),

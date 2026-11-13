@@ -59,6 +59,19 @@ def namedrop_clients(events):
     return pids
 
 
+def joined(events, pid):
+    """True when a `rex events --all --json` log saw the client with this pid join."""
+    for line in events.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        client = (event.get("payload") or {}).get("client") or {}
+        if event.get("type") == "client_joined" and (client.get("principal") or {}).get("pid") == pid:
+            return True
+    return False
+
+
 def process_environment(pid):
     environ = Path("/proc/{}/environ".format(pid))
     if environ.exists():
@@ -135,14 +148,35 @@ class Lane:
     def events_log(self):
         return self.profile.dir / "logs/rex-events.jsonl"
 
-    def start_herdr(self, python, log):
-        self.start_server()
-        # The log ends when the server stops. It starts before Herdr, so it sees every client.
+    def logged_own_join(self, timeout=5):
+        """Runs one `rex server status` and waits for the event log to show it join, which proves
+        the logger still watched the server. A log that missed it proves nothing about other
+        clients."""
+        command = ["env", "-i"] + ["{}={}".format(*item) for item in sorted(self.environment().items())]
+        command += [self.binary(), "-S", self.server, "--autostart=false", "server", "status"]
+        status = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        status.wait()
+        log = self.events_log()
+        deadline = time.monotonic() + timeout
+        while True:
+            if log.exists() and joined(log.read_text(), status.pid):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.1)
+
+    def start_events_log(self):
+        """Logs every server event until the server stops."""
         command = ["env", "-i"] + ["{}={}".format(*item) for item in sorted(self.environment().items())]
         command += [self.binary(), "-S", self.server, "--autostart=false", "events", "--all", "--json"]
         subprocess.run(["/bin/sh", "-c", '"$@" >> "$0" 2>/dev/null < /dev/null &',
                         str(self.events_log())] + command,
                        cwd=str(self.profile.dir), check=True, start_new_session=True)
+
+    def start_herdr(self, python, log):
+        self.start_server()
+        # It starts before Herdr, so it sees every client.
+        self.start_events_log()
         for stale in self.sessions():
             self.rex("kill", stale)
         environment = self.dir / "herdr-environment.json"

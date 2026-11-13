@@ -1384,12 +1384,14 @@ def step_settled(r):
     checks = judge_settled(r.store.backlog(), r.doctor("final"), r.panes(), r.store.claims())
     if r.profile.state.get("inside_rex"):
         import rex_lane
-        log = rex_lane.Lane(r.profile, testbed.fail, testbed.say).events_log()
+        lane = rex_lane.Lane(r.profile, testbed.fail, testbed.say)
+        watched = lane.logged_own_join()
+        log = lane.events_log()
         pids = rex_lane.namedrop_clients(log.read_text() if log.exists() else "")
-        checks.append(Check("rex clients", log.exists() and not pids,
+        checks.append(Check("rex clients", watched and not pids,
                             "Namedrop clients of the scratch Rex server: {}{}".format(
                                 ", ".join(map(str, pids)) or "none",
-                                "" if log.exists() else " (no event log)")))
+                                "" if watched else " (the event log missed the lane's own rex)")))
     return checks
 
 
