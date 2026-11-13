@@ -188,23 +188,34 @@ pub(super) struct HookAgent {
     /// Where it stands in the caller's ancestors.
     pub at: usize,
     pub pid: u32,
-    pub executable: PathBuf,
+    /// `None` only for the block's foreground, whose executable no rule
+    /// compares.
+    pub executable: Option<PathBuf>,
 }
 
 /// The nearest of `ancestors` whose executable is not a shell by
 /// `is_shell`, never by `comm`, which Linux sets to a script's truncated
-/// name. `None` when an executable on the way cannot be read, because a
-/// shell then cannot be told from an agent.
-pub(super) fn hook_agent(local: &dyn LocalProcesses, ancestors: &[u32]) -> Option<HookAgent> {
+/// name. An executable that cannot be read stops the walk, because a shell
+/// then cannot be told from an agent, unless it is the block's foreground:
+/// macOS cannot read the executable of an agent whose file was replaced
+/// while it runs, and an agent that is the foreground needs no executable.
+pub(super) fn hook_agent(
+    local: &dyn LocalProcesses,
+    ancestors: &[u32],
+    foreground: u32,
+) -> Option<HookAgent> {
     for (at, pid) in ancestors.iter().copied().enumerate() {
-        let executable = local.executable(pid)?;
-        if !is_shell(&executable) {
-            return Some(HookAgent {
-                at,
-                pid,
-                executable,
-            });
-        }
+        let executable = match local.executable(pid) {
+            Some(executable) if is_shell(&executable) => continue,
+            Some(executable) => Some(executable),
+            None if pid == foreground => None,
+            None => return None,
+        };
+        return Some(HookAgent {
+            at,
+            pid,
+            executable,
+        });
     }
     None
 }
@@ -300,7 +311,8 @@ fn decide(
     bound: Option<&Binding>,
 ) -> Result<(LocalProc, LocalProc), BindRefused> {
     let foreground = caller.foreground.as_ref().ok_or(BindRefused::NotAlive)?;
-    let agent = hook_agent(local, &caller.ancestors).ok_or(BindRefused::NotAlive)?;
+    let agent =
+        hook_agent(local, &caller.ancestors, foreground.pid).ok_or(BindRefused::NotAlive)?;
     let (LocalRead::Alive(f), LocalRead::Alive(h)) =
         (local.read(foreground.pid), local.read(agent.pid))
     else {
@@ -354,9 +366,11 @@ fn launches(
     ancestors[agent.at + 1..at]
         .iter()
         .all(|pid| local.executable(*pid).is_some_and(|path| is_shell(&path)))
-        && local
-            .executable(foreground)
-            .is_some_and(|path| path != agent.executable)
+        && agent.executable.as_ref().is_some_and(|own| {
+            local
+                .executable(foreground)
+                .is_some_and(|path| path != *own)
+        })
 }
 
 /// The place `block`'s binding under `state` names, for a sandboxed

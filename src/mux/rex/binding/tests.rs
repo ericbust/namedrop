@@ -371,6 +371,33 @@ fn a_program_between_the_foreground_and_another_executable_refuses() {
     );
 }
 
+/// macOS cannot read the executable of a process whose file was unlinked
+/// while it runs, as an agent's update can leave it. An agent that is the
+/// foreground still binds, so its session after `/clear` replaces the one
+/// before. Behind a launcher, the rule compares executables, so either one
+/// unread refuses.
+#[test]
+fn an_agent_whose_executable_cannot_be_read_binds_only_as_the_foreground() {
+    let unread = |hook: Hook, pid: u32| {
+        hook.local.executables.lock().unwrap().remove(&pid);
+        hook
+    };
+    let state = State::new();
+    state.bind(&bound_to(26048, "before-clear"));
+    let foreground = unread(Hook::of(&case("Claude Code 2.1.323")), 26048);
+    assert_eq!(foreground.bind(&state, "after-clear", 2000), Ok(()));
+    assert_eq!(binding(&state).unwrap().session, "after-clear");
+    let behind = || Hook::of(&case("Claude Code behind bash wrap.sh, SessionStart"));
+    for (hook, refused) in [
+        (unread(behind(), 82429), BindRefused::NotAlive),
+        (unread(behind(), 82428), BindRefused::Launcher),
+    ] {
+        let state = State::new();
+        assert_eq!(hook.bind(&state, "session-1", 1000), Err(refused));
+        assert_eq!(binding(&state), None);
+    }
+}
+
 #[test]
 fn a_place_with_no_verified_caller_binds_nothing_and_records_nothing() {
     let state = State::new();
@@ -396,17 +423,26 @@ fn the_hooks_agent_is_the_nearest_ancestor_whose_executable_is_not_a_shell() {
         local.runs(pid, executable);
     }
     assert_eq!(
-        hook_agent(&local, &[1, 2, 3, 4, 5, 6]),
+        hook_agent(&local, &[1, 2, 3, 4, 5, 6], 6),
         Some(HookAgent {
             at: 4,
             pid: 5,
-            executable: "/opt/codex".into()
+            executable: Some("/opt/codex".into())
         })
     );
     assert_eq!(
-        hook_agent(&local, &[1, 7, 5]),
+        hook_agent(&local, &[1, 7, 5], 5),
         None,
         "an executable that cannot be read cannot be told from a shell"
+    );
+    assert_eq!(
+        hook_agent(&local, &[1, 7, 5], 7),
+        Some(HookAgent {
+            at: 1,
+            pid: 7,
+            executable: None
+        }),
+        "unless it is the foreground"
     );
 }
 
@@ -419,7 +455,7 @@ fn a_real_shell_wrapper_is_skipped_for_the_process_that_ran_it() {
     const CHILD: &str = "NAMEDROP_HOOK_AGENT_CHILD";
     if let Some(out) = std::env::var_os(CHILD) {
         let ancestors = crate::mux::processes::ancestors(&ThisMachine, std::process::id());
-        let agent = hook_agent(&ThisMachine, &ancestors).expect("a hook agent");
+        let agent = hook_agent(&ThisMachine, &ancestors, 0).expect("a hook agent");
         let comm =
             std::fs::read_to_string(format!("/proc/{}/comm", ancestors[0])).unwrap_or_default();
         std::fs::write(
