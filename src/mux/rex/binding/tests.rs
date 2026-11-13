@@ -2,11 +2,14 @@ use super::*;
 use crate::{
     SpaceId,
     mux::{
-        Endpoint, PaneId,
+        Endpoint, MuxKind, PaneId,
+        home::{Claimed, HookHome, Inherited, Location, context_hook_on},
+        processes::ThisMachine,
         rex::tests::{Local, State},
     },
 };
 use serde_json::Value;
+use std::{collections::HashMap, ffi::OsString};
 
 const BLOCK: &str = "block:0f6c0d4e-1b5a-4f8e-9d2c-3a7b8c9d0e1f";
 const ENDPOINT: &str = "rex:/tmp/r.sock";
@@ -661,5 +664,174 @@ fn a_real_shell_wrapper_is_skipped_for_the_process_that_ran_it() {
     assert!(is_shell(Path::new(shell)), "{found}");
     if cfg!(target_os = "linux") {
         assert_eq!(found["comm"], "session-start-w", "{found}");
+    }
+}
+
+/// A context hook's process in the block of a measured chain: `REX_*`
+/// claims the block on the server at the chain's end, which proves local and
+/// shows the chain's foreground and record.
+struct InBlock {
+    vars: HashMap<String, String>,
+    ancestors: Vec<u32>,
+    peer: io::Result<u32>,
+    caller: Caller,
+}
+
+impl InBlock {
+    fn of(hook: &Hook) -> Self {
+        let caller = hook.place.caller.as_deref().unwrap().clone();
+        let server = *caller.ancestors.last().unwrap();
+        Self {
+            vars: [
+                ("REX_BLOCK", BLOCK),
+                ("REX_SESSION", "session:s"),
+                ("REX_SERVER", "unix:///tmp/r.sock"),
+            ]
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .into(),
+            ancestors: caller.ancestors.clone(),
+            peer: Ok(server),
+            caller,
+        }
+    }
+
+    fn var(mut self, name: &str, value: &str) -> Self {
+        self.vars.insert(name.to_owned(), value.to_owned());
+        self
+    }
+
+    fn hook(
+        &self,
+        state: &State,
+        local: &Local,
+        input: &str,
+        runtime: Option<AgentRuntime>,
+    ) -> HookHome {
+        context_hook_on(&state.0, input, runtime, self, local, 1000)
+    }
+}
+
+impl Inherited for InBlock {
+    fn var(&self, name: &str) -> Option<OsString> {
+        self.vars.get(name).map(OsString::from)
+    }
+
+    fn id(&self) -> u32 {
+        1
+    }
+
+    fn ancestors(&self) -> Vec<u32> {
+        self.ancestors.clone()
+    }
+
+    fn peer(&self, socket: &Path) -> io::Result<u32> {
+        assert_eq!(socket, Path::new("/tmp/r.sock"));
+        match &self.peer {
+            Ok(pid) => Ok(*pid),
+            Err(error) => Err(io::Error::from_raw_os_error(error.raw_os_error().unwrap())),
+        }
+    }
+
+    fn claimed(&self, _: &Path, session: &str, block: &str) -> Result<Claimed, String> {
+        assert_eq!((session, block), ("session:s", BLOCK));
+        Ok(Claimed {
+            endpoint: Endpoint::parse(ENDPOINT),
+            server: *self.ancestors.last().unwrap(),
+            child: self.ancestors[self.ancestors.len() - 2],
+            caller: self.caller.clone(),
+        })
+    }
+
+    fn incarnation(&self, _: u32) -> Option<String> {
+        None
+    }
+}
+
+fn input(session: &str) -> String {
+    serde_json::json!({"hook_event_name": "SessionStart", "source": "startup", "session_id": session})
+        .to_string()
+}
+
+/// A context hook binds the session its host sent to the block it runs in,
+/// with the runtime its wrapper named and the entrypoint it inherited, so a
+/// print-mode Claude Code behind the foreground refuses. Its notices speak
+/// Rex's words, and it records its turn at the block.
+#[test]
+fn a_context_hook_in_a_rex_block_binds_its_session_with_its_inherited_entrypoint() {
+    let hook = Hook::of(&case("Claude Code behind bash wrap.sh, SessionStart"));
+    let state = State::new();
+    let home = InBlock::of(&hook)
+        .var("CLAUDE_CODE_ENTRYPOINT", "cli")
+        .hook(
+            &state,
+            &hook.local,
+            &input("outer"),
+            Some(AgentRuntime::ClaudeCode),
+        );
+    assert_eq!(
+        home,
+        HookHome {
+            kind: MuxKind::Rex,
+            location: Some(Location {
+                endpoint: Some(Endpoint::parse(ENDPOINT)),
+                space: Some(SpaceId::new("session:s")),
+                pane: Some(PaneId::new(BLOCK)),
+                names: crate::locator::Name::Neutral,
+            }),
+        }
+    );
+    assert_eq!(binding(&state).unwrap().session, "outer");
+    let state = State::new();
+    InBlock::of(&hook)
+        .var("CLAUDE_CODE_ENTRYPOINT", "sdk-cli")
+        .hook(
+            &state,
+            &hook.local,
+            &input("nested"),
+            Some(AgentRuntime::ClaudeCode),
+        );
+    assert_eq!(binding(&state), None);
+    assert_eq!(
+        refusal_of(&state).map(|refusal| (refusal.condition, refusal.session)),
+        Some((BindRefused::NestedPrintMode, "nested".into()))
+    );
+}
+
+/// A wrapper that names no runtime, or a host that sends no session, binds
+/// nothing and leaves nothing for Doctor.
+#[test]
+fn a_context_hook_without_a_runtime_or_a_session_binds_nothing() {
+    let hook = Hook::of(&case("Claude Code 2.1.323"));
+    for (input, runtime) in [
+        (input("s1"), None),
+        (input(""), Some(AgentRuntime::ClaudeCode)),
+        (
+            r#"{"hook_event_name":"SessionStart"}"#.to_owned(),
+            Some(AgentRuntime::ClaudeCode),
+        ),
+    ] {
+        let state = State::new();
+        let home = InBlock::of(&hook).hook(&state, &hook.local, &input, runtime);
+        assert_eq!(home.kind, MuxKind::Rex);
+        assert!(!state.0.join("rex").exists(), "{input} {runtime:?}");
+    }
+}
+
+/// A Herdr pane's context hook speaks Herdr's words and writes nothing under
+/// `rex/`, with or without its wrapper's runtime.
+#[test]
+fn a_context_hook_in_a_herdr_pane_speaks_herdr_and_binds_nothing() {
+    let hook = Hook::of(&case("Claude Code 2.1.323"));
+    let mut herdr = InBlock::of(&hook).var("HERDR_PANE_ID", "w1:p1");
+    herdr.vars.retain(|name, _| !name.starts_with("REX_"));
+    for runtime in [Some(AgentRuntime::ClaudeCode), None] {
+        let state = State::new();
+        let home = herdr.hook(&state, &hook.local, &input("s1"), runtime);
+        assert_eq!(home.kind, MuxKind::Herdr);
+        assert_eq!(
+            home.location.map(|location| location.pane),
+            Some(Some(PaneId::new("w1:p1")))
+        );
+        assert!(!state.0.join("rex").exists());
     }
 }

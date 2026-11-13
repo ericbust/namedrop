@@ -11,7 +11,7 @@ use super::{
     rex::Caller,
 };
 use crate::{
-    SpaceId,
+    AgentRuntime, AgentSessionId, SpaceId,
     locator::{Locator, Name},
 };
 use serde::{Deserialize, Serialize};
@@ -103,6 +103,67 @@ impl Home {
             Self::RexDeferred(_) => None,
         }
     }
+}
+
+/// What a SessionStart or UserPromptSubmit hook takes from its home.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HookHome {
+    /// The multiplexer whose words the hook's notices use.
+    pub kind: MuxKind,
+    /// Where the hook records its turn, when its home has a place.
+    pub location: Option<Location>,
+}
+
+/// The home of a context hook whose host sent `input`. In a Rex block the
+/// hook first binds the input's session to the block, before the runtime's
+/// first survey, so that survey already reports it. Only the wrapper's
+/// `runtime` names the agent, because a nested agent inherits the outer
+/// agent's environment.
+pub fn context_hook(
+    state: &Path,
+    input: &str,
+    runtime: Option<AgentRuntime>,
+    inherited: &dyn Inherited,
+) -> HookHome {
+    context_hook_on(state, input, runtime, inherited, &ThisMachine, now_ms())
+}
+
+pub(crate) fn context_hook_on(
+    state: &Path,
+    input: &str,
+    runtime: Option<AgentRuntime>,
+    inherited: &dyn Inherited,
+    local: &dyn LocalProcesses,
+    now_ms: u64,
+) -> HookHome {
+    let home = resolve(&Flags::default(), inherited).ok();
+    let session = serde_json::from_str::<serde_json::Value>(input)
+        .ok()
+        .and_then(|input| input["session_id"].as_str().map(AgentSessionId::new))
+        .filter(|session| !session.as_str().is_empty());
+    if let (Some(Home::Rex(place)), Some(session), Some(runtime)) = (&home, &session, runtime) {
+        let entrypoint = inherited.var("CLAUDE_CODE_ENTRYPOINT");
+        let _ = place.bind(
+            state,
+            session,
+            runtime,
+            entrypoint.as_deref(),
+            local,
+            now_ms,
+        );
+    }
+    HookHome {
+        kind: home.as_ref().map_or(MuxKind::Herdr, Home::kind),
+        location: home.and_then(|home| home.location(inherited)),
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 /// Where a hook records its turn: endpoint, space, and pane, from either home.

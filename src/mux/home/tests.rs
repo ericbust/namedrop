@@ -998,6 +998,30 @@ fn a_denied_socket_defers_to_the_block_its_binding_proves() {
     );
 }
 
+/// `--plugin-state` names the state directory a sandboxed command reads,
+/// ahead of the one its Rex home would name.
+#[test]
+fn a_plugin_state_flag_is_read_before_the_homes_state_directory() {
+    let proving = Bound::agent("110@5000");
+    let other = Bound::agent("130@5000");
+    for (flag, named, defers) in [(&proving, &other, true), (&other, &proving, false)] {
+        let flags = Flags {
+            plugin_state: Some(&flag.0),
+            ..Flags::default()
+        };
+        let process = sandboxed_tool()
+            .started(110, 5000)
+            .started(130, 5000)
+            .var("NAMEDROP_STATE_DIR", named.0.to_str().unwrap());
+        assert_eq!(
+            resolve(&flags, &process).is_ok(),
+            defers,
+            "{}",
+            flag.0.display()
+        );
+    }
+}
+
 #[test]
 fn a_binding_that_does_not_prove_the_denied_caller_is_an_error() {
     let not_an_ancestor = Bound::agent("130@5000");

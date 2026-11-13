@@ -16,7 +16,7 @@ use namedrop::{
     locator::{self, Locator, Name},
     mux::{
         Budget, Mux,
-        home::{self, Flags, Home, Inherited, Location},
+        home::{self, Home, Inherited, Location},
     },
     render_command_result_to_text, render_command_result_to_text_within, validate_message_input,
 };
@@ -1106,11 +1106,6 @@ fn with_herdr_runtime<T>(
 /// Runs one hook that reads the host's event payload from stdin and may answer
 /// with context for the model. Silence is the only failure mode: a hook that
 /// cannot run must not interrupt the person's turn.
-///
-/// In a Rex block the hook first binds its session to the block, before the
-/// runtime's first survey, so that survey already reports it. Only the
-/// wrapper's `--runtime` names the agent, because a nested agent inherits
-/// the outer agent's environment.
 fn run_context_hook(
     state_directory: &Path,
     runtime: Option<namedrop::AgentRuntime>,
@@ -1121,23 +1116,8 @@ fn run_context_hook(
     if io::stdin().read_to_string(&mut input).is_err() {
         return ExitCode::SUCCESS;
     }
-    let home = home::resolve(&Flags::default(), inherited).ok();
-    let session = serde_json::from_str::<serde_json::Value>(&input)
-        .ok()
-        .and_then(|input| {
-            input["session_id"]
-                .as_str()
-                .map(namedrop::AgentSessionId::new)
-        })
-        .filter(|session| !session.as_str().is_empty());
-    if let (Some(Home::Rex(place)), Some(session), Some(runtime)) = (&home, &session, runtime) {
-        let entrypoint = inherited.var("CLAUDE_CODE_ENTRYPOINT");
-        let _ = place.bind_session(state_directory, session, runtime, entrypoint.as_deref());
-    }
-    let kind = home
-        .as_ref()
-        .map_or(namedrop::mux::MuxKind::Herdr, Home::kind);
-    let location = home.and_then(|home| home.location(inherited));
+    let home::HookHome { kind, location } =
+        home::context_hook(state_directory, &input, runtime, inherited);
     let prompted = prompt_hook::record(
         state_directory,
         endpoint_of(location.clone()).as_deref(),

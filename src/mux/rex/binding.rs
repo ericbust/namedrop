@@ -9,7 +9,7 @@ use crate::{
     mux::{
         Endpoint, Incarnation, PaneId,
         home::{BindRefused, Deferral, Place},
-        processes::{LocalProc, LocalProcesses, LocalRead, ThisMachine, is_shell},
+        processes::{LocalProc, LocalProcesses, LocalRead, is_shell},
     },
 };
 use serde::{Deserialize, Serialize};
@@ -250,19 +250,9 @@ pub(super) fn hook_agent(
 }
 
 impl Place {
-    /// Records that `session` runs in the caller's block, reading this
-    /// machine's processes. `run_context_hook` calls it for SessionStart and
-    /// UserPromptSubmit, and ignores the answer, which the refusal file keeps.
-    pub fn bind_session(
-        &self,
-        state: &Path,
-        session: &AgentSessionId,
-        runtime: AgentRuntime,
-        entrypoint: Option<&OsStr>,
-    ) -> Result<(), BindRefused> {
-        self.bind(state, session, runtime, entrypoint, &ThisMachine, now_ms())
-    }
-
+    /// Records that `session` runs in the caller's block. A context hook
+    /// calls it and ignores the answer, which the refusal file keeps.
+    ///
     /// Let F be the block's foreground and H the hook's agent. Refuses unless
     /// all of these hold:
     /// 1. H is in F's process group.
@@ -441,14 +431,6 @@ pub(crate) fn refusal(state: &Path, block: &str, foreground: &Incarnation) -> Op
     Bindings::new(state)
         .refusal(block)
         .filter(|refusal| refusal.foreground.as_ref() == Some(&foreground.0))
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        })
 }
 
 #[cfg(test)]
