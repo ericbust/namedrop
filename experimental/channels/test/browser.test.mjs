@@ -13947,7 +13947,15 @@ test("SOUNDS o: a pick another window changed first shows the saved choice and s
     },
   );
   const picker = ui.page.locator(".dm-header .sound-picker");
+  // Opening the picker reloads the settings; the other window's change
+  // lands after that reload, so the page still shows Default.
+  const reloaded = ui.page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/sounds" &&
+      response.request().method() === "GET",
+  );
   await picker.locator("summary").click();
+  await reloaded;
   const group = picker.getByRole("group", { name: "Sound for @claude" });
   await group.getByRole("radio", { name: "Default (Chime)" }).waitFor();
   ui.posts.setSounds({
