@@ -1,4 +1,8 @@
 #![cfg(feature = "test-support")]
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -30,7 +34,6 @@ use std::{
     ops::Deref,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -2873,7 +2876,7 @@ fn an_unknown_permitted_operation_cannot_be_serialized_into_an_envelope() {
 
 #[test]
 fn describe_suggests_a_hyphenated_token_without_accepting_the_misspelling() {
-    let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+    let output = crate::binary::namedrop()
         .args(["describe", "delivery.cancel_held"])
         .output()
         .unwrap();
@@ -3931,7 +3934,7 @@ fn installed_hook_wrapper_emits_only_the_confirmed_block_result() {
     )
     .unwrap();
     let wrapper = package.join("scripts/user-prompt-submit");
-    let run = || Command::new(&wrapper).output().unwrap();
+    let run = || crate::binary::command(&wrapper).output().unwrap();
 
     let output = run();
     assert_eq!(output.status.code(), Some(0));
@@ -3980,7 +3983,7 @@ fn only_the_claude_hook_wrapper_forwards_authenticated_delivery_context() {
         directory.path(),
     )
     .unwrap();
-    let claude_output = Command::new(claude.join("scripts/user-prompt-submit"))
+    let claude_output = crate::binary::command(claude.join("scripts/user-prompt-submit"))
         .output()
         .unwrap();
     assert_eq!(claude_output.status.code(), Some(0), "{claude_output:?}");
@@ -3996,7 +3999,7 @@ fn only_the_claude_hook_wrapper_forwards_authenticated_delivery_context() {
         directory.path(),
     )
     .unwrap();
-    let codex_output = Command::new(codex.join("scripts/user-prompt-submit"))
+    let codex_output = crate::binary::command(codex.join("scripts/user-prompt-submit"))
         .output()
         .unwrap();
     assert_eq!(codex_output.status.code(), Some(0), "{codex_output:?}");
@@ -4026,7 +4029,7 @@ fn installed_hook_wrapper_wakes_mailbox_delivery_without_delaying_the_hook_resul
 
     let run_hook = || {
         let started_at = std::time::Instant::now();
-        let output = Command::new(&wrapper).output().unwrap();
+        let output = crate::binary::command(&wrapper).output().unwrap();
         let elapsed = started_at.elapsed();
         assert_eq!(output.status.code(), Some(0), "{output:?}");
         assert_eq!(
@@ -4098,7 +4101,7 @@ fn both_installed_hooks_forward_only_known_safe_failed_handoff_guidance() {
                     output.replace('\'', "'\"'\"'")
                 ),
             );
-            let result = Command::new(package.join("scripts/user-prompt-submit"))
+            let result = crate::binary::command(package.join("scripts/user-prompt-submit"))
                 .output()
                 .unwrap();
             assert!(result.status.success());
@@ -4137,7 +4140,7 @@ fn installed_hook_manifest_launches_from_the_codex_plugin_root() {
         ("PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT"),
         ("CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT"),
     ] {
-        let output = Command::new("/bin/sh")
+        let output = crate::binary::command("/bin/sh")
             .args(["-c", command])
             .env_remove(absent_variable)
             .env(root_variable, &package)
@@ -4152,7 +4155,7 @@ fn installed_hook_manifest_launches_from_the_codex_plugin_root() {
         assert!(output.stderr.is_empty(), "{output:?}");
     }
 
-    let output = Command::new("/bin/sh")
+    let output = crate::binary::command("/bin/sh")
         .args(["-c", command])
         .env_remove("PLUGIN_ROOT")
         .env_remove("CLAUDE_PLUGIN_ROOT")
@@ -4185,7 +4188,7 @@ fn installed_subagent_wrapper_swallows_all_output_and_failures() {
                 directory.path(),
             )
             .unwrap();
-            let output = Command::new(package.join("scripts/subagent"))
+            let output = crate::binary::command(package.join("scripts/subagent"))
                 .env_clear()
                 .env("HOME", directory.home())
                 .env("XDG_CONFIG_HOME", directory.home().join(".config"))
@@ -4854,7 +4857,7 @@ fn installed_packages_quote_an_executable_and_state_path_containing_spaces() {
         assert!(wrapper.contains(&quoted(&state)), "{wrapper}");
         // Executing the generated wrapper proves the quoting resolves, rather
         // than only that the path text appears in it.
-        let hook = Command::new(package.join("scripts/user-prompt-submit"))
+        let hook = crate::binary::command(package.join("scripts/user-prompt-submit"))
             .output()
             .unwrap();
         assert!(hook.status.success(), "{agent_runtime:?}: {hook:?}");

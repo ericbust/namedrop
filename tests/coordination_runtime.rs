@@ -1,4 +1,8 @@
 #![cfg(feature = "test-support")]
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
@@ -360,7 +364,7 @@ impl Fixture {
             assert_eq!(*token, operation["token"].as_str().unwrap());
             let executable = command.split_once(" --plugin-state ").unwrap().0;
             let command = command.replacen(executable, &format!("'{}'", echo.display()), 1);
-            let ran = std::process::Command::new("sh")
+            let ran = crate::binary::command("sh")
                 .args(["-c", &command])
                 .output()
                 .unwrap();

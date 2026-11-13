@@ -1,6 +1,9 @@
 #![cfg(target_os = "linux")]
 #![cfg(feature = "test-support")]
 
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -13,7 +16,7 @@ mod xws;
 
 use std::{
     fs,
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -49,7 +52,7 @@ fn dropping_a_fixture_stops_its_mailbox_and_status_workers() {
             b"{\"operation\":\"mailbox-wake\"}",
         )
         .unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = crate::binary::namedrop();
         command
             .arg("--plugin-state")
             .arg(&f.state)
@@ -107,7 +110,7 @@ fn a_worker_does_not_recreate_a_deleted_state_directory() {
     let f = xws::Fixture::new();
     let state = f.state.clone();
     cleanup::remove_fixture(&state).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+    let output = crate::binary::namedrop()
         .args(["hook", "agent-status-worker"])
         .env("TMPDIR", &f.root)
         .env("HERDR_PLUGIN_STATE_DIR", &state)

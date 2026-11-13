@@ -1,3 +1,6 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -120,7 +123,7 @@ else printf '%s\n' '{}'; fi
         self.addresses()[0]["persona"].clone()
     }
     fn command(&self) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut cmd = crate::binary::namedrop();
         cmd.env("TMPDIR", &self.0)
             .env("HERDR_BIN_PATH", self.0.join("herdr"))
             .env("HERDR_PLUGIN_STATE_DIR", self.0.join("state"))
@@ -1276,7 +1279,7 @@ fn the_persona_editor_stays_live_while_a_suggestion_runs_in_a_real_terminal() {
     fs::write(f.0.join("hold-2"), "").unwrap();
     fs::write(f.0.join("hold-4"), "").unwrap();
     let command = f.command();
-    let out = Command::new("/usr/bin/python3")
+    let out = crate::binary::command("/usr/bin/python3")
         .envs(command.get_envs().filter_map(|(key, value)| value.map(|v| (key, v))))
         .env("TEST_AGENT", "1")
         .env("TEST_HOST", "claude")
@@ -1341,7 +1344,7 @@ finally:
     os.close(master)
     os.close(slave)
 "#])
-        .arg(env!("CARGO_BIN_EXE_namedrop"))
+        .arg(crate::binary::namedrop_path())
         .output()
         .unwrap();
     assert!(
@@ -1374,7 +1377,7 @@ fn management_single_keys_and_escape_work_in_a_real_terminal() {
     assert!(f.run("temporary\n\n", false).status.success());
     assert!(f.manage("\nxy\n").status.success());
     let command = f.command();
-    let out = Command::new("/usr/bin/python3")
+    let out = crate::binary::command("/usr/bin/python3")
         .envs(command.get_envs().filter_map(|(key, value)| value.map(|v| (key, v))))
         // Colour splits a hint into runs; this test reads words, not colour.
         .env("NO_COLOR", "1")
@@ -1435,7 +1438,7 @@ finally:
     os.close(master)
     os.close(slave)
 "#])
-        .arg(env!("CARGO_BIN_EXE_namedrop"))
+        .arg(crate::binary::namedrop_path())
         .output()
         .unwrap();
     assert!(

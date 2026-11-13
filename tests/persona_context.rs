@@ -2,6 +2,10 @@
 //! boundary: the current workspace persona roster, without changing how explicit
 //! Mentions route or how a Delivery Envelope authenticates.
 #![cfg(feature = "test-support")]
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
@@ -32,7 +36,6 @@ use serde_json::{Value, json};
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -358,7 +361,7 @@ fn forwarded(directory: &TestDirectory, host: AgentRuntime, output: &Value) -> S
             output.to_string().replace('\'', "'\"'\"'")
         ),
     );
-    let result = Command::new(package.join("scripts/user-prompt-submit"))
+    let result = crate::binary::command(package.join("scripts/user-prompt-submit"))
         .output()
         .unwrap();
     assert!(result.status.success(), "{host:?}: {result:?}");
@@ -972,7 +975,7 @@ fn an_incoming_task_reaches_both_hosts_with_the_roster_and_only_claude_with_the_
                     output.replace('\'', "'\"'\"'")
                 ),
             );
-            let result = Command::new(installed.join("scripts/user-prompt-submit"))
+            let result = crate::binary::command(installed.join("scripts/user-prompt-submit"))
                 .output()
                 .unwrap();
             assert!(result.status.success(), "{package}: {result:?}");
@@ -1303,7 +1306,11 @@ fn the_rendered_line_survives_a_hostile_installed_path() {
     let rendered_executable = line.split_once(" --plugin-state ").unwrap().0;
     let swapped = line.replacen(rendered_executable, &quoted_echo, 1);
 
-    let ran = Command::new("sh").arg("-c").arg(&swapped).output().unwrap();
+    let ran = crate::binary::command("sh")
+        .arg("-c")
+        .arg(&swapped)
+        .output()
+        .unwrap();
     assert!(ran.status.success(), "{swapped}\n{ran:?}");
     let passed = String::from_utf8(ran.stdout).unwrap();
     let passed = passed.lines().collect::<Vec<_>>();
@@ -1397,7 +1404,7 @@ fn every_rendered_line_matches_an_installed_codex_prefix_rule() {
             continue;
         }
         // What the shell would hand the sandbox, in order.
-        let ran = Command::new("sh")
+        let ran = crate::binary::command("sh")
             .arg("-c")
             .arg(format!("printf '%s\\n' {command}"))
             .output()
@@ -1464,7 +1471,7 @@ fn a_leading_mention_that_misses_keeps_its_guidance_and_gains_the_roster() {
                 serialized.replace('\'', "'\"'\"'")
             ),
         );
-        let result = Command::new(package.join("scripts/user-prompt-submit"))
+        let result = crate::binary::command(package.join("scripts/user-prompt-submit"))
             .output()
             .unwrap();
         assert_eq!(
@@ -1792,7 +1799,7 @@ fn both_installed_wrappers_forward_a_roster_and_only_claude_forwards_the_attesta
                     output.replace('\'', "'\"'\"'")
                 ),
             );
-            let result = Command::new(package.join("scripts/user-prompt-submit"))
+            let result = crate::binary::command(package.join("scripts/user-prompt-submit"))
                 .output()
                 .unwrap();
             assert!(result.status.success(), "{runtime:?}: {result:?}");
@@ -1816,7 +1823,7 @@ fn both_installed_wrappers_forward_a_roster_and_only_claude_forwards_the_attesta
                     output.replace('\'', "'\"'\"'")
                 ),
             );
-            let result = Command::new(package.join("scripts/session-start"))
+            let result = crate::binary::command(package.join("scripts/session-start"))
                 .output()
                 .unwrap();
             assert!(result.status.success(), "{runtime:?}: {result:?}");
@@ -1839,7 +1846,7 @@ fn app_server_notice(directory: &TestDirectory) -> String {
     let output = codex_app_server::run_with_stdin(
         codex_app_server::inside_server(
             &directory.home.join(".codex"),
-            Path::new(env!("CARGO_BIN_EXE_namedrop")),
+            Path::new(crate::binary::namedrop_path()),
         )
         .args(["hook", "session-start", "--state-directory"])
         .arg(&directory.state)
@@ -1892,7 +1899,7 @@ fn only_the_codex_session_start_wrapper_forwards_the_shared_app_server_notice_ex
                 output.replace('\'', "'\"'\"'")
             ),
         );
-        let result = Command::new(package.join("scripts/session-start"))
+        let result = crate::binary::command(package.join("scripts/session-start"))
             .output()
             .unwrap();
         assert!(result.status.success(), "{runtime:?}: {result:?}");
@@ -2090,7 +2097,7 @@ fn any_session_start_shows_that_session_the_whole_roster_again() {
     let prompt = "Plan the SSO work.";
     let session_start = |session: &str, source: &str| {
         let output = codex_app_server::run_with_stdin(
-            Command::new(env!("CARGO_BIN_EXE_namedrop"))
+            crate::binary::namedrop()
                 .args(["hook", "session-start", "--state-directory"])
                 .arg(&directory.state)
                 .env("HOME", &directory.home)
@@ -2388,7 +2395,7 @@ fn two_panes_of_one_session_keep_separate_memories_and_one_start_resets_both() {
     assert_eq!(hook_as("session-1", prompt, &reviewer), None);
 
     let output = codex_app_server::run_with_stdin(
-        Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        crate::binary::namedrop()
             .args(["hook", "session-start", "--state-directory"])
             .arg(&directory.state)
             .env("HOME", &directory.home)

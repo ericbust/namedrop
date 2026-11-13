@@ -1,3 +1,6 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -40,7 +43,7 @@ impl Fixture {
     }
 
     fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let mut command = Command::new(program);
+        let mut command = crate::binary::command(program);
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -91,7 +94,7 @@ fn both_installed_stop_hooks_return_before_the_worker_settles_a_claim() {
         let package = install_integration_package(
             &fixture.0.join("home"),
             runtime,
-            std::path::Path::new(env!("CARGO_BIN_EXE_namedrop")),
+            std::path::Path::new(crate::binary::namedrop_path()),
             &fixture.state(),
         )
         .unwrap();
@@ -162,7 +165,7 @@ fn stop_command_is_silent_and_does_not_create_state_when_unavailable() {
     ] {
         let state = fixture.0.join("missing-state");
         let mut child = fixture
-            .command(env!("CARGO_BIN_EXE_namedrop"))
+            .command(crate::binary::namedrop_path())
             .args(["hook", "stop", "--state-directory"])
             .arg(&state)
             .stdin(Stdio::piped())
@@ -307,7 +310,7 @@ impl Fixture {
             serde_json::to_string(identity).unwrap(),
             serde_json::to_string(text).unwrap(),
         );
-        let mut command = self.command(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = self.command(crate::binary::namedrop_path());
         // Inherit this descriptor through Stop and its detached worker; EOF waits for both.
         unsafe {
             command.pre_exec(move || {

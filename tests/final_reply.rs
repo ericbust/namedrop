@@ -1,6 +1,10 @@
 //! A delivery settled from the agent's final message: the prompt hook arms a
 //! claim and says so, and the Stop runs the bound operation the CLI runs.
 #![cfg(feature = "test-support")]
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
@@ -952,13 +956,13 @@ else:
 
     /// The binary as a host runs it, against the script Herdr.
     fn command(&self) -> Command {
-        self.hosted(env!("CARGO_BIN_EXE_namedrop"))
+        self.hosted(crate::binary::namedrop_path())
     }
 
     /// `program` in the environment a host gives the binary.
     fn hosted(&self, program: &str) -> Command {
         let root = &self.directory.root;
-        let mut command = Command::new(program);
+        let mut command = crate::binary::command(program);
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -2575,7 +2579,7 @@ impl Space {
 
     /// A hook as the host starts it, from the copy it holds.
     fn hook_from_cached_copy(&self, session: &str) {
-        let mut hook = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        let mut hook = crate::binary::namedrop()
             .args(["hook", "user-prompt-submit", "--state-directory"])
             .arg(&self.directory.state)
             .env_clear()
@@ -5381,7 +5385,7 @@ impl Space {
         let output = self
             .hosted("sh")
             .args(["-c", &format!(r#""$0" {rest}"#)])
-            .arg(env!("CARGO_BIN_EXE_namedrop"))
+            .arg(crate::binary::namedrop_path())
             .output()
             .unwrap();
         assert!(output.status.success(), "{line}: {output:?}");

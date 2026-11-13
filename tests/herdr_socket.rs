@@ -9,6 +9,9 @@
 //! none of `HERDR_SOCKET_PATH`, `HERDR_WORKSPACE_ID`, and `HERDR_PANE_ID` is
 //! set.
 
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/executable.rs"]
 mod executable;
 
@@ -88,7 +91,7 @@ impl Fixture {
     /// `namedrop` with this fixture's `herdr`, state, and home, and no Herdr
     /// pane, workspace, or socket of its own.
     fn namedrop(&self, inherited: Option<&str>) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = crate::binary::namedrop();
         command
             .env("ROOT", &self.0)
             .env("TMPDIR", &self.0)

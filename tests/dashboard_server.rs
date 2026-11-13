@@ -1,3 +1,6 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -67,7 +70,7 @@ impl Server {
             }
         });
         let [token, session] = credentials;
-        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = crate::binary::namedrop();
         command
             .arg("--plugin-state")
             .arg(state)
@@ -581,7 +584,7 @@ fn fake_herdr(root: &Path) -> PathBuf {
 }
 
 fn open_dashboard(root: &Path, workspace: &str) -> serde_json::Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+    let output = crate::binary::namedrop()
         .args(["--json", "--plugin-state"])
         .arg(root.join("state"))
         .args(["--herdr-socket", SOCKET, "--herdr-workspace", workspace])

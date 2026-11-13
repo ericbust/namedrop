@@ -1,4 +1,8 @@
 #![cfg(feature = "test-support")]
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 
@@ -795,7 +799,7 @@ fn human_doctor_shows_exact_targets_quoted_commands_and_hook_setup_steps() {
         .find_map(|line| line.strip_prefix("Command: "))
         .expect("interactive doctor must expose its safe recovery command");
     // Parse the offered command through the actual shell without invoking it.
-    let output = std::process::Command::new("/bin/sh")
+    let output = crate::binary::command("/bin/sh")
         .args(["-c", &format!("set -- {command}; printf '%s\\n' \"$@\"")])
         .output()
         .unwrap();
@@ -828,7 +832,7 @@ fn codex(host: &Host) -> &FakeMux {
 fn doctor_reports_unsupported_codex_without_preparing_its_home() {
     // A subprocess keeps the executable override away from parallel tests.
     if std::env::var_os("NAMEDROP_DOCTOR_UNSUPPORTED_CHILD").is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::binary::command(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "doctor_reports_unsupported_codex_without_preparing_its_home",

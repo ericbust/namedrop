@@ -1,3 +1,6 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -15,7 +18,7 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn release_checks_order_stable_and_experimental_versions() {
-    let output = Command::new("sh")
+    let output = crate::binary::command("sh")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/release_versions.sh"
@@ -47,7 +50,7 @@ impl Fixture {
         path
     }
     fn command(&self, script: &str) -> Command {
-        let mut command = Command::new("/bin/sh");
+        let mut command = crate::binary::command("/bin/sh");
         command.arg(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("scripts")
@@ -161,7 +164,7 @@ printf '%s\n' "$*" >> "${{NAMEDROP_TEST_ENTRYPOINT_LOG:-/dev/null}}"
         }
         let checkout = checkout.canonicalize().unwrap();
         self.script("cargo", CARGO);
-        let mut command = Command::new("/bin/sh");
+        let mut command = crate::binary::command("/bin/sh");
         command
             .arg(checkout.join("scripts/setup.sh"))
             .env("PATH", format!("{}:/usr/bin:/bin", self.0.display()))
@@ -178,7 +181,7 @@ printf '%s\n' "$*" >> "${{NAMEDROP_TEST_ENTRYPOINT_LOG:-/dev/null}}"
             "cargo",
             "#!/bin/sh\nprintf 'cargo-build\\n' >> \"$NAMEDROP_TEST_LOG\"\nexit 99\n",
         );
-        Command::new("sh")
+        crate::binary::command("sh")
             .arg(package.join("scripts/setup.sh"))
             .env("PATH", format!("{}:/usr/bin:/bin", self.0.display()))
             .env("PYTHONPATH", &self.0)
@@ -223,7 +226,7 @@ chmod 755 "$directory/$target/release/namedrop"
 /// ships sha256sum, macOS ships shasum.
 fn sha256_check(directory: &Path, list: &str) -> bool {
     let run = |program: &str, args: &[&str]| {
-        Command::new(program)
+        crate::binary::command(program)
             .args(args)
             .args(["-c", list])
             .current_dir(directory)
@@ -755,7 +758,7 @@ fn the_archive_bundles_every_declared_entrypoint_including_the_naming_popup() {
             continue;
         }
         assert!(
-            Command::new("/bin/sh")
+            crate::binary::command("/bin/sh")
                 .args(["-c", r#"exec "$@""#, "sh"])
                 .args(command)
                 .args(extra)
@@ -872,7 +875,7 @@ fn the_archive_installs_from_a_directory_containing_spaces() {
 
     let invocations = fixture.0.join("spaced-entrypoint-call");
     success(
-        Command::new("/bin/sh")
+        crate::binary::command("/bin/sh")
             .args(["-c", r#"exec "$@""#, "sh", "./bin/namedrop", "reconcile"])
             .current_dir(&package)
             .env("PATH", "/usr/bin:/bin")

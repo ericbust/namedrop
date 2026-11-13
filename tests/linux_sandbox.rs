@@ -1,5 +1,9 @@
 #![cfg(target_os = "linux")]
 //! Actual kernel enforcement, with no model/provider calls or recorder wrapper.
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -304,7 +308,7 @@ fn real_policy_allows_worker_auth_and_transport_but_denies_other_reads_and_exec(
 
 #[test]
 fn sandbox_fixture_cleans_up_after_a_panic() {
-    let child = Command::new(std::env::current_exe().unwrap())
+    let child = crate::binary::command(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "real_policy_allows_worker_auth_and_transport_but_denies_other_reads_and_exec",

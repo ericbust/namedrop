@@ -4,6 +4,9 @@
 //! environment, working directory and stdin it was given, which is how the
 //! isolation and bounding claims are checked rather than assumed.
 
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -1011,7 +1014,7 @@ fn the_generated_read_profile_denies_unrelated_files() {
     fs::write(&canary_path, &canary).expect("canary profile");
 
     let readable = |path: &std::path::Path| {
-        std::process::Command::new("/usr/bin/sandbox-exec")
+        crate::binary::command("/usr/bin/sandbox-exec")
             .arg("-f")
             .arg(&canary_path)
             .arg("/bin/cat")
@@ -1071,7 +1074,7 @@ fn a_seeded_parent_environment_is_stripped_and_overridden() {
     const SEEDED_THINKING: &str = "99999";
 
     if env::var(MARKER).is_err() {
-        let status = std::process::Command::new(env::current_exe().expect("test binary"))
+        let status = crate::binary::command(env::current_exe().expect("test binary"))
             .args([
                 "--exact",
                 "a_seeded_parent_environment_is_stripped_and_overridden",
@@ -1567,7 +1570,7 @@ fn fixture_cleanup_survives_thread_exit_and_panic() {
         return;
     }
     for mode in ["return", "panic"] {
-        let child = std::process::Command::new(env::current_exe().unwrap())
+        let child = crate::binary::command(env::current_exe().unwrap())
             .args([
                 "--exact",
                 "fixture_cleanup_survives_thread_exit_and_panic",

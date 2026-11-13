@@ -1,5 +1,8 @@
 #![cfg(feature = "test-support")]
 
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
@@ -20,7 +23,7 @@ use std::{
         fd::{AsRawFd, FromRawFd},
         unix::process::CommandExt,
     },
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -385,7 +388,7 @@ if args[:2] in [['pane','run'],['pane','send-text'],['pane','send-keys']]:
 if args[:2]==['worktree','list']:sys.stderr.write('{"error":{"code":"not_git_worktree"}}');sys.exit(1)
 else:sys.exit(1)
 "#).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        let mut child = crate::binary::namedrop()
             .arg("--plugin-state")
             .arg(&f.state)
             .arg("dashboard-server")
@@ -840,7 +843,7 @@ fn shell_pid_discovers_controlling_tty_with_bounded_ps() {
     let f = Fixture::new();
     let server = Server::start(&f);
     let source = SourcePty::new(200, 70);
-    let mut command = Command::new("/usr/bin/python3");
+    let mut command = crate::binary::command("/usr/bin/python3");
     command
         .args(["-c", "import time;time.sleep(120)"])
         .stdin(source.slave.try_clone().unwrap())

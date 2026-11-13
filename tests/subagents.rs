@@ -1,3 +1,6 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 use namedrop::AgentRuntime;
 use namedrop::subagent::{
     DiskFiles, HOST_FILE_CAP, HostFiles, SubagentEdge, SubagentSighting, SubagentText,
@@ -315,7 +318,7 @@ impl State {
         ParentIdentity::new("test-socket", "test-workspace", "pane-a", "parent-session").unwrap()
     }
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = crate::binary::namedrop();
         command
             .env_clear()
             .env("HOME", self.0.join("home"))

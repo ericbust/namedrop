@@ -865,6 +865,13 @@ What the design did not say, found while building 13:
 - **The Herdr daemons lose inherited names they never read.** The measured change under Herdr is the agent markers a pane's process passes on (`CODEX_SESSION_ID`, `CLAUDE_CODE_SESSION_ID`), which the status worker and the dashboard server carried before. The deferred worker and executor also lose an inherited space and pane and get their endpoint as `HERDR_SOCKET_PATH`, which their arguments already carry.
 - **The boundary is a closed registry, not a search for self-spawns.** Which variable names Namedrop's executable cannot be read from text, so every production spawn of a program named by an expression is listed with what it is, and a new one fails until it is classified. The scan empties literals and comments and cuts `#[cfg(test)]` items and test-only files first.
 
+- **13a. One door for test spawns** (`test: start every test process through one door`). `tests/support/binary.rs` holds `namedrop()`, the only `Command` for the binary, `namedrop_path()`, the only path form, `command(program)` for any program that may start the binary, and `without_rex`, each of which removes `REX_BLOCK`, `REX_SESSION`, `REX_CLIENT`, and `REX_SERVER`. A codemod moved the 33 spawns to `namedrop()`, the 48 path uses to `namedrop_path()`, and 74 other spawns (shells, Python, hook scripts, copies of the binary, the tests' own re-execs) to `command`, leaving only plain utilities (`git`, `ps`, `kill`, `pkill`, `pgrep`, `cc`, `sqlite3`, `tar`, `touch`, `sleep`, `true`) and the file publisher in `support/executable.rs` on `Command::new`. `tests/binary_door.rs` fails when the binary's Cargo name appears under `tests/` outside the door, and checks that every door removes the claim. No production code changes.
+
+What the design did not say, found while building 13a:
+
+- **The door is its own file.** `tests/support/mod.rs` needs the `test-support` feature and `crate::cleanup`, which most of the 29 files that name the binary do not load, so the helper is `tests/support/binary.rs`, which each test crate that uses it declares with `#[path]`.
+- **Every spawn that is not a plain utility goes through the door.** Telling which shell, script, or helper ends up running the binary takes reading each one, and a missed one is invisible to the token test, so the codemod sent all of them through `command`. Removing four names from a program that never runs the binary changes nothing.
+
 ## Next implementation step
 
 Step 3 is done (see [Step 3: neutral names](#step-3-neutral-names)). Next is step 4 of the [plan](PLAN.md): write the Rex adapter. Start with [Left for step 4](#left-for-step-4) and the step 4 items under [Open questions and risks](#open-questions-and-risks).

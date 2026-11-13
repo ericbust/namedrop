@@ -1,3 +1,6 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -68,7 +71,7 @@ impl Fixture {
     }
 
     fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = crate::binary::namedrop();
         command
             .args(["--plugin-state"])
             .arg(&self.state)
@@ -96,7 +99,7 @@ impl Drop for Fixture {
 
 #[test]
 fn detached_worker_behavior() {
-    let output = Command::new("python3")
+    let output = crate::binary::command("python3")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/check_update.py"
@@ -508,7 +511,7 @@ fn both_wrappers_forward_only_composed_notices_and_reject_hostile_versions() {
                     text.replace('\'', "'\"'\"'")
                 ),
             );
-            let output = Command::new(package.join("scripts/session-start"))
+            let output = crate::binary::command(package.join("scripts/session-start"))
                 .output()
                 .unwrap();
             assert!(output.status.success(), "{output:?}");

@@ -1,11 +1,14 @@
 //! Shared wiring and conflict-safe shortcut installation acceptance.
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 
 use std::{
     fs,
     path::PathBuf,
-    process::Command,
     sync::atomic::{AtomicU64, Ordering},
 };
 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -279,7 +282,7 @@ impl Fixture {
         Self(root)
     }
     fn install(&self) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        crate::binary::namedrop()
             .args(["--json", "ui", "install-shortcuts", "--config"])
             .arg(self.0.join("config.toml"))
             .env("TMPDIR", &self.0)

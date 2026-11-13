@@ -1,4 +1,8 @@
 #![cfg(feature = "test-support")]
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
@@ -2293,7 +2297,7 @@ fn cli_exposes_all_features_and_keeps_management_out_of_delivery_permissions() {
         ),
     );
     let run = |argv: &[&str], input: serde_json::Value| {
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        let output = crate::binary::namedrop()
             .current_dir(&directory.repo)
             .env("HOME", &directory.home)
             .env("CLAUDE_CONFIG_DIR", directory.home.join(".claude"))
