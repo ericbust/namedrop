@@ -598,7 +598,9 @@ impl<W: Wire> RexMux<W> {
     }
 
     /// Input with no confirmation: each `block.event` in turn. A Rex error
-    /// on the first one typed nothing. Any other failure may have typed.
+    /// on the first one typed nothing, unless it is `timeout`, whose work may
+    /// already have happened, `internal`, or a 5xx status, which say nothing
+    /// either way. Any other failure may have typed.
     fn type_events(&self, pane: &PaneId, events: Vec<Value>) -> InputOutcome {
         let block = pane.as_str();
         let (mut call, session) = match self.typing_call(block) {
@@ -609,7 +611,7 @@ impl<W: Wire> RexMux<W> {
             let payload = json!({"session_id": session, "block_id": block, "event": event});
             match call.control.request("block.event", Some(payload)) {
                 Ok(_) => {}
-                Err(fault @ Fault::Rex { .. }) if index == 0 => {
+                Err(fault @ Fault::Rex { .. }) if index == 0 && untyped_by(&fault) => {
                     return InputOutcome::Refused(mux_error(fault, Gone::Pane).to_string());
                 }
                 Err(fault) => {
@@ -622,6 +624,12 @@ impl<W: Wire> RexMux<W> {
         }
         InputOutcome::Delivered
     }
+}
+
+/// A Rex error that says its request did nothing.
+fn untyped_by(fault: &Fault) -> bool {
+    matches!(fault, Fault::Rex { code, status, .. }
+        if *status < 500 && !matches!(code.as_str(), "timeout" | "internal"))
 }
 
 impl<W: Wire> MuxInput for RexMux<W> {

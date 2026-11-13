@@ -614,13 +614,25 @@ fn a_rex_error_on_the_first_input_is_refused_and_any_later_failure_is_ambiguous(
         line(&bound(failing(0, rex_error("bad_request")))),
         InputOutcome::Refused(_)
     ));
-    assert!(matches!(
-        line(&bound(failing(
-            0,
-            Fault::Timeout(std::time::Duration::from_secs(5))
-        ))),
-        InputOutcome::Ambiguous(_)
-    ));
+    let unavailable = Fault::Rex {
+        code: "unavailable".into(),
+        message: "Rex says unavailable".into(),
+        status: 503,
+    };
+    for fault in [
+        Fault::Timeout(std::time::Duration::from_secs(5)),
+        rex_error("timeout"),
+        rex_error("internal"),
+        unavailable,
+    ] {
+        assert!(
+            matches!(
+                line(&bound(failing(0, fault.clone()))),
+                InputOutcome::Ambiguous(_)
+            ),
+            "{fault:?}"
+        );
+    }
     assert!(matches!(
         line(&bound(failing(1, rex_error("bad_request")))),
         InputOutcome::Ambiguous(_)
