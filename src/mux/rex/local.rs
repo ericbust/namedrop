@@ -61,6 +61,93 @@ pub(super) fn peer_pid(stream: &UnixStream) -> io::Result<u32> {
     u32::try_from(pid).map_err(|_| io::Error::other(format!("the peer pid {pid} is not a pid")))
 }
 
+/// The peer pid of one non-blocking connect to `socket`, which sends
+/// nothing and closes at once. A listener whose queue is full refuses or
+/// would block at once, and a connect that has not completed `within` fails
+/// `TimedOut`.
+pub(super) fn peer_within(socket: &Path, within: std::time::Duration) -> io::Result<u32> {
+    use std::os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::ffi::OsStrExt,
+    };
+    // SAFETY: an all-zero sockaddr_un is a valid empty address.
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let path = socket.as_os_str().as_bytes();
+    if path.len() >= address.sun_path.len() || path.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} cannot name a Unix socket", socket.display()),
+        ));
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address.sun_path.iter_mut().zip(path) {
+        *slot = *byte as libc::c_char;
+    }
+    // SAFETY: socket takes no pointers, and a non-negative result is a new
+    // descriptor that `OwnedFd` then closes.
+    let descriptor = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `descriptor` is open and owned by nothing else.
+    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    let fd = descriptor.as_raw_fd();
+    // SAFETY: fcntl reads and sets flags of a descriptor this function owns.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    // SAFETY: as above.
+    if flags < 0
+        || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+        || unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `address` is a filled sockaddr_un of the length given.
+    let connected = unsafe {
+        libc::connect(
+            fd,
+            (&raw const address).cast(),
+            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        )
+    };
+    if connected != 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINPROGRESS) {
+            return Err(error);
+        }
+        let mut poll = libc::pollfd {
+            fd,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let wait = libc::c_int::try_from(within.as_millis()).unwrap_or(libc::c_int::MAX);
+        // SAFETY: `poll` is one valid pollfd.
+        match unsafe { libc::poll(&raw mut poll, 1, wait) } {
+            0 => return Err(io::ErrorKind::TimedOut.into()),
+            ready if ready < 0 => return Err(io::Error::last_os_error()),
+            _ => {}
+        }
+        let mut pending: libc::c_int = 0;
+        let mut length = std::mem::size_of_val(&pending) as libc::socklen_t;
+        // SAFETY: SO_ERROR fills one c_int of `length` bytes.
+        let read = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                (&raw mut pending).cast(),
+                &raw mut length,
+            )
+        };
+        if read != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if pending != 0 {
+            return Err(io::Error::from_raw_os_error(pending));
+        }
+    }
+    peer_pid(&UnixStream::from(descriptor))
+}
+
 /// Proves that the connection to `dial`, whose peer is process `peer`, is
 /// served by a Rex server on this machine: the server's own pid is the peer,
 /// and its primary listener is a Unix socket, whose address names the server.

@@ -39,6 +39,7 @@ mod popup_input;
 #[allow(dead_code)]
 fn with_runtime_options<T>(
     _options: &namedrop::cli::RuntimeOptions,
+    _inherited: &dyn namedrop::mux::home::Inherited,
     _action: impl FnOnce(
         &namedrop::LifecycleRuntime<
             '_,

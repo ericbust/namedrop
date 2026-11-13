@@ -2,6 +2,7 @@ use namedrop::{
     Clock, SystemClock,
     cli::RuntimeOptions,
     final_reply::{BoundOperation, FinalText, HostTurn, StopFacts, TurnTasks},
+    mux::home::Inherited,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -130,7 +131,7 @@ pub fn run(state: &Path) {
     }
 }
 
-pub fn run_worker(state: &Path) {
+pub fn run_worker(state: &Path, inherited: &dyn Inherited) {
     let mut bytes = Vec::new();
     if io::stdin()
         .lock()
@@ -191,14 +192,14 @@ pub fn run_worker(state: &Path) {
         );
     }
     if captured.settles {
-        settle_stop(state, &captured);
+        settle_stop(state, &captured, inherited);
     }
     if ended {
         wake_waiting_mail(state, &captured.socket, &captured.input.session_id);
     }
 }
 
-fn settle_stop(state: &Path, captured: &CapturedStop) {
+fn settle_stop(state: &Path, captured: &CapturedStop, inherited: &dyn Inherited) {
     let running_tasks: Vec<String> = captured
         .input
         .background_tasks
@@ -227,7 +228,7 @@ fn settle_stop(state: &Path, captured: &CapturedStop) {
         &captured.socket,
         &stop,
         captured.ended_at_ms,
-        &mut settle,
+        &mut |bound| settle(bound, inherited),
     );
 }
 
@@ -301,14 +302,14 @@ fn stop_hook_outcome(path: &Path, from: u64) -> Option<StopOutcome> {
     }
 }
 
-fn settle(bound: BoundOperation) -> Result<Value, String> {
+fn settle(bound: BoundOperation, inherited: &dyn Inherited) -> Result<Value, String> {
     let options = RuntimeOptions {
         plugin_state: Some(bound.state),
         endpoint: Some(bound.socket),
         space: Some(bound.workspace),
         pane: Some(bound.pane),
     };
-    match crate::run_bound_operation(bound.operation, bound.input, &options) {
+    match crate::run_bound_operation(bound.operation, bound.input, &options, inherited) {
         crate::Ran::Finished(result) => result,
         crate::Ran::Refused(error) => Err(error),
     }

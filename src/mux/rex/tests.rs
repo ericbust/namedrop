@@ -1311,3 +1311,34 @@ fn a_socket_caps_requests_at_the_rex_timeout_only_when_it_is_set() {
         );
     }
 }
+
+#[test]
+fn a_claimed_block_is_read_on_one_proved_connection() {
+    let script = one_block(fixture("idle-login"));
+    assert_eq!(
+        claimed_over(&script, Path::new(SOCKET), "session:s", "block:b"),
+        Ok(Claimed {
+            endpoint: Endpoint::parse(&format!("rex:{SOCKET}")),
+            server: PEER,
+            child: 70768,
+        })
+    );
+    assert_eq!(
+        script.calls(),
+        [
+            "server.status",
+            "session.attach session:s",
+            "process block:b"
+        ]
+    );
+    script.forget();
+    script.peer.store(PEER + 1, Ordering::Relaxed);
+    assert!(
+        matches!(
+            claimed_over(&script, Path::new(SOCKET), "session:s", "block:b"),
+            Err(MuxError::Unavailable(why)) if why.contains("is not a Rex server on this machine")
+        ),
+        "a server whose pid is not the peer is not read"
+    );
+    assert_eq!(script.calls(), ["server.status"]);
+}

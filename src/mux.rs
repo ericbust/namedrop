@@ -8,6 +8,7 @@ mod event;
 pub mod fake;
 pub mod gate;
 pub mod herdr;
+pub mod home;
 mod input;
 mod model;
 mod ports;
