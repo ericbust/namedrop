@@ -1263,7 +1263,7 @@ fn reminder_busy_clock_work_measurement() {
     let mut catch_up = crate::reminder::CatchUp::default();
     let startup_scope = crate::work_counters::Scope::start();
     let startup_result =
-        crate::reminder::cycle_with(&f.state, &f, &ids, |_| f.mux(), &mut catch_up);
+        crate::reminder::cycle_with(&f.state, &f, &ids, |_| Ok(f.mux()), &mut catch_up);
     let startup = startup_scope.finish();
     startup_result.unwrap();
     let startup_discoveries = f.discoveries.replace(0);
@@ -1271,7 +1271,8 @@ fn reminder_busy_clock_work_measurement() {
     let mut errors = 0;
     for second in 1..=300 {
         f.now.set(60_000 + second * 1000);
-        if crate::reminder::cycle_with(&f.state, &f, &ids, |_| f.mux(), &mut catch_up).is_err() {
+        if crate::reminder::cycle_with(&f.state, &f, &ids, |_| Ok(f.mux()), &mut catch_up).is_err()
+        {
             errors += 1;
         }
     }
@@ -1368,7 +1369,7 @@ fn reminder_idle_cycle_is_read_only_under_an_external_writer() {
         &f.state,
         &f,
         &ProcessIds::default(),
-        |_| f.mux(),
+        |_| Ok(f.mux()),
         &mut crate::reminder::CatchUp::completed(),
     );
     let counts = scope.finish();
@@ -1389,7 +1390,7 @@ fn reminder_future_only_startup_has_no_discovery_write_or_drain() {
         &f.state,
         &f,
         &ProcessIds::default(),
-        |_| f.mux(),
+        |_| Ok(f.mux()),
         &mut crate::reminder::CatchUp::default(),
     );
     let counts = scope.finish();
@@ -1421,7 +1422,7 @@ fn reminder_due_cycle_ignores_future_namespaces_and_deduplicates_catchup() {
         &ProcessIds::default(),
         |namespace| {
             visited.push(namespace.clone());
-            f.mux()
+            Ok(f.mux())
         },
         &mut crate::reminder::CatchUp::default(),
     );
@@ -1450,7 +1451,7 @@ fn reminder_cancelled_after_plan_does_not_drain() {
         &ProcessIds::default(),
         |_| {
             f.tx(|tx| tx.cancel_reminder(&ns(), &owner(), "due", 60_000));
-            f.mux()
+            Ok(f.mux())
         },
         &mut crate::reminder::CatchUp::completed(),
     );
@@ -1523,7 +1524,7 @@ fn reminder_startup_catchup_keeps_transient_failure_eligible() {
         &f.state,
         &f,
         &ProcessIds::default(),
-        |_| f.mux(),
+        |_| Ok(f.mux()),
         &mut catch_up,
     )
     .unwrap();
@@ -1541,7 +1542,7 @@ fn reminder_startup_catchup_keeps_transient_failure_eligible() {
         &f.state,
         &f,
         &ProcessIds::default(),
-        |_| f.mux(),
+        |_| Ok(f.mux()),
         &mut catch_up,
     );
     let counts = scope.finish();
@@ -1568,7 +1569,7 @@ fn reminder_due_discovery_reads_the_error_code_not_its_text() {
         &f.state,
         &f,
         &ProcessIds::default(),
-        |_| f.mux(),
+        |_| Ok(f.mux()),
         &mut catch_up,
     )
     .unwrap();
@@ -1681,7 +1682,7 @@ fn reminder_startup_retry_does_not_redrain_successful_busy_namespaces() {
             &ProcessIds::default(),
             |namespace| {
                 visited.push(namespace.clone());
-                f.scoped(namespace, (namespace == &unavailable).then_some(error))
+                Ok(f.scoped(namespace, (namespace == &unavailable).then_some(error)))
             },
             &mut catch_up,
         )
@@ -1698,7 +1699,7 @@ fn reminder_startup_retry_does_not_redrain_successful_busy_namespaces() {
             &ProcessIds::default(),
             |namespace| {
                 visited.push(namespace.clone());
-                f.scoped(namespace, (namespace == &unavailable).then_some(error))
+                Ok(f.scoped(namespace, (namespace == &unavailable).then_some(error)))
             },
             &mut catch_up,
         );
@@ -1728,7 +1729,7 @@ fn reminder_startup_retry_does_not_redrain_successful_busy_namespaces() {
                 &ProcessIds::default(),
                 |namespace| {
                     visited.push(namespace.clone());
-                    f.scoped(namespace, None)
+                    Ok(f.scoped(namespace, None))
                 },
                 &mut catch_up,
             )

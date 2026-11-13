@@ -102,10 +102,7 @@ mod tests {
     use super::*;
     use crate::{
         AgentSessionId, PaneBindingId, PaneType, SpaceId, StateNamespace,
-        mux::{
-            AgentIdentity, PaneId, SessionClaim, SpaceView, TabId, TerminalId,
-            herdr::HerdrConnector,
-        },
+        mux::{AgentIdentity, Connector, PaneId, SessionClaim, SpaceView, TabId, TerminalId},
     };
     use serde_json::json;
 
@@ -193,16 +190,16 @@ mod tests {
         let history = Mutex::new(HistoryStore::Unopened);
         let catalog = SkillCatalog::default();
         assert!(matches!(
-            read(&HerdrConnector, &history, &state, &key, "missing", &catalog),
+            read(&Connector, &history, &state, &key, "missing", &catalog),
             Err(Status::NotFound)
         ));
         assert!(matches!(
-            read(&HerdrConnector, &history, &state, &key, "ended", &catalog),
+            read(&Connector, &history, &state, &key, "ended", &catalog),
             Err(Status::Gone)
         ));
         let wrong = SpaceKey::of(&StateNamespace::for_space("other-socket", "test-workspace"));
         assert!(matches!(
-            read(&HerdrConnector, &history, &state, &wrong, "ended", &catalog),
+            read(&Connector, &history, &state, &wrong, "ended", &catalog),
             Err(Status::NotFound)
         ));
         drop(history);

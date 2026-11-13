@@ -1,8 +1,10 @@
 //! Durable handoff of bound agent commands when the pane cannot connect to Herdr.
 use crate::{
     AgentSessionId, Clock, IdGenerator, LifecycleRuntime, PaneAddressId, ProcessIds,
-    StateNamespace, StateStore, StoreError, SystemClock, cli::RuntimeOptions, locator::Locator,
-    mux::Budget,
+    StateNamespace, StateStore, StoreError, SystemClock,
+    cli::RuntimeOptions,
+    locator::Locator,
+    mux::{Budget, Endpoint},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -340,6 +342,19 @@ fn permission_denied(error: &io::Error) -> bool {
     matches!(error.raw_os_error(), Some(libc::EPERM | libc::EACCES))
 }
 
+/// A connection to the socket an endpoint value names, as a liveness probe.
+fn probe(endpoint: &str) -> io::Result<UnixStream> {
+    Endpoint::parse(endpoint).unix_socket().map_or_else(
+        || {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{endpoint} names no Unix socket"),
+            ))
+        },
+        UnixStream::connect,
+    )
+}
+
 /// Runs before runtime discovery or any mutating handler. A late handler error
 /// must never enter this fallback because the command may already have committed.
 pub fn try_defer(
@@ -352,7 +367,7 @@ pub fn try_defer(
         .endpoint
         .clone()
         .or_else(|| Locator::Endpoint.env())?;
-    match UnixStream::connect(&socket) {
+    match probe(&socket) {
         Err(error) if permission_denied(&error) => {}
         _ => return None,
     }
@@ -436,7 +451,7 @@ fn launcher(state: &Path) -> Result<PathBuf, String> {
 
 /// Only a caller that can already connect to Herdr can ensure an outside owner.
 pub fn ensure_worker(state: &Path, socket: &str) -> Result<(), String> {
-    UnixStream::connect(socket).map_err(|e| e.to_string())?;
+    probe(socket).map_err(|e| e.to_string())?;
     let directory = directory(state, socket)?;
     let lock = worker_lock(&directory)?;
     if lock.try_lock().is_err() {
@@ -463,7 +478,7 @@ fn worker_lock(directory: &Dir) -> Result<fs::File, String> {
 }
 
 pub fn run_worker(state: &Path, socket: &str) -> Result<(), String> {
-    UnixStream::connect(socket).map_err(|e| e.to_string())?;
+    probe(socket).map_err(|e| e.to_string())?;
     crate::installed_runtime::reexec_if_replaced(state)?;
     let directory = directory(state, socket)?;
     let lock = worker_lock(&directory)?;
@@ -484,7 +499,7 @@ pub fn run_worker(state: &Path, socket: &str) -> Result<(), String> {
     loop {
         crate::installed_runtime::reexec_if_replaced(state)?;
         if last_probe.elapsed() >= Duration::from_secs(5) {
-            if UnixStream::connect(socket).is_err() {
+            if probe(socket).is_err() {
                 return Ok(());
             }
             let active = StateStore::open_read_only(state)
@@ -672,11 +687,12 @@ fn clear_pending(pending: &Dir, key: &str) -> Result<(), String> {
 }
 
 fn execute_request(state: &Path, request: &Request) -> Result<Value, String> {
-    let herdr = crate::mux::herdr::connect(
-        Some(&request.caller.namespace.session_socket_id),
+    let herdr = crate::mux::connect(
+        &Endpoint::parse(&request.caller.namespace.session_socket_id),
         Budget::ADAPTER_DEFAULT,
         Default::default(),
-    );
+    )
+    .map_err(|error| error.to_string())?;
     // From the worker's own environment, so a deferred `address list` reports
     // context sizes as a direct one does.
     let directories = crate::InheritedDirectories::from_environment();
@@ -835,3 +851,29 @@ fn recover_committed<M: crate::mux::Mux, C: Clock, I: IdGenerator>(
 
 #[cfg(test)]
 mod caller_race_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_probe_connects_to_a_herdr_socket_as_named_and_to_a_rex_socket_after_its_scheme() {
+        let directory = env::temp_dir().join(format!("nd-probe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("s.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let path = socket.to_str().unwrap();
+        assert!(probe(path).is_ok());
+        assert!(probe(&format!("rex:{path}")).is_ok());
+        let error = probe("rex:s.sock").unwrap_err();
+        assert_eq!(
+            (error.kind(), error.to_string()),
+            (
+                io::ErrorKind::InvalidInput,
+                "rex:s.sock names no Unix socket".to_owned()
+            )
+        );
+        fs::remove_dir_all(&directory).unwrap();
+    }
+}

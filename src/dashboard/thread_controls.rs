@@ -261,7 +261,7 @@ mod tests {
                 };
                 let result = committed.respond(
                     Path::new("/nonexistent-namedrop-control-test"),
-                    &crate::mux::herdr::HerdrConnector,
+                    &crate::mux::Connector,
                     permit,
                     |_| {
                         responding.send(()).unwrap();

@@ -336,7 +336,7 @@ mod tests {
     use super::*;
 
     fn herdr() -> Arc<dyn MuxConnector> {
-        Arc::new(crate::mux::herdr::HerdrConnector)
+        Arc::new(crate::mux::Connector)
     }
 
     fn state_root(name: &str) -> PathBuf {

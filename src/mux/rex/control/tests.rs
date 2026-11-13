@@ -4,12 +4,12 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-struct Server {
-    stream: UnixStream,
+pub(in crate::mux::rex) struct Server {
+    pub stream: UnixStream,
 }
 
 impl Server {
-    fn upgrade(stream: UnixStream) -> Self {
+    pub fn upgrade(stream: UnixStream) -> Self {
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
@@ -56,7 +56,7 @@ impl Server {
         Some((head[0] & 0x0F, payload))
     }
 
-    fn message(&mut self) -> Value {
+    pub fn message(&mut self) -> Value {
         let (opcode, payload) = self.next_client_frame().expect("the client sent a message");
         assert_eq!(opcode, 0x1, "a text message");
         serde_json::from_slice(&payload).unwrap()
@@ -86,11 +86,11 @@ impl Server {
         self.stream.write_all(&frame).is_ok()
     }
 
-    fn send(&mut self, message: Value) {
+    pub fn send(&mut self, message: Value) {
         self.send_frame(0x1, message.to_string().as_bytes());
     }
 
-    fn welcome(&mut self) -> Value {
+    pub fn welcome(&mut self) -> Value {
         let hello = self.message();
         self.send(json!({
             "type": "welcome",
@@ -102,7 +102,7 @@ impl Server {
         hello
     }
 
-    fn close_code(&mut self) -> Option<u16> {
+    pub fn close_code(&mut self) -> Option<u16> {
         let (opcode, payload) = self.next_client_frame()?;
         assert_eq!(opcode, 0x8, "the client sent nothing but its close");
         Some(u16::from_be_bytes([payload[0], payload[1]]))

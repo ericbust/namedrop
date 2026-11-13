@@ -57,6 +57,8 @@ pub(super) enum Fault {
     Closed(String),
     Cancelled,
     Allowance(String),
+    /// The server answered, and it is not one on this machine.
+    NotLocal(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -371,4 +373,4 @@ fn fault(error: WsError, limit: Duration) -> Fault {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

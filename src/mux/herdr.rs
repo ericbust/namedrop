@@ -12,8 +12,8 @@ pub use events::{decode_operation_input, plugin_event_data};
 
 use super::{
     Allowance, Applied, Budget, Depth, Effect, Endpoint, InputKind, InputOutcome, Mux, MuxAct,
-    MuxConnector, MuxError, MuxInput, MuxKind, MuxRead, PaneId, PaneInput, PaneProcess, Scope,
-    Screen, ScreenRequest, SpaceView, Survey, TabId,
+    MuxError, MuxInput, MuxKind, MuxRead, PaneId, PaneInput, PaneProcess, Scope, Screen,
+    ScreenRequest, SpaceView, Survey, TabId,
 };
 use process::Process;
 use std::{
@@ -225,20 +225,6 @@ impl<T: Transport> MuxAct for HerdrMux<T> {
 impl<T: Transport> MuxInput for HerdrMux<T> {
     fn deliver(&self, input: PaneInput<'_>) -> InputOutcome {
         self.send(input.pane(), input.kind())
-    }
-}
-
-/// Connects to a Herdr server by its socket, the stored `session_socket_id`.
-pub struct HerdrConnector;
-
-impl MuxConnector for HerdrConnector {
-    fn connect(
-        &self,
-        socket: &str,
-        budget: Budget,
-        cancelled: Arc<AtomicBool>,
-    ) -> Result<Arc<dyn Mux>, MuxError> {
-        Ok(connect(Some(socket), budget, cancelled))
     }
 }
 

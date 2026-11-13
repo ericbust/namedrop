@@ -7,8 +7,8 @@ use super::{
 use crate::{
     StateStore, StoreError, StoreErrorKind,
     mux::{
-        AgentState, Budget, Depth, InputOutcome, Key, MuxConnector, PaneId, Scope, ScreenRequest,
-        Style, Wrap,
+        AgentState, Budget, Depth, Endpoint, InputOutcome, Key, MuxConnector, MuxKind, PaneId,
+        Scope, ScreenRequest, Style, Wrap,
     },
     pane_effects::{AcquireError, DashboardInput, DashboardPane},
     store::dashboard::{LiveBinding, LiveMember},
@@ -560,11 +560,19 @@ struct Observer {
     stdout: ChildStdout,
 }
 impl Observer {
+    /// Herdr only. A Rex pane's data stream is a Ghostty snapshot and raw
+    /// VT, which only a terminal emulator could render.
     fn open(
         binding: &LiveBinding,
         identity: &NativeIdentity,
         viewport: SourceViewport,
     ) -> io::Result<Self> {
+        if Endpoint::parse(&binding.namespace.session_socket_id).kind != MuxKind::Herdr {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "live peek works only in Herdr panes",
+            ));
+        }
         let mut command = Command::new(std::env::current_exe()?);
         command
             .arg("dashboard-observer-guard")
@@ -1499,6 +1507,27 @@ fn decode(text: &str) -> Result<Vec<u8>, ()> {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn live_peek_refuses_a_rex_binding_before_starting_an_observer() {
+        let binding = LiveBinding {
+            namespace: crate::StateNamespace::for_space("rex:/tmp/r.sock", "session:s"),
+            binding_id: crate::PaneBindingId::new("binding"),
+            pane_id: "block:b".into(),
+            pane_type: crate::PaneType::Agent,
+            agent_session_id: None,
+        };
+        let identity = NativeIdentity {
+            terminal: "block:b".into(),
+            session: None,
+            status: None,
+        };
+        let refused = Observer::open(&binding, &identity, SourceViewport::default())
+            .err()
+            .expect("a Rex binding has no observer");
+        assert_eq!(refused.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(refused.to_string(), "live peek works only in Herdr panes");
+    }
 
     #[test]
     fn tty_discovery_reserves_one_second_between_probe_starts() {
