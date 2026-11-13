@@ -223,6 +223,7 @@ fn name_activates_binds_registers_and_labels_the_current_native_pane() {
         agent_config: namedrop::AgentConfigDirectories {
             codex: Some(&codex_home),
             claude: None,
+            config: None,
         },
         cwd: Path::new("/repo"),
         workspace_id: None,

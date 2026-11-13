@@ -197,7 +197,7 @@ fn main() -> ExitCode {
             cli.session_start_hook_state_directory()
                 .map(Path::to_path_buf)
         })
-        .or_else(|| locator::state_directory(None));
+        .or_else(|| state_directory(&cli.runtime, inherited));
     // The status worker outlives the hook that starts it and takes the
     // command gate itself, around each event it reconciles.
     if cli.is_agent_status_worker_hook() {
@@ -461,7 +461,7 @@ fn run_bound_operation(
     inherited: &dyn Inherited,
 ) -> Ran {
     let input = if operation == "reply" {
-        let state = locator::state_directory(options.plugin_state.clone());
+        let state = state_directory(options, inherited);
         match namedrop::expand_attempt_reply(input, state.as_deref()) {
             Ok(input) => input,
             Err(error) => return Ran::Refused(error),
@@ -956,14 +956,13 @@ fn with_runtime_options<T>(
     inherited: &dyn Inherited,
     action: impl FnOnce(&Runtime<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
+    let home = home::resolve(&flags(options), inherited)?;
     let state_directory =
-        locator::state_directory(options.plugin_state.clone()).ok_or_else(state_required)?;
-    let flags = home::Flags {
-        endpoint: options.endpoint.as_deref(),
-        space: options.space.as_deref(),
-        pane: options.pane.as_deref(),
-    };
-    let place = match home::resolve(&flags, inherited)? {
+        locator::state_directory(options.plugin_state.clone(), home.kind(), |name| {
+            inherited.var(name)
+        })
+        .ok_or_else(state_required)?;
+    let place = match home {
         Home::Herdr => return with_herdr_runtime(options, &state_directory, action),
         Home::Rex(place) => place,
         Home::RexDeferred(_) => {
@@ -992,6 +991,25 @@ fn with_runtime_options<T>(
         mux: &mux,
         clock: &clock,
         ids: &ids,
+    })
+}
+
+fn flags(options: &RuntimeOptions) -> home::Flags<'_> {
+    home::Flags {
+        endpoint: options.endpoint.as_deref(),
+        space: options.space.as_deref(),
+        pane: options.pane.as_deref(),
+    }
+}
+
+/// The state directory of the home this process runs in. A home that cannot
+/// be resolved reads Herdr's order, and the command reports the home's error
+/// when it builds its runtime.
+fn state_directory(options: &RuntimeOptions, inherited: &dyn Inherited) -> Option<PathBuf> {
+    let kind = home::resolve(&flags(options), inherited)
+        .map_or(namedrop::mux::MuxKind::Herdr, |home| home.kind());
+    locator::state_directory(options.plugin_state.clone(), kind, |name| {
+        inherited.var(name)
     })
 }
 

@@ -126,6 +126,7 @@ print(json.dumps({'result':result}))
             agent_config: namedrop::AgentConfigDirectories {
                 claude: Some(&self.claude),
                 codex: None,
+                config: None,
             },
             cwd: Path::new("/repo"),
             workspace_id: None,

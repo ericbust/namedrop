@@ -279,6 +279,32 @@ where
             issues.push(hook_issue);
         }
     }
+    if let Some((record, recorded)) = runtime
+        .home_directory
+        .and_then(|home| crate::install::install_record_mismatch(home, runtime.agent_config))
+    {
+        let mut record_issue = issue(
+            "ND-INTEGRATION-002",
+            HealthSeverity::Notice,
+            "The install record names another state directory than the hooks write.",
+            &format!(
+                "{} names {}, and an installed hook wrapper writes elsewhere, so Namedrop in a Rex block would read a directory its hooks never write.",
+                record.display(),
+                recorded.display()
+            ),
+            HealthRepairKind::AgentRepair,
+            "Activate Namedrop again, which rewrites the wrappers and the record together.",
+        );
+        add_operation(
+            &mut record_issue,
+            runtime,
+            &space_id,
+            "activate",
+            serde_json::json!({"confirmed":true}),
+            None,
+        );
+        issues.push(record_issue);
+    }
     if setup
         .worktree_state
         .as_ref()

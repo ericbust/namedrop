@@ -371,8 +371,12 @@ pub fn try_defer(
         _ => return None,
     }
     Some((|| {
-        let state = crate::locator::state_directory(options.plugin_state.clone())
-            .ok_or("plugin state is required for deferred commands")?;
+        let state = crate::locator::state_directory(
+            options.plugin_state.clone(),
+            Endpoint::parse(&socket).kind,
+            |name| env::var_os(name),
+        )
+        .ok_or("plugin state is required for deferred commands")?;
         let workspace = options
             .space
             .clone()

@@ -569,6 +569,7 @@ mod tests {
             let config = AgentConfigDirectories {
                 claude: configured.then_some(claude.as_path()),
                 codex: configured.then_some(codex.as_path()),
+                config: None,
             };
             (
                 context_tokens(

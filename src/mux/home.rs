@@ -39,6 +39,15 @@ pub struct Place {
     pub pane: Option<PaneId>,
 }
 
+impl Home {
+    pub fn kind(&self) -> MuxKind {
+        match self {
+            Self::Herdr => MuxKind::Herdr,
+            Self::Rex(_) | Self::RexDeferred(_) => MuxKind::Rex,
+        }
+    }
+}
+
 /// A place read from a binding file. It can queue a deferred command and
 /// nothing else.
 #[derive(Clone, Debug, Eq, PartialEq)]
