@@ -186,16 +186,16 @@ fn main() -> ExitCode {
         .plugin_state
         .clone()
         .or_else(|| {
-            cli.user_prompt_submit_hook()
-                .map(|(state, _)| state.to_path_buf())
+            cli.user_prompt_submit_hook_state_directory()
+                .map(Path::to_path_buf)
         })
         .or_else(|| {
             cli.mailbox_wake_hook_state_directory()
                 .map(Path::to_path_buf)
         })
         .or_else(|| {
-            cli.session_start_hook()
-                .map(|(state, _)| state.to_path_buf())
+            cli.session_start_hook_state_directory()
+                .map(Path::to_path_buf)
         })
         .or_else(|| state_directory(&cli.runtime, inherited));
     // The status worker outlives the hook that starts it and takes the
@@ -284,21 +284,11 @@ fn main() -> ExitCode {
         finish(operation, result.map_err(input_error), format)
     };
 
-    if let Some((state_directory, runtime)) = cli.user_prompt_submit_hook() {
-        return run_context_hook(
-            state_directory,
-            runtime,
-            inherited,
-            execute_user_prompt_submit_hook,
-        );
+    if let Some(state_directory) = cli.user_prompt_submit_hook_state_directory() {
+        return run_context_hook(state_directory, inherited, execute_user_prompt_submit_hook);
     }
-    if let Some((state_directory, runtime)) = cli.session_start_hook() {
-        return run_context_hook(
-            state_directory,
-            runtime,
-            inherited,
-            execute_session_start_hook,
-        );
+    if let Some(state_directory) = cli.session_start_hook_state_directory() {
+        return run_context_hook(state_directory, inherited, execute_session_start_hook);
     }
     if let Some(state_directory) = cli.mailbox_wake_hook_state_directory() {
         return run_mailbox_wake_hook(state_directory, inherited);
@@ -1108,7 +1098,6 @@ fn with_herdr_runtime<T>(
 /// cannot run must not interrupt the person's turn.
 fn run_context_hook(
     state_directory: &Path,
-    runtime: Option<namedrop::AgentRuntime>,
     inherited: &dyn Inherited,
     execute: fn(&str, &Runtime<'_>) -> Option<serde_json::Value>,
 ) -> ExitCode {
@@ -1116,8 +1105,7 @@ fn run_context_hook(
     if io::stdin().read_to_string(&mut input).is_err() {
         return ExitCode::SUCCESS;
     }
-    let home::HookHome { kind, location } =
-        home::context_hook(state_directory, &input, runtime, inherited);
+    let home::HookHome { kind, location } = home::context_hook(state_directory, &input, inherited);
     let prompted = prompt_hook::record(
         state_directory,
         endpoint_of(location.clone()).as_deref(),
@@ -2915,6 +2903,7 @@ mod status_worker_tests {
                     ("HERDR_WORKSPACE_ID", Some("w1")),
                     ("NAMEDROP_ENDPOINT", None),
                     ("NAMEDROP_HERDR_TIMEOUT_MS", Some("10000")),
+                    ("NAMEDROP_HOOK_RUNTIME", None),
                     ("NAMEDROP_PANE_ID", None),
                     ("NAMEDROP_SPACE_ID", None),
                     ("NAMEDROP_STATE_DIR", None),
@@ -2933,6 +2922,7 @@ mod status_worker_tests {
                     ("HERDR_WORKSPACE_ID", None),
                     ("NAMEDROP_ENDPOINT", Some("rex:/tmp/r.sock")),
                     ("NAMEDROP_HERDR_TIMEOUT_MS", Some("10000")),
+                    ("NAMEDROP_HOOK_RUNTIME", None),
                     ("NAMEDROP_PANE_ID", None),
                     ("NAMEDROP_SPACE_ID", Some("s1")),
                     ("NAMEDROP_STATE_DIR", Some("/state")),

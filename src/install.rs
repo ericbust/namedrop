@@ -643,9 +643,9 @@ pub(crate) fn install_record_mismatch(
         .then_some((record, recorded))
 }
 
-/// Each installed SessionStart or UserPromptSubmit wrapper that passes no
-/// `--runtime`, as one installed before the flag existed. Its hooks never
-/// bind a session in a Rex block, so Doctor names them there.
+/// Each installed SessionStart or UserPromptSubmit wrapper that sets no
+/// `NAMEDROP_HOOK_RUNTIME`, as one installed before it existed. Its hooks
+/// never bind a session in a Rex block, so Doctor names them there.
 pub(crate) fn wrappers_without_runtime(home: &Path) -> Vec<PathBuf> {
     [AgentRuntime::Codex, AgentRuntime::ClaudeCode]
         .into_iter()
@@ -654,7 +654,9 @@ pub(crate) fn wrappers_without_runtime(home: &Path) -> Vec<PathBuf> {
                 .map(|file| package_directory(home, runtime).join(file))
         })
         .filter(|path| {
-            fs::read_to_string(path).is_ok_and(|wrapper| !wrapper.contains(" --runtime "))
+            fs::read_to_string(path).is_ok_and(|wrapper| {
+                !wrapper.contains(&format!("{}=", crate::mux::home::HOOK_RUNTIME))
+            })
         })
         .collect()
 }
@@ -1246,10 +1248,11 @@ fn hook_script(
         safe_context.push_str(&forward_marked_context("UserPromptSubmit", marker));
     }
     Ok(format!(
-        "#!/bin/sh\noutput=$({} hook user-prompt-submit --state-directory {} --runtime {} 2>/dev/null) || exit 0\nif [ \"$output\" = '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ]; then\n  printf '%s' \"$output\"\n  exit 0\nfi\n{}exit 0\n",
+        "#!/bin/sh\noutput=$({}={} {} hook user-prompt-submit --state-directory {} 2>/dev/null) || exit 0\nif [ \"$output\" = '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ]; then\n  printf '%s' \"$output\"\n  exit 0\nfi\n{}exit 0\n",
+        crate::mux::home::HOOK_RUNTIME,
+        runtime.as_str(),
         shell_single_quote(executable),
         shell_single_quote(state_directory),
-        runtime.as_str(),
         safe_context,
     ))
 }
@@ -1300,10 +1303,11 @@ fn session_start_script(
     };
     let update_notice = forward_update_notice(runtime);
     Ok(format!(
-        "#!/bin/sh\noutput=$({} hook session-start --state-directory {} --runtime {} 2>/dev/null) || exit 0\n{app_server_notice}{}{update_notice}exit 0\n",
+        "#!/bin/sh\noutput=$({}={} {} hook session-start --state-directory {} 2>/dev/null) || exit 0\n{app_server_notice}{}{update_notice}exit 0\n",
+        crate::mux::home::HOOK_RUNTIME,
+        runtime.as_str(),
         shell_single_quote(executable),
         shell_single_quote(state_directory),
-        runtime.as_str(),
         forward_marked_context("SessionStart", crate::persona::POLICY_MARKER),
     ))
 }
@@ -1640,8 +1644,8 @@ mod permission_tests {
 
     /// The UserPromptSubmit wrapper is the one before commit 16 without the
     /// line that backgrounded `hook mailbox-wake`: the hook starts the wake.
-    /// It and the SessionStart wrapper name their runtime, which only a Rex
-    /// block's bind reads.
+    /// It and the SessionStart wrapper name their runtime in a variable, which
+    /// only a Rex block's bind reads and an older binary ignores.
     #[test]
     fn the_context_wrappers_name_their_runtime_and_start_no_wake() {
         for runtime in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
@@ -1651,7 +1655,7 @@ mod permission_tests {
             let prompt = format!(
                 concat!(
                     "#!/bin/sh\n",
-                    "output=$('/x/namedrop' hook user-prompt-submit --state-directory '/s' --runtime {} 2>/dev/null) || exit 0\n",
+                    "output=$(NAMEDROP_HOOK_RUNTIME={} '/x/namedrop' hook user-prompt-submit --state-directory '/s' 2>/dev/null) || exit 0\n",
                     "if [ \"$output\" = '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ]; then\n",
                     "  printf '%s' \"$output\"\n",
                     "  exit 0\n",
@@ -1665,7 +1669,7 @@ mod permission_tests {
                 .render(runtime, Path::new("/x/namedrop"), Path::new("/s"))
                 .unwrap();
             let start = format!(
-                "#!/bin/sh\noutput=$('/x/namedrop' hook session-start --state-directory '/s' --runtime {} 2>/dev/null) || exit 0\n",
+                "#!/bin/sh\noutput=$(NAMEDROP_HOOK_RUNTIME={} '/x/namedrop' hook session-start --state-directory '/s' 2>/dev/null) || exit 0\n",
                 runtime.as_str()
             );
             assert!(session.starts_with(&start), "{session}");

@@ -615,8 +615,8 @@ fn doctor_names_a_refused_bind_only_for_an_unbound_rex_blocks_foreground() {
     }
 }
 
-/// A wrapper an older Namedrop installed passes no `--runtime`, so its hooks
-/// never bind in a Rex block. Herdr ignores the flag and says nothing.
+/// A wrapper an older Namedrop installed sets no `NAMEDROP_HOOK_RUNTIME`, so
+/// its hooks never bind in a Rex block. Herdr ignores it and says nothing.
 #[test]
 fn doctor_names_a_wrapper_without_its_runtime_only_in_a_rex_space() {
     for endpoint in [REX, "socket-a"] {
@@ -628,8 +628,15 @@ fn doctor_names_a_wrapper_without_its_runtime_only_in_a_rex_space() {
         let wrapper =
             package_directory(&f.home, AgentRuntime::ClaudeCode).join("scripts/session-start");
         let current = fs::read_to_string(&wrapper).unwrap();
-        assert!(current.contains(" --runtime claude-code "), "{current}");
-        fs::write(&wrapper, current.replace(" --runtime claude-code", "")).unwrap();
+        assert!(
+            current.contains("$(NAMEDROP_HOOK_RUNTIME=claude-code '"),
+            "{current}"
+        );
+        fs::write(
+            &wrapper,
+            current.replace("NAMEDROP_HOOK_RUNTIME=claude-code ", ""),
+        )
+        .unwrap();
         let report = diagnose_collaboration(&f.runtime());
         let issues = issues_named(&report, "ND-INTEGRATION-003");
         if endpoint == REX {

@@ -1924,7 +1924,7 @@ fn the_claude_session_start_wrapper_keeps_the_installed_hook_command() {
     .unwrap();
     let wrapper = fs::read_to_string(package.join("scripts/session-start")).unwrap();
     assert!(wrapper.starts_with(&format!(
-        "#!/bin/sh\noutput=$('{}' hook session-start --state-directory '{}' --runtime claude-code 2>/dev/null) || exit 0\n",
+        "#!/bin/sh\noutput=$(NAMEDROP_HOOK_RUNTIME=claude-code '{}' hook session-start --state-directory '{}' 2>/dev/null) || exit 0\n",
         executable.display(), directory.state.display()
     )));
 }

@@ -154,13 +154,11 @@ impl Cli {
         }
     }
 
-    /// The UserPromptSubmit hook's state directory and its wrapper's
-    /// runtime, which a wrapper installed before `--runtime` existed leaves out.
-    pub fn user_prompt_submit_hook(&self) -> Option<(&Path, Option<crate::AgentRuntime>)> {
+    pub fn user_prompt_submit_hook_state_directory(&self) -> Option<&Path> {
         match &self.command {
             Command::Hook {
                 command: HookCommand::UserPromptSubmit(args),
-            } => Some(args.parts()),
+            } => Some(&args.state_directory),
             _ => None,
         }
     }
@@ -192,12 +190,11 @@ impl Cli {
         }
     }
 
-    /// The SessionStart hook's state directory and its wrapper's runtime.
-    pub fn session_start_hook(&self) -> Option<(&Path, Option<crate::AgentRuntime>)> {
+    pub fn session_start_hook_state_directory(&self) -> Option<&Path> {
         match &self.command {
             Command::Hook {
                 command: HookCommand::SessionStart(args),
-            } => Some(args.parts()),
+            } => Some(&args.state_directory),
             _ => None,
         }
     }
@@ -765,8 +762,8 @@ enum HookCommand {
     Stop(HookArgs),
     #[command(hide = true)]
     StopWorker(HookArgs),
-    SessionStart(ContextHookArgs),
-    UserPromptSubmit(ContextHookArgs),
+    SessionStart(HookArgs),
+    UserPromptSubmit(HookArgs),
     Subagent(SubagentHookArgs),
 }
 
@@ -790,22 +787,6 @@ struct HookArgs {
     /// Plugin-owned state directory for this installed hook.
     #[arg(long, value_name = "PATH")]
     state_directory: PathBuf,
-}
-
-#[derive(Debug, Args)]
-struct ContextHookArgs {
-    #[command(flatten)]
-    hook: HookArgs,
-    /// The agent whose wrapper runs this hook. A Rex block binds the hook's
-    /// session only when it is given; Herdr ignores it.
-    #[arg(long, value_enum)]
-    runtime: Option<HookRuntime>,
-}
-
-impl ContextHookArgs {
-    fn parts(&self) -> (&Path, Option<crate::AgentRuntime>) {
-        (&self.hook.state_directory, self.runtime.map(Into::into))
-    }
 }
 
 #[derive(Debug, Args)]

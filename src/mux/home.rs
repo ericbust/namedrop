@@ -114,31 +114,33 @@ pub struct HookHome {
     pub location: Option<Location>,
 }
 
+/// The variable a context hook's wrapper sets on the hook's command line to
+/// name its agent. A binary older than it ignores it, as it would not ignore
+/// a flag it does not know.
+pub const HOOK_RUNTIME: &str = "NAMEDROP_HOOK_RUNTIME";
+
 /// The home of a context hook whose host sent `input`. In a Rex block the
 /// hook first binds the input's session to the block, before the runtime's
 /// first survey, so that survey already reports it. Only the wrapper's
-/// `runtime` names the agent, because a nested agent inherits the outer
-/// agent's environment. Only a Rex claim fails to resolve, so a hook whose
-/// claim failed, as under a Codex app server that outlived the Codex that
-/// started it, still speaks Rex's words, and records its turn nowhere.
-pub fn context_hook(
-    state: &Path,
-    input: &str,
-    runtime: Option<AgentRuntime>,
-    inherited: &dyn Inherited,
-) -> HookHome {
-    context_hook_on(state, input, runtime, inherited, &ThisMachine, now_ms())
+/// `HOOK_RUNTIME` names the agent: the wrapper sets it for the hook alone,
+/// while a nested agent inherits the outer agent's whole environment. Only
+/// a Rex claim fails to resolve, so a hook whose claim failed, as under a
+/// Codex app server that outlived the Codex that started it, still speaks
+/// Rex's words, and records its turn nowhere.
+pub fn context_hook(state: &Path, input: &str, inherited: &dyn Inherited) -> HookHome {
+    context_hook_on(state, input, inherited, &ThisMachine, now_ms())
 }
 
 pub(crate) fn context_hook_on(
     state: &Path,
     input: &str,
-    runtime: Option<AgentRuntime>,
     inherited: &dyn Inherited,
     local: &dyn LocalProcesses,
     now_ms: u64,
 ) -> HookHome {
     let home = resolve(&Flags::default(), inherited);
+    let runtime =
+        set(inherited, HOOK_RUNTIME).and_then(|runtime| AgentRuntime::parse(&runtime).ok());
     let session = serde_json::from_str::<serde_json::Value>(input)
         .ok()
         .and_then(|input| input["session_id"].as_str().map(AgentSessionId::new))

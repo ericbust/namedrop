@@ -33,12 +33,6 @@ fn hook(root: &Path, event: &str, runtime: Option<&str>) -> Output {
     command
         .args(["hook", event, "--state-directory"])
         .arg(root.join("state"))
-        .args(
-            runtime
-                .map(|runtime| ["--runtime", runtime])
-                .into_iter()
-                .flatten(),
-        )
         .env("HOME", root.join("home"))
         .env("XDG_CONFIG_HOME", root.join("home/.config"))
         .env("HERDR_SOCKET_PATH", root.join("no-herdr.sock"))
@@ -51,6 +45,9 @@ fn hook(root: &Path, event: &str, runtime: Option<&str>) -> Output {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(runtime) = runtime {
+        command.env("NAMEDROP_HOOK_RUNTIME", runtime);
+    }
     let mut child = command.spawn().unwrap();
     let name = if event == "session-start" {
         "SessionStart"
@@ -70,7 +67,8 @@ fn hook(root: &Path, event: &str, runtime: Option<&str>) -> Output {
 }
 
 /// Only a Rex block binds a session. A Herdr pane's hooks take the wrapper's
-/// `--runtime`, answer as they answer without it, and write no binding.
+/// `NAMEDROP_HOOK_RUNTIME`, answer as they answer without it, and write no
+/// binding.
 #[test]
 fn a_herdr_home_ignores_the_runtime_and_writes_no_binding() {
     let scratch = Scratch::new("herdr");

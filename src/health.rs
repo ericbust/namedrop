@@ -318,7 +318,7 @@ where
             HealthSeverity::Blocked,
             "An installed hook wrapper does not name its agent, so its sessions never bind in a Rex block.",
             &format!(
-                "{} passes no --runtime. It was installed by an older Namedrop, and an agent whose hooks do not bind cannot register or receive mentions here.",
+                "{} sets no NAMEDROP_HOOK_RUNTIME. It was installed by an older Namedrop, and an agent whose hooks do not bind cannot register or receive mentions here.",
                 unbindable
                     .iter()
                     .map(|path| path.display().to_string())

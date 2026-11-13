@@ -670,10 +670,12 @@ fn a_real_shell_wrapper_is_skipped_for_the_process_that_ran_it() {
 /// A context hook's process in the block of a measured chain: `REX_*`
 /// claims the block on the server at the chain's end, which proves local and
 /// shows the chain's foreground and record.
+#[derive(Clone)]
 struct InBlock {
     vars: HashMap<String, String>,
     ancestors: Vec<u32>,
-    peer: io::Result<u32>,
+    /// The claimed server's pid, or the errno its probe fails with.
+    peer: Result<u32, i32>,
     caller: Caller,
 }
 
@@ -700,6 +702,7 @@ impl InBlock {
         self
     }
 
+    /// The hook as its wrapper runs it, naming `runtime` when it is given.
     fn hook(
         &self,
         state: &State,
@@ -707,7 +710,11 @@ impl InBlock {
         input: &str,
         runtime: Option<AgentRuntime>,
     ) -> HookHome {
-        context_hook_on(&state.0, input, runtime, self, local, 1000)
+        let mut wrapped = self.clone();
+        if let Some(runtime) = runtime {
+            wrapped = wrapped.var("NAMEDROP_HOOK_RUNTIME", runtime.as_str());
+        }
+        context_hook_on(&state.0, input, &wrapped, local, 1000)
     }
 }
 
@@ -726,10 +733,7 @@ impl Inherited for InBlock {
 
     fn peer(&self, socket: &Path) -> io::Result<u32> {
         assert_eq!(socket, Path::new("/tmp/r.sock"));
-        match &self.peer {
-            Ok(pid) => Ok(*pid),
-            Err(error) => Err(io::Error::from_raw_os_error(error.raw_os_error().unwrap())),
-        }
+        self.peer.map_err(io::Error::from_raw_os_error)
     }
 
     fn claimed(&self, _: &Path, session: &str, block: &str) -> Result<Claimed, String> {
@@ -802,6 +806,13 @@ fn a_context_hook_in_a_rex_block_binds_its_session_with_its_inherited_entrypoint
 #[test]
 fn a_context_hook_without_a_runtime_or_a_session_binds_nothing() {
     let hook = Hook::of(&case("Claude Code 2.1.323"));
+    let unknown = InBlock::of(&hook).var("NAMEDROP_HOOK_RUNTIME", "gemini");
+    let state = State::new();
+    unknown.hook(&state, &hook.local, &input("s1"), None);
+    assert!(
+        !state.0.join("rex").exists(),
+        "an unknown runtime names no agent"
+    );
     for (input, runtime) in [
         (input("s1"), None),
         (input(""), Some(AgentRuntime::ClaudeCode)),
@@ -844,7 +855,7 @@ fn a_context_hook_in_a_herdr_pane_speaks_herdr_and_binds_nothing() {
 #[test]
 fn a_context_hook_whose_rex_claim_fails_still_speaks_rex() {
     let hook = Hook::of(&case("Codex 0.163 with --no-daemon"));
-    for peer in [Ok(99_999), Err(io::Error::from_raw_os_error(libc::ENOENT))] {
+    for peer in [Ok(99_999), Err(libc::ENOENT)] {
         let mut lost = InBlock::of(&hook);
         lost.ancestors = vec![1];
         lost.peer = peer;
