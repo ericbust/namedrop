@@ -1079,6 +1079,7 @@ export function App() {
               if (drawerOpen) closeDrawer();
             }}
             onAnnounce={(words) => setMoveSaid({ words })}
+            creator={poster}
             directSelected={selectedDm !== null}
             directMessages={
               <DirectSidebar
@@ -1189,7 +1190,20 @@ export function App() {
                   channel={channel}
                   suffix={channelSuffix(channel, state.channels.values())}
                 />
-                <MemberStrip key={channel.key} members={channel.members} />
+                <MemberStrip
+                  key={channel.key}
+                  members={channel.members}
+                  addAgent={
+                    channel.state === "active"
+                      ? {
+                          add: (request) =>
+                            poster.addAgent(channel.key, request),
+                          folder: (signal) =>
+                            poster.channelFolder(channel.key, signal),
+                        }
+                      : null
+                  }
+                />
                 <NeedsYou
                   channel={channel}
                   directory={directory}

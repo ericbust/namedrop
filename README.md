@@ -366,7 +366,7 @@ namedrop channels --tailscale --no-open
 
 In a terminal, the command draws the one-time HTTPS link as a QR code and prints the link under it. Scan the code with your phone, or open the link on your other device. Namedrop configures `tailscale serve` and keeps the Channels server on loopback. It chooses another HTTPS port if 443 is already in use and leaves other Serve handlers alone. Your tailnet must have HTTPS enabled. Doctor reports the configured URL and any handler that no longer points at Channels.
 
-Only devices signed in as this machine's Tailscale owner can use this link. Channels checks the identity supplied by Serve on every request, then requires its usual browser session and CSRF checks. Shared-device users and tagged devices cannot sign in. This uses private Serve, never public Funnel. Local programs on the server remain trusted. **Type to agent** from your phone sends real input to the agent's pane.
+Only devices signed in as this machine's Tailscale owner can use this link. Channels checks the identity supplied by Serve on every request, then requires its usual browser session and CSRF checks. Shared-device users and tagged devices cannot sign in. This uses private Serve, never public Funnel. Local programs on the server remain trusted. **Type to agent** from your phone sends real input to the agent's pane. **+** and **Add agent** from your phone create real Herdr workspaces and start real agents on this machine.
 
 The browser keeps its tailnet sign-in cookie for seven days after you last opened or reconnected Channels, including across browser restarts. While Namedrop owns the Serve handler, Channels stays running without open tabs. If the browser loses its sign-in or the cookie expires, run `namedrop channels --tailscale --no-open` in the workspace on the Channels machine, then scan the new code or open the new HTTPS link on your device.
 
@@ -393,6 +393,8 @@ The ordinary `namedrop channels` command and Herdr action still open the local p
 
 ### What to try
 
+- Select **+** beside **Channels** to make a new channel. Give it a name and a working folder: type the folder's full path, or pick one of the folders your other workspaces use. Channels creates the Herdr workspace in that folder, activates Namedrop there and opens the channel. The folder must already exist. Namedrop never creates folders.
+- Select **Add agent** in a channel's member row to start Claude Code, Codex or a plain terminal. Give it a name and, if you like, a persona. Channels opens a new tab in that workspace, in the channel's folder, names the pane and runs plain `claude` or `codex` there, as you would by hand. The form shows the folder. It stays the channel's folder wherever you `cd` in its panes. If the agent stops at a first-run screen, such as trusting the folder or logging in, it shows under **Needs you** after 20 seconds. Open its pane from there and answer the screen yourself. Channels never answers it for you. A new Codex connects after its first prompt, so type one in its pane.
 - Post `@name` and a request in a channel, and watch the reply arrive. Replies stay in their thread. The channel shows the top message, reply count, and latest reply.
 - Open a thread with one agent and send a follow-up without `@`. With several agents, pick who receives it with `@name`. Channels keeps the reply unsent until you choose.
 - Post a note without a mention. It stays in the channel and wakes nobody. Embedded agent mentions go through the router described in [Examples](#examples).
@@ -413,7 +415,7 @@ An agent's final message is its answer to your Channels message. It appears in t
 
 Beta means the interface and workflows may still change. Status for Codex agents is limited compared with Claude Code. A name created before its session starts can look like an offline agent. A workspace where Namedrop was never activated shows **No agents here yet**.
 
-Channels listens on `127.0.0.1`. Use `--tailscale` to open it from your other devices. Any process running as your user that can open the page can post as you. Live Peek shows terminal content that can contain secrets. **Text snapshot** redacts recognized secrets, but redaction cannot catch every secret. See [Channels operations](docs/operations.md#channels) for authentication and server details.
+Channels listens on `127.0.0.1`. Use `--tailscale` to open it from your other devices. Any process running as your user that can open the page can post as you. It can also create channels and start agents, as you can from the page. Live Peek shows terminal content that can contain secrets. **Text snapshot** redacts recognized secrets, but redaction cannot catch every secret. See [Channels operations](docs/operations.md#channels) for authentication and server details.
 
 [Report a problem](https://github.com/ericbust/namedrop/issues) with your platform, Herdr and agent versions, steps to reproduce, and any errors. Remove credentials and private conversation text from screenshots and logs. The `experimental` branch remains available for trying upcoming features.
 

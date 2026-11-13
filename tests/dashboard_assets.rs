@@ -1595,9 +1595,8 @@ fn fix_forward_stalled_asset_writer_times_out() {
             .unwrap()
             .filter_map(Result::ok)
             .filter(|task| {
-                !fs::read_to_string(task.path().join("comm"))
-                    .unwrap_or_default()
-                    .starts_with("channel-router-")
+                let name = fs::read_to_string(task.path().join("comm")).unwrap_or_default();
+                !name.starts_with("channel-router-") && !name.starts_with("agent-launches")
             })
             .count()
     };

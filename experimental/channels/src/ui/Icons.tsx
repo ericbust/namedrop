@@ -48,6 +48,7 @@ const shapes = {
     </>
   ),
   play: <path d="M5.5 3.75v8.5L12 8z" />,
+  plus: <path d="M8 3v10M3 8h10" />,
   plug: <path d="M6 2v3M10 2v3M4.5 5h7v2.5a3.5 3.5 0 0 1-7 0zM8 11v3" />,
   prompt: <path d="M3 4.5 6 7.5 3 10.5M8 11h5" />,
   pulse: <path d="M1.5 8.5h2.8l1.7-4 3 7.5 1.8-3.5h3.7" />,

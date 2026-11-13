@@ -41,6 +41,7 @@ export type IconName =
   | "menu"
   | "pause"
   | "play"
+  | "plus"
   | "plug"
   | "prompt"
   | "pulse"
@@ -181,6 +182,13 @@ const attentionTable: Record<Attention["source"], AttentionRow> = {
     named: (alias) => `${alias} isn't set up yet`,
     hint: "Start a new session in that pane.",
   },
+  // The server's summary says what to do, which differs for Claude Code and
+  // Codex, and is the title. These stand in when it sends none.
+  agent_start: {
+    title: "Finish a new agent's setup in its pane",
+    named: (alias) => `Finish ${alias}'s setup in its pane`,
+    hint: "Open its pane. It may first ask you to trust the folder or to log in.",
+  },
   unknown: { ...needsYou, hint: "Open Details for the full message." },
 };
 // An unanswered-request item whose held answer can never arrive, by cause.
@@ -279,10 +287,12 @@ function responseHint(
     return { hint: pausedHint, hintTitle: null };
   const who = responder?.alias ?? item.subjectAlias;
   const pane = item.response?.kind === "pane";
-  // A context grant that failed is shared again by its sender, not fixed in the pane.
+  // A context grant that failed is shared again by its sender, not fixed in the
+  // pane, and a new agent's own hint already says what its pane may be asking.
   if (
     who === null ||
     item.source === "context_grant" ||
+    item.source === "agent_start" ||
     !(pane || item.source === "agent_status")
   )
     return null;
@@ -346,7 +356,7 @@ export function attentionCopy(
       : { hint: absenceCopy(absent), hintTitle: null };
   const hintTitle = response?.hintTitle ?? null;
   if (
-    item.source === "agent_status" &&
+    (item.source === "agent_status" || item.source === "agent_start") &&
     !truncated &&
     text.trim() &&
     text.length <= SHORT_SUMMARY
@@ -770,6 +780,56 @@ export const sidebarCopy = {
   ) =>
     `Moved ${name} to position ${position} of ${total}${group === null ? "" : ` in ${group}`}`,
 };
+// The refusal sentences match the server's word for word, so a check the page
+// makes first reads the same as the one the server would make.
+export const createCopy = {
+  newChannel: "New channel",
+  noChannelYet: "Activate Namedrop in one Herdr workspace first.",
+  name: "Name",
+  folder: "Folder",
+  folderPlaceholder: "~/projects/app",
+  recentFolders: "Recent folders",
+  create: "Create",
+  creating: "Creating…",
+  cancel: "Cancel",
+  addAgent: "Add agent",
+  kind: "Kind",
+  kinds: { claude: "Claude Code", codex: "Codex", terminal: "Terminal" },
+  agentName: "Name",
+  persona: "Persona",
+  optional: "optional",
+  personaPlaceholder: "Reviews changes before they merge",
+  add: "Add",
+  adding: "Adding…",
+  opensIn: "Opens in",
+  channelNameMissing: "Give the channel a name.",
+  channelNameLong: "A channel name can be up to 64 characters.",
+  channelNameHidden:
+    "A channel name can't contain control or invisible characters.",
+  channelNameUnusable:
+    'A channel name needs a letter or a digit, and it can\'t be "all".',
+  folderNotPath: "Type the folder's full path, starting with / or ~.",
+  agentNameRule:
+    "A name uses lowercase letters, digits and single hyphens, like code-reviewer.",
+  agentNameTaken: (name: string) =>
+    `@${name} is already in use in this channel. Pick a different name.`,
+  personaLong: "A persona can be up to 1,000 characters.",
+  personaInvisible: "A persona can't contain control or invisible characters.",
+  failed: "Namedrop couldn't do that. Try again.",
+};
+const createSays = new Set([400, 404, 409, 500, 503]);
+// The server words each refusal for the person, so the page shows it as is.
+export function createFailureCopy({
+  status,
+  message,
+}: {
+  status: number;
+  message: string;
+}): string {
+  if (status === 401 || status === 403) return sessionExpired();
+  const text = message.trim();
+  return createSays.has(status) && text ? text : createCopy.failed;
+}
 export const peekCopy = {
   label: (alias: string) => `Screen of ${alias}`,
   where: (channel: string) => `in ${channel}`,
