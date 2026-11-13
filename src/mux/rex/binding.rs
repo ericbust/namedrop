@@ -15,7 +15,9 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsStr,
+    fs::File,
     io,
+    os::fd::AsRawFd,
     path::{Path, PathBuf},
 };
 
@@ -69,12 +71,14 @@ pub(crate) struct Refusal {
     pub at_ms: u64,
 }
 
-/// The bindings under `<state>/rex/sessions/` and the refusals under
-/// `<state>/rex/refusals/`, one file per block each.
+/// The bindings under `<state>/rex/sessions/`, the refusals under
+/// `<state>/rex/refusals/`, and the locks under `<state>/rex/locks/`, one
+/// file per block each.
 #[derive(Clone, Debug)]
 pub(super) struct Bindings {
     sessions: PathBuf,
     refusals: PathBuf,
+    locks: PathBuf,
 }
 
 impl Bindings {
@@ -83,17 +87,39 @@ impl Bindings {
         Self {
             sessions: rex.join("sessions"),
             refusals: rex.join("refusals"),
+            locks: rex.join("locks"),
         }
     }
 
     /// `<uuid>.json` for `block:<uuid>`. Block IDs come from the server, so
     /// one that is not a UUID names no file.
     pub(super) fn path(&self, block: &str) -> Option<PathBuf> {
-        file_name(block).map(|name| self.sessions.join(name))
+        uuid(block).map(|uuid| self.sessions.join(format!("{uuid}.json")))
     }
 
     fn refusal_path(&self, block: &str) -> Option<PathBuf> {
-        file_name(block).map(|name| self.refusals.join(name))
+        uuid(block).map(|uuid| self.refusals.join(format!("{uuid}.json")))
+    }
+
+    /// Waits for the block's lock, held until the file is dropped, so a
+    /// hook's read of the binding and its write are one step: a nested
+    /// hook that read no binding could otherwise overwrite the outer
+    /// agent's bind written in between.
+    pub(super) fn lock(&self, block: &str) -> io::Result<File> {
+        let path = uuid(block)
+            .map(|uuid| self.locks.join(format!("{uuid}.lock")))
+            .ok_or_else(|| io::Error::other(format!("{block} names no file")))?;
+        std::fs::create_dir_all(&self.locks)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)?;
+        // SAFETY: flock only reads the descriptor, which `file` owns.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(file)
     }
 
     /// The block's binding. A missing, unreadable, or malformed file, or one
@@ -137,10 +163,9 @@ impl Bindings {
     }
 }
 
-fn file_name(block: &str) -> Option<String> {
+fn uuid(block: &str) -> Option<&str> {
     let uuid = block.strip_prefix("block:")?;
-    (!uuid.is_empty() && uuid.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
-        .then(|| format!("{uuid}.json"))
+    (!uuid.is_empty() && uuid.chars().all(|c| c.is_ascii_hexdigit() || c == '-')).then_some(uuid)
 }
 
 /// A temp file beside `path`, then a rename, so a reader sees the old file
@@ -248,9 +273,9 @@ impl Place {
     /// 6. When H is not F and `runtime` is Claude Code, `entrypoint` is not
     ///    `sdk-cli`, which marks a nested print-mode agent.
     ///
-    /// Writes only a change. A refusal overwrites the block's refusal file,
-    /// and a bind deletes it. A place with no verified caller has no block
-    /// to record a refusal for.
+    /// Reads and writes under the block's lock, and writes only a change. A
+    /// refusal overwrites the block's refusal file, and a bind deletes it. A
+    /// place with no verified caller has no block to record a refusal for.
     pub(crate) fn bind(
         &self,
         state: &Path,
@@ -266,6 +291,9 @@ impl Place {
         };
         let bindings = Bindings::new(state);
         let block = block.as_str();
+        let _lock = bindings
+            .lock(block)
+            .map_err(|error| BindRefused::Io(error.to_string()))?;
         let decided = decide(
             caller,
             runtime,

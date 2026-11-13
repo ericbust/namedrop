@@ -398,6 +398,87 @@ fn an_agent_whose_executable_cannot_be_read_binds_only_as_the_foreground() {
     }
 }
 
+/// Condition 5 reads the binding under the block's lock: a nested hook that
+/// waits while the outer agent binds then sees that bind and refuses,
+/// rather than overwriting it with the binding it would have written.
+#[test]
+fn a_hook_reads_and_writes_the_binding_under_the_blocks_lock() {
+    let state = State::new();
+    let bindings = Bindings::new(&state.0);
+    let nested = Hook::of(&case("Claude Code behind bash wrap.sh, SessionStart"));
+    let held = bindings.lock(BLOCK).unwrap();
+    std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| nested.bind(&state, "nested", 2000));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!waiting.is_finished(), "the hook waits for the lock");
+        assert_eq!(binding(&state), None);
+        state.bind(&bound_to(82428, "outer"));
+        drop(held);
+        assert_eq!(waiting.join().unwrap(), Err(BindRefused::AlreadyBound));
+    });
+    assert_eq!(binding(&state).unwrap().session, "outer");
+
+    let state = State::new();
+    let outer = Hook::of(&case("Claude Code 2.1.323"));
+    let watched = Watched {
+        local: &outer.local,
+        lock: state.0.join(format!(
+            "rex/locks/{}.lock",
+            BLOCK.strip_prefix("block:").unwrap()
+        )),
+        held: std::sync::Mutex::new(Vec::new()),
+    };
+    assert_eq!(
+        outer.place.bind(
+            &state.0,
+            &AgentSessionId::new("outer"),
+            outer.runtime,
+            None,
+            &watched,
+            1000
+        ),
+        Ok(())
+    );
+    let held = watched.held.into_inner().unwrap();
+    assert!(
+        !held.is_empty() && held.iter().all(|held| *held),
+        "the lock is held while the hook reads its processes: {held:?}"
+    );
+}
+
+/// `local`'s processes, recording at each read whether another holder
+/// could take the block's lock.
+struct Watched<'a> {
+    local: &'a Local,
+    lock: PathBuf,
+    held: std::sync::Mutex<Vec<bool>>,
+}
+
+impl LocalProcesses for Watched<'_> {
+    fn read(&self, pid: u32) -> LocalRead {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&self.lock)
+            .unwrap();
+        // SAFETY: flock only reads the descriptor, which `file` owns.
+        let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+        self.held.lock().unwrap().push(!taken);
+        self.local.read(pid)
+    }
+
+    fn list_group(&self, group: u32) -> Option<Vec<u32>> {
+        self.local.list_group(group)
+    }
+
+    fn parent(&self, pid: u32) -> Option<u32> {
+        self.local.parent(pid)
+    }
+
+    fn executable(&self, pid: u32) -> Option<PathBuf> {
+        self.local.executable(pid)
+    }
+}
+
 #[test]
 fn a_place_with_no_verified_caller_binds_nothing_and_records_nothing() {
     let state = State::new();
