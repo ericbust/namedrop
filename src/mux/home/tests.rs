@@ -359,7 +359,7 @@ fn herdr_is_probed_only_when_a_herdr_location_name_is_set() {
 }
 
 #[test]
-fn rex_s_socket_is_rex_server_decoded_or_rex_s_default() {
+fn rex_s_socket_is_rex_server_as_rex_reads_it_or_rex_s_default() {
     let encoded = Scripted::default()
         .var("REX_BLOCK", BLOCK)
         .var("REX_SESSION", SESSION)
@@ -368,6 +368,26 @@ fn rex_s_socket_is_rex_server_decoded_or_rex_s_default() {
         .peer("/tmp/a b/s.sock", Err(libc::ECONNREFUSED));
     assert!(resolved(&encoded).is_err());
     assert_eq!(encoded.probed(), [PathBuf::from("/tmp/a b/s.sock")]);
+
+    let bare = plain_block().var("REX_SERVER", REX);
+    assert_eq!(
+        resolved(&bare),
+        Ok(rex_place()),
+        "rex reads a bare absolute path as a Unix socket"
+    );
+    assert_eq!(bare.probed(), [PathBuf::from(REX)]);
+    let literal = Scripted::default()
+        .var("REX_BLOCK", BLOCK)
+        .var("REX_SESSION", SESSION)
+        .var("REX_SERVER", "/tmp/a%20b/s.sock")
+        .ancestors(&[110, 1])
+        .peer("/tmp/a%20b/s.sock", Err(libc::ECONNREFUSED));
+    assert!(resolved(&literal).is_err());
+    assert_eq!(
+        literal.probed(),
+        [PathBuf::from("/tmp/a%20b/s.sock")],
+        "rex takes a bare path as written"
+    );
 
     #[cfg(target_os = "macos")]
     let (variable, value, default) = (
@@ -399,16 +419,24 @@ fn rex_s_socket_is_rex_server_decoded_or_rex_s_default() {
         [PathBuf::from(default), PathBuf::from(HERDR)]
     );
 
-    let remote = Scripted::default()
-        .var("REX_BLOCK", BLOCK)
-        .var("REX_SESSION", SESSION)
-        .var("REX_SERVER", "devbox:7297")
-        .ancestors(&[110, 1]);
-    assert!(
-        resolved(&remote).is_err(),
-        "a server that is not a Unix socket is never an ancestor"
-    );
-    assert_eq!(remote.probed(), Vec::<PathBuf>::new());
+    for server in [
+        "devbox:7297",
+        "127.0.0.1:7297",
+        "devbox",
+        "rex/s.sock",
+        "unix:/tmp/rex/s.sock",
+    ] {
+        let elsewhere = Scripted::default()
+            .var("REX_BLOCK", BLOCK)
+            .var("REX_SESSION", SESSION)
+            .var("REX_SERVER", server)
+            .ancestors(&[110, 1]);
+        assert!(
+            resolved(&elsewhere).is_err(),
+            "{server}: a server that is not a Unix socket is never an ancestor"
+        );
+        assert_eq!(elsewhere.probed(), Vec::<PathBuf>::new(), "{server}");
+    }
 }
 
 #[test]

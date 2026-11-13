@@ -245,11 +245,17 @@ fn set(inherited: &dyn Inherited, name: &str) -> Option<String> {
 }
 
 /// Rex's claimed socket: `REX_SERVER` when it names a Unix socket, as `rex`
-/// reads it, else Rex's default socket.
+/// reads it (a percent-encoded `unix://` URL or a bare absolute path, taken
+/// as written), else Rex's default socket.
 fn rex_claim(inherited: &dyn Inherited) -> Option<Claim> {
     if let Some(server) = set(inherited, "REX_SERVER") {
-        return server.strip_prefix("unix://").map(|path| Claim {
-            socket: PathBuf::from(percent_decoded(path)),
+        let socket = match server.strip_prefix("unix://") {
+            Some(path) => percent_decoded(path),
+            None if server.starts_with('/') => server,
+            None => return None,
+        };
+        return Some(Claim {
+            socket: PathBuf::from(socket),
             named: true,
         });
     }
