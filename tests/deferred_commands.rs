@@ -338,6 +338,11 @@ else: print('{}')
     /// `namedrop <role> <state> <socket>` in the background, inheriting
     /// `HERDR_SOCKET_PATH` when `inherited` names one.
     fn background(&self, role: &str, inherited: Option<&str>) -> Worker {
+        self.background_with(role, &self.socket, inherited)
+    }
+
+    /// Starts `namedrop <role>` with `argv_socket` as its socket argument.
+    fn background_with(&self, role: &str, argv_socket: &str, inherited: Option<&str>) -> Worker {
         let mut command = self.command();
         if let Some(socket) = inherited {
             command.env("HERDR_SOCKET_PATH", socket);
@@ -346,7 +351,7 @@ else: print('{}')
             command
                 .arg(role)
                 .arg(self.directory.path())
-                .arg(&self.socket)
+                .arg(argv_socket)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -1830,7 +1835,8 @@ fn the_worker_runs_herdr_on_the_caller_s_stored_socket() {
 }
 
 /// The clock reaches each reminder's space on the socket stored with it,
-/// whatever `HERDR_SOCKET_PATH` it inherited.
+/// whatever socket it was started with and whatever `HERDR_SOCKET_PATH` it
+/// inherited.
 #[test]
 fn the_clock_runs_herdr_on_the_reminder_s_stored_socket() {
     let f = Fixture::new();
@@ -1849,7 +1855,11 @@ fn the_clock_runs_herdr_on_the_reminder_s_stored_socket() {
     let due = SystemClock.now_unix_ms() - 1;
     connection.execute("UPDATE reminders SET due_at_ms=?2,state_json=json_set(state_json,'$.due_at_ms',?2) WHERE reminder_id=?1",rusqlite::params![id,due as i64]).unwrap();
     lock.unlock().unwrap();
-    let _clock = f.background("reminder-clock", Some("/run/inherited.sock"));
+    let _clock = f.background_with(
+        "reminder-clock",
+        "/run/started-with.sock",
+        Some("/run/inherited.sock"),
+    );
     wait_for(|| {
         connection
             .query_row(
