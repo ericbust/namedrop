@@ -28,6 +28,7 @@ mod lifecycle;
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
 pub mod linux_sandbox;
+pub mod locator;
 mod message;
 #[doc(hidden)]
 pub mod mux;

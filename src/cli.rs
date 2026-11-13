@@ -45,17 +45,28 @@ pub enum ResultFormat {
 }
 
 /// Explicit transport context for permission-matchable direct invocations.
-/// Omitted values retain the existing Herdr environment behavior.
+/// Each flag has a neutral spelling and its Herdr one, and an omitted value
+/// comes from the environment (`crate::locator`).
 #[derive(Debug, Default, Args)]
 pub struct RuntimeOptions {
     #[arg(long, value_name = "PATH")]
     pub plugin_state: Option<PathBuf>,
-    #[arg(long, global = true, value_name = "SOCKET")]
-    pub herdr_socket: Option<String>,
-    #[arg(long, global = true, value_name = "WORKSPACE")]
-    pub herdr_workspace: Option<String>,
-    #[arg(long, global = true, value_name = "PANE")]
-    pub herdr_pane: Option<String>,
+    #[arg(
+        long,
+        visible_alias = "herdr-socket",
+        global = true,
+        value_name = "ENDPOINT"
+    )]
+    pub endpoint: Option<String>,
+    #[arg(
+        long,
+        visible_alias = "herdr-workspace",
+        global = true,
+        value_name = "SPACE"
+    )]
+    pub space: Option<String>,
+    #[arg(long, visible_alias = "herdr-pane", global = true, value_name = "PANE")]
+    pub pane: Option<String>,
 }
 
 impl Cli {

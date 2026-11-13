@@ -3,6 +3,7 @@ use super::server_files::{ServerFiles, Token, UiSource, open_directory};
 use super::snapshot::{self, SpaceKey};
 use crate::{
     StateStore,
+    locator::Locator,
     mux::{Budget, Gone, MuxConnector, MuxError, ScreenRequest, Style, Wrap},
     store::dashboard::ScreenPane,
 };
@@ -2286,13 +2287,14 @@ pub(super) fn wake_mailboxes_after_send(
         }));
     }
     for space in spaces {
-        let mut child = Command::new(crate::runtime_executable()?)
+        let mut command = Command::new(crate::runtime_executable()?);
+        Locator::StateDir.pass(&mut command, state);
+        Locator::Endpoint.pass(&mut command, &namespace.session_socket_id);
+        Locator::Space.pass(&mut command, space.as_str());
+        Locator::Pane.clear(&mut command);
+        let mut child = command
             .args(["hook", "mailbox-wake", "--state-directory"])
             .arg(state)
-            .env("HERDR_PLUGIN_STATE_DIR", state)
-            .env("HERDR_SOCKET_PATH", &namespace.session_socket_id)
-            .env("HERDR_WORKSPACE_ID", space.as_str())
-            .env_remove("HERDR_PANE_ID")
             .process_group(0)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

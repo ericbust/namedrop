@@ -1,4 +1,5 @@
 use super::snapshot::RepoRef;
+use crate::locator::Locator;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -544,11 +545,11 @@ impl ServerFiles {
             }
             None => Stdio::null(),
         };
+        for locator in [Locator::Pane, Locator::Space, Locator::Endpoint] {
+            locator.clear(&mut command);
+        }
         command
             .process_group(0)
-            .env_remove("HERDR_PANE_ID")
-            .env_remove("HERDR_WORKSPACE_ID")
-            .env_remove("HERDR_SOCKET_PATH")
             .stdin(stdin)
             .stdout(log.try_clone().map_err(|e| e.to_string())?)
             .stderr(log)

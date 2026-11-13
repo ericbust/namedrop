@@ -12,6 +12,7 @@ use namedrop::{
     execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
     execute_session_start_hook, execute_user_prompt_submit_hook, is_context_operation,
     is_control_operation, is_integration_operation, is_lifecycle_operation, is_message_operation,
+    locator::{self, Locator, Name},
     mux::{Budget, Mux},
     render_command_result_to_text, render_command_result_to_text_within, validate_message_input,
 };
@@ -189,12 +190,12 @@ fn main() -> ExitCode {
             cli.session_start_hook_state_directory()
                 .map(Path::to_path_buf)
         })
-        .or_else(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from));
+        .or_else(|| locator::state_directory(None));
     // The status worker outlives the hook that starts it and takes the
     // command gate itself, around each event it reconciles.
     if cli.is_agent_status_worker_hook() {
         if let Some(state) = selected_state.as_deref() {
-            let socket = env::var("HERDR_SOCKET_PATH").ok();
+            let socket = Locator::Endpoint.env();
             let _ = namedrop::reminder::ensure_clock(state, socket.as_deref());
         }
         return run_agent_status_worker();
@@ -233,7 +234,7 @@ fn main() -> ExitCode {
     if cli.dashboard_tailscale() == Some(false) {
         let result = selected_state
             .as_deref()
-            .ok_or_else(|| "HERDR_PLUGIN_STATE_DIR or --plugin-state is required".to_owned())
+            .ok_or_else(state_required)
             .and_then(namedrop::dashboard::disable_tailscale);
         return finish(
             "dashboard",
@@ -244,9 +245,9 @@ fn main() -> ExitCode {
     if let Some(state) = selected_state.as_deref() {
         let socket = cli
             .runtime
-            .herdr_socket
+            .endpoint
             .clone()
-            .or_else(|| env::var("HERDR_SOCKET_PATH").ok());
+            .or_else(|| Locator::Endpoint.env());
         let _ = namedrop::reminder::ensure_clock(state, socket.as_deref());
     }
     if cli.is_dashboard_server() {
@@ -445,10 +446,7 @@ fn run_bound_operation(
     options: &RuntimeOptions,
 ) -> Ran {
     let input = if operation == "reply" {
-        let state = options
-            .plugin_state
-            .clone()
-            .or_else(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from));
+        let state = locator::state_directory(options.plugin_state.clone());
         match namedrop::expand_attempt_reply(input, state.as_deref()) {
             Ok(input) => input,
             Err(error) => return Ran::Refused(error),
@@ -525,10 +523,10 @@ fn run_subagent_hook(state: &Path, host: namedrop::AgentRuntime) -> ExitCode {
     else {
         return ExitCode::SUCCESS;
     };
-    let identity = env::var("HERDR_SOCKET_PATH")
-        .ok()
-        .zip(env::var("HERDR_WORKSPACE_ID").ok())
-        .zip(env::var("HERDR_PANE_ID").ok())
+    let identity = Locator::Endpoint
+        .env()
+        .zip(Locator::Space.env())
+        .zip(Locator::Pane.env())
         .and_then(|((socket, workspace), pane)| {
             namedrop::subagent::ParentIdentity::new(&socket, &workspace, &pane, &session)
         });
@@ -731,12 +729,11 @@ fn schedule_mailbox_workers(
                 &serde_json::json!({"operation":"mailbox-wake"}),
             )
             .map_err(|error| error.to_string())?;
-            let worker = status_worker_command()?
-                .env("HERDR_PLUGIN_STATE_DIR", state_directory)
-                .env("HERDR_SOCKET_PATH", socket_id)
-                .env("HERDR_WORKSPACE_ID", &space)
-                .spawn()
-                .map_err(|error| error.to_string())?;
+            let mut worker = status_worker_command()?;
+            Locator::StateDir.pass(&mut worker, state_directory);
+            Locator::Endpoint.pass(&mut worker, socket_id);
+            Locator::Space.pass(&mut worker, &space);
+            let worker = worker.spawn().map_err(|error| error.to_string())?;
             workers.push((space.clone(), worker));
             Ok(())
         })();
@@ -911,40 +908,33 @@ fn with_runtime_options<T>(
     options: &RuntimeOptions,
     action: impl FnOnce(&Runtime<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
-    let state_directory = options
-        .plugin_state
-        .clone()
-        .or_else(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from))
-        .ok_or_else(|| "HERDR_PLUGIN_STATE_DIR or --plugin-state is required".to_owned())?;
+    let state_directory =
+        locator::state_directory(options.plugin_state.clone()).ok_or_else(state_required)?;
     let directories = namedrop::InheritedDirectories::from_environment();
     let cwd = env::current_dir().map_err(|error| error.to_string())?;
     let herdr = namedrop::mux::herdr::connect(
-        options.herdr_socket.as_deref(),
+        connection_endpoint(options.endpoint.clone()).as_deref(),
         Budget::ADAPTER_DEFAULT,
         Arc::default(),
     );
-    let mut workspace_id = options
-        .herdr_workspace
-        .clone()
-        .or_else(|| env::var("HERDR_WORKSPACE_ID").ok());
-    // An explicit --herdr-pane is the caller's assertion. An inherited
-    // HERDR_PANE_ID can be stale: a daemon keeps the variables of the pane it
-    // started in, so it only counts when this process still runs under that
-    // pane's shell.
-    let mut pane_id = match options.herdr_pane.clone() {
+    let mut workspace_id = options.space.clone().or_else(|| Locator::Space.env());
+    // An explicit --pane is the caller's assertion. An inherited pane ID can
+    // be stale: a daemon keeps the variables of the pane it started in, so it
+    // only counts when this process still runs under that pane's shell.
+    let mut pane_id = match options.pane.clone() {
         Some(pane) => Some(pane),
-        None => match env::var("HERDR_PANE_ID") {
-            Ok(pane) => {
+        None => match Locator::Pane.inherited() {
+            Some((name, pane)) => {
                 let sessions: Vec<String> = ["CODEX_SESSION_ID", "CLAUDE_CODE_SESSION_ID"]
                     .into_iter()
                     .filter_map(|key| env::var(key).ok())
                     .filter(|session| !session.is_empty())
                     .collect();
                 let sessions: Vec<&str> = sessions.iter().map(String::as_str).collect();
-                namedrop::verify_inherited_pane(&herdr, &pane, &sessions)?;
+                namedrop::verify_inherited_pane(&herdr, name, &pane, &sessions)?;
                 Some(pane)
             }
-            Err(_) => None,
+            None => None,
         },
     };
     if workspace_id.is_none()
@@ -964,7 +954,7 @@ fn with_runtime_options<T>(
         workspace_id = Some(space);
         pane_id = pane_id.or(Some(pane));
     }
-    let socket_id = session_socket_id(options.herdr_socket.clone());
+    let socket_id = session_socket_id(options.endpoint.clone());
     let clock = SystemClock;
     let ids = ProcessIds::default();
     action(&LifecycleRuntime {
@@ -1035,22 +1025,41 @@ fn run_context_hook(
 /// the one the running Herdr server reports.
 fn session_socket_id(explicit: Option<String>) -> String {
     explicit
-        .or_else(|| env::var("HERDR_SOCKET_PATH").ok())
+        .or_else(|| Locator::Endpoint.env())
         .or_else(namedrop::mux::herdr::server_socket)
         .unwrap_or_else(|| "default".to_owned())
 }
 
+/// The socket a Herdr connection names: the caller's, or a neutral
+/// `NAMEDROP_ENDPOINT` when no `HERDR_SOCKET_PATH` outranks it. Otherwise each
+/// `herdr` command inherits `HERDR_SOCKET_PATH`, or Herdr's default, as it
+/// always has.
+fn connection_endpoint(explicit: Option<String>) -> Option<String> {
+    explicit.or_else(|| match Locator::Endpoint.inherited() {
+        Some((Name::Neutral, endpoint)) => Some(endpoint),
+        _ => None,
+    })
+}
+
+fn state_required() -> String {
+    "--plugin-state, HERDR_PLUGIN_STATE_DIR or NAMEDROP_STATE_DIR is required".to_owned()
+}
+
 /// The wake the user-prompt-submit wrapper backgrounds once a mention was
 /// sent. Its hook shell has exited by the time it runs, so it is nobody's
-/// pane: it reconciles the whole space and takes no identity from the
-/// HERDR_PANE_ID it inherited, which no session ID vouches for under Codex.
+/// pane: it reconciles the whole space and takes no identity from the pane
+/// ID it inherited, which no session ID vouches for under Codex.
 fn run_mailbox_wake_hook(state_directory: &Path) -> ExitCode {
     let wake = || -> Result<(), String> {
-        let herdr = namedrop::mux::herdr::connect(None, Budget::ADAPTER_DEFAULT, Arc::default());
+        let herdr = namedrop::mux::herdr::connect(
+            connection_endpoint(None).as_deref(),
+            Budget::ADAPTER_DEFAULT,
+            Arc::default(),
+        );
         let socket_id = session_socket_id(None);
-        let space_id = match env::var("HERDR_WORKSPACE_ID") {
-            Ok(space_id) => space_id,
-            Err(_) => {
+        let space_id = match Locator::Space.env() {
+            Some(space_id) => space_id,
+            None => {
                 let cwd = env::current_dir().map_err(|error| error.to_string())?;
                 namedrop::discover_worktree(&herdr, &cwd)?.workspace_id
             }
@@ -1107,25 +1116,34 @@ fn status_worker_command() -> Result<Command, String> {
     command
         .args(["hook", "agent-status-worker"])
         .process_group(0)
-        // The worker reconciles a whole space and outlives the hook that
-        // started it, so it is nobody's pane; the hook's pane must not become
-        // its identity.
-        .env_remove("HERDR_PANE_ID")
         .env("NAMEDROP_HERDR_TIMEOUT_MS", "10000")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // The worker reconciles a whole space and outlives the hook that started
+    // it, so it is nobody's pane; the hook's pane must not become its identity.
+    Locator::Pane.clear(&mut command);
     Ok(command)
 }
 
 fn agent_status_reconciliation_directory() -> Result<PathBuf, String> {
-    let state_directory = env::var_os("HERDR_PLUGIN_STATE_DIR")
+    let required = |locator: Locator| {
+        format!(
+            "{} or {} is required",
+            locator.herdr_var(),
+            locator.neutral_var()
+        )
+    };
+    let state_directory = Locator::StateDir
+        .env_os()
         .map(PathBuf::from)
-        .ok_or_else(|| "HERDR_PLUGIN_STATE_DIR is required".to_owned())?;
-    let socket_id =
-        env::var("HERDR_SOCKET_PATH").map_err(|_| "HERDR_SOCKET_PATH is required".to_owned())?;
-    let space_id =
-        env::var("HERDR_WORKSPACE_ID").map_err(|_| "HERDR_WORKSPACE_ID is required".to_owned())?;
+        .ok_or_else(|| required(Locator::StateDir))?;
+    let socket_id = Locator::Endpoint
+        .env()
+        .ok_or_else(|| required(Locator::Endpoint))?;
+    let space_id = Locator::Space
+        .env()
+        .ok_or_else(|| required(Locator::Space))?;
     Ok(reconciliation_directory(
         &state_directory,
         &socket_id,
@@ -1209,7 +1227,7 @@ fn retryable_queue_scan(error: &io::Error) -> bool {
 fn run_agent_status_worker() -> ExitCode {
     // The hook that starts the worker runs in a pane's directory, which can be
     // removed while the worker lives; every reconcile reads the current one.
-    if let Some(state) = env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from)
+    if let Some(state) = Locator::StateDir.env_os().map(PathBuf::from)
         && state.is_absolute()
     {
         let _ = env::set_current_dir(state);
@@ -1340,7 +1358,7 @@ fn run_agent_status_worker_queue(
             // The worker can wait out retries for days, so it holds the
             // command gate only while it reconciles, and an update between
             // units hands the queue to the runtime it selected.
-            let _gate = match env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from) {
+            let _gate = match Locator::StateDir.env_os().map(PathBuf::from) {
                 Some(state) => {
                     let gate = namedrop::runtime_command_guard(&state, None)?;
                     namedrop::runtime_reexec_if_replaced(&state)?;

@@ -5,7 +5,7 @@ use namedrop::{
     turn_phase::{self, TurnEdge},
 };
 use serde::Deserialize;
-use std::{env, path::Path};
+use std::path::Path;
 
 #[derive(Deserialize)]
 struct PromptInput {
@@ -39,7 +39,7 @@ pub fn record(state: &Path, input: &str) -> Option<Prompted> {
         return None;
     }
     let prompted = Prompted {
-        socket: env::var("HERDR_SOCKET_PATH").ok()?,
+        socket: namedrop::locator::Locator::Endpoint.env()?,
         session: input.session_id.filter(|id| !id.is_empty())?,
         at_ms: SystemClock.now_unix_ms(),
         prompt: input.prompt.unwrap_or_default(),
