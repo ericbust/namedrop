@@ -2,6 +2,46 @@ use super::*;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
+#[test]
+fn a_claim_s_location_comes_from_either_key_set_and_herdr_s_wins() {
+    let location = |environment: Value| Location::from_envelope(environment.as_object().unwrap());
+    let expected = Location {
+        state: "/state".to_owned(),
+        socket: "/run/h.sock".to_owned(),
+        workspace: "w1".to_owned(),
+        pane: "w1:p3".to_owned(),
+    };
+    assert_eq!(
+        location(
+            json!({"HERDR_PLUGIN_STATE_DIR":"/state","HERDR_SOCKET_PATH":"/run/h.sock",
+                        "HERDR_WORKSPACE_ID":"w1","HERDR_PANE_ID":"w1:p3"})
+        ),
+        Some(expected.clone())
+    );
+    assert_eq!(
+        location(
+            json!({"NAMEDROP_STATE_DIR":"/state","NAMEDROP_ENDPOINT":"/run/h.sock",
+                        "NAMEDROP_SPACE_ID":"w1","NAMEDROP_PANE_ID":"w1:p3"})
+        ),
+        Some(expected.clone())
+    );
+    assert_eq!(
+        location(
+            json!({"HERDR_PLUGIN_STATE_DIR":"/state","NAMEDROP_STATE_DIR":"/other",
+                        "NAMEDROP_ENDPOINT":"/run/h.sock","HERDR_WORKSPACE_ID":"w1",
+                        "NAMEDROP_SPACE_ID":"w2","NAMEDROP_PANE_ID":"w1:p3"})
+        ),
+        Some(expected)
+    );
+    assert_eq!(
+        location(
+            json!({"HERDR_PLUGIN_STATE_DIR":"/state","HERDR_SOCKET_PATH":"/run/h.sock",
+                        "HERDR_WORKSPACE_ID":"w1"})
+        ),
+        None
+    );
+}
+
 fn reply_template() -> Value {
     json!({"request_id":"reply-attempt-1","source":"@codex <reply body>",
            "in_reply_to":"message-1","author_kind":"agent_session","attempt_id":"attempt-1"})

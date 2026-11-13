@@ -1,13 +1,14 @@
 //! Where a Namedrop command runs: its state directory and the endpoint, space,
 //! and pane of the multiplexer it serves. Each has a neutral `NAMEDROP_*` name
-//! and the Herdr name accepted beside it, in the environment and on the
-//! command line.
+//! and the Herdr name accepted beside it, in the environment, on the command
+//! line, and in a `collab/v1` tool environment.
 //!
 //! One precedence holds everywhere: an explicit flag, then the Herdr name, then
 //! the neutral name. Herdr sets its names afresh for every pane and plugin
 //! process, so under Herdr a neutral name the environment carries from
 //! elsewhere never changes what a command does. Each value resolves on its own.
 
+use serde_json::{Map, Value};
 use std::{
     env,
     ffi::{OsStr, OsString},
@@ -92,6 +93,13 @@ impl Locator {
             .map(|(_, value)| value)
     }
 
+    /// The value a `collab/v1` tool environment carries, and the flag that
+    /// passes it on.
+    pub fn in_envelope(self, environment: &Map<String, Value>) -> Option<(&'static str, &str)> {
+        self.resolve(|key| environment.get(key).and_then(Value::as_str))
+            .map(|(name, value)| (self.flag_for(name), value))
+    }
+
     /// Gives a child process `value` under the Herdr name, which a Herdr
     /// connection inherits, and clears the neutral name.
     pub fn pass(self, command: &mut Command, value: impl AsRef<OsStr>) {
@@ -123,6 +131,7 @@ pub fn state_directory(flag: Option<PathBuf>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::collections::BTreeMap;
 
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
@@ -188,6 +197,48 @@ mod tests {
             Some((Name::Neutral, "w1:p2".to_owned()))
         );
         assert_eq!(resolved(Locator::Space, &mixed), None);
+    }
+
+    #[test]
+    fn an_envelope_gives_each_value_with_the_flag_of_the_key_that_held_it() {
+        let herdr = json!({
+            "HERDR_PLUGIN_STATE_DIR": "/s",
+            "HERDR_SOCKET_PATH": "/h.sock",
+            "HERDR_WORKSPACE_ID": "w1",
+            "HERDR_PANE_ID": "w1:p1",
+        });
+        let neutral = json!({
+            "NAMEDROP_STATE_DIR": "/s",
+            "NAMEDROP_ENDPOINT": "/h.sock",
+            "NAMEDROP_SPACE_ID": "w1",
+            "NAMEDROP_PANE_ID": "w1:p1",
+        });
+        fn flags(environment: &Value) -> [Option<(&'static str, &str)>; 4] {
+            Locator::ALL.map(|locator| locator.in_envelope(environment.as_object().unwrap()))
+        }
+        assert_eq!(
+            flags(&herdr),
+            [
+                Some(("--plugin-state", "/s")),
+                Some(("--herdr-socket", "/h.sock")),
+                Some(("--herdr-workspace", "w1")),
+                Some(("--herdr-pane", "w1:p1")),
+            ]
+        );
+        assert_eq!(
+            flags(&neutral),
+            [
+                Some(("--plugin-state", "/s")),
+                Some(("--endpoint", "/h.sock")),
+                Some(("--space", "w1")),
+                Some(("--pane", "w1:p1")),
+            ]
+        );
+        let both = json!({"HERDR_PANE_ID": "herdr", "NAMEDROP_PANE_ID": "neutral"});
+        assert_eq!(
+            Locator::Pane.in_envelope(both.as_object().unwrap()),
+            Some(("--herdr-pane", "herdr"))
+        );
     }
 
     #[test]
