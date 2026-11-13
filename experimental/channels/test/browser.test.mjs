@@ -14060,7 +14060,9 @@ test("SOUNDS o: a pick another window changed first shows the saved choice and s
     muted: false,
     agents: { [SOUND_CLAUDE]: "knock" },
   });
-  await group.getByRole("radio", { name: "Pop", exact: true }).check();
+  // A click, not check(): the page takes this pick back, so the radio may
+  // already show the saved choice again by the time its state is read.
+  await group.getByRole("radio", { name: "Pop", exact: true }).click();
   await picker
     .getByRole("alert")
     .getByText(
