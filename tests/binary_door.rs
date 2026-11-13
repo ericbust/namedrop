@@ -1,5 +1,6 @@
 //! Every test reaches Namedrop's binary through `tests/support/binary.rs`,
-//! which keeps a Rex block's claim from every process a test starts. This
+//! which keeps a Rex block's claim and the developer's config from every
+//! process a test starts. This
 //! reads every file under `tests/` and fails when the binary's Cargo name
 //! appears anywhere else, and when a Rust file starts a program with
 //! `Command::new` that is not a plain utility named by a literal, because
@@ -129,21 +130,60 @@ fn removed(command: &Command) -> BTreeMap<String, bool> {
 }
 
 #[test]
-fn every_door_removes_the_rex_claim() {
-    let claim = BTreeMap::from(
-        ["REX_BLOCK", "REX_CLIENT", "REX_SERVER", "REX_SESSION"]
-            .map(|name| (name.to_owned(), true)),
+fn every_door_removes_the_rex_claim_and_the_config_roots_and_replaces_home() {
+    let mut isolation = BTreeMap::from(
+        [
+            "REX_BLOCK",
+            "REX_CLIENT",
+            "REX_SERVER",
+            "REX_SESSION",
+            "XDG_CONFIG_HOME",
+            "XDG_STATE_HOME",
+            "CLAUDE_CONFIG_DIR",
+            "CODEX_HOME",
+            "HERDR_CONFIG_PATH",
+            "HERDR_PLUGIN_STATE_DIR",
+            "NAMEDROP_STATE_DIR",
+        ]
+        .map(|name| (name.to_owned(), true)),
     );
-    assert_eq!(removed(&binary::namedrop()), claim);
-    assert_eq!(removed(&binary::command("/bin/sh")), claim);
+    isolation.insert("HOME".to_owned(), false);
+    assert_eq!(removed(&binary::namedrop()), isolation);
+    assert_eq!(removed(&binary::command("/bin/sh")), isolation);
     let mut built = Command::new("true");
-    assert_eq!(removed(binary::without_rex(&mut built)), claim);
+    assert_eq!(removed(binary::isolated(&mut built)), isolation);
+    let home = binary::scratch_home();
+    assert!(
+        home.ends_with(format!(
+            "door/{}/every_door_removes_the_rex_claim_and_the_config_roots_and_replaces_home",
+            std::process::id()
+        )),
+        "{}",
+        home.display()
+    );
     let output = binary::command("/bin/sh")
-        .args(["-c", "echo ${REX_BLOCK-unset} ${REX_SERVER-unset}"])
+        .args([
+            "-c",
+            "echo ${REX_BLOCK-unset} ${REX_SERVER-unset} ${XDG_CONFIG_HOME-unset} $HOME",
+        ])
         .env("REX_BIN_DIR", "/kept")
         .output()
         .unwrap();
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "unset unset\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("unset unset unset {}\n", home.display())
+    );
+    let output = binary::command("/bin/sh")
+        .args(["-c", "echo $HOME $XDG_CONFIG_HOME"])
+        .env("HOME", "/own/home")
+        .env("XDG_CONFIG_HOME", "/own/config")
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "/own/home /own/config\n",
+        "a test's own home and root replace the door's"
+    );
 }
 
 #[test]
