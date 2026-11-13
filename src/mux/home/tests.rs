@@ -14,6 +14,7 @@ const CANONICAL: &str = "rex:/private/tmp/rex/s.sock";
 #[derive(Default)]
 struct Scripted {
     vars: HashMap<String, String>,
+    id: u32,
     ancestors: Vec<u32>,
     peers: HashMap<PathBuf, Result<u32, i32>>,
     claimed: Option<Result<Claimed, String>>,
@@ -31,6 +32,11 @@ impl Scripted {
         self.var("REX_BLOCK", BLOCK)
             .var("REX_SESSION", SESSION)
             .var("REX_SERVER", &format!("unix://{REX}"))
+    }
+
+    fn id(mut self, id: u32) -> Self {
+        self.id = id;
+        self
     }
 
     fn ancestors(mut self, ancestors: &[u32]) -> Self {
@@ -62,6 +68,10 @@ impl Scripted {
 impl Inherited for Scripted {
     fn var(&self, name: &str) -> Option<OsString> {
         self.vars.get(name).map(OsString::from)
+    }
+
+    fn id(&self) -> u32 {
+        self.id
     }
 
     fn ancestors(&self) -> Vec<u32> {
@@ -293,12 +303,23 @@ fn every_row_of_the_home_table_picks_its_home() {
             "a block whose child is not an ancestor",
             Scripted::default()
                 .in_block()
+                .id(100)
                 .ancestors(&[110, SERVER, 1])
                 .peer(REX, Ok(SERVER))
                 .child(SERVER, 111),
             Err(
-                "REX_BLOCK=block:0f6c0d4e-1b5a-4f8e-9d2c-3a7b8c9d0e1f does not run this process: its child 111 is not an ancestor",
+                "REX_BLOCK=block:0f6c0d4e-1b5a-4f8e-9d2c-3a7b8c9d0e1f does not run this process: its child 111 is neither this process nor an ancestor",
             ),
+        ),
+        (
+            "a block whose child is this process, as after a launcher's exec",
+            Scripted::default()
+                .in_block()
+                .id(110)
+                .ancestors(&[SERVER, 1])
+                .peer(REX, Ok(SERVER))
+                .child(SERVER, 110),
+            Ok(rex_place()),
         ),
         (
             "a claim answered by a server that is not the ancestor probed",

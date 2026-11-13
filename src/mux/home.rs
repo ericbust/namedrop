@@ -123,6 +123,8 @@ pub struct Claimed {
 /// script them.
 pub trait Inherited {
     fn var(&self, name: &str) -> Option<OsString>;
+    /// This process's pid.
+    fn id(&self) -> u32;
     /// This process's ancestors, its parent first.
     fn ancestors(&self) -> Vec<u32>;
     /// One non-blocking connect to `socket`, bounded at 20 ms, and the pid of
@@ -140,6 +142,10 @@ pub struct ThisProcess;
 impl Inherited for ThisProcess {
     fn var(&self, name: &str) -> Option<OsString> {
         std::env::var_os(name)
+    }
+
+    fn id(&self) -> u32 {
+        std::process::id()
     }
 
     fn ancestors(&self) -> Vec<u32> {
@@ -398,9 +404,10 @@ fn nearest(
                     ancestors[depth]
                 ));
             }
-            if !ancestors.contains(&claimed.child) {
+            // A launcher that `exec`s Namedrop makes it the block's child.
+            if claimed.child != inherited.id() && !ancestors.contains(&claimed.child) {
                 return Err(format!(
-                    "REX_BLOCK={block} does not run this process: its child {} is not an ancestor",
+                    "REX_BLOCK={block} does not run this process: its child {} is neither this process nor an ancestor",
                     claimed.child
                 ));
             }

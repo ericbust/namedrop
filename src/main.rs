@@ -1842,6 +1842,10 @@ mod worker_shutdown_tests {
             None
         }
 
+        fn id(&self) -> u32 {
+            0
+        }
+
         fn ancestors(&self) -> Vec<u32> {
             Vec::new()
         }
