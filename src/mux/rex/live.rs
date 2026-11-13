@@ -20,6 +20,7 @@ fn socket() -> PathBuf {
 fn ws_reads_the_welcome_of_a_real_server() {
     let stream = UnixStream::connect(socket()).unwrap();
     let mut socket = WebSocket::connect(stream, "/api/control", "rex.control.v1", 1 << 20).unwrap();
+    socket.upgrade().unwrap();
     socket
         .send_text(r#"{"type":"hello","api_revision":12,"client":{"kind":"other","name":"namedrop-live"}}"#)
         .unwrap();

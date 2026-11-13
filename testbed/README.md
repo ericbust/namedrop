@@ -56,6 +56,8 @@ A pass prints the compatibility line to paste into `docs/compatibility.md`
 and deletes the profile. The report itself stays in
 `~/.namedrop-testbed/reports/`. A failure keeps the profile and its server
 running, so you can look at it with `./testbed attach --profile test-pr-27`.
+On `--inside-rex`, a failure stops both servers and deletes the profile
+instead, and the profile's logs stay in `reports/<profile>-<time>-failed/`.
 The evidence for every step is in the directory the report names. Running
 `test` again on the same profile keeps the build and starts new panes and new
 agent sessions. The exit code is 0 on a pass and 1 otherwise.

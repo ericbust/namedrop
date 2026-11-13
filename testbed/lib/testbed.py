@@ -886,7 +886,39 @@ def cmd_test(args):
             profile.name, "inside" if profile.state.get("inside_rex") else "outside"))
     profile.state["inside_rex"] = args.inside_rex
     profile.save()
-    sys.exit(0 if livetest.run(profile, request, args.codex, args.keep, lane) else 1)
+    passed = run_test(profile, lambda: livetest.run(profile, request, args.codex, args.keep, lane))
+    sys.exit(0 if passed else 1)
+
+
+def run_test(profile, run):
+    """run() for cmd_test. On the --inside-rex lane, a run that fails or raises leaves no server
+    behind: the profile is deleted, and its logs are kept under reports/."""
+    passed = False
+    try:
+        passed = run()
+    finally:
+        if profile.state.get("inside_rex") and not passed:
+            discard_failed(profile)
+    return passed
+
+
+def discard_failed(profile):
+    if not profile.dir.exists():
+        return
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    kept = testbed_home() / "reports" / "{}-{}-failed".format(profile.name, stamp)
+    if (profile.dir / "logs").is_dir():
+        shutil.copytree(str(profile.dir / "logs"), str(kept), symlinks=True)
+    try:
+        profile.stop_server()
+    except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+        say("Stopping the profile's Herdr server failed: {}".format(error))
+        rex_lane.Lane(profile, fail, say).stop()
+        profile.kill_leftovers()
+    rex_lane.remove_stale(profile.socket)
+    profile.owned()
+    shutil.rmtree(str(profile.dir))
+    say("Deleted profile {} after the failed run. Its logs are in {}".format(profile.name, kept))
 
 
 def cmd_status(args):

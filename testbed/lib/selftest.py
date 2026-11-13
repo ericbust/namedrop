@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -222,6 +224,54 @@ def check_rex_lane(scratch):
                     "REX_SERVER=unix:///s.sock"], seen
     assert len(os.fsencode(str(rex_lane.socket_for(scratch / "profiles/example")))) < 100
     return "Rex lane: Herdr gets the profile's environment and the block's REX_* names, nothing else"
+
+
+def check_rex_lane_cleanup(scratch):
+    if not shutil.which("rex"):
+        return "Rex lane cleanup: skipped, rex is not on PATH"
+    with patch.dict(os.environ, {"TESTBED_HOME": str(scratch / "rex-cleanup")}):
+        profile = testbed.Profile("test-rex-cleanup")
+        profile.create()
+        for name in ("home", "logs"):
+            (profile.dir / name).mkdir(mode=0o700)
+        profile.state.update(purpose="test", inside_rex=True, toolchain=testbed.host_toolchain())
+        profile.save()
+        lane = rex_lane.Lane(profile, testbed.fail, lambda message: None)
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(str(lane.socket))
+        stale.close()
+        blocks = []
+
+        def failing_run():
+            lane.start_server()
+            created = json.loads(lane.rex("new", "selftest", "--shell", "none", "-c",
+                                          str(profile.dir), "--json", "--", "/bin/sleep", "600").stdout)
+            block = created["initial_windows"][0]["block_ids"][0]
+            process = json.loads(lane.rex("block", "call", "-s", created["session_id"], "-b", block,
+                                          "process").stdout)
+            blocks.append(process["child"]["pid"])
+            raise RuntimeError("a checklist step failed")
+
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                testbed.run_test(profile, failing_run)
+        except RuntimeError as error:
+            assert str(error) == "a checklist step failed", error
+        else:
+            raise AssertionError("the failed run passed")
+        assert blocks, "the run started a block"
+        assert not lane.socket.exists(), lane.socket
+        assert not profile.dir.exists(), profile.dir
+        try:
+            os.kill(blocks[0], 0)
+            raise AssertionError("the block's program still runs: {}".format(blocks[0]))
+        except ProcessLookupError:
+            pass
+        listing = subprocess.run(["ps", "-eww", "-o", "command="], capture_output=True, text=True)
+        assert str(profile.dir) not in listing.stdout, "a process still names the profile"
+        assert list((scratch / "rex-cleanup/reports").glob("test-rex-cleanup-*-failed/rex-server.log"))
+    return ("Rex lane cleanup: a failed run removes a stale socket first, then leaves no server, "
+            "socket, block or profile, and keeps its logs")
 
 
 def check_syntax(kit):
@@ -856,6 +906,7 @@ def run(kit):
                   ("seed", lambda: check_seed(kit, base)),
                   ("profile safety", lambda: check_profile_safety(base)),
                   ("Rex lane", lambda: check_rex_lane(base)),
+                  ("Rex lane cleanup", lambda: check_rex_lane_cleanup(base)),
                   ("syntax", lambda: check_syntax(kit)),
                   ("screens", check_screens),
                   ("transcripts", check_transcripts),

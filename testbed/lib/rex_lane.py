@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import time
 
@@ -22,6 +23,24 @@ def exec_environment(base, inherited):
 def socket_for(directory):
     digest = hashlib.sha256(str(directory).encode()).hexdigest()[:16]
     return Path("/tmp/nd-tb-rex-{}-{}.sock".format(os.getuid(), digest))
+
+
+def remove_stale(path):
+    """Deletes a socket file that refuses connections, so nothing listens on it. True when it
+    deleted one."""
+    if not path.is_socket():
+        return False
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        probe.connect(str(path))
+    except ConnectionRefusedError:
+        path.unlink()
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+    return False
 
 
 def process_environment(pid):
@@ -67,6 +86,8 @@ class Lane:
     def start_server(self):
         if self.running():
             return
+        if remove_stale(self.socket):
+            self.say("Removed a stale scratch Rex socket: " + str(self.socket))
         if self.socket.exists():
             self.fail("the scratch Rex socket exists but cannot be reached; inspect it: " +
                       str(self.socket))
@@ -128,6 +149,7 @@ class Lane:
 
     def stop(self):
         if not self.running():
+            remove_stale(self.socket)
             return
         for session in self.sessions():
             self.rex("kill", session)
