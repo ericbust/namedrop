@@ -55,14 +55,8 @@ export function threadControls(
     : { threadId: item.threadId, actions: item.actions };
 }
 
-// The attempt whose warning the person can dismiss: only one whose held
-// answer can never arrive, which is when the server allows it.
-export function dismissal(
-  item: Pick<Attention, "source" | "sourceId" | "answerLost">,
-): string | null {
-  return item.source === "agent_disposition" &&
-    item.answerLost != null &&
-    item.sourceId != null
-    ? item.sourceId
-    : null;
+// The id a dismiss names. The person can dismiss every card the server
+// identifies.
+export function dismissal(item: Pick<Attention, "attentionId">): string | null {
+  return item.attentionId ?? null;
 }

@@ -721,10 +721,7 @@ enum Route {
         thread_id: String,
         action: super::thread_controls::Action,
     },
-    Dismiss {
-        key: SpaceKey,
-        attempt_id: String,
-    },
+    DismissItems(SpaceKey),
     Skills {
         key: SpaceKey,
         address_id: String,
@@ -960,13 +957,9 @@ fn route(
                 }
                 return Ok(Route::Deliver { key, message_id });
             }
-            if let [key, "attempts", attempt, "dismiss"] = segments.as_slice() {
+            if let [key, "attention", "dismiss"] = segments.as_slice() {
                 let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
-                let attempt_id = decode_asset_path(attempt).ok_or(Status::NotFound)?;
-                if attempt_id.is_empty() || attempt_id.contains('/') {
-                    return Err(Status::NotFound);
-                }
-                return Ok(Route::Dismiss { key, attempt_id });
+                return Ok(Route::DismissItems(key));
             }
             if let [key, "coordinations", "review"] = segments.as_slice() {
                 let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
@@ -1437,7 +1430,7 @@ fn serve_connection(
                 let mut guard = history_store.lock().map_err(|_| Status::Unavailable)?;
                 match guard.store(front.files.state()) {
                     Ok(store) => store
-                        .direct_message_peers()
+                        .direct_message_peers(crate::Clock::now_unix_ms(&crate::SystemClock))
                         .map_err(|_| Status::Unavailable),
                     Err(Status::NotFound) => Ok(Vec::new()),
                     Err(status) => Err(status),
@@ -1678,55 +1671,24 @@ fn serve_connection(
                 }
             }
         }
-        Ok(Route::Dismiss { key, attempt_id }) => {
-            let post: super::acknowledge::DismissPost = match read_json_body(&mut reader, &request)
-            {
-                Ok(post) => post,
-                Err(status) => return respond_status(&mut writer, status),
-            };
+        Ok(Route::DismissItems(key)) => {
+            let post: super::acknowledge::DismissItemsPost =
+                match read_json_body(&mut reader, &request) {
+                    Ok(post) => post,
+                    Err(status) => return respond_status(&mut writer, status),
+                };
             let admitted = match front.admit_mutation() {
                 Ok(guard) => guard,
                 Err(status) => return respond_status(&mut writer, status),
             };
-            let result = super::acknowledge::dismiss(
+            let result = super::acknowledge::dismiss_items(
                 front.files.state(),
                 &key,
-                &attempt_id,
                 &post,
                 crate::Clock::now_unix_ms(&crate::SystemClock),
             );
             drop(admitted);
-            match result {
-                Ok(receipt) => respond(
-                    &mut writer,
-                    "200 OK",
-                    "application/json",
-                    "",
-                    receipt.to_string().as_bytes(),
-                ),
-                Err(super::acknowledge::Error::NotFound) => {
-                    respond_status(&mut writer, Status::NotFound)
-                }
-                Err(super::acknowledge::Error::NothingToDismiss) => respond(
-                    &mut writer,
-                    "410 Gone",
-                    "application/json",
-                    "",
-                    serde_json::json!({"error": "This request has no warning to dismiss anymore."})
-                        .to_string()
-                        .as_bytes(),
-                ),
-                Err(super::acknowledge::Error::Refused(message)) => respond(
-                    &mut writer,
-                    "409 Conflict",
-                    "application/json",
-                    "",
-                    serde_json::json!({"error": message}).to_string().as_bytes(),
-                ),
-                Err(super::acknowledge::Error::Unavailable) => {
-                    respond_status(&mut writer, Status::Unavailable)
-                }
-            }
+            respond_dismissed(&mut writer, result)
         }
         Ok(Route::Reminders {
             key,
@@ -2455,9 +2417,33 @@ fn known_agents(front: &Front, history_store: &Mutex<HistoryStore>) -> Option<Ha
     let peers = guard
         .store(front.files.state())
         .ok()?
-        .direct_message_peers()
+        .direct_message_peers(crate::Clock::now_unix_ms(&crate::SystemClock))
         .ok()?;
     Some(peers.into_iter().map(|peer| peer.address_id).collect())
+}
+
+fn respond_dismissed(
+    writer: &mut TcpStream,
+    result: Result<serde_json::Value, super::acknowledge::Error>,
+) -> io::Result<()> {
+    use super::acknowledge::Error;
+    let (status, body) = match result {
+        Ok(receipt) => ("200 OK", receipt),
+        Err(Error::NotFound) => return respond_status(writer, Status::NotFound),
+        Err(Error::Unavailable) => return respond_status(writer, Status::Unavailable),
+        Err(Error::NothingToDismiss) => (
+            "410 Gone",
+            serde_json::json!({"error": "There is no warning to dismiss here anymore."}),
+        ),
+        Err(Error::Refused(message)) => ("409 Conflict", serde_json::json!({"error": message})),
+    };
+    respond(
+        writer,
+        status,
+        "application/json",
+        "",
+        body.to_string().as_bytes(),
+    )
 }
 
 fn respond_sounds(

@@ -2159,7 +2159,7 @@ pub(crate) fn load_collaboration_setup_from_store(
                 worktree_state,
                 addresses,
                 registered,
-                transaction.unresolved_attention_items(&namespace)?,
+                transaction.attention_items_needing_the_person(&namespace)?,
             ))
         })
         .map_err(|error| error.to_string())?;

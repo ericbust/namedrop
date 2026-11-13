@@ -426,6 +426,7 @@ mod tests {
             assignments: Vec::new(),
             terminal_runs: Vec::new(),
             attention: Vec::new(),
+            dismissals: Default::default(),
             coordination_warnings: Vec::new(),
             review_grants: Vec::new(),
             granted_clears: Vec::new(),

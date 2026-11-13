@@ -1,41 +1,51 @@
 use super::snapshot::SpaceKey;
-use crate::{ActorKind, DeliveryAttemptId, MutationAttribution, StateStore, StoreErrorKind};
+use crate::{ActorKind, MutationAttribution, StateStore};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
 
-/// What the person confirms by pressing Dismiss on a lost answer's card.
+/// What the person confirms by pressing Dismiss on any card, or Dismiss all.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct DismissPost {
+pub(super) struct DismissItemsPost {
     #[serde(default)]
     confirmed: bool,
+    /// The ids of the cards the person saw, so one that arrives while they
+    /// decide is not dismissed unseen.
+    ids: Vec<String>,
 }
+
+/// More cards than one space ever shows.
+const MAX_DISMISSED_AT_ONCE: usize = 500;
 
 pub(super) enum Error {
     NotFound,
-    /// The request has no warning any more: it was dismissed already, or its
-    /// answer came or can come again.
+    /// None of the named cards is there any more: each was dismissed
+    /// already, or its source closed it.
     NothingToDismiss,
-    /// The warning can't be dismissed now, with the reason to show.
+    /// The post can't be acted on, with the reason to show.
     Refused(String),
     Unavailable,
 }
 
-/// Dismisses the warning that a request's answer can never arrive, as
-/// `delivery acknowledge` does: by the person, only once nobody can answer
-/// it, recording no disposition and resending nothing.
-pub(super) fn dismiss(
+/// Dismisses the attention items the person names, and says how many there
+/// were. Each is recorded as theirs. Nothing is resent, no disposition is
+/// recorded, and an agent that can still answer still can.
+pub(super) fn dismiss_items(
     state: &Path,
     key: &SpaceKey,
-    attempt: &str,
-    post: &DismissPost,
+    post: &DismissItemsPost,
     now: u64,
 ) -> Result<Value, Error> {
     if !post.confirmed {
         return Err(Error::Refused(
-            "Confirm that nobody can answer this request before you dismiss it.".to_owned(),
+            "Confirm before you dismiss a warning.".to_owned(),
         ));
+    }
+    if post.ids.is_empty() || post.ids.len() > MAX_DISMISSED_AT_ONCE {
+        return Err(Error::Refused(format!(
+            "Name between 1 and {MAX_DISMISSED_AT_ONCE} warnings to dismiss."
+        )));
     }
     let mut store = StateStore::open(state).map_err(|_| Error::Unavailable)?;
     let namespace = store
@@ -45,33 +55,20 @@ pub(super) fn dismiss(
         .find(|space| SpaceKey::of(&space.namespace) == *key)
         .map(|space| space.namespace)
         .ok_or(Error::NotFound)?;
-    let attempt = DeliveryAttemptId::new(attempt);
     let by = MutationAttribution::new(ActorKind::Human, "local-human", now);
-    store
+    let dismissed = store
         .transaction(|tx| {
-            Ok(
-                match tx.acknowledge_disposition_attention(&namespace, &attempt, &by) {
-                    Ok(true) => Ok(()),
-                    Ok(false) => Err(Error::NothingToDismiss),
-                    Err(error) if error.kind() != StoreErrorKind::InvalidInput => {
-                        return Err(error);
-                    }
-                    Err(error)
-                        if error.message()
-                            == "delivery attempt does not exist in this workspace" =>
-                    {
-                        Err(Error::NotFound)
-                    }
-                    Err(_) if !tx.disposition_warning_open(&namespace, &attempt)? => {
-                        Err(Error::NothingToDismiss)
-                    }
-                    Err(_) => Err(Error::Refused(
-                        "The agent can still answer this request, so there's nothing to dismiss."
-                            .to_owned(),
-                    )),
-                },
-            )
+            let mut dismissed = 0;
+            for id in &post.ids {
+                if tx.dismiss_attention_item(&namespace, id, &by)? {
+                    dismissed += 1;
+                }
+            }
+            Ok(dismissed)
         })
-        .map_err(|_| Error::Unavailable)??;
-    Ok(json!({"attempt_id": attempt, "acknowledged": true}))
+        .map_err(|_| Error::Unavailable)?;
+    if dismissed == 0 {
+        return Err(Error::NothingToDismiss);
+    }
+    Ok(json!({"dismissed": dismissed}))
 }

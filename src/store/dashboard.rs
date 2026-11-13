@@ -16,6 +16,10 @@ fn public_sql(sql: &str) -> String {
 pub const MESSAGE_WINDOW: i64 = 150;
 pub const TERMINAL_RUN_WINDOW: i64 = 20;
 pub const COORDINATION_WINDOW: i64 = 20;
+/// How long Channels shows a stored warning as needing the person. One still
+/// open after a week is not something they will act on, so it stops being
+/// red. Doctor still reports it.
+pub const ATTENTION_SHOWN_FOR_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
 pub struct DashboardRows {
     /// Where this state keeps the images sent from Channels. A message line
@@ -37,6 +41,8 @@ pub struct DashboardRows {
     pub assignments: Vec<AssignmentRow>,
     pub terminal_runs: Vec<TerminalRunRow>,
     pub attention: Vec<AttentionRow>,
+    /// When the person last dismissed each attention item, by its id.
+    pub dismissals: HashMap<String, u64>,
     pub coordination_warnings: Vec<super::coordination_review::CoordinationWarning>,
     pub review_grants: Vec<super::coordination_review::OpenReviewGrant>,
     pub granted_clears: Vec<super::coordination_review::GrantedClear>,
@@ -1350,6 +1356,7 @@ impl StateTransaction<'_> {
             assignments,
             terminal_runs,
             attention,
+            dismissals: self.attention_dismissals(namespace)?,
             coordination_warnings: self.coordination_warnings(namespace)?,
             review_grants: self.open_review_grants(namespace)?,
             granted_clears: self.granted_clears(namespace)?,

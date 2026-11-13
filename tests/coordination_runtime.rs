@@ -3337,6 +3337,77 @@ fn an_ignored_nudge_settles_as_no_reply_and_the_coordination_is_flagged_for_a_de
     );
 }
 
+/// A dismiss in Channels is not `handoff acknowledge`. It covers the warning
+/// the person read, so the decision a lead records later still reaches them.
+#[test]
+fn a_dismissed_continuation_warning_leaves_a_later_blocked_decision_open_and_shown() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    f.reply(&a, "worker", "first-result", "completed", None);
+    f.status("lead", "idle");
+    f.settle_lead_inputs();
+    f.nudge_prompts().pop().expect("the idle lead is nudged");
+    f.now.store(100 + 31_000, Ordering::Relaxed);
+    f.drain();
+    let continuation = f.attention_summary();
+    assert!(
+        continuation.contains("without a new work decision"),
+        "{continuation}"
+    );
+    let needing_the_person = |f: &Fixture| -> Vec<String> {
+        StateStore::open(&f.state)
+            .unwrap()
+            .transaction(|tx| tx.attention_items_needing_the_person(&f.ns()))
+            .unwrap()
+            .into_iter()
+            .map(|item| item.summary)
+            .collect()
+    };
+    assert_eq!(needing_the_person(&f), [continuation]);
+
+    let person = MutationAttribution::new(ActorKind::Human, "local-human", 100 + 32_000);
+    let dismissed = StateStore::open(&f.state)
+        .unwrap()
+        .transaction(|tx| {
+            tx.dismiss_attention_item(
+                &f.ns(),
+                &format!("coordination-attention:{}", id.as_str().unwrap()),
+                &person,
+            )
+        })
+        .unwrap();
+    assert!(dismissed);
+    f.drain();
+    assert!(needing_the_person(&f).is_empty());
+
+    f.now.store(100 + 60_000, Ordering::Relaxed);
+    let resolved = f.handoff(
+        "handoff.resolve",
+        json!({"request_id":"late-blocked", "coordination_id":id, "outcome":"blocked",
+            "report":"The worker needs a choice between two designs.",
+            "reason":"Blocked on a choice."}),
+    );
+    f.status("lead", "idle");
+    f.drain();
+    f.complete(&f.attempt(&resolved["report_message_id"], "lead"));
+    for _ in 0..2 {
+        f.drain();
+    }
+    assert_eq!(
+        f.attention_count(),
+        1,
+        "the dismiss counted as an acknowledgement and closed the decision"
+    );
+    let decision = f.attention_summary();
+    assert!(decision.contains("resolved blocked"), "{decision}");
+    assert_eq!(
+        needing_the_person(&f),
+        [decision],
+        "the person never sees the decision"
+    );
+}
+
 #[test]
 fn an_open_assignment_whose_worker_idles_past_the_grace_is_not_flagged_and_its_late_reply_is_accepted()
  {

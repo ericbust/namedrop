@@ -83,7 +83,7 @@ function readOpen(key: SpaceKey): boolean | null {
 }
 // Collapsed by default once there are more than two; the operator's own
 // choice wins and is kept per channel.
-function useGroupOpen(key: SpaceKey, count: number) {
+export function useGroupOpen(key: SpaceKey, count: number) {
   const [chosen, setChosen] = useState(() => readOpen(key));
   useEffect(() => setChosen(readOpen(key)), [key]);
   const open = chosen ?? count <= 2;
@@ -264,6 +264,8 @@ export function HandoffGroup({
   channel,
   directory,
   now,
+  open,
+  onToggle: toggle,
   onFocus,
   onControl,
   onReview,
@@ -272,11 +274,13 @@ export function HandoffGroup({
   channel: ChannelSnapshot;
   directory: Directory;
   now: number;
+  // Whether the cards are on show, which the list's Dismiss all needs to know.
+  open: boolean;
+  onToggle: () => void;
   onFocus: FocusAttention;
   onControl: ControlThread;
   onReview: ReviewHandoffs;
 }) {
-  const [open, toggle] = useGroupOpen(channel.key, items.length);
   const options = reviewers(channel.members);
   const [picked, setPicked] = useState<AddressId | null>(null);
   const reviewer =

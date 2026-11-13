@@ -48,12 +48,12 @@ export type MessageContext = {
   messages: readonly Message[];
 };
 export type ThreadAction = "continue" | "stop";
-// What a card's button asks the server to do: a thread action, or dismissing
-// the warning that a request's answer can never arrive.
+// What a button asks the server to do: a thread action, or dismissing the
+// cards with these ids.
 export type ControlAction = ThreadAction | "dismiss";
 export type ControlTarget =
   | { kind: "thread"; threadId: string; action: ThreadAction }
-  | { kind: "attempt"; attemptId: string; action: "dismiss" };
+  | { kind: "attention"; ids: readonly string[]; action: "dismiss" };
 export type WarningCause =
   | "blocked"
   | "cancelled"
@@ -82,6 +82,8 @@ export type ReviewClear = {
 };
 export type Attention = {
   rowKey: string;
+  // The server's id for the card, which a dismiss names.
+  attentionId?: string | null;
   sourceId?: string | null;
   coordinationId?: string | null;
   conversation?: Conversation | null;

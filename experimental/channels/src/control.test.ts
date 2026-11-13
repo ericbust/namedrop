@@ -100,19 +100,25 @@ test("dismiss asks first like Stop, and only its own confirm sends it", () => {
   });
 });
 
-test("only a warning whose answer can never arrive can be dismissed", () => {
-  const item = (
-    source: Attention["source"],
-    answerLost: Attention["answerLost"],
-    sourceId: string | null = "attempt-1",
-  ) => ({ source, answerLost, sourceId });
-  assert.equal(dismissal(item("agent_disposition", "ended")), "attempt-1");
-  assert.equal(dismissal(item("agent_disposition", "retired")), "attempt-1");
+test("every card the server identifies can be dismissed, by its id", () => {
+  const sources: Attention["source"][] = [
+    "agent_disposition",
+    "coordination",
+    "terminal_relay",
+    "delivery_attempt",
+    "automatic_reply_limit",
+    "pane_binding",
+    "integration_registration",
+    "context_grant",
+    "agent_status",
+  ];
+  for (const source of sources) {
+    const item = { source, answerLost: null, attentionId: `card-${source}` };
+    assert.equal(dismissal(item), `card-${source}`, source);
+  }
   assert.equal(
-    dismissal(item("agent_disposition", null)),
+    dismissal({ attentionId: null }),
     null,
-    "an agent that can still answer leaves nothing to dismiss",
+    "a card with no id names nothing to dismiss",
   );
-  assert.equal(dismissal(item("agent_disposition", "ended", null)), null);
-  assert.equal(dismissal(item("delivery_attempt", "ended")), null);
 });
