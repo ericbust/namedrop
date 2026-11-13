@@ -1013,6 +1013,26 @@ def check_checklist_prompts(kit):
     return "CHECKLIST.md still has the prompts test sends"
 
 
+def check_rex_live_down_after_a_failed_stop(scratch):
+    stopped = []
+    profile = SimpleNamespace(dir=scratch / "rex-live-down", state={}, save=lambda: None,
+                              stop_server=lambda: stopped.append("herdr"),
+                              run=lambda *args, **kwargs: stopped.append("codex"),
+                              kill_leftovers=lambda: stopped.append("leftovers"))
+
+    def failing_stop(lane):
+        raise RuntimeError("the scratch Rex socket remains")
+
+    with patch.object(rex_live.Lane, "stop", failing_stop):
+        try:
+            rex_live.down(profile)
+            raise AssertionError("a failed stop passed")
+        except RuntimeError as error:
+            assert str(error) == "the scratch Rex socket remains", error
+    assert stopped == ["herdr", "codex", "leftovers"], stopped
+    return "Rex live down: a failed Rex stop still stops the profile's Herdr and leftovers"
+
+
 def run(kit):
     passed = True
     with tempfile.TemporaryDirectory(prefix="nd-tb-selftest-") as scratch:
@@ -1028,6 +1048,7 @@ def run(kit):
                   ("Rex lane cleanup", lambda: check_rex_lane_cleanup(base)),
                   ("Rex live hooks", lambda: check_rex_live_hooks(base)),
                   ("Rex live up and down", lambda: check_rex_live_up_and_down(base)),
+                  ("Rex live down", lambda: check_rex_live_down_after_a_failed_stop(base)),
                   ("syntax", lambda: check_syntax(kit)),
                   ("screens", check_screens),
                   ("transcripts", check_transcripts),

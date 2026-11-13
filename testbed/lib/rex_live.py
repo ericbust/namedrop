@@ -205,10 +205,12 @@ def down(profile):
     """Stops the scratch Rex server with its sessions, the profile's own Herdr, and Codex's
     daemon, and forgets the session."""
     lane = Lane(profile, testbed.fail, testbed.say)
-    lane.stop()
-    profile.stop_server()
-    profile.run(["codex", "app-server", "daemon", "stop"], check=False)
-    profile.kill_leftovers()
+    try:
+        lane.stop()
+    finally:
+        profile.stop_server()
+        profile.run(["codex", "app-server", "daemon", "stop"], check=False)
+        profile.kill_leftovers()
     profile.state.pop("rex_live_session", None)
     profile.state.pop("rex_live_blocks", None)
     profile.save()
