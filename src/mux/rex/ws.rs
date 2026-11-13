@@ -82,6 +82,7 @@ impl<S: Read + Write> WebSocket<S> {
     /// Writes the upgrade request and reads the server's answer, once. A
     /// read or write that times out keeps its place, so the next call
     /// resumes it.
+    #[cfg(test)]
     pub(super) fn upgrade(&mut self) -> Result<(), WsError> {
         while !self.try_upgrade()? {}
         Ok(())
@@ -149,6 +150,7 @@ impl<S: Read + Write> WebSocket<S> {
         self.allowance = bytes;
     }
 
+    #[cfg(test)]
     pub(super) fn send_text(&mut self, text: &str) -> Result<(), WsError> {
         self.upgrade()?;
         self.queue_text(text)?;
@@ -205,6 +207,7 @@ impl<S: Read + Write> WebSocket<S> {
         self.flush_all()
     }
 
+    #[cfg(test)]
     pub(super) fn recv(&mut self) -> Result<Message, WsError> {
         loop {
             if let Some(message) = self.try_recv()? {

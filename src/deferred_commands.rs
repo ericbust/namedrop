@@ -688,6 +688,7 @@ fn clear_pending(pending: &Dir, key: &str) -> Result<(), String> {
 
 fn execute_request(state: &Path, request: &Request) -> Result<Value, String> {
     let herdr = crate::mux::connect(
+        state,
         &Endpoint::parse(&request.caller.namespace.session_socket_id),
         Budget::ADAPTER_DEFAULT,
         Default::default(),
@@ -878,7 +879,7 @@ mod tests {
     }
 
     #[test]
-    fn a_deferred_command_for_a_rex_caller_is_refused_before_it_reads_the_state() {
+    fn a_deferred_command_for_a_rex_caller_connects_and_reads_the_state_as_a_herdr_one_does() {
         let state = env::temp_dir().join(format!("nd-defer-rex-{}", std::process::id()));
         let _ = fs::remove_dir_all(&state);
         fs::create_dir_all(&state).unwrap();
@@ -899,12 +900,12 @@ mod tests {
         };
         assert_eq!(
             execute_request(&state, &request),
-            Err("the Rex adapter is not built yet".to_owned())
+            Err("Namedrop state is missing; activate this workspace outside the sandbox before queuing commands".to_owned())
         );
         assert_eq!(
             fs::read_dir(&state).unwrap().count(),
             0,
-            "no store was opened"
+            "no store was made"
         );
         fs::remove_dir_all(&state).unwrap();
     }

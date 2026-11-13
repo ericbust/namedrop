@@ -229,6 +229,7 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
                 &ProcessIds::default(),
                 |ns| {
                     crate::mux::connect(
+                        state,
                         &crate::mux::Endpoint::parse(&ns.session_socket_id),
                         Budget::ADAPTER_DEFAULT,
                         Default::default(),

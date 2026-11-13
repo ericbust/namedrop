@@ -1675,9 +1675,10 @@ pub struct WorldBuilder {
 }
 
 impl WorldBuilder {
-    /// The `session_socket_id` the fake answers to.
+    /// The `session_socket_id` the fake answers to, whose kind its value
+    /// names, as `Endpoint::parse` reads every endpoint.
     pub fn endpoint(mut self, key: &str) -> Self {
-        self.endpoint.key = key.to_owned();
+        self.endpoint = Endpoint::parse(key);
         self
     }
 

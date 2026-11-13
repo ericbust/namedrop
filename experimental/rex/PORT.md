@@ -821,6 +821,14 @@ What the design did not say, found while building 10:
 - **The confirm check reads the call's budget, not `NAMEDROP_REX_TIMEOUT_MS`.** That variable caps each request, and its 5 s default is shorter than the 6 s the check needs, so counting it declined every prompt on the live lane. A Stop worker's 250 ms therefore holds each of its requests to 250 ms and does not decline its prompts, which the design's daemon table assumed it would.
 - **A paste error is `Ambiguous` even when Rex answered it,** because the gate owns that rule. A `Line` or `Keys` whose first `block.event` Rex refuses is `Refused`, because those have no gate.
 
+- **11. The Rex arm of `mux::connect`** (`feat(mux): connect to Rex through mux::connect`). `mux::connect` takes the state directory and calls `rex::connect`, and `mux::Connector` holds the directory it serves. The Rex modules and `mux::processes` join the library build, and what only later commits call stays `#[cfg(test)]`: the parent and executable reads (commits 14 and 17) and the blocking WebSocket calls the tests use. On a Rex endpoint a screen fault, a failed read or a screen `port_ansi` refuses, is `PromptBox::Unread`, which waits as `AgentWait::ScreenUnread` where Herdr's `Unseen` would deliver on `idle`. The draft recheck reads such a screen again, and Doctor's long wait names it `screen_unread` with the fault. A Herdr endpoint's failed read stays `Unseen`, and Herdr's Doctor output does not change. Both checklist lanes passed at this commit.
+
+What the design did not say, found while building 11:
+
+- **A proof that names another endpoint is refused.** A stored endpoint is the canonical one its server reported, so a server at that socket whose primary listener is elsewhere is another server, and the call fails `Unavailable` before any other request. This is also the first reader of `prove_local`'s endpoint.
+- **The fake read its endpoint's kind as Herdr whatever the key.** `WorldBuilder::endpoint` now goes through `Endpoint::parse`, so a fake built on a `rex:` key is a Rex endpoint, as a stored one is.
+- **A Rex runtime still renders `--herdr-socket` lines.** The pointer a Rex delivery typed in the delivery tests names `--herdr-socket 'rex:…'`, which commit 12's kind-aware writers change.
+
 ## Next implementation step
 
 Step 3 is done (see [Step 3: neutral names](#step-3-neutral-names)). Next is step 4 of the [plan](PLAN.md): write the Rex adapter. Start with [Left for step 4](#left-for-step-4) and the step 4 items under [Open questions and risks](#open-questions-and-risks).

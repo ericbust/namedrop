@@ -934,6 +934,16 @@ where
                 HealthRepairKind::HumanDecision,
                 format!("Clear @{alias}'s prompt box."),
             ),
+            AgentWait::ScreenUnread(_, why) => (
+                HealthSeverity::Notice,
+                format!(
+                    "Namedrop cannot read @{alias}'s screen in Rex ({why}), so it cannot see that the prompt box is empty, and the message waits until a read works."
+                ),
+                HealthRepairKind::ProductAction,
+                format!(
+                    "Leave @{alias}'s screen on its prompt, or report the escape sequence Namedrop does not read."
+                ),
+            ),
             AgentWait::PromptBoxUnseen => (
                 HealthSeverity::Info,
                 format!(
@@ -964,11 +974,15 @@ where
                 AgentWait::Status(_) => "status",
                 AgentWait::Draft(_) => "draft",
                 AgentWait::PromptBoxUnseen => "prompt_box_unseen",
+                AgentWait::ScreenUnread(..) => "screen_unread",
                 AgentWait::SentPrompt => "sent_prompt",
             },
             "queued_at_ms": queued_at_ms,
             "waited_ms": waited_ms,
         });
+        if let AgentWait::ScreenUnread(_, why) = wait {
+            waiting.diagnostic["screen_fault"] = serde_json::Value::String(why);
+        }
         issues.push(waiting);
     }
     issues

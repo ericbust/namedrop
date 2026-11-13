@@ -33,6 +33,35 @@ use std::{
 };
 use wire::{BlockEntry, ProcessReply, TERMINAL, block_call, mux_error, terminal_method};
 
+/// Opens nothing. Each port call of the connection dials the endpoint's
+/// socket, proves the server local, runs, and closes, and reads session
+/// bindings from `state`.
+pub(super) fn connect(
+    state: &Path,
+    endpoint: &Endpoint,
+    budget: Budget,
+    cancelled: Arc<AtomicBool>,
+) -> Result<Arc<dyn super::Mux>, MuxError> {
+    let path = endpoint.unix_socket().ok_or_else(|| {
+        MuxError::Unavailable(format!(
+            "{} names no Rex server's Unix socket",
+            endpoint.key
+        ))
+    })?;
+    let socket = Socket {
+        path: path.to_owned(),
+        budget,
+        cancelled,
+    };
+    let local = Arc::new(super::processes::ThisMachine);
+    Ok(Arc::new(RexMux::new(
+        socket,
+        endpoint.clone(),
+        state,
+        local,
+    )))
+}
+
 /// The Unix socket a `rex:` endpoint names, dialed afresh for each port call.
 struct Socket {
     path: PathBuf,
@@ -221,6 +250,14 @@ impl<W: Wire> RexMux<W> {
                     .unix_socket()
                     .unwrap_or(Path::new(&self.endpoint.key));
                 let server = local::prove_local(dial, &mut *control, peer).map_err(unavailable)?;
+                // A stored endpoint is the canonical one its server reported,
+                // so another one means another server took the socket.
+                if server.endpoint != self.endpoint {
+                    return Err(MuxError::Unavailable(format!(
+                        "{} is now served by the Rex server whose endpoint is {}",
+                        self.endpoint.key, server.endpoint.key
+                    )));
+                }
                 if let Ok(mut proven) = self.proven.lock() {
                     *proven = Some(Proven {
                         pid: server.pid,

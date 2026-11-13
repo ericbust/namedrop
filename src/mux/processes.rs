@@ -3,7 +3,7 @@
 //! through `LocalProcesses::read`, which reads a zombie as no process.
 
 use super::Incarnation;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// One local read of a pid.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,8 +28,10 @@ pub(crate) trait LocalProcesses: Send + Sync {
     /// zombies, or `None` when the group cannot be listed. Read members with
     /// `members`.
     fn list_group(&self, group: u32) -> Option<Vec<u32>>;
+    #[cfg(test)]
     fn parent(&self, pid: u32) -> Option<u32>;
-    fn executable(&self, pid: u32) -> Option<PathBuf>;
+    #[cfg(test)]
+    fn executable(&self, pid: u32) -> Option<std::path::PathBuf>;
 }
 
 /// The live members of a process group: each listed pid passes through
@@ -70,11 +72,13 @@ impl LocalProcesses for ThisMachine {
         platform::group(group)
     }
 
+    #[cfg(test)]
     fn parent(&self, pid: u32) -> Option<u32> {
         platform::parent(pid)
     }
 
-    fn executable(&self, pid: u32) -> Option<PathBuf> {
+    #[cfg(test)]
+    fn executable(&self, pid: u32) -> Option<std::path::PathBuf> {
         platform::executable(pid)
     }
 }
@@ -83,7 +87,7 @@ impl LocalProcesses for ThisMachine {
 mod platform {
     use super::{LocalProc, LocalRead};
     use crate::mux::Incarnation;
-    use std::{ffi::OsStr, mem::MaybeUninit, os::unix::ffi::OsStrExt, path::PathBuf};
+    use std::mem::MaybeUninit;
 
     /// `PROC_PIDTBSDINFO` with `arg` 0 fails with `ESRCH` on a zombie, as on
     /// a pid with no process, and with another error on another user's
@@ -104,6 +108,7 @@ mod platform {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn parent(pid: u32) -> Option<u32> {
         let short = info::<libc::proc_bsdshortinfo>(pid, libc::PROC_PIDT_SHORTBSDINFO)?;
         (short.pbsi_ppid != 0).then_some(short.pbsi_ppid)
@@ -131,7 +136,8 @@ mod platform {
         }
     }
 
-    pub(super) fn executable(pid: u32) -> Option<PathBuf> {
+    #[cfg(test)]
+    pub(super) fn executable(pid: u32) -> Option<std::path::PathBuf> {
         let pid = libc::c_int::try_from(pid).ok()?;
         let mut buffer = vec![0_u8; usize::try_from(libc::PROC_PIDPATHINFO_MAXSIZE).ok()?];
         // SAFETY: proc_pidpath writes at most the given size into `buffer`
@@ -144,6 +150,7 @@ mod platform {
             )
         };
         let written = usize::try_from(written).ok().filter(|n| *n > 0)?;
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
         Some(OsStr::from_bytes(&buffer[..written]).into())
     }
 
@@ -163,10 +170,11 @@ mod platform {
 mod platform {
     use super::{LocalProc, LocalRead};
     use crate::mux::Incarnation;
-    use std::{io, path::PathBuf};
+    use std::io;
 
     struct Stat {
         state: char,
+        #[cfg(test)]
         parent: u32,
         group: u32,
         start_ticks: u64,
@@ -185,6 +193,7 @@ mod platform {
                 .first()
                 .and_then(|state| state.chars().next())
                 .ok_or_else(malformed)?,
+            #[cfg(test)]
             parent: number(1).ok_or_else(malformed)?,
             group: number(2).ok_or_else(malformed)?,
             // Field 22 of the line, counting pid as 1.
@@ -215,6 +224,7 @@ mod platform {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn parent(pid: u32) -> Option<u32> {
         let parent = stat(pid).ok()?.parent;
         (parent != 0).then_some(parent)
@@ -238,7 +248,8 @@ mod platform {
         Some(members)
     }
 
-    pub(super) fn executable(pid: u32) -> Option<PathBuf> {
+    #[cfg(test)]
+    pub(super) fn executable(pid: u32) -> Option<std::path::PathBuf> {
         std::fs::read_link(format!("/proc/{pid}/exe")).ok()
     }
 }
@@ -248,12 +259,12 @@ mod platform {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod platform {
     use super::LocalRead;
-    use std::path::PathBuf;
 
     pub(super) fn read(_pid: u32) -> LocalRead {
         LocalRead::Unreadable
     }
 
+    #[cfg(test)]
     pub(super) fn parent(_pid: u32) -> Option<u32> {
         None
     }
@@ -262,7 +273,8 @@ mod platform {
         None
     }
 
-    pub(super) fn executable(_pid: u32) -> Option<PathBuf> {
+    #[cfg(test)]
+    pub(super) fn executable(_pid: u32) -> Option<std::path::PathBuf> {
         None
     }
 }

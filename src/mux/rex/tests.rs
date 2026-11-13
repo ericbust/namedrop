@@ -1142,3 +1142,26 @@ fn rex_has_no_integration_root() {
     assert_eq!(rex.integration_root(), Ok(None));
     assert!(rex.wire.calls().is_empty());
 }
+
+#[test]
+fn a_socket_now_served_by_a_server_with_another_endpoint_is_refused() {
+    let state = State::new();
+    let fixture = fixture("idle-login");
+    let script = Script::new(move |request, events| {
+        if request.short() == "server.status" {
+            let mut moved = status(PEER);
+            moved["listeners"][0]["addresses"][0] = json!("/tmp/other.sock");
+            return Ok(moved);
+        }
+        one_block(fixture.clone()).answer(request, events)
+    });
+    let rex = rex(script, &state, Local::default());
+    assert_eq!(
+        rex.survey(Scope::All, Depth::Spaces),
+        Err(MuxError::Unavailable(
+            "rex:/tmp/r.sock is now served by the Rex server whose endpoint is rex:/tmp/other.sock"
+                .into()
+        ))
+    );
+    assert_eq!(rex.wire.calls(), ["server.status"]);
+}

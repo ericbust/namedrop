@@ -289,3 +289,52 @@ fn a_prompt_reaches_a_scratch_claude_code_through_the_gate() {
     });
     std::fs::remove_file(path).unwrap();
 }
+
+/// The library's own door: `mux::connect` with a `rex:` endpoint surveys
+/// the scratch server, whose sessions hold at least one Claude Code block.
+#[test]
+#[ignore = "run with NAMEDROP_REX_LIVE=unix://<scratch server socket> and -- --ignored --test-threads=1"]
+fn mux_connect_surveys_a_scratch_server_through_a_rex_endpoint() {
+    use crate::mux::{AgentKind, Depth, Endpoint, MuxKind, Scope};
+    let state = std::env::temp_dir().join(format!("nd-rex-live-connect-{}", std::process::id()));
+    let endpoint = Endpoint::parse(&format!("rex:{}", socket().display()));
+    assert_eq!(endpoint.kind, MuxKind::Rex);
+    let mux = crate::mux::connect(
+        &state,
+        &endpoint,
+        Budget::ADAPTER_DEFAULT,
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(mux.endpoint(), &endpoint);
+    let spaces = mux.survey(Scope::All, Depth::Spaces).unwrap().spaces;
+    assert!(!spaces.is_empty());
+    let panes: Vec<_> = mux
+        .survey(Scope::All, Depth::Panes)
+        .unwrap()
+        .spaces
+        .into_iter()
+        .flat_map(|space| space.panes)
+        .collect();
+    assert!(
+        panes
+            .iter()
+            .any(|pane| pane.agent.as_ref().is_some_and(|agent| {
+                agent.kind == AgentKind::Known(crate::AgentRuntime::ClaudeCode)
+            })),
+        "{panes:#?}"
+    );
+    for pane in &panes {
+        let process = mux.process(&pane.id).unwrap();
+        println!(
+            "{} {:?} agent={:?} shell={:?} group={:?}",
+            pane.id.as_str(),
+            pane.title,
+            pane.agent
+                .as_ref()
+                .map(|agent| (&agent.kind, &agent.session)),
+            process.shell_pid,
+            process.foreground_group
+        );
+    }
+}
