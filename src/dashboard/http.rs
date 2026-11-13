@@ -1402,12 +1402,7 @@ fn serve_connection(
         Ok(Route::ImageUpload) => upload_image(&mut reader, &mut writer, front, &request),
         Ok(Route::Image(name)) => serve_image(&mut writer, front, &name),
         Ok(Route::Sounds) => {
-            let settings = super::sounds::read(&front.files);
-            let settings = match known_agents(front, history_store) {
-                Some(known) => settings.prune(&known),
-                None => settings,
-            };
-            respond_sounds(&mut writer, "200 OK", &settings)
+            respond_sounds(&mut writer, "200 OK", &super::sounds::read(&front.files))
         }
         Ok(Route::ChangeSounds) => {
             change_sounds(&mut reader, &mut writer, front, history_store, &request)
@@ -2402,20 +2397,14 @@ fn change_sounds(
         Ok(guard) => guard,
         Err(status) => return respond_status(writer, status),
     };
-    let mut settings = super::sounds::read(&front.files);
-    if let Some(known) = &known {
-        settings = settings.prune(known);
-    }
-    let settings = match settings.clone().apply(change) {
-        Ok(changed) => match &known {
-            Some(known) => changed.prune(known),
-            None => changed,
-        },
+    let stored = super::sounds::read(&front.files);
+    let settings = match stored.clone().change(change, known.as_ref()) {
+        Ok(changed) => changed,
         Err(super::sounds::Rejected::TooManyAgents) => {
             return respond_status(writer, Status::BadRequest);
         }
         Err(super::sounds::Rejected::Stale) => {
-            return respond_sounds(writer, "409 Conflict", &settings);
+            return respond_sounds(writer, "409 Conflict", &stored);
         }
     };
     if super::sounds::write(&front.files, &settings).is_err() {
@@ -2425,7 +2414,7 @@ fn change_sounds(
 }
 
 /// The pane addresses of the agents the person can message today, or `None`
-/// when the listing fails, so nothing is pruned on a guess.
+/// when the listing fails, so no pick is dropped on a guess.
 fn known_agents(front: &Front, history_store: &Mutex<HistoryStore>) -> Option<HashSet<String>> {
     let mut guard = history_store.lock().ok()?;
     let peers = guard

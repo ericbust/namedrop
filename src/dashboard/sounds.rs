@@ -67,7 +67,7 @@ pub(crate) struct Settings {
 /// One edit the page posts, so two browsers changing different fields never
 /// overwrite each other. `was` is the value the page showed before the edit,
 /// and the edit applies only while the stored value still matches it.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub(crate) enum Change {
     Default {
@@ -97,10 +97,22 @@ pub(crate) enum Rejected {
 }
 
 impl Settings {
-    /// Drops the overrides of agents that are no longer known pane addresses,
-    /// so the cap counts only agents that still exist. A change applies after
-    /// this, so the agent it sets stays even when it is not known.
-    pub(crate) fn prune(mut self, known: &HashSet<String>) -> Self {
+    /// Applies `change` and keeps every other pick. Only a new pick that
+    /// would pass the cap first drops the picks of agents that are no longer
+    /// known, so a full list refuses it only when every listed agent is known.
+    /// The agent the change sets is kept either way.
+    pub(crate) fn change(
+        self,
+        change: Change,
+        known: Option<&HashSet<String>>,
+    ) -> Result<Self, Rejected> {
+        match (self.clone().apply(change.clone()), known) {
+            (Err(Rejected::TooManyAgents), Some(known)) => self.prune(known).apply(change),
+            (result, _) => result,
+        }
+    }
+
+    fn prune(mut self, known: &HashSet<String>) -> Self {
         self.agents.retain(|agent, _| known.contains(&agent.0));
         self
     }
@@ -278,23 +290,6 @@ mod tests {
                 assert_eq!(result, Err(Rejected::Stale), "{body}");
             }
         }
-        let pruned = stored.prune(&HashSet::new());
-        assert_eq!(
-            pruned.clone().apply(
-                change(json!({"kind": "agent", "agent": "pane-address-1",
-                              "sound": "soft", "was": "pop"}))
-                .unwrap()
-            ),
-            Err(Rejected::Stale),
-            "a pruned agent compares as having no sound of its own"
-        );
-        pruned
-            .apply(
-                change(json!({"kind": "agent", "agent": "pane-address-1",
-                              "sound": "soft", "was": null}))
-                .unwrap(),
-            )
-            .unwrap();
     }
 
     #[test]
@@ -328,45 +323,45 @@ mod tests {
     }
 
     #[test]
-    fn pruning_keeps_known_agents_and_the_change_after_it_sets_any_agent() {
-        let mut settings = Settings {
-            default: Sound::Bell,
-            muted: true,
-            ..Settings::default()
-        };
-        for index in 0..4 {
-            settings.agents.insert(agent(index), Sound::Pop);
-        }
-        let known: HashSet<String> = [agent(0), agent(2), agent(9)]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        let pruned = settings.clone().prune(&known);
-        assert_eq!(
-            pruned.agents.keys().cloned().collect::<Vec<_>>(),
-            [agent(0), agent(2)]
-        );
-        assert_eq!((pruned.default, pruned.muted), (Sound::Bell, true));
-        assert!(settings.prune(&HashSet::new()).agents.is_empty());
-        let mut full = Settings::default();
-        for index in 0..MAX_AGENTS {
-            full.agents.insert(agent(index), Sound::Ping);
-        }
-        let known = (0..MAX_AGENTS - 1)
-            .map(|index| String::from(agent(index)))
-            .collect();
+    fn a_save_keeps_every_pick_and_drops_unknown_agents_only_to_fit_a_new_one() {
         let set = |key: AgentKey| Change::Agent {
             agent: key,
             sound: Some(Sound::Pop),
             was: None,
         };
-        let fits = full.prune(&known).apply(set(agent(MAX_AGENTS))).unwrap();
+        let mut few = Settings::default();
+        few.agents.insert(agent(1), Sound::Bell);
+        let known: HashSet<String> = HashSet::new();
+        let kept = few.change(set(agent(2)), Some(&known)).unwrap();
         assert_eq!(
-            fits.agents[&agent(MAX_AGENTS)],
-            Sound::Pop,
-            "a pick after a pane closed fits again, though its agent is not known yet"
+            kept.agents.keys().cloned().collect::<Vec<_>>(),
+            [agent(1), agent(2)],
+            "an agent that is not a direct message peer keeps its pick"
         );
+        let mut full = Settings::default();
+        for index in 0..MAX_AGENTS {
+            full.agents.insert(agent(index), Sound::Ping);
+        }
+        let known: HashSet<String> = (0..MAX_AGENTS - 1)
+            .map(|index| String::from(agent(index)))
+            .collect();
+        let fits = full
+            .clone()
+            .change(set(agent(MAX_AGENTS)), Some(&known))
+            .unwrap();
+        assert_eq!(fits.agents[&agent(MAX_AGENTS)], Sound::Pop);
         assert_eq!(fits.agents.len(), MAX_AGENTS);
+        assert!(!fits.agents.contains_key(&agent(MAX_AGENTS - 1)));
+        assert_eq!(
+            full.clone().change(set(agent(MAX_AGENTS)), None),
+            Err(Rejected::TooManyAgents),
+            "with no listing nothing is dropped"
+        );
+        let all: HashSet<String> = (0..MAX_AGENTS).map(|index| String::from(agent(index))).collect();
+        assert_eq!(
+            full.change(set(agent(MAX_AGENTS)), Some(&all)),
+            Err(Rejected::TooManyAgents)
+        );
     }
 
     #[test]

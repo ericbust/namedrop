@@ -3222,23 +3222,27 @@ else:
             );
             serde_json::from_str::<Value>(&response.body).unwrap()
         };
+        let gone = "pane-address-9-9-9";
         assert_eq!(
             read(&server),
-            json!({"default": "chime", "muted": false, "agents": {}}),
-            "the page sees the same pruned picks a save compares against"
+            json!({"default": "chime", "muted": false, "agents": {gone: "knock"}}),
+            "the page sees every stored pick, as a save compares against them"
         );
         let stored = fs::read(&file).unwrap();
-        let unknown = json!({"kind": "agent", "agent": "pane-address-9-9-9",
-                             "sound": "pop", "was": "knock"});
-        let response = server.post("/api/sounds", &unknown.to_string(), &[]);
+        let stale = json!({"kind": "agent", "agent": gone, "sound": "pop", "was": null});
+        let response = server.post("/api/sounds", &stale.to_string(), &[]);
         assert_eq!(response.status, 409, "{}", response.body);
         assert_eq!(
             serde_json::from_str::<Value>(&response.body).unwrap(),
-            json!({"default": "chime", "muted": false, "agents": {}}),
-            "an agent that is gone compares as having no sound of its own"
+            json!({"default": "chime", "muted": false, "agents": {gone: "knock"}}),
         );
         assert_eq!(fs::read(&file).unwrap(), stored, "a stale change");
+        let clear = json!({"kind": "agent", "agent": gone, "sound": null, "was": "knock"});
+        let response = server.post("/api/sounds", &clear.to_string(), &[]);
+        assert_eq!(response.status, 200, "{}", response.body);
         let (lead, tester) = ("address-w1-lead", "address-w2-tester");
+        // A channel member that is not a direct message peer keeps its pick.
+        let member = "pane-address-1-2-3";
         for (change, expected) in [
             (
                 json!({"kind": "default", "sound": "bell", "was": "chime"}),
@@ -3253,18 +3257,20 @@ else:
                 json!({"default": "bell", "muted": true, "agents": {lead: "pop"}}),
             ),
             (
-                json!({"kind": "agent", "agent": "pane-address-1-2-3",
+                json!({"kind": "agent", "agent": member,
                        "sound": "soft", "was": null}),
-                json!({"default": "bell", "muted": true, "agents": {lead: "pop"}}),
+                json!({"default": "bell", "muted": true,
+                       "agents": {lead: "pop", member: "soft"}}),
             ),
             (
                 json!({"kind": "agent", "agent": tester, "sound": "none", "was": null}),
                 json!({"default": "bell", "muted": true,
-                       "agents": {lead: "pop", tester: "none"}}),
+                       "agents": {lead: "pop", member: "soft", tester: "none"}}),
             ),
             (
                 json!({"kind": "agent", "agent": lead, "sound": null, "was": "pop"}),
-                json!({"default": "bell", "muted": true, "agents": {tester: "none"}}),
+                json!({"default": "bell", "muted": true,
+                       "agents": {member: "soft", tester: "none"}}),
             ),
         ] {
             let response = server.post("/api/sounds", &change.to_string(), &[]);
