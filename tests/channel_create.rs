@@ -1124,6 +1124,47 @@ fn a_workspace_or_tab_herdr_opened_in_another_folder_is_closed_again() {
     );
 }
 
+#[test]
+fn a_channel_whose_activation_fails_after_it_was_saved_is_not_left_active() {
+    let f = fixture();
+    let server = Server::start(&f);
+    // Activation saves the space, then finishes its first reconciliation.
+    // This makes that last write fail, as a busy database can.
+    f.sql(
+        "CREATE TRIGGER fail_first_reconciliation BEFORE UPDATE ON reconciliation_epochs
+         WHEN NEW.worktree_id = 'w4' AND NEW.completed = 1
+         BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+    );
+    let response = server.create_channel("w1", "Proto", "~/project");
+    assert_eq!(response.status, 500, "{}", response.body);
+    assert_eq!(
+        response.error(),
+        "Namedrop couldn't activate in the new workspace, so it was closed again. Try again."
+    );
+    assert_eq!(
+        creations(&f).last().unwrap(),
+        &args(&["workspace", "close", "w4"])
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM worktrees WHERE worktree_id = 'w4'"),
+        1,
+        "the activation had been saved before it failed"
+    );
+    assert_eq!(
+        f.count(
+            "SELECT COUNT(*) FROM worktrees WHERE worktree_id = 'w4' \
+             AND activated = 1 AND deactivated = 0"
+        ),
+        0,
+        "the closed workspace is not left as an active space"
+    );
+    let kept = fs::read_to_string(f.state.join("dashboard/channel-folders.json"));
+    assert!(
+        kept.map_or(true, |kept| !kept.contains("\"w4\"")),
+        "no folder is kept for a channel that was not made"
+    );
+}
+
 fn snapshots(server: &Server, workspace: &str) -> std::sync::mpsc::Receiver<Value> {
     let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
     write!(

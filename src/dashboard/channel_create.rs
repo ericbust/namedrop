@@ -9,7 +9,10 @@ use super::super::snapshot::{SpaceKey, StartedAgent};
 use super::{Front, Request, read_json_body, respond, respond_status};
 use crate::store::AliasClaim;
 use crate::store::dashboard::SpaceRow;
-use crate::{HerdrCommandExecutor, ProcessHerdr, StateNamespace, StateStore, WorkspaceLabel};
+use crate::{
+    ActorKind, HerdrCommandExecutor, MutationAttribution, ProcessHerdr, StateNamespace, StateStore,
+    WorkspaceLabel,
+};
 use serde::Deserialize;
 use serde_json::json;
 use std::{
@@ -753,6 +756,36 @@ pub(super) fn channel_folder(
     }
 }
 
+/// Takes back what a failed activation saved, so the workspace that was
+/// closed again isn't left as an active space. Only this space's own row is
+/// touched: the `deactivate` command also removes what every space shares.
+fn undo_activation(state: &Path, namespace: &StateNamespace) {
+    let by = MutationAttribution::new(
+        ActorKind::Human,
+        "local-human",
+        u64::try_from(now_ms()).unwrap_or(0),
+    );
+    let undone = StateStore::open(state)
+        .and_then(|mut store| {
+            store.transaction(|transaction| {
+                if transaction
+                    .worktree_state(namespace)?
+                    .is_some_and(|space| space.activated && !space.deactivated)
+                {
+                    transaction.deactivate_worktree(namespace, &by)?;
+                }
+                Ok(())
+            })
+        })
+        .map_err(|error| error.to_string());
+    if let Err(error) = undone {
+        eprintln!(
+            "dashboard: could not take back the activation of {}: {error}",
+            namespace.space_id.as_str()
+        );
+    }
+}
+
 /// Keeps a channel's folder, and lets go of the folders of this Herdr
 /// session's closed workspaces.
 fn keep_folder(front: &Front, namespace: &StateNamespace, folder: &str, live: &[Workspace]) {
@@ -850,6 +883,7 @@ fn create(
         json!({"confirmed": true}),
     ) {
         eprintln!("dashboard: could not activate the new workspace {workspace_id}: {error}");
+        undo_activation(front.files.state(), &namespace);
         herdr.undo(Undo::Workspace(workspace_id));
         return Err(ChannelRefusal::ActivateFailed);
     }
