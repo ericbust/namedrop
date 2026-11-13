@@ -71,7 +71,10 @@ impl Locator {
     /// The value `lookup` gives, and which name gave it. A Herdr value counts
     /// even when empty, as it always has; an empty neutral value counts as
     /// unset.
-    pub fn resolve<V: AsRef<OsStr>>(self, lookup: impl Fn(&str) -> Option<V>) -> Option<(Name, V)> {
+    pub(crate) fn resolve<V: AsRef<OsStr>>(
+        self,
+        lookup: impl Fn(&str) -> Option<V>,
+    ) -> Option<(Name, V)> {
         let name = match self {
             Self::StateDir if lookup(self.herdr_var()).is_some() => Name::Herdr,
             Self::StateDir | Self::Endpoint | Self::Space | Self::Pane => home(&lookup),
