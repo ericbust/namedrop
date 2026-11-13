@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import socket
 import sqlite3
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.error
+import urllib.request
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -1048,6 +1050,151 @@ def check_rex_live_down_after_a_failed_stop(scratch):
             "leftovers")
 
 
+STUB_CLAUDE = """#!/bin/sh
+here={here}
+printf '%s\\n' "$*" >> "$here/argv"
+printf '%s' "${{CLAUDE_CODE_OAUTH_TOKEN-unset}}" > "$here/token-seen"
+if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] && [ ! -f "$here/ignores-token" ]; then
+  echo '{{"loggedIn": true, "authMethod": "oauth_token"}}'
+else
+  cat "$here/status.json"
+fi
+"""
+
+
+def refusal(action):
+    try:
+        action()
+    except RuntimeError as error:
+        return str(error)
+    raise AssertionError("the run was not refused")
+
+
+def check_claude_login(scratch):
+    base = scratch / "claude-login"
+    real_home = base / "real-home"
+    credentials = real_home / ".claude/.credentials.json"
+    keychains = real_home / "Library/Keychains"
+    keychains.mkdir(parents=True)
+    credentials.parent.mkdir(parents=True)
+    credentials.write_text("{}")
+    stub_dir = base / "stub"
+    stub_dir.mkdir()
+    stub = stub_dir / "claude"
+    stub.write_text(STUB_CLAUDE.format(here=shlex.quote(str(stub_dir))))
+    stub.chmod(0o755)
+    (stub_dir / "status.json").write_text(json.dumps(
+        {"loggedIn": True, "authMethod": "claude.ai", "orgName": "Acme", "subscriptionType": "team"}))
+    token, token_file = "sk-ant-oat01-selftest", base / "token"
+    tools = {"claude": str(stub), "herdr": "/usr/bin/true", "git": "/usr/bin/true",
+             "cargo": "/usr/bin/true"}
+    organization, looked_up = {}, []
+
+    def urlopen(request, timeout=None):
+        looked_up.append(request.get_header("Authorization"))
+        if "refused" in organization:
+            raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {}, None)
+        return FakeResponse(json.dumps({"organization": organization}).encode())
+
+    def prepared(name, default_login=False, org=None):
+        profile = testbed.Profile(name)
+        profile.create()
+        profile.login = testbed.claude_login(default_login, org)
+        with contextlib.redirect_stdout(io.StringIO()):
+            profile.prepare(("claude",))
+        return profile
+
+    def calls():
+        argv = stub_dir / "argv"
+        return argv.read_text().splitlines() if argv.exists() else []
+
+    environment = {"TESTBED_HOME": str(base / "testbed"),
+                   testbed.CLAUDE_TOKEN_FILE_VARIABLE: str(token_file)}
+    with patch.dict(os.environ, environment), patch.object(Path, "home", lambda: real_home), \
+            patch.object(testbed, "host_tools", lambda herdr_bin=None: dict(tools)), \
+            patch.object(urllib.request, "urlopen", urlopen):
+        token_file.write_text(token + "\n")
+        token_file.chmod(0o600)
+        stale = testbed.Profile("test-stale-login")
+        stale.create()
+        links = [(credentials, stale.dir / "home/.claude/.credentials.json")]
+        if sys.platform == "darwin":
+            links.append((keychains, stale.dir / "home/Library/Keychains"))
+        for target, link in links:
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(target)
+        stale.state["tools"] = {"claude": str(stub)}
+        stale.save()
+        assert "./testbed up" in refusal(testbed.Profile("test-stale-login").require_claude_login)
+        organization.update(organization_type="claude_max", name="me@example.com's Organization")
+        profile = prepared("test-stale-login")
+        profile.require_claude_login()
+        for _, link in links:
+            assert not link.is_symlink() and not link.exists(), "a default login link stayed: " + str(link)
+        assert (stub_dir / "token-seen").read_text() == token, "Claude Code started without the token"
+        assert calls() == ["auth status --json"], calls()
+        assert looked_up == ["Bearer " + token], looked_up
+        assert profile.state["claude_account"] == ("max plan, personal account, signed in with the "
+                                                   "testbed token"), profile.state["claude_account"]
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in profile.env
+        for kept in ("env.sh", "state.json"):
+            assert token not in (profile.dir / kept).read_text(), "the token is in " + kept
+        assert os.readlink(profile.dir / "bin/claude") == str(profile.dir / "libexec/claude-with-token")
+
+        organization.update(organization_type="claude_team", name="Acme")
+        assert "--claude-org" in refusal(lambda: prepared("test-team-token"))
+        assert "./testbed up" in refusal(testbed.Profile("test-team-token").require_claude_login)
+        team = prepared("test-team-token", org="Acme")
+        assert team.state["claude_account"].startswith("team plan, organization Acme"), team.state
+        team.require_claude_login()
+
+        organization.clear()
+        organization.update(organization_type="claude_free", name="me@example.com's Organization")
+        unknown = refusal(lambda: prepared("test-unknown-plan"))
+        assert "--claude-org" in unknown and "example.com" not in unknown, unknown
+        organization["refused"] = True
+        scoped = prepared("test-scoped-token")
+        assert "unreadable with this token's scope" in scoped.state["claude_account"], scoped.state
+        organization.clear()
+
+        token_file.write_text(token + "\n" + token + "-second\n")
+        malformed = refusal(lambda: prepared("test-two-line-token"))
+        assert "one line" in malformed and token not in malformed, malformed
+        token_file.write_text(token + "\n")
+
+        (stub_dir / "ignores-token").write_text("")
+        assert "not the testbed token" in refusal(lambda: prepared("test-ignored-token"))
+        (stub_dir / "ignores-token").unlink()
+
+        token_file.chmod(0o640)
+        assert "chmod 600" in refusal(lambda: prepared("test-shared-token"))
+        token_file.unlink()
+        before = calls()
+        missing = refusal(lambda: prepared("test-missing-token"))
+        assert "claude setup-token" in missing and str(token_file) in missing, missing
+        assert calls() == before, "Claude Code started with no token"
+
+        assert "--claude-org" in refusal(lambda: prepared("test-default-login", default_login=True))
+        refused = testbed.Profile("test-default-login")
+        assert not (refused.dir / "home/.claude/.credentials.json").is_symlink(), \
+            "a refused default login kept its link"
+        assert "./testbed up" in refusal(refused.require_claude_login)
+        default = prepared("test-default-login", default_login=True, org="Acme")
+        assert os.readlink(default.dir / "home/.claude/.credentials.json") == str(credentials)
+        assert (stub_dir / "token-seen").read_text() == "unset"
+        assert default.state["claude_account"].endswith("signed in with the default login"), default.state
+        token_file.write_text(token + "\n")
+        token_file.chmod(0o600)
+        with patch.object(testbed.Profile, "running", lambda self: True):
+            assert "./testbed stop" in refusal(lambda: prepared("test-default-login"))
+            organization.update(organization_type="claude_max", name="me@example.com's Organization")
+            prepared("test-stale-login")
+    return ("Claude login: a token run sets the token only inside Claude Code's launch and drops "
+            "the default login's links; no token, an unnamed organization, a token Claude Code "
+            "ignores, a shared or malformed token file, or a login switch under a running server "
+            "refuses; a refused check leaves nothing trusted; --claude-default-login links the login")
+
+
 def run(kit):
     passed = True
     with tempfile.TemporaryDirectory(prefix="nd-tb-selftest-") as scratch:
@@ -1059,6 +1206,7 @@ def run(kit):
                   ("Codex config", lambda: check_codex_settings(base)),
                   ("seed", lambda: check_seed(kit, base)),
                   ("profile safety", lambda: check_profile_safety(base)),
+                  ("Claude login", lambda: check_claude_login(base)),
                   ("Rex lane", lambda: check_rex_lane(base)),
                   ("Rex lane cleanup", lambda: check_rex_lane_cleanup(base)),
                   ("Rex live hooks", lambda: check_rex_live_hooks(base)),
