@@ -2,6 +2,12 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.9.1] - 2026-11-12
+
+### Fixed
+
+- A wide diagram in Channels stays readable. A diagram wider than its column was always shrunk to fit, so a long left-to-right flowchart came out about 45 px tall in the thread pane or on a phone. A diagram is now shrunk only down to 0.7 of its drawn size, where its labels are about 10 px. A wider one keeps that size and scrolls sideways inside its own box, by swipe, scrollbar or the arrow keys. The page itself does not scroll sideways, and a click or tap still opens the diagram full size.
+
 ## [1.9.0] - 2026-11-12
 
 ### Added
