@@ -13,6 +13,12 @@ export const MAX_DIAGRAM_SOURCE = 10_000;
 export const MAX_DIAGRAMS_PER_MESSAGE = 8;
 export type DiagramRefusal = "size" | "count";
 
+/** A drawing wider than its column is shown smaller to fit, down to this share
+ * of its drawn size, where its 14 px labels are about 10 px. Below that they
+ * are too small to read, so the drawing keeps this size and its box scrolls
+ * sideways. */
+export const MIN_DIAGRAM_SCALE = 0.7;
+
 /** Counts the diagrams one message draws, in the order they appear. */
 export function diagramBudget(): (source: string) => DiagramRefusal | null {
   let drawn = 0;

@@ -11,6 +11,12 @@ Each release is a section here, newest first. The GitHub release for a version u
 - An agent that Channels started and that has not connected after 20 seconds shows under **Needs you**, with its pane one click away. It may be asking you to trust the folder or to log in. Channels never answers such a screen for you. **Type to agent** now works for a named agent that has no session yet, so you can answer the screen from the page, including from your phone. A new Codex connects after its first prompt, so type one in its pane.
 - Both forms work over the tailnet link, with the same sign-in and CSRF checks as posting. Errors read plainly in the form: a name that is taken, a folder that doesn't exist, Herdr not reachable.
 
+## [1.9.1] - 2026-11-12
+
+### Fixed
+
+- A wide diagram in Channels stays readable. A diagram wider than its column was always shrunk to fit, so a long left-to-right flowchart came out about 45 px tall in the thread pane or on a phone. A diagram is now shrunk only down to 0.7 of its drawn size, where its labels are about 10 px. A wider one keeps that size and scrolls sideways inside its own box, by swipe, scrollbar or the arrow keys. The page itself does not scroll sideways, and a click or tap still opens the diagram full size.
+
 ## [1.9.0] - 2026-11-12
 
 ### Added

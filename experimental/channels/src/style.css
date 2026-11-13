@@ -3065,8 +3065,9 @@ body.resizing-panels * {
   margin: 0 auto var(--space-4);
 }
 
-/* A drawn diagram. One wider than its column is shown smaller to fit, and its
-   full size is one press away. */
+/* A drawn diagram. One wider than its column is shown smaller to fit, down to
+   the smallest size its labels can be read at. Past that its box scrolls
+   sideways. Its full size is one press away. */
 .diagram {
   max-width: 100%;
   margin: 6px 0;
@@ -3075,15 +3076,19 @@ body.resizing-panels * {
 .diagram-box {
   width: fit-content;
   max-width: 100%;
+  overflow: auto hidden;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--bg-raised);
 }
 .diagram-view {
   display: block;
-  max-width: 100%;
   padding: 10px 12px;
   cursor: zoom-in;
+}
+/* The box clips an outline drawn outside the button. */
+.diagram-view:focus-visible {
+  outline-offset: -2px;
 }
 .diagram img {
   display: block;
