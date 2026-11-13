@@ -835,3 +835,27 @@ fn a_context_hook_in_a_herdr_pane_speaks_herdr_and_binds_nothing() {
         assert!(!state.0.join("rex").exists());
     }
 }
+
+/// A hook whose Rex claim cannot be resolved, as one under a Codex app
+/// server whose Codex exited, finds the claimed server outside its
+/// ancestors, or no server at all. It is still in a Rex block, so its
+/// notices speak Rex's words, and it binds nothing and records its turn
+/// nowhere.
+#[test]
+fn a_context_hook_whose_rex_claim_fails_still_speaks_rex() {
+    let hook = Hook::of(&case("Codex 0.163 with --no-daemon"));
+    for peer in [Ok(99_999), Err(io::Error::from_raw_os_error(libc::ENOENT))] {
+        let mut lost = InBlock::of(&hook);
+        lost.ancestors = vec![1];
+        lost.peer = peer;
+        let state = State::new();
+        assert_eq!(
+            lost.hook(&state, &hook.local, &input("s1"), Some(AgentRuntime::Codex)),
+            HookHome {
+                kind: MuxKind::Rex,
+                location: None,
+            }
+        );
+        assert!(!state.0.join("rex").exists());
+    }
+}

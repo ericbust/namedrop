@@ -118,7 +118,9 @@ pub struct HookHome {
 /// hook first binds the input's session to the block, before the runtime's
 /// first survey, so that survey already reports it. Only the wrapper's
 /// `runtime` names the agent, because a nested agent inherits the outer
-/// agent's environment.
+/// agent's environment. Only a Rex claim fails to resolve, so a hook whose
+/// claim failed, as under a Codex app server that outlived the Codex that
+/// started it, still speaks Rex's words, and records its turn nowhere.
 pub fn context_hook(
     state: &Path,
     input: &str,
@@ -136,12 +138,12 @@ pub(crate) fn context_hook_on(
     local: &dyn LocalProcesses,
     now_ms: u64,
 ) -> HookHome {
-    let home = resolve(&Flags::default(), inherited).ok();
+    let home = resolve(&Flags::default(), inherited);
     let session = serde_json::from_str::<serde_json::Value>(input)
         .ok()
         .and_then(|input| input["session_id"].as_str().map(AgentSessionId::new))
         .filter(|session| !session.as_str().is_empty());
-    if let (Some(Home::Rex(place)), Some(session), Some(runtime)) = (&home, &session, runtime) {
+    if let (Ok(Home::Rex(place)), Some(session), Some(runtime)) = (&home, &session, runtime) {
         let entrypoint = inherited.var("CLAUDE_CODE_ENTRYPOINT");
         let _ = place.bind(
             state,
@@ -153,8 +155,8 @@ pub(crate) fn context_hook_on(
         );
     }
     HookHome {
-        kind: home.as_ref().map_or(MuxKind::Herdr, Home::kind),
-        location: home.and_then(|home| home.location(inherited)),
+        kind: home.as_ref().map_or(MuxKind::Rex, Home::kind),
+        location: home.ok().and_then(|home| home.location(inherited)),
     }
 }
 
