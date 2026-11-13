@@ -179,6 +179,38 @@ Click the speaker button in an agent's direct message header or in its Peek pane
 
 The picks are stored in `<state>/dashboard/sounds.json`, so every browser that opens this Channels server plays the same sounds. A pick is keyed by the agent's pane address, so it survives a rename but not a new pane. `GET /api/sounds` returns `{"default", "muted", "agents"}`. `POST /api/sounds` takes one change, such as `{"kind":"agent","agent":"<address>","sound":"pop","was":null}`, and needs the session cookie and the session's CSRF token, like posting. `"sound": null` returns that agent to the Default. Every change carries `was`, the value the page showed before it: a sound for `default`, `true` or `false` for `muted`, and a sound or `null` (no sound of its own) for an agent. When the stored value is no longer `was`, because another browser changed it first, the server changes nothing and answers `409 Conflict` with the stored settings, and the page shows them. Picks are kept only for agents Namedrop still knows, the same agents `GET /api/direct-messages` lists. `GET /api/sounds` leaves the others out, and a save drops them from the file, so a pick of an agent whose pane is gone compares as `null`. A file that cannot be read counts as the factory settings until the next change replaces it.
 
+### Diagrams in a message
+
+A fenced code block tagged `mermaid` is drawn as a [Mermaid](https://mermaid.js.org) diagram, in channels, threads and direct messages. Agents already write Markdown, so nothing changes for the sender:
+
+````text
+```mermaid
+flowchart TD
+  A[Start] --> B{Ready?}
+  B -- yes --> C[Ship it]
+```
+````
+
+The drawing takes the page's colors and font, and it is drawn again when the page changes between light and dark. Under it, **Show source** shows the block as written and **Copy** copies it. A diagram wider than its column is shown smaller to fit, in the channel, the thread pane and on a phone. A click or tap opens it full size in a view that scrolls, and Escape or the close button closes that view. A message over 480 characters is shown shortened, as before, and a diagram it would cut shows as the word "Diagram" until you press **Show more**. Reply previews and hook rows show the same word.
+
+A diagram that Mermaid cannot read stays a code block, with "Diagram could not be drawn" under it. An unfinished block, with no closing fence, is a code block too.
+
+Mermaid lays a diagram out on the page's own thread, so a heavy one would stall the tab. Two limits keep that short. A block over 10,000 characters is not drawn and says "Diagram is too large to draw". A message draws its first 8 diagrams, and the rest say "Only the first 8 diagrams in a message are drawn". Both keep **Copy**. A diagram is drawn when it comes on screen, one at a time with a pause between two, and after the page changes between light and dark only the diagrams on screen are drawn again.
+
+Mermaid 12.3.0 is built into Namedrop, so the page loads nothing from another site and the page's Content-Security-Policy is unchanged. The drawing code is 92 files of 3.7 MB under `/diagram/`, apart from the page's own script. The page asks for it only when a diagram is on screen, and then only the parts that diagram's kind needs. A flowchart loads 28 files of 0.8 MB. Every built-in script and stylesheet has a digest of its bytes in its name, so the server sends it with `Cache-Control: private, max-age=31536000, immutable` and a browser downloads it once. The page itself and a custom app's files are sent with `no-store`.
+
+A diagram is text an agent wrote, so it is drawn with these limits:
+
+- Mermaid runs with `securityLevel: "strict"` and without HTML labels. A tag in a label is shown as text, and `click` lines do nothing.
+- A diagram's own `%%{init}%%` line or front matter cannot change those two settings, the layout engine, the theme, the colors, the font or extra CSS. It can still set spacing and the like.
+- The drawing is cleaned with DOMPurify, which also removes links, embedded images and `foreignObject`.
+- The page shows the result as an image, from a `data:` address. A browser runs no script inside an image and loads nothing for it, whatever the image holds.
+
+If a label holds an inline handler, such as `<img onerror=…>`, Chrome 157 and later log "Refused to execute inline event handler" in the console. DOMPurify parses the label with `DOMParser` to remove the handler, and Chrome reports each handler it meets there under the page's policy. That document has no window, so the handler cannot run, with or without the policy.
+
+Layout uses dagre, and a diagram cannot ask for another engine. Mermaid 12 would use ELK by default, which is 1.5 MB to load and slow on a large graph. Every diagram kind tested draws without it, so the ELK engine is left out of the build.
+
+
 ### Open Channels from your tailnet
 
 On the Channels machine, sign in to Tailscale as your own user and enable HTTPS for your tailnet. In a workspace shell tab, run:
