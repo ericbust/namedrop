@@ -94,6 +94,15 @@ impl Launches {
         }
     }
 
+    /// Whether Channels started this address's agent and still waits for it
+    /// to connect.
+    pub fn remembers(&self, namespace: &StateNamespace, address_id: &str) -> bool {
+        self.registry()
+            .launches
+            .iter()
+            .any(|known| known.is(namespace, address_id))
+    }
+
     pub fn revision(&self) -> u64 {
         self.registry().revision
     }
@@ -387,7 +396,11 @@ mod tests {
         let recorded = launches.revision();
         launches.forget(&namespace, "other");
         assert_eq!(launches.revision(), recorded);
+        assert!(launches.remembers(&namespace, "address"));
+        assert!(!launches.remembers(&namespace, "other"));
+        assert!(!launches.remembers(&StateNamespace::for_space("socket", "w2"), "address"));
         launches.forget(&namespace, "address");
+        assert!(!launches.remembers(&namespace, "address"));
         assert_eq!(launches.revision(), recorded + 1);
         assert!(launches.starting(&namespace).is_empty());
     }

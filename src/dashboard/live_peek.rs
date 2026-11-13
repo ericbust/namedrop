@@ -280,15 +280,19 @@ impl PartialEq for NativeIdentity {
 }
 impl Eq for NativeIdentity {}
 impl NativeIdentity {
-    /// Input goes to an agent, never to a bare shell: a pane with no session
-    /// takes it only while Herdr sees an agent there, as on a first-run
-    /// screen. A shell left behind by an agent that exited takes none.
-    fn accepts_input(&self) -> bool {
-        (self.session.is_some() || self.runs_agent)
-            && !self
-                .status
-                .as_deref()
-                .is_some_and(|status| matches!(status, "offline" | "disconnected" | "unknown"))
+    /// Input goes to an agent, never to a pane that was only named: a pane
+    /// with no session takes it while Herdr sees an agent there, as on a
+    /// first-run screen. `launched` is a pane Channels started an agent in
+    /// and still waits on. Its card sends the person there, so it takes
+    /// input whatever Herdr makes of it, also when the agent exited and the
+    /// person starts it again.
+    fn accepts_input(&self, launched: bool) -> bool {
+        launched
+            || (self.session.is_some() || self.runs_agent)
+                && !self
+                    .status
+                    .as_deref()
+                    .is_some_and(|status| matches!(status, "offline" | "disconnected" | "unknown"))
     }
 }
 
@@ -1036,13 +1040,15 @@ impl LivePeeks {
             .map_err(|_| Status::Unavailable)?;
         let binding = recorded(&mut store, key, address)?;
         // An agent that hasn't connected has no session on either side; its
-        // first-run screens are answered here, so it takes input too, while
-        // Herdr sees the agent running (`accepts_input`).
+        // first-run screens are answered here, so it takes input too
+        // (`accepts_input`).
         if binding.pane_type != crate::PaneType::Agent {
             return Err(Status::Gone);
         }
+        let launched = binding.agent_session_id.is_none()
+            && front.launches.remembers(&binding.namespace, address);
         let identity = native(&binding, Duration::from_millis(500))?.identity;
-        if !identity.accepts_input() {
+        if !identity.accepts_input(launched) {
             return Err(Status::Gone);
         }
         if identity.session.as_deref() != binding.agent_session_id.as_ref().map(|id| id.as_str()) {
@@ -1063,7 +1069,7 @@ impl LivePeeks {
             InputPost::Text { text, .. } => {
                 let current = recorded(&mut store, key, address)?;
                 let updated = native(&binding, Duration::from_millis(500))?.identity;
-                if current != binding || updated != identity || !updated.accepts_input() {
+                if current != binding || updated != identity || !updated.accepts_input(launched) {
                     return Err(Status::Gone);
                 }
                 send(&["pane", "run", &binding.pane_id, &text])
@@ -1691,6 +1697,34 @@ mod tests {
                 }
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn a_pane_takes_input_for_an_agent_herdr_sees_or_one_channels_started() {
+        let pane = |session: Option<&str>, status: &str, runs_agent: bool| NativeIdentity {
+            terminal: "term".into(),
+            session: session.map(str::to_owned),
+            status: Some(status.into()),
+            runs_agent,
+        };
+        assert!(pane(Some("s"), "idle", true).accepts_input(false));
+        assert!(
+            pane(None, "blocked", true).accepts_input(false),
+            "a first-run screen"
+        );
+        assert!(
+            !pane(None, "idle", false).accepts_input(false),
+            "a pane that was only named"
+        );
+        assert!(
+            !pane(None, "unknown", false).accepts_input(false),
+            "a shell"
+        );
+        assert!(!pane(Some("s"), "offline", true).accepts_input(false));
+        assert!(
+            pane(None, "unknown", false).accepts_input(true),
+            "a pane Channels started an agent in takes input whatever Herdr reports"
         );
     }
 
