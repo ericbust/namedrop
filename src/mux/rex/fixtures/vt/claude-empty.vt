@@ -1,0 +1,24 @@
+
+[0m[38;2;153;153;153m[48;2;55;55;55m❯ [0m[38;2;255;255;255m[48;2;55;55;55mReply with exactly the word pong.[0m[48;2;55;55;55m                                             [0m
+
+[0m[38;2;255;255;255m⏺[0m pong
+
+[0m[38;2;153;153;153m✻[0m [0m[38;2;153;153;153mBrewed for 1s · done 8:41 PM[0m
+
+[0m[38;2;153;153;153m[48;2;55;55;55m❯ [0m[38;2;255;255;255m[48;2;55;55;55mRun this exact shell command with the Bash tool and then reply with only its [0m[48;2;55;55;55m [0m
+[0m[48;2;55;55;55m  [0m[38;2;255;255;255m[48;2;55;55;55moutput: claude -p 'Reply with exactly the word ok.' --model haiku[0m[48;2;55;55;55m             [0m
+
+  [0m[38;2;153;153;153mRan [0m[1m[38;2;153;153;153m1[0m[38;2;153;153;153m shell command [0m
+
+[0m[38;2;255;255;255m⏺[0m The nested[1Ccall[1Cprinted[1Ca[1Cnotice[1Cbefore[1Cits[1Canswer,[1Cwhich[1Cwraps[1Conto
+[2Cthe[1Cnext[1Ctwo[1Clines[1Cof[1Cthe[1Ctranscript[1Cas[1Cthis[1Cone[1Cdoes
+  here, with plain spaces between its words.
+  ok
+
+[0m[38;2;153;153;153m✻[1CBrewed for 7s · done 8:42 PM[0m
+
+[0m[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────[0m
+❯ 
+[0m[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────[0m
+[2C[0m[1m[38;5;6mproj[0m[38;2;153;153;153m [0m[38;5;5mHaiku 5.5[0m[38;2;153;153;153m [0m[38;5;2mctx:94%[0m
+[2C[0m[38;2;255;193;7m⏵⏵ auto mode on[0m[38;2;153;153;153m (shift+tab to cycle)[0m
