@@ -194,8 +194,8 @@ fn lives(binding: &Binding, group: u32, bound_agent: Option<&LocalRead>) -> bool
 /// candidate is the foreground itself, it counts only when `foreground_pids`,
 /// the live members of its group, holds no other process: a non-interactive
 /// shell runs its commands in its own group. `None` also when Rex leaves the
-/// ancestors out, for that read only.
-pub(super) fn shell_of(process: &ProcessReply, foreground_pids: &[u32]) -> Option<u32> {
+/// ancestors out, or the group could not be listed, for that read only.
+pub(super) fn shell_of(process: &ProcessReply, foreground_pids: Option<&[u32]>) -> Option<u32> {
     let child = process.child.as_ref()?;
     let foreground = process.foreground.as_ref()?;
     let candidate = if child.name == "login" {
@@ -216,7 +216,7 @@ pub(super) fn shell_of(process: &ProcessReply, foreground_pids: &[u32]) -> Optio
     {
         return None;
     }
-    if candidate.pid == foreground.pid && foreground_pids.iter().any(|pid| *pid != candidate.pid) {
+    if candidate.pid == foreground.pid && foreground_pids?.iter().any(|pid| *pid != candidate.pid) {
         return None;
     }
     Some(candidate.pid)

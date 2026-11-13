@@ -523,13 +523,11 @@ impl<W: Wire> MuxRead for RexMux<W> {
             Some(LocalRead::Alive(foreground)) => Some(foreground.group),
             _ => None,
         };
-        let foreground_pids = group
-            .and_then(|group| members(&*self.local, group))
-            .unwrap_or_default();
+        let foreground_pids = group.and_then(|group| members(&*self.local, group));
         Ok(PaneProcess {
-            shell_pid: shell_of(&reply, &foreground_pids),
+            shell_pid: shell_of(&reply, foreground_pids.as_deref()),
             foreground_group: group,
-            foreground_pids,
+            foreground_pids: foreground_pids.unwrap_or_default(),
             tty: None,
         })
     }

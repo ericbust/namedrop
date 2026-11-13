@@ -627,7 +627,7 @@ fn shell_of_finds_a_shell_only_below_login_or_as_an_interactive_child() {
             LocalRead::Alive(foreground) => foreground.group,
             other => panic!("{other:?}"),
         };
-        shell_of(&process, &members(&local, group).unwrap())
+        shell_of(&process, members(&local, group).as_deref())
     };
     assert_eq!(shell("idle-login"), Some(70802));
     assert_eq!(shell("busy-login"), Some(70829));
@@ -645,7 +645,7 @@ fn a_shell_whose_ancestors_rex_left_out_is_not_found() {
     let fixture = fixture("busy-login");
     let mut process: ProcessReply = serde_json::from_value(fixture["process"].clone()).unwrap();
     process.ancestors = None;
-    assert_eq!(shell_of(&process, &[75319]), None);
+    assert_eq!(shell_of(&process, Some(&[75319])), None);
 }
 
 #[test]
@@ -933,6 +933,25 @@ fn a_process_read_finds_the_shell_and_the_live_members_of_the_foreground_group()
             "session.attach session:s",
             "process block:b"
         ]
+    );
+}
+
+/// A group the system would not list may hold the shell's commands.
+#[test]
+fn a_process_read_whose_group_cannot_be_listed_names_no_shell() {
+    let state = State::new();
+    let fixture = fixture("idle-login");
+    let local = Local::from_fixture(&fixture);
+    local.groups.lock().unwrap().remove(&70802);
+    let rex = rex(one_block(fixture), &state, local);
+    assert_eq!(
+        rex.process(&PaneId::new("block:b")).unwrap(),
+        PaneProcess {
+            shell_pid: None,
+            foreground_group: Some(70802),
+            foreground_pids: Vec::new(),
+            tty: None,
+        }
     );
 }
 
