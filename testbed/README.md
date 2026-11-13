@@ -53,16 +53,17 @@ The profile's `claude` is a small wrapper. It reads the token file when Claude
 Code starts and sets `CLAUDE_CODE_OAUTH_TOKEN` for Claude Code and the
 commands and hooks it runs. The testbed never puts the token on a command
 line, in `env.sh`, in the profile's `state.json`, or in a log or report. An
-agent that prints its environment can still show it in its transcript. A
-token profile links neither `~/.claude/.credentials.json` nor
-the login keychain, and `up` removes those links from a profile an earlier
-version made. Every Claude Code start in the profile goes through the
-wrapper: the Herdr lane, `--inside-rex`, `rex up`, the daily-use and upgrade
-lanes, and the verify skill's probe scripts. They start it by its full path,
-`PROFILE/bin/claude`, because a pane's login shell can put `/usr/local/bin`
-and the system directories ahead of the profile's `bin`, where another
-`claude` would start without the token. The profile's `home/.bashrc` puts
-`bin` first again, so a `claude` you type in a pane is the wrapper too.
+agent that prints its environment can still show it in its transcript. A token
+profile links neither `~/.claude/.credentials.json` nor the login keychain,
+and `up` removes those links from a profile an earlier version made. Every
+Claude Code start in the profile goes through the wrapper: the Herdr lane,
+`--inside-rex`, `rex up` and the `rex` lines it prints, the daily-use and
+upgrade lanes, and the verify skill's probe scripts. They start it by its full
+path, `PROFILE/bin/claude`, because a pane's login shell can put
+`/usr/local/bin` and the system directories ahead of the profile's `bin`,
+where another `claude` would start without the token. The profile's
+`home/.bashrc` puts `bin` first again, so a `claude` you type in a pane is the
+wrapper too.
 
 Before the first prompt, `up`, `test` and `rex up` run `claude auth status
 --json` in the profile. For a token, they check that Claude Code signs in with
@@ -72,17 +73,18 @@ for a token, so the testbed asks the OAuth profile endpoint Claude Code reads,
 address only and follows no redirect.
 
 A token from `claude setup-token` carries only the inference scope, and the
-endpoint refuses it with HTTP 403. So for such a token, which is the usual
-case, the account line always reads `plan and organization unreadable with
-this token's scope, signed in with the testbed token`, and the run goes on.
-Neither Claude Code nor the testbed can name the account the token belongs
-to. Confirm it once, out of band: after the first run, check that its usage
-shows on your personal account and not on a team organization.
+endpoint refuses it with HTTP 403 and a `permission_error`. So for such a
+token, which is the usual case, the account line always reads `plan and
+organization unreadable with this token's scope, signed in with the testbed
+token`, and the run goes on. Neither Claude Code nor the testbed can name the
+account the token belongs to. Confirm it once, out of band: after the first
+run, check that its usage shows on your personal account and not on a team
+organization.
 
 HTTP 401 means the token was revoked or mistyped. The run stops: create a new
 token with `claude setup-token` and save it as above. Any other lookup
-failure, a redirect included, stops the run too. The token file must hold the
-token alone on one line.
+failure, a redirect or a 403 without `permission_error` included, stops the
+run too. The token file must hold the token alone on one line.
 
 The plan check works only when the plan is readable: for a token that has the
 profile scope, and for `--claude-default-login`, whose `claude auth status`
@@ -95,21 +97,25 @@ email address, so neither the line nor a refusal shows that name. The account
 line heads the `test` report and follows the `Ready` line of `up` and `rex
 up`.
 
-A profile whose run starts Claude Code is trusted only after its account
-check passed. A refused check removes the default login's links again.
-`attach`, `shell`, `reset` and the verify skill's probe scripts refuse such a
-profile with no passed check, including one made before the token existed.
-Run `up` on it first. A profile whose run has no Claude Code, such as `up
---agents codex`, needs no check, so running `up --agents codex` on a refused
-profile also lets you in again. `up`, `test` and `rex up` also refuse to change how a running
+A profile has Claude Code only when its run starts Claude Code. A run
+without it, such as `up --agents codex`, needs no token and no check, and
+leaves no `claude` in the profile's `bin` and no link to the default login.
+A profile that has either one is trusted only after its account check
+passed, and a refused check removes the default login's links again.
+`attach`, `shell` and `reset` refuse such a profile with no passed check.
+That includes a profile an older testbed made, which has both even for
+`--agents codex`. Run `up` on it first, with `--agents codex` if it needs no
+Claude Code. The verify skill's probe scripts refuse any profile with no
+passed check. `up`, `test` and `rex up` also refuse to change how a running
 profile's Claude Code signs in, because a Claude Code already running keeps
 its login. Run `./testbed stop --profile NAME` first, and the next start
 launches Claude Code again.
 
 With no token file, the testbed refuses to start Claude Code and prints these
 steps. A maintainer who wants this machine's default login passes
-`--claude-default-login`. That links the default login as before and still
-checks the account, so a team organization still needs `--claude-org`.
+`--claude-default-login`. A run that starts Claude Code then links the default
+login as before and still checks the account, so a team organization still
+needs `--claude-org`. A run without Claude Code links nothing for it.
 
 What the token setup does not cover yet:
 
@@ -332,14 +338,14 @@ profile's state directory. It then stops that Herdr and starts a scratch Rex
 server under `env -i`, with the profile's environment minus its `HERDR_*`
 names and with `REX_SERVER` naming the server. So a block's only location
 names are the `REX_*` the server gives it, and the server's own files stay in
-the profile's `HOME`. Claude Code in a block signs in through the profile's
-token wrapper, because the profile's `bin` is first on the block's `PATH`. A
-scratch server started by hand needs the same wrapper and its own `HOME`, with
+the profile's `HOME`. Claude Code in a block starts as `PROFILE/bin/claude`,
+the profile's token wrapper, named in full because a block's shell can put
+another `claude` ahead of the profile's `bin`. A scratch server started by hand needs the same wrapper and its own `HOME`, with
 no keychain link, as the probe recipe in
 [ADAPTER.md](../experimental/rex/ADAPTER.md#reproduce-the-probes) shows.
 
 The session `testbed-rex` gets a shell block and one block per agent, Claude
-Code as `claude` and Codex as `codex --no-daemon`, whose model settings are in
+Code as `PROFILE/bin/claude` and Codex as `codex --no-daemon`, whose model settings are in
 the profile's `codex/config.toml`. The lane answers the first-run prompts the
 Herdr lane knows, starts Codex again after it trusts its hooks, and sends Codex
 the Herdr lane's warm-up prompt, because Codex runs its hooks only from its
@@ -348,7 +354,8 @@ that passes the profile's state directory: Codex's hook run is recorded in
 `<state>/hook-runs`, and Claude Code's SessionStart hook shows in
 `logs/claude-hooks.log`, because Claude Code gives its hooks no `PLUGIN_ROOT`
 and Namedrop records no hook run for them. `up` then prints the `rex` lines
-that start more agents. `rex down` kills every session, stops the server and
+that start more of the profile's agents, with Claude Code's wrapper named in
+full. `rex down` kills every session, stops the server and
 any Codex app server, and keeps the profile.
 
 ## Where profiles live

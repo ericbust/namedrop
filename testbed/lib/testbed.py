@@ -152,9 +152,8 @@ def missing_token(token_file):
                 CLAUDE_TOKEN_FILE_VARIABLE)
 
 
-def claude_auth(login, agents):
-    """"token" when the token file signs Claude Code in, "default" for the machine's login, or None
-    when the profile gets no Claude Code."""
+def claude_auth(login):
+    """"token" when the token file signs Claude Code in, or "default" for the machine's login."""
     if login.token_file.exists():
         mode = login.token_file.stat()
         if not login.token_file.is_file() or not mode.st_size:
@@ -166,9 +165,7 @@ def claude_auth(login, agents):
         return "token"
     if login.default_login:
         return "default"
-    if "claude" in agents:
-        fail(missing_token(login.token_file))
-    return None
+    fail(missing_token(login.token_file))
 
 
 def token_wrapper(token_file, program):
@@ -216,7 +213,7 @@ def token_account(token_file):
         with OAUTH_OPENER.open(request, timeout=20) as response:
             profile = json.loads(response.read().decode())
     except urllib.error.HTTPError as error:
-        if error.code == SCOPE_REFUSAL:
+        if error.code == SCOPE_REFUSAL and b'"permission_error"' in error.read():
             return None
         if error.code == REJECTED_TOKEN:
             fail("the testbed token was rejected (HTTP 401 from {}); create a new one with "
@@ -408,12 +405,14 @@ class Profile:
         missing = [name for name in REQUIRED_TOOLS + tuple(agents) if name not in tools]
         if missing:
             fail("required executables are missing from PATH: " + ", ".join(missing))
-        auth = claude_auth(self.login, agents) if "claude" in tools else None
+        # A profile has Claude Code, and a login for it, only when its run starts Claude Code.
+        auth = claude_auth(self.login) if "claude" in agents else None
         if "claude" in self.state.get("tools", {}) and self.state.get("claude_auth", "legacy") != auth \
                 and self.running():
             # A Claude Code already running keeps its login, and launch never restarts it.
-            fail("profile {} runs Claude Code signed in another way. Run ./testbed stop --profile {} "
-                 "first; the next start launches Claude Code again.".format(self.name, self.name))
+            fail("profile {} runs Claude Code, which keeps the login it started with. Run ./testbed "
+                 "stop --profile {} first; the next start launches Claude Code again.".format(
+                     self.name, self.name))
         self.state.pop("claude_account", None)
         if auth == "token":
             tools["claude"] = self.claude_wrapper(tools["claude"])
@@ -424,7 +423,7 @@ class Profile:
                           claude_auth=auth, agents=list(agents))
         self.save()
         self.auth_links(auth)
-        if "claude" in agents:
+        if auth:
             try:
                 self.check_claude_account(auth)
             except BaseException:
@@ -473,12 +472,14 @@ class Profile:
             fail("Herdr returned unexpected JSON for " + shlex.join(args) + ": " + result.stdout)
 
     def require_claude_login(self):
-        """Refuses a profile whose run starts Claude Code when no account check accepted it: an
-        older testbed's profile, which uses the default login, or one whose check refused it."""
-        if "claude" in self.state.get("agents", AGENTS) and "claude" in self.state.get("tools", {}) \
-                and "claude_account" not in self.state:
-            fail("profile {} has Claude Code with no accepted account check. Run ./testbed up "
-                 "--profile {} first.".format(self.name, self.name))
+        """Refuses a profile that can start Claude Code when no account check accepted it: one whose
+        check refused it, or an older testbed's profile, which links the default login and an
+        unwrapped claude whatever its agents."""
+        reachable = [self.dir / "bin/claude"] + [link for _, link in self.default_login_links()]
+        if "claude_account" not in self.state and any(path.is_symlink() for path in reachable):
+            fail("profile {0} can start Claude Code with no accepted account check. Run ./testbed "
+                 "up --profile {0} first, or add --agents codex for a profile without Claude "
+                 "Code.".format(self.name))
 
     def claude_wrapper(self, program):
         """Installs the token wrapper and returns its path. The wrapper starts Claude Code through
@@ -527,14 +528,20 @@ class Profile:
             "the testbed token" if auth == "token" else "the default login")
         self.save()
 
+    def default_login_links(self):
+        """The (target, link) pairs that give the profile's Claude Code this machine's login."""
+        real_home = Path.home()
+        links = [(real_home / ".claude/.credentials.json", self.dir / "home/.claude/.credentials.json")]
+        if sys.platform == "darwin":
+            # Claude Code on macOS keeps its login in the credentials file or the login keychain.
+            links.append((real_home / "Library/Keychains", self.dir / "home/Library/Keychains"))
+        return links
+
     def auth_links(self, claude_auth):
         """Links the Codex login, and the default Claude Code login only when the run asked for it.
         Otherwise a Claude link an earlier run made is removed."""
         real_home = Path.home()
-        claude = [(real_home / ".claude/.credentials.json", self.dir / "home/.claude/.credentials.json")]
-        if sys.platform == "darwin":
-            # Claude Code on macOS keeps its login in the credentials file or the login keychain.
-            claude.append((real_home / "Library/Keychains", self.dir / "home/Library/Keychains"))
+        claude = self.default_login_links()
         logins = [("Codex", "codex login",
                    [(Path(os.environ.get("CODEX_HOME", str(real_home / ".codex"))) / "auth.json",
                      self.dir / "codex/auth.json")])]
@@ -1190,9 +1197,9 @@ def cmd_rex(args):
         rex_live.state_directory(profile), session,
         ", ".join("@{} {}".format(alias, block) for alias, block in sorted(blocks.items()))))
     say("Start more agents in their own sessions with:")
-    for command in rex_live.AGENTS.values():
+    for agent in agents:
         say("  " + lane.command_line("new", "--shell", "none", "-c", str(profile.repo), "--",
-                                     *command))
+                                     *rex_live.agent_command(profile, agent)))
     say("Stop it with: ./testbed rex down --profile " + profile.name)
 
 
