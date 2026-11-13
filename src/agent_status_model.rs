@@ -839,7 +839,10 @@ fn capture_worker(
 
         for (key, _) in env::vars_os() {
             let name = key.to_string_lossy();
-            if name.starts_with("HERDR_") || name.starts_with("NAMEDROP_") {
+            if name.starts_with("HERDR_")
+                || name.starts_with("NAMEDROP_")
+                || name.starts_with("REX_")
+            {
                 command.env_remove(key);
             }
         }

@@ -9,6 +9,7 @@
 //! directory comes from `HERDR_PLUGIN_STATE_DIR` when it is set, and otherwise
 //! from the same set, so under Herdr `NAMEDROP_STATE_DIR` is ignored.
 
+use crate::mux::{Endpoint, MuxKind};
 use serde_json::{Map, Value};
 use std::{
     env,
@@ -105,12 +106,18 @@ impl Locator {
             .map(|(name, value)| (self.flag_for(name), value))
     }
 
-    /// Gives a child process `value` under the Herdr name, which a Herdr
-    /// connection inherits, and clears the neutral name.
-    pub fn pass(self, command: &mut Command, value: impl AsRef<OsStr>) {
+    /// Gives a child process `value` under the name of `kind`'s set and
+    /// clears the other: Herdr's name, which a Herdr connection inherits, for
+    /// a Herdr endpoint, and the neutral name for a Rex one, so a Rex
+    /// endpoint never becomes `HERDR_SOCKET_PATH`.
+    pub fn pass(self, command: &mut Command, kind: MuxKind, value: impl AsRef<OsStr>) {
+        let (name, other) = match Name::of(kind) {
+            Name::Herdr => (Name::Herdr, Name::Neutral),
+            Name::Neutral => (Name::Neutral, Name::Herdr),
+        };
         command
-            .env(self.herdr_var(), value)
-            .env_remove(self.neutral_var());
+            .env(self.var(name), value)
+            .env_remove(self.var(other));
     }
 
     /// Clears both names from a child process, so it cannot take this value
@@ -126,6 +133,23 @@ impl Locator {
 pub enum Name {
     Herdr,
     Neutral,
+}
+
+impl Name {
+    /// The set Namedrop writes for an endpoint of `kind`, into a child's
+    /// environment, an envelope, or a command line: Herdr's names for Herdr,
+    /// and the neutral ones for Rex.
+    pub const fn of(kind: MuxKind) -> Self {
+        match kind {
+            MuxKind::Herdr => Self::Herdr,
+            MuxKind::Rex => Self::Neutral,
+        }
+    }
+
+    /// The set for the endpoint `value` names, by its kind.
+    pub fn for_endpoint(value: &str) -> Self {
+        Self::of(Endpoint::parse(value).kind)
+    }
 }
 
 /// The names the endpoint, space, pane, and (without `HERDR_PLUGIN_STATE_DIR`)
@@ -282,17 +306,20 @@ mod tests {
         assert_eq!(Locator::Pane.in_envelope(mixed.as_object().unwrap()), None);
     }
 
-    #[test]
-    fn a_child_gets_the_herdr_name_and_loses_the_neutral_one() {
-        let mut command = Command::new("true");
-        Locator::Space.pass(&mut command, "w2");
-        Locator::Pane.clear(&mut command);
-        let envs: BTreeMap<_, _> = command
+    fn child_environment(command: &Command) -> BTreeMap<OsString, Option<OsString>> {
+        command
             .get_envs()
             .map(|(key, value)| (key.to_owned(), value.map(OsStr::to_owned)))
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn a_herdr_child_gets_the_herdr_name_and_loses_the_neutral_one() {
+        let mut command = Command::new("true");
+        Locator::Space.pass(&mut command, MuxKind::Herdr, "w2");
+        Locator::Pane.clear(&mut command);
         assert_eq!(
-            envs,
+            child_environment(&command),
             BTreeMap::from([
                 ("HERDR_PANE_ID".into(), None),
                 ("HERDR_WORKSPACE_ID".into(), Some("w2".into())),
@@ -300,5 +327,44 @@ mod tests {
                 ("NAMEDROP_SPACE_ID".into(), None),
             ])
         );
+    }
+
+    #[test]
+    fn a_rex_child_gets_every_neutral_name_and_loses_every_herdr_one() {
+        let mut command = Command::new("true");
+        for (locator, value) in [
+            (Locator::StateDir, "/s"),
+            (Locator::Endpoint, "rex:/tmp/r.sock"),
+            (Locator::Space, "s1"),
+            (Locator::Pane, "b1"),
+        ] {
+            locator.pass(&mut command, MuxKind::Rex, value);
+        }
+        assert_eq!(
+            child_environment(&command),
+            BTreeMap::from([
+                ("HERDR_PANE_ID".into(), None),
+                ("HERDR_PLUGIN_STATE_DIR".into(), None),
+                ("HERDR_SOCKET_PATH".into(), None),
+                ("HERDR_WORKSPACE_ID".into(), None),
+                ("NAMEDROP_ENDPOINT".into(), Some("rex:/tmp/r.sock".into())),
+                ("NAMEDROP_PANE_ID".into(), Some("b1".into())),
+                ("NAMEDROP_SPACE_ID".into(), Some("s1".into())),
+                ("NAMEDROP_STATE_DIR".into(), Some("/s".into())),
+            ])
+        );
+    }
+
+    #[test]
+    fn an_endpoint_s_kind_picks_the_set_namedrop_writes() {
+        for (value, name) in [
+            ("", Name::Herdr),
+            ("default", Name::Herdr),
+            ("/tmp/h.sock", Name::Herdr),
+            ("/tmp/rex:h.sock", Name::Herdr),
+            ("rex:/tmp/r.sock", Name::Neutral),
+        ] {
+            assert_eq!(Name::for_endpoint(value), name, "{value:?}");
+        }
     }
 }

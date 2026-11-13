@@ -912,3 +912,34 @@ fn a_change_between_the_paste_and_the_enter_never_confirms() {
         );
     }
 }
+
+/// A program change between the paste and the Enter stops the Enter as a
+/// status change does: the agent exited, its status record went, or another
+/// process took the foreground.
+#[test]
+fn a_program_change_between_the_paste_and_the_enter_holds_without_an_enter() {
+    for event in [
+        block_event("child_exited", json!({"pid": 75361, "status": 0})),
+        block_event("program_status_removed", json!({"ids": [""]})),
+        block_event(
+            "process_changed",
+            json!({"generation": 3, "foreground": {"pid": 99999}}),
+        ),
+    ] {
+        let queued = event.clone();
+        let gate = bound(|fixture, _| {
+            gate(fixture, move |step, _, events| {
+                if step == Step::Paste {
+                    events.later(queued.clone());
+                }
+                None
+            })
+        });
+        assert!(
+            matches!(prompt(&gate.rex, "hello"), InputOutcome::Ambiguous(why)
+                if why.contains("changed before the Enter")),
+            "{event}"
+        );
+        assert_eq!(typed(&gate.rex), ["block.event paste hello"], "{event}");
+    }
+}

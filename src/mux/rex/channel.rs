@@ -21,8 +21,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// What the facts saw and what the paste was acknowledged at, shared by the
-/// channel and its tap.
+/// What the facts saw and the `seq` of the Enter's acknowledgement, shared by
+/// the channel and its tap.
 #[derive(Default)]
 struct Seen {
     /// The `seq` of the `program_status` response. Events at or below it

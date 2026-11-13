@@ -1,3 +1,6 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -59,7 +62,7 @@ esac
         self.namedrop_command(args).output().unwrap()
     }
     fn namedrop_command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = crate::binary::namedrop();
         self.host(&mut command)
             .env_remove("HERDR_PLUGIN_STATE_DIR")
             .env("PATH", "/usr/bin:/bin")
@@ -83,13 +86,13 @@ esac
         }
         fs::copy(repo.join("runtime.json"), checkout.join("runtime.json")).unwrap();
         executable::copy_executable(
-            env!("CARGO_BIN_EXE_namedrop"),
+            crate::binary::namedrop_path(),
             checkout.join("bin/namedrop"),
         );
         fs::create_dir_all(self.0.join("path")).unwrap();
         std::os::unix::fs::symlink(self.0.join("herdr"), self.0.join("path/herdr")).unwrap();
         fs::create_dir_all(self.0.join("state")).unwrap();
-        self.host(Command::new("sh").arg(checkout.join("scripts/run.sh")))
+        self.host(crate::binary::command("sh").arg(checkout.join("scripts/run.sh")))
             .env("HERDR_PLUGIN_STATE_DIR", self.0.join("state"))
             .env(
                 "PATH",
@@ -263,7 +266,7 @@ fn a_session_vouches_for_the_pane_when_the_process_is_a_child_of_init() {
     let out = f.0.join("orphan.out");
     let mut command = f.namedrop_command(&["address", "list"]);
     command.env("CLAUDE_CODE_SESSION_ID", "session-p1");
-    let mut detached = Command::new("sh");
+    let mut detached = crate::binary::command("sh");
     detached
         .arg("-c")
         .arg(r#"( "$0" "$@" > "$OUT" 2>&1 & )"#)
@@ -300,7 +303,7 @@ fn the_mailbox_wake_hook_drains_the_space_after_its_hook_shell_has_exited() {
     f.shell_is(other.id());
     let calls = f.0.join("herdr-calls");
     fs::write(&calls, "").unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+    let mut command = crate::binary::namedrop();
     f.host(&mut command)
         .env_remove("HERDR_PLUGIN_STATE_DIR")
         .env("PATH", "/usr/bin:/bin")
@@ -372,11 +375,11 @@ fn a_session_start_inside_codex_s_shared_app_server_gets_its_notice_without_a_ru
     f.shell_is(other.pid());
     let codex_home = f.0.join("home/.codex");
     let hook = |event: &str, input: &str, inside: bool| {
-        let program = Path::new(env!("CARGO_BIN_EXE_namedrop"));
+        let program = Path::new(crate::binary::namedrop_path());
         let mut command = if inside {
             codex_app_server::inside_server(&codex_home, program)
         } else {
-            Command::new(program)
+            crate::binary::command(program)
         };
         f.host(&mut command)
             .env_remove("HERDR_PLUGIN_STATE_DIR")

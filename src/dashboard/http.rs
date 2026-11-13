@@ -20,7 +20,6 @@ use std::{
         unix::fs::MetadataExt,
     },
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -2260,8 +2259,6 @@ pub(super) fn wake_mailboxes_after_send(
     namespace: &crate::StateNamespace,
     receipt: &serde_json::Value,
 ) -> Result<(), String> {
-    use std::os::unix::process::CommandExt;
-
     let pending = crate::drain_reports(receipt)
         .filter(|(_, report)| report.needs_mailbox_worker())
         .map(|(workspace, _)| workspace)
@@ -2286,19 +2283,17 @@ pub(super) fn wake_mailboxes_after_send(
                 .then_some(copy.space)
         }));
     }
+    let endpoint = crate::mux::Endpoint::parse(&namespace.session_socket_id);
     for space in spaces {
-        let mut command = Command::new(crate::runtime_executable()?);
-        Locator::StateDir.pass(&mut command, state);
-        Locator::Endpoint.pass(&mut command, &namespace.session_socket_id);
-        Locator::Space.pass(&mut command, space.as_str());
-        Locator::Pane.clear(&mut command);
+        let mut command = crate::daemon::command(
+            &crate::runtime_executable()?,
+            crate::daemon::Scope::Space(&endpoint, &space),
+            crate::daemon::Starter::Caller,
+        );
+        Locator::StateDir.pass(&mut command, endpoint.kind, state);
         let mut child = command
             .args(["hook", "mailbox-wake", "--state-directory"])
             .arg(state)
-            .process_group(0)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
             .spawn()
             .map_err(|error| error.to_string())?;
         thread::spawn(move || {

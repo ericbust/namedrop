@@ -1,4 +1,8 @@
 #![cfg(feature = "test-support")]
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 
@@ -134,7 +138,7 @@ fn a_pane_without_a_reported_foreground_group_is_uncertain() {
 
 #[test]
 fn terminal_state_cleanup_preserves_retry_records() {
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
+    let output = crate::binary::command(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "naming_detects_terminal_preserves_type_on_rename_and_allows_override",

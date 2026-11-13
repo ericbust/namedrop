@@ -1,3 +1,6 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -64,7 +67,7 @@ impl Dashboard {
     }
 
     fn command_named(&self, ui: Option<&Path>, name: &str, human: bool) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = crate::binary::namedrop();
         command
             .current_dir(self.root())
             .env("TMPDIR", self.root())
@@ -588,7 +591,7 @@ fn upgrade_handoff_keeps_directory_port_and_browser_session() {
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("release")).unwrap();
     copy_executable(
-        env!("CARGO_BIN_EXE_namedrop"),
+        crate::binary::namedrop_path(),
         runtime.join("release/namedrop"),
     );
     symlink("release", runtime.join("current")).unwrap();
@@ -690,7 +693,7 @@ fn selected_startup_fixture(dashboard: &Dashboard, startup: &str) {
         runtime.join("release/namedrop"),
         format!(
             "#!/bin/sh\ncase \"$*\" in *--help*) ;; *dashboard-server*) {startup};; esac\nexec '{}' \"$@\"\n",
-            env!("CARGO_BIN_EXE_namedrop")
+            crate::binary::namedrop_path()
         ),
     );
     symlink("release", runtime.join("current")).unwrap();
@@ -699,7 +702,7 @@ fn selected_startup_fixture(dashboard: &Dashboard, startup: &str) {
         format!(
             "#!/bin/sh\nrm '{}'\nexec '{}' \"$@\"\n",
             runtime.join("namedrop").display(),
-            env!("CARGO_BIN_EXE_namedrop")
+            crate::binary::namedrop_path()
         ),
     );
 }
@@ -962,7 +965,7 @@ fn fix_two_handoff_resolves_and_probes_the_release_after_acquiring_the_runtime_g
         format!("#!/bin/sh\ntouch '{}'\nexit 1\n", premature_probe.display()),
     );
     copy_executable(
-        env!("CARGO_BIN_EXE_namedrop"),
+        crate::binary::namedrop_path(),
         runtime.join("release/namedrop"),
     );
     symlink("before-update", runtime.join("current")).unwrap();
@@ -1032,7 +1035,7 @@ fn fix_three_legacy_stub(dashboard: &Dashboard, fail_start: bool) -> PathBuf {
     let release = dashboard.state().join("runtime/legacy");
     fs::create_dir_all(&release).unwrap();
     let executable = release.join("namedrop");
-    let target = serde_json::to_string(env!("CARGO_BIN_EXE_namedrop")).unwrap();
+    let target = serde_json::to_string(crate::binary::namedrop_path()).unwrap();
     let marker = serde_json::to_string(
         dashboard
             .root()
@@ -1081,7 +1084,7 @@ fn fix_three_legacy_stub_rolls_back_embedded_and_custom_ui() {
         let _events = fix_two_subscribe(&dashboard, &opened);
         let executable = fix_three_legacy_stub(&dashboard, false);
         for flag in ["--inherit-claim", "--ui"] {
-            let output = Command::new(&executable)
+            let output = crate::binary::command(&executable)
                 .args(["dashboard-server", flag, "--help"])
                 .output()
                 .unwrap();
@@ -1140,7 +1143,7 @@ fn fix_three_inherited_successor_can_release_its_claim_for_a_legacy_rollback() {
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("current-release")).unwrap();
     copy_executable(
-        env!("CARGO_BIN_EXE_namedrop"),
+        crate::binary::namedrop_path(),
         runtime.join("current-release/namedrop"),
     );
     symlink("current-release", runtime.join("current")).unwrap();
@@ -1247,7 +1250,7 @@ fn fix_three_package_switch_during_probe_starts_the_probed_executable() {
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("pinned")).unwrap();
     fix_three_legacy_stub(&dashboard, false);
-    let target = serde_json::to_string(env!("CARGO_BIN_EXE_namedrop")).unwrap();
+    let target = serde_json::to_string(crate::binary::namedrop_path()).unwrap();
     let marker =
         serde_json::to_string(dashboard.root().join("probe-entered").to_str().unwrap()).unwrap();
     let release =
@@ -1339,7 +1342,7 @@ fn fix_three_current_successor_stays_pinned_when_its_probe_changes_current() {
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("new")).unwrap();
     fix_three_legacy_stub(&dashboard, false);
-    copy_executable(env!("CARGO_BIN_EXE_namedrop"), runtime.join("new/real"));
+    copy_executable(crate::binary::namedrop_path(), runtime.join("new/real"));
     let started = dashboard.root().join("pinned-wrapper-started");
     write_executable(
         runtime.join("new/namedrop"),
@@ -1505,7 +1508,7 @@ fn replaced_ui_ancestor_symlinks_are_not_followed() {
 }
 
 fn inherited_server(dashboard: &Dashboard) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+    let mut command = crate::binary::namedrop();
     command
         .args(["--plugin-state"])
         .arg(dashboard.state())
@@ -1652,7 +1655,7 @@ fn fix_four_current_handoff_keeps_server_log_lines_prefixed() {
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("release")).unwrap();
     copy_executable(
-        env!("CARGO_BIN_EXE_namedrop"),
+        crate::binary::namedrop_path(),
         runtime.join("release/namedrop"),
     );
     symlink("release", runtime.join("current")).unwrap();
@@ -1824,7 +1827,7 @@ fn fix_four_b_custom_ui_waits_then_refuses_an_embedded_legacy_successor() {
         format!(
             "#!/bin/sh\nrm '{}'\nexec '{}' \"$@\"\n",
             runtime.join("namedrop").display(),
-            env!("CARGO_BIN_EXE_namedrop")
+            crate::binary::namedrop_path()
         ),
     );
     symlink("release", runtime.join("current")).unwrap();

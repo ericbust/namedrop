@@ -1,5 +1,8 @@
 #![cfg(feature = "test-support")]
 
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
@@ -2153,7 +2156,7 @@ fn the_installed_wrappers_pass_the_workspace_picker_through_unchanged() {
             &fixture.state,
         )
         .unwrap();
-        let output = std::process::Command::new(package.join("scripts/user-prompt-submit"))
+        let output = crate::binary::command(package.join("scripts/user-prompt-submit"))
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(0), "{output:?}");

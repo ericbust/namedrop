@@ -11,9 +11,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     env, fs, io,
-    os::unix::{net::UnixStream, process::CommandExt},
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -458,18 +457,18 @@ pub fn ensure_worker(state: &Path, socket: &str) -> Result<(), String> {
         return Ok(());
     }
     drop(lock);
-    Command::new(launcher(state)?)
-        .args([
-            "--deferred-worker",
-            state.to_str().ok_or("state path is not UTF-8")?,
-            socket,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    crate::daemon::command(
+        &launcher(state)?,
+        crate::daemon::Scope::Endpoint(&crate::mux::Endpoint::parse(socket)),
+        crate::daemon::Starter::Caller,
+    )
+    .args([
+        "--deferred-worker",
+        state.to_str().ok_or("state path is not UTF-8")?,
+        socket,
+    ])
+    .spawn()
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -539,17 +538,17 @@ pub fn run_worker(state: &Path, socket: &str) -> Result<(), String> {
         }
         pending.sort();
         for key in pending {
-            let mut child = Command::new(launcher(state)?)
-                .arg("--deferred-execute")
-                .arg(state)
-                .arg(socket)
-                .arg(&key)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .process_group(0)
-                .spawn()
-                .map_err(|e| e.to_string())?;
+            let mut child = crate::daemon::command(
+                &launcher(state)?,
+                crate::daemon::Scope::Endpoint(&crate::mux::Endpoint::parse(socket)),
+                crate::daemon::Starter::Caller,
+            )
+            .arg("--deferred-execute")
+            .arg(state)
+            .arg(socket)
+            .arg(&key)
+            .spawn()
+            .map_err(|e| e.to_string())?;
             let deadline = Instant::now() + Duration::from_secs(60);
             loop {
                 if child.try_wait().map_err(|e| e.to_string())?.is_some() {
@@ -832,6 +831,7 @@ fn recover_committed<M: crate::mux::Mux, C: Clock, I: IdGenerator>(
                 let _ = crate::reminder::ensure_clock(
                     runtime.state_directory,
                     Some(runtime.session_socket_id),
+                    crate::daemon::Starter::Caller,
                 );
             }
             Ok(recovered.map(|r| json!(r)))

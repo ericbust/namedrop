@@ -1,4 +1,8 @@
 #![cfg(feature = "test-support")]
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]

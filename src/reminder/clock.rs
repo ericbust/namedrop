@@ -4,7 +4,7 @@ use std::{
     fs,
     os::unix::{fs::OpenOptionsExt, process::CommandExt},
     path::Path,
-    process::{Command, Stdio},
+    process::Command,
     thread,
     time::Duration,
 };
@@ -132,7 +132,13 @@ fn claim_clock(lock: &fs::File) -> bool {
     }
 }
 
-pub fn ensure_clock(state: &Path, socket: Option<&str>) -> Result<(), String> {
+/// Starts the clock when reminders are pending and none runs. `starter` says
+/// whether the clock keeps this process's multiplexer timeouts.
+pub fn ensure_clock(
+    state: &Path,
+    socket: Option<&str>,
+    starter: crate::daemon::Starter,
+) -> Result<(), String> {
     let pending = pending(state, 0, false);
     if pending.as_ref().is_ok_and(|pending| pending.count == 0) || clock_running(state) {
         return Ok(());
@@ -145,29 +151,22 @@ pub fn ensure_clock(state: &Path, socket: Option<&str>) -> Result<(), String> {
     let socket = socket
         .or(persisted_socket.as_deref())
         .ok_or("pending reminders have no Herdr socket")?;
-    let executable = selected_executable(state)?;
-    let mut command = Command::new(executable);
-    command
-        .args(["reminder-clock"])
-        .arg(state)
-        .arg(socket)
-        .env_remove("CLAUDE_CODE_SESSION_ID")
-        .env_remove("CODEX_SESSION_ID")
-        .env_remove("CLAUDE_SESSION_ID")
-        .env_remove("CODEX_THREAD_ID")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0);
-    crate::locator::Locator::Pane.clear(&mut command);
-    crate::locator::Locator::Space.clear(&mut command);
-    command.spawn().map_err(|e| e.to_string())?;
+    crate::daemon::command(
+        &selected_executable(state)?,
+        crate::daemon::Scope::Endpoint(&crate::mux::Endpoint::parse(socket)),
+        starter,
+    )
+    .args(["reminder-clock"])
+    .arg(state)
+    .arg(socket)
+    .spawn()
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 pub(super) fn signal_clock(state: &Path, socket: &str) -> Result<(), String> {
     fs::write(state.join("reminder-clock.wake"), []).map_err(|e| e.to_string())?;
-    ensure_clock(state, Some(socket))
+    ensure_clock(state, Some(socket), crate::daemon::Starter::Caller)
 }
 
 pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
@@ -196,7 +195,7 @@ pub fn run_clock(state: &Path, socket: &str) -> Result<(), String> {
         };
         if plan.count == 0 {
             lock.unlock().map_err(|e| e.to_string())?;
-            return ensure_clock(state, Some(socket));
+            return ensure_clock(state, Some(socket), crate::daemon::Starter::Caller);
         }
         let selected = selected_executable(state)?;
         let changed = fs::canonicalize(&selected).ok()
@@ -408,14 +407,14 @@ mod tests {
         fs::create_dir(&root).unwrap();
         assert_eq!(pending_count(&root), 0);
         assert!(!clock_running(&root));
-        ensure_clock(&root, None).unwrap();
+        ensure_clock(&root, None, crate::daemon::Starter::Caller).unwrap();
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
         let store = StateStore::open(&root).unwrap();
         drop(store);
         let connection = Connection::open(root.join("namedrop.sqlite3")).unwrap();
         connection.execute_batch("BEGIN IMMEDIATE").unwrap();
         assert_eq!(pending_count(&root), 0);
-        ensure_clock(&root, None).unwrap();
+        ensure_clock(&root, None, crate::daemon::Starter::Caller).unwrap();
         assert!(!root.join("reminder-clock.lock").exists());
         connection.execute_batch("ROLLBACK").unwrap();
         drop(connection);

@@ -1273,3 +1273,41 @@ fn a_screen_read_that_starts_inside_a_link_drops_the_cut_line_before_it_parses()
         Ok("second\n> box")
     );
 }
+
+/// A socket holds each request to `NAMEDROP_REX_TIMEOUT_MS` when it is set,
+/// and to the budget alone when it is not, never to the 5 s default. The
+/// variable is read when the socket is made, so each case runs in a child
+/// test process with its own environment.
+#[test]
+fn a_socket_caps_requests_at_the_rex_timeout_only_when_it_is_set() {
+    const CHILD: &str = "NAMEDROP_TEST_SOCKET_TIMEOUT";
+    let budget = Budget {
+        timeout: Duration::from_secs(6),
+        max_output_bytes: 4096,
+    };
+    if let Ok(expected) = std::env::var(CHILD) {
+        let socket = Socket::new("/nonexistent/rex.sock".into(), budget, Arc::default());
+        assert_eq!(format!("{:?}", socket.timeout()), expected);
+        return;
+    }
+    for (set, expected) in [(Some("250"), "Ok(250ms)"), (None, "Ok(6s)")] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "mux::rex::tests::a_socket_caps_requests_at_the_rex_timeout_only_when_it_is_set",
+                "--test-threads=1",
+            ])
+            .env(CHILD, expected);
+        match set {
+            Some(value) => child.env("NAMEDROP_REX_TIMEOUT_MS", value),
+            None => child.env_remove("NAMEDROP_REX_TIMEOUT_MS"),
+        };
+        let output = child.output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{set:?}: {stdout}"
+        );
+    }
+}

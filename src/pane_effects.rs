@@ -1630,10 +1630,6 @@ mod tests {
             "Command::new(std::env::current_exe().unwrap())",
         ),
         (
-            "dashboard/http.rs",
-            "Command::new(crate::runtime_executable()?)",
-        ),
-        (
             "dashboard/live_peek.rs",
             "Command::new(std::env::current_exe()?)",
         ),
@@ -1641,7 +1637,6 @@ mod tests {
             "dashboard/observer_guard.rs",
             r#"Command::new(env::var_os("HERDR_BIN_PATH").unwrap_or_else(||"herdr"))"#,
         ),
-        ("dashboard/server_files.rs", "Command::new(executable)"),
         ("dashboard/server_files.rs", "Command::new(executable)"),
         ("dashboard/tailscale.rs", "Command::new(self.0)"),
         ("dashboard/tailscale.rs", "Command::new(&executable)"),
@@ -1652,7 +1647,6 @@ mod tests {
     /// import fails the check whatever its spelling.
     const DASHBOARD_COMMAND_NAMES: &[(&str, &str)] = &[
         ("dashboard.rs", "process::{Command, ExitCode, Stdio},"),
-        ("dashboard/http.rs", "process::{Command, Stdio},"),
         (
             "dashboard/live_peek.rs",
             "process::{Child, ChildStdin, ChildStdout, Command, Stdio},",

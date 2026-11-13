@@ -1,5 +1,8 @@
 #![cfg(feature = "test-support")]
 
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
@@ -1251,7 +1254,7 @@ mod http {
         net::{Shutdown, TcpStream},
         os::unix::fs::PermissionsExt,
         path::Path,
-        process::{Child, Command, Stdio},
+        process::{Child, Stdio},
         thread,
         time::{Duration, Instant},
     };
@@ -1439,7 +1442,7 @@ else:
     sys.exit(1)
 "#,
             );
-            let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+            let mut command = crate::binary::namedrop();
             command
                 .arg("--plugin-state")
                 .arg(&f.state)
@@ -1613,7 +1616,7 @@ else:
             server.port,
             key.as_str()
         );
-        let output = Command::new("python3")
+        let output = crate::binary::command("python3")
             .arg(script)
             .arg(entry)
             .arg(key.as_str())
@@ -2033,7 +2036,7 @@ else:
     }
 
     fn cli(f: &Fixture, args: &[&str], input: Value) -> Value {
-        let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        let output = crate::binary::namedrop()
             .args(["--herdr-pane", "pane-1-lead"])
             .args(args)
             .arg("--input-json")
@@ -2458,7 +2461,7 @@ else:
         let local = Gate::new(&f, "pane-local");
         let _server = Server::start(&f, None);
         let _hook = Hook(
-            Command::new(env!("CARGO_BIN_EXE_namedrop"))
+            crate::binary::namedrop()
                 .args(["hook", "mailbox-wake", "--state-directory"])
                 .arg(&f.state)
                 .env("TMPDIR", &f.root)

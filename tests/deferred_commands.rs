@@ -1,4 +1,8 @@
 #![cfg(all(target_os = "linux", feature = "test-support"))]
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -153,7 +157,7 @@ else: print('{}')
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = crate::binary::namedrop();
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

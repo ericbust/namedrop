@@ -61,7 +61,7 @@ Rows marked † were revised again in answer to review 4.
 | 13 | A live Herdr at a guessed default path that is not an ancestor yields Rex | Fixed. On a guessed default path, a peer that is not an ancestor is `Doubt`, so the home is Herdr |
 | Deferral list | Could be deferred | Applied in full. Delivery acks, `namedrop relay list`, request batching, the two-tier poll, the cached bridge client id, `prove_local`'s file check, `scripts/runtime.py` (to step 6), and Doctor's wording for a changed `host_id` are deferred, and `space_for_wake` is gone. The relay is [Part 2](#part-2-the-relay), its own PR series after commit 24. The home table, `daemon::command`, the install record, `RexDeferred`, `port_ansi`, and coalescing stay |
 
-None of the findings changes commits 0a, 0b, 1, 2, 4, 5, or 6. The paste rule (finding 5) and the re-read (finding 1) change commit 10's `paste_submit`, and the binding's new fields change commit 9's read side and commit 17. Each lands after commit 6. The review of `exp/rex-adapter-1` adds commit 6a, which fixes `rex/control.rs` and the `--inside-rex` lane before commit 7, and a `seq` rule in commit 10. A status change at or below the paste ack's `seq` happened before the paste, so it stops the Enter and never confirms.
+None of the findings changes commits 0a, 0b, 1, 2, 4, 5, or 6. The paste rule (finding 5) and the re-read (finding 1) change commit 10's `paste_submit`, and the binding's new fields change commit 9's read side and commit 17. Each lands after commit 6. The review of `exp/rex-adapter-1` adds commit 6a, which fixes `rex/control.rs` and the `--inside-rex` lane before commit 7, and a `seq` rule in commit 10. A status change at or below the paste ack's `seq` happened before the paste, so it stops the Enter and never confirms. The review of `exp/rex-adapter-3` replaced that rule: the gate holds on any change for the block above the facts' boundary, and the Enter ack's `seq` is the tap's floor.
 
 ## Review 2 and how it was answered
 
@@ -593,8 +593,9 @@ pub(super) fn pane_agent(observed: Observed<'_>) -> PaneAgent { todo!() }
 /// holds no other process. A non-interactive shell runs its commands in its own
 /// group, so `-- bash -c 'sleep 120; true'`, whose child and foreground are both
 /// bash with `sleep` in bash's group, has no shell. `None` also when Rex leaves
-/// `ancestors` out (more than 16, or one exited), for that read only.
-pub(super) fn shell_of(process: &ProcessReply, foreground_pids: &[u32]) -> Option<u32> { todo!() }
+/// `ancestors` out (more than 16, or one exited), for that read only, and when the
+/// group could not be listed (`foreground_pids` is `None`).
+pub(super) fn shell_of(process: &ProcessReply, foreground_pids: Option<&[u32]>) -> Option<u32> { todo!() }
 ```
 
 | Record owner is the live foreground, and `app` is `claude-code` or `codex` | The binding | `agent` | `state` |
@@ -654,7 +655,7 @@ impl gate::RawChannel for RexChannel<'_> {
 }
 
 impl gate::StatusTap for RexTap {
-	fn next_change(&mut self, within: Duration) -> Option<TapChange> {
+	fn next_change(&mut self, within: Duration) -> Result<Option<TapChange>, ChannelError> {
 		// Skip events with seq <= the boundary and events for other blocks. A status
 		// change that lands between the two facts requests has a higher seq, so it declines.
 		// A zero `within` still makes one non-blocking read of the socket, so the gate's
@@ -1250,7 +1251,7 @@ The survey requests that commit 9 pins:
 | `survey(Space or PanesOf, Panes)` | `session.list` for `Space` only, `session.attach`, `session.list_blocks`, then `program_status` and `process` for each block whose `creator_name` is `com.superlogical.terminal` |
 | `survey(All, Panes)` | `session.list`, then the row above for each session |
 | `survey(CheckoutOf, _)` | None. `MuxError::Unavailable("a Rex session is not a checkout")` |
-| `screen` | `target.resolve`, then `format` with a small `max_bytes`, then one `blob_read` of the tail. `Style::Ansi` is `format: "vt"` through `port_ansi` |
+| `screen` | `target.resolve`, then `format` with a small `max_bytes`, then `blob_read` of the tail until it reports `eof`. `Style::Ansi` is `format: "vt"` through `port_ansi` |
 | `process`, `tab_label` | `target.resolve`, then `process` or the window's label from `session.view` |
 
 Every row starts with the local proof. Its `server.status`, kept with the proven pid, gives the `host_id` the survey compares. A Rex pane maps as follows. `id` and `terminal` are the block ID. `tab` is the window ID. `space` is the session ID. `cwd` is `process.foreground.cwd`. `title` is the block label. `worktree` is `rex-space:<session id>` with no checkout. `tty` is `None`.

@@ -1,5 +1,8 @@
 #![cfg(feature = "test-support")]
 
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/delivered.rs"]
@@ -17,7 +20,7 @@ use std::{
     io::{Read, Write},
     net::{Shutdown, TcpStream},
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     sync::{Barrier, mpsc},
     thread,
     time::{Duration, Instant},
@@ -138,7 +141,7 @@ else:
     sys.exit(1)
 "#,
         );
-        let mut child = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        let mut child = crate::binary::namedrop()
             .arg("--plugin-state")
             .arg(&f.state)
             .arg("dashboard-server")

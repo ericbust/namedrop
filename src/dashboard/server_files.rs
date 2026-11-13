@@ -1,5 +1,4 @@
 use super::snapshot::RepoRef;
-use crate::locator::Locator;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -528,9 +527,12 @@ impl ServerFiles {
         ui: &UiSource,
         claim: Option<&SingletonLock>,
     ) -> Result<std::process::Child, String> {
-        use std::os::unix::process::CommandExt;
         let log = self.server_log()?;
-        let mut command = Command::new(executable);
+        let mut command = crate::daemon::command(
+            executable,
+            crate::daemon::Scope::None,
+            crate::daemon::Starter::Caller,
+        );
         command
             .arg("--plugin-state")
             .arg(&self.state)
@@ -545,11 +547,7 @@ impl ServerFiles {
             }
             None => Stdio::null(),
         };
-        for locator in [Locator::Pane, Locator::Space, Locator::Endpoint] {
-            locator.clear(&mut command);
-        }
         command
-            .process_group(0)
             .stdin(stdin)
             .stdout(log.try_clone().map_err(|e| e.to_string())?)
             .stderr(log)

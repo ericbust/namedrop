@@ -1,4 +1,8 @@
 #![cfg(feature = "test-support")]
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -76,7 +80,7 @@ print(json.dumps({'result':result}))
         self.claude.join("settings.json")
     }
     fn command_for(&self, workspace: &str) -> std::process::Command {
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = crate::binary::namedrop();
         command
             .args([
                 "--plugin-state",
@@ -142,7 +146,7 @@ print(json.dumps({'result':result}))
         serde_json::from_slice(&fs::read(self.settings()).unwrap()).unwrap()
     }
     fn expected(&self) -> Vec<Value> {
-        self.expected_for(Path::new(env!("CARGO_BIN_EXE_namedrop")))
+        self.expected_for(Path::new(crate::binary::namedrop_path()))
     }
     fn expected_for(&self, executable: &Path) -> Vec<Value> {
         [
@@ -187,7 +191,7 @@ print(json.dumps({'result':result}))
         ))
     }
     fn bootstrap_rule(&self) -> Value {
-        self.bootstrap_rule_for(Path::new(env!("CARGO_BIN_EXE_namedrop")))
+        self.bootstrap_rule_for(Path::new(crate::binary::namedrop_path()))
     }
 }
 impl Drop for Fixture {
@@ -293,7 +297,7 @@ fn reactivation_is_idempotent_and_deactivation_keeps_identical_user_rules() {
     install_integration_package(
         &f.home,
         AgentRuntime::ClaudeCode,
-        &fs::canonicalize(env!("CARGO_BIN_EXE_namedrop")).unwrap(),
+        &fs::canonicalize(crate::binary::namedrop_path()).unwrap(),
         &f.root,
     )
     .unwrap();
@@ -403,7 +407,7 @@ fn doctor_reports_missing_claude_rules_with_activation_repair_without_writing() 
     assert_eq!(
         serialized["repair"]["command"],
         json!([
-            fs::canonicalize(env!("CARGO_BIN_EXE_namedrop")).unwrap(),
+            fs::canonicalize(crate::binary::namedrop_path()).unwrap(),
             "--plugin-state",
             f.root,
             "activate",
@@ -630,7 +634,7 @@ fn input_file_errors_never_echo_unknown_keys_or_values() {
             vec!["register"],
             vec!["handoff", "begin"],
         ] {
-            let output = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
+            let output = crate::binary::namedrop()
                 .args(["--plugin-state", f.root.to_str().unwrap()])
                 .args(command)
                 .args([
@@ -697,7 +701,7 @@ fn an_inherited_claude_config_directory_is_not_used_by_in_process_helpers() {
     let parent = f.root.join("parent-profile");
     fs::create_dir(&parent).unwrap();
     fs::write(parent.join("settings.json"), "{\"parent\":true}\n").unwrap();
-    let result = std::process::Command::new(std::env::current_exe().unwrap())
+    let result = crate::binary::command(std::env::current_exe().unwrap())
         .args([
             "--exact",
             "an_inherited_claude_config_directory_is_not_used_by_in_process_helpers",
@@ -876,7 +880,7 @@ fn input_file_operational_errors_match_inline_errors() {
         .output()
         .unwrap();
     assert!(named.status.success(), "{named:?}");
-    let peer = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
+    let peer = crate::binary::namedrop()
         .args([
             "--plugin-state",
             f.root.to_str().unwrap(),
@@ -1090,7 +1094,7 @@ fn registration_flags_override_every_inherited_transport_value() {
         .remove(0);
     let challenge =
         issue_registration_challenge(&address.id, AgentRuntime::ClaudeCode, &runtime).unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
+    let output = crate::binary::namedrop()
         .args(["--plugin-state", f.root.to_str().unwrap(), "register", "--herdr-socket", "socket-a", "--herdr-workspace", "workspace-1", "--herdr-pane", "pane-1", "--input-json", &json!({"runtime":"claude-code", "protocol_version":"collab/v1", "nonce":challenge.nonce, "capabilities":complete_capability_profile()}).to_string()])
         .env("HOME", &f.home).env("CLAUDE_CONFIG_DIR", &f.claude).env("CODEX_HOME", f.home.join(".codex"))
         .env("HERDR_BIN_PATH", f.root.join("herdr")).env("TEST_WORKSPACE", "workspace-1")

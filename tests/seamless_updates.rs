@@ -1,3 +1,6 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -5,7 +8,7 @@ mod executable;
 
 #[test]
 fn codex_activation_installs_and_verifies_the_local_plugin() {
-    let output = std::process::Command::new("python3")
+    let output = crate::binary::command("python3")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/codex_activation.py"
@@ -22,8 +25,8 @@ fn codex_activation_installs_and_verifies_the_local_plugin() {
 
 #[test]
 fn runtime_replacement_preserves_cached_tools_and_running_commands() {
-    let output = std::process::Command::new("python3")
-        .env("NAMEDROP_TEST_BINARY", env!("CARGO_BIN_EXE_namedrop"))
+    let output = crate::binary::command("python3")
+        .env("NAMEDROP_TEST_BINARY", crate::binary::namedrop_path())
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/runtime_lifecycle.py"
@@ -40,8 +43,8 @@ fn runtime_replacement_preserves_cached_tools_and_running_commands() {
 
 #[test]
 fn live_schema_migration_preserves_commands_and_recovers_interruption() {
-    let output = std::process::Command::new("python3")
-        .env("NAMEDROP_TEST_BINARY", env!("CARGO_BIN_EXE_namedrop"))
+    let output = crate::binary::command("python3")
+        .env("NAMEDROP_TEST_BINARY", crate::binary::namedrop_path())
         .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/live_schema.py"))
         .output()
         .expect("Python 3 is required for live schema verification");
@@ -72,7 +75,7 @@ fn live_schema_migration_preserves_commands_and_recovers_interruption() {
 /// unsupported architecture never issues the x86_64/aarch64-only syscall.
 #[test]
 fn linux_preflight_requires_landlock_and_named_prerequisites() {
-    use std::{fs, path::Path, process::Command};
+    use std::{fs, path::Path};
     let root = std::env::temp_dir().join(format!("namedrop-preflight-{}", std::process::id()));
     let _cleanup = cleanup::FixtureDirectory(root.clone());
 
@@ -111,7 +114,7 @@ fn linux_preflight_requires_landlock_and_named_prerequisites() {
             ),
         );
         let _ = fs::remove_file(bin.join("python3.syscall"));
-        let output = Command::new("/bin/sh")
+        let output = crate::binary::command("/bin/sh")
             .arg(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/scripts/check-linux-prerequisites.sh"

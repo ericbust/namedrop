@@ -9,6 +9,7 @@ mod codex_app_server;
 mod context;
 mod controls;
 mod coordination;
+pub mod daemon;
 pub mod dashboard;
 #[doc(hidden)]
 pub mod deferred_commands;

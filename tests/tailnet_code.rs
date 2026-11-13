@@ -1,5 +1,9 @@
 //! The tailnet link as a QR code, printed by `channels --tailscale --no-open`.
 //! Tailscale and Herdr are fakes throughout.
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -71,14 +75,14 @@ impl Tailnet {
     ) -> String {
         let mut command = match columns {
             Some(columns) => {
-                let mut command = Command::new("/usr/bin/python3");
+                let mut command = crate::binary::command("/usr/bin/python3");
                 command
                     .arg(self.0.join("in_terminal.py"))
                     .arg(columns.to_string())
-                    .arg(env!("CARGO_BIN_EXE_namedrop"));
+                    .arg(crate::binary::namedrop_path());
                 command
             }
-            None => Command::new(env!("CARGO_BIN_EXE_namedrop")),
+            None => crate::binary::namedrop(),
         };
         // The test itself may be run by an agent.
         for marker in namedrop::AGENT_SESSION_MARKERS {

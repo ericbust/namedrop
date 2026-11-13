@@ -1,3 +1,6 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -135,7 +138,7 @@ impl Fixture {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = crate::binary::namedrop();
         command
             .env("HERDR_PLUGIN_STATE_DIR", self.state())
             .env("HERDR_SOCKET_PATH", "test-socket")
@@ -337,7 +340,7 @@ impl Fixture {
         namedrop::install_integration_package(
             &self.root.join("home"),
             namedrop::AgentRuntime::ClaudeCode,
-            &fs::canonicalize(env!("CARGO_BIN_EXE_namedrop")).unwrap(),
+            &fs::canonicalize(crate::binary::namedrop_path()).unwrap(),
             &self.state(),
         )
         .unwrap();

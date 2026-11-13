@@ -239,7 +239,7 @@ else:
             ProcessIds::default().next_id("startup")
         ));
         let stderr = fs::File::create_new(&stderr_path).unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = crate::binary::namedrop();
         command
             .arg("--plugin-state")
             .arg(&f.state)
@@ -665,7 +665,7 @@ fn startup_reports_claim_deadline_without_spawning_a_child() {
     claim.lock().unwrap();
     let spawned = f.root.join("unexpected-child");
     let stderr = f.root.join("claim-timeout.stderr");
-    let mut command = Command::new("/bin/sh");
+    let mut command = crate::binary::command("/bin/sh");
     command
         .args(["-c", "touch \"$1\"", "probe"])
         .arg(&spawned)
@@ -699,7 +699,7 @@ fn startup_waits_for_predecessor_claim_release_before_launching_a_successor() {
     let entered = f.root.join("claim-entered");
     let release = f.root.join("claim-release");
     let mut holder = ClaimHolder {
-        child: Command::new("/usr/bin/python3")
+        child: crate::binary::command("/usr/bin/python3")
             .args([
                 "-c",
                 "import fcntl, os, sys, time\nwith open(sys.argv[1], 'a') as claim:\n fcntl.flock(claim, fcntl.LOCK_EX)\n open(sys.argv[2], 'w').close()\n while not os.path.exists(sys.argv[3]): time.sleep(0.01)",
@@ -760,7 +760,7 @@ fn startup_waits_for_predecessor_claim_release_before_launching_a_successor() {
 fn startup_diagnostics_report_early_exit_and_stderr_without_waiting_for_timeout() {
     let f = Fixture::new();
     let stderr = f.root.join("early-exit.stderr");
-    let mut child = Command::new("/usr/bin/python3")
+    let mut child = crate::binary::command("/usr/bin/python3")
         .args([
             "-c",
             "import os; os.write(2, b'x' * 262144); os.write(2, b'\\nstartup failure marker\\n'); raise SystemExit(69)",
@@ -791,7 +791,7 @@ fn startup_diagnostics_report_early_exit_and_stderr_without_waiting_for_timeout(
 fn startup_diagnostics_distinguish_timeout_from_the_cleanup_signal_and_reap_child() {
     let f = Fixture::new();
     let stderr = f.root.join("timeout.stderr");
-    let mut child = Command::new("/bin/sh")
+    let mut child = crate::binary::command("/bin/sh")
         .args([
             "-c",
             "printf 'startup blocked marker\\n' >&2; exec /bin/sleep 30",
@@ -832,9 +832,12 @@ fn fixture_executable_can_be_replaced_while_its_previous_version_runs() {
     let f = Fixture::new();
     let executable = f.root.join("running-shim");
     executable::copy_executable("/bin/sleep", &executable);
-    let mut previous = Command::new(&executable).arg("30").spawn().unwrap();
+    let mut previous = crate::binary::command(&executable)
+        .arg("30")
+        .spawn()
+        .unwrap();
     executable::write_executable(&executable, "#!/bin/sh\nprintf 'replacement-version\\n'\n");
-    let replacement = Command::new(&executable).output();
+    let replacement = crate::binary::command(&executable).output();
     let previous_running = previous.try_wait().unwrap().is_none();
     let _ = previous.kill();
     previous.wait().unwrap();

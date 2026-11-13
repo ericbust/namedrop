@@ -110,10 +110,12 @@ pub fn run(state: &Path) {
     let Ok(executable) = env::current_exe() else {
         return;
     };
-    // The front end's short Herdr timeout is for its own deadline; a settle
-    // runs the CLI's operation, which needs the CLI's.
-    let Ok(mut child) = Command::new(executable)
-        .env_remove("NAMEDROP_HERDR_TIMEOUT_MS")
+    // The worker stays in the hook's process group, and its endpoint and space
+    // travel in `CapturedStop`. The scrub also drops the front end's short
+    // timeouts, which are for its own deadline, not a settle's.
+    let mut command = Command::new(executable);
+    namedrop::daemon::scrub(&mut command, namedrop::daemon::Starter::StopHook);
+    let Ok(mut child) = command
         .args(["hook", "stop-worker", "--state-directory"])
         .arg(state)
         .stdin(Stdio::piped())

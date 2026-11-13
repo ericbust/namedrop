@@ -1,3 +1,6 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/executable.rs"]
@@ -18,7 +21,7 @@ use std::{
     io::{Read, Write},
     net::TcpStream,
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -33,13 +36,13 @@ struct Server {
 }
 impl Server {
     fn start(state: &Path) -> Self {
-        Self::start_binary(state, Path::new(env!("CARGO_BIN_EXE_namedrop")))
+        Self::start_binary(state, Path::new(crate::binary::namedrop_path()))
     }
     fn start_binary(state: &Path, binary: &Path) -> Self {
         Self::start_configured(state, binary, None)
     }
     fn start_configured(state: &Path, binary: &Path, herdr: Option<&Path>) -> Self {
-        let mut command = Command::new(binary);
+        let mut command = crate::binary::command(binary);
         if let Some(herdr) = herdr {
             command.env("HERDR_BIN_PATH", herdr);
         }
@@ -558,7 +561,7 @@ fn history_http_benchmark() {
     }
     let binary = std::env::var_os("NAMEDROP_HISTORY_BENCH_BINARY")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| env!("CARGO_BIN_EXE_namedrop").into());
+        .unwrap_or_else(|| crate::binary::namedrop_path().into());
     for count in [10_000, 40_000] {
         let dir = TestDirectory::new();
         let state = dir.path().join("state");
@@ -750,7 +753,7 @@ else:
     .unwrap();
     let server = Server::start_configured(
         &state,
-        Path::new(env!("CARGO_BIN_EXE_namedrop")),
+        Path::new(crate::binary::namedrop_path()),
         Some(&herdr),
     );
     let path = format!("/w/{}/direct-messages/address-b/messages", key.as_str());

@@ -1,4 +1,8 @@
 #![cfg(feature = "test-support")]
+
+#[path = "support/binary.rs"]
+mod binary;
+
 #[path = "support/cleanup.rs"]
 mod cleanup;
 #[path = "support/dispatch.rs"]
@@ -146,7 +150,7 @@ impl Fixture {
     }
     fn updater_state(&self) -> Value {
         let script = "import json,sys;sys.path.insert(0,sys.argv[1]);import update;s=update.durable_state([]);s['other_servers']=[];s['ready']=update.ready(s,[]);print(json.dumps(s))";
-        let output = std::process::Command::new("python3")
+        let output = crate::binary::command("python3")
             .args(["-B", "-c", script])
             .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts"))
             .env("HERDR_PLUGIN_STATE_DIR", &self.state)
