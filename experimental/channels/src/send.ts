@@ -19,6 +19,12 @@ import type {
 } from "./model.ts";
 import { type ReminderConversation, reminderPath } from "./reminders.ts";
 import {
+  parseSoundSettings,
+  type SaveResult,
+  type SoundSave,
+  type SoundSettings,
+} from "./sounds.ts";
+import {
   parseAddedAgent,
   parseChannelFolder,
   parseCreatedChannel,
@@ -227,6 +233,33 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
     },
     prepare(): void {
       void token();
+    },
+    async sounds(signal: AbortSignal): Promise<SoundSettings | null> {
+      try {
+        const response = await fetcher("/api/sounds", {
+          credentials: "same-origin",
+          signal,
+        });
+        return response.ok ? parseSoundSettings(await response.json()) : null;
+      } catch {
+        return null;
+      }
+    },
+    async changeSound(save: SoundSave): Promise<SaveResult> {
+      try {
+        const response = await postWithTokenRetry("/api/sounds", save);
+        if (response.status === 400) return { kind: "full" };
+        const settings =
+          response.ok || response.status === 409
+            ? parseSoundSettings(await response.json())
+            : null;
+        if (settings === null) return { kind: "failed" };
+        return response.ok
+          ? { kind: "saved", settings }
+          : { kind: "conflict", settings };
+      } catch {
+        return { kind: "failed" };
+      }
     },
     async fullBody(
       key: SpaceKey,

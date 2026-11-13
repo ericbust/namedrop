@@ -8,6 +8,7 @@ import type {
   SafeText,
   SpaceKey,
 } from "./model.ts";
+import { type Arrival, agentKey } from "./sounds.ts";
 
 export type DirectPeer = {
   spaceKey: SpaceKey;
@@ -115,4 +116,24 @@ export function mergeDirectHistory(
 }
 export function directSelection(): string | null {
   return new URLSearchParams(location.search).get("dm");
+}
+// Agents with a new message to the person since the last directory read. The
+// first read hears nothing: it only learns where each conversation stands.
+// After it, a peer seen for the first time rings for any message it has.
+export function heardDirect(
+  previous: readonly DirectPeer[] | null,
+  next: readonly DirectPeer[],
+): Arrival[] {
+  if (previous === null) return [];
+  const before = new Map(
+    previous.map((peer) => [directKey(peer), peer.lastAgentMessageId]),
+  );
+  const arrivals: Arrival[] = [];
+  for (const peer of next) {
+    const id = peer.lastAgentMessageId;
+    if (id === null || id === (before.get(directKey(peer)) ?? null)) continue;
+    const agent = agentKey(peer.addressId);
+    if (agent !== null) arrivals.push({ agent, id });
+  }
+  return arrivals;
 }

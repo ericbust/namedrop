@@ -29,6 +29,7 @@ import { Icon } from "./Icons.tsx";
 import { measure } from "./measure.ts";
 import { PeekCompose } from "./PeekCompose.tsx";
 import { PeekLive } from "./PeekLive.tsx";
+import { SoundPicker } from "./SoundPicker.tsx";
 import { useEscape } from "./useEscape.ts";
 
 type Retention = {
@@ -253,6 +254,7 @@ function PeekContent(props: ContentProps) {
   return (
     <>
       <PeekHeader
+        target={props.target}
         who={props.who}
         toggle={props.toggle}
         onClose={props.onClose}
@@ -300,6 +302,7 @@ function PeekContent(props: ContentProps) {
 }
 
 function PeekHeader({
+  target,
   who,
   toggle,
   onClose,
@@ -308,6 +311,7 @@ function PeekHeader({
   expanded,
   onExpand,
 }: {
+  target: PeekTarget;
   who: PeekWho;
   toggle: ReactNode;
   onClose(): void;
@@ -347,6 +351,9 @@ function PeekHeader({
           <span aria-live="polite">{stamp}</span>
         </p>
       </div>
+      {target.kind === "agent" && (
+        <SoundPicker agent={target.member} alias={who.alias} />
+      )}
       {action}
       <button
         type="button"
@@ -486,6 +493,7 @@ function PeekScreen({
   return (
     <>
       <PeekHeader
+        target={target}
         who={who}
         toggle={toggle}
         onClose={onClose}
@@ -500,7 +508,7 @@ function PeekScreen({
             onClick={again}
           >
             <Icon name="refresh" />
-            {peekCopy.refresh}
+            <span className="peek-refresh-label">{peekCopy.refresh}</span>
           </button>
         }
       />

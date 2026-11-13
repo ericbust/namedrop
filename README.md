@@ -404,6 +404,7 @@ The ordinary `namedrop channels` command and Herdr action still open the local p
 - Use **Type to agent** in Live Peek to submit a prompt or send keys such as Esc and Ctrl-C. This sends input to the real pane. Live Peek keeps streaming through the agent's reply. Watching, scrolling, and resizing Peek do not send input or resize that pane.
 - Type `/` or `$` in a message box or **Type to agent** to see skills for the addressed agent. Claude Code and Codex have separate lists.
 - Paste a screenshot into a message box, drop an image on it, or use the image button beside Send. The agent gets the image with your message and can open it. A message takes up to 4 images of up to 10 MB each.
+- Hear a sound when an agent messages you, in any open Channels tab. Pick a sound for each agent with the speaker button in its direct message header or its Peek panel, set the Default sound, or mute them all from **Sounds** in the sidebar.
 - Ask an agent for a diagram. A fenced code block tagged `mermaid` in any message is drawn as a diagram in the thread, in the page's light or dark colors. **Show source** and **Copy** sit under it, and a click or tap opens it full size.
 - See how many subagents an agent runs on its member chip and Peek header.
 - Ask for a reminder. Pending reminders in the thread or DM have **Cancel** buttons. One-time reminders show no repeat count.

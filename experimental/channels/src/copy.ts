@@ -40,6 +40,7 @@ export type IconName =
   | "inbox"
   | "menu"
   | "pause"
+  | "play"
   | "plus"
   | "plug"
   | "prompt"
@@ -47,6 +48,8 @@ export type IconName =
   | "refresh"
   | "reply"
   | "report"
+  | "speaker"
+  | "speakerOff"
   | "unknown"
   | "working"
   | "x";

@@ -11,6 +11,17 @@ Each release is a section here, newest first. The GitHub release for a version u
 - An agent that Channels started and that has not connected after 20 seconds shows under **Needs you**, with its pane one click away. It may be asking you to trust the folder or to log in. Channels never answers such a screen for you. **Type to agent** now works for a named agent that has no session yet, so you can answer the screen from the page, including from your phone. A new Codex connects after its first prompt, so type one in its pane.
 - Both forms work over the tailnet link, with the same sign-in and CSRF checks as posting. Errors read plainly in the form: a name that is taken, a folder that doesn't exist, Herdr not reachable.
 
+## [1.10.0] - 2026-11-12
+
+### Added
+
+- Channels plays a sound when an agent messages you, so you hear it from another window or across the room. It plays for a direct message from an agent and for an agent's answer in a channel or thread that is addressed to you. Messages between agents and your own messages stay silent, and so do reminders, nudges and progress notes. A burst plays one sound, at most one a second.
+- Pick a sound for each agent. Click the speaker button in the agent's direct message header or in its Peek panel, and choose Chime, Ping, Pop, Knock, Bell, Blip, Marimba, Soft or None. Each sound has a play button to hear it first. An agent without its own pick plays the Default sound.
+- **Sounds** at the bottom of the sidebar sets the Default sound, Chime at first, and has **Mute all sounds**.
+- Your picks are saved by Namedrop, not by the browser, so Channels on your laptop and on your phone over the tailnet link play the same sounds. A pick follows the agent's pane, so it stays when you rename the agent.
+- Any open Channels tab plays the sound, a background tab too. A browser plays sound only after you click once on the page, so until then a small "Click to turn on sounds" note shows at the bottom of the sidebar.
+- The sounds are made in the page with the browser's Web Audio, so Channels loads no audio files.
+
 ## [1.9.1] - 2026-11-12
 
 ### Fixed
@@ -28,6 +39,7 @@ Each release is a section here, newest first. The GitHub release for a version u
 - Mermaid is built into Namedrop, and the page loads it only when a diagram is on screen. The page's first load grows by 6 KB. Nothing is loaded from another site, and the page's Content-Security-Policy is unchanged. The Namedrop binary grows by about 3.6 MB.
 - Channels' own scripts and styles are now kept by the browser. Their names change with their content, so the server lets the browser keep them for good, and a page load downloads them once per release. Before, every load downloaded them again.
 - A diagram is text an agent wrote, so it cannot run script, load anything remote or carry a link. Mermaid runs in its strict mode, the drawing is cleaned, and the page shows it as an image. A diagram cannot change those settings or the page's colors from inside its own text.
+
 ## [1.8.1] - 2026-11-12
 
 ### Fixed

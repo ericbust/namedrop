@@ -14,6 +14,7 @@ mod reminders;
 mod server_files;
 mod skills;
 pub mod snapshot;
+mod sounds;
 pub(crate) mod tailscale;
 mod thread_controls;
 
