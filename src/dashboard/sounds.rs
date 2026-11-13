@@ -357,7 +357,9 @@ mod tests {
             Err(Rejected::TooManyAgents),
             "with no listing nothing is dropped"
         );
-        let all: HashSet<String> = (0..MAX_AGENTS).map(|index| String::from(agent(index))).collect();
+        let all: HashSet<String> = (0..MAX_AGENTS)
+            .map(|index| String::from(agent(index)))
+            .collect();
         assert_eq!(
             full.change(set(agent(MAX_AGENTS)), Some(&all)),
             Err(Rejected::TooManyAgents)
