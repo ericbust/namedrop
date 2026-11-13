@@ -1,6 +1,6 @@
 //! The only code that decides whether a Rex server runs on this machine.
 
-use super::control::{Connection, Fault, Timed};
+use super::control::{Control, Fault};
 use crate::mux::{Endpoint, REX_SCHEME};
 use serde_json::Value;
 use std::{io, os::unix::net::UnixStream, path::Path};
@@ -66,9 +66,9 @@ pub(super) fn peer_pid(stream: &UnixStream) -> io::Result<u32> {
 /// and its primary listener is a Unix socket, whose address names the server.
 /// Matching `dial` to that listener by device and inode is deferred, because
 /// the peer pid already refuses every forwarder measured.
-pub(super) fn prove_local<S: Timed>(
+pub(super) fn prove_local(
     dial: &Path,
-    control: &mut Connection<'_, S>,
+    control: &mut dyn Control,
     peer: u32,
 ) -> Result<LocalServer, Fault> {
     let status = control.request("server.status", None)?.payload;

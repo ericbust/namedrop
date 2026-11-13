@@ -12,9 +12,11 @@ mod input;
 mod model;
 mod ports;
 // Tests are the Rex adapter's only callers until `mux::connect` reaches it,
-// so the library build leaves it out.
+// so the library build leaves it and its process reads out.
 #[cfg(test)]
-mod rex;
+mod processes;
+#[cfg(test)]
+pub(crate) mod rex;
 
 pub use effect::*;
 pub use event::*;

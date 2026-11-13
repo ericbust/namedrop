@@ -1,5 +1,8 @@
 use super::*;
-use crate::mux::{Budget, MuxKind, rex::control::tests::Server};
+use crate::mux::{
+    Budget, MuxKind,
+    rex::control::{Connection, tests::Server},
+};
 use serde_json::json;
 use std::{
     io::{self as stdio},
@@ -112,7 +115,7 @@ fn prove(dial: &Path, stream: UnixStream) -> Result<LocalServer, Fault> {
     let mut control = Connection::open(
         stream,
         super::super::control::Limits {
-            budget: &budget,
+            budget: Box::new(budget),
             cancelled: &cancelled,
         },
     )

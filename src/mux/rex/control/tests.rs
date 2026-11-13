@@ -129,7 +129,13 @@ fn open<'a>(
     budget: &'a (dyn Fn() -> Result<Budget, String> + 'a),
     cancelled: &'a AtomicBool,
 ) -> Result<Connection<'a, UnixStream>, Fault> {
-    Connection::open(stream, Limits { budget, cancelled })
+    Connection::open(
+        stream,
+        Limits {
+            budget: Box::new(budget),
+            cancelled,
+        },
+    )
 }
 
 const DEFAULT: &dyn Fn() -> Result<Budget, String> = &|| Ok(Budget::ADAPTER_DEFAULT);

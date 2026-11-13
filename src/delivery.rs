@@ -1628,29 +1628,9 @@ mod prompt_box_tests {
     }
 
     /// Rex's `vt` format writes a run of blank cells as `ESC[nC`, which
-    /// `cells` drops.
-    fn blank_runs_as_spaces(vt: &str) -> String {
-        let mut screen = String::new();
-        let mut rest = vt;
-        while let Some(start) = rest.find("\u{1b}[") {
-            screen.push_str(&rest[..start]);
-            let after = &rest[start + 2..];
-            let digits = after.len() - after.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-            if after[digits..].starts_with('C') {
-                let count = after[..digits].parse().unwrap_or(1);
-                screen.extend(std::iter::repeat_n(' ', count));
-                rest = &after[digits + 1..];
-            } else {
-                screen.push_str("\u{1b}[");
-                rest = after;
-            }
-        }
-        screen.push_str(rest);
-        screen
-    }
-
+    /// `cells` drops, so the adapter hands the port `port_ansi`'s shape.
     #[test]
-    fn rex_screens_show_their_boxes_once_blank_runs_are_spaces() {
+    fn rex_screens_show_their_boxes_in_the_ports_shape() {
         let codex = crate::AgentRuntime::Codex;
         for (name, vt, agent, held) in [
             (
@@ -1690,7 +1670,8 @@ mod prompt_box_tests {
                 PromptBox::Draft,
             ),
         ] {
-            assert_eq!(prompt_box(&blank_runs_as_spaces(vt), agent), held, "{name}");
+            let screen = crate::mux::rex::wire::port_ansi(vt).unwrap();
+            assert_eq!(prompt_box(&screen, agent), held, "{name}");
         }
     }
 

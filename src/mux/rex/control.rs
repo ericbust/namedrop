@@ -41,8 +41,60 @@ impl Timed for UnixStream {
 }
 
 pub(super) struct Limits<'a> {
-    pub budget: &'a (dyn Fn() -> Result<Budget, String> + 'a),
+    pub budget: Box<dyn Fn() -> Result<Budget, String> + 'a>,
     pub cancelled: &'a AtomicBool,
+}
+
+/// Opens one control connection: upgrade, hello, welcome. Scripted in tests.
+pub(super) trait Wire: Send + Sync {
+    /// The connection and the pid of the process at its other end. Each
+    /// request is held to `narrower` as well as to the wire's own budget.
+    fn open<'a>(&'a self, narrower: Narrower<'a>) -> Result<(Box<dyn Control + 'a>, u32), Fault>;
+}
+
+/// What a `within` adds to a wire's limits. Its budget is asked for before
+/// each request, and its flag, when it has one, cancels in place of the
+/// wire's own.
+pub(super) struct Narrower<'a> {
+    pub budget: Box<dyn Fn() -> Result<Budget, String> + 'a>,
+    pub cancelled: Option<&'a AtomicBool>,
+}
+
+impl Narrower<'_> {
+    pub(super) fn none() -> Self {
+        Self {
+            budget: Box::new(|| Ok(Budget::ADAPTER_DEFAULT)),
+            cancelled: None,
+        }
+    }
+}
+
+impl<W: Wire + ?Sized> Wire for &W {
+    fn open<'a>(&'a self, narrower: Narrower<'a>) -> Result<(Box<dyn Control + 'a>, u32), Fault> {
+        (**self).open(narrower)
+    }
+}
+
+pub(super) trait Control {
+    /// One request and its response.
+    fn request(&mut self, method: &str, payload: Option<Value>) -> Result<Reply, Fault>;
+    /// A buffered event, or the next to arrive within `within`. A zero wait
+    /// still reads what the socket already holds.
+    fn next_event(&mut self, within: Duration) -> Result<Option<Event>, Fault>;
+}
+
+impl<S: Timed> Control for Connection<'_, S> {
+    fn request(&mut self, method: &str, payload: Option<Value>) -> Result<Reply, Fault> {
+        let replied = self.try_request(method, payload);
+        self.settle(replied)
+    }
+
+    /// `Duration::MAX` waits until an event arrives or the flag is set.
+    /// Events buffered before the connection broke are still returned.
+    fn next_event(&mut self, within: Duration) -> Result<Option<Event>, Fault> {
+        let next = self.try_next_event(within);
+        self.settle(next)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -91,7 +143,7 @@ impl<'a, S: Timed> Connection<'a, S> {
     /// The upgrade, hello, and welcome together take one request's budget
     /// and stop when the flag is set.
     pub(super) fn open(stream: S, limits: Limits<'a>) -> Result<Self, Fault> {
-        let timeout_limit = timeout_cap(std::env::var("NAMEDROP_REX_TIMEOUT_MS").ok().as_deref());
+        let timeout_limit = request_timeout_cap();
         let budget = request_budget(&limits, timeout_limit)?;
         if budget.timeout.is_zero() {
             return Err(Fault::Timeout(budget.timeout));
@@ -147,11 +199,6 @@ impl<'a, S: Timed> Connection<'a, S> {
         self.exchange(budget, deadline, &hello, |_| true)
     }
 
-    pub(super) fn request(&mut self, method: &str, payload: Option<Value>) -> Result<Reply, Fault> {
-        let replied = self.try_request(method, payload);
-        self.settle(replied)
-    }
-
     fn try_request(&mut self, method: &str, payload: Option<Value>) -> Result<Reply, Fault> {
         let budget = request_budget(&self.limits, self.timeout_limit)?;
         self.intact()?;
@@ -184,15 +231,6 @@ impl<'a, S: Timed> Connection<'a, S> {
             seq,
             payload: response.get("payload").cloned().unwrap_or(Value::Null),
         })
-    }
-
-    /// A buffered event, or the next to arrive within `within`. A zero wait
-    /// still reads what the socket already holds, and `Duration::MAX` waits
-    /// until an event arrives or the flag is set. Events buffered before the
-    /// connection broke are still returned.
-    pub(super) fn next_event(&mut self, within: Duration) -> Result<Option<Event>, Fault> {
-        let next = self.try_next_event(within);
-        self.settle(next)
     }
 
     fn try_next_event(&mut self, within: Duration) -> Result<Option<Event>, Fault> {
@@ -360,6 +398,11 @@ fn request_budget(limits: &Limits<'_>, cap: Duration) -> Result<Budget, Fault> {
         timeout: budget.timeout.min(cap),
         max_output_bytes: budget.max_output_bytes,
     })
+}
+
+/// The most any one request may take: `NAMEDROP_REX_TIMEOUT_MS`, or 5 s.
+pub(super) fn request_timeout_cap() -> Duration {
+    timeout_cap(std::env::var("NAMEDROP_REX_TIMEOUT_MS").ok().as_deref())
 }
 
 fn timeout_cap(value: Option<&str>) -> Duration {

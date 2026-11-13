@@ -799,6 +799,19 @@ What the design did not say, found while building 6b:
 - **The 10 ms step costs about 100 wakeups a second while it waits.** That is fine for a port call, which waits seconds at most. The bridge's wait for events has no end, so step 5 should wait in `poll(2)` with a pipe that the cancel wakes, not in 10 ms steps.
 - **A close frame after a cut write is the one that must not be sent.** A connection broken by a read timeout, a cancel, or a refused allowance still has whole frames on the wire, so it closes with 1000 as before. Only a write cut short skips the close, because the rest of its frame is never written.
 
+- **9. Reads** (`feat(rex): survey blocks and read their screens and processes`). `mux/processes.rs` reads a local pid as `Alive` with its incarnation and group, `Gone`, or `Unreadable`, lists a group's live members with zombies dropped, and reads parents and executables. `rex/wire.rs` parses Rex's replies and holds `port_ansi`, `rex/agent.rs` holds `pane_agent`, `Locality`, and `shell_of`, and `rex/binding.rs` reads the session bindings. `RexMux` implements `MuxRead` over a `Wire`, which tests script. Nine `process` fixtures under `rex/fixtures/process/` hold real replies of a scratch server with the local facts `ps` read at capture. Commit 0a's test reads the captures through `port_ansi`. All of it stays `#[cfg(test)]` until commit 11.
+
+What the design did not say, found while building 9:
+
+- **Every block method needs the connection attached to its session.** Rex answers `conflict` otherwise, so `process`, `screen`, and later every input attach after `target.resolve`. The design's request table leaves the attach out for those rows.
+- **`proc_listpgrppids` returns how many pids it wrote, not how many bytes.** Read as bytes, a group of fewer than four members listed as empty. With the count, a zombie in its launcher's live group is listed, as the patch review measured, and `members` drops it.
+- **On macOS a zombie fails `PROC_PIDTBSDINFO` with `ESRCH`, as a missing pid does.** Root's processes fail it with another error and read `Unreadable`. The short info is needed only for the parent, because `login` is root's.
+- **A tab label is the window's label from `target.resolve`,** which needs no attach and no `session.view`.
+- **`format` with `max_bytes` sends `id` and `total` and no `eof`.** `screen` asks for one byte, then reads the last 160 KiB with one `blob_read`, which encodes within the 960 KiB a `blob_read` returns even when every byte is escaped, and drops the line the read starts inside.
+- **The survey leaves out blocks that are not terminals, and a detached block has an empty tab ID,** because Rex places it in no window. A detached block's host comes from `session.list_blocks`, since the attach view lists placed blocks only.
+- **The fixtures' agent is a stand-in.** A Python program that reports `claude-code` with OSC 7501 played the agent, so the replies are Rex's own and the owner names are the stand-in's. The zombie fixture is its launcher that never reaps it.
+- **The incarnation is read where liveness is read.** `LocalProcesses::read` returns it, so the design's separate `binding::incarnation` is not needed.
+
 ## Next implementation step
 
 Step 3 is done (see [Step 3: neutral names](#step-3-neutral-names)). Next is step 4 of the [plan](PLAN.md): write the Rex adapter. Start with [Left for step 4](#left-for-step-4) and the step 4 items under [Open questions and risks](#open-questions-and-risks).

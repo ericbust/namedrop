@@ -1,0 +1,36 @@
+{
+ "about": "a block made with -- python3 -i",
+ "program_status": {
+  "records": []
+ },
+ "process": {
+  "last_exit": null,
+  "child": {
+   "pid": 70852,
+   "user_id": 501,
+   "user": "me",
+   "name": "Python",
+   "path": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python",
+   "invoked_path": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python",
+   "argv0": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python",
+   "cwd": "/private/tmp"
+  },
+  "foreground": {
+   "pid": 70852,
+   "user_id": 501,
+   "user": "me",
+   "name": "Python",
+   "path": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python",
+   "invoked_path": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python",
+   "argv0": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Contents/MacOS/Python",
+   "cwd": "/private/tmp"
+  },
+  "home": "/Users/me"
+ },
+ "local": {
+  "70852": {
+   "group": 70852,
+   "state": "alive"
+  }
+ }
+}
