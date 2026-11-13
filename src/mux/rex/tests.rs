@@ -1155,6 +1155,37 @@ fn a_tab_label_is_the_windows_label() {
     );
 }
 
+/// Rex resolves an empty ID to its default window, so a detached block's
+/// tab must not reach it.
+#[test]
+fn a_detached_blocks_empty_tab_id_names_no_window() {
+    use crate::mux::{Effect, MuxAct};
+    let state = State::new();
+    let script = Script::new(|request, _| match request.short() {
+        "server.status" => Ok(status(PEER)),
+        "target.resolve" => Ok(
+            json!({"results": [{"query": request.payload["queries"][0], "status": "resolved",
+            "target": {"kind": "window", "session_id": "session:s", "label": "default"}}]}),
+        ),
+        _ => Ok(json!({})),
+    });
+    let rex = rex(script, &state, Local::default());
+    let empty = TabId::new("");
+    assert!(matches!(
+        rex.tab_label(&empty),
+        Err(MuxError::Gone(Gone::Tab, why)) if why.contains("empty ID")
+    ));
+    let rename = Effect::RenameTab {
+        tab: empty,
+        label: "renamed".into(),
+    };
+    assert!(matches!(
+        rex.apply(&rename),
+        Err(MuxError::Gone(Gone::Tab, _))
+    ));
+    assert_eq!(rex.wire.calls(), ["server.status"]);
+}
+
 #[test]
 fn a_read_within_an_allowance_keeps_its_error_and_its_flag() {
     let state = State::new();

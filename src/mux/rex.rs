@@ -202,8 +202,16 @@ impl Call<'_> {
         )?)
     }
 
-    /// The session that holds `id`, a block or a window.
+    /// The session that holds `id`, a block or a window. An empty ID is
+    /// refused, because Rex resolves it to its default window, and a
+    /// detached block's empty tab ID names no window.
     fn resolve(&mut self, kind: &str, id: &str, gone: Gone) -> Result<wire::Target, MuxError> {
+        if id.is_empty() {
+            return Err(MuxError::Gone(
+                gone,
+                format!("Rex has no {kind} with an empty ID"),
+            ));
+        }
         let payload = self.request("target.resolve", wire::resolve_request(kind, id), gone)?;
         wire::target(payload, gone, id)
     }
