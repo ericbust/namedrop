@@ -58,6 +58,11 @@ impl TestDirectory {
             std::process::id(),
             NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
         ));
+        fs::create_dir_all(&root).unwrap();
+        // The script Herdr reports the repository by this path, and a binary
+        // run there reads its directory as the system spells it: under
+        // `/private` on macOS, where the temporary directory is a symlink.
+        let root = fs::canonicalize(root).unwrap();
         let (repo, state, home) = (root.join("repo"), root.join("state"), root.join("home"));
         for path in [&repo, &state, &home] {
             fs::create_dir_all(path).unwrap();
@@ -935,7 +940,7 @@ panes = {{'result': {{'panes': [
     {{'pane_id':'pane-lead','terminal_id':'t1','tab_id':'tab-1','workspace_id':'workspace-1','agent':'codex','agent_session':{{'value':'session-lead'}},'agent_status':'idle'}},
     {{'pane_id':'pane-reviewer','terminal_id':'t2','tab_id':'tab-2','workspace_id':'workspace-1','agent':'claude','agent_session':{{'value':'session-reviewer'}},'agent_status':reviewer.read_text() if reviewer.exists() else 'idle'}}]}}}}
 if args[:2] == ['workspace','list']: print(json.dumps({{'result':{{'workspaces':[{{'workspace_id':'workspace-1'}}]}}}}))
-elif args[:2] == ['worktree','list']: print(json.dumps({{'result':{{'worktrees':[{{'path':(here / 'worktree-path').read_text() if (here / 'worktree-path').exists() else {repo:?},'open_workspace_id':'workspace-1'}}]}}}}))
+elif args[:2] == ['worktree','list']: print(json.dumps({{'result':{{'worktrees':[{{'path':{repo:?},'open_workspace_id':'workspace-1'}}]}}}}))
 elif args[:2] == ['pane','list']: print(json.dumps(panes))
 elif args[:3] == ['pane','read','pane-reviewer'] and (here / 'reviewer-screen').exists(): print((here / 'reviewer-screen').read_text(), end='')
 elif args[:2] == ['agent','send-keys']:
@@ -5980,15 +5985,6 @@ fn a_claude_stop_with_background_agents_running_takes_mail_queued_during_the_tur
 #[test]
 fn the_prompt_hook_wakes_the_space_its_mention_went_to() {
     let space = Space::new();
-    // The wake reads its directory as the system spells it.
-    fs::write(
-        space.directory.root.join("worktree-path"),
-        fs::canonicalize(&space.directory.repo)
-            .unwrap()
-            .to_str()
-            .unwrap(),
-    )
-    .unwrap();
     let mut command = space.command();
     command.env("CLAUDE_CODE_SESSION_ID", "session-reviewer");
     let mut hook = space.start_reviewer_prompt_in(command, "@lead Is the build green?");
@@ -6185,7 +6181,12 @@ fn the_answer_to_a_mention_typed_in_a_claude_pane_goes_into_a_box_cleared_of_the
     let mut hook = space.start_reviewer_prompt_in(command, "@lead Is the build green?");
     let output: Value = serde_json::from_str(&hook.output()).unwrap();
     assert_eq!(output["decision"], "block", "{output}");
+    // The hook's own wake has typed the mention to the lead by the time the
+    // hook and its detached processes are gone.
     hook.wait();
+    let asked = space.prompted_by_binary("pane-lead");
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    let asked = &asked[0];
     // The box as Claude Code draws it with the mention back in it.
     let drawn: Vec<&str> = include_str!("fixtures/between-turns/claude-2.1.322-waiting-draft.ansi")
         .lines()
@@ -6217,8 +6218,6 @@ fn the_answer_to_a_mention_typed_in_a_claude_pane_goes_into_a_box_cleared_of_the
     )
     .unwrap();
 
-    namedrop::drain_mailboxes(&space.runtime("pane-lead")).unwrap();
-    let asked = space.herdr.envelope_for("pane-lead");
     let answered = space
         .command()
         .arg("--plugin-state")
