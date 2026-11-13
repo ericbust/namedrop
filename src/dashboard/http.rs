@@ -709,6 +709,7 @@ enum Route {
     CreateChannel(SpaceKey),
     AddAgent(SpaceKey),
     Folders(SpaceKey),
+    ChannelFolder(SpaceKey),
     Deliver {
         key: SpaceKey,
         message_id: String,
@@ -1020,12 +1021,15 @@ fn route(
                 Route::MessageContext { key, message_id }
             });
         }
-        if let [key, "folders"] = segments.as_slice() {
+        if let [key, listing @ ("folders" | "folder")] = segments.as_slice() {
             authenticate_session(request, port, session)?;
             authenticate_provenance(request, &origin)?;
-            return Ok(Route::Folders(
-                SpaceKey::parse(key).ok_or(Status::NotFound)?,
-            ));
+            let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
+            return Ok(if *listing == "folders" {
+                Route::Folders(key)
+            } else {
+                Route::ChannelFolder(key)
+            });
         }
         if segments.get(1) == Some(&"participants") {
             authenticate_session(request, port, session)?;
@@ -1598,6 +1602,9 @@ fn serve_connection(
             channel_create::add_agent(&mut reader, &mut writer, front, &request, &key)
         }
         Ok(Route::Folders(key)) => channel_create::folders(&mut writer, front, &key),
+        Ok(Route::ChannelFolder(key)) => {
+            channel_create::channel_folder(&mut writer, front, &key)
+        }
         Ok(Route::Deliver { key, message_id }) => {
             let post = match DeliverPost::read(&mut reader, &request) {
                 Ok(post) => post,
@@ -3009,6 +3016,10 @@ mod channel_create_route_tests {
             Ok(Route::Folders(_))
         ));
         assert!(matches!(
+            routes("GET", &format!("/w/{key}/folder"), false),
+            Ok(Route::ChannelFolder(_))
+        ));
+        assert!(matches!(
             routes("POST", &format!("/w/{key}/channels"), false),
             Err(Status::Forbidden)
         ));
@@ -3024,6 +3035,7 @@ mod channel_create_route_tests {
             ("GET", format!("/w/{key}/channels")),
             ("GET", format!("/w/{key}/agents")),
             ("POST", format!("/w/{key}/folders")),
+            ("POST", format!("/w/{key}/folder")),
             ("GET", "/w/not-a-key/folders".to_owned()),
             ("POST", "/w/not-a-key/agents".to_owned()),
             ("POST", format!("/w/{key}/agents/extra")),
@@ -3242,6 +3254,7 @@ mod tailnet_route_tests {
             "/w/0123456789abcdef0123/participants/agent/skills",
             "/w/0123456789abcdef0123/threads/thread/reminders",
             "/w/0123456789abcdef0123/folders",
+            "/w/0123456789abcdef0123/folder",
         ];
         for path in paths {
             let mut request = request(

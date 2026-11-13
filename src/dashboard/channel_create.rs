@@ -2,6 +2,7 @@
 //! with Namedrop active in it; an agent is a named pane in a new tab, started
 //! with the plain `claude` or `codex` command. Herdr is only ever reached on
 //! the socket of a space Namedrop already knows.
+use super::super::channel_folders::ChannelFolders;
 use super::super::hub::{HubCommand, now_ms};
 use super::super::launches::{Launch, run_lifecycle};
 use super::super::snapshot::{SpaceKey, StartedAgent};
@@ -131,6 +132,7 @@ enum ChannelRefusal {
     Restarting,
     HerdrUnreachable,
     CreateFailed,
+    FolderNotUsed,
     ActivateFailed,
 }
 
@@ -169,6 +171,11 @@ impl ChannelRefusal {
                 "500 Internal Server Error",
                 "Herdr couldn't create the workspace. Try again.".into(),
             ),
+            Self::FolderNotUsed => (
+                "500 Internal Server Error",
+                "Herdr didn't open the workspace in that folder, so it was closed again. Check the folder, then try again."
+                    .into(),
+            ),
             Self::ActivateFailed => (
                 "500 Internal Server Error",
                 "Namedrop couldn't activate in the new workspace, so it was closed again. Try again."
@@ -195,6 +202,7 @@ enum AgentRefusal {
     Restarting,
     HerdrUnreachable,
     TabFailed,
+    FolderNotUsed,
     NameFailed,
     NameUnconfirmed(String),
 }
@@ -261,6 +269,11 @@ impl AgentRefusal {
             Self::TabFailed => (
                 "500 Internal Server Error",
                 "Herdr couldn't open a tab for the agent. Try again.".into(),
+            ),
+            Self::FolderNotUsed => (
+                "500 Internal Server Error",
+                "Herdr didn't open the tab in this channel's folder, so it was closed again. Try again."
+                    .into(),
             ),
             Self::NameFailed => (
                 "500 Internal Server Error",
@@ -398,6 +411,7 @@ struct Pane {
 #[derive(Deserialize)]
 struct CreatedWorkspace {
     workspace: WorkspaceId,
+    root_pane: RootPane,
 }
 
 #[derive(Deserialize)]
@@ -408,7 +422,7 @@ struct WorkspaceId {
 #[derive(Deserialize)]
 struct CreatedTab {
     tab: TabId,
-    root_pane: PaneId,
+    root_pane: RootPane,
 }
 
 #[derive(Deserialize)]
@@ -416,9 +430,58 @@ struct TabId {
     tab_id: String,
 }
 
+/// The pane Herdr opened with a new workspace or tab, and where it opened.
 #[derive(Deserialize)]
-struct PaneId {
+struct RootPane {
     pane_id: String,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+impl RootPane {
+    /// Herdr opens in the home folder when it can't use the folder it was
+    /// given, and says so only through where the pane is.
+    fn opened_in(&self, folder: &str) -> bool {
+        let same = |path: &str| std::fs::canonicalize(path).ok();
+        self.cwd
+            .as_deref()
+            .and_then(same)
+            .is_some_and(|opened| Some(opened) == same(folder))
+    }
+}
+
+/// Where a channel's new agents open.
+#[derive(Debug, Eq, PartialEq)]
+enum ChannelFolder {
+    /// Kept by Namedrop, or the workspace's checkout: it stays put.
+    Fixed(String),
+    /// Where the first pane is now. Herdr keeps no launch folder and a
+    /// pane's folder follows `cd`, so this holds only until an agent is
+    /// added and Namedrop keeps it.
+    FirstPane(String),
+}
+
+impl ChannelFolder {
+    fn path(&self) -> &str {
+        match self {
+            Self::Fixed(path) | Self::FirstPane(path) => path,
+        }
+    }
+}
+
+/// The folder that stays put, if the channel has one: the one Namedrop
+/// kept, else the workspace's checkout.
+fn fixed_folder(
+    kept: &ChannelFolders,
+    namespace: &StateNamespace,
+    workspace: &Workspace,
+) -> Option<String> {
+    kept.of(namespace).map(str::to_owned).or_else(|| {
+        workspace
+            .worktree
+            .as_ref()
+            .and_then(|worktree| worktree.checkout_path.clone())
+    })
 }
 
 /// What a failed request closes again, so it leaves nothing it created.
@@ -466,19 +529,33 @@ impl Herdr {
             .and_then(|pane| pane.cwd))
     }
 
-    /// The workspace's folder: its checkout, else where its first pane is.
-    fn folder(&self, workspace: &Workspace) -> Result<Option<String>, ()> {
-        match workspace
-            .worktree
-            .as_ref()
-            .and_then(|worktree| worktree.checkout_path.clone())
-        {
-            Some(checkout) => Ok(Some(checkout)),
-            None => self.first_pane_cwd(&workspace.workspace_id),
+    /// The workspace's folder: the one that stays put, else where its first
+    /// pane is now.
+    fn folder(
+        &self,
+        kept: &ChannelFolders,
+        socket: &str,
+        workspace: &Workspace,
+    ) -> Result<Option<ChannelFolder>, ()> {
+        let namespace = StateNamespace::for_space(socket, workspace.workspace_id.clone());
+        match fixed_folder(kept, &namespace, workspace) {
+            Some(fixed) => Ok(Some(ChannelFolder::Fixed(fixed))),
+            None => Ok(self
+                .first_pane_cwd(&workspace.workspace_id)?
+                .map(ChannelFolder::FirstPane)),
         }
     }
 
-    fn create_workspace(&self, folder: &str, label: &str) -> Result<String, String> {
+    /// The live workspace of a space, which closing it in Herdr takes away.
+    fn workspace(&self, namespace: &StateNamespace) -> Result<Workspace, AgentRefusal> {
+        self.workspaces()
+            .map_err(|()| AgentRefusal::HerdrUnreachable)?
+            .into_iter()
+            .find(|workspace| workspace.workspace_id == namespace.space_id.as_str())
+            .ok_or(AgentRefusal::WorkspaceClosed)
+    }
+
+    fn create_workspace(&self, folder: &str, label: &str) -> Result<CreatedWorkspace, String> {
         let output = self.0.execute(&[
             "workspace",
             "create",
@@ -489,7 +566,7 @@ impl Herdr {
             "--no-focus",
         ])?;
         serde_json::from_str::<Listed<CreatedWorkspace>>(&output.stdout)
-            .map(|created| created.result.workspace.workspace_id)
+            .map(|created| created.result)
             .map_err(|error| error.to_string())
     }
 
@@ -630,12 +707,65 @@ pub(super) fn folders(writer: &mut TcpStream, front: &Front, key: &SpaceKey) -> 
         let workspaces = herdr
             .workspaces()
             .map_err(|()| FoldersRefusal::HerdrUnreachable)?;
-        recent_folders(&workspaces, |workspace| herdr.folder(workspace))
-            .map_err(|()| FoldersRefusal::HerdrUnreachable)
+        let kept = ChannelFolders::read(front.files.state());
+        let socket = &space.namespace.session_socket_id;
+        recent_folders(&workspaces, |workspace| {
+            Ok(herdr
+                .folder(&kept, socket, workspace)?
+                .map(|folder| folder.path().to_owned()))
+        })
+        .map_err(|()| FoldersRefusal::HerdrUnreachable)
     })();
     match found {
         Ok(folders) => reply_json(writer, "200 OK", json!({ "folders": folders })),
         Err(refusal) => refuse(writer, refusal.reply()),
+    }
+}
+
+/// The folder the channel's next agent opens in, for the form to show.
+pub(super) fn channel_folder(
+    writer: &mut TcpStream,
+    front: &Front,
+    key: &SpaceKey,
+) -> io::Result<()> {
+    let state = front.files.state();
+    let found = (|| {
+        let space = known_space(state, key)
+            .map_err(|()| AgentRefusal::StateUnavailable)?
+            .ok_or(AgentRefusal::UnknownChannel)?;
+        let herdr = Herdr::of(&space.namespace);
+        let workspace = herdr.workspace(&space.namespace)?;
+        herdr
+            .folder(
+                &ChannelFolders::read(state),
+                &space.namespace.session_socket_id,
+                &workspace,
+            )
+            .map_err(|()| AgentRefusal::HerdrUnreachable)
+    })();
+    match found {
+        Ok(folder) => reply_json(
+            writer,
+            "200 OK",
+            json!({ "folder": folder.as_ref().map(ChannelFolder::path) }),
+        ),
+        Err(refusal) => refuse(writer, refusal.reply()),
+    }
+}
+
+/// Keeps a channel's folder, and lets go of the folders of this Herdr
+/// session's closed workspaces.
+fn keep_folder(front: &Front, namespace: &StateNamespace, folder: &str, live: &[Workspace]) {
+    let mut kept = ChannelFolders::read(front.files.state());
+    kept.keep_live(
+        &namespace.session_socket_id,
+        live.iter()
+            .map(|workspace| workspace.workspace_id.as_str())
+            .chain([namespace.space_id.as_str()]),
+    );
+    kept.record(namespace, folder);
+    if let Err(error) = kept.save(&front.files) {
+        eprintln!("dashboard: could not keep the channel's folder: {error}");
     }
 }
 
@@ -688,12 +818,26 @@ fn create(
     }) {
         return Err(ChannelRefusal::NameTaken(channel.label.clone()));
     }
-    let workspace_id = herdr
+    // The folder was checked before this request took its turn, and can have
+    // gone since. Herdr would open the workspace in the home folder.
+    if !Path::new(&channel.folder).is_dir() {
+        return Err(ChannelRefusal::FolderMissing);
+    }
+    let created = herdr
         .create_workspace(&channel.folder, &channel.name)
         .map_err(|error| {
             eprintln!("dashboard: Herdr could not create a workspace: {error}");
             ChannelRefusal::CreateFailed
         })?;
+    let workspace_id = created.workspace.workspace_id;
+    if !created.root_pane.opened_in(&channel.folder) {
+        eprintln!(
+            "dashboard: Herdr opened {workspace_id} in {:?}, not in {}",
+            created.root_pane.cwd, channel.folder
+        );
+        herdr.undo(Undo::Workspace(workspace_id));
+        return Err(ChannelRefusal::FolderNotUsed);
+    }
     let namespace = StateNamespace::for_space(
         space.namespace.session_socket_id.clone(),
         workspace_id.clone(),
@@ -709,6 +853,7 @@ fn create(
         herdr.undo(Undo::Workspace(workspace_id));
         return Err(ChannelRefusal::ActivateFailed);
     }
+    keep_folder(front, &namespace, &channel.folder, &live);
     let _ = front.hub.send(HubCommand::DiscoveryReady);
     Ok((namespace, channel.name.clone()))
 }
@@ -753,10 +898,11 @@ fn add(front: &Front, key: &SpaceKey, agent: NewAgent) -> Result<(String, String
     }
     let namespace = space.namespace;
     let herdr = Herdr::of(&namespace);
-    let workspace = herdr
+    let live = herdr
         .workspaces()
-        .map_err(|()| AgentRefusal::HerdrUnreachable)?
-        .into_iter()
+        .map_err(|()| AgentRefusal::HerdrUnreachable)?;
+    let workspace = live
+        .iter()
         .find(|workspace| workspace.workspace_id == namespace.space_id.as_str())
         .ok_or(AgentRefusal::WorkspaceClosed)?;
     let claim = |alias: &str| read_state(state, |tx| tx.alias_claim(&namespace, alias));
@@ -764,22 +910,36 @@ fn add(front: &Front, key: &SpaceKey, agent: NewAgent) -> Result<(String, String
         return Err(AgentRefusal::NameTaken(agent.alias, claim));
     }
     let folder = herdr
-        .folder(&workspace)
+        .folder(
+            &ChannelFolders::read(state),
+            &namespace.session_socket_id,
+            workspace,
+        )
         .map_err(|()| AgentRefusal::HerdrUnreachable)?
         .ok_or(AgentRefusal::FolderUnknown)?;
-    if !Path::new(&folder).is_dir() {
-        return Err(AgentRefusal::FolderGone(folder));
+    if !Path::new(folder.path()).is_dir() {
+        return Err(AgentRefusal::FolderGone(folder.path().to_owned()));
     }
     let tab = herdr
         .create_tab(
             &workspace.workspace_id,
-            &folder,
+            folder.path(),
             &format!("@{}", agent.alias),
         )
         .map_err(|error| {
             eprintln!("dashboard: Herdr could not open a tab: {error}");
             AgentRefusal::TabFailed
         })?;
+    if !tab.root_pane.opened_in(folder.path()) {
+        eprintln!(
+            "dashboard: Herdr opened {} in {:?}, not in {}",
+            tab.tab.tab_id,
+            tab.root_pane.cwd,
+            folder.path()
+        );
+        herdr.undo(Undo::Tab(tab.tab.tab_id));
+        return Err(AgentRefusal::FolderNotUsed);
+    }
     let pane = tab.root_pane.pane_id;
     if let Err(error) = run_lifecycle(
         state,
@@ -808,6 +968,11 @@ fn add(front: &Front, key: &SpaceKey, agent: NewAgent) -> Result<(String, String
         }
         Err(()) => return Err(AgentRefusal::NameUnconfirmed(agent.alias)),
     };
+    // The channel now has an agent in that folder, so the folder is the
+    // channel's from here on, wherever its first pane goes.
+    if let ChannelFolder::FirstPane(path) = &folder {
+        keep_folder(front, &namespace, path, &live);
+    }
     if let (Some(command), Some(program)) = (agent.kind.command(), agent.kind.started()) {
         // A pane that didn't start still shows as needing the person, who can
         // start the agent by hand in Herdr, so this is not a refusal.
@@ -841,6 +1006,37 @@ mod tests {
                 checkout_path: Some(path.into()),
             }),
         }
+    }
+
+    #[test]
+    fn a_kept_folder_wins_over_the_checkout_and_a_pane_is_only_confirmed_where_it_opened() {
+        let namespace = StateNamespace::for_space("socket", "w1");
+        let mut kept = ChannelFolders::default();
+        assert_eq!(
+            fixed_folder(&kept, &namespace, &workspace("w1", None)),
+            None
+        );
+        assert_eq!(
+            fixed_folder(&kept, &namespace, &workspace("w1", Some("/repo"))),
+            Some("/repo".to_owned())
+        );
+        kept.record(&namespace, "/kept");
+        assert_eq!(
+            fixed_folder(&kept, &namespace, &workspace("w1", Some("/repo"))),
+            Some("/kept".to_owned())
+        );
+        let here = std::env::temp_dir();
+        let pane = |cwd: Option<&Path>| RootPane {
+            pane_id: "p".into(),
+            cwd: cwd.map(|cwd| cwd.to_str().unwrap().to_owned()),
+        };
+        assert!(pane(Some(&here)).opened_in(here.to_str().unwrap()));
+        assert!(!pane(Some(Path::new("/"))).opened_in(here.to_str().unwrap()));
+        assert!(
+            !pane(None).opened_in(here.to_str().unwrap()),
+            "an unreported folder is not confirmed"
+        );
+        assert!(!pane(Some(&here.join("no-such-folder"))).opened_in(here.to_str().unwrap()));
     }
 
     #[test]
@@ -1011,6 +1207,7 @@ mod tests {
             ChannelRefusal::Restarting,
             ChannelRefusal::HerdrUnreachable,
             ChannelRefusal::CreateFailed,
+            ChannelRefusal::FolderNotUsed,
             ChannelRefusal::ActivateFailed,
         ]
         .map(|refusal| refusal.reply());
@@ -1033,6 +1230,7 @@ mod tests {
             AgentRefusal::Restarting,
             AgentRefusal::HerdrUnreachable,
             AgentRefusal::TabFailed,
+            AgentRefusal::FolderNotUsed,
             AgentRefusal::NameFailed,
             AgentRefusal::NameUnconfirmed("coder".into()),
         ]

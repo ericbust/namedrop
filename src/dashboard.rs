@@ -1,6 +1,7 @@
 pub use crate::store::dashboard as rows;
 mod acknowledge;
 mod channel_delivery;
+mod channel_folders;
 mod channel_service;
 mod coordination_review;
 mod http;

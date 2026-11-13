@@ -41,12 +41,20 @@ def failing(flag):
     return os.path.exists(os.path.join(root, 'fail-' + flag))
 def option(name):
     return args[args.index(name) + 1]
+def opened(cwd):
+    # Herdr opens in the home folder when it can't use the one it was given.
+    return os.path.join(root, 'home') if failing('ignore-cwd') else cwd
 def new_pane(workspace, tab, cwd):
     pane = {'pane_id': workspace + ':p%d' % state['next'], 'tab_id': tab, 'workspace_id': workspace,
             'terminal_id': 'term-%d' % state['next'], 'cwd': cwd, 'agent': None, 'agent_status': 'unknown'}
     state['panes'].append(pane)
     return pane
 if args == ['workspace', 'list']:
+    going = os.path.join(root, 'vanish-on-list')
+    if os.path.exists(going):
+        with open(going) as named:
+            os.rmdir(named.read())
+        os.remove(going)
     if failing('workspace-list'):
         sys.stderr.write('{"error":{"code":"server_not_running"}}')
         sys.exit(1)
@@ -61,7 +69,7 @@ elif args[:2] == ['workspace', 'create']:
     state['next'] += 1
     workspace = 'w%d' % state['next']
     state['workspaces'].append({'id': workspace, 'label': option('--label')})
-    pane = new_pane(workspace, workspace + ':t1', option('--cwd'))
+    pane = new_pane(workspace, workspace + ':t1', opened(option('--cwd')))
     save()
     print(json.dumps({'result': {'type': 'workspace_created',
         'workspace': {'workspace_id': workspace, 'label': option('--label')},
@@ -73,7 +81,7 @@ elif args[:2] == ['tab', 'create']:
     state['next'] += 1
     workspace = option('--workspace')
     tab = workspace + ':t%d' % state['next']
-    pane = new_pane(workspace, tab, option('--cwd'))
+    pane = new_pane(workspace, tab, opened(option('--cwd')))
     save()
     print(json.dumps({'result': {'type': 'tab_created', 'tab': {'tab_id': tab}, 'root_pane': pane}}))
 elif args[:2] == ['workspace', 'close']:
@@ -344,6 +352,15 @@ impl Server {
 
     fn add_agent(&self, workspace: &str, body: Value) -> Response {
         self.post_with(&format!("/w/{}/agents", key(workspace)), &body, &[])
+    }
+
+    fn channel_folder(&self, workspace: &str) -> Response {
+        self.request(
+            "GET",
+            &format!("/w/{}/folder", key(workspace)),
+            &[("Cookie", &self.cookie)],
+            "",
+        )
     }
 
     fn folders(&self, workspace: &str) -> Response {
@@ -975,6 +992,135 @@ fn an_agent_whose_name_was_saved_before_a_later_step_failed_keeps_its_tab() {
     assert!(
         calls(&f).contains(&args(&["pane", "run", "w1:p4", "claude"])),
         "the named pane still gets its agent"
+    );
+}
+
+/// Moves a workspace's first pane, as `cd` in it does.
+fn move_first_pane(f: &Fixture, workspace: &str, cwd: &Path) {
+    fs::create_dir_all(cwd).unwrap();
+    let mut state = read_state(f);
+    let pane = state["panes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|pane| pane["workspace_id"] == workspace)
+        .unwrap();
+    pane["cwd"] = json!(cwd);
+    write_state(f, &state);
+}
+
+/// The folder each new tab was opened in, in order.
+fn tab_folders(f: &Fixture) -> Vec<String> {
+    creations(f)
+        .into_iter()
+        .filter(|call| call[..2] == ["tab", "create"])
+        .map(|call| call[call.iter().position(|word| word == "--cwd").unwrap() + 1].clone())
+        .collect()
+}
+
+fn coder(name: &str) -> Value {
+    json!({"kind": "claude", "name": name, "persona": null})
+}
+
+#[test]
+fn a_channel_keeps_the_folder_it_was_created_in_wherever_its_first_pane_goes() {
+    let f = fixture();
+    let server = Server::start(&f);
+    let project = fs::canonicalize(f.root.join("home/project")).unwrap();
+    let response = server.create_channel("w1", "Proto", "~/project");
+    assert_eq!(response.status, 201, "{}", response.body);
+    move_first_pane(&f, "w4", &f.root.join("elsewhere"));
+    let response = server.add_agent("w4", coder("coder"));
+    assert_eq!(response.status, 201, "{}", response.body);
+    assert_eq!(tab_folders(&f), [project.to_str().unwrap()]);
+    assert_eq!(
+        server.channel_folder("w4").json(),
+        json!({"folder": project}),
+        "the Add agent form is told the same folder"
+    );
+    assert_eq!(
+        server.folders("w1").json(),
+        json!({"folders": [project, f.root.join("checkout"), f.root.join("repo")]}),
+        "the list offers the channel's folder, not where its pane went"
+    );
+}
+
+#[test]
+fn a_workspace_made_elsewhere_opens_agents_where_its_first_one_opened() {
+    let f = fixture();
+    let server = Server::start(&f);
+    let repo = f.root.join("repo");
+    let response = server.add_agent("w1", coder("coder"));
+    assert_eq!(response.status, 201, "{}", response.body);
+    move_first_pane(&f, "w1", &f.root.join("moved"));
+    let response = server.add_agent("w1", coder("reviewer"));
+    assert_eq!(response.status, 201, "{}", response.body);
+    assert_eq!(
+        tab_folders(&f),
+        [repo.to_str().unwrap(), repo.to_str().unwrap()],
+        "the folder its first agent opened in is the channel's from then on"
+    );
+    assert_eq!(server.channel_folder("w1").json(), json!({"folder": repo}));
+    move_first_pane(&f, "w2", &f.root.join("moved"));
+    assert_eq!(
+        server.channel_folder("w2").json(),
+        json!({"folder": f.root.join("moved")}),
+        "with no agent added yet and no checkout, Herdr only knows where the pane is"
+    );
+    assert_eq!(server.channel_folder("w9").status, 404);
+}
+
+#[test]
+fn a_folder_that_goes_before_herdr_is_asked_is_refused_and_makes_no_workspace() {
+    let f = fixture();
+    let server = Server::start(&f);
+    let going = f.root.join("home/going");
+    fs::create_dir_all(&going).unwrap();
+    // The folder is there when the request is read, and gone by the time
+    // the server has listed Herdr's workspaces.
+    fs::write(f.root.join("vanish-on-list"), going.to_str().unwrap()).unwrap();
+    let response = server.create_channel("w1", "Proto", "~/going");
+    assert_eq!(response.status, 400, "{}", response.body);
+    assert_eq!(
+        response.error(),
+        "That folder doesn't exist. Namedrop never creates folders."
+    );
+    assert!(creations(&f).is_empty(), "{:?}", creations(&f));
+}
+
+#[test]
+fn a_workspace_or_tab_herdr_opened_in_another_folder_is_closed_again() {
+    let f = fixture();
+    let server = Server::start(&f);
+    fail(&f, "ignore-cwd", true);
+    let response = server.create_channel("w1", "Proto", "~/project");
+    assert_eq!(response.status, 500, "{}", response.body);
+    assert_eq!(
+        response.error(),
+        "Herdr didn't open the workspace in that folder, so it was closed again. Check the folder, then try again."
+    );
+    let created = creations(&f);
+    assert_eq!(created.len(), 2, "{created:?}");
+    assert_eq!(created[1], args(&["workspace", "close", "w4"]));
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM worktrees WHERE worktree_id = 'w4'"),
+        0,
+        "Namedrop was never activated in the home folder"
+    );
+    let response = server.add_agent("w1", coder("coder"));
+    assert_eq!(response.status, 500, "{}", response.body);
+    assert_eq!(
+        response.error(),
+        "Herdr didn't open the tab in this channel's folder, so it was closed again. Try again."
+    );
+    let created = creations(&f);
+    assert_eq!(created.len(), 4, "{created:?}");
+    assert_eq!(created[2][..2], ["tab", "create"]);
+    assert_eq!(created[3][..2], ["tab", "close"]);
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM alias_claims WHERE alias = 'coder'"),
+        0,
+        "the pane was closed before it was named"
     );
 }
 
