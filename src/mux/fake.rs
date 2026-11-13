@@ -1475,10 +1475,7 @@ impl Within<'_> {
         let mut narrowing = Some(self);
         while let Some(within) = narrowing {
             let asked = within.allowance.budget().map_err(MuxError::Unavailable)?;
-            budget = Budget {
-                timeout: budget.timeout.min(asked.timeout),
-                max_output_bytes: budget.max_output_bytes.min(asked.max_output_bytes),
-            };
+            budget = budget.tighter(asked);
             narrowing = within.wider;
         }
         Ok(budget)
