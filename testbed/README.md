@@ -13,15 +13,86 @@ numbered steps.
 ## Requirements
 
 Both platforms need Python 3.9 or newer, Git, Herdr, Claude Code, Codex, and
-Rust 1.97 or newer, because Herdr builds Namedrop from source. Sign into Claude
-Code and Codex once in your normal setup. The testbed links your login files
-into each profile and never copies them.
+Rust 1.97 or newer, because Herdr builds Namedrop from source. Sign into Codex
+once in your normal setup. The testbed links its login file into each profile
+and never copies it. Claude Code needs a token file of its own, as
+[The Claude Code account](#the-claude-code-account) explains.
 
 - **Linux.** x86_64 or aarch64 with glibc. A C compiler (`cc`) must be on PATH.
 - **macOS.** Apple silicon. Install the command-line developer tools with
   `xcode-select --install`. Homebrew tools in `/opt/homebrew/bin` are found
-  automatically. Claude's login is linked from `~/.claude/.credentials.json`,
-  or from the login keychain when Claude keeps it there.
+  automatically.
+
+## The Claude Code account
+
+Every Claude Code session the testbed starts uses one long-lived token. The
+testbed never uses this machine's default Claude Code login, so test runs bill
+the account you chose and not, for example, a team organization you are signed
+in to for work. Create the token once, under the account that pays for test
+runs:
+
+1. In your browser, sign in to claude.ai with the account to bill.
+2. Run `claude setup-token` and approve the request in the browser. It prints
+   the token.
+3. Save the token with no echo, so it never reaches your shell history or a
+   command line:
+
+   ```sh
+   mkdir -p ~/.namedrop-testbed
+   (umask 077 && read -rs token && printf '%s\n' "$token" > ~/.namedrop-testbed/claude-oauth-token)
+   chmod 600 ~/.namedrop-testbed/claude-oauth-token
+   ```
+
+   Paste the token at the silent prompt and press Enter.
+
+The token file is `$TESTBED_HOME/claude-oauth-token`. Set
+`NAMEDROP_TESTBED_CLAUDE_TOKEN_FILE` to use another file. The testbed refuses
+a token file that other users can read.
+
+The profile's `claude` is a small wrapper. It reads the token file when Claude
+Code starts and sets `CLAUDE_CODE_OAUTH_TOKEN` for Claude Code and the
+commands and hooks it runs. The testbed never puts the token on a command
+line, in `env.sh`, in the profile's `state.json`, or in a log or report. An
+agent that prints its environment can still show it in its transcript. A
+token profile links neither `~/.claude/.credentials.json` nor
+the login keychain, and `up` removes those links from a profile an earlier
+version made. Every Claude Code start in the profile goes through the
+wrapper: the Herdr lane, `--inside-rex`, `rex up`, the daily-use and upgrade
+lanes, and the verify skill's probe scripts.
+
+Before the first prompt, `up`, `test` and `rex up` run `claude auth status
+--json` in the profile. For a token, they check that Claude Code signs in with
+it (`authMethod` is `oauth_token`). Claude Code shows no plan or organization
+for a token, so the testbed asks the OAuth profile endpoint Claude Code reads,
+`https://api.anthropic.com/api/oauth/profile`. A Max or Pro plan runs. A team
+or enterprise plan, or an account whose plan is unknown, runs only when
+`--claude-org NAME` names its organization, and an account with no
+organization never runs. The account line, such as
+`max plan, personal account, signed in with the testbed token`, heads the
+`test` report and follows the `Ready` line of `up` and `rex up`. A personal
+account's organization is named after its email address, so neither the line
+nor a refusal shows that name.
+
+A token from `claude setup-token` may carry only the inference scope. If the
+profile endpoint refuses it (HTTP 401 or 403), the run goes on with the
+account line `plan and organization unreadable with this token's scope,
+signed in with the testbed token`, because the token's account is the one you
+chose when you made it. Any other lookup failure stops the run. The token
+file must hold the token alone on one line.
+
+A profile is trusted to start Claude Code only after its account check
+passed. A refused check removes the default login's links again. `attach`,
+`shell`, `reset` and the verify skill's probe scripts refuse a profile with
+no passed check, including one made before the token existed. Run `up` on it
+first. `up`, `test` and `rex up` also refuse to change how a running
+profile's Claude Code signs in, because a Claude Code already running keeps
+its login. Run `./testbed stop --profile NAME` first, and the next start
+launches Claude Code again.
+
+With no token file, the testbed refuses to start Claude Code and prints these
+steps. A maintainer who wants this machine's default login passes
+`--claude-default-login`. That links the default login as before and still
+checks the account, so a team organization still needs `--claude-org`.
 
 Run the check first. It lists each tool with its version and runs a self-test
 that needs no network:
@@ -51,6 +122,8 @@ minutes. The first build takes most of that.
 | `--daily-use` | Run the daily-use lane instead of CHECKLIST.md |
 | `--upgrade-check`, optionally with `--upgrade-from REF` | Activate `--link` over the previous release with deliveries open |
 | `--inside-rex` | Run the profile's Herdr server in a block of a scratch Rex server, which keeps the block's `REX_*` names in Herdr's environment |
+| `--claude-org NAME` | Allow Claude Code to bill this team or enterprise organization. `up` and `rex up` take it too |
+| `--claude-default-login` | With no token file, use this machine's default Claude Code login. `up` and `rex up` take it too |
 
 A pass prints the compatibility line to paste into `docs/compatibility.md`
 and deletes the profile. The report itself stays in
@@ -212,7 +285,9 @@ To start an agent with other arguments, set its launch command before `up` or
 TESTBED_CLAUDE_CMD='claude --model haiku' ./testbed reset
 ```
 
-`TESTBED_CODEX_CMD` does the same for Codex. A changed command takes effect
+The command must start with `claude`, because only the profile's `claude`
+sets the token. The testbed refuses any other command for `@claude`. `TESTBED_CODEX_CMD` does the same for Codex.
+A changed command takes effect
 when `up` or `reset` starts the agent again.
 
 ### The Rex lane
@@ -228,9 +303,11 @@ profile's state directory. It then stops that Herdr and starts a scratch Rex
 server under `env -i`, with the profile's environment minus its `HERDR_*`
 names and with `REX_SERVER` naming the server. So a block's only location
 names are the `REX_*` the server gives it, and the server's own files stay in
-the profile's `HOME`. On macOS, Claude Code is logged in only because the
-profile links the login keychain (`home/Library/Keychains`) as `up` does. A
-scratch server started by hand needs that link in its `HOME` too.
+the profile's `HOME`. Claude Code in a block signs in through the profile's
+token wrapper, because the profile's `bin` is first on the block's `PATH`. A
+scratch server started by hand needs the same wrapper and its own `HOME`, with
+no keychain link, as the probe recipe in
+[ADAPTER.md](../experimental/rex/ADAPTER.md#reproduce-the-probes) shows.
 
 The session `testbed-rex` gets a shell block and one block per agent, Claude
 Code as `claude` and Codex as `codex --no-daemon`, whose model settings are in
