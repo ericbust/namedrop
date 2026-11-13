@@ -9,6 +9,7 @@ sys.dont_write_bytecode = True
 import json
 from pathlib import Path
 import shlex
+import subprocess
 import time
 
 import livetest
@@ -175,24 +176,37 @@ def first_run(lane, session, blocks, agent, before):
 
 
 def up(profile, request, agents):
-    install(profile, request, agents)
+    """Every agent block it reports was started and proved by this call: a block saved from an
+    earlier `up` is closed and started again, because only a fresh start shows its hook runs. A
+    failure stops everything `up` started, as `down` does."""
     lane = Lane(profile, testbed.fail, testbed.say)
-    lane.start_server()
-    session, blocks = start_session(lane)
-    for agent in agents:
-        fresh = agent not in blocks
-        before = hook_runs(profile)
-        start_agent(lane, session, blocks, agent)
-        if fresh:
+    try:
+        install(profile, request, agents)
+        lane.start_server()
+        session, blocks = start_session(lane)
+        for agent in agents:
+            if agent in blocks:
+                lane.rex("block", "close", "-s", session, blocks.pop(agent), check=False)
+            before = hook_runs(profile)
+            start_agent(lane, session, blocks, agent)
             answered, evidence = first_run(lane, session, blocks, agent, before)
             testbed.say("{} runs in Rex block {}; answered {}; {}".format(
                 agent, blocks[agent], ", ".join(answered) or "no prompts", evidence))
+    except BaseException:
+        try:
+            down(profile)
+        except (RuntimeError, OSError, subprocess.SubprocessError) as error:
+            testbed.say("Cleaning up after the failed rex up failed too: {}".format(error))
+        raise
     return lane, session, blocks
 
 
 def down(profile):
+    """Stops the scratch Rex server with its sessions, the profile's own Herdr, and Codex's
+    daemon, and forgets the session."""
     lane = Lane(profile, testbed.fail, testbed.say)
     lane.stop()
+    profile.stop_server()
     profile.run(["codex", "app-server", "daemon", "stop"], check=False)
     profile.kill_leftovers()
     profile.state.pop("rex_live_session", None)

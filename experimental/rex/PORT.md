@@ -789,6 +789,16 @@ What the design did not say, found while building 6a to 8:
 - **`mux::connect` takes no state directory yet.** Its only reader is the Rex arm of commit 11, so the parameter joins then.
 - **A pong that cannot be written must end the connection.** Its `WouldBlock` read as a read timeout, so the next write followed half a pong.
 
+The review of `exp/rex-adapter-2` (PR #198) adds commit 6b, on `exp/rex-adapter-3` before commit 9.
+
+- **6b. Writes and trickled reads keep the deadline and the flag** (`fix(rex): hold every control write and read step to the deadline`). The WebSocket queues what it sends, and `flush` writes once and keeps its place, so the control connection writes in steps of at most 10 ms that check the deadline and the cancel flag, as its reads do. A read step reads once and returns, so a response or an upgrade answer that arrives a byte at a time no longer keeps the loop from the flag. A connection whose write was cut short gets no close frame, because the close would follow half a frame. `testbed rex up` stops everything it started when it fails, closes and proves again any block an earlier `up` saved, and `rex down` stops the profile's own Herdr too. A failed run stops its servers before it copies its logs, and a failed copy no longer skips the stop. The reminder clock's and the deferred worker's refused connections have tests, and `peer_pid` answers `Unsupported` on a Unix that is neither macOS nor Linux.
+
+What the design did not say, found while building 6b:
+
+- **The peer pid names different processes on the two systems.** macOS `LOCAL_PEERPID` is the last process to use the socket's other end, and Linux `SO_PEERCRED` is the process that called `listen()`. For `rex server run` both are the server. A listener the server inherited from another process fails closed, because the pid then names that process and the proof refuses it.
+- **The 10 ms step costs about 100 wakeups a second while it waits.** That is fine for a port call, which waits seconds at most. The bridge's wait for events has no end, so step 5 should wait in `poll(2)` with a pipe that the cancel wakes, not in 10 ms steps.
+- **A close frame after a cut write is the one that must not be sent.** A connection broken by a read timeout, a cancel, or a refused allowance still has whole frames on the wire, so it closes with 1000 as before. Only a write cut short skips the close, because the rest of its frame is never written.
+
 ## Next implementation step
 
 Step 3 is done (see [Step 3: neutral names](#step-3-neutral-names)). Next is step 4 of the [plan](PLAN.md): write the Rex adapter. Start with [Left for step 4](#left-for-step-4) and the step 4 items under [Open questions and risks](#open-questions-and-risks).

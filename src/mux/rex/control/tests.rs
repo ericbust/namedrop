@@ -690,3 +690,185 @@ fn a_read_interrupted_by_a_signal_is_retried() {
     assert_eq!(requester.join().unwrap(), Ok(json!({"pid": 1})));
     assert_eq!(server.join().unwrap(), Some(1000));
 }
+
+fn cancel_after(cancelled: &Arc<AtomicBool>, after: Duration) -> JoinHandle<Instant> {
+    let cancelled = Arc::clone(cancelled);
+    thread::spawn(move || {
+        thread::sleep(after);
+        cancelled.store(true, Ordering::SeqCst);
+        Instant::now()
+    })
+}
+
+fn paste(bytes: usize) -> Option<Value> {
+    Some(json!({"type": "paste", "text": "p".repeat(bytes)}))
+}
+
+/// One byte every 4 ms, until the client hangs up.
+fn trickle(stream: &mut UnixStream, bytes: &[u8]) {
+    for byte in bytes {
+        if stream.write_all(&[*byte]).is_err() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(4));
+    }
+}
+
+fn response_frame(id: &str, padding: usize) -> Vec<u8> {
+    let text =
+        json!({"type": "response", "id": id, "seq": 0, "payload": {"pad": "x".repeat(padding)}})
+            .to_string();
+    let mut frame = vec![0x81, 126];
+    frame.extend_from_slice(&(text.len() as u16).to_be_bytes());
+    frame.extend_from_slice(text.as_bytes());
+    frame
+}
+
+#[test]
+fn a_stalled_write_times_out_at_its_budget_and_the_drop_adds_no_wait() {
+    let (client, server) = scripted(|server| {
+        server.welcome();
+        thread::sleep(Duration::from_millis(1500));
+        let mut bytes = Vec::new();
+        let _ = server.stream.read_to_end(&mut bytes);
+        bytes.len()
+    });
+    let cancelled = AtomicBool::new(false);
+    let short = || Ok(budget(300, usize::MAX));
+    let mut connection = open(client, &short, &cancelled).unwrap();
+    let started = Instant::now();
+    assert_eq!(
+        connection.request("block.event", paste(900 * 1024)),
+        Err(Fault::Timeout(Duration::from_millis(300)))
+    );
+    let waited = started.elapsed();
+    drop(connection);
+    let dropped = started.elapsed() - waited;
+    assert!(
+        (Duration::from_millis(300)..Duration::from_millis(450)).contains(&waited),
+        "{waited:?}"
+    );
+    assert!(dropped < Duration::from_millis(50), "{dropped:?}");
+    server.join().unwrap();
+}
+
+#[test]
+fn nothing_follows_a_write_cut_short_even_once_the_peer_reads_again() {
+    let (client, server) = scripted(|server| {
+        server.welcome();
+        thread::sleep(Duration::from_millis(400));
+        let mut bytes = Vec::new();
+        let _ = server.stream.read_to_end(&mut bytes);
+        bytes.len()
+    });
+    let cancelled = AtomicBool::new(false);
+    let short = || Ok(budget(200, usize::MAX));
+    let mut connection = open(client, &short, &cancelled).unwrap();
+    assert_eq!(
+        connection.request("block.event", paste(900 * 1024)),
+        Err(Fault::Timeout(Duration::from_millis(200)))
+    );
+    thread::sleep(Duration::from_millis(400));
+    drop(connection);
+    let held = server.join().unwrap();
+    assert!(
+        held < 900 * 1024,
+        "the cut paste was finished: {held} bytes"
+    );
+}
+
+#[test]
+fn a_cancel_stops_a_write_to_a_slow_reader_within_50_ms() {
+    let (client, server) = scripted(|server| {
+        server.welcome();
+        let mut chunk = [0; 1024];
+        while server.stream.read(&mut chunk).is_ok_and(|read| read > 0) {
+            thread::sleep(Duration::from_millis(20));
+        }
+    });
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut connection = open(client, DEFAULT, &cancelled).unwrap();
+    let setter = cancel_after(&cancelled, Duration::from_millis(100));
+    assert_eq!(
+        connection.request("block.event", paste(900 * 1024)),
+        Err(Fault::Cancelled)
+    );
+    let late = Instant::now().saturating_duration_since(setter.join().unwrap());
+    assert!(late < Duration::from_millis(50), "{late:?}");
+    drop(connection);
+    server.join().unwrap();
+}
+
+#[test]
+fn a_response_trickled_a_byte_at_a_time_times_out_at_its_budget() {
+    let (client, server) = scripted(|server| {
+        server.welcome();
+        let request = server.message();
+        let id = request["id"].as_str().unwrap().to_owned();
+        trickle(&mut server.stream, &response_frame(&id, 600));
+    });
+    let cancelled = AtomicBool::new(false);
+    let short = || Ok(budget(150, usize::MAX));
+    let mut connection = open(client, &short, &cancelled).unwrap();
+    let started = Instant::now();
+    assert_eq!(
+        connection.request("server.status", None),
+        Err(Fault::Timeout(Duration::from_millis(150)))
+    );
+    let waited = started.elapsed();
+    assert!(
+        (Duration::from_millis(150)..Duration::from_millis(300)).contains(&waited),
+        "{waited:?}, where the whole response takes 2.6 s"
+    );
+    drop(connection);
+    server.join().unwrap();
+}
+
+#[test]
+fn a_cancel_stops_a_trickled_response_within_50_ms() {
+    let (client, server) = scripted(|server| {
+        server.welcome();
+        let request = server.message();
+        let id = request["id"].as_str().unwrap().to_owned();
+        trickle(&mut server.stream, &response_frame(&id, 600));
+    });
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut connection = open(client, DEFAULT, &cancelled).unwrap();
+    let setter = cancel_after(&cancelled, Duration::from_millis(100));
+    assert_eq!(
+        connection.request("server.status", None),
+        Err(Fault::Cancelled)
+    );
+    let late = Instant::now().saturating_duration_since(setter.join().unwrap());
+    assert!(late < Duration::from_millis(50), "{late:?}");
+    drop(connection);
+    server.join().unwrap();
+}
+
+#[test]
+fn a_cancel_stops_a_trickled_upgrade_answer_within_50_ms() {
+    let (client, mut server) = UnixStream::pair().unwrap();
+    let thread = thread::spawn(move || {
+        let mut head = Vec::new();
+        let mut byte = [0];
+        while !head.ends_with(b"\r\n\r\n") && server.read_exact(&mut byte).is_ok() {
+            head.push(byte[0]);
+        }
+        let answer = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nX-Pad: {}\r\n\
+             Sec-WebSocket-Protocol: rex.control.v1\r\n\r\n",
+            "x".repeat(600)
+        );
+        trickle(&mut server, answer.as_bytes());
+    });
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let setter = cancel_after(&cancelled, Duration::from_millis(100));
+    let long = || Ok(budget(4000, usize::MAX));
+    assert_eq!(
+        open(client, &long, &cancelled).map(|_| ()),
+        Err(Fault::Cancelled)
+    );
+    let late = Instant::now().saturating_duration_since(setter.join().unwrap());
+    assert!(late < Duration::from_millis(50), "{late:?}");
+    thread.join().unwrap();
+}

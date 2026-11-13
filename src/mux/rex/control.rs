@@ -97,7 +97,6 @@ impl<'a, S: Timed> Connection<'a, S> {
             return Err(Fault::Timeout(budget.timeout));
         }
         let deadline = Instant::now() + budget.timeout;
-        stream.write_within(budget.timeout);
         let mut socket = WebSocket::connect(stream, "/api/control", PROTOCOL, MAX_CALL_BYTES)
             .map_err(|error| fault(error, budget.timeout))?;
         socket.set_allowance(MAX_CALL_BYTES);
@@ -110,16 +109,8 @@ impl<'a, S: Timed> Connection<'a, S> {
             max_request: usize::MAX,
             broken: false,
         };
-        connection
-            .poll(Some(deadline), budget.timeout, WebSocket::upgrade)?
-            .ok_or(Fault::Timeout(budget.timeout))?;
-        let hello = json!({
-            "type": "hello",
-            "api_revision": API_REVISION,
-            "api_min_revision": API_REVISION,
-            "client": {"kind": "other", "name": "namedrop", "version": env!("CARGO_PKG_VERSION")},
-        });
-        let welcome = connection.exchange(budget, deadline, &hello, |_| true)?;
+        let welcome = connection.handshake(budget, deadline);
+        let welcome = connection.settle(welcome)?;
         let limit = welcome["limits"]["max_message_bytes"].as_u64();
         match (
             welcome["type"].as_str(),
@@ -135,6 +126,25 @@ impl<'a, S: Timed> Connection<'a, S> {
                 "the server's welcome is not one for {PROTOCOL} revision {API_REVISION}: {welcome}"
             ))),
         }
+    }
+
+    /// The upgrade request and its answer, the hello, and the welcome.
+    fn handshake(&mut self, budget: Budget, deadline: Instant) -> Result<Value, Fault> {
+        self.poll(Some(deadline), budget.timeout, Way::Write, |socket| {
+            socket.flush().map(|done| done.then_some(()))
+        })?
+        .ok_or(Fault::Timeout(budget.timeout))?;
+        self.poll(Some(deadline), budget.timeout, Way::Read, |socket| {
+            socket.try_upgrade().map(|done| done.then_some(()))
+        })?
+        .ok_or(Fault::Timeout(budget.timeout))?;
+        let hello = json!({
+            "type": "hello",
+            "api_revision": API_REVISION,
+            "api_min_revision": API_REVISION,
+            "client": {"kind": "other", "name": "namedrop", "version": env!("CARGO_PKG_VERSION")},
+        });
+        self.exchange(budget, deadline, &hello, |_| true)
     }
 
     pub(super) fn request(&mut self, method: &str, payload: Option<Value>) -> Result<Reply, Fault> {
@@ -246,10 +256,13 @@ impl<'a, S: Timed> Connection<'a, S> {
         if left.is_zero() {
             return Err(Fault::Timeout(timeout));
         }
-        self.socket.stream().write_within(left);
         self.socket
-            .send_text(text)
+            .queue_text(text)
             .map_err(|error| fault(error, timeout))?;
+        self.poll(Some(deadline), timeout, Way::Write, |socket| {
+            socket.flush().map(|done| done.then_some(()))
+        })?
+        .ok_or(Fault::Timeout(timeout))?;
         loop {
             let Some(message) = self.receive(Some(deadline), timeout)? else {
                 return Err(Fault::Timeout(timeout));
@@ -269,7 +282,7 @@ impl<'a, S: Timed> Connection<'a, S> {
         deadline: Option<Instant>,
         limit: Duration,
     ) -> Result<Option<Value>, Fault> {
-        match self.poll(deadline, limit, WebSocket::recv)? {
+        match self.poll(deadline, limit, Way::Read, WebSocket::try_recv)? {
             None => Ok(None),
             Some(Message::Text(text)) => serde_json::from_str(&text)
                 .map(Some)
@@ -280,16 +293,19 @@ impl<'a, S: Timed> Connection<'a, S> {
         }
     }
 
-    /// Runs `step` in reads of at most `CANCEL_POLL` until it finishes, the
-    /// deadline passes, or the flag is set. A deadline already passed still
-    /// gets one read that does not wait, and no deadline waits for the flag.
+    /// Runs `step`, each run one read or one write of at most `CANCEL_POLL`,
+    /// until it finishes, the deadline passes, or the flag is set. A step
+    /// that made progress and is not done answers `None`. A deadline already
+    /// passed still gets one run that does not wait, and no deadline waits
+    /// for the flag.
     fn poll<T>(
         &mut self,
         deadline: Option<Instant>,
         limit: Duration,
-        mut step: impl FnMut(&mut WebSocket<S>) -> Result<T, WsError>,
+        way: Way,
+        mut step: impl FnMut(&mut WebSocket<S>) -> Result<Option<T>, WsError>,
     ) -> Result<Option<T>, Fault> {
-        let mut read = false;
+        let mut ran = false;
         loop {
             if self.limits.cancelled.load(Ordering::Relaxed) {
                 return Err(Fault::Cancelled);
@@ -297,13 +313,18 @@ impl<'a, S: Timed> Connection<'a, S> {
             let left = deadline.map_or(CANCEL_POLL, |deadline| {
                 deadline.saturating_duration_since(Instant::now())
             });
-            if left.is_zero() && read {
+            if left.is_zero() && ran {
                 return Ok(None);
             }
-            read = true;
-            self.socket.stream().read_within(left.min(CANCEL_POLL));
+            ran = true;
+            let stream = self.socket.stream();
+            match way {
+                Way::Read => stream.read_within(left.min(CANCEL_POLL)),
+                Way::Write => stream.write_within(left.min(CANCEL_POLL)),
+            }
             match step(&mut self.socket) {
-                Ok(done) => return Ok(Some(done)),
+                Ok(Some(done)) => return Ok(Some(done)),
+                Ok(None) => {}
                 Err(WsError::Io(error))
                     if timed_out(&error) || error.kind() == io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(fault(error, limit)),
@@ -312,8 +333,20 @@ impl<'a, S: Timed> Connection<'a, S> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Way {
+    Read,
+    Write,
+}
+
+/// A write cut short leaves half a frame on the wire, so a close frame after
+/// it would be garbage. Otherwise the close is written as each step writes,
+/// within `CANCEL_POLL`, the last write timeout `poll` set.
 impl<S: Timed> Drop for Connection<'_, S> {
     fn drop(&mut self) {
+        if self.socket.unsent() {
+            return;
+        }
         let _ = self.socket.close(1000);
     }
 }

@@ -3,11 +3,7 @@
 use super::control::{Connection, Fault, Timed};
 use crate::mux::{Endpoint, REX_SCHEME};
 use serde_json::Value;
-use std::{
-    io,
-    os::{fd::AsRawFd, unix::net::UnixStream},
-    path::Path,
-};
+use std::{io, os::unix::net::UnixStream, path::Path};
 
 pub(super) struct LocalServer {
     /// `rex:` and the server's primary Unix socket, however it was dialed.
@@ -16,9 +12,23 @@ pub(super) struct LocalServer {
     pub host_id: Option<String>,
 }
 
+/// Other systems name the peer by calls this code does not make, so no
+/// server is proved local there.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub(super) fn peer_pid(_stream: &UnixStream) -> io::Result<u32> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this system's Unix sockets name no peer pid that Namedrop reads",
+    ))
+}
+
 /// The process at the other end of `stream`. A forwarder's peer is the
-/// forwarder, not the server behind it.
+/// forwarder, not the server behind it. On macOS that is the last process
+/// to use the server's end, and on Linux the process that called `listen`,
+/// which for `rex server run` are both the server.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(super) fn peer_pid(stream: &UnixStream) -> io::Result<u32> {
+    use std::os::fd::AsRawFd;
     #[cfg(target_os = "macos")]
     let (level, option, mut pid) = (libc::SOL_LOCAL, libc::LOCAL_PEERPID, 0 as libc::pid_t);
     #[cfg(target_os = "linux")]

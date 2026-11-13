@@ -876,4 +876,36 @@ mod tests {
         );
         fs::remove_dir_all(&directory).unwrap();
     }
+
+    #[test]
+    fn a_deferred_command_for_a_rex_caller_is_refused_before_it_reads_the_state() {
+        let state = env::temp_dir().join(format!("nd-defer-rex-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        fs::create_dir_all(&state).unwrap();
+        let request = Request {
+            operation: Operation::AddressList,
+            input: json!({}),
+            caller: Caller {
+                namespace: StateNamespace::for_space("rex:/tmp/r.sock", "session:s"),
+                pane: "block:b".into(),
+                address: PaneAddressId::new("address-1"),
+                session: AgentSessionId::new("session-1"),
+                registration: "registration-1".into(),
+            },
+            cwd: state.clone(),
+            key: "key-1".into(),
+            fingerprint: "fingerprint-1".into(),
+            created_at_ms: 0,
+        };
+        assert_eq!(
+            execute_request(&state, &request),
+            Err("the Rex adapter is not built yet".to_owned())
+        );
+        assert_eq!(
+            fs::read_dir(&state).unwrap().count(),
+            0,
+            "no store was opened"
+        );
+        fs::remove_dir_all(&state).unwrap();
+    }
 }
