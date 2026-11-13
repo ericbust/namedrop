@@ -272,7 +272,7 @@ impl StatusTap for RexTap<'_> {
     /// blocks. A zero wait still reads what the socket holds once. A status
     /// change at or below the Enter's acknowledgement was queued before the
     /// Enter started, so it reports `Program`, which never confirms.
-    fn next_change(&mut self, within: Duration) -> Option<TapChange> {
+    fn next_change(&mut self, within: Duration) -> Result<Option<TapChange>, ChannelError> {
         let deadline = Instant::now().checked_add(within);
         loop {
             let pending = self.seen.borrow_mut().pending.pop_front();
@@ -284,8 +284,12 @@ impl StatusTap for RexTap<'_> {
                     });
                     match self.call.borrow_mut().control.next_event(left) {
                         Ok(Some(event)) => event,
-                        Ok(None) => return None,
-                        Err(_) => return Some(TapChange::Program),
+                        Ok(None) => return Ok(None),
+                        Err(fault) => {
+                            return Err(ChannelError(
+                                wire::mux_error(fault, Gone::Pane).to_string(),
+                            ));
+                        }
                     }
                 }
             };
@@ -297,9 +301,9 @@ impl StatusTap for RexTap<'_> {
                 Some(TapChange::Status(_))
                     if seen.entered.is_some_and(|entered| event.seq <= entered) =>
                 {
-                    return Some(TapChange::Program);
+                    return Ok(Some(TapChange::Program));
                 }
-                Some(change) => return Some(change),
+                Some(change) => return Ok(Some(change)),
                 None => {}
             }
         }

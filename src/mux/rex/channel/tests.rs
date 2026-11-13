@@ -509,6 +509,28 @@ fn only_a_set_rex_timeout_counts_in_the_confirm_check() {
     );
 }
 
+/// A connection that fails before the paste typed nothing, so the prompt
+/// waits for a timed retry, not for an event the tap can no longer see.
+#[test]
+fn a_connection_fault_at_the_check_before_the_paste_retries_after_a_delay() {
+    let gate = bound(|fixture, _| {
+        gate(fixture, |step, _, events| {
+            if step == Step::Process {
+                events.broken(Fault::Closed("the connection ended".into()));
+            }
+            None
+        })
+    });
+    assert_eq!(
+        prompt(&gate.rex, "hello"),
+        InputOutcome::Declined(
+            Retry::AfterDelay,
+            "could not watch pane block:b: the connection ended".into()
+        )
+    );
+    assert!(typed(&gate.rex).is_empty());
+}
+
 #[test]
 fn input_for_a_block_rex_does_not_have_waits_for_an_event() {
     let gate = bound(|fixture, _| {
@@ -806,12 +828,15 @@ fn the_tap_reports_a_status_change_queued_before_the_enter_as_a_program_change()
             payload: status(state),
         });
     }
-    assert_eq!(tap.next_change(Duration::ZERO), Some(TapChange::Program));
     assert_eq!(
         tap.next_change(Duration::ZERO),
-        Some(TapChange::Status(AgentState::Working))
+        Ok(Some(TapChange::Program))
     );
-    assert_eq!(tap.next_change(Duration::ZERO), None);
+    assert_eq!(
+        tap.next_change(Duration::ZERO),
+        Ok(Some(TapChange::Status(AgentState::Working)))
+    );
+    assert_eq!(tap.next_change(Duration::ZERO), Ok(None));
 }
 
 /// Rex queued the change after it started the paste, so the Enter did not

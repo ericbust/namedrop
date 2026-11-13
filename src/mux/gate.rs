@@ -33,8 +33,9 @@ pub enum TapChange {
 }
 
 pub trait StatusTap {
-    /// The next change, or `None` when none arrives within `within`.
-    fn next_change(&mut self, within: Duration) -> Option<TapChange>;
+    /// The next change, or `None` when none arrives within `within`. An
+    /// error means the tap can no longer watch the pane.
+    fn next_change(&mut self, within: Duration) -> Result<Option<TapChange>, ChannelError>;
 }
 
 /// Admits only the agent the caller verified, in a status that accepts a
@@ -81,19 +82,25 @@ pub fn emulate_prompt(
         );
     }
     match tap.next_change(Duration::ZERO) {
-        Some(TapChange::Status(_)) => {
+        Err(ChannelError(error)) => {
+            return InputOutcome::Declined(
+                Retry::AfterDelay,
+                format!("could not watch pane {pane_name}: {error}"),
+            );
+        }
+        Ok(Some(TapChange::Status(_))) => {
             return InputOutcome::Declined(
                 Retry::OnEvent,
                 format!("pane {pane_name} changed status before the prompt"),
             );
         }
-        Some(TapChange::Program) => {
+        Ok(Some(TapChange::Program)) => {
             return InputOutcome::Declined(
                 Retry::OnEvent,
                 format!("the program in pane {pane_name} changed before the prompt"),
             );
         }
-        None => {}
+        Ok(None) => {}
     }
     if let Err(ChannelError(error)) = channel.paste_submit(pane, request.text) {
         return InputOutcome::Ambiguous(format!(
@@ -104,14 +111,19 @@ pub fn emulate_prompt(
     let deadline = Instant::now() + CONFIRM_WINDOW;
     while let Some(within) = deadline.checked_duration_since(Instant::now()) {
         match tap.next_change(within) {
-            Some(TapChange::Status(AgentState::Working)) => return InputOutcome::Delivered,
-            Some(TapChange::Program) => {
+            Ok(Some(TapChange::Status(AgentState::Working))) => return InputOutcome::Delivered,
+            Ok(Some(TapChange::Program)) => {
                 return InputOutcome::Ambiguous(format!(
                     "the program in pane {pane_name} changed after the prompt"
                 ));
             }
-            Some(TapChange::Status(_)) => {}
-            None => break,
+            Ok(Some(TapChange::Status(_))) => {}
+            Ok(None) => break,
+            Err(ChannelError(error)) => {
+                return InputOutcome::Ambiguous(format!(
+                    "the prompt may have reached pane {pane_name}, and its watch failed: {error}"
+                ));
+            }
         }
     }
     InputOutcome::Ambiguous(format!(
@@ -137,6 +149,7 @@ mod tests {
         StaysStaleWorking,
         ProgramChangesThenWorking,
         Fails,
+        WatchLost,
     }
 
     struct Pane {
@@ -144,6 +157,7 @@ mod tests {
         state: Option<AgentState>,
         changes: Vec<TapChange>,
         pasted: Vec<String>,
+        watch_lost: bool,
     }
 
     struct Scripted {
@@ -152,6 +166,7 @@ mod tests {
         facts_fail: bool,
         tap_fails: bool,
         changes_after_facts: Vec<TapChange>,
+        watch_lost_after_facts: bool,
     }
 
     struct Tap {
@@ -160,12 +175,15 @@ mod tests {
     }
 
     impl StatusTap for Tap {
-        fn next_change(&mut self, _within: Duration) -> Option<TapChange> {
+        fn next_change(&mut self, _within: Duration) -> Result<Option<TapChange>, ChannelError> {
+            if self.pane.borrow().watch_lost {
+                return Err(ChannelError("the connection ended".into()));
+            }
             let change = self.pane.borrow().changes.get(self.next).cloned();
             if change.is_some() {
                 self.next += 1;
             }
-            change
+            Ok(change)
         }
     }
 
@@ -183,6 +201,7 @@ mod tests {
             let facts = (pane.agent.clone(), pane.state.clone());
             pane.changes
                 .extend(self.changes_after_facts.iter().cloned());
+            pane.watch_lost = self.watch_lost_after_facts;
             Ok(facts)
         }
 
@@ -216,6 +235,10 @@ mod tests {
                     Ok(())
                 }
                 AfterPaste::Fails => Err(ChannelError("connection reset".into())),
+                AfterPaste::WatchLost => {
+                    pane.watch_lost = true;
+                    Ok(())
+                }
             }
         }
     }
@@ -239,11 +262,13 @@ mod tests {
                 state: status.map(AgentState::parse),
                 changes: Vec::new(),
                 pasted: Vec::new(),
+                watch_lost: false,
             })),
             after_paste: after,
             facts_fail: false,
             tap_fails: false,
             changes_after_facts: Vec::new(),
+            watch_lost_after_facts: false,
         }
     }
 
@@ -356,7 +381,9 @@ mod tests {
         facts_fail.facts_fail = true;
         let mut tap_fails = channel(Some(agent.clone()), Some("idle"), AfterPaste::StartsWorking);
         tap_fails.tap_fails = true;
-        for channel in [facts_fail, tap_fails] {
+        let mut watch_lost = channel(Some(agent.clone()), Some("idle"), AfterPaste::StartsWorking);
+        watch_lost.watch_lost_after_facts = true;
+        for channel in [facts_fail, tap_fails, watch_lost] {
             assert!(matches!(
                 prompt(&channel, &agent),
                 InputOutcome::Declined(Retry::AfterDelay, _)
@@ -390,6 +417,20 @@ mod tests {
             )
         );
         assert!(pasted(&channel).is_empty());
+    }
+
+    #[test]
+    fn a_watch_lost_after_the_paste_is_ambiguous_at_once() {
+        let agent = claude(reported("session-1"));
+        let channel = channel(Some(agent.clone()), Some("idle"), AfterPaste::WatchLost);
+        assert_eq!(
+            prompt(&channel, &agent),
+            InputOutcome::Ambiguous(
+                "the prompt may have reached pane pane-1, and its watch failed: the connection ended"
+                    .into()
+            )
+        );
+        assert_eq!(pasted(&channel), ["hello"]);
     }
 
     #[test]

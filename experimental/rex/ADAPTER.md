@@ -498,15 +498,18 @@ pub enum TapChange {
 
 pub trait StatusTap {
 	/// The next change after the facts were read, or `None` when none arrives within `within`.
-	fn next_change(&mut self, within: Duration) -> Option<TapChange>;
+	/// An error means the tap can no longer watch the pane, as when its connection failed.
+	fn next_change(&mut self, within: Duration) -> Result<Option<TapChange>, ChannelError>;
 }
 
-// emulate_prompt's pre-paste check is unchanged: a change of either kind declines.
+// emulate_prompt's pre-paste check: a change of either kind declines with Retry::OnEvent,
+// and a tap error declines with Retry::AfterDelay, because nothing was typed.
 // Its confirm loop becomes:
-//   Some(TapChange::Status(AgentState::Working)) => return InputOutcome::Delivered,
-//   Some(TapChange::Program) => return InputOutcome::Ambiguous(format!("the program in pane {pane} changed after the prompt")),
-//   Some(TapChange::Status(_)) => {}
-//   None => break,
+//   Ok(Some(TapChange::Status(AgentState::Working))) => return InputOutcome::Delivered,
+//   Ok(Some(TapChange::Program)) => return InputOutcome::Ambiguous(format!("the program in pane {pane} changed after the prompt")),
+//   Ok(Some(TapChange::Status(_))) => {}
+//   Ok(None) => break,
+//   Err(_) => return InputOutcome::Ambiguous(..),
 ```
 
 `FakeMux::emulated()` wraps its states in `TapChange::Status`, so its tests keep their meaning.

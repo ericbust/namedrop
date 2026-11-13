@@ -1625,7 +1625,7 @@ struct Tap<'a> {
 }
 
 impl StatusTap for Tap<'_> {
-    fn next_change(&mut self, _within: Duration) -> Option<TapChange> {
+    fn next_change(&mut self, _within: Duration) -> Result<Option<TapChange>, ChannelError> {
         let change = self
             .mux
             .lock()
@@ -1635,7 +1635,7 @@ impl StatusTap for Tap<'_> {
         if change.is_some() {
             self.next += 1;
         }
-        change.map(TapChange::Status)
+        Ok(change.map(TapChange::Status))
     }
 }
 

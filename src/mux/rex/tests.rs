@@ -79,6 +79,7 @@ impl Request {
 pub(super) struct Events {
     earlier: Vec<Value>,
     later: Vec<Value>,
+    broken: Option<Fault>,
 }
 
 impl Events {
@@ -91,6 +92,11 @@ impl Events {
     /// Queued after the server started the request.
     pub fn later(&mut self, event: Value) {
         self.later.push(event);
+    }
+
+    /// The next read of events after these fails with `fault`.
+    pub fn broken(&mut self, fault: Fault) {
+        self.broken = Some(fault);
     }
 }
 
@@ -136,7 +142,7 @@ impl Script {
 struct Scripted<'a> {
     script: &'a Script,
     seq: u64,
-    queued: VecDeque<Event>,
+    queued: VecDeque<Result<Event, Fault>>,
 }
 
 impl Control for Scripted<'_> {
@@ -150,24 +156,25 @@ impl Control for Scripted<'_> {
         let answer = (self.script.handler)(&request, &mut events);
         for payload in events.earlier {
             self.seq += 1;
-            self.queued.push_back(Event {
+            self.queued.push_back(Ok(Event {
                 seq: self.seq,
                 payload,
-            });
+            }));
         }
         let seq = self.seq;
         for payload in events.later {
             self.seq += 1;
-            self.queued.push_back(Event {
+            self.queued.push_back(Ok(Event {
                 seq: self.seq,
                 payload,
-            });
+            }));
         }
+        self.queued.extend(events.broken.map(Err));
         answer.map(|payload| Reply { seq, payload })
     }
 
     fn next_event(&mut self, _within: Duration) -> Result<Option<Event>, Fault> {
-        Ok(self.queued.pop_front())
+        self.queued.pop_front().transpose()
     }
 }
 
