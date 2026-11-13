@@ -58,11 +58,16 @@ starts and prints how to make one (`claude setup-token` under the account to bil
 with `chmod 600`); [testbed/README.md](../../../testbed/README.md#the-claude-code-account)
 has the steps. Do not create the token yourself and do not pass `--claude-default-login`
 unless the user asks for it; report the refusal instead. The report's second line names
-the account, such as `max plan, personal account, signed in with the testbed token`. A
-team or enterprise account refuses unless `--claude-org NAME` names its organization;
-pass that only when the user named the organization. Every lane, `rex up` and the probe
-scripts below start Claude Code through the profile's `claude`, so they use the same
-token.
+the account. For a `claude setup-token` token it always reads `plan and organization
+unreadable with this token's scope, signed in with the testbed token`: such a token cannot
+read its own plan, and Claude Code cannot name its account, so the user confirms the
+account once by checking that usage shows on the personal account. The plan check runs
+only for a token with the profile scope or the default login; there a team or enterprise
+account refuses unless `--claude-org NAME` names its organization, and you pass that only
+when the user named the organization. A refusal that says the token was rejected (HTTP
+401) means the user must create a new token; report it. Every lane, `rex up` and the probe
+scripts below start Claude Code by the profile's full path, `PROFILE/bin/claude`, so they
+use the same token.
 
 What the run asserts, step by step: build and names; first-run screens cleared; the Codex
 server state (and the fix in plain mode); `namedrop address list` and `doctor` clean; the

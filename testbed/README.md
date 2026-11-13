@@ -58,33 +58,50 @@ token profile links neither `~/.claude/.credentials.json` nor
 the login keychain, and `up` removes those links from a profile an earlier
 version made. Every Claude Code start in the profile goes through the
 wrapper: the Herdr lane, `--inside-rex`, `rex up`, the daily-use and upgrade
-lanes, and the verify skill's probe scripts.
+lanes, and the verify skill's probe scripts. They start it by its full path,
+`PROFILE/bin/claude`, because a pane's login shell can put `/usr/local/bin`
+and the system directories ahead of the profile's `bin`, where another
+`claude` would start without the token. The profile's `home/.bashrc` puts
+`bin` first again, so a `claude` you type in a pane is the wrapper too.
 
 Before the first prompt, `up`, `test` and `rex up` run `claude auth status
 --json` in the profile. For a token, they check that Claude Code signs in with
 it (`authMethod` is `oauth_token`). Claude Code shows no plan or organization
 for a token, so the testbed asks the OAuth profile endpoint Claude Code reads,
-`https://api.anthropic.com/api/oauth/profile`. A Max or Pro plan runs. A team
-or enterprise plan, or an account whose plan is unknown, runs only when
+`https://api.anthropic.com/api/oauth/profile`. It sends the token to that
+address only and follows no redirect.
+
+A token from `claude setup-token` carries only the inference scope, and the
+endpoint refuses it with HTTP 403. So for such a token, which is the usual
+case, the account line always reads `plan and organization unreadable with
+this token's scope, signed in with the testbed token`, and the run goes on.
+Neither Claude Code nor the testbed can name the account the token belongs
+to. Confirm it once, out of band: after the first run, check that its usage
+shows on your personal account and not on a team organization.
+
+HTTP 401 means the token was revoked or mistyped. The run stops: create a new
+token with `claude setup-token` and save it as above. Any other lookup
+failure, a redirect included, stops the run too. The token file must hold the
+token alone on one line.
+
+The plan check works only when the plan is readable: for a token that has the
+profile scope, and for `--claude-default-login`, whose `claude auth status`
+names the plan. A Max or Pro plan runs, with an account line such as `max
+plan, personal account, signed in with the testbed token`. A team or
+enterprise plan, or an account whose plan is unknown, runs only when
 `--claude-org NAME` names its organization, and an account with no
-organization never runs. The account line, such as
-`max plan, personal account, signed in with the testbed token`, heads the
-`test` report and follows the `Ready` line of `up` and `rex up`. A personal
-account's organization is named after its email address, so neither the line
-nor a refusal shows that name.
+organization never runs. A personal account's organization is named after its
+email address, so neither the line nor a refusal shows that name. The account
+line heads the `test` report and follows the `Ready` line of `up` and `rex
+up`.
 
-A token from `claude setup-token` may carry only the inference scope. If the
-profile endpoint refuses it (HTTP 401 or 403), the run goes on with the
-account line `plan and organization unreadable with this token's scope,
-signed in with the testbed token`, because the token's account is the one you
-chose when you made it. Any other lookup failure stops the run. The token
-file must hold the token alone on one line.
-
-A profile is trusted to start Claude Code only after its account check
-passed. A refused check removes the default login's links again. `attach`,
-`shell`, `reset` and the verify skill's probe scripts refuse a profile with
-no passed check, including one made before the token existed. Run `up` on it
-first. `up`, `test` and `rex up` also refuse to change how a running
+A profile whose run starts Claude Code is trusted only after its account
+check passed. A refused check removes the default login's links again.
+`attach`, `shell`, `reset` and the verify skill's probe scripts refuse such a
+profile with no passed check, including one made before the token existed.
+Run `up` on it first. A profile whose run has no Claude Code, such as `up
+--agents codex`, needs no check, so running `up --agents codex` on a refused
+profile also lets you in again. `up`, `test` and `rex up` also refuse to change how a running
 profile's Claude Code signs in, because a Claude Code already running keeps
 its login. Run `./testbed stop --profile NAME` first, and the next start
 launches Claude Code again.
@@ -93,6 +110,16 @@ With no token file, the testbed refuses to start Claude Code and prints these
 steps. A maintainer who wants this machine's default login passes
 `--claude-default-login`. That links the default login as before and still
 checks the account, so a team organization still needs `--claude-org`.
+
+What the token setup does not cover yet:
+
+- Claude Code passes `CLAUDE_CODE_OAUTH_TOKEN` on to the commands, hooks and
+  agents it starts. `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` would remove it there,
+  but it also forces the default permission mode, so the lanes would stop at
+  permission prompts. The testbed does not set it.
+- `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` might keep the token out of every
+  environment. It is untested.
+- Codex still signs in through a link to this machine's `~/.codex/auth.json`.
 
 Run the check first. It lists each tool with its version and runs a self-test
 that needs no network:
@@ -286,8 +313,10 @@ TESTBED_CLAUDE_CMD='claude --model haiku' ./testbed reset
 ```
 
 The command must start with `claude`, because only the profile's `claude`
-sets the token. The testbed refuses any other command for `@claude`. `TESTBED_CODEX_CMD` does the same for Codex.
-A changed command takes effect
+sets the token. The testbed refuses any other command for `@claude`. It types
+the command as `PROFILE/bin/claude` followed by the other words, each quoted, so
+shell syntax such as `;` or `$VAR` reaches Claude Code as plain arguments.
+`TESTBED_CODEX_CMD` sets the Codex command. A changed command takes effect
 when `up` or `reset` starts the agent again.
 
 ### The Rex lane
