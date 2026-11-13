@@ -18,15 +18,23 @@ pub trait RawChannel {
         &self,
         pane: &PaneId,
     ) -> Result<(Option<AgentIdentity>, Option<AgentState>), ChannelError>;
-    /// Reports only status changes that happen after it opens.
+    /// Reports only changes that happen after it opens.
     fn tap(&self, pane: &PaneId) -> Result<Self::Tap, ChannelError>;
     /// Pastes `text` and presses Enter on one connection.
     fn paste_submit(&self, pane: &PaneId, text: &str) -> Result<(), ChannelError>;
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TapChange {
+    Status(AgentState),
+    /// The program the facts named may no longer run in the pane, as when a
+    /// status record outlives the agent that wrote it.
+    Program,
+}
+
 pub trait StatusTap {
-    /// The next status change, or `None` when none arrives within `within`.
-    fn next_change(&mut self, within: Duration) -> Option<AgentState>;
+    /// The next change, or `None` when none arrives within `within`.
+    fn next_change(&mut self, within: Duration) -> Option<TapChange>;
 }
 
 /// Admits only the agent the caller verified, in a status that accepts a
@@ -72,11 +80,20 @@ pub fn emulate_prompt(
             format!("pane {pane_name} cannot take a prompt now"),
         );
     }
-    if tap.next_change(Duration::ZERO).is_some() {
-        return InputOutcome::Declined(
-            Retry::OnEvent,
-            format!("pane {pane_name} changed status before the prompt"),
-        );
+    match tap.next_change(Duration::ZERO) {
+        Some(TapChange::Status(_)) => {
+            return InputOutcome::Declined(
+                Retry::OnEvent,
+                format!("pane {pane_name} changed status before the prompt"),
+            );
+        }
+        Some(TapChange::Program) => {
+            return InputOutcome::Declined(
+                Retry::OnEvent,
+                format!("the program in pane {pane_name} changed before the prompt"),
+            );
+        }
+        None => {}
     }
     if let Err(ChannelError(error)) = channel.paste_submit(pane, request.text) {
         return InputOutcome::Ambiguous(format!(
@@ -87,8 +104,13 @@ pub fn emulate_prompt(
     let deadline = Instant::now() + CONFIRM_WINDOW;
     while let Some(within) = deadline.checked_duration_since(Instant::now()) {
         match tap.next_change(within) {
-            Some(AgentState::Working) => return InputOutcome::Delivered,
-            Some(_) => {}
+            Some(TapChange::Status(AgentState::Working)) => return InputOutcome::Delivered,
+            Some(TapChange::Program) => {
+                return InputOutcome::Ambiguous(format!(
+                    "the program in pane {pane_name} changed after the prompt"
+                ));
+            }
+            Some(TapChange::Status(_)) => {}
             None => break,
         }
     }
@@ -113,13 +135,14 @@ mod tests {
         StartsWorking,
         /// The snapshot says working, but no status change follows the paste.
         StaysStaleWorking,
+        ProgramChangesThenWorking,
         Fails,
     }
 
     struct Pane {
         agent: Option<AgentIdentity>,
         state: Option<AgentState>,
-        changes: Vec<AgentState>,
+        changes: Vec<TapChange>,
         pasted: Vec<String>,
     }
 
@@ -128,7 +151,7 @@ mod tests {
         after_paste: AfterPaste,
         facts_fail: bool,
         tap_fails: bool,
-        changes_after_facts: Vec<AgentState>,
+        changes_after_facts: Vec<TapChange>,
     }
 
     struct Tap {
@@ -137,7 +160,7 @@ mod tests {
     }
 
     impl StatusTap for Tap {
-        fn next_change(&mut self, _within: Duration) -> Option<AgentState> {
+        fn next_change(&mut self, _within: Duration) -> Option<TapChange> {
             let change = self.pane.borrow().changes.get(self.next).cloned();
             if change.is_some() {
                 self.next += 1;
@@ -180,11 +203,16 @@ mod tests {
             match self.after_paste {
                 AfterPaste::StartsWorking => {
                     pane.state = Some(AgentState::Working);
-                    pane.changes.push(AgentState::Working);
+                    pane.changes.push(TapChange::Status(AgentState::Working));
                     Ok(())
                 }
                 AfterPaste::StaysStaleWorking => {
                     pane.state = Some(AgentState::Working);
+                    Ok(())
+                }
+                AfterPaste::ProgramChangesThenWorking => {
+                    pane.changes
+                        .extend([TapChange::Program, TapChange::Status(AgentState::Working)]);
                     Ok(())
                 }
                 AfterPaste::Fails => Err(ChannelError("connection reset".into())),
@@ -310,11 +338,10 @@ mod tests {
             Some("idle"),
             AfterPaste::StaysStaleWorking,
         );
-        channel
-            .pane
-            .borrow_mut()
-            .changes
-            .extend([AgentState::Working, AgentState::Idle]);
+        channel.pane.borrow_mut().changes.extend([
+            TapChange::Status(AgentState::Working),
+            TapChange::Status(AgentState::Idle),
+        ]);
         assert!(matches!(
             prompt(&channel, &agent),
             InputOutcome::Ambiguous(_)
@@ -342,11 +369,41 @@ mod tests {
     fn a_status_change_after_the_facts_are_read_declines_before_any_input() {
         let agent = claude(reported("session-1"));
         let mut channel = channel(Some(agent.clone()), Some("idle"), AfterPaste::StartsWorking);
-        channel.changes_after_facts = vec![AgentState::Working];
+        channel.changes_after_facts = vec![TapChange::Status(AgentState::Working)];
         assert!(matches!(
             prompt(&channel, &agent),
             InputOutcome::Declined(Retry::OnEvent, _)
         ));
         assert!(pasted(&channel).is_empty());
+    }
+
+    #[test]
+    fn a_program_change_after_the_facts_are_read_declines_before_any_input() {
+        let agent = claude(reported("session-1"));
+        let mut channel = channel(Some(agent.clone()), Some("idle"), AfterPaste::StartsWorking);
+        channel.changes_after_facts = vec![TapChange::Program];
+        assert_eq!(
+            prompt(&channel, &agent),
+            InputOutcome::Declined(
+                Retry::OnEvent,
+                "the program in pane pane-1 changed before the prompt".into()
+            )
+        );
+        assert!(pasted(&channel).is_empty());
+    }
+
+    #[test]
+    fn a_program_change_after_the_paste_is_ambiguous_at_once() {
+        let agent = claude(reported("session-1"));
+        let channel = channel(
+            Some(agent.clone()),
+            Some("idle"),
+            AfterPaste::ProgramChangesThenWorking,
+        );
+        assert_eq!(
+            prompt(&channel, &agent),
+            InputOutcome::Ambiguous("the program in pane pane-1 changed after the prompt".into())
+        );
+        assert_eq!(pasted(&channel), ["hello"]);
     }
 }

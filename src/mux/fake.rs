@@ -10,7 +10,7 @@ use super::{
     Endpoint, InputKind, InputOutcome, Key, MuxAct, MuxConnector, MuxError, MuxInput, MuxKind,
     MuxRead, PaneFacts, PaneId, PaneInput, PaneProcess, Recipient, Retry, Scope, Screen,
     ScreenRequest, SessionClaim, SpaceView, Style, Survey, TabId, TerminalId, Wrap,
-    gate::{self, ChannelError, RawChannel, StatusTap},
+    gate::{self, ChannelError, RawChannel, StatusTap, TapChange},
 };
 use crate::{AgentRuntime, AgentSessionId, SpaceId, WorktreeId};
 use std::{
@@ -1625,7 +1625,7 @@ struct Tap<'a> {
 }
 
 impl StatusTap for Tap<'_> {
-    fn next_change(&mut self, _within: Duration) -> Option<AgentState> {
+    fn next_change(&mut self, _within: Duration) -> Option<TapChange> {
         let change = self
             .mux
             .lock()
@@ -1635,7 +1635,7 @@ impl StatusTap for Tap<'_> {
         if change.is_some() {
             self.next += 1;
         }
-        change
+        change.map(TapChange::Status)
     }
 }
 
