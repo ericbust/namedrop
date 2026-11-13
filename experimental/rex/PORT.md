@@ -550,6 +550,23 @@ Record each accepted deviation here, with its source, before the next commit sta
   - **Answered in step 4 commit 1. `Admit` had no reader**, because Herdr types to any agent that is not blocked and the gate decides from the status. The Rex adapter does not need it either, so it is deleted with `PromptRequest.admit`.
   - **The pane lock key has no `MuxKind`.** `PaneEffects::acquire` keys the lock by the SHA-256 of the socket and the pane. A Herdr socket and a Rex server address would share a lock only if the two strings were equal, but nothing in the key says which multiplexer owns it.
 
+## Step 4 commits
+
+Step 4 follows the Rex adapter design, `experimental/rex/ADAPTER.md` on `exp/rex-adapter-design`, and its numbering. These commits were built from revision 2 (`9ecbbb1`), and revision 3 (`487f7603`) keeps their content and drops commit 3. None of them needs step 3. Each commit message holds its evidence.
+
+- **0a. Fixtures** (`test(delivery): read real Rex prompt-box screens`). Six scrubbed Rex `vt` captures sit in `src/mux/rex/fixtures/vt/`. Read raw, two of them misread: `codex-empty` reads `Draft` and `codex-draft-fresh` reads `Unseen`. With each `ESC[nC` read as n spaces, all six read as their screens show. The test's converter stands in for `port_ansi` until commit 9. The other fixtures the design lists (`process` replies, hook chains, event lines, home rows) land with the commits that read them.
+- **0b. The Herdr-in-Rex lane** (`test(testbed): run the checklist with Herdr inside a Rex block`). `testbed test --inside-rex` runs the checklist with Herdr as the program of a scratch Rex block, so every Herdr process carries the block's `REX_*` names. It passed 10/10 before any adapter change.
+- **1. `Admit` deleted** and **2. `Budget::tighter` and `narrowest` in `mux::model`.** Both passed the checklist and the Herdr-in-Rex lane at their own commits.
+- **4. `TapChange`.** A program change declines before the paste and is `Ambiguous` at once after it.
+- **5. `rex/ws.rs`** and **6. `rex/control.rs`.** The WebSocket client and the control connection compile only under `#[cfg(test)]` (`src/mux.rs`), because nothing outside tests calls them until commit 11 gives `mux::connect` its Rex arm. So `clippy -D warnings` checks them in the test build, and no `allow(dead_code)` is needed. The live checks run with `NAMEDROP_REX_LIVE=unix://<scratch socket> cargo test --lib mux::rex::live -- --ignored --test-threads=1`.
+
+What the design did not say, found while building these:
+
+- **macOS refuses a socket option once the peer hangs up.** `setsockopt(SO_RCVTIMEO)` fails with `EINVAL` after the server closes, though its last response is still readable. `control.rs` ignores that refusal, and the next read reports the hang-up.
+- **`rex server stop` waits for the server's pid to exit.** A server started as a child of a process that never reaps it stays a zombie, and the stop times out. The testbed starts its scratch server from a shell that exits at once.
+- **Commit 6 has no `Wire` or `Control` trait yet.** `Wire::open` returns the peer pid, which is commit 8's local proof, and the `Control` trait has no second implementation until the scripted wire of commits 9 and 10. `Connection` has the two methods the trait will name, `request` and `next_event`. `Fault::Rex` carries the error's `status` as well, so an unknown code can still be classified by status, as the protocol asks.
+- **The 4 MiB is per connection, and the budget's byte limit is per request.** A port call is one connection, so the 4 MiB caps the call, and `Budget.max_output_bytes` caps each request inside it, as it caps each Herdr command.
+
 ## Next implementation step
 
 Step 2 is done with commit 16. Next is step 3 of the [plan](PLAN.md): accept neutral `NAMEDROP_*` names beside the `HERDR_*` ones, and make the state directory independent of `HERDR_PLUGIN_STATE_DIR`.
