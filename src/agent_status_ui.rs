@@ -59,8 +59,13 @@ const MAX_IDENTITY_OUTPUT_BYTES: usize = 512 * 1_024;
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub(super) fn run(options: &RuntimeOptions, inherited: &dyn Inherited) -> ExitCode {
-    match run_popup(options, inherited) {
+/// `observing_pane` is the pane the panel itself occupies, from its home.
+pub(super) fn run(
+    options: &RuntimeOptions,
+    inherited: &dyn Inherited,
+    observing_pane: Option<&str>,
+) -> ExitCode {
+    match run_popup(options, inherited, observing_pane) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // Keep actionable errors visible instead of closing immediately.
@@ -76,7 +81,11 @@ pub(super) fn run(options: &RuntimeOptions, inherited: &dyn Inherited) -> ExitCo
     }
 }
 
-fn run_popup(options: &RuntimeOptions, inherited: &dyn Inherited) -> Result<(), String> {
+fn run_popup(
+    options: &RuntimeOptions,
+    inherited: &dyn Inherited,
+    observing_pane: Option<&str>,
+) -> Result<(), String> {
     let workspace = env::var("NAMEDROP_TARGET_WORKSPACE")
         .map_err(|_| "This popup is missing its invoking space")?;
     let pane =
@@ -100,7 +109,13 @@ fn run_popup(options: &RuntimeOptions, inherited: &dyn Inherited) -> Result<(), 
             ..*runtime
         };
         let collect = |cancelled: &AtomicBool| {
-            namedrop::collect_agent_status(&targeted, &terminal, session.as_deref(), cancelled)
+            namedrop::collect_agent_status(
+                &targeted,
+                &terminal,
+                session.as_deref(),
+                observing_pane,
+                cancelled,
+            )
         };
         let summarize = |snapshot: &Value, cancelled: &AtomicBool| {
             namedrop::summarize_agent_status(snapshot, cancelled)

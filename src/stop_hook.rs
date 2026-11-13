@@ -49,6 +49,10 @@ struct BackgroundTask {
 struct CapturedStop {
     input: StopInput,
     socket: String,
+    /// The space the hook's home named, which the worker's wake drains. A
+    /// Stop an older hook captured has none, and its worker wakes nothing.
+    #[serde(default)]
+    space: Option<String>,
     ended_at_ms: u64,
     transcript_end: Option<u64>,
     /// Whether the session holds a claim this Stop may settle.
@@ -65,15 +69,19 @@ fn deadline(milliseconds: u64) {
 /// Hands a Stop to the detached worker when the session holds a claim the
 /// prompt hook armed, and every Claude Code Stop, whose worker records the
 /// turn's end for delivery.
-pub fn run(state: &Path) {
+pub fn run(state: &Path, inherited: &dyn Inherited) {
     deadline(250);
     let ended_at_ms = SystemClock.now_unix_ms();
     let Some(input) = read_input(io::stdin().lock()) else {
         return;
     };
-    let Some(socket) = namedrop::locator::Locator::Endpoint.env() else {
+    let Some(location) = crate::location(&RuntimeOptions::default(), inherited) else {
         return;
     };
+    let Some(socket) = location.endpoint.map(|endpoint| endpoint.key) else {
+        return;
+    };
+    let space = location.space.map(|space| space.as_str().to_owned());
     let names_notice = |tasks: &[String]| {
         let path = input
             .transcript_path
@@ -104,6 +112,7 @@ pub fn run(state: &Path) {
     let captured = CapturedStop {
         input,
         socket,
+        space,
         ended_at_ms,
         transcript_end,
         settles,
@@ -111,9 +120,11 @@ pub fn run(state: &Path) {
     let Ok(executable) = env::current_exe() else {
         return;
     };
-    // The worker stays in the hook's process group, and its endpoint and space
-    // travel in `CapturedStop`. The scrub also drops the front end's short
-    // timeouts, which are for its own deadline, not a settle's.
+    // The worker stays in the hook's process group. Its endpoint and the
+    // space its wake drains travel in `CapturedStop`, and a settle names the
+    // claim's own, so it reads no location name. The scrub also drops the
+    // front end's short timeouts, which are for its own deadline, not a
+    // settle's.
     let mut command = Command::new(executable);
     namedrop::daemon::scrub(&mut command, namedrop::daemon::Starter::StopHook);
     let Ok(mut child) = command
@@ -194,8 +205,8 @@ pub fn run_worker(state: &Path, inherited: &dyn Inherited) {
     if captured.settles {
         settle_stop(state, &captured, inherited);
     }
-    if ended {
-        wake_waiting_mail(state, &captured.socket, &captured.input.session_id);
+    if ended && let Some(space) = &captured.space {
+        wake_waiting_mail(state, &captured.socket, space, &captured.input.session_id);
     }
 }
 
@@ -235,12 +246,9 @@ fn settle_stop(state: &Path, captured: &CapturedStop, inherited: &dyn Inherited)
 /// Herdr sends no status change when a session ends its turn with background
 /// agents still running, so the Stop's worker starts the drain that mail for
 /// the session waits on.
-fn wake_waiting_mail(state: &Path, socket: &str, session: &str) {
-    let Some(space) = namedrop::locator::Locator::Space.env() else {
-        return;
-    };
-    if namedrop::mail_waits_for_session(state, socket, &space, session) {
-        let _ = crate::schedule_mailbox_workers(state, socket, &space, false);
+fn wake_waiting_mail(state: &Path, socket: &str, space: &str, session: &str) {
+    if namedrop::mail_waits_for_session(state, socket, space, session) {
+        let _ = crate::schedule_mailbox_workers(state, socket, space, false);
     }
 }
 

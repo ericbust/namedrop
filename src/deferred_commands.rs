@@ -3,8 +3,10 @@ use crate::{
     AgentSessionId, Clock, IdGenerator, LifecycleRuntime, PaneAddressId, ProcessIds,
     StateNamespace, StateStore, StoreError, SystemClock,
     cli::RuntimeOptions,
-    locator::Locator,
-    mux::{Budget, Endpoint},
+    mux::{
+        Budget, Endpoint,
+        home::{Inherited, Location},
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -356,16 +358,24 @@ fn probe(endpoint: &str) -> io::Result<UnixStream> {
 
 /// Runs before runtime discovery or any mutating handler. A late handler error
 /// must never enter this fallback because the command may already have committed.
+///
+/// The endpoint, space, and pane come from the flags, then from the home of
+/// this process, which is resolved only for an operation that can defer.
 pub fn try_defer(
     operation: &str,
     input: &Value,
     options: &RuntimeOptions,
+    inherited: &dyn Inherited,
 ) -> Option<Result<Value, String>> {
     let operation = Operation::parse(operation)?;
+    let location = crate::mux::home::resolve(&options.flags(), inherited)
+        .ok()
+        .and_then(|home| home.location(inherited));
+    let located = |value: fn(&Location) -> Option<String>| location.as_ref().and_then(value);
     let socket = options
         .endpoint
         .clone()
-        .or_else(|| Locator::Endpoint.env())?;
+        .or_else(|| located(|location| location.endpoint.as_ref().map(|e| e.key.clone())))?;
     match probe(&socket) {
         Err(error) if permission_denied(&error) => {}
         _ => return None,
@@ -374,18 +384,18 @@ pub fn try_defer(
         let state = crate::locator::state_directory(
             options.plugin_state.clone(),
             Endpoint::parse(&socket).kind,
-            |name| env::var_os(name),
+            |name| inherited.var(name),
         )
         .ok_or("plugin state is required for deferred commands")?;
         let workspace = options
             .space
             .clone()
-            .or_else(|| Locator::Space.env())
+            .or_else(|| located(|location| location.space.as_ref().map(|s| s.as_str().to_owned())))
             .ok_or("workspace is required for deferred commands")?;
         let pane = options
             .pane
             .clone()
-            .or_else(|| Locator::Pane.env())
+            .or_else(|| located(|location| location.pane.as_ref().map(|p| p.as_str().to_owned())))
             .ok_or("pane is required for deferred commands")?;
         let caller = stored_caller(&state, StateNamespace::for_space(socket, workspace), pane)?;
         let request = Request::new(

@@ -1229,9 +1229,7 @@ fn hook_script(
         safe_context.push_str(&forward_marked_context("UserPromptSubmit", marker));
     }
     Ok(format!(
-        "#!/bin/sh\noutput=$({} hook user-prompt-submit --state-directory {} 2>/dev/null) || exit 0\nif [ \"$output\" = '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ]; then\n  {} hook mailbox-wake --state-directory {} </dev/null >/dev/null 2>&1 &\n  printf '%s' \"$output\"\n  exit 0\nfi\n{}exit 0\n",
-        shell_single_quote(executable),
-        shell_single_quote(state_directory),
+        "#!/bin/sh\noutput=$({} hook user-prompt-submit --state-directory {} 2>/dev/null) || exit 0\nif [ \"$output\" = '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ]; then\n  printf '%s' \"$output\"\n  exit 0\nfi\n{}exit 0\n",
         shell_single_quote(executable),
         shell_single_quote(state_directory),
         safe_context,
@@ -1540,6 +1538,29 @@ fn conflict(path: &Path, reason: &str) -> String {
 mod permission_tests {
     use super::*;
     use crate::StateNamespace;
+
+    /// The UserPromptSubmit wrapper is the one before commit 16 without the
+    /// line that backgrounded `hook mailbox-wake`: the hook starts the wake.
+    #[test]
+    fn the_prompt_wrapper_starts_no_wake_of_its_own() {
+        for runtime in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+            let wrapper = HookScript::Prompt
+                .render(runtime, Path::new("/x/namedrop"), Path::new("/s"))
+                .unwrap();
+            assert!(
+                wrapper.starts_with(concat!(
+                    "#!/bin/sh\n",
+                    "output=$('/x/namedrop' hook user-prompt-submit --state-directory '/s' 2>/dev/null) || exit 0\n",
+                    "if [ \"$output\" = '{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}' ]; then\n",
+                    "  printf '%s' \"$output\"\n",
+                    "  exit 0\n",
+                    "fi\n",
+                )),
+                "{wrapper}"
+            );
+            assert!(!wrapper.contains("mailbox-wake"), "{wrapper}");
+        }
+    }
 
     /// The Stop wrapper holds the hook to its 250 ms under either multiplexer,
     /// and installing a package records the directory its wrappers bake.

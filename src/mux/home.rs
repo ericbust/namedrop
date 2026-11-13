@@ -46,6 +46,46 @@ impl Home {
             Self::Rex(_) | Self::RexDeferred(_) => MuxKind::Rex,
         }
     }
+
+    /// Where this process records and reads its turn. Herdr: step 3's set of
+    /// names, read as the hooks read them before the home existed. Rex: the
+    /// place. `None` for `RexDeferred`, which only queues a command.
+    pub fn location(&self, inherited: &dyn Inherited) -> Option<Location> {
+        match self {
+            Self::Herdr => {
+                let lookup = |name: &str| inherited.var(name);
+                let read = |locator: Locator| {
+                    locator
+                        .resolve(lookup)
+                        .and_then(|(_, value)| value.into_string().ok())
+                };
+                Some(Location {
+                    endpoint: read(Locator::Endpoint).map(|value| Endpoint::parse(&value)),
+                    space: read(Locator::Space).map(SpaceId::new),
+                    pane: read(Locator::Pane).map(PaneId::new),
+                    names: crate::locator::home(lookup),
+                })
+            }
+            Self::Rex(place) => Some(Location {
+                endpoint: Some(place.endpoint.clone()),
+                space: place.space.clone(),
+                pane: place.pane.clone(),
+                names: Name::Neutral,
+            }),
+            Self::RexDeferred(_) => None,
+        }
+    }
+}
+
+/// Where a hook records its turn: endpoint, space, and pane, from either home.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Location {
+    pub endpoint: Option<Endpoint>,
+    pub space: Option<SpaceId>,
+    pub pane: Option<PaneId>,
+    /// The set of names the values came from, which a Herdr pane's
+    /// verification names in its refusal.
+    pub names: Name,
 }
 
 /// A place read from a binding file. It can queue a deferred command and

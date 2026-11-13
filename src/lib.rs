@@ -76,7 +76,8 @@ pub use health::{
     diagnose_collaboration, render_health_report_to_text, request_doctor_assistance,
 };
 pub use hook::{
-    execute_codex_app_server_hook, execute_session_start_hook, execute_user_prompt_submit_hook,
+    MESSAGE_SENT, execute_codex_app_server_hook, execute_session_start_hook,
+    execute_user_prompt_submit_hook,
 };
 pub use install::{
     AgentConfigDirectories, InheritedDirectories, install_integration_package, package_directory,

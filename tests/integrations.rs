@@ -3351,7 +3351,10 @@ fn assert_installed_package(home_directory: &Path, runtime: AgentRuntime) {
     );
     let script = fs::read_to_string(script).unwrap();
     assert!(script.contains("hook user-prompt-submit --state-directory"));
-    assert!(script.contains("hook mailbox-wake --state-directory"));
+    assert!(
+        !script.contains("mailbox-wake"),
+        "the hook starts its own wake"
+    );
     assert!(script.contains("#!/bin/sh"));
     let session_start = directory.join("scripts/session-start");
     assert!(
@@ -4006,15 +4009,18 @@ fn only_the_claude_hook_wrapper_forwards_authenticated_delivery_context() {
     assert!(codex_output.stdout.is_empty(), "{codex_output:?}");
 }
 
+/// The wrapper passes the hook's result through and starts nothing itself:
+/// the hook starts the mailbox wake through the daemon door, with its home's
+/// endpoint and space.
 #[test]
-fn installed_hook_wrapper_wakes_mailbox_delivery_without_delaying_the_hook_result() {
+fn installed_hook_wrapper_passes_the_result_through_and_wakes_nothing_itself() {
     let directory = TestDirectory::new();
     let executable = directory.path().join("hook-result");
     let command_log = directory.path().join("hook-commands");
     executable::write_executable(
         &executable,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1 $2\" in\n  'hook user-prompt-submit') printf '%s' '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ;;\n  'hook mailbox-wake') sleep 1 ;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$1 $2\" in\n  'hook user-prompt-submit') printf '%s' '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ;;\nesac\n",
             command_log.display()
         ),
     );
@@ -4025,48 +4031,23 @@ fn installed_hook_wrapper_wakes_mailbox_delivery_without_delaying_the_hook_resul
         directory.path(),
     )
     .unwrap();
-    let wrapper = package.join("scripts/user-prompt-submit");
-
-    let run_hook = || {
-        let started_at = std::time::Instant::now();
-        let output = crate::binary::command(&wrapper).output().unwrap();
-        let elapsed = started_at.elapsed();
-        assert_eq!(output.status.code(), Some(0), "{output:?}");
-        assert_eq!(
-            String::from_utf8(output.stdout).unwrap(),
-            r#"{"decision":"block","reason":"Collaboration message sent."}"#
-        );
-        elapsed
-    };
-    let wait_for_wake = || {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        loop {
-            let commands = fs::read_to_string(&command_log).unwrap_or_default();
-            if commands.contains("hook mailbox-wake --state-directory") {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the hook did not wake mailbox delivery: {commands}"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    };
-
-    // macOS assesses every freshly written executable the first time it is
-    // executed, which costs a few hundred milliseconds per file and stalls
-    // further under a parallel test run. Run the wrapper once untimed so that
-    // one-off cost lands outside the measured window, then reset the log.
-    run_hook();
-    wait_for_wake();
-    fs::write(&command_log, "").unwrap();
-
-    let elapsed = run_hook();
-    assert!(
-        elapsed < std::time::Duration::from_millis(750),
-        "the hook waited for mailbox delivery: {elapsed:?}"
+    let output = crate::binary::command(package.join("scripts/user-prompt-submit"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        r#"{"decision":"block","reason":"Collaboration message sent."}"#
     );
-    wait_for_wake();
+    let commands = fs::read_to_string(&command_log).unwrap();
+    assert_eq!(
+        commands
+            .lines()
+            .map(|line| line.split(" --").next().unwrap())
+            .collect::<Vec<_>>(),
+        ["hook user-prompt-submit"],
+        "{commands}"
+    );
 }
 
 #[test]

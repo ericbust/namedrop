@@ -479,6 +479,56 @@ fn without_a_rex_claim_the_set_of_names_decides() {
     assert_eq!(resolved(&Scripted::default()), Ok(Home::Herdr));
 }
 
+#[test]
+fn every_home_gives_its_location_from_one_set_of_names() {
+    let herdr = Scripted::default()
+        .var("HERDR_SOCKET_PATH", "/h.sock")
+        .var("HERDR_WORKSPACE_ID", "w1")
+        .var("NAMEDROP_PANE_ID", "n1:p1")
+        .var("NAMEDROP_ENDPOINT", "rex:/tmp/r.sock");
+    assert_eq!(
+        Home::Herdr.location(&herdr),
+        Some(Location {
+            endpoint: Some(Endpoint::parse("/h.sock")),
+            space: Some(SpaceId::new("w1")),
+            pane: None,
+            names: Name::Herdr,
+        }),
+        "a Herdr name hides every neutral one"
+    );
+    let neutral = Scripted::default()
+        .var("NAMEDROP_ENDPOINT", "/n.sock")
+        .var("NAMEDROP_PANE_ID", "n1:p1");
+    assert_eq!(
+        Home::Herdr.location(&neutral),
+        Some(Location {
+            endpoint: Some(Endpoint::parse("/n.sock")),
+            space: None,
+            pane: Some(PaneId::new("n1:p1")),
+            names: Name::Neutral,
+        })
+    );
+    let Home::Rex(place) = rex_place() else {
+        unreachable!()
+    };
+    assert_eq!(
+        Home::Rex(place.clone()).location(&herdr),
+        Some(Location {
+            endpoint: Some(place.endpoint.clone()),
+            space: place.space.clone(),
+            pane: place.pane.clone(),
+            names: Name::Neutral,
+        }),
+        "a Rex place reads no name"
+    );
+    let deferral = Deferral {
+        endpoint: place.endpoint,
+        space: SpaceId::new(SESSION),
+        pane: PaneId::new(BLOCK),
+    };
+    assert_eq!(Home::RexDeferred(deferral).location(&herdr), None);
+}
+
 /// `ThisProcess` reads the real environment and sockets, so only `fn main`
 /// builds it and only `mux::home` defines it. A test that named it would
 /// choose its home from the developer's own terminal.
@@ -698,6 +748,104 @@ mod this_process_boundary {
                 breached.iter().any(|breach| breach.starts_with(file)),
                 "{file}: {breached:#?}"
             );
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+/// Only `mux::home` and `locator` read where a process runs. Every other
+/// production reader of the endpoint, space, or pane takes it from the home,
+/// so a Rex block never reads a stale Herdr name and a Herdr pane never reads
+/// a neutral one.
+mod identity_boundary {
+    use std::{fs, path::Path};
+
+    const READERS: [&str; 2] = ["mux/home.rs", "locator.rs"];
+    /// Live peek's observer reads the socket live peek gave it, and live peek
+    /// is refused on Rex.
+    const EXEMPT: [(&str, &str); 1] = [(
+        "dashboard/observer_guard.rs",
+        "var_os(\"HERDR_SOCKET_PATH\"",
+    )];
+
+    /// Each read of a location name in compacted production code outside
+    /// the readers, as `file: read`.
+    fn breaches(src: &Path) -> Vec<String> {
+        let mut reads = Vec::new();
+        for locator in ["Endpoint", "Space", "Pane"] {
+            for method in ["env", "env_os", "inherited"] {
+                reads.push(format!("Locator::{locator}.{method}("));
+            }
+        }
+        for name in [
+            "HERDR_SOCKET_PATH",
+            "HERDR_WORKSPACE_ID",
+            "HERDR_PANE_ID",
+            "NAMEDROP_ENDPOINT",
+            "NAMEDROP_SPACE_ID",
+            "NAMEDROP_PANE_ID",
+        ] {
+            reads.push(format!("var(\"{name}\""));
+            reads.push(format!("var_os(\"{name}\""));
+        }
+        let mut breaches = Vec::new();
+        for (file, text) in crate::daemon::tests::production_files(src) {
+            if READERS.contains(&file.as_str()) {
+                continue;
+            }
+            for read in &reads {
+                if text.contains(read.as_str()) && !EXEMPT.contains(&(file.as_str(), read.as_str()))
+                {
+                    breaches.push(format!("{file}: {read}"));
+                }
+            }
+        }
+        breaches
+    }
+
+    #[test]
+    fn only_the_home_and_the_locator_read_a_location_name() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        assert_eq!(breaches(&src), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_boundary_catches_a_reader_and_skips_tests() {
+        let root = std::env::temp_dir().join(format!("namedrop-identity-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("mux/herdr")).unwrap();
+        fs::create_dir_all(root.join("dashboard")).unwrap();
+        let write = |file: &str, text: &str| fs::write(root.join(file), text).unwrap();
+        write(
+            "locator.rs",
+            "fn a() { Locator::Pane.env(); std::env::var_os(\"HERDR_PANE_ID\"); }",
+        );
+        write(
+            "dashboard/observer_guard.rs",
+            "fn a() { env::var_os(\"HERDR_SOCKET_PATH\"); }",
+        );
+        write(
+            "mux/herdr/process.rs",
+            "// env::var(\"HERDR_PANE_ID\")\nconst TEXT: &str = \"Locator::Space.env()\";\n#[cfg(test)]\nmod tests {\n    fn t() { let socket = env::var(\"HERDR_SOCKET_PATH\"); }\n}\n",
+        );
+        write("mux/herdr/tests.rs", "fn t() { Locator::Endpoint.env(); }");
+        assert_eq!(breaches(&root), Vec::<String>::new());
+        for (source, caught) in [
+            (
+                "fn a() { let pane = std::env::var(\"HERDR_PANE_ID\"); }",
+                "planted.rs: var(\"HERDR_PANE_ID\"",
+            ),
+            (
+                "fn a() { let space = crate::locator::Locator::Space\n        .inherited(); }",
+                "planted.rs: Locator::Space.inherited(",
+            ),
+            (
+                "fn a() { env::var_os(\n    \"NAMEDROP_ENDPOINT\",\n); }",
+                "planted.rs: var_os(\"NAMEDROP_ENDPOINT\"",
+            ),
+        ] {
+            write("planted.rs", source);
+            assert_eq!(breaches(&root), [caught], "{source}");
         }
         fs::remove_dir_all(&root).unwrap();
     }

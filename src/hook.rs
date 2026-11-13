@@ -107,6 +107,10 @@ pub(crate) fn codex_app_server_hook_output() -> Value {
 /// non-authoritative local guidance, beneath the same roster the turn it stays
 /// on would have carried. Every roster carries only the parts this host
 /// session, in this pane, was not last shown.
+/// The reason of the UserPromptSubmit output that blocks a prompt whose
+/// mention was sent, after which the hook wakes the mailboxes.
+pub const MESSAGE_SENT: &str = "Collaboration message sent.";
+
 pub fn execute_user_prompt_submit_hook<M, C, I>(
     input: &str,
     runtime: &LifecycleRuntime<'_, M, C, I>,
@@ -175,8 +179,8 @@ where
         return news(reader, runtime).map(|roster| context_hook_output(&roster));
     };
     match outcome {
-        // The reason stays this exact literal: the generated wrapper wakes the
-        // mailboxes only on it.
+        // The reason stays this exact literal: the hook wakes the mailboxes
+        // only on it, and so does a wrapper installed before it did.
         PromptMentionOutcome::Sent { remote } => {
             if !remote.is_empty() {
                 let _ = runtime.mux.apply(&Effect::Notify {
@@ -187,7 +191,7 @@ where
             }
             Some(json!({
                 "decision": "block",
-                "reason": "Collaboration message sent.",
+                "reason": MESSAGE_SENT,
             }))
         }
         PromptMentionOutcome::Refused(RouteRefusal::UnknownMention { .. }) => {

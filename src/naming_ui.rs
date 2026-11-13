@@ -110,7 +110,12 @@ fn target_terminal(runtime: &Runtime<'_>) -> Result<String, String> {
 
 pub(super) fn run(options: &RuntimeOptions, inherited: &dyn Inherited, mode: UiMode) -> ExitCode {
     if mode == UiMode::Status {
-        return crate::agent_status_ui::run(options, inherited);
+        let observing = super::location(options, inherited).and_then(|location| location.pane);
+        return crate::agent_status_ui::run(
+            options,
+            inherited,
+            observing.as_ref().map(PaneId::as_str),
+        );
     }
     match run_prompt(options, inherited, mode) {
         Ok(()) => ExitCode::SUCCESS,

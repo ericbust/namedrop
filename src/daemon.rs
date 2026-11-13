@@ -98,7 +98,7 @@ pub fn scrub(command: &mut Command, starter: Starter) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::mux::herdr::boundary::{call_at, compact, rust_sources};
     use std::{collections::BTreeMap, fs};
@@ -561,7 +561,7 @@ mod tests {
 
     /// The files under `src` that build into production, each with its
     /// compacted production code.
-    fn production_files(src: &Path) -> Vec<(String, String)> {
+    pub(crate) fn production_files(src: &Path) -> Vec<(String, String)> {
         let mut files = Vec::new();
         rust_sources(src, &mut files);
         files.sort();
@@ -699,7 +699,7 @@ mod tests {
         let front_end = files.iter().any(|(name, text)| {
             name == "main.rs"
                 && text.contains(
-                    "ifletSome(state_directory)=cli.stop_hook_state_directory(){let_=namedrop::reminder::ensure_clock(state_directory,None,Starter::StopHook);stop_hook::run(state_directory);",
+                    "ifletSome(state_directory)=cli.stop_hook_state_directory(){let_=namedrop::reminder::ensure_clock(state_directory,None,Starter::StopHook);stop_hook::run(state_directory,inherited);",
                 )
         });
         let sites = files
