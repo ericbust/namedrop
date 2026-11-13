@@ -1158,15 +1158,18 @@ fn run_context_hook(
 /// The wake after a prompt sent a mention. It outlives the hook, so it gets
 /// the hook's endpoint and space through the daemon door rather than proving
 /// a block or pane of its own. Without a space it discovers one from its
-/// directory, as the wake the wrapper backgrounded did.
+/// directory, and without an endpoint it uses Herdr's default socket, as the
+/// wake the wrapper backgrounded did.
 fn start_mailbox_wake(state: &Path, location: Option<&Location>) -> Result<(), String> {
     let executable = namedrop::runtime_executable()?;
+    use namedrop::daemon::Scope;
     let endpoint = location.and_then(|location| location.endpoint.as_ref());
     let space = location.and_then(|location| location.space.as_ref());
-    let scope = match (endpoint, space) {
-        (Some(endpoint), Some(space)) => namedrop::daemon::Scope::Space(endpoint, space),
-        (Some(endpoint), None) => namedrop::daemon::Scope::Endpoint(endpoint),
-        (None, _) => namedrop::daemon::Scope::None,
+    let scope = match (endpoint, space, location) {
+        (Some(endpoint), Some(space), _) => Scope::Space(endpoint, space),
+        (Some(endpoint), None, _) => Scope::Endpoint(endpoint),
+        (None, Some(space), Some(location)) => Scope::SpaceAlone(location.names, space),
+        (None, _, _) => Scope::None,
     };
     namedrop::daemon::command(&executable, scope, Starter::Caller)
         .args(["hook", "mailbox-wake", "--state-directory"])
@@ -1311,7 +1314,7 @@ fn status_worker_command(
     command
         .args(["hook", "agent-status-worker"])
         .env("NAMEDROP_HERDR_TIMEOUT_MS", "10000");
-    Locator::StateDir.pass(&mut command, endpoint.kind, state_directory);
+    Locator::StateDir.pass(&mut command, Name::of(endpoint.kind), state_directory);
     Ok(command)
 }
 

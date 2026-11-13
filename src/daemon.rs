@@ -5,7 +5,7 @@
 
 use crate::AGENT_SESSION_MARKERS;
 use crate::SpaceId;
-use crate::locator::Locator;
+use crate::locator::{Locator, Name};
 use crate::mux::Endpoint;
 use std::{
     os::unix::process::CommandExt,
@@ -21,6 +21,10 @@ pub enum Scope<'a> {
     Endpoint(&'a Endpoint),
     /// The status worker and the dashboard's mailbox wake.
     Space(&'a Endpoint, &'a SpaceId),
+    /// The prompt hook's mailbox wake when its home named a space and no
+    /// endpoint, as a Herdr pane on Herdr's default socket. The space keeps
+    /// the set of names the hook read it under.
+    SpaceAlone(Name, &'a SpaceId),
     /// The dashboard server.
     None,
 }
@@ -66,15 +70,18 @@ pub fn command(executable: &Path, scope: Scope<'_>, starter: Starter) -> Command
     scrub(&mut command, starter);
     let (endpoint, space) = match scope {
         Scope::Endpoint(endpoint) => (Some(endpoint), None),
-        Scope::Space(endpoint, space) => (Some(endpoint), Some(space)),
+        Scope::Space(endpoint, space) => (Some(endpoint), Some((Name::of(endpoint.kind), space))),
+        Scope::SpaceAlone(set, space) => (None, Some((set, space))),
         Scope::None => (None, None),
     };
     match endpoint {
-        Some(endpoint) => Locator::Endpoint.pass(&mut command, endpoint.kind, &endpoint.key),
+        Some(endpoint) => {
+            Locator::Endpoint.pass(&mut command, Name::of(endpoint.kind), &endpoint.key)
+        }
         None => Locator::Endpoint.clear(&mut command),
     }
-    match endpoint.zip(space) {
-        Some((endpoint, space)) => Locator::Space.pass(&mut command, endpoint.kind, space.as_str()),
+    match space {
+        Some((set, space)) => Locator::Space.pass(&mut command, set, space.as_str()),
         None => Locator::Space.clear(&mut command),
     }
     Locator::Pane.clear(&mut command);
@@ -193,6 +200,7 @@ pub(crate) mod tests {
         for scope in [
             Scope::Space(&endpoint, &space),
             Scope::Endpoint(&endpoint),
+            Scope::SpaceAlone(Name::Herdr, &space),
             Scope::None,
         ] {
             let caller =
@@ -252,6 +260,48 @@ pub(crate) mod tests {
                 child_environment(&command),
                 with(&[&location[..], &pane[..]].concat()),
                 "{scope:?}"
+            );
+        }
+    }
+
+    /// A hook whose home named a space and no endpoint, as a Herdr pane on
+    /// Herdr's default socket, gives its wake that space under the set of
+    /// names that held it and no endpoint, as the wake the wrapper backgrounded
+    /// inherited them.
+    #[test]
+    fn a_space_without_an_endpoint_keeps_the_set_of_names_that_held_it() {
+        let space = SpaceId::new("w1");
+        let pane = [("HERDR_PANE_ID", None), ("NAMEDROP_PANE_ID", None)];
+        let cases = [
+            (
+                Name::Herdr,
+                [
+                    ("HERDR_SOCKET_PATH", None),
+                    ("NAMEDROP_ENDPOINT", None),
+                    ("HERDR_WORKSPACE_ID", Some("w1")),
+                    ("NAMEDROP_SPACE_ID", None),
+                ],
+            ),
+            (
+                Name::Neutral,
+                [
+                    ("HERDR_SOCKET_PATH", None),
+                    ("NAMEDROP_ENDPOINT", None),
+                    ("HERDR_WORKSPACE_ID", None),
+                    ("NAMEDROP_SPACE_ID", Some("w1")),
+                ],
+            ),
+        ];
+        for (set, location) in cases {
+            let command = command(
+                Path::new("/bin/namedrop"),
+                Scope::SpaceAlone(set, &space),
+                Starter::Caller,
+            );
+            assert_eq!(
+                child_environment(&command),
+                with(&[&location[..], &pane[..]].concat()),
+                "{set:?}"
             );
         }
     }

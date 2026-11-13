@@ -940,8 +940,11 @@ panes = {{'result': {{'panes': [
     {{'pane_id':'pane-lead','terminal_id':'t1','tab_id':'tab-1','workspace_id':'workspace-1','agent':'codex','agent_session':{{'value':'session-lead'}},'agent_status':'idle'}},
     {{'pane_id':'pane-reviewer','terminal_id':'t2','tab_id':'tab-2','workspace_id':'workspace-1','agent':'claude','agent_session':{{'value':'session-reviewer'}},'agent_status':reviewer.read_text() if reviewer.exists() else 'idle'}}]}}}}
 if args[:2] == ['workspace','list']: print(json.dumps({{'result':{{'workspaces':[{{'workspace_id':'workspace-1'}}]}}}}))
+elif args[:2] == ['worktree','list'] and '--cwd' in args and (here / 'no-checkout').exists(): print(json.dumps({{'result':{{'worktrees':[]}}}}))
 elif args[:2] == ['worktree','list']: print(json.dumps({{'result':{{'worktrees':[{{'path':{repo:?},'open_workspace_id':'workspace-1'}}]}}}}))
 elif args[:2] == ['pane','list']: print(json.dumps(panes))
+elif args[:2] == ['status','server'] and (here / 'default-socket').exists(): print('socket: ' + (here / 'default-socket').read_text())
+elif args[:3] == ['pane','process-info','--pane'] and (here / 'default-socket').exists(): print(json.dumps({{'result':{{'process_info':{{'shell_pid':999999,'foreground_process_group_id':999999,'foreground_processes':[]}}}}}}))
 elif args[:3] == ['pane','read','pane-reviewer'] and (here / 'reviewer-screen').exists(): print((here / 'reviewer-screen').read_text(), end='')
 elif args[:2] == ['agent','send-keys']:
     with (here / 'herdr-keys').open('a') as log: log.write(json.dumps(args[2:]) + '\n')
@@ -5995,6 +5998,30 @@ fn the_prompt_hook_wakes_the_space_its_mention_went_to() {
     while space.prompted_by_binary("pane-lead").is_empty() && std::time::Instant::now() < until {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    let typed = space.prompted_by_binary("pane-lead");
+    assert_eq!(typed.len(), 1, "{typed:?}");
+    assert_eq!(typed[0]["untrusted_body"], "@lead Is the build green?");
+}
+
+/// A Herdr pane on Herdr's default socket names its space and no socket. The
+/// prompt hook's wake keeps that space, as the wrapper's backgrounded wake
+/// inherited it, so the mention reaches its recipient even where Herdr places
+/// the directory in no space.
+#[test]
+fn the_prompt_hook_s_wake_keeps_a_space_named_without_a_socket() {
+    let space = Space::new();
+    fs::write(space.directory.root.join("default-socket"), "socket-a").unwrap();
+    fs::write(space.directory.root.join("no-checkout"), "").unwrap();
+    let mut command = space.command();
+    command
+        .env_remove("HERDR_SOCKET_PATH")
+        .env("HERDR_WORKSPACE_ID", "workspace-1")
+        .env("HERDR_PANE_ID", "pane-reviewer")
+        .env("CLAUDE_CODE_SESSION_ID", "session-reviewer");
+    let mut hook = space.start_reviewer_prompt_in(command, "@lead Is the build green?");
+    let output: Value = serde_json::from_str(&hook.output()).unwrap();
+    assert_eq!(output["reason"], namedrop::MESSAGE_SENT, "{output}");
+    hook.wait();
     let typed = space.prompted_by_binary("pane-lead");
     assert_eq!(typed.len(), 1, "{typed:?}");
     assert_eq!(typed[0]["untrusted_body"], "@lead Is the build green?");

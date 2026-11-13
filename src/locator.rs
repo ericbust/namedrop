@@ -107,12 +107,12 @@ impl Locator {
             .map(|(name, value)| (self.flag_for(name), value))
     }
 
-    /// Gives a child process `value` under the name of `kind`'s set and
-    /// clears the other: Herdr's name, which a Herdr connection inherits, for
-    /// a Herdr endpoint, and the neutral name for a Rex one, so a Rex
-    /// endpoint never becomes `HERDR_SOCKET_PATH`.
-    pub fn pass(self, command: &mut Command, kind: MuxKind, value: impl AsRef<OsStr>) {
-        let (name, other) = match Name::of(kind) {
+    /// Gives a child process `value` under its name in `set` and clears the
+    /// other. For an endpoint's kind, [`Name::of`] gives Herdr's name, which a
+    /// Herdr connection inherits, for Herdr, and the neutral name for Rex, so
+    /// a Rex endpoint never becomes `HERDR_SOCKET_PATH`.
+    pub fn pass(self, command: &mut Command, set: Name, value: impl AsRef<OsStr>) {
+        let (name, other) = match set {
             Name::Herdr => (Name::Herdr, Name::Neutral),
             Name::Neutral => (Name::Neutral, Name::Herdr),
         };
@@ -387,7 +387,7 @@ mod tests {
     #[test]
     fn a_herdr_child_gets_the_herdr_name_and_loses_the_neutral_one() {
         let mut command = Command::new("true");
-        Locator::Space.pass(&mut command, MuxKind::Herdr, "w2");
+        Locator::Space.pass(&mut command, Name::of(MuxKind::Herdr), "w2");
         Locator::Pane.clear(&mut command);
         assert_eq!(
             child_environment(&command),
@@ -409,7 +409,7 @@ mod tests {
             (Locator::Space, "s1"),
             (Locator::Pane, "b1"),
         ] {
-            locator.pass(&mut command, MuxKind::Rex, value);
+            locator.pass(&mut command, Name::of(MuxKind::Rex), value);
         }
         assert_eq!(
             child_environment(&command),

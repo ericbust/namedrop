@@ -2290,7 +2290,7 @@ pub(super) fn wake_mailboxes_after_send(
             crate::daemon::Scope::Space(&endpoint, &space),
             crate::daemon::Starter::Caller,
         );
-        Locator::StateDir.pass(&mut command, endpoint.kind, state);
+        Locator::StateDir.pass(&mut command, crate::locator::Name::of(endpoint.kind), state);
         let mut child = command
             .args(["hook", "mailbox-wake", "--state-directory"])
             .arg(state)
