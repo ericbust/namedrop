@@ -3,8 +3,12 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import type { Alias, Message } from "./model.ts";
 import {
+  parseAddedAgent,
+  parseChannelFolder,
+  parseCreatedChannel,
   parseDeliverAnswer,
   parseEvent,
+  parseFolders,
   parseHistory,
   routeOf,
   routePath,
@@ -607,4 +611,31 @@ test("images: a row lists its stored images, and a missing or malformed list rea
   );
   for (const value of [undefined, null, "x", {}, [], ["nope"]])
     assert.deepEqual(images(value), [], JSON.stringify(value));
+});
+
+test("create answers: a new channel needs a real space key and workspace id, and a new agent its address", () => {
+  const key = "c".repeat(20);
+  assert.deepEqual(
+    parseCreatedChannel({ key, workspace_id: "w7", label: "Proto Chan" }),
+    { key, workspaceId: "w7", label: "Proto Chan" },
+  );
+  for (const bad of [
+    { key: "short", workspace_id: "w7", label: "x" },
+    { key, workspace_id: " ", label: "x" },
+    { key, workspace_id: "w7" },
+    null,
+  ])
+    assert.throws(() => parseCreatedChannel(bad), JSON.stringify(bad));
+  assert.deepEqual(parseAddedAgent({ address_id: "a1", alias: "@rev" }), {
+    addressId: "a1",
+    alias: "rev",
+  });
+  assert.throws(() => parseAddedAgent({ address_id: "", alias: "rev" }));
+  assert.deepEqual(parseFolders({ folders: [] }), []);
+  assert.throws(() => parseFolders({ folders: "/home" }));
+  assert.equal(parseChannelFolder({ folder: "/srv/web" }), "/srv/web");
+  assert.equal(parseChannelFolder({ folder: null }), null);
+  assert.equal(parseChannelFolder({ folder: "" }), null);
+  assert.equal(parseChannelFolder({}), null);
+  assert.throws(() => parseChannelFolder("/srv/web"));
 });

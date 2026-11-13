@@ -2,7 +2,7 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
-## [1.10.1] - 2026-11-12
+## [1.11.1] - 2026-11-13
 
 ### Fixed
 
@@ -12,6 +12,15 @@ Each release is a section here, newest first. The GitHub release for a version u
 - **Dismiss all** at the foot of a channel's attention list clears the list after one confirmation. It first shows every card, then asks with the number it will dismiss. A card that arrives while it asks stays.
 - Old warnings stop being red by themselves. Channels shows a warning as needing you for 7 days, counted from when it opened or last changed its wording. After that it is no longer listed or counted. Doctor still reports it until its cause clears.
 - Doctor leaves out a warning you dismissed in Channels.
+
+## [1.11.0] - 2026-11-12
+
+### Added
+
+- You can make a new channel from the Channels page. Select **+** beside **Channels**, give the channel a name and a working folder, and select **Create**. Type the folder's full path, or pick one of the folders your other workspaces use. Channels creates the Herdr workspace in that folder, activates Namedrop there and opens the channel. The folder must already exist: Namedrop never creates folders.
+- You can add an agent from the Channels page. Select **Add agent** in a channel's member row, choose Claude Code, Codex or a plain terminal, and give it a name and an optional persona. Channels opens a new tab in that workspace, in the channel's folder, names the pane and runs plain `claude` or `codex` there, with no extra flags, as you would by hand. The form shows the folder, and it stays the channel's folder wherever you `cd` in its panes.
+- An agent that Channels started and that has not connected after 20 seconds shows under **Needs you**, with its pane one click away. It may be asking you to trust the folder or to log in. Channels never answers such a screen for you. **Type to agent** now works for a named agent that has no session yet, so you can answer the screen from the page, including from your phone. A new Codex connects after its first prompt, so type one in its pane.
+- Both forms work over the tailnet link, with the same sign-in and CSRF checks as posting. Errors read plainly in the form: a name that is taken, a folder that doesn't exist, Herdr not reachable.
 
 ## [1.10.0] - 2026-11-12
 

@@ -109,6 +109,7 @@ function postRoute(onPost) {
   const session = { secret: "session-1", csrf: "csrf-1", tokenReads: 0 };
   const attempts = [];
   const controls = [];
+  const creates = [];
   const deliveries = [];
   const receipts = new Map();
   const images = new Map();
@@ -125,6 +126,7 @@ function postRoute(onPost) {
     session,
     attempts,
     controls,
+    creates,
     deliveries,
     receipts,
     images,
@@ -303,6 +305,29 @@ function postRoute(onPost) {
       const { status = 200 } = await onControl(request);
       reply(status, status === 200 ? {} : { error: "Refused." });
     },
+    // Mirrors POST /w/<key>/channels and /w/<key>/agents: cookie, CSRF, JSON body.
+    async create(req, res, onCreate, path) {
+      const request = {
+        path,
+        csrf: req.headers["x-namedrop-csrf"] ?? null,
+        type: req.headers["content-type"] ?? null,
+        body: JSON.parse(await readBody(req)),
+        status: 0,
+      };
+      creates.push(request);
+      if (!authorized(req)) {
+        request.status = 401;
+        return sendJson(res, 401, { error: "No session." });
+      }
+      if (request.csrf !== session.csrf) {
+        request.status = 403;
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        return res.end("Forbidden.\n");
+      }
+      const { status, body } = await onCreate(request);
+      request.status = status;
+      sendJson(res, status, body);
+    },
     async deliver(req, res, onDeliver, path) {
       const request = {
         method: req.method,
@@ -446,6 +471,16 @@ async function open(
     liveInput = false,
     inlineStyles = false,
     onSkills = () => ({ runtime: null, skills: [] }),
+    onFolders = () => ({ status: 200, body: { folders: [] } }),
+    onFolder = () => ({ status: 200, body: { folder: null } }),
+    onCreateChannel = () => ({
+      status: 500,
+      body: { error: "Herdr couldn't create the workspace. Try again." },
+    }),
+    onAddAgent = () => ({
+      status: 500,
+      body: { error: "Herdr couldn't open a tab for the agent. Try again." },
+    }),
     sounds = undefined,
     directPeers = () => [],
   } = {},
@@ -458,6 +493,7 @@ async function open(
   const bodyRequests = [];
   const inputRequests = [];
   const skillRequests = [];
+  const folderRequests = [];
   const posts = postRoute(onPost);
   if (sounds !== undefined) posts.setSounds(sounds);
   const reviews = [];
@@ -519,6 +555,25 @@ async function open(
       const catalog = await onSkills(target);
       return sendJson(res, 200, catalog);
     }
+    const folder = /^\/w\/([^/]+)\/folder$/.exec(url.pathname)?.[1];
+    if (req.method === "GET" && folder !== undefined) {
+      const { status, body } = await onFolder(folder);
+      return sendJson(res, status, body);
+    }
+    const folders = /^\/w\/([^/]+)\/folders$/.exec(url.pathname)?.[1];
+    if (req.method === "GET" && folders !== undefined) {
+      folderRequests.push(folders);
+      const { status, body } = await onFolders(folders);
+      return sendJson(res, status, body);
+    }
+    const create = /^\/w\/[^/]+\/(channels|agents)$/.exec(url.pathname)?.[1];
+    if (req.method === "POST" && create !== undefined)
+      return posts.create(
+        req,
+        res,
+        create === "channels" ? onCreateChannel : onAddAgent,
+        url.pathname,
+      );
     const postKey = /^\/w\/([^/]+)\/messages$/.exec(url.pathname)?.[1];
     if (req.method === "POST" && postKey !== undefined)
       return posts.post(req, res, postKey);
@@ -682,6 +737,7 @@ async function open(
     bodyRequests,
     inputRequests,
     skillRequests,
+    folderRequests,
     posts,
     reviews,
     screens,
@@ -10961,7 +11017,7 @@ test("UI-R4 L1: on a phone or a short narrow window, the thread and the screen t
     }
     const chip = main
       .getByRole("list", { name: "Members" })
-      .getByRole("button", { name: /@codex/ });
+      .getByRole("button", { name: /@claude/ });
     await chip.click();
     await drawer(ui).waitFor();
     assert.equal(await main.isVisible(), false, `the screen fills ${at}`);
@@ -14162,7 +14218,9 @@ test("SOUNDS o: a pick another window changed first shows the saved choice and s
     muted: false,
     agents: { [SOUND_CLAUDE]: "knock" },
   });
-  await group.getByRole("radio", { name: "Pop", exact: true }).check();
+  // A click, not check(): the page takes this pick back, so the radio may
+  // already show the saved choice again by the time its state is read.
+  await group.getByRole("radio", { name: "Pop", exact: true }).click();
   await picker
     .getByRole("alert")
     .getByText(
@@ -14928,5 +14986,610 @@ test("DIAGRAMS: a diagram too wide to read when fitted keeps a readable size and
     await image.evaluate((element) => element.getBoundingClientRect().width),
     await image.evaluate((element) => element.naturalWidth),
     "a tap still opens it full size",
+  );
+});
+const newChannelButton = (ui) =>
+  ui.page.getByRole("button", { name: "New channel", exact: true });
+const newChannelForm = (ui) =>
+  ui.page.getByRole("form", { name: "New channel" });
+const addAgentButton = (ui) =>
+  ui.page.locator(".member-row").getByRole("button", { name: "Add agent" });
+const addAgentForm = (ui) => ui.page.getByRole("form", { name: "Add agent" });
+const activeIs = (locator) =>
+  locator.evaluate((element) => element === document.activeElement);
+const fitsWidth = (page) =>
+  page.evaluate(() => document.documentElement.scrollWidth <= innerWidth);
+const createPosts = (ui, path) =>
+  ui.posts.creates.filter((request) => request.path === path);
+const HERDR_DOWN =
+  "Herdr isn't reachable. Check that Herdr is running, then try again.";
+function refusal(status, error) {
+  return () => ({ status, body: { error } });
+}
+
+test("CREATE: + opens the New channel form in place with focus on Name, and Escape or Cancel closes it with focus back on +", async (t) => {
+  const ui = await open(t, (client) => replay(client, [frame(1, "alpha")]));
+  await ui.live();
+  const plus = newChannelButton(ui);
+  assert.equal(await plus.getAttribute("aria-expanded"), "false");
+  await plus.click();
+  const form = newChannelForm(ui);
+  await form.waitFor();
+  assert.equal(await plus.getAttribute("aria-expanded"), "true");
+  assert.equal(
+    await ui.page.locator(".sidebar .channels-section form").count(),
+    1,
+    "the form sits in the Channels section",
+  );
+  assert.equal(
+    await ui.channels.getByRole("button").count(),
+    1,
+    "the Channel list holds only channel rows",
+  );
+  assert.ok(await activeIs(form.getByLabel("Name", { exact: true })));
+  await form.getByLabel("Name", { exact: true }).fill("half typed");
+  await ui.page.keyboard.press("Escape");
+  await form.waitFor({ state: "detached" });
+  assert.ok(await activeIs(plus));
+  await plus.press("Enter");
+  await form.waitFor();
+  assert.equal(
+    await form.getByLabel("Name", { exact: true }).inputValue(),
+    "",
+    "a reopened form starts empty",
+  );
+  await form.getByRole("button", { name: "Cancel" }).click();
+  await form.waitFor({ state: "detached" });
+  assert.ok(await activeIs(plus));
+  assert.equal(createPosts(ui, `/w/${key(1)}/channels`).length, 0);
+});
+
+test("CREATE: a recent folder fills the field, Create posts to the channel in view, and the new channel opens once it reaches the index", async (t) => {
+  let sse;
+  const ui = await open(
+    t,
+    (client) => {
+      sse = client;
+      replay(client, [frame(1, "alpha"), frame(2, "beta")]);
+    },
+    () => [],
+    {
+      onFolders: () => ({
+        status: 200,
+        body: {
+          folders: [
+            "/home/person/projects/namedrop",
+            "/home/person/.herdr/worktrees/namedrop/a-very-long-worktree-name-here",
+          ],
+        },
+      }),
+      onCreateChannel: () => ({
+        status: 201,
+        body: { key: key(7), workspace_id: "w7", label: "Proto Chan" },
+      }),
+    },
+  );
+  await ui.live();
+  await ui.row(2).click();
+  await newChannelButton(ui).click();
+  const form = newChannelForm(ui);
+  const recent = form.getByRole("list", { name: "Recent folders" });
+  await recent.getByRole("button").first().waitFor();
+  assert.deepEqual(ui.folderRequests, [key(2)]);
+  await recent
+    .getByRole("button", { name: "/home/person/projects/namedrop" })
+    .click();
+  assert.equal(
+    await form.getByLabel("Folder", { exact: true }).inputValue(),
+    "/home/person/projects/namedrop",
+  );
+  const long = recent.getByRole("button").nth(1);
+  assert.ok(
+    await long.evaluate(
+      (element) =>
+        element.scrollWidth > element.clientWidth &&
+        getComputedStyle(element).direction === "rtl",
+    ),
+    "a long path is cut on the left, so its last folder stays in view",
+  );
+  await form.getByLabel("Name", { exact: true }).fill("Proto Chan");
+  await form.getByLabel("Name", { exact: true }).press("Enter");
+  await form.waitFor({ state: "detached" });
+  const [posted] = createPosts(ui, `/w/${key(2)}/channels`);
+  assert.deepEqual(posted.body, {
+    name: "Proto Chan",
+    folder: "/home/person/projects/namedrop",
+  });
+  assert.equal(posted.type, "application/json");
+  assert.equal(posted.csrf, ui.posts.session.csrf);
+  assert.equal(await ui.row(2).getAttribute("aria-current"), "page");
+  sse.send("space", frame(7, "Proto Chan"));
+  await eventually(
+    async () => (await ui.row(7).getAttribute("aria-current")) === "page",
+    "the new channel is selected",
+  );
+  assert.equal(
+    await ui.page.locator("main h1").first().textContent(),
+    "Proto Chan",
+  );
+  assert.ok(await activeIs(ui.row(7)), "focus lands on the new row");
+  assert.match(ui.page.url(), new RegExp(`/w/${key(7)}$`));
+});
+
+test("CREATE: the page's own checks block the POST with the server's sentences, and the form keeps what was typed", async (t) => {
+  const ui = await open(t, (client) => replay(client, [frame(1, "alpha")]));
+  await ui.live();
+  await newChannelButton(ui).click();
+  const form = newChannelForm(ui);
+  const alert = form.getByRole("alert");
+  await form.getByRole("button", { name: "Create" }).click();
+  assert.equal(await alert.textContent(), "Give the channel a name.");
+  await form.getByLabel("Name", { exact: true }).fill("all");
+  assert.equal(await alert.count(), 0, "editing clears the old message");
+  await form.getByLabel("Folder", { exact: true }).fill("/srv");
+  await form.getByLabel("Folder", { exact: true }).press("Enter");
+  assert.equal(
+    await alert.textContent(),
+    'A channel name needs a letter or a digit, and it can\'t be "all".',
+  );
+  await form.getByLabel("Name", { exact: true }).fill("web");
+  await form.getByLabel("Folder", { exact: true }).fill("projects/web");
+  await form.getByLabel("Folder", { exact: true }).press("Enter");
+  assert.equal(
+    await alert.textContent(),
+    "Type the folder's full path, starting with / or ~.",
+  );
+  assert.equal(
+    await form.getByLabel("Name", { exact: true }).inputValue(),
+    "web",
+  );
+  assert.equal(ui.posts.creates.length, 0, "nothing reached the server");
+});
+
+test("CREATE: each server refusal reads inside the New channel form, the button is busy while waiting, and two 403s read as an expired session", async (t) => {
+  const answers = [
+    refusal(
+      409,
+      "Another channel is already named #proto-chan. Pick a different name.",
+    ),
+    refusal(400, "That folder doesn't exist. Namedrop never creates folders."),
+    refusal(503, HERDR_DOWN),
+  ];
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  const ui = await open(
+    t,
+    (client) => replay(client, [frame(1, "alpha")]),
+    undefined,
+    {
+      onCreateChannel: async () => {
+        const next = answers.shift();
+        if (next) return next();
+        await held;
+        return refusal(503, HERDR_DOWN)();
+      },
+    },
+  );
+  await ui.live();
+  await newChannelButton(ui).click();
+  const form = newChannelForm(ui);
+  const alert = form.getByRole("alert");
+  await form.getByLabel("Name", { exact: true }).fill("Proto Chan");
+  await form.getByLabel("Folder", { exact: true }).fill("~/missing");
+  for (const sentence of [
+    "Another channel is already named #proto-chan. Pick a different name.",
+    "That folder doesn't exist. Namedrop never creates folders.",
+    HERDR_DOWN,
+  ]) {
+    await form.getByRole("button", { name: "Create" }).click();
+    await eventually(
+      async () =>
+        (await alert.count()) === 1 && (await alert.textContent()) === sentence,
+      sentence,
+    );
+  }
+  await form.getByRole("button", { name: "Create" }).click();
+  const busy = form.getByRole("button", { name: "Creating…" });
+  await busy.waitFor();
+  assert.equal(await busy.getAttribute("aria-disabled"), "true");
+  await busy.click({ force: true });
+  release();
+  await alert.waitFor();
+  assert.equal(await alert.textContent(), HERDR_DOWN);
+  assert.equal(
+    createPosts(ui, `/w/${key(1)}/channels`).length,
+    4,
+    "a press while waiting sends nothing",
+  );
+  assert.equal(
+    await form.getByLabel("Name", { exact: true }).inputValue(),
+    "Proto Chan",
+  );
+  assert.equal(
+    await form.getByLabel("Folder", { exact: true }).inputValue(),
+    "~/missing",
+  );
+  answers.push(
+    () => ({ status: 403, body: {} }),
+    () => ({ status: 403, body: {} }),
+  );
+  await form.getByRole("button", { name: "Create" }).click();
+  await eventually(
+    async () =>
+      (await alert.textContent()) ===
+      "Your session expired. Reload the page to keep posting.",
+    "the expired session",
+  );
+  const refused = createPosts(ui, `/w/${key(1)}/channels`).slice(-2);
+  assert.deepEqual(
+    refused.map((request) => request.status),
+    [403, 403],
+    "the page retries once with a fresh token, then gives up",
+  );
+});
+
+test("CREATE: with no channel known, + is disabled and says to activate Namedrop first", async (t) => {
+  const ui = await open(t, (client) => replay(client, []));
+  await ui.live();
+  const plus = newChannelButton(ui);
+  assert.equal(await plus.getAttribute("aria-disabled"), "true");
+  assert.equal(
+    await plus.getAttribute("title"),
+    "Activate Namedrop in one Herdr workspace first.",
+  );
+  assert.equal(
+    await plus.evaluate(
+      (element) =>
+        document.getElementById(element.getAttribute("aria-describedby"))
+          ?.textContent,
+    ),
+    "Activate Namedrop in one Herdr workspace first.",
+  );
+  await plus.click({ force: true });
+  assert.equal(await newChannelForm(ui).count(), 0);
+  assert.equal(ui.folderRequests.length, 0);
+});
+
+function agentRoom(state = "active") {
+  const value = frame(1, "alpha");
+  value.frame.space.state = state;
+  if (state === "paused") value.frame.health = { level: "paused" };
+  return value;
+}
+
+test("ADD AGENT: the members row ends in Add agent, which opens the form in place; Escape and Cancel close it with focus back on the button", async (t) => {
+  const ui = await open(t, (client) => replay(client, [agentRoom()]));
+  await ui.live();
+  const button = addAgentButton(ui);
+  await button.click();
+  const form = addAgentForm(ui);
+  await form.waitFor();
+  assert.equal(await button.getAttribute("aria-expanded"), "true");
+  const kinds = form.getByRole("group", { name: "Kind" });
+  assert.deepEqual(
+    await kinds
+      .getByRole("radio")
+      .evaluateAll((radios) =>
+        radios.map(
+          (radio) => `${radio.labels[0].textContent}:${radio.checked}`,
+        ),
+      ),
+    ["Claude Code:true", "Codex:false", "Terminal:false"],
+  );
+  assert.ok(await activeIs(form.getByLabel("Name", { exact: true })));
+  await ui.page.keyboard.press("Escape");
+  await form.waitFor({ state: "detached" });
+  assert.ok(await activeIs(button));
+  await button.click();
+  await form.getByRole("button", { name: "Cancel" }).click();
+  await form.waitFor({ state: "detached" });
+  assert.ok(await activeIs(button));
+});
+
+test("ADD AGENT: Add posts the kind, bare name and persona, the form closes, and the agent arrives through the event stream", async (t) => {
+  let sse;
+  const ui = await open(
+    t,
+    (client) => {
+      sse = client;
+      replay(client, [agentRoom()]);
+    },
+    () => [],
+    {
+      onAddAgent: () => ({
+        status: 201,
+        body: { address_id: "pane-address-new", alias: "reviewer" },
+      }),
+      onFolder: (asked) => ({
+        status: 200,
+        body: {
+          folder:
+            asked === key(1) ? "/home/person/projects/a-long-name/alpha" : null,
+        },
+      }),
+    },
+  );
+  await ui.live();
+  await addAgentButton(ui).click();
+  const form = addAgentForm(ui);
+  const opensIn = form.locator(".create-opens-in");
+  await opensIn.waitFor();
+  assert.equal(
+    (await opensIn.innerText()).replace(/\s+/g, " "),
+    "Opens in /home/person/projects/a-long-name/alpha",
+    "the form says where the agent will open",
+  );
+  assert.equal(
+    await opensIn.locator(".create-folder").getAttribute("title"),
+    "/home/person/projects/a-long-name/alpha",
+  );
+  await form.getByRole("radio", { name: "Codex" }).check();
+  await form.getByLabel("Name", { exact: true }).fill("@reviewer");
+  assert.equal(
+    await form.getByLabel("Name", { exact: true }).inputValue(),
+    "reviewer",
+    "a typed @ stays outside the field, which already shows one",
+  );
+  await form.getByLabel("Persona").fill("  Reviews changes  ");
+  await form.getByLabel("Persona").press("Enter");
+  await form.waitFor({ state: "detached" });
+  assert.ok(await activeIs(addAgentButton(ui)));
+  const [posted] = createPosts(ui, `/w/${key(1)}/agents`);
+  assert.deepEqual(posted.body, {
+    kind: "codex",
+    name: "reviewer",
+    persona: "Reviews changes",
+  });
+  assert.equal(posted.csrf, ui.posts.session.csrf);
+  const arrived = agentRoom();
+  arrived.frame.participants.push({
+    ...arrived.frame.participants[0],
+    address_id: "pane-address-new",
+    alias: "@reviewer",
+    kind: { type: "agent", runtime: "codex" },
+    activity: "idle",
+  });
+  sse.send("space", arrived);
+  await ui.page
+    .locator('.members li[data-address-id="pane-address-new"]')
+    .waitFor();
+  await addAgentButton(ui).click();
+  await form.getByRole("radio", { name: "Terminal" }).check();
+  await form.getByLabel("Name", { exact: true }).fill("shell");
+  await form.getByRole("button", { name: "Add" }).click();
+  await form.waitFor({ state: "detached" });
+  assert.deepEqual(createPosts(ui, `/w/${key(1)}/agents`)[1].body, {
+    kind: "terminal",
+    name: "shell",
+    persona: null,
+  });
+});
+
+test("ADD AGENT: the name is checked as it's typed and blocks the POST, and server refusals read inside the form", async (t) => {
+  const answers = [
+    refusal(
+      409,
+      "@helper is already in use in this channel. Pick a different name.",
+    ),
+    refusal(503, HERDR_DOWN),
+  ];
+  const ui = await open(
+    t,
+    (client) => replay(client, [agentRoom()]),
+    undefined,
+    {
+      onAddAgent: () => answers.shift()(),
+    },
+  );
+  await ui.live();
+  await addAgentButton(ui).click();
+  const form = addAgentForm(ui);
+  const name = form.getByLabel("Name", { exact: true });
+  const alert = form.getByRole("alert");
+  await name.fill("code-");
+  assert.equal(await alert.count(), 0, "a name on its way is not wrong yet");
+  await name.press("Enter");
+  assert.equal(
+    await alert.textContent(),
+    "A name uses lowercase letters, digits and single hyphens, like code-reviewer.",
+  );
+  await name.fill("Code");
+  assert.equal(
+    await alert.textContent(),
+    "A name uses lowercase letters, digits and single hyphens, like code-reviewer.",
+  );
+  assert.equal(await name.getAttribute("aria-invalid"), "true");
+  await name.fill("codex");
+  assert.equal(
+    await alert.textContent(),
+    "@codex is already in use in this channel. Pick a different name.",
+  );
+  await form.getByRole("button", { name: "Add" }).click();
+  await form.getByLabel("Persona").fill("x".repeat(1_001));
+  await name.fill("helper");
+  await form.getByRole("button", { name: "Add" }).click();
+  assert.equal(
+    await alert.textContent(),
+    "A persona can be up to 1,000 characters.",
+  );
+  assert.equal(ui.posts.creates.length, 0, "nothing reached the server");
+  await form.getByLabel("Persona").fill("");
+  for (const sentence of [
+    "@helper is already in use in this channel. Pick a different name.",
+    HERDR_DOWN,
+  ]) {
+    await form.getByRole("button", { name: "Add" }).click();
+    await eventually(
+      async () =>
+        (await alert.count()) === 1 && (await alert.textContent()) === sentence,
+      sentence,
+    );
+  }
+  assert.equal(await name.inputValue(), "helper");
+});
+
+test("ADD AGENT: a paused or inactive channel shows no Add agent, and one that pauses closes the open form", async (t) => {
+  let sse;
+  const ui = await open(t, (client) => {
+    sse = client;
+    replay(client, [agentRoom()]);
+  });
+  await ui.live();
+  await addAgentButton(ui).click();
+  await addAgentForm(ui).waitFor();
+  sse.send("space", agentRoom("paused"));
+  await addAgentForm(ui).waitFor({ state: "detached" });
+  assert.equal(await addAgentButton(ui).count(), 0);
+  sse.send("space", agentRoom("not_activated"));
+  await ui.page.locator(".members").waitFor();
+  assert.equal(await addAgentButton(ui).count(), 0);
+  const empty = agentRoom();
+  empty.frame.participants = [];
+  sse.send("space", empty);
+  await ui.page.getByText("No members yet").waitFor();
+  await addAgentButton(ui).waitFor();
+});
+
+test("ADD AGENT: a new agent that hasn't connected shows a needs-you card that names it and opens its pane", async (t) => {
+  const value = frame(1, "alpha", "needs_you");
+  value.frame.participants[0].activity = "idle";
+  value.frame.attention = [
+    {
+      attention_id: `agent-start-${CODEX}`,
+      source_id: CODEX,
+      source_kind: "agent_start",
+      summary: {
+        text: "Send @codex its first message in its pane",
+        truncated: false,
+      },
+      subject_alias: "codex",
+      opened_at_ms: Date.now() - 30_000,
+      response: { kind: "pane", address_id: CODEX },
+    },
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const card = ui.page.getByRole("region", { name: "Attention needed" });
+  await card.getByText("Send @codex its first message in its pane").waitFor();
+  await card
+    .getByText(
+      "Open its pane. It may first ask you to trust the folder or to log in.",
+    )
+    .waitFor();
+  await card.getByRole("button", { name: "See @codex's screen" }).click();
+  await drawer(ui).waitFor();
+  assert.equal(
+    await ui.page
+      .getByRole("navigation", { name: "Needs you" })
+      .locator(".row-reason")
+      .textContent(),
+    "Send @codex its first message in its pane",
+  );
+});
+
+test("CREATE and ADD AGENT at 390x844: the New channel form works inside the drawer, Escape cancels it before the drawer, and both forms fit with 16px fields and 44px targets", async (t) => {
+  const ui = await open(
+    t,
+    (client) => replay(client, [agentRoom()]),
+    undefined,
+    {
+      onFolders: () => ({
+        status: 200,
+        body: {
+          folders: [
+            "/home/person/.herdr/worktrees/namedrop/a-very-long-worktree-name-here",
+          ],
+        },
+      }),
+      onCreateChannel: refusal(503, HERDR_DOWN),
+    },
+  );
+  await ui.page.setViewportSize({ width: 390, height: 844 });
+  await ui.live();
+  await ui.page.locator(".channels-toggle").click();
+  const drawerPanel = ui.page.getByRole("dialog", { name: "Channels" });
+  await drawerPanel.waitFor();
+  const plus = drawerPanel.getByRole("button", { name: "New channel" });
+  await plus.click();
+  const form = newChannelForm(ui);
+  await form.waitFor();
+  assert.ok(
+    await drawerPanel.locator("form").count(),
+    "the form is in the drawer",
+  );
+  const sizes = async (locator) =>
+    locator.evaluateAll((elements) =>
+      elements.map((element) => {
+        const box = element.getBoundingClientRect();
+        return {
+          height: Math.round(box.height),
+          width: Math.round(box.width),
+          font: Number.parseFloat(getComputedStyle(element).fontSize),
+          right: Math.round(box.right),
+        };
+      }),
+    );
+  for (const field of await sizes(form.locator("input")))
+    assert.ok(field.font >= 16 && field.height >= 44, JSON.stringify(field));
+  for (const target of await sizes(form.getByRole("button")))
+    assert.ok(
+      target.height >= 44 && target.right <= 390,
+      JSON.stringify(target),
+    );
+  const [plusBox] = await sizes(plus);
+  assert.ok(
+    plusBox.height >= 44 && plusBox.width >= 44,
+    JSON.stringify(plusBox),
+  );
+  const nameBox = await form.getByLabel("Name", { exact: true }).boundingBox();
+  assert.ok(
+    nameBox.y + nameBox.height < 844 / 2,
+    `the Name field sits high, at ${nameBox.y}`,
+  );
+  await form.getByLabel("Name", { exact: true }).fill("web");
+  await form.getByLabel("Folder", { exact: true }).fill("/srv/web");
+  await form.getByRole("button", { name: "Create" }).click();
+  await form.getByRole("alert").getByText(HERDR_DOWN).waitFor();
+  assert.ok(
+    await fitsWidth(ui.page),
+    "no horizontal scroll with the New channel form open",
+  );
+  await form.getByLabel("Name", { exact: true }).focus();
+  await ui.page.keyboard.press("Escape");
+  await form.waitFor({ state: "detached" });
+  assert.ok(await drawerPanel.isVisible(), "the drawer stays open");
+  assert.ok(await activeIs(plus));
+  await ui.page.keyboard.press("Escape");
+  await drawerPanel.waitFor({ state: "hidden" });
+
+  await addAgentButton(ui).click();
+  const add = addAgentForm(ui);
+  await add.waitFor();
+  for (const field of await sizes(add.locator('input[type="text"]')))
+    assert.ok(field.font >= 16 && field.height >= 44, JSON.stringify(field));
+  for (const target of await sizes(add.locator(".create-kind, button")))
+    assert.ok(
+      target.height >= 44 && target.right <= 390,
+      JSON.stringify(target),
+    );
+  const hit = await addAgentButton(ui).evaluate((element) => {
+    const after = getComputedStyle(element, "::after");
+    const box = element.getBoundingClientRect();
+    return {
+      height: box.height - 2 * Number.parseFloat(after.top),
+      width: box.width - 2 * Number.parseFloat(after.left),
+    };
+  });
+  assert.ok(
+    hit.height >= 44 && hit.width >= 44,
+    `Add agent's touch area is ${JSON.stringify(hit)}`,
+  );
+  await add.getByLabel("Name", { exact: true }).fill("Bad Name");
+  await add.getByRole("alert").waitFor();
+  assert.ok(
+    await fitsWidth(ui.page),
+    "no horizontal scroll with the Add agent form open",
   );
 });

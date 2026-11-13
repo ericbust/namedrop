@@ -98,6 +98,7 @@ export type Attention = {
     | "coordination"
     | "agent_status"
     | "terminal_relay"
+    | "agent_start"
     | "unknown";
   summary: SafeText;
   subjectSummary: SafeText | null;

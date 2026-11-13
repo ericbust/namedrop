@@ -899,6 +899,7 @@ fn attention_response(item: &rows::AttentionRow) -> AttentionResponse {
 #[serde(rename_all = "snake_case")]
 pub enum AttentionSourceKind {
     AgentStatus,
+    AgentStart,
     #[serde(untagged)]
     Stored(crate::AttentionSourceKind),
 }
@@ -1115,6 +1116,98 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
                 at_ms: clear.at_ms,
             })
             .collect(),
+    }
+}
+
+/// How long an agent Channels started may take to connect before the space
+/// asks the person to look at its pane.
+pub const AGENT_START_GRACE_MS: i64 = 20_000;
+
+/// The agent program Channels started in a pane.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartedAgent {
+    Claude,
+    Codex,
+}
+
+impl StartedAgent {
+    /// What the person does for an agent that hasn't connected. Claude Code
+    /// connects once its first-run screens are answered; a new Codex connects
+    /// after its first prompt.
+    fn asks(self, alias: &str) -> String {
+        match self {
+            Self::Claude => format!("Finish Claude's setup in @{alias}'s pane"),
+            Self::Codex => format!("Send @{alias} its first message in its pane"),
+        }
+    }
+}
+
+/// An agent Channels started in this space, by address, with when it started.
+pub struct StartingAgent<'a> {
+    pub address_id: &'a str,
+    pub started_at_ms: i64,
+    pub agent: StartedAgent,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct AgentStarts {
+    /// When the next card comes due, so the space is published again then.
+    pub next_due_ms: Option<i64>,
+    /// Addresses no longer waiting for a session: connected, retired or
+    /// unbound. Their launches are over.
+    pub settled: Vec<String>,
+}
+
+impl DashboardSnapshot {
+    pub fn add_agent_start_cards(
+        &mut self,
+        rows: &DashboardRows,
+        starting: &[StartingAgent<'_>],
+        now_ms: i64,
+    ) -> AgentStarts {
+        let mut starts = AgentStarts::default();
+        for agent in starting {
+            let Some(address) = rows.addresses.iter().find(|address| {
+                address.address_id == agent.address_id
+                    && address.pane_type == PaneType::Agent
+                    && address.bound
+                    && !address.occupied
+                    && !address.retired
+            }) else {
+                starts.settled.push(agent.address_id.to_owned());
+                continue;
+            };
+            let due_ms = agent.started_at_ms.saturating_add(AGENT_START_GRACE_MS);
+            if now_ms < due_ms {
+                starts.next_due_ms = Some(starts.next_due_ms.map_or(due_ms, |d| d.min(due_ms)));
+                continue;
+            }
+            self.attention.push(AttentionCard {
+                attention_id: format!("agent-start-{}", address.address_id),
+                source_id: address.address_id.clone(),
+                thread_id: None,
+                actions: Vec::new(),
+                coordination_id: None,
+                conversation: None,
+                response: AttentionResponse::Pane {
+                    address_id: address.address_id.clone(),
+                },
+                source_kind: AttentionSourceKind::AgentStart,
+                summary: SafeText::from_untrusted(&agent.agent.asks(&address.alias), SHORT_CHARS),
+                subject_summary: None,
+                opened_at_ms: due_ms,
+                subject_alias: Some(address.alias.clone()),
+                message_id: None,
+                coordination: None,
+                answer_lost: None,
+            });
+        }
+        if self.space.state == SpaceState::Active && !self.attention.is_empty() {
+            self.health = SpaceHealth::NeedsYou {
+                items: u32::try_from(self.attention.len()).unwrap_or(u32::MAX),
+            };
+        }
+        starts
     }
 }
 

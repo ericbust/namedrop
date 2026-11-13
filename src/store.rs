@@ -129,6 +129,14 @@ pub struct StateStore {
     read_only: bool,
 }
 
+/// What already holds an alias in one space. Every claim blocks a new address.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum AliasClaim {
+    InUse,
+    Retired,
+    Renamed(Option<String>),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ManagedTabLabel {
     pub tab_id: String,
@@ -597,6 +605,30 @@ impl StateTransaction<'_> {
         namespace: &StateNamespace,
         alias: &str,
     ) -> Result<(), StoreError> {
+        let history = match self.alias_claim(namespace, alias)? {
+            None => return Ok(()),
+            Some(AliasClaim::InUse) => {
+                return Err(StoreError::invalid_input(format!(
+                    "the name @{alias} is already in use in this workspace; choose a new name"
+                )));
+            }
+            Some(AliasClaim::Retired) => "was retired".to_owned(),
+            Some(AliasClaim::Renamed(Some(replacement))) => {
+                format!("was renamed to @{replacement}")
+            }
+            Some(AliasClaim::Renamed(None)) => "was renamed away".to_owned(),
+        };
+        Err(StoreError::invalid_input(format!(
+            "the name @{alias} {history} in this workspace and cannot be reused; choose a new name"
+        )))
+    }
+
+    /// Why `alias` can't be given to a new address in this space, if it can't.
+    pub(crate) fn alias_claim(
+        &self,
+        namespace: &StateNamespace,
+        alias: &str,
+    ) -> Result<Option<AliasClaim>, StoreError> {
         let claim = self
             .transaction
             .query_row(
@@ -622,24 +654,15 @@ impl StateTransaction<'_> {
                 },
             )
             .optional()?;
-        let Some((retired, claim_state, replacement)) = claim else {
-            return Ok(());
-        };
-        let history = if retired {
-            "was retired".to_owned()
-        } else if claim_state == "tombstone" {
-            match replacement {
-                Some(replacement) => format!("was renamed to @{replacement}"),
-                None => "was renamed away".to_owned(),
+        Ok(claim.map(|(retired, claim_state, replacement)| {
+            if retired {
+                AliasClaim::Retired
+            } else if claim_state == "tombstone" {
+                AliasClaim::Renamed(replacement)
+            } else {
+                AliasClaim::InUse
             }
-        } else {
-            return Err(StoreError::invalid_input(format!(
-                "the name @{alias} is already in use in this workspace; choose a new name"
-            )));
-        };
-        Err(StoreError::invalid_input(format!(
-            "the name @{alias} {history} in this workspace and cannot be reused; choose a new name"
-        )))
+        }))
     }
 
     pub fn create_pane_address(

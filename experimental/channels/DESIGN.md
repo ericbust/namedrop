@@ -364,6 +364,40 @@ after one line, so the timeline keeps the second line's room
 headings. Each member chip is a button that opens the peek drawer for that
 member. The operator chip is not a button.
 
+### New channel and Add agent
+
+Both forms open in place, never as a new layer, and both read the same way: a
+12px 600 muted label over each field, a 32px field with a `--line-strong` border,
+an accent **Create** or **Add** button, and a quiet **Cancel**. Escape cancels
+before anything else on the page closes, and focus returns to the button that
+opened the form. Enter in a field submits. A refusal shows under the fields in
+13px `--failed-text` with `role="alert"`, in the server's own words; the page
+checks the same rules first with the same sentences. While the server works,
+the button reads "Creating…" or "Adding…" and the fields keep their text.
+
+- **New channel.** A + button on the Channels label row, accessible name "New
+  channel". The form opens under that row as a card on `--bg`: Name, Folder, and
+  the recent folders as one-line buttons in 12px mono. A long path loses its
+  start, never its last folder, and its full path is the tooltip. The form
+  creates the workspace in the Herdr session of the channel in view, or the
+  first channel. The page opens the new channel as soon as it reaches the
+  index. With no channel known, + is disabled with the hint "Activate Namedrop
+  in one Herdr workspace first."
+- **Add agent.** A dashed chip at the end of the member strip, shown only while
+  the channel is active, also when it has no members. It sits beside the chips,
+  not among them, so the "+N more" count never has to make room for it. The form
+  opens under the strip on `--bg-raised`: Kind as three pill radios (Claude Code
+  first and chosen), Name after a fixed @, checked as you type against the name
+  rule and the names in the channel, and an optional Persona. Under the fields, a 12px
+  muted line reads "Opens in" and the channel's folder in mono, cut on the
+  left so its last folder stays, with the full path as the tooltip. The new agent
+  arrives in the strip through the event stream. Under 860px wide, or
+  under 560px tall, the chip shows only its +, so the strip's lines hold
+  agents; its name stays "Add agent" for assistive tech and as its tooltip.
+- **Phone and touch.** Under 600px wide, or on a touch screen, fields are 44px
+  tall at 16px text so iOS doesn't zoom, and every button and pill is 44px tall.
+  The New channel form lives in the drawer, near its top.
+
 ### Presence
 
 | Activity | Dot                                                          | Word        |
@@ -595,16 +629,17 @@ included, at 844 by 300 and in a 390 by 460 window at 125 percent zoom (312 by
 368 CSS pixels). A longer card scrolls inside. See App shell for each layout.
 Announce new items through a polite live region.
 
-| `source`                                | Title                                                                                                | Hint                                                            |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `agent_status`                          | the server summary, which is already short, such as "@claude is waiting on an approval or question." | Answer it in its pane in Herdr.                                 |
-| `agent_disposition`, `delivery_attempt` | Unanswered request                                                                                   | An agent ended its turn without replying.                       |
-| `automatic_reply_limit`                 | Reply limit reached                                                                                  | Continue or stop this thread from its pane.                     |
-| `coordination`                          | Coordination needs a decision                                                                        | Read the report, then answer the lead.                          |
-| `context_grant`                         | Shared context failed                                                                                | Namedrop couldn't capture it. Ask the sender to share it again. |
-| `pane_binding`                          | An agent's pane changed                                                                              | Name the pane again to reconnect it.                            |
-| `integration_registration`              | Agent setup incomplete                                                                               | Start a new session in that pane.                               |
-| `unknown`                               | Something needs you                                                                                  | Open Details for the full message.                              |
+| `source`                                | Title                                                                                                | Hint                                                                  |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `agent_status`                          | the server summary, which is already short, such as "@claude is waiting on an approval or question." | Answer it in its pane in Herdr.                                       |
+| `agent_disposition`, `delivery_attempt` | Unanswered request                                                                                   | An agent ended its turn without replying.                             |
+| `automatic_reply_limit`                 | Reply limit reached                                                                                  | Continue or stop this thread from its pane.                           |
+| `coordination`                          | Coordination needs a decision                                                                        | Read the report, then answer the lead.                                |
+| `context_grant`                         | Shared context failed                                                                                | Namedrop couldn't capture it. Ask the sender to share it again.       |
+| `pane_binding`                          | An agent's pane changed                                                                              | Name the pane again to reconnect it.                                  |
+| `integration_registration`              | Agent setup incomplete                                                                               | Start a new session in that pane.                                     |
+| `agent_start`                           | the server summary, which says what to do, such as "Finish Claude's setup in @reviewer's pane"       | Open its pane. It may first ask you to trust the folder or to log in. |
+| `unknown`                               | Something needs you                                                                                  | Open Details for the full message.                                    |
 
 Never cut the server's summary mid-word into the visible line. When an
 `agent_status` summary is longer than 90 characters, use the `unknown` title and
