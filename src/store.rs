@@ -7014,11 +7014,10 @@ impl StateTransaction<'_> {
                 _ => return Ok(false),
             },
         };
-        if let Some((kind, _, _)) = &stored
+        if stored.is_some()
             && attention_dismissed(
                 &self.attention_dismissals(namespace)?,
                 item_id,
-                Some(*kind),
                 opened_at_ms,
             )
         {
@@ -7030,7 +7029,7 @@ impl StateTransaction<'_> {
             namespace,
             TransitionEntityKind::AttentionItem,
             item_id,
-            TransitionKind::Acknowledged,
+            TransitionKind::Dismissed,
             &MutationAttribution::new(ActorKind::Human, by.actor_id.clone(), at),
         )?;
         Ok(true)
@@ -7044,8 +7043,7 @@ impl StateTransaction<'_> {
         let mut statement = self.transaction.prepare_cached(
             "SELECT entity_id, MAX(occurred_at_ms) FROM transition_facts
              WHERE session_socket_id = ?1 AND worktree_id = ?2
-               AND entity_kind = 'attention_item' AND transition_kind = 'acknowledged'
-               AND actor_kind = 'human'
+               AND entity_kind = 'attention_item' AND transition_kind = 'dismissed'
              GROUP BY entity_id",
         )?;
         statement
@@ -7063,14 +7061,7 @@ impl StateTransaction<'_> {
     ) -> Result<Vec<crate::AttentionItemRecord>, StoreError> {
         let dismissals = self.attention_dismissals(namespace)?;
         let mut items = self.unresolved_attention_items(namespace)?;
-        items.retain(|item| {
-            !attention_dismissed(
-                &dismissals,
-                item.id.as_str(),
-                Some(item.source_kind),
-                item.opened_at_ms,
-            )
-        });
+        items.retain(|item| !attention_dismissed(&dismissals, item.id.as_str(), item.opened_at_ms));
         Ok(items)
     }
 
@@ -7116,16 +7107,20 @@ impl StateTransaction<'_> {
             )
             .optional()?;
         if let Some(existing) = existing {
+            // A source that says something new raises the item again: its
+            // week starts over, and a dismissal of the old wording lapses.
             self.transaction.execute(
-                "UPDATE attention_items SET summary = ?5
+                "UPDATE attention_items SET summary = ?5, opened_at_ms = ?6
                  WHERE session_socket_id = ?1 AND worktree_id = ?2
-                   AND source_kind = ?3 AND source_id = ?4 AND resolved_at_ms IS NULL",
+                   AND source_kind = ?3 AND source_id = ?4 AND resolved_at_ms IS NULL
+                   AND summary <> ?5",
                 params![
                     namespace.session_socket_id,
                     namespace.space_id.as_str(),
                     draft.source_kind.as_str(),
                     draft.source_id,
                     draft.summary,
+                    to_i64(attribution.occurred_at_ms)?,
                 ],
             )?;
             return Ok(crate::AttentionItemId::new(existing));
@@ -8036,6 +8031,7 @@ fn parse_transition_kind(value: String) -> rusqlite::Result<TransitionKind> {
         "resolved" => Ok(TransitionKind::Resolved),
         "adopted" => Ok(TransitionKind::Adopted),
         "read" => Ok(TransitionKind::Read),
+        "dismissed" => Ok(TransitionKind::Dismissed),
         _ => Err(invalid_text("transition kind", value)),
     }
 }
@@ -8053,20 +8049,18 @@ fn parse_actor_kind(value: String) -> rusqlite::Result<ActorKind> {
 /// The id of the card Channels shows for an agent waiting in its pane.
 pub(crate) const AGENT_STATUS_ITEM_PREFIX: &str = "agent-status-";
 
-/// Whether the person dismissed the item since it opened. An item its source
-/// closed and opened again is a new warning, and shows again. A request is
-/// asked once, so its warning stays dismissed however often it is judged
-/// again. An agent waiting in its pane has no stored item and no kind.
+/// Whether the person dismissed the item as it stands. `raised_at_ms` is
+/// when the item opened or its wording last changed: a dismissal covers the
+/// warning the person read, so one its source closed and raised again, or
+/// said differently, shows again.
 pub(crate) fn attention_dismissed(
     dismissals: &HashMap<String, u64>,
     item_id: &str,
-    source_kind: Option<crate::AttentionSourceKind>,
-    opened_at_ms: u64,
+    raised_at_ms: u64,
 ) -> bool {
-    dismissals.get(item_id).is_some_and(|dismissed_at_ms| {
-        source_kind == Some(crate::AttentionSourceKind::AgentDisposition)
-            || *dismissed_at_ms >= opened_at_ms
-    })
+    dismissals
+        .get(item_id)
+        .is_some_and(|dismissed_at_ms| *dismissed_at_ms >= raised_at_ms)
 }
 
 fn parse_attention_source_kind(value: String) -> rusqlite::Result<crate::AttentionSourceKind> {

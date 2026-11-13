@@ -969,18 +969,15 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
         .iter()
         .filter(|p| p.activity == Activity::Working)
         .count();
-    let dismissed = |id: &str, kind: Option<crate::AttentionSourceKind>, opened_at_ms: u64| {
-        crate::store::attention_dismissed(&rows.dismissals, id, kind, opened_at_ms)
+    let dismissed = |id: &str, raised_at_ms: u64| {
+        crate::store::attention_dismissed(&rows.dismissals, id, raised_at_ms)
     };
     let mut attention: Vec<AttentionCard> = rows
         .attention
         .iter()
         .filter(|item| {
-            !dismissed(
-                item.item.id.as_str(),
-                Some(item.item.source_kind),
-                item.item.opened_at_ms,
-            ) && attention_expires_at(item).is_none_or(|expiry| now_ms < expiry)
+            !dismissed(item.item.id.as_str(), item.item.opened_at_ms)
+                && attention_expires_at(item).is_none_or(|expiry| now_ms < expiry)
         })
         .map(|item| AttentionCard {
             attention_id: item.item.id.as_str().to_owned(),
@@ -1015,11 +1012,7 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
             crate::store::AGENT_STATUS_ITEM_PREFIX,
             address.address_id
         );
-        if dismissed(
-            &attention_id,
-            None,
-            u64::try_from(opened_at_ms).unwrap_or(0),
-        ) {
+        if dismissed(&attention_id, u64::try_from(opened_at_ms).unwrap_or(0)) {
             return None;
         }
         Some(AttentionCard {

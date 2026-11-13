@@ -668,15 +668,16 @@ namedrop doctor
 
 This saves your acknowledgement and clears only that warning. The delivery, its history and the thread don't change, no disposition is invented and nothing is resent. It's refused while the recipient isn't retired and its exact session is still the one on its name, because that session can still record the disposition itself. It's outside agents' automatic permissions, and an agent should only run it when you ask. Doctor's **Ask agent to help** doesn't count as asking.
 
-In Channels, every card in a channel's attention list has a **Dismiss** button, and a list of two or more has **Dismiss all**. Each asks once. A dismiss is recorded as yours. It takes the card away, sends nothing, records no reply for the agent and changes nothing else:
+In Channels, every card in a channel's attention list has a **Dismiss** button, and a list of two or more has **Dismiss all**. Each asks once. A dismiss is recorded as yours, and it is not an acknowledgement: it takes the card away, sends nothing, records no reply for the agent, closes nothing and changes nothing else. It covers the warning as you read it:
 
 - On a card saying an agent can't answer a request anymore, it does the same as `delivery acknowledge`, and your message reads "Ended without an answer".
-- On a request whose agent can still answer, the request stays owed. If the agent answers later, the answer arrives as usual. Namedrop doesn't warn about that request again.
-- On any other card, such as a terminal reply, a handoff or a setup warning, the card stays away until its cause clears and comes back. Then it is a new warning, and it shows.
+- On a request whose agent can still answer, the request stays owed. If the agent answers later, the answer arrives as usual.
+- On any other card, such as a terminal reply, a handoff or a setup warning, the item stays open for its cause to close. A dismissed handoff warning still needs `handoff acknowledge` to be closed for good.
+- A dismissed card comes back when it has something new to say: its cause cleared and happened again, or its wording changed. A handoff you dismissed while it waited for a decision shows again when its lead records it as blocked.
 
-Doctor leaves out a warning you dismissed. **Dismiss all** dismisses only the cards that were in the list when you pressed it. If a card was already cleared, because it was dismissed already or the answer came, the card says so and goes away on the next update.
+Doctor leaves out a warning you dismissed. **Dismiss all** first shows every card it is about to count, then asks with that number. It dismisses those cards and no others: one that arrives while it asks stays, and handoff cards count only while their group is open. If a card was already cleared, because it was dismissed already or the answer came, the card says so and goes away on the next update.
 
-Channels shows a stored warning as needing you for 7 days. One still open after that is no longer listed or counted, in the channel, the sidebar or a direct message. Doctor still reports it until its cause clears. An agent waiting in its pane is shown for as long as it waits. A workspace Herdr no longer has is not listed in Channels, so its warnings are not shown either.
+Channels shows a stored warning as needing you for 7 days, counted from when it opened or last changed its wording. One still open after that is no longer listed or counted, in the channel, the sidebar or a direct message. Doctor still reports it until its cause clears. An agent waiting in its pane is shown for as long as it waits. A workspace Herdr no longer has is not listed in Channels, so its warnings are not shown either.
 
 ### Adopt a handoff after a lead restart
 

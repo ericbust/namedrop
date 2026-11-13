@@ -316,8 +316,9 @@ export const threadControlCopy = {
   confirmDismissWarning: "Dismiss this? Nothing else changes.",
   confirmDismiss: "Dismiss",
   dismissAll: "Dismiss all",
+  dismissCount: (count: number) => `Dismiss ${count}`,
   confirmDismissAll: (count: number) =>
-    `Dismiss all ${count}? Nothing else changes.`,
+    `Dismiss these ${count}? Nothing else changes.`,
   cancel: "Cancel",
   gone: "This thread is no longer in this workspace.",
   requestGone: "This is no longer in this workspace.",

@@ -44,7 +44,13 @@ fn needs_you(store: &mut StateStore, ns: &StateNamespace, now: i64) -> (Vec<Stri
     )
 }
 
+const NEEDS_A_DECISION: &str = "This coordination needs a decision.";
+
 fn open(store: &mut StateStore, ns: &StateNamespace, id: &str, at: u64) {
+    open_saying(store, ns, id, NEEDS_A_DECISION, at);
+}
+
+fn open_saying(store: &mut StateStore, ns: &StateNamespace, id: &str, summary: &str, at: u64) {
     store
         .transaction(|tx| {
             tx.open_attention_item(
@@ -53,7 +59,7 @@ fn open(store: &mut StateStore, ns: &StateNamespace, id: &str, at: u64) {
                     id: crate::AttentionItemId::new(id),
                     source_kind: Coordination,
                     source_id: "coordination".to_owned(),
-                    summary: "This coordination needs a decision.".to_owned(),
+                    summary: summary.to_owned(),
                 },
                 &plugin(at),
             )
@@ -64,6 +70,18 @@ fn open(store: &mut StateStore, ns: &StateNamespace, id: &str, at: u64) {
 fn dismiss(store: &mut StateStore, ns: &StateNamespace, id: &str, at: u64) -> bool {
     store
         .transaction(|tx| tx.dismiss_attention_item(ns, id, &person(at)))
+        .unwrap()
+}
+
+fn facts(store: &StateStore, kind: &str) -> i64 {
+    store
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM transition_facts
+             WHERE entity_kind = 'attention_item' AND transition_kind = ?1",
+            params![kind],
+            |row| row.get(0),
+        )
         .unwrap()
 }
 
@@ -96,14 +114,21 @@ fn a_terminal_reply_card_goes_when_dismissed_and_its_item_stays_for_a_reply_to_c
         !dismiss(&mut store, &ns, &cards[0], 33),
         "a card already dismissed was dismissed again"
     );
+    assert_eq!(facts(&store, "dismissed"), 1);
+    assert_eq!(
+        facts(&store, "acknowledged"),
+        0,
+        "a dismiss was recorded as an acknowledgement, which closes what it names"
+    );
 }
 
 #[test]
-fn a_dismissed_request_warning_stays_dismissed_when_it_is_judged_again() {
+fn a_dismissed_request_stays_owed_and_warns_again_only_when_its_warning_says_something_new() {
     let (mut store, ns) = fixture();
     seed_unanswered(&mut store, &ns, false);
     let (cards, _) = needs_you(&mut store, &ns, 30);
     assert_eq!(cards, ["attention-agent-disposition-attempt"]);
+    let attempt = crate::DeliveryAttemptId::new("attempt");
 
     assert!(dismiss(&mut store, &ns, &cards[0], 31));
     assert!(needs_you(&mut store, &ns, 32).0.is_empty());
@@ -119,34 +144,72 @@ fn a_dismissed_request_warning_stays_dismissed_when_it_is_judged_again() {
         })
         .unwrap();
     assert_eq!(dispositions, 0, "a dismiss recorded a disposition");
-
-    // A judgement withdraws a warning and raises it again when its reason changes.
-    store
-        .transaction(|tx| {
-            tx.transaction.execute(
-                "DELETE FROM attention_items WHERE attention_item_id = ?1",
-                params![cards[0]],
-            )?;
-            tx.open_attention_item(
-                &ns,
-                &AttentionItemDraft {
-                    id: crate::AttentionItemId::new(&cards[0]),
-                    source_kind: AgentDisposition,
-                    source_id: "attempt".to_owned(),
-                    summary: "Its answer can't arrive.".to_owned(),
-                },
-                &plugin(40),
-            )
-        })
-        .unwrap();
-    assert!(
-        needs_you(&mut store, &ns, 41).0.is_empty(),
-        "a warning the person dismissed came back for the same request"
-    );
     let doctor = store
         .transaction(|tx| tx.attention_items_needing_the_person(&ns))
         .unwrap();
     assert!(doctor.is_empty(), "Doctor still reports it: {doctor:?}");
+
+    // The same judgement again says nothing new.
+    store
+        .transaction(|tx| tx.flag_missing_disposition(&ns, &attempt, &plugin(40)))
+        .unwrap();
+    assert!(needs_you(&mut store, &ns, 41).0.is_empty());
+
+    // A send that failed is news the person has not read.
+    store
+        .transaction(|tx| {
+            tx.flag_failed_settle(
+                &ns,
+                &attempt,
+                LostSettle::FinalMessage,
+                "the thread was stopped",
+                &plugin(50),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        needs_you(&mut store, &ns, 51).0,
+        cards,
+        "a warning that says something new stayed dismissed"
+    );
+}
+
+#[test]
+fn a_reworded_warning_shows_again_and_its_week_starts_over() {
+    let (mut store, ns) = fixture();
+    seed_unanswered(&mut store, &ns, true);
+    let week = ATTENTION_SHOWN_FOR_MS;
+    open(&mut store, &ns, "card", 1_000);
+    assert!(dismiss(&mut store, &ns, "card", 2_000));
+    open(&mut store, &ns, "card", 3_000);
+    assert!(
+        needs_you(&mut store, &ns, 3_001).0.is_empty(),
+        "the same words brought the card back"
+    );
+
+    let late = 1_000 + week + 5;
+    assert!(
+        needs_you(&mut store, &ns, i64::try_from(late).unwrap())
+            .0
+            .is_empty()
+    );
+    open_saying(
+        &mut store,
+        &ns,
+        "card",
+        "This coordination was resolved blocked.",
+        late,
+    );
+    assert_eq!(
+        needs_you(&mut store, &ns, i64::try_from(late + 1).unwrap()).0,
+        ["card"],
+        "a warning that turned into a decision stayed dismissed, or was hidden as a week old"
+    );
+    assert_eq!(
+        needs_you(&mut store, &ns, i64::try_from(late + week - 1).unwrap()).0,
+        ["card"],
+        "its week did not start over"
+    );
 }
 
 #[test]

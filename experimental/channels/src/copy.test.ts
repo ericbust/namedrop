@@ -218,9 +218,11 @@ test("a reply-limit item the browser can continue or stop says why the agents pa
       "Continue or stop this thread from its pane.",
       JSON.stringify(extra),
     );
-  const { status, confirmDismissAll, ...words } = threadControlCopy;
+  const { status, confirmDismissAll, dismissCount, ...words } =
+    threadControlCopy;
   assert.equal(status(404), "HTTP 404");
-  assert.equal(confirmDismissAll(4), "Dismiss all 4? Nothing else changes.");
+  assert.equal(confirmDismissAll(4), "Dismiss these 4? Nothing else changes.");
+  assert.equal(dismissCount(4), "Dismiss 4");
   assert.deepEqual(words, {
     continue: {
       label: "Allow 10 more replies",

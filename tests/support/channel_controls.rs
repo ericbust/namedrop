@@ -1072,6 +1072,16 @@ fn needs_you(server: &Server) -> (Vec<String>, String) {
 fn human_dismissals(f: &Fixture) -> i64 {
     f.count(
         "SELECT count(*) FROM transition_facts
+         WHERE entity_kind = 'attention_item' AND transition_kind = 'dismissed'
+           AND actor_kind = 'human'",
+    )
+}
+
+/// What `delivery acknowledge` and `handoff acknowledge` record, which closes
+/// the warning it names.
+fn human_acknowledgements(f: &Fixture) -> i64 {
+    f.count(
+        "SELECT count(*) FROM transition_facts
          WHERE entity_kind = 'attention_item' AND transition_kind = 'acknowledged'
            AND actor_kind = 'human'",
     )
@@ -1167,6 +1177,11 @@ fn browser_dismiss_clears_a_warning_whose_agent_can_still_answer_and_the_late_an
         "the dismiss was not recorded as the person's"
     );
     assert_eq!(
+        human_acknowledgements(&f),
+        0,
+        "a dismiss of a request its agent can still answer was recorded as an acknowledgement"
+    );
+    assert_eq!(
         f.count("SELECT count(*) FROM delivery_dispositions"),
         0,
         "a dismiss recorded a disposition"
@@ -1214,7 +1229,7 @@ fn browser_dismiss_closes_a_warning_nobody_can_answer() {
     let dismissed = server.post(&dismiss_path(), &dismiss_body(&[&id]), &[]);
     assert_eq!(dismissed.status, 200, "{}", dismissed.body);
     assert_eq!(open_disposition_warnings(&f), 0);
-    assert_eq!(human_dismissals(&f), 1);
+    assert_eq!(human_acknowledgements(&f), 1);
     assert_eq!(f.count("SELECT count(*) FROM delivery_dispositions"), 0);
     let replay = server.post(&dismiss_path(), &dismiss_body(&[&id]), &[]);
     assert_eq!(replay.status, 410, "{}", replay.body);
@@ -1263,6 +1278,7 @@ fn browser_dismiss_all_clears_every_kind_named_and_leaves_a_card_that_came_later
         json!({"dismissed": 6})
     );
     assert_eq!(human_dismissals(&f), 6);
+    assert_eq!(human_acknowledgements(&f), 0);
     assert_eq!(
         needs_you(&server),
         (vec!["card-later".to_owned()], "needs_you".to_owned()),

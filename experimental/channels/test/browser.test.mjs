@@ -7752,7 +7752,7 @@ test("Dismiss all asks once, posts every card's id, and the list goes", async (t
     await list.locator(".attention-more .attention-confirm").textContent(),
     threadControlCopy.confirmDismissAll(3),
   );
-  assert.equal(await focusedText(ui), threadControlCopy.dismissAll);
+  assert.equal(await focusedText(ui), threadControlCopy.dismissCount(3));
   assert.equal(ui.posts.controls.length, 0, "the first click sends nothing");
   await ui.page.keyboard.press("Escape");
   await list
@@ -7763,7 +7763,10 @@ test("Dismiss all asks once, posts every card's id, and the list goes", async (t
   await all.click();
   await list
     .locator(".attention-more")
-    .getByRole("button", { name: threadControlCopy.dismissAll, exact: true })
+    .getByRole("button", {
+      name: threadControlCopy.dismissCount(3),
+      exact: true,
+    })
     .click();
   await until(() => ui.posts.controls.length === 1, "the dismiss POST");
   assert.equal(ui.posts.controls[0].path, `/w/${key(1)}/attention/dismiss`);
@@ -7775,6 +7778,65 @@ test("Dismiss all asks once, posts every card's id, and the list goes", async (t
   value.frame.health = { level: "calm" };
   ui.connections[0].send("space", value);
   await list.waitFor({ state: "detached" });
+});
+
+test("Dismiss all shows every card before it asks, and a card that arrives while it asks stays", async (t) => {
+  const value = stuckWarnings();
+  const card = (id, at) => ({
+    attention_id: id,
+    source_kind: "pane_binding",
+    source_id: id,
+    summary: { text: `${id} needs you.`, truncated: false },
+    opened_at_ms: at,
+  });
+  value.frame.attention.push(
+    card("card-four", Date.now() - 30_000),
+    card("card-five", Date.now() - 20_000),
+  );
+  value.frame.health = { level: "needs_you", items: 5 };
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const list = ui.page.getByRole("region", { name: "Attention needed" });
+  const items = list.locator(".attention-item");
+  await items.nth(2).waitFor();
+  assert.equal(await items.count(), 3, "two cards are behind Show 2 more");
+  await list
+    .getByRole("button", { name: threadControlCopy.dismissAll, exact: true })
+    .click();
+  const confirm = list.locator(".attention-more .attention-confirm");
+  await confirm.waitFor();
+  assert.equal(
+    await items.count(),
+    5,
+    "a card the confirmation counts is not on show",
+  );
+  assert.equal(
+    await confirm.textContent(),
+    threadControlCopy.confirmDismissAll(5),
+  );
+  const seen = value.frame.attention.map((item) => item.attention_id);
+
+  value.frame.attention.push(card("card-late", Date.now()));
+  value.frame.health = { level: "needs_you", items: 6 };
+  ui.connections[0].send("space", value);
+  await items.nth(5).waitFor();
+  assert.equal(
+    await confirm.textContent(),
+    threadControlCopy.confirmDismissAll(5),
+    "the confirmation took in a card that arrived after it was asked",
+  );
+  await list
+    .locator(".attention-more")
+    .getByRole("button", {
+      name: threadControlCopy.dismissCount(5),
+      exact: true,
+    })
+    .click();
+  await until(() => ui.posts.controls.length === 1, "the dismiss POST");
+  assert.deepEqual(JSON.parse(ui.posts.controls[0].body), {
+    confirmed: true,
+    ids: seen,
+  });
 });
 
 test("one card alone has its own Dismiss and no Dismiss all", async (t) => {

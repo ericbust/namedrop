@@ -19,6 +19,7 @@ import {
   isHandoff,
   ReviewClears,
   type ReviewHandoffs,
+  useGroupOpen,
 } from "./Handoffs.tsx";
 import { Icon } from "./Icons.tsx";
 
@@ -115,17 +116,25 @@ function Item({
   );
 }
 const idle: ThreadControl = { kind: "idle" };
-/** Dismisses every card of the list, after one confirmation. */
+/**
+ * Dismisses the cards on show, after one confirmation. `ids` are the cards
+ * that are on show once `onAsk` has brought the rest of the list into view.
+ * The confirmation is for the cards it counted: one that arrives while it is
+ * open stays.
+ */
 function DismissAll({
   channel,
   ids,
+  onAsk,
   onControl,
 }: {
   channel: ChannelSnapshot;
   ids: readonly string[];
+  onAsk: () => void;
   onControl: ControlThread;
 }) {
   const [control, setControl] = useState(idle);
+  const [asked, setAsked] = useState<readonly string[]>([]);
   const ask = useRef<HTMLButtonElement>(null);
   const confirm = useRef<HTMLButtonElement>(null);
   const shown = useRef(control.kind);
@@ -149,7 +158,7 @@ function DismissAll({
     const { signal } = press.current;
     void onControl(
       channel.key,
-      { kind: "attention", ids, action: "dismiss" },
+      { kind: "attention", ids: asked, action: "dismiss" },
       signal,
     ).then((result) => {
       if (signal.aborted) return;
@@ -168,7 +177,7 @@ function DismissAll({
       {control.kind === "confirming" || busy ? (
         <>
           <span className="attention-confirm">
-            {threadControlCopy.confirmDismissAll(ids.length)}
+            {threadControlCopy.confirmDismissAll(asked.length)}
           </span>
           <button
             ref={confirm}
@@ -184,7 +193,7 @@ function DismissAll({
           >
             {busy
               ? threadControlCopy.dismiss.pending
-              : threadControlCopy.dismissAll}
+              : threadControlCopy.dismissCount(asked.length)}
           </button>
           <button
             type="button"
@@ -200,11 +209,13 @@ function DismissAll({
           ref={ask}
           type="button"
           className="text-button"
-          onClick={() =>
+          onClick={() => {
+            setAsked(ids);
+            onAsk();
             setControl((now) =>
               threadControl(now, { type: "ask", action: "dismiss" }),
-            )
-          }
+            );
+          }}
         >
           {threadControlCopy.dismissAll}
         </button>
@@ -237,7 +248,15 @@ export function NeedsYou({
   // Handoff warnings share one collapsible row; everything else stays in view.
   const handoffs = items.filter(isHandoff);
   const others = items.filter((item) => !isHandoff(item));
-  const dismissable = items.flatMap((item) => dismissal(item) ?? []);
+  const [handoffsOpen, toggleHandoffs] = useGroupOpen(
+    channel.key,
+    handoffs.length,
+  );
+  // Dismiss all first shows every card it is about to count. Handoff cards
+  // count only while their group is open.
+  const dismissable = [...others, ...(handoffsOpen ? handoffs : [])].flatMap(
+    (item) => dismissal(item) ?? [],
+  );
   const more = !all && others.length > SHOWN;
   return (
     <>
@@ -264,6 +283,8 @@ export function NeedsYou({
                 channel={channel}
                 directory={directory}
                 now={now}
+                open={handoffsOpen}
+                onToggle={toggleHandoffs}
                 onFocus={onFocus}
                 onControl={onControl}
                 onReview={onReview}
@@ -285,6 +306,7 @@ export function NeedsYou({
                 <DismissAll
                   channel={channel}
                   ids={dismissable}
+                  onAsk={() => setAll(true)}
                   onControl={onControl}
                 />
               )}

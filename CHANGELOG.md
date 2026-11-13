@@ -7,9 +7,10 @@ Each release is a section here, newest first. The GitHub release for a version u
 ### Fixed
 
 - You can dismiss any warning in Channels. Before, only a card saying an answer could never arrive had a **Dismiss** button. A request whose agent was still running, a terminal reply and a handoff that needed a decision stayed red until you cleared them in the database. Every card now has **Dismiss**. It asks once, records the dismiss as yours, and takes the card away. Nothing is sent, and no reply is recorded for the agent.
-- A dismissed request stays answerable. If its agent answers later, the answer arrives as usual, and Namedrop doesn't warn about that request again. Any other card comes back only when its cause clears and happens again.
-- **Dismiss all** at the foot of a channel's attention list clears the whole list after one confirmation. It dismisses the cards you saw, not one that arrives while you decide.
-- Old warnings stop being red by themselves. Channels shows a warning as needing you for 7 days. After that it is no longer listed or counted. Doctor still reports it until its cause clears.
+- A dismissed request stays answerable. If its agent answers later, the answer arrives as usual.
+- A dismiss covers the warning you read, and it closes nothing. The card comes back when it has something new to say: its cause cleared and happened again, or its wording changed. A handoff you dismissed while it waited for a decision shows again when its lead records it as blocked. `handoff acknowledge` and `delivery acknowledge` still close a warning for good.
+- **Dismiss all** at the foot of a channel's attention list clears the list after one confirmation. It first shows every card, then asks with the number it will dismiss. A card that arrives while it asks stays.
+- Old warnings stop being red by themselves. Channels shows a warning as needing you for 7 days, counted from when it opened or last changed its wording. After that it is no longer listed or counted. Doctor still reports it until its cause clears.
 - Doctor leaves out a warning you dismissed in Channels.
 
 ## [1.10.0] - 2026-11-12

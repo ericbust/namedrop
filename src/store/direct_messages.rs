@@ -348,9 +348,9 @@ impl StateTransaction<'_> {
                     AND i.opened_at_ms > ?4
                     AND NOT EXISTS (SELECT 1 FROM transition_facts f
                         WHERE f.session_socket_id=i.session_socket_id AND f.worktree_id=i.worktree_id
-                          AND f.entity_id=i.attention_item_id AND f.entity_kind='attention_item'
-                          AND f.transition_kind='acknowledged' AND f.actor_kind='human'
-                          AND (i.source_kind='agent_disposition' OR f.occurred_at_ms >= i.opened_at_ms))
+                          AND f.entity_kind='attention_item' AND f.entity_id=i.attention_item_id
+                          AND f.transition_kind='dismissed'
+                          AND f.occurred_at_ms >= i.opened_at_ms)
                     AND (m.thread_id=?3 OR g.thread_id=?3 OR relay.thread_id=?3
                          OR (i.source_kind='automatic_reply_limit' AND i.source_id=?3))",
                 params![peer.namespace.session_socket_id,peer.namespace.space_id.as_str(),thread.as_str(),shown_since],|row|row.get(0))?;
