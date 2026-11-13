@@ -1,7 +1,7 @@
 use super::*;
 use crate::mux::{
-    Admit, Badge, Budget, Gone, Incarnation, PopupScreen, PopupSpec, PromptRequest, StateTexts,
-    Style, Wrap,
+    Badge, Budget, Gone, Incarnation, PopupScreen, PopupSpec, PromptRequest, StateTexts, Style,
+    Wrap,
 };
 
 fn author_and_reviewer() -> FakeMux {
@@ -32,11 +32,10 @@ fn identity(mux: &FakeMux, pane: &str) -> AgentIdentity {
         .expect("the pane runs an agent")
 }
 
-fn prompt(mux: &FakeMux, pane: &str, expect: &AgentIdentity, admit: Admit) -> InputOutcome {
+fn prompt(mux: &FakeMux, pane: &str, expect: &AgentIdentity) -> InputOutcome {
     let request = PromptRequest {
         expect,
         text: "hello",
-        admit,
     };
     mux.send(&PaneId::new(pane), InputKind::Prompt(request))
 }
@@ -236,7 +235,7 @@ fn a_settled_agent_takes_a_prompt_and_starts_working() {
     let mux = author_and_reviewer();
     let author = identity(&mux, "pane-author");
     assert_eq!(
-        prompt(&mux, "pane-author", &author, Admit::Settled),
+        prompt(&mux, "pane-author", &author),
         InputOutcome::Delivered
     );
     assert_eq!(prompts(&mux, "pane-author"), ["hello"]);
@@ -254,7 +253,7 @@ fn the_native_gate_declines_a_blocked_or_absent_agent_before_typing() {
         ("pane-gone", "pane pane-gone is gone"),
     ] {
         assert_eq!(
-            prompt(&mux, pane, &reviewer, Admit::Settled),
+            prompt(&mux, pane, &reviewer),
             InputOutcome::Declined(Retry::OnEvent, reason.into()),
             "{pane}"
         );
@@ -263,30 +262,27 @@ fn the_native_gate_declines_a_blocked_or_absent_agent_before_typing() {
 }
 
 #[test]
-fn the_native_gate_types_to_a_working_or_unknown_agent_whatever_the_admission_like_herdr() {
+fn the_native_gate_types_to_a_working_or_unknown_agent_like_herdr() {
     let mux = author_and_reviewer();
     let reviewer = identity(&mux, "pane-reviewer");
-    for admit in [Admit::Settled, Admit::BetweenTurns] {
-        assert_eq!(
-            prompt(&mux, "pane-reviewer", &reviewer, admit),
-            InputOutcome::Delivered,
-            "{admit:?}"
-        );
-    }
-    mux.set_state("pane-reviewer", AgentState::Unknown("thinking".into()));
     assert_eq!(
-        prompt(&mux, "pane-reviewer", &reviewer, Admit::Settled),
+        prompt(&mux, "pane-reviewer", &reviewer),
         InputOutcome::Delivered
     );
-    assert_eq!(prompts(&mux, "pane-reviewer"), ["hello", "hello", "hello"]);
+    mux.set_state("pane-reviewer", AgentState::Unknown("thinking".into()));
+    assert_eq!(
+        prompt(&mux, "pane-reviewer", &reviewer),
+        InputOutcome::Delivered
+    );
+    assert_eq!(prompts(&mux, "pane-reviewer"), ["hello", "hello"]);
 }
 
 #[test]
-fn the_emulated_gate_declines_between_turns_and_a_replaced_agent() {
+fn the_emulated_gate_declines_a_working_agent_and_a_replaced_agent() {
     let mux = author_and_reviewer().emulated();
     let reviewer = identity(&mux, "pane-reviewer");
     assert_eq!(
-        prompt(&mux, "pane-reviewer", &reviewer, Admit::BetweenTurns),
+        prompt(&mux, "pane-reviewer", &reviewer),
         InputOutcome::Declined(
             Retry::OnEvent,
             "pane pane-reviewer cannot take a prompt now".into()
@@ -299,7 +295,7 @@ fn the_emulated_gate_declines_between_turns_and_a_replaced_agent() {
         ..identity(&mux, "pane-author")
     };
     assert_eq!(
-        prompt(&mux, "pane-author", &replaced, Admit::Settled),
+        prompt(&mux, "pane-author", &replaced),
         InputOutcome::Declined(
             Retry::OnEvent,
             "pane pane-author cannot take a prompt now".into()
@@ -313,7 +309,7 @@ fn the_emulated_gate_confirms_a_prompt_by_the_change_to_working() {
     let mux = author_and_reviewer().emulated();
     let author = identity(&mux, "pane-author");
     assert_eq!(
-        prompt(&mux, "pane-author", &author, Admit::Settled),
+        prompt(&mux, "pane-author", &author),
         InputOutcome::Delivered
     );
     assert_eq!(prompts(&mux, "pane-author"), ["hello"]);
@@ -327,7 +323,7 @@ fn an_emulated_prompt_that_is_never_confirmed_or_fails_is_ambiguous() {
     for mux in [unconfirmed, failing] {
         let author = identity(&mux, "pane-author");
         assert!(matches!(
-            prompt(&mux, "pane-author", &author, Admit::Settled),
+            prompt(&mux, "pane-author", &author),
             InputOutcome::Ambiguous(_)
         ));
         assert_eq!(prompts(&mux, "pane-author"), ["hello"]);
@@ -379,18 +375,18 @@ fn a_scripted_outcome_replaces_one_delivery_to_its_pane_and_records_what_may_hav
     mux.script("pane-author", InputOutcome::Ambiguous("timed out".into()));
     mux.script("pane-shell", InputOutcome::Refused("not this pane".into()));
     assert_eq!(
-        prompt(&mux, "pane-author", &author, Admit::Settled),
+        prompt(&mux, "pane-author", &author),
         InputOutcome::Refused("invalid_input".into())
     );
     assert!(prompts(&mux, "pane-author").is_empty());
     assert_eq!(
-        prompt(&mux, "pane-author", &author, Admit::Settled),
+        prompt(&mux, "pane-author", &author),
         InputOutcome::Ambiguous("timed out".into())
     );
     assert_eq!(prompts(&mux, "pane-author"), ["hello"]);
     assert_eq!(state(&mux, "pane-author"), Some(AgentState::Idle));
     assert_eq!(
-        prompt(&mux, "pane-author", &author, Admit::Settled),
+        prompt(&mux, "pane-author", &author),
         InputOutcome::Delivered,
         "the script for another pane is not used"
     );
@@ -403,7 +399,7 @@ fn an_answered_pane_gives_every_input_the_same_outcome_after_its_script() {
     mux.answer("pane-author", InputOutcome::Refused("invalid_input".into()));
     mux.script("pane-author", InputOutcome::Delivered);
     let outcomes: Vec<_> = (0..3)
-        .map(|_| prompt(&mux, "pane-author", &author, Admit::Settled))
+        .map(|_| prompt(&mux, "pane-author", &author))
         .collect();
     assert_eq!(
         outcomes,
@@ -429,7 +425,7 @@ fn every_attempt_is_recorded_with_its_outcome_even_when_nothing_was_typed() {
         },
     );
     mux.set_state("pane-reviewer", AgentState::Blocked);
-    let blocked = prompt(&mux, "pane-reviewer", &reviewer, Admit::Settled);
+    let blocked = prompt(&mux, "pane-reviewer", &reviewer);
     assert!(mux.sent().is_empty());
     assert_eq!(
         mux.attempts(),
@@ -919,9 +915,9 @@ fn input_observers_see_every_attempt_with_its_outcome_before_it_returns() {
     let author = identity(&mux, "pane-author");
     let reviewer = identity(&mux, "pane-reviewer");
     mux.script("pane-shell", InputOutcome::Refused("invalid_input".into()));
-    let delivered = prompt(&mux, "pane-author", &author, Admit::Settled);
+    let delivered = prompt(&mux, "pane-author", &author);
     mux.set_state("pane-reviewer", AgentState::Blocked);
-    let blocked = prompt(&mux, "pane-reviewer", &reviewer, Admit::Settled);
+    let blocked = prompt(&mux, "pane-reviewer", &reviewer);
     let refused = mux.send(&PaneId::new("pane-shell"), InputKind::Line("ls"));
     let ghost = mux.send(&PaneId::new("pane-ghost"), InputKind::Line("ls"));
     let attempt = |pane: &str, input, outcome| Attempt {
@@ -1039,7 +1035,7 @@ fn a_hidden_pane_leaves_every_listing_keeps_its_place_and_still_takes_reads_and_
     }
     let author = identity(&mux, "pane-author");
     assert_eq!(
-        prompt(&mux, "pane-author", &author, Admit::Settled),
+        prompt(&mux, "pane-author", &author),
         InputOutcome::Delivered
     );
     mux.show_pane("pane-author");
@@ -1997,7 +1993,6 @@ fn a_decider_answers_an_input_by_its_content_before_scripts_answers_and_the_gate
     let nudge = PromptRequest {
         expect: &identity,
         text: "Coordination nudge",
-        admit: Admit::Settled,
     };
     assert_eq!(
         mux.send(&author, InputKind::Prompt(nudge)),

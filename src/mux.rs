@@ -11,6 +11,10 @@ pub mod herdr;
 mod input;
 mod model;
 mod ports;
+// Tests are the Rex adapter's only callers until `mux::connect` reaches it,
+// so the library build leaves it out.
+#[cfg(test)]
+mod rex;
 
 pub use effect::*;
 pub use event::*;

@@ -10,7 +10,7 @@ use super::{
     Endpoint, InputKind, InputOutcome, Key, MuxAct, MuxConnector, MuxError, MuxInput, MuxKind,
     MuxRead, PaneFacts, PaneId, PaneInput, PaneProcess, Recipient, Retry, Scope, Screen,
     ScreenRequest, SessionClaim, SpaceView, Style, Survey, TabId, TerminalId, Wrap,
-    gate::{self, ChannelError, RawChannel, StatusTap},
+    gate::{self, ChannelError, RawChannel, StatusTap, TapChange},
 };
 use crate::{AgentRuntime, AgentSessionId, SpaceId, WorktreeId};
 use std::{
@@ -1174,8 +1174,7 @@ impl FakeMux {
         }
         // Herdr 0.9.5 `agent prompt` refuses a pane that reports no agent
         // word (`agent_not_found`, even when it reports a session) and a
-        // blocked agent, and types to one that reports `working`, whatever
-        // the caller's `Admit`.
+        // blocked agent, and types to one that reports `working`.
         let admitted = {
             let world = self.lock();
             let facts = &world.pane(pane).expect("checked above").facts;
@@ -1476,10 +1475,7 @@ impl Within<'_> {
         let mut narrowing = Some(self);
         while let Some(within) = narrowing {
             let asked = within.allowance.budget().map_err(MuxError::Unavailable)?;
-            budget = Budget {
-                timeout: budget.timeout.min(asked.timeout),
-                max_output_bytes: budget.max_output_bytes.min(asked.max_output_bytes),
-            };
+            budget = budget.tighter(asked);
             narrowing = within.wider;
         }
         Ok(budget)
@@ -1629,7 +1625,7 @@ struct Tap<'a> {
 }
 
 impl StatusTap for Tap<'_> {
-    fn next_change(&mut self, _within: Duration) -> Option<AgentState> {
+    fn next_change(&mut self, _within: Duration) -> Option<TapChange> {
         let change = self
             .mux
             .lock()
@@ -1639,7 +1635,7 @@ impl StatusTap for Tap<'_> {
         if change.is_some() {
             self.next += 1;
         }
-        change
+        change.map(TapChange::Status)
     }
 }
 

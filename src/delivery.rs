@@ -770,18 +770,12 @@ where
                 .find(|p| p.pane_id == second.pane_id)
                 .expect("live candidate checked");
             let expect = pane.agent.as_ref().expect("live candidate checked");
-            let admit = if pane.accepts_prompt() {
-                crate::mux::Admit::Settled
-            } else {
-                crate::mux::Admit::BetweenTurns
-            };
             effects.prompt(
                 runtime.mux,
                 &owner,
                 crate::mux::PromptRequest {
                     expect,
                     text: &prompt,
-                    admit,
                 },
             )
         };
@@ -1631,6 +1625,73 @@ mod prompt_box_tests {
         // Each agent's box is found only in its own drawing.
         assert_eq!(prompt_box(WAITING_EMPTY, codex), PromptBox::Unseen);
         assert_eq!(prompt_box(CODEX_EMPTY, CLAUDE), PromptBox::Unseen);
+    }
+
+    /// Rex's `vt` format writes a run of blank cells as `ESC[nC`, which
+    /// `cells` drops.
+    fn blank_runs_as_spaces(vt: &str) -> String {
+        let mut screen = String::new();
+        let mut rest = vt;
+        while let Some(start) = rest.find("\u{1b}[") {
+            screen.push_str(&rest[..start]);
+            let after = &rest[start + 2..];
+            let digits = after.len() - after.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            if after[digits..].starts_with('C') {
+                let count = after[..digits].parse().unwrap_or(1);
+                screen.extend(std::iter::repeat_n(' ', count));
+                rest = &after[digits + 1..];
+            } else {
+                screen.push_str("\u{1b}[");
+                rest = after;
+            }
+        }
+        screen.push_str(rest);
+        screen
+    }
+
+    #[test]
+    fn rex_screens_show_their_boxes_once_blank_runs_are_spaces() {
+        let codex = crate::AgentRuntime::Codex;
+        for (name, vt, agent, held) in [
+            (
+                "claude-empty",
+                include_str!("mux/rex/fixtures/vt/claude-empty.vt"),
+                CLAUDE,
+                PromptBox::Empty,
+            ),
+            (
+                "claude-placeholder",
+                include_str!("mux/rex/fixtures/vt/claude-placeholder.vt"),
+                CLAUDE,
+                PromptBox::Empty,
+            ),
+            (
+                "claude-draft",
+                include_str!("mux/rex/fixtures/vt/claude-draft.vt"),
+                CLAUDE,
+                PromptBox::Draft,
+            ),
+            (
+                "codex-empty",
+                include_str!("mux/rex/fixtures/vt/codex-empty.vt"),
+                codex,
+                PromptBox::Empty,
+            ),
+            (
+                "codex-draft",
+                include_str!("mux/rex/fixtures/vt/codex-draft.vt"),
+                codex,
+                PromptBox::Draft,
+            ),
+            (
+                "codex-draft-fresh",
+                include_str!("mux/rex/fixtures/vt/codex-draft-fresh.vt"),
+                codex,
+                PromptBox::Draft,
+            ),
+        ] {
+            assert_eq!(prompt_box(&blank_runs_as_spaces(vt), agent), held, "{name}");
+        }
     }
 
     #[test]

@@ -22,7 +22,7 @@ use std::{
 };
 
 mod transport {
-    use crate::mux::{Allowance, Budget};
+    use crate::mux::{Allowance, Budget, narrowest};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// What a command that was cancelled before it started answers, in the
@@ -86,32 +86,10 @@ mod transport {
             budget: Budget,
             cancelled: Option<&AtomicBool>,
         ) -> Result<String, String> {
-            let budget = tighter(self.allowance.budget()?, budget);
-            let cancelled = narrowest(cancelled, self.allowance.cancelled())?;
+            let budget = self.allowance.budget()?.tighter(budget);
+            let cancelled = narrowest(cancelled, self.allowance.cancelled())
+                .map_err(|_| CANCELLED.to_owned())?;
             self.transport.run_within(args, budget, cancelled)
-        }
-    }
-
-    /// Each limit of the two that is reached first.
-    pub fn tighter(one: Budget, other: Budget) -> Budget {
-        Budget {
-            timeout: one.timeout.min(other.timeout),
-            max_output_bytes: one.max_output_bytes.min(other.max_output_bytes),
-        }
-    }
-
-    /// The flag a command watches while it runs: the narrower connection's,
-    /// or the wider one's when the narrower names none. A command watches
-    /// one flag, so a wider flag that is already set refuses it here, before
-    /// it starts.
-    pub fn narrowest<'f>(
-        narrower: Option<&'f AtomicBool>,
-        wider: Option<&'f AtomicBool>,
-    ) -> Result<Option<&'f AtomicBool>, String> {
-        match (narrower, wider) {
-            (Some(_), Some(wider)) if wider.load(Ordering::Relaxed) => Err(CANCELLED.to_owned()),
-            (Some(narrower), _) => Ok(Some(narrower)),
-            (None, wider) => Ok(wider),
         }
     }
 }
@@ -137,7 +115,7 @@ impl<T: Transport> HerdrMux<T> {
 
     /// `MuxInput::deliver` minus the lock token. Herdr gates prompts itself:
     /// `agent prompt` refuses a blocked agent before it types, and types to a
-    /// working one, so the request's `admit` is not passed.
+    /// working one.
     pub(crate) fn send(&self, pane: &PaneId, kind: InputKind<'_>) -> InputOutcome {
         let args = match kind {
             InputKind::Prompt(request) => {

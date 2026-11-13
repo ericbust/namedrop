@@ -1,6 +1,10 @@
 use crate::{AgentRuntime, AgentSessionId, SpaceId, WorktreeId, domain::string_id};
 use serde::{Deserialize, Serialize};
-use std::{path::Path, sync::atomic::AtomicBool, time::Duration};
+use std::{
+    path::Path,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 string_id!(PaneId);
 string_id!(TabId);
@@ -37,6 +41,30 @@ impl Budget {
         timeout: Duration::MAX,
         max_output_bytes: usize::MAX,
     };
+
+    pub fn tighter(self, other: Self) -> Self {
+        Self {
+            timeout: self.timeout.min(other.timeout),
+            max_output_bytes: self.max_output_bytes.min(other.max_output_bytes),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct AlreadyCancelled;
+
+/// The flag a command watches while it runs: the narrower connection's, or
+/// the wider one's when the narrower names none. A command watches one flag,
+/// so a wider flag that is already set refuses it here, before it starts.
+pub fn narrowest<'f>(
+    narrower: Option<&'f AtomicBool>,
+    wider: Option<&'f AtomicBool>,
+) -> Result<Option<&'f AtomicBool>, AlreadyCancelled> {
+    match (narrower, wider) {
+        (Some(_), Some(wider)) if wider.load(Ordering::Relaxed) => Err(AlreadyCancelled),
+        (Some(narrower), _) => Ok(Some(narrower)),
+        (None, wider) => Ok(wider),
+    }
 }
 
 /// What a narrowed connection holds each of its commands to, on top of the

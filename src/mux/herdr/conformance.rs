@@ -6,7 +6,7 @@ use super::{HerdrConnector, HerdrMux, transport::Transport};
 use crate::{
     AgentRuntime, SpaceId,
     mux::{
-        Admit, AgentIdentity, AgentKind, AgentState, Badge, Budget, Depth, Effect, Gone, InputKind,
+        AgentIdentity, AgentKind, AgentState, Badge, Budget, Depth, Effect, Gone, InputKind,
         InputOutcome, Key, MuxAct, MuxConnector, MuxError, MuxRead, PaneId, PaneProcess,
         PromptRequest, Recipient, Retry, Scope, Screen, ScreenRequest, SessionClaim, StateTexts,
         Style, Survey, TabId, Wrap,
@@ -336,7 +336,6 @@ fn prompt(mux: &dyn Subject, pane: &str) -> InputOutcome {
     let request = PromptRequest {
         expect: &expect,
         text: "hello",
-        admit: Admit::Settled,
     };
     mux.send(&PaneId::new(pane), InputKind::Prompt(request))
 }
@@ -365,36 +364,32 @@ fn a_settled_agent_takes_a_prompt_and_starts_working() {
 /// agent queues it: `herdr agent prompt` answered `agent_prompted` with
 /// `agent_status: working` in a live probe (PORT.md, commit 14).
 #[test]
-fn a_working_agent_takes_a_prompt_whatever_the_admission() {
-    for admit in [Admit::Settled, Admit::BetweenTurns] {
-        let (outcome, sent, state) = agree(world, |mux, world| {
-            let expect = AgentIdentity {
-                kind: AgentKind::Known(AgentRuntime::Codex),
-                label: None,
-                session: SessionClaim::None,
-            };
-            let request = PromptRequest {
-                expect: &expect,
-                text: "hello",
-                admit,
-            };
-            let outcome = mux.send(&PaneId::new("pane-reviewer"), InputKind::Prompt(request));
-            let state = mux
-                .survey(Scope::Space(&SpaceId::new("workspace-1")), Depth::Panes)
-                .map(|survey| survey.spaces[0].panes[1].state.clone());
-            (outcome, world.sent(), state)
-        });
-        assert_eq!(outcome, InputOutcome::Delivered, "{admit:?}");
-        assert_eq!(
-            sent,
-            [Sent {
-                pane: PaneId::new("pane-reviewer"),
-                input: SentInput::Prompt("hello".into()),
-            }],
-            "{admit:?}"
-        );
-        assert_eq!(state, Ok(Some(AgentState::Working)), "{admit:?}");
-    }
+fn a_working_agent_takes_a_prompt() {
+    let (outcome, sent, state) = agree(world, |mux, world| {
+        let expect = AgentIdentity {
+            kind: AgentKind::Known(AgentRuntime::Codex),
+            label: None,
+            session: SessionClaim::None,
+        };
+        let request = PromptRequest {
+            expect: &expect,
+            text: "hello",
+        };
+        let outcome = mux.send(&PaneId::new("pane-reviewer"), InputKind::Prompt(request));
+        let state = mux
+            .survey(Scope::Space(&SpaceId::new("workspace-1")), Depth::Panes)
+            .map(|survey| survey.spaces[0].panes[1].state.clone());
+        (outcome, world.sent(), state)
+    });
+    assert_eq!(outcome, InputOutcome::Delivered);
+    assert_eq!(
+        sent,
+        [Sent {
+            pane: PaneId::new("pane-reviewer"),
+            input: SentInput::Prompt("hello".into()),
+        }]
+    );
+    assert_eq!(state, Ok(Some(AgentState::Working)));
 }
 
 /// Herdr 0.9.5's `resolve_agent_target` (`src/app/terminal_targets.rs`)

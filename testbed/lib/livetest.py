@@ -1261,6 +1261,9 @@ def step_build(profile, request, codex):
                       version_text(feats), sources.describe(profile.state["source"]))),
                   expect("named", " ".join("@" + alias for alias in named), "@shell @claude @codex"),
                   expect("activated", profile.state.get("activated"), True))
+        if profile.state.get("inside_rex"):
+            proof = profile.state.get("rex_proof")
+            checks += (Check("inside-rex", bool(proof), proof or "no proof that Herdr runs in Rex"),)
     except (RuntimeError, OSError, KeyError, ValueError) as error:
         checks = (Check("build", False, str(error)),)
     return StepResult(BUILD, checks, time.monotonic() - start), mode, feats

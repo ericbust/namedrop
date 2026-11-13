@@ -122,6 +122,19 @@ open deliveries settle once and a fresh message works in the old sessions. The o
 model calls are reported and never fail it. A new Codex session then shows whether starting
 over recovers one the update stranded.
 
+### Herdr inside Rex
+
+```sh
+testbed/testbed test --link . --fresh --yes --inside-rex
+```
+
+It runs the same checklist with the profile's Herdr server as the program of a block on a
+scratch Rex server, which it starts under `env -i` with `REX_SERVER` naming itself and stops
+after the run. Herdr, its panes, its plugin processes and every agent and hook then carry the
+block's `REX_BLOCK`, `REX_SESSION` and `REX_SERVER`, which every other lane's clean environment
+drops. The build step's line says which Rex block runs the Herdr server. Run it beside the
+checklist run for any change to how Namedrop decides which multiplexer it runs in. It needs `rex` on `PATH`.
+
 ## Read the result
 
 - Exit 0 is a pass. The report ends with `PASS n/n in …. Report: <path>.txt` and the

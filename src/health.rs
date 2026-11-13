@@ -764,7 +764,6 @@ where
     let request = crate::mux::PromptRequest {
         expect: &expect,
         text: &prompt,
-        admit: crate::mux::Admit::Settled,
     };
     match effects.prompt(
         runtime.mux,

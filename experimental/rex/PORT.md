@@ -20,7 +20,7 @@ let (space, pane) = survey.pane_running(&session).ok_or(..)?;
 
 // Delivery: one path for every multiplexer.
 let effects = PaneEffects::acquire(state, mux.endpoint(), &pane.id, LockWait::Patient)?;
-match effects.prompt(&mux, &owner, PromptRequest { expect, text, admit }) {
+match effects.prompt(&mux, &owner, PromptRequest { expect, text }) {
 	InputOutcome::Delivered => submitted(),
 	InputOutcome::Declined(retry) => requeue(retry),  // nothing was typed
 	InputOutcome::Refused(_) => failed(),
@@ -49,7 +49,7 @@ assert_eq!(mux.sent_to("pane-reviewer").len(), 1);
 | `src/mux/model.rs` | Branded `PaneId`, `TabId`, and `TerminalId`. `Survey`, `SpaceView`, `PaneFacts`, `AgentState`, `AgentIdentity`, `SessionClaim`, screen and process types, `Key`, `Budget` |
 | `src/mux/ports.rs` | The `MuxRead`, `MuxAct`, and `MuxInput` traits, `Mux` as their union, `MuxConnector`, and `MuxError` |
 | `src/mux/effect.rs` | `Effect` and `Applied`: labels, badges, tab names, notifications, popups, and config reload |
-| `src/mux/input.rs` | `InputKind`, `PromptRequest`, `Admit`, `InputOutcome`, and `Retry` |
+| `src/mux/input.rs` | `InputKind`, `PromptRequest`, `InputOutcome`, and `Retry` |
 | `src/mux/gate.rs` | The admission rule and `emulate_prompt`, the one implementation of "idle or done" and "ambiguous after the first byte" for multiplexers without a native gate |
 | `src/mux/event.rs` | `MuxEvent`, the normalized lifecycle event |
 | `src/mux/herdr/` | The only place that holds Herdr arguments, JSON, error codes, plugin events, and live-peek observation. Its transport is private to the module |
@@ -753,8 +753,25 @@ At `42c1198`, `cargo build --release` and `cargo package --locked` pass. With `-
   - **The budget is per connection, not per call.** `MuxConnector::connect` fixes it, and a read narrows it with `within`. `Budget::ADAPTER_DEFAULT` is `Duration::MAX` and `usize::MAX`, which means "no limit but the adapter's own". The Herdr process caps it at `NAMEDROP_HERDR_TIMEOUT_MS`. A Rex adapter must give the same default a real limit of its own.
   - **`SessionClaim::Unreported` has no producer.** `resolve_session` answers `None` for it. Step 4 adds the record Namedrop's SessionStart hook writes, keyed by the incarnation.
   - **`Applied::Opened(serde_json::Value)` carries Herdr's popup reply.** `namedrop ui` prints it, and the tour and tests read it. Rex needs its own reply, or the variant needs a typed one.
-  - **`Admit` has no reader.** Herdr types to any agent that is not blocked, so the adapter does not pass it, and the gate decides from the status. Step 4 either gives it a use or deletes it.
+  - **Answered in step 4 commit 1. `Admit` had no reader**, because Herdr types to any agent that is not blocked and the gate decides from the status. The Rex adapter does not need it either, so it is deleted with `PromptRequest.admit`.
   - **The pane lock key has no `MuxKind`.** `PaneEffects::acquire` keys the lock by the SHA-256 of the socket and the pane. A Herdr socket and a Rex server address would share a lock only if the two strings were equal, but nothing in the key says which multiplexer owns it.
+
+## Step 4 commits
+
+Step 4 follows the Rex adapter design, `experimental/rex/ADAPTER.md` on `exp/rex-adapter-design`, and its numbering. These commits were built from revision 2 (`9ecbbb1`), and revision 3 (`487f7603`) keeps their content and drops commit 3. None of them needs step 3. Each commit message holds its evidence.
+
+- **0a. Fixtures** (`test(delivery): read real Rex prompt-box screens`). Six scrubbed Rex `vt` captures sit in `src/mux/rex/fixtures/vt/`. Read raw, two of them misread: `codex-empty` reads `Draft` and `codex-draft-fresh` reads `Unseen`. With each `ESC[nC` read as n spaces, all six read as their screens show. The test's converter stands in for `port_ansi` until commit 9. The other fixtures the design lists (`process` replies, hook chains, event lines, home rows) land with the commits that read them.
+- **0b. The Herdr-in-Rex lane** (`test(testbed): run the checklist with Herdr inside a Rex block`). `testbed test --inside-rex` runs the checklist with Herdr as the program of a scratch Rex block, so every Herdr process carries the block's `REX_*` names. It passed 10/10 before any adapter change.
+- **1. `Admit` deleted** and **2. `Budget::tighter` and `narrowest` in `mux::model`.** Both passed the checklist and the Herdr-in-Rex lane at their own commits.
+- **4. `TapChange`.** A program change declines before the paste and is `Ambiguous` at once after it.
+- **5. `rex/ws.rs`** and **6. `rex/control.rs`.** The WebSocket client and the control connection compile only under `#[cfg(test)]` (`src/mux.rs`), because nothing outside tests calls them until commit 11 gives `mux::connect` its Rex arm. So `clippy -D warnings` checks them in the test build, and no `allow(dead_code)` is needed. The live checks run with `NAMEDROP_REX_LIVE=unix://<scratch socket> cargo test --lib mux::rex::live -- --ignored --test-threads=1`.
+
+What the design did not say, found while building these:
+
+- **macOS refuses a socket option once the peer hangs up.** `setsockopt(SO_RCVTIMEO)` fails with `EINVAL` after the server closes, though its last response is still readable. `control.rs` ignores that refusal, and the next read reports the hang-up.
+- **`rex server stop` waits for the server's pid to exit.** A server started as a child of a process that never reaps it stays a zombie, and the stop times out. The testbed starts its scratch server from a shell that exits at once.
+- **Commit 6 has no `Wire` or `Control` trait yet.** `Wire::open` returns the peer pid, which is commit 8's local proof, and the `Control` trait has no second implementation until the scripted wire of commits 9 and 10. `Connection` has the two methods the trait will name, `request` and `next_event`. `Fault::Rex` carries the error's `status` as well, so an unknown code can still be classified by status, as the protocol asks.
+- **The 4 MiB is per connection, and the budget's byte limit is per request.** A port call is one connection, so the 4 MiB caps the call, and `Budget.max_output_bytes` caps each request inside it, as it caps each Herdr command.
 
 ## Next implementation step
 

@@ -2,8 +2,11 @@
 //! child in its own process group, with its output captured in private files
 //! so the size cap holds while it runs.
 
-use super::transport::{Transport, narrowest, tighter};
-use crate::{mux::Budget, runtime::output_bounded};
+use super::transport::{CANCELLED, Transport};
+use crate::{
+    mux::{Budget, narrowest},
+    runtime::output_bounded,
+};
 use std::{
     env,
     process::Command,
@@ -58,8 +61,10 @@ impl Transport for Process {
         budget: Budget,
         cancelled: Option<&AtomicBool>,
     ) -> Result<String, String> {
-        let budget = tighter(self.budget, budget);
-        let cancelled = narrowest(cancelled, Some(&self.cancelled))?.unwrap_or(&self.cancelled);
+        let budget = self.budget.tighter(budget);
+        let cancelled = narrowest(cancelled, Some(&self.cancelled))
+            .map_err(|_| CANCELLED.to_owned())?
+            .unwrap_or(&self.cancelled);
         let mut command = Command::new(&self.binary);
         command.args(args);
         if let Some(socket) = &self.socket {

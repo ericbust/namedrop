@@ -50,6 +50,7 @@ minutes. The first build takes most of that.
 | `--keep` | Keep the profile after a pass |
 | `--daily-use` | Run the daily-use lane instead of CHECKLIST.md |
 | `--upgrade-check`, optionally with `--upgrade-from REF` | Activate `--link` over the previous release with deliveries open |
+| `--inside-rex` | Run the profile's Herdr server in a block of a scratch Rex server, which keeps the block's `REX_*` names in Herdr's environment |
 
 A pass prints the compatibility line to paste into `docs/compatibility.md`
 and deletes the profile. The report itself stays in
