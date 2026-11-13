@@ -294,25 +294,32 @@ mod tests {
     }
 
     /// A real child runs in its own process group, so a signal to its
-    /// starter's group misses it, and sees neither the Rex claim it inherited
-    /// nor a pane, only its scope.
+    /// starter's group misses it, has `/dev/null` for its stdin, stdout, and
+    /// stderr, and sees neither the Rex claim it inherited nor a pane, only
+    /// its scope.
     #[test]
-    fn a_daemon_runs_in_its_own_group_without_the_rex_claim() {
+    fn a_daemon_runs_in_its_own_group_with_null_stdio_and_without_the_rex_claim() {
         let directory =
             std::env::temp_dir().join(format!("namedrop-daemon-{}", std::process::id()));
         fs::create_dir_all(&directory).unwrap();
         let script = directory.join("record");
         fs::write(
             &script,
-            "#!/bin/sh\n{ ps -o pgid= -p $$; echo \"rex<${REX_BLOCK-unset}> pane<${HERDR_PANE_ID-unset}> socket<${HERDR_SOCKET_PATH-unset}>\"; } > \"$0.out\"\n",
+            "#!/bin/sh\nfor fd in 0 1 2; do if [ /dev/fd/$fd -ef /dev/null ]; then stdio=\"$stdio null\"; else stdio=\"$stdio open\"; fi; done\n{ ps -o pgid= -p $$; echo \"stdio<${stdio# }> rex<${REX_BLOCK-unset}> pane<${HERDR_PANE_ID-unset}> socket<${HERDR_SOCKET_PATH-unset}>\"; } > \"$0.out\"\n",
         )
         .unwrap();
-        fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let endpoint = Endpoint::parse("/run/h.sock");
-        let status = command(&script, Scope::Endpoint(&endpoint), Starter::Caller)
-            .env("PATH", "/usr/bin:/bin")
-            .status()
-            .unwrap();
+        // `/bin/sh` reads the script, so no exec of a file just written can
+        // race another test's fork into ETXTBSY.
+        let status = command(
+            Path::new("/bin/sh"),
+            Scope::Endpoint(&endpoint),
+            Starter::Caller,
+        )
+        .arg(&script)
+        .env("PATH", "/usr/bin:/bin")
+        .status()
+        .unwrap();
         assert!(status.success());
         let recorded = fs::read_to_string(directory.join("record.out")).unwrap();
         let (group, names) = recorded.split_once('\n').unwrap();
@@ -321,7 +328,10 @@ mod tests {
             unsafe { libc::getpgrp() },
             "{recorded}"
         );
-        assert_eq!(names.trim(), "rex<unset> pane<unset> socket</run/h.sock>");
+        assert_eq!(
+            names.trim(),
+            "stdio<null null null> rex<unset> pane<unset> socket</run/h.sock>"
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
