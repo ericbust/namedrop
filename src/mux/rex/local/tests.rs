@@ -226,7 +226,7 @@ fn a_peer_probe_reports_why_it_found_no_listener() {
     };
     assert_eq!(errno(&scratch.0.join("missing.sock")), Some(libc::ENOENT));
     let stale = scratch.0.join("stale.sock");
-    drop(UnixListener::bind(&stale).unwrap());
+    bound_without_listening(&stale);
     assert_eq!(errno(&stale), Some(libc::ECONNREFUSED));
     let long = scratch.0.join("x".repeat(120));
     assert_eq!(
@@ -235,6 +235,31 @@ fn a_peer_probe_reports_why_it_found_no_listener() {
             .kind(),
         stdio::ErrorKind::InvalidInput
     );
+}
+
+/// A stale socket file: a stream socket bound at `path` that never listened,
+/// so a child another test forks while holding it cannot make it answer, as
+/// it could a dropped listener.
+fn bound_without_listening(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    // SAFETY: a plain socket call; the descriptor is closed below.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    assert!(fd >= 0, "{}", stdio::Error::last_os_error());
+    // SAFETY: sockaddr_un is plain data, valid when zeroed.
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_family = libc::sa_family_t::try_from(libc::AF_UNIX).unwrap();
+    let bytes = path.as_os_str().as_bytes();
+    assert!(bytes.len() < address.sun_path.len());
+    for (to, from) in address.sun_path.iter_mut().zip(bytes) {
+        *to = *from as libc::c_char;
+    }
+    let length = libc::socklen_t::try_from(std::mem::size_of::<libc::sockaddr_un>()).unwrap();
+    // SAFETY: `address` is a valid sockaddr_un of `length` bytes.
+    let bound = unsafe { libc::bind(fd, (&raw const address).cast(), length) };
+    let error = stdio::Error::last_os_error();
+    // SAFETY: `fd` is this function's own descriptor.
+    unsafe { libc::close(fd) };
+    assert_eq!(bound, 0, "{error}");
 }
 
 /// A listener whose queue is full answers at once, so a busy server never
