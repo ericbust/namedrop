@@ -283,16 +283,19 @@ fn a_request_with_no_answer_times_out_at_its_budget() {
     assert_eq!(server.join().unwrap(), Some(1000));
 }
 
+/// The confirm check reads the set value alone, so the default is not one.
 #[test]
 fn the_timeout_cap_defaults_to_5_s_and_stops_at_60_s() {
-    for (value, cap) in [
-        (None, 5000),
-        (Some("250"), 250),
-        (Some("0"), 5000),
-        (Some("soon"), 5000),
-        (Some("999999"), 60_000),
+    for (value, cap, set) in [
+        (None, 5000, false),
+        (Some("250"), 250, true),
+        (Some("0"), 5000, false),
+        (Some("soon"), 5000, false),
+        (Some("999999"), 60_000, true),
     ] {
         assert_eq!(timeout_cap(value), Duration::from_millis(cap), "{value:?}");
+        let explicit = set.then(|| Duration::from_millis(cap));
+        assert_eq!(explicit_cap(value), explicit, "{value:?}");
     }
 }
 

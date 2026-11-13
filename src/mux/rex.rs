@@ -48,11 +48,7 @@ pub(super) fn connect(
             endpoint.key
         ))
     })?;
-    let socket = Socket {
-        path: path.to_owned(),
-        budget,
-        cancelled,
-    };
+    let socket = Socket::new(path.to_owned(), budget, cancelled);
     let local = Arc::new(super::processes::ThisMachine);
     Ok(Arc::new(RexMux::new(
         socket,
@@ -67,6 +63,21 @@ struct Socket {
     path: PathBuf,
     budget: Budget,
     cancelled: Arc<AtomicBool>,
+    /// `NAMEDROP_REX_TIMEOUT_MS` when it is set. It caps each request, and
+    /// the Stop wrapper sets it to 250 ms, so a process that carries it
+    /// types no prompt it could not confirm.
+    set_cap: Option<Duration>,
+}
+
+impl Socket {
+    fn new(path: PathBuf, budget: Budget, cancelled: Arc<AtomicBool>) -> Self {
+        Self {
+            path,
+            budget,
+            cancelled,
+            set_cap: control::explicit_timeout_cap(),
+        }
+    }
 }
 
 impl Wire for Socket {
@@ -94,8 +105,12 @@ impl Wire for Socket {
         Ok((Box::new(Connection::open(stream, limits)?), peer))
     }
 
+    /// The budget's timeout, held to `NAMEDROP_REX_TIMEOUT_MS` only when it
+    /// is set. Its 5 s default is left out, or no prompt would fit.
     fn timeout(&self) -> Result<Duration, String> {
-        Ok(self.budget.timeout)
+        Ok(self
+            .set_cap
+            .map_or(self.budget.timeout, |cap| self.budget.timeout.min(cap)))
     }
 }
 

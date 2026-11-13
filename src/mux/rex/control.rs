@@ -51,8 +51,7 @@ pub(super) trait Wire: Send + Sync {
     /// request is held to `narrower` as well as to the wire's own budget.
     fn open<'a>(&'a self, narrower: Narrower<'a>) -> Result<(Box<dyn Control + 'a>, u32), Fault>;
     /// The timeout of the budget now, for a caller that must know before it
-    /// starts whether a whole call fits. `NAMEDROP_REX_TIMEOUT_MS` caps each
-    /// request, not the call, so it is not part of it.
+    /// starts whether a whole call fits.
     fn timeout(&self) -> Result<Duration, String>;
 }
 
@@ -414,11 +413,20 @@ fn request_timeout_cap() -> Duration {
 }
 
 fn timeout_cap(value: Option<&str>) -> Duration {
+    explicit_cap(value).unwrap_or(DEFAULT_TIMEOUT)
+}
+
+/// `NAMEDROP_REX_TIMEOUT_MS` when it is set to a usable value, without the
+/// 5 s default.
+pub(super) fn explicit_timeout_cap() -> Option<Duration> {
+    explicit_cap(std::env::var("NAMEDROP_REX_TIMEOUT_MS").ok().as_deref())
+}
+
+fn explicit_cap(value: Option<&str>) -> Option<Duration> {
     value
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|milliseconds| *milliseconds > 0)
-        .map_or(DEFAULT_TIMEOUT, Duration::from_millis)
-        .min(MAX_TIMEOUT)
+        .map(|milliseconds| Duration::from_millis(milliseconds).min(MAX_TIMEOUT))
 }
 
 fn parse_event(message: &Value) -> Result<Event, Fault> {

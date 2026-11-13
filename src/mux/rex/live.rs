@@ -109,11 +109,11 @@ fn live_rex() -> super::RexMux<super::Socket> {
     let socket = socket();
     let state = std::env::temp_dir().join(format!("nd-rex-live-{}", std::process::id()));
     super::RexMux::new(
-        super::Socket {
-            path: socket.clone(),
-            budget: Budget::ADAPTER_DEFAULT,
-            cancelled: std::sync::Arc::default(),
-        },
+        super::Socket::new(
+            socket.clone(),
+            Budget::ADAPTER_DEFAULT,
+            std::sync::Arc::default(),
+        ),
         crate::mux::Endpoint::parse(&format!("rex:{}", socket.display())),
         &state,
         std::sync::Arc::new(crate::mux::processes::ThisMachine),

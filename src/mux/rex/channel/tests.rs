@@ -456,6 +456,59 @@ fn a_connection_too_short_to_confirm_declines_before_it_connects() {
     assert!(gate.rex.wire.calls().is_empty());
 }
 
+/// The Stop wrapper's 250 ms caps each request of the processes that carry
+/// it, so it declines their prompts before Namedrop dials. The 5 s each
+/// request gets when the variable is unset does not count.
+#[test]
+fn only_a_set_rex_timeout_counts_in_the_confirm_check() {
+    use crate::mux::{
+        Budget, Endpoint,
+        rex::{Socket, tests::State},
+    };
+    use std::{os::unix::net::UnixListener, time::Duration};
+    let state = State::new();
+    let path = state.0.join("rex.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let prompt_with = |set_cap| {
+        let socket = Socket {
+            path: path.clone(),
+            budget: Budget::ADAPTER_DEFAULT,
+            cancelled: Arc::default(),
+            set_cap,
+        };
+        let endpoint = Endpoint::parse(&format!("rex:{}", path.display()));
+        let rex = RexMux::new(socket, endpoint, &state.0, Arc::new(Local::default()));
+        let expect = claude();
+        rex.send(
+            &PaneId::new("block:b"),
+            InputKind::Prompt(PromptRequest {
+                expect: &expect,
+                text: "hello",
+            }),
+        )
+    };
+    assert_eq!(
+        prompt_with(Some(Duration::from_millis(250))),
+        InputOutcome::Declined(
+            Retry::AfterDelay,
+            "a prompt needs 6s to confirm, and this connection allows 250ms".into()
+        )
+    );
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "the declined prompt dialed Rex"
+    );
+    drop(listener);
+    std::fs::remove_file(&path).unwrap();
+    assert!(
+        matches!(prompt_with(None), InputOutcome::Declined(Retry::AfterDelay, why)
+            if why.starts_with("could not reach Rex at")),
+        "an unset variable declined the prompt before it dialed"
+    );
+}
+
 #[test]
 fn input_for_a_block_rex_does_not_have_waits_for_an_event() {
     let gate = bound(|fixture, _| {
