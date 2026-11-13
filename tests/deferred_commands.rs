@@ -237,21 +237,39 @@ else: print('{}')
         input: Value,
         read_only: bool,
     ) -> Output {
+        self.sandboxed(operation, input, read_only, false)
+    }
+
+    /// `neutral` gives the endpoint, space, and pane under their neutral
+    /// environment names instead of the Herdr flags.
+    fn sandboxed(
+        &self,
+        operation: &[&str],
+        input: Value,
+        read_only: bool,
+        neutral: bool,
+    ) -> Output {
         let mut command = self.command();
         command
             .arg("--plugin-state")
             .arg(self.directory.path())
-            .args(operation)
-            .args([
+            .args(operation);
+        if neutral {
+            command
+                .env("NAMEDROP_ENDPOINT", &self.socket)
+                .env("NAMEDROP_SPACE_ID", "workspace-1")
+                .env("NAMEDROP_PANE_ID", "pane-author");
+        } else {
+            command.args([
                 "--herdr-socket",
                 &self.socket,
                 "--herdr-workspace",
                 "workspace-1",
                 "--herdr-pane",
                 "pane-author",
-                "--input-json",
-                &input.to_string(),
             ]);
+        }
+        command.args(["--input-json", &input.to_string()]);
         // This is the syscall boundary Codex denies. No test-only production switch.
         unsafe {
             command.pre_exec(move || {
@@ -510,6 +528,22 @@ fn denied_socket_queues_before_mutation_and_restarts_recover_one_logical_command
     assert_eq!(recovered["result"]["Ok"]["dispatch"], "scheduled");
     assert_eq!(fixture.message_count(), 1);
     assert_eq!(fs::read(request).unwrap(), original_bytes);
+}
+
+/// A sandboxed command takes its endpoint, space, and pane from the neutral
+/// names alone: it queues, and the worker answers it.
+#[test]
+fn a_sandboxed_command_under_neutral_names_queues_and_is_answered() {
+    let fixture = Fixture::new();
+    let input = send("neutral-id", "hello");
+    let pending = response(fixture.sandboxed(&["send", "--json"], input.clone(), false, true));
+    assert_eq!(pending["data"]["state"], "pending", "{pending}");
+    let receipt = PathBuf::from(pending["data"]["receipt"].as_str().unwrap());
+    let _worker = fixture.worker();
+    wait_for(|| receipt.exists());
+    let result = response(fixture.sandboxed(&["send", "--json"], input, false, true));
+    assert!(result["data"]["message_id"].is_string(), "{result}");
+    assert_eq!(fixture.message_count(), 1);
 }
 
 #[test]
