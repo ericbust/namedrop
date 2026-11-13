@@ -72,32 +72,41 @@ where
 /// The shared app-server notice for a SessionStart that runs inside Codex's
 /// shared app-server, or `None`. It needs no runtime, which under the server
 /// usually cannot be built. A cleared or compacted session already showed the
-/// notice in its window, so only a new, resumed or forked one gets it.
-pub fn execute_codex_app_server_hook(input: &str) -> Option<Value> {
+/// notice in its window, so only a new, resumed or forked one gets it. Its
+/// words name the multiplexer the hook's home is, `kind`.
+pub fn execute_codex_app_server_hook(input: &str, kind: crate::mux::MuxKind) -> Option<Value> {
     let input: SessionStartInput = serde_json::from_str(input).ok()?;
     let rebuilt = matches!(input.source.as_deref(), Some("clear" | "compact"));
     (input.hook_event_name == "SessionStart"
         && !rebuilt
         && crate::codex_app_server::runs_inside_server())
-    .then(codex_app_server_hook_output)
+    .then(|| codex_app_server_hook_output(kind))
 }
 
-/// One fixed output, so the Codex session-start wrapper can forward it as an
-/// exact literal. The person sees `systemMessage` as one warning line; the
-/// agent gets the full advice and how to offer the fix.
-pub(crate) fn codex_app_server_hook_output() -> Value {
-    let advice = crate::codex_app_server::advice_lines(false)
-        .collect::<Vec<_>>()
-        .join("\n");
+/// One fixed output for each multiplexer, so the Codex session-start
+/// wrapper can forward each as an exact literal. The person sees
+/// `systemMessage` as one warning line; the agent gets the full advice and
+/// how to offer the fix.
+pub(crate) fn codex_app_server_hook_output(kind: crate::mux::MuxKind) -> Value {
+    use crate::codex_app_server as notice;
+    let (guidance, advice, banner) = match kind {
+        crate::mux::MuxKind::Herdr => (
+            notice::agent_guidance(),
+            notice::advice_lines(false).collect::<Vec<_>>(),
+            notice::banner(),
+        ),
+        crate::mux::MuxKind::Rex => (
+            notice::rex_agent_guidance(),
+            notice::rex_advice_lines().collect::<Vec<_>>(),
+            notice::rex_banner(),
+        ),
+    };
     json!({
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": format!(
-                "{}\n\n{advice}",
-                crate::codex_app_server::agent_guidance()
-            ),
+            "additionalContext": format!("{guidance}\n\n{}", advice.join("\n")),
         },
-        "systemMessage": crate::codex_app_server::banner(),
+        "systemMessage": banner,
     })
 }
 

@@ -1,3 +1,4 @@
+use crate::mux::MuxKind;
 use crate::{
     AgentRuntime, AttentionItemDraft, AttentionItemId, AttentionSourceKind, DiscoveredWorktree,
     LifecycleRuntime, MutationAttribution, StateStore, integration_package,
@@ -1283,11 +1284,18 @@ fn session_start_script(
             state_directory.display()
         )
     })?;
+    // Herdr's notice first, as it always was, then Rex's.
     let app_server_notice = match runtime {
-        AgentRuntime::Codex => format!(
-            "if [ \"$output\" = {} ]; then\n  printf '%s' \"$output\"\n  exit 0\nfi\n",
-            shell_single_quote(&crate::hook::codex_app_server_hook_output().to_string())
-        ),
+        AgentRuntime::Codex => [MuxKind::Herdr, MuxKind::Rex]
+            .map(|kind| {
+                format!(
+                    "if [ \"$output\" = {} ]; then\n  printf '%s' \"$output\"\n  exit 0\nfi\n",
+                    shell_single_quote(
+                        &crate::hook::codex_app_server_hook_output(kind).to_string()
+                    )
+                )
+            })
+            .concat(),
         AgentRuntime::ClaudeCode => String::new(),
     };
     let update_notice = forward_update_notice(runtime);
@@ -1325,16 +1333,18 @@ fn forward_update_notice(runtime: AgentRuntime) -> String {
         ),
     ];
     if runtime == AgentRuntime::Codex {
-        let notice = crate::hook::codex_app_server_hook_output().to_string();
-        let start = notice
-            .strip_suffix("\"}")
-            .expect("notice ends with systemMessage");
-        patterns.push(format!(
-            "{}*{}*{}",
-            shell_single_quote(&format!("{start}\\nNamedrop ")),
-            shell_single_quote(message_middle),
-            shell_single_quote(&message_end)
-        ));
+        for kind in [MuxKind::Herdr, MuxKind::Rex] {
+            let notice = crate::hook::codex_app_server_hook_output(kind).to_string();
+            let start = notice
+                .strip_suffix("\"}")
+                .expect("notice ends with systemMessage");
+            patterns.push(format!(
+                "{}*{}*{}",
+                shell_single_quote(&format!("{start}\\nNamedrop ")),
+                shell_single_quote(message_middle),
+                shell_single_quote(&message_end)
+            ));
+        }
     }
     // Validate both versions with shell builtins; wrapper bytes must remain
     // stable when only the release version changes.
@@ -1556,6 +1566,77 @@ fn conflict(path: &Path, reason: &str) -> String {
 mod permission_tests {
     use super::*;
     use crate::StateNamespace;
+
+    /// The app-server notice names the multiplexer of the hook's home, and
+    /// the Codex SessionStart wrapper forwards each wording exactly, alone
+    /// or followed by an update notice, and nothing that differs from it.
+    #[test]
+    fn the_codex_wrapper_forwards_the_app_server_notice_in_either_multiplexers_words() {
+        let herdr = crate::hook::codex_app_server_hook_output(MuxKind::Herdr).to_string();
+        let rex = crate::hook::codex_app_server_hook_output(MuxKind::Rex).to_string();
+        assert!(
+            herdr.contains("so Herdr cannot tell which pane this session is in")
+                && !herdr.contains("Rex"),
+            "{herdr}"
+        );
+        assert!(
+            rex.contains("so Namedrop cannot tell which Rex block this session is in")
+                && rex.contains("restart Codex in each of its Rex blocks")
+                && !rex.contains("Herdr")
+                && !rex.contains("pane"),
+            "{rex}"
+        );
+        let root = std::env::temp_dir().join(format!("namedrop-notice-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("hook-result");
+        let wrapper = root.join("session-start");
+        fs::write(
+            &wrapper,
+            HookScript::Session
+                .render(AgentRuntime::Codex, &executable, Path::new("/s"))
+                .unwrap(),
+        )
+        .unwrap();
+        let updated = |notice: &str| {
+            let mut composed: Value = serde_json::from_str(notice).unwrap();
+            composed["systemMessage"] = format!(
+                "{}\nNamedrop 9.0.0 is available (you have {}). Update: {}",
+                composed["systemMessage"].as_str().unwrap(),
+                env!("CARGO_PKG_VERSION"),
+                crate::update_check::UPDATE_COMMAND
+            )
+            .into();
+            composed.to_string()
+        };
+        for (output, forward) in [
+            (herdr.clone(), true),
+            (rex.clone(), true),
+            (updated(&herdr), true),
+            (updated(&rex), true),
+            (format!("{rex} "), false),
+            (rex.replacen("Namedrop", "Nomedrop", 1), false),
+        ] {
+            fs::write(
+                &executable,
+                format!(
+                    "#!/bin/sh\nprintf '%s' '{}'\n",
+                    output.replace('\'', "'\"'\"'")
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+            let result = std::process::Command::new("/bin/sh")
+                .arg(&wrapper)
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8(result.stdout).unwrap(),
+                if forward { output } else { String::new() }
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
 
     /// The UserPromptSubmit wrapper is the one before commit 16 without the
     /// line that backgrounded `hook mailbox-wake`: the hook starts the wake.

@@ -1134,6 +1134,9 @@ fn run_context_hook(
         let entrypoint = inherited.var("CLAUDE_CODE_ENTRYPOINT");
         let _ = place.bind_session(state_directory, session, runtime, entrypoint.as_deref());
     }
+    let kind = home
+        .as_ref()
+        .map_or(namedrop::mux::MuxKind::Herdr, Home::kind);
     let location = home.and_then(|home| home.location(inherited));
     let prompted = prompt_hook::record(
         state_directory,
@@ -1146,7 +1149,7 @@ fn run_context_hook(
         state_directory,
         env::var_os("PLUGIN_ROOT").as_deref().map(Path::new),
     );
-    let mut output = namedrop::execute_codex_app_server_hook(&input).or_else(|| {
+    let mut output = namedrop::execute_codex_app_server_hook(&input, kind).or_else(|| {
         with_runtime_at(state_directory, inherited, |runtime| {
             let _ = namedrop::deferred_commands::ensure_worker(
                 runtime.state_directory,
@@ -1893,6 +1896,10 @@ mod worker_shutdown_tests {
             _block: &str,
         ) -> Result<home::Claimed, String> {
             Err("no Rex claim".to_owned())
+        }
+
+        fn incarnation(&self, _pid: u32) -> Option<String> {
+            None
         }
     }
 

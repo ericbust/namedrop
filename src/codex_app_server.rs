@@ -80,6 +80,45 @@ pub(crate) fn agent_guidance() -> String {
     )
 }
 
+/// The notice's words in a Rex block. The shared server runs its hooks
+/// outside every block's program, so no Codex session there ever binds to
+/// its block.
+pub(crate) const REX_SUMMARY: &str = "Codex runs its sessions through its shared app-server, so Namedrop cannot tell which Rex block each Codex session is in.";
+
+pub(crate) const REX_EXPLANATION: &str = "Since version 0.162, Codex starts one background app-server for each Codex home (CODEX_HOME) and runs every session's hooks inside it. That server keeps the environment of wherever it was first started, not of the block you type in, and its hooks run outside the block's program. Namedrop then cannot bind a Codex session to its block: the agent cannot take a mention name, and mentions to it stay queued. Submitting another prompt does not help. The server also updates and restarts itself, which can close an open Codex window the next time it saves a setting.";
+
+pub(crate) const REX_FIX: &str = "The fix turns the shared app-server off, so each Codex runs inside its own block, where Namedrop can see it. While it is off, the `codex agents` session browser and Codex remote control are unavailable. Namedrop never changes Codex settings: run the steps yourself, or let the agent in the block run them once you approve.";
+
+pub(crate) const REX_STEPS: [&str; 7] = [
+    DISABLE,
+    STOP,
+    "Then restart Codex in each of its Rex blocks. The stop is needed because a running server keeps taking new sessions even with the setting off. It disconnects every open Codex window that uses it, including the one whose agent ran these steps for you; relaunch those windows.",
+    "To fix one session only, leave the setting on and start that Codex with:",
+    PER_SESSION,
+    "To undo the fix and turn the shared app-server back on:",
+    ENABLE,
+];
+
+/// `advice_lines`, `banner`, and `agent_guidance` for a Codex whose hooks
+/// run in a Rex home.
+pub(crate) fn rex_advice_lines() -> impl Iterator<Item = &'static str> {
+    [REX_SUMMARY, REX_EXPLANATION, REX_FIX]
+        .into_iter()
+        .chain(REX_STEPS)
+}
+
+pub(crate) fn rex_banner() -> String {
+    format!(
+        "Namedrop: Codex runs through its shared app-server, so Namedrop cannot tell which Rex block this session is in; mentions to it stay queued. Fix: {DISABLE}, then {STOP}, then restart Codex in its blocks. One session only: {PER_SESSION}. Undo: {ENABLE}. Namedrop changes nothing itself; see namedrop doctor."
+    )
+}
+
+pub(crate) fn rex_agent_guidance() -> String {
+    format!(
+        "Namedrop shared app-server notice. Relay the notice below to the person once, in plain words, in your next reply. Run none of its commands without the person's approval. If they approve, run `{DISABLE}`, then tell them that `{STOP}` disconnects this session too before you run it, and remind them to restart Codex in each of its Rex blocks. To fix one session only, they can start it with `{PER_SESSION}`."
+    )
+}
+
 /// What a plain `codex` started now under one Codex home does with its session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CodexAppServer {
@@ -717,16 +756,34 @@ mod tests {
 
     #[test]
     fn every_command_in_the_advice_is_one_of_the_four() {
-        for line in advice_lines(true) {
+        for line in advice_lines(true).chain(rex_advice_lines()) {
             assert_commands_are_exact(line);
         }
-        for prose in [SUMMARY, EXPLANATION, LINGERING, FIX] {
+        for prose in [
+            SUMMARY,
+            EXPLANATION,
+            LINGERING,
+            FIX,
+            REX_SUMMARY,
+            REX_EXPLANATION,
+            REX_FIX,
+        ] {
             assert!(!prose.starts_with("codex "), "{prose}");
         }
         for command in COMMANDS {
             assert!(STEPS.contains(&command), "{command} is a step of its own");
+            assert!(
+                REX_STEPS.contains(&command),
+                "{command} is a Rex step of its own"
+            );
         }
-        for text in [agent_guidance(), banner()] {
+        assert!(rex_banner().contains(ENABLE) && !rex_banner().contains('\n'));
+        for text in [
+            agent_guidance(),
+            banner(),
+            rex_agent_guidance(),
+            rex_banner(),
+        ] {
             for quoted in text.split('`').skip(1).step_by(2) {
                 assert_commands_are_exact(quoted);
             }

@@ -24,7 +24,7 @@ use super::{
 use crate::{SpaceId, WorktreeId};
 use agent::{Locality, Observed, pane_agent, shell_of};
 use binding::Bindings;
-pub(crate) use binding::{Caller, refusal};
+pub(crate) use binding::{Caller, bound, refusal};
 use control::{Connection, Control, Fault, Limits, Narrower, Wire};
 use serde_json::{Value, json};
 use std::{

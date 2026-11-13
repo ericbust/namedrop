@@ -5,9 +5,10 @@
 
 use super::wire::{Proc, StatusRecord};
 use crate::{
-    AgentRuntime, AgentSessionId,
+    AgentRuntime, AgentSessionId, SpaceId,
     mux::{
-        home::{BindRefused, Place},
+        Endpoint, PaneId,
+        home::{BindRefused, Deferral, Place},
         processes::{LocalProc, LocalProcesses, LocalRead, ThisMachine, is_shell},
     },
 };
@@ -356,6 +357,21 @@ fn launches(
         && local
             .executable(foreground)
             .is_some_and(|path| path != agent.executable)
+}
+
+/// The place `block`'s binding under `state` names, for a sandboxed
+/// command's deferral, with the bound agent's incarnation that must prove
+/// the caller.
+pub(crate) fn bound(state: &Path, block: &str) -> Option<(Deferral, String)> {
+    let binding = Bindings::new(state).read(block)?;
+    Some((
+        Deferral {
+            endpoint: Endpoint::parse(&binding.endpoint),
+            space: SpaceId::new(binding.space),
+            pane: PaneId::new(binding.block),
+        },
+        binding.agent,
+    ))
 }
 
 /// The latest refused bind of `block` under `state`, for Doctor.

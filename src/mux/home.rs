@@ -5,7 +5,11 @@
 //! about Herdr is resolved as Herdr, so every Herdr process keeps today's
 //! path. Everything else reads step 3's set of names.
 
-use super::{Endpoint, MuxKind, PaneId, processes::ThisMachine, rex::Caller};
+use super::{
+    Endpoint, MuxKind, PaneId,
+    processes::{LocalProcesses, ThisMachine},
+    rex::Caller,
+};
 use crate::{
     SpaceId,
     locator::{Locator, Name},
@@ -127,6 +131,8 @@ pub struct Flags<'a> {
     pub endpoint: Option<&'a str>,
     pub space: Option<&'a str>,
     pub pane: Option<&'a str>,
+    /// `--plugin-state`, where a sandboxed command finds its block's binding.
+    pub plugin_state: Option<&'a Path>,
 }
 
 /// What a Rex server said about a claimed block over one connection that
@@ -160,6 +166,9 @@ pub trait Inherited {
     /// One connection to the Rex server at `socket` that proves it local,
     /// attaches `session`, and reads `block`'s process.
     fn claimed(&self, socket: &Path, session: &str, block: &str) -> Result<Claimed, String>;
+    /// `<pid>@<start>` of a live process, or `None` when it is gone or
+    /// cannot be read.
+    fn incarnation(&self, pid: u32) -> Option<String>;
 }
 
 /// This process, read from the system. Built only in `fn main`, so nothing
@@ -185,6 +194,13 @@ impl Inherited for ThisProcess {
 
     fn claimed(&self, socket: &Path, session: &str, block: &str) -> Result<Claimed, String> {
         super::rex::claimed(socket, session, block)
+    }
+
+    fn incarnation(&self, pid: u32) -> Option<String> {
+        match ThisMachine.read(pid) {
+            super::processes::LocalRead::Alive(process) => Some(process.incarnation.0),
+            _ => None,
+        }
     }
 }
 
@@ -357,13 +373,13 @@ pub fn resolve(flags: &Flags<'_>, inherited: &dyn Inherited) -> Result<Home, Str
     if let (Some(block), Some(session)) =
         (set(inherited, "REX_BLOCK"), set(inherited, "REX_SESSION"))
     {
-        return nearest(inherited, &session, &block).map(|claimed| {
-            claimed.map_or(Home::Herdr, |(endpoint, caller)| {
-                Home::Rex(Place {
-                    caller: Some(Box::new(caller)),
-                    ..place(endpoint, Some(session), Some(block))
-                })
-            })
+        return nearest(flags, inherited, &session, &block).map(|nearest| match nearest {
+            Nearest::Herdr => Home::Herdr,
+            Nearest::Rex(endpoint, caller) => Home::Rex(Place {
+                caller: Some(Box::new(caller)),
+                ..place(endpoint, Some(session), Some(block))
+            }),
+            Nearest::Deferred(deferral) => Home::RexDeferred(deferral),
         });
     }
     let lookup = |name: &str| inherited.var(name);
@@ -388,13 +404,21 @@ pub fn resolve(flags: &Flags<'_>, inherited: &dyn Inherited) -> Result<Home, Str
     }
 }
 
-/// The verified Rex endpoint and what it showed of the caller's block when
-/// Rex's server is the nearest ancestor, and `None` when the home is Herdr.
+/// What the nearest server ancestor makes of a Rex claim.
+enum Nearest {
+    Herdr,
+    /// The verified endpoint and what it showed of the caller's block.
+    Rex(Endpoint, Caller),
+    /// The socket is denied, and the block's binding proved the caller.
+    Deferred(Deferral),
+}
+
 fn nearest(
+    flags: &Flags<'_>,
     inherited: &dyn Inherited,
     session: &str,
     block: &str,
-) -> Result<Option<(Endpoint, Caller)>, String> {
+) -> Result<Nearest, String> {
     let ancestors = inherited.ancestors();
     let rex = rex_claim(inherited);
     let rex_probe = rex
@@ -408,15 +432,19 @@ fn nearest(
     });
     let server = || set(inherited, "REX_SERVER").unwrap_or_else(|| "unset".to_owned());
     match choose(rex_probe, herdr_probe) {
-        Choice::Herdr => Ok(None),
+        Choice::Herdr => Ok(Nearest::Herdr),
         Choice::Lost => Err(format!(
             "REX_BLOCK={block} is on a Rex server this process cannot find (REX_SERVER={}); start that server with REX_SERVER set",
             server()
         )),
-        Choice::Denied => Err(format!(
-            "the agent's sandbox denies the Rex socket that REX_SERVER={} names, so REX_BLOCK={block} cannot be reached",
-            server()
-        )),
+        Choice::Denied => deferral(flags, inherited, block, &ancestors)
+            .map(Nearest::Deferred)
+            .map_err(|why| {
+                format!(
+                    "the agent's sandbox denies the Rex socket that REX_SERVER={} names, and {why}",
+                    server()
+                )
+            }),
         Choice::Rex => {
             let (Some(claim), Probe::Ancestor(depth)) = (rex, rex_probe) else {
                 unreachable!("Rex is chosen only for a server that is an ancestor")
@@ -437,9 +465,39 @@ fn nearest(
                     claimed.child
                 ));
             }
-            Ok(Some((claimed.endpoint, claimed.caller.of(ancestors))))
+            Ok(Nearest::Rex(claimed.endpoint, claimed.caller.of(ancestors)))
         }
     }
+}
+
+/// The place a sandboxed command defers to: the block's binding, when its
+/// agent is an ancestor of this process with the bound start time, as a
+/// tool's agent is. The binding is read from `--plugin-state`, else from
+/// a Rex home's state directory.
+fn deferral(
+    flags: &Flags<'_>,
+    inherited: &dyn Inherited,
+    block: &str,
+    ancestors: &[u32],
+) -> Result<Deferral, String> {
+    let state = flags.plugin_state.map(Path::to_path_buf).or_else(|| {
+        crate::locator::state_directory(None, MuxKind::Rex, |name| inherited.var(name))
+    });
+    let (deferral, agent) = state
+        .and_then(|state| super::rex::bound(&state, block))
+        .ok_or_else(|| format!("no Namedrop hook has bound REX_BLOCK={block} yet"))?;
+    let proves = agent
+        .split_once('@')
+        .and_then(|(pid, _)| pid.parse::<u32>().ok())
+        .is_some_and(|pid| {
+            ancestors.contains(&pid) && inherited.incarnation(pid).as_deref() == Some(&agent)
+        });
+    if !proves {
+        return Err(format!(
+            "the agent {agent} bound to REX_BLOCK={block} is not an ancestor of this process"
+        ));
+    }
+    Ok(deferral)
 }
 
 #[cfg(test)]

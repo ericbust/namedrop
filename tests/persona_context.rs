@@ -1936,7 +1936,11 @@ fn the_app_server_notice_stays_silent_outside_a_server_and_for_other_input() {
         r#"{"hook_event_name":"UserPromptSubmit","prompt":"hello","session_id":"s1"}"#,
         "garbage",
     ] {
-        assert_eq!(execute_codex_app_server_hook(input), None, "{input}");
+        assert_eq!(
+            execute_codex_app_server_hook(input, namedrop::mux::MuxKind::Herdr),
+            None,
+            "{input}"
+        );
     }
 }
 
