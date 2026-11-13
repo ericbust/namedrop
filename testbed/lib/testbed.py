@@ -124,9 +124,10 @@ CLAUDE_PLANS = {"claude_max": "max", "claude_pro": "pro", "claude_team": "team",
 PERSONAL_PLANS = frozenset(("max", "pro"))
 OAUTH_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9._~+/=-]+$")
-# A token from `claude setup-token` may hold only the user:inference scope, and the profile
-# endpoint may refuse it with one of these.
-SCOPE_REFUSALS = (401, 403)
+# A token from `claude setup-token` holds only the user:inference scope, and the profile endpoint
+# refuses it with 403 permission_error. A revoked or mistyped token gets 401 instead.
+SCOPE_REFUSAL = 403
+REJECTED_TOKEN = 401
 
 ClaudeLogin = namedtuple("ClaudeLogin", "token_file default_login org")
 """How a run signs Claude Code in. default_login allows the machine's own login when token_file
@@ -193,6 +194,17 @@ def read_token(token_file):
     return token
 
 
+class NoRedirects(urllib.request.HTTPRedirectHandler):
+    """urllib sends a request's headers, Authorization included, to whatever host a redirect
+    names. A redirect reaches the caller as an HTTPError instead."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+OAUTH_OPENER = urllib.request.build_opener(NoRedirects)
+
+
 def token_account(token_file):
     """The plan and organization name of the token's account, or None when the endpoint refuses
     the token's scope. Claude Code's `auth status` shows neither for a token, only its authMethod,
@@ -201,11 +213,14 @@ def token_account(token_file):
         "Authorization": "Bearer " + read_token(token_file),
         "Content-Type": "application/json", "User-Agent": "namedrop-testbed"})
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with OAUTH_OPENER.open(request, timeout=20) as response:
             profile = json.loads(response.read().decode())
     except urllib.error.HTTPError as error:
-        if error.code in SCOPE_REFUSALS:
+        if error.code == SCOPE_REFUSAL:
             return None
+        if error.code == REJECTED_TOKEN:
+            fail("the testbed token was rejected (HTTP 401 from {}); create a new one with "
+                 "claude setup-token and save it to {}".format(OAUTH_PROFILE_URL, token_file))
         fail("the Claude Code token's account lookup at {} answered HTTP {}".format(
             OAUTH_PROFILE_URL, error.code))
     except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as error:
@@ -406,7 +421,7 @@ class Profile:
             tools.pop("claude", None)
         link_tools(self.dir / "bin", tools)
         self.state.update(tools=tools, toolchain=host_toolchain(), herdr_bin=herdr_bin,
-                          claude_auth=auth)
+                          claude_auth=auth, agents=list(agents))
         self.save()
         self.auth_links(auth)
         if "claude" in agents:
@@ -419,9 +434,10 @@ class Profile:
                          "# Source this file to enter a shell with only the testbed environment.\n" +
                          "testbed_shell() {\n  " + shlex.join(self.shell_command()) + ";\n}\n"
                          "testbed_shell\n")
-        bashrc = self.dir / "home/.bashrc"
-        if not bashrc.exists():
-            write_if_changed(bashrc, "export PS1='{}'\n".format(SHELL_PS1.format(self.name)))
+        # A pane's login shell runs /etc/profile, whose path_helper puts the system directories
+        # ahead of bin, where another claude can sign in some other way.
+        write_if_changed(self.dir / "home/.bashrc", "export PS1='{}'\nPATH={}:$PATH\n".format(
+            SHELL_PS1.format(self.name), shlex.quote(str(self.dir / "bin"))))
         bash_profile = self.dir / "home/.bash_profile"
         if not bash_profile.exists():
             write_if_changed(bash_profile, 'if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi\n')
@@ -452,9 +468,10 @@ class Profile:
             fail("Herdr returned unexpected JSON for " + shlex.join(args) + ": " + result.stdout)
 
     def require_claude_login(self):
-        """Refuses a profile with Claude Code whose account no check accepted: an older testbed's
-        profile, which uses the default login, or one whose check refused it."""
-        if "claude" in self.state.get("tools", {}) and "claude_account" not in self.state:
+        """Refuses a profile whose run starts Claude Code when no account check accepted it: an
+        older testbed's profile, which uses the default login, or one whose check refused it."""
+        if "claude" in self.state.get("agents", AGENTS) and "claude" in self.state.get("tools", {}) \
+                and "claude_account" not in self.state:
             fail("profile {} has Claude Code with no accepted account check. Run ./testbed up "
                  "--profile {} first.".format(self.name, self.name))
 
@@ -857,9 +874,13 @@ class Profile:
             return
         if not command.strip():
             fail("the launch command for @{} must not be empty".format(alias))
-        if alias == "claude" and shlex.split(command)[0] != "claude":
-            fail("the launch command for @claude must start with claude, the profile's command "
-                 "that signs in with the testbed token: " + command)
+        if alias == "claude":
+            words = shlex.split(command)
+            if words[0] != "claude":
+                fail("the launch command for @claude must start with claude, the profile's command "
+                     "that signs in with the testbed token: " + command)
+            # The pane's PATH may not start with bin, so the profile's claude is named in full.
+            command = shlex.join([str(self.dir / "bin/claude")] + words[1:])
         # No exec: when the CLI exits, the pane keeps its shell and the error stays
         # on screen, and the next `up` sees no agent in the pane and starts it again.
         self.type_line(pane, command)
@@ -916,7 +937,7 @@ class Profile:
         if "source" not in self.state:
             self.state["source"] = self.resolve(request)
             self.save()
-        self.state.update(agents=list(agents), launch=launch)
+        self.state["launch"] = launch
         self.save()
         self.start_server()
         self.install_plugin(self.state["source"])

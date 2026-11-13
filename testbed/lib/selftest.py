@@ -2,6 +2,7 @@
 
 import ast
 import contextlib
+import http.server
 import io
 import json
 import os
@@ -14,6 +15,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.error
 import urllib.request
 from types import SimpleNamespace
@@ -987,6 +989,7 @@ class PastingPanes:
 def check_launch_after_kill():
     profile = object.__new__(testbed.Profile)
     panes = PastingPanes()
+    profile.dir = Path("/profiles/test one")
     profile.state = {"workspace": "w1", "panes": {"claude": "w1:p2"}}
     # Codex still runs in its own pane; only the killed claude pane is relaunched.
     profile.herdr = lambda *args: {"panes": [{"pane_id": "w1:p2", "agent": None},
@@ -994,9 +997,14 @@ def check_launch_after_kill():
     profile.run = panes.run
     profile.save = lambda: None
     profile.launch("claude", "claude --resume 14c7")
-    assert panes.lines("w1:p2") == (["claude --resume 14c7"], ""), panes.streams
+    assert panes.lines("w1:p2") == (["'/profiles/test one/bin/claude' --resume 14c7"], ""), \
+        panes.streams
     assert set(panes.streams) == {"w1:p2"}, panes.streams
     assert profile.state.get("launched_claude") is True, profile.state
+    for other in ("/usr/local/bin/claude --resume 14c7", "env claude", "claude; claude"):
+        assert "must start with claude" in refusal(lambda: profile.launch("claude", other)), other
+    assert panes.lines("w1:p2")[0] == ["'/profiles/test one/bin/claude' --resume 14c7"], \
+        "a refused launch command was typed"
     running = object.__new__(testbed.Profile)
     untouched = PastingPanes()
     running.state = {"workspace": "w1", "panes": {"claude": "w1:p2"}}
@@ -1005,7 +1013,18 @@ def check_launch_after_kill():
     running.save = lambda: None
     running.launch("claude", "claude --resume 14c7")
     assert untouched.streams == {}, untouched.streams
-    return "launch: a pane left in bracketed paste gets the command with no paste markers; a running agent gets nothing"
+    started = []
+    rex_profile = Path("/profiles/rex one")
+    lane = SimpleNamespace(profile=SimpleNamespace(dir=rex_profile, repo=rex_profile / "repo",
+                                                   state={}, save=lambda: None),
+                           rex=lambda *argv: started.append(argv) or SimpleNamespace(
+                               stdout=json.dumps({"block_ids": ["b7"]})))
+    rex_live.start_agent(lane, "s1", {"shell": "b1"}, "claude")
+    program = started[0][started[0].index("--") + 1]
+    assert program == "/profiles/rex one/bin/claude", started
+    return ("launch: a pane left in bracketed paste gets the command with no paste markers; a "
+            "running agent gets nothing; Claude Code starts by the profile's full bin/claude path "
+            "in a Herdr pane and a Rex block, and any other @claude command is refused")
 
 
 def check_checklist_prompts(kit):
@@ -1086,22 +1105,22 @@ def check_claude_login(scratch):
     (stub_dir / "status.json").write_text(json.dumps(
         {"loggedIn": True, "authMethod": "claude.ai", "orgName": "Acme", "subscriptionType": "team"}))
     token, token_file = "sk-ant-oat01-selftest", base / "token"
-    tools = {"claude": str(stub), "herdr": "/usr/bin/true", "git": "/usr/bin/true",
-             "cargo": "/usr/bin/true"}
+    tools = {"claude": str(stub), "codex": "/usr/bin/true", "herdr": "/usr/bin/true",
+             "git": "/usr/bin/true", "cargo": "/usr/bin/true"}
     organization, looked_up = {}, []
 
     def urlopen(request, timeout=None):
         looked_up.append(request.get_header("Authorization"))
-        if "refused" in organization:
-            raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {}, None)
+        if "status" in organization:
+            raise urllib.error.HTTPError(request.full_url, organization["status"], "", {}, None)
         return FakeResponse(json.dumps({"organization": organization}).encode())
 
-    def prepared(name, default_login=False, org=None):
+    def prepared(name, default_login=False, org=None, agents=("claude",)):
         profile = testbed.Profile(name)
         profile.create()
         profile.login = testbed.claude_login(default_login, org)
         with contextlib.redirect_stdout(io.StringIO()):
-            profile.prepare(("claude",))
+            profile.prepare(agents)
         return profile
 
     def calls():
@@ -1112,8 +1131,8 @@ def check_claude_login(scratch):
                    testbed.CLAUDE_TOKEN_FILE_VARIABLE: str(token_file)}
     with patch.dict(os.environ, environment), patch.object(Path, "home", lambda: real_home), \
             patch.object(testbed, "host_tools", lambda herdr_bin=None: dict(tools)), \
-            patch.object(urllib.request, "urlopen", urlopen):
-        token_file.write_text(token + "\n")
+            patch.object(testbed.OAUTH_OPENER, "open", urlopen):
+        token_file.write_text(token)
         token_file.chmod(0o600)
         stale = testbed.Profile("test-stale-login")
         stale.create()
@@ -1140,21 +1159,48 @@ def check_claude_login(scratch):
         for kept in ("env.sh", "state.json"):
             assert token not in (profile.dir / kept).read_text(), "the token is in " + kept
         assert os.readlink(profile.dir / "bin/claude") == str(profile.dir / "libexec/claude-with-token")
+        elsewhere = base / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "claude").symlink_to(stub)
+        found = subprocess.run(["/bin/bash", "-c", '. "$1" && command -v claude', "bash",
+                                str(profile.dir / "home/.bashrc")], capture_output=True, text=True,
+                               env={"PATH": "{}:/usr/bin:/bin".format(elsewhere)})
+        assert found.stdout.strip() == str(profile.dir / "bin/claude"), found
+
+        organization["status"] = 401
+        rejected = refusal(lambda: prepared("test-stale-login"))
+        assert "claude setup-token" in rejected and token not in rejected, rejected
+        assert "./testbed up" in refusal(testbed.Profile("test-stale-login").require_claude_login)
+        for status in (500, 302):
+            organization["status"] = status
+            assert "HTTP {}".format(status) in refusal(lambda: prepared("test-stale-login"))
+        organization["status"] = 403
+        scoped = prepared("test-scoped-token")
+        assert "unreadable with this token's scope" in scoped.state["claude_account"], scoped.state
+        organization.clear()
+
+        before = calls()
+        codex_only = prepared("test-stale-login", agents=("codex",))
+        assert calls() == before, "a run without Claude Code started it"
+        codex_only.require_claude_login()
+        organization["status"] = 401
+        refusal(lambda: prepared("test-stale-login"))
+        assert "./testbed up" in refusal(testbed.Profile("test-stale-login").require_claude_login)
+        organization.clear()
 
         organization.update(organization_type="claude_team", name="Acme")
+        token_file.write_text(token + "\n")
         assert "--claude-org" in refusal(lambda: prepared("test-team-token"))
         assert "./testbed up" in refusal(testbed.Profile("test-team-token").require_claude_login)
         team = prepared("test-team-token", org="Acme")
         assert team.state["claude_account"].startswith("team plan, organization Acme"), team.state
         team.require_claude_login()
+        assert (stub_dir / "token-seen").read_text() == token, "a trailing newline reached the token"
 
         organization.clear()
         organization.update(organization_type="claude_free", name="me@example.com's Organization")
         unknown = refusal(lambda: prepared("test-unknown-plan"))
         assert "--claude-org" in unknown and "example.com" not in unknown, unknown
-        organization["refused"] = True
-        scoped = prepared("test-scoped-token")
-        assert "unreadable with this token's scope" in scoped.state["claude_account"], scoped.state
         organization.clear()
 
         token_file.write_text(token + "\n" + token + "-second\n")
@@ -1189,10 +1235,51 @@ def check_claude_login(scratch):
             assert "./testbed stop" in refusal(lambda: prepared("test-default-login"))
             organization.update(organization_type="claude_max", name="me@example.com's Organization")
             prepared("test-stale-login")
-    return ("Claude login: a token run sets the token only inside Claude Code's launch and drops "
-            "the default login's links; no token, an unnamed organization, a token Claude Code "
-            "ignores, a shared or malformed token file, or a login switch under a running server "
-            "refuses; a refused check leaves nothing trusted; --claude-default-login links the login")
+    return ("Claude login: a token run sets the token, with or without a trailing newline, only "
+            "inside Claude Code's launch and drops the default login's links; the profile's bashrc "
+            "puts its claude first; no token, a rejected token, an unnamed organization, a token "
+            "Claude Code ignores, a shared or malformed token file, or a login switch under a "
+            "running server refuses; only a scope refusal reads as an unreadable account; a refused "
+            "check leaves nothing trusted; a run without Claude Code needs no check; "
+            "--claude-default-login links the login")
+
+
+def check_token_redirect(scratch):
+    seen = []
+
+    class Elsewhere(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps({"organization": {"organization_type": "claude_max"}}).encode())
+
+        def log_message(self, *args):
+            pass
+
+    class Redirecting(Elsewhere):
+        def do_GET(self):
+            self.send_response(302)
+            self.send_header("Location", "http://localhost:{}/profile".format(
+                elsewhere.server_port))
+            self.end_headers()
+
+    elsewhere = http.server.HTTPServer(("127.0.0.1", 0), Elsewhere)
+    redirecting = http.server.HTTPServer(("127.0.0.1", 0), Redirecting)
+    for server in (elsewhere, redirecting):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    token_file = scratch / "redirect-token"
+    token_file.write_text("dummy-not-a-token\n")
+    url = "http://127.0.0.1:{}/api/oauth/profile".format(redirecting.server_port)
+    try:
+        with patch.object(testbed, "OAUTH_PROFILE_URL", url):
+            assert "HTTP 302" in refusal(lambda: testbed.token_account(token_file))
+    finally:
+        for server in (elsewhere, redirecting):
+            server.shutdown()
+            server.server_close()
+    assert seen == [], "the token followed a redirect to another host: {!r}".format(seen)
+    return "token lookup: a redirect stops the run, and the token never reaches the host it names"
 
 
 def run(kit):
@@ -1207,6 +1294,7 @@ def run(kit):
                   ("seed", lambda: check_seed(kit, base)),
                   ("profile safety", lambda: check_profile_safety(base)),
                   ("Claude login", lambda: check_claude_login(base)),
+                  ("token redirect", lambda: check_token_redirect(base)),
                   ("Rex lane", lambda: check_rex_lane(base)),
                   ("Rex lane cleanup", lambda: check_rex_lane_cleanup(base)),
                   ("Rex live hooks", lambda: check_rex_live_hooks(base)),

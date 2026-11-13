@@ -103,8 +103,10 @@ def start_agent(lane, session, blocks, agent):
     # them; its own hook log shows they ran.
     if agent == "claude" and hook_log(lane.profile).exists():
         hook_log(lane.profile).unlink()
-    command = AGENTS[agent] + (("--debug=hooks", "--debug-file", str(hook_log(lane.profile)))
-                               if agent == "claude" else ())
+    command = AGENTS[agent]
+    if agent == "claude":
+        command = (str(lane.profile.dir / "bin/claude"),) + command[1:] + (
+            "--debug=hooks", "--debug-file", str(hook_log(lane.profile)))
     created = json.loads(lane.rex("split", "-s", session, "-b", blocks["shell"], "--label", agent,
                                   "--shell", "none", "--focus=false", "-c", str(lane.profile.repo),
                                   "--json", "--", *command).stdout)

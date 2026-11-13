@@ -67,7 +67,7 @@ def update_issues(code='ND-UPDATE-001'):
 def new_claude_session():
     herdr('agent', 'prompt', claude, '/exit')
     herdr('pane', 'wait-output', claude, '--regex', r'\$ *$', '--timeout', '20000')
-    herdr('pane', 'run', claude, 'claude')
+    herdr('pane', 'run', claude, shlex.quote(str(profile / 'bin/claude')))
     herdr('pane', 'wait-output', claude, '--regex', '/effort', '--timeout', '60000')
     time.sleep(4)
     return pane_text(claude, 40)

@@ -64,7 +64,9 @@ SCREENS = (
            "Claude exited to its shell; see the capture"),
     Screen("claude", "login", r"Select login method|Paste code here|Not logged in · Run /login", (),
            FATAL, None,
-           "Claude is not logged in; run ./testbed shell --profile {profile}, then claude auth login"),
+           "Claude is not logged in. The testbed token was rejected; create a new one with claude "
+           "setup-token (testbed/README.md, The Claude Code account). A --claude-default-login "
+           "profile signs in with ./testbed shell --profile {profile}, then claude auth login"),
     Screen("claude", "theme", r"Choose the text style that looks best", ("enter",), ANSWER, None, ""),
     Screen("claude", "security-notes", r"Security notes:", ("enter",), ANSWER, None, ""),
     Screen("claude", "terminal-setup", r"Use Claude Code's terminal setup\?", ("esc",), ANSWER,

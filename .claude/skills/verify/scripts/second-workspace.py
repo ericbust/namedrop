@@ -28,7 +28,8 @@ saved = json.loads((profile / 'state.json').read_text())
 setup_sh = Path(saved['plugin_root']) / 'scripts/setup.sh'
 repo = profile / 'beta'
 # Under `--codex no-daemon` a plain `codex` would start the shared app-server and add ND-SESSION-003.
-AGENTS = {'lead': 'claude', 'codex': 'codex --no-daemon'}
+# The profile's claude, named in full: a pane's login shell may put another claude first on PATH.
+AGENTS = {'lead': shlex.quote(str(profile / 'bin/claude')), 'codex': 'codex --no-daemon'}
 
 
 def run(*argv, cwd=None):
