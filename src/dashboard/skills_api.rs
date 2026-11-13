@@ -190,16 +190,37 @@ mod tests {
         let history = Mutex::new(HistoryStore::Unopened);
         let catalog = SkillCatalog::default();
         assert!(matches!(
-            read(&Connector, &history, &state, &key, "missing", &catalog),
+            read(
+                &Connector::new(&state),
+                &history,
+                &state,
+                &key,
+                "missing",
+                &catalog
+            ),
             Err(Status::NotFound)
         ));
         assert!(matches!(
-            read(&Connector, &history, &state, &key, "ended", &catalog),
+            read(
+                &Connector::new(&state),
+                &history,
+                &state,
+                &key,
+                "ended",
+                &catalog
+            ),
             Err(Status::Gone)
         ));
         let wrong = SpaceKey::of(&StateNamespace::for_space("other-socket", "test-workspace"));
         assert!(matches!(
-            read(&Connector, &history, &state, &wrong, "ended", &catalog),
+            read(
+                &Connector::new(&state),
+                &history,
+                &state,
+                &wrong,
+                "ended",
+                &catalog
+            ),
             Err(Status::NotFound)
         ));
         drop(history);

@@ -1586,6 +1586,59 @@ fn reminder_due_discovery_reads_the_error_code_not_its_text() {
     });
 }
 
+/// A namespace whose endpoint the clock cannot connect to, as a Rex
+/// endpoint before its adapter, is skipped without failing the cycle: its due
+/// reminder stays scheduled, nothing drains, and the startup catch-up keeps
+/// it until a connection serves it.
+#[test]
+fn reminder_cycle_skips_a_namespace_it_cannot_reach_and_keeps_it_in_catch_up() {
+    let f = Fixture::new();
+    f.busy.set(true);
+    f.set("queued", None, crate::reminder::Repeat::Once);
+    f.fire("queued");
+    f.set("due", None, crate::reminder::Repeat::Once);
+    let mut catch_up = crate::reminder::CatchUp::default();
+    let scope = crate::work_counters::Scope::start();
+    let caught_up = crate::reminder::cycle_with(
+        &f.state,
+        &f,
+        &ProcessIds::default(),
+        |_| -> Result<FakeMux, _> {
+            Err(crate::mux::MuxError::Unavailable(
+                "the Rex adapter is not built yet".into(),
+            ))
+        },
+        &mut catch_up,
+    )
+    .unwrap();
+    let counts = scope.finish();
+    assert!(!caught_up);
+    assert_eq!(counts.drains, 0);
+    f.tx(|tx| {
+        assert!(matches!(
+            tx.reminder(&ns(), "due")?.state,
+            ReminderState::Scheduled { .. }
+        ));
+        Ok(())
+    });
+    let caught_up = crate::reminder::cycle_with(
+        &f.state,
+        &f,
+        &ProcessIds::default(),
+        |_| Ok(f.mux()),
+        &mut catch_up,
+    )
+    .unwrap();
+    assert!(caught_up);
+    f.tx(|tx| {
+        assert!(matches!(
+            tx.reminder(&ns(), "due")?.state,
+            ReminderState::AwaitingDelivery { .. }
+        ));
+        Ok(())
+    });
+}
+
 #[test]
 fn reminder_enqueue_reports_only_a_new_durable_fire() {
     let f = Fixture::new();

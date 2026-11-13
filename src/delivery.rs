@@ -1002,7 +1002,7 @@ where
     let forget = || crate::turn_phase::forget_restored(state, socket, session);
     let mut left: Option<usize> = None;
     for batch in 0..=CLEAR_BATCHES {
-        let Some(screen) = read_screen(runtime, pane_id) else {
+        let Ok(screen) = read_screen(runtime, pane_id) else {
             break;
         };
         match prompt_box(&screen, crate::AgentRuntime::ClaudeCode) {
@@ -1056,6 +1056,10 @@ impl DrainReport {
             // reads the box as a draft, so the key is not sent again until
             // the box changes.
             Reach::Waits(AgentWait::SentPrompt) => (crate::AgentRuntime::ClaudeCode, None),
+            // Read again until a read succeeds.
+            Reach::Waits(AgentWait::ScreenUnread(agent, _)) => {
+                (*agent, Some(candidate.agent_session_id.as_str().to_owned()))
+            }
             _ => return,
         };
         {
@@ -1111,6 +1115,10 @@ pub(crate) enum AgentWait {
     /// Herdr reports the session working between turns, and Namedrop found no
     /// prompt box to see that it is empty.
     PromptBoxUnseen,
+    /// A Rex screen could not be read, or held an escape sequence Namedrop
+    /// does not read, so the box was never seen. Herdr's idle stands in for
+    /// that read, and Rex's does not: the mail waits for a read that works.
+    ScreenUnread(crate::AgentRuntime, String),
     /// Claude Code's prompt box holds only the prompt Namedrop's hook sent as
     /// a message, which Claude Code put back after the hook blocked it. The
     /// drain clears it before it types.
@@ -1150,6 +1158,7 @@ where
         // strands the mail. Between turns the empty box is the only proof.
         PromptBox::Unseen if opening == Opening::Settled => None,
         PromptBox::Unseen => Some(AgentWait::PromptBoxUnseen),
+        PromptBox::Unread(why) => Some(AgentWait::ScreenUnread(agent, why)),
     }
 }
 
@@ -1181,8 +1190,7 @@ where
         .filter(|hold| waiting.contains(&hold.address_id))
         .collect();
     if held.iter().all(|hold| {
-        read_prompt_box(runtime, &hold.pane_id, hold.agent, hold.session.as_deref())
-            == PromptBox::Draft
+        read_prompt_box(runtime, &hold.pane_id, hold.agent, hold.session.as_deref()).holds()
     }) {
         return Ok(DrainReport {
             draft_held: held,
@@ -1193,7 +1201,7 @@ where
 }
 
 /// What an agent pane's prompt box holds.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum PromptBox {
     Empty,
     /// Text the person typed and has not sent, or a box they switched to shell
@@ -1205,6 +1213,17 @@ enum PromptBox {
     Restored,
     /// The screen shows no prompt box Namedrop recognizes.
     Unseen,
+    /// A Rex screen fault: the read failed, or the screen holds what the box
+    /// reader would misread.
+    Unread(String),
+}
+
+impl PromptBox {
+    /// Whether a recheck keeps the mail waiting: the draft is still there,
+    /// or the screen still cannot be read.
+    fn holds(&self) -> bool {
+        matches!(self, Self::Draft | Self::Unread(_))
+    }
 }
 
 /// Enough of the screen's end for the box and whatever the agent draws under it.
@@ -1220,8 +1239,12 @@ where
     M: crate::mux::MuxRead,
     C: Clock,
 {
-    let Some(screen) = read_screen(runtime, pane_id) else {
-        return PromptBox::Unseen;
+    let screen = match read_screen(runtime, pane_id) {
+        Ok(screen) => screen,
+        Err(error) if runtime.mux.endpoint().kind == crate::mux::MuxKind::Rex => {
+            return PromptBox::Unread(error.to_string());
+        }
+        Err(_) => return PromptBox::Unseen,
     };
     let held = prompt_box(&screen, agent);
     let (Some(session), crate::AgentRuntime::ClaudeCode) = (session, agent) else {
@@ -1247,9 +1270,11 @@ where
     }
 }
 
-/// The end of the pane's screen as Herdr renders it, or `None` when the pane
-/// could not be read.
-fn read_screen<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>, pane_id: &str) -> Option<String>
+/// The end of the pane's screen as the multiplexer renders it.
+fn read_screen<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    pane_id: &str,
+) -> Result<String, crate::mux::MuxError>
 where
     M: crate::mux::MuxRead,
 {
@@ -1261,7 +1286,6 @@ where
     runtime
         .mux
         .screen(&crate::mux::PaneId::new(pane_id), request)
-        .ok()
         .map(|screen| screen.text)
 }
 
@@ -1628,29 +1652,9 @@ mod prompt_box_tests {
     }
 
     /// Rex's `vt` format writes a run of blank cells as `ESC[nC`, which
-    /// `cells` drops.
-    fn blank_runs_as_spaces(vt: &str) -> String {
-        let mut screen = String::new();
-        let mut rest = vt;
-        while let Some(start) = rest.find("\u{1b}[") {
-            screen.push_str(&rest[..start]);
-            let after = &rest[start + 2..];
-            let digits = after.len() - after.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-            if after[digits..].starts_with('C') {
-                let count = after[..digits].parse().unwrap_or(1);
-                screen.extend(std::iter::repeat_n(' ', count));
-                rest = &after[digits + 1..];
-            } else {
-                screen.push_str("\u{1b}[");
-                rest = after;
-            }
-        }
-        screen.push_str(rest);
-        screen
-    }
-
+    /// `cells` drops, so the adapter hands the port `port_ansi`'s shape.
     #[test]
-    fn rex_screens_show_their_boxes_once_blank_runs_are_spaces() {
+    fn rex_screens_show_their_boxes_in_the_ports_shape() {
         let codex = crate::AgentRuntime::Codex;
         for (name, vt, agent, held) in [
             (
@@ -1690,7 +1694,8 @@ mod prompt_box_tests {
                 PromptBox::Draft,
             ),
         ] {
-            assert_eq!(prompt_box(&blank_runs_as_spaces(vt), agent), held, "{name}");
+            let screen = crate::mux::rex::wire::port_ansi(vt).unwrap();
+            assert_eq!(prompt_box(&screen, agent), held, "{name}");
         }
     }
 

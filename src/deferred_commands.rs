@@ -688,6 +688,7 @@ fn clear_pending(pending: &Dir, key: &str) -> Result<(), String> {
 
 fn execute_request(state: &Path, request: &Request) -> Result<Value, String> {
     let herdr = crate::mux::connect(
+        state,
         &Endpoint::parse(&request.caller.namespace.session_socket_id),
         Budget::ADAPTER_DEFAULT,
         Default::default(),
@@ -875,5 +876,37 @@ mod tests {
             )
         );
         fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_deferred_command_for_a_rex_caller_connects_and_reads_the_state_as_a_herdr_one_does() {
+        let state = env::temp_dir().join(format!("nd-defer-rex-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        fs::create_dir_all(&state).unwrap();
+        let request = Request {
+            operation: Operation::AddressList,
+            input: json!({}),
+            caller: Caller {
+                namespace: StateNamespace::for_space("rex:/tmp/r.sock", "session:s"),
+                pane: "block:b".into(),
+                address: PaneAddressId::new("address-1"),
+                session: AgentSessionId::new("session-1"),
+                registration: "registration-1".into(),
+            },
+            cwd: state.clone(),
+            key: "key-1".into(),
+            fingerprint: "fingerprint-1".into(),
+            created_at_ms: 0,
+        };
+        assert_eq!(
+            execute_request(&state, &request),
+            Err("Namedrop state is missing; activate this workspace outside the sandbox before queuing commands".to_owned())
+        );
+        assert_eq!(
+            fs::read_dir(&state).unwrap().count(),
+            0,
+            "no store was made"
+        );
+        fs::remove_dir_all(&state).unwrap();
     }
 }

@@ -314,6 +314,85 @@ def check_rex_live_hooks(scratch):
             "from a script baked to the profile's state directory")
 
 
+@contextlib.contextmanager
+def stopped_after(lane):
+    """Stops a scratch server a failed check left running."""
+    try:
+        yield
+    finally:
+        with contextlib.suppress(Exception):
+            if lane.socket.exists():
+                lane.stop()
+
+
+def check_rex_live_up_and_down(scratch):
+    if not shutil.which("rex"):
+        return "Rex live up and down: skipped, rex is not on PATH"
+    with patch.dict(os.environ, {"TESTBED_HOME": str(scratch / "rex-live-up")}):
+        profile = testbed.Profile("test-rex-live-up")
+        profile.create()
+        for name in ("home", "logs", "repo"):
+            (profile.dir / name).mkdir(mode=0o700)
+        profile.state.update(purpose="test", toolchain=testbed.host_toolchain())
+        profile.save()
+        lane = rex_live.Lane(profile, testbed.fail, lambda message: None)
+        herdr_stops = []
+        proved = []
+
+        def first_run(lane, session, blocks, agent, before):
+            process = json.loads(lane.rex("block", "call", "-s", session, "-b", blocks[agent],
+                                          "process").stdout)
+            proved.append((blocks[agent], process["child"]["pid"]))
+            if len(proved) == 1:
+                raise RuntimeError("no Namedrop hook ran")
+            return [], "proved"
+
+        def alive(pid):
+            try:
+                os.kill(pid, 0)
+                return True
+            except ProcessLookupError:
+                return False
+
+        quiet = contextlib.redirect_stdout(io.StringIO())
+        with quiet, stopped_after(lane), patch.object(rex_live, "install", lambda *args: None), \
+                patch.dict(rex_live.AGENTS, {"probe": ("/bin/sleep", "600")}, clear=True), \
+                patch.object(rex_live, "first_run", first_run), \
+                patch.object(testbed.Profile, "stop_server", lambda self: herdr_stops.append(1)), \
+                patch.object(testbed.Profile, "run", lambda self, *args, **kwargs: None):
+            try:
+                rex_live.up(profile, None, ["probe"])
+                raise AssertionError("an up whose hook never ran passed")
+            except RuntimeError as error:
+                assert str(error) == "no Namedrop hook ran", error
+            assert not lane.socket.exists(), "a failed up left its server: " + str(lane.socket)
+            assert not alive(proved[0][1]), "a failed up left its agent running"
+            assert "rex_live_session" not in profile.state, profile.state
+            assert herdr_stops, "a failed up left the profile's Herdr"
+
+            rex_live.up(profile, None, ["probe"])
+            _, session, blocks = rex_live.up(profile, None, ["probe"])
+            assert len(proved) == 3, "the second up did not prove its saved block: {}".format(proved)
+            assert proved[2][0] != proved[1][0], "the second up proved the first up's block"
+            assert blocks == {"shell": blocks["shell"], "probe": proved[2][0]}, blocks
+            assert not alive(proved[1][1]), "the saved block still runs its agent"
+            stops = len(herdr_stops)
+            rex_live.down(profile)
+            assert not lane.socket.exists(), lane.socket
+            assert not alive(proved[2][1])
+            assert len(herdr_stops) > stops, "down left the profile's Herdr"
+
+            logs = profile.dir / "logs"
+            (logs / "rex-server.log").write_text("kept")
+            stops = len(herdr_stops)
+            with patch.object(shutil, "copytree", side_effect=OSError("disk full")):
+                testbed.discard_failed(profile)
+            assert len(herdr_stops) > stops, "a failed copy of the logs skipped the stop"
+            assert not profile.dir.exists(), profile.dir
+    return ("Rex live up and down: a failed up stops what it started, a second up proves a fresh "
+            "block, down stops the profile's Herdr, and a failed log copy still stops it")
+
+
 def check_syntax(kit):
     for path in sorted((kit / "lib").glob("*.py")):
         ast.parse(path.read_text(), str(path), feature_version=(3, 9))
@@ -934,6 +1013,26 @@ def check_checklist_prompts(kit):
     return "CHECKLIST.md still has the prompts test sends"
 
 
+def check_rex_live_down_after_a_failed_stop(scratch):
+    stopped = []
+    profile = SimpleNamespace(dir=scratch / "rex-live-down", state={}, save=lambda: None,
+                              stop_server=lambda: stopped.append("herdr"),
+                              run=lambda *args, **kwargs: stopped.append("codex"),
+                              kill_leftovers=lambda: stopped.append("leftovers"))
+
+    def failing_stop(lane):
+        raise RuntimeError("the scratch Rex socket remains")
+
+    with patch.object(rex_live.Lane, "stop", failing_stop):
+        try:
+            rex_live.down(profile)
+            raise AssertionError("a failed stop passed")
+        except RuntimeError as error:
+            assert str(error) == "the scratch Rex socket remains", error
+    assert stopped == ["herdr", "codex", "leftovers"], stopped
+    return "Rex live down: a failed Rex stop still stops the profile's Herdr and leftovers"
+
+
 def run(kit):
     passed = True
     with tempfile.TemporaryDirectory(prefix="nd-tb-selftest-") as scratch:
@@ -948,6 +1047,8 @@ def run(kit):
                   ("Rex lane", lambda: check_rex_lane(base)),
                   ("Rex lane cleanup", lambda: check_rex_lane_cleanup(base)),
                   ("Rex live hooks", lambda: check_rex_live_hooks(base)),
+                  ("Rex live up and down", lambda: check_rex_live_up_and_down(base)),
+                  ("Rex live down", lambda: check_rex_live_down_after_a_failed_stop(base)),
                   ("syntax", lambda: check_syntax(kit)),
                   ("screens", check_screens),
                   ("transcripts", check_transcripts),

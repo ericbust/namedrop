@@ -13,10 +13,10 @@ use namedrop::{
     StateNamespace, StateStore, ThreadId, complete_capability_profile, diagnose_collaboration,
     drain_mailboxes, execute_integration_operation, issue_registration_challenge,
     mux::{
-        AgentState, Depth, Effect, InputOutcome, Key, Recipient as KeysFor, Style, Wrap,
+        AgentState, Depth, Effect, InputOutcome, Key, MuxError, Recipient as KeysFor, Style, Wrap,
         fake::{
-            CHECKOUT_LISTINGS, FakeMux, Listing, ScopeKind, ScreenShape, SentInput, StrictSpace,
-            Takes, runs,
+            CHECKOUT_LISTINGS, FakeMux, Listing, Op, ScopeKind, ScreenShape, SentInput,
+            StrictSpace, Takes, runs,
         },
     },
     recheck_drafts,
@@ -86,9 +86,9 @@ fn key_word(key: Key) -> &'static str {
 }
 
 impl Recipient {
-    fn new(host: AgentRuntime, status: &str) -> Self {
+    fn new(endpoint: &str, host: AgentRuntime, status: &str) -> Self {
         let world = FakeMux::world()
-            .endpoint("socket-a")
+            .endpoint(endpoint)
             .space("workspace-1")
             .checkout("/repo")
             .unstamped()
@@ -210,6 +210,8 @@ impl IdGenerator for SequenceIds {
 }
 
 struct Fixture {
+    /// The runtime's `session_socket_id`: Herdr's socket, or a `rex:` endpoint.
+    endpoint: &'static str,
     root: PathBuf,
     home: PathBuf,
     herdr: Recipient,
@@ -237,6 +239,11 @@ impl Fixture {
     /// @recipient, a `host` agent Herdr reads as `status`, with one message
     /// from the person queued for it.
     fn new(host: AgentRuntime, status: &str) -> Self {
+        Self::on("socket-a", host, status)
+    }
+
+    /// `new` on the multiplexer `endpoint` names.
+    fn on(endpoint: &'static str, host: AgentRuntime, status: &str) -> Self {
         let root = std::env::temp_dir().join(format!(
             "namedrop-between-turns-{}-{}",
             std::process::id(),
@@ -244,13 +251,14 @@ impl Fixture {
         ));
         fs::create_dir_all(root.join("home")).unwrap();
         let fixture = Self {
-            herdr: Recipient::new(host, status),
+            endpoint,
+            herdr: Recipient::new(endpoint, host, status),
             clock: TestClock::default(),
             ids: SequenceIds(AtomicU64::new(1)),
             home: root.join("home"),
             root,
         };
-        let namespace = StateNamespace::for_space("socket-a", "workspace-1");
+        let namespace = StateNamespace::for_space(endpoint, "workspace-1");
         let attribution = MutationAttribution::new(ActorKind::Plugin, "test", 10);
         let author = address("address-author", "author");
         let recipient = address("address-recipient", "recipient");
@@ -335,7 +343,7 @@ impl Fixture {
             cwd: Path::new("/repo"),
             workspace_id: None,
             current_pane_id: Some("pane-recipient"),
-            session_socket_id: "socket-a",
+            session_socket_id: self.endpoint,
             mux: &self.herdr.space,
             clock: &self.clock,
             ids: &self.ids,
@@ -343,7 +351,7 @@ impl Fixture {
     }
 
     fn edge(&self, edge: TurnEdge, at_ms: u64) {
-        record(self.state(), "socket-a", SESSION, edge, at_ms);
+        record(self.state(), self.endpoint, SESSION, edge, at_ms);
     }
 
     fn screen(&self, screen: Option<&str>) {
@@ -618,7 +626,7 @@ impl Fixture {
     fn sent_mention(&self, at_ms: u64, prompt: &str) {
         self.edge(TurnEdge::Prompt, at_ms);
         self.edge(TurnEdge::Blocked, at_ms);
-        record_restored(self.state(), "socket-a", SESSION, at_ms, prompt);
+        record_restored(self.state(), self.endpoint, SESSION, at_ms, prompt);
     }
 
     /// The keys each call pressed in the pane since the last call.
@@ -914,5 +922,61 @@ fn the_recheck_stops_once_no_draft_holds_mail() {
     assert!(report.draft_held.is_empty(), "{report:?}");
     delivered.set_status("working");
     let (report, _) = delivered.drain_report();
+    assert!(report.draft_held.is_empty(), "{report:?}");
+}
+
+const REX: &str = "rex:/tmp/nd-test-rex.sock";
+
+/// On Rex, a screen fault is no proof that the box is empty: the read
+/// failed, or the screen held an escape sequence the box reader would
+/// misread. So mail to an idle agent waits, Doctor names the fault, and the
+/// draft recheck reads the screen again until a read works.
+#[test]
+fn a_rex_screen_fault_holds_mail_to_an_idle_agent_until_a_read_works() {
+    let refused = "Rex's screen holds an escape sequence Namedrop does not read: \"\\u{1b}[2J\"";
+    for fault in [None, Some(refused)] {
+        let fixture = Fixture::on(REX, AgentRuntime::ClaudeCode, "idle");
+        let fail = || match fault {
+            None => fixture.screen(None),
+            Some(why) => fixture
+                .herdr
+                .space
+                .fail(Op::Screen, MuxError::Unavailable(why.into())),
+        };
+        fail();
+        let (held, typed) = fixture.drain_report();
+        assert_eq!(typed, Vec::<String>::new(), "{fault:?}");
+        assert_eq!(held.draft_held.len(), 1, "{fault:?}: {held:?}");
+
+        fail();
+        let waiting = fixture.long_wait().expect("Doctor lists the pane");
+        assert_eq!(waiting.diagnostic["held_by"], "screen_unread", "{fault:?}");
+        assert_eq!(waiting.diagnostic["pane_id"], "pane-recipient");
+        if let Some(why) = fault {
+            assert_eq!(waiting.diagnostic["screen_fault"], why);
+            assert!(waiting.explanation.contains(why), "{}", waiting.explanation);
+        }
+
+        fail();
+        let (still, typed) = fixture.recheck(&held);
+        assert_eq!(typed, Vec::<String>::new(), "{fault:?}");
+        assert_eq!(still.draft_held.len(), 1, "{fault:?}: {still:?}");
+
+        fixture.screen(Some(EMPTY_BOX));
+        let (delivered, typed) = fixture.recheck(&still);
+        assert_eq!(typed.len(), 1, "{fault:?}: {typed:?}");
+        assert!(delivered.draft_held.is_empty(), "{fault:?}: {delivered:?}");
+    }
+}
+
+/// Herdr's idle stays the proof a prompt may go in, as before Namedrop read
+/// the box, so a failed read on a Herdr endpoint still delivers, and Doctor's
+/// diagnostic for Herdr holds no screen fault.
+#[test]
+fn a_herdr_screen_read_that_fails_still_delivers_to_an_idle_agent() {
+    let fixture = Fixture::new(AgentRuntime::ClaudeCode, "idle");
+    fixture.screen(None);
+    let (report, typed) = fixture.drain_report();
+    assert_eq!(typed.len(), 1, "{typed:?}");
     assert!(report.draft_held.is_empty(), "{report:?}");
 }

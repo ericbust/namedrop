@@ -1,0 +1,60 @@
+{
+ "about": "zsh running sleep 300 under login",
+ "program_status": {
+  "records": []
+ },
+ "process": {
+  "last_exit": null,
+  "child": {
+   "pid": 70814,
+   "user_id": 0,
+   "user": "root",
+   "name": "login",
+   "path": "/usr/bin/login"
+  },
+  "foreground": {
+   "pid": 75319,
+   "user_id": 501,
+   "user": "me",
+   "name": "sleep",
+   "path": "/bin/sleep",
+   "invoked_path": "/bin/sleep",
+   "argv0": "sleep",
+   "cwd": "/private/tmp"
+  },
+  "ancestors": [
+   {
+    "pid": 70829,
+    "user_id": 501,
+    "user": "me",
+    "name": "zsh",
+    "path": "/bin/zsh",
+    "invoked_path": "/bin/zsh",
+    "argv0": "-zsh",
+    "cwd": "/private/tmp"
+   },
+   {
+    "pid": 70814,
+    "user_id": 0,
+    "user": "root",
+    "name": "login",
+    "path": "/usr/bin/login"
+   }
+  ],
+  "home": "/Users/me"
+ },
+ "local": {
+  "70814": {
+   "group": 70814,
+   "state": "alive"
+  },
+  "70829": {
+   "group": 70829,
+   "state": "alive"
+  },
+  "75319": {
+   "group": 75319,
+   "state": "alive"
+  }
+ }
+}

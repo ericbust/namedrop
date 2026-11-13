@@ -11,10 +11,8 @@ pub mod herdr;
 mod input;
 mod model;
 mod ports;
-// Tests are the Rex adapter's only callers until `mux::connect` reaches it,
-// so the library build leaves it out.
-#[cfg(test)]
-mod rex;
+mod processes;
+pub(crate) mod rex;
 
 pub use effect::*;
 pub use event::*;
@@ -22,25 +20,39 @@ pub use input::*;
 pub use model::*;
 pub use ports::*;
 
-use std::sync::{Arc, atomic::AtomicBool};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, atomic::AtomicBool},
+};
 
 /// The one way to reach the multiplexer an endpoint names. Each command keeps
-/// to `budget` and stops once `cancelled` is set.
+/// to `budget` and stops once `cancelled` is set. A Rex connection reads its
+/// session bindings from the state directory `state`.
 pub fn connect(
+    state: &Path,
     endpoint: &Endpoint,
     budget: Budget,
     cancelled: Arc<AtomicBool>,
 ) -> Result<Arc<dyn Mux>, MuxError> {
     match endpoint.kind {
         MuxKind::Herdr => Ok(herdr::connect(Some(&endpoint.key), budget, cancelled)),
-        MuxKind::Rex => Err(MuxError::Unavailable(
-            "the Rex adapter is not built yet".into(),
-        )),
+        MuxKind::Rex => rex::connect(state, endpoint, budget, cancelled),
     }
 }
 
-/// `connect` for code that is handed a `MuxConnector`, such as the dashboard.
-pub struct Connector;
+/// `connect` for code that is handed a `MuxConnector`, such as the dashboard,
+/// for the state directory it serves.
+pub struct Connector {
+    state: PathBuf,
+}
+
+impl Connector {
+    pub fn new(state: &Path) -> Self {
+        Self {
+            state: state.to_owned(),
+        }
+    }
+}
 
 impl MuxConnector for Connector {
     fn connect(
@@ -49,7 +61,7 @@ impl MuxConnector for Connector {
         budget: Budget,
         cancelled: Arc<AtomicBool>,
     ) -> Result<Arc<dyn Mux>, MuxError> {
-        connect(&Endpoint::parse(endpoint), budget, cancelled)
+        connect(&self.state, &Endpoint::parse(endpoint), budget, cancelled)
     }
 }
 
@@ -58,34 +70,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_herdr_endpoint_connects_to_herdr_and_a_rex_endpoint_is_refused() {
-        for connected in [
-            connect(
-                &Endpoint::parse("/tmp/h.sock"),
-                Budget::ADAPTER_DEFAULT,
-                Arc::default(),
-            ),
-            Connector.connect("/tmp/h.sock", Budget::ADAPTER_DEFAULT, Arc::default()),
-        ] {
-            assert_eq!(
-                connected.map(|mux| mux.endpoint().clone()).ok(),
-                Some(Endpoint::parse("/tmp/h.sock"))
-            );
+    fn each_endpoint_connects_to_the_multiplexer_its_kind_names() {
+        let state = Path::new("/nonexistent-state");
+        let connector = Connector::new(state);
+        for endpoint in ["/tmp/h.sock", "rex:/tmp/r.sock"] {
+            for connected in [
+                connect(
+                    state,
+                    &Endpoint::parse(endpoint),
+                    Budget::ADAPTER_DEFAULT,
+                    Arc::default(),
+                ),
+                connector.connect(endpoint, Budget::ADAPTER_DEFAULT, Arc::default()),
+            ] {
+                assert_eq!(
+                    connected.map(|mux| mux.endpoint().clone()).ok(),
+                    Some(Endpoint::parse(endpoint))
+                );
+            }
         }
-        for refused in [
+        assert_eq!(
             connect(
-                &Endpoint::parse("rex:/tmp/r.sock"),
+                state,
+                &Endpoint::parse("rex:r.sock"),
                 Budget::ADAPTER_DEFAULT,
-                Arc::default(),
-            ),
-            Connector.connect("rex:/tmp/r.sock", Budget::ADAPTER_DEFAULT, Arc::default()),
-        ] {
-            assert_eq!(
-                refused.map(|_| ()),
-                Err(MuxError::Unavailable(
-                    "the Rex adapter is not built yet".into()
-                ))
-            );
-        }
+                Arc::default()
+            )
+            .map(|_| ()),
+            Err(MuxError::Unavailable(
+                "rex:r.sock names no Rex server's Unix socket".into()
+            ))
+        );
+    }
+
+    /// Nothing is dialed until a port call, and a call to a socket nothing
+    /// serves fails without a Herdr command.
+    #[test]
+    fn a_rex_connection_reaches_rex_and_never_herdr() {
+        let state = Path::new("/nonexistent-state");
+        let rex = connect(
+            state,
+            &Endpoint::parse("rex:/nonexistent-namedrop-rex.sock"),
+            Budget::ADAPTER_DEFAULT,
+            Arc::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            rex.survey(Scope::All, Depth::Spaces),
+            Err(MuxError::Unavailable(why)) if why.starts_with("could not reach Rex at /nonexistent-namedrop-rex.sock")
+        ));
     }
 }

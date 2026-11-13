@@ -45,15 +45,18 @@ pub(super) struct WebSocket<S> {
     close_sent: bool,
     /// The subprotocol asked for, until the server's answer to the upgrade is read.
     upgrade: Option<String>,
+    /// Bytes queued for the server and not yet written, so a write cut short
+    /// by a timeout resumes where it stopped.
+    outgoing: Vec<u8>,
 }
 
 impl<S: Read + Write> WebSocket<S> {
-    /// Sends the upgrade request. `upgrade`, or the first `recv` or
-    /// `send_text`, reads the answer. Skips the `Sec-WebSocket-Accept` check,
+    /// Queues the upgrade request. `upgrade`, or the first `recv` or
+    /// `send_text`, writes it and reads the answer. Skips the `Sec-WebSocket-Accept` check,
     /// which needs SHA-1, which no dependency provides. The Rex adapter dials
     /// only a Unix socket on this machine.
     pub(super) fn connect(
-        mut stream: S,
+        stream: S,
         path: &str,
         protocol: &str,
         max_message: usize,
@@ -64,9 +67,8 @@ impl<S: Read + Write> WebSocket<S> {
              Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\n\
              Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Protocol: {protocol}\r\n\r\n"
         );
-        stream.write_all(request.as_bytes())?;
-        stream.flush()?;
         Ok(Self {
+            outgoing: request.into_bytes(),
             stream,
             buffer: Vec::new(),
             fragmented: None,
@@ -77,12 +79,25 @@ impl<S: Read + Write> WebSocket<S> {
         })
     }
 
-    /// Reads the server's answer to the upgrade, once. A read that times out
-    /// keeps what it read, so the next call resumes it.
+    /// Writes the upgrade request and reads the server's answer, once. A
+    /// read or write that times out keeps its place, so the next call
+    /// resumes it.
+    #[cfg(test)]
     pub(super) fn upgrade(&mut self) -> Result<(), WsError> {
+        while !self.try_upgrade()? {}
+        Ok(())
+    }
+
+    /// `upgrade` with at most one read, for a caller that checks its
+    /// deadline between reads. `false` while the answer is incomplete.
+    pub(super) fn try_upgrade(&mut self) -> Result<bool, WsError> {
         let Some(protocol) = self.upgrade.clone() else {
-            return Ok(());
+            return Ok(true);
         };
+        if !self.flush()? {
+            return Ok(false);
+        }
+        let mut filled = false;
         let end = loop {
             if let Some(end) = self.buffer.windows(4).position(|w| w == b"\r\n\r\n") {
                 break end;
@@ -92,7 +107,11 @@ impl<S: Read + Write> WebSocket<S> {
                     "the upgrade answer's headers are too long".into(),
                 ));
             }
+            if filled {
+                return Ok(false);
+            }
             self.fill()?;
+            filled = true;
         };
         let head = String::from_utf8_lossy(&self.buffer[..end]).into_owned();
         self.buffer.drain(..end + 4);
@@ -116,7 +135,7 @@ impl<S: Read + Write> WebSocket<S> {
             )));
         }
         self.upgrade = None;
-        Ok(())
+        Ok(true)
     }
 
     pub(super) fn stream(&self) -> &S {
@@ -131,9 +150,50 @@ impl<S: Read + Write> WebSocket<S> {
         self.allowance = bytes;
     }
 
+    #[cfg(test)]
     pub(super) fn send_text(&mut self, text: &str) -> Result<(), WsError> {
         self.upgrade()?;
-        self.write_frame(TEXT, text.as_bytes())
+        self.queue_text(text)?;
+        self.flush_all()
+    }
+
+    /// Queues a text message for `flush`, once the upgrade was answered.
+    pub(super) fn queue_text(&mut self, text: &str) -> Result<(), WsError> {
+        if self.upgrade.is_some() {
+            return Err(WsError::Protocol(
+                "a message was queued before the upgrade was answered".into(),
+            ));
+        }
+        self.queue_frame(TEXT, text.as_bytes())
+    }
+
+    /// One write of what is queued. `true` once nothing is left.
+    pub(super) fn flush(&mut self) -> Result<bool, WsError> {
+        if self.outgoing.is_empty() {
+            return Ok(true);
+        }
+        let written = self.stream.write(&self.outgoing)?;
+        if written == 0 {
+            return Err(WsError::Closed {
+                code: None,
+                reason: "the connection takes no more bytes".into(),
+            });
+        }
+        self.outgoing.drain(..written);
+        if self.outgoing.is_empty() {
+            self.stream.flush()?;
+        }
+        Ok(self.outgoing.is_empty())
+    }
+
+    /// Whether queued bytes are still unwritten, as after a write cut short.
+    pub(super) fn unsent(&self) -> bool {
+        !self.outgoing.is_empty()
+    }
+
+    fn flush_all(&mut self) -> Result<(), WsError> {
+        while !self.flush()? {}
+        Ok(())
     }
 
     /// Sends nothing before the upgrade is answered, because no WebSocket
@@ -143,25 +203,44 @@ impl<S: Read + Write> WebSocket<S> {
             return Ok(());
         }
         self.close_sent = true;
-        self.write_frame(CLOSE, &code.to_be_bytes())
+        self.queue_frame(CLOSE, &code.to_be_bytes())?;
+        self.flush_all()
     }
 
+    #[cfg(test)]
     pub(super) fn recv(&mut self) -> Result<Message, WsError> {
-        self.upgrade()?;
+        loop {
+            if let Some(message) = self.try_recv()? {
+                return Ok(message);
+            }
+        }
+    }
+
+    /// `recv` with at most one read, for a caller that checks its deadline
+    /// between reads. `None` while the next message is incomplete.
+    pub(super) fn try_recv(&mut self) -> Result<Option<Message>, WsError> {
+        if !self.try_upgrade()? {
+            return Ok(None);
+        }
+        let mut filled = false;
         loop {
             let Some(frame) = self.take_frame()? else {
+                if filled {
+                    return Ok(None);
+                }
                 self.fill()?;
+                filled = true;
                 continue;
             };
             match frame.opcode {
                 // A failed write may have sent part of the pong, so it ends
                 // the connection rather than reading as a read that timed out.
                 PING => {
-                    self.write_frame(PONG, &frame.payload)
-                        .map_err(|_| WsError::Closed {
-                            code: None,
-                            reason: "the pong could not be sent".into(),
-                        })?;
+                    self.queue_frame(PONG, &frame.payload)?;
+                    self.flush_all().map_err(|_| WsError::Closed {
+                        code: None,
+                        reason: "the pong could not be sent".into(),
+                    })?;
                 }
                 PONG => {}
                 CLOSE => {
@@ -173,7 +252,12 @@ impl<S: Read + Write> WebSocket<S> {
                         String::from_utf8_lossy(frame.payload.get(2..).unwrap_or(&[])).into_owned();
                     if !self.close_sent {
                         self.close_sent = true;
-                        let _ = self.write_frame(CLOSE, frame.payload.get(..2).unwrap_or(&[]));
+                        if self
+                            .queue_frame(CLOSE, frame.payload.get(..2).unwrap_or(&[]))
+                            .is_ok()
+                        {
+                            let _ = self.flush_all();
+                        }
                     }
                     return Err(WsError::Closed { code, reason });
                 }
@@ -182,7 +266,9 @@ impl<S: Read + Write> WebSocket<S> {
                         "a message began inside a fragmented one".into(),
                     ));
                 }
-                TEXT | BINARY if frame.fin => return message(frame.opcode, frame.payload),
+                TEXT | BINARY if frame.fin => {
+                    return message(frame.opcode, frame.payload).map(Some);
+                }
                 TEXT | BINARY => self.fragmented = Some((frame.opcode, frame.payload)),
                 CONTINUATION => {
                     let Some((opcode, mut payload)) = self.fragmented.take() else {
@@ -192,7 +278,7 @@ impl<S: Read + Write> WebSocket<S> {
                     };
                     payload.extend(frame.payload);
                     if frame.fin {
-                        return message(opcode, payload);
+                        return message(opcode, payload).map(Some);
                     }
                     self.fragmented = Some((opcode, payload));
                 }
@@ -270,8 +356,10 @@ impl<S: Read + Write> WebSocket<S> {
         Ok(())
     }
 
-    fn write_frame(&mut self, opcode: u8, payload: &[u8]) -> Result<(), WsError> {
-        let mut frame = Vec::with_capacity(payload.len() + 14);
+    fn queue_frame(&mut self, opcode: u8, payload: &[u8]) -> Result<(), WsError> {
+        let mask = random::<4>()?;
+        let frame = &mut self.outgoing;
+        frame.reserve(payload.len() + 14);
         frame.push(0x80 | opcode);
         match payload.len() {
             length @ 0..=125 => frame.push(0x80 | length as u8),
@@ -284,7 +372,6 @@ impl<S: Read + Write> WebSocket<S> {
                 frame.extend_from_slice(&(length as u64).to_be_bytes());
             }
         }
-        let mask = random::<4>()?;
         frame.extend_from_slice(&mask);
         frame.extend(
             payload
@@ -292,8 +379,6 @@ impl<S: Read + Write> WebSocket<S> {
                 .zip(mask.iter().cycle())
                 .map(|(byte, key)| byte ^ key),
         );
-        self.stream.write_all(&frame)?;
-        self.stream.flush()?;
         Ok(())
     }
 }

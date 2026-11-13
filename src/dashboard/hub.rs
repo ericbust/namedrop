@@ -1342,7 +1342,7 @@ mod tests {
 
     fn test_hub(files: &ServerFiles) -> Hub<'_> {
         Hub {
-            mux: Arc::new(crate::mux::Connector),
+            mux: Arc::new(crate::mux::Connector::new(std::path::Path::new(""))),
             files,
             instance: "test",
             idle: Duration::from_secs(60),

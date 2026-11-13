@@ -41,8 +41,67 @@ impl Timed for UnixStream {
 }
 
 pub(super) struct Limits<'a> {
-    pub budget: &'a (dyn Fn() -> Result<Budget, String> + 'a),
+    pub budget: Box<dyn Fn() -> Result<Budget, String> + 'a>,
     pub cancelled: &'a AtomicBool,
+}
+
+/// Opens one control connection: upgrade, hello, welcome. Scripted in tests.
+pub(super) trait Wire: Send + Sync {
+    /// The connection and the pid of the process at its other end. Each
+    /// request is held to `narrower` as well as to the wire's own budget.
+    fn open<'a>(&'a self, narrower: Narrower<'a>) -> Result<(Box<dyn Control + 'a>, u32), Fault>;
+    /// The timeout of the budget now, for a caller that must know before it
+    /// starts whether a whole call fits.
+    fn timeout(&self) -> Result<Duration, String>;
+}
+
+/// What a `within` adds to a wire's limits. Its budget is asked for before
+/// each request, and its flag, when it has one, cancels in place of the
+/// wire's own.
+pub(super) struct Narrower<'a> {
+    pub budget: Box<dyn Fn() -> Result<Budget, String> + 'a>,
+    pub cancelled: Option<&'a AtomicBool>,
+}
+
+impl Narrower<'_> {
+    pub(super) fn none() -> Self {
+        Self {
+            budget: Box::new(|| Ok(Budget::ADAPTER_DEFAULT)),
+            cancelled: None,
+        }
+    }
+}
+
+impl<W: Wire + ?Sized> Wire for &W {
+    fn open<'a>(&'a self, narrower: Narrower<'a>) -> Result<(Box<dyn Control + 'a>, u32), Fault> {
+        (**self).open(narrower)
+    }
+
+    fn timeout(&self) -> Result<Duration, String> {
+        (**self).timeout()
+    }
+}
+
+pub(super) trait Control {
+    /// One request and its response.
+    fn request(&mut self, method: &str, payload: Option<Value>) -> Result<Reply, Fault>;
+    /// A buffered event, or the next to arrive within `within`. A zero wait
+    /// still reads what the socket already holds.
+    fn next_event(&mut self, within: Duration) -> Result<Option<Event>, Fault>;
+}
+
+impl<S: Timed> Control for Connection<'_, S> {
+    fn request(&mut self, method: &str, payload: Option<Value>) -> Result<Reply, Fault> {
+        let replied = self.try_request(method, payload);
+        self.settle(replied)
+    }
+
+    /// `Duration::MAX` waits until an event arrives or the flag is set.
+    /// Events buffered before the connection broke are still returned.
+    fn next_event(&mut self, within: Duration) -> Result<Option<Event>, Fault> {
+        let next = self.try_next_event(within);
+        self.settle(next)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -91,13 +150,12 @@ impl<'a, S: Timed> Connection<'a, S> {
     /// The upgrade, hello, and welcome together take one request's budget
     /// and stop when the flag is set.
     pub(super) fn open(stream: S, limits: Limits<'a>) -> Result<Self, Fault> {
-        let timeout_limit = timeout_cap(std::env::var("NAMEDROP_REX_TIMEOUT_MS").ok().as_deref());
+        let timeout_limit = request_timeout_cap();
         let budget = request_budget(&limits, timeout_limit)?;
         if budget.timeout.is_zero() {
             return Err(Fault::Timeout(budget.timeout));
         }
         let deadline = Instant::now() + budget.timeout;
-        stream.write_within(budget.timeout);
         let mut socket = WebSocket::connect(stream, "/api/control", PROTOCOL, MAX_CALL_BYTES)
             .map_err(|error| fault(error, budget.timeout))?;
         socket.set_allowance(MAX_CALL_BYTES);
@@ -110,16 +168,8 @@ impl<'a, S: Timed> Connection<'a, S> {
             max_request: usize::MAX,
             broken: false,
         };
-        connection
-            .poll(Some(deadline), budget.timeout, WebSocket::upgrade)?
-            .ok_or(Fault::Timeout(budget.timeout))?;
-        let hello = json!({
-            "type": "hello",
-            "api_revision": API_REVISION,
-            "api_min_revision": API_REVISION,
-            "client": {"kind": "other", "name": "namedrop", "version": env!("CARGO_PKG_VERSION")},
-        });
-        let welcome = connection.exchange(budget, deadline, &hello, |_| true)?;
+        let welcome = connection.handshake(budget, deadline);
+        let welcome = connection.settle(welcome)?;
         let limit = welcome["limits"]["max_message_bytes"].as_u64();
         match (
             welcome["type"].as_str(),
@@ -137,9 +187,23 @@ impl<'a, S: Timed> Connection<'a, S> {
         }
     }
 
-    pub(super) fn request(&mut self, method: &str, payload: Option<Value>) -> Result<Reply, Fault> {
-        let replied = self.try_request(method, payload);
-        self.settle(replied)
+    /// The upgrade request and its answer, the hello, and the welcome.
+    fn handshake(&mut self, budget: Budget, deadline: Instant) -> Result<Value, Fault> {
+        self.poll(Some(deadline), budget.timeout, Way::Write, |socket| {
+            socket.flush().map(|done| done.then_some(()))
+        })?
+        .ok_or(Fault::Timeout(budget.timeout))?;
+        self.poll(Some(deadline), budget.timeout, Way::Read, |socket| {
+            socket.try_upgrade().map(|done| done.then_some(()))
+        })?
+        .ok_or(Fault::Timeout(budget.timeout))?;
+        let hello = json!({
+            "type": "hello",
+            "api_revision": API_REVISION,
+            "api_min_revision": API_REVISION,
+            "client": {"kind": "other", "name": "namedrop", "version": env!("CARGO_PKG_VERSION")},
+        });
+        self.exchange(budget, deadline, &hello, |_| true)
     }
 
     fn try_request(&mut self, method: &str, payload: Option<Value>) -> Result<Reply, Fault> {
@@ -174,15 +238,6 @@ impl<'a, S: Timed> Connection<'a, S> {
             seq,
             payload: response.get("payload").cloned().unwrap_or(Value::Null),
         })
-    }
-
-    /// A buffered event, or the next to arrive within `within`. A zero wait
-    /// still reads what the socket already holds, and `Duration::MAX` waits
-    /// until an event arrives or the flag is set. Events buffered before the
-    /// connection broke are still returned.
-    pub(super) fn next_event(&mut self, within: Duration) -> Result<Option<Event>, Fault> {
-        let next = self.try_next_event(within);
-        self.settle(next)
     }
 
     fn try_next_event(&mut self, within: Duration) -> Result<Option<Event>, Fault> {
@@ -246,10 +301,13 @@ impl<'a, S: Timed> Connection<'a, S> {
         if left.is_zero() {
             return Err(Fault::Timeout(timeout));
         }
-        self.socket.stream().write_within(left);
         self.socket
-            .send_text(text)
+            .queue_text(text)
             .map_err(|error| fault(error, timeout))?;
+        self.poll(Some(deadline), timeout, Way::Write, |socket| {
+            socket.flush().map(|done| done.then_some(()))
+        })?
+        .ok_or(Fault::Timeout(timeout))?;
         loop {
             let Some(message) = self.receive(Some(deadline), timeout)? else {
                 return Err(Fault::Timeout(timeout));
@@ -269,7 +327,7 @@ impl<'a, S: Timed> Connection<'a, S> {
         deadline: Option<Instant>,
         limit: Duration,
     ) -> Result<Option<Value>, Fault> {
-        match self.poll(deadline, limit, WebSocket::recv)? {
+        match self.poll(deadline, limit, Way::Read, WebSocket::try_recv)? {
             None => Ok(None),
             Some(Message::Text(text)) => serde_json::from_str(&text)
                 .map(Some)
@@ -280,16 +338,19 @@ impl<'a, S: Timed> Connection<'a, S> {
         }
     }
 
-    /// Runs `step` in reads of at most `CANCEL_POLL` until it finishes, the
-    /// deadline passes, or the flag is set. A deadline already passed still
-    /// gets one read that does not wait, and no deadline waits for the flag.
+    /// Runs `step`, each run one read or one write of at most `CANCEL_POLL`,
+    /// until it finishes, the deadline passes, or the flag is set. A step
+    /// that made progress and is not done answers `None`. A deadline already
+    /// passed still gets one run that does not wait, and no deadline waits
+    /// for the flag.
     fn poll<T>(
         &mut self,
         deadline: Option<Instant>,
         limit: Duration,
-        mut step: impl FnMut(&mut WebSocket<S>) -> Result<T, WsError>,
+        way: Way,
+        mut step: impl FnMut(&mut WebSocket<S>) -> Result<Option<T>, WsError>,
     ) -> Result<Option<T>, Fault> {
-        let mut read = false;
+        let mut ran = false;
         loop {
             if self.limits.cancelled.load(Ordering::Relaxed) {
                 return Err(Fault::Cancelled);
@@ -297,13 +358,18 @@ impl<'a, S: Timed> Connection<'a, S> {
             let left = deadline.map_or(CANCEL_POLL, |deadline| {
                 deadline.saturating_duration_since(Instant::now())
             });
-            if left.is_zero() && read {
+            if left.is_zero() && ran {
                 return Ok(None);
             }
-            read = true;
-            self.socket.stream().read_within(left.min(CANCEL_POLL));
+            ran = true;
+            let stream = self.socket.stream();
+            match way {
+                Way::Read => stream.read_within(left.min(CANCEL_POLL)),
+                Way::Write => stream.write_within(left.min(CANCEL_POLL)),
+            }
             match step(&mut self.socket) {
-                Ok(done) => return Ok(Some(done)),
+                Ok(Some(done)) => return Ok(Some(done)),
+                Ok(None) => {}
                 Err(WsError::Io(error))
                     if timed_out(&error) || error.kind() == io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(fault(error, limit)),
@@ -312,8 +378,20 @@ impl<'a, S: Timed> Connection<'a, S> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Way {
+    Read,
+    Write,
+}
+
+/// A write cut short leaves half a frame on the wire, so a close frame after
+/// it would be garbage. Otherwise the close is written as each step writes,
+/// within `CANCEL_POLL`, the last write timeout `poll` set.
 impl<S: Timed> Drop for Connection<'_, S> {
     fn drop(&mut self) {
+        if self.socket.unsent() {
+            return;
+        }
         let _ = self.socket.close(1000);
     }
 }
@@ -329,12 +407,26 @@ fn request_budget(limits: &Limits<'_>, cap: Duration) -> Result<Budget, Fault> {
     })
 }
 
+/// The most any one request may take: `NAMEDROP_REX_TIMEOUT_MS`, or 5 s.
+fn request_timeout_cap() -> Duration {
+    timeout_cap(std::env::var("NAMEDROP_REX_TIMEOUT_MS").ok().as_deref())
+}
+
 fn timeout_cap(value: Option<&str>) -> Duration {
+    explicit_cap(value).unwrap_or(DEFAULT_TIMEOUT)
+}
+
+/// `NAMEDROP_REX_TIMEOUT_MS` when it is set to a usable value, without the
+/// 5 s default.
+pub(super) fn explicit_timeout_cap() -> Option<Duration> {
+    explicit_cap(std::env::var("NAMEDROP_REX_TIMEOUT_MS").ok().as_deref())
+}
+
+fn explicit_cap(value: Option<&str>) -> Option<Duration> {
     value
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|milliseconds| *milliseconds > 0)
-        .map_or(DEFAULT_TIMEOUT, Duration::from_millis)
-        .min(MAX_TIMEOUT)
+        .map(|milliseconds| Duration::from_millis(milliseconds).min(MAX_TIMEOUT))
 }
 
 fn parse_event(message: &Value) -> Result<Event, Fault> {
