@@ -134,7 +134,7 @@ where
     )?;
 
     let mut warnings = Vec::new();
-    let observing_pane = std::env::var("HERDR_PANE_ID").ok();
+    let observing_pane = crate::locator::Locator::Pane.env();
     let visible = visible_panes(
         &discovered,
         origin,

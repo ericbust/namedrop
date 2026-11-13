@@ -1075,6 +1075,49 @@ fn the_installed_stop_hook_settles_through_the_cli_pipeline() {
     assert_eq!(space.claims()[0]["state"], json!({"done":"replied"}));
 }
 
+/// The binary as a host with no Herdr names runs it, the space and pane given
+/// under the neutral names instead.
+fn neutral(space: &Space, pane: &str) -> Command {
+    let mut command = space.command();
+    command
+        .env_remove("HERDR_SOCKET_PATH")
+        .env("NAMEDROP_ENDPOINT", "socket-a")
+        .env("NAMEDROP_SPACE_ID", "workspace-1")
+        .env("NAMEDROP_PANE_ID", pane);
+    command
+}
+
+/// The Stop hook finds its claim under `NAMEDROP_ENDPOINT` alone and settles
+/// the delivery from the final answer.
+#[test]
+fn the_installed_stop_hook_settles_under_neutral_names() {
+    let space = Space::new();
+    dispatch::message(
+        "send",
+        json!({"request_id":"ask","source":"@reviewer Reply with the single word pong.",
+               "author_kind":"agent_session"}),
+        &space.runtime("pane-lead"),
+    )
+    .unwrap();
+    let ask = space.herdr.envelope_for("pane-reviewer");
+    let attempt = ask["control"]["attempt_id"].as_str().unwrap().to_owned();
+    space.prompt(
+        "pane-reviewer",
+        "session-reviewer",
+        CLAUDE,
+        &ask.to_string(),
+    );
+    space
+        .start_installed_stop_in(
+            neutral(&space, "pane-reviewer"),
+            json!({"hook_event_name":"Stop","session_id":"session-reviewer",
+                   "prompt_id":CLAUDE.1,"last_assistant_message":"pong","background_tasks":[]}),
+        )
+        .wait();
+    assert_eq!(space.dispositions(), [vec![attempt, "reply".to_owned()]]);
+    assert_eq!(space.claims()[0]["state"], json!({"done":"replied"}));
+}
+
 /// The bound reply of `envelope` with `source` as its text, as the agent
 /// runs it.
 fn bound_reply(space: &Space, envelope: &Value, source: &str) -> Value {
@@ -6127,6 +6170,25 @@ fn a_prompt_whose_hook_cannot_check_its_pane_still_starts_the_turn() {
     command.env("HERDR_PANE_ID", "pane-reviewer");
     space
         .start_reviewer_prompt_in(command, "Run the tests.")
+        .wait();
+    assert!(
+        matches!(
+            space.reviewer_phase(),
+            Some(namedrop::turn_phase::TurnPhase::Prompted { .. })
+        ),
+        "{:?}",
+        space.reviewer_phase()
+    );
+}
+
+/// The prompt hook records the turn's start under `NAMEDROP_ENDPOINT` alone,
+/// keyed by the same endpoint as under Herdr.
+#[test]
+fn a_prompt_under_neutral_names_starts_the_turn() {
+    let space = Space::new();
+    space.reviewer_edge(namedrop::turn_phase::TurnEdge::Stop, now_ms() - 1_000);
+    space
+        .start_reviewer_prompt_in(neutral(&space, "pane-reviewer"), "Run the tests.")
         .wait();
     assert!(
         matches!(

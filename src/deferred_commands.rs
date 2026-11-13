@@ -1,7 +1,8 @@
 //! Durable handoff of bound agent commands when the pane cannot connect to Herdr.
 use crate::{
     AgentSessionId, Clock, IdGenerator, LifecycleRuntime, PaneAddressId, ProcessIds,
-    StateNamespace, StateStore, StoreError, SystemClock, cli::RuntimeOptions, mux::Budget,
+    StateNamespace, StateStore, StoreError, SystemClock, cli::RuntimeOptions, locator::Locator,
+    mux::Budget,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -348,28 +349,25 @@ pub fn try_defer(
 ) -> Option<Result<Value, String>> {
     let operation = Operation::parse(operation)?;
     let socket = options
-        .herdr_socket
+        .endpoint
         .clone()
-        .or_else(|| env::var("HERDR_SOCKET_PATH").ok())?;
+        .or_else(|| Locator::Endpoint.env())?;
     match UnixStream::connect(&socket) {
         Err(error) if permission_denied(&error) => {}
         _ => return None,
     }
     Some((|| {
-        let state = options
-            .plugin_state
-            .clone()
-            .or_else(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from))
+        let state = crate::locator::state_directory(options.plugin_state.clone())
             .ok_or("plugin state is required for deferred commands")?;
         let workspace = options
-            .herdr_workspace
+            .space
             .clone()
-            .or_else(|| env::var("HERDR_WORKSPACE_ID").ok())
+            .or_else(|| Locator::Space.env())
             .ok_or("workspace is required for deferred commands")?;
         let pane = options
-            .herdr_pane
+            .pane
             .clone()
-            .or_else(|| env::var("HERDR_PANE_ID").ok())
+            .or_else(|| Locator::Pane.env())
             .ok_or("pane is required for deferred commands")?;
         let caller = stored_caller(&state, StateNamespace::for_space(socket, workspace), pane)?;
         let request = Request::new(
@@ -620,9 +618,9 @@ pub fn execute_queued(
             value,
             &RuntimeOptions {
                 plugin_state: Some(state.to_path_buf()),
-                herdr_socket: Some(socket.to_owned()),
-                herdr_workspace: Some(request.caller.namespace.space_id.as_str().to_owned()),
-                herdr_pane: Some(request.caller.pane.clone()),
+                endpoint: Some(socket.to_owned()),
+                space: Some(request.caller.namespace.space_id.as_str().to_owned()),
+                pane: Some(request.caller.pane.clone()),
             },
         );
     }

@@ -1126,7 +1126,12 @@ fn live_pane_list() -> HerdrMux<Scripted> {
 fn an_inherited_pane_whose_shell_is_an_ancestor_is_accepted() {
     let parent = u64::from(std::os::unix::process::parent_id());
     assert_eq!(
-        crate::verify_inherited_pane(&shell(Some(parent)), "wH:p1", &[]),
+        crate::verify_inherited_pane(
+            &shell(Some(parent)),
+            crate::locator::Name::Herdr,
+            "wH:p1",
+            &[]
+        ),
         Ok(())
     );
 }
@@ -1134,8 +1139,13 @@ fn an_inherited_pane_whose_shell_is_an_ancestor_is_accepted() {
 #[test]
 fn an_inherited_pane_whose_shell_is_not_an_ancestor_is_refused_with_the_remedy() {
     let mut other = unrelated_process();
-    let error = crate::verify_inherited_pane(&shell(Some(u64::from(other.id()))), "wH:p1", &[])
-        .unwrap_err();
+    let error = crate::verify_inherited_pane(
+        &shell(Some(u64::from(other.id()))),
+        crate::locator::Name::Herdr,
+        "wH:p1",
+        &[],
+    )
+    .unwrap_err();
     other.kill().unwrap();
     other.wait().unwrap();
     assert!(error.contains("HERDR_PANE_ID=wH:p1"), "{error}");
@@ -1145,7 +1155,9 @@ fn an_inherited_pane_whose_shell_is_not_an_ancestor_is_refused_with_the_remedy()
 
 #[test]
 fn an_inherited_pane_herdr_cannot_describe_is_refused_with_herdr_s_own_reason() {
-    let error = crate::verify_inherited_pane(&shell(None), "wH:p1", &[]).unwrap_err();
+    let error =
+        crate::verify_inherited_pane(&shell(None), crate::locator::Name::Herdr, "wH:p1", &[])
+            .unwrap_err();
     assert!(error.contains("HERDR_PANE_ID=wH:p1"), "{error}");
     assert!(error.contains("pane not found"), "{error}");
     assert!(error.contains("--herdr-pane"), "{error}");
@@ -1154,8 +1166,13 @@ fn an_inherited_pane_herdr_cannot_describe_is_refused_with_herdr_s_own_reason() 
 #[test]
 fn an_inherited_pane_herdr_names_no_foreground_group_for_is_refused() {
     let parent = u64::from(std::os::unix::process::parent_id());
-    let error =
-        crate::verify_inherited_pane(&shell_without_group(parent), "wH:p1", &[]).unwrap_err();
+    let error = crate::verify_inherited_pane(
+        &shell_without_group(parent),
+        crate::locator::Name::Herdr,
+        "wH:p1",
+        &[],
+    )
+    .unwrap_err();
     assert!(
         error.contains("Herdr reports no shell for pane wH:p1"),
         "{error}"
@@ -1166,24 +1183,52 @@ fn an_inherited_pane_herdr_names_no_foreground_group_for_is_refused() {
 #[test]
 fn the_live_pane_list_shape_vouches_for_the_session_s_own_pane_only() {
     assert_eq!(
-        crate::verify_inherited_pane(&live_pane_list(), "wG:p21", &["sess-21"]),
+        crate::verify_inherited_pane(
+            &live_pane_list(),
+            crate::locator::Name::Herdr,
+            "wG:p21",
+            &["sess-21"]
+        ),
         Ok(())
     );
-    let error = crate::verify_inherited_pane(&live_pane_list(), "wG:p21", &["sess-1"]).unwrap_err();
+    let error = crate::verify_inherited_pane(
+        &live_pane_list(),
+        crate::locator::Name::Herdr,
+        "wG:p21",
+        &["sess-1"],
+    )
+    .unwrap_err();
     assert!(error.contains("--herdr-pane"), "{error}");
-    let error = crate::verify_inherited_pane(&live_pane_list(), "wG:p21", &["nobody"]).unwrap_err();
+    let error = crate::verify_inherited_pane(
+        &live_pane_list(),
+        crate::locator::Name::Herdr,
+        "wG:p21",
+        &["nobody"],
+    )
+    .unwrap_err();
     assert!(error.contains("--herdr-pane"), "{error}");
 }
 
 #[test]
 fn a_refusal_says_how_many_agent_sessions_it_checked() {
-    let none = crate::verify_inherited_pane(&live_pane_list(), "wG:p21", &[]).unwrap_err();
+    let none = crate::verify_inherited_pane(
+        &live_pane_list(),
+        crate::locator::Name::Herdr,
+        "wG:p21",
+        &[],
+    )
+    .unwrap_err();
     assert!(
         none.contains("There is no CODEX_SESSION_ID or CLAUDE_CODE_SESSION_ID in the environment"),
         "{none}"
     );
-    let elsewhere =
-        crate::verify_inherited_pane(&live_pane_list(), "wG:p21", &["sess-1"]).unwrap_err();
+    let elsewhere = crate::verify_inherited_pane(
+        &live_pane_list(),
+        crate::locator::Name::Herdr,
+        "wG:p21",
+        &["sess-1"],
+    )
+    .unwrap_err();
     assert!(
         elsewhere
             .contains("None of the 1 agent session ID(s) in the environment runs in pane wG:p21"),

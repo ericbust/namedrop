@@ -151,8 +151,6 @@ pub fn ensure_clock(state: &Path, socket: Option<&str>) -> Result<(), String> {
         .args(["reminder-clock"])
         .arg(state)
         .arg(socket)
-        .env_remove("HERDR_PANE_ID")
-        .env_remove("HERDR_WORKSPACE_ID")
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("CODEX_SESSION_ID")
         .env_remove("CLAUDE_SESSION_ID")
@@ -161,6 +159,8 @@ pub fn ensure_clock(state: &Path, socket: Option<&str>) -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0);
+    crate::locator::Locator::Pane.clear(&mut command);
+    crate::locator::Locator::Space.clear(&mut command);
     command.spawn().map_err(|e| e.to_string())?;
     Ok(())
 }

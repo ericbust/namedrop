@@ -30,37 +30,51 @@ fn claude_delivery_guidance_matches_managed_rules_for_every_automatic_operation(
                 .filter(|op| op.automatic_permission),
         )
         .collect::<Vec<_>>();
-    let tool = json!({
-        "executable":executable,
-        "environment":{"HERDR_PLUGIN_STATE_DIR":state,"HERDR_SOCKET_PATH":"socket-a","HERDR_WORKSPACE_ID":"workspace-1","HERDR_PANE_ID":"pane-agent"},
-        "input_flag":"--input-json",
-        "operations":operations.iter().map(|op| json!({"token":op.token,"argv":op.argv,"input":{}})).collect::<Vec<_>>()
-    });
-    // A context reference is what gives context.inspect a line.
-    let guidance = guidance_of(&json!({"context_references":[{}], "tool": tool})).unwrap();
     let settings: Value =
         serde_json::from_slice(&fs::read(home.join(".claude/settings.json")).unwrap()).unwrap();
     let rules = settings["permissions"]["allow"].as_array().unwrap();
     assert_eq!(operations.len(), 22);
-    for operation in operations {
-        let prefix = format!("{}: ", operation.token);
-        let command = guidance.lines().find_map(|line| line.strip_prefix(&prefix));
-        if ["reminder.set", "handoff.preview"].contains(&operation.token.as_str()) {
+    let herdr = json!({"HERDR_PLUGIN_STATE_DIR":state,"HERDR_SOCKET_PATH":"socket-a","HERDR_WORKSPACE_ID":"workspace-1","HERDR_PANE_ID":"pane-agent"});
+    let neutral = json!({"NAMEDROP_STATE_DIR":state,"NAMEDROP_ENDPOINT":"socket-a","NAMEDROP_SPACE_ID":"workspace-1","NAMEDROP_PANE_ID":"pane-agent"});
+    for (environment, location) in [
+        (
+            herdr,
+            " --herdr-socket 'socket-a' --herdr-workspace 'workspace-1' --herdr-pane 'pane-agent' ",
+        ),
+        (
+            neutral,
+            " --endpoint 'socket-a' --space 'workspace-1' --pane 'pane-agent' ",
+        ),
+    ] {
+        let tool = json!({
+            "executable":executable,
+            "environment":environment,
+            "input_flag":"--input-json",
+            "operations":operations.iter().map(|op| json!({"token":op.token,"argv":op.argv,"input":{}})).collect::<Vec<_>>()
+        });
+        // A context reference is what gives context.inspect a line.
+        let guidance = guidance_of(&json!({"context_references":[{}], "tool": tool})).unwrap();
+        for operation in &operations {
+            let prefix = format!("{}: ", operation.token);
+            let command = guidance.lines().find_map(|line| line.strip_prefix(&prefix));
+            if ["reminder.set", "handoff.preview"].contains(&operation.token.as_str()) {
+                assert!(
+                    command.is_none(),
+                    "{} was rendered: {guidance}",
+                    operation.token
+                );
+                continue;
+            }
+            let command = command.unwrap();
+            assert!(command.contains(location), "{command}");
             assert!(
-                command.is_none(),
-                "{} was rendered: {guidance}",
+                rules
+                    .iter()
+                    .any(|rule| bash_rule_matches(rule.as_str().unwrap(), command)),
+                "{} guidance has no managed permission: {command}",
                 operation.token
             );
-            continue;
         }
-        let command = command.unwrap();
-        assert!(
-            rules
-                .iter()
-                .any(|rule| bash_rule_matches(rule.as_str().unwrap(), command)),
-            "{} guidance has no managed permission: {command}",
-            operation.token
-        );
     }
     fs::remove_dir_all(root).unwrap();
 }

@@ -507,7 +507,7 @@ Record each accepted deviation here, with its source, before the next commit sta
   - **Not scanned.** `tests/`, whose script `herdr` fakes match arguments by design, and `tests/fixtures/schema7/golden/generate_goldens.rs`, a frozen 1.6.5 generator that is not built. The migration order's item 16 also named the `collab/v1` keys. The check covers commands and the binary only, because the `HERDR_*` keys and `--herdr-*` flags are the contract step 2 keeps and step 3 adds names beside.
 - **Evidence that no Herdr command changed.**
   - **Arguments.** `src/mux/herdr/tests.rs` pins every port call's arguments over the scripted transport, and the process transport passes them to `Command::args` unchanged.
-  - **Socket and environment.** `tests/herdr_socket.rs` for the CLI and the mailbox wake hook (`the_mailbox_wake_hook_finds_its_space_on_the_inherited_socket`), and `a_connection_gives_herdr_its_socket_or_leaves_the_inherited_one` for the transport. The worker and the clock pass the socket they passed before, the stored namespace's: `tests/deferred_commands.rs` pins it in `the_worker_runs_herdr_on_the_caller_s_stored_socket` and `the_clock_runs_herdr_on_the_reminder_s_stored_socket`.
+  - **Socket and environment.** `tests/herdr_socket.rs` for the CLI and the mailbox wake hook (`the_mailbox_wake_hook_finds_its_space_on_the_inherited_socket`), and `a_connection_gives_herdr_its_socket_or_leaves_the_inherited_one` for the transport. The worker and the clock pass the socket they passed before, the stored namespace's: `tests/deferred_commands.rs` pins it in `the_worker_runs_herdr_on_the_caller_s_stored_socket` and `the_clock_runs_herdr_on_the_reminder_s_stored_socket`. Until the step 3 follow-up below, the clock test started the clock with the stored socket as its argument, so it could not tell the two apart.
   - **Timeout, output cap, and cancellation.** A plain command runs with `Budget::ADAPTER_DEFAULT` (`Duration::MAX`, `usize::MAX`) and a flag nothing sets, and the transport caps the timeout at `NAMEDROP_HERDR_TIMEOUT_MS`, which is what `execute` ran. A read within an allowance gets the allowance's budget and flag, as through the bridge. The process tests pin each limit and flag by its effect: the timeout in "timed out after N ms", the cap at 4096 and 4097 bytes, and a flag set mid-command.
   - **Error text and classification.** The runner's code and strings moved unchanged, `wire::mux_error` maps them as before, and inputs fail through the same `wire::input_failure` table.
   - **The shrinking deadline holds.** `Within` asks the allowance before every command, so a later command in one read gets what is left. `each_command_within_a_shrinking_budget_gets_what_is_left_of_it` pins that on the process transport (450 ms, then 300 ms, then the budget's own error with no command run), and `tests/agent_status_ui.rs` pins the shared deadline on FakeMux.
@@ -526,6 +526,212 @@ Record each accepted deviation here, with its source, before the next commit sta
   - **Docs.** `src/mux/herdr.rs` names the two code paths that run Herdr outside it, and `Endpoint`'s doc says a connection with no socket has an empty key.
   - **Verification.** Every commit passed `cargo fmt --check`, clippy with and without `--all-features`, and `cargo test --locked --lib` (619 of 619 at the end), and Docker Linux clippy with `tests/deferred_commands.rs` (30 of 30 at the end), `tests/health.rs` (33 of 33), and `tests/worker_cleanup.rs` (2 of 2). One Docker run at the `ps` test commit failed `a_sandboxed_roster_read_reports_context_size_from_the_workers_home` while the host ran mutation builds, and passed 28 of 28 on a rerun with the host idle. `tests/herdr_socket.rs` passes 5 of 5, and `tests/dashboard_live_peek.rs` passed 50 of 50 with `--test-threads=1` at the `ps` fix. `cargo build --release` and `cargo package --locked` pass. The live testbed with real Claude Code and Codex passed `PASS 10/10 in 2m45s` at `bc19943`, and its profile was deleted. The daily-use lane was not rerun, because only the `ps` capture changed in production code.
 
+## Step 3: neutral names
+
+Step 3 of the [plan](PLAN.md) lets a pane that has no `HERDR_*` variables run Namedrop. Each place Namedrop learns where it runs now accepts a neutral name beside the Herdr one. Real Herdr behaves as before: a Herdr pane and every process Herdr starts carry the Herdr names, and those win.
+
+The work is on `exp/neutral-names`, branched from `origin/exp/mux-delete-bridge` (commit 16, PR #191, still open when the branch started).
+
+**A commit 16 follow-up comes first** (`test(reminder): start the clock on a socket that is not the stored one`). `the_clock_runs_herdr_on_the_reminder_s_stored_socket` started the clock with the stored socket as its argument, so a clock that connected on its argument passed. It now starts the clock with `/run/started-with.sock`. In Docker the test passes 3 of 3, and with `clock.rs` connecting on `Some(socket)` it fails at its assert: `reminder-clock ran herdr off …/herdr.sock: [("worktree list", Some("/run/started-with.sock")), ("pane list", Some("/run/started-with.sock"))]`.
+
+### Inventory
+
+These are every Herdr name that tells a Namedrop command where it runs, where Namedrop reads or writes it, and its neutral name. "Reads" means production code, not tests.
+
+| What | Herdr name | Neutral name | Read by | Written by |
+|---|---|---|---|---|
+| State directory | `HERDR_PLUGIN_STATE_DIR`, `--plugin-state` | `NAMEDROP_STATE_DIR`, `--plugin-state` | The CLI's selected state and runtime (`main.rs`), the reply expansion, the deferred-command fallback, the status worker | The status worker and the dashboard's mailbox wake (as the child's environment), the Herdr popup (`wire.rs`, adapter), the envelope |
+| Endpoint | `HERDR_SOCKET_PATH`, `--herdr-socket` | `NAMEDROP_ENDPOINT`, `--endpoint` | `session_socket_id`, the CLI's Herdr connection, the reminder clock start, the subagent, Stop, and prompt hooks, the mailbox wake hook, the deferred-command fallback, the status queue directory | The same two children, the Herdr transport (`process.rs`) and popup (adapter), the envelope |
+| Space | `HERDR_WORKSPACE_ID`, `--herdr-workspace` | `NAMEDROP_SPACE_ID`, `--space` | The CLI runtime, the subagent hook, the mailbox wake hook, the Stop worker's mail wake, the deferred-command fallback, the status queue directory | The same two children, the envelope |
+| Pane | `HERDR_PANE_ID`, `--herdr-pane` | `NAMEDROP_PANE_ID`, `--pane` | The CLI runtime (an inherited pane is verified), the subagent hook, the agent status panel, the deferred-command fallback | The envelope. The status worker, the reminder clock, the dashboard server, and the mailbox wake clear it |
+
+The same names also appear in these places, which step 3 leaves as they are except where it says so:
+
+- **The `collab/v1` envelope.** `tool_environment` in `src/integration.rs` writes the four Herdr keys into every delivery's `control.tool.environment`.
+- **Command lines Namedrop writes.** The registration challenge (`registration_command`), a terminal attempt's command (`terminal.rs`), Doctor's repair command (`health.rs`), and every rendered bound line (`located_command`) pass `--plugin-state`, `--herdr-socket`, `--herdr-workspace`, and `--herdr-pane`.
+- **Prose.** The installed skill's Invocation section (step 3 adds the neutral keys, see below), the Codex registration sentence (`HERDR_PLUGIN_STATE_DIR` outside the worktree), the unrendered-line sentence, Doctor's remedies (`Pass --herdr-pane`, `--herdr-workspace`), and `docs/operations.md`.
+- **Permission rules.** Claude Code's `Bash(<exe> --plugin-state <state> <operation> *)` and Codex's `prefix_rule` on the executable, `--plugin-state`, the state directory, and the operation. The location flags fall after the matched prefix, so either spelling matches.
+- **Hooks.** The Claude Code and Codex hook scripts that `install.rs` writes pass the state directory as `--state-directory` and take nothing else from Herdr. The hooks themselves read the endpoint, space, and pane from the environment, as the table says.
+
+These places read or write Herdr's location names directly instead of through `src/locator.rs`. Step 3 leaves them Herdr's:
+
+- **Live peek's observer guard.** `src/dashboard/observer_guard.rs:23` reads `HERDR_SOCKET_PATH` itself. `src/dashboard/live_peek.rs:579-583` starts the guard with `HERDR_SOCKET_PATH` set to the binding's socket, and clears `HERDR_PANE_ID`, `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, and `HERDR_PLUGIN_STATE_DIR`. The guard runs `herdr` against that socket, so it is Herdr adapter plumbing.
+- **Finding status workers.** `scripts/runtime.py:332` (`helper_kind`) recognizes a status worker by the `HERDR_PLUGIN_STATE_DIR` in its environment. `scripts/runtime.py:434` (`queue_wake`) builds the worker's queue path from its `HERDR_PLUGIN_STATE_DIR`, `HERDR_SOCKET_PATH`, and `HERDR_WORKSPACE_ID`. Every status worker Namedrop starts today carries those names. The mailbox wake gives them with `Locator::pass`, and the status hook runs only as a Herdr plugin command, which inherits Herdr's names. A worker started under the neutral names alone would not be found (see [Left for step 4](#left-for-step-4)).
+
+Names that are not about where a command runs stay Herdr's alone:
+
+| Name | Why it has no neutral name |
+|---|---|
+| `HERDR_BIN_PATH` | The Herdr adapter's binary |
+| `NAMEDROP_HERDR_TIMEOUT_MS` | The Herdr transport's per-command cap. A Rex adapter needs a limit of its own (see Open questions), so it is not renamed |
+| `HERDR_PLUGIN_EVENT`, `HERDR_PLUGIN_EVENT_JSON` | Herdr's plugin event payload, which `herdr::plugin_event_data` decodes. The Rex bridge (step 5) reads Rex's event stream instead |
+| `HERDR_TAB_ID` | Never read. The live-peek observer clears it |
+| `HERDR_CONFIG_PATH` | Herdr's `config.toml`, where `ui install-shortcuts` writes key bindings |
+| `HERDR_ENV` | Read only by `scripts/check-linux-prerequisites.sh` and by Herdr's own agent integration hook |
+
+The plugin scripts (`scripts/run.sh`, `setup.sh`, `runtime.py`, `update.py`, `verify-agent-status.py`, `check-update.py`) run only as Herdr plugin commands, which Herdr starts with its own names, so they are unchanged.
+
+### Names
+
+The neutral names use Namedrop's own words from `src/mux/`: a *space* is a Herdr workspace or a Rex session, a *pane* is a Herdr pane or a Rex block, and an *endpoint* is a Herdr socket or a Rex server address. `--plugin-state` was already neutral and stays the only state flag, because both permission rule shapes start with it.
+
+`src/locator.rs` holds every name. `Locator` has one variant for each row of the table, and each variant knows its Herdr variable, its neutral variable, and the flag for each. `RuntimeOptions` names its fields `endpoint`, `space`, and `pane`, and clap accepts each `--herdr-*` flag as a visible alias of the neutral one. Both spellings of one flag fill one field, so giving both is a usage error.
+
+The names stay `NAMEDROP_SPACE_ID` and `NAMEDROP_PANE_ID`, matching `HERDR_WORKSPACE_ID` and `HERDR_PANE_ID`. Because both spellings of a flag fill one field, a flag's spelling carries no multiplexer kind. `--herdr-socket` and `--endpoint` give the command the same value, and step 4's home decides which multiplexer the value names.
+
+### Precedence
+
+**An explicit flag wins for its own value. Otherwise the endpoint, space, and pane come from one set of names.** `locator::home` chooses the set. It is Herdr's when any of `HERDR_SOCKET_PATH`, `HERDR_WORKSPACE_ID`, or `HERDR_PANE_ID` is set, even empty, and the neutral names otherwise. Under Herdr every neutral location name is ignored, also for a value that Herdr left unset. An empty Herdr value counts, as it always has. An empty neutral value counts as unset. The state directory follows the same set: `HERDR_PLUGIN_STATE_DIR` when it is set, otherwise the name of the set `home` chose, so under Herdr `NAMEDROP_STATE_DIR` is ignored like the other neutral names. A `collab/v1` tool environment is read by the same rule over its keys, and a reader passes each value on with the flag of the key that held it. `Locator::resolve` is the one implementation, and every reader calls it through `Locator::inherited`, `env`, `env_os`, `in_envelope`, or `locator::state_directory`. `home` is the predicate the removed default state directory used, and step 4 replaces it with `mux::home::resolve`, the choice of multiplexer.
+
+**Why one set and not one value at a time.** Commit 2 of this step resolved each value on its own, the Herdr name and then the neutral one. A review found that a process with a Herdr endpoint but no `HERDR_PANE_ID` then took an inherited `NAMEDROP_PANE_ID`. It confirmed three effects on the binary. `doctor` and `reconcile` refused, because they could not verify the inherited pane. `hook mailbox-wake` with no `HERDR_WORKSPACE_ID` and an inherited `NAMEDROP_SPACE_ID=w9` started a worker for `w9` and retried it. An inherited `NAMEDROP_ENDPOINT` replaced Herdr's default socket where only `HERDR_WORKSPACE_ID` or `HERDR_PANE_ID` was set. A location is one place in one multiplexer, so its parts come from one set.
+
+**Inherited neutral names cannot change a Herdr command.** Herdr gives each pane and each plugin process it starts its location names. The pane names are what `scripts/setup.sh` checks, and the plugin scripts read `HERDR_SOCKET_PATH` and `HERDR_WORKSPACE_ID` directly. A process with any one of them reads only Herdr's set, so no `NAMEDROP_ENDPOINT`, `NAMEDROP_SPACE_ID`, or `NAMEDROP_PANE_ID` it inherits, from a person's shell profile or a parent process, is read. That includes `NAMEDROP_STATE_DIR`: a command in a Herdr pane with no `--plugin-state` and no `HERDR_PLUGIN_STATE_DIR` refuses or runs without state exactly as on `013c129`, whatever `NAMEDROP_STATE_DIR` it inherits. (A first version of the fix round let `NAMEDROP_STATE_DIR` through there; review showed `doctor` then offered an `activate` into a second database for the Herdr server, `describe send` took the command gate and ran that directory's launcher, and `dashboard-server` served it. Applying the set rule to the state directory removed all three.)
+
+The brief suggested the neutral name before the Herdr one. Herdr's set first was chosen for these reasons:
+
+- **The freshest value wins.** A neutral value is inherited from wherever it was set, possibly an outer host. With the neutral names first, a `NAMEDROP_PANE_ID` left in a shell profile would name the wrong pane in every Herdr pane.
+- **No split state.** With the neutral name first, an exported `NAMEDROP_STATE_DIR` would send Herdr's plugin events to it, while agents' bound lines pass Herdr's directory with `--plugin-state`.
+- **An override still exists.** The flags outrank both sets.
+
+The cost is that in a pane with any stale Herdr name, Herdr's set wins over every neutral value. That pane needs the step 4 decision about which multiplexer serves it.
+
+**Children.** A process Namedrop starts gets each value under its Herdr name, and the neutral name is cleared (`Locator::pass`), so a value the parent inherited cannot reach the child. Such a child carries a Herdr location name, so it reads Herdr's set. Where a child must not take a value, both names are cleared (`Locator::clear`). Before step 3 the status worker, the reminder clock, the dashboard server, and the mailbox wake cleared only the Herdr name, which would have let an inherited `NAMEDROP_PANE_ID` become a worker's pane.
+
+**The Herdr connection.** The CLI and the mailbox wake hook pass a socket to `herdr::connect` only when the flag gave it, or `NAMEDROP_ENDPOINT` gave it outside Herdr. Under Herdr each `herdr` command still inherits `HERDR_SOCKET_PATH`, or Herdr's default socket when it is unset, as commit 16 requires.
+
+### State directory
+
+`locator::state_directory` resolves the state directory: `--plugin-state`, then `HERDR_PLUGIN_STATE_DIR`, then `NAMEDROP_STATE_DIR` only when no Herdr location name is set. With none of them a command refuses, as on `013c129`, now with "--plugin-state, HERDR_PLUGIN_STATE_DIR or NAMEDROP_STATE_DIR is required". `dashboard-server` exits 64 with the same text after `dashboard-server: `, in place of "dashboard-server requires --plugin-state", which named only the flag. Herdr passes `HERDR_PLUGIN_STATE_DIR` to every plugin process, and agents pass `--plugin-state`, so Herdr gets the same directory as before.
+
+**No default until step 4.** Commit 4 (`5a444c0`) used `$XDG_STATE_HOME/namedrop`, or `~/.local/state/namedrop`, wherever no Herdr location name was set. The fix round removed it. With only the Herdr adapter, a command outside a Herdr pane still talks to the default Herdr server, so a default could only make a second database for that server beside the plugin's. A review found that in tmux, ssh, and IDE terminals `doctor` ran four `herdr` commands and offered an `activate` into `~/.local/state/namedrop`, `address list` created a database there, and `reconcile` wrote `update-check.json` there. Step 4 adds a default once the home is known to be Rex.
+
+### `collab/v1` readers
+
+- `located_command` (every rendered line and the `delivery inbox` line) and `final_reply::Location::from_envelope` (the Stop's claim) read the four values through `Locator::in_envelope`. An envelope with Herdr keys gives the same lines, byte for byte. One with neutral keys gives `--plugin-state`, `--endpoint`, `--space`, and `--pane`.
+- The installed skill's Invocation section names both key sets and the flags for each.
+- The writer is unchanged. `tool_environment` writes only the Herdr keys, because nothing writes neutral keys until a second adapter exists. The unrendered-line sentence and the registration prompt describe the envelope and line this writer makes, so they keep the Herdr flags.
+
+### Deviations
+
+- **Herdr's set first,** as argued under Precedence.
+- **Three diagnostics changed text.** The state-directory refusal names all three sources, `dashboard-server`'s refusal is that same text, and the status queue's refusals name both variables. `verify_inherited_pane` names the variable that held the pane and its flag. Under Herdr that is `HERDR_PANE_ID` and `--herdr-pane`, byte for byte as before.
+- **`--help`** lists `--endpoint`, `--space`, and `--pane`, each with its `--herdr-*` alias, and renames the value names `SOCKET` to `ENDPOINT` and `WORKSPACE` to `SPACE`.
+- **Usage errors name the neutral flag** even when the Herdr spelling was typed, because clap reports the field's own name: `--herdr-pane a --herdr-pane b` says `the argument '--pane <PANE>' cannot be used multiple times` (base: `'--herdr-pane <PANE>'`), and `--herdr-socket` with no value says `a value is required for '--endpoint <ENDPOINT>'`. `scripts/run.sh:10` prepends `--herdr-pane`, so a duplicate there names a flag nobody typed. Only the error text changes.
+- **No neutral envelope keys are written,** as above.
+
+### Commits
+
+1. `d578c98` `test(reminder): start the clock on a socket that is not the stored one`, the commit 16 follow-up above.
+2. `37ea354` `feat(locator): read each location under its Herdr or neutral name`. `src/locator.rs`, the flag aliases, every environment reader, and the children.
+3. `2db77e9` `feat(integration): read a collab/v1 tool environment under either key set`. `Locator::in_envelope`, `located_command`, `Location::from_envelope`, and the skill text.
+4. `5a444c0` `feat(locator): default the state directory where Herdr names none`. The fix round removes the default again.
+5. `19861f8` `docs(rex): record step 3, the neutral names`.
+
+The [fix round](#fix-round) adds six more.
+
+### Evidence
+
+This evidence was measured at `19861f8`, before the fix round. Where the fix round changed a rule, the [fix round](#fix-round) has the current tests and numbers.
+
+**Tests.** `tests/herdr_socket.rs` runs `ui launch doctor` and the mailbox wake hook over a script `herdr` that logs the socket each command ran with. A neutral endpoint reaches every command and is the session's. `HERDR_SOCKET_PATH` outranks it. `--endpoint`, `--space`, and `--pane` do what the Herdr flags do, and both spellings of one flag are a usage error. `HERDR_WORKSPACE_ID` outranks `NAMEDROP_SPACE_ID`. An inherited `NAMEDROP_PANE_ID` is verified, and the refusal names it and `--pane`. `HERDR_PLUGIN_STATE_DIR` outranks `NAMEDROP_STATE_DIR`, as the popup's `HERDR_PLUGIN_STATE_DIR` shows. Outside Herdr the popup gets the default directory, and under Herdr the command refuses and runs no `herdr`. Unit tests in `src/locator.rs` pin each rule, `Location::from_envelope` reads both key sets, and the managed-rules test renders every automatic operation from both key sets and matches each line against Claude Code's installed rules.
+
+**Mutations.** `mutate.py`, a scratch harness, copied the tree, made one edit, and ran the locator, final-reply, and managed-rules lib tests and `tests/herdr_socket.rs`. Each row is the failing test count on the final tree.
+
+| Mutation | Lib tests that fail | `herdr_socket` tests that fail |
+|---|---|---|
+| The neutral name before the Herdr one | 5 | 4 |
+| The neutral name ignored | 6 | 5 |
+| An empty neutral value counts | 1 | 0 |
+| No default state directory | 1 | 1 |
+| The default under Herdr too | 1 | 1 |
+| An envelope's neutral keys ignored | 3 | not run |
+| An envelope's neutral values passed with the Herdr flags | 2 | not run |
+| The CLI connection never names `NAMEDROP_ENDPOINT` | not run | 2 |
+| `pass` keeps the neutral name | 1 | not run |
+| `clear` keeps the neutral name | 1 | not run |
+
+The same harness ran on each commit's own tree. The messages of commits 2 and 4 give their counts. On commit 3, the two envelope rows fail 3 and 2 lib tests, as above. A call site that clears only the Herdr name instead of calling `Locator::clear` fails no test. Only the unit test of `clear` guards it.
+
+**Verification.** Every code commit passed `cargo fmt --check`, `cargo clippy --locked --all-targets -D warnings` with and without `--all-features`, `cargo test --locked --lib` (626 passed and 4 ignored at the end), the test files it touched, and Docker Linux clippy with `tests/deferred_commands.rs` (30 of 30), `tests/health.rs` (33 of 33), and `tests/worker_cleanup.rs` (2 of 2). At `5a444c0`, `cargo build --release` and `cargo package --locked` pass. With `--test-threads=1`, every `dashboard_*` file passes, and `channel_chat.rs`, `channel_context.rs`, and `seamless_updates.rs` fail only the three known flakes. In the parallel full run, `dashboard_all_spaces.rs`, `dashboard_assets.rs`, `dashboard_live_peek.rs`, and `dashboard_server.rs` also failed tests, under a machine load near 9. Run alternately in parallel on this tree and on a `git archive` of `013c129` under the same load, they fail on both: `dashboard_all_spaces` 1 and 1 twice, `dashboard_assets` 5 and 5, then 4 and 5, `dashboard_live_peek` 27 to 36 on this tree and 23 to 42 on the base across six rounds each, and `dashboard_server` passed both times on both.
+
+**Live testbed.** `testbed test --link <worktree> --fresh --yes --keep` at `5a444c0` passed `PASS 10/10 in 2m45s`, and the daily-use lane (`--fresh --yes --daily-use`) passed `PASS 14/14 in 22m08s`, also at `5a444c0`. The daily-use profile was deleted on its pass.
+
+**Done-when probe** (`neutral-probe.py`, a scratch script, on that kept profile). It quit Claude Code in `@claude`'s pane and started it again as `env -u <every HERDR_* variable> NAMEDROP_ENDPOINT=… NAMEDROP_SPACE_ID=… NAMEDROP_PANE_ID=… claude`. Herdr's own agent hook needs `HERDR_ENV`, `HERDR_SOCKET_PATH`, and `HERDR_PANE_ID` to report the session to Herdr, so the probe pointed the profile's Claude Code settings at a shim that maps the neutral names for that hook alone. That stands in for whatever tells a multiplexer the session, which is not Namedrop's code. The results:
+
+- `ps eww` of the new Claude Code process shows no `HERDR_*` variable and all three `NAMEDROP_*` ones.
+- Herdr reported the new session `952fdbe8-…`, and its registration became active with no `name` command and no command from the agent.
+- The probe told `@codex` to send `@claude` "Reply to me with the word neutral-1794531561." `@claude` answered with that word and ran no tool. Both messages show as `settled`, so the Stop hook settled the reply from the final answer. The Stop hook reads the endpoint from the environment, so it ran on `NAMEDROP_ENDPOINT`.
+
+An earlier run that kept the testbed's `HERDR_BIN_PATH` and `HERDR_CONFIG_PATH` also passed. The profile was then destroyed.
+
+### Fix round
+
+A review of `19861f8` found no change for a Herdr process with today's variables, and asked for fixes first. The sections above describe the result.
+
+**Commits.**
+
+6. `fdc9dd9` `fix(locator): drop the default state directory until step 4`. See [State directory](#state-directory).
+7. `7bdc202` `fix(locator): resolve the endpoint, space and pane as one set of names`. See [Precedence](#precedence).
+8. `42c1198` `test: run the hook and worker readers under the neutral names alone`.
+9. `82cd9c2` `docs(rex): record the step 3 fix round`.
+10. `17c580d` `fix(locator): read the state directory from the location's set of names`. A second review found that the separate state-directory rule let an inherited `NAMEDROP_STATE_DIR` reach Herdr panes; see [Precedence](#precedence). The live testbed passed `PASS 10/10 in 2m29s` at this commit.
+11. This correction of the record.
+
+**Tests.**
+
+- `src/locator.rs` sets each Herdr location name, set and empty, beside all four neutral names, and gets only that Herdr value, and no state directory. `HERDR_PLUGIN_STATE_DIR` alone selects no set. An envelope with `HERDR_SOCKET_PATH` and `NAMEDROP_PANE_ID` gives no pane. `Location::from_envelope` reads a Herdr envelope with every neutral key beside it as Herdr's, and `HERDR_WORKSPACE_ID` with a neutral endpoint and pane as no location.
+- `tests/herdr_socket.rs` has the review's three cases. `doctor` under `HERDR_SOCKET_PATH` with `NAMEDROP_PANE_ID=block:outer` succeeds and runs only `worktree list` and `pane list`. The mailbox wake hook with `NAMEDROP_SPACE_ID=w9` finds its space from its directory and never names `w9`. `HERDR_WORKSPACE_ID` or `HERDR_PANE_ID` beside `NAMEDROP_ENDPOINT` runs every `herdr` with no socket, and the session is the server's. The space and pane tests read the neutral names only where no Herdr name is set. With no state directory, Doctor refuses and runs no `herdr`, inside Herdr and out, and `dashboard-server` exits 64. Each command there now fails the test after 20 s instead of hanging it, because the per-value rule made the mailbox wake hook retry forever. The state directory follows the location's set: under Herdr the popup gets `HERDR_PLUGIN_STATE_DIR`, and with no `HERDR_PLUGIN_STATE_DIR` the command refuses and runs no `herdr` although `NAMEDROP_STATE_DIR` is set; with only neutral names the popup gets `NAMEDROP_STATE_DIR`.
+- Reader sites run as a host runs them, with no Herdr location name. In `tests/runtime_reliability.rs` the status hook queues its event under the neutral names, and the worker it starts reconciles the space as nobody's pane, although the hook carries a `NAMEDROP_PANE_ID` whose shell is not an ancestor. The gate and removed-directory tests also run the worker under the neutral names. In `tests/final_reply.rs` the installed Stop hook settles a delivery from the final answer, and the prompt hook records the turn's start. In `tests/subagents.rs` the subagent hook records a start. In `tests/deferred_commands.rs` (Linux) a sandboxed send queues and the worker answers it.
+
+**Mutations and reverts.** `fix/mutate.py`, a scratch harness, copies a snapshot of the tree for each mutation, applies exact replacements, and runs the named tests. A baseline run with no edit passed every target first.
+
+| Mutation or revert | Tests that fail |
+|---|---|
+| Restore the default state directory | 1 `herdr_socket` |
+| A default only where `HERDR_SOCKET_PATH` is unset | 1 `herdr_socket` |
+| Resolve each location on its own again | 3 lib, 4 `herdr_socket` |
+| `home` reads only `HERDR_SOCKET_PATH` | 4 lib, 1 `herdr_socket` |
+| `home` ignores `HERDR_PANE_ID` | 4 lib, 1 `herdr_socket` |
+| An empty Herdr name counts as unset | 2 lib |
+| The state directory resolved on its own again (before `17c580d`) | 1 lib, 1 `herdr_socket` |
+| `home` always chooses Herdr's set | 5 lib, 5 `herdr_socket` |
+| The status queue's scope reads Herdr's names only | 3 `runtime_reliability` |
+| The status worker's directory reads `HERDR_PLUGIN_STATE_DIR` only | 1 `runtime_reliability` |
+| The status worker's gate reads `HERDR_PLUGIN_STATE_DIR` only | 1 `runtime_reliability` |
+| The status worker command clears only `HERDR_PANE_ID` | 1 `runtime_reliability` |
+| The Stop hook reads `HERDR_SOCKET_PATH` only | 1 `final_reply` |
+| The prompt hook reads `HERDR_SOCKET_PATH` only | 1 `final_reply` |
+| The subagent hook's identity reads Herdr's names only | 1 `subagents` |
+| The deferred fallback reads Herdr's names only | 1 `deferred_commands` (Docker) |
+| Every reader site above but the deferred one, at once | 2 `final_reply`, 3 `runtime_reliability`, 1 `subagents` |
+
+The reader rows count only the new neutral tests, which never failed unmutated. Two Herdr-named `runtime_reliability` tests also failed in some of those runs, and they fail with no edit at all: `status_worker_settles_an_attempt_whose_event_pane_closed_during_the_grace` failed 2 of 4 runs on `013c129` and 1 of 3 on `7bdc202`, and `status_worker_serves_a_marker_written_during_a_grace_wait_without_delay` failed 1 of 3 runs on this tree.
+
+These sites still fail no test when reverted:
+
+- **The Stop worker's space** (`wake_waiting_mail` in `src/stop_hook.rs`). Even with the wake removed outright, `a_claude_stop_with_background_agents_running_takes_mail_queued_during_the_turn` passes, likely because the send's own mailbox worker delivers the mail within the test's 15 s wait. So no test guards the Stop's own wake under either set of names.
+- **The agent status panel's observing pane** (`src/agent_status.rs`), and the socket and state directory the status worker passes to `ensure_clock` (`main`).
+- **Three `Locator::clear` sites.** The dashboard's mailbox wake passes Herdr's names with `Locator::pass`, so its child reads Herdr's set whatever it inherits. No test runs the reminder clock or the dashboard server under the neutral names.
+
+**Verification.** Each fix commit passed `cargo fmt --check`, `cargo clippy --locked --all-targets -D warnings` with and without `--all-features`, `cargo test --locked --lib` (625 passed and 4 ignored), the test files it touched, and Docker Linux clippy with `tests/deferred_commands.rs` (30 of 30, then 31 of 31 with the new test), `tests/health.rs` (33 of 33), and `tests/worker_cleanup.rs` (2 of 2). Two first runs failed one test each and passed on rerun. The lib run at `7bdc202` failed the known flake `shown_roster::tests::a_contended_prompt_shows_the_whole_roster_and_records_nothing`. `tests/runtime_reliability.rs` at `42c1198` failed `eventless_rejections_keep_pane_lock_deferrals_on_the_short_retry` once and then passed 3 of 3. A first version of `7bdc202` failed the lib test `a_claim_s_location_comes_from_either_key_set_and_herdr_s_wins`, which pinned the per-value rule. It was rewritten for the set rule before the commit was verified, and the mutation counts above come from runs after a clean baseline.
+
+At `42c1198`, `cargo build --release` and `cargo package --locked` pass. With `--test-threads=1`, every `dashboard_*` file passes except one `dashboard_all_spaces` test in that run, and `channel_chat.rs`, `channel_context.rs`, and `seamless_updates.rs` fail only the three known flakes. `dashboard_all_spaces` then passed 40 of 40 serially twice on this tree and twice on a `git archive` of `013c129`. The parallel full run passed 1,973 tests and failed 70, all in `dashboard_*`, the two channel files, and `seamless_updates.rs`. Run in parallel on this tree and on the base, alternately, `dashboard_all_spaces` failed 2 and 5, `dashboard_assets` 5 and 5, `dashboard_live_peek` 29 and 29, and `dashboard_peek` 0 and 0.
+
+**Live testbed.** `testbed test --link <worktree> --fresh --yes --keep` at `42c1198` passed `PASS 10/10 in 2m29s`. The daily-use lane (`--fresh --yes --daily-use`) passed `PASS 14/14 in 23m06s`, also at `42c1198`, and its profile was deleted on its pass.
+
+**Done-when probe** (`neutral-probe.py` again, on that kept profile). Claude Code in `@claude`'s pane restarted with no `HERDR_*` variable and with `NAMEDROP_ENDPOINT`, `NAMEDROP_SPACE_ID`, and `NAMEDROP_PANE_ID`, as `ps eww` showed. Its new session `ec1f2c60-…` registered with no `name` command. `@codex` sent "Reply to me with the word neutral-1794538716.", and `@claude` answered with that word. The request's delivery settled with disposition `reply` and the reply's with `no_reply`, so the Stop hook settled the reply from the final answer under the neutral names. The profile was then destroyed.
+
+### Left for step 4
+
+- **Which multiplexer serves a pane with both `HERDR_PANE_ID` and `REX_BLOCK`.** Step 3 does not choose. With Herdr's set first, a Rex block whose server started inside a Herdr pane inherits stale Herdr names, and any one of them hides every neutral value. `locator::home` is the one place that decides, and step 4 replaces it with `mux::home::resolve`. Step 4's choice must ignore Herdr's names in a pane that Rex serves.
+- **The writer.** A Rex adapter writes neutral keys through `tool_environment`, and the registration, terminal, and Doctor lines and the two prose sentences above follow the keys it writes.
+- **`Locator::pass` writes Herdr's names for any value.** A child then reads Herdr's set, whichever multiplexer the parent served. It must become kind-aware: a Rex endpoint must never become `HERDR_SOCKET_PATH`.
+- **`scripts/runtime.py` must find workers started under the neutral names** (`helper_kind` and `queue_wake`, see the inventory).
+- **In a Rex block, the identity must come from the home, not the locator.** These read the endpoint, space, or pane from the environment: the CLI's inherited pane in `with_runtime_options` and `session_socket_id` (`src/main.rs`), the mailbox wake hook's space (`run_mailbox_wake_hook`), the subagent hook's parent identity (`run_subagent_hook`), the Stop hook's endpoint and space (`src/stop_hook.rs` `run` and `wake_waiting_mail`), and the prompt hook's endpoint (`src/prompt_hook.rs` `record`).
+- **A flag's spelling carries no multiplexer kind.** `--herdr-socket` is an alias of `--endpoint`, so the home decides what the value names.
+- **A default state directory,** once the home is known to be Rex.
+- **Herdr's own agent integration** reports the agent session only when `HERDR_ENV`, `HERDR_SOCKET_PATH`, and `HERDR_PANE_ID` are set. Rex reports no session (PLAN.md), so step 4's SessionStart record replaces it there.
+
 ## Open questions and risks
 
 - **Answered in commit 12.** Is a dashboard key that reports busy during a delivery acceptable, or should it wait a short fixed time? It reports busy at once, and the person sends it again.
@@ -541,7 +747,7 @@ Record each accepted deviation here, with its source, before the next commit sta
 - **Answered in commit 16.** Does the budget still shrink across one operation's commands once `bounded()` is gone? Yes. `Within` asks the allowance before every command, and the process transport pins it.
 - `emulate_prompt` holds the pane lock while it waits for confirmation, for up to about 5 seconds. Is that acceptable for the Rex bridge, or should confirmation move to `observe_agent_attempt`?
 - Can `rex block call process` report a start time, so that an incarnation is a process ID plus a start time? Step 4 must check this.
-- When a pane has both `HERDR_PANE_ID` and `REX_BLOCK`, which multiplexer does `MuxConnector` choose? Step 3 decides.
+- When a pane has both `HERDR_PANE_ID` and `REX_BLOCK`, which multiplexer does `MuxConnector` choose? Step 3 left it to step 4, because the choice needs the Rex adapter. See [Left for step 4](#left-for-step-4).
 - **Open for the Rex adapter (step 4).** Commit 16 resolves none of these. Each is Herdr-shaped or untested because only Herdr exists.
   - **`emulate_prompt`'s order** (open a tap, read the facts, decline on a change already on the tap, paste and press Enter on one connection, confirm on a change to `Working`) is tested only against a scripted `RawChannel`. Step 4 must show that Rex's `program_status_changed` events reach the tap in that order.
   - **The budget is per connection, not per call.** `MuxConnector::connect` fixes it, and a read narrows it with `within`. `Budget::ADAPTER_DEFAULT` is `Duration::MAX` and `usize::MAX`, which means "no limit but the adapter's own". The Herdr process caps it at `NAMEDROP_HERDR_TIMEOUT_MS`. A Rex adapter must give the same default a real limit of its own.
@@ -552,4 +758,4 @@ Record each accepted deviation here, with its source, before the next commit sta
 
 ## Next implementation step
 
-Step 2 is done with commit 16. Next is step 3 of the [plan](PLAN.md): accept neutral `NAMEDROP_*` names beside the `HERDR_*` ones, and make the state directory independent of `HERDR_PLUGIN_STATE_DIR`.
+Step 3 is done (see [Step 3: neutral names](#step-3-neutral-names)). Next is step 4 of the [plan](PLAN.md): write the Rex adapter. Start with [Left for step 4](#left-for-step-4) and the step 4 items under [Open questions and risks](#open-questions-and-risks).

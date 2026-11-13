@@ -5,6 +5,7 @@
 //! claims, only with the text of the turn the claim was armed on. Without a
 //! claim nothing is automatic: the delivery stays pending and recoverable.
 use crate::integration::DeliveryKind;
+use crate::locator::Locator;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -210,20 +211,10 @@ pub(crate) fn claim_for(
     }) else {
         return None;
     };
-    let located = |key: &str| {
-        control["tool"]["environment"][key]
-            .as_str()
-            .map(str::to_owned)
-    };
     Some(Claim {
         attempt_id: crate::DeliveryAttemptId::new(control["attempt_id"].as_str()?),
         namespace: delivery.namespace.clone(),
-        location: Location {
-            state: located("HERDR_PLUGIN_STATE_DIR")?,
-            socket: located("HERDR_SOCKET_PATH")?,
-            workspace: located("HERDR_WORKSPACE_ID")?,
-            pane: located("HERDR_PANE_ID")?,
-        },
+        location: Location::from_envelope(control["tool"]["environment"].as_object()?)?,
         turn: turn.clone(),
         plan,
         state: ClaimState::Open,
@@ -486,6 +477,20 @@ pub(crate) struct Location {
     pub socket: String,
     pub workspace: String,
     pub pane: String,
+}
+
+impl Location {
+    /// The location a `collab/v1` tool environment names under either key
+    /// set, or `None` when it lacks one of the four.
+    pub(crate) fn from_envelope(environment: &serde_json::Map<String, Value>) -> Option<Self> {
+        let located = |locator: Locator| Some(locator.in_envelope(environment)?.1.to_owned());
+        Some(Self {
+            state: located(Locator::StateDir)?,
+            socket: located(Locator::Endpoint)?,
+            workspace: located(Locator::Space)?,
+            pane: located(Locator::Pane)?,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

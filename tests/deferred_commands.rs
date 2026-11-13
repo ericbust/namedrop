@@ -237,21 +237,39 @@ else: print('{}')
         input: Value,
         read_only: bool,
     ) -> Output {
+        self.sandboxed(operation, input, read_only, false)
+    }
+
+    /// `neutral` gives the endpoint, space, and pane under their neutral
+    /// environment names instead of the Herdr flags.
+    fn sandboxed(
+        &self,
+        operation: &[&str],
+        input: Value,
+        read_only: bool,
+        neutral: bool,
+    ) -> Output {
         let mut command = self.command();
         command
             .arg("--plugin-state")
             .arg(self.directory.path())
-            .args(operation)
-            .args([
+            .args(operation);
+        if neutral {
+            command
+                .env("NAMEDROP_ENDPOINT", &self.socket)
+                .env("NAMEDROP_SPACE_ID", "workspace-1")
+                .env("NAMEDROP_PANE_ID", "pane-author");
+        } else {
+            command.args([
                 "--herdr-socket",
                 &self.socket,
                 "--herdr-workspace",
                 "workspace-1",
                 "--herdr-pane",
                 "pane-author",
-                "--input-json",
-                &input.to_string(),
             ]);
+        }
+        command.args(["--input-json", &input.to_string()]);
         // This is the syscall boundary Codex denies. No test-only production switch.
         unsafe {
             command.pre_exec(move || {
@@ -338,6 +356,11 @@ else: print('{}')
     /// `namedrop <role> <state> <socket>` in the background, inheriting
     /// `HERDR_SOCKET_PATH` when `inherited` names one.
     fn background(&self, role: &str, inherited: Option<&str>) -> Worker {
+        self.background_with(role, &self.socket, inherited)
+    }
+
+    /// Starts `namedrop <role>` with `argv_socket` as its socket argument.
+    fn background_with(&self, role: &str, argv_socket: &str, inherited: Option<&str>) -> Worker {
         let mut command = self.command();
         if let Some(socket) = inherited {
             command.env("HERDR_SOCKET_PATH", socket);
@@ -346,7 +369,7 @@ else: print('{}')
             command
                 .arg(role)
                 .arg(self.directory.path())
-                .arg(&self.socket)
+                .arg(argv_socket)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -505,6 +528,22 @@ fn denied_socket_queues_before_mutation_and_restarts_recover_one_logical_command
     assert_eq!(recovered["result"]["Ok"]["dispatch"], "scheduled");
     assert_eq!(fixture.message_count(), 1);
     assert_eq!(fs::read(request).unwrap(), original_bytes);
+}
+
+/// A sandboxed command takes its endpoint, space, and pane from the neutral
+/// names alone: it queues, and the worker answers it.
+#[test]
+fn a_sandboxed_command_under_neutral_names_queues_and_is_answered() {
+    let fixture = Fixture::new();
+    let input = send("neutral-id", "hello");
+    let pending = response(fixture.sandboxed(&["send", "--json"], input.clone(), false, true));
+    assert_eq!(pending["data"]["state"], "pending", "{pending}");
+    let receipt = PathBuf::from(pending["data"]["receipt"].as_str().unwrap());
+    let _worker = fixture.worker();
+    wait_for(|| receipt.exists());
+    let result = response(fixture.sandboxed(&["send", "--json"], input, false, true));
+    assert!(result["data"]["message_id"].is_string(), "{result}");
+    assert_eq!(fixture.message_count(), 1);
 }
 
 #[test]
@@ -1830,7 +1869,8 @@ fn the_worker_runs_herdr_on_the_caller_s_stored_socket() {
 }
 
 /// The clock reaches each reminder's space on the socket stored with it,
-/// whatever `HERDR_SOCKET_PATH` it inherited.
+/// whatever socket it was started with and whatever `HERDR_SOCKET_PATH` it
+/// inherited.
 #[test]
 fn the_clock_runs_herdr_on_the_reminder_s_stored_socket() {
     let f = Fixture::new();
@@ -1849,7 +1889,11 @@ fn the_clock_runs_herdr_on_the_reminder_s_stored_socket() {
     let due = SystemClock.now_unix_ms() - 1;
     connection.execute("UPDATE reminders SET due_at_ms=?2,state_json=json_set(state_json,'$.due_at_ms',?2) WHERE reminder_id=?1",rusqlite::params![id,due as i64]).unwrap();
     lock.unlock().unwrap();
-    let _clock = f.background("reminder-clock", Some("/run/inherited.sock"));
+    let _clock = f.background_with(
+        "reminder-clock",
+        "/run/started-with.sock",
+        Some("/run/inherited.sock"),
+    );
     wait_for(|| {
         connection
             .query_row(

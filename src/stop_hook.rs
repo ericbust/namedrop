@@ -70,7 +70,7 @@ pub fn run(state: &Path) {
     let Some(input) = read_input(io::stdin().lock()) else {
         return;
     };
-    let Ok(socket) = env::var("HERDR_SOCKET_PATH") else {
+    let Some(socket) = namedrop::locator::Locator::Endpoint.env() else {
         return;
     };
     let names_notice = |tasks: &[String]| {
@@ -233,7 +233,7 @@ fn settle_stop(state: &Path, captured: &CapturedStop) {
 /// agents still running, so the Stop's worker starts the drain that mail for
 /// the session waits on.
 fn wake_waiting_mail(state: &Path, socket: &str, session: &str) {
-    let Ok(space) = env::var("HERDR_WORKSPACE_ID") else {
+    let Some(space) = namedrop::locator::Locator::Space.env() else {
         return;
     };
     if namedrop::mail_waits_for_session(state, socket, &space, session) {
@@ -302,9 +302,9 @@ fn stop_hook_outcome(path: &Path, from: u64) -> Option<StopOutcome> {
 fn settle(bound: BoundOperation) -> Result<Value, String> {
     let options = RuntimeOptions {
         plugin_state: Some(bound.state),
-        herdr_socket: Some(bound.socket),
-        herdr_workspace: Some(bound.workspace),
-        herdr_pane: Some(bound.pane),
+        endpoint: Some(bound.socket),
+        space: Some(bound.workspace),
+        pane: Some(bound.pane),
     };
     match crate::run_bound_operation(bound.operation, bound.input, &options) {
         crate::Ran::Finished(result) => result,

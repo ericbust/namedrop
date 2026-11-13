@@ -1,4 +1,5 @@
 use crate::lifecycle::locate_agent_session_pane;
+use crate::locator::{Locator, Name};
 use crate::mux::{MuxError, MuxRead, PaneId, PaneProcess};
 use crate::{ActorKind, Clock, DeliveryAttemptId, IdGenerator, MutationAttribution, StateStore};
 use crate::{LifecycleRuntime, PaneType, discover_worktree, discover_worktree_for_workspace};
@@ -179,26 +180,32 @@ fn process_info(mux: &impl MuxRead, pane_id: &str) -> Option<ShellProcess> {
 /// started from, so the inherited value can name a pane the caller left long
 /// ago. Acting as that pane is a silent identity error, so the check refuses
 /// instead of falling back. When Herdr does not answer, nothing was learned
-/// about the pane, so its own error is the reason given.
+/// about the pane, so its own error is the reason given. `name` says which
+/// variable held the pane ID.
 pub fn verify_inherited_pane(
     mux: &impl MuxRead,
+    name: Name,
     pane_id: &str,
     agent_session_ids: &[&str],
 ) -> Result<(), String> {
-    let remedy = "Pass --herdr-pane <pane-id> to say which pane this command acts for.";
+    let variable = Locator::Pane.var(name);
+    let remedy = format!(
+        "Pass {} <pane-id> to say which pane this command acts for.",
+        Locator::Pane.flag_for(name)
+    );
     let shell_pid = match mux.process(&PaneId::new(pane_id)) {
         Ok(process) => ShellProcess::from_reply(process).map(|p| p.shell_pid),
         Err(MuxError::Protocol(_)) => None,
         Err(error) => {
             return Err(format!(
-                "could not verify the inherited HERDR_PANE_ID={pane_id}: {error} {remedy}"
+                "could not verify the inherited {variable}={pane_id}: {error} {remedy}"
             ));
         }
     }
     .filter(|pid| *pid > 0)
     .ok_or_else(|| {
         format!(
-            "HERDR_PANE_ID={pane_id} was inherited from the environment, but Herdr reports \
+            "{variable}={pane_id} was inherited from the environment, but Herdr reports \
              no shell for pane {pane_id}, so the pane could not be verified. {remedy}"
         )
     })?;
@@ -222,7 +229,7 @@ pub fn verify_inherited_pane(
         )
     };
     Err(format!(
-        "HERDR_PANE_ID={pane_id} was inherited from the environment, but this process (pid \
+        "{variable}={pane_id} was inherited from the environment, but this process (pid \
          {caller}) is not running inside pane {pane_id}: the pane's shell (pid {shell_pid}) is \
          not one of its ancestors. {sessions} A background daemon keeps the pane variables it \
          was started with. {remedy}"

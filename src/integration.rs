@@ -1,3 +1,4 @@
+use crate::locator::Locator;
 use crate::mux::InputOutcome;
 use crate::{
     AgentSessionId, DeliveryAttemptId, DiscoveredPane, DiscoveredWorktree, LifecycleRuntime,
@@ -1986,30 +1987,23 @@ struct RenderedLine<'a> {
 }
 
 /// One operation's command up to its input flag, in the order the approval
-/// prefix needs: executable, state directory, argv, then location.
+/// prefix needs: executable, state directory, argv, then location. Each value
+/// is passed with the flag of the key that held it, Herdr's or the neutral one.
 fn located_command(
     executable: &str,
     environment: &serde_json::Map<String, Value>,
     argv: &[&str],
 ) -> String {
-    let located = |key: &str| environment.get(key).and_then(Value::as_str);
     let mut command = shell_single_quote(executable);
-    if let Some(state_directory) = located("HERDR_PLUGIN_STATE_DIR") {
-        command.push_str(&format!(
-            " --plugin-state {}",
-            shell_single_quote(state_directory)
-        ));
+    if let Some((flag, state_directory)) = Locator::StateDir.in_envelope(environment) {
+        command.push_str(&format!(" {flag} {}", shell_single_quote(state_directory)));
     }
     for argument in argv {
         command.push(' ');
         command.push_str(&shell_argument(argument));
     }
-    for (flag, key) in [
-        ("--herdr-socket", "HERDR_SOCKET_PATH"),
-        ("--herdr-workspace", "HERDR_WORKSPACE_ID"),
-        ("--herdr-pane", "HERDR_PANE_ID"),
-    ] {
-        if let Some(value) = located(key) {
+    for locator in [Locator::Endpoint, Locator::Space, Locator::Pane] {
+        if let Some((flag, value)) = locator.in_envelope(environment) {
             command.push_str(&format!(" {flag} {}", shell_single_quote(value)));
         }
     }
