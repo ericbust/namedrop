@@ -1,7 +1,7 @@
 use super::*;
 use crate::mux::{
-    Admit, Badge, Budget, InputKind, InputOutcome, Key, MuxAct, MuxConnector, MuxError, MuxRead,
-    PaneId, PromptRequest, Recipient, Scope, ScreenRequest, StateTexts, Style, TabId, Wrap,
+    Badge, Budget, InputKind, InputOutcome, Key, MuxAct, MuxConnector, MuxError, MuxRead, PaneId,
+    PromptRequest, Recipient, Scope, ScreenRequest, StateTexts, Style, TabId, Wrap,
     fake::{Op, ScreenShape},
 };
 use std::{
@@ -50,7 +50,6 @@ fn prompt(space: &FakeMux, pane: &str) -> InputOutcome {
         InputKind::Prompt(PromptRequest {
             expect: &expect,
             text: "hello",
-            admit: Admit::Settled,
         }),
     )
 }

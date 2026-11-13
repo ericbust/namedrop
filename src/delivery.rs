@@ -770,18 +770,12 @@ where
                 .find(|p| p.pane_id == second.pane_id)
                 .expect("live candidate checked");
             let expect = pane.agent.as_ref().expect("live candidate checked");
-            let admit = if pane.accepts_prompt() {
-                crate::mux::Admit::Settled
-            } else {
-                crate::mux::Admit::BetweenTurns
-            };
             effects.prompt(
                 runtime.mux,
                 &owner,
                 crate::mux::PromptRequest {
                     expect,
                     text: &prompt,
-                    admit,
                 },
             )
         };

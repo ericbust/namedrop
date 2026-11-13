@@ -30,9 +30,9 @@ pub trait StatusTap {
 }
 
 /// Admits only the agent the caller verified, in a status that accepts a
-/// prompt. The status decides even for `Admit::BetweenTurns`, because a
-/// change to `Working` after the paste could not confirm a prompt typed while
-/// the agent already reported `working`.
+/// prompt. An agent that reports `working` is declined even between turns,
+/// because a change to `Working` after the paste could not confirm a prompt
+/// typed while the agent already reported `working`.
 fn admits(
     agent: Option<&AgentIdentity>,
     state: Option<&AgentState>,
@@ -104,7 +104,7 @@ mod tests {
     use super::*;
     use crate::{
         AgentRuntime, AgentSessionId,
-        mux::{Admit, AgentKind, Incarnation, SessionClaim},
+        mux::{AgentKind, Incarnation, SessionClaim},
     };
     use std::{cell::RefCell, rc::Rc};
 
@@ -219,11 +219,10 @@ mod tests {
         }
     }
 
-    fn prompt(channel: &Scripted, expect: &AgentIdentity, admit: Admit) -> InputOutcome {
+    fn prompt(channel: &Scripted, expect: &AgentIdentity) -> InputOutcome {
         let request = PromptRequest {
             expect,
             text: "hello",
-            admit,
         };
         emulate_prompt(channel, &PaneId::new("pane-1"), &request)
     }
@@ -238,7 +237,7 @@ mod tests {
         for status in ["idle", "done"] {
             let channel = channel(Some(agent.clone()), Some(status), AfterPaste::StartsWorking);
             assert_eq!(
-                prompt(&channel, &agent, Admit::Settled),
+                prompt(&channel, &agent),
                 InputOutcome::Delivered,
                 "{status}"
             );
@@ -253,28 +252,13 @@ mod tests {
             let channel = channel(Some(agent.clone()), status, AfterPaste::StartsWorking);
             assert!(
                 matches!(
-                    prompt(&channel, &agent, Admit::Settled),
+                    prompt(&channel, &agent),
                     InputOutcome::Declined(Retry::OnEvent, _)
                 ),
                 "{status:?}"
             );
             assert!(pasted(&channel).is_empty(), "{status:?}");
         }
-    }
-
-    #[test]
-    fn a_between_turns_admission_is_declined_before_any_input() {
-        let agent = claude(reported("session-1"));
-        let channel = channel(
-            Some(agent.clone()),
-            Some("working"),
-            AfterPaste::StartsWorking,
-        );
-        assert!(matches!(
-            prompt(&channel, &agent, Admit::BetweenTurns),
-            InputOutcome::Declined(Retry::OnEvent, _)
-        ));
-        assert!(pasted(&channel).is_empty());
     }
 
     #[test]
@@ -298,7 +282,7 @@ mod tests {
             let channel = channel(found.clone(), Some("idle"), AfterPaste::StartsWorking);
             assert!(
                 matches!(
-                    prompt(&channel, &expected, Admit::Settled),
+                    prompt(&channel, &expected),
                     InputOutcome::Declined(Retry::OnEvent, _)
                 ),
                 "{found:?}"
@@ -312,7 +296,7 @@ mod tests {
         let agent = claude(reported("session-1"));
         let channel = channel(Some(agent.clone()), Some("idle"), AfterPaste::Fails);
         assert!(matches!(
-            prompt(&channel, &agent, Admit::Settled),
+            prompt(&channel, &agent),
             InputOutcome::Ambiguous(_)
         ));
         assert_eq!(pasted(&channel), ["hello"]);
@@ -332,7 +316,7 @@ mod tests {
             .changes
             .extend([AgentState::Working, AgentState::Idle]);
         assert!(matches!(
-            prompt(&channel, &agent, Admit::Settled),
+            prompt(&channel, &agent),
             InputOutcome::Ambiguous(_)
         ));
         assert_eq!(pasted(&channel), ["hello"]);
@@ -347,7 +331,7 @@ mod tests {
         tap_fails.tap_fails = true;
         for channel in [facts_fail, tap_fails] {
             assert!(matches!(
-                prompt(&channel, &agent, Admit::Settled),
+                prompt(&channel, &agent),
                 InputOutcome::Declined(Retry::AfterDelay, _)
             ));
             assert!(pasted(&channel).is_empty());
@@ -360,7 +344,7 @@ mod tests {
         let mut channel = channel(Some(agent.clone()), Some("idle"), AfterPaste::StartsWorking);
         channel.changes_after_facts = vec![AgentState::Working];
         assert!(matches!(
-            prompt(&channel, &agent, Admit::Settled),
+            prompt(&channel, &agent),
             InputOutcome::Declined(Retry::OnEvent, _)
         ));
         assert!(pasted(&channel).is_empty());

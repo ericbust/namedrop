@@ -1314,7 +1314,7 @@ mod tests {
     #[test]
     fn a_prompt_reaches_the_multiplexer_only_through_its_pane_lock() {
         use crate::mux::{
-            Admit, Depth, MuxRead, Scope,
+            Depth, MuxRead, Scope,
             fake::{Sent, SentInput},
         };
         let state = State::new();
@@ -1332,7 +1332,6 @@ mod tests {
         let request = PromptRequest {
             expect: &expect,
             text: "hello",
-            admit: Admit::Settled,
         };
         assert_eq!(
             gate.prompt(&mux, &delivery(), request),

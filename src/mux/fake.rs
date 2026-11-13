@@ -1174,8 +1174,7 @@ impl FakeMux {
         }
         // Herdr 0.9.5 `agent prompt` refuses a pane that reports no agent
         // word (`agent_not_found`, even when it reports a session) and a
-        // blocked agent, and types to one that reports `working`, whatever
-        // the caller's `Admit`.
+        // blocked agent, and types to one that reports `working`.
         let admitted = {
             let world = self.lock();
             let facts = &world.pane(pane).expect("checked above").facts;

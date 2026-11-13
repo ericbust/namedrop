@@ -1,23 +1,10 @@
 use super::{AgentIdentity, Key};
 
-/// Why the caller believes the agent can take a prompt now. No adapter
-/// reads it. Herdr types to an agent that reports `working` whatever the
-/// admission, and `gate::emulate_prompt` decides by status alone.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Admit {
-    /// The agent reports `idle` or `done`.
-    Settled,
-    /// The agent reports `working`, but its hooks show the turn ended and no
-    /// prompt arrived since.
-    BetweenTurns,
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct PromptRequest<'a> {
     /// The agent the caller verified under the pane lock.
     pub expect: &'a AgentIdentity,
     pub text: &'a str,
-    pub admit: Admit,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

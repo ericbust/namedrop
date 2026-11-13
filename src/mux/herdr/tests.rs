@@ -4,8 +4,8 @@ use super::{wire::input_failure, *};
 use crate::{
     AgentRuntime, AgentSessionId, SpaceId, WorktreeId,
     mux::{
-        Admit, AgentIdentity, AgentKind, AgentState, Badge, Checkout, Gone, Key, MuxEvent,
-        PaneFacts, PaneSlot, PopupScreen, PopupSpec, PromptRequest, Recipient, Retry, SessionClaim,
+        AgentIdentity, AgentKind, AgentState, Badge, Checkout, Gone, Key, MuxEvent, PaneFacts,
+        PaneSlot, PopupScreen, PopupSpec, PromptRequest, Recipient, Retry, SessionClaim,
         StateTexts, Style, TerminalId, Wrap,
     },
 };
@@ -924,7 +924,6 @@ fn input_runs_today_s_command_for_each_kind() {
     let request = PromptRequest {
         expect: &expect,
         text: "hello there",
-        admit: Admit::BetweenTurns,
     };
     for kind in [
         InputKind::Prompt(request),

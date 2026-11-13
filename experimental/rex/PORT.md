@@ -20,7 +20,7 @@ let (space, pane) = survey.pane_running(&session).ok_or(..)?;
 
 // Delivery: one path for every multiplexer.
 let effects = PaneEffects::acquire(state, mux.endpoint(), &pane.id, LockWait::Patient)?;
-match effects.prompt(&mux, &owner, PromptRequest { expect, text, admit }) {
+match effects.prompt(&mux, &owner, PromptRequest { expect, text }) {
 	InputOutcome::Delivered => submitted(),
 	InputOutcome::Declined(retry) => requeue(retry),  // nothing was typed
 	InputOutcome::Refused(_) => failed(),
@@ -49,7 +49,7 @@ assert_eq!(mux.sent_to("pane-reviewer").len(), 1);
 | `src/mux/model.rs` | Branded `PaneId`, `TabId`, and `TerminalId`. `Survey`, `SpaceView`, `PaneFacts`, `AgentState`, `AgentIdentity`, `SessionClaim`, screen and process types, `Key`, `Budget` |
 | `src/mux/ports.rs` | The `MuxRead`, `MuxAct`, and `MuxInput` traits, `Mux` as their union, `MuxConnector`, and `MuxError` |
 | `src/mux/effect.rs` | `Effect` and `Applied`: labels, badges, tab names, notifications, popups, and config reload |
-| `src/mux/input.rs` | `InputKind`, `PromptRequest`, `Admit`, `InputOutcome`, and `Retry` |
+| `src/mux/input.rs` | `InputKind`, `PromptRequest`, `InputOutcome`, and `Retry` |
 | `src/mux/gate.rs` | The admission rule and `emulate_prompt`, the one implementation of "idle or done" and "ambiguous after the first byte" for multiplexers without a native gate |
 | `src/mux/event.rs` | `MuxEvent`, the normalized lifecycle event |
 | `src/mux/herdr/` | The only place that holds Herdr arguments, JSON, error codes, plugin events, and live-peek observation. Its transport is private to the module |
@@ -547,7 +547,7 @@ Record each accepted deviation here, with its source, before the next commit sta
   - **The budget is per connection, not per call.** `MuxConnector::connect` fixes it, and a read narrows it with `within`. `Budget::ADAPTER_DEFAULT` is `Duration::MAX` and `usize::MAX`, which means "no limit but the adapter's own". The Herdr process caps it at `NAMEDROP_HERDR_TIMEOUT_MS`. A Rex adapter must give the same default a real limit of its own.
   - **`SessionClaim::Unreported` has no producer.** `resolve_session` answers `None` for it. Step 4 adds the record Namedrop's SessionStart hook writes, keyed by the incarnation.
   - **`Applied::Opened(serde_json::Value)` carries Herdr's popup reply.** `namedrop ui` prints it, and the tour and tests read it. Rex needs its own reply, or the variant needs a typed one.
-  - **`Admit` has no reader.** Herdr types to any agent that is not blocked, so the adapter does not pass it, and the gate decides from the status. Step 4 either gives it a use or deletes it.
+  - **Answered in step 4 commit 1. `Admit` had no reader**, because Herdr types to any agent that is not blocked and the gate decides from the status. The Rex adapter does not need it either, so it is deleted with `PromptRequest.admit`.
   - **The pane lock key has no `MuxKind`.** `PaneEffects::acquire` keys the lock by the SHA-256 of the socket and the pane. A Herdr socket and a Rex server address would share a lock only if the two strings were equal, but nothing in the key says which multiplexer owns it.
 
 ## Next implementation step
