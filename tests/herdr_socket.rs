@@ -365,39 +365,42 @@ fn the_state_directory_comes_from_the_herdr_name_then_the_neutral_one() {
     state_of(false);
 }
 
-/// With no state directory named, a command outside Herdr uses Namedrop's
-/// own default, and one under Herdr still refuses, because Herdr's plugin
-/// directory is the only one its panes share.
+/// With no state directory named, a command refuses and runs no `herdr`,
+/// inside Herdr and out: Namedrop has no default directory yet.
 #[test]
-fn the_default_state_directory_is_used_only_where_herdr_names_none() {
-    let f = Fixture::new();
-    let mut command = f.namedrop(None);
-    command
-        .env_remove("HERDR_PLUGIN_STATE_DIR")
-        .env_remove("XDG_STATE_HOME")
-        .env("NAMEDROP_ENDPOINT", "/run/neutral.sock");
-    let (output, calls) = f.launch_doctor(command, &["--space", "w1", "--pane", "p1"]);
-    assert!(output.status.success(), "{output:?}");
-    let default = f.0.join("home/.local/state/namedrop");
-    assert!(
-        calls.last().unwrap().contains(&format!(
-            " --env HERDR_PLUGIN_STATE_DIR={} ",
-            default.display()
-        )),
-        "{calls:#?}"
-    );
+fn without_a_state_directory_a_command_refuses_inside_herdr_and_out() {
+    let required = "--plugin-state, HERDR_PLUGIN_STATE_DIR or NAMEDROP_STATE_DIR is required";
+    for herdr in [false, true] {
+        let f = Fixture::new();
+        let mut command = f.namedrop(herdr.then_some("/run/inherited.sock"));
+        command
+            .env_remove("HERDR_PLUGIN_STATE_DIR")
+            .env_remove("XDG_STATE_HOME");
+        if !herdr {
+            command.env("NAMEDROP_ENDPOINT", "/run/neutral.sock");
+        }
+        let (output, calls) = f.launch_doctor(command, &["--space", "w1", "--pane", "p1"]);
+        assert!(!output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(required),
+            "{output:?}"
+        );
+        assert!(calls.is_empty(), "{calls:#?}");
+        assert!(!f.0.join("home/.local").exists());
 
-    let f = Fixture::new();
-    let mut command = f.namedrop(Some("/run/inherited.sock"));
-    command.env_remove("HERDR_PLUGIN_STATE_DIR");
-    let (output, calls) = f.launch_doctor(command, &["--space", "w1", "--pane", "p1"]);
-    assert!(!output.status.success(), "{output:?}");
-    assert!(
-        String::from_utf8_lossy(&output.stdout)
-            .contains("--plugin-state, HERDR_PLUGIN_STATE_DIR or NAMEDROP_STATE_DIR is required"),
-        "{output:?}"
-    );
-    assert!(calls.is_empty(), "{calls:#?}");
+        let output = f
+            .namedrop(herdr.then_some("/run/inherited.sock"))
+            .env_remove("HERDR_PLUGIN_STATE_DIR")
+            .env_remove("XDG_STATE_HOME")
+            .arg("dashboard-server")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(64), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(required),
+            "{output:?}"
+        );
+    }
 }
 
 #[test]

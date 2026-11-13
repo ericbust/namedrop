@@ -252,7 +252,7 @@ fn main() -> ExitCode {
     }
     if cli.is_dashboard_server() {
         let Some(state) = selected_state else {
-            eprintln!("dashboard-server requires --plugin-state");
+            eprintln!("dashboard-server: {}", state_required());
             return ExitCode::from(64);
         };
         return namedrop::dashboard::serve(

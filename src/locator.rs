@@ -123,34 +123,11 @@ pub enum Name {
     Neutral,
 }
 
-/// The state directory: `flag`, then the inherited one, then the default when
-/// no multiplexer names one.
+/// The state directory: `flag`, then the inherited one. With neither, there
+/// is no default: under Herdr a default could only be a second database
+/// beside the plugin's, so step 4 adds one once the home is known to be Rex.
 pub fn state_directory(flag: Option<PathBuf>) -> Option<PathBuf> {
-    flag.or_else(|| state_directory_in(|name| env::var_os(name)))
-}
-
-/// The state directory `lookup` names. Under Herdr only Herdr's
-/// `HERDR_PLUGIN_STATE_DIR` or a neutral name gives one, because a default
-/// would be a second, empty database beside the plugin's. Elsewhere the
-/// default is `$XDG_STATE_HOME/namedrop`, or `$HOME/.local/state/namedrop`.
-pub(crate) fn state_directory_in(lookup: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
-    if let Some((_, directory)) = Locator::StateDir.resolve(&lookup) {
-        return Some(PathBuf::from(directory));
-    }
-    if [Locator::Endpoint, Locator::Space, Locator::Pane]
-        .iter()
-        .any(|locator| lookup(locator.herdr_var()).is_some())
-    {
-        return None;
-    }
-    let absolute = |name: &str| {
-        lookup(name)
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-    };
-    absolute("XDG_STATE_HOME")
-        .or_else(|| absolute("HOME").map(|home| home.join(".local/state")))
-        .map(|directory| directory.join("namedrop"))
+    flag.or_else(|| Locator::StateDir.env_os().map(PathBuf::from))
 }
 
 #[cfg(test)]
@@ -222,44 +199,6 @@ mod tests {
             Some((Name::Neutral, "w1:p2".to_owned()))
         );
         assert_eq!(resolved(Locator::Space, &mixed), None);
-    }
-
-    #[test]
-    fn the_state_directory_comes_from_a_name_then_the_default_outside_herdr() {
-        let state = |pairs: &[(&str, &str)]| state_directory_in(env(pairs));
-        let home = ("HOME", "/home/me");
-        assert_eq!(
-            state(&[
-                ("HERDR_PLUGIN_STATE_DIR", "/herdr"),
-                ("NAMEDROP_STATE_DIR", "/n")
-            ]),
-            Some(PathBuf::from("/herdr"))
-        );
-        assert_eq!(
-            state(&[("NAMEDROP_STATE_DIR", "/n"), ("HERDR_PANE_ID", "w1:p1")]),
-            Some(PathBuf::from("/n"))
-        );
-        assert_eq!(
-            state(&[home]),
-            Some(PathBuf::from("/home/me/.local/state/namedrop"))
-        );
-        assert_eq!(
-            state(&[home, ("XDG_STATE_HOME", "/xdg")]),
-            Some(PathBuf::from("/xdg/namedrop"))
-        );
-        assert_eq!(
-            state(&[home, ("XDG_STATE_HOME", "relative")]),
-            Some(PathBuf::from("/home/me/.local/state/namedrop"))
-        );
-        assert_eq!(state(&[("HOME", "relative")]), None);
-        assert_eq!(state(&[]), None);
-        for herdr in ["HERDR_SOCKET_PATH", "HERDR_WORKSPACE_ID", "HERDR_PANE_ID"] {
-            assert_eq!(state(&[home, (herdr, "x")]), None, "{herdr}");
-        }
-        assert_eq!(
-            state(&[home, ("NAMEDROP_PANE_ID", "w1:p1")]),
-            Some(PathBuf::from("/home/me/.local/state/namedrop"))
-        );
     }
 
     #[test]
