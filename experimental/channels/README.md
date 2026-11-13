@@ -368,8 +368,9 @@ holds the drafts, the checks and the form's state machine as pure functions, and
 The New channel form reads `GET /w/<key>/folders` for **Recent folders**, where the
 key is the open channel's, or else the first channel's. A list that can't load is an
 empty one. **Create** posts `{name, folder}` to `POST /w/<key>/channels`, and the
-page opens the channel named by the `key` in the answer. **Add** posts
-`{kind, name, persona}` to `POST /w/<key>/agents` for the open channel. Both posts
+page opens the channel named by the `key` in the answer. The Add agent
+form reads `GET /w/<key>/folder` as it opens and shows the folder under **Opens in**.
+**Add** posts `{kind, name, persona}` to `POST /w/<key>/agents` for the open channel. Both posts
 carry the `X-Namedrop-Csrf` header and retry once after a 403, like a send.
 
 The page checks a draft before it posts, with the server's own sentences, so a

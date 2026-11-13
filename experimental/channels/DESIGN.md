@@ -388,7 +388,9 @@ the button reads "Creating…" or "Adding…" and the fields keep their text.
   not among them, so the "+N more" count never has to make room for it. The form
   opens under the strip on `--bg-raised`: Kind as three pill radios (Claude Code
   first and chosen), Name after a fixed @, checked as you type against the name
-  rule and the names in the channel, and an optional Persona. The new agent
+  rule and the names in the channel, and an optional Persona. Under the fields, a 12px
+  muted line reads "Opens in" and the channel's folder in mono, cut on the
+  left so its last folder stays, with the full path as the tooltip. The new agent
   arrives in the strip through the event stream. Under 860px wide, or
   under 560px tall, the chip shows only its +, so the strip's lines hold
   agents; its name stays "Add agent" for assistive tech and as its tooltip.
