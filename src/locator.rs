@@ -3,10 +3,10 @@
 //! and the Herdr name accepted beside it, in the environment, on the command
 //! line, and in a `collab/v1` tool environment.
 //!
-//! One precedence holds everywhere: an explicit flag, then the Herdr name, then
-//! the neutral name. Herdr sets its names afresh for every pane and plugin
-//! process, so under Herdr a neutral name the environment carries from
-//! elsewhere never changes what a command does. Each value resolves on its own.
+//! One rule holds everywhere. An explicit flag wins for its own value. The
+//! endpoint, space, and pane otherwise come from one set of names, chosen once
+//! by [`home`]: Herdr's under Herdr, the neutral ones elsewhere. The state
+//! directory comes from `HERDR_PLUGIN_STATE_DIR`, then `NAMEDROP_STATE_DIR`.
 
 use serde_json::{Map, Value};
 use std::{
@@ -65,23 +65,28 @@ impl Locator {
         }
     }
 
-    /// The value `lookup` gives under the Herdr name, then the neutral one,
-    /// and which name gave it. A Herdr value counts even when empty, as it
-    /// always has; an empty neutral value counts as unset.
+    /// The value `lookup` gives, and which name gave it. A Herdr value counts
+    /// even when empty, as it always has; an empty neutral value counts as
+    /// unset.
     pub fn resolve<V: AsRef<OsStr>>(self, lookup: impl Fn(&str) -> Option<V>) -> Option<(Name, V)> {
-        lookup(self.herdr_var())
-            .map(|value| (Name::Herdr, value))
-            .or_else(|| {
-                lookup(self.neutral_var())
-                    .filter(|value| !value.as_ref().is_empty())
-                    .map(|value| (Name::Neutral, value))
-            })
+        let name = match self {
+            Self::StateDir if lookup(self.herdr_var()).is_some() => Name::Herdr,
+            Self::StateDir => Name::Neutral,
+            Self::Endpoint | Self::Space | Self::Pane => home(&lookup),
+        };
+        let value = lookup(self.var(name));
+        match name {
+            Name::Herdr => value,
+            Name::Neutral => value.filter(|value| !value.as_ref().is_empty()),
+        }
+        .map(|value| (name, value))
     }
 
     /// The value this process inherited, and which name held it. A value that
     /// is not Unicode counts as unset.
     pub fn inherited(self) -> Option<(Name, String)> {
-        self.resolve(|name| env::var(name).ok())
+        let (name, value) = self.resolve(|name| env::var_os(name))?;
+        Some((name, value.into_string().ok()?))
     }
 
     pub fn env(self) -> Option<String> {
@@ -121,6 +126,23 @@ impl Locator {
 pub enum Name {
     Herdr,
     Neutral,
+}
+
+/// The names the endpoint, space, and pane all come from: Herdr's when
+/// `lookup` holds any of `HERDR_SOCKET_PATH`, `HERDR_WORKSPACE_ID`, or
+/// `HERDR_PANE_ID`, even empty, and the neutral ones otherwise. Herdr names
+/// every pane and plugin process afresh, so under Herdr a neutral name
+/// inherited from elsewhere never fills a value Herdr left unset. Step 4
+/// replaces this with the multiplexer `mux::home::resolve` chooses.
+pub fn home<V>(lookup: impl Fn(&str) -> Option<V>) -> Name {
+    if [Locator::Endpoint, Locator::Space, Locator::Pane]
+        .iter()
+        .any(|locator| lookup(locator.herdr_var()).is_some())
+    {
+        Name::Herdr
+    } else {
+        Name::Neutral
+    }
 }
 
 /// The state directory: `flag`, then the inherited one. With neither, there
@@ -185,20 +207,38 @@ mod tests {
     }
 
     #[test]
-    fn each_locator_resolves_on_its_own() {
-        let mixed = [
-            ("HERDR_SOCKET_PATH", "/herdr.sock"),
-            ("NAMEDROP_PANE_ID", "w1:p2"),
+    fn any_herdr_location_name_hides_every_neutral_location_name() {
+        let neutral = [
+            ("NAMEDROP_STATE_DIR", "/n"),
+            ("NAMEDROP_ENDPOINT", "/n.sock"),
+            ("NAMEDROP_SPACE_ID", "n1"),
+            ("NAMEDROP_PANE_ID", "n1:p1"),
         ];
+        for herdr in [Locator::Endpoint, Locator::Space, Locator::Pane] {
+            for value in ["h", ""] {
+                let mut pairs = neutral.to_vec();
+                pairs.push((herdr.herdr_var(), value));
+                for locator in [Locator::Endpoint, Locator::Space, Locator::Pane] {
+                    let expected = (locator == herdr).then(|| (Name::Herdr, value.to_owned()));
+                    assert_eq!(resolved(locator, &pairs), expected, "{herdr:?} {locator:?}");
+                }
+                assert_eq!(
+                    resolved(Locator::StateDir, &pairs),
+                    Some((Name::Neutral, "/n".to_owned())),
+                    "{herdr:?}"
+                );
+            }
+        }
+        let state = [("HERDR_PLUGIN_STATE_DIR", "/h")];
         assert_eq!(
-            resolved(Locator::Endpoint, &mixed),
-            Some((Name::Herdr, "/herdr.sock".to_owned()))
+            [Locator::Endpoint, Locator::Space, Locator::Pane]
+                .map(|locator| resolved(locator, &[state[0], neutral[1], neutral[2], neutral[3]])),
+            [
+                Some((Name::Neutral, "/n.sock".to_owned())),
+                Some((Name::Neutral, "n1".to_owned())),
+                Some((Name::Neutral, "n1:p1".to_owned())),
+            ]
         );
-        assert_eq!(
-            resolved(Locator::Pane, &mixed),
-            Some((Name::Neutral, "w1:p2".to_owned()))
-        );
-        assert_eq!(resolved(Locator::Space, &mixed), None);
     }
 
     #[test]
@@ -241,6 +281,8 @@ mod tests {
             Locator::Pane.in_envelope(both.as_object().unwrap()),
             Some(("--herdr-pane", "herdr"))
         );
+        let mixed = json!({"HERDR_SOCKET_PATH": "/h.sock", "NAMEDROP_PANE_ID": "neutral"});
+        assert_eq!(Locator::Pane.in_envelope(mixed.as_object().unwrap()), None);
     }
 
     #[test]

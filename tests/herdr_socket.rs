@@ -5,8 +5,9 @@
 //! its `herdr` inherits the variable too.
 //!
 //! Each location also has a neutral name (`namedrop::locator`): a flag beside
-//! each `--herdr-*` one and a `NAMEDROP_*` variable that only counts where
-//! the Herdr variable is unset.
+//! each `--herdr-*` one, and a `NAMEDROP_*` variable that counts only where
+//! none of `HERDR_SOCKET_PATH`, `HERDR_WORKSPACE_ID`, and `HERDR_PANE_ID` is
+//! set.
 
 #[path = "support/executable.rs"]
 mod executable;
@@ -14,9 +15,37 @@ mod executable;
 use std::{
     fs,
     path::PathBuf,
-    process::Command,
+    process::{Command, Output, Stdio},
     sync::atomic::{AtomicU64, Ordering},
+    thread,
+    time::{Duration, Instant},
 };
+
+trait Finish {
+    /// Runs the command to its end, or fails once it has run 20 s: a command
+    /// that retries a space it can never find would otherwise hang the test.
+    fn finish(&mut self) -> Output;
+}
+
+impl Finish for Command {
+    fn finish(&mut self) -> Output {
+        let mut child = self
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                panic!("still running after 20 s: {self:?}");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        child.wait_with_output().unwrap()
+    }
+}
 
 /// Logs each command with the socket it was given, and answers one pane, a
 /// popup, `status server` with the socket in `$ROOT/served`, or fails it
@@ -92,8 +121,7 @@ impl Fixture {
         let output = command
             .args(["--herdr-workspace", "w1", "--herdr-pane", "p1"])
             .args(["ui", "launch", "doctor"])
-            .output()
-            .unwrap();
+            .finish();
         assert!(output.status.success(), "{output:?}");
         self.calls()
     }
@@ -107,8 +135,7 @@ impl Fixture {
         let output = command
             .args(flags)
             .args(["ui", "launch", "doctor"])
-            .output()
-            .unwrap();
+            .finish();
         (output, self.calls())
     }
 
@@ -197,39 +224,45 @@ fn the_socket_flag_wins_over_the_inherited_one_for_every_command() {
     );
 }
 
+/// The wake hook finds its space from its directory, and a `NAMEDROP_SPACE_ID`
+/// it inherited under Herdr names none.
 #[test]
 fn the_mailbox_wake_hook_finds_its_space_on_the_inherited_socket() {
-    let f = Fixture::new();
-    let checkout = f.0.join("checkout");
-    fs::create_dir(&checkout).unwrap();
-    let checkout = checkout.canonicalize().unwrap();
-    let output = f
-        .namedrop(Some("/run/inherited.sock"))
-        .env("CHECKOUT", &checkout)
-        .current_dir(&checkout)
-        .args(["hook", "mailbox-wake", "--state-directory"])
-        .arg(f.0.join("state"))
-        .output()
-        .unwrap();
-    let calls = f.calls();
-    assert!(output.status.success(), "{output:?} {calls:#?}");
-    assert_eq!(
-        calls.first().map(String::as_str),
-        Some(
-            format!(
-                "socket</run/inherited.sock> worktree list --cwd {} --json",
-                checkout.display()
-            )
-            .as_str()
-        ),
-        "{calls:#?}"
-    );
-    assert!(
-        calls
-            .iter()
-            .all(|call| call.starts_with("socket</run/inherited.sock> ")),
-        "{calls:#?}"
-    );
+    for neutral in [None, Some("w9")] {
+        let f = Fixture::new();
+        let checkout = f.0.join("checkout");
+        fs::create_dir(&checkout).unwrap();
+        let checkout = checkout.canonicalize().unwrap();
+        let mut command = f.namedrop(Some("/run/inherited.sock"));
+        if let Some(space) = neutral {
+            command.env("NAMEDROP_SPACE_ID", space);
+        }
+        let output = command
+            .env("CHECKOUT", &checkout)
+            .current_dir(&checkout)
+            .args(["hook", "mailbox-wake", "--state-directory"])
+            .arg(f.0.join("state"))
+            .finish();
+        let calls = f.calls();
+        assert!(output.status.success(), "{output:?} {calls:#?}");
+        assert_eq!(
+            calls.first().map(String::as_str),
+            Some(
+                format!(
+                    "socket</run/inherited.sock> worktree list --cwd {} --json",
+                    checkout.display()
+                )
+                .as_str()
+            ),
+            "{calls:#?}"
+        );
+        assert!(
+            calls.iter().all(|call| {
+                call.starts_with("socket</run/inherited.sock> ") && !call.contains("w9")
+            }),
+            "{calls:#?}"
+        );
+    }
 }
 
 #[test]
@@ -253,6 +286,28 @@ fn an_inherited_herdr_socket_outranks_a_neutral_endpoint() {
         f.launch_doctor(command, &["--herdr-workspace", "w1", "--herdr-pane", "p1"]);
     assert!(output.status.success(), "{output:?}");
     assert_ran(&calls, "/run/inherited.sock", false, "/run/inherited.sock");
+}
+
+/// A Herdr pane's workspace or pane name, with no `HERDR_SOCKET_PATH`, still
+/// means Herdr: every command inherits no socket, and the session is the
+/// server's, not an inherited `NAMEDROP_ENDPOINT`.
+#[test]
+fn any_herdr_name_leaves_a_neutral_endpoint_unread() {
+    let pane_flags: &[&str] = &["--herdr-workspace", "w1", "--herdr-pane", "p1"];
+    for (herdr, value, flags) in [
+        ("HERDR_WORKSPACE_ID", "w1", &pane_flags[2..]),
+        ("HERDR_PANE_ID", "p1", pane_flags),
+    ] {
+        let f = Fixture::new();
+        f.serve("/run/served.sock");
+        let mut command = f.namedrop(None);
+        command
+            .env(herdr, value)
+            .env("NAMEDROP_ENDPOINT", "/run/neutral.sock");
+        let (output, calls) = f.launch_doctor(command, flags);
+        assert!(output.status.success(), "{herdr} {output:?}");
+        assert_ran(&calls, "unset", true, "/run/served.sock");
+    }
 }
 
 #[test]
@@ -283,58 +338,83 @@ fn the_neutral_location_flags_spell_the_herdr_ones() {
     assert!(calls.is_empty(), "{calls:#?}");
 }
 
+/// The space comes from `HERDR_WORKSPACE_ID` under Herdr, and from
+/// `NAMEDROP_SPACE_ID` only where no Herdr name is set.
 #[test]
-fn a_space_comes_from_the_herdr_name_then_the_neutral_one() {
-    let workspace = |herdr: Option<&str>, neutral: &str| {
+fn a_space_comes_from_the_herdr_names_or_else_the_neutral_ones() {
+    let first_call = |herdr: &[(&str, &str)], neutral: &[(&str, &str)]| {
         let f = Fixture::new();
-        let mut command = f.namedrop(Some("/run/inherited.sock"));
-        command.env("NAMEDROP_SPACE_ID", neutral);
-        if let Some(space) = herdr {
-            command.env("HERDR_WORKSPACE_ID", space);
-        }
+        let mut command = f.namedrop(None);
+        command
+            .envs(herdr.iter().copied())
+            .envs(neutral.iter().copied());
         let (_, calls) = f.launch_doctor(command, &["--herdr-pane", "p1"]);
         calls[0].clone()
     };
+    let neutral = [
+        ("NAMEDROP_ENDPOINT", "/run/neutral.sock"),
+        ("NAMEDROP_SPACE_ID", "w1"),
+    ];
     assert_eq!(
-        workspace(None, "w1"),
+        first_call(&[], &neutral),
+        "socket</run/neutral.sock> worktree list --workspace w1 --json"
+    );
+    let herdr = [
+        ("HERDR_SOCKET_PATH", "/run/inherited.sock"),
+        ("HERDR_WORKSPACE_ID", "w1"),
+    ];
+    assert_eq!(
+        first_call(&herdr, &[("NAMEDROP_SPACE_ID", "w9")]),
         "socket</run/inherited.sock> worktree list --workspace w1 --json"
     );
     assert_eq!(
-        workspace(Some("w1"), "w9"),
-        "socket</run/inherited.sock> worktree list --workspace w1 --json"
+        first_call(&herdr[..1], &[("NAMEDROP_SPACE_ID", "w9")]),
+        "socket</run/inherited.sock> pane list"
     );
 }
 
-/// An inherited pane must be verified whichever name held it, and the
-/// refusal names that variable and its flag. The script `herdr` reports no
-/// shell for the pane, so verification always refuses here.
+/// An inherited pane is verified under the names in use, and the refusal
+/// names that variable and its flag. The script `herdr` reports no shell for
+/// the pane, so verification always refuses here.
 #[test]
-fn an_inherited_pane_is_verified_under_the_name_that_held_it() {
-    let refusal = |herdr: Option<&str>, neutral: &str| {
+fn an_inherited_pane_is_verified_under_the_names_in_use() {
+    let doctor = |envs: &[(&str, &str)]| {
         let f = Fixture::new();
-        let mut command = f.namedrop(Some("/run/inherited.sock"));
-        command.env("NAMEDROP_PANE_ID", neutral);
-        if let Some(pane) = herdr {
-            command.env("HERDR_PANE_ID", pane);
-        }
-        let (output, calls) = f.launch_doctor(command, &["--herdr-workspace", "w1"]);
-        assert!(!output.status.success(), "{output:?}");
-        assert!(
-            calls.iter().all(|call| !call.contains("plugin pane open")),
-            "{calls:#?}"
-        );
-        String::from_utf8_lossy(&output.stdout).into_owned()
-            + &String::from_utf8_lossy(&output.stderr)
+        let mut command = f.namedrop(None);
+        command.envs(envs.iter().copied());
+        let output = command.args(["--herdr-workspace", "w1", "doctor"]).finish();
+        let text = String::from_utf8_lossy(&output.stdout).into_owned()
+            + &String::from_utf8_lossy(&output.stderr);
+        (text, f.calls())
     };
-    let neutral = refusal(None, "p1");
+    let (neutral, _) = doctor(&[
+        ("NAMEDROP_ENDPOINT", "/run/neutral.sock"),
+        ("NAMEDROP_PANE_ID", "p1"),
+    ]);
     assert!(
         neutral.contains("NAMEDROP_PANE_ID=p1 was inherited") && neutral.contains("Pass --pane "),
         "{neutral}"
     );
-    let herdr = refusal(Some("p2"), "p1");
+    let (herdr, _) = doctor(&[
+        ("HERDR_SOCKET_PATH", "/run/inherited.sock"),
+        ("HERDR_PANE_ID", "p2"),
+        ("NAMEDROP_PANE_ID", "p1"),
+    ]);
     assert!(
         herdr.contains("HERDR_PANE_ID=p2 was inherited") && herdr.contains("Pass --herdr-pane "),
         "{herdr}"
+    );
+    let (mixed, calls) = doctor(&[
+        ("HERDR_SOCKET_PATH", "/run/inherited.sock"),
+        ("NAMEDROP_PANE_ID", "block:outer"),
+    ]);
+    assert!(mixed.contains(r#""status":"ok""#), "{mixed}");
+    assert_eq!(
+        calls,
+        [
+            "socket</run/inherited.sock> worktree list --workspace w1 --json",
+            "socket</run/inherited.sock> pane list --workspace w1",
+        ]
     );
 }
 
@@ -393,8 +473,7 @@ fn without_a_state_directory_a_command_refuses_inside_herdr_and_out() {
             .env_remove("HERDR_PLUGIN_STATE_DIR")
             .env_remove("XDG_STATE_HOME")
             .arg("dashboard-server")
-            .output()
-            .unwrap();
+            .finish();
         assert_eq!(output.status.code(), Some(64), "{output:?}");
         assert!(
             String::from_utf8_lossy(&output.stderr).contains(required),
@@ -416,8 +495,7 @@ fn the_mailbox_wake_hook_runs_herdr_on_a_neutral_endpoint() {
         .current_dir(&checkout)
         .args(["hook", "mailbox-wake", "--state-directory"])
         .arg(f.0.join("state"))
-        .output()
-        .unwrap();
+        .finish();
     let calls = f.calls();
     assert!(output.status.success(), "{output:?} {calls:#?}");
     assert!(!calls.is_empty());

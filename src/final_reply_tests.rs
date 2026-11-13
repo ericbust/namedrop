@@ -3,7 +3,7 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 
 #[test]
-fn a_claim_s_location_comes_from_either_key_set_and_herdr_s_wins() {
+fn a_claim_s_location_comes_from_one_key_set() {
     let location = |environment: Value| Location::from_envelope(environment.as_object().unwrap());
     let expected = Location {
         state: "/state".to_owned(),
@@ -28,10 +28,18 @@ fn a_claim_s_location_comes_from_either_key_set_and_herdr_s_wins() {
     assert_eq!(
         location(
             json!({"HERDR_PLUGIN_STATE_DIR":"/state","NAMEDROP_STATE_DIR":"/other",
-                        "NAMEDROP_ENDPOINT":"/run/h.sock","HERDR_WORKSPACE_ID":"w1",
-                        "NAMEDROP_SPACE_ID":"w2","NAMEDROP_PANE_ID":"w1:p3"})
+                        "HERDR_SOCKET_PATH":"/run/h.sock","NAMEDROP_ENDPOINT":"/other.sock",
+                        "HERDR_WORKSPACE_ID":"w1","NAMEDROP_SPACE_ID":"w2",
+                        "HERDR_PANE_ID":"w1:p3","NAMEDROP_PANE_ID":"w2:p9"})
         ),
         Some(expected)
+    );
+    assert_eq!(
+        location(
+            json!({"HERDR_PLUGIN_STATE_DIR":"/state","HERDR_WORKSPACE_ID":"w1",
+                        "NAMEDROP_ENDPOINT":"/run/h.sock","NAMEDROP_PANE_ID":"w1:p3"})
+        ),
+        None
     );
     assert_eq!(
         location(

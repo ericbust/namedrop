@@ -1030,10 +1030,9 @@ fn session_socket_id(explicit: Option<String>) -> String {
         .unwrap_or_else(|| "default".to_owned())
 }
 
-/// The socket a Herdr connection names: the caller's, or a neutral
-/// `NAMEDROP_ENDPOINT` when no `HERDR_SOCKET_PATH` outranks it. Otherwise each
-/// `herdr` command inherits `HERDR_SOCKET_PATH`, or Herdr's default, as it
-/// always has.
+/// The socket a Herdr connection names: the caller's, or `NAMEDROP_ENDPOINT`
+/// outside Herdr. Under Herdr each `herdr` command inherits
+/// `HERDR_SOCKET_PATH`, or Herdr's default, as it always has.
 fn connection_endpoint(explicit: Option<String>) -> Option<String> {
     explicit.or_else(|| match Locator::Endpoint.inherited() {
         Some((Name::Neutral, endpoint)) => Some(endpoint),
