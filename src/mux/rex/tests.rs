@@ -1165,3 +1165,18 @@ fn a_socket_now_served_by_a_server_with_another_endpoint_is_refused() {
     );
     assert_eq!(rex.wire.calls(), ["server.status"]);
 }
+
+/// A tail read can start inside an escape sequence of the line it drops.
+#[test]
+fn a_screen_read_that_starts_inside_a_link_drops_the_cut_line_before_it_parses() {
+    let request = ScreenRequest {
+        lines: 60,
+        wrap: Wrap::AsDrawn,
+        style: Style::Ansi,
+    };
+    let screen = "\u{1b}]8;;https://example.com/a\u{1b}\\link\u{1b}]8;;\u{1b}\\\r\nsecond\r\n> box";
+    assert_eq!(
+        super::screen_lines(&screen[10..], 10, request).as_deref(),
+        Ok("second\n> box")
+    );
+}

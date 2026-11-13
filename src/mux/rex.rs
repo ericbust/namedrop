@@ -361,8 +361,13 @@ fn space_key(space: &SpaceId) -> WorktreeId {
 
 /// The last `lines` lines of a screen read from `offset`, in the port's
 /// shape. A read that starts after the first byte starts inside a line, which
-/// is dropped.
+/// is dropped before the text is parsed, because the cut can fall inside an
+/// escape sequence.
 fn screen_lines(text: &str, offset: u64, request: ScreenRequest) -> Result<String, MuxError> {
+    let text = match offset {
+        0 => text,
+        _ => text.split_once('\n').map_or("", |(_, rest)| rest),
+    };
     let text = match request.style {
         Style::Ansi => wire::port_ansi(text).map_err(|sequence| {
             MuxError::Unavailable(format!(
@@ -371,10 +376,7 @@ fn screen_lines(text: &str, offset: u64, request: ScreenRequest) -> Result<Strin
         })?,
         Style::Plain => text.replace("\r\n", "\n"),
     };
-    let mut lines: Vec<&str> = text.split('\n').collect();
-    if offset > 0 && !lines.is_empty() {
-        lines.remove(0);
-    }
+    let lines: Vec<&str> = text.split('\n').collect();
     let start = lines.len().saturating_sub(request.lines);
     Ok(lines[start..].join("\n"))
 }
