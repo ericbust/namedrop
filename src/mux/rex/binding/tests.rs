@@ -138,7 +138,7 @@ fn binding(state: &State) -> Option<Binding> {
 }
 
 fn refusal_of(state: &State) -> Option<Refusal> {
-    refusal(&state.0, BLOCK)
+    Bindings::new(&state.0).refusal(BLOCK)
 }
 
 #[test]
@@ -310,6 +310,7 @@ fn a_refusal_is_recorded_for_doctor_and_a_later_bind_deletes_it() {
             endpoint: ENDPOINT.into(),
             condition: BindRefused::NotInGroup,
             session: "nested-session".into(),
+            foreground: Some(incarnation(26048)),
             at_ms: 1000,
         })
     );
@@ -326,6 +327,79 @@ fn a_refusal_is_recorded_for_doctor_and_a_later_bind_deletes_it() {
     let outer = Hook::of(&case("Claude Code 2.1.323"));
     assert_eq!(outer.bind(&state, "outer-session", 3000), Ok(()));
     assert_eq!(refusal_of(&state), None);
+}
+
+/// A nested hook refused in a block whose binding names the block's
+/// foreground leaves no refusal: the block is served. Under a binding to
+/// another foreground the refusal is news, and it names its foreground.
+#[test]
+fn a_refusal_is_recorded_only_while_the_binding_names_another_foreground() {
+    let nested = || Hook::of(&case("claude -p run as a tool"));
+    let state = State::new();
+    assert_eq!(
+        Hook::of(&case("Claude Code 2.1.323")).bind(&state, "outer", 1000),
+        Ok(())
+    );
+    assert_eq!(
+        nested().bind(&state, "nested", 2000),
+        Err(BindRefused::NotInGroup)
+    );
+    assert_eq!(refusal_of(&state), None);
+    assert_eq!(binding(&state).unwrap().session, "outer");
+    let state = State::new();
+    state.bind(&Binding {
+        agent: incarnation(26049),
+        ..bound_to(26048, "behind a launcher")
+    });
+    assert_eq!(
+        nested().bind(&state, "nested", 2000),
+        Err(BindRefused::NotInGroup)
+    );
+    assert_eq!(refusal_of(&state), None, "the launcher is the foreground");
+    let state = State::new();
+    state.bind(&bound_to(4242, "an earlier agent"));
+    assert_eq!(
+        nested().bind(&state, "nested", 2000),
+        Err(BindRefused::NotInGroup)
+    );
+    assert_eq!(
+        refusal_of(&state).and_then(|refusal| refusal.foreground),
+        Some(incarnation(26048))
+    );
+}
+
+/// Doctor's read: a refusal counts only under the foreground it was refused
+/// under, and one that names another block, or no foreground, never counts.
+#[test]
+fn doctor_reads_a_refusal_only_under_the_foreground_it_was_refused_under() {
+    let state = State::new();
+    let under = |foreground: &str| refusal(&state.0, BLOCK, &Incarnation(foreground.into()));
+    let write = |value: Value| {
+        let path = state.0.join(format!(
+            "rex/refusals/{}.json",
+            BLOCK.strip_prefix("block:").unwrap()
+        ));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, value.to_string()).unwrap();
+    };
+    let refused = |block: &str, foreground: Option<&str>| {
+        serde_json::json!({"block": block, "endpoint": ENDPOINT, "condition": "not_in_group",
+                           "session": "nested", "foreground": foreground, "at_ms": 1})
+    };
+    write(refused(BLOCK, Some("26048@26048000")));
+    assert_eq!(
+        under("26048@26048000").map(|refusal| refusal.session),
+        Some("nested".into())
+    );
+    assert_eq!(under("26048@99"), None, "a later program in the same pid");
+    assert_eq!(under("5000@5000000"), None);
+    write(refused(BLOCK, None));
+    assert_eq!(under("26048@26048000"), None);
+    write(refused(
+        "block:11111111-1b5a-4f8e-9d2c-3a7b8c9d0e1f",
+        Some("26048@26048000"),
+    ));
+    assert_eq!(under("26048@26048000"), None, "another block's refusal");
 }
 
 #[test]

@@ -529,6 +529,8 @@ fn doctor_reports_an_install_record_that_differs_from_the_wrappers() {
 const REX: &str = "rex:/tmp/nd-health-rex.sock";
 const UNBOUND: &str = "block:0a1b2c3d-0000-4000-8000-000000000001";
 const BOUND: &str = "block:0a1b2c3d-0000-4000-8000-000000000002";
+const RESTARTED: &str = "block:0a1b2c3d-0000-4000-8000-000000000003";
+const SHELL: &str = "block:0a1b2c3d-0000-4000-8000-000000000004";
 
 fn issues_named<'a>(report: &'a HealthReport, code: &str) -> Vec<&'a HealthIssue> {
     report
@@ -539,11 +541,13 @@ fn issues_named<'a>(report: &'a HealthReport, code: &str) -> Vec<&'a HealthIssue
 }
 
 /// A hook's refused bind is a file the hook leaves, because the hook itself
-/// stays silent. Doctor names it for a block that has no session, and only
-/// in a Rex space: a bound block keeps its binding through a nested agent's
-/// refused hook.
+/// stays silent. Doctor names it only in a Rex space, for an agent's block
+/// that has no session and still runs the foreground the hook was refused
+/// under: a bound block keeps its binding through a nested agent's refused
+/// hook, and a refusal under an earlier program, or in a block back at its
+/// shell, is no longer news.
 #[test]
-fn doctor_names_a_refused_bind_only_for_an_unbound_rex_block() {
+fn doctor_names_a_refused_bind_only_for_an_unbound_rex_blocks_foreground() {
     for endpoint in [REX, "socket-a"] {
         let f = Fixture::at(endpoint);
         f.register();
@@ -552,18 +556,24 @@ fn doctor_names_a_refused_bind_only_for_an_unbound_rex_block() {
                 .pane(UNBOUND)
                 .claude()
                 .idle()
+                .unreported("4242@1")
                 .pane(BOUND)
                 .claude()
                 .session("session-bound")
                 .idle()
+                .pane(RESTARTED)
+                .claude()
+                .idle()
+                .unreported("5000@2")
+                .pane(SHELL)
         });
         let refusals = f.root.join("rex/refusals");
         fs::create_dir_all(&refusals).unwrap();
-        for block in [UNBOUND, BOUND] {
+        for block in [UNBOUND, BOUND, RESTARTED, SHELL] {
             fs::write(
                 refusals.join(format!("{}.json", block.strip_prefix("block:").unwrap())),
                 json!({"block": block, "endpoint": REX, "condition": "not_in_group",
-                       "session": "nested-session", "at_ms": 100})
+                       "session": "nested-session", "foreground": "4242@1", "at_ms": 100})
                 .to_string(),
             )
             .unwrap();
@@ -586,6 +596,12 @@ fn doctor_names_a_refused_bind_only_for_an_unbound_rex_block() {
                     .iter()
                     .all(|issue| issue.diagnostic["pane_id"] != UNBOUND),
                 "the refusal says why the block has no session: {report:?}"
+            );
+            assert!(
+                without_identity
+                    .iter()
+                    .any(|issue| issue.diagnostic["pane_id"] == RESTARTED),
+                "a restarted agent's block is named as any unbound one: {report:?}"
             );
         } else {
             assert!(refused.is_empty(), "{report:?}");

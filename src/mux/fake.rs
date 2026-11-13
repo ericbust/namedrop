@@ -7,8 +7,8 @@
 
 use super::{
     AgentIdentity, AgentKind, AgentState, Allowance, Applied, Budget, Checkout, Depth, Effect,
-    Endpoint, InputKind, InputOutcome, Key, MuxAct, MuxConnector, MuxError, MuxInput, MuxKind,
-    MuxRead, PaneFacts, PaneId, PaneInput, PaneProcess, Recipient, Retry, Scope, Screen,
+    Endpoint, Incarnation, InputKind, InputOutcome, Key, MuxAct, MuxConnector, MuxError, MuxInput,
+    MuxKind, MuxRead, PaneFacts, PaneId, PaneInput, PaneProcess, Recipient, Retry, Scope, Screen,
     ScreenRequest, SessionClaim, SpaceView, Style, Survey, TabId, TerminalId, Wrap,
     gate::{self, ChannelError, RawChannel, StatusTap, TapChange},
 };
@@ -1835,6 +1835,15 @@ impl WorldBuilder {
 
     pub fn session(mut self, session: &str) -> Self {
         self.current_agent().session = SessionClaim::Reported(AgentSessionId::new(session));
+        self
+    }
+
+    /// The agent reports no session, and its program is `incarnation`, as a
+    /// Rex block's foreground `<pid>@<start>` whose hook did not bind.
+    pub fn unreported(mut self, incarnation: &str) -> Self {
+        self.current_agent().session = SessionClaim::Unreported {
+            incarnation: Incarnation(incarnation.to_owned()),
+        };
         self
     }
 

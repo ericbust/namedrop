@@ -438,14 +438,18 @@ where
         .filter(|pane| pane_agent_runtime(pane).is_some())
         .count();
     // A Rex block reports a session only through the binding its own hook
-    // wrote, so each unbound block with a refused bind says why.
+    // wrote, so an agent's block with no session says why when its live
+    // foreground's hook was refused.
     let mut refused = Vec::new();
-    for pane in setup
-        .panes
-        .iter()
-        .filter(|pane| rex && pane.agent_session_id().is_none())
-    {
-        let Some(refusal) = crate::mux::rex::refusal(runtime.state_directory, &pane.pane_id) else {
+    for pane in setup.panes.iter().filter(|_| rex) {
+        let Some(crate::mux::SessionClaim::Unreported { incarnation }) =
+            pane.agent.as_ref().map(|agent| &agent.session)
+        else {
+            continue;
+        };
+        let Some(refusal) =
+            crate::mux::rex::refusal(runtime.state_directory, &pane.pane_id, incarnation)
+        else {
             continue;
         };
         let mut binding = issue(

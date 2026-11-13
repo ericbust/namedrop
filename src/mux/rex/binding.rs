@@ -7,7 +7,7 @@ use super::wire::{Proc, StatusRecord};
 use crate::{
     AgentRuntime, AgentSessionId, SpaceId,
     mux::{
-        Endpoint, PaneId,
+        Endpoint, Incarnation, PaneId,
         home::{BindRefused, Deferral, Place},
         processes::{LocalProc, LocalProcesses, LocalRead, ThisMachine, is_shell},
     },
@@ -60,14 +60,18 @@ impl Binding {
     }
 }
 
-/// The latest refused bind of a block, which Doctor lists while the block
-/// has no session.
+/// The latest refused bind of a block, which Doctor lists while the
+/// block's foreground is still the one it was refused under and has no
+/// session.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct Refusal {
     pub block: String,
     pub endpoint: String,
     pub condition: BindRefused,
     pub session: String,
+    /// The block's foreground as `<pid>@<start>`, when it was alive.
+    #[serde(default)]
+    pub foreground: Option<String>,
     pub at_ms: u64,
 }
 
@@ -294,34 +298,48 @@ impl Place {
         let _lock = bindings
             .lock(block)
             .map_err(|error| BindRefused::Io(error.to_string()))?;
-        let decided = decide(
-            caller,
-            runtime,
-            entrypoint,
-            local,
-            bindings.read(block).as_ref(),
-        )
-        .and_then(|(foreground, agent)| {
-            let binding = Binding {
-                block: block.to_owned(),
-                endpoint: self.endpoint.key.clone(),
-                space: space.as_str().to_owned(),
-                foreground: foreground.incarnation.0,
-                agent: agent.incarnation.0,
-                runtime: runtime.as_str().to_owned(),
-                session: session.as_str().to_owned(),
-                bound_at_ms: now_ms,
-            };
-            bindings
-                .write(&binding)
-                .map_err(|error| BindRefused::Io(error.to_string()))
-        });
-        if let Err(condition) = &decided {
+        let bound = bindings.read(block);
+        let decided = decide(caller, runtime, entrypoint, local, bound.as_ref()).and_then(
+            |(foreground, agent)| {
+                let binding = Binding {
+                    block: block.to_owned(),
+                    endpoint: self.endpoint.key.clone(),
+                    space: space.as_str().to_owned(),
+                    foreground: foreground.incarnation.0,
+                    agent: agent.incarnation.0,
+                    runtime: runtime.as_str().to_owned(),
+                    session: session.as_str().to_owned(),
+                    bound_at_ms: now_ms,
+                };
+                bindings
+                    .write(&binding)
+                    .map_err(|error| BindRefused::Io(error.to_string()))
+            },
+        );
+        let Err(condition) = &decided else {
+            return decided;
+        };
+        let foreground =
+            caller
+                .foreground
+                .as_ref()
+                .and_then(|foreground| match local.read(foreground.pid) {
+                    LocalRead::Alive(foreground) => Some(foreground.incarnation.0),
+                    _ => None,
+                });
+        // A block whose binding names its foreground is served, so a nested
+        // hook's refusal there is no news.
+        let served = bound
+            .as_ref()
+            .zip(foreground.as_ref())
+            .is_some_and(|(bound, foreground)| bound.foreground == *foreground);
+        if !served {
             let _ = bindings.refuse(&Refusal {
                 block: block.to_owned(),
                 endpoint: self.endpoint.key.clone(),
                 condition: condition.clone(),
                 session: session.as_str().to_owned(),
+                foreground,
                 at_ms: now_ms,
             });
         }
@@ -416,9 +434,13 @@ pub(crate) fn bound(state: &Path, block: &str) -> Option<(Deferral, String)> {
     ))
 }
 
-/// The latest refused bind of `block` under `state`, for Doctor.
-pub(crate) fn refusal(state: &Path, block: &str) -> Option<Refusal> {
-    Bindings::new(state).refusal(block)
+/// The latest refused bind of `block` under `state`, for Doctor, when it was
+/// refused under `foreground`, the block's live foreground. A refusal under
+/// an earlier foreground is about a program that no longer runs there.
+pub(crate) fn refusal(state: &Path, block: &str, foreground: &Incarnation) -> Option<Refusal> {
+    Bindings::new(state)
+        .refusal(block)
+        .filter(|refusal| refusal.foreground.as_ref() == Some(&foreground.0))
 }
 
 fn now_ms() -> u64 {
