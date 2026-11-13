@@ -531,6 +531,37 @@ fn a_connection_fault_at_the_check_before_the_paste_retries_after_a_delay() {
     assert!(typed(&gate.rex).is_empty());
 }
 
+/// A caller that expects no session admits an agent whose foreground cannot
+/// be read, and such a prompt would paste with nothing to re-read.
+#[test]
+fn an_agent_with_no_live_local_process_takes_no_prompt() {
+    let gate = set_up(
+        "stale-before",
+        "75361@75361000",
+        "75361@75361000",
+        |fixture, local| {
+            local.set(75361, LocalRead::Unreadable);
+            gate(fixture, quiet)
+        },
+    );
+    let expect = AgentIdentity {
+        session: SessionClaim::None,
+        ..claude()
+    };
+    let outcome = gate.rex.send(
+        &PaneId::new("block:b"),
+        InputKind::Prompt(PromptRequest {
+            expect: &expect,
+            text: "hello",
+        }),
+    );
+    assert!(
+        matches!(outcome, InputOutcome::Declined(Retry::OnEvent, _)),
+        "{outcome:?}"
+    );
+    assert!(typed(&gate.rex).is_empty());
+}
+
 #[test]
 fn input_for_a_block_rex_does_not_have_waits_for_an_event() {
     let gate = bound(|fixture, _| {

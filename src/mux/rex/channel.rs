@@ -125,7 +125,9 @@ impl<'a, 'w> RawChannel for RexChannel<'a, 'w> {
     }
 
     /// `program_status`, whose `seq` is the tap's boundary, then `process`,
-    /// then the local reads and the binding. `pane_agent` answers.
+    /// then the local reads and the binding. `pane_agent` answers, but names
+    /// no agent when no live local process backs it, because the re-read
+    /// after the paste would have nothing to check.
     fn facts(
         &self,
         _pane: &PaneId,
@@ -149,11 +151,12 @@ impl<'a, 'w> RawChannel for RexChannel<'a, 'w> {
             binding: binding.as_ref(),
             locality,
         });
+        let identity = agent.agent.filter(|_| watched.is_some());
         let mut seen = self.seen.borrow_mut();
         seen.boundary = boundary;
         seen.foreground = process.foreground.map(|foreground| foreground.pid);
         seen.watched = watched;
-        Ok((agent.agent, agent.state))
+        Ok((identity, agent.state))
     }
 
     /// The one-line paste and its acknowledgement, `process` again, and one
