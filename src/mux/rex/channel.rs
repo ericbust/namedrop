@@ -28,8 +28,9 @@ struct Seen {
     /// The `seq` of the `program_status` response. Events at or below it
     /// are already in the facts.
     boundary: u64,
-    /// The `seq` of the paste's acknowledgement, once it pasted.
-    pasted: Option<u64>,
+    /// The `seq` of the Enter's acknowledgement, once it was pressed. A
+    /// change at or below it was queued before the Enter started.
+    entered: Option<u64>,
     foreground: Option<u32>,
     /// The process whose life the facts admitted: the bound agent, or the
     /// foreground when no binding names it.
@@ -155,39 +156,16 @@ impl<'a, 'w> RawChannel for RexChannel<'a, 'w> {
         Ok((agent.agent, agent.state))
     }
 
-    /// The one-line paste and its acknowledgement, one read of what the
-    /// connection holds, and `process` again. Each of these stops before
-    /// the Enter, so the gate holds the prompt: a change for the block that
-    /// Rex queued after the facts and before the paste, another foreground,
-    /// or a watched process that is gone, a zombie, unreadable, restarted,
-    /// or out of the foreground's group. No sleep.
+    /// The one-line paste and its acknowledgement, `process` again, and one
+    /// read of what the connection holds. Each of these stops before the
+    /// Enter, so the gate holds the prompt: another foreground, a watched
+    /// process that is gone, a zombie, unreadable, restarted, or out of the
+    /// foreground's group, or any change for the block that Rex queued after
+    /// the facts. The read comes last, just before the Enter, so the Enter
+    /// follows it by one request. No sleep.
     fn paste_submit(&self, _pane: &PaneId, text: &str) -> Result<(), ChannelError> {
         let block = self.block.clone();
-        let pasted = self.event(json!({"type": "paste", "payload": {"text": one_line(text)}}))?;
-        self.seen.borrow_mut().pasted = Some(pasted);
-        loop {
-            let next = self.call.borrow_mut().control.next_event(Duration::ZERO);
-            match next {
-                Ok(Some(event)) => self.seen.borrow_mut().pending.push_back(event),
-                Ok(None) => break,
-                Err(fault) => {
-                    return Err(ChannelError(wire::mux_error(fault, Gone::Pane).to_string()));
-                }
-            }
-        }
-        {
-            let seen = self.seen.borrow();
-            let early = seen.pending.iter().any(|event| {
-                event.seq > seen.boundary
-                    && event.seq <= pasted
-                    && change(&event.payload, &block, seen.foreground).is_some()
-            });
-            if early {
-                return Err(ChannelError(format!(
-                    "block {block} changed before the paste reached it"
-                )));
-            }
-        }
+        self.event(json!({"type": "paste", "payload": {"text": one_line(text)}}))?;
         let foreground = self.process()?.foreground.map(|foreground| foreground.pid);
         let (expected, watched) = {
             let seen = self.seen.borrow();
@@ -207,7 +185,31 @@ impl<'a, 'w> RawChannel for RexChannel<'a, 'w> {
                 "the agent in block {block} is no longer the one the facts admitted"
             )));
         }
-        self.event(json!({"type": "key", "payload": key_payload(crate::mux::Key::Enter)}))?;
+        loop {
+            let next = self.call.borrow_mut().control.next_event(Duration::ZERO);
+            match next {
+                Ok(Some(event)) => self.seen.borrow_mut().pending.push_back(event),
+                Ok(None) => break,
+                Err(fault) => {
+                    return Err(ChannelError(wire::mux_error(fault, Gone::Pane).to_string()));
+                }
+            }
+        }
+        {
+            let seen = self.seen.borrow();
+            let changed = seen.pending.iter().any(|event| {
+                event.seq > seen.boundary
+                    && change(&event.payload, &block, seen.foreground).is_some()
+            });
+            if changed {
+                return Err(ChannelError(format!(
+                    "block {block} changed before the Enter"
+                )));
+            }
+        }
+        let entered =
+            self.event(json!({"type": "key", "payload": key_payload(crate::mux::Key::Enter)}))?;
+        self.seen.borrow_mut().entered = Some(entered);
         Ok(())
     }
 }
@@ -268,8 +270,8 @@ pub(super) struct RexTap<'w> {
 impl StatusTap for RexTap<'_> {
     /// Skips events at or below the facts' boundary and events for other
     /// blocks. A zero wait still reads what the socket holds once. A status
-    /// change at or below the paste's acknowledgement was queued before the
-    /// paste started, so it reports `Program`, which never confirms.
+    /// change at or below the Enter's acknowledgement was queued before the
+    /// Enter started, so it reports `Program`, which never confirms.
     fn next_change(&mut self, within: Duration) -> Option<TapChange> {
         let deadline = Instant::now().checked_add(within);
         loop {
@@ -293,7 +295,7 @@ impl StatusTap for RexTap<'_> {
             }
             match change(&event.payload, &self.block, seen.foreground) {
                 Some(TapChange::Status(_))
-                    if seen.pasted.is_some_and(|pasted| event.seq <= pasted) =>
+                    if seen.entered.is_some_and(|entered| event.seq <= entered) =>
                 {
                     return Some(TapChange::Program);
                 }

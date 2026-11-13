@@ -299,7 +299,7 @@ fn a_status_change_queued_before_the_paste_holds_without_an_enter() {
         });
         assert!(
             matches!(prompt(&gate.rex, "hello"), InputOutcome::Ambiguous(why)
-                if why.contains("changed before the paste reached it")),
+                if why.contains("changed before the Enter")),
             "{state}"
         );
         assert_eq!(typed(&gate.rex), ["block.event paste hello"], "{state}");
@@ -708,7 +708,7 @@ fn effects_rex_cannot_show_are_unsupported_without_a_connection() {
 /// The channel's drain normally finds such an event first. The tap holds the
 /// same rule for one that reaches the socket only after the drain.
 #[test]
-fn the_tap_reports_a_status_change_queued_before_the_paste_as_a_program_change() {
+fn the_tap_reports_a_status_change_queued_before_the_enter_as_a_program_change() {
     use super::{RexTap, Seen};
     use crate::mux::{
         AgentState,
@@ -723,7 +723,7 @@ fn the_tap_reports_a_status_change_queued_before_the_paste_as_a_program_change()
     let (control, _) = script.open(Narrower::none()).unwrap();
     let seen = Seen {
         boundary: 1,
-        pasted: Some(3),
+        entered: Some(3),
         foreground: Some(75361),
         ..Seen::default()
     };
@@ -747,4 +747,47 @@ fn the_tap_reports_a_status_change_queued_before_the_paste_as_a_program_change()
         Some(TapChange::Status(AgentState::Working))
     );
     assert_eq!(tap.next_change(Duration::ZERO), None);
+}
+
+/// Rex queued the change after it started the paste, so the Enter did not
+/// cause it. Read before the Enter, it stops the Enter. Queued before the
+/// Enter started and read after it, it never confirms.
+#[test]
+fn a_change_between_the_paste_and_the_enter_never_confirms() {
+    for state in ["working", "blocked"] {
+        for during in [Step::Paste, Step::Reread] {
+            let read_first = bound(|fixture, _| {
+                gate(fixture, move |step, _, events| {
+                    if step == during {
+                        events.later(status(state));
+                    }
+                    None
+                })
+            });
+            assert!(
+                matches!(prompt(&read_first.rex, "hello"), InputOutcome::Ambiguous(why)
+                    if why.contains("changed before the Enter")),
+                "{state} {during:?}"
+            );
+            assert_eq!(
+                typed(&read_first.rex),
+                ["block.event paste hello"],
+                "{state} {during:?}"
+            );
+        }
+
+        let read_after = bound(|fixture, _| {
+            gate(fixture, move |step, _, events| {
+                (step == Step::Enter).then(|| {
+                    events.earlier(status(state));
+                    Ok(json!({}))
+                })
+            })
+        });
+        assert!(
+            matches!(prompt(&read_after.rex, "hello"), InputOutcome::Ambiguous(why)
+                if why.contains("changed after the prompt")),
+            "{state}"
+        );
+    }
 }
