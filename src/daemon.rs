@@ -349,8 +349,12 @@ mod tests {
         Other(&'static str),
     }
 
-    /// Every production `Command::new` whose program is not a string literal,
-    /// by file and call. A Namedrop self-spawn goes through `daemon::command`
+    /// Programs a production spawn may name by a literal with no entry in
+    /// `SPAWNS`, because none of them starts another program.
+    const UTILITIES: &[&str] = &["/bin/ps", "/bin/stty", "git"];
+
+    /// Every production `Command::new` whose program is not a string literal
+    /// naming one of `UTILITIES`, by file and call. A Namedrop self-spawn goes through `daemon::command`
     /// or `daemon::scrub`; the four exceptions keep their identity on purpose.
     const SPAWNS: &[(&str, &str, Spawn)] = &[
         ("daemon.rs", "Command::new(executable)", Spawn::Door),
@@ -397,7 +401,7 @@ mod tests {
         ),
         (
             "dashboard/observer_guard.rs",
-            "Command::new(env::var_os(\"\").unwrap_or_else(||\"\"))",
+            "Command::new(env::var_os(\"HERDR_BIN_PATH\").unwrap_or_else(||\"herdr\"))",
             Spawn::Other("Herdr"),
         ),
         (
@@ -415,11 +419,27 @@ mod tests {
             "Command::new(&self.binary)",
             Spawn::Other("Herdr"),
         ),
+        (
+            "terminal.rs",
+            "Command::new(\"/bin/sh\")",
+            Spawn::Other("a terminal recipient's command, as a person sent it"),
+        ),
+        (
+            "update_check.rs",
+            "Command::new(\"python3\")",
+            Spawn::Other("the update check's script"),
+        ),
     ];
 
-    /// `source` with comments removed and every string and char literal
-    /// emptied, so text a literal holds is never read as code.
+    /// `source` with comments removed, char literals emptied, and each string
+    /// literal cut to its letters, digits, and `_./-`, so text a literal holds
+    /// is never read as code and a program it names still reads as one.
     fn code(source: &str) -> String {
+        let plain = |text: &[char]| -> String {
+            text.iter()
+                .filter(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '/' | '-'))
+                .collect()
+        };
         let chars: Vec<char> = source.chars().collect();
         let mut code = String::new();
         let mut at = 0;
@@ -457,18 +477,26 @@ mod tests {
                     .chain(std::iter::repeat_n('#', hashes))
                     .collect();
                 at += 2 + hashes;
+                let start = at;
                 while at < chars.len() && !chars[at..].starts_with(&close) {
                     at += 1;
                 }
+                code.push_str(&format!(
+                    "\"{}\"",
+                    plain(&chars[start..at.min(chars.len())])
+                ));
                 at += close.len();
-                code.push_str("\"\"");
             } else if rest[0] == '"' {
                 at += 1;
+                let start = at;
                 while at < chars.len() && chars[at] != '"' {
                     at += if chars[at] == '\\' { 2 } else { 1 };
                 }
+                code.push_str(&format!(
+                    "\"{}\"",
+                    plain(&chars[start..at.min(chars.len())])
+                ));
                 at += 1;
-                code.push_str("\"\"");
             } else if rest[0] == '\'' && (rest.get(1) == Some(&'\\') || rest.get(2) == Some(&'\''))
             {
                 at += 1;
@@ -564,15 +592,47 @@ mod tests {
             .collect()
     }
 
-    /// Each production spawn of a program named by an expression that the
-    /// registry does not list as it is, and each listed spawn not found.
+    /// Each production spawn the registry does not list as it is, each listed
+    /// spawn not found, and each way of starting a `Command` the scan cannot
+    /// follow: a renamed import, a type alias, and `Command::new` taken as a
+    /// function. Only a spawn of one of `UTILITIES` by its name needs no
+    /// entry, so a shell, `python3`, or `namedrop` named by a literal is
+    /// listed or caught.
     fn self_spawn_breaches(src: &Path) -> Vec<String> {
         let mut listed = SPAWNS.to_vec();
         let mut breaches = Vec::new();
         for (name, text) in production_files(src) {
+            let identifier = |c: char| c.is_alphanumeric() || c == '_';
+            for (at, _) in text.match_indices("Commandas") {
+                if !text[..at].ends_with(|c: char| identifier(c) || c == '"') {
+                    breaches.push(format!("{name} renames Command"));
+                }
+            }
+            for statement in text.split([';', '{', '}']) {
+                let statement = ["pub(crate)", "pub(super)", "pub"]
+                    .iter()
+                    .find_map(|visibility| statement.strip_prefix(visibility))
+                    .unwrap_or(statement);
+                if let Some((_, aliased)) = statement
+                    .strip_prefix("type")
+                    .and_then(|alias| alias.split_once('='))
+                    && (aliased == "Command" || aliased.ends_with("::Command"))
+                {
+                    breaches.push(format!("{name} aliases Command"));
+                }
+            }
+            for (at, _) in text.match_indices("Command::new") {
+                if !text[at + "Command::new".len()..].starts_with('(') {
+                    breaches.push(format!("{name} takes Command::new as a function"));
+                }
+            }
             for (at, _) in text.match_indices("Command::new(") {
                 let call = call_at(&text[at..], "Command::new(");
-                if call["Command::new(".len()..].starts_with('"') {
+                if call
+                    .strip_prefix("Command::new(\"")
+                    .and_then(|program| program.strip_suffix("\")"))
+                    .is_some_and(|program| UTILITIES.contains(&program))
+                {
                     continue;
                 }
                 match listed
@@ -645,17 +705,49 @@ mod tests {
                 "#[cfg(test)] fn helper() {} fn wake() { std::process::Command::new(launcher(state)).spawn(); }",
                 "planted.rs starts Command::new(launcher(state))",
             ),
+            (
+                "use std::process::Command as Spawn; fn wake() { Spawn::new(crate::runtime_executable().unwrap()).spawn(); }",
+                "planted.rs renames Command",
+            ),
+            (
+                "use std::process::{Command as Spawn, Stdio};",
+                "planted.rs renames Command",
+            ),
+            (
+                "pub(crate) type Spawn = std::process::Command; fn wake() { Spawn::new(e).spawn(); }",
+                "planted.rs aliases Command",
+            ),
+            (
+                "fn wake() { let new = Command::new; new(e).spawn(); }",
+                "planted.rs takes Command::new as a function",
+            ),
+            (
+                "fn wake() { Some(e).map(std::process::Command::new); }",
+                "planted.rs takes Command::new as a function",
+            ),
+            (
+                "fn wake() { Command::new(\"namedrop\").arg(\"hook\").spawn(); }",
+                "planted.rs starts Command::new(\"namedrop\")",
+            ),
+            (
+                "fn wake() { Command::new(\"/usr/local/bin/namedrop\").spawn(); }",
+                "planted.rs starts Command::new(\"/usr/local/bin/namedrop\")",
+            ),
+            (
+                "fn wake() { let exe = crate::runtime_executable().unwrap(); Command::new(\"sh\").arg(\"-c\").arg(format!(\"{} hook mailbox-wake\", exe.display())).spawn(); }",
+                "planted.rs starts Command::new(\"sh\")",
+            ),
         ] {
             fs::write(&planted, source).unwrap();
             let found = self_spawn_breaches(&root);
             assert!(found.contains(&caught.to_owned()), "{source}: {found:?}");
         }
         fs::remove_file(&planted).unwrap();
-        fs::write(&planted, "// Command::new(launcher)\nconst TEXT: &str = \"Command::new(launcher)\";\n#[cfg(test)]\nmod tests { fn spawn() { Command::new(launcher); } }\n").unwrap();
+        fs::write(&planted, "// Command::new(launcher)\nconst TEXT: [&str; 2] = [\"Command::new(launcher)\", \"Command as typed\"];\nfn status() { Command::new(\"git\").arg(\"status\").status(); }\n#[cfg(test)]\nmod tests { fn spawn() { Command::new(launcher); Command::new(\"namedrop\"); } }\n").unwrap();
         assert_eq!(
             self_spawn_breaches(&root),
             Vec::<String>::new(),
-            "comments, strings and tests are not production spawns"
+            "comments, strings, utilities, and tests are not breaches"
         );
         fs::remove_file(&planted).unwrap();
         let stop = root.join("stop_hook.rs");
