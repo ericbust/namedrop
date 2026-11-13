@@ -413,6 +413,12 @@ export function heardIn(
 function hear(heard: Heard, arrivals: Arrival[]): Heard {
   return arrivals.length === 0 ? heard : { seq: heard.seq + 1, arrivals };
 }
+// The newest message time at the first load, in the server's clock. A load
+// with no messages has none, so it falls back to this browser's clock.
+function loadPoint(channels: Iterable<Channel>): number {
+  const newest = newestAt(channels);
+  return newest === Number.NEGATIVE_INFINITY ? Date.now() : newest;
+}
 function newestAt(channels: Iterable<Channel>): number {
   let newest = Number.NEGATIVE_INFINITY;
   for (const channel of channels)
@@ -473,7 +479,7 @@ function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
     outbox: settleOutbox(state.outbox, [...channels.values()]),
     viewKnown: state.viewKnown || channels.size > 0 || keys !== null,
     heard: hear(state.heard, arrivals),
-    loadedAt: state.loadedAt ?? newestAt(channels.values()),
+    loadedAt: state.loadedAt ?? loadPoint(channels.values()),
     sync: { kind: keys === null ? "fallback" : "live" },
     landing:
       keys !== null && state.landing.kind === "discovering"

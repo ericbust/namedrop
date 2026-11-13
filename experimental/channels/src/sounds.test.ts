@@ -679,3 +679,27 @@ test("sounds: a preview plays right away, whatever the limit", async () => {
   h.player.preview("marimba");
   assert.equal(h.plays(), notes("soft") + notes("marimba"));
 });
+
+test("sounds: when the first load has no messages, a channel seen later rings only for messages after the load", () => {
+  let state = reduce(initialState(), { type: "opened" });
+  state = ready(state, []);
+  const now = Date.now();
+  state = apply(
+    state,
+    [
+      { id: "history", author: "claude", to: ["human"], at: now - 60_000 },
+      { id: "older", author: "codex", to: ["human"], at: now - 1_000 },
+    ],
+    keyB,
+  );
+  assert.equal(state.heard, nothingHeard, "old history stays silent");
+  state = apply(
+    state,
+    [{ id: "fresh", author: "codex", to: ["human"], at: now + 1_000 }],
+    keyC,
+  );
+  assert.deepEqual(state.heard, {
+    seq: 1,
+    arrivals: [{ agent: "codex", id: "fresh" }],
+  });
+});
