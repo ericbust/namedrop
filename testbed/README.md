@@ -195,6 +195,7 @@ With exactly one profile, every command picks it without `--profile`.
 | `list` | Lists every profile with its server state, Namedrop version and source |
 | `report` | Prints one line for Namedrop's [compatibility page](https://github.com/ericbust/namedrop/blob/main/docs/compatibility.md) |
 | `shell` | Opens a Bash shell with only the profile's environment |
+| `rex up`, `rex down` | Runs Claude Code and Codex in blocks of a scratch Rex server, in a `rex-` profile. See [The Rex lane](#the-rex-lane) |
 
 Options for `up`:
 
@@ -213,6 +214,36 @@ TESTBED_CLAUDE_CMD='claude --model haiku' ./testbed reset
 
 `TESTBED_CODEX_CMD` does the same for Codex. A changed command takes effect
 when `up` or `reset` starts the agent again.
+
+### The Rex lane
+
+```sh
+./testbed rex up --link /path/to/namedrop --fresh --yes
+./testbed rex down --link /path/to/namedrop
+```
+
+`rex up` builds the source and activates it in the profile's own Herdr, which
+installs the Claude Code and Codex packages with every hook baked to the
+profile's state directory. It then stops that Herdr and starts a scratch Rex
+server under `env -i`, with the profile's environment minus its `HERDR_*`
+names and with `REX_SERVER` naming the server. So a block's only location
+names are the `REX_*` the server gives it, and the server's own files stay in
+the profile's `HOME`. On macOS, Claude Code is logged in only because the
+profile links the login keychain (`home/Library/Keychains`) as `up` does. A
+scratch server started by hand needs that link in its `HOME` too.
+
+The session `testbed-rex` gets a shell block and one block per agent, Claude
+Code as `claude` and Codex as `codex --no-daemon`, whose model settings are in
+the profile's `codex/config.toml`. The lane answers the first-run prompts the
+Herdr lane knows, starts Codex again after it trusts its hooks, and sends Codex
+the Herdr lane's warm-up prompt, because Codex runs its hooks only from its
+first prompt. It is ready once each agent ran a Namedrop hook from a script
+that passes the profile's state directory: Codex's hook run is recorded in
+`<state>/hook-runs`, and Claude Code's SessionStart hook shows in
+`logs/claude-hooks.log`, because Claude Code gives its hooks no `PLUGIN_ROOT`
+and Namedrop records no hook run for them. `up` then prints the `rex` lines
+that start more agents. `rex down` kills every session, stops the server and
+any Codex app server, and keeps the profile.
 
 ## Where profiles live
 

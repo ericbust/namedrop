@@ -14,10 +14,12 @@ import subprocess
 import sys
 import tempfile
 import urllib.error
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import livetest as live
 import rex_lane
+import rex_live
 import source as sources
 import selftest_daily
 import testbed
@@ -272,6 +274,44 @@ def check_rex_lane_cleanup(scratch):
         assert list((scratch / "rex-cleanup/reports").glob("test-rex-cleanup-*-failed/rex-server.log"))
     return ("Rex lane cleanup: a failed run removes a stale socket first, then leaves no server, "
             "socket, block or profile, and keeps its logs")
+
+
+def check_rex_live_hooks(scratch):
+    profile = SimpleNamespace(dir=scratch / "rex-live", env={
+        "HOME": "/p/home", "PATH": "/p/bin", "HERDR_SOCKET_PATH": "/tmp/h.sock",
+        "HERDR_CONFIG_PATH": "/p/config/herdr/config.toml"})
+    lane = rex_live.Lane(profile, testbed.fail, lambda message: None)
+    assert lane.environment() == {"HOME": "/p/home", "PATH": "/p/bin", "REX_SERVER": lane.server}
+    state = rex_live.state_directory(profile)
+    baked = "#!/bin/sh\nnamedrop hook session-start --state-directory '{}'\n".format(state)
+    claude = profile.dir / "home/.claude/skills/namedrop/scripts/session-start"
+    claude.parent.mkdir(parents=True)
+    claude.write_text(baked)
+    assert rex_live.hook_ran(profile, "claude", {}) is None
+    log = rex_live.hook_log(profile)
+    log.parent.mkdir(parents=True)
+    line = ("2026-11-13T07:26:40.689Z [DEBUG] Hooks: SessionStart:startup [... '{}'; fi] (plugin "
+            "namedrop@skills-dir) finished with status {}\n")
+    log.write_text(line.format(claude, 1))
+    assert rex_live.hook_ran(profile, "claude", {}) is None
+    log.write_text(line.format(claude, "0 (155ms)"))
+    assert "SessionStart hook finished" in rex_live.hook_ran(profile, "claude", {})
+    root = profile.dir / "codex/plugins/cache/namedrop/namedrop/1.0.0+codex.x"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts/session-start").write_text(baked)
+    (state / "hook-runs").mkdir(parents=True)
+    (state / "hook-runs/old").write_text(str(root))
+    assert rex_live.hook_ran(profile, "codex", rex_live.hook_runs(profile)) is None
+    (state / "hook-runs/new").write_text(str(root))
+    assert rex_live.hook_ran(profile, "codex", {"old": str(root)}) == "a hook run from " + str(root)
+    (root / "scripts/session-start").write_text(baked.replace(str(state), "/elsewhere"))
+    try:
+        rex_live.hook_ran(profile, "codex", {})
+        raise AssertionError("a hook baked to another state directory passed")
+    except RuntimeError as error:
+        assert "does not pass --state-directory" in str(error), error
+    return ("Rex live lane: blocks get no Herdr names, and a hook counts once its agent ran it "
+            "from a script baked to the profile's state directory")
 
 
 def check_syntax(kit):
@@ -907,6 +947,7 @@ def run(kit):
                   ("profile safety", lambda: check_profile_safety(base)),
                   ("Rex lane", lambda: check_rex_lane(base)),
                   ("Rex lane cleanup", lambda: check_rex_lane_cleanup(base)),
+                  ("Rex live hooks", lambda: check_rex_live_hooks(base)),
                   ("syntax", lambda: check_syntax(kit)),
                   ("screens", check_screens),
                   ("transcripts", check_transcripts),

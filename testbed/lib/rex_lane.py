@@ -110,10 +110,11 @@ class Lane:
             time.sleep(0.1)
         self.fail("the scratch Rex server did not become ready\n" + log.read_text())
 
-    def sessions(self):
+    def sessions(self, every=False):
+        """The Herdr session's ID, or with `every` all sessions of this scratch server."""
         listed = json.loads(self.rex("list", "--json").stdout)
         return [session["session_id"] for session in listed.get("sessions") or []
-                if session.get("label") == SESSION]
+                if every or session.get("label") == SESSION]
 
     def start_herdr(self, python, log):
         self.start_server()
@@ -151,7 +152,7 @@ class Lane:
         if not self.running():
             remove_stale(self.socket)
             return
-        for session in self.sessions():
+        for session in self.sessions(every=True):
             self.rex("kill", session)
         self.rex("server", "stop")
         deadline = time.monotonic() + 10

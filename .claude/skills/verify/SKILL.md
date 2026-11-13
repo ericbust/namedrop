@@ -136,6 +136,18 @@ block's `REX_BLOCK`, `REX_SESSION` and `REX_SERVER`, which every other lane's cl
 drops. The build step's line says which Rex block runs the Herdr server. Run it beside the
 checklist run for any change to how Namedrop decides which multiplexer it runs in. It needs `rex` on `PATH`.
 
+### Agents in Rex
+
+```sh
+testbed/testbed rex up --link . --fresh --yes
+testbed/testbed rex down --link .
+```
+
+`rex up` gives the Rex adapter's live checks Claude Code and Codex in blocks of a scratch Rex
+server, with no Herdr names and with hooks baked to the profile's state directory, and prints the
+server and block IDs. It is not a checklist run and has no PASS line. See `testbed/README.md`,
+"The Rex lane".
+
 ## Read the result
 
 - Exit 0 is a pass. The report ends with `PASS n/n in …. Report: <path>.txt` and the
