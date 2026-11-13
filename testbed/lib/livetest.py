@@ -1381,7 +1381,16 @@ def step_terminal(r):
 
 
 def step_settled(r):
-    return judge_settled(r.store.backlog(), r.doctor("final"), r.panes(), r.store.claims())
+    checks = judge_settled(r.store.backlog(), r.doctor("final"), r.panes(), r.store.claims())
+    if r.profile.state.get("inside_rex"):
+        import rex_lane
+        log = rex_lane.Lane(r.profile, testbed.fail, testbed.say).events_log()
+        pids = rex_lane.namedrop_clients(log.read_text() if log.exists() else "")
+        checks.append(Check("rex clients", log.exists() and not pids,
+                            "Namedrop clients of the scratch Rex server: {}{}".format(
+                                ", ".join(map(str, pids)) or "none",
+                                "" if log.exists() else " (no event log)")))
+    return checks
 
 
 TITLES = {SERVED: "codex warning", IN_PROCESS: "codex in-process"}

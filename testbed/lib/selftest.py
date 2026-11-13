@@ -229,7 +229,14 @@ def check_rex_lane(scratch):
     assert seen == ["HOME=" + str(scratch), "PATH=/usr/bin:/bin", "REX_BLOCK=block:b",
                     "REX_SERVER=unix:///s.sock"], seen
     assert len(os.fsencode(str(rex_lane.socket_for(scratch / "profiles/example")))) < 100
-    return "Rex lane: Herdr gets the profile's environment and the block's REX_* names, nothing else"
+    joined = lambda name, pid: json.dumps({"type": "client_joined", "payload": {"client": {
+        "info": {"kind": "other", "name": name}, "principal": {"kind": "peer", "pid": pid}}}})
+    events = "\n".join([joined("rex", 7), json.dumps({"type": "client_left", "payload": {}}),
+                        joined("namedrop", 41), "not json", joined("namedrop", 42)])
+    assert rex_lane.namedrop_clients(events) == [41, 42], rex_lane.namedrop_clients(events)
+    assert rex_lane.namedrop_clients(joined("rex", 7)) == []
+    return ("Rex lane: Herdr gets the profile's environment and the block's REX_* names, nothing "
+            "else, and Namedrop clients of the scratch server are found in its event log")
 
 
 def check_rex_lane_cleanup(scratch):
