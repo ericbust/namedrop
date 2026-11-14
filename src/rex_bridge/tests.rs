@@ -193,13 +193,15 @@ fn worker() -> Result<Child, String> {
 }
 
 /// Starts workers that exit at once, and keeps the spaces they were
-/// started for, in order, and their pids. When `replaced` says so, a
-/// replaced runtime takes over at the first flush.
+/// started for, in order, and their pids. The bridge reaps them as it
+/// reaps real ones. When `replaced` says so, a replaced runtime takes over
+/// at the first flush.
 #[derive(Default)]
-struct Workers {
+struct FakeHost {
     spawned: Vec<String>,
     pids: Vec<u32>,
     replaced: bool,
+    workers: Workers,
 }
 
 /// Requests a stop when dropped, so a helper thread that panics still ends
@@ -216,12 +218,16 @@ impl Drop for StopOnDrop<'_> {
 /// never returns.
 struct Replaced;
 
-impl Host for Workers {
+impl Host for FakeHost {
     fn spawn(&mut self, space: &SpaceId) -> Result<Child, String> {
         self.spawned.push(space.as_str().to_owned());
         let worker = worker()?;
         self.pids.push(worker.id());
         Ok(worker)
+    }
+
+    fn workers(&self) -> &Workers {
+        &self.workers
     }
 
     fn reexec_if_replaced(&mut self) {
@@ -231,21 +237,15 @@ impl Host for Workers {
     }
 }
 
-/// Runs the bridge over `script`, away from its server as `away` says, with
-/// `workers` for its host.
-fn bridged_with(
-    state: &State,
-    script: &dyn Server,
-    stop: &Wake,
-    away: &Away,
-    workers: &mut Workers,
-) {
+/// Runs the bridge over `script`, away from its server as `away` says, on
+/// `host`.
+fn bridged_with(state: &State, script: &dyn Server, stop: &Wake, away: &Away, host: &mut FakeHost) {
     let lock = Lock::take(&state.0, &endpoint()).unwrap().unwrap();
-    bridge(&state.0, &endpoint(), script, stop, &lock, workers, away);
+    bridge(&state.0, &endpoint(), script, stop, &lock, host, away);
 }
 
-fn bridged_away(state: &State, script: &Script, stop: &Wake, away: &Away) -> Workers {
-    let mut workers = Workers::default();
+fn bridged_away(state: &State, script: &Script, stop: &Wake, away: &Away) -> FakeHost {
+    let mut workers = FakeHost::default();
     bridged_with(state, script, stop, away, &mut workers);
     workers
 }
@@ -301,7 +301,8 @@ fn each_connection_queues_one_resync_per_activated_space_and_a_server_never_reac
 }
 
 /// The bridge lives for days, so every worker it starts is reaped once it
-/// exits rather than left a zombie.
+/// exits rather than left a zombie, and is then no longer one a re-exec
+/// would hand on.
 #[test]
 fn every_worker_the_bridge_starts_is_reaped_once_it_exits() {
     let state = State::new();
@@ -311,7 +312,12 @@ fn every_worker_the_bridge_starts_is_reaped_once_it_exits() {
             .map(|_| (Some("host-a"), Vec::new(), None))
             .collect(),
     );
-    let Workers { spawned, pids, .. } = bridged_away(&state, &script, &stop, &NO_WAIT);
+    let FakeHost {
+        spawned,
+        pids,
+        workers,
+        ..
+    } = bridged_away(&state, &script, &stop, &NO_WAIT);
     assert_eq!(spawned.len(), 40);
     let deadline = Instant::now() + Duration::from_secs(5);
     let left = loop {
@@ -322,12 +328,13 @@ fn every_worker_the_bridge_starts_is_reaped_once_it_exits() {
             .copied()
             .filter(|pid| unsafe { libc::kill(*pid as libc::pid_t, 0) } == 0)
             .collect();
-        if left.is_empty() || Instant::now() >= deadline {
+        if (left.is_empty() && workers.live().is_empty()) || Instant::now() >= deadline {
             break left;
         }
         std::thread::sleep(Duration::from_millis(20));
     };
     assert!(left.is_empty(), "unreaped workers: {left:?}");
+    assert_eq!(workers.live(), "", "reaped workers still handed on");
 }
 
 #[test]
@@ -625,7 +632,7 @@ fn a_scripted_block_closed_retires_its_name_through_the_queue() {
         Mutex::new(Some(Scripted::new("host-a", vec![line]))),
         &state.0,
     );
-    let mut workers = Workers::default();
+    let mut workers = FakeHost::default();
     bridged_with(&state, &server, &stop, &NO_WAIT, &mut workers);
     assert!(workers.spawned.contains(&session), "{:?}", workers.spawned);
     assert_eq!(
@@ -652,9 +659,9 @@ fn a_close_lost_to_a_re_exec_is_recovered_by_the_new_bridge_s_resync() {
         Mutex::new(Some(Scripted::new("host-a", vec![line]))),
         &state.0,
     );
-    let mut replaced = Workers {
+    let mut replaced = FakeHost {
         replaced: true,
-        ..Workers::default()
+        ..FakeHost::default()
     };
     let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         bridged_with(&state, &old, &stop, &NO_WAIT, &mut replaced);
@@ -666,7 +673,7 @@ fn a_close_lost_to_a_re_exec_is_recovered_by_the_new_bridge_s_resync() {
         Mutex::new(Some(Scripted::new("host-a", Vec::new()))),
         &state.0,
     );
-    bridged_with(&state, &new, &stop, &NO_WAIT, &mut Workers::default());
+    bridged_with(&state, &new, &stop, &NO_WAIT, &mut FakeHost::default());
     assert_eq!(
         state.queued(&session),
         [MuxEvent::Resync(SpaceId::new(&session))]
@@ -852,4 +859,105 @@ fn a_bridge_stops_once_its_state_directory_is_deleted_or_replaced() {
         assert!(first.is_some());
         assert!(Lock::take(&state.0, &endpoint()).unwrap().is_none());
     }
+}
+
+/// Which image of `a_re_exec_d_bridge_reaps_the_workers_its_old_image_started`
+/// a test process is, and the state directory it uses.
+const IMAGE: &str = "NAMEDROP_TEST_BRIDGE_IMAGE";
+const IMAGE_STATE: &str = "NAMEDROP_TEST_BRIDGE_STATE";
+const REEXEC_TEST: &str =
+    "rex_bridge::tests::a_re_exec_d_bridge_reaps_the_workers_its_old_image_started";
+
+/// A worker still running when the bridge re-execs is a child of the new
+/// image, and the reaper threads of the old one are gone. The new image
+/// reaps it all the same. A child test process is the old image: it starts
+/// a worker and re-execs through the bridge's own `Processes`, into a
+/// launcher that runs this test again as the new image, which takes the
+/// workers as `run` takes them and then stays up while this test watches
+/// the worker.
+#[test]
+fn a_re_exec_d_bridge_reaps_the_workers_its_old_image_started() {
+    use std::os::unix::fs::PermissionsExt;
+    match std::env::var(IMAGE).as_deref() {
+        Ok("old") => return old_image(),
+        Ok("new") => {
+            let _workers = Workers::inherited();
+            std::thread::sleep(Duration::from_secs(4));
+            return;
+        }
+        _ => {}
+    }
+    let state = State::new();
+    let runtime = state.0.join("runtime");
+    fs::create_dir_all(runtime.join("current")).unwrap();
+    std::os::unix::fs::symlink("/usr/bin/true", runtime.join("current/namedrop")).unwrap();
+    let exe = std::env::current_exe().unwrap();
+    let launcher = runtime.join("namedrop");
+    fs::write(
+        &launcher,
+        format!(
+            "#!/bin/sh\nexec env {IMAGE}=new '{}' \"$@\"\n",
+            exe.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut image = std::process::Command::new(&exe)
+        .args([REEXEC_TEST, "--exact", "--nocapture", "--test-threads=1"])
+        .env(IMAGE, "old")
+        .env(IMAGE_STATE, &state.0)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let worker = loop {
+        if let Some(pid) = fs::read_to_string(state.0.join("worker.pid"))
+            .ok()
+            .and_then(|pid| pid.trim().parse::<libc::pid_t>().ok())
+        {
+            break pid;
+        }
+        assert!(Instant::now() < deadline, "the old image started no worker");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    // SAFETY: signal 0 only asks whether the worker still exists, and a
+    // zombie still does.
+    while unsafe { libc::kill(worker, 0) } == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let gone = unsafe { libc::kill(worker, 0) } != 0;
+    let image_ran = image.try_wait().unwrap().is_none();
+    let status = image.wait().unwrap();
+    assert!(
+        image_ran,
+        "the new image ended before the worker was reaped"
+    );
+    assert!(gone, "the new image left worker {worker} unreaped");
+    assert!(status.success(), "{status}");
+}
+
+/// The old image: one worker that outlives the re-exec, then the re-exec.
+fn old_image() {
+    let state = PathBuf::from(std::env::var_os(IMAGE_STATE).unwrap());
+    let workers = Workers::default();
+    let worker = sleeper();
+    fs::write(state.join("worker.pid"), worker.id().to_string()).unwrap();
+    workers.reap(worker);
+    let endpoint = endpoint();
+    Processes {
+        state: &state,
+        endpoint: &endpoint,
+        workers,
+    }
+    .reexec_if_replaced();
+    panic!("the bridge did not re-exec");
+}
+
+/// A worker that runs for a second.
+fn sleeper() -> Child {
+    std::process::Command::new("/bin/sleep")
+        .arg("1")
+        .spawn()
+        .unwrap()
 }

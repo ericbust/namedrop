@@ -47,13 +47,14 @@ pub enum Starter {
 /// hook's runtime, which say which agent ran it. `REX_BIN_DIR`, `REX_HOME`,
 /// and `REX_RUNTIME_DIR` stay, because they say how to run `rex`, not where
 /// this process runs.
-const SCRUBBED: [&str; 6] = [
+const SCRUBBED: [&str; 7] = [
     "REX_BLOCK",
     "REX_SESSION",
     "REX_CLIENT",
     "REX_SERVER",
     "CLAUDE_SESSION_ID",
     crate::mux::home::HOOK_RUNTIME,
+    crate::rex_bridge::INHERITED_WORKERS,
 ];
 
 /// The multiplexer timeouts, which a daemon of [`Starter::StopHook`] drops.
@@ -165,6 +166,7 @@ pub(crate) mod tests {
                 "CODEX_THREAD_ID",
                 "CLAUDE_SESSION_ID",
                 "NAMEDROP_HOOK_RUNTIME",
+                "NAMEDROP_REX_BRIDGE_WORKERS",
             ] {
                 assert_eq!(environment.get(name), Some(&None), "{starter:?} {name}");
             }
@@ -188,7 +190,7 @@ pub(crate) mod tests {
             }
             assert_eq!(
                 environment.len(),
-                if timeouts { 21 } else { 19 },
+                if timeouts { 22 } else { 20 },
                 "{environment:?}"
             );
         }

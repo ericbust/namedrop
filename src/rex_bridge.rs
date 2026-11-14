@@ -15,10 +15,11 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeSet,
     fs, io,
     path::{Path, PathBuf},
     process::{Child, ExitCode},
-    sync::OnceLock,
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -46,10 +47,75 @@ pub fn run(state: &Path, endpoint: &Endpoint) -> ExitCode {
         &server,
         stop,
         &lock,
-        &mut Processes { state, endpoint },
+        &mut Processes {
+            state,
+            endpoint,
+            workers: Workers::inherited(),
+        },
         &Away::REX,
     );
     ExitCode::SUCCESS
+}
+
+/// Names the workers a bridge leaves running when it re-execs, so the new
+/// image, still their parent, reaps them.
+pub(crate) const INHERITED_WORKERS: &str = "NAMEDROP_REX_BRIDGE_WORKERS";
+
+/// The workers a bridge started, or inherited across a re-exec, that have
+/// not been reaped yet. A thread waits for each one. `exec` ends those
+/// threads but not the workers, so a re-exec hands their pids on.
+#[derive(Default)]
+struct Workers(Arc<Mutex<BTreeSet<libc::pid_t>>>);
+
+impl Workers {
+    /// The workers the image this process replaced left running.
+    fn inherited() -> Self {
+        let workers = Self::default();
+        for pid in std::env::var(INHERITED_WORKERS)
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|pid| pid.parse().ok())
+        {
+            workers.wait_for(pid);
+        }
+        workers
+    }
+
+    /// Waits for `worker` in a thread, so it never stays a zombie.
+    fn reap(&self, worker: Child) {
+        self.wait_for(worker.id().cast_signed());
+    }
+
+    /// Waits for `pid`, a child of this process, in a thread. A pid already
+    /// reaped is no child of this process, and its wait fails at once.
+    fn wait_for(&self, pid: libc::pid_t) {
+        lock(&self.0).insert(pid);
+        let live = Arc::clone(&self.0);
+        std::thread::spawn(move || {
+            let mut status = 0;
+            // SAFETY: waits only for `pid` and writes its status to a live
+            // integer.
+            while unsafe { libc::waitpid(pid, &mut status, 0) } == -1
+                && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted
+            {}
+            lock(&live).remove(&pid);
+        });
+    }
+
+    /// The live workers, as `INHERITED_WORKERS` spells them.
+    fn live(&self) -> String {
+        lock(&self.0)
+            .iter()
+            .map(libc::pid_t::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Starts the bridge for `endpoint` unless one holds its lock, and says
@@ -155,14 +221,18 @@ impl Stream for RexEvents<'_> {
 trait Host {
     /// Starts `space`'s status worker.
     fn spawn(&mut self, space: &SpaceId) -> Result<Child, String>;
+    /// The workers that have not been reaped yet.
+    fn workers(&self) -> &Workers;
     /// Under the command gate, runs a replaced runtime in this process's
-    /// place, as the same command. Returns only when there is none to run.
+    /// place, as the same command, and hands it the workers. Returns only
+    /// when there is none to run.
     fn reexec_if_replaced(&mut self);
 }
 
 struct Processes<'a> {
     state: &'a Path,
     endpoint: &'a Endpoint,
+    workers: Workers,
 }
 
 impl Host for Processes<'_> {
@@ -170,8 +240,15 @@ impl Host for Processes<'_> {
         status_queue::spawn_worker(self.state, self.endpoint, space)
     }
 
+    fn workers(&self) -> &Workers {
+        &self.workers
+    }
+
     fn reexec_if_replaced(&mut self) {
-        let _ = crate::runtime_reexec_if_replaced(self.state);
+        use std::os::unix::process::CommandExt;
+        if let Some(mut command) = crate::installed_runtime::replacement(self.state) {
+            let _ = command.env(INHERITED_WORKERS, self.workers.live()).exec();
+        }
     }
 }
 
@@ -340,8 +417,8 @@ fn flush(state: &Path, endpoint: &Endpoint, pending: &mut Pending, host: &mut dy
                         Err(_) => left.push(event),
                     }
                 }
-                if queued && let Ok(mut worker) = host.spawn(&space) {
-                    std::thread::spawn(move || worker.wait());
+                if queued && let Ok(worker) = host.spawn(&space) {
+                    host.workers().reap(worker);
                 }
             }
         }
