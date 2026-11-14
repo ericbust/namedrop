@@ -1294,6 +1294,7 @@ fn herdr_discovery_and_restart_reconciliation_fail_closed() {
                 transaction,
                 &scope,
                 &discovered.panes,
+                &[],
                 &SequenceIds,
                 &attribution(6),
             )
@@ -1335,6 +1336,7 @@ fn herdr_discovery_and_restart_reconciliation_fail_closed() {
                 transaction,
                 &scope,
                 &[duplicate.clone(), duplicate],
+                &[],
                 &SequenceIds,
                 &attribution(8),
             )?;

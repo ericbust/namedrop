@@ -1365,3 +1365,122 @@ fn a_claimed_block_is_read_on_one_proved_connection() {
     );
     assert_eq!(script.calls(), ["server.status"]);
 }
+
+/// A successful `session.list_blocks` that leaves out a bound block, empty,
+/// `null`, or with no field at all, retires the block's name only when Rex,
+/// asked about the block alone, answers `not_found`. A lookup that resolves
+/// it, answers any other status, finds it in no list, or times out keeps
+/// the name for the next survey.
+#[test]
+fn a_survey_that_leaves_out_a_bound_block_retires_its_name_only_on_not_found() {
+    use crate::{
+        ActorKind, MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId, PaneRoleId,
+        StateNamespace, StateStore,
+    };
+    type Lookup = fn(&Request) -> Option<Result<Value, Fault>>;
+    let lookups: [(&str, Lookup, bool); 5] = [
+        ("resolves", |_| None, false),
+        (
+            "not found",
+            |request| {
+                (request.short() == "target.resolve").then(|| {
+                    Ok(
+                        json!({"results": [{"status": "not_found", "query": "block:b",
+                        "reason": ""}]}),
+                    )
+                })
+            },
+            true,
+        ),
+        (
+            "another status",
+            |request| {
+                (request.short() == "target.resolve").then(|| {
+                    Ok(
+                        json!({"results": [{"status": "unavailable", "query": "block:b",
+                        "reason": "its host is away"}]}),
+                    )
+                })
+            },
+            false,
+        ),
+        (
+            "in no list",
+            |request| {
+                (request.short() == "session.attach").then(|| Ok(json!({"view": {"windows": []}})))
+            },
+            false,
+        ),
+        (
+            "times out",
+            |request| {
+                (request.short() == "process").then(|| Err(Fault::Timeout(Duration::from_secs(5))))
+            },
+            false,
+        ),
+    ];
+    for listing in [json!({"blocks": []}), json!({"blocks": null}), json!({})] {
+        for (case, lookup, retired) in lookups {
+            let state = State::new();
+            let fixture = fixture("idle-login");
+            let listed = listing.clone();
+            let script = Script::new(move |request, events| {
+                if request.short() == "session.list_blocks" {
+                    return Ok(listed.clone());
+                }
+                lookup(request)
+                    .unwrap_or_else(|| (one_block(fixture.clone()).handler)(request, events))
+            });
+            let rex = rex(script, &state, Local::default());
+            let namespace = StateNamespace::for_space(&rex.endpoint.key, "session:s");
+            let attribution = MutationAttribution::new(ActorKind::Human, "test", 10);
+            let id = PaneAddressId::new("a");
+            StateStore::open(&state.0)
+                .unwrap()
+                .transaction(|transaction| {
+                    transaction.activate_worktree(&namespace, &attribution)?;
+                    transaction.create_pane_address(
+                        &namespace,
+                        &PaneAddressDraft {
+                            id: id.clone(),
+                            role_id: PaneRoleId::new("role-a"),
+                            role_name: "a".into(),
+                            role_description: "test role".into(),
+                            alias: "a".into(),
+                        },
+                        &attribution,
+                    )?;
+                    transaction.bind_pane(
+                        &namespace,
+                        &PaneBindingId::new("binding-a"),
+                        &id,
+                        "block:b",
+                        &attribution,
+                    )
+                })
+                .unwrap();
+            let ids = crate::ProcessIds::default();
+            let home = state.0.join("home");
+            let _ = crate::handle_mux_event(
+                &crate::LifecycleRuntime {
+                    state_directory: &state.0,
+                    home_directory: Some(&home),
+                    agent_config: crate::AgentConfigDirectories::default(),
+                    cwd: Path::new("/repo"),
+                    workspace_id: None,
+                    current_pane_id: None,
+                    session_socket_id: &rex.endpoint.key,
+                    mux: &rex,
+                    clock: &crate::SystemClock,
+                    ids: &ids,
+                },
+                &crate::mux::MuxEvent::Resync(SpaceId::new("session:s")),
+            );
+            let names = StateStore::open(&state.0)
+                .unwrap()
+                .transaction(|transaction| transaction.list_pane_addresses(&namespace))
+                .unwrap();
+            assert_eq!(names.is_empty(), retired, "{listing} {case}");
+        }
+    }
+}

@@ -153,8 +153,9 @@ pub(super) fn resolve_request(kind: &str, id: &str) -> Value {
     json!({"kinds": [kind], "queries": [id]})
 }
 
-/// The one target a `target.resolve` of a full ID names, or `Gone` when it
-/// names nothing.
+/// The one target a `target.resolve` of a full ID names, or `Gone` when Rex
+/// answers `not_found`. A survey retires a name on that answer, so any
+/// other status is no proof that the target is gone.
 pub(super) fn target(payload: Value, gone: Gone, id: &str) -> Result<Target, MuxError> {
     let Resolved { results } = parse(payload)?;
     match results.into_iter().next() {
@@ -167,13 +168,17 @@ pub(super) fn target(payload: Value, gone: Gone, id: &str) -> Result<Target, Mux
             "Rex resolved {id} to more than one target: {}",
             entry.reason
         ))),
-        Some(entry) if entry.reason.is_empty() => {
+        Some(entry) if entry.status == "not_found" && entry.reason.is_empty() => {
             Err(MuxError::Gone(gone, format!("Rex has no {id}")))
         }
-        Some(entry) => Err(MuxError::Gone(
+        Some(entry) if entry.status == "not_found" => Err(MuxError::Gone(
             gone,
             format!("Rex has no {id}: {}", entry.reason),
         )),
+        Some(entry) => Err(MuxError::Protocol(format!(
+            "Rex answered {} for {id}: {}",
+            entry.status, entry.reason
+        ))),
         None => Err(MuxError::Protocol(format!(
             "Rex answered no result for {id}"
         ))),

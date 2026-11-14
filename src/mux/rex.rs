@@ -278,7 +278,8 @@ impl Call<'_> {
     }
 
     /// The block's host, from the view or, for a detached block the view
-    /// leaves out, from the block list.
+    /// leaves out, from the block list. Rex has just resolved the block, so
+    /// a list that leaves it out is incomplete, not proof that it closed.
     fn block_host(
         &mut self,
         session: &str,
@@ -291,7 +292,11 @@ impl Call<'_> {
                 self.blocks(session)?
                     .into_iter()
                     .find(|entry| entry.block_id == block)
-                    .ok_or_else(|| MuxError::Gone(Gone::Pane, format!("Rex has no {block}")))?
+                    .ok_or_else(|| {
+                        MuxError::Unavailable(format!(
+                            "Rex resolved {block}, but its session's block list leaves it out"
+                        ))
+                    })?
                     .host_id
             }
         };

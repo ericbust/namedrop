@@ -1565,6 +1565,7 @@ fn ambiguous_binding_recovery_opens_one_attention_item_until_an_explicit_rebind(
                         idle_state_label: None,
                     },
                 ],
+                &[],
                 &ids,
                 &human,
             )

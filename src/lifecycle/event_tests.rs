@@ -424,9 +424,10 @@ fn an_event_s_changes_are_recorded_as_its_endpoint_s_multiplexer() {
 }
 
 /// Another pane's status change surveys the space after a block closed and
-/// before its close is handled. A Rex block ID is never reused, so the
-/// survey retires the name and cancels its mail, as the close would. Herdr
-/// reuses pane IDs, and its survey only unbinds the name, as it always has.
+/// before its close is handled. A Rex block ID is never reused, so once Rex
+/// says the block is gone the survey retires the name and cancels its mail,
+/// as the close would. Herdr reuses pane IDs, and its survey only unbinds
+/// the name, as it always has, with no lookup of the pane.
 #[test]
 fn a_rex_survey_retires_the_name_of_a_bound_block_it_no_longer_lists() {
     for (endpoint, left) in [(REX, vec!["b"]), ("/tmp/herdr.sock", vec!["a", "b"])] {
@@ -436,6 +437,11 @@ fn a_rex_survey_retires_the_name_of_a_bound_block_it_no_longer_lists() {
             .handle(MuxEvent::AgentStatusChanged(slot(SPACE, "pane-b")))
             .unwrap();
         assert_eq!(fixture.names(SPACE), left, "{endpoint}");
+        let looked_up = fixture
+            .mux
+            .reads()
+            .contains(&Read::Process(PaneId::new("pane-a")));
+        assert_eq!(looked_up, endpoint == REX, "{endpoint}");
         if endpoint == REX {
             assert_eq!(fixture.attempt("a"), DeliveryState::Cancelled);
         }
@@ -445,6 +451,73 @@ fn a_rex_survey_retires_the_name_of_a_bound_block_it_no_longer_lists() {
         assert_eq!(fixture.names(SPACE), left, "{endpoint}");
         assert_eq!(fixture.attempt("b"), DeliveryState::Submitted);
     }
+}
+
+/// A survey that leaves out a live block, as an incomplete listing does,
+/// retires nothing. Rex is asked about the block alone, and a lookup that
+/// finds it, times out, or cannot reach Rex keeps its name and its mail for
+/// the next survey.
+#[test]
+fn a_rex_survey_keeps_the_name_of_a_bound_block_it_leaves_out_but_rex_still_has() {
+    let faults: [Option<MuxError>; 3] = [
+        None,
+        Some(MuxError::Timeout(
+            "Rex request timed out after 5000ms".into(),
+        )),
+        Some(MuxError::Unavailable("could not reach Rex".into())),
+    ];
+    for fault in faults {
+        for event in [
+            MuxEvent::AgentStatusChanged(slot(SPACE, "pane-b")),
+            MuxEvent::Resync(SpaceId::new(SPACE)),
+        ] {
+            let fixture = Fixture::new(REX);
+            fixture.mux.hide_pane("pane-a");
+            let injected = fault.clone();
+            fixture.mux.on_read(move |_, read| match (read, &injected) {
+                (Read::Process(pane), Some(fault)) if pane.as_str() == "pane-a" => {
+                    Err(fault.clone())
+                }
+                _ => Ok(()),
+            });
+            fixture.handle(event.clone()).unwrap();
+            assert_eq!(fixture.names(SPACE), ["a", "b"], "{fault:?} {event:?}");
+            assert_ne!(fixture.attempt("a"), DeliveryState::Cancelled);
+        }
+    }
+}
+
+/// A block named after a survey was taken is missing from it. Rex still has
+/// the block, so its name stays.
+#[test]
+fn a_block_named_after_a_rex_survey_was_taken_keeps_its_name() {
+    let fixture = Fixture::new(REX);
+    let state = fixture.state.clone();
+    let named = std::sync::atomic::AtomicBool::new(false);
+    fixture.mux.on_read(move |mux, read| {
+        if matches!(read, Read::Survey { .. }) && !named.swap(true, Ordering::SeqCst) {
+            mux.open_pane(SPACE, |space| space.pane("pane-n").hidden());
+            let namespace = StateNamespace::for_space(REX, SPACE);
+            StateStore::open(&state)
+                .unwrap()
+                .transaction(|transaction| {
+                    transaction.create_pane_address(&namespace, &address("n"), &attribution())?;
+                    transaction.bind_pane(
+                        &namespace,
+                        &PaneBindingId::new("binding-n"),
+                        &PaneAddressId::new("n"),
+                        "pane-n",
+                        &attribution(),
+                    )
+                })
+                .unwrap();
+        }
+        Ok(())
+    });
+    fixture
+        .handle(MuxEvent::AgentStatusChanged(slot(SPACE, "pane-b")))
+        .unwrap();
+    assert_eq!(fixture.names(SPACE), ["a", "b", "n"]);
 }
 
 /// A block's close was never handled, as when the bridge re-execs at the

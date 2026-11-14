@@ -455,6 +455,7 @@ fn another_panes_status_event_preserves_the_blocked_agents_frame() {
                         discovered_pane(&ns, "a", "blocked"),
                         discovered_pane(&ns, "b", status),
                     ],
+                    &[],
                     &ids,
                     &MutationAttribution::new(ActorKind::Plugin, "test", at),
                 )

@@ -1278,6 +1278,8 @@ where
             "status event pane is not live in its Worktree".to_owned(),
         ));
     }
+    let closed = closed_rex_blocks(store, &event_namespace, &event_worktree.panes, runtime.mux)
+        .map_err(EventError::retry)?;
     store
         .transaction(|transaction| {
             // More than one session may restart before the next status event.
@@ -1286,6 +1288,7 @@ where
                 transaction,
                 &event_namespace,
                 &event_worktree.panes,
+                &closed,
                 runtime.ids,
                 attribution,
             )?;
@@ -1445,6 +1448,8 @@ where
     C: Clock,
     I: IdGenerator,
 {
+    let closed = closed_rex_blocks(store, namespace, &discovered.panes, runtime.mux)
+        .map_err(|error| error.to_string())?;
     store
         .transaction(|transaction| {
             reconcile_compacted_pane_bindings(
@@ -1457,6 +1462,7 @@ where
                 transaction,
                 namespace,
                 &discovered.panes,
+                &closed,
                 runtime.ids,
                 attribution,
             )?;
@@ -2165,27 +2171,64 @@ pub(crate) fn terminal_safe_text(value: &str) -> String {
     safe
 }
 
+/// The bound blocks of a Rex `namespace` that `panes`, a survey of it,
+/// leaves out and that Rex, asked about each block alone, answers
+/// `not_found` for. A Rex block ID is never reused and a block never leaves
+/// its session, so such a block has closed for good. A listing alone proves
+/// nothing: it can leave out a live block, and a block bound after the
+/// survey was taken is missing from it too. So a block whose lookup gives
+/// any other answer, a timeout included, is not named, and its binding
+/// waits for the next survey. A block of another host must not answer
+/// `not_found` while that host is away, which the relay's step must keep
+/// true. Herdr reuses pane IDs, so none of its panes is named.
+fn closed_rex_blocks(
+    store: &mut StateStore,
+    namespace: &StateNamespace,
+    panes: &[DiscoveredPane],
+    mux: &(impl MuxRead + ?Sized),
+) -> Result<Vec<String>, StoreError> {
+    if crate::mux::Endpoint::parse(&namespace.session_socket_id).kind != crate::mux::MuxKind::Rex {
+        return Ok(Vec::new());
+    }
+    let bindings = store.transaction(|transaction| transaction.active_pane_bindings(namespace))?;
+    Ok(bindings
+        .into_iter()
+        .map(|binding| binding.pane_id)
+        .filter(|block| !panes.iter().any(|pane| &pane.pane_id == block))
+        .filter(|block| {
+            matches!(
+                mux.process(&PaneId::new(block)),
+                Err(MuxError::Gone(Gone::Pane, _))
+            )
+        })
+        .collect())
+}
+
+/// Refreshes each binding of `namespace` from `panes`, a survey of it. A
+/// bound pane the survey leaves out is unbound, except in a Rex space,
+/// where its name is retired, as its close would retire it, once `closed`
+/// names its block, and is otherwise left for the next survey.
 pub fn reconcile_discovered_panes(
     transaction: &mut StateTransaction<'_>,
     namespace: &StateNamespace,
     panes: &[DiscoveredPane],
+    closed: &[String],
     ids: &impl IdGenerator,
     attribution: &MutationAttribution,
 ) -> Result<(), StoreError> {
-    // A Rex block ID is never reused and a block never leaves its session,
-    // so a bound block the survey no longer lists has closed, and its name
-    // is retired as its close would retire it. Herdr reuses pane IDs.
-    let closed_for_good =
+    let rex =
         crate::mux::Endpoint::parse(&namespace.session_socket_id).kind == crate::mux::MuxKind::Rex;
     for binding in transaction.active_pane_bindings(namespace)? {
         let mut matches = panes.iter().filter(|pane| pane.pane_id == binding.pane_id);
         let first = matches.next();
-        if first.is_none() && closed_for_good {
-            transaction.cancel_and_remove_pane_address(
-                namespace,
-                &binding.address_id,
-                attribution,
-            )?;
+        if first.is_none() && rex {
+            if closed.contains(&binding.pane_id) {
+                transaction.cancel_and_remove_pane_address(
+                    namespace,
+                    &binding.address_id,
+                    attribution,
+                )?;
+            }
             continue;
         }
         if first.is_none() {
