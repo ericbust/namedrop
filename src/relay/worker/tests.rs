@@ -556,7 +556,7 @@ fn an_answer_to_a_collected_reply_is_queued_once_to_its_b_author() {
     assert_eq!(queued[0].0, answered["message_id"].as_str().unwrap());
     assert_eq!(queued[0].1, "bob");
     assert_eq!(queued[0].2.as_deref(), Some("b-message-1"));
-    assert!(queued[0].3.ends_with(crate::relay::capture::CUT_NOTICE));
+    assert!(queued[0].3.ends_with(crate::relay::wire::CUT_NOTICE));
     assert!(queued[0].3.starts_with("zzz"));
     assert!(
         super::super::wire::deliver_size("alice", "bob", &queued[0].3)
@@ -936,7 +936,7 @@ fn a_reply_with_a_bad_field_is_acked_and_dropped_and_a_long_one_cut() {
         long.len()
     );
     assert!(long.starts_with("www"));
-    assert!(long.ends_with(crate::relay::capture::CUT_NOTICE));
+    assert!(long.ends_with(crate::relay::wire::CUT_NOTICE));
     let authors = space.main(
         "SELECT DISTINCT author_alias_snapshot FROM collaboration_messages
          WHERE author_address_id LIKE 'relay:%'",

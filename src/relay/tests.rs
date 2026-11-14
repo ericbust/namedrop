@@ -512,3 +512,22 @@ fn no_registration_or_pane_action_takes_a_relay_address_or_role() {
             .unwrap()
     );
 }
+
+/// `cut` measures a text as a JSON string encodes it.
+#[test]
+fn a_text_is_cut_only_past_its_limit_as_encoded() {
+    use super::wire::{CUT_NOTICE, cut};
+    let encoded = |text: &str| serde_json::to_string(text).unwrap().len() - 2;
+    let exact = format!("{}\u{1}\"é", "x".repeat(100));
+    let limit = encoded(&exact);
+    assert_eq!(limit, 100 + 6 + 2 + 2);
+    assert_eq!(cut(&exact, limit), exact, "a text at its limit stays whole");
+    let over = cut(&exact, limit - 1);
+    assert!(over.ends_with(CUT_NOTICE));
+    assert!(encoded(&over) < limit, "{}", encoded(&over));
+    assert!(encoded(&over) > limit - 1 - 6, "{}", encoded(&over));
+    let wide = "é".repeat(100);
+    let cut_wide = cut(&wide, 100);
+    assert!(cut_wide.ends_with(CUT_NOTICE));
+    assert!(encoded(&cut_wide) <= 100);
+}

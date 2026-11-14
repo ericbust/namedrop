@@ -13,6 +13,34 @@ pub(crate) const TEXT_LIMIT: usize = 60 * 1024;
 /// its outbox at this.
 pub(crate) const PAGE_LIMIT: usize = 256 * 1024;
 
+/// The line a cut message ends with.
+pub(crate) const CUT_NOTICE: &str = "\n\n[Namedrop cut this message to relay it.]";
+
+/// `text`, or as much of it as fits `limit` bytes once encoded as a JSON
+/// string, and the notice that Namedrop cut it. An escaped control
+/// character takes up to six bytes, so the encoded size is the one a page
+/// or a request carries.
+pub(crate) fn cut(text: &str, limit: usize) -> String {
+    let encoded = |c: char| match c {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+        c if u32::from(c) < 0x20 => 6,
+        c => c.len_utf8(),
+    };
+    if text.chars().map(encoded).sum::<usize>() <= limit {
+        return text.to_owned();
+    }
+    let room = limit.saturating_sub(CUT_NOTICE.chars().map(encoded).sum());
+    let (mut used, mut end) = (0, 0);
+    for (at, c) in text.char_indices() {
+        if used + encoded(c) > room {
+            break;
+        }
+        used += encoded(c);
+        end = at + c.len_utf8();
+    }
+    format!("{}{CUT_NOTICE}", &text[..end])
+}
+
 /// Whether `value` is an id B or A takes from the other side: 1 to 128
 /// printable ASCII characters with no space.
 pub(crate) fn valid_id(value: &str) -> bool {

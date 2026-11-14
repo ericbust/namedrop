@@ -299,7 +299,9 @@ impl RelayStore {
             .optional()?)
     }
 
-    /// Keeps a reply for `host_id`, once per B message.
+    /// Keeps a reply for `host_id`, once per B message, cut so that its
+    /// text encodes in `TEXT_LIMIT` bytes and every page holds at least one
+    /// reply.
     pub(crate) fn keep_reply(
         &self,
         host_id: &str,
@@ -315,7 +317,7 @@ impl RelayStore {
                 reply.thread,
                 reply.from,
                 reply.message_id,
-                reply.text,
+                super::wire::cut(&reply.text, super::wire::TEXT_LIMIT),
                 now_ms
             ],
         )?;

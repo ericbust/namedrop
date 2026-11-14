@@ -548,7 +548,7 @@ fn an_answer_to_a_relayed_message_is_kept_once_for_the_sender_s_pull() {
     let text = kept[1][5].as_str().unwrap();
     assert!(text.len() <= 60 * 1024);
     assert!(text.starts_with("www"));
-    assert!(text.ends_with(super::super::capture::CUT_NOTICE));
+    assert!(text.ends_with(super::super::wire::CUT_NOTICE));
     let page = b.call(&json!({
         "op": "collect", "expect_host_id": HOST_B,
         "from": {"host_id": "host-a", "name": "alice", "host": "laptop"}, "ack_through": 0,
@@ -871,4 +871,32 @@ thread_local! {
     static SECOND: std::cell::RefCell<
         Option<(std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<Answer>)>,
     > = const { std::cell::RefCell::new(None) };
+}
+
+/// A reply of control characters, each six bytes once escaped, is cut to
+/// fit B's text limit as encoded, so the page still carries it and the
+/// replies behind it.
+#[test]
+fn an_escaped_reply_is_cut_to_fit_and_never_stalls_the_outbox() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "reply please"));
+    let relayed = b.rows(
+        "namedrop.sqlite3",
+        "SELECT message_id FROM collaboration_messages",
+    )[0][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let text = "\u{1}".repeat(60 * 1024);
+    bob_answers(&b, &relayed, &format!("@alice@laptop {text}"));
+    bob_answers(&b, &relayed, "@alice@laptop behind it");
+    super::super::capture::capture(&b.0, &Endpoint::parse(REX), &mut |_| {}).unwrap();
+    let page = b.call(&json!({"op": "collect", "expect_host_id": HOST_B,
+        "from": {"host_id": "host-a", "name": "alice", "host": "laptop"}, "ack_through": 0}));
+    assert!(!page.more);
+    assert_eq!(page.outbox.len(), 2);
+    let cut = &page.outbox[0].text;
+    assert!(cut.ends_with(super::super::wire::CUT_NOTICE));
+    assert!(serde_json::to_string(cut).unwrap().len() - 2 <= TEXT_LIMIT);
+    assert_eq!(page.outbox[1].text, "behind it");
 }

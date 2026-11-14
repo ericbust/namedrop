@@ -391,7 +391,7 @@ fn insert_reply(
                 delivery_id: DeliveryId::new(ids.next_id("delivery")),
                 in_reply_to: Some(&re),
                 recipient: &sender,
-                text: &super::capture::cut(&reply.text, wire::TEXT_LIMIT),
+                text: &wire::cut(&reply.text, wire::TEXT_LIMIT),
             },
             &attribution,
         )

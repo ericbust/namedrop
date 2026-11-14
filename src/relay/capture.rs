@@ -15,9 +15,6 @@ use crate::{
 };
 use std::path::Path;
 
-/// The line a cut reply ends with.
-pub(crate) const CUT_NOTICE: &str = "\n\n[Namedrop cut this message to relay it.]";
-
 /// Captures the messages of `endpoint` that are new since the last capture,
 /// and calls `start` once for each label it queued an item for. The cursor
 /// stops before a message it could not capture, so the next capture tries
@@ -191,30 +188,18 @@ fn keep_for(
                 thread: thread.to_owned(),
                 from: row.author_alias.clone(),
                 message_id: row.message_id.clone(),
-                text: cut(&row.body, wire::TEXT_LIMIT),
+                text: row.body.clone(),
             },
             now,
         )
         .map_err(error)
 }
 
-/// `text`, or its first `limit` bytes and the notice that Namedrop cut it.
-pub(crate) fn cut(text: &str, limit: usize) -> String {
-    if text.len() <= limit {
-        return text.to_owned();
-    }
-    let mut end = limit.saturating_sub(CUT_NOTICE.len());
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}{CUT_NOTICE}", &text[..end])
-}
-
 /// `text` cut so that its `deliver` request fits what the `rex` CLI sends.
 fn fit(sender: &str, to: &str, text: &str) -> String {
     let mut limit = wire::TEXT_LIMIT;
     loop {
-        let fitted = cut(text, limit);
+        let fitted = wire::cut(text, limit);
         if wire::deliver_size(sender, to, &fitted) <= wire::REQUEST_LIMIT || limit < 2048 {
             return fitted;
         }
