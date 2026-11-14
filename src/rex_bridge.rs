@@ -370,9 +370,10 @@ struct KnownServer {
 }
 
 /// Whether the server behind `endpoint` is the one the bridge knew. The
-/// first `host_id` seen is stored and never replaced. Another server at the
-/// same socket has other state, so its bridge retires nothing until a person
-/// runs `namedrop reconcile` there.
+/// first `host_id` seen is stored, and nothing replaces it. Another server
+/// at the same socket has other state, so on each connection to it the
+/// bridge queues no `Resync`. `namedrop reconcile` in its blocks still
+/// retires what is gone, but it does not record the new `host_id` either.
 fn same_server(state: &Path, endpoint: &Endpoint, host_id: Option<&str>) -> bool {
     let path = state
         .join("rex/servers")
