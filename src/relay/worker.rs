@@ -538,9 +538,8 @@ enum Page {
 /// Automatic Reply Limit paused is held, as is each later one of that
 /// thread, so they reach it in order once it takes replies again. Acks
 /// stop at a reply A has no room to hold, or one that answers an item A
-/// has not settled, as `Reading` tells. A reply
-/// read again finds what A made of it before: it is taken or refused
-/// once.
+/// has not settled, as `Reading` tells. A reply read again finds what A
+/// made of it before: it is taken or refused once.
 fn collect_replies(
     run: &mut Run<'_>,
     store: &RelayStore,
@@ -641,11 +640,10 @@ enum Placed {
 }
 
 /// Places `reply` of `answer`: dropped when it answers nothing of this
-/// endpoint's, left on B when it answers an item A has not settled, or
-/// behind a reply of its thread this pass left,
-/// found as A placed it before, held behind its thread's held replies or
-/// by the Automatic Reply Limit, or else taken. An error is a store
-/// fault.
+/// endpoint's, left on B when it answers an item A has not settled or
+/// follows a reply of its thread this pass left, found as A placed it
+/// before, held behind its thread's held replies or by the Automatic
+/// Reply Limit, or else taken. An error is a store fault.
 fn place(
     run: &mut Run<'_>,
     store: &RelayStore,
