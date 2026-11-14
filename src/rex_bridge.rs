@@ -360,7 +360,7 @@ fn serve(
             Ok(mut stream) => {
                 reached = true;
                 let opened = Instant::now();
-                crate::relay::start_queued_workers(state, endpoint);
+                crate::relay::start_workers(state, endpoint);
                 let mut pending = Pending::default();
                 if same_server(state, endpoint, stream.host_id()) {
                     pending.resync_every_space(Instant::now());

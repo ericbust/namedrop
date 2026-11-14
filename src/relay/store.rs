@@ -185,6 +185,14 @@ impl RelayStore {
     /// Opens the relay's database in `state`, creating it when it is missing,
     /// and expires whatever outlived its limit by `now_ms`.
     pub(crate) fn open(state: &Path, now_ms: i64) -> Result<Self, StoreError> {
+        let mut store = Self::read(state)?;
+        store.expire(now_ms)?;
+        Ok(store)
+    }
+
+    /// Opens the relay's database in `state` as `open` does, without the
+    /// expiry, for a reader that looks often.
+    pub(crate) fn read(state: &Path) -> Result<Self, StoreError> {
         fs::create_dir_all(state)?;
         let path = state.join(FILE);
         let mut connection = Connection::open(&path)?;
@@ -214,9 +222,7 @@ impl RelayStore {
             }
         }
         transaction.commit()?;
-        let mut store = Self { connection };
-        store.expire(now_ms)?;
-        Ok(store)
+        Ok(Self { connection })
     }
 
     /// Queues `item`, unless its key is already stored.
@@ -373,15 +379,15 @@ impl RelayStore {
         Ok(expired)
     }
 
-    /// The items queued for `label`, oldest first.
-    pub(crate) fn queued(&self, label: &str) -> Result<Vec<Queued>, StoreError> {
+    /// The items `endpoint` queued for `label`, oldest first.
+    pub(crate) fn queued(&self, label: &str, endpoint: &str) -> Result<Vec<Queued>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT message_id, recipient, sender, thread, in_reply_to, text, host_id
-             FROM outbound WHERE label = ?1 AND state = 'queued'
+             FROM outbound WHERE label = ?1 AND endpoint = ?2 AND state = 'queued'
              ORDER BY created_at_ms, rowid",
         )?;
         let queued = statement
-            .query_map(params![label], |row| {
+            .query_map(params![label, endpoint], |row| {
                 Ok(Queued {
                     message_id: row.get(0)?,
                     recipient: row.get(1)?,
@@ -396,14 +402,23 @@ impl RelayStore {
         Ok(queued)
     }
 
-    /// The labels of `endpoint` with an item queued.
-    pub(crate) fn queued_labels(&self, endpoint: &str) -> Result<Vec<String>, StoreError> {
+    /// The labels of `endpoint` with an item queued or a thread open at
+    /// `now_ms`, each of which needs its worker.
+    pub(crate) fn active_labels(
+        &self,
+        endpoint: &str,
+        now_ms: i64,
+    ) -> Result<Vec<String>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT DISTINCT label FROM outbound WHERE endpoint = ?1 AND state = 'queued'
+            "SELECT label FROM outbound WHERE endpoint = ?1 AND (state = 'queued'
+                OR (state = 'accepted' AND updated_at_ms > ?2))
+             UNION SELECT label FROM collected WHERE endpoint = ?1 AND created_at_ms > ?2
              ORDER BY label",
         )?;
         let labels = statement
-            .query_map(params![endpoint], |row| row.get(0))?
+            .query_map(params![endpoint, now_ms - OUTBOUND_LIFETIME_MS], |row| {
+                row.get(0)
+            })?
             .collect::<Result<_, _>>()?;
         Ok(labels)
     }
@@ -460,14 +475,20 @@ impl RelayStore {
         Ok(())
     }
 
-    /// Whether `label` has a thread open: an item accepted, or a reply
-    /// collected, within 24 hours of `now_ms`.
-    pub(crate) fn thread_open(&self, label: &str, now_ms: i64) -> Result<bool, StoreError> {
+    /// Whether `endpoint` has a thread open with `label`: an item accepted,
+    /// or a reply collected, within 24 hours of `now_ms`.
+    pub(crate) fn thread_open(
+        &self,
+        label: &str,
+        endpoint: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
         Ok(self.connection.query_row(
-            "SELECT EXISTS (SELECT 1 FROM outbound WHERE label = ?1 AND state = 'accepted'
-                    AND updated_at_ms > ?2
-                UNION ALL SELECT 1 FROM collected WHERE label = ?1 AND created_at_ms > ?2)",
-            params![label, now_ms - OUTBOUND_LIFETIME_MS],
+            "SELECT EXISTS (SELECT 1 FROM outbound WHERE label = ?1 AND endpoint = ?2
+                    AND state = 'accepted' AND updated_at_ms > ?3
+                UNION ALL SELECT 1 FROM collected WHERE label = ?1 AND endpoint = ?2
+                    AND created_at_ms > ?3)",
+            params![label, endpoint, now_ms - OUTBOUND_LIFETIME_MS],
             |row| row.get(0),
         )?)
     }

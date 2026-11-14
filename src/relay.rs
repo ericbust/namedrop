@@ -76,31 +76,62 @@ pub fn accept(
 /// holding `<state>/relay/<sha256(endpoint, label)>.lock`, so a second one
 /// exits at once.
 pub fn run_worker(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) {
-    let Ok(lock) = worker_lock(state, endpoint, label) else {
-        return;
-    };
-    if lock.try_lock().is_err() || !valid_label(label) {
-        return;
-    }
-    worker::work(&mut worker::Run {
-        state,
-        endpoint,
-        label,
-        pause: &mut |within| {
-            wait_for_new(state, label, within, std::time::Duration::from_secs(1));
-            true
-        },
-        wake: &mut |space| wake(state, endpoint, space),
+    hold(state, endpoint, label, &mut || {
+        worker::work(&mut worker::Run {
+            state,
+            endpoint,
+            label,
+            pause: &mut |within| {
+                wait_for_new(
+                    state,
+                    endpoint,
+                    label,
+                    within,
+                    std::time::Duration::from_secs(1),
+                );
+                true
+            },
+            wake: &mut |space| wake(state, endpoint, space),
+        });
     });
 }
 
-/// Waits `within`, or less once an item is queued for `label` that was not
-/// queued when the wait began, looking every `step`. So a send while the
-/// worker waits to collect again is delivered at once.
-fn wait_for_new(state: &Path, label: &str, within: std::time::Duration, step: std::time::Duration) {
+/// Runs `work` while holding the worker's lock for `label`, and again while
+/// an item is queued once it lets go. A send whose start found the lock
+/// held just before `work` ended started no worker, so the last holder
+/// looks for its item.
+fn hold(state: &Path, endpoint: &crate::mux::Endpoint, label: &str, work: &mut dyn FnMut()) {
+    if !valid_label(label) {
+        return;
+    }
+    let Ok(lock) = worker_lock(state, endpoint, label) else {
+        return;
+    };
+    while lock.try_lock().is_ok() {
+        work();
+        let _ = lock.unlock();
+        let queued = RelayStore::read(state)
+            .and_then(|store| store.queued(label, &endpoint.key))
+            .is_ok_and(|queued| !queued.is_empty());
+        if !queued {
+            return;
+        }
+    }
+}
+
+/// Waits `within`, or less once `endpoint` queued an item for `label` that
+/// was not queued when the wait began, looking every `step`. So a send while
+/// the worker waits to collect again is delivered at once.
+fn wait_for_new(
+    state: &Path,
+    endpoint: &crate::mux::Endpoint,
+    label: &str,
+    within: std::time::Duration,
+    step: std::time::Duration,
+) {
     let queued = || {
-        RelayStore::open(state, now_ms())
-            .and_then(|store| store.queued(label))
+        RelayStore::read(state)
+            .and_then(|store| store.queued(label, &endpoint.key))
             .map_or(0, |queued| queued.len())
     };
     let before = queued();
@@ -191,11 +222,13 @@ fn worker_command(
     command
 }
 
-/// Starts the worker of each label of `endpoint` with an item queued, as
-/// the bridge does when it connects.
-pub(crate) fn start_queued_workers(state: &Path, endpoint: &crate::mux::Endpoint) {
-    if let Ok(store) = RelayStore::open(state, now_ms())
-        && let Ok(labels) = store.queued_labels(&endpoint.key)
+/// Starts the worker of each label of `endpoint` with an item queued or a
+/// thread open, as the bridge does when it connects, so a conversation goes
+/// on collecting after a restart.
+pub(crate) fn start_workers(state: &Path, endpoint: &crate::mux::Endpoint) {
+    let now = now_ms();
+    if let Ok(store) = RelayStore::open(state, now)
+        && let Ok(labels) = store.active_labels(&endpoint.key, now)
     {
         for label in labels {
             start_worker(state, endpoint, &label);
@@ -448,6 +481,14 @@ pub(crate) mod tests_support {
             .unwrap_or_else(|| PathBuf::from("/nonexistent/namedrop-relay-tests/rex"))
     }
 
+    /// Runs `body` with `program` as this thread's `rex`.
+    pub(crate) fn with_program<T>(program: PathBuf, body: impl FnOnce() -> T) -> T {
+        PROGRAM.with(|current| *current.borrow_mut() = Some(program));
+        let result = body();
+        PROGRAM.with(|current| *current.borrow_mut() = None);
+        result
+    }
+
     /// A script `rex` in its own directory, whose body is `script`, and a
     /// `calls` file beside it where each run appends its arguments.
     pub(crate) struct Script {
@@ -483,10 +524,7 @@ pub(crate) mod tests_support {
 
         /// Runs `body` with this script as the thread's `rex`.
         pub(crate) fn run<T>(&self, body: impl FnOnce() -> T) -> T {
-            PROGRAM.with(|program| *program.borrow_mut() = Some(self.directory.join("rex")));
-            let result = body();
-            PROGRAM.with(|program| *program.borrow_mut() = None);
-            result
+            with_program(self.directory.join("rex"), body)
         }
     }
 

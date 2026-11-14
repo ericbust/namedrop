@@ -57,10 +57,9 @@ enum Call {
 /// The worker's loop, until nothing is queued and no thread is open, or
 /// `pause` says stop.
 pub(crate) fn work(run: &mut Run<'_>) {
-    let mut peer: Option<String> = None;
     let mut faults = 0;
     loop {
-        let wait = round(run, &mut peer);
+        let wait = round(run);
         let wait = match wait {
             Round::Done => return,
             Round::Collected if finished(run) => return,
@@ -84,9 +83,11 @@ fn finished(run: &Run<'_>) -> bool {
     let now = super::now_ms();
     RelayStore::open(run.state, now).is_ok_and(|store| {
         store
-            .queued(run.label)
+            .queued(run.label, &run.endpoint.key)
             .is_ok_and(|queued| queued.is_empty())
-            && store.thread_open(run.label, now).is_ok_and(|open| !open)
+            && store
+                .thread_open(run.label, &run.endpoint.key, now)
+                .is_ok_and(|open| !open)
     })
 }
 
@@ -99,13 +100,19 @@ enum Round {
     Kept,
 }
 
-fn round(run: &mut Run<'_>, peer: &mut Option<String>) -> Round {
+/// One round: the label's queued items, then a collect. B's `host_id` is
+/// read again each round, so a new item is pinned to the server that
+/// answers now.
+fn round(run: &mut Run<'_>) -> Round {
     let now = super::now_ms();
     let Ok(store) = RelayStore::open(run.state, now) else {
         return Round::Kept;
     };
-    let (Ok(queued), Ok(open)) = (store.queued(run.label), store.thread_open(run.label, now))
-    else {
+    let endpoint = &run.endpoint.key;
+    let (Ok(queued), Ok(open)) = (
+        store.queued(run.label, endpoint),
+        store.thread_open(run.label, endpoint, now),
+    ) else {
         return Round::Kept;
     };
     if queued.is_empty() && !open {
@@ -128,15 +135,12 @@ fn round(run: &mut Run<'_>, peer: &mut Option<String>) -> Round {
     let Some(own) = crate::rex_bridge::known_host_id(run.state, run.endpoint) else {
         return Round::Kept;
     };
-    let peer_id = match peer {
-        Some(peer_id) => peer_id.clone(),
-        None => match status(run.label) {
-            Ok(host_id) => {
-                let _ = store.set_peer(run.label, &host_id, now);
-                peer.insert(host_id).clone()
-            }
-            Err(_) => return Round::Kept,
-        },
+    let peer_id = match status(run.label) {
+        Ok(host_id) => {
+            let _ = store.set_peer(run.label, &host_id, now);
+            host_id
+        }
+        Err(_) => return Round::Kept,
     };
     let mut kept = false;
     for item in &queued {
@@ -403,7 +407,7 @@ fn insert_reply(
     }
 }
 
-/// The `host_id` B's server reports, which pins who B is for this run.
+/// The `host_id` B's server reports, which pins each new item to who B is.
 fn status(label: &str) -> Result<String, Failure> {
     let status = api(label, &["server.status"], None)?;
     status["host_id"]

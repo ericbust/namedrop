@@ -21,6 +21,7 @@ fn a_waiting_worker_wakes_for_a_new_item() {
         });
         crate::relay::wait_for_new(
             &state,
+            &Endpoint::parse(REX),
             "devbox",
             Duration::from_secs(10),
             Duration::from_millis(20),
@@ -34,6 +35,7 @@ fn a_waiting_worker_wakes_for_a_new_item() {
     let started = std::time::Instant::now();
     crate::relay::wait_for_new(
         &state,
+        &Endpoint::parse(REX),
         "devbox",
         Duration::from_millis(300),
         Duration::from_millis(20),
@@ -468,7 +470,18 @@ fn a_second_worker_for_a_label_exits_at_once() {
     let held = crate::relay::worker_lock(&space.state, &endpoint, "devbox").unwrap();
     held.try_lock().unwrap();
     let calls = rex.calls().len();
-    rex.run(|| crate::relay::run_worker(&space.state, &endpoint, "devbox"));
+    let (done, finished) = std::sync::mpsc::channel();
+    let (state, program) = (space.state.clone(), rex.directory.join("rex"));
+    std::thread::spawn(move || {
+        crate::relay::tests_support::with_program(program, || {
+            crate::relay::run_worker(&state, &Endpoint::parse(REX), "devbox");
+        });
+        let _ = done.send(());
+    });
+    assert!(
+        finished.recv_timeout(Duration::from_secs(5)).is_ok(),
+        "the second worker exits at once"
+    );
     assert_eq!(rex.calls().len(), calls);
     assert_eq!(outbound(&space)[0].0, "queued");
 }
@@ -1062,4 +1075,150 @@ fn one_collect_reads_at_most_16_pages() {
             .1,
         17
     );
+}
+
+/// A send whose start found the lock held just before the worker let go
+/// started no worker, so the worker looks for its item once it lets go and
+/// works again.
+#[test]
+fn a_worker_works_again_for_an_item_queued_as_it_lets_go() {
+    let space = Space::new(REX);
+    let endpoint = Endpoint::parse(REX);
+    let store = crate::relay::tests_support::store(&space.state);
+    let mut runs = 0;
+    crate::relay::hold(&space.state, &endpoint, "devbox", &mut || {
+        runs += 1;
+        match runs {
+            1 => crate::relay::tests_support::queue(&store, "devbox", REX),
+            _ => {
+                Connection::open(space.state.join("relay.sqlite3"))
+                    .unwrap()
+                    .execute("UPDATE outbound SET state = 'accepted'", [])
+                    .unwrap();
+            }
+        }
+    });
+    assert_eq!(runs, 2);
+    let mut again = 0;
+    crate::relay::hold(&space.state, &endpoint, "devbox", &mut || again += 1);
+    assert_eq!(again, 1, "with nothing queued it works once");
+}
+
+/// B's `host_id` is read again each round, so an item sent after the
+/// label moved to another server is pinned to that server.
+#[test]
+fn a_new_item_is_pinned_to_the_server_that_answers_now() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    rex.answer_with(answer("accepted", None, json!([])));
+    rex.answer_with(answer("accepted", None, json!([])));
+    let mut waits = 0;
+    let endpoint = Endpoint::parse(REX);
+    rex.run(|| {
+        work(&mut Run {
+            state: &space.state,
+            endpoint: &endpoint,
+            label: "devbox",
+            pause: &mut |_| {
+                waits += 1;
+                if waits == 1 {
+                    fs::write(
+                        rex.directory.join("status.json"),
+                        r#"{"pid":1,"host_id":"host-c"}"#,
+                    )
+                    .unwrap();
+                    space.send("request-2", "@bob@devbox second").unwrap();
+                }
+                waits < 2
+            },
+            wake: &mut |_| {},
+        });
+    });
+    let pinned: Vec<_> = rex
+        .requests()
+        .iter()
+        .map(|request| request["expect_host_id"].clone())
+        .collect();
+    assert_eq!(pinned, [json!("host-b"), json!("host-c")]);
+}
+
+/// After a restart, the bridge starts the worker of each label with a
+/// thread open, so the conversation goes on collecting.
+#[test]
+fn a_restart_starts_the_worker_of_an_open_thread() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    collect_once(&space, &rex, json!([]));
+    STARTED.with(|started| started.borrow_mut().clear());
+    crate::relay::start_workers(&space.state, &Endpoint::parse(REX));
+    assert_eq!(STARTED.with(|started| started.borrow().clone()), ["devbox"]);
+    STARTED.with(|started| started.borrow_mut().clear());
+    crate::relay::start_workers(
+        &space.state,
+        &Endpoint::parse("rex:/tmp/namedrop-relay-other.sock"),
+    );
+    assert!(
+        STARTED.with(|started| started.borrow().is_empty()),
+        "another endpoint has no thread open"
+    );
+}
+
+/// Two local servers can share a state directory, and each one's worker
+/// sends only its own items and collects only for its own open threads.
+#[test]
+fn a_worker_sends_only_its_own_endpoint_s_items() {
+    const OTHER: &str = "rex:/tmp/namedrop-relay-other.sock";
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    let store = crate::relay::tests_support::store(&space.state);
+    crate::relay::tests_support::queue(&store, "devbox", OTHER);
+    store
+        .queue(&crate::relay::store::Outbound {
+            label: "devbox",
+            message_id: "message-2",
+            recipient: "bob",
+            endpoint: OTHER,
+            space: "session:a",
+            sender: "alice",
+            thread: "thread-2",
+            in_reply_to: None,
+            text: "an open thread of the other endpoint",
+            now_ms: crate::relay::now_ms(),
+        })
+        .unwrap();
+    Connection::open(space.state.join("relay.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE outbound SET state = 'accepted' WHERE message_id = 'message-2'",
+            [],
+        )
+        .unwrap();
+    let (waits, _) = work_for(&space, &rex, 1);
+    assert!(waits.is_empty(), "nothing of its own to do");
+    assert!(rex.requests().is_empty());
+    assert!(outbound(&space).iter().any(|row| row.0 == "queued"));
+}
+
+/// The worker's wait looks every step without expiring anything, which
+/// only an open with its own clock does.
+#[test]
+fn a_waiting_worker_expires_nothing() {
+    let space = Space::new(REX);
+    let store = crate::relay::tests_support::store(&space.state);
+    crate::relay::tests_support::queue(&store, "devbox", REX);
+    Connection::open(space.state.join("relay.sqlite3"))
+        .unwrap()
+        .execute("UPDATE outbound SET created_at_ms = 0", [])
+        .unwrap();
+    crate::relay::wait_for_new(
+        &space.state,
+        &Endpoint::parse(REX),
+        "devbox",
+        Duration::from_millis(100),
+        Duration::from_millis(20),
+    );
+    assert_eq!(outbound(&space)[0].0, "queued");
 }
