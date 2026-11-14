@@ -865,7 +865,7 @@ run(state, endpoint):
 |---|---|
 | `block_created` | `PaneAppeared` |
 | `block_closed` | `PaneClosed`, after `RexEvents` deletes the block's binding file |
-| `window_closed` | `TabClosed { space, tab: window_id }` |
+| `window_closed` | `Resync(space)`, because `rex move` closes a window whose last block it moves out and sends no `block_closed` (changed in step 5's second fix round) |
 | `session_destroyed` (top level) | `SpaceClosed`. `rex kill` sends `block_closed` for each block about 6 ms before it (review 1's measure) |
 | `block_event program_status_changed`, root record | `AgentStatusChanged` |
 | `block_event program_status_removed`, root record | `AgentStatusChanged` |
@@ -873,7 +873,7 @@ run(state, endpoint):
 | `block_event child_exited` | `AgentStatusChanged`. `block_closed` follows when the program's exit closes the block (measured) |
 | `session_created`, `title_changed`, `pwd_changed`, `bell`, `size_changed`, `client_*`, `session_view_changed`, anything unknown | Nothing |
 
-`pending` holds at most one `AgentStatusChanged` per pane. A `Resync` absorbs the queued `AgentStatusChanged` markers for its space, and a `SpaceClosed` absorbs every marker for its space. `PaneAppeared`, `PaneClosed`, and `TabClosed` keep their order. So the queue is bounded by the number of blocks on the server. The bridge flushes only for spaces with an activated worktree, which a read-only store query lists.
+`pending` holds at most one `AgentStatusChanged` per pane. A `Resync` absorbs the queued `AgentStatusChanged` markers for its space, and a `SpaceClosed` absorbs every marker for its space. `PaneAppeared` and `PaneClosed` keep their order. So the queue is bounded by the number of blocks on the server. The bridge flushes only for spaces with an activated worktree, which a read-only store query lists.
 
 A gone space is not a restart artifact. After SIGTERM and a restart of a scratch server, the first connection listed the saved session and attached to it, and the block answered `process` with a fresh `login` (measured). So `Resync` may retire a space that answers `Gone`. A changed `host_id` behind the same endpoint means another server, with other state, now answers at that socket. Then the bridge queues no `Resync`, so it retires nothing and keeps the stored `host_id`. Doctor's wording for that case is deferred, and the guard is not. `namedrop reconcile` in that server's blocks retires what is gone, once the person has looked. Recording the new `host_id` is not built, so the bridge never queues a `Resync` there (PORT.md, step 5's fix round).
 

@@ -106,14 +106,7 @@ fn expected(number: usize, kind: &str) -> MuxEvent {
         "appeared" => MuxEvent::PaneAppeared(slot()),
         "closed" => MuxEvent::PaneClosed(slot()),
         "status" => MuxEvent::AgentStatusChanged(slot()),
-        "tab" => MuxEvent::TabClosed {
-            space: session(line),
-            tab: TabId::new(
-                line["payload"]["event"]["payload"]["window_id"]
-                    .as_str()
-                    .unwrap(),
-            ),
-        },
+        "resync" => MuxEvent::Resync(session(line)),
         "space" => MuxEvent::SpaceClosed(session(line)),
         _ => unreachable!(),
     }
@@ -150,7 +143,7 @@ fn each_row_of_the_decode_table_yields_its_event_and_every_other_line_none() {
         (41, "status"),
         (46, "status"),
         (47, "closed"),
-        (48, "tab"),
+        (48, "resync"),
         (53, "closed"),
         (55, "space"),
         (57, "status"),

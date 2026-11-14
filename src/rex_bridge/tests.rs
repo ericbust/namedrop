@@ -485,6 +485,17 @@ impl State {
             .space(session)
             .checkout("/repo")
             .build();
+        self.handle(session, &self.queued(session), &mux)
+    }
+
+    /// Handles `events` in `session` over `mux`, as the status worker
+    /// would, and returns the aliases left in it.
+    fn handle(
+        &self,
+        session: &str,
+        events: &[MuxEvent],
+        mux: &crate::mux::fake::FakeMux,
+    ) -> Vec<String> {
         let ids = crate::ProcessIds::default();
         let home = self.0.join("home");
         let runtime = crate::LifecycleRuntime {
@@ -495,12 +506,12 @@ impl State {
             workspace_id: None,
             current_pane_id: None,
             session_socket_id: REX,
-            mux: &mux,
+            mux,
             clock: &crate::SystemClock,
             ids: &ids,
         };
-        for event in self.queued(session) {
-            crate::handle_mux_event(&runtime, &event).unwrap();
+        for event in events {
+            crate::handle_mux_event(&runtime, event).unwrap();
         }
         StateStore::open(&self.0)
             .unwrap()
@@ -512,6 +523,62 @@ impl State {
             .map(|address| address.alias)
             .collect()
     }
+}
+
+/// A scratch server's events for `rex move` of the only block of one
+/// window into another: `window_closed`, `active_window_changed`, and
+/// `session_view_changed`, and no `block_closed`. Over the bridge's real
+/// stream they come out as a `Resync` of the session, and the moved block,
+/// last seen in the closed window, keeps its name.
+#[test]
+fn a_block_moved_out_of_a_window_it_was_alone_in_keeps_its_name() {
+    use crate::mux::rex::events::tests_support::Scripted;
+    const MOVED: &str = "block:01a1d894-8162-7ba4-a7a0-df247750b798";
+    let lines: Vec<serde_json::Value> = include_str!("../mux/rex/fixtures/events/move.jsonl")
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let window = |line: &serde_json::Value| {
+        line["payload"]["event"]["payload"]["window_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (closed, into) = (window(&lines[0]), window(&lines[1]));
+    let session = lines[0]["payload"]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let state = State::new();
+    state.name(&session, MOVED);
+    let namespace = StateNamespace::for_space(REX, &session);
+    StateStore::open(&state.0)
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.observe_pane_binding_location(
+                &namespace,
+                &PaneAddressId::new("address-closed"),
+                MOVED,
+                &closed,
+            )
+        })
+        .unwrap();
+    let stop = Wake::new().unwrap();
+    let mut stream = Scripted::new("host-a", lines).events(&state.0, &stop);
+    let mut decoded = Vec::new();
+    while let Next::Event(event) = stream.next(Duration::from_millis(300)) {
+        decoded.push(event);
+    }
+    assert_eq!(decoded, [MuxEvent::Resync(SpaceId::new(&session))]);
+    let mux = crate::mux::fake::FakeMux::world()
+        .endpoint(REX)
+        .space(&session)
+        .checkout("/repo")
+        .pane(MOVED)
+        .tab(&into)
+        .tab_label(&into, "shell")
+        .build();
+    assert_eq!(state.handle(&session, &decoded, &mux), ["closed"]);
 }
 
 /// The fixture's `block_closed` line, with its session and block.

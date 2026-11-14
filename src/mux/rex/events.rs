@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     SpaceId,
-    mux::{Budget, MuxEvent, PaneId, PaneSlot, TabId},
+    mux::{Budget, MuxEvent, PaneId, PaneSlot},
 };
 use serde_json::{Value, json};
 use std::{
@@ -262,10 +262,10 @@ impl<'a> RexEvents<'a> {
                         let _ = self.bindings.forget(block);
                         Some(MuxEvent::PaneClosed(slot(block)))
                     }
-                    "window_closed" => Some(MuxEvent::TabClosed {
-                        tab: TabId::new(event["payload"]["window_id"].as_str()?),
-                        space,
-                    }),
+                    // Rex also closes a window when `rex move` takes its
+                    // last block to another window, with no `block_closed`,
+                    // so only a survey can tell which blocks are gone.
+                    "window_closed" => Some(MuxEvent::Resync(space)),
                     "block_event" if status_change(&event["payload"]) => {
                         Some(MuxEvent::AgentStatusChanged(slot(block()?)))
                     }
