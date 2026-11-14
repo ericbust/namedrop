@@ -450,7 +450,8 @@ struct Reading {
     after: i64,
     /// The threads with a reply this pass left on B.
     waiting: Vec<(String, String)>,
-    /// The pages collected this round.
+    /// The pages collected this round, or `PAGES` once a B that ignores
+    /// `after` gave one.
     pages: usize,
     /// Whether this round left a reply on B, or read on in a pass that
     /// did.
@@ -534,6 +535,18 @@ fn collect_replies(
     }
     let through = if epoch == answer.epoch { through } else { 0 };
     reading.follow(host_id, &answer.epoch);
+    // A B built before `after` pages from the ack, so its page starts at or
+    // before the last reply this pass read, and its next page would be the
+    // same. The pass starts again with this page, and reads no further this
+    // round, so a thread with room again takes its replies.
+    if answer
+        .outbox
+        .first()
+        .is_some_and(|reply| reply.seq <= reading.after)
+    {
+        reading.restart();
+        reading.pages = PAGES;
+    }
     for reply in &answer.outbox {
         if reply.seq <= through {
             continue;

@@ -3060,14 +3060,19 @@ fn a_refusal_reason_from_b_loses_its_format_characters() {
 /// Set, this test binary is B: it answers the perform in this directory's
 /// `perform` with the relay's own accept over the store in `b/`.
 const SERVE_AS_B: &str = "NAMEDROP_RELAY_TEST_SERVE_AS_B";
+/// Set as well, B is one built before `after`, which pages from the ack.
+const OLDER_B: &str = "NAMEDROP_RELAY_TEST_OLDER_B";
 
 #[test]
 fn serve_as_b() {
     let Some(directory) = std::env::var_os(SERVE_AS_B).map(std::path::PathBuf::from) else {
         return;
     };
-    let perform: Value =
+    let mut perform: Value =
         serde_json::from_slice(&fs::read(directory.join("perform")).unwrap()).unwrap();
+    if std::env::var_os(OLDER_B).is_some() {
+        perform["args"].as_object_mut().unwrap().remove("after");
+    }
     let answer = crate::relay::accept::accept(
         &directory.join("b"),
         &Endpoint::parse("rex:/tmp/namedrop-relay-b.sock"),
@@ -3086,6 +3091,15 @@ fn serve_as_b() {
 /// binary over B's store in `b/`, so each page is the one B makes for the
 /// request A sent, and B's store, which holds `replies` for this side.
 fn real_b(replies: &[Reply]) -> (Script, RelayStore) {
+    b_of(replies, "")
+}
+
+/// A `real_b` whose B was built before `after`.
+fn older_b(replies: &[Reply]) -> (Script, RelayStore) {
+    b_of(replies, &format!("{OLDER_B}=1 "))
+}
+
+fn b_of(replies: &[Reply], env: &str) -> (Script, RelayStore) {
     let script = Script::new(&format!(
         r#"D=$(dirname "$0")
 case "$*" in
@@ -3094,7 +3108,7 @@ case "$*" in
 *target.resolve*) echo '{{"results":[{{"query":"namedrop","status":"resolved","target":{{"kind":"client","client_id":"client:b"}}}}]}}';;
 *client.perform*)
   cat > "$D/perform"; cat "$D/perform" >> "$D/requests"; echo >> "$D/requests"
-  {SERVE_AS_B}="$D" '{}' relay::worker::tests::serve_as_b --exact --test-threads=1 >/dev/null 2>&1
+  {env}{SERVE_AS_B}="$D" '{}' relay::worker::tests::serve_as_b --exact --test-threads=1 >/dev/null 2>&1
   cat "$D/answer";;
 esac"#,
         std::env::current_exe().unwrap().display()
@@ -3341,4 +3355,88 @@ fn a_new_epoch_whose_first_reply_finds_no_room_still_reads_on() {
     let (rex, _b) = real_b(&replies);
     work_for(&space, &rex, 1);
     assert_eq!(bodies_for(&space, &second), [big(6)]);
+}
+
+/// Runs one worker for `devbox` for `rounds` rounds, with `between(n)`
+/// after its `n`th round, from 1.
+fn work_rounds(space: &Space, rex: &Script, rounds: usize, mut between: impl FnMut(usize)) {
+    let mut done = 0;
+    let endpoint = Endpoint::parse(REX);
+    rex.run(|| {
+        work(&mut Run {
+            state: &space.state,
+            endpoint: &endpoint,
+            label: "devbox",
+            gate: &|| Ok(None),
+            pause: &mut |_| {
+                done += 1;
+                between(done);
+                done < rounds
+            },
+            woken: &std::cell::RefCell::default(),
+            wake: &mut |_| {},
+        });
+    });
+}
+
+/// One worker reads past a thread with no room in its first round, a
+/// person continues that thread three times, and the same worker reads
+/// on: each reply of both threads reaches its thread once and in order,
+/// B keeps none, and the first round read B's page at most twice.
+fn one_worker_lets_a_continued_thread_s_replies_in(b: fn(&[Reply]) -> (Script, RelayStore)) {
+    let space = Space::new(REX);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    let names = rex(&["devbox"]);
+    let first = settled(&space, &names, "first", "accepted", "host-b");
+    let second = settled(&space, &names, "second", "accepted", "host-b");
+    let big = |seq: i64| format!("{seq} {}", "x".repeat(wire::TEXT_LIMIT - 10));
+    let mut replies: Vec<Reply> = (1..=30)
+        .map(|seq| reply_to(&first, "t1", seq, format!("reply {seq}")))
+        .collect();
+    replies.extend((31..=34).map(|seq| reply_to(&first, "t1", seq, big(seq))));
+    replies.push(reply_to(&second, "t2", 35, big(35)));
+    let (rex, b) = b(&replies);
+    let mut first_round = 0;
+    work_rounds(&space, &rex, 4, |round| {
+        if round == 1 {
+            first_round = rex.requests().len();
+            for _ in 0..3 {
+                as_person(
+                    &space,
+                    &first,
+                    |transaction, namespace, thread, attribution| {
+                        transaction
+                            .continue_thread(namespace, thread, attribution)
+                            .map(|_| ())
+                    },
+                );
+            }
+        }
+    });
+    assert!(first_round <= 2, "{first_round} pages in the first round");
+    let mut expected: Vec<String> = (1..=30).map(|seq| format!("reply {seq}")).collect();
+    expected.extend((31..=34).map(big));
+    assert_eq!(bodies_for(&space, &first), expected);
+    assert_eq!(bodies_for(&space, &second), [big(35)]);
+    let store = crate::relay::tests_support::store(&space.state);
+    assert_eq!(store.ack_through(REX, "host-b").unwrap().1, 35);
+    assert_eq!(
+        b.outbox_page("host-a", 35, 0, wire::PAGE_LIMIT).unwrap().2,
+        0
+    );
+}
+
+/// A B that pages after `after`: the pass that left the full thread's
+/// replies ends, and the next one reads them from the ack.
+#[test]
+fn one_worker_lets_a_continued_thread_s_replies_in_from_b() {
+    one_worker_lets_a_continued_thread_s_replies_in(real_b);
+}
+
+/// A B built before `after` gives the page after the ack each time, so
+/// the pass starts again with it, as before `after`, rather than waiting
+/// for a page past it that never comes.
+#[test]
+fn one_worker_lets_a_continued_thread_s_replies_in_from_an_older_b() {
+    one_worker_lets_a_continued_thread_s_replies_in(older_b);
 }
