@@ -351,6 +351,13 @@ impl StateTransaction<'_> {
         let answers_terminal = relayed.in_reply_to.is_some()
             && self.pane_type(namespace, &relayed.recipient.address_id)?
                 == crate::PaneType::Terminal;
+        let grammar = if relayed.notice {
+            NOTICE_GRAMMAR
+        } else if answers_terminal {
+            "mention-return/v1"
+        } else {
+            "mention/v1"
+        };
         let draft = MessageDraft {
             thread_id: relayed.thread.clone(),
             message_id: relayed.message_id.clone(),
@@ -362,12 +369,7 @@ impl StateTransaction<'_> {
             request_id: relayed.request_id.clone(),
             authored_source: relayed.text.to_owned(),
             body: relayed.text.to_owned(),
-            grammar_version: if answers_terminal {
-                "mention-return/v1"
-            } else {
-                "mention/v1"
-            }
-            .to_owned(),
+            grammar_version: grammar.to_owned(),
             recipients: vec![crate::MessageRecipientDraft {
                 address_id: relayed.recipient.address_id.clone(),
                 alias_snapshot: relayed.recipient.alias.clone(),
@@ -380,7 +382,12 @@ impl StateTransaction<'_> {
     }
 }
 
-/// A remote agent's message as B stores it.
+/// The grammar of the relay's own notice to a sender, which no agent wrote,
+/// so the Automatic Reply Limit neither counts nor refuses it.
+pub(crate) const NOTICE_GRAMMAR: &str = "relay-notice/v1";
+
+/// A remote agent's message as B stores it, or the relay's notice about
+/// one.
 pub(crate) struct Relayed<'a> {
     pub author: &'a RelayAuthor,
     pub request_id: String,
@@ -390,6 +397,9 @@ pub(crate) struct Relayed<'a> {
     pub in_reply_to: Option<&'a MessageId>,
     pub recipient: &'a RoutingAddressSnapshot,
     pub text: &'a str,
+    /// Whether the relay wrote it, as a notice that an item failed or that
+    /// replies are held.
+    pub notice: bool,
 }
 
 /// A message one relay author receives.

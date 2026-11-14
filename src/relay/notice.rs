@@ -1,9 +1,10 @@
-//! The notice a sender on A gets in its thread when an item for a remote
-//! agent failed or expired, from that agent's relay author.
+//! The notices a sender on A gets in its thread from a remote agent's relay
+//! author: that an item for that agent failed or expired, or that the
+//! Automatic Reply Limit holds that agent's replies.
 
 use super::{
     RemoteName,
-    store::{RelayStore, Unsent},
+    store::{Held, RelayStore},
 };
 use crate::{
     ActorKind, DeliveryId, IdGenerator, MessageId, MutationAttribution, SpaceId, StateNamespace,
@@ -11,57 +12,116 @@ use crate::{
 };
 use std::path::Path;
 
-/// Tells the sender of each item of `endpoint` that failed or expired, once,
-/// and calls `wake` for each space it told. A fault leaves the rest for the
-/// next call.
+/// One notice: from the relay author of `alias` on `label`, in reply to
+/// the A message `message` in `space`, to that message's sender.
+struct Notice<'a> {
+    space: &'a str,
+    label: &'a str,
+    alias: &'a str,
+    message: &'a str,
+    request_id: String,
+    text: String,
+}
+
+/// Tells the sender of each item of `endpoint` that failed or expired,
+/// and of each thread whose replies are held, once, and calls `wake` for
+/// each space it told. A fault leaves the rest for the next call.
 pub(crate) fn tell(state: &Path, endpoint: &Endpoint, wake: &mut dyn FnMut(&SpaceId)) {
     let now = super::now_ms();
     let Ok(store) = RelayStore::open(state, now) else {
         return;
     };
-    let Ok(unsent) = store.unsent(&endpoint.key) else {
+    let (Ok(unsent), Ok(held)) = (store.unsent(&endpoint.key), store.held(&endpoint.key, true))
+    else {
         return;
     };
     for item in &unsent {
-        let Ok(gate) = crate::runtime_command_guard(state, None) else {
+        let told = notice(
+            state,
+            &endpoint.key,
+            &Notice {
+                space: &item.space,
+                label: &item.label,
+                alias: &item.recipient,
+                message: &item.message_id,
+                request_id: format!(
+                    "relay-unsent:{}:{}:{}",
+                    item.label, item.message_id, item.recipient
+                ),
+                text: format!(
+                    "Namedrop could not relay this message to @{}@{}: {}.",
+                    item.recipient, item.label, item.reason
+                ),
+            },
+        );
+        if !settle(told, &item.space, wake, || store.told(item, now)) {
             return;
-        };
-        let told = notice(state, &endpoint.key, item, now);
-        drop(gate);
-        match told {
-            Ok(inserted) => {
-                if store.told(item, now).is_err() {
-                    return;
-                }
-                if inserted {
-                    wake(&SpaceId::new(&item.space));
-                }
-            }
-            Err(_) => return,
+        }
+    }
+    for held in &held {
+        let told = notice(state, &endpoint.key, &held_notice(held));
+        if !settle(told, &held.space, wake, || store.told_held(held)) {
+            return;
         }
     }
 }
 
-/// Inserts the notice for `item` in its thread, in reply to its message,
-/// to the message's sender. `false` when A can no longer take it, as when
-/// the sender is gone.
-fn notice(state: &Path, endpoint: &str, item: &Unsent, now: i64) -> Result<bool, String> {
-    let namespace = StateNamespace::for_space(endpoint, &item.space);
-    let name = RemoteName {
-        alias: item.recipient.clone(),
-        label: item.label.clone(),
+/// The notice that the Automatic Reply Limit holds `held`'s replies.
+fn held_notice(held: &Held) -> Notice<'_> {
+    Notice {
+        space: &held.space,
+        label: &held.label,
+        alias: &held.reply.from,
+        message: &held.reply.re,
+        request_id: format!(
+            "relay-held:{}:{}:{}",
+            held.label, held.host_id, held.reply.message_id
+        ),
+        text: format!(
+            "The Automatic Reply Limit paused this thread, so Namedrop is holding the \
+             replies from @{}@{}. A person's message in this thread, or Continue, resumes \
+             it, and the held replies follow.",
+            held.reply.from, held.label
+        ),
+    }
+}
+
+/// Records a notice's outcome with `told` and wakes its space when it was
+/// inserted, and says whether to go on.
+fn settle(
+    told: Result<bool, String>,
+    space: &str,
+    wake: &mut dyn FnMut(&SpaceId),
+    record: impl FnOnce() -> Result<(), crate::StoreError>,
+) -> bool {
+    let Ok(inserted) = told else {
+        return false;
     };
-    let author = name.author();
-    let message = MessageId::new(&item.message_id);
+    if record().is_err() {
+        return false;
+    }
+    if inserted {
+        wake(&SpaceId::new(space));
+    }
+    true
+}
+
+/// Inserts `notice` under the command gate. `false` when A can no longer
+/// take it, as when the sender is gone.
+fn notice(state: &Path, endpoint: &str, notice: &Notice<'_>) -> Result<bool, String> {
+    let gate = crate::runtime_command_guard(state, None)?;
+    let namespace = StateNamespace::for_space(endpoint, notice.space);
+    let author = RemoteName {
+        alias: notice.alias.to_owned(),
+        label: notice.label.to_owned(),
+    }
+    .author();
+    let message = MessageId::new(notice.message);
     let ids = crate::ProcessIds::default();
     let attribution = MutationAttribution::new(
         ActorKind::AgentSession,
         author.address_id.as_str(),
-        u64::try_from(now).unwrap_or_default(),
-    );
-    let text = format!(
-        "Namedrop could not relay this message to @{}@{}: {}.",
-        item.recipient, item.label, item.reason
+        u64::try_from(super::now_ms()).unwrap_or_default(),
     );
     let mut main = StateStore::open(state).map_err(|error| error.to_string())?;
     let inserted = main.transaction(|transaction| {
@@ -72,20 +132,19 @@ fn notice(state: &Path, endpoint: &str, item: &Unsent, now: i64) -> Result<bool,
             &namespace,
             &Relayed {
                 author: &author,
-                request_id: format!(
-                    "relay-unsent:{}:{}:{}",
-                    item.label, item.message_id, item.recipient
-                ),
+                request_id: notice.request_id.clone(),
                 thread: &route.thread_id,
                 message_id: MessageId::new(ids.next_id("message")),
                 delivery_id: DeliveryId::new(ids.next_id("delivery")),
                 in_reply_to: Some(&message),
                 recipient: &sender,
-                text: &text,
+                text: &notice.text,
+                notice: true,
             },
             &attribution,
         )
     });
+    drop(gate);
     match inserted {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == crate::StoreErrorKind::InvalidInput => Ok(false),

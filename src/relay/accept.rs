@@ -240,6 +240,7 @@ fn deliver(
                 in_reply_to: in_reply_to.as_ref(),
                 recipient: &recipient,
                 text: &item.text,
+                notice: false,
             },
             &attribution,
         )

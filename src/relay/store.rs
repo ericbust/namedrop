@@ -18,10 +18,15 @@ pub(crate) const INBOUND_LIFETIME_MS: i64 = OUTBOX_LIFETIME_MS;
 /// A keeps an item it is done with this long, which outlasts a reply B
 /// keeps for a week after a week of quiet.
 pub(crate) const DONE_LIFETIME_MS: i64 = 2 * OUTBOX_LIFETIME_MS;
+/// A holds at most this many replies of one server for one endpoint. B
+/// stops its own agents after 10 replies in a thread with no human turn,
+/// so an honest B sends far fewer while A's thread is paused.
+pub(crate) const HELD_LIMIT: i64 = 100;
 
-/// A holds `peers`, `outbound`, `collected`, and `cursors`, the last `seq`
+/// A holds `peers`, `outbound`, `collected`, `cursors`, the last `seq`
 /// each local endpoint took from each B and the outbox epoch it counts in,
-/// because each endpoint reads its own outbox on B. B holds
+/// because each endpoint reads its own outbox on B, and `held`, the
+/// replies the Automatic Reply Limit kept out of their threads. B holds
 /// `inbound`, `outbox`, its `outbox_epoch`, `remote_threads`, and the tally
 /// of the replies that expired, which Doctor reports after the items
 /// themselves are gone. Both hold `capture`, the last main-database message
@@ -70,6 +75,22 @@ CREATE TABLE cursors (
     epoch TEXT NOT NULL,
     seq INTEGER NOT NULL,
     PRIMARY KEY (endpoint, host_id)
+);
+CREATE TABLE held (
+    endpoint TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    remote_message_id TEXT NOT NULL,
+    epoch TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    label TEXT NOT NULL,
+    space TEXT NOT NULL,
+    thread TEXT NOT NULL,
+    re TEXT NOT NULL,
+    remote_alias TEXT NOT NULL,
+    text TEXT NOT NULL,
+    told INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (endpoint, host_id, remote_message_id)
 );
 CREATE TABLE inbound (
     host_id TEXT NOT NULL,
@@ -164,6 +185,19 @@ pub(crate) struct Collected<'a> {
     pub remote_alias: &'a str,
     pub thread: &'a str,
     pub now_ms: i64,
+}
+
+/// A reply A took from the server `host_id` for `endpoint` and holds,
+/// because the Automatic Reply Limit paused the A thread it answers.
+#[derive(Clone, Debug)]
+pub(crate) struct Held {
+    pub endpoint: String,
+    pub host_id: String,
+    pub epoch: String,
+    pub label: String,
+    pub space: String,
+    pub thread: String,
+    pub reply: Reply,
 }
 
 /// An item's key on B: A's `host_id`, A's message id, and the recipient.
@@ -598,6 +632,111 @@ impl RelayStore {
         Ok(())
     }
 
+    /// Holds `held` for its thread, and says whether it is held, which it is
+    /// not when the server already has `HELD_LIMIT` replies held for this
+    /// endpoint.
+    pub(crate) fn hold(&self, held: &Held, now_ms: i64) -> Result<bool, StoreError> {
+        let changed = self.connection.execute(
+            "INSERT OR IGNORE INTO held (endpoint, host_id, remote_message_id, epoch, seq,
+                label, space, thread, re, remote_alias, text, told, created_at_ms)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12
+             WHERE (SELECT COUNT(*) FROM held WHERE endpoint = ?1 AND host_id = ?2) < ?13",
+            params![
+                held.endpoint,
+                held.host_id,
+                held.reply.message_id,
+                held.epoch,
+                held.reply.seq,
+                held.label,
+                held.space,
+                held.thread,
+                held.reply.re,
+                held.reply.from,
+                held.reply.text,
+                now_ms,
+                HELD_LIMIT
+            ],
+        )?;
+        Ok(changed == 1
+            || self.connection.query_row(
+                "SELECT EXISTS (SELECT 1 FROM held WHERE endpoint = ?1 AND host_id = ?2
+                    AND remote_message_id = ?3)",
+                params![held.endpoint, held.host_id, held.reply.message_id],
+                |row| row.get(0),
+            )?)
+    }
+
+    /// Whether `endpoint` holds a reply for A's `thread` in `space`, so a
+    /// new one waits behind it.
+    pub(crate) fn holding(
+        &self,
+        endpoint: &str,
+        space: &str,
+        thread: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM held WHERE endpoint = ?1 AND space = ?2
+                AND thread = ?3)",
+            params![endpoint, space, thread],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// The replies `endpoint` holds, oldest first, or with `untold` only the
+    /// oldest of each thread, when its sender has not been told about it.
+    /// So a thread is told once each time the limit pauses it.
+    pub(crate) fn held(&self, endpoint: &str, untold: bool) -> Result<Vec<Held>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT host_id, epoch, label, space, thread, seq, re, remote_alias,
+                remote_message_id, text FROM held h
+             WHERE endpoint = ?1 AND (?2 = 0 OR (told = 0 AND rowid = (SELECT MIN(rowid)
+                FROM held o WHERE o.endpoint = h.endpoint AND o.space = h.space
+                    AND o.thread = h.thread)))
+             ORDER BY rowid",
+        )?;
+        let held = statement
+            .query_map(params![endpoint, untold], |row| {
+                Ok(Held {
+                    endpoint: endpoint.to_owned(),
+                    host_id: row.get(0)?,
+                    epoch: row.get(1)?,
+                    label: row.get(2)?,
+                    space: row.get(3)?,
+                    thread: row.get(4)?,
+                    reply: Reply {
+                        seq: row.get(5)?,
+                        re: row.get(6)?,
+                        from: row.get(7)?,
+                        message_id: row.get(8)?,
+                        text: row.get(9)?,
+                        thread: String::new(),
+                    },
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(held)
+    }
+
+    /// Records that the sender of `held`'s thread was told its replies are
+    /// held.
+    pub(crate) fn told_held(&self, held: &Held) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE held SET told = 1
+             WHERE endpoint = ?1 AND host_id = ?2 AND remote_message_id = ?3",
+            params![held.endpoint, held.host_id, held.reply.message_id],
+        )?;
+        Ok(())
+    }
+
+    /// Lets go of `held`, which its thread took or can never take.
+    pub(crate) fn release(&self, held: &Held) -> Result<(), StoreError> {
+        self.connection.execute(
+            "DELETE FROM held WHERE endpoint = ?1 AND host_id = ?2 AND remote_message_id = ?3",
+            params![held.endpoint, held.host_id, held.reply.message_id],
+        )?;
+        Ok(())
+    }
+
     /// B's outbox epoch, which A's acks name.
     pub(crate) fn outbox_epoch(&self) -> Result<String, StoreError> {
         Ok(self
@@ -819,8 +958,8 @@ impl RelayStore {
     }
 
     /// Fails each queued item older than its lifetime, drops each outbox
-    /// item and `inbound` key older than theirs, each reply A collected as
-    /// long ago, each B thread mapping unused as long, and each item A was
+    /// item and `inbound` key older than theirs, each reply A collected or
+    /// held as long ago, each B thread mapping unused as long, and each item A was
     /// done with two weeks ago, and counts the dropped outbox items per
     /// remote sender. `cursors` keeps what A acks.
     fn expire(&mut self, now_ms: i64) -> Result<(), StoreError> {
@@ -850,6 +989,10 @@ impl RelayStore {
         )?;
         transaction.execute(
             "DELETE FROM collected WHERE created_at_ms <= ?1",
+            params![outbox_limit],
+        )?;
+        transaction.execute(
+            "DELETE FROM held WHERE created_at_ms <= ?1",
             params![outbox_limit],
         )?;
         transaction.execute(

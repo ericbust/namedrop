@@ -6,12 +6,12 @@
 use super::{
     Hosts, RemoteHosts,
     rex::{self, Failure},
-    store::{Collected, Queued, RelayStore, Settled},
+    store::{Collected, Held, Queued, RelayStore, Settled},
     wire::{self, Answer, Item, Op, Perform, Reply, Request, Sender, Status},
 };
 use crate::{
     ActorKind, DeliveryId, IdGenerator, MessageId, MutationAttribution, SpaceId, StateNamespace,
-    StateStore,
+    StateStore, ThreadId,
     mux::Endpoint,
     store::{RelayAuthor, RelayOrigin, Relayed},
 };
@@ -60,6 +60,7 @@ pub(crate) fn work(run: &mut Run<'_>) {
     let mut faults = 0;
     loop {
         let wait = round(run);
+        release(run.state, run.endpoint, run.wake);
         super::notice::tell(run.state, run.endpoint, run.wake);
         let wait = match wait {
             Round::Done => return,
@@ -290,10 +291,13 @@ fn acked(store: &RelayStore, endpoint: &str, host_id: &str) -> Request {
 
 /// Inserts each reply of `answer` that A has not collected into the space
 /// of the A message it answers, from the relay author of the B agent that
-/// wrote it on the label that message was sent by, and wakes that space. A new outbox epoch means B's `seq`
-/// started again, so every reply of it is new. A reply is B's to make up,
-/// so one with a bad field, or one that answers a message this endpoint
-/// did not send to B, is acked and dropped, and A keeps nothing of it.
+/// wrote it on the label that message was sent by, and wakes that space.
+/// A new outbox epoch means B's `seq` started again, so every reply of it
+/// is new. A reply is B's to make up, so one with a bad field, or one that
+/// answers a message this endpoint did not send to B, is acked and
+/// dropped, and A keeps nothing of it. A reply whose thread the Automatic
+/// Reply Limit paused is held, as is each later one of that thread, so
+/// they reach it in order once it takes replies again.
 fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, answer: &Answer) {
     let endpoint = &run.endpoint.key;
     let Ok((epoch, through)) = store.ack_through(endpoint, host_id) else {
@@ -317,33 +321,120 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, answer:
             }
             Err(_) => return,
         };
-        let Ok(gate) = crate::runtime_command_guard(run.state, None) else {
-            return;
+        let held = Held {
+            endpoint: endpoint.clone(),
+            host_id: host_id.to_owned(),
+            epoch: answer.epoch.clone(),
+            label,
+            space,
+            thread,
+            reply: reply.clone(),
         };
-        let inserted = insert_reply(run.state, &label, host_id, reply, endpoint, &space);
-        drop(gate);
-        match inserted {
-            Ok(Some(message_id)) => {
-                let _ = store.record_collected(&Collected {
-                    host_id,
-                    epoch: &answer.epoch,
-                    seq: reply.seq,
-                    label: &label,
-                    endpoint,
-                    space: &space,
-                    message_id: &message_id,
-                    remote_message_id: &reply.message_id,
-                    remote_alias: &reply.from,
-                    thread: &thread,
-                    now_ms: super::now_ms(),
-                });
-                (run.wake)(&SpaceId::new(&space));
+        let taken = match store.holding(endpoint, &held.space, &held.thread) {
+            Ok(true) => Ok(Taken::Limited),
+            Ok(false) => take(run.state, &held),
+            Err(error) => Err(error.to_string()),
+        };
+        match taken {
+            Ok(Taken::Inserted(message_id)) => {
+                let _ = collected(store, &held, &message_id);
+                (run.wake)(&SpaceId::new(&held.space));
             }
-            Ok(None) => {}
+            Ok(Taken::Limited) => {
+                if store.hold(&held, super::now_ms()).is_err() {
+                    return;
+                }
+            }
+            Ok(Taken::Refused) => {}
             Err(_) => return,
         }
         let _ = store.advance(endpoint, host_id, &answer.epoch, reply.seq);
     }
+}
+
+/// Inserts each reply `endpoint` holds whose thread takes replies again,
+/// oldest first, wakes its space, and returns each label it inserted a
+/// reply of. A thread still paused keeps the rest of its replies, and one
+/// that can never take them, as a stopped one, lets them go.
+pub(crate) fn release(
+    state: &Path,
+    endpoint: &Endpoint,
+    wake: &mut dyn FnMut(&SpaceId),
+) -> Vec<String> {
+    let mut labels: Vec<String> = Vec::new();
+    let Ok(store) = RelayStore::open(state, super::now_ms()) else {
+        return labels;
+    };
+    let Ok(held) = store.held(&endpoint.key, false) else {
+        return labels;
+    };
+    let mut paused: Vec<(String, String)> = Vec::new();
+    for held in &held {
+        let thread = (held.space.clone(), held.thread.clone());
+        if paused.contains(&thread) {
+            continue;
+        }
+        match take(state, held) {
+            Ok(Taken::Inserted(message_id)) => {
+                if collected(&store, held, &message_id)
+                    .and_then(|()| store.release(held))
+                    .is_err()
+                {
+                    return labels;
+                }
+                wake(&SpaceId::new(&held.space));
+                if !labels.contains(&held.label) {
+                    labels.push(held.label.clone());
+                }
+            }
+            Ok(Taken::Limited) => paused.push(thread),
+            Ok(Taken::Refused) => {
+                if store.release(held).is_err() {
+                    return labels;
+                }
+            }
+            Err(_) => return labels,
+        }
+    }
+    labels
+}
+
+/// What became of a reply A tried to insert.
+enum Taken {
+    /// It is the A message with this id.
+    Inserted(String),
+    /// Its thread takes no agent reply until a person's message or
+    /// Continue, so A holds it.
+    Limited,
+    /// A can never take it, as when its sender is gone or its thread was
+    /// stopped.
+    Refused,
+}
+
+/// Inserts `held`'s reply under the command gate.
+fn take(state: &Path, held: &Held) -> Result<Taken, String> {
+    let gate = crate::runtime_command_guard(state, None)?;
+    let taken = insert_reply(state, held);
+    drop(gate);
+    taken
+}
+
+/// Records that `held`'s reply is the A message `message_id`, so an answer
+/// to it goes back to its B agent.
+fn collected(store: &RelayStore, held: &Held, message_id: &str) -> Result<(), crate::StoreError> {
+    store.record_collected(&Collected {
+        host_id: &held.host_id,
+        epoch: &held.epoch,
+        seq: held.reply.seq,
+        label: &held.label,
+        endpoint: &held.endpoint,
+        space: &held.space,
+        message_id,
+        remote_message_id: &held.reply.message_id,
+        remote_alias: &held.reply.from,
+        thread: &held.thread,
+        now_ms: super::now_ms(),
+    })
 }
 
 /// Whether each field of `reply` that A stores or shows passes the rule
@@ -355,17 +446,11 @@ fn trusted(reply: &Reply) -> bool {
             .all(|id| wire::valid_id(id))
 }
 
-/// The new A message for `reply`, `None` when A can no longer take it, as
-/// when its sender is gone, or an error to try again later.
-fn insert_reply(
-    state: &Path,
-    label: &str,
-    host_id: &str,
-    reply: &Reply,
-    endpoint: &str,
-    space: &str,
-) -> Result<Option<String>, String> {
-    let namespace = StateNamespace::for_space(endpoint, space);
+/// Inserts `held`'s reply in its A thread, or says why A does not, or
+/// gives an error to try again later.
+fn insert_reply(state: &Path, held: &Held) -> Result<Taken, String> {
+    let (label, reply) = (&held.label, &held.reply);
+    let namespace = StateNamespace::for_space(&held.endpoint, &held.space);
     let author = RelayAuthor::new(
         RelayOrigin::Label(label),
         &reply.from,
@@ -387,20 +472,31 @@ fn insert_reply(
             &namespace,
             &Relayed {
                 author: &author,
-                request_id: format!("relay-reply:{host_id}:{}", reply.message_id),
+                request_id: format!("relay-reply:{}:{}", held.host_id, reply.message_id),
                 thread: &route.thread_id,
                 message_id: MessageId::new(ids.next_id("message")),
                 delivery_id: DeliveryId::new(ids.next_id("delivery")),
                 in_reply_to: Some(&re),
                 recipient: &sender,
                 text: &wire::cut(&reply.text, wire::TEXT_LIMIT),
+                notice: false,
             },
             &attribution,
         )
     });
     match inserted {
-        Ok(receipt) => Ok(Some(receipt.message_id.as_str().to_owned())),
-        Err(error) if error.kind() == crate::StoreErrorKind::InvalidInput => Ok(None),
+        Ok(receipt) => Ok(Taken::Inserted(receipt.message_id.as_str().to_owned())),
+        Err(error) if error.kind() == crate::StoreErrorKind::InvalidInput => {
+            let thread = ThreadId::new(&held.thread);
+            let limited = main
+                .transaction(|transaction| transaction.thread_control_state(&namespace, &thread))
+                .is_ok_and(|controls| controls.reply_allowance == 0 && !controls.stopped);
+            Ok(if limited {
+                Taken::Limited
+            } else {
+                Taken::Refused
+            })
+        }
         Err(error) => Err(error.to_string()),
     }
 }

@@ -3149,7 +3149,10 @@ impl StateTransaction<'_> {
             && draft.in_reply_to.is_some()
             && !matches!(
                 draft.grammar_version.as_str(),
-                "result-set/v1" | "terminal-result/v1" | "reminder/v1"
+                "result-set/v1"
+                    | "terminal-result/v1"
+                    | "reminder/v1"
+                    | relay_author::NOTICE_GRAMMAR
             );
         let controls = self.thread_control_state(namespace, &draft.thread_id)?;
         if draft.in_reply_to.is_some()
@@ -3374,7 +3377,10 @@ impl StateTransaction<'_> {
                 || self.is_relay_author(namespace, &recipient.address_id)?
                 || (matches!(
                     grammar,
-                    "terminal-result/v1" | "result-set/v1" | "mention-return/v1"
+                    "terminal-result/v1"
+                        | "result-set/v1"
+                        | "mention-return/v1"
+                        | relay_author::NOTICE_GRAMMAR
                 ) && self.pane_type(namespace, &recipient.address_id)?
                     == crate::PaneType::Terminal)
             {

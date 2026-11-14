@@ -263,16 +263,24 @@ pub(crate) fn start_workers(
 
 /// Runs the relay's capture after a drain in a Rex home: each new message
 /// to a relay author becomes B's kept reply or A's queued answer, and each
-/// label with a new item gets its worker.
+/// label with a new item gets its worker. A person's message or Continue
+/// drains its space, so the replies held for a thread it let take replies
+/// again reach it then, and their label's worker collects again.
 pub(crate) fn capture_after_drain(state: &Path, session_socket_id: &str) {
     let endpoint = crate::mux::Endpoint::parse(session_socket_id);
     if endpoint.kind != crate::mux::MuxKind::Rex {
         return;
     }
-    let _ = capture::capture(state, &endpoint, &mut |label| {
+    let mut labels = Vec::new();
+    let _ = capture::capture(state, &endpoint, &mut |label| labels.push(label.to_owned()));
+    let woken = &mut |space: &crate::SpaceId| wake(state, &endpoint, space);
+    labels.extend(worker::release(state, &endpoint, woken));
+    labels.sort();
+    labels.dedup();
+    for label in &labels {
         start_worker(state, &endpoint, label);
-    });
-    notice::tell(state, &endpoint, &mut |space| wake(state, &endpoint, space));
+    }
+    notice::tell(state, &endpoint, woken);
 }
 
 /// Each label of the Rex endpoint `session_socket_id` whose items failed or

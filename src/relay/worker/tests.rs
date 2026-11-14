@@ -1632,3 +1632,299 @@ fn an_answer_or_a_notice_to_a_terminal_sender_settles_at_insert() {
     );
     space.drain();
 }
+
+/// `count` of bob's replies to `message`, numbered from `first`.
+fn replies(message: &str, first: i64, count: i64) -> Value {
+    json!(
+        (first..first + count)
+            .map(
+                |seq| json!({"seq": seq, "re": message, "thread": "t", "from": "bob",
+                "message_id": format!("b-{seq}"), "text": format!("reply {seq}")})
+            )
+            .collect::<Vec<_>>()
+    )
+}
+
+/// The relay's notices that a thread's replies are held, as author,
+/// recipient, `in_reply_to`, body, and grammar.
+fn held_notices(space: &Space) -> Vec<Vec<String>> {
+    space.main(
+        "SELECT m.author_alias_snapshot, r.alias_snapshot, m.in_reply_to, m.body,
+            m.grammar_version
+         FROM collaboration_messages m
+         JOIN message_recipients r USING (session_socket_id, worktree_id, message_id)
+         WHERE m.request_id LIKE 'relay-held:%' ORDER BY m.rowid",
+    )
+}
+
+/// Runs `control` on the A thread of `message` as a person would, and
+/// drains the space, as `thread continue` or `thread stop` does.
+fn as_person(
+    space: &Space,
+    message: &str,
+    control: impl FnOnce(
+        &mut crate::StateTransaction<'_>,
+        &crate::StateNamespace,
+        &crate::ThreadId,
+        &crate::MutationAttribution,
+    ) -> Result<(), crate::StoreError>,
+) {
+    let thread = crate::ThreadId::new(
+        &space.main(&format!(
+            "SELECT thread_id FROM collaboration_messages WHERE message_id = '{message}'"
+        ))[0][0],
+    );
+    let namespace = crate::StateNamespace::for_space(REX, "session:a");
+    let attribution = crate::MutationAttribution::new(crate::ActorKind::Human, "test", 1);
+    crate::StateStore::open(&space.state)
+        .unwrap()
+        .transaction(|transaction| control(transaction, &namespace, &thread, &attribution))
+        .unwrap();
+    space.drain();
+}
+
+/// The Automatic Reply Limit pauses a thread after ten relayed replies.
+/// A acks the rest, holds them, and tells the sender once, and when a
+/// person continues the thread they reach it in order, and the label's
+/// worker collects again.
+#[test]
+fn replies_past_the_reply_limit_are_held_told_once_and_follow_a_continue() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    rex.answer_with(answer("accepted", None, replies(&message, 1, 12)));
+    work_for(&space, &rex, 1);
+    let bodies = |space: &Space| {
+        collected_bodies(space)
+            .into_iter()
+            .map(|row| row[0].clone())
+            .collect::<Vec<_>>()
+    };
+    let numbered = |numbers: std::ops::RangeInclusive<i64>| {
+        numbers.map(|n| format!("reply {n}")).collect::<Vec<_>>()
+    };
+    assert_eq!(bodies(&space), numbered(1..=10));
+    assert_eq!(
+        relay_rows(&space, "SELECT seq FROM held ORDER BY rowid"),
+        [[json!(11)], [json!(12)]]
+    );
+    assert_eq!(
+        crate::relay::tests_support::store(&space.state)
+            .ack_through(REX, "host-b")
+            .unwrap()
+            .1,
+        12,
+        "B may drop what A holds"
+    );
+    let told = [[
+        "bob@devbox".to_owned(),
+        "alice".to_owned(),
+        message.clone(),
+        "The Automatic Reply Limit paused this thread, so Namedrop is holding the replies \
+         from @bob@devbox. A person's message in this thread, or Continue, resumes it, and \
+         the held replies follow."
+            .to_owned(),
+        "relay-notice/v1".to_owned(),
+    ]];
+    assert_eq!(held_notices(&space), told);
+
+    rex.answer_with(
+        json!({"host_id": "host-b", "can_reply": true, "epoch": "e1",
+        "more": false, "outbox": replies(&message, 13, 1)}),
+    );
+    work_for(&space, &rex, 1);
+    assert_eq!(
+        bodies(&space),
+        numbered(1..=10),
+        "a later reply waits behind them"
+    );
+    assert_eq!(
+        relay_rows(&space, "SELECT COUNT(*) FROM held"),
+        [[json!(3)]]
+    );
+    assert_eq!(held_notices(&space), told, "told once");
+    let mut again = Vec::new();
+    crate::relay::notice::tell(&space.state, &Endpoint::parse(REX), &mut |space| {
+        again.push(space.as_str().to_owned());
+    });
+    assert!(again.is_empty(), "a told thread wakes nothing again");
+
+    capture(&space);
+    STARTED.with(|started| started.borrow_mut().clear());
+    as_person(
+        &space,
+        &message,
+        |transaction, namespace, thread, attribution| {
+            transaction
+                .continue_thread(namespace, thread, attribution)
+                .map(|_| ())
+        },
+    );
+    assert_eq!(bodies(&space), numbered(1..=13));
+    assert_eq!(
+        relay_rows(&space, "SELECT COUNT(*) FROM held"),
+        [[json!(0)]]
+    );
+    assert_eq!(STARTED.with(|started| started.borrow().clone()), ["devbox"]);
+    let last = space.main("SELECT message_id FROM collaboration_messages WHERE body = 'reply 13'")
+        [0][0]
+        .clone();
+    rex.run(|| space.reply("reply-1", &last, "@bob@devbox thanks"))
+        .unwrap();
+    capture(&space);
+    assert_eq!(
+        queued_for(&space, "thanks"),
+        [["devbox", "bob", "alice", "b-13"].map(str::to_owned)],
+        "an answer to a released reply goes back to it"
+    );
+}
+
+/// A failure notice is the relay's, not an agent's reply, so a thread
+/// that the Automatic Reply Limit paused still takes it.
+#[test]
+fn a_failure_notice_reaches_a_thread_the_reply_limit_paused() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    let message = rex
+        .run(|| space.send("request-1", "@bob@devbox @nobody@devbox ping"))
+        .unwrap()["message_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    rex.answer_with(answer("accepted", None, replies(&message, 1, 10)));
+    rex.answer_with(answer("refused", Some("no @nobody on devbox"), json!([])));
+    work_for(&space, &rex, 1);
+    assert_eq!(collected_bodies(&space).len(), 10);
+    assert_eq!(
+        notices(&space),
+        [[
+            "nobody@devbox".to_owned(),
+            "alice".to_owned(),
+            message,
+            "Namedrop could not relay this message to @nobody@devbox: no @nobody on devbox."
+                .to_owned()
+        ]]
+    );
+}
+
+/// A holds at most 100 replies of one server, and drops the rest. A thread
+/// that pauses again as its held replies reach it keeps the others, in
+/// order, and its sender is told again.
+#[test]
+fn at_most_100_replies_are_held_and_a_thread_that_pauses_again_keeps_the_rest() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    rex.answer_with(answer("accepted", None, replies(&message, 1, 115)));
+    work_for(&space, &rex, 1);
+    assert_eq!(collected_bodies(&space).len(), 10);
+    assert_eq!(
+        relay_rows(&space, "SELECT COUNT(*), MIN(seq), MAX(seq) FROM held"),
+        [[json!(100), json!(11), json!(110)]]
+    );
+    assert_eq!(
+        crate::relay::tests_support::store(&space.state)
+            .ack_through(REX, "host-b")
+            .unwrap()
+            .1,
+        115
+    );
+    as_person(
+        &space,
+        &message,
+        |transaction, namespace, thread, attribution| {
+            transaction
+                .continue_thread(namespace, thread, attribution)
+                .map(|_| ())
+        },
+    );
+    let bodies = collected_bodies(&space);
+    assert_eq!(bodies.len(), 20);
+    assert_eq!(bodies[19], ["reply 20"]);
+    assert_eq!(
+        relay_rows(&space, "SELECT MIN(seq) FROM held"),
+        [[json!(21)]]
+    );
+    assert_eq!(held_notices(&space).len(), 2);
+}
+
+/// A reply that comes after a person continued the thread, but before the
+/// held ones reached it, waits behind them, so the thread reads in order.
+#[test]
+fn a_reply_after_a_continue_follows_the_held_ones() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    rex.answer_with(answer("accepted", None, replies(&message, 1, 12)));
+    work_for(&space, &rex, 1);
+    let thread = crate::ThreadId::new(
+        &space.main(&format!(
+            "SELECT thread_id FROM collaboration_messages WHERE message_id = '{message}'"
+        ))[0][0],
+    );
+    crate::StateStore::open(&space.state)
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.continue_thread(
+                &crate::StateNamespace::for_space(REX, "session:a"),
+                &thread,
+                &crate::MutationAttribution::new(crate::ActorKind::Human, "test", 1),
+            )
+        })
+        .unwrap();
+    rex.answer_with(
+        json!({"host_id": "host-b", "can_reply": true, "epoch": "e1",
+        "more": false, "outbox": replies(&message, 13, 1)}),
+    );
+    work_for(&space, &rex, 1);
+    let bodies: Vec<_> = collected_bodies(&space)
+        .into_iter()
+        .map(|row| row[0].clone())
+        .collect();
+    assert_eq!(
+        bodies,
+        (1..=13).map(|n| format!("reply {n}")).collect::<Vec<_>>()
+    );
+}
+
+/// A thread a person stopped never takes a reply, so A drops one that
+/// comes after the stop, and lets go of those it held.
+#[test]
+fn a_stopped_thread_takes_no_reply_held_or_new() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    rex.answer_with(answer("accepted", None, replies(&message, 1, 12)));
+    work_for(&space, &rex, 1);
+    as_person(
+        &space,
+        &message,
+        |transaction, namespace, thread, attribution| {
+            transaction
+                .stop_thread(namespace, thread, attribution)
+                .map(|_| ())
+        },
+    );
+    assert_eq!(
+        relay_rows(&space, "SELECT COUNT(*) FROM held"),
+        [[json!(0)]]
+    );
+    rex.answer_with(
+        json!({"host_id": "host-b", "can_reply": true, "epoch": "e1",
+        "more": false, "outbox": replies(&message, 13, 1)}),
+    );
+    work_for(&space, &rex, 1);
+    assert_eq!(collected_bodies(&space).len(), 10);
+    assert_eq!(
+        relay_rows(&space, "SELECT COUNT(*) FROM held"),
+        [[json!(0)]]
+    );
+    assert_eq!(
+        crate::relay::tests_support::store(&space.state)
+            .ack_through(REX, "host-b")
+            .unwrap()
+            .1,
+        13
+    );
+}
