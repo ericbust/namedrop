@@ -279,6 +279,24 @@ where
             issues.push(hook_issue);
         }
     }
+    if runtime.mux.endpoint().kind == crate::mux::MuxKind::Rex
+        && let Some(home) = runtime.home_directory
+        && let Ok(bytes) = std::fs::read(crate::locator::rex_registration(home))
+        && let Ok(registration) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        && let Some(module_state) = registration["state"].as_str()
+        && let Some(recorded) =
+            crate::locator::read_install_record(&crate::locator::install_record(home))
+        && std::path::Path::new(module_state) != recorded
+    {
+        issues.push(issue(
+            "ND-INSTALL-003",
+            HealthSeverity::Notice,
+            "The Rex module and the shared agent packages name different installs.",
+            "An older Herdr release updated the packages without updating the Rex module.",
+            HealthRepairKind::AgentRepair,
+            "Update Namedrop in Herdr, then run Activate Namedrop there again.",
+        ));
+    }
     if let Some((record, recorded)) = runtime
         .home_directory
         .and_then(|home| crate::install::install_record_mismatch(home, runtime.agent_config))

@@ -1,4 +1,3 @@
-"""Offline checks for the differential's comparison rules."""
 import json
 from pathlib import Path
 import subprocess
@@ -7,12 +6,12 @@ import tempfile
 import unittest
 
 class Comparison(unittest.TestCase):
-    def compare(self, left, right):
+    def compare(self, left, right, flags=()):
         with tempfile.TemporaryDirectory() as directory:
             a, b = Path(directory) / "a", Path(directory) / "b"
             a.write_text(left)
             b.write_text(right)
-            return subprocess.run([sys.executable, "-I", str(Path(__file__).with_name("cmp.py")), str(a), str(b)], capture_output=True).returncode
+            return subprocess.run([sys.executable, "-I", str(Path(__file__).with_name("cmp.py")), str(a), str(b), *flags], capture_output=True).returncode
 
     def test_scrubbed_environment_is_ignored_but_both_timeouts_are_compared(self):
         def report(env):
@@ -32,6 +31,16 @@ class Comparison(unittest.TestCase):
         for prefix in ['## files (set)\n', '## activate\n--stderr\n']:
             self.assertEqual(self.compare(prefix + 'same\n', prefix + 'same\n'), 0)
             self.assertNotEqual(self.compare(prefix + 'before\n', prefix + 'after\n'), 0)
+
+    def test_package_lock_pin_is_explicit_and_exact(self):
+        prefix='## files (set)\n'
+        def row(path,text):
+            return json.dumps({"path":path,"text":text},sort_keys=True)+'\n'
+        pin=row("<ROOT>/home/.config/namedrop/packages.lock", "")
+        self.assertNotEqual(self.compare(prefix,prefix+pin),0)
+        self.assertEqual(self.compare(prefix,prefix+pin,["--allow-package-lock"]),0)
+        self.assertNotEqual(self.compare(prefix,prefix+row("<ROOT>/home/.config/namedrop/other", ""),["--allow-package-lock"]),0)
+        self.assertNotEqual(self.compare(prefix,prefix+row("<ROOT>/home/.config/namedrop/packages.lock", "unexpected"),["--allow-package-lock"]),0)
 
 if __name__ == '__main__':
     unittest.main()

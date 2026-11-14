@@ -1,4 +1,5 @@
 use super::{conflict, replace_if_changed, shell_single_quote};
+use crate::installed_runtime::PackageLease;
 use serde_json::{Value, json};
 use std::{env, fs, io::ErrorKind, os::unix::fs::PermissionsExt, path::Path};
 
@@ -8,10 +9,12 @@ const PATH_SETUP: &str = "# Namedrop CLI\ncase \":$PATH:\" in\n  *:\"$HOME/.loca
 /// The launcher supplies installation state while preserving the invoking pane's
 /// Herdr context. Runtime permissions continue to use the real executable.
 pub(crate) fn install_shell_command(
+    lease: &PackageLease,
     home: &Path,
     executable: &Path,
     state: &Path,
 ) -> Result<Value, String> {
+    lease.require_write()?;
     if !home.is_absolute() || !executable.is_absolute() || !state.is_absolute() {
         return Err(
             "shell command installation requires absolute home, executable and state paths".into(),
@@ -75,11 +78,11 @@ pub(crate) fn install_shell_command(
         shell_single_quote(executable.to_str().ok_or("executable path is not UTF-8")?),
         shell_single_quote(state.to_str().ok_or("state path is not UTF-8")?)
     );
-    replace_if_changed(&launcher, &script, Some(0o755))?;
+    replace_if_changed(lease, &launcher, &script, Some(0o755))?;
     for (path, text, mode) in &updates {
         fs::create_dir_all(path.parent().expect("startup file has a parent"))
             .map_err(|e| conflict(path, &e.to_string()))?;
-        replace_if_changed(path, text, Some(*mode))?;
+        replace_if_changed(lease, path, text, Some(*mode))?;
     }
     Ok(json!({
         "path": launcher,

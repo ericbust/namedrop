@@ -269,8 +269,11 @@ where
                 .transaction(|transaction| transaction.worktree_state(&namespace))
                 .map_err(|error| error.to_string())?
                 .is_some_and(|state| state.activated && !state.deactivated);
-            let (_sandbox_package_guard, sandbox_current) =
-                crate::installed_runtime::package_guard()?;
+            let lease = crate::installed_runtime::package_guard(
+                runtime.home_directory,
+                runtime.state_directory,
+            )?;
+            let sandbox_current = lease.writable()?;
             let address_id = store
                 .transaction(|transaction| {
                     if sandbox_current
@@ -280,6 +283,7 @@ where
                             .is_some_and(|state| state.activated && !state.deactivated)
                     {
                         crate::install::codex_sandbox::activate(
+                            &lease,
                             &runtime.agent_config.codex(home),
                             runtime.state_directory,
                         )
@@ -372,7 +376,7 @@ where
                     Ok(address_id)
                 })
                 .map_err(|error| error.to_string())?;
-            drop(_sandbox_package_guard);
+            drop(lease);
             let reconciliation = reconcile_worktree(
                 &mut store,
                 &namespace,
@@ -467,19 +471,28 @@ where
                     hook_activation
                 ));
             }
-            let shell_command = crate::install::install_shell_command(
-                runtime
-                    .home_directory
-                    .ok_or("no HOME is available for shell command installation")?,
-                Path::new(&crate::collaboration_executable()?),
+            let lease = crate::installed_runtime::package_guard(
+                runtime.home_directory,
                 runtime.state_directory,
             )?;
-            let (_sandbox_package_guard, sandbox_current) =
-                crate::installed_runtime::package_guard()?;
+            let sandbox_current = lease.writable()?;
+            let shell_command = if sandbox_current {
+                crate::install::install_shell_command(
+                    &lease,
+                    runtime
+                        .home_directory
+                        .ok_or("no HOME is available for shell command installation")?,
+                    Path::new(&crate::collaboration_executable()?),
+                    runtime.state_directory,
+                )?
+            } else {
+                json!({"status":"not_current"})
+            };
             store
                 .transaction(|transaction| {
                     if sandbox_current {
                         crate::install::codex_sandbox::activate(
+                            &lease,
                             &runtime
                                 .agent_config
                                 .codex(runtime.home_directory.ok_or_else(|| {
@@ -493,7 +506,7 @@ where
                     Ok(())
                 })
                 .map_err(|error| error.to_string())?;
-            drop(_sandbox_package_guard);
+            drop(lease);
             let reconciliation = reconcile_worktree(
                 &mut store,
                 &namespace,
@@ -526,6 +539,11 @@ where
         }
         "deactivate" => {
             parse_input::<EmptyInput>(input)?;
+            let lease = crate::installed_runtime::package_guard(
+                runtime.home_directory,
+                runtime.state_directory,
+            )?;
+            lease.writable()?;
             store
                 .transaction(|transaction| {
                     transaction.deactivate_worktree(&namespace, &attribution)
@@ -533,9 +551,11 @@ where
                 .map_err(|error| error.to_string())?;
             let _ = reconcile_managed_tab_labels(&mut store, &namespace, &discovered, runtime);
             let permission_removal =
-                crate::install::remove_claude_permissions(runtime.state_directory);
-            let sandbox_removal = crate::install::codex_sandbox::remove(runtime.state_directory);
+                crate::install::remove_claude_permissions(&lease, runtime.state_directory);
+            let sandbox_removal =
+                crate::install::codex_sandbox::remove(&lease, runtime.state_directory);
             let subagent_removal = crate::install::remove_subagent_hooks(
+                &lease,
                 runtime.state_directory,
                 runtime.home_directory,
             );

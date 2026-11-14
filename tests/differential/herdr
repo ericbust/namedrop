@@ -48,13 +48,14 @@ key = " ".join(args[:2])
 if key == "status server":
     print("running: yes\nsocket: " + os.environ.get("SOCK", "/run/h.sock"))
 elif key == "worktree list":
-    out({"worktrees": [{"path": os.environ["CHECKOUT"], "open_workspace_id": "w1"}]})
+    second = "--workspace" in args and args[args.index("--workspace") + 1] == "w2"
+    out({"worktrees": [{"path": os.environ["CHECKOUT"] + ("2" if second else ""), "open_workspace_id": "w2" if second else "w1"}]})
 elif key == "workspace list":
-    out({"workspaces": [{"workspace_id": "w1", "label": "repo"}]})
+    out({"workspaces": [{"workspace_id": "w1", "label": "repo"}, {"workspace_id": "w2", "label": "inactive"}]})
 elif key == "workspace get":
-    out({"workspace": {"workspace_id": "w1", "label": "repo"}})
+    out({"workspace": {"workspace_id": "w2" if "w2" in args else "w1", "label": "repo"}})
 elif key == "pane list":
-    out({"panes": panes})
+    out({"panes": [{"pane_id":"p6","terminal_id":"t6","tab_id":"tab2","workspace_id":"w2"}] if "w2" in args else panes})
 elif key == "pane process-info":
     pane = args[2] if len(args) > 2 else "p1"
     out({"process_info": {"pane_id": pane, "shell_pid": shell,

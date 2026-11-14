@@ -91,6 +91,7 @@ pub(crate) use install::{
     user_hook_activation_guidance,
 };
 #[doc(hidden)]
+pub use installed_runtime::check_package_ownership;
 pub use installed_runtime::command_guard as runtime_command_guard;
 #[doc(hidden)]
 pub use installed_runtime::executable as runtime_executable;

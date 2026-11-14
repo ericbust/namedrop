@@ -240,3 +240,32 @@ fn a_failed_rex_claim_cannot_install_herdr_shortcuts() {
     assert!(!config.exists());
     assert!(!home.join(".config/herdr/config.toml").exists());
 }
+
+#[test]
+fn rex_doctor_reports_a_module_left_behind_by_an_older_herdr_install() {
+    let f = Fixture::new();
+    let home = f.0.join("home");
+    let ids = Ids(AtomicU64::new(0));
+    let host = host(
+        "rex:/tmp/fake.sock",
+        Ok(Applied::Unsupported),
+        Applied::Done,
+    );
+    let rt = runtime(&f, &host, &home, &ids);
+    execute_lifecycle_operation("activate", json!({"confirmed":true}), &rt).unwrap();
+    fs::write(
+        home.join(".config/namedrop/rex.json"),
+        json!({"state":"/old/standalone"}).to_string(),
+    )
+    .unwrap();
+    let report = namedrop::diagnose_collaboration(&rt);
+    let issue = report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "ND-INSTALL-003")
+        .expect("module mismatch is reported");
+    assert_eq!(
+        issue.repair.prompt,
+        "Update Namedrop in Herdr, then run Activate Namedrop there again."
+    );
+}

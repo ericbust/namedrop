@@ -23,18 +23,16 @@ import time
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 binary, out = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
-# Process inventory is part of the comparison, so a restricted run must refuse.
 subprocess.run(["/bin/ps", "-axo", "pid=,command="], capture_output=True, check=True)
 only = set(sys.argv[3:])
 shutil.rmtree(out, ignore_errors=True)
 root = out
-for d in ("home", "repo", "state"):
+for d in ("home", "repo", "repo2", "state"):
     os.makedirs(os.path.join(root, d))
 root_real = os.path.realpath(root)
 state = os.path.join(root_real, "state")
 checkout = os.path.join(root_real, "repo")
 
-# The installed runtime layout, so every self-spawn goes through the launcher.
 digest = hashlib.sha256(open(binary, "rb").read()).hexdigest()
 release = os.path.join(state, "runtime", "releases", digest)
 os.makedirs(release)
@@ -45,7 +43,6 @@ shutil.copy2(os.path.join(TOOLS, "launcher"), os.path.join(state, "runtime", "na
 os.chmod(os.path.join(state, "runtime", "namedrop"), 0o755)
 cli = os.path.join(release, "namedrop")
 
-# A browser opener that only logs, so the dashboard never opens a real browser.
 os.makedirs(os.path.join(root_real, "bin"))
 with open(os.path.join(root_real, "bin", "open"), "w") as opener:
     opener.write('#!/bin/sh\necho "open $*" >> "$ROOT/opened"\n')
@@ -228,6 +225,10 @@ run("stop-hook-p2", pane("p2", NAMEDROP_HERDR_TIMEOUT_MS="250"), ["hook", "stop"
 run("mailbox-wake", pane("p1"), ["hook", "mailbox-wake", "--state-directory", state], settle=3)
 run("channels", pane("p1"), ST + ["channels"], settle=3)
 
+run("deactivate", pane("p1"), ST + ["--json", "deactivate"])
+run("activate-again", pane("p1"), ST + ["--json", "activate", "--input-json", '{"confirmed":true}'])
+run("name-inactive-space", dict(pane("p6"), HERDR_WORKSPACE_ID="w2"), ST + ["--json", "name", "inactive-term", "--type", "terminal"])
+
 time.sleep(2)
 live = []
 mine = []
@@ -252,7 +253,8 @@ def files():
     rows = []
     for base in (BASE["HOME"], state):
         for folder, dirs, names in os.walk(base):
-            for name in sorted(names):
+            links = [name for name in dirs if os.path.islink(os.path.join(folder, name))]
+            for name in sorted(names + links):
                 path = os.path.join(folder, name)
                 rel = norm(path)
                 if os.path.islink(path):

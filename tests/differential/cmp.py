@@ -18,6 +18,9 @@ def load(path, drop):
     for line in open(path).read().splitlines():
         if line.startswith("## "): section = line
         cleaned = clean(line, drop)
+        if "--allow-package-lock" in sys.argv and section == "## files (set)":
+            if cleaned == json.dumps({"path": "<ROOT>/home/.config/namedrop/packages.lock", "text": ""}, sort_keys=True):
+                continue
         if section == "## herdr calls (set)" and cleaned.startswith('{"args"'):
             call = json.loads(cleaned)
             args = call["args"]
@@ -30,7 +33,7 @@ for title, drop in (("with the scrub's names removed and both timeouts kept", MA
     a, b = load(sys.argv[1], drop), load(sys.argv[2], drop)
     sa, sb = set(a), set(b)
     print("==", title, ": only-left", len(sa - sb), "only-right", len(sb - sa))
-    for sec, line in sorted(sa - sb): print("<", sec[:28], "|", line[:int(sys.argv[3]) if len(sys.argv) > 3 else 330])
-    for sec, line in sorted(sb - sa): print(">", sec[:28], "|", line[:int(sys.argv[3]) if len(sys.argv) > 3 else 330])
+    for sec, line in sorted(sa - sb): print("<", sec[:28], "|", line[:330])
+    for sec, line in sorted(sb - sa): print(">", sec[:28], "|", line[:330])
 
 raise SystemExit(1 if sa != sb else 0)

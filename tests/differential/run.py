@@ -6,8 +6,8 @@ import subprocess
 import sys
 
 tools = Path(__file__).resolve().parent
-if len(sys.argv) != 4:
-    raise SystemExit("usage: run.py BASE_BINARY HEAD_BINARY OUT")
+if len(sys.argv) not in (4,5) or (len(sys.argv)==5 and sys.argv[4]!="--allow-package-lock"):
+    raise SystemExit("usage: run.py BASE_BINARY HEAD_BINARY OUT [--allow-package-lock]")
 root = Path(sys.argv[3]).resolve()
 root.mkdir(parents=True, exist_ok=True)
 env = {k: v for k, v in os.environ.items() if k not in {"REX_BLOCK", "REX_SESSION", "REX_SERVER", "REX_CLIENT"}}
@@ -21,6 +21,6 @@ for label, binary in zip(("base", "head"), sys.argv[1:3]):
 failed = False
 for left, right in itertools.combinations(reports, 2):
     with (root / (left.parent.name + "-" + right.parent.name + ".diff")).open("w") as log:
-        compared = subprocess.run([sys.executable, "-I", str(tools / "cmp.py"), str(left), str(right)], env=env, stdout=log, stderr=subprocess.STDOUT)
+        compared = subprocess.run([sys.executable, "-I", str(tools / "cmp.py"), str(left), str(right), *sys.argv[4:]], env=env, stdout=log, stderr=subprocess.STDOUT)
     failed |= compared.returncode != 0
 raise SystemExit(1 if failed else 0)

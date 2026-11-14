@@ -1346,6 +1346,11 @@ fn run_agent_status_changed_hook(inherited: &dyn Inherited) -> ExitCode {
             return ExitCode::from(65);
         }
     };
+    let directories = namedrop::InheritedDirectories::from_environment();
+    if let Err(error) = namedrop::check_package_ownership(directories.home(), &state_directory) {
+        eprintln!("could not queue Namedrop reconciliation: {error}");
+        return ExitCode::from(65);
+    }
     let endpoint = namedrop::mux::Endpoint::parse(&socket_id);
     let space = namedrop::SpaceId::new(&space_id);
     if let Err(error) =

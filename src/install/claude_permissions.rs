@@ -1,6 +1,7 @@
 use super::{
     ReplacementError, claude_allow_rules, conflict, replace_if_changed, replace_with_status,
 };
+use crate::installed_runtime::PackageLease;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
@@ -112,8 +113,13 @@ fn read_record(state: &Path) -> Result<OwnedPermissions, String> {
     }
     Ok(record)
 }
-fn write_record(state: &Path, record: &OwnedPermissions) -> Result<(), String> {
+fn write_record(
+    lease: &PackageLease,
+    state: &Path,
+    record: &OwnedPermissions,
+) -> Result<(), String> {
     replace_if_changed(
+        lease,
         &state.join(RECORD_FILE),
         &format!(
             "{}\n",
@@ -214,9 +220,9 @@ impl Settings {
         })
     }
     #[cfg(test)]
-    fn publish(&self) -> Result<(), String> {
+    fn publish(&self, lease: &PackageLease) -> Result<(), String> {
         self.update()?
-            .publish()
+            .publish(lease)
             .map(|_| ())
             .map_err(|error| error.message)
     }
@@ -232,7 +238,7 @@ impl SettingsUpdate {
             mode: self.mode,
         }
     }
-    fn publish(&self) -> Result<bool, ReplacementError> {
+    fn publish(&self, lease: &PackageLease) -> Result<bool, ReplacementError> {
         let actual = read_text(&self.path)?;
         if actual != self.before {
             return Err(
@@ -242,15 +248,16 @@ impl SettingsUpdate {
         if self.before == self.after {
             return Ok(false);
         }
-        self.write(&self.after)?;
+        self.write(lease, &self.after)?;
         Ok(true)
     }
-    fn write(&self, text: &Option<String>) -> Result<(), ReplacementError> {
+    fn write(&self, lease: &PackageLease, text: &Option<String>) -> Result<(), ReplacementError> {
+        lease.require_write().map_err(ReplacementError::from)?;
         match text {
             Some(text) => {
                 fs::create_dir_all(self.path.parent().expect("settings parent"))
                     .map_err(|error| conflict(&self.path, &error.to_string()))?;
-                replace_with_status(&self.path, text, Some(self.mode))
+                replace_with_status(lease, &self.path, text, Some(self.mode))
             }
             None => match fs::remove_file(&self.path) {
                 Ok(()) => Ok(()),
@@ -259,7 +266,7 @@ impl SettingsUpdate {
             },
         }
     }
-    fn rollback(&self) -> Result<(), String> {
+    fn rollback(&self, lease: &PackageLease) -> Result<(), String> {
         let actual = read_text(&self.path)?;
         if actual == self.before {
             return Ok(());
@@ -270,7 +277,8 @@ impl SettingsUpdate {
                 "changed before rollback; the pending record was retained",
             ));
         }
-        self.write(&self.before).map_err(|error| error.message)
+        self.write(lease, &self.before)
+            .map_err(|error| error.message)
     }
 }
 fn lock(state: &Path) -> Result<fs::File, String> {
@@ -289,7 +297,7 @@ fn lock(state: &Path) -> Result<fs::File, String> {
         .map_err(|error| conflict(&path, &error.to_string()))?;
     Ok(file)
 }
-fn recover(state: &Path) -> Result<OwnedPermissions, String> {
+fn recover(lease: &PackageLease, state: &Path) -> Result<OwnedPermissions, String> {
     let record = read_record(state)?;
     let Some(pending) = &record.pending else {
         return Ok(record);
@@ -300,7 +308,7 @@ fn recover(state: &Path) -> Result<OwnedPermissions, String> {
         changed |= hash != update.before_hash && hash != update.after_hash;
     }
     if changed {
-        return discard_pending(state, record);
+        return discard_pending(lease, state, record);
     }
     for update in &pending.updates {
         if snapshot_hash(&read_text(&update.path)?) == update.after_hash {
@@ -316,20 +324,24 @@ fn recover(state: &Path) -> Result<OwnedPermissions, String> {
         let mut replacement = settings.update()?;
         replacement.mode = update.mode;
         if snapshot_hash(&replacement.after) != update.after_hash {
-            return discard_pending(state, record);
+            return discard_pending(lease, state, record);
         }
-        replacement.publish().map_err(|error| error.message)?;
+        replacement.publish(lease).map_err(|error| error.message)?;
     }
-    write_record(state, &pending.next)?;
+    write_record(lease, state, &pending.next)?;
     Ok(*pending.next.clone())
 }
-fn discard_pending(state: &Path, mut record: OwnedPermissions) -> Result<OwnedPermissions, String> {
+fn discard_pending(
+    lease: &PackageLease,
+    state: &Path,
+    mut record: OwnedPermissions,
+) -> Result<OwnedPermissions, String> {
     record.pending = None;
     if !record.entries.is_empty() {
         let settings = Settings::read(&record.settings_path)?;
         record.entries.retain(|entry| settings.contains(entry));
     }
-    write_record(state, &record)?;
+    write_record(lease, state, &record)?;
     eprintln!(
         "Namedrop discarded a pending Claude permissions update that cannot be replayed; leftover rules may need review."
     );
@@ -337,6 +349,7 @@ fn discard_pending(state: &Path, mut record: OwnedPermissions) -> Result<OwnedPe
 }
 
 fn publish(
+    lease: &PackageLease,
     state: &Path,
     next: OwnedPermissions,
     updates: Vec<SettingsUpdate>,
@@ -355,10 +368,10 @@ fn publish(
         next: Box::new(next.clone()),
         updates: updates.iter().map(SettingsUpdate::journal).collect(),
     });
-    write_record(state, &pending)?;
+    write_record(lease, state, &pending)?;
     let mut applied: Vec<&SettingsUpdate> = Vec::new();
     for update in &updates {
-        match update.publish() {
+        match update.publish(lease) {
             Ok(true) => applied.push(update),
             Ok(false) => {}
             Err(error) => {
@@ -366,24 +379,30 @@ fn publish(
                     return Err(error.message);
                 }
                 for previous in applied.into_iter().rev() {
-                    if let Err(rollback) = previous.rollback() {
+                    if let Err(rollback) = previous.rollback(lease) {
                         return Err(format!("{error}; rollback also failed: {rollback}"));
                     }
                 }
-                write_record(state, &old)?;
+                write_record(lease, state, &old)?;
                 return Err(error.message);
             }
         }
     }
     // If this rename fails or the process stops, the durable pending record
     // still owns the intended inserted occurrences and refresh can finish it.
-    write_record(state, &next)
+    write_record(lease, state, &next)
 }
-pub(super) fn refresh(directory: &Path, executable: &Path, state: &Path) -> Result<(), String> {
+pub(super) fn refresh(
+    lease: &PackageLease,
+    directory: &Path,
+    executable: &Path,
+    state: &Path,
+) -> Result<(), String> {
+    lease.require_write()?;
     let desired = claude_allow_rules(executable, state)?;
     let path = settings_path(directory)?;
     let _guard = lock(state)?;
-    let owned = recover(state)?;
+    let owned = recover(lease, state)?;
     let mut settings = Settings::read(&path)?;
     let mut updates = Vec::new();
     let mut entries = Vec::new();
@@ -410,6 +429,7 @@ pub(super) fn refresh(directory: &Path, executable: &Path, state: &Path) -> Resu
     }
     updates.push(settings.update()?);
     publish(
+        lease,
         state,
         OwnedPermissions {
             settings_path: path,
@@ -419,9 +439,11 @@ pub(super) fn refresh(directory: &Path, executable: &Path, state: &Path) -> Resu
         updates,
     )
 }
-pub(crate) fn remove_claude_permissions(state: &Path) -> Result<usize, String> {
-    let (_package_guard, current) = crate::installed_runtime::package_guard()?;
-    if !current {
+pub(crate) fn remove_claude_permissions(
+    lease: &PackageLease,
+    state: &Path,
+) -> Result<usize, String> {
+    if !lease.writable()? {
         return Ok(0);
     }
     let _guard = lock(state)?;
@@ -432,7 +454,7 @@ pub(crate) fn remove_claude_permissions(state: &Path) -> Result<usize, String> {
     {
         return Ok(0);
     }
-    let mut owned = recover(state)?;
+    let mut owned = recover(lease, state)?;
     if owned.entries.is_empty() {
         return Ok(0);
     }
@@ -442,7 +464,7 @@ pub(crate) fn remove_claude_permissions(state: &Path) -> Result<usize, String> {
         removed += usize::from(settings.remove(entry));
     }
     owned.entries.clear();
-    publish(state, owned, vec![settings.update()?])?;
+    publish(lease, state, owned, vec![settings.update()?])?;
     Ok(removed)
 }
 pub(super) fn inspect(directory: &Path, executable: &Path, state: &Path) -> Result<(), String> {
@@ -505,7 +527,12 @@ mod tests {
             }),
             ..OwnedPermissions::default()
         };
-        write_record(&root, &record).unwrap();
+        write_record(
+            &crate::installed_runtime::test_package_lease(),
+            &root,
+            &record,
+        )
+        .unwrap();
         let text = fs::read_to_string(root.join(RECORD_FILE)).unwrap();
         fs::remove_dir_all(&root).unwrap();
         for secret in ["PRIVATE_TOKEN", "PRIVATE_HELPER", "apiKeyHelper"] {
@@ -525,7 +552,12 @@ mod tests {
         )
         .unwrap();
         super::super::FAIL_DIRECTORY_SYNC.with(|fault| *fault.borrow_mut() = Some(path.clone()));
-        let result = refresh(&directory, Path::new("/opt/namedrop"), &root);
+        let result = refresh(
+            &crate::installed_runtime::test_package_lease(),
+            &directory,
+            Path::new("/opt/namedrop"),
+            &root,
+        );
         super::super::FAIL_DIRECTORY_SYNC.with(|fault| *fault.borrow_mut() = None);
         assert!(result.is_err());
         assert!(fs::read_to_string(&path).unwrap().contains("Bash("));
@@ -540,7 +572,7 @@ mod tests {
         for secret in ["PRIVATE_TOKEN", "PRIVATE_HELPER", "apiKeyHelper"] {
             assert!(!record.contains(secret), "{record}");
         }
-        let recovered = recover(&root).unwrap();
+        let recovered = recover(&crate::installed_runtime::test_package_lease(), &root).unwrap();
         assert!(!recovered.entries.is_empty());
         assert!(recovered.pending.is_none());
         fs::remove_dir_all(root).unwrap();
@@ -552,7 +584,11 @@ mod tests {
             .unwrap()
             .join(format!("nd21-never-created-{}.json", std::process::id()));
         let settings = Settings::read(&path).unwrap();
-        settings.update().unwrap().rollback().unwrap();
+        settings
+            .update()
+            .unwrap()
+            .rollback(&crate::installed_runtime::test_package_lease())
+            .unwrap();
     }
     #[test]
     fn atomic_settings_replacement_preserves_mode_under_a_restrictive_umask() {
@@ -565,7 +601,9 @@ mod tests {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o664)).unwrap();
             let mut settings = Settings::read(&path).unwrap();
             settings.add("Read").unwrap();
-            settings.publish().unwrap();
+            settings
+                .publish(&crate::installed_runtime::test_package_lease())
+                .unwrap();
             assert_eq!(
                 fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
                 0o664

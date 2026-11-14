@@ -196,9 +196,8 @@ pub fn state_directory(
             set(Locator::StateDir.neutral_var())
                 .map(PathBuf::from)
                 .or_else(|| {
-                    let config = absolute("XDG_CONFIG_HOME")
-                        .or_else(|| absolute("HOME").map(|home| home.join(".config")))?;
-                    read_install_record(&install_record(&config))
+                    let home = absolute("HOME")?;
+                    read_install_record(&install_record(&home))
                 })
                 .or_else(|| {
                     absolute("XDG_STATE_HOME")
@@ -209,12 +208,17 @@ pub fn state_directory(
     })
 }
 
-/// The install record under a config directory, `$XDG_CONFIG_HOME` or
-/// `$HOME/.config`: one line holding the state directory the installer bakes
-/// into the hook wrappers, so a Rex block's CLI opens the directory its hooks
-/// write.
-pub fn install_record(config: &Path) -> PathBuf {
-    config.join("namedrop/state-directory")
+/// The shared package slot follows HOME, even when the two hosts have different XDG roots.
+pub fn install_record(home: &Path) -> PathBuf {
+    home.join(".config/namedrop/state-directory")
+}
+
+pub(crate) fn package_lock(home: &Path) -> PathBuf {
+    home.join(".config/namedrop/packages.lock")
+}
+
+pub(crate) fn rex_registration(home: &Path) -> PathBuf {
+    home.join(".config/namedrop/rex.json")
 }
 
 /// The record's absolute directory. A missing, unreadable, or relative
@@ -227,7 +231,12 @@ pub fn read_install_record(record: &Path) -> Option<PathBuf> {
 
 /// Writes the record through a temporary file and a rename, so a reader sees
 /// the old line or the new one. An unchanged record is not written.
-pub fn write_install_record(record: &Path, state: &Path) -> io::Result<()> {
+pub(crate) fn write_install_record(
+    lease: &crate::installed_runtime::PackageLease,
+    record: &Path,
+    state: &Path,
+) -> io::Result<()> {
+    lease.require_write().map_err(io::Error::other)?;
     if read_install_record(record).as_deref() == Some(state) {
         return Ok(());
     }
@@ -246,6 +255,23 @@ pub fn write_install_record(record: &Path, state: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn package_paths_are_all_keyed_by_home() {
+        let home = std::path::Path::new("/scratch/home");
+        assert_eq!(
+            super::install_record(home),
+            home.join(".config/namedrop/state-directory")
+        );
+        assert_eq!(
+            super::package_lock(home),
+            home.join(".config/namedrop/packages.lock")
+        );
+        assert_eq!(
+            super::rex_registration(home),
+            home.join(".config/namedrop/rex.json")
+        );
+    }
+
     use super::*;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -485,8 +511,13 @@ mod tests {
             Some("/xdg/state/namedrop".into())
         );
 
-        let record = install_record(&Path::new(home).join(".config"));
-        write_install_record(&record, Path::new("/recorded")).unwrap();
+        let record = install_record(Path::new(home));
+        write_install_record(
+            &crate::installed_runtime::test_package_lease(),
+            &record,
+            Path::new("/recorded"),
+        )
+        .unwrap();
         assert_eq!(state(MuxKind::Rex, &xdg), Some("/recorded".into()));
         let config = root.join("config");
         let elsewhere = [
@@ -495,11 +526,16 @@ mod tests {
         ];
         assert_eq!(
             state(MuxKind::Rex, &elsewhere),
-            Some(Path::new(home).join(".local/state/namedrop")),
-            "the record is read from XDG_CONFIG_HOME when it is set"
+            Some("/recorded".into()),
+            "the record follows HOME even with XDG_CONFIG_HOME"
         );
-        write_install_record(&install_record(&config), Path::new("/configured")).unwrap();
-        assert_eq!(state(MuxKind::Rex, &elsewhere), Some("/configured".into()));
+        write_install_record(
+            &crate::installed_runtime::test_package_lease(),
+            &install_record(&config),
+            Path::new("/configured"),
+        )
+        .unwrap();
+        assert_eq!(state(MuxKind::Rex, &elsewhere), Some("/recorded".into()));
 
         let mut named = xdg.to_vec();
         named.push(("NAMEDROP_STATE_DIR", "/n"));
@@ -524,13 +560,28 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let record = install_record(&root);
         assert_eq!(read_install_record(&record), None);
-        write_install_record(&record, Path::new("/state/a b")).unwrap();
+        write_install_record(
+            &crate::installed_runtime::test_package_lease(),
+            &record,
+            Path::new("/state/a b"),
+        )
+        .unwrap();
         assert_eq!(fs::read_to_string(&record).unwrap(), "/state/a b\n");
         assert_eq!(read_install_record(&record), Some("/state/a b".into()));
         let inode = fs::metadata(&record).unwrap().ino();
-        write_install_record(&record, Path::new("/state/a b")).unwrap();
+        write_install_record(
+            &crate::installed_runtime::test_package_lease(),
+            &record,
+            Path::new("/state/a b"),
+        )
+        .unwrap();
         assert_eq!(fs::metadata(&record).unwrap().ino(), inode);
-        write_install_record(&record, Path::new("/state/c")).unwrap();
+        write_install_record(
+            &crate::installed_runtime::test_package_lease(),
+            &record,
+            Path::new("/state/c"),
+        )
+        .unwrap();
         assert_eq!(read_install_record(&record), Some("/state/c".into()));
         assert_eq!(
             fs::read_dir(record.parent().unwrap()).unwrap().count(),
