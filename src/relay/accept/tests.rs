@@ -686,3 +686,52 @@ fn a_drain_outside_rex_captures_nothing() {
     super::super::capture_after_drain(&b.0, REX);
     assert!(b.0.join("relay.sqlite3").exists());
 }
+
+/// A terminal runs a new message as a command, so B relays to one only
+/// while its owner allows it.
+#[test]
+fn a_terminal_recipient_is_refused_unless_b_allows_terminals() {
+    let b = B::new();
+    Connection::open(b.0.join("namedrop.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE pane_addresses SET pane_type = 'terminal' WHERE address_id = ?1",
+            ["address-session:b1-bob"],
+        )
+        .unwrap();
+    let here = super::super::machine_name();
+    let refused = b.call(&deliver("m1", "bob", "t1", "printf relayed"));
+    assert_eq!(
+        outcome(&refused),
+        (
+            Status::Refused,
+            Some(format!(
+                "@bob is a terminal on {here}, and {here} relays mentions only to agents"
+            ))
+        )
+    );
+    assert!(b.messages().is_empty());
+    assert_eq!(
+        outcome(&b.call(&deliver("m1", "bob", "t1", "printf relayed"))).0,
+        Status::Refused,
+        "a retry gets the stored refusal"
+    );
+    assert_eq!(
+        outcome(&b.call(&deliver("m2", "bob2", "t1", "an agent"))).0,
+        Status::Accepted
+    );
+
+    fs::create_dir_all(b.0.join("relay")).unwrap();
+    fs::write(b.0.join("relay/allow-terminals"), "").unwrap();
+    assert_eq!(
+        outcome(&b.call(&deliver("m3", "bob", "t1", "printf relayed"))).0,
+        Status::Accepted
+    );
+    assert_eq!(
+        b.messages()
+            .iter()
+            .map(|row| row[7].clone())
+            .collect::<Vec<_>>(),
+        [json!("bob2"), json!("bob")]
+    );
+}

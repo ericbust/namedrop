@@ -15,6 +15,15 @@ use std::path::Path;
 
 /// B keeps replies for a sender only while it holds fewer than this.
 const OUTBOX_LIMIT: usize = 10_000;
+/// While this file exists in B's state directory, B also relays a mention
+/// to a terminal, which runs it as a command.
+const ALLOW_TERMINALS: &str = "relay/allow-terminals";
+
+/// What B knows of a recipient in one space.
+struct Held {
+    paused: bool,
+    terminal: bool,
+}
 
 /// Decides the call `input` holds for the server `host_id` behind
 /// `endpoint`, and calls `wake` for the space of an item it accepts.
@@ -161,7 +170,7 @@ fn deliver(
         reason,
     };
     let mut main = StateStore::open(state).map_err(|error| error.to_string())?;
-    let space = match place(&mut main, store, endpoint, request, item)? {
+    let space = match place(state, &mut main, store, endpoint, request, item)? {
         Ok(space) => space,
         Err((status, reason)) => {
             let refusal = outcome(status, Some(reason));
@@ -251,8 +260,11 @@ fn deliver(
 /// The space the item goes to, or the status and reason it is not
 /// accepted with. A reply to a message B relayed goes to that message's
 /// space. Any other item goes to the one activated space of this server
-/// where `item.to` holds a live claim.
+/// where `item.to` holds a live claim. A terminal recipient is refused
+/// unless `<state>/relay/allow-terminals` exists, because a terminal runs
+/// a new message as a command.
 fn place(
+    state: &Path,
     main: &mut StateStore,
     store: &RelayStore,
     endpoint: &Endpoint,
@@ -297,29 +309,38 @@ fn place(
     let mut holding = Vec::new();
     for space in candidates {
         let namespace = StateNamespace::for_space(&endpoint.key, space.as_str());
-        let (holds, paused) = main
+        let held = main
             .transaction(|transaction| {
-                Ok((
-                    transaction
-                        .resolve_routing_alias(&namespace, &item.to)
-                        .is_ok(),
-                    transaction
+                let Ok(recipient) = transaction.resolve_routing_alias(&namespace, &item.to) else {
+                    return Ok(None);
+                };
+                Ok(Some(Held {
+                    paused: transaction
                         .worktree_state(&namespace)?
                         .is_some_and(|state| state.paused),
-                ))
+                    terminal: transaction.pane_type(&namespace, &recipient.address_id)?
+                        == crate::PaneType::Terminal,
+                }))
             })
             .map_err(|error| error.to_string())?;
-        if holds {
-            holding.push((space, paused));
+        if let Some(held) = held {
+            holding.push((space, held));
         }
     }
     match holding.as_slice() {
         [] => Ok(Err(unknown())),
-        [(_, true)] => Ok(Err((
+        [(_, Held { paused: true, .. })] => Ok(Err((
             Status::Refused,
             format!("@{} is in a paused space on {here}", item.to),
         ))),
-        [(space, false)] => Ok(Ok(space.clone())),
+        [(_, Held { terminal: true, .. })] if !state.join(ALLOW_TERMINALS).exists() => Ok(Err((
+            Status::Refused,
+            format!(
+                "@{} is a terminal on {here}, and {here} relays mentions only to agents",
+                item.to
+            ),
+        ))),
+        [(space, _)] => Ok(Ok(space.clone())),
         several => Ok(Err((
             Status::Ambiguous,
             format!(
