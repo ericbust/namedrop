@@ -96,7 +96,8 @@ struct Scripted<'w> {
     nexts: VecDeque<Next>,
     stop: &'w Wake,
     /// Once the script runs out, waits for a stop instead of ending, and
-    /// then hands on this last event that arrived as the stop did.
+    /// then hands on this last event that arrived as the stop did. It wakes
+    /// every 20 ms meanwhile, as a real stream wakes at its idle time.
     hold: Option<MuxEvent>,
 }
 
@@ -112,7 +113,7 @@ impl Stream for Scripted<'_> {
         if self.hold.is_none() {
             return Next::Ended("the script ran out".into());
         }
-        if self.stop.sleep(within) {
+        if self.stop.sleep(within.min(Duration::from_millis(20))) {
             self.hold
                 .take()
                 .map_or(Next::Ended("stopped".into()), Next::Event)
@@ -171,28 +172,36 @@ fn worker() -> Result<Child, String> {
         .map_err(|error| error.to_string())
 }
 
-/// Runs the bridge over `script` and returns the spaces whose worker each
-/// flush started, in order, and each worker's pid.
-fn bridged_with_pids(state: &State, script: &Script, stop: &Wake) -> (Vec<String>, Vec<u32>) {
+/// Runs the bridge over `script`, away from its server as `away` says, and
+/// returns the spaces whose worker each flush started, in order, and each
+/// worker's pid.
+fn bridged_away(
+    state: &State,
+    script: &Script,
+    stop: &Wake,
+    away: &Away,
+) -> (Vec<String>, Vec<u32>) {
+    let lock = Lock::take(&state.0, &endpoint()).unwrap().unwrap();
     let (mut spawned, mut pids) = (Vec::new(), Vec::new());
     bridge(
         &state.0,
         &endpoint(),
         script,
         stop,
+        &lock,
         &mut |space| {
             spawned.push(space.as_str().to_owned());
             let worker = worker()?;
             pids.push(worker.id());
             Ok(worker)
         },
-        &NO_WAIT,
+        away,
     );
     (spawned, pids)
 }
 
 fn bridged(state: &State, script: &Script, stop: &Wake) -> Vec<String> {
-    bridged_with_pids(state, script, stop).0
+    bridged_away(state, script, stop, &NO_WAIT).0
 }
 
 #[test]
@@ -202,8 +211,7 @@ fn a_second_bridge_for_a_server_exits_at_once_and_never_dials() {
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = Endpoint::parse(&format!("rex:{}", socket.display()));
-    let held = open_lock(&state.0, &endpoint).unwrap();
-    held.try_lock().unwrap();
+    let _held = Lock::take(&state.0, &endpoint).unwrap().unwrap();
     let started = Instant::now();
     assert_eq!(run(&state.0, &endpoint), ExitCode::SUCCESS);
     assert!(started.elapsed() < Duration::from_secs(1));
@@ -212,9 +220,10 @@ fn a_second_bridge_for_a_server_exits_at_once_and_never_dials() {
         Some(io::ErrorKind::WouldBlock),
         "the second bridge dialed the server"
     );
-    assert!(
-        ensure(&state.0, &endpoint).is_ok(),
-        "a held lock starts nothing"
+    assert_eq!(
+        ensure(&state.0, &endpoint),
+        Ok(false),
+        "a held lock starts no second bridge"
     );
 }
 
@@ -252,7 +261,7 @@ fn every_worker_the_bridge_starts_is_reaped_once_it_exits() {
             .map(|_| (Some("host-a"), Vec::new(), None))
             .collect(),
     );
-    let (spawned, pids) = bridged_with_pids(&state, &script, &stop);
+    let (spawned, pids) = bridged_away(&state, &script, &stop, &NO_WAIT);
     assert_eq!(spawned.len(), 40);
     let deadline = Instant::now() + Duration::from_secs(5);
     let left = loop {
@@ -440,12 +449,14 @@ fn a_scripted_block_closed_retires_its_name_through_the_queue() {
             Ok(Box::new(server.events(self.1, stop)))
         }
     }
+    let lock = Lock::take(&state.0, &endpoint()).unwrap().unwrap();
     let mut spawned = Vec::new();
     bridge(
         &state.0,
         &endpoint(),
         &Once(Mutex::new(Some(server)), &state.0),
         &stop,
+        &lock,
         &mut |space| {
             spawned.push(space.clone());
             worker()
@@ -487,4 +498,49 @@ fn a_scripted_block_closed_retires_its_name_through_the_queue() {
         .transaction(|transaction| transaction.list_pane_addresses(&namespace))
         .unwrap();
     assert!(names.is_empty(), "{names:?}");
+}
+
+/// Deleting the state directory under a running bridge, or replacing it,
+/// ends that bridge, so the directory made again gets exactly one.
+#[test]
+fn a_bridge_stops_once_its_state_directory_is_deleted_or_replaced() {
+    for replaced in [false, true] {
+        let state = State::new();
+        let stop = Wake::new().unwrap();
+        let held = || (Some("host-a"), Vec::new(), Some(resync("session:s")));
+        let script = Script::new(vec![held(), held()]);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let ended = std::thread::scope(|threads| {
+            threads.spawn(|| {
+                bridged(&state, &script, &stop);
+                done.store(true, Ordering::SeqCst);
+            });
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(!done.load(Ordering::SeqCst), "the bridge ended early");
+            fs::remove_dir_all(&state.0).unwrap();
+            if replaced {
+                fs::create_dir_all(state.0.join("rex-bridge")).unwrap();
+                fs::write(
+                    state
+                        .0
+                        .join("rex-bridge")
+                        .join(format!("{}.lock", scope(&endpoint()))),
+                    "",
+                )
+                .unwrap();
+            }
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !done.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let ended = done.load(Ordering::SeqCst);
+            stop.wake();
+            ended
+        });
+        assert!(ended, "replaced: {replaced}");
+        assert_eq!(script.opened.load(Ordering::Relaxed), 1);
+        let first = Lock::take(&state.0, &endpoint()).unwrap();
+        assert!(first.is_some());
+        assert!(Lock::take(&state.0, &endpoint()).unwrap().is_none());
+    }
 }

@@ -22,16 +22,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Runs the bridge for `endpoint` until SIGTERM or SIGINT, or until its
-/// server has been unreachable for two minutes. A second bridge for the same
-/// endpoint exits at once.
+/// Runs the bridge for `endpoint` until SIGTERM or SIGINT, until its
+/// server has been unreachable for two minutes, or until its state
+/// directory is deleted or replaced. A second bridge for the same endpoint
+/// exits at once.
 pub fn run(state: &Path, endpoint: &Endpoint) -> ExitCode {
-    let Ok(lock) = open_lock(state, endpoint) else {
+    let Ok(Some(lock)) = Lock::take(state, endpoint) else {
         return ExitCode::SUCCESS;
     };
-    if lock.try_lock().is_err() {
-        return ExitCode::SUCCESS;
-    }
     let Some(socket) = endpoint.unix_socket() else {
         return ExitCode::SUCCESS;
     };
@@ -47,22 +45,23 @@ pub fn run(state: &Path, endpoint: &Endpoint) -> ExitCode {
         endpoint,
         &server,
         stop,
+        &lock,
         &mut |space| status_queue::spawn_worker(state, endpoint, space),
         &Away::REX,
     );
-    drop(lock);
     ExitCode::SUCCESS
 }
 
-/// Starts the bridge for `endpoint` unless one holds its lock. The Rex
-/// runtime builder calls it, so any Namedrop command or hook in a Rex block
-/// starts its server's bridge.
-pub fn ensure(state: &Path, endpoint: &Endpoint) -> Result<(), String> {
-    let lock = open_lock(state, endpoint).map_err(|error| error.to_string())?;
-    if lock.try_lock().is_err() {
-        return Ok(());
+/// Starts the bridge for `endpoint` unless one holds its lock, and says
+/// whether it started one. The Rex runtime builder calls it, so any
+/// Namedrop command or hook in a Rex block starts its server's bridge.
+pub fn ensure(state: &Path, endpoint: &Endpoint) -> Result<bool, String> {
+    if Lock::take(state, endpoint)
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Ok(false);
     }
-    drop(lock);
     let mut command = daemon::command(
         &crate::runtime_executable()?,
         Scope::Endpoint(endpoint),
@@ -74,24 +73,47 @@ pub fn ensure(state: &Path, endpoint: &Endpoint) -> Result<(), String> {
     // A long-lived starter, such as a status worker, reaps the bridge when it
     // exits instead of keeping a zombie.
     std::thread::spawn(move || bridge.wait());
-    Ok(())
+    Ok(true)
 }
 
 fn scope(endpoint: &Endpoint) -> String {
     crate::lower_hex(&Sha256::digest(endpoint.key.as_bytes()))
 }
 
-fn open_lock(state: &Path, endpoint: &Endpoint) -> io::Result<fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let directory = state.join("rex-bridge");
-    fs::create_dir_all(&directory)?;
-    fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(directory.join(format!("{}.lock", scope(endpoint))))
+/// A bridge's hold on its endpoint: the locked file, and the path it was
+/// opened at.
+struct Lock {
+    file: fs::File,
+    path: PathBuf,
+}
+
+impl Lock {
+    /// The lock, or `None` while another bridge holds it.
+    fn take(state: &Path, endpoint: &Endpoint) -> io::Result<Option<Self>> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let directory = state.join("rex-bridge");
+        fs::create_dir_all(&directory)?;
+        let path = directory.join(format!("{}.lock", scope(endpoint)));
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)?;
+        Ok(file.try_lock().is_ok().then_some(Self { file, path }))
+    }
+
+    /// Whether the path still names the locked file. Once the state
+    /// directory is deleted or replaced, another bridge could lock the new
+    /// path, so this one stops.
+    fn held(&self) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        match (fs::metadata(&self.path), self.file.metadata()) {
+            (Ok(path), Ok(file)) => (path.dev(), path.ino()) == (file.dev(), file.ino()),
+            _ => false,
+        }
+    }
 }
 
 /// The stop request SIGTERM and SIGINT make. A process has one.
@@ -173,26 +195,29 @@ impl Away {
     }
 }
 
-/// How long one wait for an event lasts while nothing is pending. The
-/// stream pings on its own schedule within it.
-const IDLE: Duration = Duration::from_secs(3600);
+/// How long one wait for an event lasts while nothing is pending, which is
+/// also how long a bridge outlives its state directory. The stream pings on
+/// its own schedule within it.
+const IDLE: Duration = Duration::from_secs(60);
 
 /// The bridge's loop. Each connection queues a `Resync` for every activated
 /// space of the endpoint, unless the server's `host_id` changed, then
 /// coalesces events into `Pending` and flushes them when they are due. A
-/// stop flushes what is pending and returns, and so does a server that has
-/// stayed away for `away.give_up`, or one never reached at all.
+/// stop flushes what is pending and returns. So does a server that has
+/// stayed away for `away.give_up`, or one never reached at all. A lost lock
+/// returns at once, because the state it would write to is gone.
 fn bridge(
     state: &Path,
     endpoint: &Endpoint,
     server: &dyn Server,
     stop: &Wake,
+    lock: &Lock,
     spawn: &mut dyn FnMut(&SpaceId) -> Result<Child, String>,
     away: &Away,
 ) {
     let mut reached: Option<Instant> = None;
     let mut tries = 0;
-    while !stop.is_set() {
+    while !stop.is_set() && lock.held() {
         let mut stream = match server.open(stop) {
             Ok(stream) => stream,
             Err(_) => {
@@ -215,6 +240,9 @@ fn bridge(
         loop {
             if stop.is_set() {
                 flush(state, endpoint, &mut pending, spawn);
+                return;
+            }
+            if !lock.held() {
                 return;
             }
             let now = Instant::now();
