@@ -326,7 +326,7 @@ fn pending_keeps_one_status_change_per_pane_and_the_order_of_the_rest() {
     }
     assert_eq!(pending.due(), Some(now + Duration::from_millis(110)));
     assert_eq!(
-        pending.take(),
+        pending.take().spaces,
         [
             (
                 SpaceId::new("s"),
@@ -378,7 +378,7 @@ fn a_resync_absorbs_its_space_s_status_changes_and_a_space_closed_absorbs_everyt
     }
     assert_eq!(pending.due(), Some(now + Duration::from_millis(50)));
     assert_eq!(
-        pending.take(),
+        pending.take().spaces,
         [
             (
                 SpaceId::new("s"),

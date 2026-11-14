@@ -308,9 +308,25 @@ fn said(fault: Fault) -> String {
 /// for its space, so what waits is bounded by the server's blocks.
 #[derive(Debug, Default)]
 pub(crate) struct Pending {
+    every_space: bool,
     spaces: Vec<(SpaceId, Vec<MuxEvent>)>,
     first: Option<Instant>,
     last: Option<Instant>,
+}
+
+/// What a flush takes from `Pending`.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub(crate) struct Batch {
+    /// A `Resync` of every activated space is owed before the events,
+    /// which only a flush that can read the store can name.
+    pub every_space: bool,
+    pub spaces: Vec<(SpaceId, Vec<MuxEvent>)>,
+}
+
+impl Batch {
+    pub(crate) fn is_empty(&self) -> bool {
+        !self.every_space && self.spaces.is_empty()
+    }
 }
 
 /// A flush follows the last event by this much, as long as no event comes.
@@ -319,9 +335,20 @@ const SETTLE: Duration = Duration::from_millis(50);
 const LONGEST: Duration = Duration::from_millis(250);
 
 impl Pending {
-    pub(crate) fn note(&mut self, event: MuxEvent, now: Instant) {
+    /// Notes a `Resync` of every activated space, owed before any event
+    /// noted since.
+    pub(crate) fn resync_every_space(&mut self, now: Instant) {
+        self.stamp(now);
+        self.every_space = true;
+    }
+
+    fn stamp(&mut self, now: Instant) {
         self.first.get_or_insert(now);
         self.last = Some(now);
+    }
+
+    pub(crate) fn note(&mut self, event: MuxEvent, now: Instant) {
+        self.stamp(now);
         let space = event.space().clone();
         let queue = match self.spaces.iter_mut().find(|(known, _)| *known == space) {
             Some((_, queue)) => queue,
@@ -364,10 +391,13 @@ impl Pending {
         Some((self.last? + SETTLE).min(self.first? + LONGEST))
     }
 
-    pub(crate) fn take(&mut self) -> Vec<(SpaceId, Vec<MuxEvent>)> {
+    pub(crate) fn take(&mut self) -> Batch {
         self.first = None;
         self.last = None;
-        std::mem::take(&mut self.spaces)
+        Batch {
+            every_space: std::mem::take(&mut self.every_space),
+            spaces: std::mem::take(&mut self.spaces),
+        }
     }
 }
 

@@ -682,10 +682,12 @@ fn a_close_lost_to_a_re_exec_is_recovered_by_the_new_bridge_s_resync() {
 }
 
 /// While the command gate or the store cannot be read, or a marker cannot
-/// be written, a flush queues nothing for the space and keeps its events.
-/// They are queued at the next try, a second later, once it can.
+/// be written, a flush queues nothing for the space, which owes one
+/// `Resync` instead. The connection's own `Resync` of every activated space
+/// is owed too, even when the store could not be read as it began. Both
+/// are queued at the next try, a second later, once they can be.
 #[test]
-fn events_a_flush_cannot_queue_stay_pending_until_it_can() {
+fn a_space_whose_events_a_flush_cannot_queue_owes_one_resync_until_they_can_be() {
     fn database(state: &State) -> PathBuf {
         state.0.join("namedrop.sqlite3")
     }
@@ -723,13 +725,15 @@ fn events_a_flush_cannot_queue_stay_pending_until_it_can() {
         let state = State::new();
         block(&state);
         let stop = Wake::new().unwrap();
-        let appeared = MuxEvent::PaneAppeared(slot("session:s", "block:2"));
         let script = Script::new(vec![(
             None,
-            vec![Next::Event(appeared.clone())],
+            vec![Next::Event(MuxEvent::PaneAppeared(slot(
+                "session:s",
+                "block:2",
+            )))],
             Some(resync("session:t")),
         )]);
-        let (held, waited) = std::thread::scope(|threads| {
+        let (held, waited, queued) = std::thread::scope(|threads| {
             let held = threads.spawn(|| {
                 let _stop = StopOnDrop(&stop);
                 std::thread::sleep(Duration::from_millis(300));
@@ -738,17 +742,22 @@ fn events_a_flush_cannot_queue_stay_pending_until_it_can() {
                 std::thread::sleep(Duration::from_millis(150));
                 let waited = state.queued("session:s").is_empty();
                 let deadline = Instant::now() + Duration::from_secs(3);
-                while state.queued("session:s").is_empty() && Instant::now() < deadline {
+                let both = || ["session:s", "session:t"].map(|space| state.queued(space));
+                while both().iter().any(Vec::is_empty) && Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                (held, waited)
+                (held, waited, both())
             });
             bridged(&state, &script, &stop);
             held.join().unwrap()
         });
         assert!(held, "{case}: queued while blocked");
         assert!(waited, "{case}: tried again before a second passed");
-        assert!(state.queued("session:s").contains(&appeared), "{case}");
+        assert_eq!(
+            queued,
+            [[resync("session:s")], [resync("session:t")]],
+            "{case}"
+        );
     }
 }
 
@@ -1083,4 +1092,37 @@ fn a_bridge_whose_state_directory_is_replaced_while_it_waits_writes_nothing_ther
     });
     nothing_written(&state, &host, "gate");
     fs::remove_dir_all(aside).unwrap();
+}
+
+/// A queue that stays unwritable while blocks come and go keeps one
+/// `Resync` for its space, not the history of every block.
+#[test]
+fn a_space_that_cannot_be_queued_for_a_while_keeps_one_resync() {
+    let state = State::new();
+    let queue = status_queue::directory(&state.0, REX, "session:s");
+    fs::create_dir_all(queue.parent().unwrap()).unwrap();
+    fs::write(&queue, "not a directory").unwrap();
+    let lock = Lock::take(&state.0, &endpoint()).unwrap().unwrap();
+    let mut host = FakeHost::default();
+    let mut pending = Pending::default();
+    for block in 0..200 {
+        let block = format!("block:{block}");
+        pending.note(
+            MuxEvent::PaneAppeared(slot("session:s", &block)),
+            Instant::now(),
+        );
+        pending.note(
+            MuxEvent::PaneClosed(slot("session:s", &block)),
+            Instant::now(),
+        );
+        flush(&state.0, &endpoint(), &mut pending, &mut host, &lock);
+    }
+    assert_eq!(
+        pending.take(),
+        Batch {
+            every_space: false,
+            spaces: vec![(SpaceId::new("session:s"), vec![resync("session:s")])],
+        }
+    );
+    assert!(host.spawned.is_empty());
 }

@@ -8,7 +8,7 @@ use crate::{
     locator::{Locator, Name},
     mux::{
         Endpoint, MuxEvent,
-        rex::events::{Liveness, Next, Pending, RexEvents, Wake},
+        rex::events::{Batch, Liveness, Next, Pending, RexEvents, Wake},
     },
     status_queue::{self, Marker},
 };
@@ -334,9 +334,7 @@ fn bridge(
                 let opened = Instant::now();
                 let mut pending = Pending::default();
                 if same_server(state, endpoint, stream.host_id()) {
-                    for space in activated_spaces(state, endpoint).unwrap_or_default() {
-                        pending.note(MuxEvent::Resync(space), Instant::now());
-                    }
+                    pending.resync_every_space(Instant::now());
                 }
                 loop {
                     if stop.is_set() {
@@ -378,18 +376,22 @@ fn bridge(
     }
 }
 
-/// How long an event that could not be queued waits for the next try.
+/// How long a space whose events could not be queued waits for the next
+/// try.
 const RETRY: Duration = Duration::from_secs(1);
 
 /// Queues the pending events of each activated space under the command
 /// gate, after a replaced runtime has taken over, and starts each space's
 /// worker once. The bridge outlives its workers, so it reaps each one as it
-/// exits. An event that cannot be queued, because the gate or the store
-/// cannot be read or its marker cannot be written, stays pending for a
-/// try `RETRY` later. A re-exec loses the batch, and the new bridge's
-/// `Resync` of every activated space recovers it. A flush whose lock is
-/// lost by the time it holds the gate, which can wait out an update,
-/// writes nothing.
+/// exits. A space whose events cannot be queued, because the gate or the
+/// store cannot be read or a marker cannot be written, owes a `Resync`
+/// instead, tried `RETRY` later. That `Resync` recovers every event kind:
+/// a status change and a close by its survey, an appeared block by its
+/// labels, and a closed session because a `Resync` of a gone space closes
+/// it. So a failure that lasts keeps one event per space. A re-exec loses
+/// the batch, and the new bridge's `Resync` of every activated space
+/// recovers it. A flush whose lock is lost by the time it holds the gate,
+/// which can wait out an update, writes nothing.
 fn flush(
     state: &Path,
     endpoint: &Endpoint,
@@ -401,44 +403,56 @@ fn flush(
     if batch.is_empty() {
         return;
     }
-    let mut left = Vec::new();
     let gate = crate::runtime_command_guard(state, None);
     if !lock.held() {
         return;
     }
-    let gated = gate.ok().and_then(|gate| {
+    let retry = Instant::now() + RETRY;
+    let Some((_gate, activated)) = gate.ok().and_then(|gate| {
         host.reexec_if_replaced();
         Some((gate, activated_spaces(state, endpoint)?))
-    });
-    match gated {
-        None => left.extend(batch.into_iter().flat_map(|(_, events)| events)),
-        Some((_gate, activated)) => {
-            for (space, events) in batch {
-                if !activated.contains(&space) {
-                    continue;
-                }
-                let mut queued = false;
-                for event in events {
-                    match status_queue::enqueue(
-                        state,
-                        endpoint,
-                        &space,
-                        &Marker::Event(event.clone()),
-                    ) {
-                        Ok(()) => queued = true,
-                        Err(_) => left.push(event),
-                    }
-                }
-                if queued && let Ok(worker) = host.spawn(&space) {
-                    host.workers().reap(worker);
-                }
+    }) else {
+        if batch.every_space {
+            pending.resync_every_space(retry);
+        }
+        for (space, _) in batch.spaces {
+            pending.note(MuxEvent::Resync(space), retry);
+        }
+        return;
+    };
+    for (space, events) in by_space(batch, &activated) {
+        if !activated.contains(&space) {
+            continue;
+        }
+        let mut queued = false;
+        for event in events {
+            if status_queue::enqueue(state, endpoint, &space, &Marker::Event(event)).is_err() {
+                pending.note(MuxEvent::Resync(space.clone()), retry);
+                break;
             }
+            queued = true;
+        }
+        if queued && let Ok(worker) = host.spawn(&space) {
+            host.workers().reap(worker);
         }
     }
-    let retry = Instant::now() + RETRY;
-    for event in left {
-        pending.note(event, retry);
+}
+
+/// `batch`'s events by space, after a `Resync` of each `activated` space
+/// when the batch owes one.
+fn by_space(batch: Batch, activated: &[SpaceId]) -> Vec<(SpaceId, Vec<MuxEvent>)> {
+    if !batch.every_space {
+        return batch.spaces;
     }
+    let mut pending = Pending::default();
+    let now = Instant::now();
+    for space in activated {
+        pending.note(MuxEvent::Resync(space.clone()), now);
+    }
+    for event in batch.spaces.into_iter().flat_map(|(_, events)| events) {
+        pending.note(event, now);
+    }
+    pending.take().spaces
 }
 
 /// The activated spaces of `endpoint`, or `None` when the store cannot be
