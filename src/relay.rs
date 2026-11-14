@@ -458,7 +458,8 @@ impl RemoteHosts for NoRemoteHosts {
 }
 
 /// The labels `rex hosts list --json` prints, byte for byte, and the
-/// addresses each one dials, sorted.
+/// addresses each one dials, each in the one spelling of `address_spelling`,
+/// sorted.
 #[derive(Debug, Default)]
 pub(crate) struct Hosts {
     labels: Vec<String>,
@@ -488,9 +489,10 @@ impl Hosts {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|address| address.as_str().map(str::to_owned))
+                .filter_map(|address| address.as_str().map(address_spelling))
                 .collect();
             addresses.sort();
+            addresses.dedup();
             hosts.labels.push(label.to_owned());
             hosts.addresses.push(addresses);
         }
@@ -524,6 +526,57 @@ impl Hosts {
             addresses: vec![Vec::new(); labels.len()],
         }
     }
+}
+
+/// One spelling for each address of a `rex hosts` endpoint that Rex dials
+/// the same way, because Rex keeps the spelling the person typed and
+/// normalizes it only when it dials. The scheme's case, a host name's
+/// case, a trailing `/`, a bare absolute path for `unix://`, a doubled `/`
+/// in a socket path, and, for a socket that exists, its path through
+/// symbolic links. A port stays as written: Rex dials `https://h` at 443
+/// and then 7297, `https://h:443` only at 443, and a bare `h:p` over https
+/// and then http, so each can reach another server.
+pub(crate) fn address_spelling(endpoint: &str) -> String {
+    let (scheme, rest) = match endpoint.split_once("://") {
+        Some((scheme, rest)) => (Some(scheme.to_ascii_lowercase()), rest),
+        None => (None, endpoint),
+    };
+    match scheme.as_deref() {
+        Some("unix") => socket_spelling(rest),
+        None if rest.starts_with('/') => socket_spelling(rest),
+        Some(scheme) => format!("{scheme}://{}", authority_spelling(rest)),
+        None => authority_spelling(rest),
+    }
+}
+
+fn socket_spelling(path: &str) -> String {
+    let mut collapsed = String::with_capacity(path.len());
+    for c in path.chars() {
+        if !(c == '/' && collapsed.ends_with('/')) {
+            collapsed.push(c);
+        }
+    }
+    let trimmed = match collapsed.strip_suffix('/') {
+        Some(trimmed) if !trimmed.is_empty() => trimmed.to_owned(),
+        _ => collapsed,
+    };
+    let path = std::fs::canonicalize(&trimmed)
+        .ok()
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .unwrap_or(trimmed);
+    format!("unix://{path}")
+}
+
+/// `[user@]host[:port][/path]` with the host's case dropped and a bare
+/// trailing `/` gone.
+fn authority_spelling(rest: &str) -> String {
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    let (authority, path) = rest.find('/').map_or((rest, ""), |at| rest.split_at(at));
+    let (user, host) = authority
+        .rsplit_once('@')
+        .map_or(("", authority), |(user, host)| (user, host));
+    let at = if user.is_empty() { "" } else { "@" };
+    format!("{user}{at}{}{path}", host.to_ascii_lowercase())
 }
 
 /// Whether `label` can name a host in a mention: 1 to 64 ASCII letters,

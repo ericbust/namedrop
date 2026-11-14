@@ -1467,6 +1467,87 @@ fn a_server_that_reports_another_s_host_id_cannot_answer_for_its_label() {
     );
 }
 
+/// Two labels whose addresses Rex dials the same way, however each is
+/// spelled, reach one server, and a different port is another address.
+#[test]
+fn labels_reach_one_server_by_any_spelling_rex_dials_the_same_way() {
+    let directory =
+        std::env::temp_dir().join(format!("namedrop-relay-spelling-{}", std::process::id()));
+    fs::create_dir_all(&directory).unwrap();
+    let socket = directory.join("rex.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let link = directory.join("link.sock");
+    std::os::unix::fs::symlink(&socket, &link).unwrap();
+    let real = fs::canonicalize(&socket).unwrap();
+    let real = real.to_str().unwrap();
+    let spelled = [
+        format!("unix://{real}"),
+        format!("UNIX://{real}"),
+        format!("unix://{real}/"),
+        real.to_owned(),
+        format!("unix://{}", real.replacen('/', "//", 2)),
+        format!("unix://{}", link.display()),
+    ];
+    for spelling in &spelled {
+        assert_eq!(
+            crate::relay::address_spelling(spelling),
+            format!("unix://{real}"),
+            "{spelling}"
+        );
+    }
+    for (spellings, one) in [
+        (
+            &["https://Devbox.LAN:7297/", "HTTPS://devbox.lan:7297"][..],
+            "https://devbox.lan:7297",
+        ),
+        (
+            &["http://10.0.0.2/", "HTTP://10.0.0.2"][..],
+            "http://10.0.0.2",
+        ),
+        (
+            &["Devbox.lan:7297", "devbox.lan:7297/"][..],
+            "devbox.lan:7297",
+        ),
+        (
+            &["ssh://Eric@Devbox.lan:2222", "SSH://Eric@devbox.lan:2222/"][..],
+            "ssh://Eric@devbox.lan:2222",
+        ),
+    ] {
+        for spelling in spellings {
+            assert_eq!(crate::relay::address_spelling(spelling), one, "{spelling}");
+        }
+    }
+    for (one, other) in [
+        ("https://devbox.lan", "https://devbox.lan:443"),
+        ("http://devbox.lan", "http://devbox.lan:80"),
+        ("devbox.lan:7297", "http://devbox.lan:7297"),
+        (
+            "unix:///tmp/namedrop-no-such-dir/a.sock",
+            "unix:///tmp/namedrop-no-such-dir/b.sock",
+        ),
+    ] {
+        assert_ne!(
+            crate::relay::address_spelling(one),
+            crate::relay::address_spelling(other),
+            "{one} and {other} can reach different servers"
+        );
+    }
+    let rex = rex(&[]);
+    let link = format!("unix://{}", link.display());
+    listed_at(
+        &rex,
+        &[
+            ("devbox", &[spelled[1].as_str(), "HTTPS://Devbox.lan:7297/"]),
+            ("studio", &["https://devbox.lan:7297", link.as_str(), real]),
+            ("lab", &["https://devbox.lan:443"]),
+        ],
+    );
+    let hosts = rex.run(crate::relay::Hosts::read).unwrap();
+    assert_eq!(hosts.same_host("devbox"), ["devbox", "studio"]);
+    assert_eq!(hosts.same_host("lab"), ["lab"]);
+    fs::remove_dir_all(&directory).unwrap();
+}
+
 /// Two labels reach one server when `rex hosts list` gives them the same
 /// addresses, in any order, and never when either lists none.
 #[test]
