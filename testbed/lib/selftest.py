@@ -295,7 +295,8 @@ def check_rex_live_hooks(scratch):
         "HOME": "/p/home", "PATH": "/p/bin", "HERDR_SOCKET_PATH": "/tmp/h.sock",
         "HERDR_CONFIG_PATH": "/p/config/herdr/config.toml"})
     lane = rex_live.Lane(profile, testbed.fail, lambda message: None)
-    assert lane.environment() == {"HOME": "/p/home", "PATH": "/p/bin", "REX_SERVER": lane.server}
+    assert lane.environment() == {"HOME": "/p/home", "PATH": "/p/bin", "REX_SERVER": lane.server,
+                                  "REX_HOME": lane.server}
     state = rex_live.state_directory(profile)
     baked = "#!/bin/sh\nnamedrop hook session-start --state-directory '{}'\n".format(state)
     claude = profile.dir / "home/.claude/skills/namedrop/scripts/session-start"
