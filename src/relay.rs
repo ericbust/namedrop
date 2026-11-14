@@ -82,9 +82,17 @@ pub fn accept(
 /// exit, and hands those still running to that runtime.
 pub fn run_worker(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) {
     let workers = crate::rex_bridge::Workers::inherited();
+    let woken = std::cell::RefCell::new(Vec::new());
+    let wake = |space: &crate::SpaceId| {
+        wake_reaped(state, endpoint, space, &mut |child| workers.reap(child));
+    };
     let gate = || {
         let gate = crate::runtime_command_guard(state, None)?;
-        hand_over_if_replaced(state, &workers);
+        hand_over_if_replaced(state, &workers, &mut || {
+            for space in woken.take() {
+                wake(&space);
+            }
+        });
         Ok(gate)
     };
     hold(state, endpoint, label, &mut || {
@@ -103,19 +111,23 @@ pub fn run_worker(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) {
                 );
                 state.is_dir()
             },
-            wake: &mut |space| {
-                wake_reaped(state, endpoint, space, &mut |child| workers.reap(child))
-            },
+            woken: &woken,
+            wake: &mut |space| wake(space),
         });
     });
 }
 
 /// Runs the runtime an update selected in this process's place, as the
-/// same command, with `workers` handed to it to reap. Returns only when
-/// there is none to run.
-fn hand_over_if_replaced(state: &Path, workers: &crate::rex_bridge::Workers) {
+/// same command, with `workers` handed to it to reap, once `before` has
+/// run. Returns only when there is none to run.
+fn hand_over_if_replaced(
+    state: &Path,
+    workers: &crate::rex_bridge::Workers,
+    before: &mut dyn FnMut(),
+) {
     use std::os::unix::process::CommandExt;
     if let Some(mut command) = crate::installed_runtime::replacement(state) {
+        before();
         let _ = command
             .env(crate::rex_bridge::INHERITED_WORKERS, workers.live())
             .exec();

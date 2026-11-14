@@ -145,6 +145,7 @@ fn work_for(space: &Space, rex: &Script, rounds: usize) -> (Vec<Duration>, Vec<S
                 waits.push(wait);
                 waits.len() < rounds
             },
+            woken: &std::cell::RefCell::default(),
             wake: &mut |space| woken.push(space.as_str().to_owned()),
         });
     });
@@ -1230,6 +1231,7 @@ fn a_server_that_reports_another_s_host_id_cannot_answer_for_its_label() {
                     rounds += 1;
                     rounds < 1
                 },
+                woken: &std::cell::RefCell::default(),
                 wake: &mut |_| {},
             });
         });
@@ -1461,6 +1463,7 @@ fn a_reply_to_another_endpoint_s_message_is_dropped() {
                 rounds += 1;
                 rounds < 1
             },
+            woken: &std::cell::RefCell::default(),
             wake: &mut |_| {},
         });
     });
@@ -1591,6 +1594,7 @@ fn a_new_item_is_pinned_to_the_server_that_answers_now() {
                 }
                 waits < 2
             },
+            woken: &std::cell::RefCell::default(),
             wake: &mut |_| {},
         });
     });
@@ -2874,6 +2878,7 @@ fn a_thread_continued_partway_through_a_page_still_reads_in_order() {
                 rounds += 1;
                 rounds < 1
             },
+            woken: &std::cell::RefCell::default(),
             wake: &mut |_| {},
         });
     });
@@ -3256,4 +3261,59 @@ fn a_page_read_again_holds_none_of_the_replies_a_took() {
     work_for(&space, &rex, 1);
     assert_eq!(relay_rows(&space, later), [[json!(2)]]);
     assert_eq!(bodies_for(&space, &second).len(), 10);
+}
+
+/// An update that lands while a round has mail still to wake hands the
+/// worker over only once it has woken that mail's space, so the reply the
+/// old image inserted is never left unwoken.
+#[test]
+fn a_worker_wakes_its_round_s_mail_before_it_hands_over() {
+    if in_image() {
+        return;
+    }
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    let mut first = answer("accepted", None, replies(&message, 1, 1));
+    first["more"] = json!(true);
+    rex.answer_with(first);
+    rex.answer_with(
+        json!({"host_id": "host-b", "can_reply": true, "epoch": "e1", "more": false,
+        "outbox": [{"seq": 2, "re": message, "thread": "t", "from": "bob",
+            "message_id": "b-1", "text": "reply 1"}]}),
+    );
+    // The update lands after the second call, the collect whose copy of
+    // reply 1 takes the gate.
+    fs::write(
+        rex.directory.join("after"),
+        format!(
+            "D=$(dirname \"$0\")\n[ -f \"$D/once\" ] || {{ touch \"$D/once\"; exit 1; }}\n{}",
+            update_script(&space.state)
+        ),
+    )
+    .unwrap();
+    let mut image = image(
+        "relay::worker::tests::a_worker_wakes_its_round_s_mail_before_it_hands_over",
+        &space,
+        &rex,
+        true,
+    );
+    let replaced = replaced_within(&space.state.join("runtime/replaced"), &mut image);
+    let workers: Vec<i32> = replaced
+        .trim()
+        .trim_start_matches("workers=")
+        .split(',')
+        .filter_map(|pid| pid.parse().ok())
+        .collect();
+    for pid in &workers {
+        // SAFETY: ends the `sleep 30` this test's image started.
+        unsafe { libc::kill(*pid, libc::SIGKILL) };
+    }
+    assert_eq!(collected_bodies(&space), [["reply 1"]]);
+    assert_eq!(rex.requests().len(), 2);
+    assert_eq!(
+        workers.len(),
+        1,
+        "the reply's space was woken: {replaced:?}"
+    );
 }

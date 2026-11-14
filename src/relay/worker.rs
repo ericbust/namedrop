@@ -16,7 +16,7 @@ use crate::{
     store::{RelayAuthor, RelayOrigin, Relayed},
 };
 use serde_json::{Value, json};
-use std::{path::Path, time::Duration};
+use std::{cell::RefCell, path::Path, time::Duration};
 
 /// How often the worker collects while a thread is open and nothing is
 /// queued.
@@ -41,13 +41,16 @@ const PAGES: usize = 16;
 
 /// One worker's place and its effects: `gate` takes the command gate for
 /// a write to the main database, `pause` waits and says whether to go on,
-/// and `wake` starts the mailbox worker of a space that got mail.
+/// and `wake` starts the mailbox worker of a space that got mail. `woken`
+/// holds the spaces of a round to wake after it, which a gate that hands
+/// the worker over to another runtime wakes first.
 pub(crate) struct Run<'a> {
     pub state: &'a Path,
     pub endpoint: &'a Endpoint,
     pub label: &'a str,
     pub gate: Gate<'a>,
     pub pause: &'a mut dyn FnMut(Duration) -> bool,
+    pub woken: &'a RefCell<Vec<SpaceId>>,
     pub wake: &'a mut dyn FnMut(&SpaceId),
 }
 
@@ -70,9 +73,10 @@ pub(crate) fn work(run: &mut Run<'_>) {
         // An update while the worker waited selects another runtime, which
         // takes the worker's place before it does anything more.
         drop((run.gate)());
-        let mut woken: Vec<SpaceId> = Vec::new();
         let wait = {
+            let woken = run.woken;
             let mut once = |space: &SpaceId| {
+                let mut woken = woken.borrow_mut();
                 if !woken.contains(space) {
                     woken.push(space.clone());
                 }
@@ -83,6 +87,7 @@ pub(crate) fn work(run: &mut Run<'_>) {
                 label: run.label,
                 gate: run.gate,
                 pause: &mut *run.pause,
+                woken,
                 wake: &mut once,
             };
             let wait = round(&mut round_run, &mut reading);
@@ -90,8 +95,8 @@ pub(crate) fn work(run: &mut Run<'_>) {
             super::notice::tell(run.state, run.endpoint, run.gate, round_run.wake);
             wait
         };
-        for space in &woken {
-            (run.wake)(space);
+        for space in run.woken.take() {
+            (run.wake)(&space);
         }
         let wait = match wait {
             Round::Done => return,
