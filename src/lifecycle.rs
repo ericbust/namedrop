@@ -975,10 +975,9 @@ fn space_closed<M, C, I>(
                 )?;
             }
             let mut removed = Vec::new();
+            // The person's own address holds no alias, so the list never
+            // has it.
             for address in transaction.list_pane_addresses(&namespace)? {
-                if transaction.is_operator_address(&namespace, &address.id)? {
-                    continue;
-                }
                 transaction.cancel_and_remove_pane_address(&namespace, &address.id, attribution)?;
                 removed.push(address.id);
             }
