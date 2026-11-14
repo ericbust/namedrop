@@ -10,9 +10,11 @@ use crate::{
         Endpoint, MuxEvent,
         rex::events::{Batch, Liveness, Next, Pending, RexEvents, Wake},
     },
+    relay::receive::{self, Receiver},
     status_queue::{self, Marker},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
@@ -41,6 +43,8 @@ pub fn run(state: &Path, endpoint: &Endpoint) -> ExitCode {
         path: socket.to_owned(),
         state: state.to_owned(),
     };
+    let workers = Workers::inherited();
+    let accepts = workers.clone();
     bridge(
         state,
         endpoint,
@@ -50,26 +54,28 @@ pub fn run(state: &Path, endpoint: &Endpoint) -> ExitCode {
         &mut Processes {
             state,
             endpoint,
-            workers: Workers::inherited(),
+            workers,
         },
         &Away::REX,
+        &mut Receiver::new(state, endpoint).reaping(Box::new(move |child| accepts.reap(child))),
     );
     ExitCode::SUCCESS
 }
 
-/// Names the workers a bridge leaves running when it re-execs, so the new
-/// image, still their parent, reaps them.
+/// Names the workers a bridge or a relay worker leaves running when it
+/// re-execs, so the new image, still their parent, reaps them.
 pub(crate) const INHERITED_WORKERS: &str = "NAMEDROP_REX_BRIDGE_WORKERS";
 
-/// The workers a bridge started, or inherited across a re-exec, that have
-/// not been reaped yet. A thread waits for each one. `exec` ends those
-/// threads but not the workers, so a re-exec hands their pids on.
-#[derive(Default)]
-struct Workers(Arc<Mutex<BTreeSet<libc::pid_t>>>);
+/// The workers a bridge or a relay worker started, a bridge's relay
+/// accepts and relay workers among them, or inherited across a re-exec,
+/// that have not been reaped yet. A thread waits for each one. `exec` ends
+/// those threads but not the workers, so a re-exec hands their pids on.
+#[derive(Clone, Default)]
+pub(crate) struct Workers(Arc<Mutex<BTreeSet<libc::pid_t>>>);
 
 impl Workers {
     /// The workers the image this process replaced left running.
-    fn inherited() -> Self {
+    pub(crate) fn inherited() -> Self {
         let workers = Self::default();
         for pid in std::env::var(INHERITED_WORKERS)
             .unwrap_or_default()
@@ -82,7 +88,7 @@ impl Workers {
     }
 
     /// Waits for `worker` in a thread, so it never stays a zombie.
-    fn reap(&self, worker: Child) {
+    pub(crate) fn reap(&self, worker: Child) {
         self.wait_for(worker.id().cast_signed());
     }
 
@@ -103,7 +109,7 @@ impl Workers {
     }
 
     /// The live workers, as `INHERITED_WORKERS` spells them.
-    fn live(&self) -> String {
+    pub(crate) fn live(&self) -> String {
         lock(&self.0)
             .iter()
             .map(libc::pid_t::to_string)
@@ -204,6 +210,8 @@ fn stop_on_signals() -> Option<&'static Wake> {
 trait Stream {
     fn host_id(&self) -> Option<&str>;
     fn next(&mut self, within: Duration) -> Next;
+    /// Answers the relay call `call_id`.
+    fn reply(&mut self, call_id: &str, result: Value) -> Result<(), String>;
 }
 
 impl Stream for RexEvents<'_> {
@@ -213,6 +221,10 @@ impl Stream for RexEvents<'_> {
 
     fn next(&mut self, within: Duration) -> Next {
         RexEvents::next(self, within)
+    }
+
+    fn reply(&mut self, call_id: &str, result: Value) -> Result<(), String> {
+        RexEvents::reply(self, call_id, result)
     }
 }
 
@@ -311,7 +323,10 @@ const IDLE: Duration = Duration::from_secs(60);
 /// stop flushes what is pending and returns. So does a server that has
 /// stayed away for `away.give_up`, or one never reached at all. A lost lock
 /// returns at once, because the state it would write to is gone, so the
-/// lock is checked again after each wait and before each write.
+/// lock is checked again after each wait and before each write. Each call
+/// of the relay goes to `relay`, which answers it once its accept exits,
+/// and every accept is reaped before the bridge returns.
+#[allow(clippy::too_many_arguments)]
 fn bridge(
     state: &Path,
     endpoint: &Endpoint,
@@ -320,6 +335,22 @@ fn bridge(
     lock: &Lock,
     host: &mut dyn Host,
     away: &Away,
+    relay: &mut Receiver,
+) {
+    serve(state, endpoint, server, stop, lock, host, away, relay);
+    relay.finish();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serve(
+    state: &Path,
+    endpoint: &Endpoint,
+    server: &dyn Server,
+    stop: &Wake,
+    lock: &Lock,
+    host: &mut dyn Host,
+    away: &Away,
+    relay: &mut Receiver,
 ) {
     let mut reached = false;
     let mut failing: Option<Instant> = None;
@@ -332,8 +363,10 @@ fn bridge(
             Ok(mut stream) => {
                 reached = true;
                 let opened = Instant::now();
+                crate::relay::start_workers(state, endpoint, &|worker| host.workers().reap(worker));
                 let mut pending = Pending::default();
-                if same_server(state, endpoint, stream.host_id()) {
+                let known = same_server(state, endpoint, stream.host_id());
+                if known {
                     pending.resync_every_space(Instant::now());
                 }
                 loop {
@@ -350,14 +383,27 @@ fn bridge(
                     }
                     let within = pending
                         .due()
-                        .map_or(IDLE, |due| due.saturating_duration_since(now));
+                        .map_or(IDLE, |due| due.saturating_duration_since(now))
+                        .min(if relay.busy() { receive::TICK } else { IDLE });
                     match stream.next(within) {
                         Next::Event(event) => pending.note(event, Instant::now()),
+                        Next::Perform(perform) => {
+                            // Another server at the known socket has other state, so a
+                            // call for it is refused as wrong_host.
+                            let host_id = stream.host_id().filter(|_| known);
+                            if let Some((call, result)) = relay.receive(perform, host_id) {
+                                let _ = stream.reply(&call, result);
+                            }
+                        }
                         Next::Quiet => {}
                         Next::Ended(_) => {
+                            relay.abandon();
                             flush(state, endpoint, &mut pending, host, lock);
                             break;
                         }
+                    }
+                    for (call, result) in relay.poll(Instant::now()) {
+                        let _ = stream.reply(&call, result);
                     }
                 }
                 opened.elapsed() < away.steady
@@ -470,6 +516,26 @@ fn activated_spaces(state: &Path, endpoint: &Endpoint) -> Option<Vec<SpaceId>> {
 #[derive(Deserialize, Serialize)]
 struct KnownServer {
     host_id: String,
+}
+
+/// The `host_id` the bridge stored for the server behind `endpoint`.
+pub(crate) fn known_host_id(state: &Path, endpoint: &Endpoint) -> Option<String> {
+    let bytes = fs::read(
+        state
+            .join("rex/servers")
+            .join(format!("{}.json", scope(endpoint))),
+    )
+    .ok()?;
+    serde_json::from_slice::<KnownServer>(&bytes)
+        .ok()
+        .map(|known| known.host_id)
+}
+
+/// Stores `host_id` as the server the bridge knew, as its first connection
+/// does.
+#[cfg(test)]
+pub(crate) fn remember_host_id(state: &Path, endpoint: &Endpoint, host_id: &str) {
+    assert!(same_server(state, endpoint, Some(host_id)));
 }
 
 /// Whether the server behind `endpoint` is the one the bridge knew. The

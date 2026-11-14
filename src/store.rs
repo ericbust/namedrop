@@ -109,9 +109,11 @@ pub mod dashboard;
 mod missing_disposition;
 pub(crate) use missing_disposition::{LostSettle, SessionGone};
 mod operator;
+mod relay_author;
 pub(crate) use coordination::WakeReadiness;
 pub(crate) use coordination_bridge::TrackedMessage;
 pub(crate) use coordination_ownership::CoordinationRole;
+pub(crate) use relay_author::{RelayAuthor, RelayOrigin, RelayRecipient, Relayed, ToRelayAuthor};
 mod groups;
 mod handoff;
 mod terminal;
@@ -1079,6 +1081,9 @@ impl StateTransaction<'_> {
     ) -> Result<Option<RoutingAddressSnapshot>, StoreError> {
         if let Some(operator) = self.operator_snapshot(namespace, address_id)? {
             return Ok(Some(operator));
+        }
+        if let Some(relay_author) = self.relay_author_snapshot(namespace, address_id)? {
+            return Ok(Some(relay_author));
         }
         let found = self
             .transaction
@@ -3144,7 +3149,10 @@ impl StateTransaction<'_> {
             && draft.in_reply_to.is_some()
             && !matches!(
                 draft.grammar_version.as_str(),
-                "result-set/v1" | "terminal-result/v1" | "reminder/v1"
+                "result-set/v1"
+                    | "terminal-result/v1"
+                    | "reminder/v1"
+                    | relay_author::NOTICE_GRAMMAR
             );
         let controls = self.thread_control_state(namespace, &draft.thread_id)?;
         if draft.in_reply_to.is_some()
@@ -3159,9 +3167,7 @@ impl StateTransaction<'_> {
             ));
         }
         if is_agent_reply && controls.reply_allowance == 0 {
-            return Err(StoreError::invalid_input(
-                "the Automatic Reply Limit requires human continuation",
-            ));
+            return Err(StoreError::reply_limit());
         }
 
         let thread_order =
@@ -3366,9 +3372,13 @@ impl StateTransaction<'_> {
                 attribution,
             )?;
             if self.is_operator_address(namespace, &recipient.address_id)?
+                || self.is_relay_author(namespace, &recipient.address_id)?
                 || (matches!(
                     grammar,
-                    "terminal-result/v1" | "result-set/v1" | "mention-return/v1"
+                    "terminal-result/v1"
+                        | "result-set/v1"
+                        | "mention-return/v1"
+                        | relay_author::NOTICE_GRAMMAR
                 ) && self.pane_type(namespace, &recipient.address_id)?
                     == crate::PaneType::Terminal)
             {
@@ -3428,9 +3438,7 @@ impl StateTransaction<'_> {
             ],
         )?;
         if changed != 1 {
-            return Err(StoreError::invalid_input(
-                "the Automatic Reply Limit requires human continuation",
-            ));
+            return Err(StoreError::reply_limit());
         }
         if self
             .thread_control_state(namespace, thread_id)?
@@ -7458,6 +7466,8 @@ pub enum StoreErrorKind {
     Storage,
 }
 
+const REPLY_LIMIT: &str = "the Automatic Reply Limit requires human continuation";
+
 #[derive(Debug)]
 pub struct StoreError {
     kind: StoreErrorKind,
@@ -7480,6 +7490,18 @@ impl StoreError {
             message: message.into(),
             source: None,
         }
+    }
+
+    /// The refusal of an agent's reply in a thread the Automatic Reply
+    /// Limit paused, here or in a thread paired with it.
+    fn reply_limit() -> Self {
+        Self::invalid_input(REPLY_LIMIT)
+    }
+
+    /// Whether this is the Automatic Reply Limit's refusal, which a person's
+    /// message or Continue lifts, rather than another refusal.
+    pub(crate) fn is_reply_limit(&self) -> bool {
+        self.kind == StoreErrorKind::InvalidInput && self.message == REPLY_LIMIT
     }
 
     pub fn kind(&self) -> StoreErrorKind {

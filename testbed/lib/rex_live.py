@@ -24,12 +24,14 @@ FIRST_RUN_SECONDS = 180
 
 class Lane(rex_lane.Lane):
     """The profile's clean environment without its Herdr names, so a block's only location
-    names are the REX_* its server gives it."""
+    names are the REX_* its server gives it. The server is also every block's Rex home, so a
+    `rex` that Namedrop runs from a block or a daemon reads the lane's own hosts."""
 
     def environment(self):
         environment = {key: value for key, value in self.profile.env.items()
                        if not key.startswith("HERDR_")}
         environment["REX_SERVER"] = self.server
+        environment["REX_HOME"] = self.server
         return environment
 
     def command_line(self, *args):

@@ -112,14 +112,28 @@ impl Liveness {
     };
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(crate) enum Next {
     Event(MuxEvent),
+    /// A client called the relay action this connection declared.
+    Perform(Perform),
     /// The wait passed with no event the bridge handles.
     Quiet,
     /// The connection is over, and why. In-flight mail is untouched.
     Ended(String),
 }
+
+/// One `client_perform_requested`: the call to answer, its arguments, and
+/// the principal the server admitted it as.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Perform {
+    pub call_id: String,
+    pub args: Value,
+    pub principal: Value,
+}
+
+/// The action B's bridge declares, which A calls through `client.perform`.
+pub(crate) const RELAY_ACTION: &str = "namedrop.relay";
 
 pub(crate) struct RexEvents<'a> {
     connection: Connection<'a, UnixStream>,
@@ -174,6 +188,20 @@ impl<'a> RexEvents<'a> {
         connection
             .request("session.attach_all", Some(json!({"event_scope": "all"})))
             .map_err(said)?;
+        // A server that will not take the relay still has its lifecycle
+        // events bridged, and the relay's callers find no client to call.
+        let _ = connection
+            .request("client.set_label", Some(json!({"label": "namedrop"})))
+            .and_then(|_| {
+                connection.request(
+                    "client.keymap",
+                    Some(json!({
+                        "actions": [{"name": RELAY_ACTION, "kind": "client",
+                            "title": "Namedrop relay", "args": relay_schema()}],
+                        "server_actions": "none",
+                    })),
+                )
+            });
         Ok(Self {
             heard: (connection.frames(), Instant::now()),
             connection,
@@ -183,6 +211,17 @@ impl<'a> RexEvents<'a> {
             liveness,
             pinged: None,
         })
+    }
+
+    /// Answers the relay call `call_id` with `result`.
+    pub(crate) fn reply(&mut self, call_id: &str, result: Value) -> Result<(), String> {
+        self.connection
+            .request(
+                "client.reply",
+                Some(json!({"call_id": call_id, "result": result})),
+            )
+            .map(drop)
+            .map_err(said)
     }
 
     /// The server's `host_id`, as its status reported it.
@@ -225,6 +264,9 @@ impl<'a> RexEvents<'a> {
             let deadline = until.map_or(alive_until, |until| until.min(alive_until));
             match self.connection.wait_event(Some(deadline), self.wake.fd()) {
                 Ok(Some(event)) => {
+                    if let Some(perform) = perform(&event.payload) {
+                        return Next::Perform(perform);
+                    }
                     if let Some(event) = self.decode(&event.payload) {
                         return Next::Event(event);
                     }
@@ -275,6 +317,35 @@ impl<'a> RexEvents<'a> {
             _ => None,
         }
     }
+}
+
+/// The relay action's arguments, which Rex checks before it hands a call on.
+fn relay_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "op": {"type": "string", "enum": ["deliver", "collect"]},
+            "expect_host_id": {"type": "string"},
+            "from": {"type": "object"},
+            "item": {"type": "object"},
+            "ack_through": {"type": "integer"},
+            "epoch": {"type": "string"},
+        },
+        "required": ["op", "expect_host_id", "from"],
+    })
+}
+
+/// A call of the relay action, from the event that carries it.
+fn perform(payload: &Value) -> Option<Perform> {
+    if payload["type"] != "client_perform_requested" {
+        return None;
+    }
+    let call = &payload["payload"];
+    Some(Perform {
+        call_id: call["call_id"].as_str()?.to_owned(),
+        args: call["args"].clone(),
+        principal: call["requester"]["principal"].clone(),
+    })
 }
 
 /// A `block_event` that can change what the block's agent is or reports:
@@ -426,6 +497,8 @@ pub(crate) mod tests_support {
                     json!({"pid": std::process::id(), "host_id": host_id, "listeners": [
                         {"primary": true, "transport": "unix", "addresses": ["/tmp/r.sock"]}]}),
                     json!({"sessions": []}),
+                    json!({}),
+                    json!({}),
                 ] {
                     let request = server.message();
                     server.send(json!({"type": "response", "id": request["id"], "seq": 0, "payload": payload}));

@@ -220,6 +220,23 @@ fn main() -> ExitCode {
             }
         };
     }
+    if let Some(label) = cli.relay_worker_host() {
+        let endpoint = cli
+            .runtime
+            .endpoint
+            .as_deref()
+            .map(namedrop::mux::Endpoint::parse);
+        return match (selected_state.as_deref(), endpoint) {
+            (Some(state), Some(endpoint)) if endpoint.kind == namedrop::mux::MuxKind::Rex => {
+                namedrop::relay_worker(state, &endpoint, label);
+                ExitCode::SUCCESS
+            }
+            _ => {
+                eprintln!("namedrop relay worker needs a rex: --endpoint and a state directory");
+                ExitCode::from(64)
+            }
+        };
+    }
     if cli.is_agent_status_worker_hook() {
         if let Some(state) = selected_state.as_deref() {
             let socket = endpoint_of(location(&RuntimeOptions::default(), inherited));
@@ -288,6 +305,28 @@ fn main() -> ExitCode {
             cli.dashboard_ui(),
             cli.dashboard_inherit_claim(),
         );
+    }
+    if let Some(host_id) = cli.relay_accept_host_id() {
+        let endpoint = cli
+            .runtime
+            .endpoint
+            .as_deref()
+            .map(namedrop::mux::Endpoint::parse)
+            .filter(|endpoint| endpoint.kind == namedrop::mux::MuxKind::Rex);
+        let (Some(state), Some(endpoint)) = (selected_state.as_deref(), endpoint) else {
+            eprintln!("namedrop relay accept needs a rex: --endpoint and a state directory");
+            return ExitCode::from(64);
+        };
+        let mut input = Vec::new();
+        if let Err(error) = io::stdin().read_to_end(&mut input) {
+            eprintln!("namedrop relay accept could not read its call: {error}");
+            return ExitCode::from(66);
+        }
+        println!(
+            "{}",
+            namedrop::relay_accept(state, &endpoint, host_id, &input)
+        );
+        return ExitCode::SUCCESS;
     }
     let format = cli.result_format(io::stdout().is_terminal());
     let input_file = cli.input_is_file();
@@ -489,7 +528,12 @@ fn run_bound_operation(
     } else {
         input
     };
+    // A send that names `@alias@host` in a Rex home is judged by the send
+    // itself, against the host list.
     if is_message_operation(operation)
+        && !(namedrop::names_remote_host(operation, &input)
+            && home::resolve(&options.flags(), inherited)
+                .is_ok_and(|home| home.kind() == namedrop::mux::MuxKind::Rex))
         && let Err(error) = validate_message_input(operation, input.clone())
     {
         return Ran::Refused(error);

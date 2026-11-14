@@ -1,4 +1,5 @@
 use crate::mux::{Applied, Badge, Effect, PaneId};
+use crate::relay::{RemoteHosts, RemoteName};
 use crate::spaces::{RouteRefusal, ScopedName, SpaceScope, UnplacedName, WorkspaceLabel};
 use crate::{
     ActorKind, ContextGrantDraft, ContextGrantId, ContextReferenceDraft, ContextSnapshotId,
@@ -24,6 +25,9 @@ pub struct ParsedMessage {
     pub recipients: RecipientRun,
     pub body: String,
     pub context_mentions: Vec<BodyMention>,
+    /// The `@alias@label` recipients of a Rex home's `send`, which the relay
+    /// carries to the Namedrop of each label's host.
+    pub(crate) remote: Vec<RemoteName>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -72,6 +76,18 @@ pub(crate) fn body_reference_aliases<E: crate::mux::MuxRead>(
 /// the source addresses nobody and stays literal. A `#` token after the first
 /// Mention is body text.
 pub fn parse_mentions(source: &str) -> Result<ParsedMessage, String> {
+    parse_mentions_in(source, &crate::relay::NoRemoteHosts)
+}
+
+/// [`parse_mentions`] for a reader that `hosts` may give remote recipients.
+/// Only a Rex home's `send` lists hosts: there a leading `@alias@label`
+/// names `alias` on the host `label`, which must be exactly a listed label,
+/// or the send fails. With [`crate::relay::NoRemoteHosts`] such a token ends
+/// the leading run, as it always has.
+pub(crate) fn parse_mentions_in(
+    source: &str,
+    hosts: &dyn RemoteHosts,
+) -> Result<ParsedMessage, String> {
     let LeadingLabels {
         labels,
         all,
@@ -79,15 +95,46 @@ pub fn parse_mentions(source: &str) -> Result<ParsedMessage, String> {
     } = leading_labels(source);
 
     let mut recipients: Vec<String> = Vec::new();
-    for (alias, token) in mention_run(source, cursor) {
-        if !recipients.iter().any(|existing| existing == alias) {
-            recipients.push(alias.to_owned());
+    let mut remote: Vec<RemoteName> = Vec::new();
+    loop {
+        for (alias, token) in mention_run(source, cursor) {
+            if !recipients.iter().any(|existing| existing == alias) {
+                recipients.push(alias.to_owned());
+            }
+            cursor = token.end;
         }
-        cursor = token.end;
+        let Some((name, end)) = remote_token(source, cursor) else {
+            break;
+        };
+        if hosts.participant(&name.alias, &name.label) {
+            let alias = format!("{}@{}", name.alias, name.label);
+            if !recipients.contains(&alias) {
+                recipients.push(alias);
+            }
+            cursor = end;
+            continue;
+        }
+        let Some(listed) = hosts.listed() else {
+            break;
+        };
+        if !crate::relay::valid_label(&name.label) || !listed.contains(&name.label) {
+            return Err(crate::relay::unlisted(&name.label, listed));
+        }
+        if !remote.contains(&name) {
+            remote.push(name);
+        }
+        cursor = end;
     }
 
-    if recipients.is_empty() {
+    if recipients.is_empty() && remote.is_empty() {
         return Err(MISSING_RECIPIENTS.to_owned());
+    }
+    if !remote.is_empty() && (all || !labels.is_empty()) {
+        return Err(
+            "a recipient on another host takes no workspace label, because its host \
+             resolves the name"
+                .to_owned(),
+        );
     }
     let scope = match (all, labels.is_empty()) {
         (false, true) => SpaceScope::Unqualified,
@@ -114,7 +161,39 @@ pub fn parse_mentions(source: &str) -> Result<ParsedMessage, String> {
         },
         body: body.to_owned(),
         context_mentions: context_mentions(body),
+        remote,
     })
+}
+
+/// The `@alias@host` token at `cursor`, with a valid alias and any host,
+/// and where it ends.
+fn remote_token(source: &str, cursor: usize) -> Option<(RemoteName, usize)> {
+    let start = skip_whitespace(source, cursor);
+    let end = token_end(source, start);
+    let token = &source[start..end];
+    let token = token.strip_suffix([',', ':']).unwrap_or(token);
+    let (alias, label) = token.strip_prefix('@')?.split_once('@')?;
+    validate_alias(alias).ok()?;
+    Some((
+        RemoteName {
+            alias: alias.to_owned(),
+            label: label.to_owned(),
+        },
+        end,
+    ))
+}
+
+/// Whether a `send`'s leading run names a recipient as `@alias@host`. Only
+/// the send itself, in a Rex home, can judge that against its host list.
+pub fn names_remote_host(operation: &str, input: &Value) -> bool {
+    matches!(operation, "send" | "reply")
+        && input["source"].as_str().is_some_and(|source| {
+            let cursor = leading_labels(source).cursor;
+            let cursor = mention_run(source, cursor)
+                .last()
+                .map_or(cursor, |(_, token)| token.end);
+            remote_token(source, cursor).is_some()
+        })
 }
 
 /// The run of Mentions at `cursor`: each alias and its whole token, separator
@@ -262,6 +341,7 @@ pub fn parse_prompt_mentions(source: &str) -> Result<ParsedMessage, String> {
         recipients,
         body: source.to_owned(),
         context_mentions: Vec::new(),
+        remote: Vec::new(),
     })
 }
 
@@ -651,7 +731,7 @@ where
     {
         return Err(workspace_prompt_refusal(scope, runtime, &workspaces).to_string());
     }
-    let input = prepare_source_message(input)?;
+    let input = prepare_in_home(operation, input, runtime)?;
     let author = pane_author(runtime)?;
     persist_prepared_message_operation(input, author, runtime, &workspaces, caller)
         .map(|(receipt, _)| receipt)
@@ -767,18 +847,21 @@ where
         })
         .into());
     }
-    let mut input = prepare_source_message(MessageOperationInput {
-        request_id: required_nonempty(request_id.to_owned(), "request_id")
-            .map_err(SendError::Input)?,
-        source: source.to_owned(),
-        author_kind: ActorKind::Human,
-        in_reply_to: in_reply_to.cloned(),
-        disposition_attempt_id: None,
-        context: None,
-        request_context: false,
-        decline_context_request: None,
-        tracking: crate::coordination::TrackingInput::default(),
-    })
+    let mut input = prepare_source_message(
+        MessageOperationInput {
+            request_id: required_nonempty(request_id.to_owned(), "request_id")
+                .map_err(SendError::Input)?,
+            source: source.to_owned(),
+            author_kind: ActorKind::Human,
+            in_reply_to: in_reply_to.cloned(),
+            disposition_attempt_id: None,
+            context: None,
+            request_context: false,
+            decline_context_request: None,
+            tracking: crate::coordination::TrackingInput::default(),
+        },
+        &crate::relay::NoRemoteHosts,
+    )
     .map_err(SendError::Input)?;
     input.review_operator = review_operator.cloned();
     let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.mux);
@@ -846,6 +929,7 @@ where
             },
             body: source.to_owned(),
             context_mentions: context_mentions(source),
+            remote: Vec::new(),
         },
         author_kind: ActorKind::Human,
         in_reply_to: in_reply_to.cloned(),
@@ -927,7 +1011,7 @@ where
     C: crate::Clock,
     I: crate::IdGenerator,
 {
-    let input = prepare_source_message(parse_operation_input(operation, input)?)?;
+    let input = prepare_in_home(operation, parse_operation_input(operation, input)?, runtime)?;
     let mut store = StateStore::open(runtime.state_directory).map_err(|e| e.to_string())?;
     let committed = store
         .transaction(|tx| {
@@ -1275,6 +1359,25 @@ where
         tracking,
         review_operator,
     } = input;
+    let remote = parsed.remote.clone();
+    let relayed_text = if remote.is_empty() {
+        String::new()
+    } else {
+        parsed.body.clone()
+    };
+    if !remote.is_empty()
+        && (context.is_some()
+            || request_context
+            || decline_context_request.is_some()
+            || tracking.present()
+            || in_reply_to.is_some())
+    {
+        return Err(SendError::Input(
+            "a message to an agent on another host is a plain send: it carries no context \
+             and no tracked work"
+                .to_owned(),
+        ));
+    }
     if context.is_some() && author_kind != ActorKind::AgentSession {
         return Err(SendError::Input(
             "a context block requires an agent-authored message (author_kind agent_session)"
@@ -1346,16 +1449,38 @@ where
             .map(|tracked| tracked.home);
         Ok((author, replayed, tracked_home))
     })?;
+    let relay = |committed: &Committed| -> Result<(), SendError> {
+        if remote.is_empty() {
+            return Ok(());
+        }
+        let receipt = &committed.routed.receipt;
+        crate::relay::queue(
+            runtime.state_directory,
+            &crate::relay::Sent {
+                namespace: &namespace,
+                sender: &author.alias,
+                message: &receipt.message_id,
+                thread: &receipt.thread_id,
+                text: &relayed_text,
+                now_ms: i64::try_from(runtime.clock.now_unix_ms()).unwrap_or(i64::MAX),
+            },
+            &remote,
+        )
+        .map_err(SendError::Input)
+    };
     if let Some(committed) = replayed {
-        let presented = present_committed(
+        relay(&committed)?;
+        let mut presented = present_committed(
             committed,
             &mut store,
             &namespace,
             &disposition_attempt_id,
             runtime,
         )?;
+        crate::relay::present(&mut presented.0, &remote);
         return Ok(presented);
     }
+    crate::relay::check_size(&author.alias, &remote, &parsed.body).map_err(SendError::Input)?;
     let grammar_version = preparation.grammar(in_reply_to.as_ref());
     let plain_channel = preparation == MessagePreparation::OperatorPlain;
     let direct_reply = store.transaction(|tx| {
@@ -1495,11 +1620,17 @@ where
         };
         let mut recipients = if let Some(peer) = &direct_reply {
             vec![transaction.routing_address_by_id(&namespace, peer)?]
-        } else if plain_channel {
+        } else if plain_channel || (parsed.recipients.aliases.is_empty() && !remote.is_empty()) {
             Vec::new()
         } else {
             routing.resolve(transaction, &namespace, &author.address_id, runtime.clock.now_unix_ms())?
         };
+        for name in &remote {
+            let relay_author = transaction.ensure_relay_author(&namespace, &name.author(), &attribution)?;
+            if !recipients.iter().any(|recipient| recipient.address_id == relay_author.address_id) {
+                recipients.push(relay_author);
+            }
+        }
         let channel_reply = author_kind == ActorKind::AgentSession
             && reply_route.as_ref().is_some_and(|route| route.reply_mode == crate::DeliveryReplyMode::Channel);
         let pending_channel = if plain_channel {
@@ -1873,13 +2004,15 @@ where
     });
     match routed {
         Ok(committed) => {
-            let presented = present_committed(
+            relay(&committed)?;
+            let mut presented = present_committed(
                 committed,
                 &mut store,
                 &namespace,
                 &disposition_attempt_id,
                 runtime,
             )?;
+            crate::relay::present(&mut presented.0, &remote);
             Ok(presented)
         }
         Err(error) => {
@@ -2121,10 +2254,40 @@ where
     })
 }
 
+/// Parses a send or reply as its home reads it. A Rex send that names
+/// `@alias@host` reads the host list, and a Rex reply may name a remote
+/// agent of the thread it answers. Every other message reads `@a@b` as it
+/// always has.
+fn prepare_in_home<M, C, I>(
+    operation: &str,
+    input: MessageOperationInput,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+) -> Result<PreparedMessageOperation, String> {
+    let rex = crate::mux::Endpoint::parse(runtime.session_socket_id).kind
+        == crate::mux::MuxKind::Rex
+        && names_remote_host(operation, &json!({"source": input.source}));
+    if rex && operation == "send" {
+        let hosts = crate::relay::Hosts::read()?;
+        return prepare_source_message(input, &hosts);
+    }
+    if let (true, Some(answered)) = (rex, &input.in_reply_to) {
+        let participants = StateStore::open(runtime.state_directory)
+            .and_then(|mut store| {
+                store.transaction(|transaction| {
+                    transaction.relay_participants(runtime.session_socket_id, answered)
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        return prepare_source_message(input, &crate::relay::Participants(participants));
+    }
+    prepare_source_message(input, &crate::relay::NoRemoteHosts)
+}
+
 fn prepare_source_message(
     input: MessageOperationInput,
+    hosts: &dyn RemoteHosts,
 ) -> Result<PreparedMessageOperation, String> {
-    let parsed = parse_mentions(&input.source)?;
+    let parsed = parse_mentions_in(&input.source, hosts)?;
     Ok(PreparedMessageOperation {
         request_id: input.request_id,
         authored_source: input.source,

@@ -217,6 +217,26 @@ impl Cli {
         )
     }
 
+    /// The `host_id` of `namedrop relay accept`.
+    pub fn relay_accept_host_id(&self) -> Option<&str> {
+        match &self.command {
+            Command::Relay {
+                command: RelayCommand::Accept { host_id },
+            } => Some(host_id),
+            _ => None,
+        }
+    }
+
+    /// The label of `namedrop relay worker`.
+    pub fn relay_worker_host(&self) -> Option<&str> {
+        match &self.command {
+            Command::Relay {
+                command: RelayCommand::Worker { host },
+            } => Some(host),
+            _ => None,
+        }
+    }
+
     pub fn is_agent_status_worker_hook(&self) -> bool {
         matches!(
             self.command,
@@ -450,6 +470,29 @@ enum Command {
         #[command(subcommand)]
         command: RexCommand,
     },
+    /// The relay between this machine's Namedrop and another's, which
+    /// Namedrop runs itself.
+    #[command(hide = true)]
+    Relay {
+        #[command(subcommand)]
+        command: RelayCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RelayCommand {
+    /// Decide one `namedrop.relay` call, read from stdin, for the Rex server
+    /// `--endpoint` names, whose `host_id` is `--host-id`.
+    Accept {
+        #[arg(long)]
+        host_id: String,
+    },
+    /// Deliver the items queued for the `rex hosts` label `--host`, and
+    /// collect its replies, for the Rex server `--endpoint` names.
+    Worker {
+        #[arg(long)]
+        host: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -506,6 +549,12 @@ impl Command {
             Self::Rex {
                 command: RexCommand::Bridge,
             } => "rex.bridge",
+            Self::Relay {
+                command: RelayCommand::Accept { .. },
+            } => "relay.accept",
+            Self::Relay {
+                command: RelayCommand::Worker { .. },
+            } => "relay.worker",
         }
     }
 }

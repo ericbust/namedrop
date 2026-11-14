@@ -68,6 +68,16 @@ fn serve<T: Send + 'static>(
         server.send(
             json!({"type": "response", "id": attach["id"], "seq": 0, "payload": {"sessions": []}}),
         );
+        let label = server.message();
+        assert_eq!(label["method"], "client.set_label");
+        assert_eq!(label["payload"], json!({"label": "namedrop"}));
+        server.send(json!({"type": "response", "id": label["id"], "seq": 0, "payload": {}}));
+        let keymap = server.message();
+        assert_eq!(keymap["method"], "client.keymap");
+        assert_eq!(keymap["payload"]["actions"][0]["name"], "namedrop.relay");
+        assert_eq!(keymap["payload"]["actions"][0]["kind"], "client");
+        assert_eq!(keymap["payload"]["server_actions"], "none");
+        server.send(json!({"type": "response", "id": keymap["id"], "seq": 0, "payload": {}}));
         script(&mut server)
     });
     (client, thread)
@@ -395,6 +405,42 @@ fn a_resync_absorbs_its_space_s_status_changes_and_a_space_closed_absorbs_everyt
                 vec![MuxEvent::SpaceClosed(SpaceId::new("u"))]
             ),
         ]
+    );
+}
+
+/// The stream declares the relay as it opens, hands on each call of it,
+/// and answers a call with `client.reply`.
+#[test]
+fn a_relay_call_is_handed_on_and_answered_with_client_reply() {
+    let state = State::new();
+    let wake = Wake::new().unwrap();
+    let (client, server) = serve("host-a", |server| {
+        send_events(
+            server,
+            &[json!({"type": "client_perform_requested", "payload": {
+                "call_id": "call-7", "action": "namedrop.relay",
+                "args": {"op": "collect"},
+                "requester": {"principal": {"kind": "peer", "uid": 501}}}})],
+        );
+        let reply = server.message();
+        server.send(json!({"type": "response", "id": reply["id"], "seq": 1, "payload": {}}));
+        reply
+    });
+    let mut stream = events(client, &state, &wake, Liveness::REX);
+    assert_eq!(
+        stream.next(Duration::from_secs(5)),
+        Next::Perform(Perform {
+            call_id: "call-7".to_owned(),
+            args: json!({"op": "collect"}),
+            principal: json!({"kind": "peer", "uid": 501}),
+        })
+    );
+    stream.reply("call-7", json!({"outbox": []})).unwrap();
+    let reply = server.join().unwrap();
+    assert_eq!(reply["method"], "client.reply");
+    assert_eq!(
+        reply["payload"],
+        json!({"call_id": "call-7", "result": {"outbox": []}})
     );
 }
 

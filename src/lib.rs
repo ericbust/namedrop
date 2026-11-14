@@ -35,6 +35,8 @@ mod message;
 pub mod mux;
 mod pane_effects;
 mod pointer;
+mod relay;
+pub use relay::{accept as relay_accept, run_worker as relay_worker};
 #[doc(hidden)]
 pub mod reminder;
 pub mod rex_bridge;
@@ -114,8 +116,8 @@ pub use lifecycle::{
 pub use message::{
     BodyMention, OperatorSendError, OperatorSendErrorKind, ParsedMessage, RecipientOutlook,
     RecipientRun, carries_leading_mentions, execute_message_operation, expand_attempt_reply,
-    parse_mentions, parse_prompt_mentions, recipient_outlooks, send_operator_direct_message,
-    send_operator_message, validate_message_input,
+    names_remote_host, parse_mentions, parse_prompt_mentions, recipient_outlooks,
+    send_operator_direct_message, send_operator_message, validate_message_input,
 };
 pub use ports::{Clock, IdGenerator};
 pub use runtime::{ProcessIds, SystemClock};

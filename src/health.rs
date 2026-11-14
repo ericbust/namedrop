@@ -373,6 +373,19 @@ where
             workspace,
         );
         issues.extend(status_queue_issues(&queue, runtime.clock.now_unix_ms()));
+        if crate::mux::Endpoint::parse(runtime.session_socket_id).kind == crate::mux::MuxKind::Rex {
+            issues.extend(expired_replies_issue(&crate::relay::expired_replies(
+                runtime.state_directory,
+            )));
+            issues.extend(unsent_issue(&crate::relay::unsent_by_label(
+                runtime.state_directory,
+                runtime.session_socket_id,
+            )));
+            issues.extend(relay_conditions_issue(&crate::relay::conditions(
+                runtime.state_directory,
+                runtime.session_socket_id,
+            )));
+        }
     }
     match crate::update_check::settings() {
         Err(error) => {
@@ -1305,6 +1318,93 @@ fn status_queue_issues(queue: &std::path::Path, now_ms: u64) -> Vec<HealthIssue>
     issues
 }
 
+/// One notice for the replies the relay kept for other machines that
+/// expired before those machines collected them.
+fn expired_replies_issue(expired: &[(String, i64)]) -> Option<HealthIssue> {
+    if expired.is_empty() {
+        return None;
+    }
+    let senders = expired
+        .iter()
+        .map(|(sender, count)| format!("{count} for @{sender}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(issue(
+        "ND-RELAY-001",
+        HealthSeverity::Info,
+        "Replies for another machine expired before its Namedrop collected them.",
+        &format!(
+            "This machine keeps each reply for a remote sender for 7 days, until that sender's Namedrop collects it. These expired: {senders}."
+        ),
+        HealthRepairKind::HumanDecision,
+        "Nothing needs doing. A remote sender collects replies while it has a thread open with this machine.",
+    ))
+}
+
+/// One notice for the messages to other machines that failed or expired,
+/// counted per host.
+fn unsent_issue(unsent: &[(String, i64, i64)]) -> Option<HealthIssue> {
+    if unsent.is_empty() {
+        return None;
+    }
+    let hosts = unsent
+        .iter()
+        .map(|(label, failed, expired)| format!("{label}: {failed} failed, {expired} expired"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(issue(
+        "ND-RELAY-002",
+        HealthSeverity::Info,
+        "Messages to another machine did not reach it.",
+        &format!("Each sender got a notice in its thread with the reason. By host: {hosts}."),
+        HealthRepairKind::HumanDecision,
+        "Nothing needs doing. Send again once the other machine can take the message.",
+    ))
+}
+
+/// One notice for the labels whose replies need a look.
+fn relay_conditions_issue(conditions: &[crate::relay::store::Conditions]) -> Option<HealthIssue> {
+    if conditions.is_empty() {
+        return None;
+    }
+    let hosts = conditions
+        .iter()
+        .map(|condition| {
+            let mut found = Vec::new();
+            if condition.other_label > 0 {
+                found.push(format!(
+                    "{} replies answered a message sent to another host, and were dropped",
+                    condition.other_label
+                ));
+            }
+            if condition.held_full {
+                found.push(
+                    "Namedrop holds as many of its replies as it can for threads the Automatic Reply Limit paused, so it keeps the rest until a person's message or Continue resumes them"
+                        .to_owned(),
+                );
+            }
+            if condition.cannot_reply {
+                found.push(
+                    "it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them"
+                        .to_owned(),
+                );
+            }
+            format!("{}: {}", condition.label, found.join(", and "))
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(issue(
+        "ND-RELAY-003",
+        HealthSeverity::Notice,
+        "Replies from another machine need a look.",
+        &format!(
+            "A server can answer only for the messages this machine sent it, and Namedrop holds a limited number of replies while a thread is paused. By host: {hosts}."
+        ),
+        HealthRepairKind::HumanDecision,
+        "Resume each paused thread with a message or Continue, and check that each label in rex hosts list reaches the machine you expect.",
+    ))
+}
+
 fn stale_runtime_issue(stale: &crate::installed_runtime::StaleRelease) -> HealthIssue {
     let mut outdated = issue(
         "ND-SETUP-004",
@@ -1514,6 +1614,74 @@ pub fn render_health_report_to_text(report: &HealthReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_relay_replies_are_one_notice_that_counts_each_sender() {
+        assert!(expired_replies_issue(&[]).is_none());
+        let notice =
+            expired_replies_issue(&[("alice@laptop".to_owned(), 2), ("host-c".to_owned(), 1)])
+                .unwrap();
+        assert_eq!(notice.code, "ND-RELAY-001");
+        assert_eq!(notice.severity, HealthSeverity::Info);
+        assert!(
+            notice
+                .explanation
+                .ends_with("These expired: 2 for @alice@laptop, 1 for @host-c."),
+            "{}",
+            notice.explanation
+        );
+    }
+
+    #[test]
+    fn unsent_relay_items_are_one_notice_that_counts_each_host() {
+        assert!(unsent_issue(&[]).is_none());
+        let notice =
+            unsent_issue(&[("devbox".to_owned(), 2, 1), ("studio".to_owned(), 0, 3)]).unwrap();
+        assert_eq!(notice.code, "ND-RELAY-002");
+        assert_eq!(notice.severity, HealthSeverity::Info);
+        assert!(
+            notice
+                .explanation
+                .ends_with("devbox: 2 failed, 1 expired; studio: 0 failed, 3 expired."),
+            "{}",
+            notice.explanation
+        );
+    }
+
+    #[test]
+    fn relay_conditions_are_one_notice_that_names_each_host() {
+        use crate::relay::store::Conditions;
+        assert!(relay_conditions_issue(&[]).is_none());
+        let notice = relay_conditions_issue(&[
+            Conditions {
+                label: "devbox".to_owned(),
+                other_label: 3,
+                held_full: true,
+                cannot_reply: false,
+            },
+            Conditions {
+                label: "studio".to_owned(),
+                held_full: true,
+                ..Conditions::default()
+            },
+            Conditions {
+                label: "lab".to_owned(),
+                cannot_reply: true,
+                ..Conditions::default()
+            },
+        ])
+        .unwrap();
+        assert_eq!(notice.code, "ND-RELAY-003");
+        assert_eq!(notice.severity, HealthSeverity::Notice);
+        let paused = "Namedrop holds as many of its replies as it can for threads the Automatic Reply Limit paused, so it keeps the rest until a person's message or Continue resumes them";
+        assert!(
+            notice.explanation.ends_with(&format!(
+                "By host: devbox: 3 replies answered a message sent to another host, and were dropped, and {paused}; studio: {paused}; lab: it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them."
+            )),
+            "{}",
+            notice.explanation
+        );
+    }
 
     #[test]
     fn human_report_escapes_control_characters() {
