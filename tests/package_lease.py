@@ -38,9 +38,13 @@ WRITERS={
 }
 found=set()
 for path in (repo/'src').rglob('*.rs'):
-    text=path.read_text().split('#[cfg(test)]\nmod ',1)[0]
-    for name in re.findall(r"\bfn\s+(\w+)(?:\s*<[^{}]*?>)?\s*\([^{};]*?&(?:'[_a-zA-Z][_a-zA-Z0-9]*\s+)?(?:\w+::)*PackageLease\b",text,re.S):
-        found.add(str(path.relative_to(repo))+'::'+name)
+    text=re.sub(r'(?ms)^#\[cfg\(test\)\]\nmod \w+ \{$.*?^\}$','',path.read_text())
+    for match in re.finditer(r"\bfn\s+(\w+)\s*(?:<[^{}]*?>)?\s*\(",text,re.S):
+        depth,end=1,match.end()
+        while depth and end<len(text):
+            depth+={'(':1,')':-1}.get(text[end],0);end+=1
+        if re.search(r'\bPackageLease\b',text[match.start():end]):
+            found.add(str(path.relative_to(repo))+'::'+match.group(1))
 assert found==set(WRITERS),{'unmapped':sorted(found-set(WRITERS)),'stale':sorted(set(WRITERS)-found)}
 
 def snapshot(home):
