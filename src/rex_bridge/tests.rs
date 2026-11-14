@@ -109,6 +109,7 @@ struct Scripted<'w> {
     /// every 20 ms meanwhile, as a real stream wakes at its idle time.
     hold: Option<MuxEvent>,
     replies: &'w Mutex<Vec<(String, Value)>>,
+    waits: &'w Mutex<Vec<(Instant, Duration)>>,
 }
 
 impl Stream for Scripted<'_> {
@@ -117,6 +118,7 @@ impl Stream for Scripted<'_> {
     }
 
     fn next(&mut self, within: Duration) -> Next {
+        self.waits.lock().unwrap().push((Instant::now(), within));
         if let Some(next) = self.nexts.pop_front() {
             return next;
         }
@@ -153,6 +155,8 @@ struct Script {
     /// When each dial came, refused or not.
     dialed: Mutex<Vec<Instant>>,
     replies: Mutex<Vec<(String, Value)>>,
+    /// When each `next` came, and how long the bridge let it wait.
+    waits: Mutex<Vec<(Instant, Duration)>>,
 }
 
 impl Script {
@@ -166,6 +170,28 @@ impl Script {
             opened: AtomicU64::new(0),
             dialed: Mutex::new(Vec::new()),
             replies: Mutex::new(Vec::new()),
+            waits: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Waits for the bridge to first let a `next` wait longer than a batch
+    /// is held for, 250 ms, as it does only after a flush. Returns when the
+    /// `next` before that one came, which is before the flush began, or
+    /// `None` if the bridge has not waited so long 10 s on.
+    fn before_first_flush(&self) -> Option<Instant> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let wait = self
+                .waits
+                .lock()
+                .unwrap()
+                .windows(2)
+                .find(|waits| waits[1].1 > Duration::from_millis(250))
+                .map(|waits| waits[0].0);
+            if wait.is_some() || Instant::now() >= deadline {
+                return wait;
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 }
@@ -187,6 +213,7 @@ impl Server for Script {
             stop,
             hold,
             replies: &self.replies,
+            waits: &self.waits,
         }))
     }
 }
@@ -507,17 +534,25 @@ fn sigterm_stops_the_bridge_between_flushes() {
         ),
         (None, Vec::new(), None),
     ]);
-    let started = Instant::now();
-    let spawned = std::thread::scope(|scope| {
-        scope.spawn(|| {
-            std::thread::sleep(Duration::from_millis(300));
+    let (returned, on_return) = std::sync::mpsc::channel();
+    let (spawned, stopped) = std::thread::scope(|scope| {
+        let script = &script;
+        let signal = scope.spawn(move || {
+            script.before_first_flush();
             // SAFETY: the bridge's handler is installed, so the signal stops
             // it rather than this process.
             unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
+            let stopped = on_return.recv_timeout(Duration::from_secs(10)).is_ok();
+            if !stopped {
+                stop.wake();
+            }
+            stopped
         });
-        bridged(&state, &script, stop)
+        let spawned = bridged(&state, script, stop);
+        let _ = returned.send(());
+        (spawned, signal.join().unwrap())
     });
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(stopped, "the bridge ran on 10 s after SIGTERM");
     assert_eq!(script.opened.load(Ordering::Relaxed), 1);
     assert_eq!(spawned, ["session:s", "session:t", "session:s"]);
     assert_eq!(
@@ -815,23 +850,25 @@ fn a_space_whose_events_a_flush_cannot_queue_owes_one_resync_until_they_can_be()
         let (held, waited, queued) = std::thread::scope(|threads| {
             let held = threads.spawn(|| {
                 let _stop = StopOnDrop(&stop);
-                std::thread::sleep(Duration::from_millis(300));
+                let flushed = script.before_first_flush();
                 let held = state.queued("session:s").is_empty();
                 unblock(&state);
-                std::thread::sleep(Duration::from_millis(150));
-                let waited = state.queued("session:s").is_empty();
-                let deadline = Instant::now() + Duration::from_secs(3);
+                let deadline = Instant::now() + Duration::from_secs(10);
                 let both = || ["session:s", "session:t"].map(|space| state.queued(space));
                 while both().iter().any(Vec::is_empty) && Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(20));
                 }
+                let waited = flushed.map(|before| before.elapsed());
                 (held, waited, both())
             });
             bridged(&state, &script, &stop);
             held.join().unwrap()
         });
         assert!(held, "{case}: queued while blocked");
-        assert!(waited, "{case}: tried again before a second passed");
+        assert!(
+            waited.is_some_and(|waited| waited >= Duration::from_secs(1)),
+            "{case}: tried again before a second passed: {waited:?}"
+        );
         assert_eq!(
             queued,
             [[resync("session:s")], [resync("session:t")]],
