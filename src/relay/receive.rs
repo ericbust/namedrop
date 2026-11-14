@@ -126,7 +126,7 @@ impl Receiver {
         }
         let started = (self.start)(&host_id).and_then(|mut command| {
             if let Some(host) = caller_host(&perform.principal) {
-                command.args(["--caller-host", host]);
+                command.arg(format!("--caller-host={host}"));
             }
             command
                 .stdin(Stdio::piped())

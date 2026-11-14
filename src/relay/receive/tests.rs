@@ -293,8 +293,8 @@ fn finishing_waits_for_every_accept_still_running() {
     assert!(!receiver.busy());
 }
 
-/// The accept of a Tailscale caller gets its device as `--caller-host`,
-/// and a peer caller's accept gets none.
+/// The accept of a Tailscale caller gets its device as one
+/// `--caller-host=<node>` argument, and a peer caller's accept gets none.
 #[test]
 fn the_accept_of_a_tailscale_caller_names_its_device() {
     const ARGS: &str = r#"cat >/dev/null; printf '{"host_id":"host-b","can_reply":true,"result":{"id":"m1","to":"bob","status":"accepted","reason":"%s"},"outbox":[],"more":false}' "$0 $1""#;
@@ -305,7 +305,7 @@ fn the_accept_of_a_tailscale_caller_names_its_device() {
     for (principal, args) in [
         (
             json!({"kind": "tailscale", "transport": "tailscale", "node": "studio"}),
-            "--caller-host studio",
+            "--caller-host=studio ",
         ),
         (
             json!({"kind": "peer", "transport": "unix", "uid": uid}),
