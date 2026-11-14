@@ -1264,8 +1264,10 @@ impl RelayStore {
             params![host_id],
             |row| row.get(0),
         )?;
+        // Read on from `after` in `seq` order and stop at the page's end.
+        // By the `host_id` index, SQLite would first sort every later reply.
         let mut statement = self.connection.prepare(
-            "SELECT seq, re, thread, sender, message_id, text FROM outbox
+            "SELECT seq, re, thread, sender, message_id, text FROM outbox NOT INDEXED
              WHERE host_id = ?1 AND seq > ?2 ORDER BY seq",
         )?;
         let replies = statement.query_map(params![host_id, after], |row| {
@@ -1282,9 +1284,9 @@ impl RelayStore {
         for reply in replies {
             let reply = reply?;
             let size = serde_json::to_vec(&reply).map_or(usize::MAX, |encoded| encoded.len() + 1);
-            if more || used + size > limit {
+            if used + size > limit {
                 more = true;
-                continue;
+                break;
             }
             used += size;
             page.push(reply);
