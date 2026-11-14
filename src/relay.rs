@@ -75,14 +75,18 @@ pub fn accept(
 
 /// `namedrop relay worker --host <label>`: the relay's worker for `label`,
 /// holding `<state>/relay/<sha256(endpoint, label)>.lock`, so a second one
-/// exits at once.
+/// exits at once. Between rounds it runs the runtime an update selected in
+/// its place, as the bridge does, so it never works on for a day with the
+/// old image.
 pub fn run_worker(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) {
+    let children = Children::default();
     hold(state, endpoint, label, &mut || {
         worker::work(&mut worker::Run {
             state,
             endpoint,
             label,
             pause: &mut |within| {
+                children.reexec_if_replaced(state);
                 wait_for_new(
                     state,
                     endpoint,
@@ -92,9 +96,47 @@ pub fn run_worker(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) {
                 );
                 true
             },
-            wake: &mut |space| wake(state, endpoint, space),
+            wake: &mut |space| {
+                wake_reaped(state, endpoint, space, &mut |child| children.keep(child))
+            },
         });
     });
+}
+
+/// The mailbox workers one relay worker started. It reaps them as they
+/// exit, and it runs a new image only once none runs, because `exec` would
+/// leave them as zombies of an image that does not know them.
+#[derive(Default)]
+struct Children(std::cell::RefCell<Vec<std::process::Child>>);
+
+impl Children {
+    fn keep(&self, child: std::process::Child) {
+        self.0.borrow_mut().push(child);
+    }
+
+    /// Whether a child still runs, after reaping each one that exited.
+    fn running(&self) -> bool {
+        let mut children = self.0.borrow_mut();
+        children.retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_))));
+        !children.is_empty()
+    }
+
+    /// Under the command gate, the runtime an update selected, as this
+    /// process's own command, once no child runs.
+    fn replacement(&self, state: &Path) -> Option<(Option<std::fs::File>, std::process::Command)> {
+        if self.running() {
+            return None;
+        }
+        let gate = crate::runtime_command_guard(state, None).ok()?;
+        crate::installed_runtime::replacement(state).map(|command| (gate, command))
+    }
+
+    fn reexec_if_replaced(&self, state: &Path) {
+        use std::os::unix::process::CommandExt;
+        if let Some((_gate, mut command)) = self.replacement(state) {
+            let _ = command.exec();
+        }
+    }
 }
 
 /// Runs `work` while holding the worker's lock for `label`, and again while
@@ -171,18 +213,29 @@ fn worker_lock(
 /// Queues a mailbox wake for `space` and starts its worker, which is reaped
 /// when it exits, so a long-lived starter keeps no zombie.
 pub(crate) fn wake(state: &Path, endpoint: &crate::mux::Endpoint, space: &crate::SpaceId) {
+    wake_reaped(state, endpoint, space, &mut receive::reap_in_thread);
+}
+
+/// Queues a mailbox wake for `space` and starts its worker, which `reap`
+/// reaps.
+fn wake_reaped(
+    state: &Path,
+    endpoint: &crate::mux::Endpoint,
+    space: &crate::SpaceId,
+    reap: &mut dyn FnMut(std::process::Child),
+) {
     #[cfg(test)]
     {
-        let _ = (state, endpoint);
+        let _ = (state, endpoint, reap);
         tests_support::WOKEN.with(|woken| woken.borrow_mut().push(space.as_str().to_owned()));
     }
     #[cfg(not(test))]
     {
         use crate::status_queue::{self, Marker};
         if status_queue::enqueue(state, endpoint, space, &Marker::Wake).is_ok()
-            && let Ok(mut worker) = status_queue::spawn_worker(state, endpoint, space)
+            && let Ok(worker) = status_queue::spawn_worker(state, endpoint, space)
         {
-            std::thread::spawn(move || worker.wait());
+            reap(worker);
         }
     }
 }

@@ -531,3 +531,87 @@ fn a_text_is_cut_only_past_its_limit_as_encoded() {
     assert!(cut_wide.ends_with(CUT_NOTICE));
     assert!(encoded(&cut_wide) <= 100);
 }
+
+/// A relay worker runs the runtime an update selected in its place only
+/// once every mailbox worker it started has exited, and it reaps them.
+#[test]
+fn a_worker_is_replaced_only_once_its_children_have_exited() {
+    let space = Space::new(REX);
+    let runtime = space.state.join("runtime");
+    fs::create_dir_all(runtime.join("current")).unwrap();
+    std::os::unix::fs::symlink("/usr/bin/true", runtime.join("current/namedrop")).unwrap();
+    fs::write(runtime.join("namedrop"), "#!/bin/sh\n").unwrap();
+    let children = super::Children::default();
+    assert!(
+        children.replacement(&space.state).is_some(),
+        "an update selected another runtime"
+    );
+    children.keep(
+        std::process::Command::new("sleep")
+            .arg("0.3")
+            .spawn()
+            .unwrap(),
+    );
+    assert!(children.replacement(&space.state).is_none(), "a child runs");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while children.replacement(&space.state).is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the child was never reaped"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(!children.running());
+}
+
+/// The test image a relay worker of `a_working_worker_runs_the_selected_runtime_in_its_place`
+/// runs in.
+const IMAGE: &str = "NAMEDROP_RELAY_TEST_WORKER_STATE";
+
+/// A relay worker with an item it cannot send yet waits between rounds,
+/// and there it runs the runtime an update selected in its place.
+#[test]
+fn a_working_worker_runs_the_selected_runtime_in_its_place() {
+    if let Some(state) = std::env::var_os(IMAGE) {
+        super::run_worker(
+            &PathBuf::from(state),
+            &crate::mux::Endpoint::parse(REX),
+            "devbox",
+        );
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let space = Space::new(REX);
+    super::tests_support::queue(&super::tests_support::store(&space.state), "devbox", REX);
+    let runtime = space.state.join("runtime");
+    fs::create_dir_all(runtime.join("current")).unwrap();
+    std::os::unix::fs::symlink("/usr/bin/true", runtime.join("current/namedrop")).unwrap();
+    let launcher = runtime.join("namedrop");
+    fs::write(
+        &launcher,
+        "#!/bin/sh\necho \"$@\" > \"$(dirname \"$0\")/replaced\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut image = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "relay::tests::a_working_worker_runs_the_selected_runtime_in_its_place",
+            "--exact",
+            "--test-threads=1",
+        ])
+        .env(IMAGE, &space.state)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while image.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = image.kill();
+    let _ = image.wait();
+    let replaced = fs::read_to_string(runtime.join("replaced")).unwrap_or_default();
+    assert!(
+        replaced.contains("a_working_worker_runs_the_selected_runtime_in_its_place"),
+        "the worker ran the launcher with its own arguments: {replaced:?}"
+    );
+}
