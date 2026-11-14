@@ -1488,3 +1488,43 @@ fn a_retry_after_a_partial_commit_replays_the_message_and_its_notice() {
         assert_eq!(outcome(&b.call(&item)), (Status::Duplicate, None));
     }
 }
+
+/// A capture whose cursor could not be written counts the reply B could
+/// not keep once, when it is retried, and a capture whose snapshot is
+/// behind the cursor captures nothing again.
+#[test]
+fn a_capture_retried_after_its_cursor_failed_counts_a_discard_once() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "please answer"));
+    let relayed = b.rows(
+        "namedrop.sqlite3",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
+    )[0][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let relay = Connection::open(b.0.join("relay.sqlite3")).unwrap();
+    relay
+        .execute_batch(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10000)
+         INSERT INTO outbox(host_id,re,thread,sender,message_id,text,created_at_ms)
+         SELECT 'host-a','m1','t1','bob','full-' || i,'x',9999999999999 FROM n;
+         CREATE TRIGGER refuse_capture BEFORE INSERT ON capture
+         BEGIN SELECT RAISE(ABORT,'no cursor'); END;",
+        )
+        .unwrap();
+    bob_answers(&b, &relayed, "@alice@laptop one too many");
+    let endpoint = Endpoint::parse(REX);
+    assert!(super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).is_err());
+    relay.execute_batch("DROP TRIGGER refuse_capture").unwrap();
+    super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    let counts = b.rows("relay.sqlite3", "SELECT re,discarded FROM outbox_lost");
+    assert_eq!(counts, [[json!("m1"), json!(1)]]);
+    let store = RelayStore::open(&b.0, crate::relay::now_ms()).unwrap();
+    let cursor = store.capture_cursor(&endpoint.key).unwrap();
+    store
+        .captured(&endpoint.key, cursor, || {
+            panic!("a stale capture snapshot must not replay a committed message")
+        })
+        .unwrap();
+}

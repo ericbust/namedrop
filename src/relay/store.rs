@@ -629,30 +629,43 @@ impl RelayStore {
             .unwrap_or(0))
     }
 
-    /// Passes `endpoint`'s capture cursor to `rowid`, and counts with the
-    /// expired replies, in the same transaction, one reply for each remote
-    /// sender of `unkept`, whose reply from that message B could not keep.
+    /// Commits a message's relay writes, loss counts, and capture cursor together.
     pub(crate) fn captured(
         &self,
         endpoint: &str,
         rowid: i64,
-        unkept: &[String],
-    ) -> Result<(), StoreError> {
-        let transaction = self.connection.unchecked_transaction()?;
-        for display in unkept {
-            transaction.execute(
-                "INSERT INTO outbox_expired (sender, count) VALUES (?1, 1)
-                 ON CONFLICT (sender) DO UPDATE SET count = count + 1",
-                params![display],
-            )?;
+        capture: impl FnOnce() -> Result<(Vec<String>, Vec<String>), String>,
+    ) -> Result<Vec<String>, String> {
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(|error| error.to_string())?;
+        if self
+            .capture_cursor(endpoint)
+            .map_err(|error| error.to_string())?
+            >= rowid
+        {
+            return Ok(Vec::new());
         }
-        transaction.execute(
-            "INSERT INTO capture (endpoint, rowid) VALUES (?1, ?2)
+        let (queued, unkept) = capture()?;
+        for display in unkept {
+            transaction
+                .execute(
+                    "INSERT INTO outbox_expired (sender, count) VALUES (?1, 1)
+                 ON CONFLICT (sender) DO UPDATE SET count = count + 1",
+                    params![display],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        transaction
+            .execute(
+                "INSERT INTO capture (endpoint, rowid) VALUES (?1, ?2)
              ON CONFLICT (endpoint) DO UPDATE SET rowid = MAX(rowid, excluded.rowid)",
-            params![endpoint, rowid],
-        )?;
-        transaction.commit()?;
-        Ok(())
+                params![endpoint, rowid],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(queued)
     }
 
     /// A's thread and `host_id` for B's `local_thread` in `space`.

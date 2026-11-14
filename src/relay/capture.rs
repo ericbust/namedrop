@@ -38,13 +38,9 @@ pub(crate) fn capture(
     let mut labels: Vec<String> = Vec::new();
     let mut failure = None;
     for row in &rows {
-        let captured =
-            capture_one(&relay, &mut main, endpoint, row, now).and_then(|(queued, unkept)| {
-                relay
-                    .captured(&endpoint.key, row.rowid, &unkept)
-                    .map(|()| queued)
-                    .map_err(|error| error.to_string())
-            });
+        let captured = relay.captured(&endpoint.key, row.rowid, || {
+            capture_one(&relay, &mut main, endpoint, row, now)
+        });
         match captured {
             Ok(queued) => {
                 for label in queued {
