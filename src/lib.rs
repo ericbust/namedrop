@@ -37,6 +37,7 @@ mod pane_effects;
 mod pointer;
 #[doc(hidden)]
 pub mod reminder;
+pub mod rex_bridge;
 pub use reminder::execute_reminder_operation;
 mod persona;
 mod ports;
@@ -106,9 +107,9 @@ pub use integration::{
 };
 pub(crate) use integration::{collaboration_executable, tool_environment};
 pub use lifecycle::{
-    DiscoveredPane, DiscoveredWorktree, LifecycleRuntime, discover_worktree,
-    discover_worktree_for_workspace, execute_lifecycle_operation, locate_agent_session_pane,
-    open_popup, pane_workspace, reconcile_discovered_panes,
+    DiscoveredPane, DiscoveredWorktree, EventError, LifecycleRuntime, discover_worktree,
+    discover_worktree_for_workspace, execute_lifecycle_operation, handle_mux_event,
+    locate_agent_session_pane, open_popup, pane_workspace, reconcile_discovered_panes,
 };
 pub use message::{
     BodyMention, OperatorSendError, OperatorSendErrorKind, ParsedMessage, RecipientOutlook,

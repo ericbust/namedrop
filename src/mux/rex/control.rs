@@ -378,6 +378,154 @@ impl<'a, S: Timed> Connection<'a, S> {
     }
 }
 
+/// The bridge's long wait for events, which sleeps in `poll(2)` until the
+/// socket or a wake pipe is readable, rather than in short read steps.
+impl<S: Timed + std::os::fd::AsFd> Connection<'_, S> {
+    /// The next event, or `None` once `deadline` passes. A readable `wake`
+    /// cancels the wait. Each message may use the call's whole allowance,
+    /// because a stream that lasts for days reads far more than one call.
+    pub(super) fn wait_event(
+        &mut self,
+        deadline: Option<Instant>,
+        wake: std::os::fd::BorrowedFd<'_>,
+    ) -> Result<Option<Event>, Fault> {
+        let waited = self.try_wait_event(deadline, wake);
+        self.settle(waited)
+    }
+
+    fn try_wait_event(
+        &mut self,
+        deadline: Option<Instant>,
+        wake: std::os::fd::BorrowedFd<'_>,
+    ) -> Result<Option<Event>, Fault> {
+        // Bytes read earlier may hold a whole frame, which `poll(2)` cannot
+        // see. Once a read takes no message, what is left is part of one.
+        let mut whole = self.socket.buffered();
+        let mut ran = false;
+        loop {
+            if let Some(event) = self.events.pop_front() {
+                return Ok(Some(event));
+            }
+            self.intact()?;
+            if self.limits.cancelled.load(Ordering::Relaxed) {
+                return Err(Fault::Cancelled);
+            }
+            let left = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            if ran && left.is_some_and(|left| left.is_zero()) {
+                return Ok(None);
+            }
+            ran = true;
+            if !whole {
+                match readable(self.socket.stream().as_fd(), wake, left)? {
+                    Readable::Socket => {}
+                    Readable::Wake => return Err(Fault::Cancelled),
+                    Readable::Neither => return Ok(None),
+                }
+            }
+            self.socket.set_allowance(MAX_CALL_BYTES);
+            self.socket.stream().read_within(CANCEL_POLL);
+            let received = self.socket.try_recv();
+            whole = matches!(received, Ok(Some(_))) && self.socket.buffered();
+            match received {
+                Ok(Some(Message::Text(text))) => {
+                    let message: Value = serde_json::from_str(&text).map_err(|_| {
+                        Fault::Closed("the server sent a message that is not JSON".into())
+                    })?;
+                    if message["type"] == "event" {
+                        return parse_event(&message).map(Some);
+                    }
+                }
+                Ok(Some(Message::Binary(_))) => {
+                    return Err(Fault::Closed("the server sent a binary message".into()));
+                }
+                Ok(None) => {}
+                Err(WsError::Io(error))
+                    if timed_out(&error) || error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(fault(error, CANCEL_POLL)),
+            }
+        }
+    }
+
+    /// How many frames the server has sent on this connection.
+    pub(super) fn frames(&self) -> u64 {
+        self.socket.frames()
+    }
+
+    /// Sends a ping within one request's budget.
+    pub(super) fn ping(&mut self) -> Result<(), Fault> {
+        let pinged = self.try_ping();
+        self.settle(pinged)
+    }
+
+    fn try_ping(&mut self) -> Result<(), Fault> {
+        let budget = request_budget(&self.limits, self.timeout_limit)?;
+        self.intact()?;
+        self.socket
+            .queue_ping()
+            .map_err(|error| fault(error, budget.timeout))?;
+        self.poll(
+            Some(Instant::now() + budget.timeout),
+            budget.timeout,
+            Way::Write,
+            |socket| socket.flush().map(|done| done.then_some(())),
+        )?
+        .ok_or(Fault::Timeout(budget.timeout))
+    }
+}
+
+enum Readable {
+    Socket,
+    Wake,
+    Neither,
+}
+
+/// One `poll(2)` of `socket` and `wake`, for `within` or with no end. The
+/// wake wins when both are readable.
+fn readable(
+    socket: std::os::fd::BorrowedFd<'_>,
+    wake: std::os::fd::BorrowedFd<'_>,
+    within: Option<Duration>,
+) -> Result<Readable, Fault> {
+    use std::os::fd::AsRawFd;
+    let timeout = within.map_or(-1, |within| {
+        libc::c_int::try_from(
+            within
+                .as_millis()
+                .saturating_add(u128::from(within.subsec_nanos() % 1_000_000 != 0)),
+        )
+        .unwrap_or(libc::c_int::MAX)
+    });
+    let mut fds = [
+        libc::pollfd {
+            fd: socket.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: wake.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    // SAFETY: `fds` is a live array of two pollfd, and both descriptors are
+    // borrowed for the call.
+    let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout) };
+    if ready < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            return Ok(Readable::Neither);
+        }
+        return Err(Fault::Closed(format!("could not wait for Rex: {error}")));
+    }
+    Ok(if fds[1].revents != 0 {
+        Readable::Wake
+    } else if fds[0].revents != 0 {
+        Readable::Socket
+    } else {
+        Readable::Neither
+    })
+}
+
 #[derive(Clone, Copy)]
 enum Way {
     Read,

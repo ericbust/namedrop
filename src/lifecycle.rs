@@ -215,7 +215,7 @@ where
     }
     let namespace = discovered.namespace(runtime.session_socket_id);
     let (actor_kind, actor_id) = if operation.starts_with("event.") || operation == "reconcile" {
-        (ActorKind::Plugin, "herdr")
+        (ActorKind::Plugin, multiplexer_word(runtime))
     } else {
         (ActorKind::Human, "local-human")
     };
@@ -802,10 +802,80 @@ where
         }
         "event.pane-lifecycle" | "event.agent-status-changed" => {
             let event = crate::mux::herdr::decode_operation_input(operation, input)?;
-            handle_event(&mut store, &attribution, runtime, &event)
+            handle_event(&mut store, &attribution, runtime, &event).map_err(String::from)
         }
         _ => Err(format!("{operation} is not a lifecycle operation")),
     }
+}
+
+/// The word Namedrop records as the actor of the changes a multiplexer's
+/// events make: "herdr" or "rex", by the runtime's endpoint.
+fn multiplexer_word<M, C, I>(runtime: &LifecycleRuntime<'_, M, C, I>) -> &'static str {
+    crate::mux::Endpoint::parse(runtime.session_socket_id)
+        .kind
+        .word()
+}
+
+/// How the status worker treats a failure of `handle_mux_event`. Decided
+/// from the `MuxError`, never from the text.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EventError {
+    /// Gone, or a rejected input. Retrying cannot change it, so the marker
+    /// is dropped.
+    Definitive(String),
+    /// Timeout, unavailable, storage. The marker stays and the worker backs
+    /// off.
+    Retry(String),
+}
+
+impl EventError {
+    fn mux(error: MuxError) -> Self {
+        match error {
+            MuxError::Gone(..) => Self::Definitive(error.to_string()),
+            MuxError::Timeout(_)
+            | MuxError::TooLarge(_)
+            | MuxError::Unavailable(_)
+            | MuxError::Protocol(_) => Self::Retry(error.to_string()),
+        }
+    }
+
+    fn retry(error: impl ToString) -> Self {
+        Self::Retry(error.to_string())
+    }
+}
+
+impl std::fmt::Display for EventError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Self::Definitive(text) | Self::Retry(text)) = self;
+        formatter.write_str(text)
+    }
+}
+
+impl From<EventError> for String {
+    fn from(error: EventError) -> Self {
+        error.to_string()
+    }
+}
+
+/// Runs the handler for one multiplexer event. The status worker's Rex
+/// markers enter here, and the changes they make are recorded as the
+/// endpoint's multiplexer's.
+pub fn handle_mux_event<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    event: &MuxEvent,
+) -> Result<Value, EventError>
+where
+    M: crate::mux::Mux,
+    C: Clock,
+    I: IdGenerator,
+{
+    let attribution = MutationAttribution::new(
+        ActorKind::Plugin,
+        multiplexer_word(runtime),
+        runtime.clock.now_unix_ms(),
+    );
+    let mut store = StateStore::open(runtime.state_directory).map_err(EventError::retry)?;
+    handle_event(&mut store, &attribution, runtime, event)
 }
 
 /// Runs the handler for one multiplexer event. Each handler rediscovers the
@@ -815,7 +885,7 @@ fn handle_event<M, C, I>(
     attribution: &MutationAttribution,
     runtime: &LifecycleRuntime<'_, M, C, I>,
     event: &MuxEvent,
-) -> Result<Value, String>
+) -> Result<Value, EventError>
 where
     M: crate::mux::Mux,
     C: Clock,
@@ -832,21 +902,112 @@ where
         MuxEvent::AgentStatusChanged(pane) => {
             agent_status_changed(store, attribution, runtime, pane, false)
         }
+        MuxEvent::Resync(space) => resync(store, attribution, runtime, space),
+        MuxEvent::SpaceClosed(space) => space_closed(store, attribution, runtime, space),
     }
+}
+
+/// Events for `space` may have been missed. A space the multiplexer no
+/// longer has is closed. Otherwise the space is reconciled as a command's
+/// `reconcile` would, except that it is no restart: an attempt whose session
+/// still runs keeps going.
+fn resync<M, C, I>(
+    store: &mut StateStore,
+    attribution: &MutationAttribution,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    space: &crate::SpaceId,
+) -> Result<Value, EventError>
+where
+    M: crate::mux::Mux,
+    C: Clock,
+    I: IdGenerator,
+{
+    let discovered = match survey_space(runtime.mux, space.as_str()) {
+        Err(MuxError::Gone(Gone::Space, _)) => {
+            return space_closed(store, attribution, runtime, space);
+        }
+        surveyed => surveyed.map_err(EventError::mux)?,
+    };
+    let namespace = discovered.namespace(runtime.session_socket_id);
+    check_activated(store, &namespace)?;
+    let event_runtime = LifecycleRuntime {
+        workspace_id: Some(space.as_str()),
+        ..*runtime
+    };
+    let reconciliation = reconcile_worktree(
+        store,
+        &namespace,
+        &discovered,
+        &event_runtime,
+        attribution,
+        false,
+    )
+    .map_err(EventError::Retry)?;
+    Ok(json!({
+        "type": "space_resynced",
+        "handled": true,
+        "space_id": space.as_str(),
+        "reconciliation_epoch": reconciliation.epoch,
+        "drain": reconciliation.drain
+    }))
+}
+
+/// The space is gone for good. Every pane address in it is cancelled and
+/// removed, its reminders fail, and Namedrop is no longer activated for it,
+/// so nothing waits on it again. Running it twice changes nothing more.
+fn space_closed<M, C, I>(
+    store: &mut StateStore,
+    attribution: &MutationAttribution,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    space: &crate::SpaceId,
+) -> Result<Value, EventError> {
+    let namespace = StateNamespace::for_space(runtime.session_socket_id, space.as_str());
+    let removed = store
+        .transaction(|transaction| {
+            let Some(state) = transaction.worktree_state(&namespace)? else {
+                return Ok(Vec::new());
+            };
+            for binding in transaction.active_pane_bindings(&namespace)? {
+                transaction.end_moves_into(
+                    runtime.session_socket_id,
+                    &binding.pane_id,
+                    attribution,
+                )?;
+            }
+            let mut removed = Vec::new();
+            // The person's own address holds no alias, so the list never
+            // has it.
+            for address in transaction.list_pane_addresses(&namespace)? {
+                transaction.cancel_and_remove_pane_address(&namespace, &address.id, attribution)?;
+                removed.push(address.id);
+            }
+            transaction.fail_reminder_workspace(&namespace)?;
+            if !state.deactivated {
+                transaction.deactivate_worktree(&namespace, attribution)?;
+            }
+            Ok(removed)
+        })
+        .map_err(EventError::retry)?;
+    Ok(json!({
+        "type": "space_closed",
+        "handled": true,
+        "space_id": space.as_str(),
+        "removed_address_ids": removed
+    }))
 }
 
 fn pane_appeared<M, C, I>(
     store: &mut StateStore,
     runtime: &LifecycleRuntime<'_, M, C, I>,
     pane: &PaneSlot,
-) -> Result<Value, String>
+) -> Result<Value, EventError>
 where
     M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
     let workspace_id = pane.space.as_str();
-    if let Ok(event_worktree) = discover_reminder_workspace(
+    if let Ok(event_worktree) = discover_event_space(
         runtime.state_directory,
         &StateNamespace::for_space(runtime.session_socket_id, workspace_id),
         runtime.mux,
@@ -867,14 +1028,14 @@ fn pane_closed<M, C, I>(
     attribution: &MutationAttribution,
     runtime: &LifecycleRuntime<'_, M, C, I>,
     pane: &PaneSlot,
-) -> Result<Value, String>
+) -> Result<Value, EventError>
 where
     M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
     let (workspace_id, pane_id) = (pane.space.as_str(), pane.pane.as_str());
-    let event_worktree = discover_reminder_workspace(
+    let event_worktree = discover_event_space(
         runtime.state_directory,
         &StateNamespace::for_space(runtime.session_socket_id, workspace_id),
         runtime.mux,
@@ -884,8 +1045,8 @@ where
         .transaction(|transaction| {
             transaction.end_moves_into(runtime.session_socket_id, pane_id, attribution)
         })
-        .map_err(|error| error.to_string())?;
-    require_activated(store, &event_namespace)?;
+        .map_err(EventError::retry)?;
+    check_activated(store, &event_namespace)?;
     let removed_address_id = store
         .transaction(|transaction| {
             let binding = transaction
@@ -902,12 +1063,12 @@ where
             }
             Ok(None)
         })
-        .map_err(|error| error.to_string())?;
+        .map_err(EventError::retry)?;
     let event_runtime = LifecycleRuntime {
         workspace_id: Some(workspace_id),
         ..*runtime
     };
-    let refreshed = discover_reminder_workspace(
+    let refreshed = discover_event_space(
         runtime.state_directory,
         &StateNamespace::for_space(runtime.session_socket_id, workspace_id),
         runtime.mux,
@@ -925,8 +1086,8 @@ where
             )?;
             Ok(())
         })
-        .map_err(|error| error.to_string())?;
-    let drain = crate::drain_mailboxes(&event_runtime)?;
+        .map_err(EventError::retry)?;
+    let drain = crate::drain_mailboxes(&event_runtime).map_err(EventError::Retry)?;
     Ok(json!({
         "type": "pane_unavailable",
         "handled": true,
@@ -941,20 +1102,20 @@ fn tab_closed<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
     space: &crate::SpaceId,
     tab: &TabId,
-) -> Result<Value, String>
+) -> Result<Value, EventError>
 where
     M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
     let workspace_id = space.as_str();
-    let event_worktree = discover_reminder_workspace(
+    let event_worktree = discover_event_space(
         runtime.state_directory,
         &StateNamespace::for_space(runtime.session_socket_id, workspace_id),
         runtime.mux,
     )?;
     let event_namespace = event_worktree.namespace(runtime.session_socket_id);
-    require_activated(store, &event_namespace)?;
+    check_activated(store, &event_namespace)?;
     let removed_bindings = store
         .transaction(|transaction| {
             let addresses = transaction.list_pane_addresses(&event_namespace)?;
@@ -983,18 +1144,18 @@ where
             }
             Ok(removed)
         })
-        .map_err(|error| error.to_string())?;
+        .map_err(EventError::retry)?;
     let event_runtime = LifecycleRuntime {
         workspace_id: Some(workspace_id),
         ..*runtime
     };
-    let refreshed = discover_reminder_workspace(
+    let refreshed = discover_event_space(
         runtime.state_directory,
         &StateNamespace::for_space(runtime.session_socket_id, workspace_id),
         runtime.mux,
     )?;
     let _ = reconcile_managed_tab_labels(store, &event_namespace, &refreshed, &event_runtime);
-    let drain = crate::drain_mailboxes(&event_runtime)?;
+    let drain = crate::drain_mailboxes(&event_runtime).map_err(EventError::Retry)?;
     Ok(json!({
         "type": "tab_unavailable",
         "handled": true,
@@ -1013,25 +1174,24 @@ fn pane_moved<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
     from: &PaneSlot,
     to: &PaneSlot,
-) -> Result<Value, String>
+) -> Result<Value, EventError>
 where
     M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
     let previous_workspace_id = from.space.as_str();
-    let destination_tab = to
-        .tab
-        .as_ref()
-        .ok_or_else(|| "a moved pane event names no destination tab".to_owned())?;
-    let source = discover_reminder_workspace(
+    let destination_tab = to.tab.as_ref().ok_or_else(|| {
+        EventError::Definitive("a moved pane event names no destination tab".to_owned())
+    })?;
+    let source = discover_event_space(
         runtime.state_directory,
         &StateNamespace::for_space(runtime.session_socket_id, previous_workspace_id),
         runtime.mux,
     )?;
     let source_namespace = source.namespace(runtime.session_socket_id);
-    require_activated(store, &source_namespace)?;
-    let destination = discover_reminder_workspace(
+    check_activated(store, &source_namespace)?;
+    let destination = discover_event_space(
         runtime.state_directory,
         &StateNamespace::for_space(runtime.session_socket_id, to.space.as_str()),
         runtime.mux,
@@ -1057,12 +1217,12 @@ where
             }
             Ok(())
         })
-        .map_err(|error| error.to_string())?;
+        .map_err(EventError::retry)?;
     let event_runtime = LifecycleRuntime {
         workspace_id: Some(previous_workspace_id),
         ..*runtime
     };
-    let refreshed = discover_reminder_workspace(
+    let refreshed = discover_event_space(
         runtime.state_directory,
         &StateNamespace::for_space(runtime.session_socket_id, previous_workspace_id),
         runtime.mux,
@@ -1080,8 +1240,8 @@ where
             )?;
             Ok(())
         })
-        .map_err(|error| error.to_string())?;
-    let drain = crate::drain_mailboxes(&event_runtime)?;
+        .map_err(EventError::retry)?;
+    let drain = crate::drain_mailboxes(&event_runtime).map_err(EventError::Retry)?;
     Ok(json!({
         "type": "pane_moved",
         "handled": true,
@@ -1095,27 +1255,31 @@ fn agent_status_changed<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
     pane: &PaneSlot,
     detected: bool,
-) -> Result<Value, String>
+) -> Result<Value, EventError>
 where
     M: crate::mux::Mux,
     C: Clock,
     I: IdGenerator,
 {
     let (workspace_id, pane_id) = (pane.space.as_str(), pane.pane.as_str());
-    let event_worktree = discover_reminder_workspace(
+    let event_worktree = discover_event_space(
         runtime.state_directory,
         &StateNamespace::for_space(runtime.session_socket_id, workspace_id),
         runtime.mux,
     )?;
     let event_namespace = event_worktree.namespace(runtime.session_socket_id);
-    require_activated(store, &event_namespace)?;
+    check_activated(store, &event_namespace)?;
     if !event_worktree
         .panes
         .iter()
         .any(|pane| pane.pane_id == pane_id)
     {
-        return Err("status event pane is not live in its Worktree".to_owned());
+        return Err(EventError::Definitive(
+            "status event pane is not live in its Worktree".to_owned(),
+        ));
     }
+    let closed = closed_rex_blocks(store, &event_namespace, &event_worktree.panes, runtime.mux)
+        .map_err(EventError::retry)?;
     store
         .transaction(|transaction| {
             // More than one session may restart before the next status event.
@@ -1124,6 +1288,7 @@ where
                 transaction,
                 &event_namespace,
                 &event_worktree.panes,
+                &closed,
                 runtime.ids,
                 attribution,
             )?;
@@ -1137,17 +1302,17 @@ where
             )?;
             Ok(())
         })
-        .map_err(|error| error.to_string())?;
+        .map_err(EventError::retry)?;
     let event_runtime = LifecycleRuntime {
         workspace_id: Some(workspace_id),
         ..*runtime
     };
-    onboard_settled_integrations(&event_runtime, &event_worktree)?;
+    onboard_settled_integrations(&event_runtime, &event_worktree).map_err(EventError::Retry)?;
     // Only a detection means an agent newly appeared; status changes
     // arrive constantly and must never open a popup.
     let tour = detected
         .then(|| crate::tour::show_for_first_agent(&event_runtime, &event_worktree, Some(pane_id)));
-    let drain = crate::drain_mailboxes(&event_runtime)?;
+    let drain = crate::drain_mailboxes(&event_runtime).map_err(EventError::Retry)?;
     Ok(json!({
         "type": "pane_agent_status_changed",
         "handled": true,
@@ -1283,6 +1448,8 @@ where
     C: Clock,
     I: IdGenerator,
 {
+    let closed = closed_rex_blocks(store, namespace, &discovered.panes, runtime.mux)
+        .map_err(|error| error.to_string())?;
     store
         .transaction(|transaction| {
             reconcile_compacted_pane_bindings(
@@ -1295,6 +1462,7 @@ where
                 transaction,
                 namespace,
                 &discovered.panes,
+                &closed,
                 runtime.ids,
                 attribution,
             )?;
@@ -1581,13 +1749,19 @@ fn mutate_address(
 }
 
 fn require_activated(store: &mut StateStore, namespace: &StateNamespace) -> Result<(), String> {
+    check_activated(store, namespace).map_err(String::from)
+}
+
+fn check_activated(store: &mut StateStore, namespace: &StateNamespace) -> Result<(), EventError> {
     let state = store
         .transaction(|transaction| transaction.worktree_state(namespace))
-        .map_err(|error| error.to_string())?;
+        .map_err(EventError::retry)?;
     if state.is_some_and(|state| state.activated && !state.deactivated) {
         Ok(())
     } else {
-        Err("Namedrop is not activated for this space".to_owned())
+        Err(EventError::Definitive(
+            "Namedrop is not activated for this space".to_owned(),
+        ))
     }
 }
 
@@ -1806,14 +1980,24 @@ pub(crate) fn discover_reminder_workspace(
     namespace: &StateNamespace,
     mux: &impl MuxRead,
 ) -> Result<DiscoveredWorktree, String> {
+    discover_event_space(state, namespace, mux).map_err(String::from)
+}
+
+/// The space `namespace` names, as an event handler finds it. A space that
+/// is gone fails its reminders.
+fn discover_event_space(
+    state: &Path,
+    namespace: &StateNamespace,
+    mux: &impl MuxRead,
+) -> Result<DiscoveredWorktree, EventError> {
     let result = survey_space(mux, namespace.space_id.as_str());
     if let Err(MuxError::Gone(Gone::Space, _)) = result {
         StateStore::open(state)
-            .map_err(|error| error.to_string())?
+            .map_err(EventError::retry)?
             .transaction(|tx| tx.fail_reminder_workspace(namespace))
-            .map_err(|error| error.to_string())?;
+            .map_err(EventError::retry)?;
     }
-    result.map_err(|error| error.to_string())
+    result.map_err(EventError::mux)
 }
 
 pub fn discover_worktree_for_workspace(
@@ -1987,16 +2171,66 @@ pub(crate) fn terminal_safe_text(value: &str) -> String {
     safe
 }
 
+/// The bound blocks of a Rex `namespace` that `panes`, a survey of it,
+/// leaves out and that Rex, asked about each block alone, answers
+/// `not_found` for. A Rex block ID is never reused and a block never leaves
+/// its session, so such a block has closed for good. A listing alone proves
+/// nothing: it can leave out a live block, and a block bound after the
+/// survey was taken is missing from it too. So a block whose lookup gives
+/// any other answer, a timeout included, is not named, and its binding
+/// waits for the next survey. A block of another host must not answer
+/// `not_found` while that host is away, which the relay's step must keep
+/// true. Herdr reuses pane IDs, so none of its panes is named.
+fn closed_rex_blocks(
+    store: &mut StateStore,
+    namespace: &StateNamespace,
+    panes: &[DiscoveredPane],
+    mux: &(impl MuxRead + ?Sized),
+) -> Result<Vec<String>, StoreError> {
+    if crate::mux::Endpoint::parse(&namespace.session_socket_id).kind != crate::mux::MuxKind::Rex {
+        return Ok(Vec::new());
+    }
+    let bindings = store.transaction(|transaction| transaction.active_pane_bindings(namespace))?;
+    Ok(bindings
+        .into_iter()
+        .map(|binding| binding.pane_id)
+        .filter(|block| !panes.iter().any(|pane| &pane.pane_id == block))
+        .filter(|block| {
+            matches!(
+                mux.process(&PaneId::new(block)),
+                Err(MuxError::Gone(Gone::Pane, _))
+            )
+        })
+        .collect())
+}
+
+/// Refreshes each binding of `namespace` from `panes`, a survey of it. A
+/// bound pane the survey leaves out is unbound, except in a Rex space,
+/// where its name is retired, as its close would retire it, once `closed`
+/// names its block, and is otherwise left for the next survey.
 pub fn reconcile_discovered_panes(
     transaction: &mut StateTransaction<'_>,
     namespace: &StateNamespace,
     panes: &[DiscoveredPane],
+    closed: &[String],
     ids: &impl IdGenerator,
     attribution: &MutationAttribution,
 ) -> Result<(), StoreError> {
+    let rex =
+        crate::mux::Endpoint::parse(&namespace.session_socket_id).kind == crate::mux::MuxKind::Rex;
     for binding in transaction.active_pane_bindings(namespace)? {
         let mut matches = panes.iter().filter(|pane| pane.pane_id == binding.pane_id);
         let first = matches.next();
+        if first.is_none() && rex {
+            if closed.contains(&binding.pane_id) {
+                transaction.cancel_and_remove_pane_address(
+                    namespace,
+                    &binding.address_id,
+                    attribution,
+                )?;
+            }
+            continue;
+        }
         if first.is_none() {
             transaction.unbind_pane(namespace, &binding.address_id, attribution)?;
             continue;
@@ -2183,3 +2417,6 @@ fn reconcile_compacted_pane_bindings(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod event_tests;

@@ -75,17 +75,24 @@ pub fn command_guard(
 /// reason the selected one could not start.
 pub fn reexec_if_replaced(state: &std::path::Path) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
-    let launcher = state.join("runtime/namedrop");
-    if launcher.is_file()
-        && fs::canonicalize(state.join("runtime/current/namedrop")).ok()
-            != std::env::current_exe().and_then(fs::canonicalize).ok()
-    {
-        return Err(std::process::Command::new(launcher)
-            .args(std::env::args_os().skip(1))
-            .exec()
-            .to_string());
+    match replacement(state) {
+        Some(mut command) => Err(command.exec().to_string()),
+        None => Ok(()),
     }
-    Ok(())
+}
+
+/// The command that runs the selected runtime with this process's own
+/// arguments, once an update has selected another runtime.
+pub(crate) fn replacement(state: &std::path::Path) -> Option<std::process::Command> {
+    let launcher = state.join("runtime/namedrop");
+    (launcher.is_file()
+        && fs::canonicalize(state.join("runtime/current/namedrop")).ok()
+            != std::env::current_exe().and_then(fs::canonicalize).ok())
+    .then(|| {
+        let mut command = std::process::Command::new(launcher);
+        command.args(std::env::args_os().skip(1));
+        command
+    })
 }
 
 pub(crate) fn directory() -> Result<Option<PathBuf>, String> {

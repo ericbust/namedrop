@@ -847,12 +847,15 @@ run(state, endpoint):
 		stream = RexEvents::open(endpoint) (prove_local first), else wait on `away`, or exit 0 when it gives up
 		compare server.status host_id with <state>/rex/servers/<sha256(endpoint)>.json; write it only when none is stored
 		from Part 2 on, declare the relay: client.set_label "namedrop", client.keymap with namedrop.relay
-		unless the host_id changed: for each activated space of this endpoint in the store, pending.push(Resync(space))
+		unless the host_id changed: pending owes a Resync of every activated space, which the flush names
 		loop:
 			flush when 50 ms pass with no event, or 250 ms after the first pending change:
-				take runtime_command_guard, call runtime_reexec_if_replaced
+				take runtime_command_guard; write nothing if the lock's path no longer names its file
+				call runtime_reexec_if_replaced, handing the new image the workers not yet reaped
+				read the activated spaces of this endpoint in the store, and put each one's Resync first if owed
 				for each (space, marker) in pending: status_queue::enqueue
-				for each space with a new marker: status_queue::spawn_worker
+				for each space with a new marker: status_queue::spawn_worker, and reap it in a thread
+				a space whose markers cannot be written, or every space when the gate or store cannot be read, owes one Resync, tried 1 s later
 				release the gate
 			match stream.next(time to the next flush):
 				Some(Event(event)) => pending.note(classify(event)) // coalesced, see below
@@ -865,7 +868,7 @@ run(state, endpoint):
 |---|---|
 | `block_created` | `PaneAppeared` |
 | `block_closed` | `PaneClosed`, after `RexEvents` deletes the block's binding file |
-| `window_closed` | `TabClosed { space, tab: window_id }` |
+| `window_closed` | `Resync(space)`, because `rex move` closes a window whose last block it moves out and sends no `block_closed` (changed in step 5's second fix round) |
 | `session_destroyed` (top level) | `SpaceClosed`. `rex kill` sends `block_closed` for each block about 6 ms before it (review 1's measure) |
 | `block_event program_status_changed`, root record | `AgentStatusChanged` |
 | `block_event program_status_removed`, root record | `AgentStatusChanged` |
@@ -873,9 +876,9 @@ run(state, endpoint):
 | `block_event child_exited` | `AgentStatusChanged`. `block_closed` follows when the program's exit closes the block (measured) |
 | `session_created`, `title_changed`, `pwd_changed`, `bell`, `size_changed`, `client_*`, `session_view_changed`, anything unknown | Nothing |
 
-`pending` holds at most one `AgentStatusChanged` per pane. A `Resync` absorbs the queued `AgentStatusChanged` markers for its space, and a `SpaceClosed` absorbs every marker for its space. `PaneAppeared`, `PaneClosed`, and `TabClosed` keep their order. So the queue is bounded by the number of blocks on the server. The bridge flushes only for spaces with an activated worktree, which a read-only store query lists.
+`pending` holds at most one `AgentStatusChanged` per pane. A `Resync` absorbs the queued `AgentStatusChanged` markers for its space, and a `SpaceClosed` absorbs every marker for its space. `PaneAppeared` and `PaneClosed` keep their order. So the queue is bounded by the number of blocks on the server. The bridge flushes only for spaces with an activated worktree, which a read-only store query lists.
 
-A gone space is not a restart artifact. After SIGTERM and a restart of a scratch server, the first connection listed the saved session and attached to it, and the block answered `process` with a fresh `login` (measured). So `Resync` may retire a space that answers `Gone`. A changed `host_id` behind the same endpoint means another server, with other state, now answers at that socket. Then the bridge queues no `Resync`, so it retires nothing and keeps the stored `host_id`. Doctor's wording for that case is deferred, and the guard is not. `namedrop reconcile` in that server's blocks records the new `host_id` and retires what is gone, once the person has looked.
+A gone space is not a restart artifact. After SIGTERM and a restart of a scratch server, the first connection listed the saved session and attached to it, and the block answered `process` with a fresh `login` (measured). So `Resync` may retire a space that answers `Gone`. A changed `host_id` behind the same endpoint means another server, with other state, now answers at that socket. Then the bridge queues no `Resync`, so it retires nothing and keeps the stored `host_id`. Doctor's wording for that case is deferred, and the guard is not. `namedrop reconcile` in that server's blocks retires what is gone, once the person has looked. Recording the new `host_id` is not built, so the bridge never queues a `Resync` there (PORT.md, step 5's fix round).
 
 `AgentDetected` is never produced in steps 4 and 5. On Herdr it differs from a status change only by opening the tour popup, and Rex popups arrive in step 6.
 
@@ -1179,11 +1182,11 @@ See [One module decides where a process runs](#one-module-decides-where-a-proces
 - **One process per server.** `namedrop rex bridge --endpoint rex:/…` holds `try_lock` on `<state>/rex-bridge/<sha256(endpoint)>.lock` for its whole life, so a second start exits 0. The endpoint is canonical, so two spellings of one server cannot start two bridges.
 - **The stream.** One connection with `session.attach_all {event_scope: "all"}`. It delivered every event in the decode table (measured).
 - **How it calls lifecycle and drain.** It does not. It enqueues `Marker::Event` into the per-space status queue and spawns the status worker, which runs `handle_mux_event`, then drains, with its existing `worker.lock`, backoff, draft rechecks, `DrainReport` timers, and `failing.json`.
-- **Reconnect and reconcile.** When the stream ends, the bridge reconnects with backoff and queues `Resync` for every activated space on the endpoint, unless the server's `host_id` changed. A space that answers `Gone` is retired.
+- **Reconnect and reconcile.** When the stream ends, the bridge reconnects with backoff and queues `Resync` for every activated space on the endpoint, unless the server's `host_id` changed. A space that answers `Gone` is retired. A bound block that a survey leaves out keeps its name until Rex, asked about that block alone, answers `not_found`, because a listing can leave out a live block (step 5's second fix round). A remote host's blocks must not answer `not_found` while the host is away, which the relay's step must prove before it lists remote blocks.
 - **Restart detection.** A restart ended the control connection with no close frame, killed each block's program, and kept the block IDs with a fresh `login` child and no status records (measured). Every program has a new incarnation, so the survey reports no session for any of them, and `observe_agent_attempt` holds each in-flight attempt.
 - **The relay.** The bridge is also the relay's receiving client, because it already holds a connection to its server.
 - **Starting with no plugin host.** `rex_bridge::ensure` is a `try_lock` probe and a spawn through `daemon::command`. The Rex runtime builder calls it, so any Namedrop command or hook in a Rex block starts the bridge. Step 6's Lua module adds a top-level `rex.exec` that calls it, which runs at every server start and `rex config reload` (measured).
-- **Stopping.** SIGTERM or SIGINT stops it between flushes. A server unreachable for 120 s ends it with exit 0. A replaced runtime re-execs between flushes. The lock dies with it, and every marker it writes is idempotent.
+- **Stopping.** SIGTERM or SIGINT stops it between flushes. A server unreachable for 120 s ends it with exit 0. A replaced runtime re-execs between flushes, and the new image reaps the workers the old one left running, whose pids it is handed in `NAMEDROP_REX_BRIDGE_WORKERS`. The lock dies with it, and every marker it writes is idempotent.
 - **Liveness.** The bridge pings after 120 s of silence and ends the stream after 60 s without a pong.
 
 ### 9. Remote Rex hosts are in the first release

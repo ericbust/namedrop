@@ -1328,7 +1328,7 @@ fn stale_runtime_issue(stale: &crate::installed_runtime::StaleRelease) -> Health
     outdated
 }
 
-/// The condition of `Place::bind_session` that refused a bind, in words.
+/// The condition of `Place::bind` that refused a bind, in words.
 fn refused_bind_reason(condition: &crate::mux::home::BindRefused) -> String {
     use crate::mux::home::BindRefused;
     match condition {

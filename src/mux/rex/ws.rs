@@ -48,6 +48,8 @@ pub(super) struct WebSocket<S> {
     /// Bytes queued for the server and not yet written, so a write cut short
     /// by a timeout resumes where it stopped.
     outgoing: Vec<u8>,
+    /// How many whole frames the server has sent, pings and pongs included.
+    frames: u64,
 }
 
 impl<S: Read + Write> WebSocket<S> {
@@ -76,6 +78,7 @@ impl<S: Read + Write> WebSocket<S> {
             allowance: usize::MAX,
             close_sent: false,
             upgrade: Some(protocol.to_owned()),
+            frames: 0,
         })
     }
 
@@ -184,6 +187,20 @@ impl<S: Read + Write> WebSocket<S> {
             self.stream.flush()?;
         }
         Ok(self.outgoing.is_empty())
+    }
+
+    /// Queues a ping for `flush`.
+    pub(super) fn queue_ping(&mut self) -> Result<(), WsError> {
+        self.queue_frame(PING, b"namedrop")
+    }
+
+    pub(super) fn frames(&self) -> u64 {
+        self.frames
+    }
+
+    /// Whether bytes the server sent are read and not yet taken as a frame.
+    pub(super) fn buffered(&self) -> bool {
+        !self.buffer.is_empty()
     }
 
     /// Whether queued bytes are still unwritten, as after a write cut short.
@@ -336,6 +353,7 @@ impl<S: Read + Write> WebSocket<S> {
         let payload = self.buffer[header..size].to_vec();
         self.buffer.drain(..size);
         self.allowance -= size;
+        self.frames += 1;
         Ok(Some(Frame {
             fin,
             opcode,

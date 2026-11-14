@@ -46,7 +46,11 @@ fn serve_status_as_a_child_process() {
     let Some(path) = std::env::var_os(SERVE) else {
         return;
     };
-    let listener = UnixListener::bind(&path).unwrap();
+    // Bound elsewhere and then moved, so the socket is listening by the
+    // time its path exists.
+    let binding = Path::new(&path).with_extension("binding");
+    let listener = UnixListener::bind(&binding).unwrap();
+    std::fs::rename(&binding, &path).unwrap();
     let (stream, _) = listener.accept().unwrap();
     let path = path.to_str().unwrap().to_owned();
     serve(stream, status(std::process::id(), unix_listener(&path)));
@@ -70,7 +74,27 @@ impl Drop for Scratch {
     }
 }
 
-fn child_server(socket: &Path) -> Child {
+/// The child server, killed and reaped if a test fails before it ends.
+struct ChildServer(Child);
+
+impl ChildServer {
+    fn id(&self) -> u32 {
+        self.0.id()
+    }
+
+    fn succeeded(&mut self) -> bool {
+        self.0.wait().unwrap().success()
+    }
+}
+
+impl Drop for ChildServer {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn child_server(socket: &Path) -> ChildServer {
     let child = Command::new(std::env::current_exe().unwrap())
         .args([
             "mux::rex::local::tests::serve_status_as_a_child_process",
@@ -82,6 +106,7 @@ fn child_server(socket: &Path) -> Child {
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
+    let child = ChildServer(child);
     let deadline = Instant::now() + Duration::from_secs(10);
     while !socket.exists() {
         assert!(Instant::now() < deadline, "the child server never listened");
@@ -142,7 +167,7 @@ fn a_server_whose_pid_is_the_peer_is_local_and_named_by_its_primary_unix_listene
     assert_eq!(server.endpoint.unix_socket(), Some(socket.as_path()));
     assert_eq!(server.pid, child.id());
     assert_eq!(server.host_id.as_deref(), Some("host:1"));
-    assert!(child.wait().unwrap().success());
+    assert!(child.succeeded());
 }
 
 #[test]
@@ -163,7 +188,7 @@ fn a_forwarded_socket_to_a_local_server_is_refused() {
         )))
     );
     forwarder.join().unwrap();
-    assert!(child.wait().unwrap().success());
+    assert!(child.succeeded());
 }
 
 #[test]

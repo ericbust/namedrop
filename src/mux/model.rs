@@ -32,6 +32,17 @@ pub enum MuxKind {
 /// starts so, because Herdr values are absolute paths, `default`, or empty.
 pub const REX_SCHEME: &str = "rex:";
 
+impl MuxKind {
+    /// The multiplexer's name, as Namedrop records it for the changes its
+    /// events make.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Herdr => "herdr",
+            Self::Rex => "rex",
+        }
+    }
+}
+
 impl Endpoint {
     /// The one reader of an endpoint value: a `session_socket_id`, an
     /// envelope's `NAMEDROP_ENDPOINT` or `HERDR_SOCKET_PATH`, or the

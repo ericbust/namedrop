@@ -1,7 +1,8 @@
 use super::{PaneId, TabId};
 use crate::SpaceId;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PaneSlot {
     pub space: SpaceId,
     pub pane: PaneId,
@@ -10,12 +11,38 @@ pub struct PaneSlot {
 
 /// A lifecycle event from any multiplexer. It carries only IDs, because the
 /// handlers rediscover the space.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MuxEvent {
     PaneAppeared(PaneSlot),
     PaneClosed(PaneSlot),
-    PaneMoved { from: PaneSlot, to: PaneSlot },
-    TabClosed { space: SpaceId, tab: TabId },
+    PaneMoved {
+        from: PaneSlot,
+        to: PaneSlot,
+    },
+    TabClosed {
+        space: SpaceId,
+        tab: TabId,
+    },
     AgentDetected(PaneSlot),
     AgentStatusChanged(PaneSlot),
+    /// Events for this space may have been missed, as when the Rex bridge
+    /// connects again.
+    Resync(SpaceId),
+    /// The space and every pane in it are gone for good.
+    SpaceClosed(SpaceId),
+}
+
+impl MuxEvent {
+    /// The space the event happened in: a moved pane's former one.
+    pub fn space(&self) -> &SpaceId {
+        match self {
+            Self::PaneAppeared(slot)
+            | Self::PaneClosed(slot)
+            | Self::AgentDetected(slot)
+            | Self::AgentStatusChanged(slot) => &slot.space,
+            Self::PaneMoved { from, .. } => &from.space,
+            Self::TabClosed { space, .. } | Self::Resync(space) | Self::SpaceClosed(space) => space,
+        }
+    }
 }

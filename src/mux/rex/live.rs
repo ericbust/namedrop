@@ -338,3 +338,75 @@ fn mux_connect_surveys_a_scratch_server_through_a_rex_endpoint() {
         );
     }
 }
+
+/// The bridge's stream on a real server sees a session's first block start
+/// its shell, and its kill close the block and then the session. Set
+/// `NAMEDROP_REX_LIVE_HOME` to the scratch server's `HOME`, which the `rex`
+/// client runs with.
+#[test]
+#[ignore = "run with NAMEDROP_REX_LIVE=unix://<scratch server socket>, NAMEDROP_REX_LIVE_HOME, and -- --ignored --test-threads=1"]
+fn the_bridge_stream_follows_a_real_session_from_start_to_kill() {
+    use super::events::{Liveness, Next, RexEvents, Wake};
+    use crate::mux::MuxEvent;
+    use std::time::Duration;
+    let home = std::env::var("NAMEDROP_REX_LIVE_HOME").expect("set NAMEDROP_REX_LIVE_HOME");
+    let state = std::env::temp_dir().join(format!("namedrop-live-events-{}", std::process::id()));
+    let wake = Wake::new().unwrap();
+    let mut stream = RexEvents::open(&socket(), &state, &wake, Liveness::REX).unwrap();
+    assert!(stream.host_id().is_some());
+    let rex = |args: &[&str]| {
+        let output = std::process::Command::new("rex")
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", std::env::var("PATH").unwrap())
+            .arg("-S")
+            .arg(std::env::var("NAMEDROP_REX_LIVE").unwrap())
+            .arg("--autostart=false")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap_or_default()
+    };
+    let created = rex(&[
+        "new",
+        "nd-live-events",
+        "--shell",
+        "none",
+        "--json",
+        "--",
+        "/bin/zsh",
+        "-f",
+    ]);
+    let session = created["session_id"].as_str().unwrap().to_owned();
+    let block = created["initial_windows"][0]["block_ids"][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut seen = Vec::new();
+    while let Next::Event(event) = stream.next(Duration::from_millis(500)) {
+        seen.push(event);
+    }
+    rex(&["kill", &session]);
+    while let Next::Event(event) = stream.next(Duration::from_millis(500)) {
+        seen.push(event);
+    }
+    let slot = crate::mux::PaneSlot {
+        space: crate::SpaceId::new(&session),
+        pane: crate::mux::PaneId::new(&block),
+        tab: None,
+    };
+    assert!(
+        seen.contains(&MuxEvent::AgentStatusChanged(slot.clone())),
+        "{seen:?}"
+    );
+    assert_eq!(
+        seen[seen.len() - 2..],
+        [
+            MuxEvent::PaneClosed(slot),
+            MuxEvent::SpaceClosed(crate::SpaceId::new(&session))
+        ],
+        "{seen:?}"
+    );
+    let _ = std::fs::remove_dir_all(state);
+}

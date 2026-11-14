@@ -517,6 +517,24 @@ impl StateTransaction<'_> {
         }
     }
 
+    /// The spaces of `session_socket_id` that Namedrop is activated for.
+    pub(crate) fn activated_spaces(
+        &self,
+        session_socket_id: &str,
+    ) -> Result<Vec<crate::SpaceId>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT worktree_id FROM worktrees
+             WHERE session_socket_id = ?1 AND activated = 1 AND deactivated = 0
+             ORDER BY worktree_id",
+        )?;
+        statement
+            .query_map(params![session_socket_id], |row| {
+                row.get::<_, String>(0).map(crate::SpaceId::new)
+            })?
+            .collect::<Result<_, _>>()
+            .map_err(Into::into)
+    }
+
     pub(crate) fn any_activated_worktrees(&self) -> Result<bool, StoreError> {
         self.transaction
             .query_row(

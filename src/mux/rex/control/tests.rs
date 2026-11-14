@@ -30,7 +30,7 @@ impl Server {
         server
     }
 
-    fn next_client_frame(&mut self) -> Option<(u8, Vec<u8>)> {
+    pub fn next_client_frame(&mut self) -> Option<(u8, Vec<u8>)> {
         let mut head = [0; 2];
         self.stream.read_exact(&mut head).ok()?;
         let length = match head[1] & 0x7F {
@@ -62,7 +62,7 @@ impl Server {
         serde_json::from_slice(&payload).unwrap()
     }
 
-    fn send_frame(&mut self, opcode: u8, payload: &[u8]) {
+    pub fn send_frame(&mut self, opcode: u8, payload: &[u8]) {
         assert!(
             self.try_send_frame(opcode, payload),
             "the client is reading"

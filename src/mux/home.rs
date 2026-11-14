@@ -45,7 +45,7 @@ pub struct Place {
 }
 
 /// Why a hook did not bind its session to its block: the conditions of
-/// `Place::bind_session` in order, or a write that failed.
+/// `Place::bind` in order, or a write that failed.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BindRefused {
