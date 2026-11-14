@@ -290,7 +290,7 @@ fn acked(store: &RelayStore, endpoint: &str, host_id: &str) -> Request {
 
 /// Inserts each reply of `answer` that A has not collected into the space
 /// of the A message it answers, from the relay author of the B agent that
-/// wrote it, and wakes that space. A new outbox epoch means B's `seq`
+/// wrote it on the label that message was sent by, and wakes that space. A new outbox epoch means B's `seq`
 /// started again, so every reply of it is new. A reply is B's to make up,
 /// so one with a bad field, or one that answers a message this endpoint
 /// did not send to B, is acked and dropped, and A keeps nothing of it.
@@ -305,11 +305,11 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, answer:
             continue;
         }
         let sent = if trusted(reply) {
-            store.sent_from(&reply.re, run.label, host_id, endpoint)
+            store.sent_from(&reply.re, host_id, endpoint, &reply.from, run.label)
         } else {
             Ok(None)
         };
-        let (space, thread) = match sent {
+        let (label, space, thread) = match sent {
             Ok(Some(sent)) => sent,
             Ok(None) => {
                 let _ = store.advance(endpoint, host_id, &answer.epoch, reply.seq);
@@ -320,7 +320,7 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, answer:
         let Ok(gate) = crate::runtime_command_guard(run.state, None) else {
             return;
         };
-        let inserted = insert_reply(run.state, run.label, host_id, reply, endpoint, &space);
+        let inserted = insert_reply(run.state, &label, host_id, reply, endpoint, &space);
         drop(gate);
         match inserted {
             Ok(Some(message_id)) => {
@@ -328,7 +328,7 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, answer:
                     host_id,
                     epoch: &answer.epoch,
                     seq: reply.seq,
-                    label: run.label,
+                    label: &label,
                     endpoint,
                     space: &space,
                     message_id: &message_id,

@@ -1137,8 +1137,8 @@ fn a_long_refusal_reason_from_b_is_cut() {
 }
 
 /// B answers only what this endpoint sent it and it accepted, so a reply
-/// that names another label's, another server's, or a failed item's
-/// message is dropped.
+/// that names a message another server accepted, by another label or by
+/// this one, or a failed item's message, is dropped.
 #[test]
 fn a_reply_to_a_message_not_sent_to_this_b_is_dropped() {
     let space = Space::new(REX);
@@ -1153,7 +1153,7 @@ fn a_reply_to_a_message_not_sent_to_this_b_is_dropped() {
     Connection::open(space.state.join("relay.sqlite3"))
         .unwrap()
         .execute(
-            "UPDATE outbound SET state = 'accepted', host_id = 'host-b' WHERE label = 'studio'",
+            "UPDATE outbound SET state = 'accepted', host_id = 'host-s' WHERE label = 'studio'",
             [],
         )
         .unwrap();
@@ -1174,6 +1174,88 @@ fn a_reply_to_a_message_not_sent_to_this_b_is_dropped() {
         ]),
     );
     assert_eq!(collected_bodies(&space), [["forged 4"]]);
+}
+
+/// Two labels that reach one server share its outbox, so a reply that one
+/// label's worker collects for the other label's message goes to that
+/// label's relay author, and an answer to it goes back by that label.
+#[test]
+fn a_reply_for_another_label_of_the_same_server_reaches_its_thread() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox", "studio"]);
+    sent(&space, &rex);
+    let studio = rex
+        .run(|| space.send("studio", "@eve@studio a studio question"))
+        .unwrap()["message_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    Connection::open(space.state.join("relay.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE outbound SET state = 'accepted', host_id = 'host-b' WHERE label = 'studio'",
+            [],
+        )
+        .unwrap();
+    collect_once(
+        &space,
+        &rex,
+        json!([{"seq": 1, "re": studio, "thread": "t", "from": "eve",
+            "message_id": "b-eve", "text": "eve's answer"}]),
+    );
+    assert_eq!(
+        space.main(
+            "SELECT author_alias_snapshot, body FROM collaboration_messages
+             WHERE request_id LIKE 'relay-reply:%'"
+        ),
+        [["eve@studio", "eve's answer"]]
+    );
+    rex.run(|| space.reply("reply-1", &studio, "@eve@studio thanks"))
+        .unwrap();
+    capture(&space);
+    assert_eq!(
+        queued_for(&space, "thanks"),
+        [["studio", "eve", "alice", "b-eve"].map(str::to_owned)]
+    );
+}
+
+/// One message sent to two labels of one server is answered by the label
+/// it was sent to the replying agent by, and otherwise by the collecting
+/// worker's own label.
+#[test]
+fn a_reply_to_a_message_sent_by_two_labels_of_one_server_names_its_agent_s_label() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox", "studio"]);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    let message = rex
+        .run(|| space.send("request-1", "@bob@devbox @eve@studio ping"))
+        .unwrap()["message_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    Connection::open(space.state.join("relay.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE outbound SET state = 'accepted', host_id = 'host-b'",
+            [],
+        )
+        .unwrap();
+    let reply = |seq: i64, from: &str| {
+        json!({"seq": seq, "re": message, "thread": "t", "from": from,
+            "message_id": format!("b-{seq}"), "text": format!("{from} here")})
+    };
+    rex.answer_with(
+        json!({"host_id": "host-b", "can_reply": true, "epoch": "e1",
+        "more": false, "outbox": [reply(1, "eve"), reply(2, "carol")]}),
+    );
+    work_for(&space, &rex, 1);
+    assert_eq!(
+        space.main(
+            "SELECT author_alias_snapshot FROM collaboration_messages
+             WHERE request_id LIKE 'relay-reply:%' ORDER BY rowid"
+        ),
+        [["eve@studio"], ["carol@devbox"]]
+    );
 }
 
 /// A worker for one endpoint takes no reply into another endpoint's space.

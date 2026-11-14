@@ -605,23 +605,28 @@ impl RelayStore {
             .query_row("SELECT epoch FROM outbox_epoch", [], |row| row.get(0))?)
     }
 
-    /// The space and thread of the A message `message_id`, when `endpoint`
-    /// sent it to `label` and the server `host_id` accepted it there, so B
-    /// can answer only what was sent to it.
+    /// The label, space, and thread of the A message `message_id`, when
+    /// `endpoint` sent it to a label that the server `host_id` answers for
+    /// and that server accepted it, so B can answer only what was sent to
+    /// it. Two labels of one server share its outbox, so a reply goes to
+    /// the label its message was sent by: the one sent to `from` first,
+    /// and then `label`.
     pub(crate) fn sent_from(
         &self,
         message_id: &str,
-        label: &str,
         host_id: &str,
         endpoint: &str,
-    ) -> Result<Option<(String, String)>, StoreError> {
+        from: &str,
+        label: &str,
+    ) -> Result<Option<(String, String, String)>, StoreError> {
         Ok(self
             .connection
             .query_row(
-                "SELECT space, thread FROM outbound WHERE message_id = ?1 AND label = ?2
-                    AND host_id = ?3 AND endpoint = ?4 AND state = 'accepted' LIMIT 1",
-                params![message_id, label, host_id, endpoint],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                "SELECT label, space, thread FROM outbound WHERE message_id = ?1
+                    AND host_id = ?2 AND endpoint = ?3 AND state = 'accepted'
+                 ORDER BY recipient = ?4 DESC, label = ?5 DESC LIMIT 1",
+                params![message_id, host_id, endpoint, from, label],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?)
     }
