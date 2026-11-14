@@ -362,7 +362,8 @@ fn serve(
                 let opened = Instant::now();
                 crate::relay::start_workers(state, endpoint);
                 let mut pending = Pending::default();
-                if same_server(state, endpoint, stream.host_id()) {
+                let known = same_server(state, endpoint, stream.host_id());
+                if known {
                     pending.resync_every_space(Instant::now());
                 }
                 loop {
@@ -384,7 +385,10 @@ fn serve(
                     match stream.next(within) {
                         Next::Event(event) => pending.note(event, Instant::now()),
                         Next::Perform(perform) => {
-                            if let Some((call, result)) = relay.receive(perform, stream.host_id()) {
+                            // Another server at the known socket has other state, so a
+                            // call for it is refused as wrong_host.
+                            let host_id = stream.host_id().filter(|_| known);
+                            if let Some((call, result)) = relay.receive(perform, host_id) {
                                 let _ = stream.reply(&call, result);
                             }
                         }

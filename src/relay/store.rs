@@ -15,6 +15,9 @@ pub(crate) const OUTBOUND_LIFETIME_MS: i64 = 24 * 60 * 60 * 1000;
 /// key outlasts A's retries, so every retry still finds it.
 pub(crate) const OUTBOX_LIFETIME_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 pub(crate) const INBOUND_LIFETIME_MS: i64 = OUTBOX_LIFETIME_MS;
+/// A keeps an item it is done with this long, which outlasts a reply B
+/// keeps for a week after a week of quiet.
+pub(crate) const DONE_LIFETIME_MS: i64 = 2 * OUTBOX_LIFETIME_MS;
 
 /// A holds `peers`, `outbound`, `collected`, and `cursors`, the last
 /// collected `seq` of each B and the outbox epoch it counts in. B holds
@@ -95,6 +98,7 @@ CREATE TABLE remote_threads (
     local_thread TEXT NOT NULL,
     sender TEXT NOT NULL,
     display_host TEXT NOT NULL,
+    used_at_ms INTEGER NOT NULL,
     PRIMARY KEY (host_id, thread, space)
 );
 CREATE INDEX remote_threads_by_local ON remote_threads (endpoint, space, local_thread);
@@ -687,15 +691,19 @@ impl RelayStore {
             .optional()?)
     }
 
+    /// Records B's `local_thread` for A's thread, or that the thread it
+    /// already has was used at `now_ms`.
     pub(crate) fn record_remote_thread(
         &self,
         thread: &RemoteThread<'_>,
         local_thread: &str,
+        now_ms: i64,
     ) -> Result<(), StoreError> {
         self.connection.execute(
-            "INSERT OR IGNORE INTO remote_threads (host_id, thread, endpoint, space,
-                local_thread, sender, display_host)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO remote_threads (host_id, thread, endpoint, space, local_thread,
+                sender, display_host, used_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT (host_id, thread, space) DO UPDATE SET used_at_ms = excluded.used_at_ms",
             params![
                 thread.host_id,
                 thread.thread,
@@ -703,8 +711,26 @@ impl RelayStore {
                 thread.space,
                 local_thread,
                 thread.sender,
-                thread.display_host
+                thread.display_host,
+                now_ms
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Records that B's `local_thread` in `space` carried a reply at
+    /// `now_ms`.
+    pub(crate) fn touch_thread(
+        &self,
+        endpoint: &str,
+        space: &str,
+        local_thread: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE remote_threads SET used_at_ms = ?4
+             WHERE endpoint = ?1 AND space = ?2 AND local_thread = ?3",
+            params![endpoint, space, local_thread, now_ms],
         )?;
         Ok(())
     }
@@ -768,9 +794,10 @@ impl RelayStore {
     }
 
     /// Fails each queued item older than its lifetime, drops each outbox
-    /// item and `inbound` key older than theirs and each reply A collected
-    /// as long ago, and counts the dropped outbox items per remote sender.
-    /// `cursors` keeps what A acks.
+    /// item and `inbound` key older than theirs, each reply A collected as
+    /// long ago, each B thread mapping unused as long, and each item A was
+    /// done with two weeks ago, and counts the dropped outbox items per
+    /// remote sender. `cursors` keeps what A acks.
     fn expire(&mut self, now_ms: i64) -> Result<(), StoreError> {
         let transaction = self.connection.transaction()?;
         transaction.execute(
@@ -799,6 +826,14 @@ impl RelayStore {
         transaction.execute(
             "DELETE FROM collected WHERE created_at_ms <= ?1",
             params![outbox_limit],
+        )?;
+        transaction.execute(
+            "DELETE FROM remote_threads WHERE used_at_ms <= ?1",
+            params![outbox_limit],
+        )?;
+        transaction.execute(
+            "DELETE FROM outbound WHERE state <> 'queued' AND updated_at_ms <= ?1",
+            params![now_ms - DONE_LIFETIME_MS],
         )?;
         transaction.commit()?;
         Ok(())

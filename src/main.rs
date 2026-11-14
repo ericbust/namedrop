@@ -311,7 +311,8 @@ fn main() -> ExitCode {
             .runtime
             .endpoint
             .as_deref()
-            .map(namedrop::mux::Endpoint::parse);
+            .map(namedrop::mux::Endpoint::parse)
+            .filter(|endpoint| endpoint.kind == namedrop::mux::MuxKind::Rex);
         let (Some(state), Some(endpoint)) = (selected_state.as_deref(), endpoint) else {
             eprintln!("namedrop relay accept needs a rex: --endpoint and a state directory");
             return ExitCode::from(64);

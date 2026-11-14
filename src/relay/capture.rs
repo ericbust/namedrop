@@ -192,6 +192,7 @@ fn keep_for(
             },
             now,
         )
+        .and_then(|()| relay.touch_thread(&endpoint.key, &row.space, &row.thread_id, now))
         .map_err(error)
 }
 

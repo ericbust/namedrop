@@ -143,8 +143,8 @@ fn a_queued_item_expires_24_hours_after_it_was_queued() {
             "INSERT INTO outbound (label, message_id, recipient, endpoint, space, sender,
                 thread, text, state, created_at_ms, updated_at_ms)
              VALUES ('devbox', 'done', 'bob', 'rex:/tmp/a.sock', 'session:a', 'alice',
-                'thread-1', 'hi', 'accepted', 0, 0)",
-            [],
+                'thread-1', 'hi', 'accepted', 0, ?1)",
+            [NOW],
         )
         .unwrap();
     drop(store);
@@ -265,5 +265,77 @@ fn a_collected_reply_is_dropped_after_7_days_and_its_cursor_stays() {
     assert_eq!(
         store.ack_through("host-b").unwrap(),
         ("epoch-1".to_owned(), 2)
+    );
+}
+
+#[test]
+fn a_done_item_is_dropped_after_14_days_and_a_thread_mapping_after_7_unused() {
+    assert_eq!(DONE_LIFETIME_MS, 14 * 24 * 60 * 60 * 1000);
+    let state = State::new();
+    let store = state.open(NOW);
+    for (message, item_state, at) in [
+        ("old-accepted", "accepted", NOW - DONE_LIFETIME_MS),
+        ("old-failed", "failed", NOW - DONE_LIFETIME_MS),
+        ("young-accepted", "accepted", NOW - DONE_LIFETIME_MS + 1),
+    ] {
+        store
+            .connection
+            .execute(
+                "INSERT INTO outbound (label, message_id, recipient, endpoint, space, sender,
+                    thread, text, state, created_at_ms, updated_at_ms)
+                 VALUES ('devbox', ?1, 'bob', 'rex:/tmp/a.sock', 'session:a', 'alice',
+                    'thread-1', 'hi', ?2, ?3, ?3)",
+                params![message, item_state, at],
+            )
+            .unwrap();
+    }
+    for (thread, at) in [
+        ("old", NOW - OUTBOX_LIFETIME_MS),
+        ("young", NOW - OUTBOX_LIFETIME_MS + 1),
+    ] {
+        store
+            .record_remote_thread(
+                &RemoteThread {
+                    host_id: "host-a",
+                    thread,
+                    endpoint: "rex:/tmp/b.sock",
+                    space: "session:b",
+                    sender: "alice",
+                    display_host: "laptop",
+                },
+                &format!("b-{thread}"),
+                at,
+            )
+            .unwrap();
+    }
+    drop(store);
+
+    let store = state.open(NOW);
+    let left = |sql: &str| -> Vec<String> {
+        store
+            .connection
+            .prepare(sql)
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(left("SELECT message_id FROM outbound"), ["young-accepted"]);
+    assert_eq!(left("SELECT thread FROM remote_threads"), ["young"]);
+    store
+        .touch_thread(
+            "rex:/tmp/b.sock",
+            "session:b",
+            "b-young",
+            NOW + OUTBOX_LIFETIME_MS,
+        )
+        .unwrap();
+    drop(store);
+    let store = state.open(NOW + OUTBOX_LIFETIME_MS + 2);
+    assert_eq!(
+        count(&store, "SELECT COUNT(*) FROM remote_threads"),
+        1,
+        "a used mapping stays"
     );
 }

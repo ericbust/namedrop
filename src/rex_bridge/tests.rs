@@ -1435,6 +1435,63 @@ fn the_bridge_answers_each_relay_call_on_its_connection() {
     assert!(!relay.busy());
 }
 
+/// A server other than the one the bridge knows at its socket has other
+/// state, so the bridge refuses its relay calls as `wrong_host` and starts
+/// no accept.
+#[test]
+fn the_bridge_refuses_relay_calls_for_a_server_it_does_not_know() {
+    let state = State::new();
+    crate::rex_bridge::remember_host_id(&state.0, &endpoint(), "host-old");
+    // SAFETY: `getuid` has no preconditions.
+    let uid = unsafe { libc::getuid() };
+    let script = Script::new(vec![(
+        Some("host-b"),
+        vec![Next::Perform(crate::mux::rex::events::Perform {
+            call_id: "call-1".to_owned(),
+            args: serde_json::json!({"op": "collect", "expect_host_id": "host-b",
+                "from": {"host_id": "host-a", "name": "alice", "host": "laptop"}}),
+            principal: serde_json::json!({"kind": "peer", "uid": uid}),
+        })],
+        None,
+    )]);
+    let stop = Wake::new().unwrap();
+    let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let starts = started.clone();
+    let mut relay = Receiver::with(
+        &state.0,
+        Box::new(move |_| {
+            starts.store(true, std::sync::atomic::Ordering::SeqCst);
+            Err("no accept here".to_owned())
+        }),
+        receive::ANSWER_WITHIN,
+    );
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let until = Instant::now() + Duration::from_secs(10);
+            while script.replies.lock().unwrap().is_empty() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            stop.wake();
+        });
+        let lock = Lock::take(&state.0, &endpoint()).unwrap().unwrap();
+        bridge(
+            &state.0,
+            &endpoint(),
+            &script,
+            &stop,
+            &lock,
+            &mut FakeHost::default(),
+            &NO_WAIT,
+            &mut relay,
+        );
+    });
+    let replies = script.replies.lock().unwrap();
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert_eq!(replies[0].1["result"]["status"], "refused");
+    assert_eq!(replies[0].1["result"]["reason"], "wrong_host");
+    assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
+}
+
 /// A connection starts the relay worker of each label with an item queued.
 #[test]
 fn a_connection_starts_the_worker_of_each_label_with_an_item_queued() {

@@ -900,3 +900,37 @@ fn an_escaped_reply_is_cut_to_fit_and_never_stalls_the_outbox() {
     assert!(serde_json::to_string(cut).unwrap().len() - 2 <= TEXT_LIMIT);
     assert_eq!(page.outbox[1].text, "behind it");
 }
+
+/// Each accepted item and each kept reply in a B thread mark its mapping
+/// used, so a conversation that goes on keeps its mapping.
+#[test]
+fn an_item_or_a_reply_in_a_b_thread_keeps_its_mapping_in_use() {
+    let b = B::new();
+    let hour_ago = super::super::now_ms() - 60 * 60 * 1000;
+    let used = || {
+        b.rows("relay.sqlite3", "SELECT used_at_ms FROM remote_threads")[0][0]
+            .as_i64()
+            .unwrap()
+    };
+    let age = || {
+        Connection::open(b.0.join("relay.sqlite3"))
+            .unwrap()
+            .execute("UPDATE remote_threads SET used_at_ms = ?1", [hour_ago])
+            .unwrap();
+    };
+    b.call(&deliver("m1", "bob", "t1", "first"));
+    age();
+    b.call(&deliver("m2", "bob", "t1", "second"));
+    assert!(used() > hour_ago, "an accepted item marks it used");
+    age();
+    let relayed = b.rows(
+        "namedrop.sqlite3",
+        "SELECT message_id FROM collaboration_messages",
+    )[0][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    bob_answers(&b, &relayed, "@alice@laptop an answer");
+    super::super::capture::capture(&b.0, &Endpoint::parse(REX), &mut |_| {}).unwrap();
+    assert!(used() > hour_ago, "a kept reply marks it used");
+}

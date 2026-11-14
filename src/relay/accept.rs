@@ -257,7 +257,7 @@ fn deliver(
     };
     let accepted = outcome(Status::Accepted, None);
     store
-        .record_remote_thread(&thread, receipt.thread_id.as_str())
+        .record_remote_thread(&thread, receipt.thread_id.as_str(), now_ms)
         .and_then(|()| {
             store.record_inbound(
                 &key,
