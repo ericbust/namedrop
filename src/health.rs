@@ -1370,10 +1370,20 @@ fn relay_conditions_issue(conditions: &[crate::relay::store::Conditions]) -> Opt
     let hosts = conditions
         .iter()
         .map(|condition| {
-            format!(
-                "{}: {} replies answered a message sent to another host",
-                condition.label, condition.other_label
-            )
+            let mut found = Vec::new();
+            if condition.other_label > 0 {
+                found.push(format!(
+                    "{} replies answered a message sent to another host, and were dropped",
+                    condition.other_label
+                ));
+            }
+            if condition.held_full {
+                found.push(
+                    "Namedrop holds as many of its replies as it can for threads the Automatic Reply Limit paused, so it keeps the rest until a person's message or Continue resumes them"
+                        .to_owned(),
+                );
+            }
+            format!("{}: {}", condition.label, found.join(", and "))
         })
         .collect::<Vec<_>>()
         .join("; ");
@@ -1382,10 +1392,10 @@ fn relay_conditions_issue(conditions: &[crate::relay::store::Conditions]) -> Opt
         HealthSeverity::Notice,
         "Replies from another machine need a look.",
         &format!(
-            "Namedrop dropped each reply that answered a message this machine sent to another host, because a server can answer only for the messages sent to it. By host: {hosts}."
+            "A server can answer only for the messages this machine sent it, and Namedrop holds a limited number of replies while a thread is paused. By host: {hosts}."
         ),
         HealthRepairKind::HumanDecision,
-        "Check that each label in rex hosts list reaches the machine you expect.",
+        "Resume each paused thread with a message or Continue, and check that each label in rex hosts list reaches the machine you expect.",
     ))
 }
 
@@ -1634,18 +1644,28 @@ mod tests {
 
     #[test]
     fn relay_conditions_are_one_notice_that_names_each_host() {
+        use crate::relay::store::Conditions;
         assert!(relay_conditions_issue(&[]).is_none());
-        let notice = relay_conditions_issue(&[crate::relay::store::Conditions {
-            label: "devbox".to_owned(),
-            other_label: 3,
-        }])
+        let notice = relay_conditions_issue(&[
+            Conditions {
+                label: "devbox".to_owned(),
+                other_label: 3,
+                held_full: true,
+            },
+            Conditions {
+                label: "studio".to_owned(),
+                held_full: true,
+                ..Conditions::default()
+            },
+        ])
         .unwrap();
         assert_eq!(notice.code, "ND-RELAY-003");
         assert_eq!(notice.severity, HealthSeverity::Notice);
+        let paused = "Namedrop holds as many of its replies as it can for threads the Automatic Reply Limit paused, so it keeps the rest until a person's message or Continue resumes them";
         assert!(
-            notice
-                .explanation
-                .ends_with("By host: devbox: 3 replies answered a message sent to another host."),
+            notice.explanation.ends_with(&format!(
+                "By host: devbox: 3 replies answered a message sent to another host, and were dropped, and {paused}; studio: {paused}."
+            )),
             "{}",
             notice.explanation
         );

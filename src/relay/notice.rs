@@ -1,10 +1,11 @@
 //! The notices a sender on A gets in its thread from a remote agent's relay
-//! author: that an item for that agent failed or expired, or that the
-//! Automatic Reply Limit holds that agent's replies.
+//! author: that an item for that agent failed or expired, that the
+//! Automatic Reply Limit holds that agent's replies, or that held ones
+//! expired.
 
 use super::{
     RemoteName,
-    store::{Held, RelayStore},
+    store::{Dropped, Held, RelayStore},
 };
 use crate::{
     ActorKind, DeliveryId, IdGenerator, MessageId, MutationAttribution, SpaceId, StateNamespace,
@@ -24,7 +25,8 @@ struct Notice<'a> {
 }
 
 /// Tells the sender of each item of `endpoint` that failed or expired,
-/// and of each thread whose replies are held, once, and calls `wake` for
+/// of each thread whose replies are held, and of each whose held replies
+/// expired, once, and calls `wake` for
 /// each space it told. A fault leaves the rest for the next call.
 pub(crate) fn tell(
     state: &Path,
@@ -36,8 +38,11 @@ pub(crate) fn tell(
     let Ok(store) = RelayStore::open(state, now) else {
         return;
     };
-    let (Ok(unsent), Ok(held)) = (store.unsent(&endpoint.key), store.held(&endpoint.key, true))
-    else {
+    let (Ok(unsent), Ok(held), Ok(dropped)) = (
+        store.unsent(&endpoint.key),
+        store.held(&endpoint.key, true),
+        store.dropped(&endpoint.key),
+    ) else {
         return;
     };
     for item in &unsent {
@@ -69,6 +74,38 @@ pub(crate) fn tell(
         if !settle(told, &held.space, wake, || store.told_held(held)) {
             return;
         }
+    }
+    for dropped in &dropped {
+        let told = notice(state, gate, &endpoint.key, &dropped_notice(dropped));
+        if !settle(told, &dropped.space, wake, || {
+            store.told_dropped(&endpoint.key, dropped)
+        }) {
+            return;
+        }
+    }
+}
+
+/// The notice that the held replies of a thread expired.
+fn dropped_notice(dropped: &Dropped) -> Notice<'_> {
+    let replies = if dropped.count == 1 {
+        "1 reply".to_owned()
+    } else {
+        format!("{} replies", dropped.count)
+    };
+    Notice {
+        space: &dropped.space,
+        label: &dropped.label,
+        alias: &dropped.remote_alias,
+        message: &dropped.re,
+        request_id: format!(
+            "relay-dropped:{}:{}:{}",
+            dropped.label, dropped.host_id, dropped.remote_message_id
+        ),
+        text: format!(
+            "Namedrop let go of {replies} from @{}@{} that it held for 7 days while the \
+             Automatic Reply Limit paused this thread.",
+            dropped.remote_alias, dropped.label
+        ),
     }
 }
 

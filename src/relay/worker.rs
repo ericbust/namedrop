@@ -215,8 +215,9 @@ fn round(run: &mut Run<'_>) -> Round {
                     host_id: &host_id,
                     labels: &labels,
                 };
-                collect_replies(run, &store, &peer, &answer);
-                if more && !collect(run, &store, &own, &peer) {
+                if collect_replies(run, &store, &peer, &answer) != Page::Taken
+                    || more && !collect(run, &store, &own, &peer)
+                {
                     kept = true;
                 }
             }
@@ -279,8 +280,8 @@ fn decide(
 }
 
 /// Collects B's replies for this side until B has no more, or for at most
-/// `PAGES` pages, and says whether every call was answered. The next round
-/// collects what remains.
+/// `PAGES` pages, and says whether every call was answered and every reply
+/// taken. The next round collects what remains.
 fn collect(run: &mut Run<'_>, store: &RelayStore, own: &str, peer: &Peer<'_>) -> bool {
     for _ in 0..PAGES {
         let request = Request {
@@ -304,7 +305,9 @@ fn collect(run: &mut Run<'_>, store: &RelayStore, own: &str, peer: &Peer<'_>) ->
             // B refused the call itself, as for another server's host_id.
             return false;
         }
-        collect_replies(run, store, peer, &answer);
+        if collect_replies(run, store, peer, &answer) != Page::Taken {
+            return false;
+        }
         if !answer.more || answer.outbox.is_empty() {
             return true;
         }
@@ -338,6 +341,18 @@ struct Peer<'a> {
     labels: &'a [String],
 }
 
+/// Whether a page of replies was all taken.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Page {
+    Taken,
+    /// A had no room to hold a reply, so B keeps it and every later one,
+    /// and they come again.
+    Full,
+    /// A store failed, so B keeps the reply it failed on and every later
+    /// one.
+    Fault,
+}
+
 /// Inserts each reply of `answer` that A has not collected into the space
 /// of the A message it answers, from the relay author of the B agent that
 /// wrote it on the label that message was sent by, and wakes that space.
@@ -347,13 +362,31 @@ struct Peer<'a> {
 /// dropped, and A keeps nothing of it but a count for Doctor of those that
 /// answer a message sent to another host. A reply whose thread the
 /// Automatic Reply Limit paused is held, as is each later one of that
-/// thread, so they reach it in order once it takes replies again.
-fn collect_replies(run: &mut Run<'_>, store: &RelayStore, peer: &Peer<'_>, answer: &Answer) {
+/// thread, so they reach it in order once it takes replies again. A reply
+/// A has no room to hold is not acked, nor is any later one, and the
+/// later replies of its thread wait for it, while those of other threads
+/// are taken: taking a reply again finds what the first take made.
+fn collect_replies(
+    run: &mut Run<'_>,
+    store: &RelayStore,
+    peer: &Peer<'_>,
+    answer: &Answer,
+) -> Page {
     let (endpoint, host_id) = (&run.endpoint.key, peer.host_id);
+    if !wire::valid_id(&answer.epoch) {
+        // A refusal or a retry brings no page.
+        return Page::Taken;
+    }
     let Ok((epoch, through)) = store.ack_through(endpoint, host_id) else {
-        return;
+        return Page::Fault;
     };
     let through = if epoch == answer.epoch { through } else { 0 };
+    let mut full: Vec<(String, String)> = Vec::new();
+    // Acks `seq` unless B keeps an earlier reply, and says whether that
+    // went well.
+    let ack = |seq: i64, full: &[(String, String)]| {
+        !full.is_empty() || store.advance(endpoint, host_id, &answer.epoch, seq).is_ok()
+    };
     for reply in &answer.outbox {
         if reply.seq <= through {
             continue;
@@ -372,19 +405,17 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, peer: &Peer<'_>, answe
             Ok(dropped) => {
                 if matches!(dropped, Answers::OtherLabel)
                     && store.count_other_label(endpoint, run.label).is_err()
+                    || !ack(reply.seq, &full)
                 {
-                    return;
-                }
-                if store
-                    .advance(endpoint, host_id, &answer.epoch, reply.seq)
-                    .is_err()
-                {
-                    return;
+                    return Page::Fault;
                 }
                 continue;
             }
-            Err(_) => return,
+            Err(_) => return Page::Fault,
         };
+        if full.contains(&(space.clone(), thread.clone())) {
+            continue;
+        }
         let held = Held {
             endpoint: endpoint.clone(),
             host_id: host_id.to_owned(),
@@ -403,22 +434,33 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, peer: &Peer<'_>, answe
             Ok(Taken::Inserted(message_id)) => match collected(store, &held, &message_id) {
                 Ok(true) => (run.wake)(&SpaceId::new(&held.space)),
                 Ok(false) => {}
-                Err(_) => return,
+                Err(_) => return Page::Fault,
             },
-            Ok(Taken::Limited) => {
-                if store.hold(&held, super::now_ms()).is_err() {
-                    return;
+            Ok(Taken::Limited) => match store.hold(&held, super::now_ms()) {
+                Ok(true) => {}
+                Ok(false) => {
+                    full.push((held.space, held.thread));
+                    continue;
                 }
-            }
+                Err(_) => return Page::Fault,
+            },
             Ok(Taken::Refused) => {}
-            Err(_) => return,
+            Err(_) => return Page::Fault,
         }
-        if store
-            .advance(endpoint, host_id, &answer.epoch, reply.seq)
-            .is_err()
-        {
-            return;
+        if !ack(reply.seq, &full) {
+            return Page::Fault;
         }
+    }
+    if store
+        .set_held_full(endpoint, run.label, !full.is_empty())
+        .is_err()
+    {
+        return Page::Fault;
+    }
+    if full.is_empty() {
+        Page::Taken
+    } else {
+        Page::Full
     }
 }
 

@@ -342,3 +342,54 @@ fn a_done_item_is_dropped_after_14_days_and_a_thread_mapping_after_7_unused() {
         "a used mapping stays"
     );
 }
+
+/// A endpoint holds at most 100 replies of one label, whatever `host_id`
+/// each came from, and at most 20 of one thread.
+#[test]
+fn a_label_holds_at_most_100_replies_and_a_thread_20() {
+    let state = State::new();
+    let store = state.open(NOW);
+    let held = |label: &str, host_id: &str, thread: &str, n: usize| Held {
+        endpoint: "rex:/tmp/a.sock".to_owned(),
+        host_id: host_id.to_owned(),
+        epoch: "e1".to_owned(),
+        label: label.to_owned(),
+        space: "session:a".to_owned(),
+        thread: thread.to_owned(),
+        reply: Reply {
+            seq: i64::try_from(n).unwrap(),
+            re: "message-a".to_owned(),
+            thread: "t".to_owned(),
+            from: "bob".to_owned(),
+            message_id: format!("{host_id}-{thread}-{n}"),
+            text: "x".to_owned(),
+        },
+    };
+    for thread in 0..5 {
+        let host_id = format!("host-{thread}");
+        for n in 0..20 {
+            assert!(
+                store
+                    .hold(&held("devbox", &host_id, &format!("t{thread}"), n), NOW)
+                    .unwrap()
+            );
+        }
+        assert!(
+            !store
+                .hold(&held("devbox", &host_id, &format!("t{thread}"), 20), NOW)
+                .unwrap(),
+            "a thread holds 20"
+        );
+    }
+    assert!(
+        !store
+            .hold(&held("devbox", "host-new", "t9", 0), NOW)
+            .unwrap(),
+        "a new host_id gets no more room"
+    );
+    assert!(
+        store.hold(&held("devbox", "host-0", "t0", 3), NOW).unwrap(),
+        "one already held stays held"
+    );
+    assert!(store.hold(&held("studio", "host-0", "t5", 0), NOW).unwrap());
+}

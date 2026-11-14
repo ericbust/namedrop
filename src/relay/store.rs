@@ -18,10 +18,13 @@ pub(crate) const INBOUND_LIFETIME_MS: i64 = OUTBOX_LIFETIME_MS;
 /// A keeps an item it is done with this long, which outlasts a reply B
 /// keeps for a week after a week of quiet.
 pub(crate) const DONE_LIFETIME_MS: i64 = 2 * OUTBOX_LIFETIME_MS;
-/// A holds at most this many replies of one server for one endpoint. B
-/// stops its own agents after 10 replies in a thread with no human turn,
-/// so an honest B sends far fewer while A's thread is paused.
+/// A holds at most this many replies of one label for one endpoint, and
+/// at most `HELD_PER_THREAD` of them for one thread, so no thread takes
+/// every place. B stops its own agents after 10 replies in a thread with
+/// no human turn, so an honest B sends about 10 while A's thread is
+/// paused. A reply past either cap stays on B until A has room.
 pub(crate) const HELD_LIMIT: i64 = 100;
+pub(crate) const HELD_PER_THREAD: i64 = 20;
 /// B keeps at most this many replies for one A host. One more is counted
 /// with the expired replies, as one that can never reach A.
 pub(crate) const OUTBOX_LIMIT: i64 = 10_000;
@@ -29,8 +32,9 @@ pub(crate) const OUTBOX_LIMIT: i64 = 10_000;
 /// A holds `peers`, `outbound`, `collected`, `cursors`, the last `seq`
 /// each local endpoint took from each B and the outbox epoch it counts in,
 /// because each endpoint reads its own outbox on B, `held`, the replies
-/// the Automatic Reply Limit kept out of their threads, and `conditions`,
-/// what Doctor reports for each label. B holds
+/// the Automatic Reply Limit kept out of their threads, `dropped`, the
+/// held replies that expired, whose senders are still to be told, and
+/// `conditions`, what Doctor reports for each label. B holds
 /// `inbound`, `outbox`, its `outbox_epoch`, `remote_threads`, and the tally
 /// of the replies that expired, which Doctor reports after the items
 /// themselves are gone. Both hold `capture`, the last main-database message
@@ -146,7 +150,20 @@ CREATE TABLE conditions (
     endpoint TEXT NOT NULL,
     label TEXT NOT NULL,
     other_label INTEGER NOT NULL DEFAULT 0,
+    held_full INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (endpoint, label)
+);
+CREATE TABLE dropped (
+    endpoint TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    remote_message_id TEXT NOT NULL,
+    label TEXT NOT NULL,
+    space TEXT NOT NULL,
+    re TEXT NOT NULL,
+    remote_alias TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (endpoint, host_id, remote_message_id)
 );
 ";
 
@@ -227,11 +244,25 @@ pub(crate) enum Answers {
 }
 
 /// What Doctor reports on A for one label: how many replies its worker
-/// dropped because they answered a message sent to another host.
-#[derive(Debug, Eq, PartialEq)]
+/// dropped because they answered a message sent to another host, and
+/// whether A holds as many of its replies as it can, so B keeps the rest.
+#[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct Conditions {
     pub label: String,
     pub other_label: i64,
+    pub held_full: bool,
+}
+
+/// Held replies of one thread that expired, whose sender is still to be
+/// told: the first one, and how many.
+pub(crate) struct Dropped {
+    pub host_id: String,
+    pub remote_message_id: String,
+    pub label: String,
+    pub space: String,
+    pub re: String,
+    pub remote_alias: String,
+    pub count: i64,
 }
 
 /// An item's key on B: A's `host_id`, A's message id, and the recipient.
@@ -686,14 +717,17 @@ impl RelayStore {
     }
 
     /// Holds `held` for its thread, cut as A would insert it, and says
-    /// whether it is held, which it is not when the server already has
-    /// `HELD_LIMIT` replies held for this endpoint.
+    /// whether it is held, which it is not when this endpoint already holds
+    /// `HELD_LIMIT` replies of its label, whatever `host_id` they came
+    /// from, or `HELD_PER_THREAD` of its thread.
     pub(crate) fn hold(&self, held: &Held, now_ms: i64) -> Result<bool, StoreError> {
         let changed = self.connection.execute(
             "INSERT OR IGNORE INTO held (endpoint, host_id, remote_message_id, epoch, seq,
                 label, space, thread, re, remote_alias, text, told, created_at_ms)
              SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12
-             WHERE (SELECT COUNT(*) FROM held WHERE endpoint = ?1 AND host_id = ?2) < ?13",
+             WHERE (SELECT COUNT(*) FROM held WHERE endpoint = ?1 AND label = ?6) < ?13
+                AND (SELECT COUNT(*) FROM held WHERE endpoint = ?1 AND space = ?7
+                    AND thread = ?8) < ?14",
             params![
                 held.endpoint,
                 held.host_id,
@@ -707,7 +741,8 @@ impl RelayStore {
                 held.reply.from,
                 super::wire::cut(&held.reply.text, super::wire::TEXT_LIMIT),
                 now_ms,
-                HELD_LIMIT
+                HELD_LIMIT,
+                HELD_PER_THREAD
             ],
         )?;
         Ok(changed == 1
@@ -853,17 +888,66 @@ impl RelayStore {
         Ok(())
     }
 
+    /// Records whether `endpoint`'s worker for `label` last stopped a
+    /// collect at a reply A had no room to hold.
+    pub(crate) fn set_held_full(
+        &self,
+        endpoint: &str,
+        label: &str,
+        full: bool,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO conditions (endpoint, label, held_full) VALUES (?1, ?2, ?3)
+             ON CONFLICT (endpoint, label) DO UPDATE SET held_full = excluded.held_full",
+            params![endpoint, label, full],
+        )?;
+        Ok(())
+    }
+
+    /// The held replies of `endpoint` that expired, one row a thread, whose
+    /// senders are still to be told, oldest first.
+    pub(crate) fn dropped(&self, endpoint: &str) -> Result<Vec<Dropped>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT host_id, remote_message_id, label, space, re, remote_alias, count
+             FROM dropped WHERE endpoint = ?1 ORDER BY created_at_ms, rowid",
+        )?;
+        let dropped = statement
+            .query_map(params![endpoint], |row| {
+                Ok(Dropped {
+                    host_id: row.get(0)?,
+                    remote_message_id: row.get(1)?,
+                    label: row.get(2)?,
+                    space: row.get(3)?,
+                    re: row.get(4)?,
+                    remote_alias: row.get(5)?,
+                    count: row.get(6)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(dropped)
+    }
+
+    /// Records that the sender of `dropped`'s thread was told.
+    pub(crate) fn told_dropped(&self, endpoint: &str, dropped: &Dropped) -> Result<(), StoreError> {
+        self.connection.execute(
+            "DELETE FROM dropped WHERE endpoint = ?1 AND host_id = ?2 AND remote_message_id = ?3",
+            params![endpoint, dropped.host_id, dropped.remote_message_id],
+        )?;
+        Ok(())
+    }
+
     /// What `endpoint`'s Doctor reports for each label.
     pub(crate) fn conditions(&self, endpoint: &str) -> Result<Vec<Conditions>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT label, other_label FROM conditions
-             WHERE endpoint = ?1 AND other_label > 0 ORDER BY label",
+            "SELECT label, other_label, held_full FROM conditions
+             WHERE endpoint = ?1 AND (other_label > 0 OR held_full) ORDER BY label",
         )?;
         let conditions = statement
             .query_map(params![endpoint], |row| {
                 Ok(Conditions {
                     label: row.get(0)?,
                     other_label: row.get(1)?,
+                    held_full: row.get(2)?,
                 })
             })?
             .collect::<Result<_, _>>()?;
@@ -1065,7 +1149,8 @@ impl RelayStore {
     /// item and `inbound` key older than theirs, each reply A collected or
     /// held as long ago, each B thread mapping unused as long, and each item A was
     /// done with two weeks ago, and counts the dropped outbox items per
-    /// remote sender. `cursors` keeps what A acks.
+    /// remote sender. The held replies of each thread that expire leave one
+    /// `dropped` row, so their sender is told. `cursors` keeps what A acks.
     fn expire(&mut self, now_ms: i64) -> Result<(), StoreError> {
         let transaction = self.connection.transaction()?;
         transaction.execute(
@@ -1094,6 +1179,15 @@ impl RelayStore {
         transaction.execute(
             "DELETE FROM collected WHERE created_at_ms <= ?1",
             params![outbox_limit],
+        )?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO dropped (endpoint, host_id, remote_message_id, label, space,
+                re, remote_alias, count, created_at_ms)
+             SELECT endpoint, host_id, remote_message_id, label, space, re, remote_alias, n, ?1
+             FROM (SELECT endpoint, host_id, remote_message_id, label, space, re,
+                    remote_alias, COUNT(*) AS n, MIN(rowid)
+                FROM held WHERE created_at_ms <= ?2 GROUP BY endpoint, space, thread)",
+            params![now_ms, outbox_limit],
         )?;
         transaction.execute(
             "DELETE FROM held WHERE created_at_ms <= ?1",
