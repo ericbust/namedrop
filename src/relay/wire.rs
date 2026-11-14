@@ -164,6 +164,18 @@ pub(crate) struct Reply {
     pub text: String,
 }
 
+/// The replies of `from` to the A message `re` that B let go of: those it
+/// discarded because it kept `OUTBOX_LIMIT` replies for A, and those that
+/// expired before A collected them, counted since `since`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct Lost {
+    pub re: String,
+    pub from: String,
+    pub since: i64,
+    pub discarded: i64,
+    pub expired: i64,
+}
+
 /// The action's result.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct Answer {
@@ -182,6 +194,9 @@ pub(crate) struct Answer {
     /// B's relay version.
     #[serde(default = "version_1")]
     pub relay: u32,
+    /// What B let go of for A, for a version 2 A.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lost: Vec<Lost>,
 }
 
 /// The encoded size of the `deliver` request for one item, with every id

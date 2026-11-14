@@ -209,6 +209,7 @@ fn each_recipient_is_accepted_once_from_the_sender_s_relay_author() {
             more: false,
             epoch: answer.epoch.clone(),
             relay: 2,
+            lost: Vec::new(),
         }
     );
     assert!(!answer.epoch.is_empty());
@@ -407,6 +408,36 @@ fn b_takes_the_first_relay_s_requests() {
     }
     assert!(collect(3).outbox.is_empty());
     assert_eq!(store.outbox_page("host-a", 0, 0, PAGE_LIMIT).unwrap().2, 0);
+}
+
+/// B names what it let go of for A to a version 2 A, and nothing to a
+/// version 1 A, which would not read it.
+#[test]
+fn b_tells_a_version_2_a_what_it_let_go_of() {
+    let b = B::new();
+    drop(RelayStore::open(&b.0, crate::relay::now_ms()).unwrap());
+    let full = rusqlite::Connection::open(b.0.join("relay.sqlite3")).unwrap();
+    full.execute(
+        "INSERT INTO outbox_lost (host_id, re, sender, since_ms, discarded, expired,
+            updated_at_ms) VALUES ('host-a', 'm1', 'bob', 5, 2, 1, ?1)",
+        [crate::relay::now_ms()],
+    )
+    .unwrap();
+    let mut collect = deliver("m1", "bob", "t1", "x");
+    collect["op"] = json!("collect");
+    collect.as_object_mut().unwrap().remove("item");
+    assert!(b.call(&collect).lost.is_empty(), "version 1");
+    collect["relay"] = json!(2);
+    assert_eq!(
+        b.call(&collect).lost,
+        [crate::relay::wire::Lost {
+            re: "m1".to_owned(),
+            from: "bob".to_owned(),
+            since: 5,
+            discarded: 2,
+            expired: 1,
+        }]
+    );
 }
 
 /// A request from a newer relay is read as this version: B takes the item,

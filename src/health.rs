@@ -1389,6 +1389,16 @@ fn relay_conditions_issue(conditions: &[crate::relay::store::Conditions]) -> Opt
                         .to_owned(),
                 );
             }
+            match condition.lost {
+                0 => {}
+                1 => found.push(
+                    "it let go of 1 reply for this machine before this machine collected it"
+                        .to_owned(),
+                ),
+                count => found.push(format!(
+                    "it let go of {count} replies for this machine before this machine collected them"
+                )),
+            }
             if condition.cannot_reply {
                 found.push(
                     "it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them"
@@ -1701,6 +1711,7 @@ mod tests {
                 other_label: 3,
                 held_full: true,
                 cannot_reply: false,
+                lost: 0,
             },
             Conditions {
                 label: "studio".to_owned(),
@@ -1717,6 +1728,17 @@ mod tests {
                 other_label: 1,
                 ..Conditions::default()
             },
+            Conditions {
+                label: "mini".to_owned(),
+                lost: 4,
+                ..Conditions::default()
+            },
+            Conditions {
+                label: "nano".to_owned(),
+                lost: 1,
+                cannot_reply: true,
+                ..Conditions::default()
+            },
         ])
         .unwrap();
         assert_eq!(notice.code, "ND-RELAY-003");
@@ -1724,7 +1746,7 @@ mod tests {
         let paused = "Namedrop holds as many of its replies as it can for threads the Automatic Reply Limit paused, so it keeps the rest until a person's message or Continue resumes them";
         assert!(
             notice.explanation.ends_with(&format!(
-                "By host: devbox: 3 replies answered a message sent to another host, and were dropped, and {paused}; studio: {paused}; lab: it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them; pi: 1 reply answered a message sent to another host, and was dropped."
+                "By host: devbox: 3 replies answered a message sent to another host, and were dropped, and {paused}; studio: {paused}; lab: it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them; pi: 1 reply answered a message sent to another host, and was dropped; mini: it let go of 4 replies for this machine before this machine collected them; nano: it let go of 1 reply for this machine before this machine collected it, and it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them."
             )),
             "{}",
             notice.explanation

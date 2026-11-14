@@ -251,6 +251,7 @@ fn answer(host_id: &str, item: &(String, String), status: Status, reason: &str) 
         more: false,
         epoch: String::new(),
         relay: super::wire::VERSION,
+        lost: Vec::new(),
     })
     .unwrap_or(Value::Null)
 }

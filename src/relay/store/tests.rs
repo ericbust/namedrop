@@ -93,7 +93,7 @@ fn the_relay_database_is_created_from_nothing_and_reopened_with_its_rows() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, VERSION);
     for table in [
         "peers",
         "outbound",
@@ -123,18 +123,18 @@ fn a_newer_relay_schema_is_refused() {
     drop(state.open(NOW));
     Connection::open(state.0.join("relay.sqlite3"))
         .unwrap()
-        .pragma_update(None, "user_version", 3)
+        .pragma_update(None, "user_version", VERSION + 1)
         .unwrap();
     let Err(error) = RelayStore::open(&state.0, NOW) else {
         panic!("a newer schema opened");
     };
-    assert!(error.to_string().contains("relay schema 3"), "{error}");
+    assert!(error.to_string().contains("relay schema 4"), "{error}");
 }
 
-/// A version 1 database, as the first relay made, opens as version 2 with
-/// its rows, and takes what version 2 adds.
+/// A version 1 database, as the first relay made, opens as this version
+/// with its rows, and takes what versions 2 and 3 add.
 #[test]
-fn a_version_1_relay_database_is_brought_to_version_2_with_its_rows() {
+fn a_version_1_relay_database_is_brought_to_this_version_with_its_rows() {
     let state = State::new();
     let store = state.open(NOW);
     queue(&store, "message-1", NOW);
@@ -146,6 +146,8 @@ fn a_version_1_relay_database_is_brought_to_version_2_with_its_rows() {
         .execute_batch(
             "ALTER TABLE conditions DROP COLUMN other_label_at_ms;
              ALTER TABLE dropped DROP COLUMN told;
+             DROP TABLE outbox_lost;
+             DROP TABLE lost;
              PRAGMA user_version = 1;",
         )
         .unwrap();
@@ -155,7 +157,7 @@ fn a_version_1_relay_database_is_brought_to_version_2_with_its_rows() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, VERSION);
     assert_eq!(count(&store, "SELECT COUNT(*) FROM outbound"), 1);
     store
         .count_other_label("rex:/tmp/a.sock", "devbox", NOW)
@@ -169,7 +171,7 @@ fn a_version_1_relay_database_is_brought_to_version_2_with_its_rows() {
 
 /// Opens that race on a database still to be made, on one at version 1,
 /// or on one of an unreleased layout, wait their turn: each succeeds, and
-/// the database is made, brought to version 2, or set aside once.
+/// the database is made, brought to this version, or set aside once.
 #[test]
 fn opens_that_race_to_make_or_migrate_the_database_each_succeed() {
     for version in [0, 1, 99] {
@@ -185,6 +187,8 @@ fn opens_that_race_to_make_or_migrate_the_database_each_succeed() {
                     .execute_batch(
                         "ALTER TABLE conditions DROP COLUMN other_label_at_ms;
                          ALTER TABLE dropped DROP COLUMN told;
+                         DROP TABLE outbox_lost;
+                         DROP TABLE lost;
                          PRAGMA user_version = 1;",
                     )
                     .unwrap();
@@ -212,7 +216,7 @@ fn opens_that_race_to_make_or_migrate_the_database_each_succeed() {
                 .connection
                 .pragma_query_value(None, "user_version", |row| row.get(0))
                 .unwrap();
-            assert_eq!(now, 2);
+            assert_eq!(now, VERSION);
             assert_eq!(count(&store, "SELECT COUNT(*) FROM outbox_epoch"), 1);
             assert_eq!(
                 state.set_aside().len(),
@@ -290,10 +294,12 @@ fn usable(store: &RelayStore) {
     store.outbox_epoch().unwrap();
     store.outbox_page("host-a", 0, 0, 1024).unwrap();
     store.expired_replies().unwrap();
+    store.lost_for("host-a").unwrap();
+    store.lost_untold(endpoint).unwrap();
 }
 
 /// Each version 1 layout an unreleased build made opens. The newest is
-/// brought to version 2 in place with its rows. Each other one is set
+/// brought to this version in place with its rows. Each other one is set
 /// aside, with its rows, and a new database is made, which every call can
 /// use.
 #[test]
@@ -347,9 +353,22 @@ fn a_version_2_database_that_lacks_columns_is_set_aside() {
     usable(&store);
 }
 
-/// A version 2 database opens again as it is, and its rows stay.
+/// A version 2 database, as the relay of `329c278b` made, is brought to
+/// this version in place with its rows.
 #[test]
-fn a_version_2_database_opens_again_with_its_rows() {
+fn a_version_2_database_is_brought_to_this_version_with_its_rows() {
+    let state = State::new();
+    state.made_by(include_str!("fixtures/v2-6ca19369.sql"), 2);
+    let store = state.open(NOW);
+    assert_eq!(version(&store), VERSION);
+    assert!(state.set_aside().is_empty());
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM peers"), 1);
+    usable(&store);
+}
+
+/// A database of this version opens again as it is, and its rows stay.
+#[test]
+fn a_database_of_this_version_opens_again_with_its_rows() {
     let state = State::new();
     queue(&state.open(NOW), "message-1", NOW);
     for _ in 0..2 {
@@ -358,6 +377,84 @@ fn a_version_2_database_opens_again_with_its_rows() {
         assert_eq!(count(&store, "SELECT COUNT(*) FROM outbound"), 1);
     }
     assert!(state.set_aside().is_empty());
+}
+
+/// B counts, for each A message and B alias, the replies it discards for
+/// an A host that it keeps 10,000 for and those that expire, and names the
+/// latest 32 to that host.
+#[test]
+fn b_counts_what_it_lets_go_of_per_a_message() {
+    let state = State::new();
+    let store = state.open(NOW);
+    store
+        .connection
+        .execute_batch(&format!(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < {OUTBOX_LIMIT})
+             INSERT INTO outbox (host_id, re, thread, sender, message_id, text, created_at_ms)
+             SELECT 'host-a', 'message-full', 't', 'bob', 'full-' || i, 'x', {NOW} FROM n"
+        ))
+        .unwrap();
+    let reply = |message_id: &str, re: &str| Reply {
+        seq: 0,
+        re: re.to_owned(),
+        thread: "t".to_owned(),
+        from: "bob".to_owned(),
+        message_id: message_id.to_owned(),
+        text: "past the limit".to_owned(),
+    };
+    for (id, re) in [
+        ("b-1", "message-1"),
+        ("b-2", "message-1"),
+        ("b-3", "message-2"),
+    ] {
+        assert!(!store.keep_reply("host-a", &reply(id, re), NOW + 1).unwrap());
+    }
+    assert!(
+        store
+            .keep_reply("host-c", &reply("c-1", "message-1"), NOW + 1)
+            .unwrap()
+    );
+    let lost = store.lost_for("host-a").unwrap();
+    let counts: Vec<_> = lost
+        .iter()
+        .map(|lost| (lost.re.as_str(), lost.discarded, lost.expired, lost.since))
+        .collect();
+    assert_eq!(
+        counts,
+        [("message-1", 2, 0, NOW + 1), ("message-2", 1, 0, NOW + 1)]
+    );
+    assert!(store.lost_for("host-c").unwrap().is_empty());
+    drop(store);
+    let later = NOW + OUTBOX_LIFETIME_MS;
+    let store = state.open(later);
+    let lost = store.lost_for("host-a").unwrap();
+    assert_eq!(
+        (
+            lost[0].re.as_str(),
+            lost[0].discarded,
+            lost[0].expired,
+            lost[0].since
+        ),
+        ("message-full", 0, OUTBOX_LIMIT, later),
+        "the latest loss is named first"
+    );
+    assert_eq!(lost.len(), 3);
+    store
+        .connection
+        .execute_batch(&format!(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 40)
+             INSERT INTO outbox_lost (host_id, re, sender, since_ms, discarded, expired,
+                updated_at_ms)
+             SELECT 'host-a', 'm-' || i, 'bob', {later}, 1, 0, {later} - i FROM n"
+        ))
+        .unwrap();
+    assert_eq!(store.lost_for("host-a").unwrap().len(), 32);
+    drop(store);
+    let store = state.open(later + OUTBOX_LIFETIME_MS);
+    assert!(
+        store.lost_for("host-a").unwrap().is_empty(),
+        "a loss B has not added to for 7 days is forgotten"
+    );
 }
 
 /// Doctor counts the replies dropped for another host's message until

@@ -515,6 +515,68 @@ fn start_workers_starts_none_while_a_worker_holds_the_lock() {
     assert_eq!(start(), ["devbox"]);
 }
 
+/// A sender hears in its thread, once for each new loss, of the replies
+/// to its message that B let go of, and Doctor counts them.
+#[test]
+fn a_sender_is_told_once_of_each_new_loss_b_names() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    let lost = |discarded: i64, expired: i64| {
+        let mut answer = answer("accepted", None, json!([]));
+        answer["lost"] = json!([{"re": message, "from": "bob", "since": 7,
+            "discarded": discarded, "expired": expired}]);
+        answer
+    };
+    rex.answer_with(lost(2, 0));
+    for (discarded, expired) in [(2, 0), (2, 1), (5, 3)] {
+        let mut page = lost(discarded, expired);
+        page.as_object_mut().unwrap().remove("result");
+        rex.answer_with(page);
+    }
+    let told = || {
+        space.main(
+            "SELECT m.author_alias_snapshot, r.alias_snapshot, m.in_reply_to, m.body
+             FROM collaboration_messages m
+             JOIN message_recipients r USING (session_socket_id, worktree_id, message_id)
+             WHERE m.request_id LIKE 'relay-lost:%' ORDER BY m.rowid",
+        )
+    };
+    let (_, woken) = work_for(&space, &rex, 1);
+    let doctor = || {
+        crate::relay::tests_support::store(&space.state)
+            .conditions(REX, crate::relay::now_ms())
+            .unwrap()
+    };
+    let first = vec![
+        "bob@devbox".to_owned(),
+        "alice".to_owned(),
+        message.clone(),
+        "The machine of @bob@devbox let go of 2 replies to this message because it already \
+         kept 10,000 replies for this machine."
+            .to_owned(),
+    ];
+    assert_eq!(told(), [first]);
+    assert_eq!(woken, ["session:a"]);
+    assert_eq!(doctor()[0].lost, 2);
+    work_for(&space, &rex, 1);
+    assert_eq!(told().len(), 1, "the same loss is told once");
+    work_for(&space, &rex, 1);
+    assert_eq!(
+        told()[1][3],
+        "The machine of @bob@devbox let go of 1 reply to this message that waited 7 days for \
+         this machine to collect them."
+    );
+    work_for(&space, &rex, 1);
+    assert_eq!(
+        told()[2][3],
+        "The machine of @bob@devbox let go of 5 replies to this message: 3 because it already \
+         kept 10,000 replies for this machine, and 2 that waited 7 days for this machine to \
+         collect them."
+    );
+    assert_eq!(doctor()[0].lost, 8);
+}
+
 /// The answers of the first merged relay, `2496500e`, as it made them,
 /// name no version. A takes the item's outcome and the page's replies.
 #[test]
@@ -1293,7 +1355,8 @@ fn a_reply_to_a_message_not_sent_to_this_b_is_dropped() {
             label: "devbox".to_owned(),
             other_label: 1,
             held_full: false,
-            cannot_reply: false
+            cannot_reply: false,
+            lost: 0,
         }],
         "only the reply to studio's message answered another host's"
     );
@@ -1376,7 +1439,8 @@ fn a_server_that_reports_another_s_host_id_cannot_answer_for_its_label() {
             label: "devbox".to_owned(),
             other_label: 1,
             held_full: false,
-            cannot_reply: false
+            cannot_reply: false,
+            lost: 0,
         }]
     );
 
@@ -2123,7 +2187,8 @@ fn a_thread_holds_at_most_20_replies_and_b_keeps_the_rest_in_order() {
             label: "devbox".to_owned(),
             other_label: 0,
             held_full: true,
-            cannot_reply: false
+            cannot_reply: false,
+            lost: 0,
         }]
     );
     as_person(

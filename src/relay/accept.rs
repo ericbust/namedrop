@@ -48,6 +48,7 @@ pub(crate) fn accept(
         more: false,
         epoch: String::new(),
         relay: VERSION,
+        lost: Vec::new(),
     };
     let request: Request = match serde_json::from_slice(input) {
         Ok(request) => request,
@@ -85,8 +86,14 @@ pub(crate) fn accept(
             .outbox_page(&request.from.host_id, acked, after, PAGE_LIMIT)
             .map(|page| (epoch, page))
     });
-    match paged {
-        Ok((epoch, (outbox, more, kept))) => Answer {
+    // A version 1 A reads no losses, so its answer stays as it was.
+    let lost = if request.relay >= 2 {
+        store.lost_for(&request.from.host_id)
+    } else {
+        Ok(Vec::new())
+    };
+    match paged.and_then(|paged| lost.map(|lost| (paged, lost))) {
+        Ok(((epoch, (outbox, more, kept)), lost)) => Answer {
             host_id: host_id.to_owned(),
             can_reply: i64::try_from(kept).is_ok_and(|kept| kept < super::store::OUTBOX_LIMIT),
             result,
@@ -94,6 +101,7 @@ pub(crate) fn accept(
             more,
             epoch,
             relay: VERSION,
+            lost,
         },
         Err(error) => retry(host_id, request.item.as_ref(), &error.to_string()),
     }
@@ -114,6 +122,7 @@ fn retry(host_id: &str, item: Option<&Item>, reason: &str) -> Answer {
         more: false,
         epoch: String::new(),
         relay: VERSION,
+        lost: Vec::new(),
     }
 }
 

@@ -555,6 +555,16 @@ fn collect_replies(
     if store
         .set_can_reply(endpoint, run.label, answer.can_reply)
         .is_err()
+        || store
+            .note_lost(
+                endpoint,
+                run.label,
+                host_id,
+                &answer.epoch,
+                &answer.lost,
+                super::now_ms(),
+            )
+            .is_err()
     {
         return Page::Fault;
     }

@@ -1,11 +1,12 @@
 //! The notices a sender on A gets in its thread from a remote agent's relay
 //! author: that an item for that agent failed or expired, that the
-//! Automatic Reply Limit holds that agent's replies, or that A refused one
-//! or let held ones expire.
+//! Automatic Reply Limit holds that agent's replies, that A refused one or
+//! let held ones expire, or that B let go of replies before A collected
+//! them.
 
 use super::{
     RemoteName,
-    store::{Dropped, Held, RelayStore, Why},
+    store::{Dropped, Held, LostReplies, RelayStore, Why},
 };
 use crate::{
     ActorKind, DeliveryId, IdGenerator, MessageId, MutationAttribution, SpaceId, StateNamespace,
@@ -38,10 +39,11 @@ pub(crate) fn tell(
     let Ok(store) = RelayStore::open(state, now) else {
         return;
     };
-    let (Ok(unsent), Ok(held), Ok(dropped)) = (
+    let (Ok(unsent), Ok(held), Ok(dropped), Ok(lost)) = (
         store.unsent(&endpoint.key),
         store.held(&endpoint.key, true),
         store.dropped(&endpoint.key),
+        store.lost_untold(&endpoint.key),
     ) else {
         return;
     };
@@ -82,6 +84,48 @@ pub(crate) fn tell(
         }) {
             return;
         }
+    }
+    for lost in &lost {
+        let told = notice(state, gate, &endpoint.key, &lost_notice(lost));
+        if !settle(told, &lost.space, wake, || {
+            store.told_lost(&endpoint.key, lost)
+        }) {
+            return;
+        }
+    }
+}
+
+/// The notice that B let go of replies to a message before A collected
+/// them.
+fn lost_notice(lost: &LostReplies) -> Notice<'_> {
+    let replies = |count: i64| {
+        if count == 1 {
+            "1 reply".to_owned()
+        } else {
+            format!("{count} replies")
+        }
+    };
+    let (alias, label) = (&lost.remote_alias, &lost.label);
+    const FULL: &str = "because it already kept 10,000 replies for this machine";
+    const WAITED: &str = "that waited 7 days for this machine to collect them";
+    let why = match (lost.new_discarded, lost.new_expired) {
+        (discarded, 0) => format!("{} to this message {FULL}", replies(discarded)),
+        (0, expired) => format!("{} to this message {WAITED}", replies(expired)),
+        (discarded, expired) => format!(
+            "{} to this message: {discarded} {FULL}, and {expired} {WAITED}",
+            replies(discarded + expired)
+        ),
+    };
+    Notice {
+        space: &lost.space,
+        label,
+        alias,
+        message: &lost.re,
+        request_id: format!(
+            "relay-lost:{label}:{}:{}:{}:{alias}:{}:{}:{}",
+            lost.host_id, lost.epoch, lost.re, lost.since_ms, lost.discarded, lost.expired
+        ),
+        text: format!("The machine of @{alias}@{label} let go of {why}."),
     }
 }
 
