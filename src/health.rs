@@ -377,6 +377,10 @@ where
             issues.extend(expired_replies_issue(&crate::relay::expired_replies(
                 runtime.state_directory,
             )));
+            issues.extend(unsent_issue(&crate::relay::unsent_by_label(
+                runtime.state_directory,
+                runtime.session_socket_id,
+            )));
         }
     }
     match crate::update_check::settings() {
@@ -1333,6 +1337,27 @@ fn expired_replies_issue(expired: &[(String, i64)]) -> Option<HealthIssue> {
     ))
 }
 
+/// One notice for the messages to other machines that failed or expired,
+/// counted per host.
+fn unsent_issue(unsent: &[(String, i64, i64)]) -> Option<HealthIssue> {
+    if unsent.is_empty() {
+        return None;
+    }
+    let hosts = unsent
+        .iter()
+        .map(|(label, failed, expired)| format!("{label}: {failed} failed, {expired} expired"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(issue(
+        "ND-RELAY-002",
+        HealthSeverity::Info,
+        "Messages to another machine did not reach it.",
+        &format!("Each sender got a notice in its thread with the reason. By host: {hosts}."),
+        HealthRepairKind::HumanDecision,
+        "Nothing needs doing. Send again once the other machine can take the message.",
+    ))
+}
+
 fn stale_runtime_issue(stale: &crate::installed_runtime::StaleRelease) -> HealthIssue {
     let mut outdated = issue(
         "ND-SETUP-004",
@@ -1555,6 +1580,22 @@ mod tests {
             notice
                 .explanation
                 .ends_with("These expired: 2 for @alice@laptop, 1 for @host-c."),
+            "{}",
+            notice.explanation
+        );
+    }
+
+    #[test]
+    fn unsent_relay_items_are_one_notice_that_counts_each_host() {
+        assert!(unsent_issue(&[]).is_none());
+        let notice =
+            unsent_issue(&[("devbox".to_owned(), 2, 1), ("studio".to_owned(), 0, 3)]).unwrap();
+        assert_eq!(notice.code, "ND-RELAY-002");
+        assert_eq!(notice.severity, HealthSeverity::Info);
+        assert!(
+            notice
+                .explanation
+                .ends_with("devbox: 2 failed, 1 expired; studio: 0 failed, 3 expired."),
             "{}",
             notice.explanation
         );

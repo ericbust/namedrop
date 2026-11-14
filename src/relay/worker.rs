@@ -60,6 +60,7 @@ pub(crate) fn work(run: &mut Run<'_>) {
     let mut faults = 0;
     loop {
         let wait = round(run);
+        super::notice::tell(run.state, run.endpoint, run.wake);
         let wait = match wait {
             Round::Done => return,
             Round::Collected if finished(run) => return,

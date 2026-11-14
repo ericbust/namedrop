@@ -43,6 +43,7 @@ CREATE TABLE outbound (
     reason TEXT,
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
+    notified_at_ms INTEGER,
     PRIMARY KEY (label, message_id, recipient)
 );
 CREATE TABLE collected (
@@ -125,6 +126,15 @@ pub(crate) struct Queued {
     pub text: String,
     /// The `host_id` the item was first sent to.
     pub host_id: Option<String>,
+}
+
+/// An item that failed or expired and whose sender has not been told.
+pub(crate) struct Unsent {
+    pub label: String,
+    pub message_id: String,
+    pub recipient: String,
+    pub space: String,
+    pub reason: String,
 }
 
 /// How a queued item ends.
@@ -421,6 +431,56 @@ impl RelayStore {
             })?
             .collect::<Result<_, _>>()?;
         Ok(labels)
+    }
+
+    /// The items of `endpoint` that failed or expired and whose sender has
+    /// not been told, oldest first.
+    pub(crate) fn unsent(&self, endpoint: &str) -> Result<Vec<Unsent>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT label, message_id, recipient, space, COALESCE(reason, state) FROM outbound
+             WHERE endpoint = ?1 AND state IN ('failed', 'expired') AND notified_at_ms IS NULL
+             ORDER BY updated_at_ms, rowid",
+        )?;
+        let unsent = statement
+            .query_map(params![endpoint], |row| {
+                Ok(Unsent {
+                    label: row.get(0)?,
+                    message_id: row.get(1)?,
+                    recipient: row.get(2)?,
+                    space: row.get(3)?,
+                    reason: row.get(4)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(unsent)
+    }
+
+    pub(crate) fn told(&self, unsent: &Unsent, now_ms: i64) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE outbound SET notified_at_ms = ?4
+             WHERE label = ?1 AND message_id = ?2 AND recipient = ?3",
+            params![unsent.label, unsent.message_id, unsent.recipient, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Each label of `endpoint` with items that failed or expired, with how
+    /// many of each.
+    pub(crate) fn unsent_by_label(
+        &self,
+        endpoint: &str,
+    ) -> Result<Vec<(String, i64, i64)>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT label, SUM(state = 'failed'), SUM(state = 'expired') FROM outbound
+             WHERE endpoint = ?1 AND state IN ('failed', 'expired')
+             GROUP BY label ORDER BY label",
+        )?;
+        let counts = statement
+            .query_map(params![endpoint], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(counts)
     }
 
     /// Records the `host_id` an item was first sent to.

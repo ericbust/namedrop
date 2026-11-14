@@ -900,10 +900,10 @@ fn settled(space: &Space, rex: &Script, text: &str, state: &str, host_id: &str) 
     message
 }
 
-/// The bodies of the messages relay authors wrote in the space.
+/// The bodies of the replies A collected into the space.
 fn collected_bodies(space: &Space) -> Vec<Vec<String>> {
     space.main(
-        "SELECT body FROM collaboration_messages WHERE author_address_id LIKE 'relay:%'
+        "SELECT body FROM collaboration_messages WHERE request_id LIKE 'relay-reply:%'
          ORDER BY rowid",
     )
 }
@@ -1221,4 +1221,76 @@ fn a_waiting_worker_expires_nothing() {
         Duration::from_millis(20),
     );
     assert_eq!(outbound(&space)[0].0, "queued");
+}
+
+/// The notices relay authors wrote in the space: each one's author, its
+/// recipient, what it answers, and its text.
+fn notices(space: &Space) -> Vec<Vec<String>> {
+    space.main(
+        "SELECT m.author_alias_snapshot, r.alias_snapshot, m.in_reply_to, m.body
+         FROM collaboration_messages m
+         JOIN message_recipients r USING (session_socket_id, worktree_id, message_id)
+         WHERE m.request_id LIKE 'relay-unsent:%' ORDER BY m.rowid",
+    )
+}
+
+/// A sender hears in its thread, once, from the relay author it sent to,
+/// that an item failed, with B's reason, and its space is woken.
+#[test]
+fn a_sender_is_told_once_in_its_thread_that_an_item_failed() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    rex.answer_with(answer("refused", Some("no @bob on devbox"), json!([])));
+    let (_, woken) = work_for(&space, &rex, 1);
+    assert_eq!(
+        notices(&space),
+        [[
+            "bob@devbox".to_owned(),
+            "alice".to_owned(),
+            message.clone(),
+            "Namedrop could not relay this message to @bob@devbox: no @bob on devbox.".to_owned()
+        ]]
+    );
+    assert_eq!(woken, ["session:a"]);
+    let mut again = Vec::new();
+    crate::relay::notice::tell(&space.state, &Endpoint::parse(REX), &mut |space| {
+        again.push(space.as_str().to_owned());
+    });
+    assert_eq!(notices(&space).len(), 1, "told once");
+    assert!(again.is_empty(), "a told item wakes nothing again");
+}
+
+/// An item that expired is told by the next drain in a Rex home, with no
+/// worker running.
+#[test]
+fn a_drain_tells_the_sender_of_an_expired_item() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    Connection::open(space.state.join("relay.sqlite3"))
+        .unwrap()
+        .execute("UPDATE outbound SET created_at_ms = 0", [])
+        .unwrap();
+    crate::relay::tests_support::WOKEN.with(|woken| woken.borrow_mut().clear());
+    space.drain();
+    assert_eq!(
+        notices(&space),
+        [[
+            "bob@devbox".to_owned(),
+            "alice".to_owned(),
+            message,
+            "Namedrop could not relay this message to @bob@devbox: devbox was unreachable \
+             for 24 hours."
+                .to_owned()
+        ]]
+    );
+    assert_eq!(
+        crate::relay::tests_support::WOKEN.with(|woken| woken.borrow().clone()),
+        ["session:a"]
+    );
+    assert_eq!(
+        crate::relay::unsent_by_label(&space.state, REX),
+        [("devbox".to_owned(), 0, 1)]
+    );
 }

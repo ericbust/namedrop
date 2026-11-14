@@ -4,6 +4,7 @@
 
 mod accept;
 mod capture;
+mod notice;
 pub(crate) mod receive;
 mod rex;
 mod store;
@@ -170,11 +171,19 @@ fn worker_lock(
 /// Queues a mailbox wake for `space` and starts its worker, which is reaped
 /// when it exits, so a long-lived starter keeps no zombie.
 pub(crate) fn wake(state: &Path, endpoint: &crate::mux::Endpoint, space: &crate::SpaceId) {
-    use crate::status_queue::{self, Marker};
-    if status_queue::enqueue(state, endpoint, space, &Marker::Wake).is_ok()
-        && let Ok(mut worker) = status_queue::spawn_worker(state, endpoint, space)
+    #[cfg(test)]
     {
-        std::thread::spawn(move || worker.wait());
+        let _ = (state, endpoint);
+        tests_support::WOKEN.with(|woken| woken.borrow_mut().push(space.as_str().to_owned()));
+    }
+    #[cfg(not(test))]
+    {
+        use crate::status_queue::{self, Marker};
+        if status_queue::enqueue(state, endpoint, space, &Marker::Wake).is_ok()
+            && let Ok(mut worker) = status_queue::spawn_worker(state, endpoint, space)
+        {
+            std::thread::spawn(move || worker.wait());
+        }
     }
 }
 
@@ -247,6 +256,18 @@ pub(crate) fn capture_after_drain(state: &Path, session_socket_id: &str) {
     let _ = capture::capture(state, &endpoint, &mut |label| {
         start_worker(state, &endpoint, label);
     });
+    notice::tell(state, &endpoint, &mut |space| wake(state, &endpoint, space));
+}
+
+/// Each label of the Rex endpoint `session_socket_id` whose items failed or
+/// expired, with how many failed and how many expired, for Doctor.
+pub(crate) fn unsent_by_label(state: &Path, session_socket_id: &str) -> Vec<(String, i64, i64)> {
+    if !state.join("relay.sqlite3").is_file() {
+        return Vec::new();
+    }
+    RelayStore::read(state)
+        .and_then(|store| store.unsent_by_label(session_socket_id))
+        .unwrap_or_default()
 }
 
 /// Each remote sender whose replies expired here before it collected
@@ -469,6 +490,8 @@ pub(crate) mod tests_support {
         static PROGRAM: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
         /// The labels whose worker this thread started.
         pub(crate) static STARTED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+        /// The spaces whose mailbox worker this thread woke.
+        pub(crate) static WOKEN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     }
 
     static NEXT: AtomicU64 = AtomicU64::new(0);

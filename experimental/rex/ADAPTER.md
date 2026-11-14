@@ -989,6 +989,8 @@ On A, the relay worker for a label and endpoint collects while that endpoint has
 | Rex `refused` or `internal`, a failed `rex`, no route | A transient fault | Kept, with backoff |
 | The label is gone from `rex hosts list` | The person removed the host | Failed |
 
+An item that fails or expires is told to its sender once, in its thread: a message from the relay author it was sent to, in reply to the A message, addressed to that message's sender, such as `Namedrop could not relay this message to @bob@devbox: no @bob on devbox.` The worker tells after each round, and every drain in a Rex home tells too, so an item that expired while no worker ran is told. A's Doctor reports, as `ND-RELAY-002`, how many items failed and how many expired for each label.
+
 Retries are safe because B deduplicates per recipient. A perform that timed out at A still ran on B, and the retry with the same id came back `duplicate` (measured). So the relay is at-least-once on the wire and exactly-once into B's mailbox. B's own delivery keeps the gate's at-most-once typing. Whether B delivered the item to its agent is not reported back to A, because delivery acks are deferred.
 
 **Limits and expiry.** The `rex` CLI refuses a request over 64 KiB before it sends it (measured: `control message too large: encoded request is 70269 bytes, limit is 65536`), although the server accepts 1 MiB. So the send refuses an item whose encoded request would pass 60 KiB, and B caps `text` at 60 KiB itself. B caps a result at 256 KiB, because a reply over the server's 1 MiB limit broke B's own connection (measured: a 1.1 MB reply, after which A got `client_unavailable`). An item A cannot deliver within 24 hours fails with `devbox was unreachable for 24 hours`. An outbox item on B expires 7 days after B wrote it, and B's Doctor reports how many expired for each remote sender. An `inbound` row expires 7 days after B wrote it, which outlasts A's 24-hour retry, so every retry still finds its key.
@@ -998,7 +1000,7 @@ Retries are safe because B deduplicates per recipient. A perform that timed out 
 | Table | On | Key | Holds |
 |---|---|---|---|
 | `peers` | A | label | The `host_id` from the last `server.status`, the last contact |
-| `outbound` | A | (label, A's message id, recipient) | The item, its state (queued, accepted, failed, expired), B's `host_id`, the reason |
+| `outbound` | A | (label, A's message id, recipient) | The item, its state (queued, accepted, failed, expired), B's `host_id`, the reason, and when its sender was told it failed |
 | `collected` | A | (B's `host_id`, B's outbox epoch, `seq`) | A's inserted message id, B's message id, B's alias, A's thread |
 | `cursors` | A | B's `host_id` | The highest `seq` A stored and the outbox epoch it counts in |
 | `outbox_epoch` | B | (one row) | B's outbox epoch, made when the database is created |
