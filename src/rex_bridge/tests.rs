@@ -46,11 +46,20 @@ impl State {
         Self(path)
     }
 
-    /// The events queued for `space`, in queue order.
+    /// The events queued for `space`, in queue order. A marker still being
+    /// written is not queued yet.
     fn queued(&self, space: &str) -> Vec<MuxEvent> {
         let directory = status_queue::directory(&self.0, REX, space);
         let mut files: Vec<PathBuf> = fs::read_dir(directory)
-            .map(|entries| entries.map(|entry| entry.unwrap().path()).collect())
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| Some(entry.ok()?.path()))
+                    .filter(|path| {
+                        path.file_name()
+                            .is_some_and(|name| name.to_string_lossy().starts_with("pending-"))
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         files.sort();
         files
@@ -191,6 +200,16 @@ struct Workers {
     spawned: Vec<String>,
     pids: Vec<u32>,
     replaced: bool,
+}
+
+/// Requests a stop when dropped, so a helper thread that panics still ends
+/// the bridge it watches.
+struct StopOnDrop<'w>(&'w Wake);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.wake();
+    }
 }
 
 /// What unwinds out of a bridge whose runtime was replaced, since `exec`
@@ -638,6 +657,7 @@ fn events_a_flush_cannot_queue_stay_pending_until_it_can() {
         )]);
         let (held, waited) = std::thread::scope(|threads| {
             let held = threads.spawn(|| {
+                let _stop = StopOnDrop(&stop);
                 std::thread::sleep(Duration::from_millis(300));
                 let held = state.queued("session:s").is_empty();
                 unblock(&state);
@@ -647,7 +667,6 @@ fn events_a_flush_cannot_queue_stay_pending_until_it_can() {
                 while state.queued("session:s").is_empty() && Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                stop.wake();
                 (held, waited)
             });
             bridged(&state, &script, &stop);
@@ -740,6 +759,7 @@ fn a_bridge_stops_once_its_state_directory_is_deleted_or_replaced() {
                 bridged(&state, &script, &stop);
                 done.store(true, Ordering::SeqCst);
             });
+            let _stop = StopOnDrop(&stop);
             std::thread::sleep(Duration::from_millis(200));
             let early = done.load(Ordering::SeqCst);
             if replaced {
@@ -756,9 +776,7 @@ fn a_bridge_stops_once_its_state_directory_is_deleted_or_replaced() {
             while !done.load(Ordering::SeqCst) && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            let ended = done.load(Ordering::SeqCst);
-            stop.wake();
-            (early, ended)
+            (early, done.load(Ordering::SeqCst))
         });
         assert!(!early, "the bridge ended early");
         assert!(ended, "replaced: {replaced}");
