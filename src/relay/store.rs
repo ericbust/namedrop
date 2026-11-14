@@ -3,7 +3,7 @@
 
 use super::wire::{Outcome, Reply};
 use crate::StoreError;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 
 const FILE: &str = "relay.sqlite3";
@@ -350,7 +350,13 @@ impl RelayStore {
         let mut connection = Connection::open(&path)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         connection.busy_timeout(Duration::from_secs(2))?;
-        let transaction = connection.transaction()?;
+        let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version == VERSION {
+            return Ok(Self { connection });
+        }
+        // The write lock first, so opens that race to make or migrate the
+        // database wait their turn, where a read that upgrades would fail.
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: u32 =
             transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
         match version {

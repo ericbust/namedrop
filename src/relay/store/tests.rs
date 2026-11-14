@@ -167,6 +167,54 @@ fn a_version_1_relay_database_is_brought_to_version_2_with_its_rows() {
     );
 }
 
+/// Opens that race on a database still to be made, or on one at version
+/// 1, wait their turn: each succeeds, and the database is made or brought
+/// to version 2 once.
+#[test]
+fn opens_that_race_to_make_or_migrate_the_database_each_succeed() {
+    for version in [0, 1] {
+        for _ in 0..10 {
+            let state = State::new();
+            if version == 1 {
+                state
+                    .open(NOW)
+                    .connection
+                    .execute_batch(
+                        "ALTER TABLE conditions DROP COLUMN other_label_at_ms;
+                         ALTER TABLE dropped DROP COLUMN told;
+                         PRAGMA user_version = 1;",
+                    )
+                    .unwrap();
+            }
+            let barrier = std::sync::Barrier::new(8);
+            let failed: Vec<String> = std::thread::scope(|scope| {
+                let opens: Vec<_> = (0..8)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            RelayStore::read(&state.0)
+                                .err()
+                                .map(|error| error.to_string())
+                        })
+                    })
+                    .collect();
+                opens
+                    .into_iter()
+                    .filter_map(|open| open.join().unwrap())
+                    .collect()
+            });
+            assert!(failed.is_empty(), "version {version}: {failed:?}");
+            let store = state.open(NOW);
+            let now: u32 = store
+                .connection
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(now, 2);
+            assert_eq!(count(&store, "SELECT COUNT(*) FROM outbox_epoch"), 1);
+        }
+    }
+}
+
 /// Doctor counts the replies dropped for another host's message until
 /// 7 days pass with none, and then counts from one again.
 #[test]
