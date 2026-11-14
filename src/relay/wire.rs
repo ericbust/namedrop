@@ -13,6 +13,10 @@ pub(crate) const TEXT_LIMIT: usize = 60 * 1024;
 /// its outbox at this.
 pub(crate) const PAGE_LIMIT: usize = 256 * 1024;
 
+/// A keeps at most this much of a reason B gives for refusing an item,
+/// which the sender's notice quotes.
+pub(crate) const REASON_LIMIT: usize = 1024;
+
 /// The line a cut message ends with.
 pub(crate) const CUT_NOTICE: &str = "\n\n[Namedrop cut this message to relay it.]";
 

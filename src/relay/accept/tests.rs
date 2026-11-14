@@ -346,6 +346,7 @@ fn each_bad_field_is_refused_by_name_and_nothing_is_stored() {
         ("from.name", "/from/name", json!("ali ce")),
         ("from.name", "/from/name", json!("a".repeat(65))),
         ("item.to", "/item/to", json!("bo b")),
+        ("item.to", "/item/to", json!("b".repeat(65))),
         ("item.id", "/item/id", json!(long)),
         ("item.thread", "/item/thread", json!("t 1")),
         ("from.host_id", "/from/host_id", json!("")),

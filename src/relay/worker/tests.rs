@@ -116,7 +116,7 @@ impl Script {
 fn answer(status: &str, reason: Option<&str>, outbox: Value) -> Value {
     json!({"host_id": "host-b", "can_reply": true,
         "result": {"id": "x", "to": "bob", "status": status, "reason": reason},
-        "outbox": outbox, "more": false})
+        "outbox": outbox, "more": false, "epoch": "e1"})
 }
 
 /// A sent `@bob@devbox` item, and the A message it carries.
@@ -177,7 +177,8 @@ fn an_accepted_item_is_done_and_its_reply_is_collected_once_from_b_s_relay_autho
         "message_id": "b-message-1", "text": "pong"}]);
     rex.answer_with(answer("accepted", None, reply.clone()));
     rex.answer_with(
-        json!({"host_id": "host-b", "can_reply": true, "outbox": reply, "more": false}),
+        json!({"host_id": "host-b", "can_reply": true, "outbox": reply, "more": false,
+            "epoch": "e1"}),
     );
     let (waits, woken) = work_for(&space, &rex, 2);
 
@@ -971,6 +972,170 @@ fn a_reply_with_a_bad_field_is_acked_and_dropped_and_a_long_one_cut() {
     );
 }
 
+/// The rows of `sql` in A's relay database.
+fn relay_rows(space: &Space, sql: &str) -> Vec<Vec<Value>> {
+    Connection::open(space.state.join("relay.sqlite3"))
+        .unwrap()
+        .prepare(sql)
+        .unwrap()
+        .query_map([], |row| {
+            (0..row.as_ref().column_count())
+                .map(|column| {
+                    Ok(match row.get_ref(column)? {
+                        rusqlite::types::ValueRef::Null => Value::Null,
+                        rusqlite::types::ValueRef::Integer(value) => json!(value),
+                        value => json!(value.as_str().unwrap_or_default()),
+                    })
+                })
+                .collect::<Result<_, _>>()
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// A reply A drops is acked and leaves no row, so B's made-up traffic
+/// neither grows A's database nor keeps a thread open.
+#[test]
+fn a_dropped_reply_is_acked_and_leaves_no_row_or_open_thread() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    let garbage: Vec<Value> = (1..=50)
+        .map(|seq| {
+            json!({"seq": seq, "re": if seq % 2 == 0 { "x" } else { "message-unknown" },
+                "thread": "t", "from": if seq % 2 == 0 { "bob" } else { "UP PER" },
+                "message_id": format!("b-{seq}"), "text": "junk"})
+        })
+        .collect();
+    collect_once(&space, &rex, json!(garbage));
+    assert_eq!(
+        relay_rows(&space, "SELECT COUNT(*) FROM collected"),
+        [[json!(0)]]
+    );
+    assert_eq!(
+        crate::relay::tests_support::store(&space.state)
+            .ack_through(REX, "host-b")
+            .unwrap(),
+        ("e1".to_owned(), 50)
+    );
+    Connection::open(space.state.join("relay.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE outbound SET updated_at_ms = updated_at_ms - 25 * 3600 * 1000",
+            [],
+        )
+        .unwrap();
+    let store = crate::relay::tests_support::store(&space.state);
+    let now = crate::relay::now_ms();
+    assert!(!store.thread_open("devbox", REX, now).unwrap());
+    assert!(store.active_labels(REX, now).unwrap().is_empty());
+}
+
+/// B makes up its outbox epoch, so A takes no reply from an answer whose
+/// epoch is not an id, and stores no such epoch, but still decides the
+/// item by the answer's outcome.
+#[test]
+fn an_epoch_that_is_not_an_id_brings_no_reply_and_is_never_stored() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    for epoch in [json!("E".repeat(129)), json!("e 1"), json!("")] {
+        let mut first = answer(
+            "accepted",
+            None,
+            json!([{"seq": 1, "re": message, "thread": "t", "from": "bob",
+                "message_id": "b-1", "text": "pong"}]),
+        );
+        first["epoch"] = epoch;
+        rex.answer_with(first);
+        work_for(&space, &rex, 1);
+        assert_eq!(
+            outbound(&space)[0].0,
+            "accepted",
+            "B's outcome still decides"
+        );
+        Connection::open(space.state.join("relay.sqlite3"))
+            .unwrap()
+            .execute("UPDATE outbound SET state = 'queued'", [])
+            .unwrap();
+    }
+    assert!(collected_bodies(&space).is_empty());
+    assert_eq!(
+        relay_rows(&space, "SELECT COUNT(*) FROM cursors"),
+        [[json!(0)]]
+    );
+    assert_eq!(
+        relay_rows(&space, "SELECT COUNT(*) FROM collected"),
+        [[json!(0)]]
+    );
+    let mut good = answer(
+        "accepted",
+        None,
+        json!([{"seq": 1, "re": message, "thread": "t", "from": "bob",
+            "message_id": "b-1", "text": "pong"}]),
+    );
+    good["epoch"] = json!("e".repeat(128));
+    rex.answer_with(good);
+    work_for(&space, &rex, 1);
+    assert_eq!(outbound(&space)[0].0, "accepted");
+    assert_eq!(collected_bodies(&space), [["pong"]]);
+}
+
+/// A `host_id` that `server.status` gives is B's to make up too, so one
+/// that is not an id pins nothing and sends nothing.
+#[test]
+fn a_status_host_id_that_is_not_an_id_pins_nothing() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    for host_id in ["host b".to_owned(), "h".repeat(129), String::new()] {
+        fs::write(
+            rex.directory.join("status.json"),
+            json!({"pid": 1, "host_id": host_id}).to_string(),
+        )
+        .unwrap();
+        let (waits, _) = work_for(&space, &rex, 1);
+        assert_eq!(waits, [BACKOFF[0]], "{host_id:?}");
+    }
+    assert!(rex.requests().is_empty());
+    assert_eq!(
+        relay_rows(&space, "SELECT COUNT(*) FROM peers"),
+        [[json!(0)]]
+    );
+    assert_eq!(
+        outbound(&space),
+        [("queued".to_owned(), None, None)],
+        "the item waits, pinned to no server"
+    );
+}
+
+/// B's reason for a refusal is cut before A stores it or tells the sender.
+#[test]
+fn a_long_refusal_reason_from_b_is_cut() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    let reason = format!("no @bob on devbox {}", "A".repeat(300_000));
+    rex.answer_with(answer("refused", Some(&reason), json!([])));
+    work_for(&space, &rex, 1);
+    let (_, stored, _) = outbound(&space).remove(0);
+    let stored = stored.unwrap();
+    assert!(
+        stored.len() <= crate::relay::wire::REASON_LIMIT,
+        "{}",
+        stored.len()
+    );
+    assert!(stored.starts_with("no @bob on devbox AAA"));
+    assert!(stored.ends_with(crate::relay::wire::CUT_NOTICE));
+    let body = &notices(&space)[0][3];
+    assert!(
+        body.len() < crate::relay::wire::REASON_LIMIT + 100,
+        "{}",
+        body.len()
+    );
+}
+
 /// B answers only what this endpoint sent it and it accepted, so a reply
 /// that names another label's, another server's, or a failed item's
 /// message is dropped.
@@ -1096,7 +1261,7 @@ fn one_collect_reads_at_most_16_pages() {
     let rex = rex(&["devbox"]);
     let message = sent(&space, &rex);
     let page = |seq: i64| {
-        json!({"host_id": "host-b", "can_reply": true, "more": true,
+        json!({"host_id": "host-b", "can_reply": true, "more": true, "epoch": "e1",
             "outbox": [{"seq": seq, "re": message, "thread": "t", "from": "bob",
                 "message_id": format!("b-{seq}"), "text": format!("more {seq}")}]})
     };

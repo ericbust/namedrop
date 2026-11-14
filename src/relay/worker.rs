@@ -210,7 +210,11 @@ fn decide(
         *kept = true;
         return;
     };
-    let reason = outcome.reason.as_deref().unwrap_or("refused");
+    let reason = wire::cut(
+        outcome.reason.as_deref().unwrap_or("refused"),
+        wire::REASON_LIMIT,
+    );
+    let reason = reason.as_str();
     let _ = match outcome.status {
         Status::Accepted | Status::Duplicate => {
             store.settle(label, item, Settled::Accepted, None, now)
@@ -289,7 +293,7 @@ fn acked(store: &RelayStore, endpoint: &str, host_id: &str) -> Request {
 /// wrote it, and wakes that space. A new outbox epoch means B's `seq`
 /// started again, so every reply of it is new. A reply is B's to make up,
 /// so one with a bad field, or one that answers a message this endpoint
-/// did not send to B, is acked and dropped.
+/// did not send to B, is acked and dropped, and A keeps nothing of it.
 fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, answer: &Answer) {
     let endpoint = &run.endpoint.key;
     let Ok((epoch, through)) = store.ack_through(endpoint, host_id) else {
@@ -305,50 +309,40 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, answer:
         } else {
             Ok(None)
         };
-        let Ok(Some((space, thread))) = sent else {
-            let _ = store.record_collected(&Collected {
-                host_id,
-                epoch: &answer.epoch,
-                seq: reply.seq,
-                label: run.label,
-                endpoint,
-                space: "",
-                message_id: "",
-                remote_message_id: "",
-                remote_alias: "",
-                thread: "",
-                now_ms: super::now_ms(),
-            });
-            let _ = store.advance(endpoint, host_id, &answer.epoch, reply.seq);
-            continue;
+        let (space, thread) = match sent {
+            Ok(Some(sent)) => sent,
+            Ok(None) => {
+                let _ = store.advance(endpoint, host_id, &answer.epoch, reply.seq);
+                continue;
+            }
+            Err(_) => return,
         };
         let Ok(gate) = crate::runtime_command_guard(run.state, None) else {
             return;
         };
         let inserted = insert_reply(run.state, run.label, host_id, reply, endpoint, &space);
         drop(gate);
-        let message_id = match inserted {
-            Ok(Some(message)) => message,
-            Ok(None) => String::new(),
+        match inserted {
+            Ok(Some(message_id)) => {
+                let _ = store.record_collected(&Collected {
+                    host_id,
+                    epoch: &answer.epoch,
+                    seq: reply.seq,
+                    label: run.label,
+                    endpoint,
+                    space: &space,
+                    message_id: &message_id,
+                    remote_message_id: &reply.message_id,
+                    remote_alias: &reply.from,
+                    thread: &thread,
+                    now_ms: super::now_ms(),
+                });
+                (run.wake)(&SpaceId::new(&space));
+            }
+            Ok(None) => {}
             Err(_) => return,
-        };
-        let _ = store.record_collected(&Collected {
-            host_id,
-            epoch: &answer.epoch,
-            seq: reply.seq,
-            label: run.label,
-            endpoint,
-            space: &space,
-            message_id: &message_id,
-            remote_message_id: &reply.message_id,
-            remote_alias: &reply.from,
-            thread: &thread,
-            now_ms: super::now_ms(),
-        });
-        let _ = store.advance(endpoint, host_id, &answer.epoch, reply.seq);
-        if !message_id.is_empty() {
-            (run.wake)(&SpaceId::new(&space));
         }
+        let _ = store.advance(endpoint, host_id, &answer.epoch, reply.seq);
     }
 }
 
@@ -416,8 +410,9 @@ fn status(label: &str) -> Result<String, Failure> {
     let status = api(label, &["server.status"], None)?;
     status["host_id"]
         .as_str()
+        .filter(|host_id| wire::valid_id(host_id))
         .map(str::to_owned)
-        .ok_or_else(|| Failure::Exit("server.status gave no host_id".to_owned()))
+        .ok_or_else(|| Failure::Exit("server.status gave no valid host_id".to_owned()))
 }
 
 /// One `namedrop.relay` call: `target.resolve` for B's bridge, then
@@ -449,11 +444,21 @@ fn perform(label: &str, request: &Request) -> Call {
     };
     match api(label, &["client.perform", "-"], Some(&input)) {
         Ok(performed) => match serde_json::from_value::<Answer>(performed["result"].clone()) {
-            Ok(answer) => Call::Answered(answer),
+            Ok(answer) => Call::Answered(bounded(answer)),
             Err(_) => Call::Failed(format!("{label} runs a Namedrop without this relay")),
         },
         Err(failure) => failed(label, &failure),
     }
+}
+
+/// `answer` without its replies when its epoch is not an id, because A
+/// stores the epoch B makes up with each reply it takes.
+fn bounded(mut answer: Answer) -> Answer {
+    if !wire::valid_id(&answer.epoch) {
+        answer.outbox.clear();
+        answer.more = false;
+    }
+    answer
 }
 
 /// The outcome table's rows for a failed `rex` call.

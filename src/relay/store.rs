@@ -364,7 +364,7 @@ impl RelayStore {
             .query_row(
                 "SELECT remote_message_id FROM collected
                  WHERE endpoint = ?1 AND space = ?2 AND thread = ?3 AND label = ?5
-                   AND remote_alias = ?6 AND message_id <> ''
+                   AND remote_alias = ?6
                  ORDER BY message_id = ?4 DESC, created_at_ms DESC, seq DESC LIMIT 1",
                 params![endpoint, space, thread, in_reply_to, label, alias],
                 |row| row.get(0),

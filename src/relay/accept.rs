@@ -136,7 +136,7 @@ fn validate(request: &Request) -> Result<(), &'static str> {
     if !id(&item.id) {
         return Err("item.id");
     }
-    if crate::validate_alias(&item.to).is_err() {
+    if !super::valid_name(&item.to) {
         return Err("item.to");
     }
     if !id(&item.thread) {
