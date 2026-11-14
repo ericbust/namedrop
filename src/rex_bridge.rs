@@ -77,11 +77,7 @@ impl Workers {
     /// The workers the image this process replaced left running.
     pub(crate) fn inherited() -> Self {
         let workers = Self::default();
-        for pid in std::env::var(INHERITED_WORKERS)
-            .unwrap_or_default()
-            .split(',')
-            .filter_map(|pid| pid.parse().ok())
-        {
+        for pid in named(&std::env::var(INHERITED_WORKERS).unwrap_or_default()) {
             workers.wait_for(pid);
         }
         workers
@@ -116,6 +112,17 @@ impl Workers {
             .collect::<Vec<_>>()
             .join(",")
     }
+}
+
+/// The pids `value` names as `INHERITED_WORKERS` spells them. Only a
+/// positive one names a process: `waitpid` reads 0 or a negative pid as a
+/// whole group, so it would reap a child that is not a worker.
+fn named(value: &str) -> Vec<libc::pid_t> {
+    value
+        .split(',')
+        .filter_map(|pid| pid.parse().ok())
+        .filter(|pid| *pid > 0)
+        .collect()
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -458,12 +465,10 @@ fn flush(
         host.reexec_if_replaced();
         Some((gate, activated_spaces(state, endpoint)?))
     }) else {
-        if batch.every_space {
-            pending.resync_every_space(retry);
-        }
-        for (space, _) in batch.spaces {
-            pending.note(MuxEvent::Resync(space), retry);
-        }
+        // Which spaces are activated is unknown, so the next try resyncs
+        // each one, which recovers every event of the batch.
+        pending.resync_every_space(Instant::now());
+        pending.wait_until(retry);
         return;
     };
     for (space, events) in by_space(batch, &activated) {
@@ -473,7 +478,8 @@ fn flush(
         let mut queued = false;
         for event in events {
             if status_queue::enqueue(state, endpoint, &space, &Marker::Event(event)).is_err() {
-                pending.note(MuxEvent::Resync(space.clone()), retry);
+                pending.note(MuxEvent::Resync(space.clone()), Instant::now());
+                pending.wait_until(retry);
                 break;
             }
             queued = true;

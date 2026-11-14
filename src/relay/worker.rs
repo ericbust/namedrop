@@ -16,7 +16,7 @@ use crate::{
     store::{RelayAuthor, RelayOrigin, Relayed},
 };
 use serde_json::{Value, json};
-use std::{path::Path, time::Duration};
+use std::{cell::RefCell, path::Path, time::Duration};
 
 /// How often the worker collects while a thread is open and nothing is
 /// queued.
@@ -41,13 +41,16 @@ const PAGES: usize = 16;
 
 /// One worker's place and its effects: `gate` takes the command gate for
 /// a write to the main database, `pause` waits and says whether to go on,
-/// and `wake` starts the mailbox worker of a space that got mail.
+/// and `wake` starts the mailbox worker of a space that got mail. `woken`
+/// holds the spaces of a round to wake after it, which a gate that hands
+/// the worker over to another runtime wakes first.
 pub(crate) struct Run<'a> {
     pub state: &'a Path,
     pub endpoint: &'a Endpoint,
     pub label: &'a str,
     pub gate: Gate<'a>,
     pub pause: &'a mut dyn FnMut(Duration) -> bool,
+    pub woken: &'a RefCell<Vec<SpaceId>>,
     pub wake: &'a mut dyn FnMut(&SpaceId),
 }
 
@@ -65,13 +68,15 @@ enum Call {
 /// after it.
 pub(crate) fn work(run: &mut Run<'_>) {
     let mut faults = 0;
+    let mut reading = Reading::default();
     loop {
         // An update while the worker waited selects another runtime, which
         // takes the worker's place before it does anything more.
         drop((run.gate)());
-        let mut woken: Vec<SpaceId> = Vec::new();
         let wait = {
+            let woken = run.woken;
             let mut once = |space: &SpaceId| {
+                let mut woken = woken.borrow_mut();
                 if !woken.contains(space) {
                     woken.push(space.clone());
                 }
@@ -82,15 +87,16 @@ pub(crate) fn work(run: &mut Run<'_>) {
                 label: run.label,
                 gate: run.gate,
                 pause: &mut *run.pause,
+                woken,
                 wake: &mut once,
             };
-            let wait = round(&mut round_run);
+            let wait = round(&mut round_run, &mut reading);
             release(run.state, run.endpoint, run.gate, round_run.wake);
             super::notice::tell(run.state, run.endpoint, run.gate, round_run.wake);
             wait
         };
-        for space in &woken {
-            (run.wake)(space);
+        for space in run.woken.take() {
+            (run.wake)(&space);
         }
         let wait = match wait {
             Round::Done => return,
@@ -128,15 +134,18 @@ enum Round {
     Done,
     /// Every queued item was decided, and the label was collected.
     Collected,
-    /// An item was kept or a call failed, so the next round waits longer.
+    /// An item was kept, a call failed, or a reply stays on B for want of
+    /// room, so the next round waits longer.
     Kept,
 }
 
 /// One round: the label's queued items, then a collect. B's `host_id` is
 /// read again each round, so a new item is pinned to the server that
 /// answers now.
-fn round(run: &mut Run<'_>) -> Round {
+fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
     let now = super::now_ms();
+    reading.pages = 0;
+    reading.left = !reading.waiting.is_empty();
     let Ok(store) = RelayStore::open(run.state, now) else {
         return Round::Kept;
     };
@@ -183,6 +192,10 @@ fn round(run: &mut Run<'_>) -> Round {
             .cannot_reply(&run.endpoint.key, run.label)
             .is_ok_and(|no| no)
     };
+    // Whether B said in a page this round that it keeps no more replies
+    // for this side. Only that fails an item, and only one never sent,
+    // since B may have accepted one sent before and still answers for it.
+    let mut full = false;
     if !queued.is_empty() && silent() {
         // B's last page said it keeps no more replies for this side, so a
         // collect first tells whether that still holds.
@@ -190,10 +203,12 @@ fn round(run: &mut Run<'_>) -> Round {
             host_id: &peer_id,
             labels: &labels,
         };
-        kept = !collect(run, &store, &own, &peer);
+        let pages = collect(run, &store, &own, &peer, reading);
+        kept = !pages.answered;
+        full = pages.read && silent();
     }
     for item in &queued {
-        if silent() {
+        if full && item.host_id.is_none() {
             let reason = format!(
                 "{} keeps no more replies for this machine until this machine collects them",
                 run.label
@@ -220,7 +235,7 @@ fn round(run: &mut Run<'_>) -> Round {
                 in_reply_to: item.in_reply_to.clone(),
                 text: item.text.clone(),
             }),
-            ..acked(&store, &run.endpoint.key, &host_id)
+            ..acked(&store, &run.endpoint.key, &host_id, reading)
         };
         match perform(run.label, &request) {
             Call::Answered(answer) => {
@@ -237,8 +252,12 @@ fn round(run: &mut Run<'_>) -> Round {
                     host_id: &host_id,
                     labels: &labels,
                 };
-                if collect_replies(run, &store, &peer, &answer) != Page::Taken
-                    || more && !collect(run, &store, &own, &peer)
+                let page = collect_replies(run, &store, &peer, &answer, reading);
+                if page == Page::Read {
+                    full = silent();
+                }
+                if page == Page::Fault
+                    || more && !collect(run, &store, &own, &peer, reading).answered
                 {
                     kept = true;
                 }
@@ -256,10 +275,14 @@ fn round(run: &mut Run<'_>) -> Round {
         host_id: &peer_id,
         labels: &labels,
     };
-    if queued.is_empty() && !collect(run, &store, &own, &peer) {
+    if queued.is_empty() && !collect(run, &store, &own, &peer, reading).answered {
         kept = true;
     }
-    if kept { Round::Kept } else { Round::Collected }
+    if kept || full || reading.left {
+        Round::Kept
+    } else {
+        Round::Collected
+    }
 }
 
 /// Settles `item` by B's outcome for it.
@@ -280,11 +303,11 @@ fn decide(
         .as_deref()
         .unwrap_or("refused")
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| if shown(c) { c } else { ' ' })
         .collect();
     let reason = wire::cut(&printable, wire::REASON_LIMIT);
     let reason = reason.as_str();
-    let _ = match outcome.status {
+    let settled = match outcome.status {
         Status::Accepted | Status::Duplicate => {
             store.settle(label, item, Settled::Accepted, None, now)
         }
@@ -303,13 +326,64 @@ fn decide(
             Ok(())
         }
     };
+    // The item stays queued, and B keeps each reply to it until a later
+    // round settles it by B's stored outcome.
+    if settled.is_err() {
+        *kept = true;
+    }
+}
+
+/// What a collect found.
+struct Pages {
+    /// B answered with at least one page.
+    read: bool,
+    /// Every call was answered and every page stored.
+    answered: bool,
+}
+
+/// Whether a terminal shows `c` as itself: not a control character, nor
+/// one that formats or breaks the text around it, as U+202E reverses it.
+/// Those are Unicode 16's General_Category Cf, the rest of the tag block,
+/// and the line and paragraph separators.
+fn shown(c: char) -> bool {
+    !(c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061C}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08E2}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{110BD}'
+                | '\u{110CD}'
+                | '\u{13430}'..='\u{1343F}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0000}'..='\u{E007F}'
+        ))
 }
 
 /// Collects B's replies for this side until B has no more, or for at most
-/// `PAGES` pages, and says whether every call was answered and every reply
-/// taken. The next round collects what remains.
-fn collect(run: &mut Run<'_>, store: &RelayStore, own: &str, peer: &Peer<'_>) -> bool {
-    for _ in 0..PAGES {
+/// `PAGES` pages a round. The next round reads on from where it stopped.
+fn collect(
+    run: &mut Run<'_>,
+    store: &RelayStore,
+    own: &str,
+    peer: &Peer<'_>,
+    reading: &mut Reading,
+) -> Pages {
+    let mut read = false;
+    while reading.pages < PAGES {
+        reading.pages += 1;
         let request = Request {
             op: Op::Collect,
             expect_host_id: peer.host_id.to_owned(),
@@ -318,10 +392,13 @@ fn collect(run: &mut Run<'_>, store: &RelayStore, own: &str, peer: &Peer<'_>) ->
                 name: "namedrop".to_owned(),
                 host: super::machine_name(),
             },
-            ..acked(store, &run.endpoint.key, peer.host_id)
+            ..acked(store, &run.endpoint.key, peer.host_id, reading)
         };
         let Call::Answered(answer) = perform(run.label, &request) else {
-            return false;
+            return Pages {
+                read,
+                answered: false,
+            };
         };
         if answer
             .result
@@ -329,22 +406,40 @@ fn collect(run: &mut Run<'_>, store: &RelayStore, own: &str, peer: &Peer<'_>) ->
             .is_some_and(|result| result.status != Status::Retry)
         {
             // B refused the call itself, as for another server's host_id.
-            return false;
+            return Pages {
+                read,
+                answered: false,
+            };
         }
-        if collect_replies(run, store, peer, &answer) != Page::Taken {
-            return false;
+        match collect_replies(run, store, peer, &answer, reading) {
+            Page::None => {}
+            Page::Read => read = true,
+            Page::Fault => {
+                return Pages {
+                    read,
+                    answered: false,
+                };
+            }
         }
         if !answer.more || answer.outbox.is_empty() {
-            return true;
+            break;
         }
     }
-    true
+    Pages {
+        read,
+        answered: true,
+    }
 }
 
 /// The parts of a request that ack what `endpoint` has taken from
-/// `host_id`.
-fn acked(store: &RelayStore, endpoint: &str, host_id: &str) -> Request {
+/// `host_id`, and ask for the replies after those `reading` read.
+fn acked(store: &RelayStore, endpoint: &str, host_id: &str, reading: &Reading) -> Request {
     let (epoch, ack_through) = store.ack_through(endpoint, host_id).unwrap_or_default();
+    let after = if reading.host_id == host_id && reading.epoch == epoch {
+        reading.after
+    } else {
+        0
+    };
     Request {
         op: Op::Collect,
         expect_host_id: String::new(),
@@ -356,6 +451,7 @@ fn acked(store: &RelayStore, endpoint: &str, host_id: &str) -> Request {
         item: None,
         ack_through,
         epoch,
+        after,
     }
 }
 
@@ -367,15 +463,67 @@ struct Peer<'a> {
     labels: &'a [String],
 }
 
-/// Whether a page of replies was all taken.
+/// How far a worker has read B's outbox for one server, apart from what
+/// it acks. A pass reads from the ack to B's last reply, over as many
+/// rounds as it takes. A reply A has no room for stays on B, as does one
+/// to an item A has not settled, and so does every later one, since an
+/// ack covers all before it. The pass still takes the later replies of
+/// other threads, while those of the reply's own thread wait for it, so
+/// it reads in order on a later pass. So no thread waits for another
+/// one's room.
+#[derive(Default)]
+struct Reading {
+    host_id: String,
+    epoch: String,
+    /// The last `seq` this pass read.
+    after: i64,
+    /// The threads with a reply this pass left on B.
+    waiting: Vec<(String, String)>,
+    /// Whether a reply this pass left on B found no room in A's hold.
+    full: bool,
+    /// The pages collected this round, or `PAGES` once a B that ignores
+    /// `after` gave one.
+    pages: usize,
+    /// Whether this round left a reply on B, or read on in a pass that
+    /// did.
+    left: bool,
+}
+
+impl Reading {
+    /// Starts a pass over `host_id`'s outbox of `epoch` when this one reads
+    /// another.
+    fn follow(&mut self, host_id: &str, epoch: &str) {
+        if self.host_id != host_id || self.epoch != epoch {
+            host_id.clone_into(&mut self.host_id);
+            epoch.clone_into(&mut self.epoch);
+            self.restart();
+        }
+    }
+
+    /// Starts the next pass from the ack.
+    fn restart(&mut self) {
+        self.after = 0;
+        self.waiting.clear();
+        self.full = false;
+    }
+
+    fn leave(&mut self, thread: (String, String)) {
+        self.left = true;
+        if !self.waiting.contains(&thread) {
+            self.waiting.push(thread);
+        }
+    }
+}
+
+/// Whether an answer brought a page of replies, and whether A stored what
+/// it found in it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Page {
-    Taken,
-    /// A had no room to hold a reply, so B keeps it and every later one,
-    /// and they come again.
-    Full,
+    /// The answer brought no page, as a refusal or a retry does.
+    None,
+    Read,
     /// A store failed, so B keeps the reply it failed on and every later
-    /// one.
+    /// one, and this pass reads on from the one before it.
     Fault,
 }
 
@@ -388,20 +536,20 @@ enum Page {
 /// dropped, and A keeps nothing of it but a count for Doctor of those that
 /// answer a message sent to another host. A reply whose thread the
 /// Automatic Reply Limit paused is held, as is each later one of that
-/// thread, so they reach it in order once it takes replies again. A reply
-/// A has no room to hold is not acked, nor is any later one, and the
-/// later replies of its thread wait for it, while those of other threads
-/// are taken: taking a reply again finds what the first take made.
+/// thread, so they reach it in order once it takes replies again. Acks
+/// stop at a reply A has no room to hold, or one that answers an item A
+/// has not settled, as `Reading` tells. A reply read again finds what A
+/// made of it before: it is taken or refused once.
 fn collect_replies(
     run: &mut Run<'_>,
     store: &RelayStore,
     peer: &Peer<'_>,
     answer: &Answer,
+    reading: &mut Reading,
 ) -> Page {
     let (endpoint, host_id) = (&run.endpoint.key, peer.host_id);
     if !wire::valid_id(&answer.epoch) {
-        // A refusal or a retry brings no page.
-        return Page::Taken;
+        return Page::None;
     }
     if store
         .set_can_reply(endpoint, run.label, answer.can_reply)
@@ -412,92 +560,158 @@ fn collect_replies(
     let Ok((epoch, through)) = store.ack_through(endpoint, host_id) else {
         return Page::Fault;
     };
+    // A new epoch starts the cursor at 0, so the next request names the
+    // epoch the pass reads, even before A acks a reply of it.
+    if epoch != answer.epoch && store.advance(endpoint, host_id, &answer.epoch, 0).is_err() {
+        return Page::Fault;
+    }
     let through = if epoch == answer.epoch { through } else { 0 };
-    let mut full: Vec<(String, String)> = Vec::new();
-    // Acks `seq` unless B keeps an earlier reply, and says whether that
-    // went well.
-    let ack = |seq: i64, full: &[(String, String)]| {
-        !full.is_empty() || store.advance(endpoint, host_id, &answer.epoch, seq).is_ok()
-    };
+    reading.follow(host_id, &answer.epoch);
+    // A B built before `after` pages from the ack, so its page starts at or
+    // before the last reply this pass read, and its next page would be the
+    // same. The pass starts again with this page, and reads no further this
+    // round, so a thread with room again takes its replies.
+    if answer
+        .outbox
+        .first()
+        .is_some_and(|reply| reply.seq <= reading.after)
+    {
+        reading.restart();
+        reading.pages = PAGES;
+    }
     for reply in &answer.outbox {
         if reply.seq <= through {
             continue;
         }
-        let sent = if trusted(reply) {
-            store.sent_from(&reply.re, host_id, endpoint, &reply.from, peer.labels)
-        } else {
-            Ok(Answers::Unknown)
+        // A dropped reply is counted once, when it is acked, since it is
+        // read again on each pass until then.
+        let acked = |other_label: bool| {
+            !reading.waiting.is_empty()
+                || (!other_label
+                    || store
+                        .count_other_label(endpoint, run.label, super::now_ms())
+                        .is_ok())
+                    && store
+                        .advance(endpoint, host_id, &answer.epoch, reply.seq)
+                        .is_ok()
         };
-        let (label, space, thread) = match sent {
-            Ok(Answers::Sent {
-                label,
-                space,
-                thread,
-            }) => (label, space, thread),
-            Ok(dropped) => {
-                if matches!(dropped, Answers::OtherLabel)
-                    && store.count_other_label(endpoint, run.label).is_err()
-                    || !ack(reply.seq, &full)
-                {
+        match place(run, store, peer, answer, reply, reading) {
+            Ok(Placed::Done) => {
+                if !acked(false) {
                     return Page::Fault;
                 }
-                continue;
             }
-            Err(_) => return Page::Fault,
-        };
-        if full.contains(&(space.clone(), thread.clone())) {
-            continue;
+            Ok(Placed::Dropped { other_label }) => {
+                if !acked(other_label) {
+                    return Page::Fault;
+                }
+            }
+            Ok(Placed::Left(thread)) => reading.leave(thread),
+            Ok(Placed::Full(thread)) => {
+                reading.full = true;
+                reading.leave(thread);
+            }
+            Err(()) => return Page::Fault,
         }
-        let held = Held {
-            endpoint: endpoint.clone(),
-            host_id: host_id.to_owned(),
-            epoch: answer.epoch.clone(),
+        reading.after = reading.after.max(reply.seq);
+    }
+    let held_full = reading.full;
+    if !answer.more {
+        reading.restart();
+    }
+    if store.set_held_full(endpoint, run.label, held_full).is_err() {
+        return Page::Fault;
+    }
+    Page::Read
+}
+
+/// What A made of one reply.
+enum Placed {
+    /// It is taken, held, or refused, so B may let it go.
+    Done,
+    /// It answers nothing of this endpoint's, or with `other_label` a
+    /// message sent to another host, so B may let it go.
+    Dropped { other_label: bool },
+    /// It stays on B behind an earlier reply of its thread, or until A
+    /// settles the item it answers.
+    Left((String, String)),
+    /// It stays on B, as one A has no room to hold.
+    Full((String, String)),
+}
+
+/// Places `reply` of `answer`: dropped when it answers nothing of this
+/// endpoint's, left on B when it answers an item A has not settled or
+/// follows a reply of its thread this pass left, found as A placed it
+/// before, held behind its thread's held replies or by the Automatic
+/// Reply Limit, or else taken. An error is a store fault.
+fn place(
+    run: &mut Run<'_>,
+    store: &RelayStore,
+    peer: &Peer<'_>,
+    answer: &Answer,
+    reply: &Reply,
+    reading: &Reading,
+) -> Result<Placed, ()> {
+    let (endpoint, host_id) = (&run.endpoint.key, peer.host_id);
+    let sent = if trusted(reply) {
+        store
+            .sent_from(&reply.re, host_id, endpoint, &reply.from, peer.labels)
+            .map_err(drop)?
+    } else {
+        Answers::Unknown
+    };
+    let (label, space, thread) = match sent {
+        Answers::Sent {
             label,
             space,
             thread,
-            reply: reply.clone(),
-        };
-        let taken = match store.holding(endpoint, &held.space, &held.thread) {
-            Ok(true) => Ok(Taken::Limited),
-            Ok(false) => take(run.state, run.gate, &held),
-            Err(error) => Err(error.to_string()),
-        };
-        match taken {
-            Ok(Taken::Inserted(message_id)) => match collected(store, &held, &message_id) {
-                Ok(true) => (run.wake)(&SpaceId::new(&held.space)),
-                Ok(false) => {}
-                Err(_) => return Page::Fault,
-            },
-            Ok(Taken::Limited) => match store.hold(&held, super::now_ms()) {
-                Ok(true) => {}
-                Ok(false) => {
-                    full.push((held.space, held.thread));
-                    continue;
-                }
-                Err(_) => return Page::Fault,
-            },
-            Ok(Taken::Refused(reason)) => {
-                if store.refused(&held, &reason, super::now_ms()).is_err() {
-                    return Page::Fault;
-                }
-            }
-            Err(_) => return Page::Fault,
-        }
-        if !ack(reply.seq, &full) {
-            return Page::Fault;
-        }
+        } => (label, space, thread),
+        Answers::Unsettled { space, thread } => return Ok(Placed::Left((space, thread))),
+        Answers::OtherLabel => return Ok(Placed::Dropped { other_label: true }),
+        Answers::Unknown => return Ok(Placed::Dropped { other_label: false }),
+    };
+    let thread = (space, thread);
+    if reading.waiting.contains(&thread) {
+        return Ok(Placed::Left(thread));
     }
-    if store
-        .set_held_full(endpoint, run.label, !full.is_empty())
-        .is_err()
+    let held = Held {
+        endpoint: endpoint.clone(),
+        host_id: host_id.to_owned(),
+        epoch: answer.epoch.clone(),
+        label,
+        space: thread.0.clone(),
+        thread: thread.1.clone(),
+        reply: reply.clone(),
+    };
+    if store.placed(&held).map_err(drop)? {
+        return Ok(Placed::Done);
+    }
+    let taken = if store
+        .holding(endpoint, &held.space, &held.thread)
+        .map_err(drop)?
     {
-        return Page::Fault;
-    }
-    if full.is_empty() {
-        Page::Taken
+        Taken::Limited
     } else {
-        Page::Full
+        take(run.state, run.gate, &held).map_err(drop)?
+    };
+    match taken {
+        Taken::Inserted(message_id) => {
+            if collected(store, &held, &message_id).map_err(drop)? {
+                (run.wake)(&SpaceId::new(&held.space));
+            }
+        }
+        Taken::Limited => {
+            if !store.hold(&held, super::now_ms()).map_err(drop)? {
+                return Ok(Placed::Full(thread));
+            }
+        }
+        Taken::Refused(reason) => {
+            store
+                .refused(&held, &reason, super::now_ms())
+                .map_err(drop)?;
+        }
     }
+    Ok(Placed::Done)
 }
 
 /// Inserts each reply `endpoint` holds whose thread takes replies again,

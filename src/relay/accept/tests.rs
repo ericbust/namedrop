@@ -464,6 +464,45 @@ fn the_outbox_page_drops_what_was_acked_and_stops_at_256_kib_with_more() {
     );
 }
 
+/// A collect that names the last reply A read gets the page after it, and
+/// B keeps every reply A has not acked. Another epoch's names nothing.
+#[test]
+fn a_page_starts_after_the_last_reply_a_read_and_b_keeps_what_a_has_not_acked() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "first"));
+    let relay = Connection::open(b.0.join("relay.sqlite3")).unwrap();
+    for n in 1..=6 {
+        relay
+            .execute(
+                "INSERT INTO outbox (host_id, re, thread, sender, message_id, text, created_at_ms)
+                 VALUES ('host-a', 'm1', 't1', 'bob', ?1, ?2, ?3)",
+                params![
+                    format!("b{n}"),
+                    "y".repeat(60 * 1024),
+                    super::super::now_ms()
+                ],
+            )
+            .unwrap();
+    }
+    let collect = |ack: i64, after: i64, epoch: &str| {
+        let page = b.call(&json!({
+            "op": "collect", "expect_host_id": HOST_B,
+            "from": {"host_id": "host-a", "name": "alice", "host": "laptop"},
+            "ack_through": ack, "epoch": epoch, "after": after,
+        }));
+        let seqs: Vec<i64> = page.outbox.iter().map(|reply| reply.seq).collect();
+        (seqs, page.more, page.epoch)
+    };
+    let (_, _, epoch) = collect(0, 0, "");
+    assert_eq!(collect(1, 4, &epoch), (vec![5, 6], false, epoch.clone()));
+    assert_eq!(
+        collect(1, 4, "another-epoch").0,
+        [2, 3, 4, 5],
+        "another epoch's ack and read name nothing"
+    );
+    assert_eq!(collect(1, 0, &epoch).0, [2, 3, 4, 5]);
+}
+
 /// B's `@bob` in block `block:b1`, and a runtime for him.
 fn bob_answers(b: &B, in_reply_to: &str, source: &str) -> Value {
     let namespace = StateNamespace::for_space(REX, "session:b1");

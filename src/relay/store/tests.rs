@@ -93,7 +93,7 @@ fn the_relay_database_is_created_from_nothing_and_reopened_with_its_rows() {
         .connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
     for table in [
         "peers",
         "outbound",
@@ -123,12 +123,146 @@ fn a_newer_relay_schema_is_refused() {
     drop(state.open(NOW));
     Connection::open(state.0.join("relay.sqlite3"))
         .unwrap()
-        .pragma_update(None, "user_version", 2)
+        .pragma_update(None, "user_version", 3)
         .unwrap();
     let Err(error) = RelayStore::open(&state.0, NOW) else {
         panic!("a newer schema opened");
     };
-    assert!(error.to_string().contains("relay schema 2"), "{error}");
+    assert!(error.to_string().contains("relay schema 3"), "{error}");
+}
+
+/// A version 1 database, as the first relay made, opens as version 2 with
+/// its rows, and takes what version 2 adds.
+#[test]
+fn a_version_1_relay_database_is_brought_to_version_2_with_its_rows() {
+    let state = State::new();
+    let store = state.open(NOW);
+    queue(&store, "message-1", NOW);
+    store
+        .count_other_label("rex:/tmp/a.sock", "devbox", NOW)
+        .unwrap();
+    store
+        .connection
+        .execute_batch(
+            "ALTER TABLE conditions DROP COLUMN other_label_at_ms;
+             ALTER TABLE dropped DROP COLUMN told;
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+    drop(store);
+    let store = state.open(NOW);
+    let version: u32 = store
+        .connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 2);
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM outbound"), 1);
+    store
+        .count_other_label("rex:/tmp/a.sock", "devbox", NOW)
+        .unwrap();
+    assert_eq!(
+        store.conditions("rex:/tmp/a.sock", NOW).unwrap()[0].other_label,
+        1,
+        "a count from before the version has no time, so it starts again"
+    );
+}
+
+/// Opens that race on a database still to be made, or on one at version
+/// 1, wait their turn: each succeeds, and the database is made or brought
+/// to version 2 once.
+#[test]
+fn opens_that_race_to_make_or_migrate_the_database_each_succeed() {
+    for version in [0, 1] {
+        for _ in 0..10 {
+            let state = State::new();
+            if version == 1 {
+                state
+                    .open(NOW)
+                    .connection
+                    .execute_batch(
+                        "ALTER TABLE conditions DROP COLUMN other_label_at_ms;
+                         ALTER TABLE dropped DROP COLUMN told;
+                         PRAGMA user_version = 1;",
+                    )
+                    .unwrap();
+            }
+            let barrier = std::sync::Barrier::new(8);
+            let failed: Vec<String> = std::thread::scope(|scope| {
+                let opens: Vec<_> = (0..8)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            RelayStore::read(&state.0)
+                                .err()
+                                .map(|error| error.to_string())
+                        })
+                    })
+                    .collect();
+                opens
+                    .into_iter()
+                    .filter_map(|open| open.join().unwrap())
+                    .collect()
+            });
+            assert!(failed.is_empty(), "version {version}: {failed:?}");
+            let store = state.open(NOW);
+            let now: u32 = store
+                .connection
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(now, 2);
+            assert_eq!(count(&store, "SELECT COUNT(*) FROM outbox_epoch"), 1);
+        }
+    }
+}
+
+/// Doctor counts the replies dropped for another host's message until
+/// 7 days pass with none, and then counts from one again.
+#[test]
+fn replies_dropped_for_another_host_are_counted_until_7_quiet_days() {
+    let state = State::new();
+    let store = state.open(NOW);
+    let endpoint = "rex:/tmp/a.sock";
+    for at in [NOW, NOW + 1000] {
+        store.count_other_label(endpoint, "devbox", at).unwrap();
+    }
+    let later = NOW + 1000 + OTHER_LABEL_LIFETIME_MS;
+    assert_eq!(
+        store.conditions(endpoint, later - 1).unwrap()[0].other_label,
+        2
+    );
+    assert!(store.conditions(endpoint, later).unwrap().is_empty());
+    store.count_other_label(endpoint, "devbox", later).unwrap();
+    assert_eq!(store.conditions(endpoint, later).unwrap()[0].other_label, 1);
+}
+
+/// A refused reply's sender is told once: the record stays once told, so
+/// the same reply refused again is not told again.
+#[test]
+fn a_refused_reply_is_listed_until_told_and_never_again() {
+    let state = State::new();
+    let store = state.open(NOW);
+    let held = Held {
+        endpoint: "rex:/tmp/a.sock".to_owned(),
+        host_id: "host-b".to_owned(),
+        epoch: "e1".to_owned(),
+        label: "devbox".to_owned(),
+        space: "session:a".to_owned(),
+        thread: "thread-1".to_owned(),
+        reply: Reply {
+            seq: 1,
+            re: "message-1".to_owned(),
+            thread: "t".to_owned(),
+            from: "bob".to_owned(),
+            message_id: "b-1".to_owned(),
+            text: "hi".to_owned(),
+        },
+    };
+    store.refused(&held, "no", NOW).unwrap();
+    let dropped = store.dropped(&held.endpoint).unwrap();
+    assert_eq!(dropped.len(), 1);
+    store.told_dropped(&held.endpoint, &dropped[0]).unwrap();
+    store.refused(&held, "no", NOW + 1).unwrap();
+    assert!(store.dropped(&held.endpoint).unwrap().is_empty());
 }
 
 #[test]

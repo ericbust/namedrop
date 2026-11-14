@@ -341,6 +341,9 @@ pub(super) fn one_block(fixture: Value) -> Script {
         "session.list" => Ok(json!({"sessions": [
             {"session_id": "session:s", "label": "work"},
         ]})),
+        "session.attach" if request.payload["session_id"] != "session:s" => {
+            Err(rex_error("session_not_found"))
+        }
         "session.attach" => Ok(json!({"view": {"windows": [{"layers": [{"blocks": [
             {"block_id": "block:b", "host_id": HOST},
         ]}]}]}})),
@@ -1481,6 +1484,114 @@ fn a_survey_that_leaves_out_a_bound_block_retires_its_name_only_on_not_found() {
                 .transaction(|transaction| transaction.list_pane_addresses(&namespace))
                 .unwrap();
             assert_eq!(names.is_empty(), retired, "{listing} {case}");
+        }
+    }
+}
+
+/// A successful `session.list` that leaves out a session, empty, `null`,
+/// or with no field at all, closes the space only when Rex, asked for the
+/// session alone, answers `session_not_found`. A session that still
+/// attaches, a bare `not_found`, or a timeout keeps its names.
+#[test]
+fn a_session_list_that_leaves_out_a_session_closes_it_only_on_session_not_found() {
+    use crate::{
+        ActorKind, MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId, PaneRoleId,
+        StateNamespace, StateStore,
+    };
+    type Attach = fn() -> Option<Result<Value, Fault>>;
+    let attaches: [(&str, Attach, bool); 4] = [
+        ("still attaches", || None, false),
+        (
+            "session_not_found",
+            || Some(Err(rex_error("session_not_found"))),
+            true,
+        ),
+        ("not_found", || Some(Err(rex_error("not_found"))), false),
+        (
+            "times out",
+            || Some(Err(Fault::Timeout(Duration::from_secs(5)))),
+            false,
+        ),
+    ];
+    for listing in [
+        json!({"sessions": []}),
+        json!({"sessions": null}),
+        json!({}),
+    ] {
+        for (case, attach, closed) in attaches {
+            let state = State::new();
+            let fixture = fixture("idle-login");
+            let listed = listing.clone();
+            let script = Script::new(move |request, events| {
+                match request.short() {
+                    "session.list" => return Ok(listed.clone()),
+                    "session.attach" => {
+                        if let Some(answer) = attach() {
+                            return answer;
+                        }
+                    }
+                    _ => {}
+                }
+                (one_block(fixture.clone()).handler)(request, events)
+            });
+            let rex = rex(script, &state, Local::default());
+            let namespace = StateNamespace::for_space(&rex.endpoint.key, "session:s");
+            let attribution = MutationAttribution::new(ActorKind::Human, "test", 10);
+            let id = PaneAddressId::new("a");
+            StateStore::open(&state.0)
+                .unwrap()
+                .transaction(|transaction| {
+                    transaction.activate_worktree(&namespace, &attribution)?;
+                    transaction.create_pane_address(
+                        &namespace,
+                        &PaneAddressDraft {
+                            id: id.clone(),
+                            role_id: PaneRoleId::new("role-a"),
+                            role_name: "a".into(),
+                            role_description: "test role".into(),
+                            alias: "a".into(),
+                        },
+                        &attribution,
+                    )?;
+                    transaction.bind_pane(
+                        &namespace,
+                        &PaneBindingId::new("binding-a"),
+                        &id,
+                        "block:b",
+                        &attribution,
+                    )
+                })
+                .unwrap();
+            let ids = crate::ProcessIds::default();
+            let home = state.0.join("home");
+            let _ = crate::handle_mux_event(
+                &crate::LifecycleRuntime {
+                    state_directory: &state.0,
+                    home_directory: Some(&home),
+                    agent_config: crate::AgentConfigDirectories::default(),
+                    cwd: Path::new("/repo"),
+                    workspace_id: None,
+                    current_pane_id: None,
+                    session_socket_id: &rex.endpoint.key,
+                    mux: &rex,
+                    clock: &crate::SystemClock,
+                    ids: &ids,
+                },
+                &crate::mux::MuxEvent::Resync(SpaceId::new("session:s")),
+            );
+            let mut store = StateStore::open(&state.0).unwrap();
+            let names = store
+                .transaction(|transaction| transaction.list_pane_addresses(&namespace))
+                .unwrap();
+            let activated = store
+                .transaction(|transaction| transaction.activated_spaces(&rex.endpoint.key))
+                .unwrap()
+                .contains(&SpaceId::new("session:s"));
+            assert_eq!(
+                (names.is_empty(), !activated),
+                (closed, closed),
+                "{listing} {case}"
+            );
         }
     }
 }

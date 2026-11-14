@@ -3,11 +3,18 @@
 
 use super::wire::{Outcome, Reply};
 use crate::StoreError;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 
 const FILE: &str = "relay.sqlite3";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+/// What version 1 lacks: when a reply for another label was last dropped,
+/// and whether the sender of a reply A let go of was told, so the row
+/// stays as the refusal's tombstone.
+const TO_2: &str = "
+ALTER TABLE conditions ADD COLUMN other_label_at_ms INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dropped ADD COLUMN told INTEGER NOT NULL DEFAULT 0;
+";
 
 /// An item A could not deliver within this fails.
 pub(crate) const OUTBOUND_LIFETIME_MS: i64 = 24 * 60 * 60 * 1000;
@@ -28,6 +35,9 @@ pub(crate) const HELD_PER_THREAD: i64 = 20;
 /// B keeps at most this many replies for one A host. One more is counted
 /// with the expired replies, as one that can never reach A.
 pub(crate) const OUTBOX_LIMIT: i64 = 10_000;
+/// Doctor counts the replies dropped for answering a message sent to
+/// another host until this long after the last one.
+pub(crate) const OTHER_LABEL_LIFETIME_MS: i64 = OUTBOX_LIFETIME_MS;
 
 /// A holds `peers`, `outbound`, `collected`, `cursors`, the last `seq`
 /// each local endpoint took from each B and the outbox epoch it counts in,
@@ -153,6 +163,7 @@ CREATE TABLE conditions (
     other_label INTEGER NOT NULL DEFAULT 0,
     held_full INTEGER NOT NULL DEFAULT 0,
     cannot_reply INTEGER NOT NULL DEFAULT 0,
+    other_label_at_ms INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (endpoint, label)
 );
 CREATE TABLE dropped (
@@ -166,6 +177,7 @@ CREATE TABLE dropped (
     count INTEGER NOT NULL,
     reason TEXT,
     created_at_ms INTEGER NOT NULL,
+    told INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (endpoint, host_id, remote_message_id)
 );
 ";
@@ -239,6 +251,10 @@ pub(crate) enum Answers {
         space: String,
         thread: String,
     },
+    /// Nowhere yet: B may have accepted its message, but A has not
+    /// settled it, as when the write failed, so B keeps the reply until A
+    /// does. The thread is the one of `space` the message was sent from.
+    Unsettled { space: String, thread: String },
     /// Nowhere: its message was sent to another host, which this server
     /// cannot answer for.
     OtherLabel,
@@ -247,7 +263,8 @@ pub(crate) enum Answers {
 }
 
 /// What Doctor reports on A for one label: how many replies its worker
-/// dropped because they answered a message sent to another host, whether
+/// dropped because they answered a message sent to another host, counted
+/// since a quiet `OTHER_LABEL_LIFETIME_MS`, whether
 /// A holds as many of its replies as it can, so B keeps the rest, and
 /// whether B keeps no more replies for A, so A sends it nothing new.
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -333,7 +350,13 @@ impl RelayStore {
         let mut connection = Connection::open(&path)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         connection.busy_timeout(Duration::from_secs(2))?;
-        let transaction = connection.transaction()?;
+        let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version == VERSION {
+            return Ok(Self { connection });
+        }
+        // The write lock first, so opens that race to make or migrate the
+        // database wait their turn, where a read that upgrades would fail.
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: u32 =
             transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
         match version {
@@ -346,6 +369,10 @@ impl RelayStore {
                         "outbox"
                     )],
                 )?;
+                transaction.pragma_update(None, "user_version", VERSION)?;
+            }
+            1 => {
+                transaction.execute_batch(TO_2)?;
                 transaction.pragma_update(None, "user_version", VERSION)?;
             }
             VERSION => {}
@@ -767,6 +794,25 @@ impl RelayStore {
             )?)
     }
 
+    /// Whether A placed `held`'s reply before: took it at its `seq`, or
+    /// refused it.
+    pub(crate) fn placed(&self, held: &Held) -> Result<bool, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM collected WHERE endpoint = ?1 AND host_id = ?2
+                    AND epoch = ?3 AND seq = ?4)
+                OR EXISTS (SELECT 1 FROM dropped WHERE endpoint = ?1 AND host_id = ?2
+                    AND remote_message_id = ?5 AND reason IS NOT NULL)",
+            params![
+                held.endpoint,
+                held.host_id,
+                held.epoch,
+                held.reply.seq,
+                held.reply.message_id
+            ],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Whether `endpoint` holds a reply for A's `thread` in `space`, so a
     /// new one waits behind it.
     pub(crate) fn holding(
@@ -851,7 +897,8 @@ impl RelayStore {
     /// collecting worker's own, first, and those that dial its addresses,
     /// which share its server's outbox, so a reply goes to the label its
     /// message was sent by: the one sent to `from` first, and then the
-    /// worker's own.
+    /// worker's own. A message still queued but pinned to `host_id` was
+    /// sent there, and is unsettled.
     pub(crate) fn sent_from(
         &self,
         message_id: &str,
@@ -861,10 +908,12 @@ impl RelayStore {
         labels: &[String],
     ) -> Result<Answers, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT label, recipient, space, thread, host_id IS ?3 FROM outbound
-             WHERE message_id = ?1 AND endpoint = ?2 AND state = 'accepted'",
+            "SELECT label, recipient, space, thread, host_id IS ?3, state = 'accepted'
+             FROM outbound
+             WHERE message_id = ?1 AND endpoint = ?2
+                AND (state = 'accepted' OR state = 'queued' AND host_id IS ?3)",
         )?;
-        let sent: Vec<(String, String, String, String, bool)> = statement
+        let sent: Vec<(String, String, String, String, bool, bool)> = statement
             .query_map(params![message_id, endpoint, host_id], |row| {
                 Ok((
                     row.get(0)?,
@@ -872,31 +921,52 @@ impl RelayStore {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             })?
             .collect::<Result<_, _>>()?;
         let best = sent
             .iter()
-            .filter(|(label, _, _, _, pinned)| *pinned && labels.contains(label))
+            .filter(|(label, _, _, _, pinned, _)| *pinned && labels.contains(label))
             .max_by_key(|(label, recipient, ..)| (recipient == from, *label == labels[0]));
         Ok(match best {
-            Some((label, _, space, thread, _)) => Answers::Sent {
+            Some((label, _, space, thread, _, true)) => Answers::Sent {
                 label: label.clone(),
                 space: space.clone(),
                 thread: thread.clone(),
             },
-            None if sent.iter().any(|(label, ..)| !labels.contains(label)) => Answers::OtherLabel,
+            Some((_, _, space, thread, _, false)) => Answers::Unsettled {
+                space: space.clone(),
+                thread: thread.clone(),
+            },
+            None if sent
+                .iter()
+                .any(|(label, .., accepted)| *accepted && !labels.contains(label)) =>
+            {
+                Answers::OtherLabel
+            }
             None => Answers::Unknown,
         })
     }
 
     /// Counts a reply that `endpoint`'s worker for `label` collected and
-    /// dropped because it answered a message sent to another host.
-    pub(crate) fn count_other_label(&self, endpoint: &str, label: &str) -> Result<(), StoreError> {
+    /// dropped at `now_ms` because it answered a message sent to another
+    /// host. The count starts again after `OTHER_LABEL_LIFETIME_MS` with
+    /// none.
+    pub(crate) fn count_other_label(
+        &self,
+        endpoint: &str,
+        label: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
         self.connection.execute(
-            "INSERT INTO conditions (endpoint, label, other_label) VALUES (?1, ?2, 1)
-             ON CONFLICT (endpoint, label) DO UPDATE SET other_label = other_label + 1",
-            params![endpoint, label],
+            "INSERT INTO conditions (endpoint, label, other_label, other_label_at_ms)
+             VALUES (?1, ?2, 1, ?3)
+             ON CONFLICT (endpoint, label) DO UPDATE SET
+                other_label = CASE WHEN other_label_at_ms > ?3 - ?4 THEN other_label + 1
+                    ELSE 1 END,
+                other_label_at_ms = ?3",
+            params![endpoint, label, now_ms, OTHER_LABEL_LIFETIME_MS],
         )?;
         Ok(())
     }
@@ -918,7 +988,8 @@ impl RelayStore {
     }
 
     /// Records that the main store refused `held`'s reply for `reason`, so
-    /// its sender is told once.
+    /// its sender is told once. The record outlives the telling, so the
+    /// same reply read again is neither taken nor told again.
     pub(crate) fn refused(&self, held: &Held, reason: &str, now_ms: i64) -> Result<(), StoreError> {
         self.connection.execute(
             "INSERT OR IGNORE INTO dropped (endpoint, host_id, remote_message_id, label, space,
@@ -975,7 +1046,7 @@ impl RelayStore {
     pub(crate) fn dropped(&self, endpoint: &str) -> Result<Vec<Dropped>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT host_id, remote_message_id, label, space, re, remote_alias, count, reason
-             FROM dropped WHERE endpoint = ?1 ORDER BY created_at_ms, rowid",
+             FROM dropped WHERE endpoint = ?1 AND told = 0 ORDER BY created_at_ms, rowid",
         )?;
         let dropped = statement
             .query_map(params![endpoint], |row| {
@@ -999,21 +1070,27 @@ impl RelayStore {
     /// Records that the sender of `dropped`'s thread was told.
     pub(crate) fn told_dropped(&self, endpoint: &str, dropped: &Dropped) -> Result<(), StoreError> {
         self.connection.execute(
-            "DELETE FROM dropped WHERE endpoint = ?1 AND host_id = ?2 AND remote_message_id = ?3",
+            "UPDATE dropped SET told = 1
+             WHERE endpoint = ?1 AND host_id = ?2 AND remote_message_id = ?3",
             params![endpoint, dropped.host_id, dropped.remote_message_id],
         )?;
         Ok(())
     }
 
-    /// What `endpoint`'s Doctor reports for each label.
-    pub(crate) fn conditions(&self, endpoint: &str) -> Result<Vec<Conditions>, StoreError> {
+    /// What `endpoint`'s Doctor reports for each label at `now_ms`.
+    pub(crate) fn conditions(
+        &self,
+        endpoint: &str,
+        now_ms: i64,
+    ) -> Result<Vec<Conditions>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT label, other_label, held_full, cannot_reply FROM conditions
-             WHERE endpoint = ?1 AND (other_label > 0 OR held_full OR cannot_reply)
+            "SELECT label, CASE WHEN other_label_at_ms > ?2 - ?3 THEN other_label ELSE 0 END
+                    AS recent, held_full, cannot_reply
+             FROM conditions WHERE endpoint = ?1 AND (recent > 0 OR held_full OR cannot_reply)
              ORDER BY label",
         )?;
         let conditions = statement
-            .query_map(params![endpoint], |row| {
+            .query_map(params![endpoint, now_ms, OTHER_LABEL_LIFETIME_MS], |row| {
                 Ok(Conditions {
                     label: row.get(0)?,
                     other_label: row.get(1)?,
@@ -1174,24 +1251,32 @@ impl RelayStore {
         )?)
     }
 
-    /// Drops B's replies for `host_id` through `ack_through`, and returns the
-    /// rest from the oldest, within `limit` encoded bytes, whether more
-    /// remain, and how many B keeps for `host_id`.
+    /// Drops B's replies for `host_id` through `ack_through`, and returns
+    /// those after `after` from the oldest, within `limit` encoded bytes,
+    /// whether more remain, and how many B keeps for `host_id`.
     pub(crate) fn outbox_page(
         &self,
         host_id: &str,
         ack_through: i64,
+        after: i64,
         limit: usize,
     ) -> Result<(Vec<Reply>, bool, usize), StoreError> {
         self.connection.execute(
             "DELETE FROM outbox WHERE host_id = ?1 AND seq <= ?2",
             params![host_id, ack_through],
         )?;
-        let mut statement = self.connection.prepare(
-            "SELECT seq, re, thread, sender, message_id, text FROM outbox
-             WHERE host_id = ?1 ORDER BY seq",
+        let kept: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM outbox WHERE host_id = ?1",
+            params![host_id],
+            |row| row.get(0),
         )?;
-        let replies = statement.query_map(params![host_id], |row| {
+        // Read on from `after` in `seq` order and stop at the page's end.
+        // By the `host_id` index, SQLite would first sort every later reply.
+        let mut statement = self.connection.prepare(
+            "SELECT seq, re, thread, sender, message_id, text FROM outbox NOT INDEXED
+             WHERE host_id = ?1 AND seq > ?2 ORDER BY seq",
+        )?;
+        let replies = statement.query_map(params![host_id, after], |row| {
             Ok(Reply {
                 seq: row.get(0)?,
                 re: row.get(1)?,
@@ -1201,19 +1286,18 @@ impl RelayStore {
                 text: row.get(5)?,
             })
         })?;
-        let (mut page, mut used, mut kept, mut more) = (Vec::new(), 0, 0, false);
+        let (mut page, mut used, mut more) = (Vec::new(), 0, false);
         for reply in replies {
             let reply = reply?;
-            kept += 1;
             let size = serde_json::to_vec(&reply).map_or(usize::MAX, |encoded| encoded.len() + 1);
-            if more || used + size > limit {
+            if used + size > limit {
                 more = true;
-                continue;
+                break;
             }
             used += size;
             page.push(reply);
         }
-        Ok((page, more, kept))
+        Ok((page, more, usize::try_from(kept).unwrap_or_default()))
     }
 
     /// Fails each queued item older than its lifetime, drops each outbox
