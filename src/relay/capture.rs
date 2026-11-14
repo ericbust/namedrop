@@ -18,7 +18,9 @@ use std::path::Path;
 /// Captures the messages of `endpoint` that are new since the last capture,
 /// and calls `start` once for each label it queued an item for. The cursor
 /// stops before a message it could not capture, so the next capture tries
-/// that message again.
+/// that message again, and it passes each message in one transaction with
+/// the count of the replies of it that B could not keep, so a retry never
+/// counts one twice.
 pub(crate) fn capture(
     state: &Path,
     endpoint: &Endpoint,
@@ -34,28 +36,28 @@ pub(crate) fn capture(
         .transaction(|transaction| transaction.relay_recipient_messages(&endpoint.key, cursor))
         .map_err(|error| error.to_string())?;
     let mut labels: Vec<String> = Vec::new();
-    let mut captured = None;
     let mut failure = None;
     for row in &rows {
-        match capture_one(&relay, &mut main, endpoint, row, now) {
+        let captured =
+            capture_one(&relay, &mut main, endpoint, row, now).and_then(|(queued, unkept)| {
+                relay
+                    .captured(&endpoint.key, row.rowid, &unkept)
+                    .map(|()| queued)
+                    .map_err(|error| error.to_string())
+            });
+        match captured {
             Ok(queued) => {
                 for label in queued {
                     if !labels.contains(&label) {
                         labels.push(label);
                     }
                 }
-                captured = Some(row.rowid);
             }
             Err(error) => {
                 failure = Some(error);
                 break;
             }
         }
-    }
-    if let Some(rowid) = captured {
-        relay
-            .set_capture_cursor(&endpoint.key, rowid)
-            .map_err(|error| error.to_string())?;
     }
     for label in &labels {
         start(label);
@@ -64,22 +66,23 @@ pub(crate) fn capture(
 }
 
 /// Keeps or queues one message for each relay author it addresses, and
-/// returns each label it queued for.
+/// returns each label it queued for, and the display name of each relay
+/// author whose reply B could not keep.
 fn capture_one(
     relay: &RelayStore,
     main: &mut StateStore,
     endpoint: &Endpoint,
     row: &ToRelayAuthor,
     now: i64,
-) -> Result<Vec<String>, String> {
+) -> Result<(Vec<String>, Vec<String>), String> {
     let error = |error: crate::StoreError| error.to_string();
     if row.author_address_id.starts_with("relay:") {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let mapped = relay
         .mapped_thread(&endpoint.key, &row.space, &row.thread_id)
         .map_err(error)?;
-    let mut labels = Vec::new();
+    let (mut labels, mut unkept) = (Vec::new(), Vec::new());
     for recipient in &row.relay_recipients {
         let Some((alias, origin)) = recipient.display.rsplit_once('@') else {
             return Err(format!("relay author {} has no host", recipient.address_id));
@@ -89,15 +92,18 @@ fn capture_one(
             labels.push(origin.to_owned());
             continue;
         }
-        match &mapped {
+        let kept = match &mapped {
             Some((host_id, thread)) if is(recipient, RelayOrigin::Host(host_id), alias) => {
-                keep_for(relay, main, endpoint, row, recipient, host_id, thread, now)?;
+                keep_for(relay, main, endpoint, row, recipient, host_id, thread, now)?
             }
             // Its thread's mapping expired, so no reply can reach it.
-            _ => relay.count_unrouted(&recipient.display).map_err(error)?,
+            _ => false,
+        };
+        if !kept {
+            unkept.push(recipient.display.clone());
         }
     }
-    Ok(labels)
+    Ok((labels, unkept))
 }
 
 /// Whether `recipient` is the relay author of `alias` from `origin`.
@@ -146,7 +152,8 @@ fn queue_to(
 }
 
 /// On B: keeps `row` for the A host `host_id`, in reply to the A message of
-/// `recipient`'s that it answers.
+/// `recipient`'s that it answers, and says whether B kept it, which it does
+/// not once that A message is no longer known or B's outbox for A is full.
 #[allow(clippy::too_many_arguments)]
 fn keep_for(
     relay: &RelayStore,
@@ -157,7 +164,7 @@ fn keep_for(
     host_id: &str,
     thread: &str,
     now: i64,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let error = |error: crate::StoreError| error.to_string();
     let namespace = StateNamespace::for_space(&endpoint.key, &row.space);
     let answered = main
@@ -176,10 +183,9 @@ fn keep_for(
         None => None,
     };
     let Some(re) = re else {
-        // The A message it answers is no longer known here.
-        return relay.count_unrouted(&recipient.display).map_err(error);
+        return Ok(false);
     };
-    relay
+    let kept = relay
         .keep_reply(
             host_id,
             &Reply {
@@ -192,8 +198,11 @@ fn keep_for(
             },
             now,
         )
-        .and_then(|()| relay.touch_thread(&endpoint.key, &row.space, &row.thread_id, now))
-        .map_err(error)
+        .map_err(error)?;
+    relay
+        .touch_thread(&endpoint.key, &row.space, &row.thread_id, now)
+        .map_err(error)?;
+    Ok(kept)
 }
 
 /// `text` cut so that its `deliver` request fits what the `rex` CLI sends.

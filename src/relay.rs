@@ -75,7 +75,7 @@ pub fn accept(
 
 /// `namedrop relay worker --host <label>`: the relay's worker for `label`,
 /// holding `<state>/relay/<sha256(endpoint, label)>.lock`, so a second one
-/// exits at once. Between rounds it runs the runtime an update selected in
+/// exits at once. It exits when its state directory is gone. Between rounds it runs the runtime an update selected in
 /// its place, as the bridge does, so it never works on for a day with the
 /// old image.
 pub fn run_worker(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) {
@@ -94,7 +94,7 @@ pub fn run_worker(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) {
                     within,
                     std::time::Duration::from_secs(1),
                 );
-                true
+                state.is_dir()
             },
             wake: &mut |space| {
                 wake_reaped(state, endpoint, space, &mut |child| children.keep(child))
@@ -163,8 +163,9 @@ fn hold(state: &Path, endpoint: &crate::mux::Endpoint, label: &str, work: &mut d
 }
 
 /// Waits `within`, or less once `endpoint` queued an item for `label` that
-/// was not queued when the wait began, looking every `step`. So a send while
-/// the worker waits to collect again is delivered at once.
+/// was not queued when the wait began, or the state directory is gone,
+/// looking every `step`. So a send while the worker waits to collect again
+/// is delivered at once, and a worker whose state was deleted exits.
 fn wait_for_new(
     state: &Path,
     endpoint: &crate::mux::Endpoint,
@@ -185,7 +186,7 @@ fn wait_for_new(
             return;
         }
         std::thread::sleep(left.min(step));
-        if queued() > before {
+        if queued() > before || !state.is_dir() {
             return;
         }
     }
@@ -199,7 +200,7 @@ fn worker_lock(
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::OpenOptionsExt;
     let directory = state.join("relay");
-    std::fs::create_dir_all(&directory)?;
+    create_relay_dir(&directory)?;
     let scope = crate::lower_hex(&Sha256::digest(format!("{}\0{label}", endpoint.key)));
     std::fs::OpenOptions::new()
         .create(true)
@@ -208,6 +209,15 @@ fn worker_lock(
         .truncate(false)
         .mode(0o600)
         .open(directory.join(format!("{scope}.lock")))
+}
+
+/// Creates `<state>/relay`, but never the state directory itself, so a
+/// relay process whose state directory was deleted makes none again.
+fn create_relay_dir(directory: &Path) -> std::io::Result<()> {
+    match std::fs::create_dir(directory) {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        created => created,
+    }
 }
 
 /// Queues a mailbox wake for `space` and starts its worker, which is reaped

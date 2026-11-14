@@ -13,11 +13,11 @@ use crate::{
 };
 use std::path::Path;
 
-/// B keeps replies for a sender only while it holds fewer than this.
-const OUTBOX_LIMIT: usize = 10_000;
 /// While this file exists in B's state directory, B also relays a mention
 /// to a terminal, which runs it as a command.
 const ALLOW_TERMINALS: &str = "relay/allow-terminals";
+/// How long an accept waits for another one to let go of the lock.
+const LOCK_WITHIN: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// What B knows of a recipient in one space.
 struct Held {
@@ -87,7 +87,7 @@ pub(crate) fn accept(
     match paged {
         Ok((epoch, (outbox, more, kept))) => Answer {
             host_id: host_id.to_owned(),
-            can_reply: kept < OUTBOX_LIMIT,
+            can_reply: i64::try_from(kept).is_ok_and(|kept| kept < super::store::OUTBOX_LIMIT),
             result,
             outbox,
             more,
@@ -273,11 +273,13 @@ fn deliver(
 }
 
 /// The lock that one accept holds from its key's lookup until it records
-/// the B thread it chose, so two first items of one A thread share it.
+/// the B thread it chose, so two first items of one A thread share it. An
+/// accept that cannot take it within `LOCK_WITHIN` answers `retry`, before
+/// the bridge's own deadline.
 fn serial(state: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     let directory = state.join("relay");
-    std::fs::create_dir_all(&directory)?;
+    super::create_relay_dir(&directory)?;
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -285,8 +287,21 @@ fn serial(state: &Path) -> std::io::Result<std::fs::File> {
         .truncate(false)
         .mode(0o600)
         .open(directory.join("accept.lock"))?;
-    lock.lock()?;
-    Ok(lock)
+    let until = std::time::Instant::now() + LOCK_WITHIN;
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(lock),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < until => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(std::io::Error::other(
+                    "another accept holds the relay's lock",
+                ));
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+        }
+    }
 }
 
 /// The space the item goes to, or the status and reason it is not

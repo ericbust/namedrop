@@ -22,6 +22,9 @@ pub(crate) const DONE_LIFETIME_MS: i64 = 2 * OUTBOX_LIFETIME_MS;
 /// stops its own agents after 10 replies in a thread with no human turn,
 /// so an honest B sends far fewer while A's thread is paused.
 pub(crate) const HELD_LIMIT: i64 = 100;
+/// B keeps at most this many replies for one A host. One more is counted
+/// with the expired replies, as one that can never reach A.
+pub(crate) const OUTBOX_LIMIT: i64 = 10_000;
 
 /// A holds `peers`, `outbound`, `collected`, `cursors`, the last `seq`
 /// each local endpoint took from each B and the outbox epoch it counts in,
@@ -242,9 +245,15 @@ impl RelayStore {
     }
 
     /// Opens the relay's database in `state` as `open` does, without the
-    /// expiry, for a reader that looks often.
+    /// expiry, for a reader that looks often. A state directory that is gone
+    /// is an error, and is not made again.
     pub(crate) fn read(state: &Path) -> Result<Self, StoreError> {
-        fs::create_dir_all(state)?;
+        if !state.is_dir() {
+            return Err(StoreError::invalid_input(format!(
+                "{} is not a directory",
+                state.display()
+            )));
+        }
         let path = state.join(FILE);
         let mut connection = Connection::open(&path)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
@@ -312,12 +321,29 @@ impl RelayStore {
             .unwrap_or(0))
     }
 
-    pub(crate) fn set_capture_cursor(&self, endpoint: &str, rowid: i64) -> Result<(), StoreError> {
-        self.connection.execute(
+    /// Passes `endpoint`'s capture cursor to `rowid`, and counts with the
+    /// expired replies, in the same transaction, one reply for each remote
+    /// sender of `unkept`, whose reply from that message B could not keep.
+    pub(crate) fn captured(
+        &self,
+        endpoint: &str,
+        rowid: i64,
+        unkept: &[String],
+    ) -> Result<(), StoreError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        for display in unkept {
+            transaction.execute(
+                "INSERT INTO outbox_expired (sender, count) VALUES (?1, 1)
+                 ON CONFLICT (sender) DO UPDATE SET count = count + 1",
+                params![display],
+            )?;
+        }
+        transaction.execute(
             "INSERT INTO capture (endpoint, rowid) VALUES (?1, ?2)
              ON CONFLICT (endpoint) DO UPDATE SET rowid = MAX(rowid, excluded.rowid)",
             params![endpoint, rowid],
         )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -358,16 +384,19 @@ impl RelayStore {
 
     /// Keeps a reply for `host_id`, once per B message, cut so that its
     /// text encodes in `TEXT_LIMIT` bytes and every page holds at least one
-    /// reply.
+    /// reply, and says whether it is kept, which it is not while B keeps
+    /// `OUTBOX_LIMIT` replies for `host_id`.
     pub(crate) fn keep_reply(
         &self,
         host_id: &str,
         reply: &Reply,
         now_ms: i64,
-    ) -> Result<(), StoreError> {
+    ) -> Result<bool, StoreError> {
         self.connection.execute(
             "INSERT OR IGNORE INTO outbox (host_id, re, thread, sender, message_id, text,
-                created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                created_at_ms)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
+             WHERE (SELECT COUNT(*) FROM outbox WHERE host_id = ?1) < ?8",
             params![
                 host_id,
                 reply.re,
@@ -375,10 +404,15 @@ impl RelayStore {
                 reply.from,
                 reply.message_id,
                 super::wire::cut(&reply.text, super::wire::TEXT_LIMIT),
-                now_ms
+                now_ms,
+                OUTBOX_LIMIT
             ],
         )?;
-        Ok(())
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM outbox WHERE host_id = ?1 AND message_id = ?2)",
+            params![host_id, reply.message_id],
+            |row| row.get(0),
+        )?)
     }
 
     /// B's id for the reply of `alias` on `label` that an answer in A's
@@ -404,18 +438,6 @@ impl RelayStore {
                 |row| row.get(0),
             )
             .optional()?)
-    }
-
-    /// Counts a reply to the remote sender `display` that B could not keep,
-    /// because the A message it answers is no longer known, with the replies
-    /// that expired.
-    pub(crate) fn count_unrouted(&self, display: &str) -> Result<(), StoreError> {
-        self.connection.execute(
-            "INSERT INTO outbox_expired (sender, count) VALUES (?1, 1)
-             ON CONFLICT (sender) DO UPDATE SET count = count + 1",
-            params![display],
-        )?;
-        Ok(())
     }
 
     /// Each remote sender whose replies expired on B, by its display name,

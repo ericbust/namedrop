@@ -1928,3 +1928,40 @@ fn a_stopped_thread_takes_no_reply_held_or_new() {
         13
     );
 }
+
+/// A worker whose state directory is deleted while it waits exits, and
+/// makes no state directory again.
+#[test]
+fn a_worker_whose_state_directory_is_gone_exits_and_makes_none() {
+    let state = std::env::temp_dir().join(format!("namedrop-relay-gone-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&state);
+    let started = std::time::Instant::now();
+    crate::relay::wait_for_new(
+        &state,
+        &Endpoint::parse(REX),
+        "devbox",
+        Duration::from_secs(10),
+        Duration::from_millis(20),
+    );
+    assert!(started.elapsed() < Duration::from_secs(2), "the wait ends");
+    crate::relay::run_worker(&state, &Endpoint::parse(REX), "devbox");
+    crate::relay::tests_support::WOKEN.with(|woken| woken.borrow_mut().clear());
+    assert!(!state.exists());
+
+    let space = Space::new(REX);
+    let gone = space.state.clone();
+    crate::relay::tests_support::queue(&crate::relay::tests_support::store(&gone), "devbox", REX);
+    let (done, finished) = std::sync::mpsc::channel();
+    let running = gone.clone();
+    std::thread::spawn(move || {
+        crate::relay::run_worker(&running, &Endpoint::parse(REX), "devbox");
+        let _ = done.send(());
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    fs::remove_dir_all(&gone).unwrap();
+    assert!(
+        finished.recv_timeout(Duration::from_secs(10)).is_ok(),
+        "the worker exits"
+    );
+    assert!(!gone.exists());
+}

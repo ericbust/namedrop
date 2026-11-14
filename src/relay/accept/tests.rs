@@ -1048,3 +1048,105 @@ fn can_reply_holds_below_10_000_kept_replies() {
     fill(&mut relay, 9_999, 10_000);
     assert!(!collect().can_reply);
 }
+
+/// An accept that cannot take the relay's lock in time answers `retry`,
+/// which A sends again, and stores nothing.
+#[test]
+fn an_accept_that_waits_too_long_for_the_lock_answers_retry() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let b = B::new();
+    fs::create_dir_all(b.0.join("relay")).unwrap();
+    let held = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(b.0.join("relay/accept.lock"))
+        .unwrap();
+    held.lock().unwrap();
+    let started = std::time::Instant::now();
+    let answer = b.call(&deliver("m1", "bob", "t1", "hello"));
+    let waited = started.elapsed();
+    assert_eq!(outcome(&answer).0, Status::Retry);
+    assert!(
+        waited >= LOCK_WITHIN && waited < LOCK_WITHIN + std::time::Duration::from_secs(2),
+        "{waited:?}"
+    );
+    assert!(b.messages().is_empty());
+    assert_eq!(b.inbound(), 0);
+    held.unlock().unwrap();
+    assert_eq!(
+        outcome(&b.call(&deliver("m1", "bob", "t1", "hello"))).0,
+        Status::Accepted
+    );
+}
+
+/// B keeps at most 10,000 replies for one A host. One more is counted for
+/// Doctor with the expired replies, as one that can never reach A.
+#[test]
+fn a_reply_past_10_000_kept_for_a_host_is_counted_not_kept() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "please answer"));
+    let relayed = b.rows(
+        "namedrop.sqlite3",
+        "SELECT message_id FROM collaboration_messages",
+    )[0][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut relay = Connection::open(b.0.join("relay.sqlite3")).unwrap();
+    let transaction = relay.transaction().unwrap();
+    for n in 0..10_000 {
+        transaction
+            .execute(
+                "INSERT INTO outbox (host_id, re, thread, sender, message_id, text,
+                    created_at_ms) VALUES ('host-a', 'm1', 't1', 'bob', ?1, 'r', ?2)",
+                params![format!("b{n}"), super::super::now_ms()],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+    bob_answers(&b, &relayed, "@alice@laptop one too many");
+    super::super::capture::capture(&b.0, &Endpoint::parse(REX), &mut |_| {}).unwrap();
+    assert_eq!(
+        b.rows("relay.sqlite3", "SELECT COUNT(*) FROM outbox"),
+        [[json!(10_000)]]
+    );
+    assert_eq!(
+        super::super::expired_replies(&b.0),
+        [("alice@laptop".to_owned(), 1)]
+    );
+}
+
+/// A capture that fails to pass a message and reads it again counts its
+/// unroutable reply once.
+#[test]
+fn a_capture_read_again_counts_an_unroutable_reply_once() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "please answer"));
+    let relayed = b.rows(
+        "namedrop.sqlite3",
+        "SELECT message_id FROM collaboration_messages",
+    )[0][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let relay = Connection::open(b.0.join("relay.sqlite3")).unwrap();
+    relay
+        .execute_batch(
+            "DELETE FROM remote_threads;
+             CREATE TRIGGER refuse_capture BEFORE INSERT ON capture
+             BEGIN SELECT RAISE(ABORT, 'no cursor'); END;",
+        )
+        .unwrap();
+    bob_answers(&b, &relayed, "@alice@laptop too late");
+    let endpoint = Endpoint::parse(REX);
+    assert!(super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).is_err());
+    relay.execute_batch("DROP TRIGGER refuse_capture").unwrap();
+    super::super::capture::capture(&b.0, &endpoint, &mut |_| {}).unwrap();
+    assert_eq!(
+        super::super::expired_replies(&b.0),
+        [("alice@laptop".to_owned(), 1)]
+    );
+}
