@@ -97,6 +97,21 @@ pub(crate) struct RelayStore {
     connection: Connection,
 }
 
+/// One item A sends: the A message `message_id` for `recipient` on `label`,
+/// from `sender` in the space of `endpoint`.
+pub(crate) struct Outbound<'a> {
+    pub label: &'a str,
+    pub message_id: &'a str,
+    pub recipient: &'a str,
+    pub endpoint: &'a str,
+    pub space: &'a str,
+    pub sender: &'a str,
+    pub thread: &'a str,
+    pub in_reply_to: Option<&'a str>,
+    pub text: &'a str,
+    pub now_ms: i64,
+}
+
 impl RelayStore {
     /// Opens the relay's database in `state`, creating it when it is missing,
     /// and expires whatever outlived its limit by `now_ms`.
@@ -126,6 +141,28 @@ impl RelayStore {
         let mut store = Self { connection };
         store.expire(now_ms)?;
         Ok(store)
+    }
+
+    /// Queues `item`, unless its key is already stored.
+    pub(crate) fn queue(&self, item: &Outbound<'_>) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO outbound (label, message_id, recipient, endpoint, space,
+                sender, thread, in_reply_to, text, state, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', ?10, ?10)",
+            params![
+                item.label,
+                item.message_id,
+                item.recipient,
+                item.endpoint,
+                item.space,
+                item.sender,
+                item.thread,
+                item.in_reply_to,
+                item.text,
+                item.now_ms
+            ],
+        )?;
+        Ok(())
     }
 
     /// Fails each queued item older than its lifetime, drops each outbox

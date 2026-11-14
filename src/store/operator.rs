@@ -10,6 +10,16 @@ pub(super) fn refuse_reserved_creation(draft: &PaneAddressDraft) -> Result<(), S
             "the person's identity is reserved",
         ));
     }
+    if draft.id.as_str().starts_with(relay_author::ADDRESS_PREFIX)
+        || draft
+            .role_id
+            .as_str()
+            .starts_with(relay_author::ROLE_PREFIX)
+    {
+        return Err(StoreError::invalid_input(
+            "a remote agent's identity is reserved",
+        ));
+    }
     Ok(())
 }
 
@@ -17,6 +27,11 @@ pub(super) fn refuse_pane_mutation(address: &PaneAddressId) -> Result<(), StoreE
     if address.as_str() == ADDRESS {
         return Err(StoreError::invalid_input(
             "the person's identity has no pane lifecycle",
+        ));
+    }
+    if address.as_str().starts_with(relay_author::ADDRESS_PREFIX) {
+        return Err(StoreError::invalid_input(
+            "a remote agent's identity has no pane lifecycle",
         ));
     }
     Ok(())

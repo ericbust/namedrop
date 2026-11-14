@@ -109,9 +109,11 @@ pub mod dashboard;
 mod missing_disposition;
 pub(crate) use missing_disposition::{LostSettle, SessionGone};
 mod operator;
+mod relay_author;
 pub(crate) use coordination::WakeReadiness;
 pub(crate) use coordination_bridge::TrackedMessage;
 pub(crate) use coordination_ownership::CoordinationRole;
+pub(crate) use relay_author::{RelayAuthor, RelayOrigin};
 mod groups;
 mod handoff;
 mod terminal;
@@ -3366,6 +3368,7 @@ impl StateTransaction<'_> {
                 attribution,
             )?;
             if self.is_operator_address(namespace, &recipient.address_id)?
+                || self.is_relay_author(namespace, &recipient.address_id)?
                 || (matches!(
                     grammar,
                     "terminal-result/v1" | "result-set/v1" | "mention-return/v1"

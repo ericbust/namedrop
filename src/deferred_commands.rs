@@ -205,7 +205,11 @@ impl Request {
                 required(&input, "reminder_id")?;
             }
             Operation::Send | Operation::Reply => {
-                crate::validate_message_input(operation.token(), input.clone())?;
+                let rex = crate::mux::Endpoint::parse(&caller.namespace.session_socket_id).kind
+                    == crate::mux::MuxKind::Rex;
+                if !(rex && crate::names_remote_host(operation.token(), &input)) {
+                    crate::validate_message_input(operation.token(), input.clone())?;
+                }
                 if input["author_kind"] != "agent_session" {
                     return Err("deferred messages require author_kind agent_session".into());
                 }

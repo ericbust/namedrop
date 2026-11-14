@@ -489,7 +489,12 @@ fn run_bound_operation(
     } else {
         input
     };
+    // A send that names `@alias@host` in a Rex home is judged by the send
+    // itself, against the host list.
     if is_message_operation(operation)
+        && !(namedrop::names_remote_host(operation, &input)
+            && home::resolve(&options.flags(), inherited)
+                .is_ok_and(|home| home.kind() == namedrop::mux::MuxKind::Rex))
         && let Err(error) = validate_message_input(operation, input.clone())
     {
         return Ran::Refused(error);
