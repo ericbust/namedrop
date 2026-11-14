@@ -512,3 +512,83 @@ fn a_rex_close_and_survey_keep_every_name_not_bound_to_the_gone_block() {
         }
     }
 }
+
+/// The person's own address has no pane, so a closed space keeps it.
+#[test]
+fn a_space_closed_keeps_the_person_s_own_address() {
+    let fixture = Fixture::new(REX);
+    let operator = StateStore::open(&fixture.state)
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.ensure_operator_author(&fixture.namespace(SPACE), &attribution())
+        })
+        .unwrap()
+        .address_id;
+    fixture
+        .handle(MuxEvent::SpaceClosed(SpaceId::new(SPACE)))
+        .unwrap();
+    fixture.assert_space_closed();
+    let kept = StateStore::open(&fixture.state)
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.is_operator_address(&fixture.namespace(SPACE), &operator)
+        })
+        .unwrap();
+    assert!(kept);
+}
+
+/// Only a gone space or pane is definitive. A server that is down, too
+/// slow, too large in its answer, or garbled is tried again.
+#[test]
+fn only_a_gone_space_or_pane_is_definitive() {
+    let failures = [
+        MuxError::Gone(Gone::Space, "session gone".into()),
+        MuxError::Timeout("timed out".into()),
+        MuxError::TooLarge("too large".into()),
+        MuxError::Unavailable("no server".into()),
+        MuxError::Protocol("garbled".into()),
+    ];
+    for failure in failures {
+        let definitive = matches!(failure, MuxError::Gone(..));
+        let fixture = Fixture::new(REX);
+        let failed = std::sync::Mutex::new(Some(failure));
+        fixture.mux.on_read(move |_, read| match read {
+            Read::Survey {
+                scope: Surveyed::Space(id),
+                ..
+            } if id.as_str() == SPACE => failed.lock().unwrap().take().map_or(Ok(()), Err),
+            _ => Ok(()),
+        });
+        let handled = fixture.handle(MuxEvent::PaneClosed(slot(SPACE, "pane-a")));
+        assert_eq!(
+            matches!(handled, Err(EventError::Definitive(_))),
+            definitive,
+            "{handled:?}"
+        );
+        assert_eq!(
+            matches!(handled, Err(EventError::Retry(_))),
+            !definitive,
+            "{handled:?}"
+        );
+    }
+}
+
+/// A space Namedrop is no longer activated for is left alone by a
+/// `Resync`, whatever its server now holds.
+#[test]
+fn a_resync_of_a_deactivated_space_changes_nothing() {
+    let fixture = Fixture::new(REX);
+    StateStore::open(&fixture.state)
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.deactivate_worktree(&fixture.namespace(SPACE), &attribution())
+        })
+        .unwrap();
+    fixture.mux.close_pane("pane-a");
+    assert!(matches!(
+        fixture.handle(MuxEvent::Resync(SpaceId::new(SPACE))),
+        Err(EventError::Definitive(_))
+    ));
+    assert_eq!(fixture.names(SPACE), ["a", "b"]);
+    assert_eq!(fixture.attempt("a"), DeliveryState::Submitted);
+}

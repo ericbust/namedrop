@@ -588,8 +588,9 @@ fn a_close_lost_to_a_re_exec_is_recovered_by_the_new_bridge_s_resync() {
     assert!(state.handle_queued(&session).is_empty());
 }
 
-/// While the command gate or the store cannot be read, a flush queues
-/// nothing and keeps its events. They are queued once it can.
+/// While the command gate or the store cannot be read, or a marker cannot
+/// be written, a flush queues nothing for the space and keeps its events.
+/// They are queued at the next try, a second later, once it can.
 #[test]
 fn events_a_flush_cannot_queue_stay_pending_until_it_can() {
     fn database(state: &State) -> PathBuf {
@@ -598,8 +599,11 @@ fn events_a_flush_cannot_queue_stay_pending_until_it_can() {
     fn gate(state: &State) -> PathBuf {
         state.0.join("runtime/commands.lock")
     }
+    fn queue(state: &State) -> PathBuf {
+        status_queue::directory(&state.0, REX, "session:s")
+    }
     type Change = fn(&State);
-    let blocks: [(&str, Change, Change); 2] = [
+    let blocks: [(&str, Change, Change); 3] = [
         (
             "gate",
             |state| fs::create_dir_all(gate(state)).unwrap(),
@@ -613,6 +617,14 @@ fn events_a_flush_cannot_queue_stay_pending_until_it_can() {
             },
             |state| fs::rename(state.0.join("saved"), database(state)).unwrap(),
         ),
+        (
+            "queue",
+            |state| {
+                fs::create_dir_all(queue(state).parent().unwrap()).unwrap();
+                fs::write(queue(state), "not a directory").unwrap();
+            },
+            |state| fs::remove_file(queue(state)).unwrap(),
+        ),
     ];
     for (case, block, unblock) in blocks {
         let state = State::new();
@@ -624,22 +636,25 @@ fn events_a_flush_cannot_queue_stay_pending_until_it_can() {
             vec![Next::Event(appeared.clone())],
             Some(resync("session:t")),
         )]);
-        let held = std::thread::scope(|threads| {
+        let (held, waited) = std::thread::scope(|threads| {
             let held = threads.spawn(|| {
                 std::thread::sleep(Duration::from_millis(300));
                 let held = state.queued("session:s").is_empty();
                 unblock(&state);
+                std::thread::sleep(Duration::from_millis(150));
+                let waited = state.queued("session:s").is_empty();
                 let deadline = Instant::now() + Duration::from_secs(3);
                 while state.queued("session:s").is_empty() && Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(20));
                 }
                 stop.wake();
-                held
+                (held, waited)
             });
             bridged(&state, &script, &stop);
             held.join().unwrap()
         });
         assert!(held, "{case}: queued while blocked");
+        assert!(waited, "{case}: tried again before a second passed");
         assert!(state.queued("session:s").contains(&appeared), "{case}");
     }
 }
@@ -709,8 +724,9 @@ fn a_connection_that_ends_at_once_counts_as_a_failed_try() {
     );
 }
 
-/// Deleting the state directory under a running bridge, or replacing it,
-/// ends that bridge, so the directory made again gets exactly one.
+/// Deleting the state directory under a running bridge, or replacing its
+/// lock file, ends that bridge, so the directory made again gets exactly
+/// one.
 #[test]
 fn a_bridge_stops_once_its_state_directory_is_deleted_or_replaced() {
     for replaced in [false, true] {
@@ -719,24 +735,22 @@ fn a_bridge_stops_once_its_state_directory_is_deleted_or_replaced() {
         let held = || (Some("host-a"), Vec::new(), Some(resync("session:s")));
         let script = Script::new(vec![held(), held()]);
         let done = std::sync::atomic::AtomicBool::new(false);
-        let ended = std::thread::scope(|threads| {
+        let (early, ended) = std::thread::scope(|threads| {
             threads.spawn(|| {
                 bridged(&state, &script, &stop);
                 done.store(true, Ordering::SeqCst);
             });
             std::thread::sleep(Duration::from_millis(200));
-            assert!(!done.load(Ordering::SeqCst), "the bridge ended early");
-            fs::remove_dir_all(&state.0).unwrap();
+            let early = done.load(Ordering::SeqCst);
             if replaced {
-                fs::create_dir_all(state.0.join("rex-bridge")).unwrap();
-                fs::write(
-                    state
-                        .0
-                        .join("rex-bridge")
-                        .join(format!("{}.lock", scope(&endpoint()))),
-                    "",
-                )
-                .unwrap();
+                let lock = state
+                    .0
+                    .join("rex-bridge")
+                    .join(format!("{}.lock", scope(&endpoint())));
+                fs::write(state.0.join("new.lock"), "").unwrap();
+                fs::rename(state.0.join("new.lock"), lock).unwrap();
+            } else {
+                fs::remove_dir_all(&state.0).unwrap();
             }
             let deadline = Instant::now() + Duration::from_secs(2);
             while !done.load(Ordering::SeqCst) && Instant::now() < deadline {
@@ -744,8 +758,9 @@ fn a_bridge_stops_once_its_state_directory_is_deleted_or_replaced() {
             }
             let ended = done.load(Ordering::SeqCst);
             stop.wake();
-            ended
+            (early, ended)
         });
+        assert!(!early, "the bridge ended early");
         assert!(ended, "replaced: {replaced}");
         assert_eq!(script.opened.load(Ordering::Relaxed), 1);
         let first = Lock::take(&state.0, &endpoint()).unwrap();
