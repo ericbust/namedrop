@@ -26,7 +26,12 @@ struct Notice<'a> {
 /// Tells the sender of each item of `endpoint` that failed or expired,
 /// and of each thread whose replies are held, once, and calls `wake` for
 /// each space it told. A fault leaves the rest for the next call.
-pub(crate) fn tell(state: &Path, endpoint: &Endpoint, wake: &mut dyn FnMut(&SpaceId)) {
+pub(crate) fn tell(
+    state: &Path,
+    endpoint: &Endpoint,
+    gate: super::worker::Gate<'_>,
+    wake: &mut dyn FnMut(&SpaceId),
+) {
     let now = super::now_ms();
     let Ok(store) = RelayStore::open(state, now) else {
         return;
@@ -38,6 +43,7 @@ pub(crate) fn tell(state: &Path, endpoint: &Endpoint, wake: &mut dyn FnMut(&Spac
     for item in &unsent {
         let told = notice(
             state,
+            gate,
             &endpoint.key,
             &Notice {
                 space: &item.space,
@@ -59,7 +65,7 @@ pub(crate) fn tell(state: &Path, endpoint: &Endpoint, wake: &mut dyn FnMut(&Spac
         }
     }
     for held in &held {
-        let told = notice(state, &endpoint.key, &held_notice(held));
+        let told = notice(state, gate, &endpoint.key, &held_notice(held));
         if !settle(told, &held.space, wake, || store.told_held(held)) {
             return;
         }
@@ -108,8 +114,13 @@ fn settle(
 
 /// Inserts `notice` under the command gate. `false` when A can no longer
 /// take it, as when the sender is gone.
-fn notice(state: &Path, endpoint: &str, notice: &Notice<'_>) -> Result<bool, String> {
-    let gate = crate::runtime_command_guard(state, None)?;
+fn notice(
+    state: &Path,
+    gate: super::worker::Gate<'_>,
+    endpoint: &str,
+    notice: &Notice<'_>,
+) -> Result<bool, String> {
+    let gate = gate()?;
     let namespace = StateNamespace::for_space(endpoint, notice.space);
     let author = RemoteName {
         alias: notice.alias.to_owned(),

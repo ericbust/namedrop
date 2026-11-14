@@ -29,18 +29,24 @@ const BACKOFF: [Duration; 5] = [
     Duration::from_secs(10),
     Duration::from_secs(30),
 ];
+/// Takes the command gate. A relay worker's also runs the runtime an
+/// update selected in its place, right after it takes the gate.
+pub(crate) type Gate<'a> = &'a dyn Fn() -> Result<Option<std::fs::File>, String>;
+
 /// The client label B's bridge sets.
 const BRIDGE: &str = "namedrop";
 /// The most outbox pages one collect reads, so a B that always has more
 /// cannot hold the worker.
 const PAGES: usize = 16;
 
-/// One worker's place and its two effects: `pause` waits and says whether
-/// to go on, and `wake` starts the mailbox worker of a space that got mail.
+/// One worker's place and its effects: `gate` takes the command gate for
+/// a write to the main database, `pause` waits and says whether to go on,
+/// and `wake` starts the mailbox worker of a space that got mail.
 pub(crate) struct Run<'a> {
     pub state: &'a Path,
     pub endpoint: &'a Endpoint,
     pub label: &'a str,
+    pub gate: Gate<'a>,
     pub pause: &'a mut dyn FnMut(Duration) -> bool,
     pub wake: &'a mut dyn FnMut(&SpaceId),
 }
@@ -60,6 +66,9 @@ enum Call {
 pub(crate) fn work(run: &mut Run<'_>) {
     let mut faults = 0;
     loop {
+        // An update while the worker waited selects another runtime, which
+        // takes the worker's place before it does anything more.
+        drop((run.gate)());
         let mut woken: Vec<SpaceId> = Vec::new();
         let wait = {
             let mut once = |space: &SpaceId| {
@@ -71,12 +80,13 @@ pub(crate) fn work(run: &mut Run<'_>) {
                 state: run.state,
                 endpoint: run.endpoint,
                 label: run.label,
+                gate: run.gate,
                 pause: &mut *run.pause,
                 wake: &mut once,
             };
             let wait = round(&mut round_run);
-            release(run.state, run.endpoint, round_run.wake);
-            super::notice::tell(run.state, run.endpoint, round_run.wake);
+            release(run.state, run.endpoint, run.gate, round_run.wake);
+            super::notice::tell(run.state, run.endpoint, run.gate, round_run.wake);
             wait
         };
         for space in &woken {
@@ -386,7 +396,7 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, peer: &Peer<'_>, answe
         };
         let taken = match store.holding(endpoint, &held.space, &held.thread) {
             Ok(true) => Ok(Taken::Limited),
-            Ok(false) => take(run.state, &held),
+            Ok(false) => take(run.state, run.gate, &held),
             Err(error) => Err(error.to_string()),
         };
         match taken {
@@ -419,6 +429,7 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, peer: &Peer<'_>, answe
 pub(crate) fn release(
     state: &Path,
     endpoint: &Endpoint,
+    gate: Gate<'_>,
     wake: &mut dyn FnMut(&SpaceId),
 ) -> Vec<String> {
     let mut labels: Vec<String> = Vec::new();
@@ -434,7 +445,7 @@ pub(crate) fn release(
         if paused.contains(&thread) {
             continue;
         }
-        match take(state, held) {
+        match take(state, gate, held) {
             Ok(Taken::Inserted(message_id)) => {
                 if collected(&store, held, &message_id)
                     .and_then(|_| store.release(held))
@@ -472,8 +483,8 @@ enum Taken {
 }
 
 /// Inserts `held`'s reply under the command gate.
-fn take(state: &Path, held: &Held) -> Result<Taken, String> {
-    let gate = crate::runtime_command_guard(state, None)?;
+fn take(state: &Path, gate: Gate<'_>, held: &Held) -> Result<Taken, String> {
+    let gate = gate()?;
     let taken = insert_reply(state, held);
     drop(gate);
     taken

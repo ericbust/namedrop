@@ -48,7 +48,8 @@ fn a_waiting_worker_wakes_for_a_new_item() {
 
 /// A `rex` that answers each `client.perform` with the next file in
 /// `answers/`, whose first line is the exit status, the second stderr, and
-/// the rest stdout, and records each request it read.
+/// the rest stdout, records each request it read, and then runs the
+/// script `after` once, when there is one.
 fn rex(labels: &[&str]) -> Script {
     let hosts: Vec<Value> = labels
         .iter()
@@ -64,7 +65,8 @@ case "$*" in
   cat >> "$D/requests"; echo >> "$D/requests"
   f=$(ls "$D/answers" 2>/dev/null | sort | head -1)
   if [ -z "$f" ]; then echo 'Error: no answer (status=409 code=client_unavailable)' >&2; exit 1; fi
-  code=$(sed -n 1p "$D/answers/$f"); sed -n 2p "$D/answers/$f" >&2; sed -n '3,$p' "$D/answers/$f"; rm "$D/answers/$f"; exit "$code";;
+  code=$(sed -n 1p "$D/answers/$f"); sed -n 2p "$D/answers/$f" >&2; sed -n '3,$p' "$D/answers/$f"; rm "$D/answers/$f"
+  [ -f "$D/after" ] && sh "$D/after" && rm "$D/after"; exit "$code";;
 esac"#,
         hosts = json!({"hosts": hosts})
     ));
@@ -138,6 +140,7 @@ fn work_for(space: &Space, rex: &Script, rounds: usize) -> (Vec<Duration>, Vec<S
             state: &space.state,
             endpoint: &endpoint,
             label: "devbox",
+            gate: &|| Ok(None),
             pause: &mut |wait| {
                 waits.push(wait);
                 waits.len() < rounds
@@ -1220,6 +1223,7 @@ fn a_server_that_reports_another_s_host_id_cannot_answer_for_its_label() {
                 state: &space.state,
                 endpoint: &Endpoint::parse(REX),
                 label,
+                gate: &|| Ok(None),
                 pause: &mut |_| {
                     rounds += 1;
                     rounds < 1
@@ -1448,6 +1452,7 @@ fn a_reply_to_another_endpoint_s_message_is_dropped() {
             state: &space.state,
             endpoint: &other,
             label: "devbox",
+            gate: &|| Ok(None),
             pause: &mut |_| {
                 rounds += 1;
                 rounds < 1
@@ -1569,6 +1574,7 @@ fn a_new_item_is_pinned_to_the_server_that_answers_now() {
             state: &space.state,
             endpoint: &endpoint,
             label: "devbox",
+            gate: &|| Ok(None),
             pause: &mut |_| {
                 waits += 1;
                 if waits == 1 {
@@ -1708,9 +1714,14 @@ fn a_sender_is_told_once_in_its_thread_that_an_item_failed() {
     );
     assert_eq!(woken, ["session:a"]);
     let mut again = Vec::new();
-    crate::relay::notice::tell(&space.state, &Endpoint::parse(REX), &mut |space| {
-        again.push(space.as_str().to_owned());
-    });
+    crate::relay::notice::tell(
+        &space.state,
+        &Endpoint::parse(REX),
+        &|| Ok(None),
+        &mut |space| {
+            again.push(space.as_str().to_owned());
+        },
+    );
     assert_eq!(notices(&space).len(), 1, "told once");
     assert!(again.is_empty(), "a told item wakes nothing again");
 }
@@ -1906,13 +1917,19 @@ fn replies_past_the_reply_limit_are_held_told_once_and_follow_a_continue() {
     );
     assert_eq!(held_notices(&space), told, "told once");
     let mut again = Vec::new();
-    crate::relay::notice::tell(&space.state, &Endpoint::parse(REX), &mut |space| {
-        again.push(space.as_str().to_owned());
-    });
+    crate::relay::notice::tell(
+        &space.state,
+        &Endpoint::parse(REX),
+        &|| Ok(None),
+        &mut |space| {
+            again.push(space.as_str().to_owned());
+        },
+    );
     assert!(again.is_empty(), "a told thread wakes nothing again");
 
     capture(&space);
     STARTED.with(|started| started.borrow_mut().clear());
+    crate::relay::tests_support::WOKEN.with(|woken| woken.borrow_mut().clear());
     as_person(
         &space,
         &message,
@@ -1923,6 +1940,11 @@ fn replies_past_the_reply_limit_are_held_told_once_and_follow_a_continue() {
         },
     );
     assert_eq!(bodies(&space), numbered(1..=13));
+    assert_eq!(
+        crate::relay::tests_support::WOKEN.with(|woken| woken.borrow().clone()),
+        ["session:a"],
+        "the drain wakes the space once for its three released replies"
+    );
     assert_eq!(
         relay_rows(&space, "SELECT COUNT(*) FROM held"),
         [[json!(0)]]
@@ -2265,4 +2287,152 @@ fn a_reply_whose_record_failed_is_not_acked_and_is_recorded_next_round() {
         queued_for(&space, "follow-up"),
         [["devbox", "bob", "alice", "b-1"].map(str::to_owned)]
     );
+}
+
+/// The state, `rex`, and test the image of a relay worker test runs.
+const IMAGE_STATE: &str = "NAMEDROP_RELAY_TEST_IMAGE_STATE";
+const IMAGE_REX: &str = "NAMEDROP_RELAY_TEST_IMAGE_REX";
+
+/// Whether this process is a test's image: then it has run the relay
+/// worker for `devbox` on the state and with the `rex` it was given.
+fn in_image() -> bool {
+    let (Some(state), Some(program)) = (std::env::var_os(IMAGE_STATE), std::env::var_os(IMAGE_REX))
+    else {
+        return false;
+    };
+    crate::relay::tests_support::with_program(program.into(), || {
+        crate::relay::run_worker(
+            &std::path::PathBuf::from(state),
+            &Endpoint::parse(REX),
+            "devbox",
+        );
+    });
+    true
+}
+
+/// Starts `test` again as an image that runs the relay worker for `devbox`
+/// on `space` with `rex` and, with `child`, a `sleep 30` for each mailbox
+/// worker it wakes.
+fn image(test: &str, space: &Space, rex: &Script, child: bool) -> std::process::Child {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([test, "--exact", "--test-threads=1"])
+        .env(IMAGE_STATE, &space.state)
+        .env(IMAGE_REX, rex.directory.join("rex"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if child {
+        command.env(crate::relay::tests_support::MAILBOX_WORKER, "1");
+    }
+    command.spawn().unwrap()
+}
+
+/// A script that selects another runtime for `state`, as an update does,
+/// whose launcher records the workers handed to it in `replaced`.
+fn update_script(state: &std::path::Path) -> String {
+    format!(
+        r#"R='{}'
+mkdir -p "$R/current" && ln -sf /usr/bin/true "$R/current/namedrop"
+cat > "$R/namedrop" <<'LAUNCHER'
+#!/bin/sh
+echo "workers=$NAMEDROP_REX_BRIDGE_WORKERS" > "$(dirname "$0")/replaced"
+LAUNCHER
+chmod 700 "$R/namedrop"
+"#,
+        state.join("runtime").display()
+    )
+}
+
+/// Waits up to 15 s for `path`, and then for `image` to end.
+fn replaced_within(path: &std::path::Path, image: &mut std::process::Child) -> String {
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while !path.is_file() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    while image.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = image.kill();
+    let _ = image.wait();
+    fs::read_to_string(path).unwrap_or_default()
+}
+
+/// An update selected while the worker waits for a `rex` call takes the
+/// worker's place as soon as the worker takes the command gate, so the
+/// old image writes nothing to the main database after it.
+#[test]
+fn a_worker_runs_the_selected_runtime_as_soon_as_it_takes_the_gate() {
+    if in_image() {
+        return;
+    }
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    rex.answer_with(answer("accepted", None, replies(&message, 1, 1)));
+    fs::write(rex.directory.join("after"), update_script(&space.state)).unwrap();
+    let mut image = image(
+        "relay::worker::tests::a_worker_runs_the_selected_runtime_as_soon_as_it_takes_the_gate",
+        &space,
+        &rex,
+        false,
+    );
+    let replaced = replaced_within(&space.state.join("runtime/replaced"), &mut image);
+    assert!(replaced.starts_with("workers="), "{replaced:?}");
+    assert_eq!(rex.requests().len(), 1);
+    assert!(
+        collected_bodies(&space).is_empty(),
+        "the old image inserted no reply"
+    );
+}
+
+/// An update selected while the worker waits to collect again takes its
+/// place before the next round sends anything, and the mailbox worker it
+/// woke, still running, is handed to the new runtime rather than waited
+/// for.
+#[test]
+fn a_worker_hands_its_running_mailbox_workers_to_the_selected_runtime() {
+    if in_image() {
+        return;
+    }
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    rex.answer_with(answer("accepted", None, replies(&message, 1, 1)));
+    let mut image = image(
+        "relay::worker::tests::a_worker_hands_its_running_mailbox_workers_to_the_selected_runtime",
+        &space,
+        &rex,
+        true,
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while collected_bodies(&space).is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    std::process::Command::new("sh")
+        .args(["-c", &update_script(&space.state)])
+        .status()
+        .unwrap();
+    rex.run(|| space.send("request-2", "@bob@devbox after the update"))
+        .unwrap();
+    rex.answer_with(answer("accepted", None, json!([])));
+    let replaced = replaced_within(&space.state.join("runtime/replaced"), &mut image);
+    let workers: Vec<i32> = replaced
+        .trim()
+        .trim_start_matches("workers=")
+        .split(',')
+        .filter_map(|pid| pid.parse().ok())
+        .collect();
+    let running = workers
+        .iter()
+        // SAFETY: signal 0 only checks that the process exists.
+        .filter(|pid| unsafe { libc::kill(**pid, 0) } == 0)
+        .count();
+    for pid in &workers {
+        // SAFETY: ends the `sleep 30` this test's image started.
+        unsafe { libc::kill(*pid, libc::SIGKILL) };
+    }
+    assert_eq!(workers.len(), 1, "{replaced:?}");
+    assert_eq!(running, 1, "the woken worker was not waited for");
+    assert_eq!(rex.requests().len(), 1, "the old image sent nothing more");
 }

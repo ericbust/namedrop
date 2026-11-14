@@ -62,20 +62,20 @@ pub fn run(state: &Path, endpoint: &Endpoint) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Names the workers a bridge leaves running when it re-execs, so the new
-/// image, still their parent, reaps them.
+/// Names the workers a bridge or a relay worker leaves running when it
+/// re-execs, so the new image, still their parent, reaps them.
 pub(crate) const INHERITED_WORKERS: &str = "NAMEDROP_REX_BRIDGE_WORKERS";
 
-/// The workers a bridge started, its relay's accepts and relay workers among
-/// them, or inherited across a re-exec, that have not been reaped yet. A
-/// thread waits for each one. `exec` ends those threads but not the
-/// workers, so a re-exec hands their pids on.
+/// The workers a bridge or a relay worker started, a bridge's relay
+/// accepts and relay workers among them, or inherited across a re-exec,
+/// that have not been reaped yet. A thread waits for each one. `exec` ends
+/// those threads but not the workers, so a re-exec hands their pids on.
 #[derive(Clone, Default)]
-struct Workers(Arc<Mutex<BTreeSet<libc::pid_t>>>);
+pub(crate) struct Workers(Arc<Mutex<BTreeSet<libc::pid_t>>>);
 
 impl Workers {
     /// The workers the image this process replaced left running.
-    fn inherited() -> Self {
+    pub(crate) fn inherited() -> Self {
         let workers = Self::default();
         for pid in std::env::var(INHERITED_WORKERS)
             .unwrap_or_default()
@@ -88,7 +88,7 @@ impl Workers {
     }
 
     /// Waits for `worker` in a thread, so it never stays a zombie.
-    fn reap(&self, worker: Child) {
+    pub(crate) fn reap(&self, worker: Child) {
         self.wait_for(worker.id().cast_signed());
     }
 
@@ -109,7 +109,7 @@ impl Workers {
     }
 
     /// The live workers, as `INHERITED_WORKERS` spells them.
-    fn live(&self) -> String {
+    pub(crate) fn live(&self) -> String {
         lock(&self.0)
             .iter()
             .map(libc::pid_t::to_string)

@@ -75,18 +75,25 @@ pub fn accept(
 
 /// `namedrop relay worker --host <label>`: the relay's worker for `label`,
 /// holding `<state>/relay/<sha256(endpoint, label)>.lock`, so a second one
-/// exits at once. It exits when its state directory is gone. Between rounds it runs the runtime an update selected in
-/// its place, as the bridge does, so it never works on for a day with the
-/// old image.
+/// exits at once. It exits when its state directory is gone. Before each
+/// round, and each time it takes the command gate, it runs the runtime an
+/// update selected in its place, as the bridge does, so it never works on
+/// with the old image. It reaps the mailbox workers it starts as they
+/// exit, and hands those still running to that runtime.
 pub fn run_worker(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) {
-    let children = Children::default();
+    let workers = crate::rex_bridge::Workers::inherited();
+    let gate = || {
+        let gate = crate::runtime_command_guard(state, None)?;
+        hand_over_if_replaced(state, &workers);
+        Ok(gate)
+    };
     hold(state, endpoint, label, &mut || {
         worker::work(&mut worker::Run {
             state,
             endpoint,
             label,
+            gate: &gate,
             pause: &mut |within| {
-                children.reexec_if_replaced(state);
                 wait_for_new(
                     state,
                     endpoint,
@@ -97,45 +104,21 @@ pub fn run_worker(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) {
                 state.is_dir()
             },
             wake: &mut |space| {
-                wake_reaped(state, endpoint, space, &mut |child| children.keep(child))
+                wake_reaped(state, endpoint, space, &mut |child| workers.reap(child))
             },
         });
     });
 }
 
-/// The mailbox workers one relay worker started. It reaps them as they
-/// exit, and it runs a new image only once none runs, because `exec` would
-/// leave them as zombies of an image that does not know them.
-#[derive(Default)]
-struct Children(std::cell::RefCell<Vec<std::process::Child>>);
-
-impl Children {
-    fn keep(&self, child: std::process::Child) {
-        self.0.borrow_mut().push(child);
-    }
-
-    /// Whether a child still runs, after reaping each one that exited.
-    fn running(&self) -> bool {
-        let mut children = self.0.borrow_mut();
-        children.retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_))));
-        !children.is_empty()
-    }
-
-    /// Under the command gate, the runtime an update selected, as this
-    /// process's own command, once no child runs.
-    fn replacement(&self, state: &Path) -> Option<(Option<std::fs::File>, std::process::Command)> {
-        if self.running() {
-            return None;
-        }
-        let gate = crate::runtime_command_guard(state, None).ok()?;
-        crate::installed_runtime::replacement(state).map(|command| (gate, command))
-    }
-
-    fn reexec_if_replaced(&self, state: &Path) {
-        use std::os::unix::process::CommandExt;
-        if let Some((_gate, mut command)) = self.replacement(state) {
-            let _ = command.exec();
-        }
+/// Runs the runtime an update selected in this process's place, as the
+/// same command, with `workers` handed to it to reap. Returns only when
+/// there is none to run.
+fn hand_over_if_replaced(state: &Path, workers: &crate::rex_bridge::Workers) {
+    use std::os::unix::process::CommandExt;
+    if let Some(mut command) = crate::installed_runtime::replacement(state) {
+        let _ = command
+            .env(crate::rex_bridge::INHERITED_WORKERS, workers.live())
+            .exec();
     }
 }
 
@@ -236,8 +219,13 @@ fn wake_reaped(
 ) {
     #[cfg(test)]
     {
-        let _ = (state, endpoint, reap);
+        let _ = (state, endpoint);
         tests_support::WOKEN.with(|woken| woken.borrow_mut().push(space.as_str().to_owned()));
+        if std::env::var_os(tests_support::MAILBOX_WORKER).is_some()
+            && let Ok(worker) = std::process::Command::new("sleep").arg("30").spawn()
+        {
+            reap(worker);
+        }
     }
     #[cfg(not(test))]
     {
@@ -336,19 +324,20 @@ pub(crate) fn capture_after_drain(state: &Path, session_socket_id: &str) {
     }
     let mut labels = Vec::new();
     let _ = capture::capture(state, &endpoint, &mut |label| labels.push(label.to_owned()));
+    let gate = || crate::runtime_command_guard(state, None);
     let mut spaces: Vec<crate::SpaceId> = Vec::new();
     let mut once = |space: &crate::SpaceId| {
         if !spaces.contains(space) {
             spaces.push(space.clone());
         }
     };
-    labels.extend(worker::release(state, &endpoint, &mut once));
+    labels.extend(worker::release(state, &endpoint, &gate, &mut once));
     labels.sort();
     labels.dedup();
     for label in &labels {
         start_worker(state, &endpoint, label);
     }
-    notice::tell(state, &endpoint, &mut once);
+    notice::tell(state, &endpoint, &gate, &mut once);
     for space in &spaces {
         wake(state, &endpoint, space);
     }
@@ -641,6 +630,10 @@ pub(crate) mod tests_support {
     }
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    /// Set, each mailbox worker a relay worker wakes is a `sleep 30` it
+    /// reaps, so a test image can watch what becomes of it.
+    pub(crate) const MAILBOX_WORKER: &str = "NAMEDROP_RELAY_TEST_MAILBOX_WORKER";
 
     /// The `rex` this thread's relay runs: none outside `with_rex`, so no
     /// test runs the machine's own `rex`.

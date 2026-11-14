@@ -527,38 +527,6 @@ fn a_text_is_cut_only_past_its_limit_as_encoded() {
     assert!(encoded(&cut_wide) <= 100);
 }
 
-/// A relay worker runs the runtime an update selected in its place only
-/// once every mailbox worker it started has exited, and it reaps them.
-#[test]
-fn a_worker_is_replaced_only_once_its_children_have_exited() {
-    let space = Space::new(REX);
-    let runtime = space.state.join("runtime");
-    fs::create_dir_all(runtime.join("current")).unwrap();
-    std::os::unix::fs::symlink("/usr/bin/true", runtime.join("current/namedrop")).unwrap();
-    fs::write(runtime.join("namedrop"), "#!/bin/sh\n").unwrap();
-    let children = super::Children::default();
-    assert!(
-        children.replacement(&space.state).is_some(),
-        "an update selected another runtime"
-    );
-    children.keep(
-        std::process::Command::new("sleep")
-            .arg("0.3")
-            .spawn()
-            .unwrap(),
-    );
-    assert!(children.replacement(&space.state).is_none(), "a child runs");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while children.replacement(&space.state).is_none() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the child was never reaped"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    assert!(!children.running());
-}
-
 /// The test image a relay worker of `a_working_worker_runs_the_selected_runtime_in_its_place`
 /// runs in.
 const IMAGE: &str = "NAMEDROP_RELAY_TEST_WORKER_STATE";
