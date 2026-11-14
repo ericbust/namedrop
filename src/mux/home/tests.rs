@@ -19,6 +19,7 @@ struct Scripted {
     peers: HashMap<PathBuf, Result<u32, i32>>,
     claimed: Option<Result<Claimed, String>>,
     probed: Mutex<Vec<PathBuf>>,
+    incarnations: HashMap<u32, String>,
 }
 
 impl Scripted {
@@ -56,7 +57,14 @@ impl Scripted {
             endpoint: Endpoint::parse(CANONICAL),
             server,
             child,
+            caller: Caller::default(),
         }));
+        self
+    }
+
+    /// `pid` is alive and started at `start`.
+    fn started(mut self, pid: u32, start: u64) -> Self {
+        self.incarnations.insert(pid, format!("{pid}@{start}"));
         self
     }
 
@@ -97,13 +105,24 @@ impl Inherited for Scripted {
             .clone()
             .unwrap_or_else(|| panic!("the block was read with no scripted answer"))
     }
+
+    fn incarnation(&self, pid: u32) -> Option<String> {
+        self.incarnations.get(&pid).cloned()
+    }
 }
 
+/// The place of `BLOCK`, verified for a process whose ancestors are a
+/// plain block's.
 fn rex_place() -> Home {
+    rex_place_under(&[110, SERVER, 1])
+}
+
+fn rex_place_under(ancestors: &[u32]) -> Home {
     Home::Rex(Place {
         endpoint: Endpoint::parse(CANONICAL),
         space: Some(SpaceId::new(SESSION)),
         pane: Some(PaneId::new(BLOCK)),
+        caller: Some(Box::new(Caller::default().of(ancestors.to_vec()))),
     })
 }
 
@@ -160,7 +179,7 @@ fn every_row_of_the_home_table_picks_its_home() {
                 .peer(REX, Ok(SERVER))
                 .peer(HERDR, Ok(HERDR_SERVER))
                 .child(SERVER, 110),
-            Ok(rex_place()),
+            Ok(rex_place_under(&[110, SERVER, 120, HERDR_SERVER, 1])),
         ),
         (
             "a Rex block whose HERDR_SOCKET_PATH names a live Herdr elsewhere",
@@ -296,7 +315,7 @@ fn every_row_of_the_home_table_picks_its_home() {
                 .ancestors(&[110, SERVER, 1])
                 .peer(REX, Err(libc::EACCES)),
             Err(
-                "the agent's sandbox denies the Rex socket that REX_SERVER=unix:///tmp/rex/s.sock names, so REX_BLOCK=block:0f6c0d4e-1b5a-4f8e-9d2c-3a7b8c9d0e1f cannot be reached",
+                "the agent's sandbox denies the Rex socket that REX_SERVER=unix:///tmp/rex/s.sock names, and no Namedrop hook has bound REX_BLOCK=block:0f6c0d4e-1b5a-4f8e-9d2c-3a7b8c9d0e1f yet",
             ),
         ),
         (
@@ -319,7 +338,7 @@ fn every_row_of_the_home_table_picks_its_home() {
                 .ancestors(&[SERVER, 1])
                 .peer(REX, Ok(SERVER))
                 .child(SERVER, 110),
-            Ok(rex_place()),
+            Ok(rex_place_under(&[SERVER, 1])),
         ),
         (
             "a claim answered by a server that is not the ancestor probed",
@@ -458,6 +477,7 @@ fn an_explicit_endpoint_decides_by_its_kind_with_no_probe() {
         endpoint: Some(endpoint),
         space: Some("session:s"),
         pane: Some("block:b"),
+        plugin_state: None,
     };
     for endpoint in ["", "default", "/tmp/h.sock"] {
         assert_eq!(
@@ -472,6 +492,7 @@ fn an_explicit_endpoint_decides_by_its_kind_with_no_probe() {
             endpoint: Endpoint::parse("rex:/tmp/r.sock"),
             space: Some(SpaceId::new("session:s")),
             pane: Some(PaneId::new("block:b")),
+            caller: None,
         }))
     );
     assert_eq!(block.probed(), Vec::<PathBuf>::new());
@@ -483,6 +504,7 @@ fn a_flag_names_its_own_value_in_a_claimed_place() {
         endpoint: None,
         space: None,
         pane: Some("block:flag"),
+        plugin_state: None,
     };
     assert_eq!(
         resolve(&flags, &plain_block()),
@@ -490,6 +512,7 @@ fn a_flag_names_its_own_value_in_a_claimed_place() {
             endpoint: Endpoint::parse(CANONICAL),
             space: Some(SpaceId::new(SESSION)),
             pane: Some(PaneId::new("block:flag")),
+            caller: Some(Box::new(Caller::default().of(vec![110, SERVER, 1]))),
         }))
     );
 }
@@ -508,6 +531,7 @@ fn without_a_rex_claim_the_set_of_names_decides() {
             endpoint: Endpoint::parse("rex:/tmp/r.sock"),
             space: Some(SpaceId::new("session:s")),
             pane: None,
+            caller: None,
         }))
     );
     assert_eq!(resolved(&neutral("/tmp/h.sock")), Ok(Home::Herdr));
@@ -522,6 +546,7 @@ fn without_a_rex_claim_the_set_of_names_decides() {
             endpoint: Endpoint::parse("rex:/tmp/r.sock"),
             space: Some(SpaceId::new("session:s")),
             pane: None,
+            caller: None,
         })),
         "a claim needs both REX_BLOCK and REX_SESSION"
     );
@@ -894,5 +919,127 @@ mod identity_boundary {
             assert_eq!(breaches(&root), [caught], "{source}");
         }
         fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+/// A state directory holding `BLOCK`'s binding, whose agent is `agent`.
+struct Bound(PathBuf);
+
+impl Bound {
+    fn agent(agent: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let state = std::env::temp_dir().join(format!(
+            "nd-home-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let sessions = state.join("rex/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join(format!("{}.json", BLOCK.strip_prefix("block:").unwrap())),
+            serde_json::json!({
+                "block": BLOCK, "endpoint": CANONICAL, "space": SESSION,
+                "foreground": agent, "agent": agent, "runtime": "codex",
+                "session": "codex-session", "bound_at_ms": 1,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        Self(state)
+    }
+}
+
+impl Drop for Bound {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A Codex tool under its default sandbox: the Rex socket is denied, and
+/// its ancestors, the Codex it runs under among them, still read.
+fn sandboxed_tool() -> Scripted {
+    Scripted::default()
+        .in_block()
+        .ancestors(&[120, 110, SERVER, 1])
+        .peer(REX, Err(libc::EPERM))
+}
+
+fn deferred() -> Home {
+    Home::RexDeferred(Deferral {
+        endpoint: Endpoint::parse(CANONICAL),
+        space: SpaceId::new(SESSION),
+        pane: PaneId::new(BLOCK),
+    })
+}
+
+#[test]
+fn a_denied_socket_defers_to_the_block_its_binding_proves() {
+    let bound = Bound::agent("110@5000");
+    let flag = Flags {
+        plugin_state: Some(&bound.0),
+        ..Flags::default()
+    };
+    assert_eq!(
+        resolve(&flag, &sandboxed_tool().started(110, 5000)),
+        Ok(deferred())
+    );
+    let named = sandboxed_tool()
+        .started(110, 5000)
+        .var("NAMEDROP_STATE_DIR", bound.0.to_str().unwrap());
+    assert_eq!(
+        resolved(&named),
+        Ok(deferred()),
+        "a Rex home's state directory holds the binding too"
+    );
+    assert_eq!(
+        deferred().location(&named),
+        None,
+        "a deferral is no place to record a turn"
+    );
+}
+
+/// `--plugin-state` names the state directory a sandboxed command reads,
+/// ahead of the one its Rex home would name.
+#[test]
+fn a_plugin_state_flag_is_read_before_the_homes_state_directory() {
+    let proving = Bound::agent("110@5000");
+    let other = Bound::agent("130@5000");
+    for (flag, named, defers) in [(&proving, &other, true), (&other, &proving, false)] {
+        let flags = Flags {
+            plugin_state: Some(&flag.0),
+            ..Flags::default()
+        };
+        let process = sandboxed_tool()
+            .started(110, 5000)
+            .started(130, 5000)
+            .var("NAMEDROP_STATE_DIR", named.0.to_str().unwrap());
+        assert_eq!(
+            resolve(&flags, &process).is_ok(),
+            defers,
+            "{}",
+            flag.0.display()
+        );
+    }
+}
+
+#[test]
+fn a_binding_that_does_not_prove_the_denied_caller_is_an_error() {
+    let not_an_ancestor = Bound::agent("130@5000");
+    let restarted = Bound::agent("110@4000");
+    for (bound, process) in [
+        (&not_an_ancestor, sandboxed_tool().started(130, 5000)),
+        (&restarted, sandboxed_tool().started(110, 5000)),
+        (&restarted, sandboxed_tool()),
+    ] {
+        let flags = Flags {
+            plugin_state: Some(&bound.0),
+            ..Flags::default()
+        };
+        let refused = resolve(&flags, &process).unwrap_err();
+        assert!(
+            refused.starts_with("the agent's sandbox denies the Rex socket")
+                && refused.contains("is not an ancestor of this process"),
+            "{refused}"
+        );
     }
 }

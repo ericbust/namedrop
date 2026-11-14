@@ -1924,7 +1924,7 @@ fn the_claude_session_start_wrapper_keeps_the_installed_hook_command() {
     .unwrap();
     let wrapper = fs::read_to_string(package.join("scripts/session-start")).unwrap();
     assert!(wrapper.starts_with(&format!(
-        "#!/bin/sh\noutput=$('{}' hook session-start --state-directory '{}' 2>/dev/null) || exit 0\n",
+        "#!/bin/sh\noutput=$(NAMEDROP_HOOK_RUNTIME=claude-code '{}' hook session-start --state-directory '{}' 2>/dev/null) || exit 0\n",
         executable.display(), directory.state.display()
     )));
 }
@@ -1936,7 +1936,11 @@ fn the_app_server_notice_stays_silent_outside_a_server_and_for_other_input() {
         r#"{"hook_event_name":"UserPromptSubmit","prompt":"hello","session_id":"s1"}"#,
         "garbage",
     ] {
-        assert_eq!(execute_codex_app_server_hook(input), None, "{input}");
+        assert_eq!(
+            execute_codex_app_server_hook(input, namedrop::mux::MuxKind::Herdr),
+            None,
+            "{input}"
+        );
     }
 }
 

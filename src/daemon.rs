@@ -43,15 +43,17 @@ pub enum Starter {
 }
 
 /// What a daemon never inherits: the Rex claim, which says which block the
-/// starting process ran in, and the agent session markers, which say which
-/// agent ran it. `REX_BIN_DIR`, `REX_HOME`, and `REX_RUNTIME_DIR` stay,
-/// because they say how to run `rex`, not where this process runs.
-const SCRUBBED: [&str; 5] = [
+/// starting process ran in, and the agent session markers and the context
+/// hook's runtime, which say which agent ran it. `REX_BIN_DIR`, `REX_HOME`,
+/// and `REX_RUNTIME_DIR` stay, because they say how to run `rex`, not where
+/// this process runs.
+const SCRUBBED: [&str; 6] = [
     "REX_BLOCK",
     "REX_SESSION",
     "REX_CLIENT",
     "REX_SERVER",
     "CLAUDE_SESSION_ID",
+    crate::mux::home::HOOK_RUNTIME,
 ];
 
 /// The multiplexer timeouts, which a daemon of [`Starter::StopHook`] drops.
@@ -162,6 +164,7 @@ pub(crate) mod tests {
                 "CODEX_SESSION_ID",
                 "CODEX_THREAD_ID",
                 "CLAUDE_SESSION_ID",
+                "NAMEDROP_HOOK_RUNTIME",
             ] {
                 assert_eq!(environment.get(name), Some(&None), "{starter:?} {name}");
             }
@@ -185,7 +188,7 @@ pub(crate) mod tests {
             }
             assert_eq!(
                 environment.len(),
-                if timeouts { 20 } else { 18 },
+                if timeouts { 21 } else { 19 },
                 "{environment:?}"
             );
         }

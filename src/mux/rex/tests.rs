@@ -209,6 +209,7 @@ impl Wire for Script {
 pub(super) struct Local {
     pub reads: Mutex<HashMap<u32, LocalRead>>,
     pub groups: Mutex<HashMap<u32, Vec<u32>>>,
+    pub executables: Mutex<HashMap<u32, PathBuf>>,
     /// A remote block's pids name nothing here, so reading one fails the test.
     pub forbidden: bool,
 }
@@ -232,6 +233,13 @@ impl Local {
 
     pub fn set(&self, pid: u32, read: LocalRead) {
         self.reads.lock().unwrap().insert(pid, read);
+    }
+
+    pub fn runs(&self, pid: u32, executable: &str) {
+        self.executables
+            .lock()
+            .unwrap()
+            .insert(pid, PathBuf::from(executable));
     }
 
     /// The fixture's local facts: a live pid starts at `<pid>000`, a zombie
@@ -286,8 +294,8 @@ impl LocalProcesses for Local {
         None
     }
 
-    fn executable(&self, _pid: u32) -> Option<PathBuf> {
-        None
+    fn executable(&self, pid: u32) -> Option<PathBuf> {
+        self.executables.lock().unwrap().get(&pid).cloned()
     }
 }
 
@@ -1314,13 +1322,27 @@ fn a_socket_caps_requests_at_the_rex_timeout_only_when_it_is_set() {
 
 #[test]
 fn a_claimed_block_is_read_on_one_proved_connection() {
-    let script = one_block(fixture("idle-login"));
+    let wrapped = fixture("wrapper-before");
+    let script = one_block(wrapped.clone());
     assert_eq!(
         claimed_over(&script, Path::new(SOCKET), "session:s", "block:b"),
         Ok(Claimed {
             endpoint: Endpoint::parse(&format!("rex:{SOCKET}")),
             server: PEER,
-            child: 70768,
+            child: 70962,
+            caller: Caller {
+                foreground: serde_json::from_value(wrapped["process"]["foreground"].clone()).ok(),
+                record: Some(StatusRecord {
+                    id: None,
+                    state: "idle".into(),
+                    app: Some("claude-code".into()),
+                    owner: Some(wire::Owner {
+                        pid: 70962,
+                        name: "bash".into(),
+                    }),
+                }),
+                ancestors: Vec::new(),
+            },
         })
     );
     assert_eq!(
@@ -1328,7 +1350,8 @@ fn a_claimed_block_is_read_on_one_proved_connection() {
         [
             "server.status",
             "session.attach session:s",
-            "process block:b"
+            "process block:b",
+            "program_status block:b"
         ]
     );
     script.forget();

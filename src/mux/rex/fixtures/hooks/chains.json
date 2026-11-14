@@ -1,0 +1,713 @@
+{
+ "about": "Hook chains measured in revisions 3 and 4 and review 4 of experimental/rex/ADAPTER.md, scrubbed. Each chain lists the hook process's ancestors, parent first: Namedrop's wrapper, then up to the Rex server. A live pid starts at <pid>000, and a foreground missing from its chain is alive in a group of its own. `agent` is the pid a bind names.",
+ "cases": [
+  {
+   "name": "Claude Code 2.1.323, its own SessionStart",
+   "source": "revision 3",
+   "foreground": {
+    "pid": 26048,
+    "name": "2.1.323"
+   },
+   "record": {
+    "state": "idle",
+    "app": "claude-code",
+    "owner": {
+     "pid": 26048,
+     "name": "2.1.323"
+    },
+    "updated_at": "2026-11-13T00:00:00Z"
+   },
+   "runtime": "claude-code",
+   "entrypoint": "cli",
+   "chain": [
+    {
+     "pid": 33279,
+     "group": 33279,
+     "executable": "/bin/sh"
+    },
+    {
+     "pid": 26048,
+     "group": 26048,
+     "executable": "/Users/me/.local/share/claude/versions/2.1.323"
+    },
+    {
+     "pid": 45533,
+     "group": 45416,
+     "executable": "/Users/me/.local/bin/rex"
+    }
+   ],
+   "bound_agent": null,
+   "expect": "bind",
+   "agent": 26048
+  },
+  {
+   "name": "claude -p run as a tool by that Claude Code",
+   "source": "revision 3",
+   "foreground": {
+    "pid": 26048,
+    "name": "2.1.323"
+   },
+   "record": {
+    "state": "working",
+    "app": "claude-code",
+    "owner": {
+     "pid": 26048,
+     "name": "2.1.323"
+    },
+    "updated_at": "2026-11-13T00:00:00Z"
+   },
+   "runtime": "claude-code",
+   "entrypoint": "sdk-cli",
+   "chain": [
+    {
+     "pid": 46166,
+     "group": 46166,
+     "executable": "/bin/sh"
+    },
+    {
+     "pid": 46007,
+     "group": 45976,
+     "executable": "/Users/me/.local/share/claude/versions/2.1.323"
+    },
+    {
+     "pid": 45976,
+     "group": 45976,
+     "executable": "/bin/zsh"
+    },
+    {
+     "pid": 26048,
+     "group": 26048,
+     "executable": "/Users/me/.local/share/claude/versions/2.1.323"
+    },
+    {
+     "pid": 45533,
+     "group": 45416,
+     "executable": "/Users/me/.local/bin/rex"
+    }
+   ],
+   "bound_agent": null,
+   "expect": "not_in_group",
+   "agent": null
+  },
+  {
+   "name": "Codex 0.163 with --no-daemon",
+   "source": "revision 3",
+   "foreground": {
+    "pid": 50380,
+    "name": "codex"
+   },
+   "record": {
+    "state": "idle",
+    "app": "codex",
+    "owner": {
+     "pid": 50380,
+     "name": "codex"
+    },
+    "updated_at": "2026-11-13T00:00:00Z"
+   },
+   "runtime": "codex",
+   "entrypoint": null,
+   "chain": [
+    {
+     "pid": 54133,
+     "group": 54133,
+     "executable": "/bin/sh"
+    },
+    {
+     "pid": 50380,
+     "group": 50380,
+     "executable": "/Users/me/.local/bin/codex"
+    },
+    {
+     "pid": 45533,
+     "group": 45416,
+     "executable": "/Users/me/.local/bin/rex"
+    }
+   ],
+   "bound_agent": null,
+   "expect": "bind",
+   "agent": 50380
+  },
+  {
+   "name": "Codex 0.142.2 through its npm launcher, which sends no record",
+   "source": "revision 3",
+   "foreground": {
+    "pid": 82223,
+    "name": "node"
+   },
+   "record": null,
+   "runtime": "codex",
+   "entrypoint": null,
+   "chain": [
+    {
+     "pid": 96092,
+     "group": 82223,
+     "executable": "/bin/sh"
+    },
+    {
+     "pid": 82278,
+     "group": 82223,
+     "executable": "/Users/me/.hermes/node/lib/node_modules/@openai/codex/vendor/aarch64-apple-darwin/codex/codex"
+    },
+    {
+     "pid": 82223,
+     "group": 82223,
+     "executable": "/Users/me/.hermes/node/bin/node"
+    },
+    {
+     "pid": 45533,
+     "group": 45416,
+     "executable": "/Users/me/.local/bin/rex"
+    }
+   ],
+   "bound_agent": null,
+   "expect": "bind",
+   "agent": 82278
+  },
+  {
+   "name": "Codex 0.163 in its default mode, the block that started its app server",
+   "source": "revision 3",
+   "foreground": {
+    "pid": 80440,
+    "name": "codex"
+   },
+   "record": {
+    "state": "idle",
+    "app": "codex",
+    "owner": {
+     "pid": 80440,
+     "name": "codex"
+    },
+    "updated_at": "2026-11-13T00:00:00Z"
+   },
+   "runtime": "codex",
+   "entrypoint": null,
+   "chain": [
+    {
+     "pid": 91415,
+     "group": 91415,
+     "executable": "/bin/sh"
+    },
+    {
+     "pid": 81243,
+     "group": 81243,
+     "executable": "/Users/me/.local/bin/codex"
+    },
+    {
+     "pid": 80440,
+     "group": 80440,
+     "executable": "/Users/me/.local/bin/codex"
+    },
+    {
+     "pid": 45533,
+     "group": 45416,
+     "executable": "/Users/me/.local/bin/rex"
+    }
+   ],
+   "bound_agent": null,
+   "expect": "not_in_group",
+   "agent": null
+  },
+  {
+   "name": "Codex 0.163 in its default mode, a second block whose hook claims the first",
+   "source": "revision 3",
+   "foreground": {
+    "pid": 80440,
+    "name": "codex"
+   },
+   "record": {
+    "state": "idle",
+    "app": "codex",
+    "owner": {
+     "pid": 80440,
+     "name": "codex"
+    },
+    "updated_at": "2026-11-13T00:00:00Z"
+   },
+   "runtime": "codex",
+   "entrypoint": null,
+   "chain": [
+    {
+     "pid": 5236,
+     "group": 5236,
+     "executable": "/bin/sh"
+    },
+    {
+     "pid": 81243,
+     "group": 81243,
+     "executable": "/Users/me/.local/bin/codex"
+    },
+    {
+     "pid": 80440,
+     "group": 80440,
+     "executable": "/Users/me/.local/bin/codex"
+    },
+    {
+     "pid": 45533,
+     "group": 45416,
+     "executable": "/Users/me/.local/bin/rex"
+    }
+   ],
+   "bound_agent": null,
+   "expect": "not_in_group",
+   "agent": null
+  },
+  {
+   "name": "Claude Code behind bash wrap.sh, SessionStart before any record",
+   "source": "revision 4",
+   "foreground": {
+    "pid": 82428,
+    "name": "bash"
+   },
+   "record": null,
+   "runtime": "claude-code",
+   "entrypoint": "cli",
+   "chain": [
+    {
+     "pid": 90001,
+     "group": 90001,
+     "executable": "/bin/sh"
+    },
+    {
+     "pid": 82429,
+     "group": 82428,
+     "executable": "/Users/me/.local/share/claude/versions/2.1.323"
+    },
+    {
+     "pid": 82428,
+     "group": 82428,
+     "executable": "/bin/bash"
+    },
+    {
+     "pid": 75489,
+     "group": 75489,
+     "executable": "/bin/zsh"
+    },
+    {
+     "pid": 45533,
+     "group": 45416,
+     "executable": "/Users/me/.local/bin/rex"
+    }
+   ],
+   "bound_agent": null,
+   "expect": "bind",
+   "agent": 82429
+  },
+  {
+   "name": "Claude Code behind bash wrap.sh, UserPromptSubmit with the launcher's record",
+   "source": "revision 4",
+   "foreground": {
+    "pid": 82428,
+    "name": "bash"
+   },
+   "record": {
+    "state": "working",
+    "app": "claude-code",
+    "owner": {
+     "pid": 82428,
+     "name": "bash"
+    },
+    "updated_at": "2026-11-13T00:00:00Z"
+   },
+   "runtime": "claude-code",
+   "entrypoint": "cli",
+   "chain": [
+    {
+     "pid": 90002,
+     "group": 90002,
+     "executable": "/bin/sh"
+    },
+    {
+     "pid": 82429,
+     "group": 82428,
+     "executable": "/Users/me/.local/share/claude/versions/2.1.323"
+    },
+    {
+     "pid": 82428,
+     "group": 82428,
+     "executable": "/bin/bash"
+    },
+    {
+     "pid": 75489,
+     "group": 75489,
+     "executable": "/bin/zsh"
+    },
+    {
+     "pid": 45533,
+     "group": 45416,
+     "executable": "/Users/me/.local/bin/rex"
+    }
+   ],
+   "bound_agent": null,
+   "expect": "bind",
+   "agent": 82429
+  },
+  {
+   "name": "claude -p started by a Python MCP server",
+   "source": "revision 4",
+   "foreground": {
+    "pid": 46300,
+    "name": "2.1.323"
+   },
+   "record": {
+    "state": "working",
+    "app": "claude-code",
+    "owner": {
+     "pid": 46300,
+     "name": "2.1.323"
+    },
+    "updated_at": "2026-11-13T00:00:00Z"
+   },
+   "runtime": "claude-code",
+   "entrypoint": "sdk-cli",
+   "chain": [
+    {
+     "pid": 46700,
+     "group": 46700,
+     "executable": "/bin/sh"
+    },
+    {
+     "pid": 46638,
+     "group": 46300,
+     "executable": "/Users/me/.local/share/claude/versions/2.1.323"
+    },
+    {
+     "pid": 46626,
+     "group": 46300,
+     "executable": "/Library/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python"
+    },
+    {
+     "pid": 46300,
+     "group": 46300,
+     "executable": "/Users/me/.local/share/claude/versions/2.1.323"
+    },
+    {
+     "pid": 45533,
+     "group": 45416,
+     "executable": "/Users/me/.local/bin/rex"
+    }
+   ],
+   "bound_agent": null,
+   "expect": "launcher",
+   "agent": null
+  },
+  {
+   "name": "claude -p through a shell from a Python MCP server",
+   "source": "revision 4",
+   "foreground": {
+    "pid": 46326,
+    "name": "2.1.323"
+   },
+   "record": {
+    "state": "working",
+    "app": "claude-code",
+    "owner": {
+     "pid": 46326,
+     "name": "2.1.323"
+    },
+    "updated_at": "2026-11-13T00:00:00Z"
+   },
+   "runtime": "claude-code",
+   "entrypoint": "sdk-cli",
+   "chain": [
+    {
+     "pid": 46800,
+     "group": 46800,
+     "executable": "/bin/sh"
+    },
+    {
+     "pid": 46719,
+     "group": 46326,
+     "executable": "/Users/me/.local/share/claude/versions/2.1.323"
+    },
+    {
+     "pid": 46717,
+     "group": 46326,
+     "executable": "/bin/bash"
+    },
+    {
+     "pid": 46709,
+     "group": 46326,
+     "executable": "/Library/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python"
+    },
+    {
+     "pid": 46326,
+     "group": 46326,
+     "executable": "/Users/me/.local/share/claude/versions/2.1.323"
+    },
+    {
+     "pid": 45533,
+     "group": 45416,
+     "executable": "/Users/me/.local/bin/rex"
+    }
+   ],
+   "bound_agent": null,
+   "expect": "launcher",
+   "agent": null
+  },
+  {
+   "name": "claude -p from an MCP server that is itself a shell",
+   "source": "revision 4",
+   "foreground": {
+    "pid": 59404,
+    "name": "2.1.323"
+   },
+   "record": {
+    "state": "idle",
+    "app": "claude-code",
+    "owner": {
+     "pid": 59404,
+     "name": "2.1.323"
+    },
+    "updated_at": "2026-11-13T00:00:00Z"
+   },
+   "runtime": "claude-code",
+   "entrypoint": "sdk-cli",
+   "chain": [
+    {
+     "pid": 59700,
+     "group": 59700,
+     "executable": "/bin/sh"
+    },
+    {
+     "pid": 59612,
+     "group": 59404,
+     "executable": "/Users/me/.local/share/claude/versions/2.1.323"
+    },
+    {
+     "pid": 59609,
+     "group": 59404,
+     "executable": "/bin/bash"
+    },
+    {
+     "pid": 59404,
+     "group": 59404,
+     "executable": "/Users/me/.local/share/claude/versions/2.1.323"
+    },
+    {
+     "pid": 45533,
+     "group": 45416,
+     "executable": "/Users/me/.local/bin/rex"
+    }
+   ],
+   "bound_agent": null,
+   "expect": "launcher",
+   "agent": null
+  },
+  {
+   "name": "that nested agent's UserPromptSubmit after its shell parent exited",
+   "source": "revision 4",
+   "foreground": {
+    "pid": 59404,
+    "name": "2.1.323"
+   },
+   "record": {
+    "state": "idle",
+    "app": "claude-code",
+    "owner": {
+     "pid": 59404,
+     "name": "2.1.323"
+    },
+    "updated_at": "2026-11-13T00:00:00Z"
+   },
+   "runtime": "claude-code",
+   "entrypoint": "sdk-cli",
+   "chain": [
+    {
+     "pid": 59701,
+     "group": 59701,
+     "executable": "/bin/sh"
+    },
+    {
+     "pid": 59612,
+     "group": 59404,
+     "executable": "/Users/me/.local/share/claude/versions/2.1.323"
+    },
+    {
+     "pid": 1,
+     "group": 1,
+     "executable": "/sbin/launchd"
+    }
+   ],
+   "bound_agent": null,
+   "expect": "launcher",
+   "agent": null
+  },
+  {
+   "name": "another Claude Code version from a shell MCP server, once the outer agent is bound",
+   "source": "review 4",
+   "foreground": {
+    "pid": 70000,
+    "name": "2.1.323"
+   },
+   "record": {
+    "state": "working",
+    "app": "claude-code",
+    "owner": {
+     "pid": 70000,
+     "name": "2.1.323"
+    },
+    "updated_at": "2026-11-13T00:00:00Z"
+   },
+   "runtime": "claude-code",
+   "entrypoint": "sdk-cli",
+   "chain": [
+    {
+     "pid": 70200,
+     "group": 70200,
+     "executable": "/bin/sh"
+    },
+    {
+     "pid": 70100,
+     "group": 70000,
+     "executable": "/Users/me/.local/share/claude/versions/2.1.322"
+    },
+    {
+     "pid": 70090,
+     "group": 70000,
+     "executable": "/bin/sh"
+    },
+    {
+     "pid": 70000,
+     "group": 70000,
+     "executable": "/Users/me/.local/share/claude/versions/2.1.323"
+    },
+    {
+     "pid": 45533,
+     "group": 45416,
+     "executable": "/Users/me/.local/bin/rex"
+    }
+   ],
+   "bound_agent": 70000,
+   "expect": "already_bound",
+   "agent": null
+  },
+  {
+   "name": "another Claude Code version from a shell MCP server, before the outer agent binds",
+   "source": "review 4",
+   "foreground": {
+    "pid": 70000,
+    "name": "2.1.323"
+   },
+   "record": {
+    "state": "working",
+    "app": "claude-code",
+    "owner": {
+     "pid": 70000,
+     "name": "2.1.323"
+    },
+    "updated_at": "2026-11-13T00:00:00Z"
+   },
+   "runtime": "claude-code",
+   "entrypoint": "sdk-cli",
+   "chain": [
+    {
+     "pid": 70201,
+     "group": 70201,
+     "executable": "/bin/sh"
+    },
+    {
+     "pid": 70100,
+     "group": 70000,
+     "executable": "/Users/me/.local/share/claude/versions/2.1.322"
+    },
+    {
+     "pid": 70090,
+     "group": 70000,
+     "executable": "/bin/sh"
+    },
+    {
+     "pid": 70000,
+     "group": 70000,
+     "executable": "/Users/me/.local/share/claude/versions/2.1.323"
+    },
+    {
+     "pid": 45533,
+     "group": 45416,
+     "executable": "/Users/me/.local/bin/rex"
+    }
+   ],
+   "bound_agent": null,
+   "expect": "nested_print_mode",
+   "agent": null
+  },
+  {
+   "name": "Codex --no-daemon under a Debian wrapper, executable dash, comm session-start-w",
+   "source": "revision 3 (Linux)",
+   "foreground": {
+    "pid": 933100,
+    "name": "codex"
+   },
+   "record": {
+    "state": "idle",
+    "app": "codex",
+    "owner": {
+     "pid": 933100,
+     "name": "codex"
+    },
+    "updated_at": "2026-11-13T00:00:00Z"
+   },
+   "runtime": "codex",
+   "entrypoint": null,
+   "chain": [
+    {
+     "pid": 933178,
+     "group": 933178,
+     "executable": "/usr/bin/dash"
+    },
+    {
+     "pid": 933100,
+     "group": 933100,
+     "executable": "/usr/local/bin/codex"
+    },
+    {
+     "pid": 933000,
+     "group": 932990,
+     "executable": "/usr/local/bin/rex"
+    }
+   ],
+   "bound_agent": null,
+   "expect": "bind",
+   "agent": 933100
+  },
+  {
+   "name": "Codex --no-daemon under an Alpine wrapper, executable busybox, comm session-start-w",
+   "source": "revision 3 (Linux)",
+   "foreground": {
+    "pid": 933101,
+    "name": "codex"
+   },
+   "record": {
+    "state": "idle",
+    "app": "codex",
+    "owner": {
+     "pid": 933101,
+     "name": "codex"
+    },
+    "updated_at": "2026-11-13T00:00:00Z"
+   },
+   "runtime": "codex",
+   "entrypoint": null,
+   "chain": [
+    {
+     "pid": 933219,
+     "group": 933219,
+     "executable": "/bin/busybox"
+    },
+    {
+     "pid": 933101,
+     "group": 933101,
+     "executable": "/usr/local/bin/codex"
+    },
+    {
+     "pid": 933000,
+     "group": 932990,
+     "executable": "/usr/local/bin/rex"
+    }
+   ],
+   "bound_agent": null,
+   "expect": "bind",
+   "agent": 933101
+  }
+ ]
+}

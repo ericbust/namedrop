@@ -24,6 +24,7 @@ use super::{
 use crate::{SpaceId, WorktreeId};
 use agent::{Locality, Observed, pane_agent, shell_of};
 use binding::Bindings;
+pub(crate) use binding::{Caller, bound, refusal};
 use control::{Connection, Control, Fault, Limits, Narrower, Wire};
 use serde_json::{Value, json};
 use std::{
@@ -73,7 +74,7 @@ pub(crate) fn claimed(socket: &Path, session: &str, block: &str) -> Result<Claim
 }
 
 /// `server.status` for the local proof, `session.attach`, and the block's
-/// `process`, on one connection.
+/// `process` and `program_status`, on one connection.
 fn claimed_over(
     wire: &impl Wire,
     dial: &Path,
@@ -91,6 +92,7 @@ fn claimed_over(
         .map_err(|fault| mux_error(fault, Gone::Pane))?;
     call.attach(session)?;
     let process: ProcessReply = wire::parse(call.block(session, block, "process", json!({}))?)?;
+    let record = wire::root_record(call.block(session, block, "program_status", json!({}))?)?;
     let child = process
         .child
         .ok_or_else(|| MuxError::Protocol(format!("Rex named no child process for {block}")))?;
@@ -98,6 +100,11 @@ fn claimed_over(
         endpoint: server.endpoint,
         server: server.pid,
         child: child.pid,
+        caller: Caller {
+            foreground: process.foreground,
+            record,
+            ancestors: Vec::new(),
+        },
     })
 }
 

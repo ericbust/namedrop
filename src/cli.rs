@@ -76,6 +76,7 @@ impl RuntimeOptions {
             endpoint: self.endpoint.as_deref(),
             space: self.space.as_deref(),
             pane: self.pane.as_deref(),
+            plugin_state: self.plugin_state.as_deref(),
         }
     }
 }

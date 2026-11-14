@@ -305,6 +305,39 @@ where
         );
         issues.push(record_issue);
     }
+    let rex =
+        crate::mux::Endpoint::parse(runtime.session_socket_id).kind == crate::mux::MuxKind::Rex;
+    let unbindable = runtime
+        .home_directory
+        .filter(|_| rex)
+        .map(crate::install::wrappers_without_runtime)
+        .unwrap_or_default();
+    if !unbindable.is_empty() {
+        let mut wrapper_issue = issue(
+            "ND-INTEGRATION-003",
+            HealthSeverity::Blocked,
+            "An installed hook wrapper does not name its agent, so its sessions never bind in a Rex block.",
+            &format!(
+                "{} sets no NAMEDROP_HOOK_RUNTIME. It was installed by an older Namedrop, and an agent whose hooks do not bind cannot register or receive mentions here.",
+                unbindable
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ),
+            HealthRepairKind::AgentRepair,
+            "Activate Namedrop again, which rewrites the wrappers, then restart the agent.",
+        );
+        add_operation(
+            &mut wrapper_issue,
+            runtime,
+            &space_id,
+            "activate",
+            serde_json::json!({"confirmed":true}),
+            None,
+        );
+        issues.push(wrapper_issue);
+    }
     if setup
         .worktree_state
         .as_ref()
@@ -404,12 +437,52 @@ where
         .iter()
         .filter(|pane| pane_agent_runtime(pane).is_some())
         .count();
+    // A Rex block reports a session only through the binding its own hook
+    // wrote, so an agent's block with no session says why when its live
+    // foreground's hook was refused.
+    let mut refused = Vec::new();
+    for pane in setup.panes.iter().filter(|_| rex) {
+        let Some(crate::mux::SessionClaim::Unreported { incarnation }) =
+            pane.agent.as_ref().map(|agent| &agent.session)
+        else {
+            continue;
+        };
+        let Some(refusal) =
+            crate::mux::rex::refusal(runtime.state_directory, &pane.pane_id, incarnation)
+        else {
+            continue;
+        };
+        let mut binding = issue(
+            "ND-SESSION-004",
+            HealthSeverity::Blocked,
+            &format!(
+                "Namedrop refused to bind the agent session in block {}.",
+                pane.pane_id
+            ),
+            &format!(
+                "Its latest hook ({}) was refused because {}.",
+                refusal.session,
+                refused_bind_reason(&refusal.condition)
+            ),
+            HealthRepairKind::HumanDecision,
+            "Start the agent as the block's own program, then send it one prompt so its hook binds the session.",
+        );
+        binding.diagnostic = serde_json::json!({
+            "pane_id": pane.pane_id, "workspace_id": space_id, "endpoint": refusal.endpoint,
+            "condition": refusal.condition, "session": refusal.session, "refused_at_ms": refusal.at_ms,
+        });
+        issues.push(binding);
+        refused.push(pane.pane_id.as_str());
+    }
     for pane in setup
         .panes
         .iter()
         .filter(|pane| pane_agent_runtime(pane).is_some())
     {
-        if pane.agent_session_id().is_none() && !served_pane(Some(&pane.pane_id)) {
+        if pane.agent_session_id().is_none()
+            && !served_pane(Some(&pane.pane_id))
+            && !refused.contains(&pane.pane_id.as_str())
+        {
             let agent_runtime = pane_agent_runtime(pane).expect("supported panes were filtered");
             let setup = crate::install::native_session_setup(agent_runtime);
             let mut native = issue(
@@ -1253,6 +1326,21 @@ fn stale_runtime_issue(stale: &crate::installed_runtime::StaleRelease) -> Health
         "--human".into(),
     ]);
     outdated
+}
+
+/// The condition of `Place::bind_session` that refused a bind, in words.
+fn refused_bind_reason(condition: &crate::mux::home::BindRefused) -> String {
+    use crate::mux::home::BindRefused;
+    match condition {
+        BindRefused::NotInGroup => "the hook's agent is not in the block's foreground process group, as for an agent run as a tool or a Codex shared app-server".to_owned(),
+        BindRefused::Launcher => "a program other than a shell runs between the block's program and the hook's agent, or the block's program is the agent's own executable, as for an agent an MCP server started".to_owned(),
+        BindRefused::Runtime => "the block's status record names another agent than the hook's wrapper".to_owned(),
+        BindRefused::NotAlive => "the block's program or the hook's agent could not be read as a live process".to_owned(),
+        BindRefused::AlreadyBound => "the block is already bound to its own program, and the hook ran in an agent behind it".to_owned(),
+        BindRefused::NestedPrintMode => "the hook ran in a Claude Code print-mode agent (CLAUDE_CODE_ENTRYPOINT=sdk-cli) behind the block's program".to_owned(),
+        BindRefused::NoCaller => "the hook could not prove which block it runs in".to_owned(),
+        BindRefused::Io(error) => format!("the binding could not be written: {error}"),
+    }
 }
 
 /// One issue per space, not per pane: the server is shared by every Codex

@@ -134,9 +134,14 @@ struct Fixture {
     home: PathBuf,
     host: Host,
     ids: Ids,
+    endpoint: &'static str,
 }
 impl Fixture {
     fn new() -> Self {
+        Self::at("socket-a")
+    }
+    /// The fixture's world and state under `endpoint`.
+    fn at(endpoint: &'static str) -> Self {
         let root = update_profile::root(std::env::temp_dir().join(format!(
             "namedrop-health-{}-{}",
             std::process::id(),
@@ -147,8 +152,9 @@ impl Fixture {
         Self {
             root,
             home,
-            host: Host::new(),
+            host: Host::new(endpoint),
             ids: Ids(AtomicU64::new(1)),
+            endpoint,
         }
     }
     fn runtime(&self) -> LifecycleRuntime<'_, FakeMux, Time, Ids> {
@@ -159,14 +165,14 @@ impl Fixture {
             cwd: Path::new("/repo"),
             workspace_id: None,
             current_pane_id: Some("pane-1"),
-            session_socket_id: "socket-a",
+            session_socket_id: self.endpoint,
             mux: &self.host,
             clock: &Time,
             ids: &self.ids,
         }
     }
     fn register(&self) {
-        let ns = StateNamespace::for_space("socket-a", "workspace-1");
+        let ns = StateNamespace::for_space(self.endpoint, "workspace-1");
         let attr = MutationAttribution::new(ActorKind::Human, "test", 100);
         let address = PaneAddressId::new("reviewer");
         StateStore::open(&self.root)
@@ -267,9 +273,9 @@ impl Host {
     /// report-metadata`, and reads no screen, process, or tab label. The
     /// tour's keybinding reload and popup fail, as the old executor failed
     /// every command it did not list.
-    fn new() -> Self {
+    fn new(endpoint: &str) -> Self {
         let mux = FakeMux::world()
-            .endpoint("socket-a")
+            .endpoint(endpoint)
             .space("workspace-1")
             .checkout("/repo")
             .unstamped()
@@ -518,6 +524,133 @@ fn doctor_reports_an_install_record_that_differs_from_the_wrappers() {
         !codes(&diagnose_collaboration(&f.runtime())).contains(&"ND-INTEGRATION-002".to_owned()),
         "no record, as before an install that writes one, is not reported"
     );
+}
+
+const REX: &str = "rex:/tmp/nd-health-rex.sock";
+const UNBOUND: &str = "block:0a1b2c3d-0000-4000-8000-000000000001";
+const BOUND: &str = "block:0a1b2c3d-0000-4000-8000-000000000002";
+const RESTARTED: &str = "block:0a1b2c3d-0000-4000-8000-000000000003";
+const SHELL: &str = "block:0a1b2c3d-0000-4000-8000-000000000004";
+
+fn issues_named<'a>(report: &'a HealthReport, code: &str) -> Vec<&'a HealthIssue> {
+    report
+        .issues
+        .iter()
+        .filter(|issue| issue.code == code)
+        .collect()
+}
+
+/// A hook's refused bind is a file the hook leaves, because the hook itself
+/// stays silent. Doctor names it only in a Rex space, for an agent's block
+/// that has no session and still runs the foreground the hook was refused
+/// under: a bound block keeps its binding through a nested agent's refused
+/// hook, and a refusal under an earlier program, or in a block back at its
+/// shell, is no longer news.
+#[test]
+fn doctor_names_a_refused_bind_only_for_an_unbound_rex_blocks_foreground() {
+    for endpoint in [REX, "socket-a"] {
+        let f = Fixture::at(endpoint);
+        f.register();
+        f.host.open_pane("workspace-1", |space| {
+            space
+                .pane(UNBOUND)
+                .claude()
+                .idle()
+                .unreported("4242@1")
+                .pane(BOUND)
+                .claude()
+                .session("session-bound")
+                .idle()
+                .pane(RESTARTED)
+                .claude()
+                .idle()
+                .unreported("5000@2")
+                .pane(SHELL)
+        });
+        let refusals = f.root.join("rex/refusals");
+        fs::create_dir_all(&refusals).unwrap();
+        for block in [UNBOUND, BOUND, RESTARTED, SHELL] {
+            fs::write(
+                refusals.join(format!("{}.json", block.strip_prefix("block:").unwrap())),
+                json!({"block": block, "endpoint": REX, "condition": "not_in_group",
+                       "session": "nested-session", "foreground": "4242@1", "at_ms": 100})
+                .to_string(),
+            )
+            .unwrap();
+        }
+        let report = diagnose_collaboration(&f.runtime());
+        let refused = issues_named(&report, "ND-SESSION-004");
+        let without_identity = issues_named(&report, "ND-SESSION-002");
+        if endpoint == REX {
+            assert_eq!(refused.len(), 1, "{report:?}");
+            assert_eq!(refused[0].diagnostic["pane_id"], UNBOUND);
+            assert_eq!(refused[0].diagnostic["condition"], "not_in_group");
+            assert!(
+                refused[0].explanation.contains("nested-session")
+                    && refused[0].explanation.contains("foreground process group"),
+                "{:?}",
+                refused[0]
+            );
+            assert!(
+                without_identity
+                    .iter()
+                    .all(|issue| issue.diagnostic["pane_id"] != UNBOUND),
+                "the refusal says why the block has no session: {report:?}"
+            );
+            assert!(
+                without_identity
+                    .iter()
+                    .any(|issue| issue.diagnostic["pane_id"] == RESTARTED),
+                "a restarted agent's block is named as any unbound one: {report:?}"
+            );
+        } else {
+            assert!(refused.is_empty(), "{report:?}");
+            assert!(
+                without_identity
+                    .iter()
+                    .any(|issue| issue.diagnostic["pane_id"] == UNBOUND),
+                "Herdr's Doctor is unchanged: {report:?}"
+            );
+        }
+    }
+}
+
+/// A wrapper an older Namedrop installed sets no `NAMEDROP_HOOK_RUNTIME`, so
+/// its hooks never bind in a Rex block. Herdr ignores it and says nothing.
+#[test]
+fn doctor_names_a_wrapper_without_its_runtime_only_in_a_rex_space() {
+    for endpoint in [REX, "socket-a"] {
+        let f = Fixture::at(endpoint);
+        f.register();
+        assert!(
+            issues_named(&diagnose_collaboration(&f.runtime()), "ND-INTEGRATION-003").is_empty()
+        );
+        let wrapper =
+            package_directory(&f.home, AgentRuntime::ClaudeCode).join("scripts/session-start");
+        let current = fs::read_to_string(&wrapper).unwrap();
+        assert!(
+            current.contains("$(NAMEDROP_HOOK_RUNTIME=claude-code '"),
+            "{current}"
+        );
+        fs::write(
+            &wrapper,
+            current.replace("NAMEDROP_HOOK_RUNTIME=claude-code ", ""),
+        )
+        .unwrap();
+        let report = diagnose_collaboration(&f.runtime());
+        let issues = issues_named(&report, "ND-INTEGRATION-003");
+        if endpoint == REX {
+            assert_eq!(issues.len(), 1, "{report:?}");
+            assert!(
+                issues[0].explanation.contains(wrapper.to_str().unwrap()),
+                "{:?}",
+                issues[0]
+            );
+            assert_eq!(issues[0].repair.operation.as_deref(), Some("activate"));
+        } else {
+            assert!(issues.is_empty(), "{report:?}");
+        }
+    }
 }
 
 #[test]

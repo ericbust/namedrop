@@ -8,11 +8,13 @@
 use super::{
     Endpoint, MuxKind, PaneId,
     processes::{LocalProcesses, ThisMachine},
+    rex::Caller,
 };
 use crate::{
-    SpaceId,
+    AgentRuntime, AgentSessionId, SpaceId,
     locator::{Locator, Name},
 };
+use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsString,
     io,
@@ -37,6 +39,32 @@ pub struct Place {
     pub endpoint: Endpoint,
     pub space: Option<SpaceId>,
     pub pane: Option<PaneId>,
+    /// What the verifying read showed about the caller's block. Present only
+    /// when an inherited `REX_BLOCK` verified, so only then can a hook bind.
+    pub(crate) caller: Option<Box<Caller>>,
+}
+
+/// Why a hook did not bind its session to its block: the conditions of
+/// `Place::bind_session` in order, or a write that failed.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BindRefused {
+    /// The hook's agent is not in the foreground's process group.
+    NotInGroup,
+    /// Something other than shells lies between the foreground and the
+    /// hook's agent, or the foreground runs the agent's own executable.
+    Launcher,
+    /// The foreground's status record names another runtime.
+    Runtime,
+    /// The foreground or the hook's agent is not a live process here.
+    NotAlive,
+    /// The block's binding already names the foreground as its agent.
+    AlreadyBound,
+    /// A Claude Code in print mode behind the foreground.
+    NestedPrintMode,
+    /// The place came from flags or names, not a verified block.
+    NoCaller,
+    Io(String),
 }
 
 impl Home {
@@ -77,6 +105,71 @@ impl Home {
     }
 }
 
+/// What a SessionStart or UserPromptSubmit hook takes from its home.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HookHome {
+    /// The multiplexer whose words the hook's notices use.
+    pub kind: MuxKind,
+    /// Where the hook records its turn, when its home has a place.
+    pub location: Option<Location>,
+}
+
+/// The variable a context hook's wrapper sets on the hook's command line to
+/// name its agent. A binary older than it ignores it, as it would not ignore
+/// a flag it does not know.
+pub const HOOK_RUNTIME: &str = "NAMEDROP_HOOK_RUNTIME";
+
+/// The home of a context hook whose host sent `input`. In a Rex block the
+/// hook first binds the input's session to the block, before the runtime's
+/// first survey, so that survey already reports it. Only the wrapper's
+/// `HOOK_RUNTIME` names the agent: the wrapper sets it for the hook alone,
+/// while a nested agent inherits the outer agent's whole environment. Only
+/// a Rex claim fails to resolve, so a hook whose claim failed, as under a
+/// Codex app server that outlived the Codex that started it, still speaks
+/// Rex's words, and records its turn nowhere.
+pub fn context_hook(state: &Path, input: &str, inherited: &dyn Inherited) -> HookHome {
+    context_hook_on(state, input, inherited, &ThisMachine, now_ms())
+}
+
+pub(crate) fn context_hook_on(
+    state: &Path,
+    input: &str,
+    inherited: &dyn Inherited,
+    local: &dyn LocalProcesses,
+    now_ms: u64,
+) -> HookHome {
+    let home = resolve(&Flags::default(), inherited);
+    let runtime =
+        set(inherited, HOOK_RUNTIME).and_then(|runtime| AgentRuntime::parse(&runtime).ok());
+    let session = serde_json::from_str::<serde_json::Value>(input)
+        .ok()
+        .and_then(|input| input["session_id"].as_str().map(AgentSessionId::new))
+        .filter(|session| !session.as_str().is_empty());
+    if let (Ok(Home::Rex(place)), Some(session), Some(runtime)) = (&home, &session, runtime) {
+        let entrypoint = inherited.var("CLAUDE_CODE_ENTRYPOINT");
+        let _ = place.bind(
+            state,
+            session,
+            runtime,
+            entrypoint.as_deref(),
+            local,
+            now_ms,
+        );
+    }
+    HookHome {
+        kind: home.as_ref().map_or(MuxKind::Rex, Home::kind),
+        location: home.ok().and_then(|home| home.location(inherited)),
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 /// Where a hook records its turn: endpoint, space, and pane, from either home.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Location {
@@ -103,6 +196,8 @@ pub struct Flags<'a> {
     pub endpoint: Option<&'a str>,
     pub space: Option<&'a str>,
     pub pane: Option<&'a str>,
+    /// `--plugin-state`, where a sandboxed command finds its block's binding.
+    pub plugin_state: Option<&'a Path>,
 }
 
 /// What a Rex server said about a claimed block over one connection that
@@ -116,6 +211,9 @@ pub struct Claimed {
     pub server: u32,
     /// The block's child process.
     pub child: u32,
+    /// The block's foreground and its status record, read on the same
+    /// connection.
+    pub(crate) caller: Caller,
 }
 
 /// What this process inherited: its environment, its ancestors, and what a
@@ -133,6 +231,9 @@ pub trait Inherited {
     /// One connection to the Rex server at `socket` that proves it local,
     /// attaches `session`, and reads `block`'s process.
     fn claimed(&self, socket: &Path, session: &str, block: &str) -> Result<Claimed, String>;
+    /// `<pid>@<start>` of a live process, or `None` when it is gone or
+    /// cannot be read.
+    fn incarnation(&self, pid: u32) -> Option<String>;
 }
 
 /// This process, read from the system. Built only in `fn main`, so nothing
@@ -149,16 +250,7 @@ impl Inherited for ThisProcess {
     }
 
     fn ancestors(&self) -> Vec<u32> {
-        let mut ancestors = Vec::new();
-        let mut pid = std::process::id();
-        while let Some(parent) = ThisMachine.parent(pid) {
-            if ancestors.len() == 64 || ancestors.contains(&parent) {
-                break;
-            }
-            ancestors.push(parent);
-            pid = parent;
-        }
-        ancestors
+        super::processes::ancestors(&ThisMachine, std::process::id())
     }
 
     fn peer(&self, socket: &Path) -> io::Result<u32> {
@@ -167,6 +259,13 @@ impl Inherited for ThisProcess {
 
     fn claimed(&self, socket: &Path, session: &str, block: &str) -> Result<Claimed, String> {
         super::rex::claimed(socket, session, block)
+    }
+
+    fn incarnation(&self, pid: u32) -> Option<String> {
+        match ThisMachine.read(pid) {
+            super::processes::LocalRead::Alive(process) => Some(process.incarnation.0),
+            _ => None,
+        }
     }
 }
 
@@ -323,27 +422,29 @@ fn percent_decoded(text: &str) -> String {
 ///    set, else the neutral set, whose `NAMEDROP_ENDPOINT` is parsed for its
 ///    kind.
 pub fn resolve(flags: &Flags<'_>, inherited: &dyn Inherited) -> Result<Home, String> {
-    let place = |endpoint: Endpoint, space: Option<String>, pane: Option<String>| {
-        Home::Rex(Place {
-            endpoint,
-            space: flags.space.map(SpaceId::new).or(space.map(SpaceId::new)),
-            pane: flags.pane.map(PaneId::new).or(pane.map(PaneId::new)),
-        })
+    let place = |endpoint: Endpoint, space: Option<String>, pane: Option<String>| Place {
+        endpoint,
+        space: flags.space.map(SpaceId::new).or(space.map(SpaceId::new)),
+        pane: flags.pane.map(PaneId::new).or(pane.map(PaneId::new)),
+        caller: None,
     };
     if let Some(endpoint) = flags.endpoint {
         let endpoint = Endpoint::parse(endpoint);
         return Ok(match endpoint.kind {
             MuxKind::Herdr => Home::Herdr,
-            MuxKind::Rex => place(endpoint, None, None),
+            MuxKind::Rex => Home::Rex(place(endpoint, None, None)),
         });
     }
     if let (Some(block), Some(session)) =
         (set(inherited, "REX_BLOCK"), set(inherited, "REX_SESSION"))
     {
-        return nearest(inherited, &session, &block).map(|claimed| {
-            claimed.map_or(Home::Herdr, |endpoint| {
-                place(endpoint, Some(session), Some(block))
-            })
+        return nearest(flags, inherited, &session, &block).map(|nearest| match nearest {
+            Nearest::Herdr => Home::Herdr,
+            Nearest::Rex(endpoint, caller) => Home::Rex(Place {
+                caller: Some(Box::new(caller)),
+                ..place(endpoint, Some(session), Some(block))
+            }),
+            Nearest::Deferred(deferral) => Home::RexDeferred(deferral),
         });
     }
     let lookup = |name: &str| inherited.var(name);
@@ -356,11 +457,11 @@ pub fn resolve(flags: &Flags<'_>, inherited: &dyn Inherited) -> Result<Home, Str
                         .resolve(lookup)
                         .and_then(|(_, value)| value.into_string().ok())
                 };
-                return Ok(place(
+                return Ok(Home::Rex(place(
                     endpoint,
                     neutral(Locator::Space),
                     neutral(Locator::Pane),
-                ));
+                )));
             }
             Ok(Home::Herdr)
         }
@@ -368,13 +469,21 @@ pub fn resolve(flags: &Flags<'_>, inherited: &dyn Inherited) -> Result<Home, Str
     }
 }
 
-/// The verified Rex endpoint when Rex's server is the nearest ancestor, and
-/// `None` when the home is Herdr.
+/// What the nearest server ancestor makes of a Rex claim.
+enum Nearest {
+    Herdr,
+    /// The verified endpoint and what it showed of the caller's block.
+    Rex(Endpoint, Caller),
+    /// The socket is denied, and the block's binding proved the caller.
+    Deferred(Deferral),
+}
+
 fn nearest(
+    flags: &Flags<'_>,
     inherited: &dyn Inherited,
     session: &str,
     block: &str,
-) -> Result<Option<Endpoint>, String> {
+) -> Result<Nearest, String> {
     let ancestors = inherited.ancestors();
     let rex = rex_claim(inherited);
     let rex_probe = rex
@@ -388,15 +497,19 @@ fn nearest(
     });
     let server = || set(inherited, "REX_SERVER").unwrap_or_else(|| "unset".to_owned());
     match choose(rex_probe, herdr_probe) {
-        Choice::Herdr => Ok(None),
+        Choice::Herdr => Ok(Nearest::Herdr),
         Choice::Lost => Err(format!(
             "REX_BLOCK={block} is on a Rex server this process cannot find (REX_SERVER={}); start that server with REX_SERVER set",
             server()
         )),
-        Choice::Denied => Err(format!(
-            "the agent's sandbox denies the Rex socket that REX_SERVER={} names, so REX_BLOCK={block} cannot be reached",
-            server()
-        )),
+        Choice::Denied => deferral(flags, inherited, block, &ancestors)
+            .map(Nearest::Deferred)
+            .map_err(|why| {
+                format!(
+                    "the agent's sandbox denies the Rex socket that REX_SERVER={} names, and {why}",
+                    server()
+                )
+            }),
         Choice::Rex => {
             let (Some(claim), Probe::Ancestor(depth)) = (rex, rex_probe) else {
                 unreachable!("Rex is chosen only for a server that is an ancestor")
@@ -417,9 +530,39 @@ fn nearest(
                     claimed.child
                 ));
             }
-            Ok(Some(claimed.endpoint))
+            Ok(Nearest::Rex(claimed.endpoint, claimed.caller.of(ancestors)))
         }
     }
+}
+
+/// The place a sandboxed command defers to: the block's binding, when its
+/// agent is an ancestor of this process with the bound start time, as a
+/// tool's agent is. The binding is read from `--plugin-state`, else from
+/// a Rex home's state directory.
+fn deferral(
+    flags: &Flags<'_>,
+    inherited: &dyn Inherited,
+    block: &str,
+    ancestors: &[u32],
+) -> Result<Deferral, String> {
+    let state = flags.plugin_state.map(Path::to_path_buf).or_else(|| {
+        crate::locator::state_directory(None, MuxKind::Rex, |name| inherited.var(name))
+    });
+    let (deferral, agent) = state
+        .and_then(|state| super::rex::bound(&state, block))
+        .ok_or_else(|| format!("no Namedrop hook has bound REX_BLOCK={block} yet"))?;
+    let proves = agent
+        .split_once('@')
+        .and_then(|(pid, _)| pid.parse::<u32>().ok())
+        .is_some_and(|pid| {
+            ancestors.contains(&pid) && inherited.incarnation(pid).as_deref() == Some(&agent)
+        });
+    if !proves {
+        return Err(format!(
+            "the agent {agent} bound to REX_BLOCK={block} is not an ancestor of this process"
+        ));
+    }
+    Ok(deferral)
 }
 
 #[cfg(test)]

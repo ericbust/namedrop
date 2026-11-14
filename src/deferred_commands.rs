@@ -5,7 +5,7 @@ use crate::{
     cli::RuntimeOptions,
     mux::{
         Budget, Endpoint,
-        home::{Inherited, Location},
+        home::{Home, Inherited, Location},
     },
 };
 use serde::{Deserialize, Serialize};
@@ -356,6 +356,58 @@ fn probe(endpoint: &str) -> io::Result<UnixStream> {
     )
 }
 
+/// Where a command whose socket is denied queues: the endpoint key, space,
+/// and pane, and whether the socket still has to be probed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Target {
+    socket: String,
+    space: Option<String>,
+    pane: Option<String>,
+    probe: bool,
+}
+
+/// The flags first, then the home. A deferred Rex place was denied by the
+/// home's own probe and proved by its block's binding. A place from a
+/// verified `REX_BLOCK` reached its socket already, so it never defers. Any
+/// other home defers only when a probe of its socket is denied.
+fn target(
+    options: &RuntimeOptions,
+    home: Option<&Home>,
+    location: Option<Location>,
+) -> Option<Target> {
+    let flag = |flag: &Option<String>, value: Option<String>| flag.clone().or(value);
+    match home {
+        Some(Home::RexDeferred(deferral)) => Some(Target {
+            socket: deferral.endpoint.key.clone(),
+            space: flag(&options.space, Some(deferral.space.as_str().to_owned())),
+            pane: flag(&options.pane, Some(deferral.pane.as_str().to_owned())),
+            probe: false,
+        }),
+        Some(Home::Rex(place)) if place.caller.is_some() => None,
+        _ => {
+            let location = location.as_ref();
+            Some(Target {
+                socket: flag(
+                    &options.endpoint,
+                    location.and_then(|location| location.endpoint.as_ref().map(|e| e.key.clone())),
+                )?,
+                space: flag(
+                    &options.space,
+                    location.and_then(|location| {
+                        location.space.as_ref().map(|s| s.as_str().to_owned())
+                    }),
+                ),
+                pane: flag(
+                    &options.pane,
+                    location
+                        .and_then(|location| location.pane.as_ref().map(|p| p.as_str().to_owned())),
+                ),
+                probe: true,
+            })
+        }
+    }
+}
+
 /// Runs before runtime discovery or any mutating handler. A late handler error
 /// must never enter this fallback because the command may already have committed.
 ///
@@ -368,36 +420,33 @@ pub fn try_defer(
     inherited: &dyn Inherited,
 ) -> Option<Result<Value, String>> {
     let operation = Operation::parse(operation)?;
-    let location = crate::mux::home::resolve(&options.flags(), inherited)
-        .ok()
-        .and_then(|home| home.location(inherited));
-    let located = |value: fn(&Location) -> Option<String>| location.as_ref().and_then(value);
-    let socket = options
-        .endpoint
-        .clone()
-        .or_else(|| located(|location| location.endpoint.as_ref().map(|e| e.key.clone())))?;
-    match probe(&socket) {
-        Err(error) if permission_denied(&error) => {}
-        _ => return None,
+    let home = crate::mux::home::resolve(&options.flags(), inherited).ok();
+    let location = home.as_ref().and_then(|home| home.location(inherited));
+    let target = target(options, home.as_ref(), location)?;
+    if target.probe {
+        match probe(&target.socket) {
+            Err(error) if permission_denied(&error) => {}
+            _ => return None,
+        }
     }
     Some((|| {
         let state = crate::locator::state_directory(
             options.plugin_state.clone(),
-            Endpoint::parse(&socket).kind,
+            Endpoint::parse(&target.socket).kind,
             |name| inherited.var(name),
         )
         .ok_or("plugin state is required for deferred commands")?;
-        let workspace = options
+        let workspace = target
             .space
-            .clone()
-            .or_else(|| located(|location| location.space.as_ref().map(|s| s.as_str().to_owned())))
             .ok_or("workspace is required for deferred commands")?;
-        let pane = options
+        let pane = target
             .pane
-            .clone()
-            .or_else(|| located(|location| location.pane.as_ref().map(|p| p.as_str().to_owned())))
             .ok_or("pane is required for deferred commands")?;
-        let caller = stored_caller(&state, StateNamespace::for_space(socket, workspace), pane)?;
+        let caller = stored_caller(
+            &state,
+            StateNamespace::for_space(target.socket, workspace),
+            pane,
+        )?;
         let request = Request::new(
             operation,
             input.clone(),
@@ -870,6 +919,89 @@ mod caller_race_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        SpaceId,
+        mux::{
+            PaneId,
+            home::{Deferral, Place},
+            rex::Caller as BlockCaller,
+        },
+    };
+
+    fn place(caller: Option<BlockCaller>) -> Home {
+        Home::Rex(Place {
+            endpoint: Endpoint::parse("rex:/tmp/r.sock"),
+            space: Some(SpaceId::new("session:s")),
+            pane: Some(PaneId::new("block:b")),
+            caller: caller.map(Box::new),
+        })
+    }
+
+    fn located(home: &Home) -> Option<Location> {
+        match home {
+            Home::Rex(place) => Some(Location {
+                endpoint: Some(place.endpoint.clone()),
+                space: place.space.clone(),
+                pane: place.pane.clone(),
+                names: crate::locator::Name::Neutral,
+            }),
+            _ => None,
+        }
+    }
+
+    fn queued(socket: &str, space: &str, pane: &str, probe: bool) -> Option<Target> {
+        Some(Target {
+            socket: socket.into(),
+            space: Some(space.into()),
+            pane: Some(pane.into()),
+            probe,
+        })
+    }
+
+    /// A denial the home proved through the block's binding queues for the
+    /// binding's block with no second probe. A place from flags still
+    /// probes its socket, as Herdr's flags do, and a verified block, whose
+    /// socket answered, never defers.
+    #[test]
+    fn a_denied_command_queues_for_the_place_its_home_names() {
+        let none = RuntimeOptions::default();
+        let deferred = Home::RexDeferred(Deferral {
+            endpoint: Endpoint::parse("rex:/tmp/r.sock"),
+            space: SpaceId::new("session:bound"),
+            pane: PaneId::new("block:bound"),
+        });
+        assert_eq!(
+            target(&none, Some(&deferred), None),
+            queued("rex:/tmp/r.sock", "session:bound", "block:bound", false)
+        );
+        let flagged = place(None);
+        assert_eq!(
+            target(&none, Some(&flagged), located(&flagged)),
+            queued("rex:/tmp/r.sock", "session:s", "block:b", true)
+        );
+        let verified = place(Some(BlockCaller::default()));
+        assert_eq!(target(&none, Some(&verified), located(&verified)), None);
+        let herdr = Location {
+            endpoint: Some(Endpoint::parse("/tmp/h.sock")),
+            space: Some(SpaceId::new("w1")),
+            pane: Some(PaneId::new("w1:p1")),
+            names: crate::locator::Name::Herdr,
+        };
+        assert_eq!(
+            target(&none, Some(&Home::Herdr), Some(herdr)),
+            queued("/tmp/h.sock", "w1", "w1:p1", true)
+        );
+        assert_eq!(target(&none, None, None), None);
+        let explicit = RuntimeOptions {
+            pane: Some("block:flag".into()),
+            ..RuntimeOptions::default()
+        };
+        assert_eq!(
+            target(&explicit, Some(&deferred), None),
+            queued("rex:/tmp/r.sock", "session:bound", "block:flag", false),
+            "a flag names its own value, as everywhere"
+        );
+    }
 
     #[test]
     fn a_probe_connects_to_a_herdr_socket_as_named_and_to_a_rex_socket_after_its_scheme() {

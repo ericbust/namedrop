@@ -1105,7 +1105,7 @@ fn run_context_hook(
     if io::stdin().read_to_string(&mut input).is_err() {
         return ExitCode::SUCCESS;
     }
-    let location = location(&RuntimeOptions::default(), inherited);
+    let home::HookHome { kind, location } = home::context_hook(state_directory, &input, inherited);
     let prompted = prompt_hook::record(
         state_directory,
         endpoint_of(location.clone()).as_deref(),
@@ -1117,7 +1117,7 @@ fn run_context_hook(
         state_directory,
         env::var_os("PLUGIN_ROOT").as_deref().map(Path::new),
     );
-    let mut output = namedrop::execute_codex_app_server_hook(&input).or_else(|| {
+    let mut output = namedrop::execute_codex_app_server_hook(&input, kind).or_else(|| {
         with_runtime_at(state_directory, inherited, |runtime| {
             let _ = namedrop::deferred_commands::ensure_worker(
                 runtime.state_directory,
@@ -1864,6 +1864,10 @@ mod worker_shutdown_tests {
             _block: &str,
         ) -> Result<home::Claimed, String> {
             Err("no Rex claim".to_owned())
+        }
+
+        fn incarnation(&self, _pid: u32) -> Option<String> {
+            None
         }
     }
 
@@ -2899,6 +2903,7 @@ mod status_worker_tests {
                     ("HERDR_WORKSPACE_ID", Some("w1")),
                     ("NAMEDROP_ENDPOINT", None),
                     ("NAMEDROP_HERDR_TIMEOUT_MS", Some("10000")),
+                    ("NAMEDROP_HOOK_RUNTIME", None),
                     ("NAMEDROP_PANE_ID", None),
                     ("NAMEDROP_SPACE_ID", None),
                     ("NAMEDROP_STATE_DIR", None),
@@ -2917,6 +2922,7 @@ mod status_worker_tests {
                     ("HERDR_WORKSPACE_ID", None),
                     ("NAMEDROP_ENDPOINT", Some("rex:/tmp/r.sock")),
                     ("NAMEDROP_HERDR_TIMEOUT_MS", Some("10000")),
+                    ("NAMEDROP_HOOK_RUNTIME", None),
                     ("NAMEDROP_PANE_ID", None),
                     ("NAMEDROP_SPACE_ID", Some("s1")),
                     ("NAMEDROP_STATE_DIR", Some("/state")),

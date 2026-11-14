@@ -31,8 +31,22 @@ pub(crate) trait LocalProcesses: Send + Sync {
     /// The parent, read with the short call that also reads root's
     /// processes, such as the `login` under a Rex block's shell.
     fn parent(&self, pid: u32) -> Option<u32>;
-    #[cfg(test)]
+    /// The executable, with symlinks resolved.
     fn executable(&self, pid: u32) -> Option<std::path::PathBuf>;
+}
+
+/// The ancestors of `pid`, its parent first, as far as they can be read.
+pub(crate) fn ancestors(local: &dyn LocalProcesses, pid: u32) -> Vec<u32> {
+    let mut ancestors = Vec::new();
+    let mut pid = pid;
+    while let Some(parent) = local.parent(pid) {
+        if ancestors.len() == 64 || ancestors.contains(&parent) {
+            break;
+        }
+        ancestors.push(parent);
+        pid = parent;
+    }
+    ancestors
 }
 
 /// The live members of a process group: each listed pid passes through
@@ -77,7 +91,6 @@ impl LocalProcesses for ThisMachine {
         platform::parent(pid)
     }
 
-    #[cfg(test)]
     fn executable(&self, pid: u32) -> Option<std::path::PathBuf> {
         platform::executable(pid)
     }
@@ -135,7 +148,6 @@ mod platform {
         }
     }
 
-    #[cfg(test)]
     pub(super) fn executable(pid: u32) -> Option<std::path::PathBuf> {
         let pid = libc::c_int::try_from(pid).ok()?;
         let mut buffer = vec![0_u8; usize::try_from(libc::PROC_PIDPATHINFO_MAXSIZE).ok()?];
@@ -244,7 +256,6 @@ mod platform {
         Some(members)
     }
 
-    #[cfg(test)]
     pub(super) fn executable(pid: u32) -> Option<std::path::PathBuf> {
         std::fs::read_link(format!("/proc/{pid}/exe")).ok()
     }
@@ -268,7 +279,6 @@ mod platform {
         None
     }
 
-    #[cfg(test)]
     pub(super) fn executable(_pid: u32) -> Option<std::path::PathBuf> {
         None
     }
