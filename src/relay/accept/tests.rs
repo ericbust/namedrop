@@ -350,6 +350,14 @@ fn each_bad_field_is_refused_by_name_and_nothing_is_stored() {
         ("item.thread", "/item/thread", json!("t 1")),
         ("from.host_id", "/from/host_id", json!("")),
         ("item.text", "/item/text", json!(text)),
+        ("item.text", "/item/text", json!("x".repeat(60 * 1024 + 1))),
+        ("item.id", "/item/id", json!("m\u{7}1")),
+        ("item.id", "/item/id", json!("m\u{e9}1")),
+        ("item.thread", "/item/thread", json!("t\u{1b}1")),
+        ("item.in_reply_to", "/item/in_reply_to", json!("b 1")),
+        ("item.in_reply_to", "/item/in_reply_to", json!("b\u{7f}1")),
+        ("expect_host_id", "/expect_host_id", json!("host\u{0}b")),
+        ("expect_host_id", "/expect_host_id", json!("h\u{f6}st-b")),
     ] {
         let mut args = deliver("m1", "bob", "t1", "hi");
         *args.pointer_mut(path).unwrap() = value;
@@ -933,4 +941,104 @@ fn an_item_or_a_reply_in_a_b_thread_keeps_its_mapping_in_use() {
     bob_answers(&b, &relayed, "@alice@laptop an answer");
     super::super::capture::capture(&b.0, &Endpoint::parse(REX), &mut |_| {}).unwrap();
     assert!(used() > hour_ago, "a kept reply marks it used");
+}
+
+/// A text of exactly 60 KiB is accepted, one byte more is refused.
+#[test]
+fn a_text_of_exactly_60_kib_is_accepted() {
+    let b = B::new();
+    let text = "x".repeat(TEXT_LIMIT);
+    assert_eq!(
+        outcome(&b.call(&deliver("m1", "bob", "t1", &text))).0,
+        Status::Accepted
+    );
+}
+
+/// What B keeps for one A host is that host's alone: its keys, its threads,
+/// the threads a reply may answer, and the outbox its ack drops.
+#[test]
+fn another_host_reaches_no_key_thread_or_outbox_of_this_one() {
+    let b = B::new();
+    let from = |host_id: &str, mut args: Value| {
+        args["from"]["host_id"] = json!(host_id);
+        args
+    };
+    b.call(&deliver("m1", "bob", "t1", "from host-a"));
+    let relayed = b.rows(
+        "namedrop.sqlite3",
+        "SELECT message_id FROM collaboration_messages",
+    )[0][0]
+        .clone();
+    let same_key = b.call(&from("host-c", deliver("m1", "bob", "t1", "from host-c")));
+    assert_eq!(
+        outcome(&same_key).0,
+        Status::Accepted,
+        "host-c's m1 is not host-a's"
+    );
+    let threads = b.rows(
+        "namedrop.sqlite3",
+        "SELECT thread_id FROM collaboration_messages ORDER BY rowid",
+    );
+    assert_ne!(threads[0], threads[1], "host-c's t1 is another B thread");
+
+    let mut into = from("host-c", deliver("m2", "bob", "t9", "into host-a's thread"));
+    into["item"]["in_reply_to"] = relayed.clone();
+    let here = super::super::machine_name();
+    assert_eq!(
+        outcome(&b.call(&into)),
+        (
+            Status::Refused,
+            Some(format!(
+                "{here} relayed no message {}",
+                relayed.as_str().unwrap()
+            ))
+        )
+    );
+
+    Connection::open(b.0.join("relay.sqlite3"))
+        .unwrap()
+        .execute(
+            "INSERT INTO outbox (host_id, re, thread, sender, message_id, text, created_at_ms)
+             VALUES ('host-a', 'm1', 't1', 'bob', 'b1', 'for host-a', ?1)",
+            [super::super::now_ms()],
+        )
+        .unwrap();
+    let epoch = b.call(&deliver("m1", "bob", "t1", "again")).epoch;
+    b.call(&json!({"op": "collect", "expect_host_id": HOST_B,
+        "from": {"host_id": "host-c", "name": "carol", "host": "studio"},
+        "ack_through": 100, "epoch": epoch}));
+    assert_eq!(
+        b.rows("relay.sqlite3", "SELECT message_id FROM outbox"),
+        [[json!("b1")]],
+        "host-c's ack drops none of host-a's replies"
+    );
+}
+
+/// B tells A it can reply while it keeps fewer than 10,000 replies for A.
+#[test]
+fn can_reply_holds_below_10_000_kept_replies() {
+    let b = B::new();
+    let mut relay = Connection::open(b.0.join("relay.sqlite3")).unwrap_or_else(|_| unreachable!());
+    b.call(&deliver("m1", "bob", "t1", "first"));
+    let fill = |relay: &mut Connection, from: usize, to: usize| {
+        let transaction = relay.transaction().unwrap();
+        for n in from..to {
+            transaction
+                .execute(
+                    "INSERT INTO outbox (host_id, re, thread, sender, message_id, text,
+                        created_at_ms) VALUES ('host-a', 'm1', 't1', 'bob', ?1, 'r', ?2)",
+                    params![format!("b{n}"), super::super::now_ms()],
+                )
+                .unwrap();
+        }
+        transaction.commit().unwrap();
+    };
+    let collect = || {
+        b.call(&json!({"op": "collect", "expect_host_id": HOST_B,
+            "from": {"host_id": "host-a", "name": "alice", "host": "laptop"}}))
+    };
+    fill(&mut relay, 0, 9_999);
+    assert!(collect().can_reply);
+    fill(&mut relay, 9_999, 10_000);
+    assert!(!collect().can_reply);
 }
