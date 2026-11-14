@@ -240,8 +240,22 @@ impl Host for FakeHost {
 /// Runs the bridge over `script`, away from its server as `away` says, on
 /// `host`.
 fn bridged_with(state: &State, script: &dyn Server, stop: &Wake, away: &Away, host: &mut FakeHost) {
-    let lock = Lock::take(&state.0, &endpoint()).unwrap().unwrap();
+    let lock = take(state);
     bridge(&state.0, &endpoint(), script, stop, &lock, host, away);
+}
+
+/// The bridge's lock on `state`, once no one holds it. A bridge that just
+/// returned closed its lock, but a child another test is starting holds a
+/// copy of the lock's descriptor from its `fork` until its `exec`.
+fn take(state: &State) -> Lock {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match Lock::take(&state.0, &endpoint()).unwrap() {
+            Some(lock) => return lock,
+            None if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            None => panic!("the bridge's lock stayed held"),
+        }
+    }
 }
 
 fn bridged_away(state: &State, script: &Script, stop: &Wake, away: &Away) -> FakeHost {
@@ -843,7 +857,14 @@ fn a_bridge_stops_once_its_state_directory_is_deleted_or_replaced() {
                 done.store(true, Ordering::SeqCst);
             });
             let _stop = StopOnDrop(&stop);
-            std::thread::sleep(Duration::from_millis(200));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while ["session:s", "session:t"]
+                .iter()
+                .any(|space| state.queued(space).is_empty())
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
             let early = done.load(Ordering::SeqCst);
             if replaced {
                 let lock = state
