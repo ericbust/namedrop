@@ -310,7 +310,8 @@ const IDLE: Duration = Duration::from_secs(60);
 /// coalesces events into `Pending` and flushes them when they are due. A
 /// stop flushes what is pending and returns. So does a server that has
 /// stayed away for `away.give_up`, or one never reached at all. A lost lock
-/// returns at once, because the state it would write to is gone.
+/// returns at once, because the state it would write to is gone, so the
+/// lock is checked again after each wait and before each write.
 fn bridge(
     state: &Path,
     endpoint: &Endpoint,
@@ -327,6 +328,7 @@ fn bridge(
         let failed = match server.open(stop) {
             Err(_) if !reached => return,
             Err(_) => true,
+            Ok(_) if !lock.held() => return,
             Ok(mut stream) => {
                 reached = true;
                 let opened = Instant::now();
@@ -338,7 +340,7 @@ fn bridge(
                 }
                 loop {
                     if stop.is_set() {
-                        flush(state, endpoint, &mut pending, host);
+                        flush(state, endpoint, &mut pending, host, lock);
                         return;
                     }
                     if !lock.held() {
@@ -346,7 +348,7 @@ fn bridge(
                     }
                     let now = Instant::now();
                     if pending.due().is_some_and(|due| due <= now) {
-                        flush(state, endpoint, &mut pending, host);
+                        flush(state, endpoint, &mut pending, host, lock);
                     }
                     let within = pending
                         .due()
@@ -355,7 +357,7 @@ fn bridge(
                         Next::Event(event) => pending.note(event, Instant::now()),
                         Next::Quiet => {}
                         Next::Ended(_) => {
-                            flush(state, endpoint, &mut pending, host);
+                            flush(state, endpoint, &mut pending, host, lock);
                             break;
                         }
                     }
@@ -385,19 +387,29 @@ const RETRY: Duration = Duration::from_secs(1);
 /// exits. An event that cannot be queued, because the gate or the store
 /// cannot be read or its marker cannot be written, stays pending for a
 /// try `RETRY` later. A re-exec loses the batch, and the new bridge's
-/// `Resync` of every activated space recovers it.
-fn flush(state: &Path, endpoint: &Endpoint, pending: &mut Pending, host: &mut dyn Host) {
+/// `Resync` of every activated space recovers it. A flush whose lock is
+/// lost by the time it holds the gate, which can wait out an update,
+/// writes nothing.
+fn flush(
+    state: &Path,
+    endpoint: &Endpoint,
+    pending: &mut Pending,
+    host: &mut dyn Host,
+    lock: &Lock,
+) {
     let batch = pending.take();
     if batch.is_empty() {
         return;
     }
     let mut left = Vec::new();
-    let gated = crate::runtime_command_guard(state, None)
-        .ok()
-        .and_then(|gate| {
-            host.reexec_if_replaced();
-            Some((gate, activated_spaces(state, endpoint)?))
-        });
+    let gate = crate::runtime_command_guard(state, None);
+    if !lock.held() {
+        return;
+    }
+    let gated = gate.ok().and_then(|gate| {
+        host.reexec_if_replaced();
+        Some((gate, activated_spaces(state, endpoint)?))
+    });
     match gated {
         None => left.extend(batch.into_iter().flat_map(|(_, events)| events)),
         Some((_gate, activated)) => {

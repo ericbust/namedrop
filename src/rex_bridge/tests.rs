@@ -961,3 +961,126 @@ fn sleeper() -> Child {
         .spawn()
         .unwrap()
 }
+
+impl State {
+    /// Moves the state directory aside, and makes a new one at its path
+    /// with `session:s` activated and another bridge's lock, which is
+    /// returned with where the old directory went.
+    fn replace(&self) -> (Lock, PathBuf) {
+        let aside = self.0.with_extension("old");
+        fs::rename(&self.0, &aside).unwrap();
+        fs::create_dir_all(&self.0).unwrap();
+        StateStore::open(&self.0)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.activate_worktree(
+                    &StateNamespace::for_space(REX, "session:s"),
+                    &MutationAttribution::new(ActorKind::Human, "test", 20),
+                )
+            })
+            .unwrap();
+        (Lock::take(&self.0, &endpoint()).unwrap().unwrap(), aside)
+    }
+}
+
+/// When a server's dial or its wait for an event replaces the state
+/// directory.
+#[derive(Clone, Copy, Debug)]
+enum Replacement {
+    AtDial,
+    InWait,
+}
+
+/// A server whose one connection replaces the state directory where
+/// `Replacement` says, and then ends.
+struct Replacing<'s> {
+    state: &'s State,
+    when: Replacement,
+    new: Mutex<Option<(Lock, PathBuf)>>,
+}
+
+impl Replacing<'_> {
+    fn replace(&self) {
+        *self.new.lock().unwrap() = Some(self.state.replace());
+    }
+}
+
+struct EndsAfterReplacing<'s>(&'s Replacing<'s>);
+
+impl Stream for EndsAfterReplacing<'_> {
+    fn host_id(&self) -> Option<&str> {
+        Some("host-a")
+    }
+
+    fn next(&mut self, _: Duration) -> Next {
+        if let Replacement::InWait = self.0.when {
+            self.0.replace();
+        }
+        Next::Ended("the old connection ended".into())
+    }
+}
+
+impl Server for Replacing<'_> {
+    fn open<'w>(&'w self, _: &'w Wake) -> Result<Box<dyn Stream + 'w>, String> {
+        if self.new.lock().unwrap().is_some() {
+            return Err("refused".into());
+        }
+        if let Replacement::AtDial = self.when {
+            self.replace();
+        }
+        Ok(Box::new(EndsAfterReplacing(self)))
+    }
+}
+
+/// A state directory replaced while the bridge waits, for its server, for
+/// an event, or for the command gate, which an update can hold, gets
+/// nothing from that bridge: no `host_id`, no marker, and no worker.
+/// Another bridge holds the new directory's lock.
+#[test]
+fn a_bridge_whose_state_directory_is_replaced_while_it_waits_writes_nothing_there() {
+    let nothing_written = |state: &State, host: &FakeHost, case: &str| {
+        assert!(state.queued("session:s").is_empty(), "{case}");
+        assert!(host.spawned.is_empty(), "{case}: {:?}", host.spawned);
+        assert!(!state.0.join("rex/servers").exists(), "{case}");
+    };
+    for when in [Replacement::AtDial, Replacement::InWait] {
+        let state = State::new();
+        let stop = Wake::new().unwrap();
+        let server = Replacing {
+            state: &state,
+            when,
+            new: Mutex::new(None),
+        };
+        let mut host = FakeHost::default();
+        bridged_with(&state, &server, &stop, &NO_WAIT, &mut host);
+        let (_lock, aside) = server.new.lock().unwrap().take().unwrap();
+        nothing_written(&state, &host, &format!("{when:?}"));
+        fs::remove_dir_all(aside).unwrap();
+    }
+    let state = State::new();
+    fs::create_dir_all(state.0.join("runtime")).unwrap();
+    let gate = fs::File::create(state.0.join("runtime/commands.lock")).unwrap();
+    gate.lock().unwrap();
+    let stop = Wake::new().unwrap();
+    let script = Script::new(vec![(
+        Some("host-a"),
+        Vec::new(),
+        Some(resync("session:s")),
+    )]);
+    let mut host = FakeHost::default();
+    let aside = std::thread::scope(|threads| {
+        let replaced = threads.spawn(|| {
+            let _stop = StopOnDrop(&stop);
+            std::thread::sleep(Duration::from_millis(300));
+            let (lock, aside) = state.replace();
+            drop(gate);
+            std::thread::sleep(Duration::from_millis(300));
+            drop(lock);
+            aside
+        });
+        bridged_with(&state, &script, &stop, &NO_WAIT, &mut host);
+        replaced.join().unwrap()
+    });
+    nothing_written(&state, &host, "gate");
+    fs::remove_dir_all(aside).unwrap();
+}
