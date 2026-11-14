@@ -283,6 +283,7 @@ function attention(
     rowKey:
       optionalIdentity(item.attention_id) ??
       JSON.stringify([fingerprint, occurrence]),
+    attentionId: optionalIdentity(item.attention_id),
     sourceId: optionalIdentity(item.source_id),
     coordinationId: optionalIdentity(item.coordination_id),
     conversation: anchor,

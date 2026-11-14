@@ -397,7 +397,9 @@ where
             let (waiting, _) = transaction.delivery_health(&namespace)?;
             Ok((
                 waiting,
-                transaction.unresolved_attention_items(&namespace)?.len() as u64,
+                transaction
+                    .attention_items_needing_the_person(&namespace)?
+                    .len() as u64,
                 transaction.active_pane_bindings(&namespace)?,
                 transaction.list_pane_addresses(&namespace)?,
             ))

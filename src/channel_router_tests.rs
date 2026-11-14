@@ -64,6 +64,7 @@ pub(super) fn rows() -> DashboardRows {
         assignments: vec![],
         terminal_runs: vec![],
         attention: vec![],
+        dismissals: Default::default(),
         coordination_warnings: vec![],
         review_grants: vec![],
         granted_clears: vec![],

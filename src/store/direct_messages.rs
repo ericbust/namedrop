@@ -200,8 +200,11 @@ pub(crate) struct DirectMessageHistory {
 }
 
 impl StateStore {
-    pub(crate) fn direct_message_peers(&mut self) -> Result<Vec<DirectMessagePeer>, StoreError> {
-        self.transaction(|tx| tx.direct_message_peers())
+    pub(crate) fn direct_message_peers(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<Vec<DirectMessagePeer>, StoreError> {
+        self.transaction(|tx| tx.direct_message_peers(now_ms))
     }
 
     pub(crate) fn direct_message_body(
@@ -251,7 +254,10 @@ impl StateStore {
 }
 
 impl StateTransaction<'_> {
-    fn direct_message_peers(&self) -> Result<Vec<DirectMessagePeer>, StoreError> {
+    fn direct_message_peers(&self, now_ms: u64) -> Result<Vec<DirectMessagePeer>, StoreError> {
+        // A peer's count holds what its channel's attention list holds: the
+        // warnings the person has not dismissed, for a week.
+        let shown_since = to_i64(now_ms)? - to_i64(super::dashboard::ATTENTION_SHOWN_FOR_MS)?;
         let sql = format!("SELECT a.session_socket_id, a.worktree_id, a.address_id,
             COALESCE((SELECT alias FROM alias_claims c WHERE c.session_socket_id=a.session_socket_id
                 AND c.worktree_id=a.worktree_id AND c.address_id=a.address_id AND c.claim_state='active'),
@@ -339,9 +345,15 @@ impl StateTransaction<'_> {
                 LEFT JOIN collaboration_messages relay ON relay.session_socket_id=i.session_socket_id
                     AND relay.worktree_id=i.worktree_id AND relay.message_id=i.source_id AND i.source_kind='terminal_relay'
                 WHERE i.session_socket_id=?1 AND i.worktree_id=?2 AND i.resolved_at_ms IS NULL
+                    AND i.opened_at_ms > ?4
+                    AND NOT EXISTS (SELECT 1 FROM transition_facts f
+                        WHERE f.session_socket_id=i.session_socket_id AND f.worktree_id=i.worktree_id
+                          AND f.entity_kind='attention_item' AND f.entity_id=i.attention_item_id
+                          AND f.transition_kind='dismissed'
+                          AND f.occurred_at_ms >= i.opened_at_ms)
                     AND (m.thread_id=?3 OR g.thread_id=?3 OR relay.thread_id=?3
                          OR (i.source_kind='automatic_reply_limit' AND i.source_id=?3))",
-                params![peer.namespace.session_socket_id,peer.namespace.space_id.as_str(),thread.as_str()],|row|row.get(0))?;
+                params![peer.namespace.session_socket_id,peer.namespace.space_id.as_str(),thread.as_str(),shown_since],|row|row.get(0))?;
         }
 
         peers.sort_by(|a, b| {
@@ -848,7 +860,7 @@ mod tests {
             })
             .unwrap();
         assert_ne!(first.receipt.message_id, second.receipt.message_id);
-        let peers = f.store.direct_message_peers().unwrap();
+        let peers = f.store.direct_message_peers(0).unwrap();
         assert_eq!(peers.len(), 2);
         assert_ne!(peers[0].space_key, peers[1].space_key);
         assert_eq!(peers[0].alias, peers[1].alias);
@@ -860,7 +872,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        let peers = f.store.direct_message_peers().unwrap();
+        let peers = f.store.direct_message_peers(0).unwrap();
         assert_eq!(peers.len(), 2);
         assert!(peers.iter().any(|peer| peer.closed
             && peer.last_message_id.as_deref() == Some(first.receipt.message_id.as_str())));
@@ -976,7 +988,7 @@ mod tests {
             serde_json::json!({"stage": "replied", "reply_id": relay.as_str()}),
             "the person's message reads as answered"
         );
-        let peers = f.store.direct_message_peers().unwrap();
+        let peers = f.store.direct_message_peers(0).unwrap();
         assert_eq!(peers.len(), 1);
         let peer = &peers[0];
         assert_eq!(
@@ -1033,7 +1045,7 @@ mod tests {
             .unwrap();
         f.at = MutationAttribution::new(ActorKind::Human, "test", 30);
         f.send("dm-follow-up", "Option A");
-        let peers = f.store.direct_message_peers().unwrap();
+        let peers = f.store.direct_message_peers(0).unwrap();
         assert_eq!(peers[0].attention_count, 0);
     }
 
@@ -1198,8 +1210,32 @@ mod tests {
         let rows = f.store.dashboard_rows(&f.ns).unwrap();
         assert!(rows.attention.is_empty());
         assert!(rows.mailbox.is_empty());
-        let peers = f.store.direct_message_peers().unwrap();
+        let peers = f.store.direct_message_peers(0).unwrap();
         assert_eq!(peers[0].attention_count, 2);
+
+        // The count holds what the channel's list holds.
+        let count = |store: &mut StateStore, now: u64| {
+            store.direct_message_peers(now).unwrap()[0].attention_count
+        };
+        let opened = f.at.occurred_at_ms;
+        let week = super::super::dashboard::ATTENTION_SHOWN_FOR_MS;
+        assert_eq!(count(&mut f.store, opened + week - 1), 2);
+        assert_eq!(
+            count(&mut f.store, opened + week),
+            0,
+            "a week-old warning still counts"
+        );
+        let person = MutationAttribution::new(ActorKind::Human, "local-human", opened + 1);
+        f.store
+            .transaction(|tx| {
+                tx.dismiss_attention_item(&f.ns, "private-automatic-attention", &person)
+            })
+            .unwrap();
+        assert_eq!(
+            count(&mut f.store, opened + 2),
+            1,
+            "a dismissed warning still counts"
+        );
     }
 
     #[test]

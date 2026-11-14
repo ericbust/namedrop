@@ -208,14 +208,18 @@ test("control: posts a thread action with the session token and an empty body, s
   );
 });
 
-test("control: a dismiss posts the person's confirmation to the attempt", async () => {
+test("control: a dismiss posts the person's confirmation and the cards' ids", async () => {
   const server = fakeServer(({ url }) =>
     url === "/api/session" ? json(200, { csrf_token: "t" }) : json(200, {}),
   );
   assert.deepEqual(
     await createPoster(server.fetcher).control(
       key,
-      { kind: "attempt", attemptId: "attempt 1/a", action: "dismiss" },
+      {
+        kind: "attention",
+        ids: ["attention-agent-disposition-attempt 1/a", "agent-status-a1"],
+        action: "dismiss",
+      },
       press,
     ),
     { kind: "done" },
@@ -229,10 +233,13 @@ test("control: a dismiss posts the person's confirmation to the attempt", async 
     ]),
     [
       [
-        `/w/${key}/attempts/attempt%201%2Fa/dismiss`,
+        `/w/${key}/attention/dismiss`,
         "t",
         "application/json",
-        { confirmed: true },
+        {
+          confirmed: true,
+          ids: ["attention-agent-disposition-attempt 1/a", "agent-status-a1"],
+        },
       ],
     ],
   );

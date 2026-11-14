@@ -865,6 +865,10 @@ pub enum TransitionKind {
     Adopted,
     /// The coordination's owner session read its results.
     Read,
+    /// The person dismissed an attention item in Channels. Unlike
+    /// `Acknowledged`, it closes nothing and stands for no review: the item
+    /// is only left out of what needs them, as it was worded then.
+    Dismissed,
 }
 
 impl TransitionKind {
@@ -906,6 +910,7 @@ impl TransitionKind {
             Self::Resolved => "resolved",
             Self::Adopted => "adopted",
             Self::Read => "read",
+            Self::Dismissed => "dismissed",
         }
     }
 }
