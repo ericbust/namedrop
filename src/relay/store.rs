@@ -654,9 +654,9 @@ impl RelayStore {
         Ok(())
     }
 
-    /// Holds `held` for its thread, and says whether it is held, which it is
-    /// not when the server already has `HELD_LIMIT` replies held for this
-    /// endpoint.
+    /// Holds `held` for its thread, cut as A would insert it, and says
+    /// whether it is held, which it is not when the server already has
+    /// `HELD_LIMIT` replies held for this endpoint.
     pub(crate) fn hold(&self, held: &Held, now_ms: i64) -> Result<bool, StoreError> {
         let changed = self.connection.execute(
             "INSERT OR IGNORE INTO held (endpoint, host_id, remote_message_id, epoch, seq,
@@ -674,7 +674,7 @@ impl RelayStore {
                 held.thread,
                 held.reply.re,
                 held.reply.from,
-                held.reply.text,
+                super::wire::cut(&held.reply.text, super::wire::TEXT_LIMIT),
                 now_ms,
                 HELD_LIMIT
             ],

@@ -1965,3 +1965,24 @@ fn a_worker_whose_state_directory_is_gone_exits_and_makes_none() {
     );
     assert!(!gone.exists());
 }
+
+/// A held reply is cut as A inserts it, so 100 held replies of a B that
+/// makes up long ones stay within 100 texts of 60 KiB.
+#[test]
+fn a_held_reply_is_cut_when_it_is_held() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    let mut replies = replies(&message, 1, 11);
+    replies[10]["text"] = json!("w".repeat(200 * 1024));
+    rex.answer_with(answer("accepted", None, replies));
+    work_for(&space, &rex, 1);
+    let held = relay_rows(&space, "SELECT text FROM held");
+    let text = held[0][0].as_str().unwrap();
+    assert!(
+        text.len() <= crate::relay::wire::TEXT_LIMIT,
+        "{}",
+        text.len()
+    );
+    assert!(text.ends_with(crate::relay::wire::CUT_NOTICE));
+}
