@@ -322,8 +322,9 @@ fn worker_command(
     command
 }
 
-/// Starts the worker of each label of `endpoint` with an item queued or a
-/// thread open whose worker does not run, as the bridge does when it
+/// Starts the worker of each label of `endpoint`, of those `rex hosts
+/// list` still lists, with an item queued or a thread open whose worker
+/// does not run, as the bridge does when it
 /// connects and every so often after, so a conversation goes on collecting
 /// after a restart or a killed worker. `reap` reaps each one.
 pub(crate) fn start_workers(
@@ -336,10 +337,13 @@ pub(crate) fn start_workers(
     }
     if let Ok(store) = RelayStore::read(state)
         && let Ok(labels) = store.active_labels(&endpoint.key, now_ms())
+        && !labels.is_empty()
+        && let Ok(hosts) = Hosts::read()
     {
         drop(store);
         for label in labels {
-            if !worker_runs(state, endpoint, &label)
+            if hosts.labels.contains(&label)
+                && !worker_runs(state, endpoint, &label)
                 && let Some(worker) = spawn_worker(state, endpoint, &label)
             {
                 reap(worker);

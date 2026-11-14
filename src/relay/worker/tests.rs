@@ -503,16 +503,39 @@ fn start_workers_starts_none_while_a_worker_holds_the_lock() {
     held.try_lock().unwrap();
     STARTED.with(|started| started.borrow_mut().clear());
     let start = || {
-        crate::relay::start_workers(
-            &space.state,
-            &endpoint,
-            &crate::relay::receive::reap_in_thread,
-        );
+        rex.run(|| {
+            crate::relay::start_workers(
+                &space.state,
+                &endpoint,
+                &crate::relay::receive::reap_in_thread,
+            )
+        });
         STARTED.with(|started| started.take())
     };
     assert!(start().is_empty(), "the running worker keeps its label");
     drop(held);
     assert_eq!(start(), ["devbox"]);
+}
+
+/// A label `rex hosts list` no longer lists gets no worker however long
+/// its thread stays open, and one listed again gets one.
+#[test]
+fn start_workers_skips_a_label_removed_from_rex_hosts() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    STARTED.with(|started| started.borrow_mut().clear());
+    let start = || {
+        crate::relay::start_workers(
+            &space.state,
+            &Endpoint::parse(REX),
+            &crate::relay::receive::reap_in_thread,
+        )
+    };
+    crate::relay::tests_support::with_hosts(&[], start);
+    assert!(STARTED.with(|started| started.borrow().is_empty()));
+    rex.run(start);
+    assert_eq!(STARTED.with(|started| started.take()), ["devbox"]);
 }
 
 /// A sender hears in its thread, once for each new loss, of the replies
@@ -1853,18 +1876,22 @@ fn a_restart_starts_the_worker_of_an_open_thread() {
     sent(&space, &rex);
     collect_once(&space, &rex, json!([]));
     STARTED.with(|started| started.borrow_mut().clear());
-    crate::relay::start_workers(
-        &space.state,
-        &Endpoint::parse(REX),
-        &crate::relay::receive::reap_in_thread,
-    );
+    rex.run(|| {
+        crate::relay::start_workers(
+            &space.state,
+            &Endpoint::parse(REX),
+            &crate::relay::receive::reap_in_thread,
+        )
+    });
     assert_eq!(STARTED.with(|started| started.borrow().clone()), ["devbox"]);
     STARTED.with(|started| started.borrow_mut().clear());
-    crate::relay::start_workers(
-        &space.state,
-        &Endpoint::parse("rex:/tmp/namedrop-relay-other.sock"),
-        &crate::relay::receive::reap_in_thread,
-    );
+    rex.run(|| {
+        crate::relay::start_workers(
+            &space.state,
+            &Endpoint::parse("rex:/tmp/namedrop-relay-other.sock"),
+            &crate::relay::receive::reap_in_thread,
+        )
+    });
     assert!(
         STARTED.with(|started| started.borrow().is_empty()),
         "another endpoint has no thread open"

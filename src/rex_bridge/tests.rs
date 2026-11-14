@@ -1590,11 +1590,13 @@ fn a_connection_starts_the_worker_of_each_label_with_an_item_queued() {
     let host = bridged_away(&state, &script, &Wake::new().unwrap(), &NO_WAIT);
     assert_eq!(host.relay_starts.len(), 1);
     crate::relay::tests_support::STARTED.with(|started| started.borrow_mut().clear());
-    crate::relay::start_workers(
-        &state.0,
-        &endpoint(),
-        &crate::relay::receive::reap_in_thread,
-    );
+    crate::relay::tests_support::with_hosts(&["devbox", "studio"], || {
+        crate::relay::start_workers(
+            &state.0,
+            &endpoint(),
+            &crate::relay::receive::reap_in_thread,
+        )
+    });
     assert_eq!(
         crate::relay::tests_support::STARTED.with(|started| started.borrow().clone()),
         ["devbox", "studio"]
