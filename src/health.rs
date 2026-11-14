@@ -1383,6 +1383,12 @@ fn relay_conditions_issue(conditions: &[crate::relay::store::Conditions]) -> Opt
                         .to_owned(),
                 );
             }
+            if condition.cannot_reply {
+                found.push(
+                    "it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them"
+                        .to_owned(),
+                );
+            }
             format!("{}: {}", condition.label, found.join(", and "))
         })
         .collect::<Vec<_>>()
@@ -1651,10 +1657,16 @@ mod tests {
                 label: "devbox".to_owned(),
                 other_label: 3,
                 held_full: true,
+                cannot_reply: false,
             },
             Conditions {
                 label: "studio".to_owned(),
                 held_full: true,
+                ..Conditions::default()
+            },
+            Conditions {
+                label: "lab".to_owned(),
+                cannot_reply: true,
                 ..Conditions::default()
             },
         ])
@@ -1664,7 +1676,7 @@ mod tests {
         let paused = "Namedrop holds as many of its replies as it can for threads the Automatic Reply Limit paused, so it keeps the rest until a person's message or Continue resumes them";
         assert!(
             notice.explanation.ends_with(&format!(
-                "By host: devbox: 3 replies answered a message sent to another host, and were dropped, and {paused}; studio: {paused}."
+                "By host: devbox: 3 replies answered a message sent to another host, and were dropped, and {paused}; studio: {paused}; lab: it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them."
             )),
             "{}",
             notice.explanation

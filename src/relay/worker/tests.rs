@@ -1198,7 +1198,8 @@ fn a_reply_to_a_message_not_sent_to_this_b_is_dropped() {
         [crate::relay::store::Conditions {
             label: "devbox".to_owned(),
             other_label: 1,
-            held_full: false
+            held_full: false,
+            cannot_reply: false
         }],
         "only the reply to studio's message answered another host's"
     );
@@ -1279,7 +1280,8 @@ fn a_server_that_reports_another_s_host_id_cannot_answer_for_its_label() {
         [crate::relay::store::Conditions {
             label: "devbox".to_owned(),
             other_label: 1,
-            held_full: false
+            held_full: false,
+            cannot_reply: false
         }]
     );
 
@@ -2023,7 +2025,8 @@ fn a_thread_holds_at_most_20_replies_and_b_keeps_the_rest_in_order() {
         [crate::relay::store::Conditions {
             label: "devbox".to_owned(),
             other_label: 0,
-            held_full: true
+            held_full: true,
+            cannot_reply: false
         }]
     );
     as_person(
@@ -2076,9 +2079,10 @@ fn replies_past_a_full_hold_stay_on_b_until_there_is_room() {
         .collect();
     rex.answer_with(
         json!({"host_id": "host-b", "can_reply": true, "epoch": "e1",
-        "more": false, "outbox": page}),
+        "more": true, "outbox": page}),
     );
     work_for(&space, &rex, 1);
+    assert_eq!(rex.requests().len(), 1, "a full page asks for no next one");
     assert_eq!(collected_bodies(&space).len(), 110);
     assert_eq!(
         relay_rows(&space, "SELECT COUNT(*) FROM held"),
@@ -2595,4 +2599,295 @@ fn a_worker_hands_its_running_mailbox_workers_to_the_selected_runtime() {
     assert_eq!(workers.len(), 1, "{replaced:?}");
     assert_eq!(running, 1, "the woken worker was not waited for");
     assert_eq!(rex.requests().len(), 1, "the old image sent nothing more");
+}
+
+/// alice's agent answers `message` to dan, as a local agent's reply, which
+/// the Automatic Reply Limit counts.
+fn agent_reply(space: &Space, request: &str, message: &str) {
+    let ids = crate::ProcessIds::default();
+    let namespace = crate::StateNamespace::for_space(REX, "session:a");
+    let attribution = crate::MutationAttribution::new(ActorKind::AgentSession, "session-alice", 1);
+    StateStore::open(&space.state)
+        .unwrap()
+        .transaction(|transaction| {
+            let route = transaction.message_route(&namespace, &MessageId::new(message))?;
+            let draft = crate::MessageDraft {
+                thread_id: route.thread_id,
+                message_id: MessageId::new(ids.next_id("message")),
+                in_reply_to: Some(MessageId::new(message)),
+                author_address_id: crate::PaneAddressId::new("address-alice"),
+                author_kind: ActorKind::AgentSession,
+                author_alias_snapshot: "alice".to_owned(),
+                author_agent_session_snapshot: Some(crate::AgentSessionId::new("session-alice")),
+                request_id: request.to_owned(),
+                authored_source: "@dan noted".to_owned(),
+                body: "noted".to_owned(),
+                grammar_version: "mention/v1".to_owned(),
+                recipients: vec![crate::MessageRecipientDraft {
+                    address_id: crate::PaneAddressId::new("address-dan"),
+                    alias_snapshot: "dan".to_owned(),
+                    agent_session_snapshot: None,
+                    delivery_id: DeliveryId::new(ids.next_id("delivery")),
+                }],
+                context_references: Vec::new(),
+            };
+            transaction.append_message(&namespace, &draft, &attribution)
+        })
+        .unwrap();
+}
+
+/// The relay's notices that A could not take a reply, as their bodies.
+fn dropped_bodies(space: &Space) -> Vec<Vec<String>> {
+    space.main(
+        "SELECT body FROM collaboration_messages WHERE request_id LIKE 'relay-dropped:%'
+         ORDER BY rowid",
+    )
+}
+
+/// A reply the main store refuses for a reason other than the Automatic
+/// Reply Limit is told to its sender once, and is not held, even in a
+/// thread the limit paused.
+#[test]
+fn a_reply_a_refuses_is_told_once_and_never_held() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    rex.answer_with(answer("accepted", None, replies(&message, 1, 1)));
+    work_for(&space, &rex, 1);
+    for n in 0..9 {
+        agent_reply(&space, &format!("local-{n}"), &message);
+    }
+    assert_eq!(
+        space.main("SELECT CAST(reply_allowance AS TEXT) FROM thread_controls"),
+        [["0"]],
+        "the thread is paused"
+    );
+    let changed = |seq: i64| {
+        json!({"seq": seq, "re": message, "thread": "t", "from": "bob",
+            "message_id": "b-1", "text": "other text"})
+    };
+    for seq in [2, 3] {
+        rex.answer_with(
+            json!({"host_id": "host-b", "can_reply": true, "epoch": "e1",
+            "more": false, "outbox": [changed(seq)]}),
+        );
+        work_for(&space, &rex, 1);
+    }
+    assert_eq!(
+        dropped_bodies(&space),
+        [[
+            "Namedrop could not take a reply from @bob@devbox: request id was already used for \
+           different message content."
+        ]]
+    );
+    assert!(held_notices(&space).is_empty());
+    assert_eq!(
+        relay_rows(&space, "SELECT COUNT(*) FROM held"),
+        [[json!(0)]]
+    );
+    assert_eq!(
+        crate::relay::tests_support::store(&space.state)
+            .ack_through(REX, "host-b")
+            .unwrap()
+            .1,
+        3
+    );
+}
+
+/// A thread paired with a paused one refuses an agent's reply by the same
+/// limit, so A holds the reply rather than dropping it, and it follows
+/// once the pair takes replies again.
+#[test]
+fn a_reply_refused_by_a_paired_thread_s_limit_is_held() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    let thread = space.main(&format!(
+        "SELECT thread_id FROM collaboration_messages WHERE message_id = '{message}'"
+    ))[0][0]
+        .clone();
+    let main = Connection::open(space.state.join("namedrop.sqlite3")).unwrap();
+    main.execute(
+        "INSERT INTO bridged_threads (session_socket_id, worktree_id, thread_id, peer_space_id,
+            peer_thread_id) VALUES (?1, 'session:a', ?2, 'session:paused', 'thread-paused')",
+        [REX, &thread],
+    )
+    .unwrap();
+    rex.answer_with(answer("accepted", None, replies(&message, 1, 1)));
+    work_for(&space, &rex, 1);
+    assert!(collected_bodies(&space).is_empty());
+    assert_eq!(relay_rows(&space, "SELECT seq FROM held"), [[json!(1)]]);
+    assert!(dropped_bodies(&space).is_empty());
+    main.execute("DELETE FROM bridged_threads", []).unwrap();
+    release(
+        &space.state,
+        &Endpoint::parse(REX),
+        &|| Ok(None),
+        &mut |_| {},
+    );
+    assert_eq!(collected_bodies(&space), [["reply 1"]]);
+}
+
+/// B's reason for a refusal reaches the sender's thread with no control
+/// character, so a terminal that shows it runs no escape sequence.
+#[test]
+fn a_refusal_reason_from_b_loses_its_control_characters() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    rex.answer_with(answer(
+        "refused",
+        Some("no \u{1b}[31m@bob\u{1b}[0m\non devbox\u{7}"),
+        json!([]),
+    ));
+    work_for(&space, &rex, 1);
+    assert_eq!(
+        outbound(&space)[0].1.as_deref(),
+        Some("no  [31m@bob [0m on devbox ")
+    );
+}
+
+/// A B that keeps 10,000 replies for this side says it can reply no more.
+/// A then sends it nothing new: a queued item fails with the reason, its
+/// sender is told, and Doctor says so, until a collect finds room again.
+#[test]
+fn a_b_that_keeps_no_more_replies_is_sent_nothing_new_until_it_has_room() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let full = |mut answer: Value| {
+        answer["can_reply"] = json!(false);
+        answer
+    };
+    sent(&space, &rex);
+    rex.answer_with(full(answer("accepted", None, json!([]))));
+    work_for(&space, &rex, 1);
+    assert!(crate::relay::conditions(&space.state, REX)[0].cannot_reply);
+    rex.run(|| space.send("request-2", "@bob@devbox one more"))
+        .unwrap();
+    rex.answer_with(full(
+        json!({"host_id": "host-b", "epoch": "e1", "more": false,
+        "outbox": []}),
+    ));
+    work_for(&space, &rex, 1);
+    let requests = rex.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1]["op"], "collect",
+        "it collects, and delivers nothing"
+    );
+    let reason = "devbox keeps no more replies for this machine until this machine collects them";
+    assert_eq!(
+        outbound(&space)
+            .into_iter()
+            .map(|row| (row.0, row.1))
+            .collect::<Vec<_>>(),
+        [
+            ("accepted".to_owned(), None),
+            ("failed".to_owned(), Some(reason.to_owned()))
+        ]
+    );
+    assert_eq!(
+        notices(&space)[0][3],
+        format!("Namedrop could not relay this message to @bob@devbox: {reason}.")
+    );
+    rex.run(|| space.send("request-3", "@bob@devbox and now"))
+        .unwrap();
+    rex.answer_with(
+        json!({"host_id": "host-b", "can_reply": true, "epoch": "e1",
+        "more": false, "outbox": []}),
+    );
+    rex.answer_with(answer("accepted", None, json!([])));
+    work_for(&space, &rex, 1);
+    assert_eq!(rex.requests()[3]["op"], "deliver");
+    assert_eq!(outbound(&space)[2].0, "accepted");
+    assert!(crate::relay::conditions(&space.state, REX).is_empty());
+}
+
+/// A thread whose reply found no room takes none of its later replies in
+/// that page, even once a person continued it meanwhile, so it reads in
+/// order when B sends them again.
+#[test]
+fn a_thread_continued_partway_through_a_page_still_reads_in_order() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    let messages: Vec<String> = (0..7)
+        .map(|n| settled(&space, &rex, &format!("thread-{n}"), "accepted", "host-b"))
+        .collect();
+    let reply = |n: usize, seq: i64| {
+        json!({"seq": seq, "re": messages[n], "thread": format!("t{n}"), "from": "bob",
+            "message_id": format!("b-{seq}"), "text": format!("reply {seq}")})
+    };
+    let mut page: Vec<Value> = Vec::new();
+    for n in 0..6 {
+        let first = i64::try_from(n).unwrap() * 30;
+        let count = if n == 5 { 10 } else { 30 };
+        page.extend((first + 1..=first + count).map(|seq| reply(n, seq)));
+    }
+    page.extend([reply(5, 201), reply(6, 202), reply(5, 203)]);
+    rex.answer_with(
+        json!({"host_id": "host-b", "can_reply": true, "epoch": "e1",
+        "more": false, "outbox": page}),
+    );
+    let thread = crate::ThreadId::new(
+        &space.main(&format!(
+            "SELECT thread_id FROM collaboration_messages WHERE message_id = '{}'",
+            messages[5]
+        ))[0][0],
+    );
+    // The worker takes the gate once before its round. Then each thread of
+    // the first five takes ten replies and holds one more before it holds
+    // without a take, the sixth takes ten, and its reply 201 finds no room.
+    // Reply 202's take, the next, continues the sixth.
+    let continue_at = 1 + 5 * 11 + 10 + 1 + 1;
+    let takes = std::cell::Cell::new(0);
+    let gate = || {
+        takes.set(takes.get() + 1);
+        if takes.get() == continue_at {
+            crate::StateStore::open(&space.state)
+                .unwrap()
+                .transaction(|transaction| {
+                    transaction.continue_thread(
+                        &crate::StateNamespace::for_space(REX, "session:a"),
+                        &thread,
+                        &crate::MutationAttribution::new(ActorKind::Human, "test", 1),
+                    )
+                })
+                .unwrap();
+        }
+        Ok(None)
+    };
+    rex.run(|| {
+        let mut rounds = 0;
+        work(&mut Run {
+            state: &space.state,
+            endpoint: &Endpoint::parse(REX),
+            label: "devbox",
+            gate: &gate,
+            pause: &mut |_| {
+                rounds += 1;
+                rounds < 1
+            },
+            wake: &mut |_| {},
+        });
+    });
+    assert!(takes.get() >= continue_at, "{}", takes.get());
+    let bodies = |message: &str| -> Vec<String> {
+        space
+            .main(&format!(
+                "SELECT body FROM collaboration_messages WHERE in_reply_to = '{message}'
+                    AND request_id LIKE 'relay-reply:%' ORDER BY rowid"
+            ))
+            .into_iter()
+            .map(|row| row[0].clone())
+            .collect()
+    };
+    assert_eq!(
+        bodies(&messages[5]),
+        (151..=160)
+            .map(|seq| format!("reply {seq}"))
+            .collect::<Vec<_>>(),
+        "reply 203 waits for 201"
+    );
+    assert_eq!(bodies(&messages[6]), ["reply 202"]);
 }

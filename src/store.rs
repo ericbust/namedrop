@@ -3167,9 +3167,7 @@ impl StateTransaction<'_> {
             ));
         }
         if is_agent_reply && controls.reply_allowance == 0 {
-            return Err(StoreError::invalid_input(
-                "the Automatic Reply Limit requires human continuation",
-            ));
+            return Err(StoreError::reply_limit());
         }
 
         let thread_order =
@@ -3440,9 +3438,7 @@ impl StateTransaction<'_> {
             ],
         )?;
         if changed != 1 {
-            return Err(StoreError::invalid_input(
-                "the Automatic Reply Limit requires human continuation",
-            ));
+            return Err(StoreError::reply_limit());
         }
         if self
             .thread_control_state(namespace, thread_id)?
@@ -7470,6 +7466,8 @@ pub enum StoreErrorKind {
     Storage,
 }
 
+const REPLY_LIMIT: &str = "the Automatic Reply Limit requires human continuation";
+
 #[derive(Debug)]
 pub struct StoreError {
     kind: StoreErrorKind,
@@ -7492,6 +7490,18 @@ impl StoreError {
             message: message.into(),
             source: None,
         }
+    }
+
+    /// The refusal of an agent's reply in a thread the Automatic Reply
+    /// Limit paused, here or in a thread paired with it.
+    fn reply_limit() -> Self {
+        Self::invalid_input(REPLY_LIMIT)
+    }
+
+    /// Whether this is the Automatic Reply Limit's refusal, which a person's
+    /// message or Continue lifts, rather than another refusal.
+    pub(crate) fn is_reply_limit(&self) -> bool {
+        self.kind == StoreErrorKind::InvalidInput && self.message == REPLY_LIMIT
     }
 
     pub fn kind(&self) -> StoreErrorKind {

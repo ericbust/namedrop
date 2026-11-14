@@ -33,7 +33,8 @@ pub(crate) const OUTBOX_LIMIT: i64 = 10_000;
 /// each local endpoint took from each B and the outbox epoch it counts in,
 /// because each endpoint reads its own outbox on B, `held`, the replies
 /// the Automatic Reply Limit kept out of their threads, `dropped`, the
-/// held replies that expired, whose senders are still to be told, and
+/// replies A refused and the held ones that expired, whose senders are
+/// still to be told, and
 /// `conditions`, what Doctor reports for each label. B holds
 /// `inbound`, `outbox`, its `outbox_epoch`, `remote_threads`, and the tally
 /// of the replies that expired, which Doctor reports after the items
@@ -151,6 +152,7 @@ CREATE TABLE conditions (
     label TEXT NOT NULL,
     other_label INTEGER NOT NULL DEFAULT 0,
     held_full INTEGER NOT NULL DEFAULT 0,
+    cannot_reply INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (endpoint, label)
 );
 CREATE TABLE dropped (
@@ -162,6 +164,7 @@ CREATE TABLE dropped (
     re TEXT NOT NULL,
     remote_alias TEXT NOT NULL,
     count INTEGER NOT NULL,
+    reason TEXT,
     created_at_ms INTEGER NOT NULL,
     PRIMARY KEY (endpoint, host_id, remote_message_id)
 );
@@ -244,17 +247,19 @@ pub(crate) enum Answers {
 }
 
 /// What Doctor reports on A for one label: how many replies its worker
-/// dropped because they answered a message sent to another host, and
-/// whether A holds as many of its replies as it can, so B keeps the rest.
+/// dropped because they answered a message sent to another host, whether
+/// A holds as many of its replies as it can, so B keeps the rest, and
+/// whether B keeps no more replies for A, so A sends it nothing new.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct Conditions {
     pub label: String,
     pub other_label: i64,
     pub held_full: bool,
+    pub cannot_reply: bool,
 }
 
-/// Held replies of one thread that expired, whose sender is still to be
-/// told: the first one, and how many.
+/// A reply A refused, or the held replies of one thread that expired,
+/// whose sender is still to be told.
 pub(crate) struct Dropped {
     pub host_id: String,
     pub remote_message_id: String,
@@ -262,7 +267,15 @@ pub(crate) struct Dropped {
     pub space: String,
     pub re: String,
     pub remote_alias: String,
-    pub count: i64,
+    pub why: Why,
+}
+
+/// Why A let go of a reply.
+pub(crate) enum Why {
+    /// The main store refused it, for this reason.
+    Refused(String),
+    /// It and this many held replies of its thread expired.
+    Expired(i64),
 }
 
 /// An item's key on B: A's `host_id`, A's message id, and the recipient.
@@ -904,11 +917,64 @@ impl RelayStore {
         Ok(())
     }
 
-    /// The held replies of `endpoint` that expired, one row a thread, whose
-    /// senders are still to be told, oldest first.
+    /// Records that the main store refused `held`'s reply for `reason`, so
+    /// its sender is told once.
+    pub(crate) fn refused(&self, held: &Held, reason: &str, now_ms: i64) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO dropped (endpoint, host_id, remote_message_id, label, space,
+                re, remote_alias, count, reason, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9)",
+            params![
+                held.endpoint,
+                held.host_id,
+                held.reply.message_id,
+                held.label,
+                held.space,
+                held.reply.re,
+                held.reply.from,
+                reason,
+                now_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Records whether the server behind `label` said, in its last page for
+    /// `endpoint`, that it keeps more replies for it.
+    pub(crate) fn set_can_reply(
+        &self,
+        endpoint: &str,
+        label: &str,
+        can_reply: bool,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO conditions (endpoint, label, cannot_reply) VALUES (?1, ?2, ?3)
+             ON CONFLICT (endpoint, label) DO UPDATE SET cannot_reply = excluded.cannot_reply",
+            params![endpoint, label, !can_reply],
+        )?;
+        Ok(())
+    }
+
+    /// Whether the server behind `label` last said it keeps no more
+    /// replies for `endpoint`.
+    pub(crate) fn cannot_reply(&self, endpoint: &str, label: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT cannot_reply FROM conditions WHERE endpoint = ?1 AND label = ?2",
+                params![endpoint, label],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    /// The replies of `endpoint` A refused, and its held replies that
+    /// expired, one row a thread, whose senders are still to be told,
+    /// oldest first.
     pub(crate) fn dropped(&self, endpoint: &str) -> Result<Vec<Dropped>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT host_id, remote_message_id, label, space, re, remote_alias, count
+            "SELECT host_id, remote_message_id, label, space, re, remote_alias, count, reason
              FROM dropped WHERE endpoint = ?1 ORDER BY created_at_ms, rowid",
         )?;
         let dropped = statement
@@ -920,7 +986,10 @@ impl RelayStore {
                     space: row.get(3)?,
                     re: row.get(4)?,
                     remote_alias: row.get(5)?,
-                    count: row.get(6)?,
+                    why: match row.get::<_, Option<String>>(7)? {
+                        Some(reason) => Why::Refused(reason),
+                        None => Why::Expired(row.get(6)?),
+                    },
                 })
             })?
             .collect::<Result<_, _>>()?;
@@ -939,8 +1008,9 @@ impl RelayStore {
     /// What `endpoint`'s Doctor reports for each label.
     pub(crate) fn conditions(&self, endpoint: &str) -> Result<Vec<Conditions>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT label, other_label, held_full FROM conditions
-             WHERE endpoint = ?1 AND (other_label > 0 OR held_full) ORDER BY label",
+            "SELECT label, other_label, held_full, cannot_reply FROM conditions
+             WHERE endpoint = ?1 AND (other_label > 0 OR held_full OR cannot_reply)
+             ORDER BY label",
         )?;
         let conditions = statement
             .query_map(params![endpoint], |row| {
@@ -948,6 +1018,7 @@ impl RelayStore {
                     label: row.get(0)?,
                     other_label: row.get(1)?,
                     held_full: row.get(2)?,
+                    cannot_reply: row.get(3)?,
                 })
             })?
             .collect::<Result<_, _>>()?;
@@ -1191,6 +1262,10 @@ impl RelayStore {
         )?;
         transaction.execute(
             "DELETE FROM held WHERE created_at_ms <= ?1",
+            params![outbox_limit],
+        )?;
+        transaction.execute(
+            "DELETE FROM dropped WHERE created_at_ms <= ?1",
             params![outbox_limit],
         )?;
         transaction.execute(

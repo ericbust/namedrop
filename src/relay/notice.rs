@@ -1,11 +1,11 @@
 //! The notices a sender on A gets in its thread from a remote agent's relay
 //! author: that an item for that agent failed or expired, that the
-//! Automatic Reply Limit holds that agent's replies, or that held ones
-//! expired.
+//! Automatic Reply Limit holds that agent's replies, or that A refused one
+//! or let held ones expire.
 
 use super::{
     RemoteName,
-    store::{Dropped, Held, RelayStore},
+    store::{Dropped, Held, RelayStore, Why},
 };
 use crate::{
     ActorKind, DeliveryId, IdGenerator, MessageId, MutationAttribution, SpaceId, StateNamespace,
@@ -25,8 +25,8 @@ struct Notice<'a> {
 }
 
 /// Tells the sender of each item of `endpoint` that failed or expired,
-/// of each thread whose replies are held, and of each whose held replies
-/// expired, once, and calls `wake` for
+/// of each thread whose replies are held, of each reply A refused, and of
+/// each thread whose held replies expired, once, and calls `wake` for
 /// each space it told. A fault leaves the rest for the next call.
 pub(crate) fn tell(
     state: &Path,
@@ -85,27 +85,33 @@ pub(crate) fn tell(
     }
 }
 
-/// The notice that the held replies of a thread expired.
+/// The notice that A refused a reply, or that the held replies of a
+/// thread expired.
 fn dropped_notice(dropped: &Dropped) -> Notice<'_> {
-    let replies = if dropped.count == 1 {
-        "1 reply".to_owned()
-    } else {
-        format!("{} replies", dropped.count)
-    };
+    let (alias, label) = (&dropped.remote_alias, &dropped.label);
     Notice {
         space: &dropped.space,
-        label: &dropped.label,
-        alias: &dropped.remote_alias,
+        label,
+        alias,
         message: &dropped.re,
         request_id: format!(
-            "relay-dropped:{}:{}:{}",
-            dropped.label, dropped.host_id, dropped.remote_message_id
+            "relay-dropped:{label}:{}:{}",
+            dropped.host_id, dropped.remote_message_id
         ),
-        text: format!(
-            "Namedrop let go of {replies} from @{}@{} that it held for 7 days while the \
-             Automatic Reply Limit paused this thread.",
-            dropped.remote_alias, dropped.label
-        ),
+        text: match &dropped.why {
+            Why::Refused(reason) => {
+                format!("Namedrop could not take a reply from @{alias}@{label}: {reason}.")
+            }
+            Why::Expired(count) => format!(
+                "Namedrop let go of {} from @{alias}@{label} that it held for 7 days while the \
+                 Automatic Reply Limit paused this thread.",
+                if *count == 1 {
+                    "1 reply".to_owned()
+                } else {
+                    format!("{count} replies")
+                }
+            ),
+        },
     }
 }
 

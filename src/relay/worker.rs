@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{
     ActorKind, DeliveryId, IdGenerator, MessageId, MutationAttribution, SpaceId, StateNamespace,
-    StateStore, ThreadId,
+    StateStore,
     mux::Endpoint,
     store::{RelayAuthor, RelayOrigin, Relayed},
 };
@@ -178,7 +178,29 @@ fn round(run: &mut Run<'_>) -> Round {
         Err(_) => return Round::Kept,
     };
     let mut kept = false;
+    let silent = || {
+        store
+            .cannot_reply(&run.endpoint.key, run.label)
+            .is_ok_and(|no| no)
+    };
+    if !queued.is_empty() && silent() {
+        // B's last page said it keeps no more replies for this side, so a
+        // collect first tells whether that still holds.
+        let peer = Peer {
+            host_id: &peer_id,
+            labels: &labels,
+        };
+        kept = !collect(run, &store, &own, &peer);
+    }
     for item in &queued {
+        if silent() {
+            let reason = format!(
+                "{} keeps no more replies for this machine until this machine collects them",
+                run.label
+            );
+            let _ = store.settle(run.label, item, Settled::Failed, Some(&reason), now);
+            continue;
+        }
         let host_id = item.host_id.clone().unwrap_or_else(|| peer_id.clone());
         if store.pin(run.label, item, &host_id).is_err() {
             return Round::Kept;
@@ -253,10 +275,14 @@ fn decide(
         *kept = true;
         return;
     };
-    let reason = wire::cut(
-        outcome.reason.as_deref().unwrap_or("refused"),
-        wire::REASON_LIMIT,
-    );
+    let printable: String = outcome
+        .reason
+        .as_deref()
+        .unwrap_or("refused")
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let reason = wire::cut(&printable, wire::REASON_LIMIT);
     let reason = reason.as_str();
     let _ = match outcome.status {
         Status::Accepted | Status::Duplicate => {
@@ -377,6 +403,12 @@ fn collect_replies(
         // A refusal or a retry brings no page.
         return Page::Taken;
     }
+    if store
+        .set_can_reply(endpoint, run.label, answer.can_reply)
+        .is_err()
+    {
+        return Page::Fault;
+    }
     let Ok((epoch, through)) = store.ack_through(endpoint, host_id) else {
         return Page::Fault;
     };
@@ -444,7 +476,11 @@ fn collect_replies(
                 }
                 Err(_) => return Page::Fault,
             },
-            Ok(Taken::Refused) => {}
+            Ok(Taken::Refused(reason)) => {
+                if store.refused(&held, &reason, super::now_ms()).is_err() {
+                    return Page::Fault;
+                }
+            }
             Err(_) => return Page::Fault,
         }
         if !ack(reply.seq, &full) {
@@ -501,8 +537,12 @@ pub(crate) fn release(
                 }
             }
             Ok(Taken::Limited) => paused.push(thread),
-            Ok(Taken::Refused) => {
-                if store.release(held).is_err() {
+            Ok(Taken::Refused(reason)) => {
+                if store
+                    .refused(held, &reason, super::now_ms())
+                    .and_then(|()| store.release(held))
+                    .is_err()
+                {
                     return labels;
                 }
             }
@@ -519,9 +559,9 @@ enum Taken {
     /// Its thread takes no agent reply until a person's message or
     /// Continue, so A holds it.
     Limited,
-    /// A can never take it, as when its sender is gone or its thread was
-    /// stopped.
-    Refused,
+    /// A can never take it, for this reason, as when its sender is gone or
+    /// its thread was stopped.
+    Refused(String),
 }
 
 /// Inserts `held`'s reply under the command gate.
@@ -602,16 +642,9 @@ fn insert_reply(state: &Path, held: &Held) -> Result<Taken, String> {
     });
     match inserted {
         Ok(receipt) => Ok(Taken::Inserted(receipt.message_id.as_str().to_owned())),
+        Err(error) if error.is_reply_limit() => Ok(Taken::Limited),
         Err(error) if error.kind() == crate::StoreErrorKind::InvalidInput => {
-            let thread = ThreadId::new(&held.thread);
-            let limited = main
-                .transaction(|transaction| transaction.thread_control_state(&namespace, &thread))
-                .is_ok_and(|controls| controls.reply_allowance == 0 && !controls.stopped);
-            Ok(if limited {
-                Taken::Limited
-            } else {
-                Taken::Refused
-            })
+            Ok(Taken::Refused(error.message().to_owned()))
         }
         Err(error) => Err(error.to_string()),
     }
