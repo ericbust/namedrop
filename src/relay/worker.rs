@@ -164,7 +164,7 @@ fn round(run: &mut Run<'_>) -> Round {
                 in_reply_to: item.in_reply_to.clone(),
                 text: item.text.clone(),
             }),
-            ..acked(&store, &host_id)
+            ..acked(&store, &run.endpoint.key, &host_id)
         };
         match perform(run.label, &request) {
             Call::Answered(answer) => {
@@ -245,7 +245,7 @@ fn collect(run: &mut Run<'_>, store: &RelayStore, own: &str, host_id: &str) -> b
                 name: "namedrop".to_owned(),
                 host: super::machine_name(),
             },
-            ..acked(store, host_id)
+            ..acked(store, &run.endpoint.key, host_id)
         };
         let Call::Answered(answer) = perform(run.label, &request) else {
             return false;
@@ -266,9 +266,10 @@ fn collect(run: &mut Run<'_>, store: &RelayStore, own: &str, host_id: &str) -> b
     true
 }
 
-/// The parts of a request that ack what A has collected from `host_id`.
-fn acked(store: &RelayStore, host_id: &str) -> Request {
-    let (epoch, ack_through) = store.ack_through(host_id).unwrap_or_default();
+/// The parts of a request that ack what `endpoint` has taken from
+/// `host_id`.
+fn acked(store: &RelayStore, endpoint: &str, host_id: &str) -> Request {
+    let (epoch, ack_through) = store.ack_through(endpoint, host_id).unwrap_or_default();
     Request {
         op: Op::Collect,
         expect_host_id: String::new(),
@@ -290,7 +291,8 @@ fn acked(store: &RelayStore, host_id: &str) -> Request {
 /// so one with a bad field, or one that answers a message this endpoint
 /// did not send to B, is acked and dropped.
 fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, answer: &Answer) {
-    let Ok((epoch, through)) = store.ack_through(host_id) else {
+    let endpoint = &run.endpoint.key;
+    let Ok((epoch, through)) = store.ack_through(endpoint, host_id) else {
         return;
     };
     let through = if epoch == answer.epoch { through } else { 0 };
@@ -298,7 +300,6 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, answer:
         if reply.seq <= through {
             continue;
         }
-        let endpoint = &run.endpoint.key;
         let sent = if trusted(reply) {
             store.sent_from(&reply.re, run.label, host_id, endpoint)
         } else {
@@ -318,6 +319,7 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, answer:
                 thread: "",
                 now_ms: super::now_ms(),
             });
+            let _ = store.advance(endpoint, host_id, &answer.epoch, reply.seq);
             continue;
         };
         let Ok(gate) = crate::runtime_command_guard(run.state, None) else {
@@ -343,6 +345,7 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, answer:
             thread: &thread,
             now_ms: super::now_ms(),
         });
+        let _ = store.advance(endpoint, host_id, &answer.epoch, reply.seq);
         if !message_id.is_empty() {
             (run.wake)(&SpaceId::new(&space));
         }

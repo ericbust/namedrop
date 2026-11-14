@@ -257,13 +257,16 @@ fn a_collected_reply_is_dropped_after_7_days_and_its_cursor_stays() {
                 now_ms: at,
             })
             .unwrap();
+        store
+            .advance("rex:/tmp/a.sock", "host-b", "epoch-1", seq)
+            .unwrap();
     }
     drop(store);
 
     let store = state.open(NOW);
     assert_eq!(count(&store, "SELECT seq FROM collected"), 2);
     assert_eq!(
-        store.ack_through("host-b").unwrap(),
+        store.ack_through("rex:/tmp/a.sock", "host-b").unwrap(),
         ("epoch-1".to_owned(), 2)
     );
 }

@@ -963,7 +963,7 @@ fn a_reply_with_a_bad_field_is_acked_and_dropped_and_a_long_one_cut() {
     );
     assert_eq!(
         crate::relay::tests_support::store(&space.state)
-            .ack_through("host-b")
+            .ack_through(REX, "host-b")
             .unwrap()
             .1,
         8,
@@ -1049,6 +1049,46 @@ fn a_reply_to_another_endpoint_s_message_is_dropped() {
     assert!(collected_bodies(&space).is_empty());
 }
 
+/// Each local endpoint reads its own outbox on B, so another endpoint
+/// that took B's later replies neither makes this one ack them nor skip
+/// its own earlier reply.
+#[test]
+fn each_endpoint_acks_only_what_it_took_from_b() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    rex.answer_with(answer("accepted", None, json!([])));
+    work_for(&space, &rex, 1);
+    let store = crate::relay::tests_support::store(&space.state);
+    store
+        .advance("rex:/tmp/namedrop-relay-other.sock", "host-b", "e1", 5)
+        .unwrap();
+    rex.answer_with(
+        json!({"host_id": "host-b", "can_reply": true, "epoch": "e1", "more": false,
+            "outbox": [{"seq": 2, "re": message, "thread": "t", "from": "bob",
+                "message_id": "b-2", "text": "this endpoint's reply"}]}),
+    );
+    rex.answer_with(
+        json!({"host_id": "host-b", "can_reply": true, "epoch": "e1", "more": false,
+            "outbox": []}),
+    );
+    work_for(&space, &rex, 2);
+    let acks: Vec<_> = rex
+        .requests()
+        .iter()
+        .map(|request| request["ack_through"].clone())
+        .collect();
+    assert_eq!(acks, [json!(0), json!(0), json!(2)]);
+    assert_eq!(collected_bodies(&space), [["this endpoint's reply"]]);
+    assert_eq!(
+        store
+            .ack_through("rex:/tmp/namedrop-relay-other.sock", "host-b")
+            .unwrap(),
+        ("e1".to_owned(), 5),
+        "the other endpoint's cursor is its own"
+    );
+}
+
 /// A B that always has more gives at most 16 pages to one collect.
 #[test]
 fn one_collect_reads_at_most_16_pages() {
@@ -1070,7 +1110,7 @@ fn one_collect_reads_at_most_16_pages() {
     assert_eq!(rex.requests().len(), 1 + 16);
     assert_eq!(
         crate::relay::tests_support::store(&space.state)
-            .ack_through("host-b")
+            .ack_through(REX, "host-b")
             .unwrap()
             .1,
         17
