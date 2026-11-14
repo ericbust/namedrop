@@ -1,6 +1,6 @@
 //! Session bindings: which agent session runs in a Rex block, as the
 //! block's own Namedrop hook recorded it. Rex reports no session, so this file
-//! is the only witness. Only `Place::bind_session` writes one, and a refused
+//! is the only witness. Only `Place::bind` writes one, and a refused
 //! bind leaves its reason for Doctor, because the hook itself stays silent.
 
 use super::wire::{Proc, StatusRecord};
