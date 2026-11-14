@@ -3317,3 +3317,28 @@ fn a_worker_wakes_its_round_s_mail_before_it_hands_over() {
         "the reply's space was woken: {replaced:?}"
     );
 }
+
+/// A new outbox epoch on B whose first reply finds no room still reads
+/// on: the next request names the new epoch, so B pages after what A read
+/// rather than from its start.
+#[test]
+fn a_new_epoch_whose_first_reply_finds_no_room_still_reads_on() {
+    let space = Space::new(REX);
+    let names = rex(&["devbox"]);
+    let first = sent(&space, &names);
+    let second = settled(&space, &names, "second", "accepted", "host-b");
+    names.answer_with(answer("accepted", None, replies(&first, 1, 31)));
+    work_for(&space, &names, 1);
+    assert_eq!(
+        relay_rows(&space, "SELECT COUNT(*) FROM held"),
+        [[json!(20)]]
+    );
+    let big = |seq: i64| format!("{seq} {}", "x".repeat(wire::TEXT_LIMIT - 10));
+    let mut replies: Vec<Reply> = (1..=5)
+        .map(|seq| reply_to(&first, "t", 100 + seq, big(seq)))
+        .collect();
+    replies.push(reply_to(&second, "t2", 106, big(6)));
+    let (rex, _b) = real_b(&replies);
+    work_for(&space, &rex, 1);
+    assert_eq!(bodies_for(&space, &second), [big(6)]);
+}
