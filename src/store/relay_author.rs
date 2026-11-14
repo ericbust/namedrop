@@ -198,6 +198,66 @@ impl StateTransaction<'_> {
         Ok(aliases)
     }
 
+    /// The messages of `session_socket_id` after `rowid` that a relay author
+    /// receives, oldest first.
+    pub(crate) fn relay_recipient_messages(
+        &self,
+        session_socket_id: &str,
+        after: i64,
+    ) -> Result<Vec<ToRelayAuthor>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT m.rowid, m.worktree_id, m.message_id, m.thread_id, m.in_reply_to,
+                m.author_alias_snapshot, m.author_address_id, m.body
+             FROM collaboration_messages m
+             WHERE m.session_socket_id = ?1 AND m.rowid > ?2 AND EXISTS (
+                SELECT 1 FROM message_recipients r WHERE r.session_socket_id = m.session_socket_id
+                  AND r.worktree_id = m.worktree_id AND r.message_id = m.message_id
+                  AND r.address_id LIKE 'relay:%')
+             ORDER BY m.rowid",
+        )?;
+        let rows = statement
+            .query_map(params![session_socket_id, after], |row| {
+                Ok(ToRelayAuthor {
+                    rowid: row.get(0)?,
+                    space: row.get(1)?,
+                    message_id: row.get(2)?,
+                    thread_id: row.get(3)?,
+                    in_reply_to: row.get(4)?,
+                    author_alias: row.get(5)?,
+                    author_address_id: row.get(6)?,
+                    body: row.get(7)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// The latest message in `thread` before `rowid` that a relay author
+    /// wrote.
+    pub(crate) fn latest_relay_authored(
+        &self,
+        namespace: &StateNamespace,
+        thread: &ThreadId,
+        before: i64,
+    ) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT message_id FROM collaboration_messages
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3
+                   AND rowid < ?4 AND author_address_id LIKE 'relay:%'
+                 ORDER BY rowid DESC LIMIT 1",
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    thread.as_str(),
+                    before
+                ],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     /// The space and thread of `message` among the spaces of
     /// `session_socket_id`.
     pub(crate) fn message_place(
@@ -295,4 +355,16 @@ pub(crate) struct Relayed<'a> {
     pub in_reply_to: Option<&'a MessageId>,
     pub recipient: &'a RoutingAddressSnapshot,
     pub text: &'a str,
+}
+
+/// A message one relay author receives.
+pub(crate) struct ToRelayAuthor {
+    pub rowid: i64,
+    pub space: String,
+    pub message_id: String,
+    pub thread_id: String,
+    pub in_reply_to: Option<String>,
+    pub author_alias: String,
+    pub author_address_id: String,
+    pub body: String,
 }

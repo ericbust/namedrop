@@ -446,6 +446,127 @@ fn the_outbox_page_drops_what_was_acked_and_stops_at_256_kib_with_more() {
     );
 }
 
+/// B's `@bob` in block `block:b1`, and a runtime for him.
+fn bob_answers(b: &B, in_reply_to: &str, source: &str) -> Value {
+    let namespace = StateNamespace::for_space(REX, "session:b1");
+    let attribution = MutationAttribution::new(ActorKind::Human, "test", 3);
+    StateStore::open(&b.0)
+        .unwrap()
+        .transaction(|transaction| {
+            if transaction.active_pane_bindings(&namespace)?.is_empty() {
+                transaction.bind_pane(
+                    &namespace,
+                    &crate::PaneBindingId::new("binding-bob"),
+                    &PaneAddressId::new("address-session:b1-bob"),
+                    "block:b1",
+                    &attribution,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let mux = crate::mux::fake::FakeMux::world()
+        .space("session:b1")
+        .checkout("/repo-b")
+        .pane("block:b1")
+        .tab("window:b1")
+        .session("session-bob")
+        .idle()
+        .build();
+    let ids = crate::ProcessIds::default();
+    let runtime = crate::LifecycleRuntime {
+        state_directory: &b.0,
+        home_directory: None,
+        agent_config: Default::default(),
+        cwd: Path::new("/repo-b"),
+        workspace_id: Some("session:b1"),
+        current_pane_id: Some("block:b1"),
+        session_socket_id: REX,
+        mux: &mux,
+        clock: &crate::SystemClock,
+        ids: &ids,
+    };
+    crate::execute_message_operation(
+        "reply",
+        json!({"request_id": format!("reply-{}", super::super::now_ms()), "in_reply_to": in_reply_to, "source": source}),
+        &runtime,
+    )
+    .unwrap()
+}
+
+/// On B, an answer to a relayed message becomes one kept reply for A that
+/// names A's message and thread, and a long one is cut with the notice.
+#[test]
+fn an_answer_to_a_relayed_message_is_kept_once_for_the_sender_s_pull() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "please answer"));
+    let relayed = b.rows(
+        "namedrop.sqlite3",
+        "SELECT message_id FROM collaboration_messages",
+    )[0][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let first = bob_answers(&b, &relayed, "@alice@laptop short answer");
+    let long = "w".repeat(70 * 1024);
+    let second = bob_answers(&b, &relayed, &format!("@alice@laptop {long}"));
+    let endpoint = Endpoint::parse(REX);
+    let mut started = Vec::new();
+    for _ in 0..2 {
+        super::super::capture::capture(&b.0, &endpoint, &mut |label| {
+            started.push(label.to_owned())
+        })
+        .unwrap();
+    }
+    assert!(started.is_empty(), "B starts no worker");
+    let kept = b.rows(
+        "relay.sqlite3",
+        "SELECT host_id, re, thread, sender, message_id, text FROM outbox ORDER BY seq",
+    );
+    assert_eq!(kept.len(), 2);
+    assert_eq!(
+        kept[0],
+        [
+            json!("host-a"),
+            json!("m1"),
+            json!("t1"),
+            json!("bob"),
+            first["message_id"].clone(),
+            json!("short answer"),
+        ]
+    );
+    assert_eq!(kept[1][4], second["message_id"]);
+    let text = kept[1][5].as_str().unwrap();
+    assert!(text.len() <= 60 * 1024);
+    assert!(text.starts_with("www"));
+    assert!(text.ends_with(super::super::capture::CUT_NOTICE));
+    let page = b.call(&json!({
+        "op": "collect", "expect_host_id": HOST_B,
+        "from": {"host_id": "host-a", "name": "alice", "host": "laptop"}, "ack_through": 0,
+    }));
+    assert_eq!(page.outbox.len(), 2);
+}
+
+#[test]
+fn expired_replies_are_counted_per_remote_sender() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "hi"));
+    let relay = Connection::open(b.0.join("relay.sqlite3")).unwrap();
+    for (host, message) in [("host-a", "b1"), ("host-a", "b2"), ("host-c", "b3")] {
+        relay
+            .execute(
+                "INSERT INTO outbox (host_id, re, thread, sender, message_id, text, created_at_ms)
+                 VALUES (?1, 'm1', 't1', 'bob', ?2, 'old', 0)",
+                params![host, message],
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        super::super::expired_replies(&b.0),
+        [("alice@laptop".to_owned(), 2), ("host-c".to_owned(), 1)]
+    );
+}
+
 /// B's agent answers a relayed message by naming its sender as the pointer
 /// does, `@alice@laptop`, and the answer reaches the relay author, whose
 /// delivery settles at insert.
@@ -522,4 +643,46 @@ fn a_reply_to_a_relayed_message_reaches_its_relay_author_and_settles() {
         answer,
         [["here it is", "alice@laptop", "settled"].map(|v| json!(v))]
     );
+}
+
+/// An answer that names an earlier relayed message answers that one, not
+/// the latest.
+#[test]
+fn an_answer_names_the_relayed_message_its_in_reply_to_names() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "first"));
+    b.call(&deliver("m2", "bob", "t1", "second"));
+    let relayed = b.rows(
+        "namedrop.sqlite3",
+        "SELECT message_id FROM collaboration_messages ORDER BY rowid",
+    );
+    bob_answers(
+        &b,
+        relayed[0][0].as_str().unwrap(),
+        "@alice@laptop to the first",
+    );
+    bob_answers(
+        &b,
+        relayed[1][0].as_str().unwrap(),
+        "@alice@laptop to the second",
+    );
+    super::super::capture::capture(&b.0, &Endpoint::parse(REX), &mut |_| {}).unwrap();
+    assert_eq!(
+        b.rows("relay.sqlite3", "SELECT re, text FROM outbox ORDER BY seq"),
+        [
+            [json!("m1"), json!("to the first")],
+            [json!("m2"), json!("to the second")],
+        ]
+    );
+}
+
+/// Outside Rex the relay never runs, so a drain there opens no relay
+/// database.
+#[test]
+fn a_drain_outside_rex_captures_nothing() {
+    let b = B::new();
+    super::super::capture_after_drain(&b.0, "/tmp/namedrop-relay-herdr.sock");
+    assert!(!b.0.join("relay.sqlite3").exists());
+    super::super::capture_after_drain(&b.0, REX);
+    assert!(b.0.join("relay.sqlite3").exists());
 }

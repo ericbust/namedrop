@@ -439,6 +439,19 @@ where
     C: Clock,
     I: IdGenerator,
 {
+    let drained = drain_mailboxes_here(runtime);
+    crate::relay::capture_after_drain(runtime.state_directory, runtime.session_socket_id);
+    drained
+}
+
+fn drain_mailboxes_here<M, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+) -> Result<DrainReport, String>
+where
+    M: crate::mux::Mux,
+    C: Clock,
+    I: IdGenerator,
+{
     #[cfg(test)]
     crate::work_counters::drain();
     let first_discovery = discover(runtime)?;

@@ -18,7 +18,9 @@ pub(crate) const INBOUND_LIFETIME_MS: i64 = OUTBOX_LIFETIME_MS;
 
 /// A holds `peers`, `outbound`, and `collected`. B holds `inbound`,
 /// `outbox`, `remote_threads`, and the tally of the outbox items that
-/// expired, which Doctor reports after the items themselves are gone.
+/// expired, which Doctor reports after the items themselves are gone. Both
+/// hold `capture`, the last main-database message each endpoint's capture
+/// read.
 const SCHEMA: &str = "
 CREATE TABLE peers (
     label TEXT PRIMARY KEY,
@@ -92,6 +94,10 @@ CREATE TABLE outbox_expired (
     host_id TEXT PRIMARY KEY,
     count INTEGER NOT NULL
 );
+CREATE TABLE capture (
+    endpoint TEXT PRIMARY KEY,
+    rowid INTEGER NOT NULL
+);
 ";
 
 pub(crate) struct RelayStore {
@@ -109,6 +115,13 @@ pub(crate) struct Queued {
     pub text: String,
     /// The `host_id` the item was first sent to.
     pub host_id: Option<String>,
+}
+
+/// A reply A collected, as a later answer from A finds it.
+pub(crate) struct CollectedReply {
+    pub label: String,
+    pub remote_message_id: String,
+    pub remote_alias: String,
 }
 
 /// How a queued item ends.
@@ -215,6 +228,142 @@ impl RelayStore {
             ],
         )?;
         Ok(())
+    }
+
+    /// The rowid of the last main-database message capture read for
+    /// `endpoint`.
+    pub(crate) fn capture_cursor(&self, endpoint: &str) -> Result<i64, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT rowid FROM capture WHERE endpoint = ?1",
+                params![endpoint],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
+    }
+
+    pub(crate) fn set_capture_cursor(&self, endpoint: &str, rowid: i64) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO capture (endpoint, rowid) VALUES (?1, ?2)
+             ON CONFLICT (endpoint) DO UPDATE SET rowid = MAX(rowid, excluded.rowid)",
+            params![endpoint, rowid],
+        )?;
+        Ok(())
+    }
+
+    /// A's thread and `host_id` for B's `local_thread` in `space`.
+    pub(crate) fn mapped_thread(
+        &self,
+        endpoint: &str,
+        space: &str,
+        local_thread: &str,
+    ) -> Result<Option<(String, String)>, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT host_id, thread FROM remote_threads
+                 WHERE endpoint = ?1 AND space = ?2 AND local_thread = ?3 LIMIT 1",
+                params![endpoint, space, local_thread],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// A's message id for the item B stored as `local_message_id`, when it
+    /// came from `host_id`.
+    pub(crate) fn relayed_as(
+        &self,
+        host_id: &str,
+        local_message_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT message_id FROM inbound WHERE host_id = ?1 AND local_message_id = ?2",
+                params![host_id, local_message_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Keeps a reply for `host_id`, once per B message.
+    pub(crate) fn keep_reply(
+        &self,
+        host_id: &str,
+        reply: &Reply,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO outbox (host_id, re, thread, sender, message_id, text,
+                created_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                host_id,
+                reply.re,
+                reply.thread,
+                reply.from,
+                reply.message_id,
+                reply.text,
+                now_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The collected reply A stored as `message_id`, or else the latest one
+    /// in A's `thread` of `space`.
+    pub(crate) fn collected_answer(
+        &self,
+        endpoint: &str,
+        space: &str,
+        thread: &str,
+        message_id: Option<&str>,
+    ) -> Result<Option<CollectedReply>, StoreError> {
+        let read = |row: &rusqlite::Row<'_>| {
+            Ok(CollectedReply {
+                label: row.get(0)?,
+                remote_message_id: row.get(1)?,
+                remote_alias: row.get(2)?,
+            })
+        };
+        if let Some(message_id) = message_id
+            && let Some(collected) = self
+                .connection
+                .query_row(
+                    "SELECT label, remote_message_id, remote_alias FROM collected
+                     WHERE endpoint = ?1 AND space = ?2 AND message_id = ?3",
+                    params![endpoint, space, message_id],
+                    read,
+                )
+                .optional()?
+        {
+            return Ok(Some(collected));
+        }
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT label, remote_message_id, remote_alias FROM collected
+                 WHERE endpoint = ?1 AND space = ?2 AND thread = ?3 AND message_id <> ''
+                 ORDER BY created_at_ms DESC, seq DESC LIMIT 1",
+                params![endpoint, space, thread],
+                read,
+            )
+            .optional()?)
+    }
+
+    /// Each remote sender whose replies expired on B, by its display name,
+    /// with how many expired.
+    pub(crate) fn expired_replies(&self) -> Result<Vec<(String, i64)>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT COALESCE((SELECT sender || '@' || display_host FROM remote_threads t
+                    WHERE t.host_id = e.host_id LIMIT 1), e.host_id), e.count
+             FROM outbox_expired e WHERE e.count > 0 ORDER BY 1",
+        )?;
+        let expired = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        Ok(expired)
     }
 
     /// The items queued for `label`, oldest first.

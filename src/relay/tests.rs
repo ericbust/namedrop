@@ -214,8 +214,35 @@ impl Space {
     }
 
     pub(crate) fn send(&self, request: &str, source: &str) -> Result<serde_json::Value, String> {
+        self.operate(
+            "send",
+            serde_json::json!({"request_id": request, "source": source}),
+        )
+    }
+
+    pub(crate) fn reply(
+        &self,
+        request: &str,
+        in_reply_to: &str,
+        source: &str,
+    ) -> Result<serde_json::Value, String> {
+        self.operate(
+            "reply",
+            serde_json::json!({"request_id": request, "in_reply_to": in_reply_to, "source": source}),
+        )
+    }
+
+    /// Drains the space's mailboxes as its status worker does.
+    pub(crate) fn drain(&self) {
         let ids = ProcessIds::default();
-        let runtime = crate::LifecycleRuntime {
+        crate::drain_mailboxes(&self.runtime(&ids)).unwrap();
+    }
+
+    fn runtime<'a>(
+        &'a self,
+        ids: &'a ProcessIds,
+    ) -> crate::LifecycleRuntime<'a, FakeMux, SystemClock, ProcessIds> {
+        crate::LifecycleRuntime {
             state_directory: &self.state,
             home_directory: None,
             agent_config: Default::default(),
@@ -225,13 +252,17 @@ impl Space {
             session_socket_id: self.socket,
             mux: &self.mux,
             clock: &SystemClock,
-            ids: &ids,
-        };
-        crate::execute_message_operation(
-            "send",
-            serde_json::json!({"request_id": request, "source": source}),
-            &runtime,
-        )
+            ids,
+        }
+    }
+
+    fn operate(
+        &self,
+        operation: &str,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let ids = ProcessIds::default();
+        crate::execute_message_operation(operation, input, &self.runtime(&ids))
     }
 
     pub(crate) fn outbound(&self) -> Vec<Vec<String>> {

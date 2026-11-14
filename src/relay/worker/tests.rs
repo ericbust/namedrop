@@ -508,3 +508,86 @@ fn the_worker_command_names_the_endpoint() {
         ["relay", "worker", "--host", "devbox", "--endpoint", REX]
     );
 }
+
+/// A's agent answers a collected reply by naming its B author, and capture
+/// queues the answer to that B agent, in reply to the B message, once.
+#[test]
+fn an_answer_to_a_collected_reply_is_queued_once_to_its_b_author() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    let reply = json!([{"seq": 1, "re": message, "thread": "t", "from": "bob",
+        "message_id": "b-message-1", "text": "pong"}]);
+    rex.answer_with(answer("accepted", None, reply));
+    work_for(&space, &rex, 1);
+    let collected = space.main(&format!(
+        "SELECT message_id FROM collaboration_messages WHERE in_reply_to = '{message}'"
+    ))[0][0]
+        .clone();
+    let long = "z".repeat(70 * 1024);
+    let answered = rex
+        .run(|| space.reply("reply-1", &collected, &format!("@bob@devbox {long}")))
+        .unwrap();
+    assert_eq!(answered["recipients"][0]["alias"], "bob@devbox");
+    let endpoint = Endpoint::parse(REX);
+    let mut started = Vec::new();
+    for _ in 0..2 {
+        crate::relay::capture::capture(&space.state, &endpoint, &mut |label| {
+            started.push(label.to_owned());
+        })
+        .unwrap();
+    }
+    assert_eq!(started, ["devbox"]);
+    let queued: Vec<(String, String, Option<String>, String)> =
+        Connection::open(space.state.join("relay.sqlite3"))
+            .unwrap()
+            .prepare(
+                "SELECT message_id, recipient, in_reply_to, text FROM outbound
+                 WHERE state = 'queued'",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].0, answered["message_id"].as_str().unwrap());
+    assert_eq!(queued[0].1, "bob");
+    assert_eq!(queued[0].2.as_deref(), Some("b-message-1"));
+    assert!(queued[0].3.ends_with(crate::relay::capture::CUT_NOTICE));
+    assert!(queued[0].3.starts_with("zzz"));
+    assert!(
+        super::super::wire::deliver_size("alice", "bob", &queued[0].3)
+            <= super::super::wire::REQUEST_LIMIT
+    );
+}
+
+/// The drain a reply wakes captures it, so the answer is queued with no
+/// other step.
+#[test]
+fn a_drain_queues_an_answer_to_a_collected_reply() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    let reply = json!([{"seq": 1, "re": message, "thread": "t", "from": "bob",
+        "message_id": "b-message-1", "text": "pong"}]);
+    rex.answer_with(answer("accepted", None, reply));
+    work_for(&space, &rex, 1);
+    let collected = space.main(&format!(
+        "SELECT message_id FROM collaboration_messages WHERE in_reply_to = '{message}'"
+    ))[0][0]
+        .clone();
+    rex.run(|| space.reply("reply-1", &collected, "@bob@devbox ack"))
+        .unwrap();
+    assert_eq!(space.outbound().len(), 1);
+    space.drain();
+    let outbound = space.outbound();
+    assert_eq!(outbound.len(), 2);
+    assert!(
+        outbound
+            .iter()
+            .any(|row| row[7] == "b-message-1" && row[8] == "ack")
+    );
+}

@@ -3,6 +3,7 @@
 //! it there. Replies come back by this side's pull.
 
 mod accept;
+mod capture;
 pub(crate) mod receive;
 mod rex;
 mod store;
@@ -200,6 +201,30 @@ pub(crate) fn start_queued_workers(state: &Path, endpoint: &crate::mux::Endpoint
             start_worker(state, endpoint, &label);
         }
     }
+}
+
+/// Runs the relay's capture after a drain in a Rex home: each new message
+/// to a relay author becomes B's kept reply or A's queued answer, and each
+/// label with a new item gets its worker.
+pub(crate) fn capture_after_drain(state: &Path, session_socket_id: &str) {
+    let endpoint = crate::mux::Endpoint::parse(session_socket_id);
+    if endpoint.kind != crate::mux::MuxKind::Rex {
+        return;
+    }
+    let _ = capture::capture(state, &endpoint, &mut |label| {
+        start_worker(state, &endpoint, label);
+    });
+}
+
+/// Each remote sender whose replies expired here before it collected
+/// them, with how many, for Doctor. Nothing when the relay never ran.
+pub(crate) fn expired_replies(state: &Path) -> Vec<(String, i64)> {
+    if !state.join("relay.sqlite3").is_file() {
+        return Vec::new();
+    }
+    RelayStore::open(state, now_ms())
+        .and_then(|store| store.expired_replies())
+        .unwrap_or_default()
 }
 
 /// The hosts a `send` may name a remote recipient on.
