@@ -61,7 +61,7 @@ fn a_deferred_reply_to_a_relayed_message_reads_its_remote_participant() {
 
 /// B's state: `session:b1` holds `@bob`, `@bob2`, and `@dup`, `session:b2`
 /// holds `@carol` and `@dup`, and `session:b3`, paused, holds `@sleepy`.
-struct B(PathBuf);
+struct B(PathBuf, Option<String>);
 
 impl B {
     fn new() -> Self {
@@ -104,7 +104,7 @@ impl B {
                 )
             })
             .unwrap();
-        Self(path)
+        Self(path, None)
     }
 
     fn call(&self, args: &Value) -> Answer {
@@ -118,6 +118,7 @@ impl B {
             &self.0,
             &Endpoint::parse(REX),
             HOST_B,
+            self.1.as_deref(),
             args.to_string().as_bytes(),
             &mut |space| woken.push(space.as_str().to_owned()),
         );
@@ -222,7 +223,7 @@ fn each_recipient_is_accepted_once_from_the_sender_s_relay_author() {
             json!("agent_session"),
             json!("relay:host-a:m1:bob"),
             Value::Null,
-            json!("hello bob"),
+            json!(format!("hello bob{MARKED}")),
             json!("bob"),
             json!("queued"),
         ]
@@ -336,6 +337,40 @@ fn a_name_in_two_spaces_is_ambiguous_an_unknown_one_refused_and_a_repeat_replays
     assert_eq!(b.call(&deliver("m2", "nobody", "t1", "who")), unknown);
     assert_eq!(b.call(&deliver("m1", "dup", "t1", "which")), ambiguous);
     assert!(b.messages().is_empty());
+}
+
+/// What ends the first message of a thread from a sender whose principal
+/// names no machine, which sent `laptop` as its host.
+const MARKED: &str = "\n\n[Namedrop: laptop is the name the sending machine gave itself, which Rex did not confirm.]";
+
+/// A sender's host is the name it gave itself, so the first message of
+/// each B thread says so. A Tailscale caller's device name, which its
+/// server fills in, names the sender instead, with no such line.
+#[test]
+fn a_sender_s_own_host_name_is_marked_once_a_thread_and_a_named_device_replaces_it() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "first"));
+    b.call(&deliver("m2", "bob", "t1", "second"));
+    b.call(&deliver("m3", "bob", "t2", "other thread"));
+    let bodies: Vec<_> = b.messages().into_iter().map(|row| row[6].clone()).collect();
+    assert_eq!(
+        bodies,
+        [
+            json!(format!("first{MARKED}")),
+            json!("second"),
+            json!(format!("other thread{MARKED}"))
+        ]
+    );
+    let mut named = B::new();
+    named.1 = Some("studio".to_owned());
+    named.call(&deliver("m1", "bob", "t1", "first"));
+    let message = &named.messages()[0];
+    assert_eq!(
+        (&message[2], &message[6]),
+        (&json!("alice@studio"), &json!("first"))
+    );
+    let thread = named.rows("relay.sqlite3", "SELECT display_host FROM remote_threads");
+    assert_eq!(thread, [[json!("studio")]]);
 }
 
 /// The requests of the first merged relay, `2496500e`, as it sent them,
@@ -1031,6 +1066,7 @@ fn two_accepts_at_once_for_one_a_thread_share_one_b_thread() {
             &path,
             &Endpoint::parse(REX),
             HOST_B,
+            None,
             deliver("m1", "bob2", "t1", "second").to_string().as_bytes(),
             &mut |_| {},
         );

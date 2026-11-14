@@ -26,11 +26,13 @@ struct Held {
 }
 
 /// Decides the call `input` holds for the server `host_id` behind
-/// `endpoint`, and calls `wake` for the space of an item it accepts.
+/// `endpoint`, from the machine `caller_host` when the caller's principal
+/// names one, and calls `wake` for the space of an item it accepts.
 pub(crate) fn accept(
     state: &Path,
     endpoint: &Endpoint,
     host_id: &str,
+    caller_host: Option<&str>,
     input: &[u8],
     wake: &mut dyn FnMut(&crate::SpaceId),
 ) -> Answer {
@@ -68,7 +70,18 @@ pub(crate) fn accept(
     };
     let result = match (&request.op, &request.item) {
         (Op::Deliver, Some(item)) => {
-            match deliver(state, endpoint, &store, &request, item, now_ms, wake) {
+            match deliver(
+                state,
+                endpoint,
+                &store,
+                &Caller {
+                    request: &request,
+                    host: caller_host,
+                },
+                item,
+                now_ms,
+                wake,
+            ) {
                 Ok(outcome) => Some(outcome),
                 Err(error) => return retry(host_id, Some(item), &error),
             }
@@ -181,15 +194,28 @@ fn validate(request: &Request) -> Result<(), &'static str> {
 /// The item's outcome: the stored one for a known key, or a new one stored
 /// with its key. A refusal that depends on B's state is stored too, so a
 /// retry never changes the answer.
+/// A call's request, and the caller's machine as its principal names it.
+struct Caller<'a> {
+    request: &'a Request,
+    host: Option<&'a str>,
+}
+
+/// The line that ends the first message of each thread from a sender whose
+/// principal names no machine, after the host that sender named.
+const SELF_NAMED: &str =
+    " is the name the sending machine gave itself, which Rex did not confirm.]";
+
 fn deliver(
     state: &Path,
     endpoint: &Endpoint,
     store: &RelayStore,
-    request: &Request,
+    caller: &Caller<'_>,
     item: &Item,
     now_ms: i64,
     wake: &mut dyn FnMut(&crate::SpaceId),
 ) -> Result<Outcome, String> {
+    let request = caller.request;
+    let display_host = caller.host.unwrap_or(&request.from.host);
     let key = InboundKey {
         host_id: &request.from.host_id,
         message_id: &item.id,
@@ -226,10 +252,11 @@ fn deliver(
         endpoint: &endpoint.key,
         space: space.as_str(),
         sender: &request.from.name,
-        display_host: &request.from.host,
+        display_host,
     };
     let ids = crate::ProcessIds::default();
     let in_reply_to = item.in_reply_to.as_deref().map(MessageId::new);
+    let mut continued = true;
     let local_thread = match &in_reply_to {
         Some(message) => main
             .transaction(|transaction| transaction.message_place(&endpoint.key, message))
@@ -240,13 +267,21 @@ fn deliver(
             .map_err(|error| error.to_string())?
             .map(ThreadId::new),
     }
-    .unwrap_or_else(|| ThreadId::new(ids.next_id("thread")));
+    .unwrap_or_else(|| {
+        continued = false;
+        ThreadId::new(ids.next_id("thread"))
+    });
+    let text = if continued || caller.host.is_some() {
+        item.text.clone()
+    } else {
+        format!("{}\n\n[Namedrop: {display_host}{SELF_NAMED}", item.text)
+    };
     #[cfg(test)]
     tests::thread_chosen();
     let author = RelayAuthor::new(
         RelayOrigin::Host(&request.from.host_id),
         &request.from.name,
-        format!("{}@{}", request.from.name, request.from.host),
+        format!("{}@{display_host}", request.from.name),
     );
     let request_id = format!("relay:{}:{}:{}", request.from.host_id, item.id, item.to);
     let attribution = MutationAttribution::new(
@@ -266,7 +301,7 @@ fn deliver(
                 delivery_id: DeliveryId::new(ids.next_id("delivery")),
                 in_reply_to: in_reply_to.as_ref(),
                 recipient: &recipient,
-                text: &item.text,
+                text: &text,
                 notice: false,
             },
             &attribution,

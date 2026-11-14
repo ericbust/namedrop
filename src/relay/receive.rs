@@ -125,6 +125,9 @@ impl Receiver {
             return answer(Status::Refused, "wrong_host".to_owned());
         }
         let started = (self.start)(&host_id).and_then(|mut command| {
+            if let Some(host) = caller_host(&perform.principal) {
+                command.args(["--caller-host", host]);
+            }
             command
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -254,6 +257,15 @@ fn answer(host_id: &str, item: &(String, String), status: Status, reason: &str) 
         lost: Vec::new(),
     })
     .unwrap_or(Value::Null)
+}
+
+/// The caller's machine, when its principal names one: the device of a
+/// Tailscale principal, which the server fills in. A peer principal, as
+/// through an `ssh -L` forward, names only a local uid and pid.
+fn caller_host(principal: &Value) -> Option<&str> {
+    principal["node"]
+        .as_str()
+        .filter(|node| principal["kind"] == "tailscale" && super::valid_label(node))
 }
 
 /// Whether B relays for `principal`: a peer with B's own uid, a tailnet

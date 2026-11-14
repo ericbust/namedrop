@@ -53,18 +53,21 @@ pub(crate) fn machine_name() -> String {
 }
 
 /// `namedrop relay accept`: one `namedrop.relay` call B's bridge admitted
-/// for the server `host_id` behind `endpoint`, read from `input`. Its
-/// answer is the call's result.
+/// for the server `host_id` behind `endpoint`, read from `input`, from the
+/// machine `caller_host` when the caller's principal names one. Its answer
+/// is the call's result.
 pub fn accept(
     state: &Path,
     endpoint: &crate::mux::Endpoint,
     host_id: &str,
+    caller_host: Option<&str>,
     input: &[u8],
 ) -> String {
     serde_json::to_string(&accept::accept(
         state,
         endpoint,
         host_id,
+        caller_host,
         input,
         &mut |space| {
             wake(state, endpoint, space);

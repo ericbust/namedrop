@@ -3349,6 +3349,7 @@ fn serve_as_b() {
         &directory.join("b"),
         &Endpoint::parse("rex:/tmp/namedrop-relay-b.sock"),
         "host-b",
+        None,
         perform["args"].to_string().as_bytes(),
         &mut |_| {},
     );

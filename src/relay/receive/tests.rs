@@ -293,6 +293,31 @@ fn finishing_waits_for_every_accept_still_running() {
     assert!(!receiver.busy());
 }
 
+/// Only a Tailscale principal names the caller's machine, by its device,
+/// and only a device name that is a label is passed on.
+#[test]
+fn only_a_tailscale_principal_names_the_caller_s_host() {
+    for (principal, host) in [
+        (
+            json!({"kind": "tailscale", "transport": "tailscale", "display": "eric@example.com",
+                "node": "studio", "login_name": "eric@example.com"}),
+            Some("studio"),
+        ),
+        (
+            json!({"kind": "peer", "transport": "unix", "display": "uid 501", "uid": 501,
+                "gid": 20, "pid": 66537}),
+            None,
+        ),
+        (
+            json!({"kind": "tailscale", "node": "studio.tail1234.ts.net"}),
+            None,
+        ),
+        (json!({"kind": "anonymous", "node": "studio"}), None),
+    ] {
+        assert_eq!(caller_host(&principal), host, "{principal}");
+    }
+}
+
 /// The accept names its endpoint as a flag, which is where `relay accept`
 /// reads it, and gets the bridge's state directory.
 #[test]
