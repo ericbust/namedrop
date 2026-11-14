@@ -91,7 +91,7 @@ CREATE TABLE remote_threads (
 );
 CREATE INDEX remote_threads_by_local ON remote_threads (endpoint, space, local_thread);
 CREATE TABLE outbox_expired (
-    host_id TEXT PRIMARY KEY,
+    sender TEXT PRIMARY KEY,
     count INTEGER NOT NULL
 );
 CREATE TABLE capture (
@@ -115,13 +115,6 @@ pub(crate) struct Queued {
     pub text: String,
     /// The `host_id` the item was first sent to.
     pub host_id: Option<String>,
-}
-
-/// A reply A collected, as a later answer from A finds it.
-pub(crate) struct CollectedReply {
-    pub label: String,
-    pub remote_message_id: String,
-    pub remote_alias: String,
 }
 
 /// How a queued item ends.
@@ -311,55 +304,49 @@ impl RelayStore {
         Ok(())
     }
 
-    /// The collected reply A stored as `message_id`, or else the latest one
-    /// in A's `thread` of `space`.
-    pub(crate) fn collected_answer(
+    /// B's id for the reply of `alias` on `label` that an answer in A's
+    /// `thread` of `space` goes back to: the one A stored as `in_reply_to`
+    /// when it is that agent's, or else that agent's latest one there.
+    pub(crate) fn answered_reply(
         &self,
         endpoint: &str,
         space: &str,
         thread: &str,
-        message_id: Option<&str>,
-    ) -> Result<Option<CollectedReply>, StoreError> {
-        let read = |row: &rusqlite::Row<'_>| {
-            Ok(CollectedReply {
-                label: row.get(0)?,
-                remote_message_id: row.get(1)?,
-                remote_alias: row.get(2)?,
-            })
-        };
-        if let Some(message_id) = message_id
-            && let Some(collected) = self
-                .connection
-                .query_row(
-                    "SELECT label, remote_message_id, remote_alias FROM collected
-                     WHERE endpoint = ?1 AND space = ?2 AND message_id = ?3",
-                    params![endpoint, space, message_id],
-                    read,
-                )
-                .optional()?
-        {
-            return Ok(Some(collected));
-        }
+        in_reply_to: Option<&str>,
+        label: &str,
+        alias: &str,
+    ) -> Result<Option<String>, StoreError> {
         Ok(self
             .connection
             .query_row(
-                "SELECT label, remote_message_id, remote_alias FROM collected
-                 WHERE endpoint = ?1 AND space = ?2 AND thread = ?3 AND message_id <> ''
-                 ORDER BY created_at_ms DESC, seq DESC LIMIT 1",
-                params![endpoint, space, thread],
-                read,
+                "SELECT remote_message_id FROM collected
+                 WHERE endpoint = ?1 AND space = ?2 AND thread = ?3 AND label = ?5
+                   AND remote_alias = ?6 AND message_id <> ''
+                 ORDER BY message_id = ?4 DESC, created_at_ms DESC, seq DESC LIMIT 1",
+                params![endpoint, space, thread, in_reply_to, label, alias],
+                |row| row.get(0),
             )
             .optional()?)
+    }
+
+    /// Counts a reply to the remote sender `display` that B could not keep,
+    /// because the A message it answers is no longer known, with the replies
+    /// that expired.
+    pub(crate) fn count_unrouted(&self, display: &str) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO outbox_expired (sender, count) VALUES (?1, 1)
+             ON CONFLICT (sender) DO UPDATE SET count = count + 1",
+            params![display],
+        )?;
+        Ok(())
     }
 
     /// Each remote sender whose replies expired on B, by its display name,
     /// with how many expired.
     pub(crate) fn expired_replies(&self) -> Result<Vec<(String, i64)>, StoreError> {
-        let mut statement = self.connection.prepare(
-            "SELECT COALESCE((SELECT sender || '@' || display_host FROM remote_threads t
-                    WHERE t.host_id = e.host_id LIMIT 1), e.host_id), e.count
-             FROM outbox_expired e WHERE e.count > 0 ORDER BY 1",
-        )?;
+        let mut statement = self
+            .connection
+            .prepare("SELECT sender, count FROM outbox_expired WHERE count > 0 ORDER BY sender")?;
         let expired = statement
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<Result<_, _>>()?;
@@ -675,9 +662,11 @@ impl RelayStore {
         )?;
         let outbox_limit = now_ms - OUTBOX_LIFETIME_MS;
         transaction.execute(
-            "INSERT INTO outbox_expired (host_id, count)
-             SELECT host_id, COUNT(*) FROM outbox WHERE created_at_ms <= ?1 GROUP BY host_id
-             ON CONFLICT (host_id) DO UPDATE SET count = count + excluded.count",
+            "INSERT INTO outbox_expired (sender, count)
+             SELECT COALESCE((SELECT sender || '@' || display_host FROM remote_threads t
+                    WHERE t.host_id = o.host_id LIMIT 1), o.host_id), COUNT(*)
+             FROM outbox o WHERE created_at_ms <= ?1 GROUP BY 1
+             ON CONFLICT (sender) DO UPDATE SET count = count + excluded.count",
             params![outbox_limit],
         )?;
         transaction.execute(

@@ -199,7 +199,7 @@ impl StateTransaction<'_> {
     }
 
     /// The messages of `session_socket_id` after `rowid` that a relay author
-    /// receives, oldest first.
+    /// receives, oldest first, each with every relay author it addresses.
     pub(crate) fn relay_recipient_messages(
         &self,
         session_socket_id: &str,
@@ -215,7 +215,7 @@ impl StateTransaction<'_> {
                   AND r.address_id LIKE 'relay:%')
              ORDER BY m.rowid",
         )?;
-        let rows = statement
+        let mut rows = statement
             .query_map(params![session_socket_id, after], |row| {
                 Ok(ToRelayAuthor {
                     rowid: row.get(0)?,
@@ -226,32 +226,57 @@ impl StateTransaction<'_> {
                     author_alias: row.get(5)?,
                     author_address_id: row.get(6)?,
                     body: row.get(7)?,
+                    relay_recipients: Vec::new(),
                 })
             })?
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut recipients = self.transaction.prepare(
+            "SELECT address_id, alias_snapshot FROM message_recipients
+             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND message_id = ?3
+               AND address_id LIKE 'relay:%'
+             ORDER BY recipient_order",
+        )?;
+        for row in &mut rows {
+            row.relay_recipients = recipients
+                .query_map(
+                    params![session_socket_id, row.space, row.message_id],
+                    |recipient| {
+                        Ok(RelayRecipient {
+                            address_id: recipient.get(0)?,
+                            display: recipient.get(1)?,
+                        })
+                    },
+                )?
+                .collect::<Result<_, _>>()?;
+        }
         Ok(rows)
     }
 
-    /// The latest message in `thread` before `rowid` that a relay author
-    /// wrote.
-    pub(crate) fn latest_relay_authored(
+    /// What a message to `author` in `thread`, before `rowid`, answers of
+    /// that author's: `preferred` when `author` wrote it there, and
+    /// otherwise the latest message `author` wrote there.
+    pub(crate) fn relay_answered(
         &self,
         namespace: &StateNamespace,
         thread: &ThreadId,
         before: i64,
+        author: &str,
+        preferred: Option<&str>,
     ) -> Result<Option<String>, StoreError> {
         Ok(self
             .transaction
             .query_row(
                 "SELECT message_id FROM collaboration_messages
                  WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3
-                   AND rowid < ?4 AND author_address_id LIKE 'relay:%'
-                 ORDER BY rowid DESC LIMIT 1",
+                   AND rowid < ?4 AND author_address_id = ?5
+                 ORDER BY message_id = ?6 DESC, rowid DESC LIMIT 1",
                 params![
                     namespace.session_socket_id,
                     namespace.space_id.as_str(),
                     thread.as_str(),
-                    before
+                    before,
+                    author,
+                    preferred
                 ],
                 |row| row.get(0),
             )
@@ -367,4 +392,11 @@ pub(crate) struct ToRelayAuthor {
     pub author_alias: String,
     pub author_address_id: String,
     pub body: String,
+    pub relay_recipients: Vec<RelayRecipient>,
+}
+
+/// A relay author a message addresses, and its display alias.
+pub(crate) struct RelayRecipient {
+    pub address_id: String,
+    pub display: String,
 }

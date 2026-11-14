@@ -735,3 +735,63 @@ fn a_terminal_recipient_is_refused_unless_b_allows_terminals() {
         [json!("bob2"), json!("bob")]
     );
 }
+
+/// When one A thread reaches B from two senders, an answer to one of them
+/// goes back for the A message of the sender it names, not for the latest
+/// relayed message.
+#[test]
+fn an_answer_goes_back_for_the_relay_author_it_names() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "from alice"));
+    let mut dan = deliver("m2", "bob", "t1", "from dan");
+    dan["from"]["name"] = json!("dan");
+    assert_eq!(outcome(&b.call(&dan)).0, Status::Accepted);
+    let relayed = b.rows(
+        "namedrop.sqlite3",
+        "SELECT message_id FROM collaboration_messages ORDER BY rowid",
+    );
+    let first = bob_answers(
+        &b,
+        relayed[0][0].as_str().unwrap(),
+        "@alice@laptop to alice",
+    );
+    bob_answers(
+        &b,
+        first["message_id"].as_str().unwrap(),
+        "@alice@laptop more for alice",
+    );
+    super::super::capture::capture(&b.0, &Endpoint::parse(REX), &mut |_| {}).unwrap();
+    assert_eq!(
+        b.rows("relay.sqlite3", "SELECT re, text FROM outbox ORDER BY seq"),
+        [
+            [json!("m1"), json!("to alice")],
+            [json!("m1"), json!("more for alice")],
+        ]
+    );
+}
+
+/// A reply in a thread whose mapping is gone cannot reach A, so B counts
+/// it with the expired replies Doctor reports.
+#[test]
+fn a_reply_b_cannot_route_is_counted_for_doctor() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "please answer"));
+    let relayed = b.rows(
+        "namedrop.sqlite3",
+        "SELECT message_id FROM collaboration_messages",
+    )[0][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    Connection::open(b.0.join("relay.sqlite3"))
+        .unwrap()
+        .execute("DELETE FROM remote_threads", [])
+        .unwrap();
+    bob_answers(&b, &relayed, "@alice@laptop too late");
+    super::super::capture::capture(&b.0, &Endpoint::parse(REX), &mut |_| {}).unwrap();
+    assert!(b.rows("relay.sqlite3", "SELECT * FROM outbox").is_empty());
+    assert_eq!(
+        super::super::expired_replies(&b.0),
+        [("alice@laptop".to_owned(), 1)]
+    );
+}

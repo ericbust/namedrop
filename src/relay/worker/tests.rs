@@ -591,3 +591,231 @@ fn a_drain_queues_an_answer_to_a_collected_reply() {
             .any(|row| row[7] == "b-message-1" && row[8] == "ack")
     );
 }
+
+/// Answers each collected reply of `replies` and then nothing more, after
+/// one round of the worker.
+fn collect_once(space: &Space, rex: &Script, replies: Value) {
+    rex.answer_with(answer("accepted", None, replies));
+    rex.answer_with(answer("accepted", None, json!([])));
+    work_for(space, rex, 1);
+}
+
+/// Each outbound row capture queued for `text`: label, recipient, sender,
+/// and B's `in_reply_to`.
+fn queued_for(space: &Space, text: &str) -> Vec<[String; 4]> {
+    space
+        .outbound()
+        .into_iter()
+        .filter(|row| row[8] == text)
+        .map(|row| {
+            [
+                row[0].clone(),
+                row[2].clone(),
+                row[5].clone(),
+                row[7].clone(),
+            ]
+        })
+        .collect()
+}
+
+fn capture(space: &Space) {
+    crate::relay::capture::capture(&space.state, &Endpoint::parse(REX), &mut |_| {}).unwrap();
+}
+
+/// After `@bob@devbox` and `@carol@devbox` both reply, an answer to the
+/// first message that names only Bob goes to Bob, in reply to Bob's reply.
+#[test]
+fn an_answer_goes_to_the_remote_agent_it_names_not_the_latest_reply() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    let sent = rex
+        .run(|| space.send("request-1", "@bob@devbox @carol@devbox ping"))
+        .unwrap();
+    let message = sent["message_id"].as_str().unwrap();
+    collect_once(
+        &space,
+        &rex,
+        json!([
+            {"seq": 1, "re": message, "thread": "t", "from": "bob", "message_id": "b-bob",
+                "text": "bob reply"},
+            {"seq": 2, "re": message, "thread": "t", "from": "carol", "message_id": "b-carol",
+                "text": "carol reply"},
+        ]),
+    );
+    rex.run(|| space.reply("reply-1", message, "@bob@devbox for bob only"))
+        .unwrap();
+    capture(&space);
+    assert_eq!(
+        queued_for(&space, "for bob only"),
+        [["devbox", "bob", "alice", "b-bob"].map(str::to_owned)]
+    );
+}
+
+/// An answer that names an agent on another host goes to that host, with
+/// no `in_reply_to` while that agent has not replied.
+#[test]
+fn an_answer_to_an_agent_on_another_host_goes_to_that_host() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox", "studio"]);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    let sent = rex
+        .run(|| space.send("request-1", "@bob@devbox @eve@studio ping"))
+        .unwrap();
+    let message = sent["message_id"].as_str().unwrap();
+    collect_once(
+        &space,
+        &rex,
+        json!([{"seq": 1, "re": message, "thread": "t", "from": "bob",
+            "message_id": "b-bob", "text": "pong"}]),
+    );
+    rex.run(|| space.reply("reply-1", message, "@eve@studio for eve only"))
+        .unwrap();
+    capture(&space);
+    assert_eq!(
+        queued_for(&space, "for eve only"),
+        [["studio", "eve", "alice", "-"].map(str::to_owned)]
+    );
+}
+
+/// Before any reply is collected, a follow-up from the sender and a local
+/// agent's answer that names the remote agent each still reach it, and the
+/// cursor passes only what was queued.
+#[test]
+fn a_follow_up_before_any_reply_is_collected_still_reaches_the_remote_agent() {
+    use crate::{ActorKind, MutationAttribution, PaneAddressId, StateNamespace, StateStore};
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    let sent = rex
+        .run(|| space.send("request-1", "@dan @bob@devbox design question"))
+        .unwrap();
+    let message = sent["message_id"].as_str().unwrap().to_owned();
+    collect_once(&space, &rex, json!([]));
+    rex.run(|| space.reply("reply-1", &message, "@bob@devbox one more thing"))
+        .unwrap();
+
+    let namespace = StateNamespace::for_space(REX, "session:a");
+    let attribution = MutationAttribution::new(ActorKind::Human, "test", 3);
+    StateStore::open(&space.state)
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.bind_pane(
+                &namespace,
+                &crate::PaneBindingId::new("binding-dan"),
+                &PaneAddressId::new("address-dan"),
+                "block:d",
+                &attribution,
+            )
+        })
+        .unwrap();
+    let mux = crate::mux::fake::FakeMux::world()
+        .space("session:a")
+        .checkout("/repo")
+        .pane("block:d")
+        .tab("window:a")
+        .session("session-dan")
+        .idle()
+        .build();
+    let ids = crate::ProcessIds::default();
+    let runtime = crate::LifecycleRuntime {
+        state_directory: &space.state,
+        home_directory: None,
+        agent_config: Default::default(),
+        cwd: std::path::Path::new("/repo"),
+        workspace_id: Some("session:a"),
+        current_pane_id: Some("block:d"),
+        session_socket_id: REX,
+        mux: &mux,
+        clock: &crate::SystemClock,
+        ids: &ids,
+    };
+    rex.run(|| {
+        crate::execute_message_operation(
+            "reply",
+            json!({"request_id": "reply-dan", "in_reply_to": message,
+                "source": "@alice @bob@devbox dan adds context"}),
+            &runtime,
+        )
+    })
+    .unwrap();
+    capture(&space);
+    assert_eq!(
+        queued_for(&space, "one more thing"),
+        [["devbox", "bob", "alice", "-"].map(str::to_owned)]
+    );
+    assert_eq!(
+        queued_for(&space, "dan adds context"),
+        [["devbox", "bob", "dan", "-"].map(str::to_owned)]
+    );
+    let last =
+        space.main("SELECT CAST(MAX(rowid) AS TEXT) FROM collaboration_messages")[0][0].clone();
+    let cursor: i64 = Connection::open(space.state.join("relay.sqlite3"))
+        .unwrap()
+        .query_row("SELECT rowid FROM capture", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(cursor.to_string(), last);
+}
+
+/// A message capture fails to queue stops the cursor before it, so it and
+/// every later message are captured once capture can queue it.
+#[test]
+fn capture_stops_before_a_message_it_could_not_queue() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    rex.run(|| space.send("request-1", "@bob@devbox first"))
+        .unwrap();
+    rex.run(|| space.send("request-2", "@bob@devbox second"))
+        .unwrap();
+    let relay = Connection::open(space.state.join("relay.sqlite3")).unwrap();
+    relay
+        .execute_batch(
+            "DELETE FROM outbound;
+             CREATE TRIGGER refuse BEFORE INSERT ON outbound WHEN NEW.text = 'first'
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+        )
+        .unwrap();
+    let endpoint = Endpoint::parse(REX);
+    assert!(crate::relay::capture::capture(&space.state, &endpoint, &mut |_| {}).is_err());
+    assert!(space.outbound().is_empty());
+    relay.execute_batch("DROP TRIGGER refuse").unwrap();
+    capture(&space);
+    assert_eq!(
+        space
+            .outbound()
+            .iter()
+            .map(|row| row[8].clone())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+}
+
+/// An answer to an older reply of an agent goes back in reply to that one,
+/// not to that agent's latest.
+#[test]
+fn an_answer_to_an_older_reply_names_that_reply() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    collect_once(
+        &space,
+        &rex,
+        json!([
+            {"seq": 1, "re": message, "thread": "t", "from": "bob", "message_id": "b-1",
+                "text": "first"},
+            {"seq": 2, "re": message, "thread": "t", "from": "bob", "message_id": "b-2",
+                "text": "second"},
+        ]),
+    );
+    let older = space.main("SELECT message_id FROM collaboration_messages WHERE body = 'first'")[0]
+        [0]
+    .clone();
+    rex.run(|| space.reply("reply-1", &older, "@bob@devbox about the first"))
+        .unwrap();
+    capture(&space);
+    assert_eq!(
+        queued_for(&space, "about the first"),
+        [["devbox", "bob", "alice", "b-1"].map(str::to_owned)]
+    );
+}

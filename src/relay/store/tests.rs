@@ -194,7 +194,7 @@ fn an_outbox_item_expires_after_7_days_and_is_counted_per_remote_sender() {
     let tally = |store: &RelayStore| -> Vec<(String, i64)> {
         store
             .connection
-            .prepare("SELECT host_id, count FROM outbox_expired ORDER BY host_id")
+            .prepare("SELECT sender, count FROM outbox_expired ORDER BY sender")
             .unwrap()
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .unwrap()
