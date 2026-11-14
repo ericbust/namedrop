@@ -214,6 +214,9 @@ struct FakeHost {
     pids: Vec<u32>,
     replaced: bool,
     workers: Workers,
+    /// When the bridge started the relay's workers, and how often it does.
+    relay_starts: Vec<Instant>,
+    relay_every: Option<Duration>,
 }
 
 /// Requests a stop when dropped, so a helper thread that panics still ends
@@ -246,6 +249,14 @@ impl Host for FakeHost {
         if self.replaced {
             std::panic::resume_unwind(Box::new(Replaced));
         }
+    }
+
+    fn start_relay_workers(&mut self) {
+        self.relay_starts.push(Instant::now());
+    }
+
+    fn relay_every(&self) -> Duration {
+        self.relay_every.unwrap_or(IDLE)
     }
 }
 
@@ -310,6 +321,39 @@ fn a_second_bridge_for_a_server_exits_at_once_and_never_dials() {
         Ok(false),
         "a held lock starts no second bridge"
     );
+}
+
+/// While it stays connected, the bridge starts the relay's workers again
+/// each `relay_every`, so one killed while a thread is open collects again.
+#[test]
+fn a_connected_bridge_starts_the_relay_workers_again_on_its_cadence() {
+    let state = State::new();
+    let stop = Wake::new().unwrap();
+    let script = Script::new(vec![(
+        Some("host-a"),
+        Vec::new(),
+        Some(resync("session:s")),
+    )]);
+    let mut host = FakeHost {
+        relay_every: Some(Duration::from_millis(50)),
+        ..FakeHost::default()
+    };
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let _stop = StopOnDrop(&stop);
+            std::thread::sleep(Duration::from_millis(400));
+        });
+        bridged_with(&state, &script, &stop, &NO_WAIT, &mut host);
+    });
+    let starts = &host.relay_starts;
+    assert!(starts.len() >= 2, "{} starts", starts.len());
+    for pair in starts.windows(2) {
+        assert!(
+            pair[1] - pair[0] >= Duration::from_millis(50),
+            "{:?}",
+            pair[1] - pair[0]
+        );
+    }
 }
 
 #[test]
@@ -1492,7 +1536,8 @@ fn the_bridge_refuses_relay_calls_for_a_server_it_does_not_know() {
     assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
 }
 
-/// A connection starts the relay worker of each label with an item queued.
+/// A connection starts the relay's workers, one for each label of its
+/// endpoint with an item queued.
 #[test]
 fn a_connection_starts_the_worker_of_each_label_with_an_item_queued() {
     let state = State::new();
@@ -1504,9 +1549,15 @@ fn a_connection_starts_the_worker_of_each_label_with_an_item_queued() {
     ] {
         crate::relay::tests_support::queue(&store, label, endpoint);
     }
-    crate::relay::tests_support::STARTED.with(|started| started.borrow_mut().clear());
     let script = Script::new(vec![(Some("host-a"), Vec::new(), None)]);
-    bridged(&state, &script, &Wake::new().unwrap());
+    let host = bridged_away(&state, &script, &Wake::new().unwrap(), &NO_WAIT);
+    assert_eq!(host.relay_starts.len(), 1);
+    crate::relay::tests_support::STARTED.with(|started| started.borrow_mut().clear());
+    crate::relay::start_workers(
+        &state.0,
+        &endpoint(),
+        &crate::relay::receive::reap_in_thread,
+    );
     assert_eq!(
         crate::relay::tests_support::STARTED.with(|started| started.borrow().clone()),
         ["devbox", "studio"]

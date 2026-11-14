@@ -305,23 +305,38 @@ fn worker_command(
 }
 
 /// Starts the worker of each label of `endpoint` with an item queued or a
-/// thread open, as the bridge does when it connects, so a conversation goes
-/// on collecting after a restart. `reap` reaps each one.
+/// thread open whose worker does not run, as the bridge does when it
+/// connects and every so often after, so a conversation goes on collecting
+/// after a restart or a killed worker. `reap` reaps each one.
 pub(crate) fn start_workers(
     state: &Path,
     endpoint: &crate::mux::Endpoint,
     reap: &dyn Fn(std::process::Child),
 ) {
-    let now = now_ms();
-    if let Ok(store) = RelayStore::open(state, now)
-        && let Ok(labels) = store.active_labels(&endpoint.key, now)
+    if !state.join("relay.sqlite3").is_file() {
+        return;
+    }
+    if let Ok(store) = RelayStore::read(state)
+        && let Ok(labels) = store.active_labels(&endpoint.key, now_ms())
     {
+        drop(store);
         for label in labels {
-            if let Some(worker) = spawn_worker(state, endpoint, &label) {
+            if !worker_runs(state, endpoint, &label)
+                && let Some(worker) = spawn_worker(state, endpoint, &label)
+            {
                 reap(worker);
             }
         }
     }
+}
+
+/// Whether a worker for `label` holds its lock. The lock alone keeps a
+/// second worker from working, so this only spares a start that would exit
+/// at once. A worker that starts during the look exits at once, and the
+/// look then finds none, so its caller starts one.
+fn worker_runs(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) -> bool {
+    worker_lock(state, endpoint, label)
+        .is_ok_and(|lock| matches!(lock.try_lock(), Err(std::fs::TryLockError::WouldBlock)))
 }
 
 /// Runs the relay's capture after a drain in a Rex home: each new message

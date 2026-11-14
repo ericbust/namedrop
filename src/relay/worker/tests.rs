@@ -491,6 +491,30 @@ fn a_second_worker_for_a_label_exits_at_once() {
     assert_eq!(outbound(&space)[0].0, "queued");
 }
 
+/// The bridge starts no worker for a label whose worker holds the lock,
+/// and starts one once it lets go.
+#[test]
+fn start_workers_starts_none_while_a_worker_holds_the_lock() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    let endpoint = Endpoint::parse(REX);
+    let held = crate::relay::worker_lock(&space.state, &endpoint, "devbox").unwrap();
+    held.try_lock().unwrap();
+    STARTED.with(|started| started.borrow_mut().clear());
+    let start = || {
+        crate::relay::start_workers(
+            &space.state,
+            &endpoint,
+            &crate::relay::receive::reap_in_thread,
+        );
+        STARTED.with(|started| started.take())
+    };
+    assert!(start().is_empty(), "the running worker keeps its label");
+    drop(held);
+    assert_eq!(start(), ["devbox"]);
+}
+
 /// B answers `duplicate` for a retry of an item it already took, which is
 /// done like `accepted`.
 #[test]
