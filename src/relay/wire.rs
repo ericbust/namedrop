@@ -83,6 +83,14 @@ pub(crate) struct Request {
     /// ack from another epoch.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub epoch: String,
+    /// The last `seq` of `epoch` A read, so B's page starts after it while
+    /// B keeps what A has not acked.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub after: i64,
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -183,6 +191,7 @@ pub(crate) fn deliver_size(sender: &str, to: &str, text: &str) -> usize {
             }),
             ack_through: i64::MAX,
             epoch: LONGEST_ID.to_owned(),
+            after: i64::MAX,
         },
     })
     .map_or(usize::MAX, |encoded| encoded.len())

@@ -75,13 +75,13 @@ pub(crate) fn accept(
         (Op::Collect, _) => None,
     };
     let paged = store.outbox_epoch().and_then(|epoch| {
-        let acked = if request.epoch == epoch {
-            request.ack_through
+        let (acked, after) = if request.epoch == epoch {
+            (request.ack_through, request.after)
         } else {
-            0
+            (0, 0)
         };
         store
-            .outbox_page(&request.from.host_id, acked, PAGE_LIMIT)
+            .outbox_page(&request.from.host_id, acked, after, PAGE_LIMIT)
             .map(|page| (epoch, page))
     });
     match paged {

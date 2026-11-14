@@ -2082,7 +2082,13 @@ fn replies_past_a_full_hold_stay_on_b_until_there_is_room() {
         "more": true, "outbox": page}),
     );
     work_for(&space, &rex, 1);
-    assert_eq!(rex.requests().len(), 1, "a full page asks for no next one");
+    let requests = rex.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        (&requests[1]["ack_through"], &requests[1]["after"]),
+        (&json!(210), &json!(220)),
+        "the next page follows the last reply read, and B keeps those after the ack"
+    );
     assert_eq!(collected_bodies(&space).len(), 110);
     assert_eq!(
         relay_rows(&space, "SELECT COUNT(*) FROM held"),
@@ -3044,4 +3050,210 @@ fn a_refusal_reason_from_b_loses_its_format_characters() {
         outbound(&space)[0].1.as_deref(),
         Some("no @bob xoved  on devbox ")
     );
+}
+
+/// Set, this test binary is B: it answers the perform in this directory's
+/// `perform` with the relay's own accept over the store in `b/`.
+const SERVE_AS_B: &str = "NAMEDROP_RELAY_TEST_SERVE_AS_B";
+
+#[test]
+fn serve_as_b() {
+    let Some(directory) = std::env::var_os(SERVE_AS_B).map(std::path::PathBuf::from) else {
+        return;
+    };
+    let perform: Value =
+        serde_json::from_slice(&fs::read(directory.join("perform")).unwrap()).unwrap();
+    let answer = crate::relay::accept::accept(
+        &directory.join("b"),
+        &Endpoint::parse("rex:/tmp/namedrop-relay-b.sock"),
+        "host-b",
+        perform["args"].to_string().as_bytes(),
+        &mut |_| {},
+    );
+    fs::write(
+        directory.join("answer"),
+        json!({"result": answer, "performed_by": "client:b"}).to_string(),
+    )
+    .unwrap();
+}
+
+/// A `rex` for `devbox` whose B is the relay's accept, run by this test
+/// binary over B's store in `b/`, so each page is the one B makes for the
+/// request A sent, and B's store, which holds `replies` for this side.
+fn real_b(replies: &[Reply]) -> (Script, RelayStore) {
+    let script = Script::new(&format!(
+        r#"D=$(dirname "$0")
+case "$*" in
+*"hosts list"*) echo '{{"hosts":[{{"host":{{"label":"devbox"}},"from":"home","held":false}}]}}';;
+*server.status*) echo '{{"pid":1,"host_id":"host-b"}}';;
+*target.resolve*) echo '{{"results":[{{"query":"namedrop","status":"resolved","target":{{"kind":"client","client_id":"client:b"}}}}]}}';;
+*client.perform*)
+  cat > "$D/perform"; cat "$D/perform" >> "$D/requests"; echo >> "$D/requests"
+  {SERVE_AS_B}="$D" '{}' relay::worker::tests::serve_as_b --exact --test-threads=1 >/dev/null 2>&1
+  cat "$D/answer";;
+esac"#,
+        std::env::current_exe().unwrap().display()
+    ));
+    let b = script.directory.join("b");
+    fs::create_dir(&b).unwrap();
+    let store = RelayStore::open(&b, crate::relay::now_ms()).unwrap();
+    for reply in replies {
+        assert!(
+            store
+                .keep_reply("host-a", reply, crate::relay::now_ms())
+                .unwrap()
+        );
+    }
+    (script, store)
+}
+
+fn reply_to(message: &str, thread: &str, seq: i64, text: String) -> Reply {
+    Reply {
+        seq: 0,
+        re: message.to_owned(),
+        thread: thread.to_owned(),
+        from: "bob".to_owned(),
+        message_id: format!("b-{seq}"),
+        text,
+    }
+}
+
+/// The bodies of the replies A collected in answer to `message`.
+fn bodies_for(space: &Space, message: &str) -> Vec<String> {
+    space
+        .main(&format!(
+            "SELECT body FROM collaboration_messages WHERE in_reply_to = '{message}'
+                AND request_id LIKE 'relay-reply:%' ORDER BY rowid"
+        ))
+        .into_iter()
+        .map(|row| row[0].clone())
+        .collect()
+}
+
+/// A thread the Automatic Reply Limit paused, with no more room to hold,
+/// keeps its later replies on B, but a later reply of another thread on
+/// B's next page still arrives in the same round, though B keeps it until
+/// the paused thread's replies are taken. Then each reaches its thread
+/// once, in order.
+#[test]
+fn a_thread_with_no_room_keeps_no_other_thread_s_reply_from_arriving() {
+    let space = Space::new(REX);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    let names = rex(&["devbox"]);
+    let first = settled(&space, &names, "first", "accepted", "host-b");
+    let second = settled(&space, &names, "second", "accepted", "host-b");
+    let big = |seq: i64| format!("{seq} {}", "x".repeat(wire::TEXT_LIMIT - 10));
+    let mut replies: Vec<Reply> = (1..=30)
+        .map(|seq| reply_to(&first, "t1", seq, format!("reply {seq}")))
+        .collect();
+    replies.extend((31..=34).map(|seq| reply_to(&first, "t1", seq, big(seq))));
+    replies.push(reply_to(&second, "t2", 35, big(35)));
+    let (rex, b) = real_b(&replies);
+    work_for(&space, &rex, 1);
+    assert_eq!(bodies_for(&space, &second), [big(35)]);
+    assert_eq!(bodies_for(&space, &first).len(), 10);
+    let store = crate::relay::tests_support::store(&space.state);
+    assert_eq!(store.ack_through(REX, "host-b").unwrap().1, 30);
+    assert_eq!(
+        b.outbox_page("host-a", 30, 0, wire::PAGE_LIMIT).unwrap().2,
+        5,
+        "B keeps the paused thread's replies and the one after them"
+    );
+    assert!(crate::relay::conditions(&space.state, REX)[0].held_full);
+    let resume = || {
+        as_person(
+            &space,
+            &first,
+            |transaction, namespace, thread, attribution| {
+                transaction
+                    .continue_thread(namespace, thread, attribution)
+                    .map(|_| ())
+            },
+        );
+    };
+    resume();
+    resume();
+    assert_eq!(bodies_for(&space, &first).len(), 30);
+    work_for(&space, &rex, 1);
+    assert_eq!(store.ack_through(REX, "host-b").unwrap().1, 35);
+    resume();
+    let mut expected: Vec<String> = (1..=30).map(|seq| format!("reply {seq}")).collect();
+    expected.extend((31..=34).map(big));
+    assert_eq!(bodies_for(&space, &first), expected);
+    assert_eq!(bodies_for(&space, &second), [big(35)], "taken once");
+    assert_eq!(
+        b.outbox_page("host-a", 35, 0, wire::PAGE_LIMIT).unwrap().2,
+        0
+    );
+    assert!(crate::relay::conditions(&space.state, REX).is_empty());
+}
+
+/// Past a reply A has no room for, a round reads at most 16 pages, and
+/// the next round reads on from where it stopped, so a reply more than 16
+/// pages behind still arrives.
+#[test]
+fn the_next_round_reads_on_past_the_pages_a_round_read() {
+    let space = Space::new(REX);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    let names = rex(&["devbox"]);
+    let first = settled(&space, &names, "first", "accepted", "host-b");
+    let others: Vec<String> = (0..8)
+        .map(|n| settled(&space, &names, &format!("other-{n}"), "accepted", "host-b"))
+        .collect();
+    let big = |seq: i64| format!("{seq} {}", "x".repeat(wire::TEXT_LIMIT - 10));
+    let mut replies: Vec<Reply> = (1..=31)
+        .map(|seq| reply_to(&first, "t1", seq, format!("reply {seq}")))
+        .collect();
+    // Nine replies a thread, so no thread pauses.
+    replies.extend((32..=103).map(|seq| {
+        let n = usize::try_from(seq - 32).unwrap() / 9;
+        reply_to(&others[n], &format!("t{n}"), seq, big(seq))
+    }));
+    let (rex, _b) = real_b(&replies);
+    let (waits, _) = work_for(&space, &rex, 2);
+    assert_eq!(
+        waits,
+        [BACKOFF[0], BACKOFF[1]],
+        "a reply left on B backs off"
+    );
+    let requests = rex.requests();
+    assert!(requests.len() > 16, "{}", requests.len());
+    assert_eq!(requests[16]["ack_through"], 30);
+    assert!(
+        requests[16]["after"].as_i64().unwrap() > 90,
+        "the second round reads on: {}",
+        requests[16]["after"]
+    );
+    let taken: Vec<String> = others
+        .iter()
+        .flat_map(|message| bodies_for(&space, message))
+        .collect();
+    assert_eq!(taken, (32..=103).map(big).collect::<Vec<_>>());
+}
+
+/// A page read again, as past a reply A has no room for, finds the
+/// replies A already took: none is held again, though its thread paused
+/// since.
+#[test]
+fn a_page_read_again_holds_none_of_the_replies_a_took() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let first = sent(&space, &rex);
+    let second = settled(&space, &rex, "second", "accepted", "host-b");
+    let mut page = replies(&first, 1, 31).as_array().unwrap().clone();
+    page.extend((32..=43).map(|seq| {
+        json!({"seq": seq, "re": second, "thread": "t2", "from": "bob",
+            "message_id": format!("b-{seq}"), "text": format!("second {seq}")})
+    }));
+    rex.answer_with(answer("accepted", None, json!(page)));
+    work_for(&space, &rex, 1);
+    let later = "SELECT COUNT(*) FROM held WHERE seq > 31";
+    assert_eq!(relay_rows(&space, later), [[json!(2)]]);
+    rex.answer_with(
+        json!({"host_id": "host-b", "can_reply": true, "epoch": "e1",
+        "more": false, "outbox": page}),
+    );
+    work_for(&space, &rex, 1);
+    assert_eq!(relay_rows(&space, later), [[json!(2)]]);
+    assert_eq!(bodies_for(&space, &second).len(), 10);
 }

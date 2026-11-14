@@ -330,6 +330,7 @@ fn relay_schema() -> Value {
             "item": {"type": "object"},
             "ack_through": {"type": "integer"},
             "epoch": {"type": "string"},
+            "after": {"type": "integer"},
         },
         "required": ["op", "expect_host_id", "from"],
     })

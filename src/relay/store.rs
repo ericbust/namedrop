@@ -784,6 +784,25 @@ impl RelayStore {
             )?)
     }
 
+    /// Whether A placed `held`'s reply before: took it at its `seq`, or
+    /// refused it.
+    pub(crate) fn placed(&self, held: &Held) -> Result<bool, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM collected WHERE endpoint = ?1 AND host_id = ?2
+                    AND epoch = ?3 AND seq = ?4)
+                OR EXISTS (SELECT 1 FROM dropped WHERE endpoint = ?1 AND host_id = ?2
+                    AND remote_message_id = ?5 AND reason IS NOT NULL)",
+            params![
+                held.endpoint,
+                held.host_id,
+                held.epoch,
+                held.reply.seq,
+                held.reply.message_id
+            ],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Whether `endpoint` holds a reply for A's `thread` in `space`, so a
     /// new one waits behind it.
     pub(crate) fn holding(
@@ -1209,24 +1228,30 @@ impl RelayStore {
         )?)
     }
 
-    /// Drops B's replies for `host_id` through `ack_through`, and returns the
-    /// rest from the oldest, within `limit` encoded bytes, whether more
-    /// remain, and how many B keeps for `host_id`.
+    /// Drops B's replies for `host_id` through `ack_through`, and returns
+    /// those after `after` from the oldest, within `limit` encoded bytes,
+    /// whether more remain, and how many B keeps for `host_id`.
     pub(crate) fn outbox_page(
         &self,
         host_id: &str,
         ack_through: i64,
+        after: i64,
         limit: usize,
     ) -> Result<(Vec<Reply>, bool, usize), StoreError> {
         self.connection.execute(
             "DELETE FROM outbox WHERE host_id = ?1 AND seq <= ?2",
             params![host_id, ack_through],
         )?;
+        let kept: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM outbox WHERE host_id = ?1",
+            params![host_id],
+            |row| row.get(0),
+        )?;
         let mut statement = self.connection.prepare(
             "SELECT seq, re, thread, sender, message_id, text FROM outbox
-             WHERE host_id = ?1 ORDER BY seq",
+             WHERE host_id = ?1 AND seq > ?2 ORDER BY seq",
         )?;
-        let replies = statement.query_map(params![host_id], |row| {
+        let replies = statement.query_map(params![host_id, after], |row| {
             Ok(Reply {
                 seq: row.get(0)?,
                 re: row.get(1)?,
@@ -1236,10 +1261,9 @@ impl RelayStore {
                 text: row.get(5)?,
             })
         })?;
-        let (mut page, mut used, mut kept, mut more) = (Vec::new(), 0, 0, false);
+        let (mut page, mut used, mut more) = (Vec::new(), 0, false);
         for reply in replies {
             let reply = reply?;
-            kept += 1;
             let size = serde_json::to_vec(&reply).map_or(usize::MAX, |encoded| encoded.len() + 1);
             if more || used + size > limit {
                 more = true;
@@ -1248,7 +1272,7 @@ impl RelayStore {
             used += size;
             page.push(reply);
         }
-        Ok((page, more, kept))
+        Ok((page, more, usize::try_from(kept).unwrap_or_default()))
     }
 
     /// Fails each queued item older than its lifetime, drops each outbox
