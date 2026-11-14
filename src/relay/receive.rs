@@ -10,6 +10,7 @@ use crate::{
     locator::{Locator, Name},
     mux::{Endpoint, rex::events::Perform},
 };
+use serde::Deserialize;
 use serde_json::Value;
 use std::{
     io::{Read, Write},
@@ -174,9 +175,11 @@ impl Receiver {
             let call = self.calls.swap_remove(index);
             if exited {
                 let output = call.accept.join().unwrap_or_default();
-                let result = serde_json::from_slice::<Answer>(&output)
+                // The answer goes on as the accept wrote it, so a field of a
+                // newer accept, as after an update, is not dropped here.
+                let result = serde_json::from_slice::<Value>(&output)
                     .ok()
-                    .and_then(|answer| serde_json::to_value(answer).ok())
+                    .filter(|answer| Answer::deserialize(answer).is_ok())
                     .unwrap_or_else(|| {
                         answer(
                             &call.host_id,
@@ -247,6 +250,7 @@ fn answer(host_id: &str, item: &(String, String), status: Status, reason: &str) 
         outbox: Vec::new(),
         more: false,
         epoch: String::new(),
+        relay: super::wire::VERSION,
     })
     .unwrap_or(Value::Null)
 }

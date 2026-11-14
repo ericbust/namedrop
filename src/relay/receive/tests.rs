@@ -374,3 +374,42 @@ fn each_accept_goes_to_the_reaper_it_was_given() {
         .unwrap();
     assert_eq!(*handed.lock().unwrap(), [pid]);
 }
+
+/// The bridge passes an accept's answer on as the accept wrote it, a field
+/// it does not know included, so a newer accept after an update loses
+/// nothing on its way to A. Output that is no answer is a `retry`.
+#[test]
+fn an_accept_s_answer_goes_on_as_it_wrote_it() {
+    const NEWER: &str = r#"cat >/dev/null; printf '{"host_id":"host-b","can_reply":true,"outbox":[],"more":false,"relay":9,"future":{"field":1}}'"#;
+    // SAFETY: `getuid` has no preconditions.
+    let uid = unsafe { libc::getuid() };
+    for (script, expected) in [
+        (
+            NEWER,
+            Some(
+                json!({"host_id": "host-b", "can_reply": true, "outbox": [], "more": false,
+                "relay": 9, "future": {"field": 1}}),
+            ),
+        ),
+        (r#"cat >/dev/null; printf '{"host_id":5}'"#, None),
+    ] {
+        let state = State::new();
+        let (mut receiver, _) = receiver(&state, script, ANSWER_WITHIN);
+        assert_eq!(
+            receiver.receive(
+                perform(
+                    json!({"kind": "peer", "transport": "unix", "uid": uid}),
+                    "host-b"
+                ),
+                Some("host-b")
+            ),
+            None
+        );
+        let replies = answered(&mut receiver, Duration::from_secs(5));
+        match expected {
+            Some(answer) => assert_eq!(replies[0].1, answer),
+            None => assert_eq!(status(&replies[0]).0, "retry"),
+        }
+        receiver.finish();
+    }
+}

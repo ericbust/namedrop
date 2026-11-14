@@ -515,6 +515,75 @@ fn start_workers_starts_none_while_a_worker_holds_the_lock() {
     assert_eq!(start(), ["devbox"]);
 }
 
+/// The answers of the first merged relay, `2496500e`, as it made them,
+/// name no version. A takes the item's outcome and the page's replies.
+#[test]
+fn a_takes_the_first_relay_s_answers() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    let fixture = |text: &str| -> Value {
+        serde_json::from_str(&text.replace("MESSAGE", &message).replace("EPOCH", "e1")).unwrap()
+    };
+    rex.answer_with(fixture(include_str!(
+        "../fixtures/2496500e-answer-deliver.json"
+    )));
+    rex.answer_with(fixture(include_str!(
+        "../fixtures/2496500e-answer-collect.json"
+    )));
+    work_for(&space, &rex, 2);
+    assert_eq!(outbound(&space)[0].0, "accepted");
+    assert_eq!(
+        bodies_for(&space, &message),
+        ["reply 1", "reply 2", "reply 3"]
+    );
+}
+
+/// A names its relay version in each request, and takes a newer B's
+/// answer, skipping the fields it does not know.
+#[test]
+fn a_names_its_version_and_takes_a_newer_b_s_answer() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    let mut newer = answer("accepted", None, json!([]));
+    newer["relay"] = json!(99);
+    newer["future"] = json!({"field": true});
+    newer["result"]["future"] = json!(1);
+    rex.answer_with(newer);
+    rex.answer_with(answer("accepted", None, json!([])));
+    work_for(&space, &rex, 1);
+    assert_eq!(rex.requests()[0]["relay"], 2);
+    assert_eq!(outbound(&space)[0].0, "accepted");
+}
+
+/// An answer A cannot read, from a newer B, fails the item with both
+/// versions, where one with no version says B has no relay.
+#[test]
+fn an_answer_a_cannot_read_names_a_newer_b_s_version() {
+    for (result, reason) in [
+        (
+            json!({"relay": 99, "host_id": 5}),
+            "devbox runs a newer relay (version 99) than this Namedrop's (version 2)",
+        ),
+        (
+            json!({"relay": 2, "host_id": 5}),
+            "devbox runs a Namedrop without this relay",
+        ),
+    ] {
+        let space = Space::new(REX);
+        let rex = rex(&["devbox"]);
+        sent(&space, &rex);
+        rex.answer_with(result);
+        work_for(&space, &rex, 1);
+        let (state, failed, _) = outbound(&space).remove(0);
+        assert_eq!(
+            (state.as_str(), failed.as_deref()),
+            ("failed", Some(reason))
+        );
+    }
+}
+
 /// B answers `duplicate` for a retry of an item it already took, which is
 /// done like `accepted`.
 #[test]

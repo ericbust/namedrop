@@ -17,6 +17,16 @@ pub(crate) const PAGE_LIMIT: usize = 256 * 1024;
 /// which the sender's notice quotes.
 pub(crate) const REASON_LIMIT: usize = 1024;
 
+/// This build's relay version, which each request and answer names. A
+/// request or answer that names none is version 1, as every build through
+/// `329c278b` made. A side answers a newer peer as this version, and a
+/// newer version keeps every field an older one reads.
+pub(crate) const VERSION: u32 = 2;
+
+fn version_1() -> u32 {
+    1
+}
+
 /// The line a cut message ends with.
 pub(crate) const CUT_NOTICE: &str = "\n\n[Namedrop cut this message to relay it.]";
 
@@ -87,6 +97,9 @@ pub(crate) struct Request {
     /// B keeps what A has not acked.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub after: i64,
+    /// A's relay version.
+    #[serde(default = "version_1")]
+    pub relay: u32,
 }
 
 fn is_zero(value: &i64) -> bool {
@@ -166,6 +179,9 @@ pub(crate) struct Answer {
     /// created, so A knows when B's `seq` started again.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub epoch: String,
+    /// B's relay version.
+    #[serde(default = "version_1")]
+    pub relay: u32,
 }
 
 /// The encoded size of the `deliver` request for one item, with every id
@@ -192,6 +208,7 @@ pub(crate) fn deliver_size(sender: &str, to: &str, text: &str) -> usize {
             ack_through: i64::MAX,
             epoch: LONGEST_ID.to_owned(),
             after: i64::MAX,
+            relay: u32::MAX,
         },
     })
     .map_or(usize::MAX, |encoded| encoded.len())

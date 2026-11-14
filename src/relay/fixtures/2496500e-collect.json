@@ -1,0 +1,11 @@
+{
+ "ack_through": 3,
+ "epoch": "EPOCH",
+ "expect_host_id": "host-b",
+ "from": {
+  "host": "laptop",
+  "host_id": "host-a",
+  "name": "namedrop"
+ },
+ "op": "collect"
+}

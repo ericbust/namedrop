@@ -452,6 +452,7 @@ fn acked(store: &RelayStore, endpoint: &str, host_id: &str, reading: &Reading) -
         ack_through,
         epoch,
         after,
+        relay: wire::VERSION,
     }
 }
 
@@ -904,9 +905,21 @@ fn perform(label: &str, request: &Request) -> Call {
     match api(label, &["client.perform", "-"], Some(&input)) {
         Ok(performed) => match serde_json::from_value::<Answer>(performed["result"].clone()) {
             Ok(answer) => Call::Answered(bounded(answer)),
-            Err(_) => Call::Failed(format!("{label} runs a Namedrop without this relay")),
+            Err(_) => Call::Failed(unread(label, &performed["result"])),
         },
         Err(failure) => failed(label, &failure),
+    }
+}
+
+/// Why A fails an item whose answer it cannot read: B runs a newer relay
+/// that answered in a shape this one does not know, or none at all.
+fn unread(label: &str, result: &Value) -> String {
+    match result["relay"].as_u64() {
+        Some(theirs) if theirs > u64::from(wire::VERSION) => format!(
+            "{label} runs a newer relay (version {theirs}) than this Namedrop's (version {})",
+            wire::VERSION
+        ),
+        _ => format!("{label} runs a Namedrop without this relay"),
     }
 }
 

@@ -208,6 +208,7 @@ fn each_recipient_is_accepted_once_from_the_sender_s_relay_author() {
             outbox: Vec::new(),
             more: false,
             epoch: answer.epoch.clone(),
+            relay: 2,
         }
     );
     assert!(!answer.epoch.is_empty());
@@ -334,6 +335,122 @@ fn a_name_in_two_spaces_is_ambiguous_an_unknown_one_refused_and_a_repeat_replays
     assert_eq!(b.call(&deliver("m2", "nobody", "t1", "who")), unknown);
     assert_eq!(b.call(&deliver("m1", "dup", "t1", "which")), ambiguous);
     assert!(b.messages().is_empty());
+}
+
+/// The requests of the first merged relay, `2496500e`, as it sent them,
+/// name no version, so they are version 1. B takes the item, pages its
+/// outbox, and answers with only the fields that build reads and its own
+/// version.
+#[test]
+fn b_takes_the_first_relay_s_requests() {
+    let b = B::new();
+    let deliver: Value =
+        serde_json::from_str(include_str!("../fixtures/2496500e-deliver.json")).unwrap();
+    let answer = b.call(&deliver);
+    assert_eq!(outcome(&answer), (Status::Accepted, None));
+    let store = RelayStore::open(&b.0, crate::relay::now_ms()).unwrap();
+    for seq in 1..=3 {
+        let reply = crate::relay::wire::Reply {
+            seq: 0,
+            re: "MESSAGE".to_owned(),
+            thread: "THREAD".to_owned(),
+            from: "bob".to_owned(),
+            message_id: format!("b-{seq}"),
+            text: format!("reply {seq}"),
+        };
+        assert!(
+            store
+                .keep_reply("host-a", &reply, crate::relay::now_ms())
+                .unwrap()
+        );
+    }
+    let collect = |ack_through: i64| {
+        let mut collect: Value =
+            serde_json::from_str(include_str!("../fixtures/2496500e-collect.json")).unwrap();
+        collect["epoch"] = json!(answer.epoch);
+        collect["ack_through"] = json!(ack_through);
+        b.call(&collect)
+    };
+    let page = collect(0);
+    let texts: Vec<&str> = page
+        .outbox
+        .iter()
+        .map(|reply| reply.text.as_str())
+        .collect();
+    assert_eq!(texts, ["reply 1", "reply 2", "reply 3"]);
+    for (answer, keys) in [
+        (
+            &answer,
+            &[
+                "can_reply",
+                "epoch",
+                "host_id",
+                "more",
+                "outbox",
+                "relay",
+                "result",
+            ][..],
+        ),
+        (
+            &page,
+            &["can_reply", "epoch", "host_id", "more", "outbox", "relay"][..],
+        ),
+    ] {
+        let encoded = serde_json::to_value(answer).unwrap();
+        let named: Vec<&str> = encoded
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(named, keys);
+    }
+    assert!(collect(3).outbox.is_empty());
+    assert_eq!(store.outbox_page("host-a", 0, 0, PAGE_LIMIT).unwrap().2, 0);
+}
+
+/// A request from a newer relay is read as this version: B takes the item,
+/// skips what it does not know, and names its own version.
+#[test]
+fn b_answers_a_newer_a_as_its_own_version() {
+    let b = B::new();
+    let mut request = deliver("m1", "bob", "t1", "hello bob");
+    request["relay"] = json!(99);
+    request["future"] = json!({"field": true});
+    request["item"]["future"] = json!(1);
+    let answer = b.call(&request);
+    assert_eq!(outcome(&answer), (Status::Accepted, None));
+    assert_eq!(answer.relay, 2);
+}
+
+/// A request B cannot read, from a newer relay, is refused with both
+/// versions, so A can fall back to one this B reads.
+#[test]
+fn b_refuses_a_newer_request_it_cannot_read_naming_both_versions() {
+    let b = B::new();
+    let mut request = deliver("m1", "bob", "t1", "hello bob");
+    request["op"] = json!("hello");
+    request["relay"] = json!(99);
+    let answer = b.call(&request);
+    let (status, reason) = outcome(&answer);
+    assert_eq!(status, Status::Refused);
+    let reason = reason.unwrap();
+    assert!(
+        reason.starts_with(
+            "this Namedrop's relay is version 2, which cannot read a version 99 request: "
+        ),
+        "{reason}"
+    );
+    assert_eq!(answer.relay, 2);
+    request["relay"] = json!(2);
+    let (_, reason) = outcome(&b.call(&request));
+    assert!(
+        reason
+            .unwrap()
+            .starts_with("the request is not a relay request: "),
+        "a request of this version names no versions"
+    );
+    assert_eq!(b.inbound(), 0);
 }
 
 #[test]

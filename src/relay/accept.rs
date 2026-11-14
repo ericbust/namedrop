@@ -3,7 +3,7 @@
 
 use super::{
     store::{InboundKey, RelayStore, RemoteThread},
-    wire::{Answer, Item, Op, Outcome, PAGE_LIMIT, Request, Status, TEXT_LIMIT},
+    wire::{Answer, Item, Op, Outcome, PAGE_LIMIT, Request, Status, TEXT_LIMIT, VERSION},
 };
 use crate::{
     ActorKind, DeliveryId, IdGenerator, MessageId, MutationAttribution, StateNamespace, StateStore,
@@ -47,10 +47,11 @@ pub(crate) fn accept(
         outbox: Vec::new(),
         more: false,
         epoch: String::new(),
+        relay: VERSION,
     };
     let request: Request = match serde_json::from_slice(input) {
         Ok(request) => request,
-        Err(error) => return refused(format!("the request is not a relay request: {error}")),
+        Err(error) => return refused(unparsed(input, &error)),
     };
     if let Err(field) = validate(&request) {
         let mut answer = refused(format!("{field} is not valid"));
@@ -92,6 +93,7 @@ pub(crate) fn accept(
             outbox,
             more,
             epoch,
+            relay: VERSION,
         },
         Err(error) => retry(host_id, request.item.as_ref(), &error.to_string()),
     }
@@ -111,6 +113,22 @@ fn retry(host_id: &str, item: Option<&Item>, reason: &str) -> Answer {
         outbox: Vec::new(),
         more: false,
         epoch: String::new(),
+        relay: VERSION,
+    }
+}
+
+/// Why B refuses a request it cannot read, naming both relay versions when
+/// A's is newer, so A can fall back to what this B reads.
+fn unparsed(input: &[u8], error: &serde_json::Error) -> String {
+    let theirs = serde_json::from_slice::<serde_json::Value>(input)
+        .ok()
+        .and_then(|request| request["relay"].as_u64())
+        .filter(|theirs| *theirs > u64::from(VERSION));
+    match theirs {
+        Some(theirs) => format!(
+            "this Namedrop's relay is version {VERSION}, which cannot read a version {theirs} request: {error}"
+        ),
+        None => format!("the request is not a relay request: {error}"),
     }
 }
 
