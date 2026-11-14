@@ -307,7 +307,7 @@ fn decide(
         .collect();
     let reason = wire::cut(&printable, wire::REASON_LIMIT);
     let reason = reason.as_str();
-    let _ = match outcome.status {
+    let settled = match outcome.status {
         Status::Accepted | Status::Duplicate => {
             store.settle(label, item, Settled::Accepted, None, now)
         }
@@ -326,6 +326,11 @@ fn decide(
             Ok(())
         }
     };
+    // The item stays queued, and B keeps each reply to it until a later
+    // round settles it by B's stored outcome.
+    if settled.is_err() {
+        *kept = true;
+    }
 }
 
 /// What a collect found.
@@ -437,11 +442,12 @@ struct Peer<'a> {
 
 /// How far a worker has read B's outbox for one server, apart from what
 /// it acks. A pass reads from the ack to B's last reply, over as many
-/// rounds as it takes. A reply A has no room for stays on B, and so does
-/// every later one, since an ack covers all before it. The pass still
-/// takes the later replies of other threads, while those of the reply's
-/// own thread wait for it, so it reads in order on a later pass. So no
-/// thread waits for another one's room.
+/// rounds as it takes. A reply A has no room for stays on B, as does one
+/// to an item A has not settled, and so does every later one, since an
+/// ack covers all before it. The pass still takes the later replies of
+/// other threads, while those of the reply's own thread wait for it, so
+/// it reads in order on a later pass. So no thread waits for another
+/// one's room.
 #[derive(Default)]
 struct Reading {
     host_id: String,
@@ -450,6 +456,8 @@ struct Reading {
     after: i64,
     /// The threads with a reply this pass left on B.
     waiting: Vec<(String, String)>,
+    /// Whether a reply this pass left on B found no room in A's hold.
+    full: bool,
     /// The pages collected this round, or `PAGES` once a B that ignores
     /// `after` gave one.
     pages: usize,
@@ -473,6 +481,7 @@ impl Reading {
     fn restart(&mut self) {
         self.after = 0;
         self.waiting.clear();
+        self.full = false;
     }
 
     fn leave(&mut self, thread: (String, String)) {
@@ -505,7 +514,8 @@ enum Page {
 /// answer a message sent to another host. A reply whose thread the
 /// Automatic Reply Limit paused is held, as is each later one of that
 /// thread, so they reach it in order once it takes replies again. Acks
-/// stop at a reply A has no room to hold, as `Reading` tells. A reply
+/// stop at a reply A has no room to hold, or one that answers an item A
+/// has not settled, as `Reading` tells. A reply
 /// read again finds what A made of it before: it is taken or refused
 /// once.
 fn collect_replies(
@@ -575,11 +585,15 @@ fn collect_replies(
                 }
             }
             Ok(Placed::Left(thread)) => reading.leave(thread),
+            Ok(Placed::Full(thread)) => {
+                reading.full = true;
+                reading.leave(thread);
+            }
             Err(()) => return Page::Fault,
         }
         reading.after = reading.after.max(reply.seq);
     }
-    let held_full = !reading.waiting.is_empty();
+    let held_full = reading.full;
     if !answer.more {
         reading.restart();
     }
@@ -596,12 +610,16 @@ enum Placed {
     /// It answers nothing of this endpoint's, or with `other_label` a
     /// message sent to another host, so B may let it go.
     Dropped { other_label: bool },
-    /// It stays on B, as one of this thread that A has no room for.
+    /// It stays on B behind an earlier reply of its thread, or until A
+    /// settles the item it answers.
     Left((String, String)),
+    /// It stays on B, as one A has no room to hold.
+    Full((String, String)),
 }
 
 /// Places `reply` of `answer`: dropped when it answers nothing of this
-/// endpoint's, left on B behind a reply of its thread this pass left,
+/// endpoint's, left on B when it answers an item A has not settled, or
+/// behind a reply of its thread this pass left,
 /// found as A placed it before, held behind its thread's held replies or
 /// by the Automatic Reply Limit, or else taken. An error is a store
 /// fault.
@@ -627,6 +645,7 @@ fn place(
             space,
             thread,
         } => (label, space, thread),
+        Answers::Unsettled { space, thread } => return Ok(Placed::Left((space, thread))),
         Answers::OtherLabel => return Ok(Placed::Dropped { other_label: true }),
         Answers::Unknown => return Ok(Placed::Dropped { other_label: false }),
     };
@@ -662,7 +681,7 @@ fn place(
         }
         Taken::Limited => {
             if !store.hold(&held, super::now_ms()).map_err(drop)? {
-                return Ok(Placed::Left(thread));
+                return Ok(Placed::Full(thread));
             }
         }
         Taken::Refused(reason) => {

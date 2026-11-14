@@ -251,6 +251,10 @@ pub(crate) enum Answers {
         space: String,
         thread: String,
     },
+    /// Nowhere yet: B may have accepted its message, but A has not
+    /// settled it, as when the write failed, so B keeps the reply until A
+    /// does. The thread is the one of `space` the message was sent from.
+    Unsettled { space: String, thread: String },
     /// Nowhere: its message was sent to another host, which this server
     /// cannot answer for.
     OtherLabel,
@@ -887,7 +891,8 @@ impl RelayStore {
     /// collecting worker's own, first, and those that dial its addresses,
     /// which share its server's outbox, so a reply goes to the label its
     /// message was sent by: the one sent to `from` first, and then the
-    /// worker's own.
+    /// worker's own. A message still queued but pinned to `host_id` was
+    /// sent there, and is unsettled.
     pub(crate) fn sent_from(
         &self,
         message_id: &str,
@@ -897,10 +902,12 @@ impl RelayStore {
         labels: &[String],
     ) -> Result<Answers, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT label, recipient, space, thread, host_id IS ?3 FROM outbound
-             WHERE message_id = ?1 AND endpoint = ?2 AND state = 'accepted'",
+            "SELECT label, recipient, space, thread, host_id IS ?3, state = 'accepted'
+             FROM outbound
+             WHERE message_id = ?1 AND endpoint = ?2
+                AND (state = 'accepted' OR state = 'queued' AND host_id IS ?3)",
         )?;
-        let sent: Vec<(String, String, String, String, bool)> = statement
+        let sent: Vec<(String, String, String, String, bool, bool)> = statement
             .query_map(params![message_id, endpoint, host_id], |row| {
                 Ok((
                     row.get(0)?,
@@ -908,20 +915,30 @@ impl RelayStore {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             })?
             .collect::<Result<_, _>>()?;
         let best = sent
             .iter()
-            .filter(|(label, _, _, _, pinned)| *pinned && labels.contains(label))
+            .filter(|(label, _, _, _, pinned, _)| *pinned && labels.contains(label))
             .max_by_key(|(label, recipient, ..)| (recipient == from, *label == labels[0]));
         Ok(match best {
-            Some((label, _, space, thread, _)) => Answers::Sent {
+            Some((label, _, space, thread, _, true)) => Answers::Sent {
                 label: label.clone(),
                 space: space.clone(),
                 thread: thread.clone(),
             },
-            None if sent.iter().any(|(label, ..)| !labels.contains(label)) => Answers::OtherLabel,
+            Some((_, _, space, thread, _, false)) => Answers::Unsettled {
+                space: space.clone(),
+                thread: thread.clone(),
+            },
+            None if sent
+                .iter()
+                .any(|(label, .., accepted)| *accepted && !labels.contains(label)) =>
+            {
+                Answers::OtherLabel
+            }
             None => Answers::Unknown,
         })
     }

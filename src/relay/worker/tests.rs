@@ -3440,3 +3440,68 @@ fn one_worker_lets_a_continued_thread_s_replies_in_from_b() {
 fn one_worker_lets_a_continued_thread_s_replies_in_from_an_older_b() {
     one_worker_lets_a_continued_thread_s_replies_in(older_b);
 }
+
+/// An item B accepted whose settlement A cannot write, as while another
+/// writer holds the relay's database, stays queued, and the round backs
+/// off. B keeps each reply to it, since A has nowhere to put one yet. The
+/// next round settles the item by B's stored outcome, and the reply
+/// reaches its thread once.
+#[test]
+fn a_reply_to_an_item_a_could_not_settle_stays_on_b_until_a_settles_it() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    let store = crate::relay::tests_support::store(&space.state);
+    let queued = store.queued("devbox", REX).unwrap();
+    store.pin("devbox", &queued[0], "host-b").unwrap();
+    let writer = Connection::open(space.state.join("relay.sqlite3")).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut kept = false;
+    let accepted = wire::Outcome {
+        id: message.clone(),
+        to: "bob".to_owned(),
+        status: Status::Accepted,
+        reason: None,
+    };
+    decide(
+        "devbox",
+        &store,
+        &queued[0],
+        Some(&accepted),
+        crate::relay::now_ms(),
+        &mut kept,
+    );
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert!(kept, "the round backs off");
+    assert_eq!(outbound(&space)[0].0, "queued");
+    let endpoint = Endpoint::parse(REX);
+    let mut run = Run {
+        state: &space.state,
+        endpoint: &endpoint,
+        label: "devbox",
+        gate: &|| Ok(None),
+        pause: &mut |_| false,
+        woken: &std::cell::RefCell::default(),
+        wake: &mut |_| {},
+    };
+    let labels = ["devbox".to_owned()];
+    let peer = Peer {
+        host_id: "host-b",
+        labels: &labels,
+    };
+    let page: Answer =
+        serde_json::from_value(answer("accepted", None, replies(&message, 1, 1))).unwrap();
+    rex.run(|| collect_replies(&mut run, &store, &peer, &page, &mut Reading::default()));
+    assert_eq!(store.ack_through(REX, "host-b").unwrap().1, 0, "B keeps it");
+    assert!(collected_bodies(&space).is_empty());
+    assert!(dropped_bodies(&space).is_empty());
+    assert!(
+        crate::relay::conditions(&space.state, REX).is_empty(),
+        "no hold is full"
+    );
+    rex.answer_with(answer("duplicate", None, replies(&message, 1, 1)));
+    work_for(&space, &rex, 1);
+    assert_eq!(outbound(&space)[0].0, "accepted");
+    assert_eq!(collected_bodies(&space), [["reply 1"]]);
+    assert_eq!(store.ack_through(REX, "host-b").unwrap().1, 1);
+}
