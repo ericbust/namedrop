@@ -401,13 +401,14 @@ pub(crate) fn unsent_by_label(state: &Path, session_socket_id: &str) -> Vec<(Str
 
 /// What Doctor reports for each label of the Rex endpoint
 /// `session_socket_id` that needs a look. Nothing when the relay never ran.
-pub(crate) fn conditions(state: &Path, session_socket_id: &str) -> Vec<store::Conditions> {
+pub(crate) fn conditions(
+    state: &Path,
+    session_socket_id: &str,
+) -> Result<Vec<store::Conditions>, crate::StoreError> {
     if !state.join("relay.sqlite3").is_file() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    RelayStore::read(state)
-        .and_then(|store| store.conditions(session_socket_id, now_ms()))
-        .unwrap_or_default()
+    RelayStore::read(state).and_then(|store| store.conditions(session_socket_id, now_ms()))
 }
 
 /// Each remote sender whose replies expired here before it collected

@@ -1350,7 +1350,7 @@ fn a_reply_to_a_message_not_sent_to_this_b_is_dropped() {
     );
     assert_eq!(collected_bodies(&space), [["forged 4"]]);
     assert_eq!(
-        crate::relay::conditions(&space.state, REX),
+        crate::relay::conditions(&space.state, REX).unwrap(),
         [crate::relay::store::Conditions {
             label: "devbox".to_owned(),
             other_label: 1,
@@ -1434,7 +1434,7 @@ fn a_server_that_reports_another_s_host_id_cannot_answer_for_its_label() {
         "the dropped reply is acked"
     );
     assert_eq!(
-        crate::relay::conditions(&space.state, REX),
+        crate::relay::conditions(&space.state, REX).unwrap(),
         [crate::relay::store::Conditions {
             label: "devbox".to_owned(),
             other_label: 1,
@@ -2263,7 +2263,7 @@ fn a_thread_holds_at_most_20_replies_and_b_keeps_the_rest_in_order() {
     };
     assert_eq!(ack(&space), 30, "B keeps 31 on");
     assert_eq!(
-        crate::relay::conditions(&space.state, REX),
+        crate::relay::conditions(&space.state, REX).unwrap(),
         [crate::relay::store::Conditions {
             label: "devbox".to_owned(),
             other_label: 0,
@@ -2339,7 +2339,7 @@ fn replies_past_a_full_hold_stay_on_b_until_there_is_room() {
     );
     let store = crate::relay::tests_support::store(&space.state);
     assert_eq!(store.ack_through(REX, "host-b").unwrap().1, 210);
-    assert!(crate::relay::conditions(&space.state, REX)[0].held_full);
+    assert!(crate::relay::conditions(&space.state, REX).unwrap()[0].held_full);
     for message in &messages {
         as_person(
             &space,
@@ -2359,7 +2359,11 @@ fn replies_past_a_full_hold_stay_on_b_until_there_is_room() {
     work_for(&space, &rex, 1);
     assert_eq!(collected_bodies(&space).len(), 220, "no reply is lost");
     assert_eq!(store.ack_through(REX, "host-b").unwrap().1, 220);
-    assert!(crate::relay::conditions(&space.state, REX).is_empty());
+    assert!(
+        crate::relay::conditions(&space.state, REX)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// A thread with no more room keeps its own later replies back, but not
@@ -3010,7 +3014,7 @@ fn a_b_that_keeps_no_more_replies_is_sent_nothing_new_until_it_has_room() {
     sent(&space, &rex);
     rex.answer_with(full(answer("accepted", None, json!([]))));
     work_for(&space, &rex, 1);
-    assert!(crate::relay::conditions(&space.state, REX)[0].cannot_reply);
+    assert!(crate::relay::conditions(&space.state, REX).unwrap()[0].cannot_reply);
     rex.run(|| space.send("request-2", "@bob@devbox one more"))
         .unwrap();
     rex.answer_with(full(
@@ -3049,7 +3053,11 @@ fn a_b_that_keeps_no_more_replies_is_sent_nothing_new_until_it_has_room() {
     work_for(&space, &rex, 1);
     assert_eq!(rex.requests()[3]["op"], "deliver");
     assert_eq!(outbound(&space)[2].0, "accepted");
-    assert!(crate::relay::conditions(&space.state, REX).is_empty());
+    assert!(
+        crate::relay::conditions(&space.state, REX)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// A thread whose reply found no room takes none of its later replies in
@@ -3213,7 +3221,7 @@ fn an_item_b_may_hold_is_sent_again_while_b_keeps_no_more_replies() {
     rex.answer_with(accepted);
     work_for(&space, &rex, 1);
     assert_eq!(outbound(&space)[1].0, "queued");
-    assert!(crate::relay::conditions(&space.state, REX)[0].cannot_reply);
+    assert!(crate::relay::conditions(&space.state, REX).unwrap()[0].cannot_reply);
     relay.execute_batch("DROP TRIGGER no_accept").unwrap();
     rex.answer_with(
         json!({"host_id": "host-b", "can_reply": false, "epoch": "e1",
@@ -3451,7 +3459,7 @@ fn a_thread_with_no_room_keeps_no_other_thread_s_reply_from_arriving() {
         5,
         "B keeps the paused thread's replies and the one after them"
     );
-    assert!(crate::relay::conditions(&space.state, REX)[0].held_full);
+    assert!(crate::relay::conditions(&space.state, REX).unwrap()[0].held_full);
     let resume = || {
         as_person(
             &space,
@@ -3477,7 +3485,11 @@ fn a_thread_with_no_room_keeps_no_other_thread_s_reply_from_arriving() {
         b.outbox_page("host-a", 35, 0, wire::PAGE_LIMIT).unwrap().2,
         0
     );
-    assert!(crate::relay::conditions(&space.state, REX).is_empty());
+    assert!(
+        crate::relay::conditions(&space.state, REX)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// Past a reply A has no room for, a round reads at most 16 pages, and
@@ -3769,7 +3781,9 @@ fn a_reply_to_an_item_a_could_not_settle_stays_on_b_until_a_settles_it() {
     assert!(collected_bodies(&space).is_empty());
     assert!(dropped_bodies(&space).is_empty());
     assert!(
-        crate::relay::conditions(&space.state, REX).is_empty(),
+        crate::relay::conditions(&space.state, REX)
+            .unwrap()
+            .is_empty(),
         "no hold is full"
     );
     rex.answer_with(answer("duplicate", None, replies(&message, 1, 1)));
@@ -3777,4 +3791,121 @@ fn a_reply_to_an_item_a_could_not_settle_stays_on_b_until_a_settles_it() {
     assert_eq!(outbound(&space)[0].0, "accepted");
     assert_eq!(collected_bodies(&space), [["reply 1"]]);
     assert_eq!(store.ack_through(REX, "host-b").unwrap().1, 1);
+}
+
+/// The losses A told, each as (relay author, recipient, thread, body).
+fn told_losses(space: &Space) -> Vec<Vec<String>> {
+    space.main(
+        "SELECT m.author_alias_snapshot, r.alias_snapshot, m.thread_id, m.body
+         FROM collaboration_messages m
+         JOIN message_recipients r USING (session_socket_id, worktree_id, message_id)
+         WHERE m.request_id LIKE 'relay-lost:%' ORDER BY m.rowid",
+    )
+}
+
+/// A loss devbox's B names for a message sent to both hosts is told as
+/// devbox's, by the remote alias it names, even when studio's item was
+/// accepted too.
+#[test]
+fn a_loss_for_a_message_to_two_hosts_is_told_as_the_reporting_host_s() {
+    let space = Space::new(REX);
+    let rex = rex(&["studio", "devbox"]);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    let message = rex
+        .run(|| space.send("request-1", "@bob@studio @bob@devbox ping"))
+        .unwrap()["message_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    Connection::open(space.state.join("relay.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE outbound SET state = 'accepted', host_id = 'host-studio'
+             WHERE label = 'studio'",
+            [],
+        )
+        .unwrap();
+    let mut page = answer("accepted", None, json!([]));
+    page["lost"] = json!([
+        {"re": message, "from": "bob", "since": 7, "discarded": 2, "expired": 0},
+        {"re": message, "from": "eve", "since": 7, "discarded": 1, "expired": 0},
+    ]);
+    rex.answer_with(page);
+    work_for(&space, &rex, 1);
+    let told: Vec<_> = told_losses(&space)
+        .into_iter()
+        .map(|row| row[0].clone())
+        .collect();
+    assert_eq!(told, ["bob@devbox", "eve@devbox"]);
+}
+
+/// A loss for a message sent only to studio, or for a message A never
+/// sent, or with an alias that is not a name, is neither kept nor told,
+/// however many entries the answer has.
+#[test]
+fn a_loss_devbox_cannot_answer_for_is_neither_kept_nor_told() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox", "studio"]);
+    let message = sent(&space, &rex);
+    let other = rex
+        .run(|| space.send("request-2", "@carol@studio for studio only"))
+        .unwrap()["message_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut lost = vec![
+        json!({"re": other, "from": "carol", "since": 7, "discarded": 3, "expired": 0}),
+        json!({"re": message, "from": "evil\nFORGED HEADER", "since": 7,
+            "discarded": 1, "expired": 0}),
+        json!({"re": message, "from": "x".repeat(65), "since": 7,
+            "discarded": 1, "expired": 0}),
+    ];
+    for i in 0..5000 {
+        lost.push(
+            json!({"re": format!("made-up-{i}"), "from": "bob", "since": i,
+            "discarded": 1, "expired": 0}),
+        );
+    }
+    let mut page = answer("accepted", None, json!([]));
+    page["lost"] = json!(lost);
+    rex.answer_with(page);
+    work_for(&space, &rex, 1);
+    assert!(told_losses(&space).is_empty());
+    let store = crate::relay::tests_support::store(&space.state);
+    let kept: i64 = Connection::open(space.state.join("relay.sqlite3"))
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM lost", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(kept, 0);
+    assert!(store.lost_untold(REX).unwrap().is_empty());
+    assert!(
+        crate::relay::conditions(&space.state, REX)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Counts past the bound, up to `i64::MAX`, are ignored without a panic,
+/// and Doctor still reads the relay's conditions.
+#[test]
+fn a_loss_with_counts_past_the_bound_is_ignored() {
+    for (discarded, expired) in [(i64::MAX, 1), (i64::MAX, i64::MAX), (1, -1)] {
+        let space = Space::new(REX);
+        let rex = rex(&["devbox"]);
+        let message = sent(&space, &rex);
+        let mut page = answer("accepted", None, json!([]));
+        page["lost"] = json!([{"re": message, "from": "bob", "since": 7,
+            "discarded": discarded, "expired": expired}]);
+        rex.answer_with(page);
+        let worked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            work_for(&space, &rex, 1);
+        }));
+        assert!(worked.is_ok(), "{discarded}, {expired}");
+        assert!(told_losses(&space).is_empty());
+        assert!(
+            crate::relay::conditions(&space.state, REX)
+                .unwrap()
+                .is_empty()
+        );
+    }
 }

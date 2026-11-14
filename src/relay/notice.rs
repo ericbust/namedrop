@@ -113,7 +113,7 @@ fn lost_notice(lost: &LostReplies) -> Notice<'_> {
         (0, expired) => format!("{} to this message {WAITED}", replies(expired)),
         (discarded, expired) => format!(
             "{} to this message: {discarded} {FULL}, and {expired} {WAITED}",
-            replies(discarded + expired)
+            replies(discarded.saturating_add(expired))
         ),
     };
     Notice {
@@ -247,5 +247,32 @@ fn notice(
         Ok(_) => Ok(true),
         Err(error) if error.kind() == crate::StoreErrorKind::InvalidInput => Ok(false),
         Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lost_notice_saturates_legacy_counts() {
+        let lost = LostReplies {
+            host_id: "host-b".into(),
+            epoch: "epoch".into(),
+            re: "message".into(),
+            remote_alias: "bob".into(),
+            since_ms: 1,
+            discarded: i64::MAX,
+            expired: i64::MAX,
+            new_discarded: i64::MAX,
+            new_expired: i64::MAX,
+            label: "devbox".into(),
+            space: "space".into(),
+        };
+        assert!(
+            lost_notice(&lost)
+                .text
+                .contains(&format!("{} replies", i64::MAX))
+        );
     }
 }

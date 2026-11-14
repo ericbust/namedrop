@@ -381,10 +381,17 @@ where
                 runtime.state_directory,
                 runtime.session_socket_id,
             )));
-            issues.extend(relay_conditions_issue(&crate::relay::conditions(
-                runtime.state_directory,
-                runtime.session_socket_id,
-            )));
+            match crate::relay::conditions(runtime.state_directory, runtime.session_socket_id) {
+                Ok(conditions) => issues.extend(relay_conditions_issue(&conditions)),
+                Err(error) => issues.push(issue(
+                    "ND-RELAY-005",
+                    HealthSeverity::Notice,
+                    "Relay conditions could not be read.",
+                    &error.to_string(),
+                    HealthRepairKind::HumanDecision,
+                    "Check the relay database and filesystem permissions, then run Doctor again.",
+                )),
+            }
             issues.extend(relay_set_aside_issue(&crate::relay::store::set_aside_in(
                 runtime.state_directory,
             )));

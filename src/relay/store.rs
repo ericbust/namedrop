@@ -55,6 +55,7 @@ const PAGE: &str = "SELECT seq, re, thread, sender, message_id, text FROM outbox
 /// B tells A of at most this many of the A messages whose replies it let
 /// go of, the latest first.
 pub(crate) const LOST_LIMIT: i64 = 32;
+pub(crate) const LOST_COUNT_LIMIT: i64 = 1_000_000_000;
 
 /// An item A could not deliver within this fails.
 pub(crate) const OUTBOUND_LIFETIME_MS: i64 = 24 * 60 * 60 * 1000;
@@ -753,8 +754,21 @@ impl RelayStore {
         lost: &[Lost],
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        for lost in lost {
-            self.connection.execute(
+        let transaction = self.connection.unchecked_transaction()?;
+        let labels = [label.to_owned()];
+        for lost in lost.iter().take(LOST_LIMIT as usize) {
+            if !super::valid_name(&lost.from)
+                || !super::wire::valid_id(&lost.re)
+                || !(0..=LOST_COUNT_LIMIT).contains(&lost.discarded)
+                || !(0..=LOST_COUNT_LIMIT).contains(&lost.expired)
+                || !matches!(
+                    self.sent_from(&lost.re, host_id, endpoint, &lost.from, &labels)?,
+                    Answers::Sent { .. }
+                )
+            {
+                continue;
+            }
+            transaction.execute(
                 "INSERT INTO lost (endpoint, host_id, epoch, re, remote_alias, since_ms, label,
                     discarded, expired, updated_at_ms)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
@@ -778,6 +792,14 @@ impl RelayStore {
                 ],
             )?;
         }
+        transaction.execute(
+            "DELETE FROM lost WHERE endpoint = ?1 AND label = ?2 AND host_id = ?3
+             AND rowid NOT IN (SELECT rowid FROM lost
+                WHERE endpoint = ?1 AND label = ?2 AND host_id = ?3
+                ORDER BY updated_at_ms DESC, rowid DESC LIMIT ?4)",
+            params![endpoint, label, host_id, LOST_LIMIT],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -790,7 +812,9 @@ impl RelayStore {
             "SELECT l.host_id, l.epoch, l.re, l.remote_alias, l.since_ms, l.discarded, l.expired,
                 l.discarded - l.told_discarded, l.expired - l.told_expired, o.label, o.space
              FROM lost l JOIN outbound o ON o.rowid = (SELECT rowid FROM outbound
-                WHERE endpoint = l.endpoint AND message_id = l.re LIMIT 1)
+                WHERE endpoint = l.endpoint AND message_id = l.re
+                    AND label = l.label AND host_id = l.host_id AND state = 'accepted'
+                ORDER BY recipient = l.remote_alias DESC, rowid LIMIT 1)
              WHERE l.endpoint = ?1
                 AND (l.discarded > l.told_discarded OR l.expired > l.told_expired)
              ORDER BY l.updated_at_ms, l.rowid",
@@ -1422,12 +1446,17 @@ impl RelayStore {
             })?
             .collect::<Result<Vec<Conditions>, _>>()?;
         let mut statement = self.connection.prepare(
-            "SELECT label, SUM(discarded + expired) FROM lost
-             WHERE endpoint = ?1 AND updated_at_ms > ?2 - ?3 GROUP BY label",
+            "SELECT label, discarded, expired FROM lost
+             WHERE endpoint = ?1 AND updated_at_ms > ?2 - ?3",
         )?;
         let lost = statement
             .query_map(params![endpoint, now_ms, OTHER_LABEL_LIFETIME_MS], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?
+                        .max(0)
+                        .saturating_add(row.get::<_, i64>(2)?.max(0)),
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         let mut conditions = conditions;
@@ -1436,7 +1465,7 @@ impl RelayStore {
                 .iter_mut()
                 .find(|condition| condition.label == label)
             {
-                Some(condition) => condition.lost = count,
+                Some(condition) => condition.lost = condition.lost.saturating_add(count),
                 None => conditions.push(Conditions {
                     label,
                     lost: count,

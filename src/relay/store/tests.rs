@@ -853,3 +853,180 @@ fn a_label_holds_at_most_100_replies_and_a_thread_20() {
     );
     assert!(store.hold(&held("studio", "host-0", "t5", 0), NOW).unwrap());
 }
+
+fn loss(re: &str, from: &str, since: i64) -> Lost {
+    Lost {
+        re: re.into(),
+        from: from.into(),
+        since,
+        discarded: 1,
+        expired: 0,
+    }
+}
+
+#[test]
+fn lost_reports_validate_authority_fields_and_bound_the_page() {
+    let state = State::new();
+    let store = state.open(NOW);
+    queue(&store, "message", NOW);
+    store
+        .connection
+        .execute("UPDATE outbound SET state='accepted', host_id='host-b'", [])
+        .unwrap();
+    let endpoint = "rex:/tmp/a.sock";
+    for (label, host, report) in [
+        ("studio", "host-b", loss("message", "bob", 1)),
+        ("devbox", "other-host", loss("message", "bob", 2)),
+        ("devbox", "host-b", loss("unknown", "bob", 3)),
+        ("devbox", "host-b", loss("bad\nid", "bob", 4)),
+        ("devbox", "host-b", loss("message", "bad\nalias", 5)),
+        ("devbox", "host-b", loss("message", &"a".repeat(65), 6)),
+    ] {
+        store
+            .note_lost(endpoint, label, host, "epoch", &[report], NOW)
+            .unwrap();
+    }
+    for count in [-1, LOST_COUNT_LIMIT + 1, i64::MAX] {
+        for expired in [false, true] {
+            let mut report = loss("message", "bob", 7);
+            if expired {
+                report.expired = count;
+            } else {
+                report.discarded = count;
+            }
+            store
+                .note_lost(endpoint, "devbox", "host-b", "epoch", &[report], NOW)
+                .unwrap();
+        }
+    }
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM lost"), 0);
+    store
+        .connection
+        .execute("UPDATE outbound SET state='queued'", [])
+        .unwrap();
+    store
+        .note_lost(
+            endpoint,
+            "devbox",
+            "host-b",
+            "epoch",
+            &[loss("message", "bob", 8)],
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM lost"), 0);
+    store
+        .connection
+        .execute("UPDATE outbound SET state='accepted'", [])
+        .unwrap();
+    let reports: Vec<_> = (0..100).map(|i| loss("message", "bob", i)).collect();
+    store
+        .note_lost(endpoint, "devbox", "host-b", "epoch", &reports, NOW)
+        .unwrap();
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM lost"), LOST_LIMIT);
+    assert_eq!(
+        store.lost_untold(endpoint).unwrap().len(),
+        LOST_LIMIT as usize
+    );
+}
+
+#[test]
+fn lost_reports_roll_back_the_whole_page_on_write_failure() {
+    let state = State::new();
+    let store = state.open(NOW);
+    queue(&store, "message", NOW);
+    store
+        .connection
+        .execute("UPDATE outbound SET state='accepted', host_id='host-b'", [])
+        .unwrap();
+    store.connection.execute_batch("CREATE TRIGGER fail_second BEFORE INSERT ON lost WHEN NEW.since_ms = 2 BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+    assert!(
+        store
+            .note_lost(
+                "rex:/tmp/a.sock",
+                "devbox",
+                "host-b",
+                "epoch",
+                &[loss("message", "bob", 1), loss("message", "bob", 2)],
+                NOW
+            )
+            .is_err()
+    );
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM lost"), 0);
+}
+
+#[test]
+fn lost_reports_doctor_saturates_legacy_counts_and_preserves_other_conditions() {
+    let state = State::new();
+    let store = state.open(NOW);
+    store
+        .set_can_reply("rex:/tmp/a.sock", "devbox", false)
+        .unwrap();
+    for since in [1, 2] {
+        store.connection.execute("INSERT INTO lost (endpoint, host_id, epoch, re, remote_alias, since_ms, label, discarded, expired, updated_at_ms) VALUES ('rex:/tmp/a.sock', 'host-b', 'epoch', 'message', 'bob', ?1, 'devbox', ?2, ?2, ?3)", params![since, i64::MAX, NOW]).unwrap();
+    }
+    let conditions = store.conditions("rex:/tmp/a.sock", NOW).unwrap();
+    assert_eq!(conditions.len(), 1);
+    assert_eq!(conditions[0].lost, i64::MAX);
+    assert!(conditions[0].cannot_reply);
+    drop(store);
+    fs::write(state.0.join("relay.sqlite3"), b"not a SQLite database").unwrap();
+    assert!(crate::relay::conditions(&state.0, "rex:/tmp/a.sock").is_err());
+}
+
+#[test]
+fn lost_reports_retain_only_the_latest_page_per_peer_across_answers() {
+    let state = State::new();
+    let store = state.open(NOW);
+    let endpoint = "rex:/tmp/a.sock";
+    queue(&store, "message", NOW);
+    store
+        .connection
+        .execute("UPDATE outbound SET state='accepted', host_id='host-b'", [])
+        .unwrap();
+    store.connection.execute("INSERT INTO outbound (label, message_id, recipient, endpoint, space, sender, thread, text, state, host_id, created_at_ms, updated_at_ms) VALUES ('studio', 'message', 'bob', 'rex:/tmp/a.sock', 'session:a', 'alice', 'thread-1', 'hi', 'accepted', 'host-c', ?1, ?1)", params![NOW]).unwrap();
+    store
+        .note_lost(
+            endpoint,
+            "studio",
+            "host-c",
+            "epoch",
+            &[loss("message", "bob", 0)],
+            NOW,
+        )
+        .unwrap();
+    for page in 0..3 {
+        let reports: Vec<_> = (0..LOST_LIMIT)
+            .map(|i| loss("message", "bob", page * LOST_LIMIT + i))
+            .collect();
+        store
+            .note_lost(
+                endpoint,
+                "devbox",
+                "host-b",
+                &format!("epoch-{page}"),
+                &reports,
+                NOW + page,
+            )
+            .unwrap();
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM lost WHERE label='devbox'"),
+            LOST_LIMIT
+        );
+        assert_eq!(
+            count(
+                &store,
+                "SELECT MIN(since_ms) FROM lost WHERE label='devbox'"
+            ),
+            page * LOST_LIMIT
+        );
+        assert_eq!(
+            count(&store, "SELECT COUNT(*) FROM lost WHERE label='studio'"),
+            1
+        );
+        assert_eq!(
+            store.lost_untold(endpoint).unwrap().len(),
+            LOST_LIMIT as usize + 1
+        );
+    }
+}
