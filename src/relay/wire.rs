@@ -13,6 +13,12 @@ pub(crate) const TEXT_LIMIT: usize = 60 * 1024;
 /// its outbox at this.
 pub(crate) const PAGE_LIMIT: usize = 256 * 1024;
 
+/// Whether `value` is an id B or A takes from the other side: 1 to 128
+/// printable ASCII characters with no space.
+pub(crate) fn valid_id(value: &str) -> bool {
+    (1..=128).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
 /// The longest id Rex or B accepts for each field that is not known until
 /// the item is sent.
 const LONGEST_ID: &str = "................................................................................................................................";

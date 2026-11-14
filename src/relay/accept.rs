@@ -117,16 +117,14 @@ fn retry(host_id: &str, item: Option<&Item>, reason: &str) -> Answer {
 /// Every field a direct client could make up, checked before anything is
 /// read or stored. The error names the field.
 fn validate(request: &Request) -> Result<(), &'static str> {
-    let id = |value: &str| {
-        (1..=128).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_graphic())
-    };
+    let id = super::wire::valid_id;
     if !id(&request.expect_host_id) {
         return Err("expect_host_id");
     }
     if !id(&request.from.host_id) {
         return Err("from.host_id");
     }
-    if crate::validate_alias(&request.from.name).is_err() {
+    if !super::valid_name(&request.from.name) {
         return Err("from.name");
     }
     if !super::valid_label(&request.from.host) {

@@ -7,7 +7,7 @@ use super::{
     Hosts, RemoteHosts,
     rex::{self, Failure},
     store::{Collected, Queued, RelayStore, Settled},
-    wire::{Answer, Item, Op, Perform, Reply, Request, Sender, Status},
+    wire::{self, Answer, Item, Op, Perform, Reply, Request, Sender, Status},
 };
 use crate::{
     ActorKind, DeliveryId, IdGenerator, MessageId, MutationAttribution, SpaceId, StateNamespace,
@@ -31,6 +31,9 @@ const BACKOFF: [Duration; 5] = [
 ];
 /// The client label B's bridge sets.
 const BRIDGE: &str = "namedrop";
+/// The most outbox pages one collect reads, so a B that always has more
+/// cannot hold the worker.
+const PAGES: usize = 16;
 
 /// One worker's place and its two effects: `pause` waits and says whether
 /// to go on, and `wake` starts the mailbox worker of a space that got mail.
@@ -161,7 +164,6 @@ fn round(run: &mut Run<'_>, peer: &mut Option<String>) -> Round {
         match perform(run.label, &request) {
             Call::Answered(answer) => {
                 let more = answer.more;
-                collect_replies(run, &store, &host_id, &answer);
                 decide(
                     run.label,
                     &store,
@@ -170,6 +172,7 @@ fn round(run: &mut Run<'_>, peer: &mut Option<String>) -> Round {
                     now,
                     &mut kept,
                 );
+                collect_replies(run, &store, &host_id, &answer);
                 if more && !collect(run, &store, &own, &host_id) {
                     kept = true;
                 }
@@ -224,10 +227,11 @@ fn decide(
     };
 }
 
-/// Collects B's replies for this side until B has no more, and says whether
-/// every call was answered.
+/// Collects B's replies for this side until B has no more, or for at most
+/// `PAGES` pages, and says whether every call was answered. The next round
+/// collects what remains.
 fn collect(run: &mut Run<'_>, store: &RelayStore, own: &str, host_id: &str) -> bool {
-    loop {
+    for _ in 0..PAGES {
         let request = Request {
             op: Op::Collect,
             expect_host_id: host_id.to_owned(),
@@ -254,6 +258,7 @@ fn collect(run: &mut Run<'_>, store: &RelayStore, own: &str, host_id: &str) -> b
             return true;
         }
     }
+    true
 }
 
 /// The parts of a request that ack what A has collected from `host_id`.
@@ -276,7 +281,9 @@ fn acked(store: &RelayStore, host_id: &str) -> Request {
 /// Inserts each reply of `answer` that A has not collected into the space
 /// of the A message it answers, from the relay author of the B agent that
 /// wrote it, and wakes that space. A new outbox epoch means B's `seq`
-/// started again, so every reply of it is new.
+/// started again, so every reply of it is new. A reply is B's to make up,
+/// so one with a bad field, or one that answers a message this endpoint
+/// did not send to B, is acked and dropped.
 fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, answer: &Answer) {
     let Ok((epoch, through)) = store.ack_through(host_id) else {
         return;
@@ -286,18 +293,24 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, answer:
         if reply.seq <= through {
             continue;
         }
-        let Ok(Some((endpoint, space, thread))) = store.sent_from(&reply.re) else {
+        let endpoint = &run.endpoint.key;
+        let sent = if trusted(reply) {
+            store.sent_from(&reply.re, run.label, host_id, endpoint)
+        } else {
+            Ok(None)
+        };
+        let Ok(Some((space, thread))) = sent else {
             let _ = store.record_collected(&Collected {
                 host_id,
                 epoch: &answer.epoch,
                 seq: reply.seq,
                 label: run.label,
-                endpoint: &run.endpoint.key,
+                endpoint,
                 space: "",
                 message_id: "",
-                remote_message_id: &reply.message_id,
-                remote_alias: &reply.from,
-                thread: &reply.thread,
+                remote_message_id: "",
+                remote_alias: "",
+                thread: "",
                 now_ms: super::now_ms(),
             });
             continue;
@@ -305,7 +318,7 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, answer:
         let Ok(gate) = crate::runtime_command_guard(run.state, None) else {
             return;
         };
-        let inserted = insert_reply(run.state, run.label, host_id, reply, &endpoint, &space);
+        let inserted = insert_reply(run.state, run.label, host_id, reply, endpoint, &space);
         drop(gate);
         let message_id = match inserted {
             Ok(Some(message)) => message,
@@ -317,7 +330,7 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, answer:
             epoch: &answer.epoch,
             seq: reply.seq,
             label: run.label,
-            endpoint: &endpoint,
+            endpoint,
             space: &space,
             message_id: &message_id,
             remote_message_id: &reply.message_id,
@@ -329,6 +342,15 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, answer:
             (run.wake)(&SpaceId::new(&space));
         }
     }
+}
+
+/// Whether each field of `reply` that A stores or shows passes the rule
+/// B holds A's own fields to.
+fn trusted(reply: &Reply) -> bool {
+    super::valid_name(&reply.from)
+        && [&reply.re, &reply.message_id, &reply.thread]
+            .into_iter()
+            .all(|id| wire::valid_id(id))
 }
 
 /// The new A message for `reply`, `None` when A can no longer take it, as
@@ -369,7 +391,7 @@ fn insert_reply(
                 delivery_id: DeliveryId::new(ids.next_id("delivery")),
                 in_reply_to: Some(&re),
                 recipient: &sender,
-                text: &reply.text,
+                text: &super::capture::cut(&reply.text, wire::TEXT_LIMIT),
             },
             &attribution,
         )

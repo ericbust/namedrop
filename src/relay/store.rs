@@ -491,18 +491,23 @@ impl RelayStore {
             .query_row("SELECT epoch FROM outbox_epoch", [], |row| row.get(0))?)
     }
 
-    /// Where the A message `message_id` was sent from: its endpoint, space,
-    /// and thread.
+    /// The space and thread of the A message `message_id`, when `endpoint`
+    /// sent it to `label` and the server `host_id` accepted it there, so B
+    /// can answer only what was sent to it.
     pub(crate) fn sent_from(
         &self,
         message_id: &str,
-    ) -> Result<Option<(String, String, String)>, StoreError> {
+        label: &str,
+        host_id: &str,
+        endpoint: &str,
+    ) -> Result<Option<(String, String)>, StoreError> {
         Ok(self
             .connection
             .query_row(
-                "SELECT endpoint, space, thread FROM outbound WHERE message_id = ?1 LIMIT 1",
-                params![message_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                "SELECT space, thread FROM outbound WHERE message_id = ?1 AND label = ?2
+                    AND host_id = ?3 AND endpoint = ?4 AND state = 'accepted' LIMIT 1",
+                params![message_id, label, host_id, endpoint],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?)
     }
@@ -680,8 +685,9 @@ impl RelayStore {
     }
 
     /// Fails each queued item older than its lifetime, drops each outbox
-    /// item and `inbound` key older than theirs, and counts the dropped
-    /// outbox items per remote sender.
+    /// item and `inbound` key older than theirs and each reply A collected
+    /// as long ago, and counts the dropped outbox items per remote sender.
+    /// `cursors` keeps what A acks.
     fn expire(&mut self, now_ms: i64) -> Result<(), StoreError> {
         let transaction = self.connection.transaction()?;
         transaction.execute(
@@ -706,6 +712,10 @@ impl RelayStore {
         transaction.execute(
             "DELETE FROM inbound WHERE created_at_ms <= ?1",
             params![now_ms - INBOUND_LIFETIME_MS],
+        )?;
+        transaction.execute(
+            "DELETE FROM collected WHERE created_at_ms <= ?1",
+            params![outbox_limit],
         )?;
         transaction.commit()?;
         Ok(())

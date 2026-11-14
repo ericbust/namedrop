@@ -305,6 +305,12 @@ pub(crate) fn valid_label(label: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
+/// Whether `name` can name an agent on the other side: an alias of at most
+/// 64 bytes, which the other side shows as `name@host`.
+pub(crate) fn valid_name(name: &str) -> bool {
+    name.len() <= 64 && crate::validate_alias(name).is_ok()
+}
+
 /// The refusal for a label that is not exactly a listed, valid one.
 pub(crate) fn unlisted(label: &str, listed: &[String]) -> String {
     if listed.is_empty() {

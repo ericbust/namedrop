@@ -233,3 +233,37 @@ fn an_inbound_key_expires_after_7_days() {
     );
     assert_eq!(count(&store, "SELECT COUNT(*) FROM inbound"), 1);
 }
+
+#[test]
+fn a_collected_reply_is_dropped_after_7_days_and_its_cursor_stays() {
+    let state = State::new();
+    let store = state.open(NOW);
+    for (seq, at) in [
+        (1, NOW - OUTBOX_LIFETIME_MS),
+        (2, NOW - OUTBOX_LIFETIME_MS + 1),
+    ] {
+        store
+            .record_collected(&Collected {
+                host_id: "host-b",
+                epoch: "epoch-1",
+                seq,
+                label: "devbox",
+                endpoint: "rex:/tmp/a.sock",
+                space: "session:a",
+                message_id: "",
+                remote_message_id: "",
+                remote_alias: "",
+                thread: "",
+                now_ms: at,
+            })
+            .unwrap();
+    }
+    drop(store);
+
+    let store = state.open(NOW);
+    assert_eq!(count(&store, "SELECT seq FROM collected"), 2);
+    assert_eq!(
+        store.ack_through("host-b").unwrap(),
+        ("epoch-1".to_owned(), 2)
+    );
+}
