@@ -7,7 +7,14 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 
 const FILE: &str = "relay.sqlite3";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+/// What version 1 lacks: when a reply for another label was last dropped,
+/// and whether the sender of a reply A let go of was told, so the row
+/// stays as the refusal's tombstone.
+const TO_2: &str = "
+ALTER TABLE conditions ADD COLUMN other_label_at_ms INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE dropped ADD COLUMN told INTEGER NOT NULL DEFAULT 0;
+";
 
 /// An item A could not deliver within this fails.
 pub(crate) const OUTBOUND_LIFETIME_MS: i64 = 24 * 60 * 60 * 1000;
@@ -28,6 +35,9 @@ pub(crate) const HELD_PER_THREAD: i64 = 20;
 /// B keeps at most this many replies for one A host. One more is counted
 /// with the expired replies, as one that can never reach A.
 pub(crate) const OUTBOX_LIMIT: i64 = 10_000;
+/// Doctor counts the replies dropped for answering a message sent to
+/// another host until this long after the last one.
+pub(crate) const OTHER_LABEL_LIFETIME_MS: i64 = OUTBOX_LIFETIME_MS;
 
 /// A holds `peers`, `outbound`, `collected`, `cursors`, the last `seq`
 /// each local endpoint took from each B and the outbox epoch it counts in,
@@ -153,6 +163,7 @@ CREATE TABLE conditions (
     other_label INTEGER NOT NULL DEFAULT 0,
     held_full INTEGER NOT NULL DEFAULT 0,
     cannot_reply INTEGER NOT NULL DEFAULT 0,
+    other_label_at_ms INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (endpoint, label)
 );
 CREATE TABLE dropped (
@@ -166,6 +177,7 @@ CREATE TABLE dropped (
     count INTEGER NOT NULL,
     reason TEXT,
     created_at_ms INTEGER NOT NULL,
+    told INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (endpoint, host_id, remote_message_id)
 );
 ";
@@ -247,7 +259,8 @@ pub(crate) enum Answers {
 }
 
 /// What Doctor reports on A for one label: how many replies its worker
-/// dropped because they answered a message sent to another host, whether
+/// dropped because they answered a message sent to another host, counted
+/// since a quiet `OTHER_LABEL_LIFETIME_MS`, whether
 /// A holds as many of its replies as it can, so B keeps the rest, and
 /// whether B keeps no more replies for A, so A sends it nothing new.
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -346,6 +359,10 @@ impl RelayStore {
                         "outbox"
                     )],
                 )?;
+                transaction.pragma_update(None, "user_version", VERSION)?;
+            }
+            1 => {
+                transaction.execute_batch(TO_2)?;
                 transaction.pragma_update(None, "user_version", VERSION)?;
             }
             VERSION => {}
@@ -891,12 +908,23 @@ impl RelayStore {
     }
 
     /// Counts a reply that `endpoint`'s worker for `label` collected and
-    /// dropped because it answered a message sent to another host.
-    pub(crate) fn count_other_label(&self, endpoint: &str, label: &str) -> Result<(), StoreError> {
+    /// dropped at `now_ms` because it answered a message sent to another
+    /// host. The count starts again after `OTHER_LABEL_LIFETIME_MS` with
+    /// none.
+    pub(crate) fn count_other_label(
+        &self,
+        endpoint: &str,
+        label: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
         self.connection.execute(
-            "INSERT INTO conditions (endpoint, label, other_label) VALUES (?1, ?2, 1)
-             ON CONFLICT (endpoint, label) DO UPDATE SET other_label = other_label + 1",
-            params![endpoint, label],
+            "INSERT INTO conditions (endpoint, label, other_label, other_label_at_ms)
+             VALUES (?1, ?2, 1, ?3)
+             ON CONFLICT (endpoint, label) DO UPDATE SET
+                other_label = CASE WHEN other_label_at_ms > ?3 - ?4 THEN other_label + 1
+                    ELSE 1 END,
+                other_label_at_ms = ?3",
+            params![endpoint, label, now_ms, OTHER_LABEL_LIFETIME_MS],
         )?;
         Ok(())
     }
@@ -918,7 +946,8 @@ impl RelayStore {
     }
 
     /// Records that the main store refused `held`'s reply for `reason`, so
-    /// its sender is told once.
+    /// its sender is told once. The record outlives the telling, so the
+    /// same reply read again is neither taken nor told again.
     pub(crate) fn refused(&self, held: &Held, reason: &str, now_ms: i64) -> Result<(), StoreError> {
         self.connection.execute(
             "INSERT OR IGNORE INTO dropped (endpoint, host_id, remote_message_id, label, space,
@@ -975,7 +1004,7 @@ impl RelayStore {
     pub(crate) fn dropped(&self, endpoint: &str) -> Result<Vec<Dropped>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT host_id, remote_message_id, label, space, re, remote_alias, count, reason
-             FROM dropped WHERE endpoint = ?1 ORDER BY created_at_ms, rowid",
+             FROM dropped WHERE endpoint = ?1 AND told = 0 ORDER BY created_at_ms, rowid",
         )?;
         let dropped = statement
             .query_map(params![endpoint], |row| {
@@ -999,21 +1028,27 @@ impl RelayStore {
     /// Records that the sender of `dropped`'s thread was told.
     pub(crate) fn told_dropped(&self, endpoint: &str, dropped: &Dropped) -> Result<(), StoreError> {
         self.connection.execute(
-            "DELETE FROM dropped WHERE endpoint = ?1 AND host_id = ?2 AND remote_message_id = ?3",
+            "UPDATE dropped SET told = 1
+             WHERE endpoint = ?1 AND host_id = ?2 AND remote_message_id = ?3",
             params![endpoint, dropped.host_id, dropped.remote_message_id],
         )?;
         Ok(())
     }
 
-    /// What `endpoint`'s Doctor reports for each label.
-    pub(crate) fn conditions(&self, endpoint: &str) -> Result<Vec<Conditions>, StoreError> {
+    /// What `endpoint`'s Doctor reports for each label at `now_ms`.
+    pub(crate) fn conditions(
+        &self,
+        endpoint: &str,
+        now_ms: i64,
+    ) -> Result<Vec<Conditions>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT label, other_label, held_full, cannot_reply FROM conditions
-             WHERE endpoint = ?1 AND (other_label > 0 OR held_full OR cannot_reply)
+            "SELECT label, CASE WHEN other_label_at_ms > ?2 - ?3 THEN other_label ELSE 0 END
+                    AS recent, held_full, cannot_reply
+             FROM conditions WHERE endpoint = ?1 AND (recent > 0 OR held_full OR cannot_reply)
              ORDER BY label",
         )?;
         let conditions = statement
-            .query_map(params![endpoint], |row| {
+            .query_map(params![endpoint, now_ms, OTHER_LABEL_LIFETIME_MS], |row| {
                 Ok(Conditions {
                     label: row.get(0)?,
                     other_label: row.get(1)?,

@@ -2998,3 +2998,50 @@ fn an_unanswered_collect_fails_nothing_for_a_b_that_kept_no_more_replies() {
     assert_eq!(outbound(&space)[1].0, "queued");
     assert!(notices(&space).is_empty());
 }
+
+/// A reply A refused is read again while an earlier reply that found no
+/// room keeps B from dropping it. Its sender is told once, and the space
+/// is woken for it once.
+#[test]
+fn a_refused_reply_read_again_is_told_and_woken_once() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let first = sent(&space, &rex);
+    let second = settled(&space, &rex, "second", "accepted", "host-b");
+    rex.answer_with(answer("accepted", None, replies(&second, 1, 1)));
+    work_for(&space, &rex, 1);
+    let mut page = replies(&first, 2, 31).as_array().unwrap().clone();
+    page.push(
+        json!({"seq": 33, "re": second, "thread": "t2", "from": "bob",
+        "message_id": "b-1", "text": "other text"}),
+    );
+    let mut woken = Vec::new();
+    for _ in 0..3 {
+        rex.answer_with(
+            json!({"host_id": "host-b", "can_reply": true, "epoch": "e1",
+            "more": false, "outbox": page}),
+        );
+        woken.push(work_for(&space, &rex, 1).1.len());
+    }
+    assert_eq!(woken, [1, 0, 0]);
+    assert_eq!(dropped_bodies(&space).len(), 1);
+}
+
+/// A reason B quotes loses each character that would reorder, hide, or
+/// break the text around it in the sender's terminal, as U+202E does.
+#[test]
+fn a_refusal_reason_from_b_loses_its_format_characters() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    rex.answer_with(answer(
+        "refused",
+        Some("no @bob\u{202e}xoved\u{200b} on\u{2028}devbox\u{feff}"),
+        json!([]),
+    ));
+    work_for(&space, &rex, 1);
+    assert_eq!(
+        outbound(&space)[0].1.as_deref(),
+        Some("no @bob xoved  on devbox ")
+    );
+}

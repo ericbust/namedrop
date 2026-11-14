@@ -294,7 +294,7 @@ fn decide(
         .as_deref()
         .unwrap_or("refused")
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| if shown(c) { c } else { ' ' })
         .collect();
     let reason = wire::cut(&printable, wire::REASON_LIMIT);
     let reason = reason.as_str();
@@ -325,6 +325,14 @@ struct Pages {
     read: bool,
     /// Every call was answered and every reply taken.
     taken: bool,
+}
+
+/// Whether a terminal shows `c` as itself: not a control character, nor
+/// one that formats or breaks the text around it, as U+202E reverses it.
+fn shown(c: char) -> bool {
+    !(c.is_control()
+        || crate::domain::is_invisible_format(c)
+        || matches!(c, '\u{2028}' | '\u{2029}'))
 }
 
 /// Collects B's replies for this side until B has no more, or for at most
@@ -467,7 +475,9 @@ fn collect_replies(
             }) => (label, space, thread),
             Ok(dropped) => {
                 if matches!(dropped, Answers::OtherLabel)
-                    && store.count_other_label(endpoint, run.label).is_err()
+                    && store
+                        .count_other_label(endpoint, run.label, super::now_ms())
+                        .is_err()
                     || !ack(reply.seq, &full)
                 {
                     return Page::Fault;

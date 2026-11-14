@@ -361,7 +361,7 @@ pub(crate) fn conditions(state: &Path, session_socket_id: &str) -> Vec<store::Co
         return Vec::new();
     }
     RelayStore::read(state)
-        .and_then(|store| store.conditions(session_socket_id))
+        .and_then(|store| store.conditions(session_socket_id, now_ms()))
         .unwrap_or_default()
 }
 

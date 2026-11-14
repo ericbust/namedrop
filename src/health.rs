@@ -1371,11 +1371,14 @@ fn relay_conditions_issue(conditions: &[crate::relay::store::Conditions]) -> Opt
         .iter()
         .map(|condition| {
             let mut found = Vec::new();
-            if condition.other_label > 0 {
-                found.push(format!(
-                    "{} replies answered a message sent to another host, and were dropped",
-                    condition.other_label
-                ));
+            match condition.other_label {
+                0 => {}
+                1 => found.push(
+                    "1 reply answered a message sent to another host, and was dropped".to_owned(),
+                ),
+                count => found.push(format!(
+                    "{count} replies answered a message sent to another host, and were dropped"
+                )),
             }
             if condition.held_full {
                 found.push(
@@ -1669,6 +1672,11 @@ mod tests {
                 cannot_reply: true,
                 ..Conditions::default()
             },
+            Conditions {
+                label: "pi".to_owned(),
+                other_label: 1,
+                ..Conditions::default()
+            },
         ])
         .unwrap();
         assert_eq!(notice.code, "ND-RELAY-003");
@@ -1676,7 +1684,7 @@ mod tests {
         let paused = "Namedrop holds as many of its replies as it can for threads the Automatic Reply Limit paused, so it keeps the rest until a person's message or Continue resumes them";
         assert!(
             notice.explanation.ends_with(&format!(
-                "By host: devbox: 3 replies answered a message sent to another host, and were dropped, and {paused}; studio: {paused}; lab: it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them."
+                "By host: devbox: 3 replies answered a message sent to another host, and were dropped, and {paused}; studio: {paused}; lab: it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them; pi: 1 reply answered a message sent to another host, and was dropped."
             )),
             "{}",
             notice.explanation
