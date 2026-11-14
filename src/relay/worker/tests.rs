@@ -819,3 +819,54 @@ fn an_answer_to_an_older_reply_names_that_reply() {
         [["devbox", "bob", "alice", "b-1"].map(str::to_owned)]
     );
 }
+
+/// When B's relay database starts again, its `seq` starts again at 1 in a
+/// new outbox epoch, so A collects the new reply 1 and acks it in that
+/// epoch.
+#[test]
+fn a_new_outbox_epoch_on_b_restarts_what_a_has_collected() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    let mut first = answer(
+        "accepted",
+        None,
+        json!([
+            {"seq": 1, "re": message, "thread": "t", "from": "bob",
+                "message_id": "b-message-1", "text": "pong"},
+            {"seq": 2, "re": message, "thread": "t", "from": "bob",
+                "message_id": "b-message-2", "text": "ping"},
+        ]),
+    );
+    first["epoch"] = json!("epoch-1");
+    rex.answer_with(first);
+    rex.answer_with(
+        json!({"host_id": "host-b", "can_reply": true, "epoch": "epoch-2",
+        "outbox": [{"seq": 1, "re": message, "thread": "t", "from": "bob",
+            "message_id": "b-message-3", "text": "after B started again"}], "more": false}),
+    );
+    rex.answer_with(
+        json!({"host_id": "host-b", "can_reply": true, "epoch": "epoch-2",
+        "outbox": [], "more": false}),
+    );
+    work_for(&space, &rex, 3);
+    assert_eq!(
+        space.main(&format!(
+            "SELECT body FROM collaboration_messages WHERE message_id <> '{message}' ORDER BY rowid"
+        )),
+        [["pong"], ["ping"], ["after B started again"]]
+    );
+    let acks: Vec<_> = rex
+        .requests()
+        .iter()
+        .map(|request| (request["epoch"].clone(), request["ack_through"].clone()))
+        .collect();
+    assert_eq!(
+        acks,
+        [
+            (Value::Null, json!(0)),
+            (json!("epoch-1"), json!(2)),
+            (json!("epoch-2"), json!(1)),
+        ]
+    );
+}

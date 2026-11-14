@@ -46,6 +46,7 @@ pub(crate) fn accept(
         }),
         outbox: Vec::new(),
         more: false,
+        epoch: String::new(),
     };
     let request: Request = match serde_json::from_slice(input) {
         Ok(request) => request,
@@ -73,13 +74,24 @@ pub(crate) fn accept(
         (Op::Deliver, None) => return refused("item is not valid".to_owned()),
         (Op::Collect, _) => None,
     };
-    match store.outbox_page(&request.from.host_id, request.ack_through, PAGE_LIMIT) {
-        Ok((outbox, more, kept)) => Answer {
+    let paged = store.outbox_epoch().and_then(|epoch| {
+        let acked = if request.epoch == epoch {
+            request.ack_through
+        } else {
+            0
+        };
+        store
+            .outbox_page(&request.from.host_id, acked, PAGE_LIMIT)
+            .map(|page| (epoch, page))
+    });
+    match paged {
+        Ok((epoch, (outbox, more, kept))) => Answer {
             host_id: host_id.to_owned(),
             can_reply: kept < OUTBOX_LIMIT,
             result,
             outbox,
             more,
+            epoch,
         },
         Err(error) => retry(host_id, request.item.as_ref(), &error.to_string()),
     }
@@ -98,6 +110,7 @@ fn retry(host_id: &str, item: Option<&Item>, reason: &str) -> Answer {
         }),
         outbox: Vec::new(),
         more: false,
+        epoch: String::new(),
     }
 }
 

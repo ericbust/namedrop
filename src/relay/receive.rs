@@ -228,6 +228,7 @@ fn answer(host_id: &str, item: &(String, String), status: Status, reason: &str) 
         }),
         outbox: Vec::new(),
         more: false,
+        epoch: String::new(),
     })
     .unwrap_or(Value::Null)
 }

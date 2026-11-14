@@ -16,11 +16,12 @@ pub(crate) const OUTBOUND_LIFETIME_MS: i64 = 24 * 60 * 60 * 1000;
 pub(crate) const OUTBOX_LIFETIME_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 pub(crate) const INBOUND_LIFETIME_MS: i64 = OUTBOX_LIFETIME_MS;
 
-/// A holds `peers`, `outbound`, and `collected`. B holds `inbound`,
-/// `outbox`, `remote_threads`, and the tally of the outbox items that
-/// expired, which Doctor reports after the items themselves are gone. Both
-/// hold `capture`, the last main-database message each endpoint's capture
-/// read.
+/// A holds `peers`, `outbound`, `collected`, and `cursors`, the last
+/// collected `seq` of each B and the outbox epoch it counts in. B holds
+/// `inbound`, `outbox`, its `outbox_epoch`, `remote_threads`, and the tally
+/// of the replies that expired, which Doctor reports after the items
+/// themselves are gone. Both hold `capture`, the last main-database message
+/// each endpoint's capture read.
 const SCHEMA: &str = "
 CREATE TABLE peers (
     label TEXT PRIMARY KEY,
@@ -46,6 +47,7 @@ CREATE TABLE outbound (
 );
 CREATE TABLE collected (
     host_id TEXT NOT NULL,
+    epoch TEXT NOT NULL,
     seq INTEGER NOT NULL,
     label TEXT NOT NULL,
     endpoint TEXT NOT NULL,
@@ -55,7 +57,12 @@ CREATE TABLE collected (
     remote_alias TEXT NOT NULL,
     thread TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (host_id, seq)
+    PRIMARY KEY (host_id, epoch, seq)
+);
+CREATE TABLE cursors (
+    host_id TEXT PRIMARY KEY,
+    epoch TEXT NOT NULL,
+    seq INTEGER NOT NULL
 );
 CREATE TABLE inbound (
     host_id TEXT NOT NULL,
@@ -98,6 +105,9 @@ CREATE TABLE capture (
     endpoint TEXT PRIMARY KEY,
     rowid INTEGER NOT NULL
 );
+CREATE TABLE outbox_epoch (
+    epoch TEXT NOT NULL
+);
 ";
 
 pub(crate) struct RelayStore {
@@ -127,6 +137,7 @@ pub(crate) enum Settled {
 /// A reply A collected from B and inserted as `message_id`.
 pub(crate) struct Collected<'a> {
     pub host_id: &'a str,
+    pub epoch: &'a str,
     pub seq: i64,
     pub label: &'a str,
     pub endpoint: &'a str,
@@ -185,6 +196,13 @@ impl RelayStore {
         match version {
             0 => {
                 transaction.execute_batch(SCHEMA)?;
+                transaction.execute(
+                    "INSERT INTO outbox_epoch (epoch) VALUES (?1)",
+                    params![crate::IdGenerator::next_id(
+                        &crate::ProcessIds::default(),
+                        "outbox"
+                    )],
+                )?;
                 transaction.pragma_update(None, "user_version", VERSION)?;
             }
             VERSION => {}
@@ -452,21 +470,25 @@ impl RelayStore {
         )?)
     }
 
-    /// The highest outbox `seq` of `host_id` that A has stored.
-    pub(crate) fn ack_through(&self, host_id: &str) -> Result<i64, StoreError> {
-        Ok(self.connection.query_row(
-            "SELECT COALESCE(MAX(seq), 0) FROM collected WHERE host_id = ?1",
-            params![host_id],
-            |row| row.get(0),
-        )?)
+    /// The outbox epoch of `host_id` that A last collected in, and the
+    /// highest `seq` of it that A has stored.
+    pub(crate) fn ack_through(&self, host_id: &str) -> Result<(String, i64), StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT epoch, seq FROM cursors WHERE host_id = ?1",
+                params![host_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or_default())
     }
 
-    pub(crate) fn is_collected(&self, host_id: &str, seq: i64) -> Result<bool, StoreError> {
-        Ok(self.connection.query_row(
-            "SELECT EXISTS (SELECT 1 FROM collected WHERE host_id = ?1 AND seq = ?2)",
-            params![host_id, seq],
-            |row| row.get(0),
-        )?)
+    /// B's outbox epoch, which A's acks name.
+    pub(crate) fn outbox_epoch(&self) -> Result<String, StoreError> {
+        Ok(self
+            .connection
+            .query_row("SELECT epoch FROM outbox_epoch", [], |row| row.get(0))?)
     }
 
     /// Where the A message `message_id` was sent from: its endpoint, space,
@@ -487,11 +509,12 @@ impl RelayStore {
 
     pub(crate) fn record_collected(&self, collected: &Collected<'_>) -> Result<(), StoreError> {
         self.connection.execute(
-            "INSERT OR IGNORE INTO collected (host_id, seq, label, endpoint, space, message_id,
-                remote_message_id, remote_alias, thread, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT OR IGNORE INTO collected (host_id, epoch, seq, label, endpoint, space,
+                message_id, remote_message_id, remote_alias, thread, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 collected.host_id,
+                collected.epoch,
                 collected.seq,
                 collected.label,
                 collected.endpoint,
@@ -502,6 +525,13 @@ impl RelayStore {
                 collected.thread,
                 collected.now_ms
             ],
+        )?;
+        self.connection.execute(
+            "INSERT INTO cursors (host_id, epoch, seq) VALUES (?1, ?2, ?3)
+             ON CONFLICT (host_id) DO UPDATE SET seq = CASE
+                WHEN epoch = excluded.epoch THEN MAX(seq, excluded.seq) ELSE excluded.seq END,
+                epoch = excluded.epoch",
+            params![collected.host_id, collected.epoch, collected.seq],
         )?;
         Ok(())
     }

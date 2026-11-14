@@ -156,12 +156,12 @@ fn round(run: &mut Run<'_>, peer: &mut Option<String>) -> Round {
                 in_reply_to: item.in_reply_to.clone(),
                 text: item.text.clone(),
             }),
-            ack_through: store.ack_through(&host_id).unwrap_or_default(),
+            ..acked(&store, &host_id)
         };
         match perform(run.label, &request) {
             Call::Answered(answer) => {
                 let more = answer.more;
-                collect_replies(run, &store, &host_id, &answer.outbox);
+                collect_replies(run, &store, &host_id, &answer);
                 decide(
                     run.label,
                     &store,
@@ -236,8 +236,7 @@ fn collect(run: &mut Run<'_>, store: &RelayStore, own: &str, host_id: &str) -> b
                 name: "namedrop".to_owned(),
                 host: super::machine_name(),
             },
-            item: None,
-            ack_through: store.ack_through(host_id).unwrap_or_default(),
+            ..acked(store, host_id)
         };
         let Call::Answered(answer) = perform(run.label, &request) else {
             return false;
@@ -250,24 +249,47 @@ fn collect(run: &mut Run<'_>, store: &RelayStore, own: &str, host_id: &str) -> b
             // B refused the call itself, as for another server's host_id.
             return false;
         }
-        collect_replies(run, store, host_id, &answer.outbox);
+        collect_replies(run, store, host_id, &answer);
         if !answer.more || answer.outbox.is_empty() {
             return true;
         }
     }
 }
 
-/// Inserts each reply A has not collected into the space of the A message
-/// it answers, from the relay author of the B agent that wrote it, and
-/// wakes that space.
-fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, replies: &[Reply]) {
-    for reply in replies {
-        if store.is_collected(host_id, reply.seq).unwrap_or(true) {
+/// The parts of a request that ack what A has collected from `host_id`.
+fn acked(store: &RelayStore, host_id: &str) -> Request {
+    let (epoch, ack_through) = store.ack_through(host_id).unwrap_or_default();
+    Request {
+        op: Op::Collect,
+        expect_host_id: String::new(),
+        from: Sender {
+            host_id: String::new(),
+            name: String::new(),
+            host: String::new(),
+        },
+        item: None,
+        ack_through,
+        epoch,
+    }
+}
+
+/// Inserts each reply of `answer` that A has not collected into the space
+/// of the A message it answers, from the relay author of the B agent that
+/// wrote it, and wakes that space. A new outbox epoch means B's `seq`
+/// started again, so every reply of it is new.
+fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, answer: &Answer) {
+    let Ok((epoch, through)) = store.ack_through(host_id) else {
+        return;
+    };
+    let through = if epoch == answer.epoch { through } else { 0 };
+    for reply in &answer.outbox {
+        if reply.seq <= through {
             continue;
         }
         let Ok(Some((endpoint, space, thread))) = store.sent_from(&reply.re) else {
             let _ = store.record_collected(&Collected {
                 host_id,
+                epoch: &answer.epoch,
                 seq: reply.seq,
                 label: run.label,
                 endpoint: &run.endpoint.key,
@@ -292,6 +314,7 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, replies
         };
         let _ = store.record_collected(&Collected {
             host_id,
+            epoch: &answer.epoch,
             seq: reply.seq,
             label: run.label,
             endpoint: &endpoint,

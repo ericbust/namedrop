@@ -41,6 +41,10 @@ pub(crate) struct Request {
     pub item: Option<Item>,
     #[serde(default)]
     pub ack_through: i64,
+    /// The outbox epoch `ack_through` counts in. B drops nothing for an
+    /// ack from another epoch.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub epoch: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -112,6 +116,10 @@ pub(crate) struct Answer {
     pub outbox: Vec<Reply>,
     #[serde(default)]
     pub more: bool,
+    /// The epoch of B's outbox, new each time B's relay database is
+    /// created, so A knows when B's `seq` started again.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub epoch: String,
 }
 
 /// The encoded size of the `deliver` request for one item, with every id
@@ -136,6 +144,7 @@ pub(crate) fn deliver_size(sender: &str, to: &str, text: &str) -> usize {
                 text: text.to_owned(),
             }),
             ack_through: i64::MAX,
+            epoch: LONGEST_ID.to_owned(),
         },
     })
     .map_or(usize::MAX, |encoded| encoded.len())

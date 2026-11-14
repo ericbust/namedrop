@@ -933,13 +933,15 @@ How each element of review 1's remote table comes out:
 //   expect_host_id: <B's host_id, as A pinned it>,
 //   from: {host_id: <A's server.status host_id>, name: <the sender's alias>, host: <A's machine name, for display>},
 //   item: {id: <A's message id>, to: <a name on B>, thread: <A's thread id>, in_reply_to: <B's message id or null>, text}, // deliver only
-//   ack_through: <the highest outbox seq A has stored>
+//   ack_through: <the highest outbox seq A has stored>,
+//   epoch: <the outbox epoch that ack_through counts in>
 // }
 // result: {
 //   host_id: <B's>, can_reply: bool,
 //   result: {id, to, status: "accepted" | "duplicate" | "refused" | "ambiguous" | "retry", reason?}, // deliver only
 //   outbox: [{seq, re: <the A message id it answers>, thread: <A's thread id>, from: <B alias>, message_id: <B's>, text}],
-//   more: bool
+//   more: bool,
+//   epoch: <B's outbox epoch, new each time B's relay.sqlite3 is created>
 // }
 fn receive(request: PerformRequest) {
 	// 1. The principal: `peer` with B's uid, or `tailscale`. `anonymous` only while
@@ -959,7 +961,7 @@ fn receive(request: PerformRequest) {
 3. It refuses an item for a paused space. It also refuses an item whose recipient is a terminal, with `@bob is a terminal on devbox, and devbox relays mentions only to agents`, unless `<state>/relay/allow-terminals` exists on B. A terminal runs a new message as a shell command, so in the first release a relayed mention names an agent, and B's owner opts in to terminals by creating that file, as the stand-in does for `@bterm`. The refusal is stored with the key, so creating the file later changes the answer only for new items.
 4. It resolves `to`. With `in_reply_to` naming a message B relayed, `to` must hold a live alias claim in that message's space. Otherwise it resolves among the activated spaces of B's proven-local endpoints. One live claim accepts the item into that space. None refuses it with `no @bob on devbox`. More than one answers `ambiguous` with the session labels, because a remote address has no space part yet.
 5. For an accepted item, in one main-database transaction, it inserts the message with the sender's relay author ([below](#relayed-messages-have-a-paneless-author)), with the request id `relay:<A host_id>:<item id>:<to>`, into the B thread that `remote_threads` holds for (A's `host_id`, A's thread, B's space), or a new one. Then it records the key, the outcome, B's message id, and the thread in `relay.sqlite3`, and schedules the space's mailbox worker. A crash between the two writes is found on the retry by the request id. The request id names the recipient, so the second recipient of one A message in the same B space gets its own message, not a fingerprint conflict on `idempotency_records` (`src/store.rs:3073`, `:3088`).
-6. It drops B's outbox items for A with `seq <= ack_through`, and returns at most 256 KiB of the rest, with `more` when some remain.
+6. It drops B's outbox items for A with `seq <= ack_through` when the request's `epoch` is B's own, and returns at most 256 KiB of the rest, with `more` when some remain, and B's `epoch`. A database that B creates again starts `seq` again at 1 under a new epoch, so an ack from the old epoch drops nothing.
 
 `can_reply` is `true` when B will keep replies for A's `host_id`, which holds unless B's outbox for A holds 10,000 items.
 
@@ -970,7 +972,7 @@ fn receive(request: PerformRequest) {
 
 So when A's agent answers a collected reply, its answer goes back to the B agent in the same B thread, and a conversation continues across hosts while only A can reach B. A new mention from B's agent to A's agent is a send from B, so B must list A and reach it.
 
-A inserts each collected `reply` into the sender's space as a message from the relay author for that B agent, in reply to the A message it answers. Its key in `collected` is (B's `host_id`, `seq`), so a reply collected twice is inserted once. The row also keeps A's new message id, B's message id, and B's alias, which A's capture reads.
+A inserts each collected `reply` into the sender's space as a message from the relay author for that B agent, in reply to the A message it answers. Its key in `collected` is (B's `host_id`, B's outbox epoch, `seq`). A keeps in `cursors` the highest `seq` it stored for each B and the epoch it counts in, acks that, and skips a reply at or below it, so a reply collected twice is inserted once. An answer with another epoch means B's `seq` started again, so A reads every reply of it as new. The row also keeps A's new message id, B's message id, and B's alias, which A's capture reads.
 
 On A, the relay worker for a label collects while that label has an open thread. A thread is open for 24 hours after its last accepted item or collected reply. The worker collects every 30 s while a thread is open, and every `deliver` also collects. It exits when no item is queued and no thread is open, and a new send starts it again. A reply that B writes after A's threads closed waits in B's outbox until A's next send to B collects it, or until it expires.
 
@@ -997,7 +999,9 @@ Retries are safe because B deduplicates per recipient. A perform that timed out 
 |---|---|---|---|
 | `peers` | A | label | The `host_id` from the last `server.status`, the last contact |
 | `outbound` | A | (label, A's message id, recipient) | The item, its state (queued, accepted, failed, expired), B's `host_id`, the reason |
-| `collected` | A | (B's `host_id`, `seq`) | A's inserted message id, B's message id, B's alias, A's thread |
+| `collected` | A | (B's `host_id`, B's outbox epoch, `seq`) | A's inserted message id, B's message id, B's alias, A's thread |
+| `cursors` | A | B's `host_id` | The highest `seq` A stored and the outbox epoch it counts in |
+| `outbox_epoch` | B | (one row) | B's outbox epoch, made when the database is created |
 | `inbound` | B | (A's `host_id`, A's message id, recipient) | The stored outcome, B's message id and space, when B wrote it |
 | `outbox` | B | (A's `host_id`, `seq`) | Replies for A, and when B wrote them |
 | `remote_threads` | B | (A's `host_id`, A's thread id, B's space) | B's thread, and the remote sender's name and display host |

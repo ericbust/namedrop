@@ -207,8 +207,10 @@ fn each_recipient_is_accepted_once_from_the_sender_s_relay_author() {
             }),
             outbox: Vec::new(),
             more: false,
+            epoch: answer.epoch.clone(),
         }
     );
+    assert!(!answer.epoch.is_empty());
     let messages = b.messages();
     assert_eq!(messages.len(), 1);
     assert_eq!(
@@ -410,14 +412,14 @@ fn the_outbox_page_drops_what_was_acked_and_stops_at_256_kib_with_more() {
             )
             .unwrap();
     }
-    let collect = |ack: i64| {
+    let collect = |ack: i64, epoch: &str| {
         b.call(&json!({
             "op": "collect", "expect_host_id": HOST_B,
             "from": {"host_id": "host-a", "name": "alice", "host": "laptop"},
-            "ack_through": ack,
+            "ack_through": ack, "epoch": epoch,
         }))
     };
-    let page = collect(0);
+    let page = collect(0, "");
     assert_eq!(page.result, None);
     assert_eq!(
         page.outbox
@@ -430,7 +432,13 @@ fn the_outbox_page_drops_what_was_acked_and_stops_at_256_kib_with_more() {
     assert!(page.can_reply);
     assert_eq!(page.outbox[0].from, "bob");
     assert_eq!(page.outbox[0].re, "m1");
-    let page = collect(4);
+    let epoch = page.epoch.clone();
+    assert_eq!(
+        collect(4, "another-epoch").outbox.len(),
+        4,
+        "an ack from another outbox epoch drops nothing"
+    );
+    let page = collect(4, &epoch);
     assert_eq!(
         page.outbox
             .iter()
@@ -439,7 +447,7 @@ fn the_outbox_page_drops_what_was_acked_and_stops_at_256_kib_with_more() {
         [5]
     );
     assert!(!page.more);
-    assert_eq!(collect(5).outbox, []);
+    assert_eq!(collect(5, &epoch).outbox, []);
     assert_eq!(
         b.rows("relay.sqlite3", "SELECT host_id FROM outbox"),
         [[json!("host-c")]]
