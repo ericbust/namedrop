@@ -73,6 +73,7 @@ CREATE TABLE collected (
     created_at_ms INTEGER NOT NULL,
     PRIMARY KEY (endpoint, host_id, epoch, seq)
 );
+CREATE INDEX collected_by_message ON collected (endpoint, message_id);
 CREATE TABLE cursors (
     endpoint TEXT NOT NULL,
     host_id TEXT NOT NULL,
@@ -869,11 +870,15 @@ impl RelayStore {
         Ok(conditions)
     }
 
-    pub(crate) fn record_collected(&self, collected: &Collected<'_>) -> Result<(), StoreError> {
-        self.connection.execute(
+    /// Records a reply A inserted as `collected.message_id`, unless that A
+    /// message is already recorded, and says whether it was not.
+    pub(crate) fn record_collected(&self, collected: &Collected<'_>) -> Result<bool, StoreError> {
+        let recorded = self.connection.execute(
             "INSERT OR IGNORE INTO collected (endpoint, host_id, epoch, seq, label, space,
                 message_id, remote_message_id, remote_alias, thread, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+             WHERE NOT EXISTS (SELECT 1 FROM collected WHERE endpoint = ?1
+                AND message_id = ?7)",
             params![
                 collected.endpoint,
                 collected.host_id,
@@ -888,7 +893,7 @@ impl RelayStore {
                 collected.now_ms
             ],
         )?;
-        Ok(())
+        Ok(recorded == 1)
     }
 
     /// The outcome B stored for an item's key.

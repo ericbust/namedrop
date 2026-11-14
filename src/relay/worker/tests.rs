@@ -2148,3 +2148,121 @@ fn a_held_reply_is_cut_when_it_is_held() {
     );
     assert!(text.ends_with(crate::relay::wire::CUT_NOTICE));
 }
+
+/// B may send a reply it already sent under a new `seq`, as often as it
+/// likes. Each copy is the A message the first one made: it is acked, but
+/// it records nothing, wakes nothing, and keeps no thread open.
+#[test]
+fn a_copy_of_a_collected_reply_records_nothing_and_wakes_nothing() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    rex.answer_with(answer("accepted", None, replies(&message, 1, 1)));
+    let (_, woken) = work_for(&space, &rex, 1);
+    assert_eq!(woken, ["session:a"]);
+    let copies: Vec<Value> = (2..=50)
+        .map(|seq| {
+            json!({"seq": seq, "re": message, "thread": "t", "from": "bob",
+                "message_id": "b-1", "text": "reply 1"})
+        })
+        .collect();
+    rex.answer_with(
+        json!({"host_id": "host-b", "can_reply": true, "epoch": "e1",
+        "more": false, "outbox": copies}),
+    );
+    let (_, woken) = work_for(&space, &rex, 1);
+    assert!(woken.is_empty(), "{woken:?}");
+    assert_eq!(collected_bodies(&space), [["reply 1"]]);
+    assert_eq!(
+        relay_rows(&space, "SELECT COUNT(*) FROM collected"),
+        [[json!(1)]]
+    );
+    assert_eq!(
+        crate::relay::tests_support::store(&space.state)
+            .ack_through(REX, "host-b")
+            .unwrap()
+            .1,
+        50
+    );
+    let relay = Connection::open(space.state.join("relay.sqlite3")).unwrap();
+    for table in ["outbound", "collected"] {
+        let time = if table == "outbound" {
+            "updated_at_ms"
+        } else {
+            "created_at_ms"
+        };
+        relay
+            .execute(
+                &format!("UPDATE {table} SET {time} = {time} - 25 * 3600 * 1000"),
+                [],
+            )
+            .unwrap();
+    }
+    let store = crate::relay::tests_support::store(&space.state);
+    assert!(
+        !store
+            .thread_open("devbox", REX, crate::relay::now_ms())
+            .unwrap(),
+        "the copies kept no thread open"
+    );
+}
+
+/// A round wakes each space that got mail once, however many replies and
+/// notices reached it.
+#[test]
+fn a_round_wakes_each_space_once() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    let message = rex
+        .run(|| space.send("request-1", "@bob@devbox @nobody@devbox ping"))
+        .unwrap()["message_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    rex.answer_with(answer("accepted", None, replies(&message, 1, 12)));
+    rex.answer_with(answer("refused", Some("no @nobody on devbox"), json!([])));
+    let (_, woken) = work_for(&space, &rex, 1);
+    assert_eq!(collected_bodies(&space).len(), 10);
+    assert_eq!(notices(&space).len(), 1);
+    assert_eq!(held_notices(&space).len(), 1);
+    assert_eq!(woken, ["session:a"]);
+}
+
+/// A reply inserted whose routing record could not be written is not
+/// acked, so the next collect takes it again, records it, and an answer
+/// to it still goes back to the reply.
+#[test]
+fn a_reply_whose_record_failed_is_not_acked_and_is_recorded_next_round() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    let relay = Connection::open(space.state.join("relay.sqlite3")).unwrap();
+    relay
+        .execute_batch(
+            "CREATE TRIGGER fail_collected BEFORE INSERT ON collected
+             BEGIN SELECT RAISE(FAIL, 'no room'); END;",
+        )
+        .unwrap();
+    rex.answer_with(answer("accepted", None, replies(&message, 1, 1)));
+    work_for(&space, &rex, 1);
+    assert_eq!(collected_bodies(&space), [["reply 1"]]);
+    let store = crate::relay::tests_support::store(&space.state);
+    assert_eq!(store.ack_through(REX, "host-b").unwrap().1, 0, "not acked");
+    relay.execute_batch("DROP TRIGGER fail_collected").unwrap();
+    rex.answer_with(
+        json!({"host_id": "host-b", "can_reply": true, "epoch": "e1",
+        "more": false, "outbox": replies(&message, 1, 1)}),
+    );
+    let (_, woken) = work_for(&space, &rex, 1);
+    assert_eq!(woken, ["session:a"]);
+    assert_eq!(collected_bodies(&space), [["reply 1"]]);
+    assert_eq!(store.ack_through(REX, "host-b").unwrap().1, 1);
+    rex.run(|| space.reply("answer", &message, "@bob@devbox follow-up"))
+        .unwrap();
+    capture(&space);
+    assert_eq!(
+        queued_for(&space, "follow-up"),
+        [["devbox", "bob", "alice", "b-1"].map(str::to_owned)]
+    );
+}

@@ -250,7 +250,7 @@ fn a_collected_reply_is_dropped_after_7_days_and_its_cursor_stays() {
                 label: "devbox",
                 endpoint: "rex:/tmp/a.sock",
                 space: "session:a",
-                message_id: "",
+                message_id: &format!("message-{seq}"),
                 remote_message_id: "",
                 remote_alias: "",
                 thread: "",

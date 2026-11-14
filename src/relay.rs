@@ -336,14 +336,22 @@ pub(crate) fn capture_after_drain(state: &Path, session_socket_id: &str) {
     }
     let mut labels = Vec::new();
     let _ = capture::capture(state, &endpoint, &mut |label| labels.push(label.to_owned()));
-    let woken = &mut |space: &crate::SpaceId| wake(state, &endpoint, space);
-    labels.extend(worker::release(state, &endpoint, woken));
+    let mut spaces: Vec<crate::SpaceId> = Vec::new();
+    let mut once = |space: &crate::SpaceId| {
+        if !spaces.contains(space) {
+            spaces.push(space.clone());
+        }
+    };
+    labels.extend(worker::release(state, &endpoint, &mut once));
     labels.sort();
     labels.dedup();
     for label in &labels {
         start_worker(state, &endpoint, label);
     }
-    notice::tell(state, &endpoint, woken);
+    notice::tell(state, &endpoint, &mut once);
+    for space in &spaces {
+        wake(state, &endpoint, space);
+    }
 }
 
 /// Each label of the Rex endpoint `session_socket_id` whose items failed or

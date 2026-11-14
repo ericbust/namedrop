@@ -55,13 +55,33 @@ enum Call {
 }
 
 /// The worker's loop, until nothing is queued and no thread is open, or
-/// `pause` says stop.
+/// `pause` says stop. Each space that got mail in a round is woken once,
+/// after it.
 pub(crate) fn work(run: &mut Run<'_>) {
     let mut faults = 0;
     loop {
-        let wait = round(run);
-        release(run.state, run.endpoint, run.wake);
-        super::notice::tell(run.state, run.endpoint, run.wake);
+        let mut woken: Vec<SpaceId> = Vec::new();
+        let wait = {
+            let mut once = |space: &SpaceId| {
+                if !woken.contains(space) {
+                    woken.push(space.clone());
+                }
+            };
+            let mut round_run = Run {
+                state: run.state,
+                endpoint: run.endpoint,
+                label: run.label,
+                pause: &mut *run.pause,
+                wake: &mut once,
+            };
+            let wait = round(&mut round_run);
+            release(run.state, run.endpoint, round_run.wake);
+            super::notice::tell(run.state, run.endpoint, round_run.wake);
+            wait
+        };
+        for space in &woken {
+            (run.wake)(space);
+        }
         let wait = match wait {
             Round::Done => return,
             Round::Collected if finished(run) => return,
@@ -345,7 +365,12 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, peer: &Peer<'_>, answe
                 {
                     return;
                 }
-                let _ = store.advance(endpoint, host_id, &answer.epoch, reply.seq);
+                if store
+                    .advance(endpoint, host_id, &answer.epoch, reply.seq)
+                    .is_err()
+                {
+                    return;
+                }
                 continue;
             }
             Err(_) => return,
@@ -365,10 +390,11 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, peer: &Peer<'_>, answe
             Err(error) => Err(error.to_string()),
         };
         match taken {
-            Ok(Taken::Inserted(message_id)) => {
-                let _ = collected(store, &held, &message_id);
-                (run.wake)(&SpaceId::new(&held.space));
-            }
+            Ok(Taken::Inserted(message_id)) => match collected(store, &held, &message_id) {
+                Ok(true) => (run.wake)(&SpaceId::new(&held.space)),
+                Ok(false) => {}
+                Err(_) => return,
+            },
             Ok(Taken::Limited) => {
                 if store.hold(&held, super::now_ms()).is_err() {
                     return;
@@ -377,7 +403,12 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, peer: &Peer<'_>, answe
             Ok(Taken::Refused) => {}
             Err(_) => return,
         }
-        let _ = store.advance(endpoint, host_id, &answer.epoch, reply.seq);
+        if store
+            .advance(endpoint, host_id, &answer.epoch, reply.seq)
+            .is_err()
+        {
+            return;
+        }
     }
 }
 
@@ -406,7 +437,7 @@ pub(crate) fn release(
         match take(state, held) {
             Ok(Taken::Inserted(message_id)) => {
                 if collected(&store, held, &message_id)
-                    .and_then(|()| store.release(held))
+                    .and_then(|_| store.release(held))
                     .is_err()
                 {
                     return labels;
@@ -449,8 +480,11 @@ fn take(state: &Path, held: &Held) -> Result<Taken, String> {
 }
 
 /// Records that `held`'s reply is the A message `message_id`, so an answer
-/// to it goes back to its B agent.
-fn collected(store: &RelayStore, held: &Held, message_id: &str) -> Result<(), crate::StoreError> {
+/// to it goes back to its B agent, and says whether A had no record of it.
+/// A copy of a reply B sends again under a new `seq` is the same A
+/// message, so it records nothing, and neither wakes its space nor keeps
+/// its thread open.
+fn collected(store: &RelayStore, held: &Held, message_id: &str) -> Result<bool, crate::StoreError> {
     store.record_collected(&Collected {
         host_id: &held.host_id,
         epoch: &held.epoch,
