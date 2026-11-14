@@ -343,10 +343,33 @@ struct Pages {
 
 /// Whether a terminal shows `c` as itself: not a control character, nor
 /// one that formats or breaks the text around it, as U+202E reverses it.
+/// Those are Unicode 16's General_Category Cf, the rest of the tag block,
+/// and the line and paragraph separators.
 fn shown(c: char) -> bool {
     !(c.is_control()
-        || crate::domain::is_invisible_format(c)
-        || matches!(c, '\u{2028}' | '\u{2029}'))
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061C}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08E2}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{110BD}'
+                | '\u{110CD}'
+                | '\u{13430}'..='\u{1343F}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0000}'..='\u{E007F}'
+        ))
 }
 
 /// Collects B's replies for this side until B has no more, or for at most

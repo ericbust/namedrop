@@ -3039,21 +3039,54 @@ fn a_refused_reply_read_again_is_told_and_woken_once() {
 }
 
 /// A reason B quotes loses each character that would reorder, hide, or
-/// break the text around it in the sender's terminal, as U+202E does.
+/// break the text around it in the sender's terminal, as U+202E does:
+/// each Unicode format character, from each range of them, and the line
+/// and paragraph separators.
 #[test]
 fn a_refusal_reason_from_b_loses_its_format_characters() {
     let space = Space::new(REX);
     let rex = rex(&["devbox"]);
     sent(&space, &rex);
+    let format = [
+        '\u{00ad}',
+        '\u{0600}',
+        '\u{0605}',
+        '\u{061c}',
+        '\u{06dd}',
+        '\u{070f}',
+        '\u{0890}',
+        '\u{08e2}',
+        '\u{180e}',
+        '\u{200b}',
+        '\u{200d}',
+        '\u{2028}',
+        '\u{2029}',
+        '\u{202e}',
+        '\u{2060}',
+        '\u{2066}',
+        '\u{206f}',
+        '\u{feff}',
+        '\u{fff9}',
+        '\u{110bd}',
+        '\u{110cd}',
+        '\u{13430}',
+        '\u{1343f}',
+        '\u{1bca0}',
+        '\u{1d173}',
+        '\u{1d17a}',
+        '\u{e0001}',
+        '\u{e007f}',
+    ];
+    let quoted: String = format.iter().collect();
     rex.answer_with(answer(
         "refused",
-        Some("no @bob\u{202e}xoved\u{200b} on\u{2028}devbox\u{feff}"),
+        Some(&format!("no @bob{quoted}on devbox")),
         json!([]),
     ));
     work_for(&space, &rex, 1);
     assert_eq!(
-        outbound(&space)[0].1.as_deref(),
-        Some("no @bob xoved  on devbox ")
+        outbound(&space)[0].1,
+        Some(format!("no @bob{}on devbox", " ".repeat(format.len())))
     );
 }
 
