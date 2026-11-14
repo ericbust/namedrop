@@ -229,11 +229,11 @@ impl<'a> RexEvents<'a> {
                         return Next::Event(event);
                     }
                 }
-                Ok(None) if until.is_some_and(|until| Instant::now() >= until) => {
-                    return Next::Quiet;
-                }
                 Ok(None) => {}
                 Err(fault) => return Next::Ended(said(fault)),
+            }
+            if until.is_some_and(|until| Instant::now() >= until) {
+                return Next::Quiet;
             }
         }
     }

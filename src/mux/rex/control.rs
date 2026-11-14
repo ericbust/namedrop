@@ -398,14 +398,24 @@ impl<S: Timed + std::os::fd::AsFd> Connection<'_, S> {
         deadline: Option<Instant>,
         wake: std::os::fd::BorrowedFd<'_>,
     ) -> Result<Option<Event>, Fault> {
+        // Bytes read earlier may hold a whole frame, which `poll(2)` cannot
+        // see. Once a read takes no message, what is left is part of one.
+        let mut whole = self.socket.buffered();
+        let mut ran = false;
         loop {
             if let Some(event) = self.events.pop_front() {
                 return Ok(Some(event));
             }
             self.intact()?;
-            if !self.socket.buffered() {
-                let left =
-                    deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            if self.limits.cancelled.load(Ordering::Relaxed) {
+                return Err(Fault::Cancelled);
+            }
+            let left = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            if ran && left.is_some_and(|left| left.is_zero()) {
+                return Ok(None);
+            }
+            ran = true;
+            if !whole {
                 match readable(self.socket.stream().as_fd(), wake, left)? {
                     Readable::Socket => {}
                     Readable::Wake => return Err(Fault::Cancelled),
@@ -414,7 +424,9 @@ impl<S: Timed + std::os::fd::AsFd> Connection<'_, S> {
             }
             self.socket.set_allowance(MAX_CALL_BYTES);
             self.socket.stream().read_within(CANCEL_POLL);
-            match self.socket.try_recv() {
+            let received = self.socket.try_recv();
+            whole = matches!(received, Ok(Some(_))) && self.socket.buffered();
+            match received {
                 Ok(Some(Message::Text(text))) => {
                     let message: Value = serde_json::from_str(&text).map_err(|_| {
                         Fault::Closed("the server sent a message that is not JSON".into())

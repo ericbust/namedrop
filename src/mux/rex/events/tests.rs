@@ -2,6 +2,7 @@ use super::*;
 use crate::mux::rex::control::tests::Server;
 use std::{
     fs,
+    io::Write,
     path::PathBuf,
     sync::atomic::AtomicU64,
     thread::{self, JoinHandle},
@@ -400,4 +401,217 @@ fn a_resync_absorbs_its_space_s_status_changes_and_a_space_closed_absorbs_everyt
             ),
         ]
     );
+}
+
+/// What a server sends before it hangs for a second without hanging up.
+type Stall = Box<dyn FnOnce(&mut Server) + Send>;
+
+/// Half a frame and then nothing.
+fn half_a_frame() -> Stall {
+    Box::new(|server| server.stream.write_all(&[0x81, 50, b'{']).unwrap())
+}
+
+/// The header of a 50-byte frame, then one byte of it every 20 ms until
+/// the stream hangs up.
+fn trickle() -> Stall {
+    Box::new(|server| {
+        server.stream.write_all(&[0x81, 50]).unwrap();
+        for _ in 0..50 {
+            thread::sleep(Duration::from_millis(20));
+            if server.stream.write_all(b" ").is_err() {
+                return;
+            }
+        }
+    })
+}
+
+/// `messages` as the frames a server sends, for one write.
+fn frames(messages: impl IntoIterator<Item = Value>) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for message in messages {
+        let text = message.to_string();
+        bytes.extend([0x81, 126]);
+        bytes.extend(u16::try_from(text.len()).unwrap().to_be_bytes());
+        bytes.extend(text.as_bytes());
+    }
+    bytes
+}
+
+/// 8 MiB of `message` frames in one write, built before the server
+/// answers the hello, so the stream always has bytes to read until it has
+/// read them all.
+fn flood(message: impl Fn(usize) -> Value) -> Stall {
+    let one = frames([message(1)]).len();
+    let bytes = frames((1..=(8 << 20) / one + 1).map(message));
+    Box::new(move |server| {
+        let _ = server.stream.write_all(&bytes);
+    })
+}
+
+/// `bell` events, which yield nothing.
+fn bells() -> Stall {
+    let line = &lines()[62];
+    flood(|seq| json!({"type": "event", "seq": seq, "payload": line}))
+}
+
+/// Answers to no request, which the wait reads past.
+fn answers() -> Stall {
+    flood(|seq| json!({"type": "response", "id": 0, "seq": seq, "payload": {}}))
+}
+
+/// What `next(within)` answers, and how long it took, from a server that
+/// sends what `stall` sends and then stays connected for a second. A stop
+/// is requested 100 ms in when `stops` says so.
+fn wait_through(
+    stall: Stall,
+    liveness: Liveness,
+    within: Duration,
+    stops: bool,
+) -> (Next, Duration) {
+    let state = State::new();
+    let wake = Wake::new().unwrap();
+    let (client, server) = serve("host-a", move |server| {
+        stall(server);
+        thread::sleep(Duration::from_millis(1000));
+    });
+    let mut stream = events(client, &state, &wake, liveness);
+    let started = Instant::now();
+    let next = thread::scope(|scope| {
+        if stops {
+            scope.spawn(|| {
+                thread::sleep(Duration::from_millis(100));
+                wake.wake();
+            });
+        }
+        stream.next(within)
+    });
+    let took = started.elapsed();
+    drop(stream);
+    server.join().unwrap();
+    (next, took)
+}
+
+/// A server that stays connected but sends no whole frame the bridge
+/// handles in time: the wait still ends at its deadline, at a stop, and
+/// when liveness runs out.
+#[test]
+fn a_server_that_sends_nothing_whole_in_time_still_ends_the_wait_on_time() {
+    let soon = Duration::from_millis(100)..Duration::from_millis(350);
+    let stalls = [
+        ("half a frame", half_a_frame as fn() -> Stall),
+        ("a trickle", trickle),
+        ("bells", bells),
+        ("answers", answers),
+    ];
+    for (name, stall) in stalls {
+        let (next, took) = wait_through(stall(), Liveness::REX, Duration::from_millis(100), false);
+        assert_eq!(next, Next::Quiet, "{name}");
+        assert!(soon.contains(&took), "{name}, deadline: {took:?}");
+        let (next, took) = wait_through(stall(), Liveness::REX, Duration::from_secs(10), true);
+        assert_eq!(next, Next::Ended("stopped".to_owned()), "{name}");
+        assert!(soon.contains(&took), "{name}, stop: {took:?}");
+    }
+    let quick = Liveness {
+        quiet: Duration::from_millis(100),
+        answer: Duration::from_millis(100),
+    };
+    let (next, took) = wait_through(half_a_frame(), quick, Duration::from_secs(10), false);
+    assert_eq!(
+        next,
+        Next::Ended("the server sent nothing for 0.1 s after a ping".to_owned())
+    );
+    assert!(
+        (Duration::from_millis(200)..Duration::from_millis(450)).contains(&took),
+        "liveness: {took:?}"
+    );
+}
+
+/// Messages read in one go come out without waiting for the server to
+/// send more: an answer to no request is passed over, and then each event
+/// comes out of its own `next`.
+#[test]
+fn messages_already_read_come_out_without_waiting_for_more_bytes() {
+    let state = State::new();
+    let wake = Wake::new().unwrap();
+    let (client, server) = serve("host-a", |server| {
+        let bytes = frames([
+            json!({"type": "response", "id": 0, "seq": 1, "payload": {}}),
+            json!({"type": "event", "seq": 2, "payload": lines()[1]}),
+            json!({"type": "event", "seq": 3, "payload": lines()[3]}),
+        ]);
+        server.stream.write_all(&bytes).unwrap();
+        thread::sleep(Duration::from_millis(1000));
+    });
+    let mut stream = events(client, &state, &wake, Liveness::REX);
+    for (number, kind) in [(2, "status"), (4, "appeared")] {
+        let started = Instant::now();
+        assert_eq!(
+            stream.next(Duration::from_secs(2)),
+            Next::Event(expected(number, kind))
+        );
+        let took = started.elapsed();
+        assert!(took < Duration::from_millis(100), "{kind}: {took:?}");
+    }
+    drop(stream);
+    server.join().unwrap();
+}
+
+/// A stop wins over an event already read, as it wins over a readable
+/// socket.
+#[test]
+fn a_stop_wins_over_an_event_already_read() {
+    let state = State::new();
+    let wake = Wake::new().unwrap();
+    let (client, server) = serve("host-a", |server| {
+        let bytes = frames([
+            json!({"type": "event", "seq": 1, "payload": lines()[1]}),
+            json!({"type": "event", "seq": 2, "payload": lines()[3]}),
+        ]);
+        server.stream.write_all(&bytes).unwrap();
+        thread::sleep(Duration::from_millis(1000));
+    });
+    let mut stream = events(client, &state, &wake, Liveness::REX);
+    assert_eq!(
+        stream.next(Duration::from_secs(2)),
+        Next::Event(expected(2, "status"))
+    );
+    wake.wake();
+    assert_eq!(
+        stream.next(Duration::from_secs(2)),
+        Next::Ended("stopped".to_owned())
+    );
+    drop(stream);
+    server.join().unwrap();
+}
+
+/// The wait for the rest of a frame sleeps in `poll(2)`, as every wait
+/// does, rather than in short reads: 800 ms of it use almost no CPU.
+#[test]
+fn the_wait_for_the_rest_of_a_frame_sleeps_in_poll() {
+    fn cpu() -> Duration {
+        let mut now = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `clock_gettime` writes one timespec this owns.
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+        Duration::new(
+            u64::try_from(now.tv_sec).unwrap(),
+            u32::try_from(now.tv_nsec).unwrap(),
+        )
+    }
+    let state = State::new();
+    let wake = Wake::new().unwrap();
+    let stall = half_a_frame();
+    let (client, server) = serve("host-a", |server| {
+        stall(server);
+        thread::sleep(Duration::from_millis(1000));
+    });
+    let mut stream = events(client, &state, &wake, Liveness::REX);
+    let before = cpu();
+    assert_eq!(stream.next(Duration::from_millis(800)), Next::Quiet);
+    let used = cpu() - before;
+    assert!(used < Duration::from_micros(400), "{used:?}");
+    drop(stream);
+    server.join().unwrap();
 }
