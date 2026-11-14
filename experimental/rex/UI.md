@@ -31,7 +31,7 @@ Each row is a fact this design depends on, with the command or page that showed 
 | How a module learns the current block and session | `run(ctx, args)` gets `ctx.session_id`, `ctx.block_id` (usually the focused block), `ctx.client_id`, and `ctx.origin`. No `ctx.server` arrived, although the docs list one | Measured with `rex do -s S -b B nd_probe_ctx --json` |
 | How a module learns the server | `rex.call("server.status")` inside an action returns `api_revision`, `pid`, `host_id`, and `listeners`, whose `primary` entry holds the Unix socket path | Measured |
 | How the Lua API is versioned | The only version is the server's `api_revision`: 12 on preview.14, 13 on preview.18, from `rex version` and `server.status`. Lua has no version of its own. Each function is tagged by where it works, and a missing script-only function is `nil` | Measured `rex version` and `server.status`. Docs, Lua API, "Where Each Function Works" |
-| How a client's revision is settled | The client's hello offers a range, and the server answers with the highest revision both support, or closes the connection. preview.14 answers 12 to the offers 12–12, 12–13, and 12–14, and closes on 13–13. preview.18 answers 12 to 12–12 and 13 to 12–13, 13–13, and 12–14. Today's Namedrop offers 12–12 and accepts only a welcome of 12 (`src/mux/rex/control.rs:13-14`, `:180`, `:202-203`) | Measured with a raw hello on each server |
+| How a client's revision is settled | The client's hello offers a range, and the server answers with the highest revision both support, or closes the connection. Written as (highest, lowest), preview.14 answers 12 to the offers (12, 12), (13, 12), and (14, 12), and closes on (13, 13). preview.18 answers 12 to (12, 12), and 13 to (13, 12), (13, 13), and (14, 12). Today's Namedrop offers (12, 12) and accepts only a welcome of 12 (`src/mux/rex/control.rs:13-14`, `:180`, `:202-203`) | Measured with a raw hello on each server |
 | What changed from preview.14 to preview.18 | For Namedrop's purposes, the revision only. `rex --help`, `rex __internal skill`, the help for `config`, `actions`, `keymap`, and `do`, and the schemas of `server.status`, `session.new_layer`, `client.keymap`, and `server.config_reload` are byte-identical. `rex block types` gains one terminal action, `download_begin`, and `rex api list` gains its line | Measured: the outputs of both servers, diffed |
 | Whether Namedrop works on preview.18 | Yes, on both handshakes. Today's binary (offering 12) and the scratch build (offering 12 to 13, so it ran at 13 on preview.18) gave the same results on both servers: Doctor's `ND-SETUP-001`, then a confirmed `activate`, then the naming screen in a layer, `@term1` set as the block's label and listed by `address list`, and a bridge and a deferred worker started. The fixture-free live tests (`ws_reads_the_welcome…`, `control_reads_the_server_status…`, `the_scratch_server_is_local…`, `the_bridge_stream_follows…`) passed on all four pairs. `mux_connect_surveys…` failed identically on all four, for want of its fixture sessions | Measured |
 | What `rex.exec` in an action sees | The server's own environment (`HOME`, `USER`, `SHELL`, `PATH=/usr/bin:/bin` on the probe, and `REX_SERVER` when the server had it), merged with any `env` the call passes, and the server's working directory. A program must be named by its absolute path | Measured: an action ran `/usr/bin/env` and `/bin/pwd` |
@@ -131,85 +131,101 @@ Four whole shapes could put the screens into Rex.
 
 **B. Lua opens layers that run Namedrop's TUI.** Each action calls `rex.session.new_layer` with a command that runs `namedrop ui run <mode>` and passes the targets through `/usr/bin/env` in argv. The probe proved this works with today's binary. The cost is a second copy of `PopupSpec` in Lua: the target terminal and agent session, which the module cannot read, the screen sizes, the state directory, and the target checks that `ui launch` does. The tour that opens after activation, and any future popup Namedrop starts itself, would still need a Rust path to `new_layer`.
 
-**C. Lua runs `namedrop ui launch`, and the Rex adapter opens the layer.** Each action is one `rex.exec` of `namedrop --endpoint <server> --space <ctx.session_id> --pane <ctx.block_id> ui launch <mode>`. The Rex adapter renders `Effect::OpenPopup` as `session.new_layer`, with the same targets and checks Herdr gets, in argv instead of `--env`. The Lua module holds a table of actions and keys and nothing else.
+**C. Lua runs `namedrop ui launch`, and the Rex adapter opens the layer.** Each action is one `rex.exec` of `namedrop rex action <name> --endpoint <server> --space <ctx.session_id> --pane <ctx.block_id>`, which runs `ui launch <mode>` for a screen. The Rex adapter renders `Effect::OpenPopup` as `session.new_layer`, with the same targets and checks Herdr gets, in argv instead of `--env`. The Lua module holds a table of action names, titles, and keys, and nothing else.
 
 **D. A Rex block plugin.** A Namedrop block type could draw its own screens. It needs `--block-dir` on the server's command line, which the app's server does not take from the person, and the docs describe nothing beyond the flag.
 
-**Chosen: C.** It gives Rex every screen with one code path for both hosts. `ui launch` already finds the target, checks it, and emits `OpenPopup`, and `ui run` already reads its targets and refuses a changed pane, so the only new Rust is one adapter arm and the argv form of the targets. The tour after activation opens through the same arm. The module stays a table, so a change to a screen never touches Lua, and the module can be generated by the binary that it runs, with the launcher and state directory written in. The cost over B is one process start per action, 0.03 s for the whole `rex do` in the probe (measured, debug build).
+**Chosen: C.** It gives Rex every screen with one code path for both hosts. `ui launch` already finds the target, checks it, and emits `OpenPopup`, and `ui run` already reads its targets and refuses a changed pane, so the only new Rust is one adapter arm and the argv form of the targets. The tour after activation opens through the same arm. The module stays a table of names, and each action calls one Rust entry point, so a change to an action or a screen never touches Lua, and a module loaded before an update keeps working after it. The binary that the module runs generates it, with the launcher and state directory written in. The cost over B is one process start per action, 0.03 s for the whole `rex do` in the probe (measured, debug build).
 
 ## Design
 
 ### The Lua module
 
-`namedrop install` writes `namedrop.lua` beside `init.lua` and adds one line to `init.lua`:
+`namedrop install` writes `namedrop.lua` beside the `init.lua` that Rex reads, and inserts one line as the first line of `init.lua`:
 
 ```lua
-require("namedrop")
+pcall(require, "namedrop");
 ```
+
+`pcall` keeps a missing or broken module from rejecting the person's whole file. The `;` keeps a file whose first line starts with `(` from turning the line into a call of `pcall`'s result. Both were measured. A broken module is then silent at load, so the installer and Doctor read back what loaded instead of trusting the reload's exit status.
+
+The module holds only what every Namedrop release reads the same way: the launcher, the state directory, a table of action names, titles, and keys, and an `endpoint()` helper. Each action runs one Rust entry point, `namedrop rex action <name> --endpoint … --space … --pane …`. An update that changes what an action does, or how a screen opens, changes the binary behind the launcher and never the loaded Lua. A server that loaded the module before an update keeps working after it, with no reload.
 
 The generated module looks like this, with the paths written in at install.
 
 ```lua
--- Managed by Namedrop 1.8.0. `namedrop install` rewrites this file, so edits here are lost.
--- Remove a key after the require line with rex.unbind("alt+shift+cmd+i").
+-- Managed by Namedrop. `namedrop install` rewrites this file, so edits here are lost.
+-- A key bound later in init.lua wins over the same key below.
 local NAMEDROP = "/Users/me/.local/state/namedrop/runtime/namedrop"
 local STATE = "/Users/me/.local/state/namedrop"
-local REVISIONS = { low = 12, high = 12 }
 
 local function endpoint()
 	local status, err = rex.call("server.status")
-	if status == nil then error("Namedrop could not ask Rex for its server: " .. err, 0) end
-	if status.api_revision < REVISIONS.low or status.api_revision > REVISIONS.high then
-		error(string.format("Namedrop supports Rex API revision %d to %d, and this server is %d. Update Namedrop.",
-			REVISIONS.low, REVISIONS.high, status.api_revision), 0)
-	end
+	if status == nil then error("Namedrop could not ask Rex for its server: " .. tostring(err), 0) end
 	for _, listener in ipairs(status.listeners or {}) do
 		if listener.primary and listener.transport == "unix" then return "rex:" .. listener.addresses[1] end
 	end
 	error("Namedrop needs a Rex server that listens on a Unix socket", 0)
 end
 
-local function namedrop(ctx, ...)
-	if ctx.session_id == nil or ctx.block_id == nil then error("Run this from a Rex pane", 0) end
-	local argv = { NAMEDROP, "--endpoint", endpoint(), "--space", ctx.session_id, "--pane", ctx.block_id, ... }
-	local result, err = rex.exec(argv, { env = { NAMEDROP_STATE_DIR = STATE }, timeout = 25 })
-	if result == nil then error(err, 0) end
-	if not result.ok then error(result.stderr ~= "" and result.stderr or result.stdout, 0) end
-end
-
 local actions = {
-	{ "namedrop_activate", "Activate Namedrop", { "activate", "--input-json", '{"confirmed":true}', "--open", "doctor" } },
-	{ "namedrop_name", "Name this pane", { "ui", "launch", "name" }, "alt+shift+cmd+i" },
-	{ "namedrop_manage", "Manage Namedrop names and agents", { "ui", "launch", "manage" }, "alt+shift+cmd+m" },
-	{ "namedrop_doctor", "Namedrop Doctor", { "ui", "launch", "doctor" }, "alt+shift+cmd+h" },
-	{ "namedrop_status", "Agent status", { "ui", "launch", "status" }, "alt+shift+cmd+s" },
-	{ "namedrop_tour", "Namedrop tour", { "ui", "launch", "tour" }, "alt+shift+cmd+o" },
-	{ "namedrop_channels", "Open Namedrop Channels", { "channels" } },
-	{ "namedrop_pause", "Pause Namedrop", { "space", "pause" } },
-	{ "namedrop_resume", "Resume Namedrop", { "space", "resume" } },
-	{ "namedrop_deactivate", "Deactivate Namedrop", { "deactivate" } },
+	{ "activate", "Activate Namedrop" },
+	{ "name", "Name this pane", "alt+shift+cmd+i" },
+	{ "manage", "Manage Namedrop names and agents", "alt+shift+cmd+m" },
+	{ "doctor", "Namedrop Doctor", "alt+shift+cmd+h" },
+	{ "status", "Agent status", "alt+shift+cmd+s" },
+	{ "tour", "Namedrop tour", "alt+shift+cmd+o" },
+	{ "channels", "Open Namedrop Channels" },
+	{ "pause", "Pause Namedrop" },
+	{ "resume", "Resume Namedrop" },
+	{ "deactivate", "Deactivate Namedrop" },
 }
 
 for _, a in ipairs(actions) do
-	local name, title, argv, key = a[1], a[2], a[3], a[4]
-	rex.action{ name = name, title = title, category = "Namedrop", keywords = "namedrop mention agent",
-		run = function(ctx) namedrop(ctx, unpack(argv)) end }
-	if key ~= nil and #rex.bindings{ key = key } == 0 then rex.bind(key, name) end
+	local name, title, key = a[1], a[2], a[3]
+	rex.action{ name = "namedrop_" .. name, title = title, category = "Namedrop", keywords = "namedrop mention agent",
+		run = function(ctx)
+			if ctx.session_id == nil or ctx.block_id == nil then error("Run this from a Rex pane", 0) end
+			local argv = { NAMEDROP, "rex", "action", name, "--endpoint", endpoint(),
+				"--space", ctx.session_id, "--pane", ctx.block_id }
+			local result, err = rex.exec(argv, { env = { NAMEDROP_STATE_DIR = STATE }, timeout = 25 })
+			if result == nil then error(tostring(err), 0) end
+			if not result.ok then error(result.stderr, 0) end
+		end }
+	if key ~= nil and #rex.bindings{ key = key } == 0 then rex.bind(key, "namedrop_" .. name) end
 end
 
-rex.exec.start({ NAMEDROP, "rex", "ensure", "--from-server-start" },
+rex.exec.start({ NAMEDROP, "rex", "ensure", "--from-server" },
 	{ env = { NAMEDROP_STATE_DIR = STATE }, detach = true, stdout = false, stderr = false })
 ```
 
-Five choices in it need a reason.
+Six choices in it need a reason.
 
+- **One entry point.** `namedrop rex action <name>` maps the name to today's commands. `activate` runs a confirmed `activate`. `name`, `manage`, `doctor`, `status`, and `tour` run `ui launch <mode>`. `channels`, `pause`, `resume`, and `deactivate` run their commands. It prints a failure as one plain line on stderr, decoded from Namedrop's JSON envelope, and exits 1, so the palette shows `Error: <the line>` and never JSON. A name the binary does not know, as after a rollback to an older release, fails with `This Namedrop has no action <name>. Run sh scripts/install.sh again.` The module's text changes only when the list of actions does.
 - **The endpoint comes from `server.status`.** Rex does not set `REX_SERVER` in every block, and an action's `ctx` carried no server (measured). The primary Unix listener is the canonical endpoint that `prove_local` already uses (ADAPTER.md, "The endpoint string carries the kind"). An explicit `--endpoint` decides the home with no socket probe, and the adapter still proves the server local before it types anything.
-- **The revision gate runs in the action.** At load, `rex.call` fails, so the module cannot read the revision then. Each action checks it first and names both revisions in its error. The Rust adapter keeps its own check, so the CLI is gated too.
-- **Keys bind only where this file has none.** `rex.bindings{ key = … }` returns the bindings the file has made so far, so a key the person bound above the `require` line keeps that binding, and a binding below it wins as it would anyway. The keys are Herdr's letters on the one modifier set the Mac app leaves free. The bindings carry action names, so `rex keymap` shows each one with its source.
+- **No revision check in Lua.** The Rust handshake is the only version gate. Its hello offers a range, and the server settles on the highest revision both support or closes the connection (measured), so every action and every CLI call is gated in one place, with one error. The tested range widens per release, after the probes of [What exists in Rex](#what-exists-in-rex) run on the new Rex build. Revision 13 joins it in U1: preview.18 differs from preview.14 only by the revision and one terminal action Namedrop does not use, and a build that offered 12 to 13 passed the same checks on both servers (measured).
+- **Keys are bound by default, and a bound key is skipped.** The module binds `alt+shift+cmd+{i,m,h,s,o}`, Herdr's letters on the one modifier set the Mac app leaves free, unless `rex.bindings{ key = … }` already returns a binding for the key. That call sees only the bindings the file made before the module (measured), which on line 1 is none, unless the person moved the line down. A key the person binds later in `init.lua` wins, because Rex puts the newest binding on top (measured). Doctor reads `client.keymap` and reports each Namedrop key as in effect, or as shadowed with the source line that shadows it, and lists the keys skipped at load. The bindings carry action names, so `rex keymap` shows each one with its source.
 - **No palette action takes an argument.** The palette's handling of arguments is undocumented, and every input is read by a screen.
-- **The last line starts the bridge at server start, behind a guard.** A top-level `rex.exec` also runs at `rex config check`, in the checker's environment (measured). `namedrop rex ensure --from-server-start` proves that its parent process is a local Rex server, by peer pid on the server's socket as `prove_local` does, and otherwise exits doing nothing. So a server restart starts the bridge before any agent runs, which a remote host needs to accept relayed mentions (PLAN.md, "With B's bridge stopped, A keeps the item"), and a `config check` starts nothing. `ensure` is already idempotent through the bridge lock.
+- **The last line starts the bridge at server start, behind a guard.** A remote host needs its bridge running before any agent there runs a Namedrop command (PLAN.md, "With B's bridge stopped, A keeps the item"). [The load-time start](#the-load-time-start) gives the guard.
 
-Activation is the one action with no screen of its own. `activate --open doctor` activates the session and then opens the Doctor screen, which shows what remains, such as Codex's hook approval. Herdr's `activate` does not take `--open`.
+### The load-time start
+
+`namedrop rex ensure --from-server` starts the bridge when config code runs inside the server, and otherwise exits doing nothing. A top-level `rex.exec.start` also runs at `rex config check`, in the checker's environment (measured), and the guard keeps that run from starting anything.
+
+The guard runs first in `main`, before the runtime, the store, the locator, or any home probe exists, so a refused run writes no file and calls no host. It finds the socket as `rex` does: `REX_SERVER` when it names a Unix socket, else Rex's default socket, which is `$HOME/Library/Application Support/rex/server.sock` on macOS and `$XDG_RUNTIME_DIR/rex/server.sock` on Linux. That is the rule `rex_claim` already applies (`src/mux/home.rs:346-370`). It connects, reads the socket's peer pid as `prove_local` does, reads its own parent pid at once, and continues only when the two are equal. Then it runs today's `rex ensure` with the endpoint `rex:<socket>`, which is idempotent through the bridge lock.
+
+The measured parents decide each case.
+
+| Who ran the config code | Parent | Peer | Result |
+|---|---|---|---|
+| The server, at start or `config reload` | the server | the server | the bridge starts |
+| `rex config check` | 1 | the server, or no socket | refused |
+| A `rex do` script | 1 | the server, or no socket | refused |
+| A server whose `REX_SERVER` names a forwarding socket | the server | the forwarder | refused |
+| A server with no `REX_SERVER` and a socket that is not the default | the server | no socket | refused. The bridge then starts with the first Namedrop command in a block, as today |
+| A program that an action runs | the server | the server | the bridge starts, or is already running |
+
+This is a correctness guard, not a security boundary. Config code already runs programs as the same user, so a hostile `init.lua` needs no guard to start a bridge. The guard only keeps a checker's run, in the wrong environment, from starting one. On Linux, an orphan goes to the nearest subreaper rather than to pid 1. If the Rex server is a subreaper, a `config check` run inside a Rex block could see the server as its parent. That is measured before release ([Release checks](#release-checks)).
 
 ### Popups on Rex
 
@@ -241,54 +257,100 @@ fn popup_argv(popup: &PopupSpec, endpoint: &Endpoint, launcher: &Path) -> Vec<St
 
 `/usr/bin/env` carries the five values the Herdr popup gets with `--env`, so `ui run` reads them unchanged. The probe ran exactly this argv (measured). Its `--endpoint` keeps the popup's own `REX_BLOCK`, which names the layer, out of the home decision. `login = false` matters for the testbed, whose profile `HOME` differs from the account's, and it drops the "Last login" banner from the screen.
 
-`ui launch` on Rex refuses a target block whose foreground program is `herdr`. A person who runs Herdr inside Rex and opens Rex's palette over the Herdr block would otherwise name the Rex block that holds Herdr. The refusal says to use Herdr's own Name this pane.
+The layer keeps Rex's default `exit`. A screen that fails within 250 ms leaves its layer open with the error, as Rex intends (measured). A later failure would close the layer and take the error with it, so `ui run` on a Rex endpoint prints any refusal or error and waits for one key before it exits. A launcher that cannot start makes `new_layer` itself fail (measured), and `rex action` reports that error in the palette.
+
+`ui launch` on Rex refuses two targets before it builds any request.
+
+- **A block whose foreground program is `herdr`.** A person who runs Herdr inside Rex and opens Rex's palette over the Herdr block would otherwise name the Rex block that holds Herdr. The refusal says to use Herdr's own Name this pane.
+- **A block whose foreground program is a Namedrop screen,** `namedrop … ui run`, read from the block's process facts (`foreground` with `name`, `path`, and `argv0`). `ctx.block_id` is usually the focused block, so a palette run from inside a layer would otherwise target the layer.
+
+In a Rex session that is not active, the naming screen offers activation instead of refusing: `Namedrop is not active in this session. Press Enter to activate it, or Esc to cancel.` Enter runs the confirmed activation and continues to the name prompt. A Herdr space keeps today's behavior.
 
 ### Activation on Rex
 
-`activate` stops writing Herdr's keys for a Rex home, and reports `shortcuts: {"status": "rex_module", "path": "<config dir>/namedrop.lua"}` instead. `activate_shortcuts` returns an error for `Applied::Unsupported` rather than `reloaded: true`, so no host reports a reload that did not happen. The tour consumes its marker only when the popup reports `Opened`. With the adapter arm above, the tour after activation opens in a layer on Rex as it does in a Herdr popup.
+`activate` stops writing Herdr's keys for a Rex home. It reports `shortcuts: {"status": "rex_module", "path": "<config dir>/namedrop.lua", "keys": […]}`, with the keys in effect, instead. `activate_shortcuts` returns an error for `Applied::Unsupported` rather than `reloaded: true`, so no host reports a reload that did not happen. `ui install-shortcuts` on a Rex home writes no Herdr file, and exits with an error that names `namedrop.lua` and Doctor's report of the keys.
+
+Activation opens at most one layer. Today's `activate` already opens the first-agent tour when an agent is present and the tour's marker is unclaimed (`src/lifecycle.rs:509`). `namedrop rex action activate` opens Doctor only when no tour opened, and Doctor lists what remains, such as Codex's hook approval. Herdr's `activate` does not change.
+
+The tour keeps Herdr's marker rule: it claims the marker before the popup, so two agents found at once open one tour, and a failed open keeps the marker. On a Rex home, an `Unsupported` result releases the marker, so the next detection tries again. With the adapter arm, Rex reports `Opened`, so the release applies only to a Rex server that cannot open layers.
 
 ### The installer
 
 A person on a machine with Rex and no Herdr does four things.
 
 1. Download the release archive and its `.sha256`, check it, and unpack it. Or clone the repository and run `sh scripts/build.sh`.
-2. Run `sh scripts/install.sh`. It shows what it will change and asks once.
-3. Open the Rex palette in a pane and run **Activate Namedrop**. Doctor opens and lists anything left, such as Codex's hook approval.
+2. Run `sh scripts/install.sh` with Rex running. It shows what it will change and asks once.
+3. Open the Rex palette in a pane and run **Activate Namedrop**. The tour or Doctor opens, and Doctor lists anything left, such as Codex's hook approval.
 4. Run **Name this pane**, or press <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>Cmd</kbd>+<kbd>I</kbd>, in each pane to name, and start new agent sessions.
 
-`scripts/install.sh` checks the platform as `build.sh` does, checks for `python3` and `rex`, and runs `python3 scripts/runtime.py <root> --state-dir <dir> --verify install`. The state directory is the one `locator::state_directory` gives a Rex home: `NAMEDROP_STATE_DIR`, the install record, then `$XDG_STATE_HOME/namedrop` or `~/.local/state/namedrop`. The runtime and the confirmed install then put these on the machine.
+`scripts/install.sh` checks the platform as `build.sh` does, and checks for `python3` and for `rex`: `rex` on `PATH`, else `$REX_BIN_DIR/rex`. A plain login shell has neither (measured), so outside a Rex block it stops and names both ways to supply `rex`. It then runs `python3 scripts/runtime.py <root> --state-dir <dir> --verify install`. The state directory is the one `locator::state_directory` gives a Rex home: `NAMEDROP_STATE_DIR`, the install record, then `$XDG_STATE_HOME/namedrop` or `~/.local/state/namedrop`. The runtime and the confirmed install then put these on the machine.
 
 | What | Where | Written by |
 |---|---|---|
 | The runtime | `<state>/runtime/releases/<sha256>/namedrop`, the `current` link, and the launcher `<state>/runtime/namedrop` | `runtime.py`, as for Herdr |
-| The install source | `<state>/runtime/source.json`: the version, and `archive` or `checkout` with its origin | `runtime.py` |
+| The owner and the install source | `<state>/runtime/owner` (`herdr` or `standalone`), and `<state>/runtime/source.json`: the version, and `archive` or `checkout` with its origin | `runtime.py` |
 | The agent packages, permissions, Codex rules and sandbox root, `~/.local/bin/namedrop`, and the install record | As Herdr's activation writes them, baked to the launcher and the state directory | `namedrop install` |
-| The Lua module | `<Rex config dir>/namedrop.lua`, with the managed-file line first | `namedrop install` |
-| The `require` line | Appended to `init.lua`, or `init.lua` created with it, unless a `require("namedrop")` line is there | `namedrop install`, after a backup `init.lua.namedrop-<pid>.bak` |
+| The Lua module | `namedrop.lua` beside the `init.lua` Rex reads, with the managed-file line first | `namedrop install`, and the owner's package refresh |
+| The `init.lua` line | `pcall(require, "namedrop");` as line 1, under the guards below | `namedrop install` |
+| The Rex install record | `~/.config/namedrop/rex.json`: the module's path, the `init.lua` path, the line's state (`inserted`, `printed`, or `removed`), and the keys skipped at load | `namedrop install`, and the owner's package refresh |
 | The Codex plugin | `codex plugin marketplace add` and `codex plugin add namedrop@namedrop` | `runtime.py`, as for Herdr |
-| The config reload | `rex --autostart=false config reload` | `namedrop install` |
+| The config reload | `server.config_reload` on the local default server | `namedrop install` |
 
-`namedrop install` is a new command. It refuses without `--input-json {"confirmed":true}` and then lists every target, as `activate` does (`src/install.rs:203-226`). It shares `activate`'s package installer, which is already host-neutral, and it activates no space. It finds the Rex config dir by Rex's own rule, `REX_CONFIG` then `$XDG_CONFIG_HOME/rex` then `~/.config/rex`, and not with `rex config check`, which would run the file's load-time code. It refuses to replace a `namedrop.lua` whose first line is not its own. It records the module's path in `<state>/rex/module`, and each later package refresh (`src/integration.rs:545-548`) rewrites the module at that path only, so the module's paths follow every update and a machine with no Rex install never gets one. `config reload` is refused over a remote connection (Rex's docs), so the installer runs it only against the local default server, and otherwise prints the command.
+`namedrop install` is a new command. It refuses without `--input-json {"confirmed":true}` and then lists every target, as `activate` does (`src/install.rs:203-226`). It shares `activate`'s package installer, which is already host-neutral, and it activates no space. It finds the path Rex reads by Rex's own rule, `REX_CONFIG`, then `$XDG_CONFIG_HOME/rex/init.lua`, then `~/.config/rex/init.lua`, and not with `rex config check`, which would run the file's load-time code. It refuses to replace a `namedrop.lua` whose first line is not its own. With `--print-config`, it writes `namedrop.lua`, prints the line and where it goes, and edits nothing else in Rex's config. `config reload` is refused over a remote connection (Rex's docs), so the installer reloads only the local default server.
 
-**`scripts/runtime.py` becomes host-neutral.** It takes `--state-dir` and `--verify activate|install`. `run.sh activate` passes `--state-dir "$HERDR_PLUGIN_STATE_DIR" --verify activate`, so Herdr's path runs the same steps with the same values. `--verify install` runs `<launcher> install` and checks `state_directory` and the packages instead of the space. `helper_kind` and `queue_wake` also recognize a worker by `NAMEDROP_STATE_DIR`, `NAMEDROP_ENDPOINT`, and `NAMEDROP_SPACE_ID` (PORT.md, "Finding status workers"), and the publish stops a Rex bridge, relay worker, and deferred worker of the same state directory the way it stops Herdr's helpers. The bridge and the relay worker already run the replacement runtime when they see one (ADAPTER.md, "The relay worker"), so a stop is needed only when the schema migrates. A Rust port of `runtime.py` would drop the `python3` requirement, which Herdr has too. This design keeps the script, because it is the one piece that must run outside the binary it replaces.
+**Editing `init.lua`.** The installer edits `init.lua` only under six guards, and otherwise prints the line, the reason, and where the line goes.
+
+1. The path Rex reads must be a regular file, or absent, in which case the installer creates it with the line. For a symlink or any other kind of file, it prints the line. `namedrop.lua` still goes beside the path Rex reads, in the link's folder, because that is where `require` looks (measured).
+2. The line counts as present only as a whole line of its own, with surrounding spaces ignored. A comment or a string that mentions `require("namedrop")` does not count. A present line is left where it is.
+3. When `rex.json` records the line as `inserted` and the line is gone, the person removed it. The record becomes `removed`, and no later install or refresh adds the line again. Doctor reports it, with the line to restore.
+4. The installer first reloads the unedited file through `server.config_reload`. When that reports an error, the file is already broken: it edits nothing, prints Rex's diagnostic and the line, and stops. When no local server answers, it edits nothing and asks the person to start Rex and run the install again.
+5. It copies `init.lua` to `init.lua.namedrop-<UTC time>.bak`, writes the new file through a temporary file and a rename, and reloads. When the reload reports an error, it renames the backup back, reloads again, and reports Rex's diagnostic.
+6. It confirms the install by reading `rex actions --json`, which runs no load-time code (measured). The ten `namedrop_` actions must be listed with the source `namedrop.lua`. A reload that exits 0 proves nothing here, because `pcall` hides a module error. A missing action fails the install and lists the actions found. The edit stays, because the line is harmless without a working module.
+
+The edit, the reloads, and the readback all run under the shared package lock ([One Namedrop](#one-namedrop-on-a-machine-with-both-hosts)).
+
+**`scripts/runtime.py` becomes host-neutral.** It takes `--state-dir` and `--verify activate|install`. `run.sh activate` passes `--state-dir "$HERDR_PLUGIN_STATE_DIR" --verify activate`, and that path keeps today's steps, its Herdr survey included: `record_legacy` through `herdr session list` on the first publish, and `preflight` before an update that is not live or that changes the schema. `--verify install` makes no `herdr` call. It takes the migration record and the update preflight from two sources: the agent sessions the store holds for each endpoint, and a survey of the Rex agents through the incoming runtime, `<launcher> rex sessions --json`, which lists each Rex block's agent and session as the adapter's survey sees them. It then runs `<launcher> install` and checks `state_directory`, the packages, and `rex.json` instead of the space. The first draft also taught `helper_kind` and `queue_wake` the neutral names, and stopped Rex helpers at publish. That half is dropped: a publish stops only status workers of releases before 1.7.0, which never ran on Rex, and waits for every later helper. The bridge and the relay worker already run the replacement runtime when they see one (ADAPTER.md, "The relay worker").
+
+Herdr's update preflight in `scripts/update.py` also counts the Rex-bound agent sessions in the store, so an update from Herdr on a machine with both hosts waits for Rex agents as it waits for Herdr's. It reads them from the store, because its Herdr survey cannot see Rex.
+
+A Rust port of `runtime.py` would drop the `python3` requirement, which Herdr has too. This design keeps the script, because it is the one piece that must run outside the binary it replaces.
 
 ### One Namedrop on a machine with both hosts
 
 The agent packages are one slot: `~/.claude/skills/namedrop`, `~/.agents/skills/namedrop`, `~/.local/bin/namedrop`, the install record, the Codex rules, and the Codex plugin name each hold one launcher and one state directory, and Claude Code and Codex load one set of hooks. Two installs cannot each own a copy without firing every hook twice. So one machine has one Namedrop: one state directory, one runtime, one set of packages. Both hosts' spaces live in one store, kept apart by the endpoint kind in `session_socket_id`, and each process resolves its host through `mux::home`. The testbed's Rex lane already runs this way: it activates in a profile Herdr, and its Rex blocks reach Herdr's state directory through the install record (`testbed/README.md:335-339`).
 
-- **Herdr first, then Rex.** `install.sh` finds the install record, or the state directory baked into the existing packages, naming Herdr's plugin state, and adopts it. It installs no second runtime and changes no package path. It writes the Lua module and the `require` line, baked to Herdr's launcher. Herdr's updates then update both hosts, and the module follows through the package refresh.
-- **Rex first, then Herdr.** Herdr fixes its own state directory, so its activation cannot adopt Rex's. Its package install rebakes every package and the record to Herdr's directory, and the module follows. Names made on Rex before that stay in the old directory. Doctor reports `ND-INSTALL-001`, naming the old directory and its count of live names, and the person names those panes again. Moving that store into Herdr's is deferred.
-- **Ownership.** `runtime.py` writes `<state>/runtime/owner`, `herdr` or `standalone`. `install.sh` with a `herdr` owner adopts, and `--verify install` never publishes a runtime into a Herdr-owned directory, so a standalone install cannot flip the packages back.
+**One lock and one owner.** Every writer of the shared packages takes one per-user lock, `~/.config/namedrop/packages.lock`, beside the install record. The writers are `activate`, `namedrop install` and its removal, the package refresh that lifecycle events and hooks run (`src/install.rs:898-907`, `:1116`), and the handoff below. Under the lock, a writer reads the install record and the `owner` file of the state directory the record names, and then follows four rules.
+
+- A runtime whose state directory is the recorded one writes, as today.
+- A standalone runtime never writes over a Herdr-owned record. It writes nothing and reports `ND-INSTALL-002`, which names Herdr's state directory.
+- Herdr's activation over a standalone record takes the packages over, in the handoff below.
+- A state directory with no `owner` file counts as Herdr-owned, because every runtime published before this step came from Herdr.
+
+`package_guard()`'s lock stays: it still serializes publication with refresh inside one state directory, and the new lock serializes writers across state directories. A Herdr release from before this step takes neither lock. It can only write in Herdr's favor, which the rules allow, and the third case below covers what it misses.
+
+**The module registration** lives in `~/.config/namedrop/rex.json`, beside the install record, and not in a state directory. So it outlives any one state directory, and the runtime that owns the packages also owns the module: its package refresh rewrites `namedrop.lua` at the recorded path with its own launcher and state directory. A machine with no `rex.json` never gets a module.
+
+- **Herdr first, then Rex.** `install.sh` finds the install record naming Herdr's state, and adopts it. Before adopting, it asks the recorded launcher for its capabilities through `--runtime-info`, whose contract gains a `rex_ui` field in this step. A launcher without it is a Herdr release from before step 6, with no `install` and no `rex action` (the first review measured `install --help` failing with exit 64 on such a copy). The installer then refuses with `Update Namedrop in Herdr first, then run sh scripts/install.sh again.` With a capable launcher, it publishes no runtime, runs the adopted launcher's `install`, and writes the module baked to Herdr's launcher. Herdr's updates then update both hosts, and the module follows through the package refresh.
+- **Rex first, then Herdr.** Herdr fixes its own state directory, so its activation cannot adopt Rex's. Its activation finds a standalone owner under the lock and hands off in four steps. It stops the standalone state's bridge and relay worker, found through their lock files and checked by argv and state directory before any signal. It rewrites the packages and the install record to Herdr's state directory. It rewrites `namedrop.lua` and `rex.json` to Herdr's launcher. It reloads Rex's config on the local default server. The old runtime stays on disk, and nothing names it any more. Names made on Rex before that stay in the old store. Doctor reports `ND-INSTALL-001`, naming the old directory and its count of live names, and the person names those panes again. Moving that store into Herdr's is deferred.
+- **Rex first, then a Herdr release from before step 6.** That release rebakes the packages and the record without the lock, and knows nothing of `rex.json`, so the module still names the standalone runtime. Doctor on Rex sees the record naming another state directory and reports `ND-INSTALL-003`: `Update Namedrop in Herdr, then run Activate Namedrop there again.`
+
+### Removing Namedrop from Rex
+
+`namedrop install --remove` undoes the Rex half under the lock. It deletes line 1 of `init.lua` only when that line is exactly the line it inserted and `rex.json` says `inserted`, with the same backup, reload, and restore as the install. It deletes `namedrop.lua` only when the file's first line is the managed-file line, and then deletes `rex.json`. It removes the agent packages, the permissions, the Codex rules and plugin, `~/.local/bin/namedrop`, and the install record only when the owner is `standalone`. With a Herdr owner it leaves them, because Herdr still uses them, and says so. It never deletes a state directory. A full uninstall command for both hosts stays deferred.
 
 ### Updates
 
-A standalone install has no Herdr registration, so `check-update.py` learns its source from `source.json`. For an archive or a GitHub checkout it lists the repository's `v*` tags with `git ls-remote --tags` and records the newest. Doctor's `ND-UPDATE-001` and the SessionStart notice then say `Update: download Namedrop <version> and run sh scripts/install.sh`, and Herdr installs keep today's text. The SessionStart wrapper accepts either text by exact pattern, as it accepts one today (`src/install.rs:1315-1357`). Running `install.sh` from the new archive publishes the new runtime, refreshes the packages and the module, and reloads Rex's config. An update command that downloads and checks the archive itself is deferred.
+A standalone install has no Herdr registration, so `check-update.py` learns its source from `source.json`. For an archive or a GitHub checkout it lists the repository's `v*` tags with `git ls-remote --tags` and records the newest. Doctor's `ND-UPDATE-001` and the SessionStart notice then say `Update: download Namedrop <version> and run sh scripts/install.sh`, and Herdr installs keep today's text. The SessionStart wrapper accepts either text by exact pattern, as it accepts one today (`src/install.rs:1315-1357`).
+
+A standalone install's update setting lives in `~/.config/namedrop/settings.json`, with the same `check_for_updates` key as Herdr's `~/.config/herdr/plugins/config/namedrop/settings.json` (`src/update_check.rs:27-54`). The owner decides which file is read, so a machine with both hosts has one setting, in the owner's place.
+
+Running `install.sh` from the new archive publishes the new runtime, refreshes the packages and the module, and reloads Rex's config. An archive whose state schema differs migrates the store through `runtime.py`, as Herdr's updates do, behind the store-and-Rex preflight above, and a failure restores the previous runtime (`restore`, `scripts/runtime.py:640-655`). An update command that downloads and checks the archive itself is deferred.
 
 ### Remote hosts
 
 On host B, the machine that receives relayed mentions, a person does this.
 
-1. Install Namedrop on B as above. On a Linux server the Rex config dir is `~/.config/rex` too, and `install.sh` reloads B's config only when it runs on B.
+1. Install Namedrop on B as above, with B's Rex server running. On a Linux server the Rex config dir is `~/.config/rex` too, and `install.sh` reloads B's config only when it runs on B.
 2. Start the agents on B in Rex blocks, activate each session, and name the agents, with `namedrop` in B's blocks, or from the palette of an app attached to B. That B's palette shows B's actions is inferred from Rex's docs and unverified.
 3. To let A mention a terminal on B, create `<B's state>/relay/allow-terminals`. A terminal runs a relayed message as a shell command, so this is off by default. `namedrop doctor` on B says whether it is on.
 
@@ -296,7 +358,7 @@ On A, the person adds B with `rex hosts add devbox <endpoint>`, which goes to A'
 
 ### Words
 
-Text that names Herdr where the host is Rex changes: the packaged `SKILL.md` description ("inside Herdr"), the `activate`, `deactivate`, `address`, and `space` help ("this Herdr space"), Doctor's `ND-SESSION-002` repair for a Rex block (PORT.md, "Doctor's refusal line"), and the tour's "Herdr returned an unreadable popup result". A Herdr home keeps its Herdr wording where it gives a Herdr command.
+Text that names Herdr where the host is Rex changes, and a Herdr home keeps its Herdr wording where it gives a Herdr command. The first draft listed the texts it found: the packaged `SKILL.md` description ("inside Herdr"), the `activate`, `deactivate`, `address`, and `space` help ("this Herdr space"), Doctor's `ND-SESSION-002` repair for a Rex block (PORT.md, "Doctor's refusal line"), and the tour's "Herdr returned an unreadable popup result". The second review found more, in `src/naming_ui.rs:68` and `:71` and about ten strings in `src/health.rs`. So a test replaces the list. It runs every user-facing command and screen against the fake Rex host and fails on any `Herdr` or `herdr` in the output, except an allowlist of texts that are reached only on a Herdr home. Each allowlist entry names its file and line.
 
 ## Tradeoffs accepted
 
@@ -305,6 +367,9 @@ Text that names Herdr where the host is Rex changes: the packaged `SKILL.md` des
 - **Rex-first names are lost when Herdr is installed later.** Doctor says so and counts them.
 - **The palette is proven only by `--origin palette` until the operator's check.** The app attaches only to the default server.
 - **Popup bounds are fractions of the window.** A screen of 72 columns in a narrow window wraps, and the layer cannot be sized in cells.
+- **A broken module is silent at load.** `pcall` keeps it from rejecting the person's file, so the install's readback and Doctor, not Rex, report it.
+- **The person's own key wins.** A key bound later in `init.lua` shadows Namedrop's, and Doctor says which.
+- **The installer needs Rex running.** It reloads and reads back on the local default server, and edits nothing without one.
 
 ## Implementation plan
 
@@ -332,21 +397,25 @@ U10. **Live check for step 6.** On the lane: install, `rex config reload`, `rex 
 
 ## Deferred
 
-An uninstall command, moving a Rex-first store into Herdr's, an update command that downloads the archive, a Rust port of `runtime.py`, palette arguments, notifications through OSC 777, and popup sizes in cells.
+A full uninstall command for both hosts, moving a Rex-first store into Herdr's, an update command that downloads the archive, a Rust port of `runtime.py`, palette arguments, notifications through OSC 777, popup sizes in cells, and a Linux run of the installer, which PLAN's "Before the first release" #11 holds with the Linux B.
 
-## What only the operator can decide
+## Decisions
 
-- **The palette check.** The Rex app shows only its default server's actions. U10's last step needs a machine or macOS account whose default Rex server is a test server, or the operator's consent to install on their own server.
-- **Editing `init.lua`.** The installer appends one line after a backup and lists it in the confirmation. The other choice is to print the line and let the person add it.
-- **The default keys.** `alt+shift+cmd+{i,m,h,s,o}` follow Herdr's letters. The operator may prefer no keys by default.
+The first draft left four calls to the operator. They are made.
+
+- **No Lua revision gate.** The Rust handshake is the only version gate, and its tested range widens per release. The module carries no revision, so it cannot refuse a server that the binary accepts.
+- **A version-stable module.** The module holds names, titles, keys, and `endpoint()`, and every action calls `namedrop rex action`. A binary update cannot break a loaded module.
+- **`init.lua` is edited, under guards.** `pcall(require, "namedrop");` goes in as line 1, under the six guards of [Editing `init.lua`](#the-installer), and `--print-config` edits nothing.
+- **Keys are bound by default.** A key already bound is skipped, and Doctor reports the skipped keys and the keys in effect.
+- **The palette check runs in a disposable macOS account** whose default Rex server is a test server. U13 writes it as an operator step.
 
 ## Open questions and risks
 
 - **The palette may treat custom actions differently from the docs.** If the actions are missing from the palette, the keys and `rex do` still work, and the done-when is not met until Rex fixes it.
-- **Rex is a preview.** The module gates on revision 12 only. Each Rex update needs the probe of [What exists in Rex](#what-exists-in-rex) again before the range widens.
-- **The app's server environment is unmeasured.** The probe's server had `PATH=/usr/bin:/bin`. The module names every program by its absolute path, so the app's `PATH` does not matter, but `HOME` and `XDG_*` in the app's server decide where `rex.exec` children look for the install record. The module passes `NAMEDROP_STATE_DIR`, so the record is not read there.
-- **Naming in an inactive session.** The probe named a pane after activation. Whether the name screen should offer activation, as Doctor's `ND-SETUP-001` does, is a call for U2.
-- **`ctx.block_id` is "usually the focused" block.** A palette run from a Namedrop layer would target the layer. U2 should make `ui launch` refuse a block whose foreground process is `namedrop ui run`, which it can read from the block's process facts.
+- **Rex is a preview.** Each release can change the API. The handshake refuses a revision outside its tested range with one error, and the range widens only after the probes of [What exists in Rex](#what-exists-in-rex) run again on the new release.
+- **The app's server environment is unmeasured.** The probe's server had `PATH=/usr/bin:/bin`. The module names every program by its absolute path, so the app's `PATH` does not matter, but `HOME` and `XDG_*` in the app's server decide where `rex.exec` children look for the install record. The module passes `NAMEDROP_STATE_DIR`, so the record is not read there. U13's operator step records them.
+- **A Herdr release from before step 6 takes no lock.** It can still rebake the packages over a standalone install. Doctor reports `ND-INSTALL-003` and names the fix, but nothing prevents it.
+- **On Linux, a subreaper may adopt the checker's child.** The guard's parent test is measured only on macOS ([Release checks](#release-checks)).
 
 ## Evidence
 
@@ -406,7 +475,7 @@ rex do -s "$S" -b "$B" namedrop_t --json   # rex.bindings{key} at line 1: 0 for 
 #   context              parent   peer     verdict
 #   server start/reload  server   server   accept
 #   rex config check     1        server   refuse    (no socket found when REX_SERVER is unset and the socket is not the default)
-#   rex do <script>      1        —        refuse
+#   rex do <script>      1        server   refuse
 #   an action's rex.exec server   server   accept
 #   REX_SERVER=forwarder server   forwarder refuse
 # rex actions, rex keymap, and rex api call client.keymap started none.
@@ -425,4 +494,14 @@ namedrop --endpoint rex:$X/s.sock --space "$S" --pane "$B" activate --input-json
 NAMEDROP_REX_LIVE=unix://$X/s.sock NAMEDROP_REX_LIVE_HOME=$X/home <test binary> mux::rex::live::<test> --ignored --test-threads=1
 ```
 
-The same `rex` outputs were saved from both servers and diffed: `--help`, `__internal skill`, `config --help`, `actions --help`, `keymap --help`, `do --help`, and `api describe` for `server.status`, `session.new_layer`, `client.keymap`, and `server.config_reload` were identical. Each probe's server, bridge, deferred worker, and load-time program was stopped by pid, and none was left running.
+The same `rex` outputs were saved from both servers and diffed: `--help`, `__internal skill`, `config --help`, `actions --help`, `keymap --help`, `do --help`, and `api describe` for `server.status`, `session.new_layer`, `client.keymap`, and `server.config_reload` were identical. The generated module in [The Lua module](#the-lua-module) was then loaded verbatim on both builds, behind the line, with a stub launcher that logs its parent pid and argv and fails `doctor` with one stderr line.
+
+```sh
+rex actions --json   # namedrop_activate … namedrop_tour, ten actions, each with source namedrop.lua
+rex keymap           # alt+shift+cmd+{i,h,s,o} namedrop.lua:39; alt+shift+cmd+m mine init.lua:3 above namedrop_manage
+rex do -s "$S" -b "$B" --origin palette namedrop_name     # exit 0; stub: <server pid> rex action name --endpoint rex:$X/s.sock --space $S --pane $B
+rex do -s "$S" -b "$B" --origin palette namedrop_doctor   # Error: Namedrop is not active in this session. Run Activate Namedrop.  exit 1
+# stub log: "<server pid> rex ensure --from-server" at server start, "1 rex ensure --from-server" at rex config check
+```
+
+Each probe's server, bridge, deferred worker, and load-time program was stopped by pid, and none was left running.
