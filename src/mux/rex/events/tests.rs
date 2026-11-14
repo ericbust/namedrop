@@ -447,6 +447,17 @@ fn bells() -> Stall {
     flood(|seq| json!({"type": "event", "seq": seq, "payload": line}))
 }
 
+/// `bell` events, sent faster than they are read and for longer than any
+/// of these waits lasts, until the stream hangs up.
+fn endless_bells() -> Stall {
+    let line = &lines()[62];
+    let chunk = frames((1..=4096).map(|seq| json!({"type": "event", "seq": seq, "payload": line})));
+    Box::new(move |server| {
+        let until = Instant::now() + Duration::from_millis(1500);
+        while Instant::now() < until && server.stream.write_all(&chunk).is_ok() {}
+    })
+}
+
 /// Answers to no request, which the wait reads past.
 fn answers() -> Stall {
     flood(|seq| json!({"type": "response", "id": 0, "seq": seq, "payload": {}}))
@@ -494,6 +505,7 @@ fn a_server_that_sends_nothing_whole_in_time_still_ends_the_wait_on_time() {
         ("half a frame", half_a_frame as fn() -> Stall),
         ("a trickle", trickle),
         ("bells", bells),
+        ("endless bells", endless_bells),
         ("answers", answers),
     ];
     for (name, stall) in stalls {

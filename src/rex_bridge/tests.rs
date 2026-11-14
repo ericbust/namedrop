@@ -1147,3 +1147,180 @@ fn a_space_that_cannot_be_queued_for_a_while_keeps_one_resync() {
     );
     assert!(host.spawned.is_empty());
 }
+
+/// One dial of a `Dials` server.
+#[derive(Clone, Copy)]
+enum Dial {
+    Refused,
+    /// A connection that ends after this long, deleting the state
+    /// directory as it ends when `deletes` says so.
+    Lasts {
+        lasts: Duration,
+        deletes: bool,
+    },
+}
+
+/// A server that answers its dials in order and refuses every dial after
+/// them, and when each dial came.
+struct Dials<'s> {
+    state: &'s State,
+    dials: Mutex<VecDeque<Dial>>,
+    dialed: Mutex<Vec<Instant>>,
+}
+
+impl<'s> Dials<'s> {
+    fn new(state: &'s State, dials: Vec<Dial>) -> Self {
+        Self {
+            state,
+            dials: Mutex::new(dials.into()),
+            dialed: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn dialed(&self) -> Vec<Instant> {
+        self.dialed.lock().unwrap().clone()
+    }
+}
+
+struct Lasting<'s> {
+    state: &'s State,
+    stop: &'s Wake,
+    until: Instant,
+    deletes: bool,
+}
+
+impl Stream for Lasting<'_> {
+    fn host_id(&self) -> Option<&str> {
+        Some("host-a")
+    }
+
+    fn next(&mut self, within: Duration) -> Next {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() || self.stop.sleep(within.min(left)) {
+            if self.deletes {
+                fs::remove_dir_all(&self.state.0).unwrap();
+            }
+            return Next::Ended("the connection ended".into());
+        }
+        Next::Quiet
+    }
+}
+
+impl Server for Dials<'_> {
+    fn open<'w>(&'w self, stop: &'w Wake) -> Result<Box<dyn Stream + 'w>, String> {
+        self.dialed.lock().unwrap().push(Instant::now());
+        match self.dials.lock().unwrap().pop_front() {
+            None | Some(Dial::Refused) => Err("connection refused".into()),
+            Some(Dial::Lasts { lasts, deletes }) => Ok(Box::new(Lasting {
+                state: self.state,
+                stop,
+                until: Instant::now() + lasts,
+                deletes,
+            })),
+        }
+    }
+}
+
+/// The state of a bridge with no activated space, so a test can delete its
+/// directory while it runs.
+fn spaceless() -> State {
+    let state = State::new();
+    State(state.0.join("spaceless"))
+}
+
+/// A connection that lasted starts the bridge's tries over: its next
+/// failure waits the shortest backoff, and it gives up only once the
+/// server has been away for `give_up` since that failure.
+#[test]
+fn a_connection_that_lasted_starts_the_backoff_and_the_give_up_over() {
+    let lasted = Dial::Lasts {
+        lasts: Duration::from_millis(400),
+        deletes: false,
+    };
+    const AWAY: Away = Away {
+        delays: &[Duration::from_millis(20), Duration::from_millis(300)],
+        give_up: Duration::from_millis(400),
+        steady: Duration::from_millis(100),
+    };
+    let state = spaceless();
+    let dials = Dials::new(&state, vec![lasted, Dial::Refused, Dial::Refused, lasted]);
+    bridged_with(
+        &state,
+        &dials,
+        &Wake::new().unwrap(),
+        &AWAY,
+        &mut FakeHost::default(),
+    );
+    let dialed = dials.dialed();
+    assert!(dialed.len() >= 6, "{} dials", dialed.len());
+    let after = dialed[5] - dialed[4];
+    assert!(
+        after < Duration::from_millis(200),
+        "the first wait after a lasting connection took {after:?}"
+    );
+    let away = *dialed.last().unwrap() - dialed[4];
+    assert!(
+        away >= Duration::from_millis(350),
+        "gave up {away:?} after the first failure since the second connection"
+    );
+}
+
+/// A bridge waiting to dial again sees its state directory deleted, and
+/// stops before its next dial rather than when it would give up.
+#[test]
+fn a_bridge_away_from_its_server_stops_once_its_state_directory_is_deleted() {
+    const AWAY: Away = Away {
+        delays: &[Duration::from_millis(20)],
+        give_up: Duration::from_secs(5),
+        steady: Duration::ZERO,
+    };
+    let state = spaceless();
+    let dials = Dials::new(
+        &state,
+        vec![Dial::Lasts {
+            lasts: Duration::ZERO,
+            deletes: true,
+        }],
+    );
+    let started = Instant::now();
+    bridged_with(
+        &state,
+        &dials,
+        &Wake::new().unwrap(),
+        &AWAY,
+        &mut FakeHost::default(),
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(dials.dialed().len(), 1);
+}
+
+/// A server the bridge never reached ends it at its first refusal, however
+/// long the bridge would wait for a server it had reached.
+#[test]
+fn a_server_never_reached_ends_the_bridge_at_its_first_refusal() {
+    const AWAY: Away = Away {
+        delays: &[Duration::from_millis(20)],
+        give_up: Duration::from_secs(5),
+        steady: Duration::ZERO,
+    };
+    let state = spaceless();
+    let dials = Dials::new(&state, Vec::new());
+    let started = Instant::now();
+    bridged_with(
+        &state,
+        &dials,
+        &Wake::new().unwrap(),
+        &AWAY,
+        &mut FakeHost::default(),
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(dials.dialed().len(), 1);
+}
