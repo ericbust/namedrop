@@ -903,16 +903,21 @@ const REEXEC_TEST: &str =
 /// reaps it all the same. A child test process is the old image: it starts
 /// a worker and re-execs through the bridge's own `Processes`, into a
 /// launcher that runs this test again as the new image, which takes the
-/// workers as `run` takes them and then stays up while this test watches
-/// the worker.
+/// workers as `run` takes them and then stays up until this test has
+/// watched the worker.
 #[test]
 fn a_re_exec_d_bridge_reaps_the_workers_its_old_image_started() {
     use std::os::unix::fs::PermissionsExt;
     match std::env::var(IMAGE).as_deref() {
         Ok("old") => return old_image(),
         Ok("new") => {
+            let state = PathBuf::from(std::env::var_os(IMAGE_STATE).unwrap());
             let _workers = Workers::inherited();
-            std::thread::sleep(Duration::from_secs(4));
+            fs::write(state.join("reaping"), "").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !state.join("watched").exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
             return;
         }
         _ => {}
@@ -950,7 +955,12 @@ fn a_re_exec_d_bridge_reaps_the_workers_its_old_image_started() {
         assert!(Instant::now() < deadline, "the old image started no worker");
         std::thread::sleep(Duration::from_millis(10));
     };
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !state.0.join("reaping").exists() {
+        assert!(Instant::now() < deadline, "no new image took the workers");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
     // SAFETY: signal 0 only asks whether the worker still exists, and a
     // zombie still does.
     while unsafe { libc::kill(worker, 0) } == 0 && Instant::now() < deadline {
@@ -958,6 +968,7 @@ fn a_re_exec_d_bridge_reaps_the_workers_its_old_image_started() {
     }
     let gone = unsafe { libc::kill(worker, 0) } != 0;
     let image_ran = image.try_wait().unwrap().is_none();
+    fs::write(state.0.join("watched"), "").unwrap();
     let status = image.wait().unwrap();
     assert!(
         image_ran,
