@@ -305,31 +305,44 @@ fn current_layout() -> &'static Layout {
 fn upgrade(connection: &mut Connection, path: &Path) -> Result<bool, StoreError> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: u32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let migrated = match version {
-        0 if layout(&transaction)?.is_empty() => transaction
-            .execute_batch(SCHEMA)
-            .and_then(|()| {
-                transaction.execute(
-                    "INSERT INTO outbox_epoch (epoch) VALUES (?1)",
-                    params![crate::IdGenerator::next_id(
-                        &crate::ProcessIds::default(),
-                        "outbox"
-                    )],
-                )
+    if matches!(version, 1 | 2) {
+        let expected: Layout = current_layout()
+            .iter()
+            .filter(|(table, column, ..)| {
+                !matches!(table.as_str(), "outbox_lost" | "lost" | "outbox_by_seq")
+                    && !(version == 1
+                        && ((table == "conditions" && column == "other_label_at_ms")
+                            || (table == "dropped" && column == "told")))
             })
-            .is_ok(),
-        1 => transaction.execute_batch(&format!("{TO_2}{TO_3}")).is_ok(),
-        2 => transaction.execute_batch(TO_3).is_ok(),
-        VERSION => true,
+            .cloned()
+            .collect();
+        if layout(&transaction)? != expected {
+            return Ok(false);
+        }
+    }
+    match version {
+        0 if layout(&transaction)?.is_empty() => {
+            transaction.execute_batch(SCHEMA)?;
+            transaction.execute(
+                "INSERT INTO outbox_epoch (epoch) VALUES (?1)",
+                params![crate::IdGenerator::next_id(
+                    &crate::ProcessIds::default(),
+                    "outbox"
+                )],
+            )?;
+        }
+        1 => transaction.execute_batch(&format!("{TO_2}{TO_3}"))?,
+        2 => transaction.execute_batch(TO_3)?,
+        VERSION => (),
         newer if newer > VERSION => {
             return Err(StoreError::invalid_input(format!(
                 "{} has relay schema {newer}, and this Namedrop knows {VERSION}",
                 path.display()
             )));
         }
-        _ => false,
-    };
-    if !migrated || layout(&transaction)? != *current_layout() {
+        _ => return Ok(false),
+    }
+    if layout(&transaction)? != *current_layout() {
         return Ok(false);
     }
     transaction.pragma_update(None, "user_version", VERSION)?;

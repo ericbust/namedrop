@@ -368,6 +368,80 @@ fn a_version_2_database_is_brought_to_this_version_with_its_rows() {
     usable(&store);
 }
 
+/// A migration that finds the disk full returns the error and leaves the
+/// database as it was, and the next open migrates it.
+#[test]
+fn a_full_migration_returns_the_storage_error_and_keeps_the_database() {
+    let state = State::new();
+    state.made_by(include_str!("fixtures/v2-6ca19369.sql"), 2);
+    let path = state.0.join("relay.sqlite3");
+    let mut connection = Connection::open(&path).unwrap();
+    let pages: i64 = connection
+        .pragma_query_value(None, "page_count", |row| row.get(0))
+        .unwrap();
+    connection
+        .pragma_update(None, "max_page_count", pages)
+        .unwrap();
+    let before = layout(&connection).unwrap();
+    let error = upgrade(&mut connection, &path).unwrap_err();
+    assert!(error.to_string().contains("full"), "{error}");
+    assert_eq!(layout(&connection).unwrap(), before);
+    assert_eq!(
+        connection
+            .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM peers", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert!(state.set_aside().is_empty());
+    drop(connection);
+    let store = state.open(NOW);
+    assert_eq!(version(&store), VERSION);
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM peers"), 1);
+    assert!(state.set_aside().is_empty());
+}
+
+/// A migration whose writes fail with an I/O error, past the file size
+/// limit, keeps the database where it is.
+#[test]
+fn a_migration_io_error_never_sets_the_database_aside() {
+    const CHILD_STATE: &str = "NAMEDROP_MIGRATION_IO_STATE";
+    if let Some(path) = std::env::var_os(CHILD_STATE) {
+        let path = PathBuf::from(path);
+        assert!(RelayStore::read(&path).is_err());
+        assert!(set_aside_in(&path).is_empty());
+        return;
+    }
+    let state = State::new();
+    state.made_by(include_str!("fixtures/v2-6ca19369.sql"), 2);
+    let output = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            "ulimit -f 4; trap '' XFSZ; exec \"$1\" --exact \"$2\"",
+            "migration-io",
+        ])
+        .arg(std::env::current_exe().unwrap())
+        .arg("relay::store::tests::a_migration_io_error_never_sets_the_database_aside")
+        .env(CHILD_STATE, &state.0)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(state.set_aside().is_empty());
+    let store = state.open(NOW);
+    assert_eq!(version(&store), VERSION);
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM peers"), 1);
+}
+
 /// A database stamped this version whose layout is not this schema's, as
 /// an earlier build of the same version made without the page's index, is
 /// set aside by its layout.
