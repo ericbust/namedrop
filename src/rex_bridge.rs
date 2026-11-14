@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs, io,
     path::{Path, PathBuf},
-    process::ExitCode,
+    process::{Child, ExitCode},
     sync::OnceLock,
     time::{Duration, Instant},
 };
@@ -47,7 +47,7 @@ pub fn run(state: &Path, endpoint: &Endpoint) -> ExitCode {
         endpoint,
         &server,
         stop,
-        &mut |space| status_queue::spawn_worker(state, endpoint, space).map(drop),
+        &mut |space| status_queue::spawn_worker(state, endpoint, space),
         &Away::REX,
     );
     drop(lock);
@@ -187,7 +187,7 @@ fn bridge(
     endpoint: &Endpoint,
     server: &dyn Server,
     stop: &Wake,
-    spawn: &mut dyn FnMut(&SpaceId) -> Result<(), String>,
+    spawn: &mut dyn FnMut(&SpaceId) -> Result<Child, String>,
     away: &Away,
 ) {
     let mut reached: Option<Instant> = None;
@@ -239,12 +239,13 @@ fn bridge(
 
 /// Queues the pending events of each activated space under the command
 /// gate, after a replaced runtime has taken over, and starts each space's
-/// worker once.
+/// worker once. The bridge outlives its workers, so it reaps each one as it
+/// exits.
 fn flush(
     state: &Path,
     endpoint: &Endpoint,
     pending: &mut Pending,
-    spawn: &mut dyn FnMut(&SpaceId) -> Result<(), String>,
+    spawn: &mut dyn FnMut(&SpaceId) -> Result<Child, String>,
 ) {
     let batch = pending.take();
     if batch.is_empty() {
@@ -266,8 +267,10 @@ fn flush(
                     .is_ok()
             })
             .count();
-        if queued > 0 {
-            let _ = spawn(&space);
+        if queued > 0
+            && let Ok(mut worker) = spawn(&space)
+        {
+            std::thread::spawn(move || worker.wait());
         }
     }
 }

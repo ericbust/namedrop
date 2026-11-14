@@ -164,10 +164,17 @@ const NO_WAIT: Away = Away {
     give_up: Duration::ZERO,
 };
 
+/// A worker that exits at once.
+fn worker() -> Result<Child, String> {
+    std::process::Command::new("true")
+        .spawn()
+        .map_err(|error| error.to_string())
+}
+
 /// Runs the bridge over `script` and returns the spaces whose worker each
-/// flush started, in order.
-fn bridged(state: &State, script: &Script, stop: &Wake) -> Vec<String> {
-    let mut spawned = Vec::new();
+/// flush started, in order, and each worker's pid.
+fn bridged_with_pids(state: &State, script: &Script, stop: &Wake) -> (Vec<String>, Vec<u32>) {
+    let (mut spawned, mut pids) = (Vec::new(), Vec::new());
     bridge(
         &state.0,
         &endpoint(),
@@ -175,11 +182,17 @@ fn bridged(state: &State, script: &Script, stop: &Wake) -> Vec<String> {
         stop,
         &mut |space| {
             spawned.push(space.as_str().to_owned());
-            Ok(())
+            let worker = worker()?;
+            pids.push(worker.id());
+            Ok(worker)
         },
         &NO_WAIT,
     );
-    spawned
+    (spawned, pids)
+}
+
+fn bridged(state: &State, script: &Script, stop: &Wake) -> Vec<String> {
+    bridged_with_pids(state, script, stop).0
 }
 
 #[test]
@@ -226,6 +239,36 @@ fn each_connection_queues_one_resync_per_activated_space_and_a_server_never_reac
     assert!(state.queued("w1").is_empty());
     let empty = State(state.0.join("never"));
     assert!(bridged(&empty, &Script::new(Vec::new()), &stop).is_empty());
+}
+
+/// The bridge lives for days, so every worker it starts is reaped once it
+/// exits rather than left a zombie.
+#[test]
+fn every_worker_the_bridge_starts_is_reaped_once_it_exits() {
+    let state = State::new();
+    let stop = Wake::new().unwrap();
+    let script = Script::new(
+        (0..20)
+            .map(|_| (Some("host-a"), Vec::new(), None))
+            .collect(),
+    );
+    let (spawned, pids) = bridged_with_pids(&state, &script, &stop);
+    assert_eq!(spawned.len(), 40);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let left = loop {
+        // SAFETY: signal 0 only asks whether each process still exists, and
+        // an exited child that nobody reaped still does.
+        let left: Vec<u32> = pids
+            .iter()
+            .copied()
+            .filter(|pid| unsafe { libc::kill(*pid as libc::pid_t, 0) } == 0)
+            .collect();
+        if left.is_empty() || Instant::now() >= deadline {
+            break left;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(left.is_empty(), "unreaped workers: {left:?}");
 }
 
 #[test]
@@ -405,7 +448,7 @@ fn a_scripted_block_closed_retires_its_name_through_the_queue() {
         &stop,
         &mut |space| {
             spawned.push(space.clone());
-            Ok(())
+            worker()
         },
         &NO_WAIT,
     );
