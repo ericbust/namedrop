@@ -1410,16 +1410,24 @@ pub fn open_popup<M, C, I>(
 where
     M: MuxAct,
 {
+    match apply_popup(runtime, screen, target)? {
+        Applied::Opened(reply) => Ok(reply),
+        Applied::Done | Applied::Unsupported => Ok(serde_json::Value::Null),
+    }
+}
+
+pub(crate) fn apply_popup<M: MuxAct, C, I>(
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+    screen: PopupScreen,
+    target: PaneFacts,
+) -> Result<Applied, MuxError> {
     let popup = PopupSpec {
         screen,
         target,
         state_dir: runtime.state_directory.to_owned(),
         socket: runtime.session_socket_id.to_owned(),
     };
-    match runtime.mux.apply(&Effect::OpenPopup(Box::new(popup)))? {
-        Applied::Opened(reply) => Ok(reply),
-        Applied::Done | Applied::Unsupported => Ok(serde_json::Value::Null),
-    }
+    runtime.mux.apply(&Effect::OpenPopup(Box::new(popup)))
 }
 
 fn rename_tab(mux: &impl MuxAct, tab_id: &str, label: &str) -> Result<Applied, MuxError> {

@@ -1,0 +1,242 @@
+#![cfg(feature = "test-support")]
+#[path = "support/binary.rs"]
+mod binary;
+use namedrop::{
+    AgentConfigDirectories, Clock, IdGenerator, LifecycleRuntime, discover_worktree_for_workspace,
+    execute_lifecycle_operation, mux::*, tour,
+};
+use serde_json::json;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+struct Host {
+    inner: fake::FakeMux,
+    popup: Result<Applied, MuxError>,
+    reload: Applied,
+}
+impl MuxRead for Host {
+    fn endpoint(&self) -> &Endpoint {
+        self.inner.endpoint()
+    }
+    fn survey(&self, scope: Scope<'_>, depth: Depth) -> Result<Survey, MuxError> {
+        self.inner.survey(scope, depth)
+    }
+    fn screen(&self, pane: &PaneId, request: ScreenRequest) -> Result<Screen, MuxError> {
+        self.inner.screen(pane, request)
+    }
+    fn process(&self, pane: &PaneId) -> Result<PaneProcess, MuxError> {
+        self.inner.process(pane)
+    }
+    fn tab_label(&self, tab: &TabId) -> Result<Option<String>, MuxError> {
+        self.inner.tab_label(tab)
+    }
+    fn integration_root(&self) -> Result<Option<PathBuf>, MuxError> {
+        self.inner.integration_root()
+    }
+    fn within<'a>(&'a self, allowance: Allowance<'a>) -> Box<dyn MuxRead + 'a> {
+        self.inner.within(allowance)
+    }
+}
+impl MuxAct for Host {
+    fn apply(&self, effect: &Effect) -> Result<Applied, MuxError> {
+        match effect {
+            Effect::OpenPopup(_) => self.popup.clone(),
+            Effect::ReloadKeybindings => Ok(self.reload.clone()),
+            _ => self.inner.apply(effect),
+        }
+    }
+}
+impl MuxInput for Host {
+    fn deliver(&self, input: PaneInput<'_>) -> InputOutcome {
+        self.inner.deliver(input)
+    }
+}
+struct Time;
+impl Clock for Time {
+    fn now_unix_ms(&self) -> u64 {
+        100
+    }
+}
+struct Ids(AtomicU64);
+impl IdGenerator for Ids {
+    fn next_id(&self, kind: &str) -> String {
+        format!("{kind}-{}", self.0.fetch_add(1, Ordering::Relaxed))
+    }
+}
+struct Fixture(PathBuf);
+impl Fixture {
+    fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "nd-activation-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(root.join("home")).unwrap();
+        Self(root)
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+fn host(endpoint: &str, popup: Result<Applied, MuxError>, reload: Applied) -> Host {
+    Host {
+        inner: fake::FakeMux::world()
+            .endpoint(endpoint)
+            .space("w1")
+            .pane("p1")
+            .build(),
+        popup,
+        reload,
+    }
+}
+fn runtime<'a>(
+    f: &'a Fixture,
+    host: &'a Host,
+    home: &'a Path,
+    ids: &'a Ids,
+) -> LifecycleRuntime<'a, Host, Time, Ids> {
+    LifecycleRuntime {
+        state_directory: &f.0,
+        home_directory: Some(home),
+        agent_config: AgentConfigDirectories::default(),
+        cwd: Path::new("/repo"),
+        workspace_id: Some("w1"),
+        current_pane_id: Some("p1"),
+        session_socket_id: &host.endpoint().key,
+        mux: host,
+        clock: &Time,
+        ids,
+    }
+}
+#[test]
+fn rex_activation_writes_no_herdr_keys_and_herdr_keeps_its_bytes() {
+    for endpoint in ["rex:/tmp/fake.sock", "/tmp/fake.sock"] {
+        let f = Fixture::new();
+        let home = f.0.join("home");
+        let ids = Ids(AtomicU64::new(0));
+        let host = host(endpoint, Ok(Applied::Unsupported), Applied::Done);
+        let rt = runtime(&f, &host, &home, &ids);
+        let report =
+            execute_lifecycle_operation("activate", json!({"confirmed":true}), &rt).unwrap();
+        let config = home.join(".config/herdr/config.toml");
+        if endpoint.starts_with("rex:") {
+            assert_eq!(
+                report["shortcuts"],
+                json!({"status":"no_module","repair":"Run sh scripts/install.sh."})
+            );
+            assert!(!config.exists());
+        } else {
+            let expected = f.0.join("expected.toml");
+            namedrop::install_shortcuts(Some(&expected), Some(&home)).unwrap();
+            assert_eq!(fs::read(config).unwrap(), fs::read(expected).unwrap());
+            assert_eq!(report["shortcuts"]["reloaded"], true);
+        }
+    }
+}
+#[test]
+fn unsupported_reload_is_reported_as_an_error() {
+    let f = Fixture::new();
+    let home = f.0.join("home");
+    let ids = Ids(AtomicU64::new(0));
+    let host = host(
+        "/tmp/fake.sock",
+        Ok(Applied::Unsupported),
+        Applied::Unsupported,
+    );
+    let report = execute_lifecycle_operation(
+        "activate",
+        json!({"confirmed":true}),
+        &runtime(&f, &host, &home, &ids),
+    )
+    .unwrap();
+    assert_eq!(report["shortcuts"]["reloaded"], false);
+    assert!(
+        report["shortcuts"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("does not support")
+    );
+}
+#[test]
+fn only_an_unsupported_rex_popup_releases_the_tour_marker() {
+    for endpoint in ["rex:/tmp/fake.sock", "/tmp/fake.sock"] {
+        for popup in [
+            Ok(Applied::Unsupported),
+            Ok(Applied::Done),
+            Err(MuxError::Unavailable("cannot open".into())),
+        ] {
+            let f = Fixture::new();
+            let home = f.0.join("home");
+            let ids = Ids(AtomicU64::new(0));
+            let host = host(endpoint, popup.clone(), Applied::Done);
+            let rt = runtime(&f, &host, &home, &ids);
+            let mut space = discover_worktree_for_workspace(&host, "w1").unwrap();
+            space.panes[0].agent = Some(AgentIdentity {
+                kind: AgentKind::Known(namedrop::AgentRuntime::Codex),
+                label: None,
+                session: SessionClaim::None,
+            });
+            let first = tour::show_for_first_agent(&rt, &space, None);
+            let second = tour::show_for_first_agent(&rt, &space, None);
+            let retry = endpoint.starts_with("rex:") && popup == Ok(Applied::Unsupported);
+            assert_eq!(tour::is_shown(&f.0, tour::CURRENT_ID).unwrap(), !retry);
+            if retry {
+                assert_eq!(first["reason"], "unsupported");
+                assert_eq!(second["reason"], "unsupported");
+            } else {
+                assert_eq!(second["reason"], "already_shown");
+            }
+        }
+    }
+}
+#[test]
+fn rex_shortcut_repair_refuses_before_writing_any_config() {
+    let f = Fixture::new();
+    let home = f.0.join("home");
+    let config = f.0.join("override.toml");
+    let out = binary::namedrop()
+        .env("HOME", &home)
+        .args([
+            "--endpoint",
+            "rex:/tmp/fake.sock",
+            "--json",
+            "ui",
+            "install-shortcuts",
+            "--config",
+        ])
+        .arg(&config)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("namedrop.lua"),
+        "{out:?}"
+    );
+    assert!(!config.exists());
+    assert!(!home.join(".config/herdr/config.toml").exists());
+}
+
+#[test]
+fn a_failed_rex_claim_cannot_install_herdr_shortcuts() {
+    let f = Fixture::new();
+    let home = f.0.join("home");
+    let config = f.0.join("override.toml");
+    let out = binary::namedrop()
+        .env("HOME", &home)
+        .env("REX_BLOCK", "block:missing")
+        .env("REX_SESSION", "session:missing")
+        .env("REX_SERVER", "unix:///tmp/nd-ui-no-such-server.sock")
+        .args(["--json", "ui", "install-shortcuts", "--config"])
+        .arg(&config)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    assert!(!config.exists());
+    assert!(!home.join(".config/herdr/config.toml").exists());
+}

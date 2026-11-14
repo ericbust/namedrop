@@ -391,6 +391,13 @@ fn main() -> ExitCode {
         );
     }
     if let Some(config) = cli.shortcuts_config() {
+        match home::resolve(&cli.runtime.flags(), inherited) {
+            Err(error) => return finish("ui.install-shortcuts", Err(error)),
+            Ok(home) if home.kind() == namedrop::mux::MuxKind::Rex => return finish("ui.install-shortcuts", Err(
+                "Rex shortcuts come from namedrop.lua. Run sh scripts/install.sh, then use Namedrop Doctor to see the keys in effect.".into(),
+            )),
+            Ok(_) => {}
+        }
         return finish("ui.install-shortcuts", naming_ui::install_shortcuts(config));
     }
     if cli.is_reset_tour() {
