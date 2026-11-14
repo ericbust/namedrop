@@ -368,6 +368,25 @@ fn a_version_2_database_is_brought_to_this_version_with_its_rows() {
     usable(&store);
 }
 
+/// A database stamped this version whose layout is not this schema's, as
+/// an earlier build of the same version made without the page's index, is
+/// set aside by its layout.
+#[test]
+fn a_database_stamped_this_version_with_another_layout_is_set_aside() {
+    let state = State::new();
+    let store = state.open(NOW);
+    queue(&store, "message-1", NOW);
+    store
+        .connection
+        .execute_batch("DROP INDEX outbox_by_seq")
+        .unwrap();
+    drop(store);
+    let store = state.open(NOW);
+    assert_eq!(state.set_aside().len(), 1);
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM outbound"), 0);
+    assert_eq!(layout(&store.connection).unwrap(), *current_layout());
+}
+
 /// A database of this version opens again as it is, and its rows stay.
 #[test]
 fn a_database_of_this_version_opens_again_with_its_rows() {

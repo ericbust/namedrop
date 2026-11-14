@@ -293,6 +293,35 @@ fn finishing_waits_for_every_accept_still_running() {
     assert!(!receiver.busy());
 }
 
+/// The accept of a Tailscale caller gets its device as `--caller-host`,
+/// and a peer caller's accept gets none.
+#[test]
+fn the_accept_of_a_tailscale_caller_names_its_device() {
+    const ARGS: &str = r#"cat >/dev/null; printf '{"host_id":"host-b","can_reply":true,"result":{"id":"m1","to":"bob","status":"accepted","reason":"%s"},"outbox":[],"more":false}' "$0 $1""#;
+    let state = State::new();
+    let (mut receiver, _) = receiver(&state, ARGS, ANSWER_WITHIN);
+    // SAFETY: `getuid` has no preconditions.
+    let uid = unsafe { libc::getuid() };
+    for (principal, args) in [
+        (
+            json!({"kind": "tailscale", "transport": "tailscale", "node": "studio"}),
+            "--caller-host studio",
+        ),
+        (
+            json!({"kind": "peer", "transport": "unix", "uid": uid}),
+            "/bin/sh ",
+        ),
+    ] {
+        assert_eq!(
+            receiver.receive(perform(principal, "host-b"), Some("host-b")),
+            None
+        );
+        let replies = answered(&mut receiver, Duration::from_secs(5));
+        assert_eq!(status(&replies[0]), ("accepted", args));
+    }
+    receiver.finish();
+}
+
 /// Only a Tailscale principal names the caller's machine, by its device,
 /// and only a device name that is a label is passed on.
 #[test]
