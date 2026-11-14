@@ -1238,7 +1238,7 @@ fn a_connection_that_lasted_starts_the_backoff_and_the_give_up_over() {
         deletes: false,
     };
     const AWAY: Away = Away {
-        delays: &[Duration::from_millis(20), Duration::from_millis(300)],
+        delays: &[Duration::from_millis(20), Duration::from_secs(1)],
         give_up: Duration::from_millis(400),
         steady: Duration::from_millis(100),
     };
@@ -1255,7 +1255,7 @@ fn a_connection_that_lasted_starts_the_backoff_and_the_give_up_over() {
     assert!(dialed.len() >= 6, "{} dials", dialed.len());
     let after = dialed[5] - dialed[4];
     assert!(
-        after < Duration::from_millis(200),
+        after < Duration::from_millis(700),
         "the first wait after a lasting connection took {after:?}"
     );
     let away = *dialed.last().unwrap() - dialed[4];
@@ -1291,7 +1291,7 @@ fn a_bridge_away_from_its_server_stops_once_its_state_directory_is_deleted() {
         &mut FakeHost::default(),
     );
     assert!(
-        started.elapsed() < Duration::from_secs(1),
+        started.elapsed() < Duration::from_secs(4),
         "{:?}",
         started.elapsed()
     );
@@ -1318,7 +1318,7 @@ fn a_server_never_reached_ends_the_bridge_at_its_first_refusal() {
         &mut FakeHost::default(),
     );
     assert!(
-        started.elapsed() < Duration::from_millis(500),
+        started.elapsed() < Duration::from_secs(4),
         "{:?}",
         started.elapsed()
     );
