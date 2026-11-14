@@ -2938,3 +2938,63 @@ fn a_held_reply_a_refuses_on_release_is_told() {
         [[json!(0)]]
     );
 }
+
+/// An item B accepted while A could not record it stays queued even once
+/// B keeps no more replies for this side, and is sent again, so A learns
+/// B's stored outcome rather than telling its sender it failed.
+#[test]
+fn an_item_b_may_hold_is_sent_again_while_b_keeps_no_more_replies() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    rex.answer_with(answer("accepted", None, json!([])));
+    work_for(&space, &rex, 1);
+    rex.run(|| space.send("request-2", "@bob@devbox one more"))
+        .unwrap();
+    let relay = Connection::open(space.state.join("relay.sqlite3")).unwrap();
+    relay
+        .execute_batch(
+            "CREATE TRIGGER no_accept BEFORE UPDATE ON outbound WHEN NEW.state = 'accepted'
+             BEGIN SELECT RAISE(FAIL, 'no room'); END;",
+        )
+        .unwrap();
+    let mut accepted = answer("accepted", None, json!([]));
+    accepted["can_reply"] = json!(false);
+    rex.answer_with(accepted);
+    work_for(&space, &rex, 1);
+    assert_eq!(outbound(&space)[1].0, "queued");
+    assert!(crate::relay::conditions(&space.state, REX)[0].cannot_reply);
+    relay.execute_batch("DROP TRIGGER no_accept").unwrap();
+    rex.answer_with(
+        json!({"host_id": "host-b", "can_reply": false, "epoch": "e1",
+        "more": false, "outbox": []}),
+    );
+    let mut duplicate = answer("duplicate", None, json!([]));
+    duplicate["can_reply"] = json!(false);
+    rex.answer_with(duplicate);
+    work_for(&space, &rex, 1);
+    let ops: Vec<Value> = rex.requests().iter().map(|r| r["op"].clone()).collect();
+    assert_eq!(ops, ["deliver", "deliver", "collect", "deliver"]);
+    assert_eq!(outbound(&space)[1].0, "accepted");
+    assert!(notices(&space).is_empty());
+}
+
+/// A B whose last page kept no more replies fails no item when the
+/// collect that would say so again goes unanswered: the item stays queued
+/// for the next round.
+#[test]
+fn an_unanswered_collect_fails_nothing_for_a_b_that_kept_no_more_replies() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    let mut accepted = answer("accepted", None, json!([]));
+    accepted["can_reply"] = json!(false);
+    rex.answer_with(accepted);
+    work_for(&space, &rex, 1);
+    rex.run(|| space.send("request-2", "@bob@devbox one more"))
+        .unwrap();
+    let (waits, _) = work_for(&space, &rex, 1);
+    assert_eq!(waits, [BACKOFF[0]]);
+    assert_eq!(outbound(&space)[1].0, "queued");
+    assert!(notices(&space).is_empty());
+}

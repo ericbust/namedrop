@@ -183,6 +183,10 @@ fn round(run: &mut Run<'_>) -> Round {
             .cannot_reply(&run.endpoint.key, run.label)
             .is_ok_and(|no| no)
     };
+    // Whether B said in a page this round that it keeps no more replies
+    // for this side. Only that fails an item, and only one never sent,
+    // since B may have accepted one sent before and still answers for it.
+    let mut full = false;
     if !queued.is_empty() && silent() {
         // B's last page said it keeps no more replies for this side, so a
         // collect first tells whether that still holds.
@@ -190,10 +194,12 @@ fn round(run: &mut Run<'_>) -> Round {
             host_id: &peer_id,
             labels: &labels,
         };
-        kept = !collect(run, &store, &own, &peer);
+        let pages = collect(run, &store, &own, &peer);
+        kept = !pages.taken;
+        full = pages.read && silent();
     }
     for item in &queued {
-        if silent() {
+        if full && item.host_id.is_none() {
             let reason = format!(
                 "{} keeps no more replies for this machine until this machine collects them",
                 run.label
@@ -237,8 +243,12 @@ fn round(run: &mut Run<'_>) -> Round {
                     host_id: &host_id,
                     labels: &labels,
                 };
-                if collect_replies(run, &store, &peer, &answer) != Page::Taken
-                    || more && !collect(run, &store, &own, &peer)
+                let page = collect_replies(run, &store, &peer, &answer);
+                if matches!(page, Page::Taken | Page::Full) {
+                    full = silent();
+                }
+                if matches!(page, Page::Full | Page::Fault)
+                    || more && !collect(run, &store, &own, &peer).taken
                 {
                     kept = true;
                 }
@@ -256,10 +266,14 @@ fn round(run: &mut Run<'_>) -> Round {
         host_id: &peer_id,
         labels: &labels,
     };
-    if queued.is_empty() && !collect(run, &store, &own, &peer) {
+    if queued.is_empty() && !collect(run, &store, &own, &peer).taken {
         kept = true;
     }
-    if kept { Round::Kept } else { Round::Collected }
+    if kept || full {
+        Round::Kept
+    } else {
+        Round::Collected
+    }
 }
 
 /// Settles `item` by B's outcome for it.
@@ -305,10 +319,18 @@ fn decide(
     };
 }
 
+/// What a collect found.
+struct Pages {
+    /// B answered with at least one page.
+    read: bool,
+    /// Every call was answered and every reply taken.
+    taken: bool,
+}
+
 /// Collects B's replies for this side until B has no more, or for at most
-/// `PAGES` pages, and says whether every call was answered and every reply
-/// taken. The next round collects what remains.
-fn collect(run: &mut Run<'_>, store: &RelayStore, own: &str, peer: &Peer<'_>) -> bool {
+/// `PAGES` pages. The next round collects what remains.
+fn collect(run: &mut Run<'_>, store: &RelayStore, own: &str, peer: &Peer<'_>) -> Pages {
+    let mut read = false;
     for _ in 0..PAGES {
         let request = Request {
             op: Op::Collect,
@@ -321,7 +343,7 @@ fn collect(run: &mut Run<'_>, store: &RelayStore, own: &str, peer: &Peer<'_>) ->
             ..acked(store, &run.endpoint.key, peer.host_id)
         };
         let Call::Answered(answer) = perform(run.label, &request) else {
-            return false;
+            return Pages { read, taken: false };
         };
         if answer
             .result
@@ -329,16 +351,24 @@ fn collect(run: &mut Run<'_>, store: &RelayStore, own: &str, peer: &Peer<'_>) ->
             .is_some_and(|result| result.status != Status::Retry)
         {
             // B refused the call itself, as for another server's host_id.
-            return false;
+            return Pages { read, taken: false };
         }
-        if collect_replies(run, store, peer, &answer) != Page::Taken {
-            return false;
+        match collect_replies(run, store, peer, &answer) {
+            Page::None => {}
+            Page::Taken => read = true,
+            Page::Full => {
+                return Pages {
+                    read: true,
+                    taken: false,
+                };
+            }
+            Page::Fault => return Pages { read, taken: false },
         }
         if !answer.more || answer.outbox.is_empty() {
-            return true;
+            return Pages { read, taken: true };
         }
     }
-    true
+    Pages { read, taken: true }
 }
 
 /// The parts of a request that ack what `endpoint` has taken from
@@ -370,6 +400,8 @@ struct Peer<'a> {
 /// Whether a page of replies was all taken.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Page {
+    /// The answer brought no page, as a refusal or a retry does.
+    None,
     Taken,
     /// A had no room to hold a reply, so B keeps it and every later one,
     /// and they come again.
@@ -400,8 +432,7 @@ fn collect_replies(
 ) -> Page {
     let (endpoint, host_id) = (&run.endpoint.key, peer.host_id);
     if !wire::valid_id(&answer.epoch) {
-        // A refusal or a retry brings no page.
-        return Page::Taken;
+        return Page::None;
     }
     if store
         .set_can_reply(endpoint, run.label, answer.can_reply)
