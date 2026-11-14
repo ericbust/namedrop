@@ -384,6 +384,8 @@ pub(crate) struct Pending {
     spaces: Vec<(SpaceId, Vec<MuxEvent>)>,
     first: Option<Instant>,
     last: Option<Instant>,
+    /// No flush comes before this, after one that could not queue.
+    not_before: Option<Instant>,
 }
 
 /// What a flush takes from `Pending`.
@@ -458,14 +460,24 @@ impl Pending {
         queue.push(event);
     }
 
+    /// Holds every flush until `at`, however many events come before it.
+    pub(crate) fn wait_until(&mut self, at: Instant) {
+        self.not_before = self.not_before.max(Some(at));
+    }
+
     /// When the pending events should be queued, or `None` with none.
     pub(crate) fn due(&self) -> Option<Instant> {
-        Some((self.last? + SETTLE).min(self.first? + LONGEST))
+        let due = (self.last? + SETTLE).min(self.first? + LONGEST);
+        Some(
+            self.not_before
+                .map_or(due, |not_before| due.max(not_before)),
+        )
     }
 
     pub(crate) fn take(&mut self) -> Batch {
         self.first = None;
         self.last = None;
+        self.not_before = None;
         Batch {
             every_space: std::mem::take(&mut self.every_space),
             spaces: std::mem::take(&mut self.spaces),

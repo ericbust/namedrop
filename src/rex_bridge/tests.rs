@@ -1512,3 +1512,78 @@ fn a_connection_starts_the_worker_of_each_label_with_an_item_queued() {
         ["devbox", "studio"]
     );
 }
+
+/// Only a positive pid in `INHERITED_WORKERS` names a worker: `waitpid`
+/// reads 0 or a negative pid as a whole process group.
+#[test]
+fn inherited_workers_name_only_positive_pids() {
+    assert_eq!(named("12,0,-1,abc,,99999999999,7"), [12, 7]);
+    assert!(named("").is_empty());
+}
+
+/// While the store cannot be read, a flush that fails owes one `Resync`
+/// of every activated space, however many spaces its events named, and
+/// the next good flush recovers them all.
+#[test]
+fn an_unreadable_store_owes_one_resync_of_every_space_not_one_per_space() {
+    let state = State::new();
+    let database = state.0.join("namedrop.sqlite3");
+    fs::rename(&database, state.0.join("saved")).unwrap();
+    fs::write(&database, "not a database").unwrap();
+    let lock = take(&state);
+    let mut host = FakeHost::default();
+    let mut pending = Pending::default();
+    for n in 0..50 {
+        let space = format!("session:gone-{n}");
+        pending.note(
+            MuxEvent::PaneAppeared(slot(&space, "block:1")),
+            Instant::now(),
+        );
+        pending.note(MuxEvent::SpaceClosed(SpaceId::new(&space)), Instant::now());
+        flush(&state.0, &endpoint(), &mut pending, &mut host, &lock);
+    }
+    pending.note(
+        MuxEvent::PaneAppeared(slot("session:s", "block:2")),
+        Instant::now(),
+    );
+    flush(&state.0, &endpoint(), &mut pending, &mut host, &lock);
+    let mut owed = Pending::default();
+    std::mem::swap(&mut owed, &mut pending);
+    let batch = owed.take();
+    assert!(batch.every_space);
+    assert!(batch.spaces.is_empty(), "{:?}", batch.spaces);
+    fs::rename(state.0.join("saved"), &database).unwrap();
+    pending = Pending::default();
+    pending.resync_every_space(Instant::now());
+    flush(&state.0, &endpoint(), &mut pending, &mut host, &lock);
+    assert_eq!(state.queued("session:s"), [resync("session:s")]);
+    assert_eq!(state.queued("session:t"), [resync("session:t")]);
+}
+
+/// A flush that could not queue tries again a second later, even as new
+/// events keep coming in that second.
+#[test]
+fn a_failed_flush_waits_a_second_however_many_events_come() {
+    let state = State::new();
+    let queue = status_queue::directory(&state.0, REX, "session:s");
+    fs::create_dir_all(queue.parent().unwrap()).unwrap();
+    fs::write(&queue, "not a directory").unwrap();
+    let lock = take(&state);
+    let mut host = FakeHost::default();
+    let mut pending = Pending::default();
+    pending.note(
+        MuxEvent::PaneAppeared(slot("session:s", "block:1")),
+        Instant::now(),
+    );
+    let failed = Instant::now();
+    flush(&state.0, &endpoint(), &mut pending, &mut host, &lock);
+    pending.note(
+        MuxEvent::PaneAppeared(slot("session:t", "block:2")),
+        Instant::now(),
+    );
+    assert!(
+        pending.due().unwrap() >= failed + RETRY,
+        "an event brought the retry forward by {:?}",
+        failed + RETRY - pending.due().unwrap()
+    );
+}
