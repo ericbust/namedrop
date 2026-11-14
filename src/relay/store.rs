@@ -336,17 +336,12 @@ fn upgrade(connection: &mut Connection, path: &Path) -> Result<bool, StoreError>
     Ok(true)
 }
 
-/// Moves the database at `path`, and any journal of it, to
-/// `relay.sqlite3.unreleased-<now_ms>`, so it is kept but no longer read.
+/// Moves the database at `path` to `relay.sqlite3.unreleased-<now_ms>`, so
+/// it is kept but no longer read. It has no journal to take along: the
+/// relay never uses WAL, SQLite rolls back a crashed writer's journal at
+/// the first read, and `upgrade` rolled back its own transaction.
 fn set_aside(path: &Path, now_ms: i64) -> Result<(), StoreError> {
-    let aside = format!("{}.{UNRELEASED}{now_ms}", path.display());
-    for suffix in ["-journal", "-wal", "-shm", ""] {
-        let from = format!("{}{suffix}", path.display());
-        match fs::rename(&from, format!("{aside}{suffix}")) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            moved => moved?,
-        }
-    }
+    fs::rename(path, format!("{}.{UNRELEASED}{now_ms}", path.display()))?;
     Ok(())
 }
 
