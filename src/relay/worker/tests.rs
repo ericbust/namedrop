@@ -1299,3 +1299,49 @@ fn a_drain_tells_the_sender_of_an_expired_item() {
         [("devbox".to_owned(), 0, 1)]
     );
 }
+
+/// A terminal runs only new requests, so B's answer to a terminal's
+/// message, and a notice to one, settle at insert as a local agent's
+/// answer to a terminal does, and the space drains cleanly.
+#[test]
+fn an_answer_or_a_notice_to_a_terminal_sender_settles_at_insert() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    rex.run(|| space.send("request-2", "@nobody@devbox are you there?"))
+        .unwrap();
+    Connection::open(space.state.join("namedrop.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE pane_addresses SET pane_type = 'terminal' WHERE address_id = 'address-alice'",
+            [],
+        )
+        .unwrap();
+    rex.answer_with(answer(
+        "accepted",
+        None,
+        json!([{"seq": 1, "re": message, "thread": "t", "from": "bob",
+            "message_id": "b-1", "text": "pong"}]),
+    ));
+    rex.answer_with(answer("refused", Some("no @nobody on devbox"), json!([])));
+    rex.answer_with(answer("accepted", None, json!([])));
+    work_for(&space, &rex, 1);
+    let states = space.main(
+        "SELECT m.body, d.state FROM collaboration_messages m
+         JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, message_id)
+         WHERE m.author_address_id LIKE 'relay:%' AND d.address_id = 'address-alice'
+         ORDER BY m.rowid",
+    );
+    assert_eq!(
+        states,
+        [
+            ["pong".to_owned(), "settled".to_owned()],
+            [
+                "Namedrop could not relay this message to @nobody@devbox: no @nobody on devbox."
+                    .to_owned(),
+                "settled".to_owned()
+            ],
+        ]
+    );
+    space.drain();
+}

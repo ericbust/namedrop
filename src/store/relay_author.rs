@@ -346,6 +346,11 @@ impl StateTransaction<'_> {
             let title: String = title.chars().take(80).collect();
             self.create_thread(namespace, relayed.thread, &title, attribution)?;
         }
+        // A terminal runs only new requests, so an answer to one is kept as
+        // a local agent's answer to a terminal is, and settles at insert.
+        let answers_terminal = relayed.in_reply_to.is_some()
+            && self.pane_type(namespace, &relayed.recipient.address_id)?
+                == crate::PaneType::Terminal;
         let draft = MessageDraft {
             thread_id: relayed.thread.clone(),
             message_id: relayed.message_id.clone(),
@@ -357,7 +362,12 @@ impl StateTransaction<'_> {
             request_id: relayed.request_id.clone(),
             authored_source: relayed.text.to_owned(),
             body: relayed.text.to_owned(),
-            grammar_version: "mention/v1".to_owned(),
+            grammar_version: if answers_terminal {
+                "mention-return/v1"
+            } else {
+                "mention/v1"
+            }
+            .to_owned(),
             recipients: vec![crate::MessageRecipientDraft {
                 address_id: relayed.recipient.address_id.clone(),
                 alias_snapshot: relayed.recipient.alias.clone(),

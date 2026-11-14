@@ -751,6 +751,11 @@ fn a_terminal_recipient_is_refused_unless_b_allows_terminals() {
             .collect::<Vec<_>>(),
         [json!("bob2"), json!("bob")]
     );
+    assert_eq!(
+        b.messages()[1][8],
+        "queued",
+        "the terminal runs the item as a new request"
+    );
 }
 
 /// When one A thread reaches B from two senders, an answer to one of them
