@@ -688,6 +688,11 @@ fn a_page_starts_after_the_last_reply_a_read_and_b_keeps_what_a_has_not_acked() 
 
 /// B's `@bob` in block `block:b1`, and a runtime for him.
 fn bob_answers(b: &B, in_reply_to: &str, source: &str) -> Value {
+    bob_tries(b, in_reply_to, source).unwrap()
+}
+
+/// `@bob`'s reply in `session:b1`, or why Namedrop refused it.
+fn bob_tries(b: &B, in_reply_to: &str, source: &str) -> Result<Value, String> {
     let namespace = StateNamespace::for_space(REX, "session:b1");
     let attribution = MutationAttribution::new(ActorKind::Human, "test", 3);
     StateStore::open(&b.0)
@@ -731,7 +736,7 @@ fn bob_answers(b: &B, in_reply_to: &str, source: &str) -> Value {
         json!({"request_id": format!("reply-{}", super::super::now_ms()), "in_reply_to": in_reply_to, "source": source}),
         &runtime,
     )
-    .unwrap()
+    .map_err(|error| error.to_string())
 }
 
 /// On B, an answer to a relayed message becomes one kept reply for A that
@@ -1012,6 +1017,40 @@ fn an_answer_goes_back_for_the_relay_author_it_names() {
             [json!("m1"), json!("to alice")],
             [json!("m1"), json!("more for alice")],
         ]
+    );
+}
+
+/// B keeps one outbox row per B message for a host, so a B message to two
+/// relay authors of one A host could keep only one. No reply reaches that:
+/// a reply names only the relay author of the message it answers, and one
+/// that names another relay author of the thread is refused.
+#[test]
+fn no_b_reply_reaches_two_relay_authors_of_one_host() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "from alice"));
+    let mut dan = deliver("m2", "bob", "t1", "from dan");
+    dan["from"]["name"] = json!("dan");
+    b.call(&dan);
+    let relayed = b.rows(
+        "namedrop.sqlite3",
+        "SELECT message_id FROM collaboration_messages ORDER BY rowid",
+    );
+    let to_dan = relayed[1][0].as_str().unwrap();
+    for source in [
+        "@alice@laptop @dan@laptop to both",
+        "@dan@laptop @alice@laptop to both",
+    ] {
+        assert_eq!(
+            bob_tries(&b, to_dan, source).err().as_deref(),
+            Some("unknown Mention: @alice@laptop"),
+            "{source}"
+        );
+    }
+    bob_answers(&b, to_dan, "@dan@laptop to dan");
+    super::super::capture::capture(&b.0, &Endpoint::parse(REX), &mut |_| {}).unwrap();
+    assert_eq!(
+        b.rows("relay.sqlite3", "SELECT re, text FROM outbox ORDER BY seq"),
+        [[json!("m2"), json!("to dan")]]
     );
 }
 
