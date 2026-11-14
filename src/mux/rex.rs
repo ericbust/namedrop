@@ -8,6 +8,8 @@ mod binding;
 mod channel;
 mod control;
 #[cfg(test)]
+mod events;
+#[cfg(test)]
 mod live;
 mod local;
 pub(crate) mod wire;

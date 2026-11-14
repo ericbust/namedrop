@@ -32,3 +32,17 @@ pub enum MuxEvent {
     /// The space and every pane in it are gone for good.
     SpaceClosed(SpaceId),
 }
+
+impl MuxEvent {
+    /// The space the event happened in: a moved pane's former one.
+    pub fn space(&self) -> &SpaceId {
+        match self {
+            Self::PaneAppeared(slot)
+            | Self::PaneClosed(slot)
+            | Self::AgentDetected(slot)
+            | Self::AgentStatusChanged(slot) => &slot.space,
+            Self::PaneMoved { from, .. } => &from.space,
+            Self::TabClosed { space, .. } | Self::Resync(space) | Self::SpaceClosed(space) => space,
+        }
+    }
+}

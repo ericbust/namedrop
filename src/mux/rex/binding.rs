@@ -159,6 +159,22 @@ impl Bindings {
         }
     }
 
+    /// Deletes a closed block's binding, refusal, and lock. Block IDs are
+    /// never reused, so no hook binds the block again.
+    #[cfg(test)]
+    pub(super) fn forget(&self, block: &str) -> io::Result<()> {
+        let lock = self.lock(block)?;
+        let gone = |path: Option<PathBuf>| match path.map(std::fs::remove_file) {
+            Some(Err(error)) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        };
+        gone(self.path(block))?;
+        gone(self.refusal_path(block))?;
+        gone(uuid(block).map(|uuid| self.locks.join(format!("{uuid}.lock"))))?;
+        drop(lock);
+        Ok(())
+    }
+
     fn refuse(&self, refusal: &Refusal) -> io::Result<()> {
         match self.refusal_path(&refusal.block) {
             Some(path) => replace(&path, refusal),
