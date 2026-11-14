@@ -148,6 +148,7 @@ fn a_version_1_relay_database_is_brought_to_this_version_with_its_rows() {
              ALTER TABLE dropped DROP COLUMN told;
              DROP TABLE outbox_lost;
              DROP TABLE lost;
+             DROP INDEX outbox_by_seq;
              PRAGMA user_version = 1;",
         )
         .unwrap();
@@ -189,6 +190,7 @@ fn opens_that_race_to_make_or_migrate_the_database_each_succeed() {
                          ALTER TABLE dropped DROP COLUMN told;
                          DROP TABLE outbox_lost;
                          DROP TABLE lost;
+                         DROP INDEX outbox_by_seq;
                          PRAGMA user_version = 1;",
                     )
                     .unwrap();
@@ -454,6 +456,69 @@ fn b_counts_what_it_lets_go_of_per_a_message() {
     assert!(
         store.lost_for("host-a").unwrap().is_empty(),
         "a loss B has not added to for 7 days is forgotten"
+    );
+}
+
+/// A reply from a third agent to a message whose item for one recipient
+/// is accepted and for another still queued goes to the accepted one,
+/// whichever row comes first, and a recipient's own reply waits for its
+/// own item.
+#[test]
+fn a_reply_answers_the_accepted_item_before_a_queued_one() {
+    for order in [["accepted", "queued"], ["queued", "accepted"]] {
+        let state = State::new();
+        let store = state.open(NOW);
+        for (recipient, state) in [("bob", order[0]), ("eve", order[1])] {
+            store
+                .connection
+                .execute(
+                    "INSERT INTO outbound (label, message_id, recipient, endpoint, space, sender,
+                        thread, text, state, host_id, created_at_ms, updated_at_ms)
+                     VALUES ('devbox', 'm1', ?1, 'rex:/tmp/a.sock', 'session:a', 'alice',
+                        'thread-1', 'hi', ?2, 'host-b', ?3, ?3)",
+                    params![recipient, state, NOW],
+                )
+                .unwrap();
+        }
+        let labels = ["devbox".to_owned()];
+        let answers = |from: &str| match store
+            .sent_from("m1", "host-b", "rex:/tmp/a.sock", from, &labels)
+            .unwrap()
+        {
+            Answers::Sent { .. } => "sent",
+            Answers::Unsettled { .. } => "unsettled",
+            Answers::OtherLabel | Answers::Unknown => "nowhere",
+        };
+        let own = |recipient: &str| {
+            if order[usize::from(recipient == "eve")] == "accepted" {
+                "sent"
+            } else {
+                "unsettled"
+            }
+        };
+        assert_eq!(answers("carol"), "sent", "{order:?}");
+        assert_eq!(answers("bob"), own("bob"), "{order:?}");
+        assert_eq!(answers("eve"), own("eve"), "{order:?}");
+    }
+}
+
+/// B reads a page as a range of its `(host_id, seq)` index, so neither
+/// another host's replies nor a sort of every later reply costs a read.
+#[test]
+fn b_reads_a_page_as_a_range_of_its_host_s_replies() {
+    let state = State::new();
+    let store = state.open(NOW);
+    let plan: Vec<String> = store
+        .connection
+        .prepare(&format!("EXPLAIN QUERY PLAN {PAGE}"))
+        .unwrap()
+        .query_map(params!["host-a", 0], |row| row.get(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        plan,
+        ["SEARCH outbox USING INDEX outbox_by_seq (host_id=? AND seq>?)"]
     );
 }
 

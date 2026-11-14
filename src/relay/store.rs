@@ -16,9 +16,11 @@ ALTER TABLE conditions ADD COLUMN other_label_at_ms INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE dropped ADD COLUMN told INTEGER NOT NULL DEFAULT 0;
 ";
 
-/// What version 2 lacks: on B, the replies for each A host it let go of,
-/// and on A, what B said it let go of and what A told the sender.
+/// What version 2 lacks: on B, the index B's page reads by, and the
+/// replies for each A host it let go of, and on A, what B said it let go
+/// of and what A told the sender.
 const TO_3: &str = "
+CREATE INDEX outbox_by_seq ON outbox (host_id, seq);
 CREATE TABLE outbox_lost (
     host_id TEXT NOT NULL,
     re TEXT NOT NULL,
@@ -45,6 +47,11 @@ CREATE TABLE lost (
     PRIMARY KEY (endpoint, host_id, epoch, re, remote_alias, since_ms)
 );
 ";
+/// B's replies for A after `after`, a range of `outbox_by_seq` read in
+/// `seq` order, which B stops at the page's end.
+const PAGE: &str = "SELECT seq, re, thread, sender, message_id, text FROM outbox
+    WHERE host_id = ?1 AND seq > ?2 ORDER BY seq";
+
 /// B tells A of at most this many of the A messages whose replies it let
 /// go of, the latest first.
 pub(crate) const LOST_LIMIT: i64 = 32;
@@ -167,6 +174,7 @@ CREATE TABLE outbox (
     created_at_ms INTEGER NOT NULL,
     UNIQUE (host_id, message_id)
 );
+CREATE INDEX outbox_by_seq ON outbox (host_id, seq);
 CREATE TABLE remote_threads (
     host_id TEXT NOT NULL,
     thread TEXT NOT NULL,
@@ -249,7 +257,8 @@ fn connect(path: &Path) -> Result<Connection, StoreError> {
 }
 
 /// Each table's columns, by name, with each column's type, whether it is
-/// `NOT NULL`, and its place in the primary key.
+/// `NOT NULL`, and its place in the primary key, and each index's columns,
+/// by name, in order.
 type Layout = Vec<(String, String, String, bool, i64)>;
 
 fn layout(connection: &Connection) -> Result<Layout, StoreError> {
@@ -257,7 +266,11 @@ fn layout(connection: &Connection) -> Result<Layout, StoreError> {
         "SELECT m.name, c.name, c.type, c.\"notnull\", c.pk
          FROM sqlite_schema m JOIN pragma_table_info(m.name) c
          WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
-         ORDER BY m.name, c.name",
+         UNION ALL
+         SELECT m.name, c.name, '', 0, c.seqno
+         FROM sqlite_schema m JOIN pragma_index_info(m.name) c
+         WHERE m.type = 'index' AND m.name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
+         ORDER BY 1, 2",
     )?;
     let layout = statement
         .query_map([], |row| {
@@ -1239,7 +1252,9 @@ impl RelayStore {
         let best = sent
             .iter()
             .filter(|(label, _, _, _, pinned, _)| *pinned && labels.contains(label))
-            .max_by_key(|(label, recipient, ..)| (recipient == from, *label == labels[0]));
+            .max_by_key(|(label, recipient, .., accepted)| {
+                (recipient == from, *accepted, *label == labels[0])
+            });
         Ok(match best {
             Some((label, _, space, thread, _, true)) => Answers::Sent {
                 label: label.clone(),
@@ -1606,12 +1621,7 @@ impl RelayStore {
             params![host_id],
             |row| row.get(0),
         )?;
-        // Read on from `after` in `seq` order and stop at the page's end.
-        // By the `host_id` index, SQLite would first sort every later reply.
-        let mut statement = self.connection.prepare(
-            "SELECT seq, re, thread, sender, message_id, text FROM outbox NOT INDEXED
-             WHERE host_id = ?1 AND seq > ?2 ORDER BY seq",
-        )?;
+        let mut statement = self.connection.prepare(PAGE)?;
         let replies = statement.query_map(params![host_id, after], |row| {
             Ok(Reply {
                 seq: row.get(0)?,
