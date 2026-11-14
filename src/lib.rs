@@ -36,6 +36,7 @@ pub mod mux;
 mod pane_effects;
 mod pointer;
 mod relay;
+pub use relay::accept as relay_accept;
 #[doc(hidden)]
 pub mod reminder;
 pub mod rex_bridge;

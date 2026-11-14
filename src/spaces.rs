@@ -687,7 +687,9 @@ fn local_participant(
     participant: &RoutingAddressSnapshot,
 ) -> Result<RoutingAddressSnapshot, crate::StoreError> {
     let alias = &participant.alias;
-    if transaction.is_operator_address(namespace, &participant.address_id)? {
+    if transaction.is_operator_address(namespace, &participant.address_id)?
+        || transaction.is_relay_author(namespace, &participant.address_id)?
+    {
         return transaction.routing_address_by_id(namespace, &participant.address_id);
     }
     if transaction.alias_holder(namespace, alias)?.as_ref() == Some(&participant.address_id) {

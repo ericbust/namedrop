@@ -10,9 +10,11 @@ use crate::{
         Endpoint, MuxEvent,
         rex::events::{Batch, Liveness, Next, Pending, RexEvents, Wake},
     },
+    relay::receive::{self, Receiver},
     status_queue::{self, Marker},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
@@ -53,6 +55,7 @@ pub fn run(state: &Path, endpoint: &Endpoint) -> ExitCode {
             workers: Workers::inherited(),
         },
         &Away::REX,
+        &mut Receiver::new(state, endpoint),
     );
     ExitCode::SUCCESS
 }
@@ -204,6 +207,8 @@ fn stop_on_signals() -> Option<&'static Wake> {
 trait Stream {
     fn host_id(&self) -> Option<&str>;
     fn next(&mut self, within: Duration) -> Next;
+    /// Answers the relay call `call_id`.
+    fn reply(&mut self, call_id: &str, result: Value) -> Result<(), String>;
 }
 
 impl Stream for RexEvents<'_> {
@@ -213,6 +218,10 @@ impl Stream for RexEvents<'_> {
 
     fn next(&mut self, within: Duration) -> Next {
         RexEvents::next(self, within)
+    }
+
+    fn reply(&mut self, call_id: &str, result: Value) -> Result<(), String> {
+        RexEvents::reply(self, call_id, result)
     }
 }
 
@@ -311,7 +320,10 @@ const IDLE: Duration = Duration::from_secs(60);
 /// stop flushes what is pending and returns. So does a server that has
 /// stayed away for `away.give_up`, or one never reached at all. A lost lock
 /// returns at once, because the state it would write to is gone, so the
-/// lock is checked again after each wait and before each write.
+/// lock is checked again after each wait and before each write. Each call
+/// of the relay goes to `relay`, which answers it once its accept exits,
+/// and every accept is reaped before the bridge returns.
+#[allow(clippy::too_many_arguments)]
 fn bridge(
     state: &Path,
     endpoint: &Endpoint,
@@ -320,6 +332,22 @@ fn bridge(
     lock: &Lock,
     host: &mut dyn Host,
     away: &Away,
+    relay: &mut Receiver,
+) {
+    serve(state, endpoint, server, stop, lock, host, away, relay);
+    relay.finish();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serve(
+    state: &Path,
+    endpoint: &Endpoint,
+    server: &dyn Server,
+    stop: &Wake,
+    lock: &Lock,
+    host: &mut dyn Host,
+    away: &Away,
+    relay: &mut Receiver,
 ) {
     let mut reached = false;
     let mut failing: Option<Instant> = None;
@@ -350,14 +378,24 @@ fn bridge(
                     }
                     let within = pending
                         .due()
-                        .map_or(IDLE, |due| due.saturating_duration_since(now));
+                        .map_or(IDLE, |due| due.saturating_duration_since(now))
+                        .min(if relay.busy() { receive::TICK } else { IDLE });
                     match stream.next(within) {
                         Next::Event(event) => pending.note(event, Instant::now()),
+                        Next::Perform(perform) => {
+                            if let Some((call, result)) = relay.receive(perform, stream.host_id()) {
+                                let _ = stream.reply(&call, result);
+                            }
+                        }
                         Next::Quiet => {}
                         Next::Ended(_) => {
+                            relay.abandon();
                             flush(state, endpoint, &mut pending, host, lock);
                             break;
                         }
+                    }
+                    for (call, result) in relay.poll(Instant::now()) {
+                        let _ = stream.reply(&call, result);
                     }
                 }
                 opened.elapsed() < away.steady

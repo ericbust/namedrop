@@ -1,8 +1,9 @@
 //! `<state>/relay.sqlite3`: the relay's own state, apart from the main
 //! database, whose schema a relay never changes. Only relay code opens it.
 
+use super::wire::{Outcome, Reply};
 use crate::StoreError;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 
 const FILE: &str = "relay.sqlite3";
@@ -97,6 +98,23 @@ pub(crate) struct RelayStore {
     connection: Connection,
 }
 
+/// An item's key on B: A's `host_id`, A's message id, and the recipient.
+pub(crate) struct InboundKey<'a> {
+    pub host_id: &'a str,
+    pub message_id: &'a str,
+    pub recipient: &'a str,
+}
+
+/// A's thread as one of B's spaces carries it, and who started it there.
+pub(crate) struct RemoteThread<'a> {
+    pub host_id: &'a str,
+    pub thread: &'a str,
+    pub endpoint: &'a str,
+    pub space: &'a str,
+    pub sender: &'a str,
+    pub display_host: &'a str,
+}
+
 /// One item A sends: the A message `message_id` for `recipient` on `label`,
 /// from `sender` in the space of `endpoint`.
 pub(crate) struct Outbound<'a> {
@@ -163,6 +181,149 @@ impl RelayStore {
             ],
         )?;
         Ok(())
+    }
+
+    /// The outcome B stored for an item's key.
+    pub(crate) fn inbound(&self, key: &InboundKey<'_>) -> Result<Option<Outcome>, StoreError> {
+        let outcome: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT outcome FROM inbound
+                 WHERE host_id = ?1 AND message_id = ?2 AND recipient = ?3",
+                params![key.host_id, key.message_id, key.recipient],
+                |row| row.get(0),
+            )
+            .optional()?;
+        outcome
+            .map(|outcome| {
+                serde_json::from_str(&outcome)
+                    .map_err(|error| StoreError::invalid_input(error.to_string()))
+            })
+            .transpose()
+    }
+
+    /// Stores B's outcome for an item's key, with where an accepted item
+    /// went.
+    pub(crate) fn record_inbound(
+        &self,
+        key: &InboundKey<'_>,
+        outcome: &Outcome,
+        placed: Option<(&str, &str, &str)>,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO inbound (host_id, message_id, recipient, outcome,
+                local_message_id, endpoint, space, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                key.host_id,
+                key.message_id,
+                key.recipient,
+                serde_json::to_string(outcome)
+                    .map_err(|error| StoreError::invalid_input(error.to_string()))?,
+                placed.map(|placed| placed.0),
+                placed.map(|placed| placed.1),
+                placed.map(|placed| placed.2),
+                now_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// B's thread for A's thread in one of B's spaces.
+    pub(crate) fn remote_thread(
+        &self,
+        thread: &RemoteThread<'_>,
+    ) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT local_thread FROM remote_threads
+                 WHERE host_id = ?1 AND thread = ?2 AND space = ?3",
+                params![thread.host_id, thread.thread, thread.space],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn record_remote_thread(
+        &self,
+        thread: &RemoteThread<'_>,
+        local_thread: &str,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO remote_threads (host_id, thread, endpoint, space,
+                local_thread, sender, display_host)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                thread.host_id,
+                thread.thread,
+                thread.endpoint,
+                thread.space,
+                local_thread,
+                thread.sender,
+                thread.display_host
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Whether B's `local_thread` in `space` carries a thread of `host_id`.
+    pub(crate) fn maps_thread(
+        &self,
+        host_id: &str,
+        endpoint: &str,
+        space: &str,
+        local_thread: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM remote_threads WHERE host_id = ?1 AND endpoint = ?2
+                AND space = ?3 AND local_thread = ?4)",
+            params![host_id, endpoint, space, local_thread],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Drops B's replies for `host_id` through `ack_through`, and returns the
+    /// rest from the oldest, within `limit` encoded bytes, whether more
+    /// remain, and how many B keeps for `host_id`.
+    pub(crate) fn outbox_page(
+        &self,
+        host_id: &str,
+        ack_through: i64,
+        limit: usize,
+    ) -> Result<(Vec<Reply>, bool, usize), StoreError> {
+        self.connection.execute(
+            "DELETE FROM outbox WHERE host_id = ?1 AND seq <= ?2",
+            params![host_id, ack_through],
+        )?;
+        let mut statement = self.connection.prepare(
+            "SELECT seq, re, thread, sender, message_id, text FROM outbox
+             WHERE host_id = ?1 ORDER BY seq",
+        )?;
+        let replies = statement.query_map(params![host_id], |row| {
+            Ok(Reply {
+                seq: row.get(0)?,
+                re: row.get(1)?,
+                thread: row.get(2)?,
+                from: row.get(3)?,
+                message_id: row.get(4)?,
+                text: row.get(5)?,
+            })
+        })?;
+        let (mut page, mut used, mut kept, mut more) = (Vec::new(), 0, 0, false);
+        for reply in replies {
+            let reply = reply?;
+            kept += 1;
+            let size = serde_json::to_vec(&reply).map_or(usize::MAX, |encoded| encoded.len() + 1);
+            if more || used + size > limit {
+                more = true;
+                continue;
+            }
+            used += size;
+            page.push(reply);
+        }
+        Ok((page, more, kept))
     }
 
     /// Fails each queued item older than its lifetime, drops each outbox

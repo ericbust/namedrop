@@ -1,70 +1,139 @@
-//! The `namedrop.relay` action's request, as A's `rex` sends it to B's
-//! bridge through `client.perform`.
+//! The `namedrop.relay` action: the request A's `rex` sends to B's bridge
+//! through `client.perform`, and the result B answers with.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The `rex` CLI refuses a request over 64 KiB before it sends it, so an
 /// item whose request passes this is refused before it is queued.
 pub(super) const REQUEST_LIMIT: usize = 60 * 1024;
+/// B refuses a longer `text` itself, because a direct client is not held to
+/// A's CLI.
+pub(super) const TEXT_LIMIT: usize = 60 * 1024;
+/// A result over the server's 1 MiB breaks B's own connection, so B pages
+/// its outbox at this.
+pub(super) const PAGE_LIMIT: usize = 256 * 1024;
 
 /// The longest id Rex or B accepts for each field that is not known until
 /// the item is sent.
 const LONGEST_ID: &str = "................................................................................................................................";
 
-#[derive(Serialize)]
-pub(super) struct Perform<'a> {
-    pub client_id: &'a str,
-    pub action: &'static str,
-    pub args: Args<'a>,
+#[derive(Debug, Deserialize, Serialize)]
+pub(super) struct Perform {
+    pub client_id: String,
+    pub action: String,
+    pub args: Request,
 }
 
-#[derive(Serialize)]
-pub(super) struct Args<'a> {
-    pub op: &'static str,
-    pub expect_host_id: &'a str,
-    pub from: Sender<'a>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub item: Option<Item<'a>>,
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum Op {
+    Deliver,
+    Collect,
+}
+
+/// The action's arguments.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(super) struct Request {
+    pub op: Op,
+    pub expect_host_id: String,
+    pub from: Sender,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<Item>,
+    #[serde(default)]
     pub ack_through: i64,
 }
 
-#[derive(Serialize)]
-pub(super) struct Sender<'a> {
-    pub host_id: &'a str,
-    pub name: &'a str,
-    pub host: &'a str,
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(super) struct Sender {
+    /// A's `host_id`, as A's server reported it.
+    pub host_id: String,
+    /// The sender's alias on A.
+    pub name: String,
+    /// A's machine name, for display.
+    pub host: String,
 }
 
-#[derive(Serialize)]
-pub(super) struct Item<'a> {
-    pub id: &'a str,
-    pub to: &'a str,
-    pub thread: &'a str,
-    pub in_reply_to: Option<&'a str>,
-    pub text: &'a str,
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(super) struct Item {
+    /// A's message id.
+    pub id: String,
+    /// A name on B.
+    pub to: String,
+    /// A's thread id.
+    pub thread: String,
+    /// The B message it answers, when it answers one.
+    pub in_reply_to: Option<String>,
+    pub text: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum Status {
+    Accepted,
+    Duplicate,
+    Refused,
+    Ambiguous,
+    Retry,
+}
+
+/// What B decided for one item.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(super) struct Outcome {
+    pub id: String,
+    pub to: String,
+    pub status: Status,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// One reply B keeps for A.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(super) struct Reply {
+    pub seq: i64,
+    /// The A message it answers.
+    pub re: String,
+    /// A's thread.
+    pub thread: String,
+    /// The B alias that wrote it.
+    pub from: String,
+    /// B's message id.
+    pub message_id: String,
+    pub text: String,
+}
+
+/// The action's result.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub(super) struct Answer {
+    pub host_id: String,
+    pub can_reply: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Outcome>,
+    #[serde(default)]
+    pub outbox: Vec<Reply>,
+    #[serde(default)]
+    pub more: bool,
 }
 
 /// The encoded size of the `deliver` request for one item, with every id
 /// not yet known at its longest.
 pub(super) fn deliver_size(sender: &str, to: &str, text: &str) -> usize {
-    let host = &LONGEST_ID[..64];
     serde_json::to_vec(&Perform {
-        client_id: LONGEST_ID,
-        action: "namedrop.relay",
-        args: Args {
-            op: "deliver",
-            expect_host_id: LONGEST_ID,
+        client_id: LONGEST_ID.to_owned(),
+        action: "namedrop.relay".to_owned(),
+        args: Request {
+            op: Op::Deliver,
+            expect_host_id: LONGEST_ID.to_owned(),
             from: Sender {
-                host_id: LONGEST_ID,
-                name: sender,
-                host,
+                host_id: LONGEST_ID.to_owned(),
+                name: sender.to_owned(),
+                host: LONGEST_ID[..64].to_owned(),
             },
             item: Some(Item {
-                id: LONGEST_ID,
-                to,
-                thread: LONGEST_ID,
-                in_reply_to: Some(LONGEST_ID),
-                text,
+                id: LONGEST_ID.to_owned(),
+                to: to.to_owned(),
+                thread: LONGEST_ID.to_owned(),
+                in_reply_to: Some(LONGEST_ID.to_owned()),
+                text: text.to_owned(),
             }),
             ack_through: i64::MAX,
         },

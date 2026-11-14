@@ -103,10 +103,18 @@ pub(crate) fn parse_mentions_in(
             }
             cursor = token.end;
         }
-        let Some(listed) = hosts.listed() else {
+        let Some((name, end)) = remote_token(source, cursor) else {
             break;
         };
-        let Some((name, end)) = remote_token(source, cursor) else {
+        if hosts.participant(&name.alias, &name.label) {
+            let alias = format!("{}@{}", name.alias, name.label);
+            if !recipients.contains(&alias) {
+                recipients.push(alias);
+            }
+            cursor = end;
+            continue;
+        }
+        let Some(listed) = hosts.listed() else {
             break;
         };
         if !crate::relay::valid_label(&name.label) || !listed.contains(&name.label) {
@@ -178,7 +186,7 @@ fn remote_token(source: &str, cursor: usize) -> Option<(RemoteName, usize)> {
 /// Whether a `send`'s leading run names a recipient as `@alias@host`. Only
 /// the send itself, in a Rex home, can judge that against its host list.
 pub fn names_remote_host(operation: &str, input: &Value) -> bool {
-    operation == "send"
+    matches!(operation, "send" | "reply")
         && input["source"].as_str().is_some_and(|source| {
             let cursor = leading_labels(source).cursor;
             let cursor = mention_run(source, cursor)
@@ -723,15 +731,7 @@ where
     {
         return Err(workspace_prompt_refusal(scope, runtime, &workspaces).to_string());
     }
-    let input = if operation == "send"
-        && crate::mux::Endpoint::parse(runtime.session_socket_id).kind == crate::mux::MuxKind::Rex
-        && names_remote_host(operation, &json!({"source": input.source}))
-    {
-        let hosts = crate::relay::Hosts::read()?;
-        prepare_source_message(input, &hosts)?
-    } else {
-        prepare_source_message(input, &crate::relay::NoRemoteHosts)?
-    };
+    let input = prepare_in_home(operation, input, runtime)?;
     let author = pane_author(runtime)?;
     persist_prepared_message_operation(input, author, runtime, &workspaces, caller)
         .map(|(receipt, _)| receipt)
@@ -1011,10 +1011,7 @@ where
     C: crate::Clock,
     I: crate::IdGenerator,
 {
-    let input = prepare_source_message(
-        parse_operation_input(operation, input)?,
-        &crate::relay::NoRemoteHosts,
-    )?;
+    let input = prepare_in_home(operation, parse_operation_input(operation, input)?, runtime)?;
     let mut store = StateStore::open(runtime.state_directory).map_err(|e| e.to_string())?;
     let committed = store
         .transaction(|tx| {
@@ -2255,6 +2252,35 @@ where
         "notification_error": notification.err().map(|error| error.to_string()),
         "metadata_error": metadata.err().map(|error| error.to_string()),
     })
+}
+
+/// Parses a send or reply as its home reads it. A Rex send that names
+/// `@alias@host` reads the host list, and a Rex reply may name a remote
+/// agent of the thread it answers. Every other message reads `@a@b` as it
+/// always has.
+fn prepare_in_home<M, C, I>(
+    operation: &str,
+    input: MessageOperationInput,
+    runtime: &LifecycleRuntime<'_, M, C, I>,
+) -> Result<PreparedMessageOperation, String> {
+    let rex = crate::mux::Endpoint::parse(runtime.session_socket_id).kind
+        == crate::mux::MuxKind::Rex
+        && names_remote_host(operation, &json!({"source": input.source}));
+    if rex && operation == "send" {
+        let hosts = crate::relay::Hosts::read()?;
+        return prepare_source_message(input, &hosts);
+    }
+    if let (true, Some(answered)) = (rex, &input.in_reply_to) {
+        let participants = StateStore::open(runtime.state_directory)
+            .and_then(|mut store| {
+                store.transaction(|transaction| {
+                    transaction.relay_participants(runtime.session_socket_id, answered)
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        return prepare_source_message(input, &crate::relay::Participants(participants));
+    }
+    prepare_source_message(input, &crate::relay::NoRemoteHosts)
 }
 
 fn prepare_source_message(

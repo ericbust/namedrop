@@ -289,6 +289,27 @@ fn main() -> ExitCode {
             cli.dashboard_inherit_claim(),
         );
     }
+    if let Some(host_id) = cli.relay_accept_host_id() {
+        let endpoint = cli
+            .runtime
+            .endpoint
+            .as_deref()
+            .map(namedrop::mux::Endpoint::parse);
+        let (Some(state), Some(endpoint)) = (selected_state.as_deref(), endpoint) else {
+            eprintln!("namedrop relay accept needs a rex: --endpoint and a state directory");
+            return ExitCode::from(64);
+        };
+        let mut input = Vec::new();
+        if let Err(error) = io::stdin().read_to_end(&mut input) {
+            eprintln!("namedrop relay accept could not read its call: {error}");
+            return ExitCode::from(66);
+        }
+        println!(
+            "{}",
+            namedrop::relay_accept(state, &endpoint, host_id, &input)
+        );
+        return ExitCode::SUCCESS;
+    }
     let format = cli.result_format(io::stdout().is_terminal());
     let input_file = cli.input_is_file();
     let omitted = "Input file rejected; file contents are omitted from diagnostics.";

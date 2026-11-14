@@ -2,6 +2,8 @@
 //! Namedrop to the Namedrop beside that machine's Rex server, which delivers
 //! it there. Replies come back by this side's pull.
 
+mod accept;
+pub(crate) mod receive;
 mod rex;
 mod store;
 mod wire;
@@ -10,11 +12,92 @@ use crate::{MessageId, StateNamespace, ThreadId};
 use std::path::Path;
 use store::{Outbound, RelayStore};
 
+pub(crate) fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
+}
+
+/// This machine's name as a host label, for display: the host name up to
+/// its first dot, with every byte the label rule refuses dropped.
+pub(crate) fn machine_name() -> String {
+    let mut buffer = [0_u8; 256];
+    // SAFETY: `gethostname` writes at most the buffer's length into it.
+    let named = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } == 0;
+    let name: String = if named {
+        let end = buffer
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(buffer.len());
+        String::from_utf8_lossy(&buffer[..end])
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .take(64)
+            .collect()
+    } else {
+        String::new()
+    };
+    if name.is_empty() {
+        "host".to_owned()
+    } else {
+        name
+    }
+}
+
+/// `namedrop relay accept`: one `namedrop.relay` call B's bridge admitted
+/// for the server `host_id` behind `endpoint`, read from `input`. Its
+/// answer is the call's result.
+pub fn accept(
+    state: &Path,
+    endpoint: &crate::mux::Endpoint,
+    host_id: &str,
+    input: &[u8],
+) -> String {
+    serde_json::to_string(&accept::accept(
+        state,
+        endpoint,
+        host_id,
+        input,
+        &mut |space| {
+            accept::wake(state, endpoint, space);
+        },
+    ))
+    .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}"))
+}
+
 /// The hosts a `send` may name a remote recipient on.
 pub(crate) trait RemoteHosts {
     /// The listed labels, or `None` when the send takes no remote recipient,
     /// so that `@a@b` reads exactly as it does outside Rex.
     fn listed(&self) -> Option<&[String]>;
+
+    /// Whether `@alias@host` names a remote agent that takes part in the
+    /// thread a reply answers, which the reply addresses as a participant.
+    fn participant(&self, _alias: &str, _host: &str) -> bool {
+        false
+    }
+}
+
+/// The remote agents of the thread a Rex reply answers, by display alias.
+pub(crate) struct Participants(pub(crate) Vec<String>);
+
+impl RemoteHosts for Participants {
+    fn listed(&self) -> Option<&[String]> {
+        None
+    }
+
+    fn participant(&self, alias: &str, host: &str) -> bool {
+        self.0.iter().any(|known| {
+            known
+                .split_once('@')
+                .is_some_and(|known| known == (alias, host))
+        })
+    }
 }
 
 /// Every reader of a message but a Rex home's `send`.

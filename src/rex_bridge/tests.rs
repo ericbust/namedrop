@@ -108,6 +108,7 @@ struct Scripted<'w> {
     /// then hands on this last event that arrived as the stop did. It wakes
     /// every 20 ms meanwhile, as a real stream wakes at its idle time.
     hold: Option<MuxEvent>,
+    replies: &'w Mutex<Vec<(String, Value)>>,
 }
 
 impl Stream for Scripted<'_> {
@@ -130,6 +131,14 @@ impl Stream for Scripted<'_> {
             Next::Quiet
         }
     }
+
+    fn reply(&mut self, call_id: &str, result: Value) -> Result<(), String> {
+        self.replies
+            .lock()
+            .unwrap()
+            .push((call_id.to_owned(), result));
+        Ok(())
+    }
 }
 
 /// One connection of a script: its `host_id`, its answers, and the event
@@ -143,6 +152,7 @@ struct Script {
     opened: AtomicU64,
     /// When each dial came, refused or not.
     dialed: Mutex<Vec<Instant>>,
+    replies: Mutex<Vec<(String, Value)>>,
 }
 
 impl Script {
@@ -155,6 +165,7 @@ impl Script {
             dials: Mutex::new(dials.into()),
             opened: AtomicU64::new(0),
             dialed: Mutex::new(Vec::new()),
+            replies: Mutex::new(Vec::new()),
         }
     }
 }
@@ -175,6 +186,7 @@ impl Server for Script {
             nexts: nexts.into(),
             stop,
             hold,
+            replies: &self.replies,
         }))
     }
 }
@@ -241,7 +253,16 @@ impl Host for FakeHost {
 /// `host`.
 fn bridged_with(state: &State, script: &dyn Server, stop: &Wake, away: &Away, host: &mut FakeHost) {
     let lock = take(state);
-    bridge(&state.0, &endpoint(), script, stop, &lock, host, away);
+    bridge(
+        &state.0,
+        &endpoint(),
+        script,
+        stop,
+        &lock,
+        host,
+        away,
+        &mut Receiver::new(&state.0, &endpoint()),
+    );
 }
 
 /// The bridge's lock on `state`, once no one holds it. A bridge that just
@@ -1059,6 +1080,10 @@ impl Stream for EndsAfterReplacing<'_> {
         }
         Next::Ended("the old connection ended".into())
     }
+
+    fn reply(&mut self, _: &str, _: Value) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 impl Server for Replacing<'_> {
@@ -1215,6 +1240,10 @@ impl Stream for Lasting<'_> {
         }
         Next::Quiet
     }
+
+    fn reply(&mut self, _: &str, _: Value) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 impl Server for Dials<'_> {
@@ -1334,4 +1363,74 @@ fn a_server_never_reached_ends_the_bridge_at_its_first_refusal() {
         started.elapsed()
     );
     assert_eq!(dials.dialed().len(), 1);
+}
+
+/// A relay call is answered on the connection it came on: a refused one at
+/// once, and an admitted one when its accept exits, while events go on.
+#[test]
+fn the_bridge_answers_each_relay_call_on_its_connection() {
+    let state = State::new();
+    let call = |id: &str, principal: Value| {
+        Next::Perform(crate::mux::rex::events::Perform {
+            call_id: id.to_owned(),
+            args: serde_json::json!({"op": "collect", "expect_host_id": "host-b",
+                "from": {"host_id": "host-a", "name": "alice", "host": "laptop"}}),
+            principal,
+        })
+    };
+    // SAFETY: `getuid` has no preconditions.
+    let uid = unsafe { libc::getuid() };
+    let script = Script::new(vec![(
+        Some("host-b"),
+        vec![
+            call("call-1", serde_json::json!({"kind": "anonymous"})),
+            call("call-2", serde_json::json!({"kind": "peer", "uid": uid})),
+        ],
+        Some(MuxEvent::Resync(SpaceId::new("session:s"))),
+    )]);
+    let stop = Wake::new().unwrap();
+    let mut relay = Receiver::with(
+        &state.0,
+        Box::new(|host_id| {
+            let mut command = std::process::Command::new("/bin/sh");
+            command.args([
+                "-c",
+                &format!(
+                    r#"cat >/dev/null; printf '{{"host_id":"{host_id}","can_reply":true,"outbox":[],"more":false}}'"#
+                ),
+            ]);
+            Ok(command)
+        }),
+        receive::ANSWER_WITHIN,
+    );
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let until = Instant::now() + Duration::from_secs(10);
+            while script.replies.lock().unwrap().len() < 2 && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            stop.wake();
+        });
+        let lock = Lock::take(&state.0, &endpoint()).unwrap().unwrap();
+        bridge(
+            &state.0,
+            &endpoint(),
+            &script,
+            &stop,
+            &lock,
+            &mut FakeHost::default(),
+            &NO_WAIT,
+            &mut relay,
+        );
+    });
+    let replies = script.replies.lock().unwrap();
+    assert_eq!(replies.len(), 2, "{replies:?}");
+    assert_eq!(replies[0].0, "call-1");
+    assert_eq!(replies[0].1["result"]["status"], "refused");
+    assert_eq!(replies[1].0, "call-2");
+    assert_eq!(
+        replies[1].1,
+        serde_json::json!({"host_id": "host-b", "can_reply": true, "outbox": [], "more": false})
+    );
+    assert!(!relay.busy());
 }

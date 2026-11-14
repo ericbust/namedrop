@@ -113,7 +113,7 @@ mod relay_author;
 pub(crate) use coordination::WakeReadiness;
 pub(crate) use coordination_bridge::TrackedMessage;
 pub(crate) use coordination_ownership::CoordinationRole;
-pub(crate) use relay_author::{RelayAuthor, RelayOrigin};
+pub(crate) use relay_author::{RelayAuthor, RelayOrigin, Relayed};
 mod groups;
 mod handoff;
 mod terminal;
@@ -1081,6 +1081,9 @@ impl StateTransaction<'_> {
     ) -> Result<Option<RoutingAddressSnapshot>, StoreError> {
         if let Some(operator) = self.operator_snapshot(namespace, address_id)? {
             return Ok(Some(operator));
+        }
+        if let Some(relay_author) = self.relay_author_snapshot(namespace, address_id)? {
+            return Ok(Some(relay_author));
         }
         let found = self
             .transaction
