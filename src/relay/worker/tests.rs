@@ -2891,3 +2891,50 @@ fn a_thread_continued_partway_through_a_page_still_reads_in_order() {
     );
     assert_eq!(bodies(&messages[6]), ["reply 202"]);
 }
+
+/// A reply held behind others that the main store then refuses, as a copy
+/// of an earlier reply with other text, is told to its sender once the
+/// thread takes replies again, and lets the rest follow.
+#[test]
+fn a_held_reply_a_refuses_on_release_is_told() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    rex.answer_with(answer("accepted", None, replies(&message, 1, 11)));
+    work_for(&space, &rex, 1);
+    rex.answer_with(
+        json!({"host_id": "host-b", "can_reply": true, "epoch": "e1",
+        "more": false, "outbox": [{"seq": 12, "re": message, "thread": "t", "from": "bob",
+            "message_id": "b-1", "text": "other text"}, replies(&message, 13, 1)[0]]}),
+    );
+    work_for(&space, &rex, 1);
+    assert_eq!(
+        relay_rows(&space, "SELECT seq FROM held ORDER BY rowid"),
+        [[json!(11)], [json!(12)], [json!(13)]]
+    );
+    as_person(
+        &space,
+        &message,
+        |transaction, namespace, thread, attribution| {
+            transaction
+                .continue_thread(namespace, thread, attribution)
+                .map(|_| ())
+        },
+    );
+    assert_eq!(
+        dropped_bodies(&space),
+        [[
+            "Namedrop could not take a reply from @bob@devbox: request id was already used for \
+           different message content."
+        ]]
+    );
+    let bodies: Vec<String> = collected_bodies(&space)
+        .into_iter()
+        .map(|row| row[0].clone())
+        .collect();
+    assert_eq!(bodies[10..], ["reply 11", "reply 13"]);
+    assert_eq!(
+        relay_rows(&space, "SELECT COUNT(*) FROM held"),
+        [[json!(0)]]
+    );
+}
