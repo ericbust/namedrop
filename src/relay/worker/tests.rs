@@ -1,0 +1,510 @@
+use super::*;
+use crate::relay::tests::{REX, Space};
+use crate::relay::tests_support::{STARTED, Script};
+use rusqlite::Connection;
+use std::fs;
+
+/// A worker waiting to collect again wakes for an item queued meanwhile.
+#[test]
+fn a_waiting_worker_wakes_for_a_new_item() {
+    let space = Space::new(REX);
+    let state = space.state.clone();
+    let started = std::time::Instant::now();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(200));
+            crate::relay::tests_support::queue(
+                &crate::relay::tests_support::store(&state),
+                "devbox",
+                REX,
+            );
+        });
+        crate::relay::wait_for_new(
+            &state,
+            "devbox",
+            Duration::from_secs(10),
+            Duration::from_millis(20),
+        );
+    });
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_millis(200) && waited < Duration::from_secs(2),
+        "{waited:?}"
+    );
+    let started = std::time::Instant::now();
+    crate::relay::wait_for_new(
+        &state,
+        "devbox",
+        Duration::from_millis(300),
+        Duration::from_millis(20),
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(300),
+        "an item already queued does not end a wait"
+    );
+}
+
+/// A `rex` that answers each `client.perform` with the next file in
+/// `answers/`, whose first line is the exit status, the second stderr, and
+/// the rest stdout, and records each request it read.
+fn rex(labels: &[&str]) -> Script {
+    let hosts: Vec<Value> = labels
+        .iter()
+        .map(|label| json!({"host": {"label": label}, "from": "home", "held": false}))
+        .collect();
+    let script = Script::new(&format!(
+        r#"D=$(dirname "$0")
+case "$*" in
+*"hosts list"*) [ -f "$D/hosts.json" ] && cat "$D/hosts.json" || echo '{hosts}';;
+*server.status*) [ -f "$D/status.json" ] && cat "$D/status.json" || echo '{{"pid":1,"host_id":"host-b"}}';;
+*target.resolve*) [ -f "$D/resolve.json" ] && cat "$D/resolve.json" || echo '{{"results":[{{"query":"namedrop","status":"resolved","target":{{"kind":"client","client_id":"client:b"}}}}]}}';;
+*client.perform*)
+  cat >> "$D/requests"; echo >> "$D/requests"
+  f=$(ls "$D/answers" 2>/dev/null | sort | head -1)
+  if [ -z "$f" ]; then echo 'Error: no answer (status=409 code=client_unavailable)' >&2; exit 1; fi
+  code=$(sed -n 1p "$D/answers/$f"); sed -n 2p "$D/answers/$f" >&2; sed -n '3,$p' "$D/answers/$f"; rm "$D/answers/$f"; exit "$code";;
+esac"#,
+        hosts = json!({"hosts": hosts})
+    ));
+    fs::create_dir_all(script.directory.join("answers")).unwrap();
+    script
+}
+
+impl Script {
+    /// Queues one answer: `code`, `stderr`, and `stdout`.
+    fn answer(&self, code: i32, stderr: &str, stdout: &Value) {
+        let n = fs::read_dir(self.directory.join("answers"))
+            .unwrap()
+            .count()
+            + self.requests().len();
+        fs::write(
+            self.directory.join(format!("answers/{n:03}")),
+            format!(
+                "{code}\n{stderr}\n{}",
+                if stdout.is_null() {
+                    String::new()
+                } else {
+                    stdout.to_string()
+                }
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Queues B's answer `result` to a perform.
+    fn answer_with(&self, result: Value) {
+        self.answer(
+            0,
+            "",
+            &json!({"result": result, "performed_by": "client:b"}),
+        );
+    }
+
+    /// Each perform request's `args`, in order.
+    fn requests(&self) -> Vec<Value> {
+        fs::read_to_string(self.directory.join("requests"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str::<Value>(line).unwrap()["args"].clone())
+            .collect()
+    }
+}
+
+fn answer(status: &str, reason: Option<&str>, outbox: Value) -> Value {
+    json!({"host_id": "host-b", "can_reply": true,
+        "result": {"id": "x", "to": "bob", "status": status, "reason": reason},
+        "outbox": outbox, "more": false})
+}
+
+/// A sent `@bob@devbox` item, and the A message it carries.
+fn sent(space: &Space, rex: &Script) -> String {
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    let sent = rex
+        .run(|| space.send("request-1", "@bob@devbox ping"))
+        .unwrap();
+    sent["message_id"].as_str().unwrap().to_owned()
+}
+
+/// Runs the worker for `devbox` for at most `rounds` waits, and returns
+/// each wait and each space it woke.
+fn work_for(space: &Space, rex: &Script, rounds: usize) -> (Vec<Duration>, Vec<String>) {
+    let (mut waits, mut woken) = (Vec::new(), Vec::new());
+    let endpoint = Endpoint::parse(REX);
+    rex.run(|| {
+        work(&mut Run {
+            state: &space.state,
+            endpoint: &endpoint,
+            label: "devbox",
+            pause: &mut |wait| {
+                waits.push(wait);
+                waits.len() < rounds
+            },
+            wake: &mut |space| woken.push(space.as_str().to_owned()),
+        });
+    });
+    (waits, woken)
+}
+
+fn outbound(space: &Space) -> Vec<(String, Option<String>, Option<String>)> {
+    Connection::open(space.state.join("relay.sqlite3"))
+        .unwrap()
+        .prepare("SELECT state, reason, host_id FROM outbound")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn a_send_starts_its_label_s_worker() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    STARTED.with(|started| started.borrow_mut().clear());
+    sent(&space, &rex);
+    assert_eq!(STARTED.with(|started| started.borrow().clone()), ["devbox"]);
+}
+
+#[test]
+fn an_accepted_item_is_done_and_its_reply_is_collected_once_from_b_s_relay_author() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    let reply = json!([{"seq": 1, "re": message, "thread": "t", "from": "bob",
+        "message_id": "b-message-1", "text": "pong"}]);
+    rex.answer_with(answer("accepted", None, reply.clone()));
+    rex.answer_with(
+        json!({"host_id": "host-b", "can_reply": true, "outbox": reply, "more": false}),
+    );
+    let (waits, woken) = work_for(&space, &rex, 2);
+
+    assert_eq!(
+        outbound(&space),
+        [("accepted".to_owned(), None, Some("host-b".to_owned()))]
+    );
+    let requests = rex.requests();
+    assert_eq!(requests[0]["op"], "deliver");
+    assert_eq!(requests[0]["expect_host_id"], "host-b");
+    assert_eq!(requests[0]["from"]["host_id"], "host-a");
+    assert_eq!(requests[0]["from"]["name"], "alice");
+    assert_eq!(requests[0]["item"]["id"], message.as_str());
+    assert_eq!(requests[0]["item"]["to"], "bob");
+    assert_eq!(requests[0]["item"]["text"], "ping");
+    assert_eq!(requests[0]["ack_through"], 0);
+    assert_eq!(requests[1]["op"], "collect");
+    assert_eq!(requests[1]["ack_through"], 1, "the collected seq is acked");
+    assert_eq!(woken, ["session:a"]);
+    assert_eq!(
+        waits,
+        [COLLECT_EVERY, COLLECT_EVERY],
+        "a thread is open, so it collects"
+    );
+    assert_eq!(
+        space.main(&format!(
+            "SELECT m.author_alias_snapshot, m.author_kind, m.in_reply_to, m.body, r.alias_snapshot, d.state
+             FROM collaboration_messages m
+             JOIN message_recipients r USING (session_socket_id, worktree_id, message_id)
+             JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, message_id, address_id)
+             WHERE m.message_id <> '{message}'"
+        )),
+        [["bob@devbox", "agent_session", &message, "pong", "alice", "queued"].map(str::to_owned)]
+    );
+    let collected: Vec<(String, i64, String)> = Connection::open(space.state.join("relay.sqlite3"))
+        .unwrap()
+        .prepare("SELECT host_id, seq, remote_alias FROM collected")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(collected, [("host-b".to_owned(), 1, "bob".to_owned())]);
+}
+
+#[test]
+fn each_failing_row_of_the_outcome_table_fails_the_item_and_the_worker_exits() {
+    for (label, code, stderr, result, reason) in [
+        (
+            "refused",
+            0,
+            "",
+            Some(answer("refused", Some("no @bob on b"), json!([]))),
+            "no @bob on b",
+        ),
+        (
+            "wrong host",
+            0,
+            "",
+            Some(answer("refused", Some("wrong_host"), json!([]))),
+            "devbox now answers as another Rex server",
+        ),
+        (
+            "ambiguous",
+            0,
+            "",
+            Some(answer(
+                "ambiguous",
+                Some("@bob is in more than one session"),
+                json!([]),
+            )),
+            "@bob is in more than one session",
+        ),
+        (
+            "bad request",
+            1,
+            "Error: missing required properties (status=400 code=bad_request)",
+            None,
+            "devbox runs a Namedrop without this relay",
+        ),
+        (
+            "not supported",
+            1,
+            r#"Error: "namedrop" does not offer "namedrop.relay" (status=400 code=not_supported)"#,
+            None,
+            "devbox runs a Namedrop without this relay",
+        ),
+        (
+            "too large",
+            1,
+            "Error: control message too large: encoded request is 70269 bytes, limit is 65536",
+            None,
+            "the message is too large to relay",
+        ),
+        (
+            "server too large",
+            1,
+            "Error: request too large (status=413 code=too_large)",
+            None,
+            "the message is too large to relay",
+        ),
+    ] {
+        let space = Space::new(REX);
+        let rex = rex(&["devbox"]);
+        sent(&space, &rex);
+        match result {
+            Some(result) => rex.answer_with(result),
+            None => rex.answer(code, stderr, &Value::Null),
+        }
+        let (waits, _) = work_for(&space, &rex, 5);
+        assert_eq!(
+            outbound(&space),
+            [(
+                "failed".to_owned(),
+                Some(reason.to_owned()),
+                Some("host-b".to_owned())
+            )],
+            "{label}"
+        );
+        assert!(waits.is_empty(), "{label}: the worker exits at once");
+    }
+}
+
+#[test]
+fn each_transient_row_keeps_the_item_and_sends_it_again_with_the_same_id() {
+    for (label, code, stderr, result) in [
+        (
+            "retry",
+            0,
+            "",
+            Some(answer("retry", Some("still deciding"), json!([]))),
+        ),
+        (
+            "timeout",
+            1,
+            r#"Error: "namedrop" did not answer within 1s (status=504 code=timeout)"#,
+            None,
+        ),
+        (
+            "client unavailable",
+            1,
+            r#"Error: "namedrop" disconnected while the request waited (status=409 code=client_unavailable)"#,
+            None,
+        ),
+        (
+            "not found",
+            1,
+            "Error: client client:b not found (status=404 code=not_found)",
+            None,
+        ),
+        (
+            "internal",
+            1,
+            "Error: boom (status=500 code=internal)",
+            None,
+        ),
+        (
+            "no route",
+            1,
+            "Error: connecting to Rex server: no such host",
+            None,
+        ),
+    ] {
+        let space = Space::new(REX);
+        let rex = rex(&["devbox"]);
+        let message = sent(&space, &rex);
+        match result {
+            Some(result) => rex.answer_with(result),
+            None => rex.answer(code, stderr, &Value::Null),
+        }
+        rex.answer_with(answer("accepted", None, json!([])));
+        rex.answer_with(
+            json!({"host_id": "host-b", "can_reply": true, "outbox": [], "more": false}),
+        );
+        let (waits, _) = work_for(&space, &rex, 2);
+        assert_eq!(
+            waits[0],
+            Duration::from_secs(1),
+            "{label}: a kept item backs off"
+        );
+        assert_eq!(outbound(&space)[0].0, "accepted", "{label}");
+        let requests = rex.requests();
+        assert_eq!(requests[0]["item"]["id"], message.as_str(), "{label}");
+        assert_eq!(requests[1]["item"]["id"], message.as_str(), "{label}");
+    }
+}
+
+#[test]
+fn a_resolve_that_finds_no_single_bridge_keeps_the_item() {
+    for status in ["not_found", "ambiguous"] {
+        let space = Space::new(REX);
+        let rex = rex(&["devbox"]);
+        sent(&space, &rex);
+        fs::write(
+            rex.directory.join("resolve.json"),
+            json!({"results": [{"query": "namedrop", "status": status}]}).to_string(),
+        )
+        .unwrap();
+        let (waits, _) = work_for(&space, &rex, 1);
+        assert_eq!(waits, [Duration::from_secs(1)]);
+        assert_eq!(outbound(&space)[0].0, "queued");
+        assert!(rex.requests().is_empty(), "{status}: nothing was performed");
+    }
+}
+
+#[test]
+fn an_item_whose_label_left_the_host_list_fails() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    fs::write(rex.directory.join("hosts.json"), r#"{"hosts":[]}"#).unwrap();
+    let (waits, _) = work_for(&space, &rex, 1);
+    assert_eq!(
+        outbound(&space)[0].1.as_deref(),
+        Some("devbox is no longer in your Rex hosts")
+    );
+    assert!(waits.is_empty());
+    assert!(rex.requests().is_empty());
+}
+
+#[test]
+fn an_item_pinned_to_one_host_id_is_sent_to_it_after_the_label_moved() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    rex.answer(1, "Error: boom (status=500 code=internal)", &Value::Null);
+    work_for(&space, &rex, 1);
+    fs::write(rex.directory.join("status.json"), r#"{"host_id":"host-z"}"#).unwrap();
+    rex.answer_with(answer("refused", Some("wrong_host"), json!([])));
+    work_for(&space, &rex, 1);
+    let requests = rex.requests();
+    assert_eq!(requests[1]["expect_host_id"], "host-b");
+    assert_eq!(
+        outbound(&space)[0].1.as_deref(),
+        Some("devbox now answers as another Rex server")
+    );
+}
+
+#[test]
+fn the_worker_exits_when_nothing_is_queued_and_no_thread_is_open() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    rex.answer_with(answer("accepted", None, json!([])));
+    rex.answer_with(json!({"host_id": "host-b", "can_reply": true, "outbox": [], "more": false}));
+    let (waits, _) = work_for(&space, &rex, 1);
+    assert_eq!(waits, [Duration::from_secs(30)]);
+    Connection::open(space.state.join("relay.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE outbound SET updated_at_ms = updated_at_ms - ?1",
+            [crate::relay::store::OUTBOUND_LIFETIME_MS],
+        )
+        .unwrap();
+    let (waits, _) = work_for(&space, &rex, 1);
+    assert!(waits.is_empty());
+    assert_eq!(rex.requests().len(), 1, "a closed thread is not collected");
+}
+
+#[test]
+fn an_item_unsent_for_24_hours_expires_and_the_worker_exits() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    Connection::open(space.state.join("relay.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE outbound SET created_at_ms = created_at_ms - ?1",
+            [crate::relay::store::OUTBOUND_LIFETIME_MS],
+        )
+        .unwrap();
+    let (waits, _) = work_for(&space, &rex, 1);
+    assert!(waits.is_empty());
+    assert_eq!(
+        outbound(&space)[0],
+        (
+            "expired".to_owned(),
+            Some("devbox was unreachable for 24 hours".to_owned()),
+            None
+        )
+    );
+}
+
+#[test]
+fn a_second_worker_for_a_label_exits_at_once() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    let endpoint = Endpoint::parse(REX);
+    let held = crate::relay::worker_lock(&space.state, &endpoint, "devbox").unwrap();
+    held.try_lock().unwrap();
+    let calls = rex.calls().len();
+    rex.run(|| crate::relay::run_worker(&space.state, &endpoint, "devbox"));
+    assert_eq!(rex.calls().len(), calls);
+    assert_eq!(outbound(&space)[0].0, "queued");
+}
+
+/// B answers `duplicate` for a retry of an item it already took, which is
+/// done like `accepted`.
+#[test]
+fn a_duplicate_item_is_done() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    sent(&space, &rex);
+    rex.answer_with(answer("duplicate", None, json!([])));
+    work_for(&space, &rex, 1);
+    assert_eq!(
+        outbound(&space),
+        [("accepted".to_owned(), None, Some("host-b".to_owned()))]
+    );
+}
+
+/// The worker names its endpoint as a flag, which is where `relay worker`
+/// reads it.
+#[test]
+fn the_worker_command_names_the_endpoint() {
+    let endpoint = Endpoint::parse(REX);
+    let command = crate::relay::worker_command(
+        std::path::Path::new("/x/namedrop"),
+        std::path::Path::new("/x/state"),
+        &endpoint,
+        "devbox",
+    );
+    let args: Vec<_> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        args[..6],
+        ["relay", "worker", "--host", "devbox", "--endpoint", REX]
+    );
+}

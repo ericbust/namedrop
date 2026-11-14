@@ -9,18 +9,9 @@ use crate::{
     ActorKind, DeliveryId, IdGenerator, MessageId, MutationAttribution, StateNamespace, StateStore,
     ThreadId,
     mux::Endpoint,
-    status_queue::{self, Marker},
     store::{RelayAuthor, RelayOrigin, Relayed},
 };
 use std::path::Path;
-
-/// Queues a mailbox wake for `space` and starts its worker, which drains
-/// the accepted item.
-pub(crate) fn wake(state: &Path, endpoint: &Endpoint, space: &crate::SpaceId) {
-    if status_queue::enqueue(state, endpoint, space, &Marker::Wake).is_ok() {
-        let _ = status_queue::spawn_worker(state, endpoint, space);
-    }
-}
 
 /// B keeps replies for a sender only while it holds fewer than this.
 const OUTBOX_LIMIT: usize = 10_000;

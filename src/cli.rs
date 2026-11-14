@@ -227,6 +227,16 @@ impl Cli {
         }
     }
 
+    /// The label of `namedrop relay worker`.
+    pub fn relay_worker_host(&self) -> Option<&str> {
+        match &self.command {
+            Command::Relay {
+                command: RelayCommand::Worker { host },
+            } => Some(host),
+            _ => None,
+        }
+    }
+
     pub fn is_agent_status_worker_hook(&self) -> bool {
         matches!(
             self.command,
@@ -477,6 +487,12 @@ enum RelayCommand {
         #[arg(long)]
         host_id: String,
     },
+    /// Deliver the items queued for the `rex hosts` label `--host`, and
+    /// collect its replies, for the Rex server `--endpoint` names.
+    Worker {
+        #[arg(long)]
+        host: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -536,6 +552,9 @@ impl Command {
             Self::Relay {
                 command: RelayCommand::Accept { .. },
             } => "relay.accept",
+            Self::Relay {
+                command: RelayCommand::Worker { .. },
+            } => "relay.worker",
         }
     }
 }

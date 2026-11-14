@@ -98,6 +98,40 @@ pub(crate) struct RelayStore {
     connection: Connection,
 }
 
+/// An item queued on A for one label.
+#[derive(Clone, Debug)]
+pub(crate) struct Queued {
+    pub message_id: String,
+    pub recipient: String,
+    pub sender: String,
+    pub thread: String,
+    pub in_reply_to: Option<String>,
+    pub text: String,
+    /// The `host_id` the item was first sent to.
+    pub host_id: Option<String>,
+}
+
+/// How a queued item ends.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Settled {
+    Accepted,
+    Failed,
+}
+
+/// A reply A collected from B and inserted as `message_id`.
+pub(crate) struct Collected<'a> {
+    pub host_id: &'a str,
+    pub seq: i64,
+    pub label: &'a str,
+    pub endpoint: &'a str,
+    pub space: &'a str,
+    pub message_id: &'a str,
+    pub remote_message_id: &'a str,
+    pub remote_alias: &'a str,
+    pub thread: &'a str,
+    pub now_ms: i64,
+}
+
 /// An item's key on B: A's `host_id`, A's message id, and the recipient.
 pub(crate) struct InboundKey<'a> {
     pub host_id: &'a str,
@@ -178,6 +212,159 @@ impl RelayStore {
                 item.in_reply_to,
                 item.text,
                 item.now_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The items queued for `label`, oldest first.
+    pub(crate) fn queued(&self, label: &str) -> Result<Vec<Queued>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT message_id, recipient, sender, thread, in_reply_to, text, host_id
+             FROM outbound WHERE label = ?1 AND state = 'queued'
+             ORDER BY created_at_ms, rowid",
+        )?;
+        let queued = statement
+            .query_map(params![label], |row| {
+                Ok(Queued {
+                    message_id: row.get(0)?,
+                    recipient: row.get(1)?,
+                    sender: row.get(2)?,
+                    thread: row.get(3)?,
+                    in_reply_to: row.get(4)?,
+                    text: row.get(5)?,
+                    host_id: row.get(6)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(queued)
+    }
+
+    /// The labels of `endpoint` with an item queued.
+    pub(crate) fn queued_labels(&self, endpoint: &str) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT label FROM outbound WHERE endpoint = ?1 AND state = 'queued'
+             ORDER BY label",
+        )?;
+        let labels = statement
+            .query_map(params![endpoint], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(labels)
+    }
+
+    /// Records the `host_id` an item was first sent to.
+    pub(crate) fn pin(&self, label: &str, item: &Queued, host_id: &str) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE outbound SET host_id = ?4
+             WHERE label = ?1 AND message_id = ?2 AND recipient = ?3 AND host_id IS NULL",
+            params![label, item.message_id, item.recipient, host_id],
+        )?;
+        Ok(())
+    }
+
+    /// Ends a queued item as `state`, with `reason` for a failure.
+    pub(crate) fn settle(
+        &self,
+        label: &str,
+        item: &Queued,
+        state: Settled,
+        reason: Option<&str>,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE outbound SET state = ?4, reason = ?5, updated_at_ms = ?6
+             WHERE label = ?1 AND message_id = ?2 AND recipient = ?3 AND state = 'queued'",
+            params![
+                label,
+                item.message_id,
+                item.recipient,
+                match state {
+                    Settled::Accepted => "accepted",
+                    Settled::Failed => "failed",
+                },
+                reason,
+                now_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn set_peer(
+        &self,
+        label: &str,
+        host_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO peers (label, host_id, contacted_at_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT (label) DO UPDATE SET host_id = excluded.host_id,
+                contacted_at_ms = excluded.contacted_at_ms",
+            params![label, host_id, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Whether `label` has a thread open: an item accepted, or a reply
+    /// collected, within 24 hours of `now_ms`.
+    pub(crate) fn thread_open(&self, label: &str, now_ms: i64) -> Result<bool, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM outbound WHERE label = ?1 AND state = 'accepted'
+                    AND updated_at_ms > ?2
+                UNION ALL SELECT 1 FROM collected WHERE label = ?1 AND created_at_ms > ?2)",
+            params![label, now_ms - OUTBOUND_LIFETIME_MS],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// The highest outbox `seq` of `host_id` that A has stored.
+    pub(crate) fn ack_through(&self, host_id: &str) -> Result<i64, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM collected WHERE host_id = ?1",
+            params![host_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub(crate) fn is_collected(&self, host_id: &str, seq: i64) -> Result<bool, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM collected WHERE host_id = ?1 AND seq = ?2)",
+            params![host_id, seq],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Where the A message `message_id` was sent from: its endpoint, space,
+    /// and thread.
+    pub(crate) fn sent_from(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<(String, String, String)>, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT endpoint, space, thread FROM outbound WHERE message_id = ?1 LIMIT 1",
+                params![message_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn record_collected(&self, collected: &Collected<'_>) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO collected (host_id, seq, label, endpoint, space, message_id,
+                remote_message_id, remote_alias, thread, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                collected.host_id,
+                collected.seq,
+                collected.label,
+                collected.endpoint,
+                collected.space,
+                collected.message_id,
+                collected.remote_message_id,
+                collected.remote_alias,
+                collected.thread,
+                collected.now_ms
             ],
         )?;
         Ok(())

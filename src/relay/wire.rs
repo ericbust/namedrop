@@ -5,20 +5,20 @@ use serde::{Deserialize, Serialize};
 
 /// The `rex` CLI refuses a request over 64 KiB before it sends it, so an
 /// item whose request passes this is refused before it is queued.
-pub(super) const REQUEST_LIMIT: usize = 60 * 1024;
+pub(crate) const REQUEST_LIMIT: usize = 60 * 1024;
 /// B refuses a longer `text` itself, because a direct client is not held to
 /// A's CLI.
-pub(super) const TEXT_LIMIT: usize = 60 * 1024;
+pub(crate) const TEXT_LIMIT: usize = 60 * 1024;
 /// A result over the server's 1 MiB breaks B's own connection, so B pages
 /// its outbox at this.
-pub(super) const PAGE_LIMIT: usize = 256 * 1024;
+pub(crate) const PAGE_LIMIT: usize = 256 * 1024;
 
 /// The longest id Rex or B accepts for each field that is not known until
 /// the item is sent.
 const LONGEST_ID: &str = "................................................................................................................................";
 
 #[derive(Debug, Deserialize, Serialize)]
-pub(super) struct Perform {
+pub(crate) struct Perform {
     pub client_id: String,
     pub action: String,
     pub args: Request,
@@ -26,14 +26,14 @@ pub(super) struct Perform {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(super) enum Op {
+pub(crate) enum Op {
     Deliver,
     Collect,
 }
 
 /// The action's arguments.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(super) struct Request {
+pub(crate) struct Request {
     pub op: Op,
     pub expect_host_id: String,
     pub from: Sender,
@@ -44,7 +44,7 @@ pub(super) struct Request {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(super) struct Sender {
+pub(crate) struct Sender {
     /// A's `host_id`, as A's server reported it.
     pub host_id: String,
     /// The sender's alias on A.
@@ -54,7 +54,7 @@ pub(super) struct Sender {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub(super) struct Item {
+pub(crate) struct Item {
     /// A's message id.
     pub id: String,
     /// A name on B.
@@ -68,7 +68,7 @@ pub(super) struct Item {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(super) enum Status {
+pub(crate) enum Status {
     Accepted,
     Duplicate,
     Refused,
@@ -78,7 +78,7 @@ pub(super) enum Status {
 
 /// What B decided for one item.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(super) struct Outcome {
+pub(crate) struct Outcome {
     pub id: String,
     pub to: String,
     pub status: Status,
@@ -88,7 +88,7 @@ pub(super) struct Outcome {
 
 /// One reply B keeps for A.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(super) struct Reply {
+pub(crate) struct Reply {
     pub seq: i64,
     /// The A message it answers.
     pub re: String,
@@ -103,7 +103,7 @@ pub(super) struct Reply {
 
 /// The action's result.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub(super) struct Answer {
+pub(crate) struct Answer {
     pub host_id: String,
     pub can_reply: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -116,7 +116,7 @@ pub(super) struct Answer {
 
 /// The encoded size of the `deliver` request for one item, with every id
 /// not yet known at its longest.
-pub(super) fn deliver_size(sender: &str, to: &str, text: &str) -> usize {
+pub(crate) fn deliver_size(sender: &str, to: &str, text: &str) -> usize {
     serde_json::to_vec(&Perform {
         client_id: LONGEST_ID.to_owned(),
         action: "namedrop.relay".to_owned(),

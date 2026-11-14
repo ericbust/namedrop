@@ -360,6 +360,7 @@ fn serve(
             Ok(mut stream) => {
                 reached = true;
                 let opened = Instant::now();
+                crate::relay::start_queued_workers(state, endpoint);
                 let mut pending = Pending::default();
                 if same_server(state, endpoint, stream.host_id()) {
                     pending.resync_every_space(Instant::now());
@@ -508,6 +509,26 @@ fn activated_spaces(state: &Path, endpoint: &Endpoint) -> Option<Vec<SpaceId>> {
 #[derive(Deserialize, Serialize)]
 struct KnownServer {
     host_id: String,
+}
+
+/// The `host_id` the bridge stored for the server behind `endpoint`.
+pub(crate) fn known_host_id(state: &Path, endpoint: &Endpoint) -> Option<String> {
+    let bytes = fs::read(
+        state
+            .join("rex/servers")
+            .join(format!("{}.json", scope(endpoint))),
+    )
+    .ok()?;
+    serde_json::from_slice::<KnownServer>(&bytes)
+        .ok()
+        .map(|known| known.host_id)
+}
+
+/// Stores `host_id` as the server the bridge knew, as its first connection
+/// does.
+#[cfg(test)]
+pub(crate) fn remember_host_id(state: &Path, endpoint: &Endpoint, host_id: &str) {
+    assert!(same_server(state, endpoint, Some(host_id)));
 }
 
 /// Whether the server behind `endpoint` is the one the bridge knew. The

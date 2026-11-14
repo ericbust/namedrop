@@ -1434,3 +1434,24 @@ fn the_bridge_answers_each_relay_call_on_its_connection() {
     );
     assert!(!relay.busy());
 }
+
+/// A connection starts the relay worker of each label with an item queued.
+#[test]
+fn a_connection_starts_the_worker_of_each_label_with_an_item_queued() {
+    let state = State::new();
+    let store = crate::relay::tests_support::store(&state.0);
+    for (label, endpoint) in [
+        ("devbox", REX),
+        ("studio", REX),
+        ("elsewhere", "rex:/tmp/other.sock"),
+    ] {
+        crate::relay::tests_support::queue(&store, label, endpoint);
+    }
+    crate::relay::tests_support::STARTED.with(|started| started.borrow_mut().clear());
+    let script = Script::new(vec![(Some("host-a"), Vec::new(), None)]);
+    bridged(&state, &script, &Wake::new().unwrap());
+    assert_eq!(
+        crate::relay::tests_support::STARTED.with(|started| started.borrow().clone()),
+        ["devbox", "studio"]
+    );
+}

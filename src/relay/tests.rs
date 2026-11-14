@@ -16,7 +16,7 @@ use std::{
 };
 
 const MISSING: &str = "message must begin with one or more recipient Mentions";
-const REX: &str = "rex:/tmp/namedrop-relay-tests.sock";
+pub(crate) const REX: &str = "rex:/tmp/namedrop-relay-tests.sock";
 
 fn remote(alias: &str, label: &str) -> RemoteName {
     RemoteName {
@@ -143,14 +143,14 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 
 /// A Rex space with the named sender `@alice` in block `block:a`, and
 /// `@dan`, who has no block.
-struct Space {
-    state: PathBuf,
+pub(crate) struct Space {
+    pub(crate) state: PathBuf,
     mux: FakeMux,
     socket: &'static str,
 }
 
 impl Space {
-    fn new(socket: &'static str) -> Self {
+    pub(crate) fn new(socket: &'static str) -> Self {
         let state = std::env::temp_dir().join(format!(
             "namedrop-relay-{}-{}",
             std::process::id(),
@@ -213,7 +213,7 @@ impl Space {
         Self { state, mux, socket }
     }
 
-    fn send(&self, request: &str, source: &str) -> Result<serde_json::Value, String> {
+    pub(crate) fn send(&self, request: &str, source: &str) -> Result<serde_json::Value, String> {
         let ids = ProcessIds::default();
         let runtime = crate::LifecycleRuntime {
             state_directory: &self.state,
@@ -234,7 +234,7 @@ impl Space {
         )
     }
 
-    fn outbound(&self) -> Vec<Vec<String>> {
+    pub(crate) fn outbound(&self) -> Vec<Vec<String>> {
         let Ok(relay) = Connection::open_with_flags(
             self.state.join("relay.sqlite3"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -257,7 +257,7 @@ impl Space {
             .unwrap()
     }
 
-    fn main(&self, sql: &str) -> Vec<Vec<String>> {
+    pub(crate) fn main(&self, sql: &str) -> Vec<Vec<String>> {
         Connection::open(self.state.join("namedrop.sqlite3"))
             .unwrap()
             .prepare(sql)

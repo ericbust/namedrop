@@ -7,6 +7,7 @@ pub(crate) mod receive;
 mod rex;
 mod store;
 mod wire;
+mod worker;
 
 use crate::{MessageId, StateNamespace, ThreadId};
 use std::path::Path;
@@ -64,10 +65,141 @@ pub fn accept(
         host_id,
         input,
         &mut |space| {
-            accept::wake(state, endpoint, space);
+            wake(state, endpoint, space);
         },
     ))
     .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}"))
+}
+
+/// `namedrop relay worker --host <label>`: the relay's worker for `label`,
+/// holding `<state>/relay/<sha256(endpoint, label)>.lock`, so a second one
+/// exits at once.
+pub fn run_worker(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) {
+    let Ok(lock) = worker_lock(state, endpoint, label) else {
+        return;
+    };
+    if lock.try_lock().is_err() || !valid_label(label) {
+        return;
+    }
+    worker::work(&mut worker::Run {
+        state,
+        endpoint,
+        label,
+        pause: &mut |within| {
+            wait_for_new(state, label, within, std::time::Duration::from_secs(1));
+            true
+        },
+        wake: &mut |space| wake(state, endpoint, space),
+    });
+}
+
+/// Waits `within`, or less once an item is queued for `label` that was not
+/// queued when the wait began, looking every `step`. So a send while the
+/// worker waits to collect again is delivered at once.
+fn wait_for_new(state: &Path, label: &str, within: std::time::Duration, step: std::time::Duration) {
+    let queued = || {
+        RelayStore::open(state, now_ms())
+            .and_then(|store| store.queued(label))
+            .map_or(0, |queued| queued.len())
+    };
+    let before = queued();
+    let until = std::time::Instant::now() + within;
+    loop {
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        std::thread::sleep(left.min(step));
+        if queued() > before {
+            return;
+        }
+    }
+}
+
+fn worker_lock(
+    state: &Path,
+    endpoint: &crate::mux::Endpoint,
+    label: &str,
+) -> std::io::Result<std::fs::File> {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::OpenOptionsExt;
+    let directory = state.join("relay");
+    std::fs::create_dir_all(&directory)?;
+    let scope = crate::lower_hex(&Sha256::digest(format!("{}\0{label}", endpoint.key)));
+    std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(directory.join(format!("{scope}.lock")))
+}
+
+/// Queues a mailbox wake for `space` and starts its worker, which is reaped
+/// when it exits, so a long-lived starter keeps no zombie.
+pub(crate) fn wake(state: &Path, endpoint: &crate::mux::Endpoint, space: &crate::SpaceId) {
+    use crate::status_queue::{self, Marker};
+    if status_queue::enqueue(state, endpoint, space, &Marker::Wake).is_ok()
+        && let Ok(mut worker) = status_queue::spawn_worker(state, endpoint, space)
+    {
+        std::thread::spawn(move || worker.wait());
+    }
+}
+
+/// Starts the relay's worker for `label` unless one runs. It is reaped when
+/// it exits.
+pub(crate) fn start_worker(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) {
+    #[cfg(test)]
+    {
+        let _ = (state, endpoint);
+        tests_support::STARTED.with(|started| started.borrow_mut().push(label.to_owned()));
+    }
+    #[cfg(not(test))]
+    {
+        let Ok(executable) = crate::runtime_executable() else {
+            return;
+        };
+        if let Ok(mut worker) = worker_command(&executable, state, endpoint, label).spawn() {
+            std::thread::spawn(move || worker.wait());
+        }
+    }
+}
+
+/// `namedrop relay worker` for `label`, which reads its endpoint from the
+/// flag.
+fn worker_command(
+    executable: &Path,
+    state: &Path,
+    endpoint: &crate::mux::Endpoint,
+    label: &str,
+) -> std::process::Command {
+    use crate::{
+        daemon::{self, Scope, Starter},
+        locator::{Locator, Name},
+    };
+    let mut command = daemon::command(executable, Scope::Endpoint(endpoint), Starter::Caller);
+    command.args([
+        "relay",
+        "worker",
+        "--host",
+        label,
+        "--endpoint",
+        &endpoint.key,
+    ]);
+    Locator::StateDir.pass(&mut command, Name::of(endpoint.kind), state);
+    command
+}
+
+/// Starts the worker of each label of `endpoint` with an item queued, as
+/// the bridge does when it connects.
+pub(crate) fn start_queued_workers(state: &Path, endpoint: &crate::mux::Endpoint) {
+    if let Ok(store) = RelayStore::open(state, now_ms())
+        && let Ok(labels) = store.queued_labels(&endpoint.key)
+    {
+        for label in labels {
+            start_worker(state, endpoint, &label);
+        }
+    }
 }
 
 /// The hosts a `send` may name a remote recipient on.
@@ -207,8 +339,9 @@ pub(crate) struct Sent<'a> {
     pub now_ms: i64,
 }
 
-/// Queues one `outbound` item per remote recipient of `sent`. A replayed
-/// send queues the same keys, which are already there.
+/// Queues one `outbound` item per remote recipient of `sent`, and starts
+/// each label's worker. A replayed send queues the same keys, which are
+/// already there.
 pub(crate) fn queue(state: &Path, sent: &Sent<'_>, remote: &[RemoteName]) -> Result<(), String> {
     let store = RelayStore::open(state, sent.now_ms).map_err(|error| error.to_string())?;
     for name in remote {
@@ -226,6 +359,14 @@ pub(crate) fn queue(state: &Path, sent: &Sent<'_>, remote: &[RemoteName]) -> Res
                 now_ms: sent.now_ms,
             })
             .map_err(|error| error.to_string())?;
+    }
+    let endpoint = crate::mux::Endpoint::parse(&sent.namespace.session_socket_id);
+    let mut started: Vec<&str> = Vec::new();
+    for name in remote {
+        if !started.contains(&name.label.as_str()) {
+            started.push(&name.label);
+            start_worker(state, &endpoint, &name.label);
+        }
     }
     Ok(())
 }
@@ -262,6 +403,8 @@ pub(crate) mod tests_support {
 
     thread_local! {
         static PROGRAM: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+        /// The labels whose worker this thread started.
+        pub(crate) static STARTED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     }
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -322,6 +465,29 @@ pub(crate) mod tests_support {
         }
     }
 
+    /// The relay database of `state`.
+    pub(crate) fn store(state: &std::path::Path) -> super::RelayStore {
+        super::RelayStore::open(state, super::now_ms()).unwrap()
+    }
+
+    /// Queues an item for `label` from a space of `endpoint`.
+    pub(crate) fn queue(store: &super::RelayStore, label: &str, endpoint: &str) {
+        store
+            .queue(&super::Outbound {
+                label,
+                message_id: "message-1",
+                recipient: "bob",
+                endpoint,
+                space: "session:a",
+                sender: "alice",
+                thread: "thread-1",
+                in_reply_to: None,
+                text: "hi",
+                now_ms: super::now_ms(),
+            })
+            .unwrap();
+    }
+
     /// A `rex` whose `hosts list --json` prints `labels` as Rex does.
     pub(crate) fn hosts(labels: &[&str]) -> Script {
         let hosts: Vec<_> = labels
@@ -346,4 +512,4 @@ pub(crate) mod tests_support {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

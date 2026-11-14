@@ -220,6 +220,23 @@ fn main() -> ExitCode {
             }
         };
     }
+    if let Some(label) = cli.relay_worker_host() {
+        let endpoint = cli
+            .runtime
+            .endpoint
+            .as_deref()
+            .map(namedrop::mux::Endpoint::parse);
+        return match (selected_state.as_deref(), endpoint) {
+            (Some(state), Some(endpoint)) if endpoint.kind == namedrop::mux::MuxKind::Rex => {
+                namedrop::relay_worker(state, &endpoint, label);
+                ExitCode::SUCCESS
+            }
+            _ => {
+                eprintln!("namedrop relay worker needs a rex: --endpoint and a state directory");
+                ExitCode::from(64)
+            }
+        };
+    }
     if cli.is_agent_status_worker_hook() {
         if let Some(state) = selected_state.as_deref() {
             let socket = endpoint_of(location(&RuntimeOptions::default(), inherited));
