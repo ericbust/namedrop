@@ -417,18 +417,36 @@ impl<W: Wire> RexMux<W> {
         }
     }
 
+    /// The space `space` is, by its place in the session list. A list that
+    /// leaves it out proves nothing alone, so the space is gone only when
+    /// Rex, asked for that session, answers `session_not_found`. Any other
+    /// answer keeps it.
     fn listed_space(call: &mut Call<'_>, space: &SpaceId) -> Result<SpaceView, MuxError> {
-        call.sessions()?
+        if let Some((position, session)) = call
+            .sessions()?
             .into_iter()
             .enumerate()
             .find(|(_, session)| session.session_id == space.as_str())
-            .map(|(position, session)| Self::space(session, position))
-            .ok_or_else(|| {
-                MuxError::Gone(
-                    Gone::Space,
-                    format!("Rex has no session {}", space.as_str()),
-                )
-            })
+        {
+            return Ok(Self::space(session, position));
+        }
+        match call.control.request(
+            "session.attach",
+            Some(json!({"session_id": space.as_str()})),
+        ) {
+            Err(Fault::Rex { code, message, .. }) if code == "session_not_found" => {
+                Err(MuxError::Gone(Gone::Space, message))
+            }
+            // A bare `not_found` does not name the session.
+            Err(fault) => Err(match mux_error(fault, Gone::Pane) {
+                MuxError::Gone(_, message) => MuxError::Unavailable(message),
+                error => error,
+            }),
+            Ok(_) => Err(MuxError::Unavailable(format!(
+                "Rex's session list leaves out {}, which Rex still attaches",
+                space.as_str()
+            ))),
+        }
     }
 }
 
