@@ -6,7 +6,7 @@
 use super::{
     Hosts, RemoteHosts,
     rex::{self, Failure},
-    store::{Collected, Held, Queued, RelayStore, Settled},
+    store::{Answers, Collected, Held, Queued, RelayStore, Settled},
     wire::{self, Answer, Item, Op, Perform, Reply, Request, Sender, Status},
 };
 use crate::{
@@ -120,11 +120,14 @@ fn round(run: &mut Run<'_>) -> Round {
     if queued.is_empty() && !open {
         return Round::Done;
     }
-    match Hosts::read() {
+    let labels = match Hosts::read() {
         Ok(hosts)
             if hosts
                 .listed()
-                .is_some_and(|listed| listed.iter().any(|l| l == run.label)) => {}
+                .is_some_and(|listed| listed.iter().any(|l| l == run.label)) =>
+        {
+            hosts.same_host(run.label)
+        }
         Ok(_) => {
             let reason = format!("{} is no longer in your Rex hosts", run.label);
             for item in &queued {
@@ -133,7 +136,7 @@ fn round(run: &mut Run<'_>) -> Round {
             return Round::Done;
         }
         Err(_) => return Round::Kept,
-    }
+    };
     let Some(own) = crate::rex_bridge::known_host_id(run.state, run.endpoint) else {
         return Round::Kept;
     };
@@ -178,8 +181,12 @@ fn round(run: &mut Run<'_>) -> Round {
                     now,
                     &mut kept,
                 );
-                collect_replies(run, &store, &host_id, &answer);
-                if more && !collect(run, &store, &own, &host_id) {
+                let peer = Peer {
+                    host_id: &host_id,
+                    labels: &labels,
+                };
+                collect_replies(run, &store, &peer, &answer);
+                if more && !collect(run, &store, &own, &peer) {
                     kept = true;
                 }
             }
@@ -192,7 +199,11 @@ fn round(run: &mut Run<'_>) -> Round {
             }
         }
     }
-    if queued.is_empty() && !collect(run, &store, &own, &peer_id) {
+    let peer = Peer {
+        host_id: &peer_id,
+        labels: &labels,
+    };
+    if queued.is_empty() && !collect(run, &store, &own, &peer) {
         kept = true;
     }
     if kept { Round::Kept } else { Round::Collected }
@@ -240,17 +251,17 @@ fn decide(
 /// Collects B's replies for this side until B has no more, or for at most
 /// `PAGES` pages, and says whether every call was answered. The next round
 /// collects what remains.
-fn collect(run: &mut Run<'_>, store: &RelayStore, own: &str, host_id: &str) -> bool {
+fn collect(run: &mut Run<'_>, store: &RelayStore, own: &str, peer: &Peer<'_>) -> bool {
     for _ in 0..PAGES {
         let request = Request {
             op: Op::Collect,
-            expect_host_id: host_id.to_owned(),
+            expect_host_id: peer.host_id.to_owned(),
             from: Sender {
                 host_id: own.to_owned(),
                 name: "namedrop".to_owned(),
                 host: super::machine_name(),
             },
-            ..acked(store, &run.endpoint.key, host_id)
+            ..acked(store, &run.endpoint.key, peer.host_id)
         };
         let Call::Answered(answer) = perform(run.label, &request) else {
             return false;
@@ -263,7 +274,7 @@ fn collect(run: &mut Run<'_>, store: &RelayStore, own: &str, host_id: &str) -> b
             // B refused the call itself, as for another server's host_id.
             return false;
         }
-        collect_replies(run, store, host_id, &answer);
+        collect_replies(run, store, peer, &answer);
         if !answer.more || answer.outbox.is_empty() {
             return true;
         }
@@ -289,17 +300,26 @@ fn acked(store: &RelayStore, endpoint: &str, host_id: &str) -> Request {
     }
 }
 
+/// The server a worker collects from: the `host_id` it reports, and the
+/// labels that reach it by this machine's host list, the worker's own
+/// first.
+struct Peer<'a> {
+    host_id: &'a str,
+    labels: &'a [String],
+}
+
 /// Inserts each reply of `answer` that A has not collected into the space
 /// of the A message it answers, from the relay author of the B agent that
 /// wrote it on the label that message was sent by, and wakes that space.
 /// A new outbox epoch means B's `seq` started again, so every reply of it
 /// is new. A reply is B's to make up, so one with a bad field, or one that
-/// answers a message this endpoint did not send to B, is acked and
-/// dropped, and A keeps nothing of it. A reply whose thread the Automatic
-/// Reply Limit paused is held, as is each later one of that thread, so
-/// they reach it in order once it takes replies again.
-fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, answer: &Answer) {
-    let endpoint = &run.endpoint.key;
+/// answers a message this endpoint did not send to `peer`, is acked and
+/// dropped, and A keeps nothing of it but a count for Doctor of those that
+/// answer a message sent to another host. A reply whose thread the
+/// Automatic Reply Limit paused is held, as is each later one of that
+/// thread, so they reach it in order once it takes replies again.
+fn collect_replies(run: &mut Run<'_>, store: &RelayStore, peer: &Peer<'_>, answer: &Answer) {
+    let (endpoint, host_id) = (&run.endpoint.key, peer.host_id);
     let Ok((epoch, through)) = store.ack_through(endpoint, host_id) else {
         return;
     };
@@ -309,13 +329,22 @@ fn collect_replies(run: &mut Run<'_>, store: &RelayStore, host_id: &str, answer:
             continue;
         }
         let sent = if trusted(reply) {
-            store.sent_from(&reply.re, host_id, endpoint, &reply.from, run.label)
+            store.sent_from(&reply.re, host_id, endpoint, &reply.from, peer.labels)
         } else {
-            Ok(None)
+            Ok(Answers::Unknown)
         };
         let (label, space, thread) = match sent {
-            Ok(Some(sent)) => sent,
-            Ok(None) => {
+            Ok(Answers::Sent {
+                label,
+                space,
+                thread,
+            }) => (label, space, thread),
+            Ok(dropped) => {
+                if matches!(dropped, Answers::OtherLabel)
+                    && store.count_other_label(endpoint, run.label).is_err()
+                {
+                    return;
+                }
                 let _ = store.advance(endpoint, host_id, &answer.epoch, reply.seq);
                 continue;
             }

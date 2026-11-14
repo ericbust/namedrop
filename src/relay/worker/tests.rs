@@ -994,6 +994,22 @@ fn relay_rows(space: &Space, sql: &str) -> Vec<Vec<Value>> {
         .unwrap()
 }
 
+/// Lists `labels` in `rex`'s host list, each dialing `addresses[i]`.
+fn listed_at(rex: &Script, labels: &[(&str, &[&str])]) {
+    let hosts: Vec<Value> = labels
+        .iter()
+        .map(|(label, addresses)| {
+            json!({"host": {"id": format!("host:{label}"), "label": label,
+                "endpoints": addresses}, "from": "home", "held": false})
+        })
+        .collect();
+    fs::write(
+        rex.directory.join("hosts.json"),
+        json!({"hosts": hosts}).to_string(),
+    )
+    .unwrap();
+}
+
 /// A reply A drops is acked and leaves no row, so B's made-up traffic
 /// neither grows A's database nor keeps a thread open.
 #[test]
@@ -1174,16 +1190,155 @@ fn a_reply_to_a_message_not_sent_to_this_b_is_dropped() {
         ]),
     );
     assert_eq!(collected_bodies(&space), [["forged 4"]]);
+    assert_eq!(
+        crate::relay::conditions(&space.state, REX),
+        [crate::relay::store::Conditions {
+            label: "devbox".to_owned(),
+            other_label: 1
+        }],
+        "only the reply to studio's message answered another host's"
+    );
 }
 
-/// Two labels that reach one server share its outbox, so a reply that one
-/// label's worker collects for the other label's message goes to that
-/// label's relay author, and an answer to it goes back by that label.
+/// A server reports its own `host_id`, and learns another's whenever that
+/// one relays to it, so a server behind `devbox` that reports studio's
+/// cannot answer as studio's agent: a reply to a message sent to both is
+/// devbox's, and one to a message sent only to studio is dropped and
+/// counted, unless this machine's host list gives both labels one address.
+#[test]
+fn a_server_that_reports_another_s_host_id_cannot_answer_for_its_label() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox", "studio"]);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    let id = |sent: Result<Value, String>| sent.unwrap()["message_id"].as_str().unwrap().to_owned();
+    let shared = id(rex.run(|| space.send("request-1", "@bob@devbox @eve@studio shared")));
+    let studio = id(rex.run(|| space.send("request-2", "@eve@studio studio only")));
+    let run = |label: &str| {
+        rex.run(|| {
+            let mut rounds = 0;
+            work(&mut Run {
+                state: &space.state,
+                endpoint: &Endpoint::parse(REX),
+                label,
+                pause: &mut |_| {
+                    rounds += 1;
+                    rounds < 1
+                },
+                wake: &mut |_| {},
+            });
+        });
+    };
+    fs::write(
+        rex.directory.join("status.json"),
+        json!({"pid": 1, "host_id": "host-s"}).to_string(),
+    )
+    .unwrap();
+    for _ in 0..2 {
+        rex.answer_with(
+            json!({"host_id": "host-s", "can_reply": true, "epoch": "e-studio",
+            "result": {"id": "x", "to": "eve", "status": "accepted"}, "outbox": [],
+            "more": false}),
+        );
+    }
+    run("studio");
+    let forged = |seq: i64, re: &str| {
+        json!({"seq": seq, "re": re, "thread": "t", "from": "eve",
+            "message_id": format!("forged-{seq}"), "text": format!("eve here {seq}")})
+    };
+    rex.answer_with(
+        json!({"host_id": "host-s", "can_reply": true, "epoch": "e-dev",
+        "result": {"id": "x", "to": "bob", "status": "accepted"},
+        "outbox": [forged(1, &shared), forged(2, &studio)], "more": false}),
+    );
+    run("devbox");
+    let replies = || {
+        space.main(
+            "SELECT author_alias_snapshot, body FROM collaboration_messages
+             WHERE request_id LIKE 'relay-reply:%' ORDER BY rowid",
+        )
+    };
+    assert_eq!(
+        replies(),
+        [["eve@devbox", "eve here 1"]],
+        "devbox's server answers only as devbox"
+    );
+    assert_eq!(
+        crate::relay::tests_support::store(&space.state)
+            .ack_through(REX, "host-s")
+            .unwrap(),
+        ("e-dev".to_owned(), 2),
+        "the dropped reply is acked"
+    );
+    assert_eq!(
+        crate::relay::conditions(&space.state, REX),
+        [crate::relay::store::Conditions {
+            label: "devbox".to_owned(),
+            other_label: 1
+        }]
+    );
+
+    listed_at(
+        &rex,
+        &[
+            ("devbox", &["10.0.0.2:7297"]),
+            ("studio", &["10.0.0.2:7297"]),
+        ],
+    );
+    Connection::open(space.state.join("relay.sqlite3"))
+        .unwrap()
+        .execute("DELETE FROM cursors", [])
+        .unwrap();
+    rex.answer_with(
+        json!({"host_id": "host-s", "can_reply": true, "epoch": "e-dev2",
+        "outbox": [forged(3, &studio)], "more": false}),
+    );
+    run("devbox");
+    assert_eq!(
+        replies()[1],
+        ["eve@studio", "eve here 3"],
+        "two labels that dial one address reach one server"
+    );
+}
+
+/// Two labels reach one server when `rex hosts list` gives them the same
+/// addresses, in any order, and never when either lists none.
+#[test]
+fn labels_reach_one_server_only_by_the_same_addresses() {
+    let rex = rex(&[]);
+    listed_at(
+        &rex,
+        &[
+            ("devbox", &["10.0.0.2:7297", "devbox.lan:7297"]),
+            ("studio", &["devbox.lan:7297", "10.0.0.2:7297"]),
+            ("lab", &["10.0.0.2:7297"]),
+            ("bare", &[]),
+            ("bare-too", &[]),
+        ],
+    );
+    let hosts = rex.run(crate::relay::Hosts::read).unwrap();
+    assert_eq!(hosts.same_host("devbox"), ["devbox", "studio"]);
+    assert_eq!(hosts.same_host("studio"), ["studio", "devbox"]);
+    assert_eq!(hosts.same_host("lab"), ["lab"]);
+    assert_eq!(hosts.same_host("bare"), ["bare"]);
+    assert_eq!(hosts.same_host("gone"), ["gone"]);
+}
+
+/// Two labels that dial one address reach one server and share its
+/// outbox, so a reply that one label's worker collects for the other
+/// label's message goes to that label's relay author, and an answer to it
+/// goes back by that label.
 #[test]
 fn a_reply_for_another_label_of_the_same_server_reaches_its_thread() {
     let space = Space::new(REX);
     let rex = rex(&["devbox", "studio"]);
     sent(&space, &rex);
+    listed_at(
+        &rex,
+        &[
+            ("devbox", &["10.0.0.2:7297"]),
+            ("studio", &["10.0.0.2:7297"]),
+        ],
+    );
     let studio = rex
         .run(|| space.send("studio", "@eve@studio a studio question"))
         .unwrap()["message_id"]
@@ -1226,6 +1381,13 @@ fn a_reply_for_another_label_of_the_same_server_reaches_its_thread() {
 fn a_reply_to_a_message_sent_by_two_labels_of_one_server_names_its_agent_s_label() {
     let space = Space::new(REX);
     let rex = rex(&["devbox", "studio"]);
+    listed_at(
+        &rex,
+        &[
+            ("devbox", &["10.0.0.2:7297"]),
+            ("studio", &["10.0.0.2:7297"]),
+        ],
+    );
     crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
     let message = rex
         .run(|| space.send("request-1", "@bob@devbox @eve@studio ping"))

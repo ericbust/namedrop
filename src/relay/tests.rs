@@ -65,7 +65,7 @@ fn a_prompt_or_a_reply_body_naming_a_remote_host_stays_literal() {
 
 #[test]
 fn a_rex_send_reads_an_exact_listed_label_as_a_remote_recipient() {
-    let hosts = Hosts(vec!["studio".to_owned(), "devbox".to_owned()]);
+    let hosts = Hosts::labelled(&["studio", "devbox"]);
     let parsed = parse_mentions_in("@bob@devbox hi", &hosts).unwrap();
     assert!(parsed.recipients.aliases.is_empty());
     assert_eq!(parsed.remote, [remote("bob", "devbox")]);
@@ -90,12 +90,7 @@ fn a_rex_send_reads_an_exact_listed_label_as_a_remote_recipient() {
 
 #[test]
 fn a_rex_send_refuses_a_label_that_is_not_exactly_listed_and_lists_the_labels() {
-    let hosts = Hosts(vec![
-        "studio".to_owned(),
-        "devbox".to_owned(),
-        "dev.box".to_owned(),
-        "dev:box".to_owned(),
-    ]);
+    let hosts = Hosts::labelled(&["studio", "devbox", "dev.box", "dev:box"]);
     let listed = "(rex hosts list): studio, devbox, dev.box, dev:box";
     for (source, label) in [
         ("@bob@DevBox hi", "DevBox"),

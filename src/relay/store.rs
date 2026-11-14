@@ -28,8 +28,9 @@ pub(crate) const OUTBOX_LIMIT: i64 = 10_000;
 
 /// A holds `peers`, `outbound`, `collected`, `cursors`, the last `seq`
 /// each local endpoint took from each B and the outbox epoch it counts in,
-/// because each endpoint reads its own outbox on B, and `held`, the
-/// replies the Automatic Reply Limit kept out of their threads. B holds
+/// because each endpoint reads its own outbox on B, `held`, the replies
+/// the Automatic Reply Limit kept out of their threads, and `conditions`,
+/// what Doctor reports for each label. B holds
 /// `inbound`, `outbox`, its `outbox_epoch`, `remote_threads`, and the tally
 /// of the replies that expired, which Doctor reports after the items
 /// themselves are gone. Both hold `capture`, the last main-database message
@@ -140,6 +141,12 @@ CREATE TABLE capture (
 CREATE TABLE outbox_epoch (
     epoch TEXT NOT NULL
 );
+CREATE TABLE conditions (
+    endpoint TEXT NOT NULL,
+    label TEXT NOT NULL,
+    other_label INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (endpoint, label)
+);
 ";
 
 pub(crate) struct RelayStore {
@@ -201,6 +208,29 @@ pub(crate) struct Held {
     pub space: String,
     pub thread: String,
     pub reply: Reply,
+}
+
+/// Where a reply B made up goes on A.
+pub(crate) enum Answers {
+    /// To the thread of `space` that the label sent its message from.
+    Sent {
+        label: String,
+        space: String,
+        thread: String,
+    },
+    /// Nowhere: its message was sent to another host, which this server
+    /// cannot answer for.
+    OtherLabel,
+    /// Nowhere: A sent this server no such message.
+    Unknown,
+}
+
+/// What Doctor reports on A for one label: how many replies its worker
+/// dropped because they answered a message sent to another host.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct Conditions {
+    pub label: String,
+    pub other_label: i64,
 }
 
 /// An item's key on B: A's `host_id`, A's message id, and the recipient.
@@ -766,30 +796,77 @@ impl RelayStore {
             .query_row("SELECT epoch FROM outbox_epoch", [], |row| row.get(0))?)
     }
 
-    /// The label, space, and thread of the A message `message_id`, when
-    /// `endpoint` sent it to a label that the server `host_id` answers for
-    /// and that server accepted it, so B can answer only what was sent to
-    /// it. Two labels of one server share its outbox, so a reply goes to
-    /// the label its message was sent by: the one sent to `from` first,
-    /// and then `label`.
+    /// Where a reply to the A message `message_id` goes, when `endpoint`
+    /// sent it to one of `labels` for the server `host_id`, which accepted
+    /// it, so B answers only what was sent to it. `labels` are the
+    /// collecting worker's own, first, and those that dial its addresses,
+    /// which share its server's outbox, so a reply goes to the label its
+    /// message was sent by: the one sent to `from` first, and then the
+    /// worker's own.
     pub(crate) fn sent_from(
         &self,
         message_id: &str,
         host_id: &str,
         endpoint: &str,
         from: &str,
-        label: &str,
-    ) -> Result<Option<(String, String, String)>, StoreError> {
-        Ok(self
-            .connection
-            .query_row(
-                "SELECT label, space, thread FROM outbound WHERE message_id = ?1
-                    AND host_id = ?2 AND endpoint = ?3 AND state = 'accepted'
-                 ORDER BY recipient = ?4 DESC, label = ?5 DESC LIMIT 1",
-                params![message_id, host_id, endpoint, from, label],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?)
+        labels: &[String],
+    ) -> Result<Answers, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT label, recipient, space, thread, host_id IS ?3 FROM outbound
+             WHERE message_id = ?1 AND endpoint = ?2 AND state = 'accepted'",
+        )?;
+        let sent: Vec<(String, String, String, String, bool)> = statement
+            .query_map(params![message_id, endpoint, host_id], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?
+            .collect::<Result<_, _>>()?;
+        let best = sent
+            .iter()
+            .filter(|(label, _, _, _, pinned)| *pinned && labels.contains(label))
+            .max_by_key(|(label, recipient, ..)| (recipient == from, *label == labels[0]));
+        Ok(match best {
+            Some((label, _, space, thread, _)) => Answers::Sent {
+                label: label.clone(),
+                space: space.clone(),
+                thread: thread.clone(),
+            },
+            None if sent.iter().any(|(label, ..)| !labels.contains(label)) => Answers::OtherLabel,
+            None => Answers::Unknown,
+        })
+    }
+
+    /// Counts a reply that `endpoint`'s worker for `label` collected and
+    /// dropped because it answered a message sent to another host.
+    pub(crate) fn count_other_label(&self, endpoint: &str, label: &str) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO conditions (endpoint, label, other_label) VALUES (?1, ?2, 1)
+             ON CONFLICT (endpoint, label) DO UPDATE SET other_label = other_label + 1",
+            params![endpoint, label],
+        )?;
+        Ok(())
+    }
+
+    /// What `endpoint`'s Doctor reports for each label.
+    pub(crate) fn conditions(&self, endpoint: &str) -> Result<Vec<Conditions>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT label, other_label FROM conditions
+             WHERE endpoint = ?1 AND other_label > 0 ORDER BY label",
+        )?;
+        let conditions = statement
+            .query_map(params![endpoint], |row| {
+                Ok(Conditions {
+                    label: row.get(0)?,
+                    other_label: row.get(1)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(conditions)
     }
 
     pub(crate) fn record_collected(&self, collected: &Collected<'_>) -> Result<(), StoreError> {

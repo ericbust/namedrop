@@ -7,7 +7,7 @@ mod capture;
 mod notice;
 pub(crate) mod receive;
 mod rex;
-mod store;
+pub(crate) mod store;
 mod wire;
 mod worker;
 
@@ -357,6 +357,17 @@ pub(crate) fn unsent_by_label(state: &Path, session_socket_id: &str) -> Vec<(Str
         .unwrap_or_default()
 }
 
+/// What Doctor reports for each label of the Rex endpoint
+/// `session_socket_id` that needs a look. Nothing when the relay never ran.
+pub(crate) fn conditions(state: &Path, session_socket_id: &str) -> Vec<store::Conditions> {
+    if !state.join("relay.sqlite3").is_file() {
+        return Vec::new();
+    }
+    RelayStore::read(state)
+        .and_then(|store| store.conditions(session_socket_id))
+        .unwrap_or_default()
+}
+
 /// Each remote sender whose replies expired here before it collected
 /// them, with how many, for Doctor. Nothing when the relay never ran.
 pub(crate) fn expired_replies(state: &Path) -> Vec<(String, i64)> {
@@ -407,13 +418,17 @@ impl RemoteHosts for NoRemoteHosts {
     }
 }
 
-/// The labels `rex hosts list --json` prints, byte for byte.
+/// The labels `rex hosts list --json` prints, byte for byte, and the
+/// addresses each one dials, sorted.
 #[derive(Debug, Default)]
-pub(crate) struct Hosts(Vec<String>);
+pub(crate) struct Hosts {
+    labels: Vec<String>,
+    addresses: Vec<Vec<String>>,
+}
 
 impl RemoteHosts for Hosts {
     fn listed(&self) -> Option<&[String]> {
-        Some(&self.0)
+        Some(&self.labels)
     }
 }
 
@@ -425,14 +440,50 @@ impl Hosts {
             .map_err(|failure| format!("could not read your Rex hosts: {failure}"))?;
         let listed: serde_json::Value = serde_json::from_slice(&output)
             .map_err(|error| format!("could not read your Rex hosts: {error}"))?;
-        Ok(Self(
-            listed["hosts"]
+        let mut hosts = Self::default();
+        for host in listed["hosts"].as_array().into_iter().flatten() {
+            let Some(label) = host["host"]["label"].as_str() else {
+                continue;
+            };
+            let mut addresses: Vec<String> = host["host"]["endpoints"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|entry| entry["host"]["label"].as_str().map(str::to_owned))
-                .collect(),
-        ))
+                .filter_map(|address| address.as_str().map(str::to_owned))
+                .collect();
+            addresses.sort();
+            hosts.labels.push(label.to_owned());
+            hosts.addresses.push(addresses);
+        }
+        Ok(hosts)
+    }
+
+    /// `label`, then each other label that dials exactly its addresses, so
+    /// reaches the same server by this machine's own host list rather than
+    /// by any `host_id` a server reports.
+    pub(crate) fn same_host(&self, label: &str) -> Vec<String> {
+        let mut same = vec![label.to_owned()];
+        let Some(at) = self.labels.iter().position(|listed| listed == label) else {
+            return same;
+        };
+        let addresses = &self.addresses[at];
+        if addresses.is_empty() {
+            return same;
+        }
+        for (other, theirs) in self.labels.iter().zip(&self.addresses) {
+            if theirs == addresses && !same.contains(other) {
+                same.push(other.clone());
+            }
+        }
+        same
+    }
+
+    #[cfg(test)]
+    pub(crate) fn labelled(labels: &[&str]) -> Self {
+        Self {
+            labels: labels.iter().map(|label| (*label).to_owned()).collect(),
+            addresses: vec![Vec::new(); labels.len()],
+        }
     }
 }
 

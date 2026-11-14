@@ -381,6 +381,10 @@ where
                 runtime.state_directory,
                 runtime.session_socket_id,
             )));
+            issues.extend(relay_conditions_issue(&crate::relay::conditions(
+                runtime.state_directory,
+                runtime.session_socket_id,
+            )));
         }
     }
     match crate::update_check::settings() {
@@ -1358,6 +1362,33 @@ fn unsent_issue(unsent: &[(String, i64, i64)]) -> Option<HealthIssue> {
     ))
 }
 
+/// One notice for the labels whose replies need a look.
+fn relay_conditions_issue(conditions: &[crate::relay::store::Conditions]) -> Option<HealthIssue> {
+    if conditions.is_empty() {
+        return None;
+    }
+    let hosts = conditions
+        .iter()
+        .map(|condition| {
+            format!(
+                "{}: {} replies answered a message sent to another host",
+                condition.label, condition.other_label
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(issue(
+        "ND-RELAY-003",
+        HealthSeverity::Notice,
+        "Replies from another machine need a look.",
+        &format!(
+            "Namedrop dropped each reply that answered a message this machine sent to another host, because a server can answer only for the messages sent to it. By host: {hosts}."
+        ),
+        HealthRepairKind::HumanDecision,
+        "Check that each label in rex hosts list reaches the machine you expect.",
+    ))
+}
+
 fn stale_runtime_issue(stale: &crate::installed_runtime::StaleRelease) -> HealthIssue {
     let mut outdated = issue(
         "ND-SETUP-004",
@@ -1596,6 +1627,25 @@ mod tests {
             notice
                 .explanation
                 .ends_with("devbox: 2 failed, 1 expired; studio: 0 failed, 3 expired."),
+            "{}",
+            notice.explanation
+        );
+    }
+
+    #[test]
+    fn relay_conditions_are_one_notice_that_names_each_host() {
+        assert!(relay_conditions_issue(&[]).is_none());
+        let notice = relay_conditions_issue(&[crate::relay::store::Conditions {
+            label: "devbox".to_owned(),
+            other_label: 3,
+        }])
+        .unwrap();
+        assert_eq!(notice.code, "ND-RELAY-003");
+        assert_eq!(notice.severity, HealthSeverity::Notice);
+        assert!(
+            notice
+                .explanation
+                .ends_with("By host: devbox: 3 replies answered a message sent to another host."),
             "{}",
             notice.explanation
         );
