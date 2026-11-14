@@ -385,6 +385,9 @@ where
                 runtime.state_directory,
                 runtime.session_socket_id,
             )));
+            issues.extend(relay_set_aside_issue(&crate::relay::store::set_aside_in(
+                runtime.state_directory,
+            )));
         }
     }
     match crate::update_check::settings() {
@@ -1408,6 +1411,25 @@ fn relay_conditions_issue(conditions: &[crate::relay::store::Conditions]) -> Opt
     ))
 }
 
+/// One notice for the relay databases from unreleased builds that were
+/// set aside.
+fn relay_set_aside_issue(names: &[String]) -> Option<HealthIssue> {
+    if names.is_empty() {
+        return None;
+    }
+    Some(issue(
+        "ND-RELAY-004",
+        HealthSeverity::Info,
+        "Namedrop set aside a relay database from an unreleased build.",
+        &format!(
+            "relay.sqlite3 had tables that no release of Namedrop makes, so Namedrop moved it aside and started a new one. Messages to or from another machine that were in flight then stayed in it. Set aside in the state directory: {}.",
+            names.join(", ")
+        ),
+        HealthRepairKind::HumanDecision,
+        "Nothing needs doing. Delete the file once you no longer need it.",
+    ))
+}
+
 fn stale_runtime_issue(stale: &crate::installed_runtime::StaleRelease) -> HealthIssue {
     let mut outdated = issue(
         "ND-SETUP-004",
@@ -1646,6 +1668,24 @@ mod tests {
             notice
                 .explanation
                 .ends_with("devbox: 2 failed, 1 expired; studio: 0 failed, 3 expired."),
+            "{}",
+            notice.explanation
+        );
+    }
+
+    #[test]
+    fn relay_databases_set_aside_are_one_notice_that_names_each() {
+        assert!(relay_set_aside_issue(&[]).is_none());
+        let notice = relay_set_aside_issue(&[
+            "relay.sqlite3.unreleased-1".to_owned(),
+            "relay.sqlite3.unreleased-2".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(notice.code, "ND-RELAY-004");
+        assert!(
+            notice
+                .explanation
+                .ends_with("relay.sqlite3.unreleased-1, relay.sqlite3.unreleased-2."),
             "{}",
             notice.explanation
         );

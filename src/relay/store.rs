@@ -182,6 +182,121 @@ CREATE TABLE dropped (
 );
 ";
 
+/// Opens `path`, which only its owner may read.
+fn connect(path: &Path) -> Result<Connection, StoreError> {
+    let connection = Connection::open(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    connection.busy_timeout(Duration::from_secs(2))?;
+    Ok(connection)
+}
+
+/// Each table's columns, by name, with each column's type, whether it is
+/// `NOT NULL`, and its place in the primary key.
+type Layout = Vec<(String, String, String, bool, i64)>;
+
+fn layout(connection: &Connection) -> Result<Layout, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT m.name, c.name, c.type, c.\"notnull\", c.pk
+         FROM sqlite_schema m JOIN pragma_table_info(m.name) c
+         WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite\\_%' ESCAPE '\\'
+         ORDER BY m.name, c.name",
+    )?;
+    let layout = statement
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(layout)
+}
+
+/// The layout `SCHEMA` makes.
+fn current_layout() -> &'static Layout {
+    static CURRENT: std::sync::OnceLock<Layout> = std::sync::OnceLock::new();
+    CURRENT.get_or_init(|| {
+        let connection = Connection::open_in_memory().expect("an in-memory database opens");
+        connection
+            .execute_batch(SCHEMA)
+            .expect("the relay's schema is valid");
+        layout(&connection).expect("an in-memory database lists its columns")
+    })
+}
+
+/// Makes the database at `path`, or migrates it from its version, under
+/// the write lock, and says whether it then has this schema's layout. One
+/// that does not is left as it was.
+fn upgrade(connection: &mut Connection, path: &Path) -> Result<bool, StoreError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let version: u32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let migrated = match version {
+        0 if layout(&transaction)?.is_empty() => transaction
+            .execute_batch(SCHEMA)
+            .and_then(|()| {
+                transaction.execute(
+                    "INSERT INTO outbox_epoch (epoch) VALUES (?1)",
+                    params![crate::IdGenerator::next_id(
+                        &crate::ProcessIds::default(),
+                        "outbox"
+                    )],
+                )
+            })
+            .is_ok(),
+        1 => transaction.execute_batch(TO_2).is_ok(),
+        VERSION => true,
+        newer if newer > VERSION => {
+            return Err(StoreError::invalid_input(format!(
+                "{} has relay schema {newer}, and this Namedrop knows {VERSION}",
+                path.display()
+            )));
+        }
+        _ => false,
+    };
+    if !migrated || layout(&transaction)? != *current_layout() {
+        return Ok(false);
+    }
+    transaction.pragma_update(None, "user_version", VERSION)?;
+    transaction.commit()?;
+    Ok(true)
+}
+
+/// Moves the database at `path`, and any journal of it, to
+/// `relay.sqlite3.unreleased-<now_ms>`, so it is kept but no longer read.
+fn set_aside(path: &Path, now_ms: i64) -> Result<(), StoreError> {
+    let aside = format!("{}.{UNRELEASED}{now_ms}", path.display());
+    for suffix in ["-journal", "-wal", "-shm", ""] {
+        let from = format!("{}{suffix}", path.display());
+        match fs::rename(&from, format!("{aside}{suffix}")) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            moved => moved?,
+        }
+    }
+    Ok(())
+}
+
+/// What a database set aside is named after, past `relay.sqlite3.`.
+pub(crate) const UNRELEASED: &str = "unreleased-";
+
+/// Each relay database set aside in `state`, by file name.
+pub(crate) fn set_aside_in(state: &Path) -> Vec<String> {
+    let prefix = format!("{FILE}.{UNRELEASED}");
+    let mut names: Vec<String> = fs::read_dir(state)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| {
+            name.strip_prefix(&prefix)
+                .is_some_and(|rest| rest.bytes().all(|byte| byte.is_ascii_digit()))
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 pub(crate) struct RelayStore {
     connection: Connection,
 }
@@ -338,7 +453,10 @@ impl RelayStore {
 
     /// Opens the relay's database in `state` as `open` does, without the
     /// expiry, for a reader that looks often. A state directory that is gone
-    /// is an error, and is not made again.
+    /// is an error, and is not made again. A database whose tables or
+    /// columns are not this schema's, even after the migrations from its
+    /// version, came from an unreleased build: it is set aside as
+    /// `relay.sqlite3.unreleased-<ms>`, and a new one is made.
     pub(crate) fn read(state: &Path) -> Result<Self, StoreError> {
         if !state.is_dir() {
             return Err(StoreError::invalid_input(format!(
@@ -347,44 +465,31 @@ impl RelayStore {
             )));
         }
         let path = state.join(FILE);
-        let mut connection = Connection::open(&path)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-        connection.busy_timeout(Duration::from_secs(2))?;
+        let connection = connect(&path)?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version == VERSION {
+        if version == VERSION && layout(&connection)? == *current_layout() {
             return Ok(Self { connection });
         }
-        // The write lock first, so opens that race to make or migrate the
-        // database wait their turn, where a read that upgrades would fail.
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let version: u32 =
-            transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        match version {
-            0 => {
-                transaction.execute_batch(SCHEMA)?;
-                transaction.execute(
-                    "INSERT INTO outbox_epoch (epoch) VALUES (?1)",
-                    params![crate::IdGenerator::next_id(
-                        &crate::ProcessIds::default(),
-                        "outbox"
-                    )],
-                )?;
-                transaction.pragma_update(None, "user_version", VERSION)?;
-            }
-            1 => {
-                transaction.execute_batch(TO_2)?;
-                transaction.pragma_update(None, "user_version", VERSION)?;
-            }
-            VERSION => {}
-            newer => {
-                return Err(StoreError::invalid_input(format!(
-                    "{} has relay schema {newer}, and this Namedrop knows {VERSION}",
-                    path.display()
-                )));
-            }
+        drop(connection);
+        // Opens that race to make, migrate, or set aside the database take
+        // turns, and each looks again at what the path holds then.
+        let lock = super::open_lock(state)?;
+        lock.lock()?;
+        let mut connection = connect(&path)?;
+        if upgrade(&mut connection, &path)? {
+            return Ok(Self { connection });
         }
-        transaction.commit()?;
-        Ok(Self { connection })
+        drop(connection);
+        set_aside(&path, super::now_ms())?;
+        let mut connection = connect(&path)?;
+        if upgrade(&mut connection, &path)? {
+            Ok(Self { connection })
+        } else {
+            Err(StoreError::invalid_input(format!(
+                "{} could not be made",
+                path.display()
+            )))
+        }
     }
 
     /// Queues `item`, unless its key is already stored.

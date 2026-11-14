@@ -167,14 +167,17 @@ fn a_version_1_relay_database_is_brought_to_version_2_with_its_rows() {
     );
 }
 
-/// Opens that race on a database still to be made, or on one at version
-/// 1, wait their turn: each succeeds, and the database is made or brought
-/// to version 2 once.
+/// Opens that race on a database still to be made, on one at version 1,
+/// or on one of an unreleased layout, wait their turn: each succeeds, and
+/// the database is made, brought to version 2, or set aside once.
 #[test]
 fn opens_that_race_to_make_or_migrate_the_database_each_succeed() {
-    for version in [0, 1] {
+    for version in [0, 1, 99] {
         for _ in 0..10 {
             let state = State::new();
+            if version == 99 {
+                state.made_by(VERSION_1_LAYOUTS[1].1, 1);
+            }
             if version == 1 {
                 state
                     .open(NOW)
@@ -211,8 +214,150 @@ fn opens_that_race_to_make_or_migrate_the_database_each_succeed() {
                 .unwrap();
             assert_eq!(now, 2);
             assert_eq!(count(&store, "SELECT COUNT(*) FROM outbox_epoch"), 1);
+            assert_eq!(
+                state.set_aside().len(),
+                usize::from(version == 99),
+                "an unreleased layout is set aside once"
+            );
         }
     }
+}
+
+/// The 12 version 1 layouts the relay's unreleased builds made, each named
+/// for a commit that made it, newest first. Only the newest is version 2
+/// less what `TO_2` adds.
+const VERSION_1_LAYOUTS: [(&str, &str); 12] = [
+    ("1dbdfbd0", include_str!("fixtures/v1-1dbdfbd0.sql")),
+    ("e4da0d71", include_str!("fixtures/v1-e4da0d71.sql")),
+    ("d09d95ff", include_str!("fixtures/v1-d09d95ff.sql")),
+    ("7da6330e", include_str!("fixtures/v1-7da6330e.sql")),
+    ("8fe7e2e6", include_str!("fixtures/v1-8fe7e2e6.sql")),
+    ("b47fc24a", include_str!("fixtures/v1-b47fc24a.sql")),
+    ("7c7c897f", include_str!("fixtures/v1-7c7c897f.sql")),
+    ("233aa8fb", include_str!("fixtures/v1-233aa8fb.sql")),
+    ("1f0a8049", include_str!("fixtures/v1-1f0a8049.sql")),
+    ("4e324deb", include_str!("fixtures/v1-4e324deb.sql")),
+    ("79cbe1a7", include_str!("fixtures/v1-79cbe1a7.sql")),
+    ("20ab6818", include_str!("fixtures/v1-20ab6818.sql")),
+];
+
+impl State {
+    /// A relay database made by `schema`, stamped `version`, with one row
+    /// in `peers`, which every layout has, and its outbox epoch when the
+    /// layout has one.
+    fn made_by(&self, schema: &str, version: u32) {
+        let made = Connection::open(self.0.join("relay.sqlite3")).unwrap();
+        made.execute_batch(schema).unwrap();
+        made.execute(
+            "INSERT INTO peers (label, host_id, contacted_at_ms) VALUES ('devbox', 'host-b', 1)",
+            [],
+        )
+        .unwrap();
+        let epochs: bool = made
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE name = 'outbox_epoch')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if epochs {
+            made.execute("INSERT INTO outbox_epoch (epoch) VALUES ('e0')", [])
+                .unwrap();
+        }
+        made.pragma_update(None, "user_version", version).unwrap();
+    }
+
+    fn set_aside(&self) -> Vec<String> {
+        set_aside_in(&self.0)
+    }
+}
+
+fn version(store: &RelayStore) -> u32 {
+    store
+        .connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap()
+}
+
+/// Every call that reads a column some earlier layout lacked works.
+fn usable(store: &RelayStore) {
+    let endpoint = "rex:/tmp/a.sock";
+    store.count_other_label(endpoint, "devbox", NOW).unwrap();
+    store.conditions(endpoint, NOW).unwrap();
+    store.unsent(endpoint).unwrap();
+    store.dropped(endpoint).unwrap();
+    store.held(endpoint, true).unwrap();
+    store.outbox_epoch().unwrap();
+    store.outbox_page("host-a", 0, 0, 1024).unwrap();
+    store.expired_replies().unwrap();
+}
+
+/// Each version 1 layout an unreleased build made opens. The newest is
+/// brought to version 2 in place with its rows. Each other one is set
+/// aside, with its rows, and a new database is made, which every call can
+/// use.
+#[test]
+fn each_version_1_layout_is_migrated_or_set_aside() {
+    for (made_at, schema) in VERSION_1_LAYOUTS {
+        let state = State::new();
+        state.made_by(schema, 1);
+        let store = state.open(NOW);
+        assert_eq!(version(&store), VERSION, "{made_at}");
+        assert_eq!(
+            layout(&store.connection).unwrap(),
+            *current_layout(),
+            "{made_at}"
+        );
+        usable(&store);
+        let peers = count(&store, "SELECT COUNT(*) FROM peers");
+        let aside = state.set_aside();
+        if made_at == "1dbdfbd0" {
+            assert!(aside.is_empty(), "{made_at}: {aside:?}");
+            assert_eq!(peers, 1, "{made_at} keeps its rows");
+        } else {
+            assert_eq!(aside.len(), 1, "{made_at}: {aside:?}");
+            assert_eq!(peers, 0, "{made_at}");
+            assert_eq!(count(&store, "SELECT COUNT(*) FROM outbox_epoch"), 1);
+            let kept = Connection::open(state.0.join(&aside[0])).unwrap();
+            let kept_peers: i64 = kept
+                .query_row("SELECT COUNT(*) FROM peers", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(kept_peers, 1, "{made_at} is kept as it was");
+        }
+        drop(store);
+        let store = state.open(NOW);
+        assert_eq!(
+            state.set_aside().len(),
+            aside.len(),
+            "{made_at} opens again as is"
+        );
+        usable(&store);
+    }
+}
+
+/// A database of the `e4da0d71` era that a later build brought to version
+/// 2 still lacks columns, so its layout, not its version, sets it aside.
+#[test]
+fn a_version_2_database_that_lacks_columns_is_set_aside() {
+    let state = State::new();
+    state.made_by(&format!("{}{TO_2}", VERSION_1_LAYOUTS[1].1), 2);
+    let store = state.open(NOW);
+    assert_eq!(state.set_aside().len(), 1);
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM peers"), 0);
+    usable(&store);
+}
+
+/// A version 2 database opens again as it is, and its rows stay.
+#[test]
+fn a_version_2_database_opens_again_with_its_rows() {
+    let state = State::new();
+    queue(&state.open(NOW), "message-1", NOW);
+    for _ in 0..2 {
+        let store = state.open(NOW);
+        assert_eq!(version(&store), VERSION);
+        assert_eq!(count(&store, "SELECT COUNT(*) FROM outbound"), 1);
+    }
+    assert!(state.set_aside().is_empty());
 }
 
 /// Doctor counts the replies dropped for another host's message until
