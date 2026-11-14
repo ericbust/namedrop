@@ -172,10 +172,12 @@ impl Server for Socket {
 }
 
 /// How long the bridge waits before each new try at its server, and when it
-/// gives up.
+/// gives up. A connection that ends sooner than `steady` counts as a failed
+/// try, so a server that hangs up at once is not dialed in a loop.
 struct Away {
     delays: &'static [Duration],
     give_up: Duration,
+    steady: Duration,
 }
 
 impl Away {
@@ -188,6 +190,7 @@ impl Away {
             Duration::from_secs(5),
         ],
         give_up: Duration::from_secs(120),
+        steady: Duration::from_secs(5),
     };
 
     fn delay(&self, tries: usize) -> Duration {
@@ -215,53 +218,59 @@ fn bridge(
     spawn: &mut dyn FnMut(&SpaceId) -> Result<Child, String>,
     away: &Away,
 ) {
-    let mut reached: Option<Instant> = None;
+    let mut reached = false;
+    let mut failing: Option<Instant> = None;
     let mut tries = 0;
     while !stop.is_set() && lock.held() {
-        let mut stream = match server.open(stop) {
-            Ok(stream) => stream,
-            Err(_) => {
-                if reached.is_none_or(|at| at.elapsed() >= away.give_up)
-                    || stop.sleep(away.delay(tries))
-                {
-                    return;
+        let failed = match server.open(stop) {
+            Err(_) if !reached => return,
+            Err(_) => true,
+            Ok(mut stream) => {
+                reached = true;
+                let opened = Instant::now();
+                let mut pending = Pending::default();
+                if same_server(state, endpoint, stream.host_id()) {
+                    for space in activated_spaces(state, endpoint) {
+                        pending.note(MuxEvent::Resync(space), Instant::now());
+                    }
                 }
-                tries += 1;
-                continue;
+                loop {
+                    if stop.is_set() {
+                        flush(state, endpoint, &mut pending, spawn);
+                        return;
+                    }
+                    if !lock.held() {
+                        return;
+                    }
+                    let now = Instant::now();
+                    if pending.due().is_some_and(|due| due <= now) {
+                        flush(state, endpoint, &mut pending, spawn);
+                    }
+                    let within = pending
+                        .due()
+                        .map_or(IDLE, |due| due.saturating_duration_since(now));
+                    match stream.next(within) {
+                        Next::Event(event) => pending.note(event, Instant::now()),
+                        Next::Quiet => {}
+                        Next::Ended(_) => {
+                            flush(state, endpoint, &mut pending, spawn);
+                            break;
+                        }
+                    }
+                }
+                opened.elapsed() < away.steady
             }
         };
-        tries = 0;
-        let mut pending = Pending::default();
-        if same_server(state, endpoint, stream.host_id()) {
-            for space in activated_spaces(state, endpoint) {
-                pending.note(MuxEvent::Resync(space), Instant::now());
-            }
+        if !failed {
+            tries = 0;
+            failing = None;
+            continue;
         }
-        loop {
-            if stop.is_set() {
-                flush(state, endpoint, &mut pending, spawn);
-                return;
-            }
-            if !lock.held() {
-                return;
-            }
-            let now = Instant::now();
-            if pending.due().is_some_and(|due| due <= now) {
-                flush(state, endpoint, &mut pending, spawn);
-            }
-            let within = pending
-                .due()
-                .map_or(IDLE, |due| due.saturating_duration_since(now));
-            match stream.next(within) {
-                Next::Event(event) => pending.note(event, Instant::now()),
-                Next::Quiet => {}
-                Next::Ended(_) => {
-                    flush(state, endpoint, &mut pending, spawn);
-                    break;
-                }
-            }
+        let since = *failing.get_or_insert_with(Instant::now);
+        if since.elapsed() >= away.give_up || stop.sleep(away.delay(tries)) {
+            return;
         }
-        reached = Some(Instant::now());
+        tries += 1;
     }
 }
 

@@ -127,28 +127,38 @@ impl Stream for Scripted<'_> {
 /// it hands on once a stop ends its wait, if it waits for one.
 type Connection = (Option<&'static str>, Vec<Next>, Option<MuxEvent>);
 
-/// Each `open` takes the next connection, and a server out of them is away.
+/// Each `open` takes the next dial: a connection, or `None` for a refusal.
+/// A server out of dials refuses every one.
 struct Script {
-    connections: Mutex<VecDeque<Connection>>,
+    dials: Mutex<VecDeque<Option<Connection>>>,
     opened: AtomicU64,
+    /// When each dial came, refused or not.
+    dialed: Mutex<Vec<Instant>>,
 }
 
 impl Script {
     fn new(connections: Vec<Connection>) -> Self {
+        Self::dials(connections.into_iter().map(Some).collect())
+    }
+
+    fn dials(dials: Vec<Option<Connection>>) -> Self {
         Self {
-            connections: Mutex::new(connections.into()),
+            dials: Mutex::new(dials.into()),
             opened: AtomicU64::new(0),
+            dialed: Mutex::new(Vec::new()),
         }
     }
 }
 
 impl Server for Script {
     fn open<'w>(&'w self, stop: &'w Wake) -> Result<Box<dyn Stream + 'w>, String> {
+        self.dialed.lock().unwrap().push(Instant::now());
         let (host, nexts, hold) = self
-            .connections
+            .dials
             .lock()
             .unwrap()
             .pop_front()
+            .flatten()
             .ok_or_else(|| "connection refused".to_owned())?;
         self.opened.fetch_add(1, Ordering::Relaxed);
         Ok(Box::new(Scripted {
@@ -163,6 +173,7 @@ impl Server for Script {
 const NO_WAIT: Away = Away {
     delays: &[Duration::ZERO],
     give_up: Duration::ZERO,
+    steady: Duration::ZERO,
 };
 
 /// A worker that exits at once.
@@ -498,6 +509,70 @@ fn a_scripted_block_closed_retires_its_name_through_the_queue() {
         .transaction(|transaction| transaction.list_pane_addresses(&namespace))
         .unwrap();
     assert!(names.is_empty(), "{names:?}");
+}
+
+/// A server that answers after three refusals is dialed again after each,
+/// each wait at least as long as the backoff says.
+#[test]
+fn a_server_away_for_a_while_is_dialed_again_after_each_backoff() {
+    let state = State::new();
+    let stop = Wake::new().unwrap();
+    let script = Script::dials(vec![
+        Some((Some("host-a"), Vec::new(), None)),
+        None,
+        None,
+        None,
+        Some((Some("host-a"), Vec::new(), Some(resync("session:s")))),
+    ]);
+    const AWAY: Away = Away {
+        delays: &[Duration::from_millis(50), Duration::from_millis(100)],
+        give_up: Duration::from_secs(5),
+        steady: Duration::ZERO,
+    };
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while script.opened.load(Ordering::Relaxed) < 2 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            stop.wake();
+        });
+        bridged_away(&state, &script, &stop, &AWAY);
+    });
+    assert_eq!(script.opened.load(Ordering::Relaxed), 2);
+    let dialed = script.dialed.lock().unwrap();
+    let gaps: Vec<Duration> = dialed.windows(2).map(|at| at[1] - at[0]).collect();
+    assert_eq!(gaps.len(), 4, "{gaps:?}");
+    for (gap, least) in gaps[1..].iter().zip([50, 100, 100]) {
+        assert!(*gap >= Duration::from_millis(least), "{gaps:?}");
+    }
+}
+
+/// A server that attaches and hangs up at once is a failed try each time:
+/// the bridge backs off between them and gives up as for a server away.
+#[test]
+fn a_connection_that_ends_at_once_counts_as_a_failed_try() {
+    let state = State::new();
+    let stop = Wake::new().unwrap();
+    let script = Script::new(
+        (0..200)
+            .map(|_| (Some("host-a"), Vec::new(), None))
+            .collect(),
+    );
+    const AWAY: Away = Away {
+        delays: &[Duration::from_millis(20)],
+        give_up: Duration::from_millis(300),
+        steady: Duration::from_secs(1),
+    };
+    let started = Instant::now();
+    bridged_away(&state, &script, &stop, &AWAY);
+    let took = started.elapsed();
+    let opened = script.opened.load(Ordering::Relaxed);
+    assert!((5..40).contains(&opened), "{opened} connections");
+    assert!(
+        (Duration::from_millis(300)..Duration::from_secs(2)).contains(&took),
+        "{took:?}"
+    );
 }
 
 /// Deleting the state directory under a running bridge, or replacing it,
