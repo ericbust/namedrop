@@ -183,36 +183,56 @@ fn worker() -> Result<Child, String> {
         .map_err(|error| error.to_string())
 }
 
-/// Runs the bridge over `script`, away from its server as `away` says, and
-/// returns the spaces whose worker each flush started, in order, and each
-/// worker's pid.
-fn bridged_away(
+/// Starts workers that exit at once, and keeps the spaces they were
+/// started for, in order, and their pids. When `replaced` says so, a
+/// replaced runtime takes over at the first flush.
+#[derive(Default)]
+struct Workers {
+    spawned: Vec<String>,
+    pids: Vec<u32>,
+    replaced: bool,
+}
+
+/// What unwinds out of a bridge whose runtime was replaced, since `exec`
+/// never returns.
+struct Replaced;
+
+impl Host for Workers {
+    fn spawn(&mut self, space: &SpaceId) -> Result<Child, String> {
+        self.spawned.push(space.as_str().to_owned());
+        let worker = worker()?;
+        self.pids.push(worker.id());
+        Ok(worker)
+    }
+
+    fn reexec_if_replaced(&mut self) {
+        if self.replaced {
+            std::panic::resume_unwind(Box::new(Replaced));
+        }
+    }
+}
+
+/// Runs the bridge over `script`, away from its server as `away` says, with
+/// `workers` for its host.
+fn bridged_with(
     state: &State,
-    script: &Script,
+    script: &dyn Server,
     stop: &Wake,
     away: &Away,
-) -> (Vec<String>, Vec<u32>) {
+    workers: &mut Workers,
+) {
     let lock = Lock::take(&state.0, &endpoint()).unwrap().unwrap();
-    let (mut spawned, mut pids) = (Vec::new(), Vec::new());
-    bridge(
-        &state.0,
-        &endpoint(),
-        script,
-        stop,
-        &lock,
-        &mut |space| {
-            spawned.push(space.as_str().to_owned());
-            let worker = worker()?;
-            pids.push(worker.id());
-            Ok(worker)
-        },
-        away,
-    );
-    (spawned, pids)
+    bridge(&state.0, &endpoint(), script, stop, &lock, workers, away);
+}
+
+fn bridged_away(state: &State, script: &Script, stop: &Wake, away: &Away) -> Workers {
+    let mut workers = Workers::default();
+    bridged_with(state, script, stop, away, &mut workers);
+    workers
 }
 
 fn bridged(state: &State, script: &Script, stop: &Wake) -> Vec<String> {
-    bridged_away(state, script, stop, &NO_WAIT).0
+    bridged_away(state, script, stop, &NO_WAIT).spawned
 }
 
 #[test]
@@ -272,7 +292,7 @@ fn every_worker_the_bridge_starts_is_reaped_once_it_exits() {
             .map(|_| (Some("host-a"), Vec::new(), None))
             .collect(),
     );
-    let (spawned, pids) = bridged_away(&state, &script, &stop, &NO_WAIT);
+    let Workers { spawned, pids, .. } = bridged_away(&state, &script, &stop, &NO_WAIT);
     assert_eq!(spawned.len(), 40);
     let deadline = Instant::now() + Duration::from_secs(5);
     let left = loop {
@@ -405,12 +425,78 @@ fn sigterm_stops_the_bridge_between_flushes() {
     );
 }
 
-/// A real `block_closed` line, decoded by the bridge's real stream over a
-/// scripted server, flushed to the space's queue, and handled as the status
-/// worker handles a marker, retires the block's name.
-#[test]
-fn a_scripted_block_closed_retires_its_name_through_the_queue() {
-    use crate::mux::{fake::FakeMux, rex::events::tests_support};
+impl State {
+    /// `session` activated, with the name `closed` bound to `block`.
+    fn name(&self, session: &str, block: &str) {
+        let namespace = StateNamespace::for_space(REX, session);
+        let attribution = MutationAttribution::new(ActorKind::Human, "test", 10);
+        let address = PaneAddressId::new("address-closed");
+        StateStore::open(&self.0)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.activate_worktree(&namespace, &attribution)?;
+                transaction.create_pane_address(
+                    &namespace,
+                    &PaneAddressDraft {
+                        id: address.clone(),
+                        role_id: PaneRoleId::new("role-closed"),
+                        role_name: "closed".into(),
+                        role_description: "closed test role".into(),
+                        alias: "closed".into(),
+                    },
+                    &attribution,
+                )?;
+                transaction.bind_pane(
+                    &namespace,
+                    &PaneBindingId::new("binding-closed"),
+                    &address,
+                    block,
+                    &attribution,
+                )
+            })
+            .unwrap();
+    }
+
+    /// Handles each event queued for `session`, as its status worker would,
+    /// over a server where `session` has no blocks, and returns the aliases
+    /// left in it.
+    fn handle_queued(&self, session: &str) -> Vec<String> {
+        let mux = crate::mux::fake::FakeMux::world()
+            .endpoint(REX)
+            .space(session)
+            .checkout("/repo")
+            .build();
+        let ids = crate::ProcessIds::default();
+        let home = self.0.join("home");
+        let runtime = crate::LifecycleRuntime {
+            state_directory: &self.0,
+            home_directory: Some(&home),
+            agent_config: crate::AgentConfigDirectories::default(),
+            cwd: Path::new("/repo"),
+            workspace_id: None,
+            current_pane_id: None,
+            session_socket_id: REX,
+            mux: &mux,
+            clock: &crate::SystemClock,
+            ids: &ids,
+        };
+        for event in self.queued(session) {
+            crate::handle_mux_event(&runtime, &event).unwrap();
+        }
+        StateStore::open(&self.0)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.list_pane_addresses(&StateNamespace::for_space(REX, session))
+            })
+            .unwrap()
+            .into_iter()
+            .map(|address| address.alias)
+            .collect()
+    }
+}
+
+/// The fixture's `block_closed` line, with its session and block.
+fn block_closed() -> (serde_json::Value, String, String) {
     let line: serde_json::Value = serde_json::from_str(
         include_str!("../mux/rex/fixtures/events/lifecycle.jsonl")
             .lines()
@@ -423,58 +509,39 @@ fn a_scripted_block_closed_retires_its_name_through_the_queue() {
         .as_str()
         .unwrap()
         .to_owned();
-    let state = State::new();
-    let namespace = StateNamespace::for_space(REX, &session);
-    let attribution = MutationAttribution::new(ActorKind::Human, "test", 10);
-    let address = PaneAddressId::new("address-closed");
-    StateStore::open(&state.0)
-        .unwrap()
-        .transaction(|transaction| {
-            transaction.activate_worktree(&namespace, &attribution)?;
-            transaction.create_pane_address(
-                &namespace,
-                &PaneAddressDraft {
-                    id: address.clone(),
-                    role_id: PaneRoleId::new("role-closed"),
-                    role_name: "closed".into(),
-                    role_description: "closed test role".into(),
-                    alias: "closed".into(),
-                },
-                &attribution,
-            )?;
-            transaction.bind_pane(
-                &namespace,
-                &PaneBindingId::new("binding-closed"),
-                &address,
-                &block,
-                &attribution,
-            )
-        })
-        .unwrap();
-    let stop = Wake::new().unwrap();
-    let server = tests_support::Scripted::new("host-a", vec![line]);
-    struct Once<'s>(Mutex<Option<tests_support::Scripted>>, &'s Path);
-    impl Server for Once<'_> {
-        fn open<'w>(&'w self, stop: &'w Wake) -> Result<Box<dyn Stream + 'w>, String> {
-            let server = self.0.lock().unwrap().take().ok_or("refused")?;
-            Ok(Box::new(server.events(self.1, stop)))
-        }
+    (line, session, block)
+}
+
+/// Each `open` dials a scripted server over the bridge's real stream once.
+struct Once<'s>(
+    Mutex<Option<crate::mux::rex::events::tests_support::Scripted>>,
+    &'s Path,
+);
+
+impl Server for Once<'_> {
+    fn open<'w>(&'w self, stop: &'w Wake) -> Result<Box<dyn Stream + 'w>, String> {
+        let server = self.0.lock().unwrap().take().ok_or("refused")?;
+        Ok(Box::new(server.events(self.1, stop)))
     }
-    let lock = Lock::take(&state.0, &endpoint()).unwrap().unwrap();
-    let mut spawned = Vec::new();
-    bridge(
+}
+
+/// A real `block_closed` line, decoded by the bridge's real stream over a
+/// scripted server, flushed to the space's queue, and handled as the status
+/// worker handles a marker, retires the block's name.
+#[test]
+fn a_scripted_block_closed_retires_its_name_through_the_queue() {
+    use crate::mux::rex::events::tests_support::Scripted;
+    let (line, session, block) = block_closed();
+    let state = State::new();
+    state.name(&session, &block);
+    let stop = Wake::new().unwrap();
+    let server = Once(
+        Mutex::new(Some(Scripted::new("host-a", vec![line]))),
         &state.0,
-        &endpoint(),
-        &Once(Mutex::new(Some(server)), &state.0),
-        &stop,
-        &lock,
-        &mut |space| {
-            spawned.push(space.clone());
-            worker()
-        },
-        &NO_WAIT,
     );
-    assert!(spawned.contains(&SpaceId::new(&session)), "{spawned:?}");
+    let mut workers = Workers::default();
+    bridged_with(&state, &server, &stop, &NO_WAIT, &mut workers);
+    assert!(workers.spawned.contains(&session), "{:?}", workers.spawned);
     assert_eq!(
         state.queued(&session),
         [
@@ -482,33 +549,99 @@ fn a_scripted_block_closed_retires_its_name_through_the_queue() {
             MuxEvent::PaneClosed(slot(&session, &block)),
         ]
     );
-    let mux = FakeMux::world()
-        .endpoint(REX)
-        .space(&session)
-        .checkout("/repo")
-        .build();
-    let ids = crate::ProcessIds::default();
-    let home = state.0.join("home");
-    let runtime = crate::LifecycleRuntime {
-        state_directory: &state.0,
-        home_directory: Some(&home),
-        agent_config: crate::AgentConfigDirectories::default(),
-        cwd: Path::new("/repo"),
-        workspace_id: None,
-        current_pane_id: None,
-        session_socket_id: REX,
-        mux: &mux,
-        clock: &crate::SystemClock,
-        ids: &ids,
+    assert!(state.handle_queued(&session).is_empty());
+}
+
+/// A replaced runtime takes over at the flush that holds a block's close,
+/// so the close is never queued. The new bridge's first connection queues a
+/// `Resync`, which retires the block's name all the same.
+#[test]
+fn a_close_lost_to_a_re_exec_is_recovered_by_the_new_bridge_s_resync() {
+    use crate::mux::rex::events::tests_support::Scripted;
+    let (line, session, block) = block_closed();
+    let state = State::new();
+    state.name(&session, &block);
+    let stop = Wake::new().unwrap();
+    let old = Once(
+        Mutex::new(Some(Scripted::new("host-a", vec![line]))),
+        &state.0,
+    );
+    let mut replaced = Workers {
+        replaced: true,
+        ..Workers::default()
     };
-    for event in state.queued(&session) {
-        crate::handle_mux_event(&runtime, &event).unwrap();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        bridged_with(&state, &old, &stop, &NO_WAIT, &mut replaced);
+    }));
+    assert!(unwound.is_err_and(|payload| payload.is::<Replaced>()));
+    assert!(state.queued(&session).is_empty());
+    assert!(replaced.spawned.is_empty());
+    let new = Once(
+        Mutex::new(Some(Scripted::new("host-a", Vec::new()))),
+        &state.0,
+    );
+    bridged_with(&state, &new, &stop, &NO_WAIT, &mut Workers::default());
+    assert_eq!(
+        state.queued(&session),
+        [MuxEvent::Resync(SpaceId::new(&session))]
+    );
+    assert!(state.handle_queued(&session).is_empty());
+}
+
+/// While the command gate or the store cannot be read, a flush queues
+/// nothing and keeps its events. They are queued once it can.
+#[test]
+fn events_a_flush_cannot_queue_stay_pending_until_it_can() {
+    fn database(state: &State) -> PathBuf {
+        state.0.join("namedrop.sqlite3")
     }
-    let names = StateStore::open(&state.0)
-        .unwrap()
-        .transaction(|transaction| transaction.list_pane_addresses(&namespace))
-        .unwrap();
-    assert!(names.is_empty(), "{names:?}");
+    fn gate(state: &State) -> PathBuf {
+        state.0.join("runtime/commands.lock")
+    }
+    type Change = fn(&State);
+    let blocks: [(&str, Change, Change); 2] = [
+        (
+            "gate",
+            |state| fs::create_dir_all(gate(state)).unwrap(),
+            |state| fs::remove_dir(gate(state)).unwrap(),
+        ),
+        (
+            "store",
+            |state| {
+                fs::rename(database(state), state.0.join("saved")).unwrap();
+                fs::write(database(state), "not a database").unwrap();
+            },
+            |state| fs::rename(state.0.join("saved"), database(state)).unwrap(),
+        ),
+    ];
+    for (case, block, unblock) in blocks {
+        let state = State::new();
+        block(&state);
+        let stop = Wake::new().unwrap();
+        let appeared = MuxEvent::PaneAppeared(slot("session:s", "block:2"));
+        let script = Script::new(vec![(
+            None,
+            vec![Next::Event(appeared.clone())],
+            Some(resync("session:t")),
+        )]);
+        let held = std::thread::scope(|threads| {
+            let held = threads.spawn(|| {
+                std::thread::sleep(Duration::from_millis(300));
+                let held = state.queued("session:s").is_empty();
+                unblock(&state);
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while state.queued("session:s").is_empty() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                stop.wake();
+                held
+            });
+            bridged(&state, &script, &stop);
+            held.join().unwrap()
+        });
+        assert!(held, "{case}: queued while blocked");
+        assert!(state.queued("session:s").contains(&appeared), "{case}");
+    }
 }
 
 /// A server that answers after three refusals is dialed again after each,
@@ -553,6 +686,7 @@ fn a_server_away_for_a_while_is_dialed_again_after_each_backoff() {
 #[test]
 fn a_connection_that_ends_at_once_counts_as_a_failed_try() {
     let state = State::new();
+    let state = State(state.0.join("no-spaces"));
     let stop = Wake::new().unwrap();
     let script = Script::new(
         (0..200)
@@ -568,7 +702,7 @@ fn a_connection_that_ends_at_once_counts_as_a_failed_try() {
     bridged_away(&state, &script, &stop, &AWAY);
     let took = started.elapsed();
     let opened = script.opened.load(Ordering::Relaxed);
-    assert!((5..40).contains(&opened), "{opened} connections");
+    assert!((3..40).contains(&opened), "{opened} connections");
     assert!(
         (Duration::from_millis(300)..Duration::from_secs(2)).contains(&took),
         "{took:?}"

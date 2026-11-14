@@ -46,7 +46,7 @@ pub fn run(state: &Path, endpoint: &Endpoint) -> ExitCode {
         &server,
         stop,
         &lock,
-        &mut |space| status_queue::spawn_worker(state, endpoint, space),
+        &mut Processes { state, endpoint },
         &Away::REX,
     );
     ExitCode::SUCCESS
@@ -150,6 +150,31 @@ impl Stream for RexEvents<'_> {
     }
 }
 
+/// The processes a bridge starts, and the one it can become. Tests script
+/// them.
+trait Host {
+    /// Starts `space`'s status worker.
+    fn spawn(&mut self, space: &SpaceId) -> Result<Child, String>;
+    /// Under the command gate, runs a replaced runtime in this process's
+    /// place, as the same command. Returns only when there is none to run.
+    fn reexec_if_replaced(&mut self);
+}
+
+struct Processes<'a> {
+    state: &'a Path,
+    endpoint: &'a Endpoint,
+}
+
+impl Host for Processes<'_> {
+    fn spawn(&mut self, space: &SpaceId) -> Result<Child, String> {
+        status_queue::spawn_worker(self.state, self.endpoint, space)
+    }
+
+    fn reexec_if_replaced(&mut self) {
+        let _ = crate::runtime_reexec_if_replaced(self.state);
+    }
+}
+
 /// Where a bridge's streams come from.
 trait Server {
     fn open<'w>(&'w self, stop: &'w Wake) -> Result<Box<dyn Stream + 'w>, String>;
@@ -215,7 +240,7 @@ fn bridge(
     server: &dyn Server,
     stop: &Wake,
     lock: &Lock,
-    spawn: &mut dyn FnMut(&SpaceId) -> Result<Child, String>,
+    host: &mut dyn Host,
     away: &Away,
 ) {
     let mut reached = false;
@@ -230,13 +255,13 @@ fn bridge(
                 let opened = Instant::now();
                 let mut pending = Pending::default();
                 if same_server(state, endpoint, stream.host_id()) {
-                    for space in activated_spaces(state, endpoint) {
+                    for space in activated_spaces(state, endpoint).unwrap_or_default() {
                         pending.note(MuxEvent::Resync(space), Instant::now());
                     }
                 }
                 loop {
                     if stop.is_set() {
-                        flush(state, endpoint, &mut pending, spawn);
+                        flush(state, endpoint, &mut pending, host);
                         return;
                     }
                     if !lock.held() {
@@ -244,7 +269,7 @@ fn bridge(
                     }
                     let now = Instant::now();
                     if pending.due().is_some_and(|due| due <= now) {
-                        flush(state, endpoint, &mut pending, spawn);
+                        flush(state, endpoint, &mut pending, host);
                     }
                     let within = pending
                         .due()
@@ -253,7 +278,7 @@ fn bridge(
                         Next::Event(event) => pending.note(event, Instant::now()),
                         Next::Quiet => {}
                         Next::Ended(_) => {
-                            flush(state, endpoint, &mut pending, spawn);
+                            flush(state, endpoint, &mut pending, host);
                             break;
                         }
                     }
@@ -274,54 +299,69 @@ fn bridge(
     }
 }
 
+/// How long an event that could not be queued waits for the next try.
+const RETRY: Duration = Duration::from_secs(1);
+
 /// Queues the pending events of each activated space under the command
 /// gate, after a replaced runtime has taken over, and starts each space's
 /// worker once. The bridge outlives its workers, so it reaps each one as it
-/// exits.
-fn flush(
-    state: &Path,
-    endpoint: &Endpoint,
-    pending: &mut Pending,
-    spawn: &mut dyn FnMut(&SpaceId) -> Result<Child, String>,
-) {
+/// exits. An event that cannot be queued, because the gate or the store
+/// cannot be read or its marker cannot be written, stays pending for a
+/// try `RETRY` later. A re-exec loses the batch, and the new bridge's
+/// `Resync` of every activated space recovers it.
+fn flush(state: &Path, endpoint: &Endpoint, pending: &mut Pending, host: &mut dyn Host) {
     let batch = pending.take();
     if batch.is_empty() {
         return;
     }
-    let Ok(_gate) = crate::runtime_command_guard(state, None) else {
-        return;
-    };
-    let _ = crate::runtime_reexec_if_replaced(state);
-    let activated = activated_spaces(state, endpoint);
-    for (space, events) in batch {
-        if !activated.contains(&space) {
-            continue;
+    let mut left = Vec::new();
+    let gated = crate::runtime_command_guard(state, None)
+        .ok()
+        .and_then(|gate| {
+            host.reexec_if_replaced();
+            Some((gate, activated_spaces(state, endpoint)?))
+        });
+    match gated {
+        None => left.extend(batch.into_iter().flat_map(|(_, events)| events)),
+        Some((_gate, activated)) => {
+            for (space, events) in batch {
+                if !activated.contains(&space) {
+                    continue;
+                }
+                let mut queued = false;
+                for event in events {
+                    match status_queue::enqueue(
+                        state,
+                        endpoint,
+                        &space,
+                        &Marker::Event(event.clone()),
+                    ) {
+                        Ok(()) => queued = true,
+                        Err(_) => left.push(event),
+                    }
+                }
+                if queued && let Ok(mut worker) = host.spawn(&space) {
+                    std::thread::spawn(move || worker.wait());
+                }
+            }
         }
-        let queued = events
-            .into_iter()
-            .filter(|event| {
-                status_queue::enqueue(state, endpoint, &space, &Marker::Event(event.clone()))
-                    .is_ok()
-            })
-            .count();
-        if queued > 0
-            && let Ok(mut worker) = spawn(&space)
-        {
-            std::thread::spawn(move || worker.wait());
-        }
+    }
+    let retry = Instant::now() + RETRY;
+    for event in left {
+        pending.note(event, retry);
     }
 }
 
-fn activated_spaces(state: &Path, endpoint: &Endpoint) -> Vec<SpaceId> {
-    StateStore::open_read_only(state)
-        .ok()
-        .flatten()
-        .and_then(|mut store| {
-            store
-                .transaction(|transaction| transaction.activated_spaces(&endpoint.key))
-                .ok()
-        })
-        .unwrap_or_default()
+/// The activated spaces of `endpoint`, or `None` when the store cannot be
+/// read. A state directory with no store has none.
+fn activated_spaces(state: &Path, endpoint: &Endpoint) -> Option<Vec<SpaceId>> {
+    match StateStore::open_read_only(state) {
+        Ok(None) => Some(Vec::new()),
+        Ok(Some(mut store)) => store
+            .transaction(|transaction| transaction.activated_spaces(&endpoint.key))
+            .ok(),
+        Err(_) => None,
+    }
 }
 
 #[derive(Deserialize, Serialize)]
