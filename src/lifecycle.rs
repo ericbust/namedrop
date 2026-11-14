@@ -1048,32 +1048,21 @@ where
         })
         .map_err(EventError::retry)?;
     check_activated(store, &event_namespace)?;
-    // A Rex block ID is never reused, so a close also retires a name that a
-    // survey unbound once the block had gone, before its close was handled.
-    let never_reused =
-        crate::mux::Endpoint::parse(runtime.session_socket_id).kind == crate::mux::MuxKind::Rex;
     let removed_address_id = store
         .transaction(|transaction| {
             let binding = transaction
                 .active_pane_bindings(&event_namespace)?
                 .into_iter()
                 .find(|binding| binding.pane_id == pane_id);
-            let address_id = match binding {
-                Some(binding) => Some(binding.address_id),
-                None if never_reused => transaction
-                    .addresses_last_bound_to(&event_namespace, pane_id)?
-                    .into_iter()
-                    .next(),
-                None => None,
-            };
-            if let Some(address_id) = &address_id {
+            if let Some(binding) = binding {
                 transaction.cancel_and_remove_pane_address(
                     &event_namespace,
-                    address_id,
+                    &binding.address_id,
                     attribution,
                 )?;
+                return Ok(Some(binding.address_id));
             }
-            Ok(address_id)
+            Ok(None)
         })
         .map_err(EventError::retry)?;
     let event_runtime = LifecycleRuntime {
@@ -2184,9 +2173,22 @@ pub fn reconcile_discovered_panes(
     ids: &impl IdGenerator,
     attribution: &MutationAttribution,
 ) -> Result<(), StoreError> {
+    // A Rex block ID is never reused and a block never leaves its session,
+    // so a bound block the survey no longer lists has closed, and its name
+    // is retired as its close would retire it. Herdr reuses pane IDs.
+    let closed_for_good =
+        crate::mux::Endpoint::parse(&namespace.session_socket_id).kind == crate::mux::MuxKind::Rex;
     for binding in transaction.active_pane_bindings(namespace)? {
         let mut matches = panes.iter().filter(|pane| pane.pane_id == binding.pane_id);
         let first = matches.next();
+        if first.is_none() && closed_for_good {
+            transaction.cancel_and_remove_pane_address(
+                namespace,
+                &binding.address_id,
+                attribution,
+            )?;
+            continue;
+        }
         if first.is_none() {
             transaction.unbind_pane(namespace, &binding.address_id, attribution)?;
             continue;

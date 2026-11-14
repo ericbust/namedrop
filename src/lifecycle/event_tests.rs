@@ -424,20 +424,91 @@ fn an_event_s_changes_are_recorded_as_its_endpoint_s_multiplexer() {
 }
 
 /// Another pane's status change surveys the space after a block closed and
-/// unbinds its name before the close is handled. A Rex block ID is never
-/// reused, so the close still retires the name. Herdr reuses pane IDs, and
-/// its unbound name stays as it always has.
+/// before its close is handled. A Rex block ID is never reused, so the
+/// survey retires the name and cancels its mail, as the close would. Herdr
+/// reuses pane IDs, and its survey only unbinds the name, as it always has.
 #[test]
-fn a_rex_close_retires_a_name_a_status_change_already_unbound() {
+fn a_rex_survey_retires_the_name_of_a_bound_block_it_no_longer_lists() {
     for (endpoint, left) in [(REX, vec!["b"]), ("/tmp/herdr.sock", vec!["a", "b"])] {
         let fixture = Fixture::new(endpoint);
         fixture.mux.close_pane("pane-a");
         fixture
             .handle(MuxEvent::AgentStatusChanged(slot(SPACE, "pane-b")))
             .unwrap();
+        assert_eq!(fixture.names(SPACE), left, "{endpoint}");
+        if endpoint == REX {
+            assert_eq!(fixture.attempt("a"), DeliveryState::Cancelled);
+        }
         fixture
             .handle(MuxEvent::PaneClosed(slot(SPACE, "pane-a")))
             .unwrap();
         assert_eq!(fixture.names(SPACE), left, "{endpoint}");
+        assert_eq!(fixture.attempt("b"), DeliveryState::Submitted);
+    }
+}
+
+/// A block's close was never handled, as when the bridge re-execs at the
+/// flush that held it. The new bridge's `Resync` retires the name.
+#[test]
+fn a_resync_retires_the_name_of_a_block_whose_close_was_lost() {
+    let fixture = Fixture::new(REX);
+    fixture.mux.close_pane("pane-a");
+    fixture
+        .handle(MuxEvent::Resync(SpaceId::new(SPACE)))
+        .unwrap();
+    assert_eq!(fixture.names(SPACE), ["b"]);
+    assert_eq!(fixture.attempt("a"), DeliveryState::Cancelled);
+    assert_eq!(fixture.attempt("b"), DeliveryState::Submitted);
+    assert_eq!(fixture.names(OTHER), ["c"]);
+}
+
+/// Only a name actively bound to the gone block is retired: not one a
+/// person parked with `address unbind` whose last block it was, and not
+/// one bound to another block since, even by a clock that stepped back.
+#[test]
+fn a_rex_close_and_survey_keep_every_name_not_bound_to_the_gone_block() {
+    let parked = |transaction: &mut crate::StateTransaction<'_>, namespace: &StateNamespace| {
+        transaction.unbind_pane(namespace, &PaneAddressId::new("a"), &attribution())?;
+        transaction.create_pane_address(namespace, &address("z"), &attribution())?;
+        transaction.bind_pane(
+            namespace,
+            &PaneBindingId::new("binding-z"),
+            &PaneAddressId::new("z"),
+            "pane-a",
+            &attribution(),
+        )
+    };
+    let rebound_earlier = |transaction: &mut crate::StateTransaction<'_>,
+                           namespace: &StateNamespace| {
+        transaction.unbind_pane(namespace, &PaneAddressId::new("b"), &attribution())?;
+        transaction.rebind_pane(
+            namespace,
+            &PaneBindingId::new("binding-a2"),
+            &PaneAddressId::new("a"),
+            "pane-b",
+            &MutationAttribution::new(ActorKind::Human, "test", 5),
+        )
+    };
+    type Setup =
+        fn(&mut crate::StateTransaction<'_>, &StateNamespace) -> Result<(), crate::StoreError>;
+    let setups: [(&str, Setup); 2] = [("parked", parked), ("rebound earlier", rebound_earlier)];
+    for (case, setup) in setups {
+        for events in [
+            vec![MuxEvent::PaneClosed(slot(SPACE, "pane-a"))],
+            vec![MuxEvent::AgentStatusChanged(slot(SPACE, "pane-b"))],
+            vec![MuxEvent::Resync(SpaceId::new(SPACE))],
+        ] {
+            let fixture = Fixture::new(REX);
+            StateStore::open(&fixture.state)
+                .unwrap()
+                .transaction(|transaction| setup(transaction, &fixture.namespace(SPACE)))
+                .unwrap();
+            fixture.mux.close_pane("pane-a");
+            for event in events {
+                fixture.handle(event).unwrap();
+            }
+            assert_eq!(fixture.names(SPACE), ["a", "b"], "{case}");
+            assert_ne!(fixture.attempt("a"), DeliveryState::Cancelled, "{case}");
+        }
     }
 }
