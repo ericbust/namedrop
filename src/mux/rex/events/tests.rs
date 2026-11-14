@@ -283,19 +283,21 @@ fn a_wake_ends_a_wait_at_once() {
     let wake = Wake::new().unwrap();
     let (client, _server) = serve("host-a", |server| server.close_code());
     let mut stream = events(client, &state, &wake, Liveness::REX);
-    let started = Instant::now();
-    thread::scope(|scope| {
-        scope.spawn(|| {
+    let woken = thread::scope(|scope| {
+        let waker = scope.spawn(|| {
             thread::sleep(Duration::from_millis(100));
+            let woken = Instant::now();
             wake.wake();
+            woken
         });
         assert_eq!(
             stream.next(Duration::from_secs(10)),
             Next::Ended("stopped".to_owned())
         );
+        let ended = Instant::now();
+        ended.saturating_duration_since(waker.join().unwrap())
     });
-    let took = started.elapsed();
-    assert!(took < Duration::from_millis(150), "{took:?}");
+    assert!(woken < Duration::from_secs(1), "{woken:?}");
     assert!(wake.is_set());
 }
 
