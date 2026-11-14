@@ -804,3 +804,71 @@ fn a_reply_b_cannot_route_is_counted_for_doctor() {
         [("alice@laptop".to_owned(), 1)]
     );
 }
+
+thread_local! {
+    /// What this thread's accept runs once it has chosen its B thread.
+    static THREAD_CHOSEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(super) fn thread_chosen() {
+    if let Some(hook) = THREAD_CHOSEN.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+}
+
+/// Two first items of one A thread choose their B thread one at a time,
+/// so the second one, sent while the first holds its choice, lands in the
+/// same B thread.
+#[test]
+fn two_accepts_at_once_for_one_a_thread_share_one_b_thread() {
+    let b = B::new();
+    let (done, finished) = std::sync::mpsc::channel();
+    let path = b.0.clone();
+    let second = move || {
+        let answer = accept(
+            &path,
+            &Endpoint::parse(REX),
+            HOST_B,
+            deliver("m1", "bob2", "t1", "second").to_string().as_bytes(),
+            &mut |_| {},
+        );
+        done.send(answer).unwrap();
+    };
+    THREAD_CHOSEN.with(|chosen| {
+        *chosen.borrow_mut() = Some(Box::new(move || {
+            let running = std::thread::spawn(second);
+            assert!(
+                finished
+                    .recv_timeout(std::time::Duration::from_millis(500))
+                    .is_err(),
+                "the second accept waits for the first"
+            );
+            SECOND.with(|kept| *kept.borrow_mut() = Some((running, finished)));
+        }));
+    });
+    assert_eq!(
+        outcome(&b.call(&deliver("m1", "bob", "t1", "first"))).0,
+        Status::Accepted
+    );
+    let (running, finished) = SECOND.with(|kept| kept.borrow_mut().take()).unwrap();
+    assert_eq!(outcome(&finished.recv().unwrap()).0, Status::Accepted);
+    running.join().unwrap();
+    let messages = b.messages();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(
+        messages[0][1], messages[1][1],
+        "one B thread for A's thread"
+    );
+    assert_eq!(
+        b.rows("relay.sqlite3", "SELECT COUNT(*) FROM remote_threads"),
+        [[json!(1)]]
+    );
+}
+
+thread_local! {
+    /// The second accept of the test above, once the first let it run.
+    static SECOND: std::cell::RefCell<
+        Option<(std::thread::JoinHandle<()>, std::sync::mpsc::Receiver<Answer>)>,
+    > = const { std::cell::RefCell::new(None) };
+}

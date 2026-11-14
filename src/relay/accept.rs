@@ -168,6 +168,7 @@ fn deliver(
         message_id: &item.id,
         recipient: &item.to,
     };
+    let _serial = serial(state).map_err(|error| error.to_string())?;
     if let Some(mut stored) = store.inbound(&key).map_err(|error| error.to_string())? {
         if stored.status == Status::Accepted {
             stored.status = Status::Duplicate;
@@ -213,6 +214,8 @@ fn deliver(
             .map(ThreadId::new),
     }
     .unwrap_or_else(|| ThreadId::new(ids.next_id("thread")));
+    #[cfg(test)]
+    tests::thread_chosen();
     let author = RelayAuthor::new(
         RelayOrigin::Host(&request.from.host_id),
         &request.from.name,
@@ -266,6 +269,23 @@ fn deliver(
         .map_err(|error| error.to_string())?;
     wake(&space);
     Ok(accepted)
+}
+
+/// The lock that one accept holds from its key's lookup until it records
+/// the B thread it chose, so two first items of one A thread share it.
+fn serial(state: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let directory = state.join("relay");
+    std::fs::create_dir_all(&directory)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(directory.join("accept.lock"))?;
+    lock.lock()?;
+    Ok(lock)
 }
 
 /// The space the item goes to, or the status and reason it is not
