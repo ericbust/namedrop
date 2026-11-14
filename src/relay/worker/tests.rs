@@ -1152,12 +1152,17 @@ fn a_restart_starts_the_worker_of_an_open_thread() {
     sent(&space, &rex);
     collect_once(&space, &rex, json!([]));
     STARTED.with(|started| started.borrow_mut().clear());
-    crate::relay::start_workers(&space.state, &Endpoint::parse(REX));
+    crate::relay::start_workers(
+        &space.state,
+        &Endpoint::parse(REX),
+        &crate::relay::receive::reap_in_thread,
+    );
     assert_eq!(STARTED.with(|started| started.borrow().clone()), ["devbox"]);
     STARTED.with(|started| started.borrow_mut().clear());
     crate::relay::start_workers(
         &space.state,
         &Endpoint::parse("rex:/tmp/namedrop-relay-other.sock"),
+        &crate::relay::receive::reap_in_thread,
     );
     assert!(
         STARTED.with(|started| started.borrow().is_empty()),

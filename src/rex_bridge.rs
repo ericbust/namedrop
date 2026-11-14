@@ -43,6 +43,8 @@ pub fn run(state: &Path, endpoint: &Endpoint) -> ExitCode {
         path: socket.to_owned(),
         state: state.to_owned(),
     };
+    let workers = Workers::inherited();
+    let accepts = workers.clone();
     bridge(
         state,
         endpoint,
@@ -52,10 +54,10 @@ pub fn run(state: &Path, endpoint: &Endpoint) -> ExitCode {
         &mut Processes {
             state,
             endpoint,
-            workers: Workers::inherited(),
+            workers,
         },
         &Away::REX,
-        &mut Receiver::new(state, endpoint),
+        &mut Receiver::new(state, endpoint).reaping(Box::new(move |child| accepts.reap(child))),
     );
     ExitCode::SUCCESS
 }
@@ -64,10 +66,11 @@ pub fn run(state: &Path, endpoint: &Endpoint) -> ExitCode {
 /// image, still their parent, reaps them.
 pub(crate) const INHERITED_WORKERS: &str = "NAMEDROP_REX_BRIDGE_WORKERS";
 
-/// The workers a bridge started, or inherited across a re-exec, that have
-/// not been reaped yet. A thread waits for each one. `exec` ends those
-/// threads but not the workers, so a re-exec hands their pids on.
-#[derive(Default)]
+/// The workers a bridge started, its relay's accepts and relay workers among
+/// them, or inherited across a re-exec, that have not been reaped yet. A
+/// thread waits for each one. `exec` ends those threads but not the
+/// workers, so a re-exec hands their pids on.
+#[derive(Clone, Default)]
 struct Workers(Arc<Mutex<BTreeSet<libc::pid_t>>>);
 
 impl Workers {
@@ -360,7 +363,7 @@ fn serve(
             Ok(mut stream) => {
                 reached = true;
                 let opened = Instant::now();
-                crate::relay::start_workers(state, endpoint);
+                crate::relay::start_workers(state, endpoint, &|worker| host.workers().reap(worker));
                 let mut pending = Pending::default();
                 let known = same_server(state, endpoint, stream.host_id());
                 if known {

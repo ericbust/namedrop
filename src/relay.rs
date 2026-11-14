@@ -190,19 +190,29 @@ pub(crate) fn wake(state: &Path, endpoint: &crate::mux::Endpoint, space: &crate:
 /// Starts the relay's worker for `label` unless one runs. It is reaped when
 /// it exits.
 pub(crate) fn start_worker(state: &Path, endpoint: &crate::mux::Endpoint, label: &str) {
+    if let Some(worker) = spawn_worker(state, endpoint, label) {
+        receive::reap_in_thread(worker);
+    }
+}
+
+/// The relay's worker for `label`, started. A second one exits at once.
+fn spawn_worker(
+    state: &Path,
+    endpoint: &crate::mux::Endpoint,
+    label: &str,
+) -> Option<std::process::Child> {
     #[cfg(test)]
     {
         let _ = (state, endpoint);
         tests_support::STARTED.with(|started| started.borrow_mut().push(label.to_owned()));
+        None
     }
     #[cfg(not(test))]
     {
-        let Ok(executable) = crate::runtime_executable() else {
-            return;
-        };
-        if let Ok(mut worker) = worker_command(&executable, state, endpoint, label).spawn() {
-            std::thread::spawn(move || worker.wait());
-        }
+        let executable = crate::runtime_executable().ok()?;
+        worker_command(&executable, state, endpoint, label)
+            .spawn()
+            .ok()
     }
 }
 
@@ -233,14 +243,20 @@ fn worker_command(
 
 /// Starts the worker of each label of `endpoint` with an item queued or a
 /// thread open, as the bridge does when it connects, so a conversation goes
-/// on collecting after a restart.
-pub(crate) fn start_workers(state: &Path, endpoint: &crate::mux::Endpoint) {
+/// on collecting after a restart. `reap` reaps each one.
+pub(crate) fn start_workers(
+    state: &Path,
+    endpoint: &crate::mux::Endpoint,
+    reap: &dyn Fn(std::process::Child),
+) {
     let now = now_ms();
     if let Ok(store) = RelayStore::open(state, now)
         && let Ok(labels) = store.active_labels(&endpoint.key, now)
     {
         for label in labels {
-            start_worker(state, endpoint, &label);
+            if let Some(worker) = spawn_worker(state, endpoint, &label) {
+                reap(worker);
+            }
         }
     }
 }

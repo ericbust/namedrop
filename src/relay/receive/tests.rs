@@ -334,3 +334,43 @@ fn the_accept_command_names_the_endpoint_and_the_state() {
         "{args:?} {environment:?}"
     );
 }
+
+/// The bridge's reaper gets each accept, so a re-exec, which ends the
+/// bridge's threads, hands the accept on to the new image to reap, and the
+/// call is still answered from the accept's output.
+#[test]
+fn each_accept_goes_to_the_reaper_it_was_given() {
+    let state = State::new();
+    let uid = unsafe { libc::getuid() };
+    let handed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let kept = handed.clone();
+    let directory = state.0.clone();
+    let mut receiver = Receiver::with(
+        &state.0,
+        Box::new(move |_host_id| {
+            let mut command = Command::new("/bin/sh");
+            command.current_dir(&directory).args([
+                "-c",
+                r#"echo $$ >pid; cat >/dev/null; printf '{"host_id":"host-b","can_reply":true,"result":{"id":"m1","to":"bob","status":"accepted"},"outbox":[],"more":false}'"#,
+            ]);
+            Ok(command)
+        }),
+        ANSWER_WITHIN,
+    )
+    .reaping(Box::new(move |mut child| {
+        kept.lock().unwrap().push(child.id());
+        thread::spawn(move || child.wait());
+    }));
+    receiver.receive(
+        perform(json!({"kind": "peer", "uid": uid}), "host-b"),
+        Some("host-b"),
+    );
+    let replies = answered(&mut receiver, Duration::from_secs(5));
+    assert_eq!(status(&replies[0]).0, "accepted");
+    let pid: u32 = fs::read_to_string(state.0.join("pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(*handed.lock().unwrap(), [pid]);
+}

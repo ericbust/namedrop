@@ -1,7 +1,8 @@
 //! B's bridge as the relay's receiver: it admits each call of
 //! `namedrop.relay`, hands it to `namedrop relay accept`, and answers it
 //! when the accept exits, or with `retry` when it takes too long. The event
-//! loop never waits for an accept, and a thread reaps each one as it exits.
+//! loop never waits for an accept, and the bridge's reaper reaps each one as
+//! it exits.
 
 use super::wire::{Answer, Outcome, Status};
 use crate::{
@@ -13,7 +14,7 @@ use serde_json::Value;
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -25,18 +26,27 @@ pub(crate) const TICK: Duration = Duration::from_millis(20);
 
 /// How an accept starts: a command whose stdin takes the call's arguments.
 pub(crate) type Start = Box<dyn Fn(&str) -> Result<Command, String>>;
+/// Who reaps a child the relay starts. The bridge's reaper names each one
+/// it waits for, so a re-exec hands them to the new image.
+pub(crate) type Reap = Box<dyn Fn(Child)>;
+
+/// Reaps `child` in a thread of its own.
+pub(crate) fn reap_in_thread(mut child: Child) {
+    thread::spawn(move || child.wait());
+}
 
 pub(crate) struct Receiver {
     state: PathBuf,
     start: Start,
+    reap: Reap,
     within: Duration,
     calls: Vec<Call>,
     /// Accepts already answered `retry`, which finish their commit.
     late: Vec<Accept>,
 }
 
-/// A running accept's thread, which reads its output, reaps it, and then
-/// returns the output.
+/// A running accept's thread, which reads its output to its end, as the
+/// accept exits, and returns it.
 type Accept = JoinHandle<Vec<u8>>;
 
 struct Call {
@@ -73,10 +83,17 @@ impl Receiver {
         Self {
             state: state.to_owned(),
             start,
+            reap: Box::new(reap_in_thread),
             within,
             calls: Vec::new(),
             late: Vec::new(),
         }
+    }
+
+    /// The receiver with `reap` reaping each accept.
+    pub(crate) fn reaping(mut self, reap: Reap) -> Self {
+        self.reap = reap;
+        self
     }
 
     /// Whether a call waits for its accept, so the bridge looks again within
@@ -122,12 +139,13 @@ impl Receiver {
             let input = perform.args.to_string();
             thread::spawn(move || stdin.write_all(input.as_bytes()));
         }
+        let stdout = child.stdout.take();
+        (self.reap)(child);
         let accept = thread::spawn(move || {
             let mut bytes = Vec::new();
-            if let Some(stdout) = child.stdout.as_mut() {
+            if let Some(mut stdout) = stdout {
                 let _ = stdout.read_to_end(&mut bytes);
             }
-            let _ = child.wait();
             bytes
         });
         self.calls.push(Call {
