@@ -200,11 +200,6 @@ struct Caller<'a> {
     host: Option<&'a str>,
 }
 
-/// The line that ends the first message of each thread from a sender whose
-/// principal names no machine, after the host that sender named.
-const SELF_NAMED: &str =
-    " is the name the sending machine gave itself, which Rex did not confirm.]";
-
 fn deliver(
     state: &Path,
     endpoint: &Endpoint,
@@ -256,7 +251,6 @@ fn deliver(
     };
     let ids = crate::ProcessIds::default();
     let in_reply_to = item.in_reply_to.as_deref().map(MessageId::new);
-    let mut continued = true;
     let local_thread = match &in_reply_to {
         Some(message) => main
             .transaction(|transaction| transaction.message_place(&endpoint.key, message))
@@ -267,15 +261,7 @@ fn deliver(
             .map_err(|error| error.to_string())?
             .map(ThreadId::new),
     }
-    .unwrap_or_else(|| {
-        continued = false;
-        ThreadId::new(ids.next_id("thread"))
-    });
-    let text = if continued || caller.host.is_some() {
-        item.text.clone()
-    } else {
-        format!("{}\n\n[Namedrop: {display_host}{SELF_NAMED}", item.text)
-    };
+    .unwrap_or_else(|| ThreadId::new(ids.next_id("thread")));
     #[cfg(test)]
     tests::thread_chosen();
     let author = RelayAuthor::new(
@@ -301,8 +287,9 @@ fn deliver(
                 delivery_id: DeliveryId::new(ids.next_id("delivery")),
                 in_reply_to: in_reply_to.as_ref(),
                 recipient: &recipient,
-                text: &text,
+                text: &item.text,
                 notice: false,
+                self_named_host: caller.host.is_none().then_some(display_host),
             },
             &attribution,
         )

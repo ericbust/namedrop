@@ -358,6 +358,37 @@ impl StateTransaction<'_> {
         } else {
             "mention/v1"
         };
+        if !exists
+            && let Some(host) = relayed.self_named_host
+            && self.pane_type(namespace, &relayed.recipient.address_id)? == crate::PaneType::Agent
+        {
+            let text = format!(
+                "[Namedrop: {host} is the name the sending machine gave itself, which Rex did \
+                 not confirm.]"
+            );
+            self.insert_relayed_message(
+                namespace,
+                &Relayed {
+                    author: relayed.author,
+                    request_id: format!("{}:host-notice", relayed.request_id),
+                    thread: relayed.thread,
+                    message_id: MessageId::new(format!(
+                        "{}-host-notice",
+                        relayed.message_id.as_str()
+                    )),
+                    delivery_id: crate::DeliveryId::new(format!(
+                        "{}-host-notice",
+                        relayed.delivery_id.as_str()
+                    )),
+                    in_reply_to: None,
+                    recipient: relayed.recipient,
+                    text: &text,
+                    notice: true,
+                    self_named_host: None,
+                },
+                attribution,
+            )?;
+        }
         let draft = MessageDraft {
             thread_id: relayed.thread.clone(),
             message_id: relayed.message_id.clone(),
@@ -400,6 +431,10 @@ pub(crate) struct Relayed<'a> {
     /// Whether the relay wrote it, as a notice that an item failed or that
     /// replies are held.
     pub notice: bool,
+    /// The host a sender named itself by, when its principal names no
+    /// machine: an agent recipient gets a notice that says so before the
+    /// first message of a thread.
+    pub self_named_host: Option<&'a str>,
 }
 
 /// A message one relay author receives.

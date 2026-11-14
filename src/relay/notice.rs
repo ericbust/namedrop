@@ -238,6 +238,7 @@ fn notice(
                 recipient: &sender,
                 text: &notice.text,
                 notice: true,
+                self_named_host: None,
             },
             &attribution,
         )

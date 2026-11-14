@@ -21,7 +21,7 @@ fn a_deferred_reply_to_a_relayed_message_reads_its_remote_participant() {
     b.call(&deliver("m1", "bob", "t1", "please answer"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     )[0][0]
         .as_str()
         .unwrap()
@@ -160,6 +160,7 @@ impl B {
              FROM collaboration_messages m
              JOIN message_recipients r USING (session_socket_id, worktree_id, message_id)
              JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, message_id, address_id)
+             WHERE m.grammar_version <> 'relay-notice/v1'
              ORDER BY m.created_at_ms, m.rowid",
         )
     }
@@ -223,7 +224,7 @@ fn each_recipient_is_accepted_once_from_the_sender_s_relay_author() {
             json!("agent_session"),
             json!("relay:host-a:m1:bob"),
             Value::Null,
-            json!(format!("hello bob{MARKED}")),
+            json!("hello bob"),
             json!("bob"),
             json!("queued"),
         ]
@@ -339,13 +340,16 @@ fn a_name_in_two_spaces_is_ambiguous_an_unknown_one_refused_and_a_repeat_replays
     assert!(b.messages().is_empty());
 }
 
-/// What ends the first message of a thread from a sender whose principal
-/// names no machine, which sent `laptop` as its host.
-const MARKED: &str = "\n\n[Namedrop: laptop is the name the sending machine gave itself, which Rex did not confirm.]";
+/// The notice an agent gets before the first message of each thread from
+/// a sender whose principal names no machine, which sent `laptop` as its
+/// host.
+const MARKED: &str =
+    "[Namedrop: laptop is the name the sending machine gave itself, which Rex did not confirm.]";
 
-/// A sender's host is the name it gave itself, so the first message of
-/// each B thread says so. A Tailscale caller's device name, which its
-/// server fills in, names the sender instead, with no such line.
+/// A sender's host is the name it gave itself, so an agent gets a notice
+/// that says so before the first message of each B thread, and each body
+/// stays as sent. A Tailscale caller's device name, which its server fills
+/// in, names the sender instead, with no notice.
 #[test]
 fn a_sender_s_own_host_name_is_marked_once_a_thread_and_a_named_device_replaces_it() {
     let b = B::new();
@@ -355,15 +359,26 @@ fn a_sender_s_own_host_name_is_marked_once_a_thread_and_a_named_device_replaces_
     let bodies: Vec<_> = b.messages().into_iter().map(|row| row[6].clone()).collect();
     assert_eq!(
         bodies,
-        [
-            json!(format!("first{MARKED}")),
-            json!("second"),
-            json!(format!("other thread{MARKED}"))
-        ]
+        [json!("first"), json!("second"), json!("other thread")]
+    );
+    assert_eq!(
+        b.rows(
+            "namedrop.sqlite3",
+            "SELECT body FROM collaboration_messages WHERE grammar_version = 'relay-notice/v1'"
+        ),
+        vec![vec![json!(MARKED)]; 2]
     );
     let mut named = B::new();
     named.1 = Some("studio".to_owned());
     named.call(&deliver("m1", "bob", "t1", "first"));
+    assert!(
+        named
+            .rows(
+                "namedrop.sqlite3",
+                "SELECT body FROM collaboration_messages WHERE grammar_version = 'relay-notice/v1'"
+            )
+            .is_empty()
+    );
     let message = &named.messages()[0];
     assert_eq!(
         (&message[2], &message[6]),
@@ -562,7 +577,7 @@ fn a_reply_to_a_message_b_relayed_goes_to_its_thread_and_another_is_refused() {
     b.call(&deliver("m1", "bob", "t1", "first"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id, thread_id FROM collaboration_messages",
+        "SELECT message_id, thread_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     );
     let (message, thread) = (relayed[0][0].clone(), relayed[0][1].clone());
     let mut reply = deliver("m2", "bob", "t9", "answer");
@@ -747,7 +762,7 @@ fn an_answer_to_a_relayed_message_is_kept_once_for_the_sender_s_pull() {
     b.call(&deliver("m1", "bob", "t1", "please answer"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     )[0][0]
         .as_str()
         .unwrap()
@@ -821,7 +836,7 @@ fn a_reply_to_a_relayed_message_reaches_its_relay_author_and_settles() {
     b.call(&deliver("m1", "bob", "t1", "please answer"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id, author_address_id FROM collaboration_messages",
+        "SELECT message_id, author_address_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     );
     let message = relayed[0][0].as_str().unwrap().to_owned();
     let author = PaneAddressId::new(relayed[0][1].as_str().unwrap());
@@ -899,7 +914,7 @@ fn an_answer_names_the_relayed_message_its_in_reply_to_names() {
     b.call(&deliver("m2", "bob", "t1", "second"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages ORDER BY rowid",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1' ORDER BY rowid",
     );
     bob_answers(
         &b,
@@ -998,7 +1013,7 @@ fn an_answer_goes_back_for_the_relay_author_it_names() {
     assert_eq!(outcome(&b.call(&dan)).0, Status::Accepted);
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages ORDER BY rowid",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1' ORDER BY rowid",
     );
     let first = bob_answers(
         &b,
@@ -1033,7 +1048,7 @@ fn no_b_reply_reaches_two_relay_authors_of_one_host() {
     b.call(&dan);
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages ORDER BY rowid",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1' ORDER BY rowid",
     );
     let to_dan = relayed[1][0].as_str().unwrap();
     for source in [
@@ -1062,7 +1077,7 @@ fn a_reply_b_cannot_route_is_counted_for_doctor() {
     b.call(&deliver("m1", "bob", "t1", "please answer"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     )[0][0]
         .as_str()
         .unwrap()
@@ -1158,7 +1173,7 @@ fn an_escaped_reply_is_cut_to_fit_and_never_stalls_the_outbox() {
     b.call(&deliver("m1", "bob", "t1", "reply please"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     )[0][0]
         .as_str()
         .unwrap()
@@ -1201,7 +1216,7 @@ fn an_item_or_a_reply_in_a_b_thread_keeps_its_mapping_in_use() {
     age();
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     )[0][0]
         .as_str()
         .unwrap()
@@ -1234,7 +1249,7 @@ fn another_host_reaches_no_key_thread_or_outbox_of_this_one() {
     b.call(&deliver("m1", "bob", "t1", "from host-a"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     )[0][0]
         .clone();
     let same_key = b.call(&from("host-c", deliver("m1", "bob", "t1", "from host-c")));
@@ -1245,7 +1260,7 @@ fn another_host_reaches_no_key_thread_or_outbox_of_this_one() {
     );
     let threads = b.rows(
         "namedrop.sqlite3",
-        "SELECT thread_id FROM collaboration_messages ORDER BY rowid",
+        "SELECT thread_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1' ORDER BY rowid",
     );
     assert_ne!(threads[0], threads[1], "host-c's t1 is another B thread");
 
@@ -1352,7 +1367,7 @@ fn a_reply_past_10_000_kept_for_a_host_is_counted_not_kept() {
     b.call(&deliver("m1", "bob", "t1", "please answer"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     )[0][0]
         .as_str()
         .unwrap()
@@ -1389,7 +1404,7 @@ fn a_capture_read_again_counts_an_unroutable_reply_once() {
     b.call(&deliver("m1", "bob", "t1", "please answer"));
     let relayed = b.rows(
         "namedrop.sqlite3",
-        "SELECT message_id FROM collaboration_messages",
+        "SELECT message_id FROM collaboration_messages WHERE grammar_version <> 'relay-notice/v1'",
     )[0][0]
         .as_str()
         .unwrap()
@@ -1411,4 +1426,65 @@ fn a_capture_read_again_counts_an_unroutable_reply_once() {
         super::super::expired_replies(&b.0),
         [("alice@laptop".to_owned(), 1)]
     );
+}
+
+/// A terminal gets no host notice, and its command runs as the sender
+/// wrote it.
+#[test]
+fn a_terminal_runs_a_self_named_sender_s_command_as_sent() {
+    let b = B::new();
+    Connection::open(b.0.join("namedrop.sqlite3"))
+        .unwrap()
+        .execute(
+            "UPDATE pane_addresses SET pane_type = 'terminal' WHERE address_id = ?1",
+            ["address-session:b1-bob"],
+        )
+        .unwrap();
+    fs::create_dir_all(b.0.join("relay")).unwrap();
+    fs::write(b.0.join("relay/allow-terminals"), "").unwrap();
+    assert_eq!(
+        outcome(&b.call(&deliver("m1", "bob", "t9", "printf relayed"))),
+        (Status::Accepted, None)
+    );
+    let bodies = b.rows(
+        "namedrop.sqlite3",
+        "SELECT body FROM collaboration_messages",
+    );
+    assert_eq!(bodies, [[json!("printf relayed")]]);
+    let out = std::process::Command::new("/bin/sh")
+        .args(["-c", bodies[0][0].as_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(out.stdout, b"relayed");
+}
+
+/// A retry after B committed the message but not its `inbound` key, or
+/// its thread's mapping either, replays the message and its notice,
+/// with nothing new.
+#[test]
+fn a_retry_after_a_partial_commit_replays_the_message_and_its_notice() {
+    let b = B::new();
+    let item = deliver("m1", "bob", "t1", "hello");
+    assert_eq!(outcome(&b.call(&item)), (Status::Accepted, None));
+    let stored = || {
+        b.rows(
+            "namedrop.sqlite3",
+            "SELECT message_id, body FROM collaboration_messages ORDER BY rowid",
+        )
+    };
+    let before = stored();
+    assert_eq!(before.len(), 2);
+    assert_eq!(before[0][1], json!(MARKED));
+    assert_eq!(before[1][1], json!("hello"));
+    let relay = Connection::open(b.0.join("relay.sqlite3")).unwrap();
+    for lose_thread in [false, true] {
+        relay.execute("DELETE FROM inbound", []).unwrap();
+        if lose_thread {
+            relay.execute("DELETE FROM remote_threads", []).unwrap();
+        }
+        assert_eq!(outcome(&b.call(&item)), (Status::Accepted, None));
+        assert_eq!(stored(), before);
+        assert_eq!(outcome(&b.call(&item)), (Status::Duplicate, None));
+    }
 }

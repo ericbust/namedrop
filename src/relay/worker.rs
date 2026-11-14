@@ -861,6 +861,7 @@ fn insert_reply(state: &Path, held: &Held) -> Result<Taken, String> {
                 recipient: &sender,
                 text: &wire::cut(&reply.text, wire::TEXT_LIMIT),
                 notice: false,
+                self_named_host: None,
             },
             &attribution,
         )
