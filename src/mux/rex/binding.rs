@@ -161,7 +161,6 @@ impl Bindings {
 
     /// Deletes a closed block's binding, refusal, and lock. Block IDs are
     /// never reused, so no hook binds the block again.
-    #[cfg(test)]
     pub(super) fn forget(&self, block: &str) -> io::Result<()> {
         let lock = self.lock(block)?;
         let gone = |path: Option<PathBuf>| match path.map(std::fs::remove_file) {

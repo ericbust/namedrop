@@ -380,7 +380,6 @@ impl<'a, S: Timed> Connection<'a, S> {
 
 /// The bridge's long wait for events, which sleeps in `poll(2)` until the
 /// socket or a wake pipe is readable, rather than in short read steps.
-#[cfg(test)]
 impl<S: Timed + std::os::fd::AsFd> Connection<'_, S> {
     /// The next event, or `None` once `deadline` passes. A readable `wake`
     /// cancels the wait. Each message may use the call's whole allowance,
@@ -462,7 +461,6 @@ impl<S: Timed + std::os::fd::AsFd> Connection<'_, S> {
     }
 }
 
-#[cfg(test)]
 enum Readable {
     Socket,
     Wake,
@@ -471,7 +469,6 @@ enum Readable {
 
 /// One `poll(2)` of `socket` and `wake`, for `within` or with no end. The
 /// wake wins when both are readable.
-#[cfg(test)]
 fn readable(
     socket: std::os::fd::BorrowedFd<'_>,
     wake: std::os::fd::BorrowedFd<'_>,

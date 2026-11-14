@@ -422,3 +422,22 @@ fn an_event_s_changes_are_recorded_as_its_endpoint_s_multiplexer() {
         );
     }
 }
+
+/// Another pane's status change surveys the space after a block closed and
+/// unbinds its name before the close is handled. A Rex block ID is never
+/// reused, so the close still retires the name. Herdr reuses pane IDs, and
+/// its unbound name stays as it always has.
+#[test]
+fn a_rex_close_retires_a_name_a_status_change_already_unbound() {
+    for (endpoint, left) in [(REX, vec!["b"]), ("/tmp/herdr.sock", vec!["a", "b"])] {
+        let fixture = Fixture::new(endpoint);
+        fixture.mux.close_pane("pane-a");
+        fixture
+            .handle(MuxEvent::AgentStatusChanged(slot(SPACE, "pane-b")))
+            .unwrap();
+        fixture
+            .handle(MuxEvent::PaneClosed(slot(SPACE, "pane-a")))
+            .unwrap();
+        assert_eq!(fixture.names(SPACE), left, "{endpoint}");
+    }
+}

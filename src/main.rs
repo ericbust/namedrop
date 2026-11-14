@@ -202,8 +202,24 @@ fn main() -> ExitCode {
                 .map(Path::to_path_buf)
         })
         .or_else(|| state_directory(&cli.runtime, inherited));
-    // The status worker outlives the hook that starts it and takes the
-    // command gate itself, around each event it reconciles.
+    // The bridge and the status worker outlive what starts them and take the
+    // command gate themselves, around each flush or event.
+    if cli.is_rex_bridge() {
+        let endpoint = cli
+            .runtime
+            .endpoint
+            .as_deref()
+            .map(namedrop::mux::Endpoint::parse);
+        return match (selected_state.as_deref(), endpoint) {
+            (Some(state), Some(endpoint)) if endpoint.kind == namedrop::mux::MuxKind::Rex => {
+                namedrop::rex_bridge::run(state, &endpoint)
+            }
+            _ => {
+                eprintln!("namedrop rex bridge needs a rex: --endpoint and a state directory");
+                ExitCode::from(64)
+            }
+        };
+    }
     if cli.is_agent_status_worker_hook() {
         if let Some(state) = selected_state.as_deref() {
             let socket = endpoint_of(location(&RuntimeOptions::default(), inherited));
@@ -980,6 +996,7 @@ fn with_runtime_options<T>(
             return Err("a deferred Rex place runs no command of its own".to_owned());
         }
     };
+    let _ = namedrop::rex_bridge::ensure(&state_directory, &place.endpoint);
     let directories = namedrop::InheritedDirectories::from_environment();
     let cwd = env::current_dir().map_err(|error| error.to_string())?;
     let mux = namedrop::mux::connect(

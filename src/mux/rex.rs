@@ -7,8 +7,7 @@ mod agent;
 mod binding;
 mod channel;
 mod control;
-#[cfg(test)]
-mod events;
+pub(crate) mod events;
 #[cfg(test)]
 mod live;
 mod local;

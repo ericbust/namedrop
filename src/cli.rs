@@ -208,6 +208,15 @@ impl Cli {
         )
     }
 
+    pub fn is_rex_bridge(&self) -> bool {
+        matches!(
+            self.command,
+            Command::Rex {
+                command: RexCommand::Bridge
+            }
+        )
+    }
+
     pub fn is_agent_status_worker_hook(&self) -> bool {
         matches!(
             self.command,
@@ -435,6 +444,18 @@ enum Command {
         #[command(subcommand)]
         command: HookCommand,
     },
+    /// Rex's long-lived bridge, which Namedrop starts itself.
+    #[command(hide = true)]
+    Rex {
+        #[command(subcommand)]
+        command: RexCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RexCommand {
+    /// Turn one Rex server's events, named by `--endpoint`, into lifecycle work.
+    Bridge,
 }
 
 impl Command {
@@ -482,6 +503,9 @@ impl Command {
             Self::DashboardServer { .. } => "dashboard.server",
             Self::DashboardObserverGuard { .. } => "dashboard.observer-guard",
             Self::Hook { command } => command.operation(),
+            Self::Rex {
+                command: RexCommand::Bridge,
+            } => "rex.bridge",
         }
     }
 }

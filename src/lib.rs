@@ -37,6 +37,7 @@ mod pane_effects;
 mod pointer;
 #[doc(hidden)]
 pub mod reminder;
+pub mod rex_bridge;
 pub use reminder::execute_reminder_operation;
 mod persona;
 mod ports;

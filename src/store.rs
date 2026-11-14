@@ -517,6 +517,58 @@ impl StateTransaction<'_> {
         }
     }
 
+    /// The addresses of `namespace` whose latest binding was to `pane_id`
+    /// and has ended, as when a survey that no longer listed the pane
+    /// unbound them.
+    pub(crate) fn addresses_last_bound_to(
+        &self,
+        namespace: &StateNamespace,
+        pane_id: &str,
+    ) -> Result<Vec<PaneAddressId>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT b.address_id FROM pane_bindings b
+             JOIN pane_addresses a USING (session_socket_id, worktree_id, address_id)
+             WHERE b.session_socket_id = ?1 AND b.worktree_id = ?2 AND b.pane_id = ?3
+               AND b.active = 0 AND a.retired = 0
+               AND b.rowid = (
+                   SELECT l.rowid FROM pane_bindings l
+                   WHERE l.session_socket_id = b.session_socket_id
+                     AND l.worktree_id = b.worktree_id AND l.address_id = b.address_id
+                   ORDER BY l.bound_at_ms DESC, l.rowid DESC LIMIT 1
+               )
+             ORDER BY b.address_id",
+        )?;
+        statement
+            .query_map(
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    pane_id
+                ],
+                |row| row.get::<_, String>(0).map(PaneAddressId::new),
+            )?
+            .collect::<Result<_, _>>()
+            .map_err(Into::into)
+    }
+
+    /// The spaces of `session_socket_id` that Namedrop is activated for.
+    pub(crate) fn activated_spaces(
+        &self,
+        session_socket_id: &str,
+    ) -> Result<Vec<crate::SpaceId>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT worktree_id FROM worktrees
+             WHERE session_socket_id = ?1 AND activated = 1 AND deactivated = 0
+             ORDER BY worktree_id",
+        )?;
+        statement
+            .query_map(params![session_socket_id], |row| {
+                row.get::<_, String>(0).map(crate::SpaceId::new)
+            })?
+            .collect::<Result<_, _>>()
+            .map_err(Into::into)
+    }
+
     pub(crate) fn any_activated_worktrees(&self) -> Result<bool, StoreError> {
         self.transaction
             .query_row(

@@ -1048,21 +1048,32 @@ where
         })
         .map_err(EventError::retry)?;
     check_activated(store, &event_namespace)?;
+    // A Rex block ID is never reused, so a close also retires a name that a
+    // survey unbound once the block had gone, before its close was handled.
+    let never_reused =
+        crate::mux::Endpoint::parse(runtime.session_socket_id).kind == crate::mux::MuxKind::Rex;
     let removed_address_id = store
         .transaction(|transaction| {
             let binding = transaction
                 .active_pane_bindings(&event_namespace)?
                 .into_iter()
                 .find(|binding| binding.pane_id == pane_id);
-            if let Some(binding) = binding {
+            let address_id = match binding {
+                Some(binding) => Some(binding.address_id),
+                None if never_reused => transaction
+                    .addresses_last_bound_to(&event_namespace, pane_id)?
+                    .into_iter()
+                    .next(),
+                None => None,
+            };
+            if let Some(address_id) = &address_id {
                 transaction.cancel_and_remove_pane_address(
                     &event_namespace,
-                    &binding.address_id,
+                    address_id,
                     attribution,
                 )?;
-                return Ok(Some(binding.address_id));
             }
-            Ok(None)
+            Ok(address_id)
         })
         .map_err(EventError::retry)?;
     let event_runtime = LifecycleRuntime {

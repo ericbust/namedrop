@@ -68,6 +68,28 @@ impl Wake {
         self.set.load(Ordering::SeqCst)
     }
 
+    /// Waits `within`, or less once a stop is requested, and says whether
+    /// one was.
+    pub(crate) fn sleep(&self, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        while !self.is_set() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            let mut fd = libc::pollfd {
+                fd: self.read.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let timeout =
+                libc::c_int::try_from(left.as_millis().max(1)).unwrap_or(libc::c_int::MAX);
+            // SAFETY: one live pollfd for a descriptor this owns.
+            unsafe { libc::poll(&mut fd, 1, timeout) };
+        }
+        self.is_set()
+    }
+
     pub(super) fn fd(&self) -> BorrowedFd<'_> {
         self.read.as_fd()
     }
@@ -351,3 +373,42 @@ impl Pending {
 
 #[cfg(test)]
 mod tests;
+
+/// A scripted server for tests outside this module.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::{Liveness, RexEvents, Wake};
+    use crate::mux::rex::control::tests::Server;
+    use serde_json::{Value, json};
+    use std::{os::unix::net::UnixStream, path::Path};
+
+    /// A local server with `host_id` that sends `events` as soon as the
+    /// stream attaches, then hangs up.
+    pub(crate) struct Scripted(UnixStream);
+
+    impl Scripted {
+        pub(crate) fn new(host_id: &'static str, events: Vec<Value>) -> Self {
+            let (client, server) = UnixStream::pair().unwrap();
+            std::thread::spawn(move || {
+                let mut server = Server::upgrade(server);
+                server.welcome();
+                for payload in [
+                    json!({"pid": std::process::id(), "host_id": host_id, "listeners": [
+                        {"primary": true, "transport": "unix", "addresses": ["/tmp/r.sock"]}]}),
+                    json!({"sessions": []}),
+                ] {
+                    let request = server.message();
+                    server.send(json!({"type": "response", "id": request["id"], "seq": 0, "payload": payload}));
+                }
+                for (seq, payload) in events.into_iter().enumerate() {
+                    server.send(json!({"type": "event", "seq": seq + 1, "payload": payload}));
+                }
+            });
+            Self(client)
+        }
+
+        pub(crate) fn events<'w>(self, state: &Path, wake: &'w Wake) -> RexEvents<'w> {
+            RexEvents::over(self.0, Path::new("/tmp/r.sock"), state, wake, Liveness::REX).unwrap()
+        }
+    }
+}
