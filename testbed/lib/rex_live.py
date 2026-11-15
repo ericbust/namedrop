@@ -9,6 +9,7 @@ sys.dont_write_bytecode = True
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -23,14 +24,13 @@ SESSION = "testbed-rex"
 AGENTS = {"claude": ("claude",), "codex": ("codex", "--no-daemon")}
 KEYS = {"enter": "enter", "down": "down", "esc": "escape", "c-c": "ctrl+c", "ctrl+u": "ctrl+u"}
 FIRST_RUN_SECONDS = 180
-
-
-def without_herdr(path, profile_dir):
-    """PATH without the host's directories that hold a herdr. The profile's own directories
-    stay, so a herdr linked into them is still found."""
-    return os.pathsep.join(entry for entry in path.split(os.pathsep) if entry and (
-        Path(entry) == profile_dir or profile_dir in Path(entry).parents
-        or not shutil.which("herdr", path=entry)))
+# The startup files a login zsh, bash or sh reads from HOME after /etc's path_helper has put the
+# host's directories, such as Homebrew's, back on PATH. Codex's and Claude Code's tool shells
+# are login shells.
+LOGIN_FILES = (".zprofile", ".bash_profile", ".profile")
+LOGIN_SHELLS = ("zsh", "bash", "sh")
+FILTER_START = "# >>> testbed: no herdr on PATH\n"
+FILTER_END = "# <<< testbed: no herdr on PATH\n"
 
 
 class Lane(rex_lane.Lane):
@@ -40,12 +40,7 @@ class Lane(rex_lane.Lane):
     own hosts."""
 
     def environment(self):
-        environment = {key: value for key, value in self.profile.env.items()
-                       if not key.startswith("HERDR_")}
-        environment["PATH"] = without_herdr(environment["PATH"], self.profile.dir)
-        environment["REX_SERVER"] = self.server
-        environment["REX_HOME"] = self.server
-        return environment
+        return testbed.rex_environment(self.profile.env, self.profile.dir)
 
     def command_line(self, *args):
         """A `rex` command for a person. A block takes its environment from the server, so the
@@ -74,11 +69,77 @@ def state_directory(profile):
 
 
 def require_no_herdr(lane):
+    """Refuses a herdr on the lane's PATH or beside its rex, whose directory the Rex server puts
+    on every block's PATH."""
     path = lane.environment()["PATH"]
+    beside = shutil.which("herdr", path=str(Path(lane.binary()).parent))
+    if beside:
+        testbed.fail("the Rex lane's rex sits beside a herdr, and the Rex server puts that "
+                     "directory on every block's PATH: " + beside)
     found = shutil.which("herdr", path=path)
+    if found and str(Path(found).parent) in testbed.SYSTEM_DIRECTORIES:
+        testbed.fail("the Rex lane's PATH finds a herdr in a system directory: {}. The lane keeps "
+                     "{} on PATH, because its build and install need their tools, so it cannot "
+                     "run on a host with a herdr in one of them.".format(
+                         found, ", ".join(testbed.SYSTEM_DIRECTORIES)))
     if found:
         testbed.fail("the Rex lane's PATH finds a herdr: " + found)
-    return "No herdr on the lane's PATH: " + path
+    return "No herdr on the lane's PATH or beside its rex: " + path
+
+
+def login_filter(profile_dir):
+    """Shell lines that take PATH through testbed.without_herdr's filter, for a login shell."""
+    own = shlex.quote(str(profile_dir))
+    kept = "|".join((own, own + "/*") + testbed.SYSTEM_DIRECTORIES)
+    return (FILTER_START +
+            "testbed_rest=$PATH:\n"
+            "testbed_path=\n"
+            'while [ -n "$testbed_rest" ]; do\n'
+            "  testbed_dir=${testbed_rest%%:*}\n"
+            "  testbed_rest=${testbed_rest#*:}\n"
+            "  case $testbed_dir in\n"
+            "    '') continue ;;\n"
+            "    " + kept + ") ;;\n"
+            '    *) if [ -f "$testbed_dir/herdr" ] && [ -x "$testbed_dir/herdr" ]; then continue; fi ;;\n'
+            "  esac\n"
+            "  testbed_path=${testbed_path:+$testbed_path:}$testbed_dir\n"
+            "done\n"
+            'export PATH="$testbed_path"\n'
+            "unset testbed_rest testbed_path testbed_dir\n" + FILTER_END)
+
+
+def write_login_filters(profile):
+    """Puts the PATH filter first in each login startup file of the profile's HOME, in place of
+    the one an earlier run wrote, and keeps the rest, such as the install's own PATH lines."""
+    block = login_filter(profile.dir)
+    for name in LOGIN_FILES:
+        path = profile.dir / "home" / name
+        if path.is_symlink():
+            testbed.fail("profile startup file must not be a symlink: " + str(path))
+        kept = path.read_text() if path.exists() else ""
+        kept = re.sub(re.escape(FILTER_START) + ".*?" + re.escape(FILTER_END), "", kept,
+                      flags=re.S)
+        testbed.write_if_changed(path, block + kept)
+
+
+def login_shells_find_no_herdr(environment, cwd):
+    """Runs a herdr lookup in a login zsh, bash and sh, each one that is on PATH, in the
+    environment, and refuses any that finds one."""
+    checked = []
+    for shell in LOGIN_SHELLS:
+        program = shutil.which(shell, path=environment["PATH"])
+        if not program:
+            continue
+        result = subprocess.run(testbed.env_command(environment, [
+            program, "-lc", "command -v herdr || :"]), cwd=str(cwd), text=True,
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
+        if result.stdout.strip():
+            testbed.fail("a login {} in the Rex lane finds a herdr: {}{}".format(
+                shell, result.stdout.strip(), "\n" + result.stderr if result.stderr else ""))
+        checked.append(shell)
+    if not checked:
+        testbed.fail("the Rex lane's PATH has none of " + ", ".join(LOGIN_SHELLS))
+    return "A login {} finds no herdr".format(", ".join(checked))
 
 
 def build_archive(lane):
@@ -127,8 +188,10 @@ def install(lane, request, agents):
     profile.seed()
     root = build_archive(lane)
     log = profile.dir / "logs/install.log"
+    # install.sh runs the first rex on PATH, so the lane's own comes first.
+    path = os.pathsep.join([str(Path(lane.binary()).parent), lane.environment()["PATH"]])
     report = lane.run(["sh", str(root / "scripts/install.sh"), "--yes"], log, profile.dir,
-                      {"REX_BIN_DIR": str(Path(lane.binary()).parent)})
+                      {"PATH": path})
     with log.open("a") as kept:
         kept.write(report)
     print(report, end="", flush=True)
@@ -158,7 +221,8 @@ def start_session(lane):
     session, blocks = session_blocks(lane)
     if session:
         return session, blocks
-    # A login shell runs path_helper, which can put a herdr back on PATH.
+    # The shell block skips /etc/profile, whose path_helper puts the host's directories back on
+    # PATH, so it starts with the lane's PATH. Login shells get the profile's PATH filter instead.
     shell = ("/bin/bash", "--noprofile", "--rcfile", str(lane.profile.dir / "home/.bashrc"), "-i")
     created = json.loads(lane.rex("new", SESSION, "--shell", "none", "-c", str(lane.profile.repo),
                                   "--window", "agents", "--json", "--", *shell).stdout)
@@ -170,11 +234,20 @@ def start_session(lane):
 
 
 def shell_finds_no_herdr(lane, session, blocks, timeout=20):
-    """Types a herdr lookup into the shell block, which writes what it found to a file."""
+    """Types a herdr lookup into the shell block, which writes what it found to a file. A
+    saved shell block that runs a program gets nothing typed, and what waits at its prompt is
+    cleared first."""
+    process = json.loads(lane.rex("block", "call", "-s", session, "-b", blocks["shell"],
+                                  "process").stdout)
+    child, foreground = process.get("child") or {}, process.get("foreground") or {}
+    if child.get("name") != "bash" or foreground.get("pid") != child.get("pid"):
+        return "The shell block {} runs {}, so no herdr lookup was typed into it".format(
+            blocks["shell"], foreground.get("name") or child.get("name") or "nothing")
     found = lane.profile.dir / "logs/shell-herdr.txt"
     if found.exists():
         found.unlink()
     target = shlex.quote(str(found))
+    lane.rex("send-key", "-s", session, "-b", blocks["shell"], KEYS["ctrl+u"])
     lane.rex("send", "-s", session, "-b", blocks["shell"],
              "command -v herdr > {0} || echo none > {0}".format(target))
     lane.rex("send-key", "-s", session, "-b", blocks["shell"], "enter")
@@ -288,6 +361,8 @@ def up(profile, request, agents):
     lane = Lane(profile, testbed.fail, testbed.say)
     try:
         install(lane, request, agents)
+        write_login_filters(profile)
+        testbed.say(login_shells_find_no_herdr(lane.environment(), profile.dir))
         lane.start_server()
         session, blocks = start_session(lane)
         testbed.say(shell_finds_no_herdr(lane, session, blocks))

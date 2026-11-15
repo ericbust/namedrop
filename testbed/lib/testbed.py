@@ -117,6 +117,29 @@ def clean_environment(base, socket, toolchain):
     }
 
 
+# The lane's build and install need these directories' tools, so a herdr in one stops the lane.
+SYSTEM_DIRECTORIES = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+
+
+def without_herdr(path, profile_dir):
+    """PATH without the host's directories that hold a herdr. The profile's own directories and
+    the system directories stay, so a herdr in one of them is still found and refused."""
+    return os.pathsep.join(entry for entry in path.split(os.pathsep) if entry and (
+        Path(entry) == profile_dir or profile_dir in Path(entry).parents
+        or entry in SYSTEM_DIRECTORIES or not shutil.which("herdr", path=entry)))
+
+
+def rex_environment(env, profile_dir):
+    """The Rex lane's environment: no Herdr names, no host directory with a herdr on PATH, and
+    the lane's scratch server as Rex's server and home."""
+    environment = {key: value for key, value in env.items() if not key.startswith("HERDR_")}
+    environment["PATH"] = without_herdr(environment["PATH"], profile_dir)
+    server = "unix://" + str(rex_lane.socket_for(profile_dir))
+    environment["REX_SERVER"] = server
+    environment["REX_HOME"] = server
+    return environment
+
+
 CLAUDE_TOKEN_FILE_VARIABLE = "NAMEDROP_TESTBED_CLAUDE_TOKEN_FILE"
 # Claude Code's own map of an OAuth profile's organization_type to its subscription type.
 CLAUDE_PLANS = {"claude_max": "max", "claude_pro": "pro", "claude_team": "team",
@@ -365,7 +388,10 @@ class Profile:
         if "toolchain" not in self.state:
             fail("profile {} never finished setup; run ./testbed up --profile {}".format(
                 self.name, self.name))
-        return clean_environment(self.dir, self.socket, self.state["toolchain"])
+        env = clean_environment(self.dir, self.socket, self.state["toolchain"])
+        # So env.sh, `testbed shell` and every command the testbed runs in a Rex lane profile
+        # see the Rex lane's environment.
+        return rex_environment(env, self.dir) if self.state.get("purpose") == "rex" else env
 
     def save(self):
         write_if_changed(self.state_path, json.dumps(self.state, indent=2, sort_keys=True) + "\n")
