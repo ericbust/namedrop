@@ -18,11 +18,92 @@ ALTER TABLE dropped ADD COLUMN told INTEGER NOT NULL DEFAULT 0;
 
 /// What version 2 lacks: on B, the index B's page reads by, and the
 /// replies for each A host it let go of, and on A, what B said it let go
-/// of and what A told the sender, and whether B's Automatic Reply Limit
-/// paused an item and its sender was told.
+/// of and what A told the sender, whether B's Automatic Reply Limit
+/// paused an item and its sender was told, the server each cursor and
+/// reply is of, and the label whose server another one answers as. A row
+/// from before is of the first label that last found its `host_id`.
 const TO_3: &str = "
 ALTER TABLE outbound ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE outbound ADD COLUMN paused_told INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE conditions ADD COLUMN same_server_as TEXT;
+CREATE TABLE cursors_3 (
+    endpoint TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    epoch TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    peer TEXT NOT NULL,
+    PRIMARY KEY (endpoint, host_id, peer)
+);
+INSERT INTO cursors_3 SELECT endpoint, host_id, epoch, seq,
+    COALESCE((SELECT MIN(label) FROM peers p WHERE p.host_id = c.host_id), '') FROM cursors c;
+DROP TABLE cursors;
+ALTER TABLE cursors_3 RENAME TO cursors;
+CREATE TABLE collected_3 (
+    endpoint TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    epoch TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    label TEXT NOT NULL,
+    space TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    remote_message_id TEXT NOT NULL,
+    remote_alias TEXT NOT NULL,
+    thread TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    peer TEXT NOT NULL,
+    PRIMARY KEY (endpoint, host_id, epoch, seq, peer)
+);
+INSERT INTO collected_3 SELECT endpoint, host_id, epoch, seq, label, space, message_id,
+    remote_message_id, remote_alias, thread, created_at_ms,
+    COALESCE((SELECT MIN(p.label) FROM peers p WHERE p.host_id = c.host_id), c.label)
+    FROM collected c;
+DROP TABLE collected;
+ALTER TABLE collected_3 RENAME TO collected;
+CREATE INDEX collected_by_message ON collected (endpoint, message_id);
+CREATE TABLE held_3 (
+    endpoint TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    remote_message_id TEXT NOT NULL,
+    epoch TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    label TEXT NOT NULL,
+    space TEXT NOT NULL,
+    thread TEXT NOT NULL,
+    re TEXT NOT NULL,
+    remote_alias TEXT NOT NULL,
+    text TEXT NOT NULL,
+    told INTEGER NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    peer TEXT NOT NULL,
+    PRIMARY KEY (endpoint, host_id, remote_message_id, peer)
+);
+INSERT INTO held_3 SELECT endpoint, host_id, remote_message_id, epoch, seq, label, space,
+    thread, re, remote_alias, text, told, created_at_ms,
+    COALESCE((SELECT MIN(p.label) FROM peers p WHERE p.host_id = h.host_id), h.label)
+    FROM held h ORDER BY rowid;
+DROP TABLE held;
+ALTER TABLE held_3 RENAME TO held;
+CREATE TABLE dropped_3 (
+    endpoint TEXT NOT NULL,
+    host_id TEXT NOT NULL,
+    remote_message_id TEXT NOT NULL,
+    label TEXT NOT NULL,
+    space TEXT NOT NULL,
+    re TEXT NOT NULL,
+    remote_alias TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    reason TEXT,
+    created_at_ms INTEGER NOT NULL,
+    told INTEGER NOT NULL DEFAULT 0,
+    peer TEXT NOT NULL,
+    PRIMARY KEY (endpoint, host_id, remote_message_id, peer)
+);
+INSERT INTO dropped_3 SELECT endpoint, host_id, remote_message_id, label, space, re,
+    remote_alias, count, reason, created_at_ms, told,
+    COALESCE((SELECT MIN(p.label) FROM peers p WHERE p.host_id = d.host_id), d.label)
+    FROM dropped d ORDER BY rowid;
+DROP TABLE dropped;
+ALTER TABLE dropped_3 RENAME TO dropped;
 CREATE INDEX outbox_by_seq ON outbox (host_id, seq);
 CREATE TABLE outbox_lost (
     host_id TEXT NOT NULL,
@@ -89,7 +170,10 @@ pub(crate) const OTHER_LABEL_LIFETIME_MS: i64 = OUTBOX_LIFETIME_MS;
 /// the Automatic Reply Limit kept out of their threads, `dropped`, the
 /// replies A refused and the held ones that expired, whose senders are
 /// still to be told, and
-/// `conditions`, what Doctor reports for each label. B holds
+/// `conditions`, what Doctor reports for each label. A cursor, and each
+/// reply A collected, holds, or dropped, is of one `peer`: the first label,
+/// by name, of the labels that dial the server's addresses, so a server
+/// that reports another's `host_id` touches none of that one's. B holds
 /// `inbound`, `outbox`, its `outbox_epoch`, `remote_threads`, and the tally
 /// of the replies that expired, which Doctor reports after the items
 /// themselves are gone. Both hold `capture`, the last main-database message
@@ -132,7 +216,8 @@ CREATE TABLE collected (
     remote_alias TEXT NOT NULL,
     thread TEXT NOT NULL,
     created_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (endpoint, host_id, epoch, seq)
+    peer TEXT NOT NULL,
+    PRIMARY KEY (endpoint, host_id, epoch, seq, peer)
 );
 CREATE INDEX collected_by_message ON collected (endpoint, message_id);
 CREATE TABLE cursors (
@@ -140,7 +225,8 @@ CREATE TABLE cursors (
     host_id TEXT NOT NULL,
     epoch TEXT NOT NULL,
     seq INTEGER NOT NULL,
-    PRIMARY KEY (endpoint, host_id)
+    peer TEXT NOT NULL,
+    PRIMARY KEY (endpoint, host_id, peer)
 );
 CREATE TABLE held (
     endpoint TEXT NOT NULL,
@@ -156,7 +242,8 @@ CREATE TABLE held (
     text TEXT NOT NULL,
     told INTEGER NOT NULL,
     created_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (endpoint, host_id, remote_message_id)
+    peer TEXT NOT NULL,
+    PRIMARY KEY (endpoint, host_id, remote_message_id, peer)
 );
 CREATE TABLE inbound (
     host_id TEXT NOT NULL,
@@ -211,6 +298,7 @@ CREATE TABLE conditions (
     held_full INTEGER NOT NULL DEFAULT 0,
     cannot_reply INTEGER NOT NULL DEFAULT 0,
     other_label_at_ms INTEGER NOT NULL DEFAULT 0,
+    same_server_as TEXT,
     PRIMARY KEY (endpoint, label)
 );
 CREATE TABLE dropped (
@@ -225,7 +313,8 @@ CREATE TABLE dropped (
     reason TEXT,
     created_at_ms INTEGER NOT NULL,
     told INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (endpoint, host_id, remote_message_id)
+    peer TEXT NOT NULL,
+    PRIMARY KEY (endpoint, host_id, remote_message_id, peer)
 );
 CREATE TABLE outbox_lost (
     host_id TEXT NOT NULL,
@@ -309,7 +398,15 @@ const COLUMNS_NEW_IN_2: [(&str, &str); 2] =
     [("conditions", "other_label_at_ms"), ("dropped", "told")];
 /// The tables and indexes `TO_3` makes, and the columns it adds.
 const NEW_IN_3: [&str; 3] = ["outbox_lost", "lost", "outbox_by_seq"];
-const COLUMNS_NEW_IN_3: [(&str, &str); 2] = [("outbound", "paused"), ("outbound", "paused_told")];
+const COLUMNS_NEW_IN_3: [(&str, &str); 7] = [
+    ("outbound", "paused"),
+    ("outbound", "paused_told"),
+    ("conditions", "same_server_as"),
+    ("cursors", "peer"),
+    ("collected", "peer"),
+    ("held", "peer"),
+    ("dropped", "peer"),
+];
 
 /// Makes the database at `path`, or migrates it from its version, under
 /// the write lock, and says whether it then has this schema's layout. One
@@ -434,6 +531,7 @@ pub(crate) enum Settled {
 
 /// A reply A collected from B and inserted as `message_id`.
 pub(crate) struct Collected<'a> {
+    pub peer: &'a str,
     pub host_id: &'a str,
     pub epoch: &'a str,
     pub seq: i64,
@@ -447,11 +545,13 @@ pub(crate) struct Collected<'a> {
     pub now_ms: i64,
 }
 
-/// A reply A took from the server `host_id` for `endpoint` and holds,
-/// because the Automatic Reply Limit paused the A thread it answers.
+/// A reply A took from the server `host_id`, of `peer`, for `endpoint`
+/// and holds, because the Automatic Reply Limit paused the A thread it
+/// answers.
 #[derive(Clone, Debug)]
 pub(crate) struct Held {
     pub endpoint: String,
+    pub peer: String,
     pub host_id: String,
     pub epoch: String,
     pub label: String,
@@ -482,14 +582,19 @@ pub(crate) enum Answers {
 /// What Doctor reports on A for one label: how many replies its worker
 /// dropped because they answered a message sent to another host, counted
 /// since a quiet `OTHER_LABEL_LIFETIME_MS`, whether
-/// A holds as many of its replies as it can, so B keeps the rest, and
-/// whether B keeps no more replies for A, so A sends it nothing new.
+/// A holds as many of its replies as it can, so B keeps the rest,
+/// whether B keeps no more replies for A, so A sends it nothing new, and
+/// whether its server answers as another label's.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct Conditions {
     pub label: String,
     pub other_label: i64,
     pub held_full: bool,
     pub cannot_reply: bool,
+    /// The label whose server this label's server answers as, while this
+    /// machine's host list gives the two other addresses, so A relays
+    /// nothing by this label.
+    pub same_server_as: Option<String>,
     /// How many replies B said it let go of for this machine, counted
     /// since a quiet `OTHER_LABEL_LIFETIME_MS`.
     pub lost: i64,
@@ -498,6 +603,7 @@ pub(crate) struct Conditions {
 /// A reply A refused, or the held replies of one thread that expired,
 /// whose sender is still to be told.
 pub(crate) struct Dropped {
+    pub peer: String,
     pub host_id: String,
     pub remote_message_id: String,
     pub label: String,
@@ -1121,6 +1227,40 @@ impl RelayStore {
         Ok(())
     }
 
+    /// The labels whose server last reported `host_id`, by name.
+    pub(crate) fn answering_as(&self, host_id: &str) -> Result<Vec<String>, StoreError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT label FROM peers WHERE host_id = ?1 ORDER BY label")?;
+        let labels = statement
+            .query_map(params![host_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(labels)
+    }
+
+    /// Records the label whose server the server behind `label` answers as,
+    /// for Doctor, or with `None` that it answers as no other.
+    pub(crate) fn set_same_server(
+        &self,
+        endpoint: &str,
+        label: &str,
+        other: Option<&str>,
+    ) -> Result<(), StoreError> {
+        match other {
+            Some(other) => self.connection.execute(
+                "INSERT INTO conditions (endpoint, label, same_server_as) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (endpoint, label) DO UPDATE SET same_server_as = excluded.same_server_as",
+                params![endpoint, label, other],
+            )?,
+            None => self.connection.execute(
+                "UPDATE conditions SET same_server_as = NULL
+                 WHERE endpoint = ?1 AND label = ?2 AND same_server_as IS NOT NULL",
+                params![endpoint, label],
+            )?,
+        };
+        Ok(())
+    }
+
     pub(crate) fn set_peer(
         &self,
         label: &str,
@@ -1154,18 +1294,21 @@ impl RelayStore {
         )?)
     }
 
-    /// The outbox epoch of `host_id` that `endpoint` last collected in, and
-    /// the highest `seq` of it that `endpoint` has taken.
+    /// The outbox epoch of `host_id`, as `peer` reaches it, that `endpoint`
+    /// last collected in, and the highest `seq` of it that `endpoint` has
+    /// taken.
     pub(crate) fn ack_through(
         &self,
         endpoint: &str,
+        peer: &str,
         host_id: &str,
     ) -> Result<(String, i64), StoreError> {
         Ok(self
             .connection
             .query_row(
-                "SELECT epoch, seq FROM cursors WHERE endpoint = ?1 AND host_id = ?2",
-                params![endpoint, host_id],
+                "SELECT epoch, seq FROM cursors
+                 WHERE endpoint = ?1 AND peer = ?2 AND host_id = ?3",
+                params![endpoint, peer, host_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
@@ -1173,21 +1316,22 @@ impl RelayStore {
     }
 
     /// Records that `endpoint` has taken B's `seq` of `epoch` from
-    /// `host_id`, so its next call acks it. A new epoch starts the count
-    /// again.
+    /// `host_id`, as `peer` reaches it, so its next call acks it. A new
+    /// epoch starts the count again.
     pub(crate) fn advance(
         &self,
         endpoint: &str,
+        peer: &str,
         host_id: &str,
         epoch: &str,
         seq: i64,
     ) -> Result<(), StoreError> {
         self.connection.execute(
-            "INSERT INTO cursors (endpoint, host_id, epoch, seq) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (endpoint, host_id) DO UPDATE SET seq = CASE
+            "INSERT INTO cursors (endpoint, peer, host_id, epoch, seq) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (endpoint, host_id, peer) DO UPDATE SET seq = CASE
                 WHEN epoch = excluded.epoch THEN MAX(seq, excluded.seq) ELSE excluded.seq END,
                 epoch = excluded.epoch",
-            params![endpoint, host_id, epoch, seq],
+            params![endpoint, peer, host_id, epoch, seq],
         )?;
         Ok(())
     }
@@ -1199,8 +1343,8 @@ impl RelayStore {
     pub(crate) fn hold(&self, held: &Held, now_ms: i64) -> Result<bool, StoreError> {
         let changed = self.connection.execute(
             "INSERT OR IGNORE INTO held (endpoint, host_id, remote_message_id, epoch, seq,
-                label, space, thread, re, remote_alias, text, told, created_at_ms)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12
+                label, space, thread, re, remote_alias, text, told, created_at_ms, peer)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?15
              WHERE (SELECT COUNT(*) FROM held WHERE endpoint = ?1 AND label = ?6) < ?13
                 AND (SELECT COUNT(*) FROM held WHERE endpoint = ?1 AND space = ?7
                     AND thread = ?8) < ?14",
@@ -1218,14 +1362,20 @@ impl RelayStore {
                 super::wire::cut(&held.reply.text, super::wire::TEXT_LIMIT),
                 now_ms,
                 HELD_LIMIT,
-                HELD_PER_THREAD
+                HELD_PER_THREAD,
+                held.peer
             ],
         )?;
         Ok(changed == 1
             || self.connection.query_row(
-                "SELECT EXISTS (SELECT 1 FROM held WHERE endpoint = ?1 AND host_id = ?2
-                    AND remote_message_id = ?3)",
-                params![held.endpoint, held.host_id, held.reply.message_id],
+                "SELECT EXISTS (SELECT 1 FROM held WHERE endpoint = ?1 AND peer = ?2
+                    AND host_id = ?3 AND remote_message_id = ?4)",
+                params![
+                    held.endpoint,
+                    held.peer,
+                    held.host_id,
+                    held.reply.message_id
+                ],
                 |row| row.get(0),
             )?)
     }
@@ -1234,16 +1384,17 @@ impl RelayStore {
     /// refused it.
     pub(crate) fn placed(&self, held: &Held) -> Result<bool, StoreError> {
         Ok(self.connection.query_row(
-            "SELECT EXISTS (SELECT 1 FROM collected WHERE endpoint = ?1 AND host_id = ?2
-                    AND epoch = ?3 AND seq = ?4)
-                OR EXISTS (SELECT 1 FROM dropped WHERE endpoint = ?1 AND host_id = ?2
-                    AND remote_message_id = ?5 AND reason IS NOT NULL)",
+            "SELECT EXISTS (SELECT 1 FROM collected WHERE endpoint = ?1 AND peer = ?6
+                    AND host_id = ?2 AND epoch = ?3 AND seq = ?4)
+                OR EXISTS (SELECT 1 FROM dropped WHERE endpoint = ?1 AND peer = ?6
+                    AND host_id = ?2 AND remote_message_id = ?5 AND reason IS NOT NULL)",
             params![
                 held.endpoint,
                 held.host_id,
                 held.epoch,
                 held.reply.seq,
-                held.reply.message_id
+                held.reply.message_id,
+                held.peer
             ],
             |row| row.get(0),
         )?)
@@ -1271,7 +1422,7 @@ impl RelayStore {
     pub(crate) fn held(&self, endpoint: &str, untold: bool) -> Result<Vec<Held>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT host_id, epoch, label, space, thread, seq, re, remote_alias,
-                remote_message_id, text FROM held h
+                remote_message_id, text, peer FROM held h
              WHERE endpoint = ?1 AND (?2 = 0 OR (told = 0 AND rowid = (SELECT MIN(rowid)
                 FROM held o WHERE o.endpoint = h.endpoint AND o.space = h.space
                     AND o.thread = h.thread)))
@@ -1281,6 +1432,7 @@ impl RelayStore {
             .query_map(params![endpoint, untold], |row| {
                 Ok(Held {
                     endpoint: endpoint.to_owned(),
+                    peer: row.get(10)?,
                     host_id: row.get(0)?,
                     epoch: row.get(1)?,
                     label: row.get(2)?,
@@ -1305,8 +1457,13 @@ impl RelayStore {
     pub(crate) fn told_held(&self, held: &Held) -> Result<(), StoreError> {
         self.connection.execute(
             "UPDATE held SET told = 1
-             WHERE endpoint = ?1 AND host_id = ?2 AND remote_message_id = ?3",
-            params![held.endpoint, held.host_id, held.reply.message_id],
+             WHERE endpoint = ?1 AND peer = ?2 AND host_id = ?3 AND remote_message_id = ?4",
+            params![
+                held.endpoint,
+                held.peer,
+                held.host_id,
+                held.reply.message_id
+            ],
         )?;
         Ok(())
     }
@@ -1314,8 +1471,14 @@ impl RelayStore {
     /// Lets go of `held`, which its thread took or can never take.
     pub(crate) fn release(&self, held: &Held) -> Result<(), StoreError> {
         self.connection.execute(
-            "DELETE FROM held WHERE endpoint = ?1 AND host_id = ?2 AND remote_message_id = ?3",
-            params![held.endpoint, held.host_id, held.reply.message_id],
+            "DELETE FROM held
+             WHERE endpoint = ?1 AND peer = ?2 AND host_id = ?3 AND remote_message_id = ?4",
+            params![
+                held.endpoint,
+                held.peer,
+                held.host_id,
+                held.reply.message_id
+            ],
         )?;
         Ok(())
     }
@@ -1431,8 +1594,8 @@ impl RelayStore {
     pub(crate) fn refused(&self, held: &Held, reason: &str, now_ms: i64) -> Result<(), StoreError> {
         self.connection.execute(
             "INSERT OR IGNORE INTO dropped (endpoint, host_id, remote_message_id, label, space,
-                re, remote_alias, count, reason, created_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9)",
+                re, remote_alias, count, reason, created_at_ms, peer)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10)",
             params![
                 held.endpoint,
                 held.host_id,
@@ -1442,7 +1605,8 @@ impl RelayStore {
                 held.reply.re,
                 held.reply.from,
                 reason,
-                now_ms
+                now_ms,
+                held.peer
             ],
         )?;
         Ok(())
@@ -1483,12 +1647,13 @@ impl RelayStore {
     /// oldest first.
     pub(crate) fn dropped(&self, endpoint: &str) -> Result<Vec<Dropped>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT host_id, remote_message_id, label, space, re, remote_alias, count, reason
-             FROM dropped WHERE endpoint = ?1 AND told = 0 ORDER BY created_at_ms, rowid",
+            "SELECT host_id, remote_message_id, label, space, re, remote_alias, count, reason,
+                peer FROM dropped WHERE endpoint = ?1 AND told = 0 ORDER BY created_at_ms, rowid",
         )?;
         let dropped = statement
             .query_map(params![endpoint], |row| {
                 Ok(Dropped {
+                    peer: row.get(8)?,
                     host_id: row.get(0)?,
                     remote_message_id: row.get(1)?,
                     label: row.get(2)?,
@@ -1509,8 +1674,13 @@ impl RelayStore {
     pub(crate) fn told_dropped(&self, endpoint: &str, dropped: &Dropped) -> Result<(), StoreError> {
         self.connection.execute(
             "UPDATE dropped SET told = 1
-             WHERE endpoint = ?1 AND host_id = ?2 AND remote_message_id = ?3",
-            params![endpoint, dropped.host_id, dropped.remote_message_id],
+             WHERE endpoint = ?1 AND peer = ?2 AND host_id = ?3 AND remote_message_id = ?4",
+            params![
+                endpoint,
+                dropped.peer,
+                dropped.host_id,
+                dropped.remote_message_id
+            ],
         )?;
         Ok(())
     }
@@ -1523,8 +1693,9 @@ impl RelayStore {
     ) -> Result<Vec<Conditions>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT label, CASE WHEN other_label_at_ms > ?2 - ?3 THEN other_label ELSE 0 END
-                    AS recent, held_full, cannot_reply
-             FROM conditions WHERE endpoint = ?1 AND (recent > 0 OR held_full OR cannot_reply)
+                    AS recent, held_full, cannot_reply, same_server_as
+             FROM conditions WHERE endpoint = ?1
+                AND (recent > 0 OR held_full OR cannot_reply OR same_server_as IS NOT NULL)
              ORDER BY label",
         )?;
         let conditions = statement
@@ -1534,6 +1705,7 @@ impl RelayStore {
                     other_label: row.get(1)?,
                     held_full: row.get(2)?,
                     cannot_reply: row.get(3)?,
+                    same_server_as: row.get(4)?,
                     lost: 0,
                 })
             })?
@@ -1575,8 +1747,8 @@ impl RelayStore {
     pub(crate) fn record_collected(&self, collected: &Collected<'_>) -> Result<bool, StoreError> {
         let recorded = self.connection.execute(
             "INSERT OR IGNORE INTO collected (endpoint, host_id, epoch, seq, label, space,
-                message_id, remote_message_id, remote_alias, thread, created_at_ms)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+                message_id, remote_message_id, remote_alias, thread, created_at_ms, peer)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
              WHERE NOT EXISTS (SELECT 1 FROM collected WHERE endpoint = ?1
                 AND message_id = ?7)",
             params![
@@ -1590,7 +1762,8 @@ impl RelayStore {
                 collected.remote_message_id,
                 collected.remote_alias,
                 collected.thread,
-                collected.now_ms
+                collected.now_ms,
+                collected.peer
             ],
         )?;
         Ok(recorded == 1)
@@ -1821,10 +1994,11 @@ impl RelayStore {
         )?;
         transaction.execute(
             "INSERT OR IGNORE INTO dropped (endpoint, host_id, remote_message_id, label, space,
-                re, remote_alias, count, created_at_ms)
-             SELECT endpoint, host_id, remote_message_id, label, space, re, remote_alias, n, ?1
+                re, remote_alias, count, created_at_ms, peer)
+             SELECT endpoint, host_id, remote_message_id, label, space, re, remote_alias, n, ?1,
+                peer
              FROM (SELECT endpoint, host_id, remote_message_id, label, space, re,
-                    remote_alias, COUNT(*) AS n, MIN(rowid)
+                    remote_alias, peer, COUNT(*) AS n, MIN(rowid)
                 FROM held WHERE created_at_ms <= ?2 GROUP BY endpoint, space, thread)",
             params![now_ms, outbox_limit],
         )?;

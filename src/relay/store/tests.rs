@@ -340,15 +340,56 @@ fn a_version_2_database_that_lacks_columns_is_set_aside() {
 }
 
 /// A version 2 database, as the relay of `329c278b` made, is brought to
-/// this version in place with its rows.
+/// this version in place with its rows. Each cursor and reply is of the
+/// first label that last found its server's `host_id`, or of its own label
+/// when none did, and a cursor of no known server is of none.
 #[test]
 fn a_version_2_database_is_brought_to_this_version_with_its_rows() {
     let state = State::new();
     state.made_by(include_str!("fixtures/v2-6ca19369.sql"), 2);
+    Connection::open(state.0.join("relay.sqlite3"))
+        .unwrap()
+        .execute_batch(
+            "INSERT INTO peers (label, host_id, contacted_at_ms) VALUES ('aardvark', 'host-b', 1);
+             INSERT INTO cursors (endpoint, host_id, epoch, seq) VALUES
+                ('rex:/tmp/a.sock', 'host-b', 'e1', 7), ('rex:/tmp/a.sock', 'host-x', 'e2', 3);
+             INSERT INTO collected (endpoint, host_id, epoch, seq, label, space, message_id,
+                remote_message_id, remote_alias, thread, created_at_ms)
+                VALUES ('rex:/tmp/a.sock', 'host-b', 'e1', 7, 'devbox', 'session:a', 'm-7',
+                    'b-7', 'bob', 'thread-1', 1800000000000);
+             INSERT INTO held (endpoint, host_id, remote_message_id, epoch, seq, label, space,
+                thread, re, remote_alias, text, told, created_at_ms)
+                VALUES ('rex:/tmp/a.sock', 'host-x', 'b-8', 'e2', 8, 'lab', 'session:a',
+                    'thread-1', 'm-1', 'bob', 'held', 0, 1800000000000);
+             INSERT INTO dropped (endpoint, host_id, remote_message_id, label, space, re,
+                remote_alias, count, reason, created_at_ms)
+                VALUES ('rex:/tmp/a.sock', 'host-b', 'b-9', 'devbox', 'session:a', 'm-1',
+                    'bob', 1, 'refused', 1800000000000);",
+        )
+        .unwrap();
     let store = state.open(NOW);
     assert_eq!(version(&store), VERSION);
     assert!(state.set_aside().is_empty());
-    assert_eq!(count(&store, "SELECT COUNT(*) FROM peers"), 1);
+    assert_eq!(count(&store, "SELECT COUNT(*) FROM peers"), 2);
+    let endpoint = "rex:/tmp/a.sock";
+    assert_eq!(
+        store.ack_through(endpoint, "aardvark", "host-b").unwrap(),
+        ("e1".to_owned(), 7)
+    );
+    assert_eq!(
+        store.ack_through(endpoint, "", "host-x").unwrap(),
+        ("e2".to_owned(), 3)
+    );
+    let peers = |table: &str| -> String {
+        store
+            .connection
+            .query_row(&format!("SELECT peer FROM {table}"), [], |row| row.get(0))
+            .unwrap()
+    };
+    assert_eq!(peers("collected"), "aardvark");
+    assert_eq!(peers("held"), "lab");
+    assert_eq!(peers("dropped"), "aardvark");
+    assert_eq!(store.held(endpoint, false).unwrap()[0].peer, "lab");
     usable(&store);
 }
 
@@ -627,6 +668,7 @@ fn a_refused_reply_is_listed_until_told_and_never_again() {
     let store = state.open(NOW);
     let held = Held {
         endpoint: "rex:/tmp/a.sock".to_owned(),
+        peer: "devbox".to_owned(),
         host_id: "host-b".to_owned(),
         epoch: "e1".to_owned(),
         label: "devbox".to_owned(),
@@ -782,6 +824,7 @@ fn a_collected_reply_is_dropped_after_7_days_and_its_cursor_stays() {
     ] {
         store
             .record_collected(&Collected {
+                peer: "devbox",
                 host_id: "host-b",
                 epoch: "epoch-1",
                 seq,
@@ -796,7 +839,7 @@ fn a_collected_reply_is_dropped_after_7_days_and_its_cursor_stays() {
             })
             .unwrap();
         store
-            .advance("rex:/tmp/a.sock", "host-b", "epoch-1", seq)
+            .advance("rex:/tmp/a.sock", "devbox", "host-b", "epoch-1", seq)
             .unwrap();
     }
     drop(store);
@@ -804,7 +847,9 @@ fn a_collected_reply_is_dropped_after_7_days_and_its_cursor_stays() {
     let store = state.open(NOW);
     assert_eq!(count(&store, "SELECT seq FROM collected"), 2);
     assert_eq!(
-        store.ack_through("rex:/tmp/a.sock", "host-b").unwrap(),
+        store
+            .ack_through("rex:/tmp/a.sock", "devbox", "host-b")
+            .unwrap(),
         ("epoch-1".to_owned(), 2)
     );
 }
@@ -889,6 +934,7 @@ fn a_label_holds_at_most_100_replies_and_a_thread_20() {
     let store = state.open(NOW);
     let held = |label: &str, host_id: &str, thread: &str, n: usize| Held {
         endpoint: "rex:/tmp/a.sock".to_owned(),
+        peer: label.to_owned(),
         host_id: host_id.to_owned(),
         epoch: "e1".to_owned(),
         label: label.to_owned(),

@@ -1412,6 +1412,12 @@ fn relay_conditions_issue(conditions: &[crate::relay::store::Conditions]) -> Opt
                         .to_owned(),
                 );
             }
+            if let Some(other) = &condition.same_server_as {
+                found.push(format!(
+                    "its server answers as the one {other} reaches, which rex hosts list gives other addresses, so Namedrop relays nothing by {} until the two list the same addresses or one is removed",
+                    condition.label
+                ));
+            }
             format!("{}: {}", condition.label, found.join(", and "))
         })
         .collect::<Vec<_>>()
@@ -1718,6 +1724,7 @@ mod tests {
                 other_label: 3,
                 held_full: true,
                 cannot_reply: false,
+                same_server_as: None,
                 lost: 0,
             },
             Conditions {
@@ -1746,6 +1753,11 @@ mod tests {
                 cannot_reply: true,
                 ..Conditions::default()
             },
+            Conditions {
+                label: "twin".to_owned(),
+                same_server_as: Some("studio".to_owned()),
+                ..Conditions::default()
+            },
         ])
         .unwrap();
         assert_eq!(notice.code, "ND-RELAY-003");
@@ -1753,7 +1765,7 @@ mod tests {
         let paused = "Namedrop holds as many of its replies as it can for threads the Automatic Reply Limit paused, so it keeps the rest until a person's message or Continue resumes them";
         assert!(
             notice.explanation.ends_with(&format!(
-                "By host: devbox: 3 replies answered a message sent to another host, and were dropped, and {paused}; studio: {paused}; lab: it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them; pi: 1 reply answered a message sent to another host, and was dropped; mini: it let go of 4 replies for this machine before this machine acknowledged them; nano: it let go of 1 reply for this machine before this machine acknowledged it, and it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them."
+                "By host: devbox: 3 replies answered a message sent to another host, and were dropped, and {paused}; studio: {paused}; lab: it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them; pi: 1 reply answered a message sent to another host, and was dropped; mini: it let go of 4 replies for this machine before this machine acknowledged them; nano: it let go of 1 reply for this machine before this machine acknowledged it, and it keeps no more replies for this machine, so Namedrop sends it nothing new until this machine collects them; twin: its server answers as the one studio reaches, which rex hosts list gives other addresses, so Namedrop relays nothing by twin until the two list the same addresses or one is removed."
             )),
             "{}",
             notice.explanation

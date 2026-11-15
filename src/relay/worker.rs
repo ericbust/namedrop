@@ -4,7 +4,7 @@
 //! slow network call never holds a space's local mail.
 
 use super::{
-    Hosts, RemoteHosts,
+    Hosts,
     rex::{self, Failure},
     store::{Answers, Collected, Held, Queued, RelayStore, Settled},
     wire::{self, Answer, Item, Op, Perform, Reply, Request, Sender, Status},
@@ -159,13 +159,10 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
     if queued.is_empty() && !open {
         return Round::Done;
     }
-    let labels = match Hosts::read() {
-        Ok(hosts)
-            if hosts
-                .listed()
-                .is_some_and(|listed| listed.iter().any(|l| l == run.label)) =>
-        {
-            hosts.same_host(run.label)
+    let (hosts, labels) = match Hosts::read() {
+        Ok(hosts) if hosts.labels.iter().any(|listed| listed == run.label) => {
+            let labels = hosts.same_host(run.label);
+            (hosts, labels)
         }
         Ok(_) => {
             let reason = format!("{} is no longer in your Rex hosts", run.label);
@@ -176,16 +173,33 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
         }
         Err(_) => return Round::Kept,
     };
+    // A's name for the server these labels reach: the first of them.
+    let name = labels.iter().min().map_or(run.label, String::as_str);
     let Some(own) = crate::rex_bridge::known_host_id(run.state, run.endpoint) else {
         return Round::Kept;
     };
-    let peer_id = match status(run.label) {
-        Ok(host_id) => {
-            let _ = store.set_peer(run.label, &host_id, now);
-            host_id
+    let Ok(peer_id) = status(run.label) else {
+        return Round::Kept;
+    };
+    match answered_as_elsewhere(&store, &hosts, &labels, &peer_id, now) {
+        Ok(None) => {
+            let _ = store.set_same_server(endpoint, run.label, None);
+            let _ = store.set_peer(run.label, &peer_id, now);
+        }
+        Ok(Some(other)) => {
+            let _ = store.set_same_server(endpoint, run.label, Some(&other));
+            let reason = format!(
+                "{}'s Rex server answers as the one {other} reaches, which your Rex hosts list \
+                 gives other addresses",
+                run.label
+            );
+            for item in queued.iter().filter(|item| item.host_id.is_none()) {
+                let _ = store.settle(run.label, item, Settled::Failed, Some(&reason), now);
+            }
+            return Round::Kept;
         }
         Err(_) => return Round::Kept,
-    };
+    }
     let mut kept = false;
     let silent = || {
         store
@@ -205,6 +219,7 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
         // B's last page said it keeps no more replies for this side, so a
         // collect first tells whether that still holds.
         let peer = Peer {
+            name,
             host_id: &peer_id,
             labels: &labels,
         };
@@ -232,6 +247,11 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
         if store.pin(run.label, item, &host_id).is_err() {
             return Round::Kept;
         }
+        let peer = Peer {
+            name,
+            host_id: &host_id,
+            labels: &labels,
+        };
         let request = Request {
             op: Op::Deliver,
             expect_host_id: host_id.clone(),
@@ -247,7 +267,7 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
                 in_reply_to: item.in_reply_to.clone(),
                 text: item.text.clone(),
             }),
-            ..acked(&store, &run.endpoint.key, &host_id, reading)
+            ..acked(&store, &run.endpoint.key, &peer, reading)
         };
         match perform(run.label, &request) {
             Call::Answered(answer) => {
@@ -262,10 +282,6 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
                 ) {
                     waiting.push((item.thread.as_str(), item.message_id.as_str()));
                 }
-                let peer = Peer {
-                    host_id: &host_id,
-                    labels: &labels,
-                };
                 let page = collect_replies(run, &store, &peer, &answer, reading);
                 let pages = (page != Page::Fault && more)
                     .then(|| collect(run, &store, &own, &peer, reading));
@@ -288,6 +304,7 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
         }
     }
     let peer = Peer {
+        name,
         host_id: &peer_id,
         labels: &labels,
     };
@@ -299,6 +316,30 @@ fn round(run: &mut Run<'_>, reading: &mut Reading) -> Round {
     } else {
         Round::Collected
     }
+}
+
+/// The label outside `labels`, and listed in `hosts`, whose server last
+/// reported `host_id` and still does when asked again, so the server
+/// behind `labels` answers as one this machine reaches by other
+/// addresses. One that now reports another `host_id` is recorded so, and
+/// one that does not answer counts.
+fn answered_as_elsewhere(
+    store: &RelayStore,
+    hosts: &Hosts,
+    labels: &[String],
+    host_id: &str,
+    now: i64,
+) -> Result<Option<String>, crate::StoreError> {
+    for other in store.answering_as(host_id)? {
+        if labels.contains(&other) || !hosts.labels.contains(&other) {
+            continue;
+        }
+        match status(&other) {
+            Ok(theirs) if theirs != host_id => store.set_peer(&other, &theirs, now)?,
+            _ => return Ok(Some(other)),
+        }
+    }
+    Ok(None)
 }
 
 /// Settles `item` by B's outcome for it, and says whether B has not taken
@@ -415,7 +456,7 @@ fn collect(
                 name: "namedrop".to_owned(),
                 host: super::machine_name(),
             },
-            ..acked(store, &run.endpoint.key, peer.host_id, reading)
+            ..acked(store, &run.endpoint.key, peer, reading)
         };
         let Call::Answered(answer) = perform(run.label, &request) else {
             return Pages {
@@ -452,11 +493,13 @@ fn collect(
     }
 }
 
-/// The parts of a request that ack what `endpoint` has taken from
-/// `host_id`, and ask for the replies after those `reading` read.
-fn acked(store: &RelayStore, endpoint: &str, host_id: &str, reading: &Reading) -> Request {
-    let (epoch, ack_through) = store.ack_through(endpoint, host_id).unwrap_or_default();
-    let after = if reading.host_id == host_id && reading.epoch == epoch {
+/// The parts of a request that ack what `endpoint` has taken from `peer`,
+/// and ask for the replies after those `reading` read.
+fn acked(store: &RelayStore, endpoint: &str, peer: &Peer<'_>, reading: &Reading) -> Request {
+    let (epoch, ack_through) = store
+        .ack_through(endpoint, peer.name, peer.host_id)
+        .unwrap_or_default();
+    let after = if reading.host_id == peer.host_id && reading.epoch == epoch {
         reading.after
     } else {
         0
@@ -477,10 +520,11 @@ fn acked(store: &RelayStore, endpoint: &str, host_id: &str, reading: &Reading) -
     }
 }
 
-/// The server a worker collects from: the `host_id` it reports, and the
-/// labels that reach it by this machine's host list, the worker's own
-/// first.
+/// The server a worker collects from: A's name for it, the first by name
+/// of the labels that reach it by this machine's host list, the `host_id`
+/// it reports, and those labels, the worker's own first.
 struct Peer<'a> {
+    name: &'a str,
     host_id: &'a str,
     labels: &'a [String],
 }
@@ -589,12 +633,16 @@ fn collect_replies(
     {
         return Page::Fault;
     }
-    let Ok((epoch, through)) = store.ack_through(endpoint, host_id) else {
+    let Ok((epoch, through)) = store.ack_through(endpoint, peer.name, host_id) else {
         return Page::Fault;
     };
     // A new epoch starts the cursor at 0, so the next request names the
     // epoch the pass reads, even before A acks a reply of it.
-    if epoch != answer.epoch && store.advance(endpoint, host_id, &answer.epoch, 0).is_err() {
+    if epoch != answer.epoch
+        && store
+            .advance(endpoint, peer.name, host_id, &answer.epoch, 0)
+            .is_err()
+    {
         return Page::Fault;
     }
     let through = if epoch == answer.epoch { through } else { 0 };
@@ -624,7 +672,7 @@ fn collect_replies(
                         .count_other_label(endpoint, run.label, super::now_ms())
                         .is_ok())
                     && store
-                        .advance(endpoint, host_id, &answer.epoch, reply.seq)
+                        .advance(endpoint, peer.name, host_id, &answer.epoch, reply.seq)
                         .is_ok()
         };
         match place(run, store, peer, answer, reply, reading) {
@@ -708,6 +756,7 @@ fn place(
     }
     let held = Held {
         endpoint: endpoint.clone(),
+        peer: peer.name.to_owned(),
         host_id: host_id.to_owned(),
         epoch: answer.epoch.clone(),
         label,
@@ -825,6 +874,7 @@ fn take(state: &Path, gate: Gate<'_>, held: &Held) -> Result<Taken, String> {
 /// its thread open.
 fn collected(store: &RelayStore, held: &Held, message_id: &str) -> Result<bool, crate::StoreError> {
     store.record_collected(&Collected {
+        peer: &held.peer,
         host_id: &held.host_id,
         epoch: &held.epoch,
         seq: held.reply.seq,

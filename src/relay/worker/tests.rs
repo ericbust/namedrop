@@ -59,7 +59,7 @@ fn rex(labels: &[&str]) -> Script {
         r#"D=$(dirname "$0")
 case "$*" in
 *"hosts list"*) [ -f "$D/hosts.json" ] && cat "$D/hosts.json" || echo '{hosts}';;
-*server.status*) [ -f "$D/status.json" ] && cat "$D/status.json" || echo '{{"pid":1,"host_id":"host-b"}}';;
+*server.status*) if [ -f "$D/status-$3.json" ]; then cat "$D/status-$3.json"; elif [ -f "$D/status.json" ]; then cat "$D/status.json"; else echo '{{"pid":1,"host_id":"host-b"}}'; fi;;
 *target.resolve*) [ -f "$D/resolve.json" ] && cat "$D/resolve.json" || echo '{{"results":[{{"query":"namedrop","status":"resolved","target":{{"kind":"client","client_id":"client:b"}}}}]}}';;
 *client.perform*)
   cat >> "$D/requests"; echo >> "$D/requests"
@@ -1228,7 +1228,7 @@ fn a_reply_with_a_bad_field_is_acked_and_dropped_and_a_long_one_cut() {
     );
     assert_eq!(
         crate::relay::tests_support::store(&space.state)
-            .ack_through(REX, "host-b")
+            .ack_through(REX, "devbox", "host-b")
             .unwrap()
             .1,
         8,
@@ -1295,7 +1295,7 @@ fn a_dropped_reply_is_acked_and_leaves_no_row_or_open_thread() {
     );
     assert_eq!(
         crate::relay::tests_support::store(&space.state)
-            .ack_through(REX, "host-b")
+            .ack_through(REX, "devbox", "host-b")
             .unwrap(),
         ("e1".to_owned(), 50)
     );
@@ -1461,65 +1461,113 @@ fn a_reply_to_a_message_not_sent_to_this_b_is_dropped() {
             other_label: 1,
             held_full: false,
             cannot_reply: false,
+            same_server_as: None,
             lost: 0,
         }],
         "only the reply to studio's message answered another host's"
     );
 }
 
-/// A server reports its own `host_id`, and learns another's whenever that
-/// one relays to it, so a server behind `devbox` that reports studio's
-/// cannot answer as studio's agent: a reply to a message sent to both is
-/// devbox's, and one to a message sent only to studio is dropped and
-/// counted, unless this machine's host list gives both labels one address.
+/// Runs the worker of `label` for one round.
+fn run_label(space: &Space, rex: &Script, label: &str) {
+    rex.run(|| {
+        let mut rounds = 0;
+        work(&mut Run {
+            state: &space.state,
+            endpoint: &Endpoint::parse(REX),
+            label,
+            gate: &|| Ok(None),
+            pause: &mut |_| {
+                rounds += 1;
+                rounds < 1
+            },
+            woken: &std::cell::RefCell::default(),
+            wake: &mut |_| {},
+        });
+    });
+}
+
+/// Makes `label`'s server report `host_id`.
+fn reports(rex: &Script, label: &str, host_id: &str) {
+    fs::write(
+        rex.directory.join(format!("status-{label}.json")),
+        json!({"pid": 1, "host_id": host_id}).to_string(),
+    )
+    .unwrap();
+}
+
+/// A server behind `devbox` that reports the `host_id` of studio's, which
+/// this machine reaches by other addresses, is sent nothing, not even
+/// studio's epoch and ack: devbox's new item fails with the reason, Doctor
+/// names both labels, and studio's cursor is its own, even for a forged
+/// reply in studio's epoch. Two labels that dial one address reach one
+/// server, and share its cursor.
 #[test]
 fn a_server_that_reports_another_s_host_id_cannot_answer_for_its_label() {
     let space = Space::new(REX);
     let rex = rex(&["devbox", "studio"]);
     crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
     let id = |sent: Result<Value, String>| sent.unwrap()["message_id"].as_str().unwrap().to_owned();
-    let shared = id(rex.run(|| space.send("request-1", "@bob@devbox @eve@studio shared")));
-    let studio = id(rex.run(|| space.send("request-2", "@eve@studio studio only")));
-    let run = |label: &str| {
-        rex.run(|| {
-            let mut rounds = 0;
-            work(&mut Run {
-                state: &space.state,
-                endpoint: &Endpoint::parse(REX),
-                label,
-                gate: &|| Ok(None),
-                pause: &mut |_| {
-                    rounds += 1;
-                    rounds < 1
-                },
-                woken: &std::cell::RefCell::default(),
-                wake: &mut |_| {},
-            });
-        });
-    };
-    fs::write(
-        rex.directory.join("status.json"),
-        json!({"pid": 1, "host_id": "host-s"}).to_string(),
-    )
-    .unwrap();
-    for _ in 0..2 {
-        rex.answer_with(
-            json!({"host_id": "host-s", "can_reply": true, "epoch": "e-studio",
-            "result": {"id": "x", "to": "eve", "status": "accepted"}, "outbox": [],
-            "more": false}),
-        );
-    }
-    run("studio");
-    let forged = |seq: i64, re: &str| {
-        json!({"seq": seq, "re": re, "thread": "t", "from": "eve",
-            "message_id": format!("forged-{seq}"), "text": format!("eve here {seq}")})
+    let studio = id(rex.run(|| space.send("request-1", "@eve@studio studio only")));
+    reports(&rex, "studio", "host-s");
+    reports(&rex, "devbox", "host-s");
+    let reply = |seq: i64| {
+        json!({"seq": seq, "re": studio, "thread": "t", "from": "eve",
+            "message_id": format!("s-{seq}"), "text": format!("eve {seq}")})
     };
     rex.answer_with(
-        json!({"host_id": "host-s", "can_reply": true, "epoch": "e-dev",
-        "result": {"id": "x", "to": "bob", "status": "accepted"},
-        "outbox": [forged(1, &shared), forged(2, &studio)], "more": false}),
+        json!({"host_id": "host-s", "can_reply": true, "epoch": "e-studio",
+        "result": {"id": "x", "to": "eve", "status": "accepted"},
+        "outbox": [reply(1)], "more": false}),
     );
-    run("devbox");
+    run_label(&space, &rex, "studio");
+    let cursor = |peer: &str| {
+        crate::relay::tests_support::store(&space.state)
+            .ack_through(REX, peer, "host-s")
+            .unwrap()
+    };
+    assert_eq!(cursor("studio"), ("e-studio".to_owned(), 1));
+
+    rex.run(|| space.send("request-2", "@bob@devbox hello"))
+        .unwrap();
+    let sent = rex.requests().len();
+    run_label(&space, &rex, "devbox");
+    assert_eq!(
+        rex.requests().len(),
+        sent,
+        "devbox's server is sent nothing"
+    );
+    assert_eq!(
+        outbound(&space)[1],
+        (
+            "failed".to_owned(),
+            Some(
+                "devbox's Rex server answers as the one studio reaches, which your Rex hosts \
+                 list gives other addresses"
+                    .to_owned()
+            ),
+            None
+        )
+    );
+    assert_eq!(
+        crate::relay::conditions(&space.state, REX).unwrap(),
+        [crate::relay::store::Conditions {
+            label: "devbox".to_owned(),
+            same_server_as: Some("studio".to_owned()),
+            ..crate::relay::store::Conditions::default()
+        }]
+    );
+
+    rex.answer_with(
+        json!({"host_id": "host-s", "can_reply": true, "epoch": "e-studio",
+        "outbox": [reply(2), reply(3)], "more": false}),
+    );
+    run_label(&space, &rex, "studio");
+    let to_studio = rex.requests().pop().unwrap();
+    assert_eq!(
+        (&to_studio["epoch"], &to_studio["ack_through"]),
+        (&json!("e-studio"), &json!(1))
+    );
     let replies = || {
         space.main(
             "SELECT author_alias_snapshot, body FROM collaboration_messages
@@ -1528,25 +1576,11 @@ fn a_server_that_reports_another_s_host_id_cannot_answer_for_its_label() {
     };
     assert_eq!(
         replies(),
-        [["eve@devbox", "eve here 1"]],
-        "devbox's server answers only as devbox"
-    );
-    assert_eq!(
-        crate::relay::tests_support::store(&space.state)
-            .ack_through(REX, "host-s")
-            .unwrap(),
-        ("e-dev".to_owned(), 2),
-        "the dropped reply is acked"
-    );
-    assert_eq!(
-        crate::relay::conditions(&space.state, REX).unwrap(),
-        [crate::relay::store::Conditions {
-            label: "devbox".to_owned(),
-            other_label: 1,
-            held_full: false,
-            cannot_reply: false,
-            lost: 0,
-        }]
+        [
+            ["eve@studio", "eve 1"],
+            ["eve@studio", "eve 2"],
+            ["eve@studio", "eve 3"]
+        ]
     );
 
     listed_at(
@@ -1556,19 +1590,98 @@ fn a_server_that_reports_another_s_host_id_cannot_answer_for_its_label() {
             ("studio", &["10.0.0.2:7297"]),
         ],
     );
-    Connection::open(space.state.join("relay.sqlite3"))
-        .unwrap()
-        .execute("DELETE FROM cursors", [])
+    rex.run(|| space.send("request-3", "@bob@devbox again"))
         .unwrap();
     rex.answer_with(
-        json!({"host_id": "host-s", "can_reply": true, "epoch": "e-dev2",
-        "outbox": [forged(3, &studio)], "more": false}),
+        json!({"host_id": "host-s", "can_reply": true, "epoch": "e-studio",
+        "result": {"id": "x", "to": "bob", "status": "accepted"},
+        "outbox": [reply(2), reply(3), reply(4)], "more": false}),
     );
-    run("devbox");
+    run_label(&space, &rex, "devbox");
     assert_eq!(
-        replies()[1],
-        ["eve@studio", "eve here 3"],
-        "two labels that dial one address reach one server"
+        replies(),
+        [
+            ["eve@studio", "eve 1"],
+            ["eve@studio", "eve 2"],
+            ["eve@studio", "eve 3"],
+            ["eve@studio", "eve 4"]
+        ],
+        "a reply read again under the server's new name is taken once"
+    );
+    rex.answer_with(
+        json!({"host_id": "host-s", "can_reply": true, "epoch": "e-studio",
+        "outbox": [], "more": false}),
+    );
+    run_label(&space, &rex, "studio");
+    let to_studio = rex.requests().pop().unwrap();
+    assert_eq!(
+        (&to_studio["epoch"], &to_studio["ack_through"]),
+        (&json!("e-studio"), &json!(4)),
+        "two labels that dial one address share the server's cursor"
+    );
+    assert!(
+        crate::relay::conditions(&space.state, REX)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// What a server did as one label is of that label's server alone: one
+/// that reported another's `host_id` first, and moved a cursor for it,
+/// moves nothing of the server that reports it next once it reports its
+/// own again.
+#[test]
+fn a_server_s_cursor_is_its_own_after_another_answered_as_it() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox", "studio"]);
+    crate::rex_bridge::remember_host_id(&space.state, &Endpoint::parse(REX), "host-a");
+    let id = |sent: Result<Value, String>| sent.unwrap()["message_id"].as_str().unwrap().to_owned();
+    reports(&rex, "devbox", "host-s");
+    rex.run(|| space.send("request-1", "@bob@devbox hello"))
+        .unwrap();
+    rex.answer_with(
+        json!({"host_id": "host-s", "can_reply": true, "epoch": "e-studio",
+        "result": {"id": "x", "to": "bob", "status": "accepted"},
+        "outbox": [{"seq": 1_000_000, "re": "nothing", "thread": "t", "from": "eve",
+            "message_id": "f-1", "text": ""}], "more": false}),
+    );
+    run_label(&space, &rex, "devbox");
+    let store = crate::relay::tests_support::store(&space.state);
+    assert_eq!(
+        store.ack_through(REX, "devbox", "host-s").unwrap(),
+        ("e-studio".to_owned(), 1_000_000)
+    );
+
+    reports(&rex, "devbox", "host-d");
+    reports(&rex, "studio", "host-s");
+    let studio = id(rex.run(|| space.send("request-2", "@eve@studio studio only")));
+    rex.answer_with(
+        json!({"host_id": "host-s", "can_reply": true, "epoch": "e-studio",
+        "result": {"id": "x", "to": "eve", "status": "accepted"},
+        "outbox": [{"seq": 1, "re": studio, "thread": "t", "from": "eve",
+            "message_id": "s-1", "text": "eve 1"}], "more": false}),
+    );
+    run_label(&space, &rex, "studio");
+    let to_studio = rex.requests().pop().unwrap();
+    assert_eq!(to_studio["item"]["id"], studio.as_str());
+    assert_eq!(to_studio["ack_through"], 0);
+    assert!(to_studio.get("epoch").is_none(), "{to_studio}");
+    assert_eq!(
+        space.main(
+            "SELECT author_alias_snapshot, body FROM collaboration_messages
+             WHERE request_id LIKE 'relay-reply:%' ORDER BY rowid"
+        ),
+        [["eve@studio", "eve 1"]]
+    );
+    assert_eq!(
+        store.ack_through(REX, "studio", "host-s").unwrap(),
+        ("e-studio".to_owned(), 1)
+    );
+    assert!(
+        crate::relay::conditions(&space.state, REX)
+            .unwrap()
+            .is_empty(),
+        "devbox now reports its own host_id"
     );
 }
 
@@ -1825,7 +1938,13 @@ fn each_endpoint_acks_only_what_it_took_from_b() {
     work_for(&space, &rex, 1);
     let store = crate::relay::tests_support::store(&space.state);
     store
-        .advance("rex:/tmp/namedrop-relay-other.sock", "host-b", "e1", 5)
+        .advance(
+            "rex:/tmp/namedrop-relay-other.sock",
+            "devbox",
+            "host-b",
+            "e1",
+            5,
+        )
         .unwrap();
     rex.answer_with(
         json!({"host_id": "host-b", "can_reply": true, "epoch": "e1", "more": false,
@@ -1846,7 +1965,7 @@ fn each_endpoint_acks_only_what_it_took_from_b() {
     assert_eq!(collected_bodies(&space), [["this endpoint's reply"]]);
     assert_eq!(
         store
-            .ack_through("rex:/tmp/namedrop-relay-other.sock", "host-b")
+            .ack_through("rex:/tmp/namedrop-relay-other.sock", "devbox", "host-b")
             .unwrap(),
         ("e1".to_owned(), 5),
         "the other endpoint's cursor is its own"
@@ -1874,7 +1993,7 @@ fn one_collect_reads_at_most_16_pages() {
     assert_eq!(rex.requests().len(), 1 + 16);
     assert_eq!(
         crate::relay::tests_support::store(&space.state)
-            .ack_through(REX, "host-b")
+            .ack_through(REX, "devbox", "host-b")
             .unwrap()
             .1,
         17
@@ -2294,7 +2413,7 @@ fn replies_past_the_reply_limit_are_held_told_once_and_follow_a_continue() {
     );
     assert_eq!(
         crate::relay::tests_support::store(&space.state)
-            .ack_through(REX, "host-b")
+            .ack_through(REX, "devbox", "host-b")
             .unwrap()
             .1,
         12,
@@ -2422,7 +2541,7 @@ fn a_thread_holds_at_most_20_replies_and_b_keeps_the_rest_in_order() {
     );
     let ack = |space: &Space| {
         crate::relay::tests_support::store(&space.state)
-            .ack_through(REX, "host-b")
+            .ack_through(REX, "devbox", "host-b")
             .unwrap()
             .1
     };
@@ -2434,6 +2553,7 @@ fn a_thread_holds_at_most_20_replies_and_b_keeps_the_rest_in_order() {
             other_label: 0,
             held_full: true,
             cannot_reply: false,
+            same_server_as: None,
             lost: 0,
         }]
     );
@@ -2503,7 +2623,7 @@ fn replies_past_a_full_hold_stay_on_b_until_there_is_room() {
         [[json!(100)]]
     );
     let store = crate::relay::tests_support::store(&space.state);
-    assert_eq!(store.ack_through(REX, "host-b").unwrap().1, 210);
+    assert_eq!(store.ack_through(REX, "devbox", "host-b").unwrap().1, 210);
     assert!(crate::relay::conditions(&space.state, REX).unwrap()[0].held_full);
     for message in &messages {
         as_person(
@@ -2523,7 +2643,7 @@ fn replies_past_a_full_hold_stay_on_b_until_there_is_room() {
     );
     work_for(&space, &rex, 1);
     assert_eq!(collected_bodies(&space).len(), 220, "no reply is lost");
-    assert_eq!(store.ack_through(REX, "host-b").unwrap().1, 220);
+    assert_eq!(store.ack_through(REX, "devbox", "host-b").unwrap().1, 220);
     assert!(
         crate::relay::conditions(&space.state, REX)
             .unwrap()
@@ -2563,7 +2683,7 @@ fn a_thread_with_no_room_keeps_back_only_its_own_replies() {
     );
     assert_eq!(
         crate::relay::tests_support::store(&space.state)
-            .ack_through(REX, "host-b")
+            .ack_through(REX, "devbox", "host-b")
             .unwrap()
             .1,
         30
@@ -2688,7 +2808,7 @@ fn a_stopped_thread_takes_no_reply_held_or_new() {
     );
     assert_eq!(
         crate::relay::tests_support::store(&space.state)
-            .ack_through(REX, "host-b")
+            .ack_through(REX, "devbox", "host-b")
             .unwrap()
             .1,
         13
@@ -2783,7 +2903,7 @@ fn a_copy_of_a_collected_reply_records_nothing_and_wakes_nothing() {
     );
     assert_eq!(
         crate::relay::tests_support::store(&space.state)
-            .ack_through(REX, "host-b")
+            .ack_through(REX, "devbox", "host-b")
             .unwrap()
             .1,
         50
@@ -2852,7 +2972,11 @@ fn a_reply_whose_record_failed_is_not_acked_and_is_recorded_next_round() {
     work_for(&space, &rex, 1);
     assert_eq!(collected_bodies(&space), [["reply 1"]]);
     let store = crate::relay::tests_support::store(&space.state);
-    assert_eq!(store.ack_through(REX, "host-b").unwrap().1, 0, "not acked");
+    assert_eq!(
+        store.ack_through(REX, "devbox", "host-b").unwrap().1,
+        0,
+        "not acked"
+    );
     relay.execute_batch("DROP TRIGGER fail_collected").unwrap();
     rex.answer_with(
         json!({"host_id": "host-b", "can_reply": true, "epoch": "e1",
@@ -2861,7 +2985,7 @@ fn a_reply_whose_record_failed_is_not_acked_and_is_recorded_next_round() {
     let (_, woken) = work_for(&space, &rex, 1);
     assert_eq!(woken, ["session:a"]);
     assert_eq!(collected_bodies(&space), [["reply 1"]]);
-    assert_eq!(store.ack_through(REX, "host-b").unwrap().1, 1);
+    assert_eq!(store.ack_through(REX, "devbox", "host-b").unwrap().1, 1);
     rex.run(|| space.reply("answer", &message, "@bob@devbox follow-up"))
         .unwrap();
     capture(&space);
@@ -3105,7 +3229,7 @@ fn a_reply_a_refuses_is_told_once_and_never_held() {
     );
     assert_eq!(
         crate::relay::tests_support::store(&space.state)
-            .ack_through(REX, "host-b")
+            .ack_through(REX, "devbox", "host-b")
             .unwrap()
             .1,
         3
@@ -3665,7 +3789,7 @@ fn a_thread_with_no_room_keeps_no_other_thread_s_reply_from_arriving() {
     assert_eq!(bodies_for(&space, &second), [big(35)]);
     assert_eq!(bodies_for(&space, &first).len(), 10);
     let store = crate::relay::tests_support::store(&space.state);
-    assert_eq!(store.ack_through(REX, "host-b").unwrap().1, 30);
+    assert_eq!(store.ack_through(REX, "devbox", "host-b").unwrap().1, 30);
     assert_eq!(
         b.outbox_page("host-a", 30, 0, wire::PAGE_LIMIT).unwrap().2,
         5,
@@ -3687,7 +3811,7 @@ fn a_thread_with_no_room_keeps_no_other_thread_s_reply_from_arriving() {
     resume();
     assert_eq!(bodies_for(&space, &first).len(), 30);
     work_for(&space, &rex, 1);
-    assert_eq!(store.ack_through(REX, "host-b").unwrap().1, 35);
+    assert_eq!(store.ack_through(REX, "devbox", "host-b").unwrap().1, 35);
     resume();
     let mut expected: Vec<String> = (1..=30).map(|seq| format!("reply {seq}")).collect();
     expected.extend((31..=34).map(big));
@@ -3916,7 +4040,7 @@ fn one_worker_lets_a_continued_thread_s_replies_in(b: fn(&[Reply]) -> (Script, R
     assert_eq!(bodies_for(&space, &first), expected);
     assert_eq!(bodies_for(&space, &second), [big(35)]);
     let store = crate::relay::tests_support::store(&space.state);
-    assert_eq!(store.ack_through(REX, "host-b").unwrap().1, 35);
+    assert_eq!(store.ack_through(REX, "devbox", "host-b").unwrap().1, 35);
     assert_eq!(
         b.outbox_page("host-a", 35, 0, wire::PAGE_LIMIT).unwrap().2,
         0
@@ -3983,13 +4107,18 @@ fn a_reply_to_an_item_a_could_not_settle_stays_on_b_until_a_settles_it() {
     };
     let labels = ["devbox".to_owned()];
     let peer = Peer {
+        name: "devbox",
         host_id: "host-b",
         labels: &labels,
     };
     let page: Answer =
         serde_json::from_value(answer("accepted", None, replies(&message, 1, 1))).unwrap();
     rex.run(|| collect_replies(&mut run, &store, &peer, &page, &mut Reading::default()));
-    assert_eq!(store.ack_through(REX, "host-b").unwrap().1, 0, "B keeps it");
+    assert_eq!(
+        store.ack_through(REX, "devbox", "host-b").unwrap().1,
+        0,
+        "B keeps it"
+    );
     assert!(collected_bodies(&space).is_empty());
     assert!(dropped_bodies(&space).is_empty());
     assert!(
@@ -4002,7 +4131,7 @@ fn a_reply_to_an_item_a_could_not_settle_stays_on_b_until_a_settles_it() {
     work_for(&space, &rex, 1);
     assert_eq!(outbound(&space)[0].0, "accepted");
     assert_eq!(collected_bodies(&space), [["reply 1"]]);
-    assert_eq!(store.ack_through(REX, "host-b").unwrap().1, 1);
+    assert_eq!(store.ack_through(REX, "devbox", "host-b").unwrap().1, 1);
 }
 
 /// The losses A told, each as (relay author, recipient, thread, body).
