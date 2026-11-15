@@ -167,7 +167,18 @@ def main():
         server_log.close()
         recorded = root / "helper-pids"
         evidence["helper_pids"] = sorted({int(pid) for pid in recorded.read_text().split()}) if recorded.exists() else []
-        for pid in evidence["helper_pids"]:
+        # Helpers that spawn through runtime/current skip the launcher's record.
+        try:
+            listing = subprocess.run(["/bin/ps", "-axo", "pid=,command="], capture_output=True,
+                                     text=True, check=True).stdout
+            prefixes = (str(root) + "/", str(root.resolve()) + "/")
+            stray = [int(line.split(None, 1)[0]) for line in listing.splitlines()
+                     if line.split(None, 1)[1:] and line.split(None, 1)[1].startswith(prefixes)]
+        except (OSError, subprocess.CalledProcessError) as error:
+            evidence["stray_scan_error"] = repr(error)
+            stray = []
+        evidence["stray_pids"] = sorted(set(stray) - set(evidence["helper_pids"]))
+        for pid in evidence["helper_pids"] + evidence["stray_pids"]:
             try:
                 os.kill(pid, signal.SIGTERM)
             except ProcessLookupError:
