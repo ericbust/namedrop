@@ -1,37 +1,1056 @@
-[
-  {
-    "file": "src/mux/rex/popup.rs",
-    "line": 40,
-    "source": "This pane is running Herdr. Use Herdr's own {title}.",
-    "text": "This pane is running Herdr. Use Herdr's own Name this pane.",
-    "reason": "U5 pins the refusal when the Rex pane runs Herdr in its foreground."
-  },
-  {
-    "file": "src/mux/rex/popup.rs",
-    "line": 40,
-    "source": "This pane is running Herdr. Use Herdr's own {title}.",
-    "text": "This pane is running Herdr. Use Herdr's own Manage Namedrop names and agents.",
-    "reason": "U5 pins the refusal when the Rex pane runs Herdr in its foreground."
-  },
-  {
-    "file": "src/mux/rex/popup.rs",
-    "line": 40,
-    "source": "This pane is running Herdr. Use Herdr's own {title}.",
-    "text": "This pane is running Herdr. Use Herdr's own Namedrop Doctor.",
-    "reason": "U5 pins the refusal when the Rex pane runs Herdr in its foreground."
-  },
-  {
-    "file": "src/mux/rex/popup.rs",
-    "line": 40,
-    "source": "This pane is running Herdr. Use Herdr's own {title}.",
-    "text": "This pane is running Herdr. Use Herdr's own Agent status.",
-    "reason": "U5 pins the refusal when the Rex pane runs Herdr in its foreground."
-  },
-  {
-    "file": "src/mux/rex/popup.rs",
-    "line": 40,
-    "source": "This pane is running Herdr. Use Herdr's own {title}.",
-    "text": "This pane is running Herdr. Use Herdr's own Namedrop tour.",
-    "reason": "U5 pins the refusal when the Rex pane runs Herdr in its foreground."
-  }
-]
+{
+  "printed": [
+    {
+      "kind": "foreground-refusal",
+      "text": "This pane is running Herdr. Use Herdr's own Name this pane.",
+      "surfaces": [
+        "ui launch name (Herdr in the foreground)"
+      ],
+      "sources": [
+        {"file": "src/mux/rex/popup.rs", "line": 40, "source": "This pane is running Herdr. Use Herdr's own {title}."}
+      ],
+      "reason": "U5 pins the refusal when the Rex pane runs Herdr in its foreground."
+    },
+    {
+      "kind": "foreground-refusal",
+      "text": "This pane is running Herdr. Use Herdr's own Manage Namedrop names and agents.",
+      "surfaces": [
+        "ui launch manage (Herdr in the foreground)"
+      ],
+      "sources": [
+        {"file": "src/mux/rex/popup.rs", "line": 40, "source": "This pane is running Herdr. Use Herdr's own {title}."}
+      ],
+      "reason": "U5 pins the refusal when the Rex pane runs Herdr in its foreground."
+    },
+    {
+      "kind": "foreground-refusal",
+      "text": "This pane is running Herdr. Use Herdr's own Namedrop Doctor.",
+      "surfaces": [
+        "ui launch doctor (Herdr in the foreground)"
+      ],
+      "sources": [
+        {"file": "src/mux/rex/popup.rs", "line": 40, "source": "This pane is running Herdr. Use Herdr's own {title}."}
+      ],
+      "reason": "U5 pins the refusal when the Rex pane runs Herdr in its foreground."
+    },
+    {
+      "kind": "foreground-refusal",
+      "text": "This pane is running Herdr. Use Herdr's own Agent status.",
+      "surfaces": [
+        "ui launch status (Herdr in the foreground)"
+      ],
+      "sources": [
+        {"file": "src/mux/rex/popup.rs", "line": 40, "source": "This pane is running Herdr. Use Herdr's own {title}."}
+      ],
+      "reason": "U5 pins the refusal when the Rex pane runs Herdr in its foreground."
+    },
+    {
+      "kind": "foreground-refusal",
+      "text": "This pane is running Herdr. Use Herdr's own Namedrop tour.",
+      "surfaces": [
+        "ui launch tour (Herdr in the foreground)"
+      ],
+      "sources": [
+        {"file": "src/mux/rex/popup.rs", "line": 40, "source": "This pane is running Herdr. Use Herdr's own {title}."}
+      ],
+      "reason": "U5 pins the refusal when the Rex pane runs Herdr in its foreground."
+    },
+    {
+      "kind": "shared-home",
+      "text": "ND-INSTALL-002: Namedrop's shared agent packages belong to Herdr's install in <path>. Run Activate Namedrop in Herdr to update them.",
+      "surfaces": [
+        "activate (Herdr owns the packages)",
+        "install.sh"
+      ],
+      "sources": [
+        {"file": "src/installed_runtime/packages.rs", "line": 123, "source": "ND-INSTALL-002: Namedrop's shared agent packages belong to Herdr's install in {}. Run Activate Namedrop in Herdr to update them."},
+        {"file": "scripts/install.sh", "line": 115, "source": "ND-INSTALL-002: Namedrop's shared agent packages belong to Herdr's install in "},
+        {"file": "scripts/runtime_install.py", "line": 23, "source": "ND-INSTALL-002: Namedrop's shared agent packages belong to Herdr's install in "},
+        {"file": "scripts/install.sh", "line": 116, "source": "{state}. Run Activate Namedrop in Herdr to update them."},
+        {"file": "scripts/runtime_install.py", "line": 24, "source": "{self.state}. Run Activate Namedrop in Herdr to update them."}
+      ],
+      "reason": "ND-INSTALL-002's Herdr form: a Rex install's writer refuses packages that Herdr's install owns. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "ND-INSTALL-001: Namedrop on Rex moved to Herdr's install in <path>. In each Rex session, run Activate Namedrop again and name the panes again, then restart the agents there so they load the new hooks.",
+      "surfaces": [
+        "activate (Herdr took the state over)",
+        "name (Herdr took the state over)",
+        "address.list (Herdr took the state over)",
+        "doctor (Herdr took the state over)",
+        "doctor text (Herdr took the state over)"
+      ],
+      "sources": [
+        {"file": "src/installed_runtime/retirement.rs", "line": 27, "source": "ND-INSTALL-001: Namedrop on Rex moved to Herdr's install in {}. In each Rex session, run Activate Namedrop again and name the panes again, then restart the agents there so they load the new hooks."}
+      ],
+      "reason": "UI.md, Retiring a state: a Rex state that Herdr took over says where it went. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Namedrop on Rex moved to Herdr's install in <path>. 1 agent on Rex still runs the old hooks from <path>, and the names made there were not carried over. In each Rex session, run Activate Namedrop again and name the panes again, then restart those agents so they load the new hooks. This warning clears when they have all ended.",
+      "surfaces": [
+        "doctor (Herdr took the state over)",
+        "doctor text (Herdr took the state over)"
+      ],
+      "sources": [
+        {"file": "src/rex_ui/handoff.rs", "line": 278, "source": "Namedrop on Rex moved to Herdr's install in {}. {count} the old hooks from {}, and the names made there were not carried over. In each Rex session, run Activate Namedrop again and name the panes again, then restart those agents so they load the new hooks. This warning clears when they have all ended.\n{blocks}"}
+      ],
+      "reason": "ND-INSTALL-001 in Doctor of the state that took over, read from a Rex block whose agent still runs the old hooks. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "An older Herdr release updated the packages without updating the Rex module.",
+      "surfaces": [
+        "doctor (Herdr rebaked the packages)",
+        "doctor text (Herdr rebaked the packages)"
+      ],
+      "sources": [
+        {"file": "src/health.rs", "line": 321, "source": "An older Herdr release updated the packages without updating the Rex module."}
+      ],
+      "reason": "ND-INSTALL-003 (U3): Herdr's install rebaked the packages under the Rex module. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Update Namedrop in Herdr, then run Activate Namedrop there again.",
+      "surfaces": [
+        "doctor (Herdr rebaked the packages)",
+        "doctor text (Herdr rebaked the packages)"
+      ],
+      "sources": [
+        {"file": "src/health.rs", "line": 323, "source": "Update Namedrop in Herdr, then run Activate Namedrop there again."}
+      ],
+      "reason": "ND-INSTALL-003's repair. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again.",
+      "surfaces": [
+        "install.sh"
+      ],
+      "sources": [
+        {"file": "scripts/runtime.py", "line": 852, "source": "Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again."},
+        {"file": "scripts/install.sh", "line": 111, "source": "Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again."}
+      ],
+      "reason": "A Rex state that Herdr is taking over refuses the install. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Install Namedrop for Rex, or adopt the existing Herdr runtime.",
+      "surfaces": [
+        "install.sh"
+      ],
+      "sources": [
+        {"file": "scripts/install.sh", "line": 11, "source": "Install Namedrop for Rex, or adopt the existing Herdr runtime."}
+      ],
+      "reason": "install.sh's help names the adoption it offers. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Namedrop is already installed in Herdr (<path>). Update Namedrop in Herdr first, then run sh scripts/install.sh again.",
+      "surfaces": [
+        "install.sh"
+      ],
+      "sources": [
+        {"file": "scripts/install.sh", "line": 124, "source": "Namedrop is already installed in Herdr ({herdr}). "},
+        {"file": "scripts/install.sh", "line": 125, "source": "Update Namedrop in Herdr first, then run sh scripts/install.sh again."}
+      ],
+      "reason": "A Herdr release from before step 6 owns this HOME's Namedrop. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Update Namedrop in Herdr first, then run sh scripts/install.sh again.",
+      "surfaces": [
+        "install.sh"
+      ],
+      "sources": [
+        {"file": "scripts/install.sh", "line": 135, "source": "Update Namedrop in Herdr first, then run sh scripts/install.sh again."}
+      ],
+      "reason": "Herdr's runtime cannot install the Rex module yet. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Herdr keeps its runtime and updates it. This archive publishes no runtime.",
+      "surfaces": [
+        "install.sh"
+      ],
+      "sources": [
+        {"file": "scripts/install.sh", "line": 154, "source": "Herdr keeps its runtime and updates it. This archive publishes no runtime."}
+      ],
+      "reason": "install.sh adopts Herdr's runtime. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Installing the Rex module and agent packages with Herdr's runtime…",
+      "surfaces": [
+        "install.sh"
+      ],
+      "sources": [
+        {"file": "scripts/install.sh", "line": 166, "source": "Installing the Rex module and agent packages with Herdr's runtime…"}
+      ],
+      "reason": "install.sh adopts Herdr's runtime. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Name and @mention agents or terminals in Herdr;",
+      "surfaces": [
+        "installed Codex/SKILL.md (Herdr owns the packages)",
+        "installed ClaudeCode/SKILL.md (Herdr owns the packages)"
+      ],
+      "sources": [
+        {"file": "integrations/SKILL.md", "line": 3, "source": "Name and @mention agents or terminals in Herdr;"}
+      ],
+      "reason": "The shared packages' SKILL.md when Herdr's install owns them. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Registration uses that prefix with Herdr flags.",
+      "surfaces": [
+        "installed Codex/SKILL.md (Herdr owns the packages)",
+        "installed ClaudeCode/SKILL.md (Herdr owns the packages)"
+      ],
+      "sources": [
+        {"file": "integrations/SKILL.md", "line": 14, "source": "Registration uses that prefix with Herdr flags."}
+      ],
+      "reason": "The shared packages' SKILL.md when Herdr's install owns them. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Use the installed executable directly with `--plugin-state` and the state directory (`HERDR_PLUGIN_STATE_DIR` or `NAMEDROP_STATE_DIR`) before the bound operation. Append the location flags with the exact values the delivery's lines or `control.tool.environment` show: `--herdr-socket`, `--herdr-workspace`, and `--herdr-pane` for `HERDR_SOCKET_PATH`, `HERDR_WORKSPACE_ID`, and `HERDR_PANE_ID`, or `--endpoint`, `--space`, and `--pane` for `NAMEDROP_ENDPOINT`, `NAMEDROP_SPACE_ID`, and `NAMEDROP_PANE_ID`.",
+      "surfaces": [
+        "installed Codex/SKILL.md (Herdr owns the packages)",
+        "installed ClaudeCode/SKILL.md (Herdr owns the packages)"
+      ],
+      "sources": [
+        {"file": "src/install.rs", "line": 891, "source": "Use the installed executable directly with `--plugin-state` and the state directory (`HERDR_PLUGIN_STATE_DIR` or `NAMEDROP_STATE_DIR`) before the bound operation. Append the location flags with the exact values the delivery's lines or `control.tool.environment` show: `--herdr-socket`, `--herdr-workspace`, and `--herdr-pane` for `HERDR_SOCKET_PATH`, `HERDR_WORKSPACE_ID`, and `HERDR_PANE_ID`, or `--endpoint`, `--space`, and `--pane` for `NAMEDROP_ENDPOINT`, `NAMEDROP_SPACE_ID`, and `NAMEDROP_PANE_ID`."}
+      ],
+      "reason": "The shared packages' SKILL.md when Herdr's install owns them. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "If the sandbox blocks Herdr, Namedrop queues these commands for its outside worker.",
+      "surfaces": [
+        "installed Codex/SKILL.md (Herdr owns the packages)"
+      ],
+      "sources": [
+        {"file": "src/install.rs", "line": 896, "source": "Herdr"}
+      ],
+      "reason": "The shared packages' Codex SKILL.md when Herdr's install owns them. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "Read every activated workspace of this Herdr session instead of this one.",
+      "surfaces": [
+        "installed Codex/tool.json (Herdr owns the packages)",
+        "installed ClaudeCode/tool.json (Herdr owns the packages)"
+      ],
+      "sources": [
+        {"file": "integrations/tool.json", "line": 1393, "source": "Read every activated workspace of this Herdr session instead of this one."}
+      ],
+      "reason": "The shared packages' tool.json when Herdr's install owns them. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    },
+    {
+      "kind": "shared-home",
+      "text": "the pin writes one ref under refs/herdr-context/",
+      "surfaces": [
+        "installed Codex/tool.json (Herdr owns the packages)",
+        "installed ClaudeCode/tool.json (Herdr owns the packages)"
+      ],
+      "sources": [
+        {"file": "integrations/tool.json", "line": 169, "source": "the pin writes one ref under refs/herdr-context/"}
+      ],
+      "reason": "The shared packages' tool.json when Herdr's install owns them. It is about the Herdr install that shares this HOME, which a Rex home reaches when both hosts are installed."
+    }
+  ],
+  "unprinted": [
+    {
+      "kind": "herdr-home-only",
+      "file": "scripts/check-linux-prerequisites.sh",
+      "reason": "Herdr's Linux prerequisites check, which probes for herdr.",
+      "literals": [
+        [83, "inside herdr"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "scripts/check-update.py",
+      "reason": "The update check of a Herdr registration; a standalone install reads source.json instead.",
+      "literals": [
+        [55, "plugins"],
+        [56, "plugin_list"],
+        [60, "plugin_id"],
+        [78, "plugin_root"],
+        [93, "--plugin"],
+        [93, "HERDR_BIN_PATH"],
+        [93, "herdr"],
+        [93, "plugin"],
+        [221, "https://raw.githubusercontent.com/{source[\"owner\"]}/{source[\"repo\"]}/{commit}/{prefix}herdr-plugin.toml"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "scripts/install.sh",
+      "reason": "A file or directory name of the agent packages, read and written, never printed as text.",
+      "literals": [
+        [122, "herdr/plugins/namedrop"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "scripts/install.sh",
+      "reason": "A value of runtime/owner or retired.json's reason, read and written, never printed.",
+      "literals": [
+        [59, "herdr"],
+        [60, "herdr"],
+        [111, "herdr_handoff"],
+        [114, "herdr"],
+        [123, "herdr"],
+        [127, "herdr"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "scripts/package-release.sh",
+      "reason": "Maintainer release tooling, which no home runs.",
+      "literals": [
+        [34, "$namedrop_root/herdr-plugin.toml"],
+        [35, "Cargo and Herdr manifest versions must match."],
+        [86, "$namedrop_root/herdr-plugin.toml"],
+        [86, "$package/herdr-plugin.toml"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "scripts/release.sh",
+      "reason": "Maintainer release tooling, which no home runs.",
+      "literals": [
+        [6, "version  prints the release version after checking Cargo.toml, Cargo.lock and herdr-plugin.toml agree."],
+        [18, "$namedrop_root/herdr-plugin.toml"],
+        [20, "herdr-plugin.toml has version '$manifest' but Cargo.toml has '$version'. Set the same version in both."],
+        [71, "Experimental version $version cannot be released to main. Choose a stable version for main in Cargo.toml, herdr-plugin.toml and Cargo.lock."],
+        [79, "Raise the version in Cargo.toml, herdr-plugin.toml and Cargo.lock (see docs/releasing.md#choose-the-version)."]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "scripts/run.sh",
+      "reason": "An entry point of Herdr's plugin manifest (herdr-plugin.toml), which only Herdr runs.",
+      "literals": [
+        [9, "${HERDR_PANE_ID-}"],
+        [10, "$HERDR_PANE_ID"],
+        [15, "$HERDR_PLUGIN_STATE_DIR/runtime/namedrop"],
+        [15, "${HERDR_PLUGIN_STATE_DIR-}"],
+        [16, "$HERDR_PLUGIN_STATE_DIR/runtime/namedrop"]
+      ]
+    },
+    {
+      "kind": "agent-plugin",
+      "file": "scripts/runtime.py",
+      "reason": "Codex's or Claude Code's own plugin, or Namedrop's --plugin-state flag, which a Rex home uses as a Herdr home does.",
+      "literals": [
+        [821, "plugin"],
+        [822, "plugin"],
+        [832, "Installing the Namedrop Codex plugin…"],
+        [843, "Codex installation finished but its installed plugin cache could not be verified."]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "scripts/runtime.py",
+      "reason": "The Herdr survey of the first publish; --verify install makes no herdr call.",
+      "literals": [
+        [99, "Could not identify existing sessions for the one-time runtime migration. Retry activation when Herdr can report their identities."]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "scripts/runtime.py",
+      "reason": "The busy refusal's word for a Herdr state; a standalone state's says screen.",
+      "literals": [
+        [181, "popup"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "scripts/runtime.py",
+      "reason": "run.sh's argv form; install.sh always passes the explicit --state-dir form.",
+      "literals": [
+        [1218, "--herdr-pane"],
+        [1219, "Expected activate or --herdr-pane after ROOT; explicit calls need --state-dir DIR --verify activate|install."]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "scripts/runtime.py",
+      "reason": "A value of runtime/owner or retired.json's reason, read and written, never printed.",
+      "literals": [
+        [857, "herdr_handoff"],
+        [948, "herdr_handoff"],
+        [1007, "herdr_handoff"],
+        [1125, "herdr\n"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "scripts/runtime.py",
+      "reason": "An environment or config name read or set, never printed.",
+      "literals": [
+        [342, "HERDR_PLUGIN_STATE_DIR"],
+        [444, "HERDR_PLUGIN_STATE_DIR"],
+        [444, "HERDR_SOCKET_PATH"],
+        [444, "HERDR_WORKSPACE_ID"],
+        [1045, "HERDR_PLUGIN_STATE_DIR"],
+        [1136, "HERDR_WORKSPACE_ID"],
+        [1215, "HERDR_PLUGIN_STATE_DIR"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "scripts/runtime_install.py",
+      "reason": "A file or directory name of the agent packages, read and written, never printed as text.",
+      "literals": [
+        [149, "herdr-plugin.toml"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "scripts/runtime_install.py",
+      "reason": "A value of runtime/owner or retired.json's reason, read and written, never printed.",
+      "literals": [
+        [21, "herdr"],
+        [22, "herdr"],
+        [23, "herdr"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "scripts/setup.sh",
+      "reason": "An entry point of Herdr's plugin manifest (herdr-plugin.toml), which only Herdr runs.",
+      "literals": [
+        [10, "Run in a terminal in the desired Herdr workspace. install links this directory and activates Namedrop, activate only activates an already registered installation, and check only runs doctor. --keep-open keeps the result visible until Enter is pressed."],
+        [28, "${HERDR_PANE_ID:-}"],
+        [28, "${HERDR_SOCKET_PATH:-}"],
+        [28, "${HERDR_WORKSPACE_ID:-}"],
+        [29, "Open a terminal in the desired Herdr workspace, then run this command again. HERDR_WORKSPACE_ID, HERDR_PANE_ID and HERDR_SOCKET_PATH must identify that workspace."],
+        [33, "Herdr is missing from PATH. Install Herdr and open a new terminal inside it."],
+        [37, "Herdr native runtime hooks require Python 3 on PATH to report Agent Session IDs. Install Python 3, open a new Herdr terminal, and retry. The Namedrop executable itself does not require Python."],
+        [51, "import json, sys\ntry:\n    plugins = json.loads(sys.argv[1])[\"result\"][\"plugins\"]\n    # Only a real list is a registration. An object or a string also iterates,\n    # yielding no kinds, so either would otherwise read as `none` and authorize\n    # the build-and-relink branch below. A non-object envelope, or one missing\n    # result.plugins, raises on the line above and reports the same way.\n    if isinstance(plugins, list):\n        kinds = [p.get(\"source\", {}).get(\"kind\") for p in plugins\n                 if p.get(\"plugin_id\") == \"namedrop\"]\n    else:\n        kinds = None\nexcept (AttributeError, IndexError, KeyError, TypeError, ValueError):\n    kinds = None\nif kinds is None:\n    print(\"unreadable\")\nelif not kinds:\n    print(\"none\")\nelif \"github\" in kinds:\n    print(\"github\")\nelif all(kind == \"local\" for kind in kinds):\n    print(\"local\")\nelse:\n    print(\"unsupported:\" + \", \".join(repr(kind) if isinstance(kind, str)\n                                     else \"no source kind\" for kind in kinds))"],
+        [76, "$(herdr plugin list --plugin namedrop --json || true)"],
+        [95, "Install from source instead: herdr plugin install ericbust/namedrop --ref main"],
+        [101, "Namedrop is registered with Herdr from a source this helper cannot keep (${registration#unsupported:}). Inspect herdr plugin list --plugin namedrop --json, then run sh scripts/setup.sh activate instead of relinking it."],
+        [105, "Could not read how Namedrop is registered with Herdr, so this run stopped rather than risk replacing a managed installation with a local link. Inspect herdr plugin list --plugin namedrop --json, then run sh scripts/setup.sh activate if it is already installed."],
+        [112, "$HERDR_WORKSPACE_ID"],
+        [134, "herdr"],
+        [139, "Herdr command exited {result.returncode}"],
+        [148, "HERDR_PANE_ID"],
+        [152, "plugin.action.invoke"],
+        [153, "plugin_id"],
+        [158, "HERDR_SOCKET_PATH"],
+        [163, "Herdr did not accept the bound setup action: "],
+        [170, "herdr "],
+        [246, "  For new Codex sessions, refresh the installed plugin:"],
+        [258, "Herdr "],
+        [272, "    herdr integration install codex\n    herdr integration install claude"],
+        [289, "plugin"],
+        [293, "plugin_action_invoked"],
+        [299, "--plugin"],
+        [299, "plugin"],
+        [300, "plugin_log_list"],
+        [307, "plugin_id"],
+        [357, "Inspect herdr plugin log list --plugin namedrop --limit 100; do not assume the action failed or retry automatically."]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "scripts/update.py",
+      "reason": "Herdr's updater, which Update Namedrop in Herdr's workspace actions runs.",
+      "literals": [
+        [37, "plugin_root"],
+        [41, "HERDR_PLUGIN_STATE_DIR"],
+        [47, "herdr-plugin.toml"],
+        [48, "{revision}:{prefix}herdr-plugin.toml"],
+        [96, "HERDR_SOCKET_PATH"],
+        [97, "herdr"],
+        [98, "herdr {shlex.join(args)} failed: {result.stderr.strip()}"],
+        [100, "Herdr returned an invalid response."],
+        [105, "--plugin"],
+        [105, "plugin"],
+        [106, "Invalid plugin registry response."],
+        [107, "plugins"],
+        [108, "plugin_list"],
+        [111, "plugin_id"],
+        [121, "The registration has no safe explicit requested_ref. Resolve the intended pin with Herdr before updating."],
+        [122, "plugin_root"],
+        [138, "plugin_root"],
+        [152, "HERDR_PLUGIN_STATE_DIR"],
+        [255, "HERDR_PLUGIN_STATE_DIR"],
+        [282, "Cannot inspect other Herdr sessions."],
+        [283, "HERDR_SOCKET_PATH"],
+        [287, "Unknown Herdr session state."],
+        [292, "Unknown Herdr session"],
+        [378, "HERDR_SOCKET_PATH"],
+        [379, "HERDR_PANE_ID"],
+        [380, "HERDR_WORKSPACE_ID"],
+        [425, "HERDR_SOCKET_PATH"],
+        [453, "HERDR_SOCKET_PATH"],
+        [454, "Herdr"],
+        [520, "  Could not check another Herdr session: "],
+        [528, "  Its cached plugin has not yet been verified for seamless updates."],
+        [556, "HERDR_PANE_ID"],
+        [556, "HERDR_PLUGIN_STATE_DIR"],
+        [556, "HERDR_SOCKET_PATH"],
+        [556, "HERDR_WORKSPACE_ID"],
+        [557, "Missing {key}; open Update Namedrop from Herdr's workspace actions."],
+        [558, "HERDR_PLUGIN_STATE_DIR"],
+        [560, "--plugin"],
+        [560, "herdr"],
+        [560, "plugin"],
+        [562, "HERDR_WORKSPACE_ID"],
+        [566, "plugin_root"],
+        [569, "This updater is not from the currently registered root. Reopen Update Namedrop from Herdr."],
+        [570, "HERDR_PLUGIN_STATE_DIR"],
+        [576, "herdr"],
+        [576, "plugin"],
+        [577, "herdr"],
+        [577, "plugin"],
+        [648, "plugin_root"],
+        [649, "Reinstalled root has no setup script: {setup}. Inspect plugin logs; activation was not attempted."],
+        [659, "Reinstall succeeded but activation did not complete (exit {result.returncode}).\n  Log: {log}\n  Inspect: herdr plugin log list --plugin namedrop --limit 20\n  After resolving the cause: {shlex.join(['sh', str(setup), 'activate', '--human'])}\n  Recovery: {shlex.join(recover)}\n  Recovery pins the old commit; no source rollback was attempted."],
+        [674, "\nInspect: herdr plugin list --plugin namedrop --json\nHelp: Namedrop README → upgrade guide → docs/operations.md#manual-upgrade"],
+        [676, "Update interrupted. Inspect registration and plugin logs before retrying; an install already started may still be running."]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "scripts/update.py",
+      "reason": "An environment or config name read or set, never printed.",
+      "literals": [
+        [339, "HERDR_PLUGIN_STATE_DIR"],
+        [399, "HERDR_PLUGIN_STATE_DIR"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "scripts/verify-agent-status.py",
+      "reason": "A maintainer's live sampling tool, which no home runs.",
+      "literals": [
+        [37, "HERDR_PLUGIN_STATE_DIR"],
+        [37, "HERDR_SOCKET_PATH"],
+        [37, "HERDR_WORKSPACE_ID"],
+        [41, "HERDR_WORKSPACE_ID"],
+        [41, "herdr"],
+        [52, "live library calls; popup/TTY and usage acceptance separate"],
+        [53, "HERDR_WORKSPACE_ID"],
+        [89, "real floating popup/TTY acceptance"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/agent_status_model.rs",
+      "reason": "An environment or config name read or set, never printed.",
+      "literals": [
+        [842, "HERDR_"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/cli.rs",
+      "reason": "A hidden alias a Rex home still accepts; its help shows the neutral flag.",
+      "literals": [
+        [56, "herdr-socket"],
+        [63, "herdr-workspace"],
+        [68, "herdr-pane"],
+        [168, "herdr-socket"],
+        [169, "herdr-workspace"],
+        [170, "herdr-pane"],
+        [192, "--herdr-socket="],
+        [195, "--herdr-socket"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/codex_app_server.rs",
+      "reason": "The Herdr form of Codex's shared app-server notice; a Rex home gets the REX_ forms.",
+      "literals": [
+        [35, "Then restart Codex in each of its Herdr panes. The stop is needed because a running server keeps taking new sessions even with the setting off. It disconnects every open Codex window that uses it, including the one whose agent ran these steps for you; relaunch those windows."],
+        [81, "Namedrop: Codex runs through its shared app-server, so Herdr cannot tell which pane this session is in; mentions to it stay queued or reach the wrong pane. Fix: {DISABLE}, then {STOP}, then restart Codex in its panes. One session only: {PER_SESSION}. Undo: {ENABLE}. Namedrop changes nothing itself; see namedrop doctor."],
+        [89, "Namedrop shared app-server notice. Relay the notice below to the person once, in plain words, in your next reply. Run none of its commands without the person's approval. If they approve, run `{DISABLE}`, then tell them that `{STOP}` disconnects this session too before you run it, and remind them to restart Codex in each of its Herdr panes. To fix one session only, they can start it with `{PER_SESSION}`."]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/context.rs",
+      "reason": "The context pin's git ref, commit identity and scratch file, which keep their names on both hosts and are never printed (UI.md, Words).",
+      "literals": [
+        [1626, "refs/herdr-context/"],
+        [1675, "user.name=herdr-context"],
+        [1677, "user.email=context@herdr.invalid"],
+        [1683, "herdr context pin"],
+        [1722, "herdr-context-pin-XXXXXX"],
+        [1748, "refs/herdr-context"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/daemon.rs",
+      "reason": "An environment or config name read or set, never printed.",
+      "literals": [
+        [61, "NAMEDROP_HERDR_TIMEOUT_MS"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/dashboard/live_peek.rs",
+      "reason": "Live peek, which refuses a Rex binding before it starts an observer.",
+      "literals": [
+        [587, "HERDR_SOCKET_PATH"],
+        [588, "HERDR_PANE_ID"],
+        [589, "HERDR_WORKSPACE_ID"],
+        [590, "HERDR_TAB_ID"],
+        [591, "HERDR_PLUGIN_STATE_DIR"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/dashboard/observer_guard.rs",
+      "reason": "Live peek, which refuses a Rex binding before it starts an observer.",
+      "literals": [
+        [23, "HERDR_SOCKET_PATH"],
+        [33, "HERDR_BIN_PATH"],
+        [33, "herdr"],
+        [42, "HERDR_SOCKET_PATH"],
+        [43, "HERDR_PANE_ID"],
+        [44, "HERDR_TAB_ID"],
+        [45, "HERDR_WORKSPACE_ID"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/dashboard/skills.rs",
+      "reason": "File names of Claude Code's and Codex's plugin stores, which Channels' skill list reads.",
+      "literals": [
+        [235, "{plugin}:{name}"],
+        [446, "enabledPlugins"],
+        [455, "plugins/installed_plugins.json"],
+        [458, "plugins"],
+        [481, ".claude-plugin/plugin.json"],
+        [496, "plugins"],
+        [511, "plugins/cache"],
+        [517, ".codex-plugin/plugin.json"],
+        [527, ".codex-plugin/plugin.json"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/domain.rs",
+      "reason": "The plugin actor kind, a stored value of the attribution.",
+      "literals": [
+        [268, "plugin"]
+      ]
+    },
+    {
+      "kind": "agent-plugin",
+      "file": "src/health.rs",
+      "reason": "Codex's or Claude Code's own plugin, or Namedrop's --plugin-state flag, which a Rex home uses as a Herdr home does.",
+      "literals": [
+        [747, "The Namedrop plugin changed after this session started, and a running session doesn't pick up the change. An answer it gives as its final message won't reach anyone."]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/health.rs",
+      "reason": "ND-SESSION-002's Herdr repair; a Rex home's repair is Activate Namedrop.",
+      "literals": [
+        [595, "herdr.integration.install"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/health.rs",
+      "reason": "The stale-build notice of a Herdr plugin root, which only Herdr's reinstall leaves.",
+      "literals": [
+        [1573, "A reinstall rebuilt Namedrop but did not switch to the new build, so every command still runs the earlier release. Update Namedrop switches builds for you on GitHub installs; a bare `herdr plugin install` does not."],
+        [1575, "Switch to the new build? Run the command in this Herdr workspace."]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/health.rs",
+      "reason": "A key of the JSON interface, which stays one for both hosts.",
+      "literals": [
+        [1579, "plugin_root"]
+      ]
+    },
+    {
+      "kind": "agent-plugin",
+      "file": "src/hook_runs.rs",
+      "reason": "Codex's or Claude Code's own plugin, or Namedrop's --plugin-state flag, which a Rex home uses as a Herdr home does.",
+      "literals": [
+        [16, "Codex refused this session's Namedrop hooks because the plugin changed after the session started. Start a new Codex session in that pane and trust the hooks at Hooks need review"]
+      ]
+    },
+    {
+      "kind": "agent-plugin",
+      "file": "src/install.rs",
+      "reason": "Codex's or Claude Code's own plugin, or Namedrop's --plugin-state flag, which a Rex home uses as a Herdr home does.",
+      "literals": [
+        [246, "Codex rules, sandbox root and plugin"],
+        [277, "codex plugin marketplace remove namedrop --json"],
+        [291, "resolve an absolute UTF-8 HOME before activating the Codex plugin"],
+        [294, "resolve an absolute HOME before activating the Codex plugin"],
+        [797, "Bash({} --plugin-state {} {} *)"],
+        [1169, "if [ -n \"${{PLUGIN_ROOT:-}}\" ]; then \"${{PLUGIN_ROOT}}/{script}\"; elif [ -n \"${{CLAUDE_PLUGIN_ROOT:-}}\" ]; then \"${{CLAUDE_PLUGIN_ROOT}}/{script}\"; else {}; fi"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/install.rs",
+      "reason": "native_session_setup's Herdr form; a Rex home returns before it.",
+      "literals": [
+        [327, "Herdr has not reported a native agent session identity. A fresh Codex can show its composer before running SessionStart; submit your first prompt in that pane, then check registration. Mentions stay queued until the real session is registered. If identity is still missing after a turn, install/update the Herdr native integration, restart Codex and approve its native hooks if requested."],
+        [330, "Herdr has not reported a native agent session identity. For a new setup, install the Herdr native integration, then restart the agent and approve its native hooks if requested."],
+        [335, "herdr"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/install.rs",
+      "reason": "A file or directory name of the agent packages, read and written, never printed as text.",
+      "literals": [
+        [30, ".codex-plugin/plugin.json"],
+        [31, ".claude-plugin/plugin.json"],
+        [87, ".agents/plugins/marketplace.json"],
+        [92, ".agents/plugins"],
+        [93, ".claude-plugin"],
+        [94, ".codex-plugin"],
+        [384, "plugins"],
+        [402, "plugins/cache"],
+        [1134, "namedrop-codex-plugin-v1"],
+        [1149, "https://anthropic.com/claude-code/plugin.schema.json"],
+        [1195, "plugins"],
+        [1256, "plugins"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/install.rs",
+      "reason": "An environment or config name read or set, never printed.",
+      "literals": [
+        [1398, "#!/bin/sh\nexec >/dev/null 2>&1\nNAMEDROP_HERDR_TIMEOUT_MS=250 NAMEDROP_REX_TIMEOUT_MS=250 {executable} hook stop --state-directory {state} <&0 >/dev/null 2>&1\nexit 0\n"]
+      ]
+    },
+    {
+      "kind": "agent-plugin",
+      "file": "src/install/command.rs",
+      "reason": "Codex's or Claude Code's own plugin, or Namedrop's --plugin-state flag, which a Rex home uses as a Herdr home does.",
+      "literals": [
+        [62, "{OWNER}exec {} --plugin-state {} \"$@\"\n"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/installed_runtime/helpers.rs",
+      "reason": "An environment or config name read or set, never printed.",
+      "literals": [
+        [158, "--plugin-state="],
+        [172, "HERDR_PLUGIN_STATE_DIR"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/installed_runtime/packages.rs",
+      "reason": "A value of runtime/owner or retired.json's reason, read and written, never printed.",
+      "literals": [
+        [19, "herdr"]
+      ]
+    },
+    {
+      "kind": "agent-plugin",
+      "file": "src/integration.rs",
+      "reason": "Codex's or Claude Code's own plugin, or Namedrop's --plugin-state flag, which a Rex home uses as a Herdr home does.",
+      "literals": [
+        [1075, "{} --plugin-state {} register {} {} {} {} {} {} --input-json {}"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/lifecycle.rs",
+      "reason": "A check of with_herdr_runtime, which only a Herdr home runs.",
+      "literals": [
+        [2177, "Herdr has no pane {pane_id}, so its space is unknown. Pass --herdr-workspace <space-id>."]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/locator.rs",
+      "reason": "Herdr's location names; a Rex home uses the neutral ones (Name::Neutral).",
+      "literals": [
+        [35, "HERDR_PLUGIN_STATE_DIR"],
+        [36, "HERDR_SOCKET_PATH"],
+        [37, "HERDR_WORKSPACE_ID"],
+        [38, "HERDR_PANE_ID"],
+        [55, "--herdr-socket"],
+        [56, "--herdr-workspace"],
+        [57, "--herdr-pane"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/main.rs",
+      "reason": "Herdr's plugin event hook, which Herdr alone sends.",
+      "literals": [
+        [1327, "HERDR_PLUGIN_EVENT_JSON"],
+        [1341, "HERDR_PLUGIN_EVENT"],
+        [1342, "HERDR_PLUGIN_EVENT is required for an event hook"],
+        [1720, "HERDR_PLUGIN_EVENT_JSON"],
+        [1721, "HERDR_PLUGIN_EVENT_JSON is required for an event hook"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/main.rs",
+      "reason": "An environment or config name read or set, never printed.",
+      "literals": [
+        [1574, "PLUGIN_ROOT"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/main.rs",
+      "reason": "An internal invariant that no input reaches.",
+      "literals": [
+        [1428, "a Herdr home has a location"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/main.rs",
+      "reason": "The hidden dashboard-server's own argv, which `channels` builds with a state.",
+      "literals": [
+        [1670, "--plugin-state, HERDR_PLUGIN_STATE_DIR or NAMEDROP_STATE_DIR is required"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/mux/herdr.rs",
+      "reason": "The Herdr adapter, which only a Herdr home builds.",
+      "literals": [
+        [30, "Herdr read cancelled"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/mux/herdr/events.rs",
+      "reason": "The Herdr adapter, which only a Herdr home builds.",
+      "literals": [
+        [147, "unsupported Herdr plugin event: {other}"],
+        [151, "Herdr plugin event {} does not match operation {operation}"],
+        [204, "{other} is not a Herdr event operation"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/mux/herdr/process.rs",
+      "reason": "The Herdr adapter, which only a Herdr home builds.",
+      "literals": [
+        [37, "HERDR_BIN_PATH"],
+        [37, "herdr"],
+        [39, "NAMEDROP_HERDR_TIMEOUT_MS"],
+        [71, "HERDR_SOCKET_PATH"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/mux/herdr/wire.rs",
+      "reason": "The Herdr adapter, which only a Herdr home builds.",
+      "literals": [
+        [30, "Herdr command timed out"],
+        [31, "Herdr read exceeded its output limit"],
+        [370, "herdr-space:{workspace_id}"],
+        [376, "Herdr returned a Worktree snapshot that does not contain space {workspace_id}"],
+        [406, "Herdr did not resolve {cwd} as a Worktree"],
+        [409, "Worktree {} is not open in Herdr"],
+        [416, "Herdr space {owner}"],
+        [417, "more than one Herdr space ({})"],
+        [423, " and may be open in {}, whose checkout Herdr does not report"],
+        [428, "Checkout {} is open in {open_in}{suspects}, so Namedrop can't tell which one this command is for. Pass --herdr-workspace <space-id> (or --herdr-pane <pane-id>)."],
+        [590, "--plugin"],
+        [590, "plugin"],
+        [592, "plugins"],
+        [597, "plugin_id"],
+        [599, "plugin_root"],
+        [701, "plugin"],
+        [704, "--plugin"],
+        [709, "popup"],
+        [727, "HERDR_PLUGIN_STATE_DIR={}"],
+        [729, "HERDR_SOCKET_PATH={}"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/mux/home.rs",
+      "reason": "Herdr's default socket path.",
+      "literals": [
+        [389, "herdr/herdr.sock"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/mux/model.rs",
+      "reason": "word() for a Herdr home, the actor recorded for Herdr's events.",
+      "literals": [
+        [51, "herdr"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/mux/rex/popup.rs",
+      "reason": "The foreground program's name the refusal compares.",
+      "literals": [
+        [38, "herdr"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/output.rs",
+      "reason": "The activation report's Herdr hook lines; a Rex report says Namedrop's.",
+      "literals": [
+        [164, "  Check native hooks: herdr integration status\n  If setup is needed, choose your runtime:\n    herdr integration install codex\n    herdr integration install claude"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/persona.rs",
+      "reason": "The Herdr form of the session policy; session_policy_text's replace pairs give Rex its words.",
+      "literals": [
+        [38, "A Namedrop workspace roster lists the named agents in this Herdr space, each one's persona, which row is you, and whether each can take work now. Its agent rows, and separately its other-workspaces line, arrive with your first turn and again whenever they change; a turn or incoming task without them means the last ones you were shown still hold. This policy governs every roster in this session."],
+        [40, "Namedrop channel: these @names address Herdr panes. Outside a delivery, load the installed Namedrop skill and use its executable for roster reads and sends. Host-native team messaging does not reach these panes. For a delivery, run its bound reply or completion once, using the operation's argv first, the input flag and its JSON last, every placeholder authored. A local answer does not return a helper's result, and an input flag put before the subcommand is read as that flag's value, so nothing runs. Selection: first, who assigned this task. A returned result or progress update never changes the coordinator of existing work. If another agent assigned you this task, you are its helper: do the work asked and return the findings through the bound reply. Printing findings locally and choosing complete.no-reply does not return them. Recommend collaborators to that coordinator instead of independently recruiting peers. Otherwise you coordinate this turn. As coordinator: the roster you hold may be out of date and readiness changes, so run `address list` immediately before you choose collaborators, every time you choose. Among agents that fit, give unrelated work to the one with the smallest `context_tokens` when shown, and a follow-up to the one that already holds its context. Pick the available agents whose persona fits the work, say in one line why each was useful, and deliver one consolidated answer to the person. Once you ask a helper for a result, finish any independent work, then end this turn with a brief waiting status only. Until its reply arrives, do not give a recommendation, task answer or completion claim. Read that reply before consolidating or crediting the helper. For tracked work, use the bound coordination actions to save your consolidated report, then let report_to_human present it once; worker replies and coordination nudges must not emit the task answer. Generic agents carry no specialization and remain eligible. Your own persona, on the roster row marked (you), is your default role guidance; an explicit task from the person or from a delivery overrides it, as do explicit @mentions. If nobody listed fits or is available, or the roster says the space is paused, do the work locally and say so. Do not fan out to everyone. Assignments already in flight are unaffected by the roster: do not re-route, re-open or re-send them. Other workspaces: a roster can also name agents in other Herdr workspaces of this session. A bare @name in a new message never reaches them, though a reply still reaches whoever wrote to you. They are not collaborators to recruit on your own. Address one only when the person names a workspace, says \"all my @name\", or answers the workspace question. Then run `address list` with {\"workspaces\":\"all\"} for each workspace's label and readiness, and start the send source with `#label @name`, or `#all @name` for every workspace with that name. Reply and send bodies may use Markdown lists, code, and emphasis, rendered in the Channels page. For multi-line or formatted bodies, write the JSON to a file and use `--input-json-file`."]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/reminder/clock.rs",
+      "reason": "The reminder clock with neither a socket passed nor one recorded; every caller passes its endpoint and every reminder records one.",
+      "literals": [
+        [156, "pending reminders have no Herdr socket"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/runtime.rs",
+      "reason": "The herdr CLI runner, which only the Herdr adapter calls.",
+      "literals": [
+        [48, "Herdr read cancelled"],
+        [57, "failed to capture Herdr command stdout: {error}"],
+        [60, "failed to capture Herdr command stderr: {error}"],
+        [74, "Herdr read exceeded its output limit"],
+        [76, "Herdr read cancelled"],
+        [89, "Herdr command timed out after {} ms"],
+        [100, "Herdr read exceeded its output limit"],
+        [114, ".namedrop-herdr-{stream}-{}-{}"],
+        [127, "failed to secure Herdr command output: {error}"],
+        [132, "failed to capture Herdr command output: {error}"],
+        [136, "failed to reserve Herdr command output"],
+        [145, "failed to read Herdr command {stream}: {error}"],
+        [149, "failed to read Herdr command {stream}: {error}"],
+        [151, "Herdr read exceeded its output limit"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/shortcuts.rs",
+      "reason": "Herdr's shortcut installer; ui install-shortcuts refuses on a Rex home.",
+      "literals": [
+        [76, "herdr/config.toml"],
+        [89, "HERDR_CONFIG_PATH"],
+        [94, "Could not locate Herdr configuration; use --config PATH"],
+        [97, "Herdr configuration must be a regular file"],
+        [118, "plugin_action"],
+        [127, "{key} already has a binding; configuration unchanged. Bind {action} to another key in Herdr settings."],
+        [152, "Herdr keys must be a table"],
+        [159, "Herdr keys.command must be an array of tables"],
+        [163, "plugin_action"],
+        [190, "Herdr configuration changed while preparing the shortcuts; try again"],
+        [202, "herdr server reload-config"],
+        [229, "Shortcuts saved, but Herdr could not reload them: {error}. Run herdr server reload-config or reopen setup."]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/status_queue.rs",
+      "reason": "An environment or config name read or set, never printed.",
+      "literals": [
+        [146, "NAMEDROP_HERDR_TIMEOUT_MS"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/store.rs",
+      "reason": "The plugin actor kind, a stored value of the attribution.",
+      "literals": [
+        [7953, "plugin"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/store/bridge.rs",
+      "reason": "The envoy role's stored description. No surface reads an envoy's role: address lists join active alias claims, which envoys lack, and Channels leaves envoys out (src/store/dashboard.rs).",
+      "literals": [
+        [145, "INSERT OR IGNORE INTO pane_roles (session_socket_id, worktree_id, role_id, name, description)\n             VALUES (?1, ?2, 'role-envoy', 'envoy',\n                     'Stands in for a named agent in another Herdr workspace.')"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/terminal.rs",
+      "reason": "A check of with_herdr_runtime, which only a Herdr home runs.",
+      "literals": [
+        [212, "{variable}={pane_id} was inherited from the environment, but Herdr reports no shell for pane {pane_id}, so the pane could not be verified. {remedy}"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/tour.rs",
+      "reason": "A key of the JSON interface, which stays one for both hosts.",
+      "literals": [
+        [544, "popup"]
+      ]
+    },
+    {
+      "kind": "unshown",
+      "file": "src/tour.rs",
+      "reason": "The tour's authoring check, which the test suite runs on every shipped tour.",
+      "literals": [
+        [193, "presentation {id} page {number} wraps to {height} lines at width {BODY_WIDTH}; the popup holds {MAX_BODY_LINES}"]
+      ]
+    },
+    {
+      "kind": "herdr-home-only",
+      "file": "src/update_check.rs",
+      "reason": "Herdr's update instruction and settings file; a standalone install has its own.",
+      "literals": [
+        [14, "herdr plugin action invoke update --plugin namedrop"],
+        [50, "herdr/plugins/config/namedrop/settings.json"]
+      ]
+    }
+  ],
+  "unstaged": [
+    {
+      "file": "src/popup_input.rs",
+      "line": 82,
+      "text": "Could not enable interactive screen input",
+      "reason": "Printed only when /bin/stty fails on the layer's own terminal, which a test cannot make happen."
+    },
+    {
+      "file": "src/coordination.rs",
+      "line": 526,
+      "text": "session from Rex",
+      "reason": "A tracked send whose recipient's Rex session could not be listed between the send's own read and its commit."
+    },
+    {
+      "file": "src/deferred_commands.rs",
+      "line": 444,
+      "text": "a state directory is required for deferred commands",
+      "reason": "A deferred command arrives without the state its installed prefix always carries."
+    }
+  ]
+}

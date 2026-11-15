@@ -19,6 +19,14 @@ CONTRACT = json.loads((REPO / 'runtime.json').read_text())
 # macOS's /usr/bin/python3 caches bytecode under HOME. The python3 on the
 # stub PATH does the same, so a write that would land there is seen.
 CACHE = 'Library/Caches/com.apple.python'
+# The Words test (tests/words.rs) reads what each run printed from here.
+CAPTURE = os.environ.get('NAMEDROP_WORDS_CAPTURE')
+
+
+def capture(surface, text):
+    if CAPTURE and text:
+        with open(CAPTURE, 'a') as log:
+            log.write(json.dumps({'surface': surface, 'text': text}) + '\n')
 
 STUB = '''#!{python} -B
 import json, os, shutil, sqlite3, sys
@@ -140,6 +148,8 @@ class Installer(unittest.TestCase):
         result = subprocess.run(['/bin/sh', str(package / 'scripts/install.sh'), *args],
                                 input=answer if stdin is None else None, stdin=stdin,
                                 env=self.env, capture_output=True, text=True)
+        capture('install.sh', result.stdout)
+        capture('install.sh', result.stderr)
         return result
 
     def ok(self, result):
