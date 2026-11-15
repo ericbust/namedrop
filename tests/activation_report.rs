@@ -195,6 +195,52 @@ fn only_an_unsupported_rex_popup_releases_the_tour_marker() {
         }
     }
 }
+/// A detached Rex block has no window for the tour's layer. The tour waits,
+/// marker unclaimed, for an agent in a window, and prefers one over the
+/// detached agent an event names.
+#[test]
+fn a_rex_tour_skips_detached_agents_and_keeps_its_marker() {
+    let f = Fixture::new();
+    let home = f.0.join("home");
+    let ids = Ids(AtomicU64::new(0));
+    let rex = host(
+        "rex:/tmp/fake.sock",
+        Ok(Applied::Opened(json!({}))),
+        Applied::Done,
+    );
+    let rt = runtime(&f, &rex, &home, &ids);
+    let mut space = discover_worktree_for_workspace(&rex, "w1").unwrap();
+    space.panes[0].agent = Some(AgentIdentity {
+        kind: AgentKind::Known(namedrop::AgentRuntime::Codex),
+        label: None,
+        session: SessionClaim::None,
+    });
+    let attached = space.panes[0].clone();
+    space.panes[0].tab_id.clear();
+    let detached = space.panes[0].pane_id.clone();
+    let report = tour::show_for_first_agent(&rt, &space, Some(&detached));
+    assert_eq!(report["reason"], "no_window", "{report}");
+    assert!(!tour::is_shown(&f.0, tour::CURRENT_ID).unwrap());
+    space.panes.push(namedrop::DiscoveredPane {
+        pane_id: "p2".into(),
+        ..attached
+    });
+    let report = tour::show_for_first_agent(&rt, &space, Some(&detached));
+    assert_eq!(report["shown"], true, "{report}");
+    assert_eq!(report["pane_id"], "p2");
+
+    // Herdr's tour is unchanged: it never reads the tab.
+    let f = Fixture::new();
+    let host = host(
+        "/tmp/fake.sock",
+        Ok(Applied::Opened(json!({}))),
+        Applied::Done,
+    );
+    let rt = runtime(&f, &host, &home, &ids);
+    space.panes.truncate(1);
+    let report = tour::show_for_first_agent(&rt, &space, Some(&detached));
+    assert_eq!(report["shown"], true, "{report}");
+}
 #[test]
 fn rex_shortcut_repair_refuses_before_writing_any_config() {
     let f = Fixture::new();

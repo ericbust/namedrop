@@ -19,6 +19,13 @@ impl<W: Wire> RexMux<W> {
         }
         let target = &popup.target;
         let (title, from) = words(popup.screen);
+        // A layer floats over a window, and a detached block is in none.
+        if target.tab.as_str().is_empty() {
+            return Err(MuxError::Unavailable(format!(
+                "This block is not in a window, so {title} cannot open over it. Open {title} \
+                 from a block in a window."
+            )));
+        }
         let mut call = self.call()?;
         call.attach(target.space.as_str())?;
         let process: ProcessReply = wire::parse(call.block(
@@ -330,6 +337,28 @@ mod tests {
         mux.open_popup(&popup(PopupScreen::Doctor, &state), &launcher)
             .unwrap();
         assert!(opened_layer(&mux));
+    }
+
+    #[test]
+    fn a_detached_target_is_refused_before_any_request() {
+        for screen in [PopupScreen::Name, PopupScreen::Tour] {
+            let state = State::new();
+            let launcher = launcher(&state);
+            let mut spec = popup(screen, &state);
+            spec.target.tab = TabId::new("");
+            let mux = rex(
+                layer_script(fixture("idle-login")),
+                &state,
+                Local::default(),
+            );
+            let error = mux.open_popup(&spec, &launcher).unwrap_err().to_string();
+            assert!(
+                error.starts_with("This block is not in a window, so ")
+                    && error.contains(words(screen).0),
+                "{error}"
+            );
+            assert!(mux.wire.calls().is_empty(), "{:?}", mux.wire.calls());
+        }
     }
 
     #[test]
