@@ -1,9 +1,11 @@
+#[path = "support/binary.rs"]
+mod binary;
+
 use serde_json::{Value, json};
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::PathBuf,
-    process::Command,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -21,7 +23,7 @@ impl Fixture {
         Self(path)
     }
     fn run(&self, args: &[&str]) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        binary::namedrop()
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("HOME", self.0.join("home"))
@@ -159,11 +161,7 @@ fn retirement_precedes_every_dispatch_form_and_all_cached_hook_forms() {
 fn takeover_resumes_predecessors_and_doctor_reads_liveness_without_the_old_store() {
     use namedrop::{
         AgentConfigDirectories, Clock, LifecycleRuntime, ProcessIds, SystemClock,
-        execute_lifecycle_operation,
-        mux::{
-            fake::FakeMux,
-            home::{Inherited, ThisProcess},
-        },
+        execute_lifecycle_operation, mux::fake::FakeMux,
     };
     let f = Fixture::new();
     let home = f.0.join("home");
@@ -183,7 +181,7 @@ fn takeover_resumes_predecessors_and_doctor_reads_liveness_without_the_old_store
         format!("{}\n", old.display()),
     )
     .unwrap();
-    let agent = ThisProcess.incarnation(std::process::id()).unwrap();
+    let agent = namedrop::test_process_incarnation(std::process::id()).unwrap();
     fs::create_dir_all(old.join("rex/sessions")).unwrap();
     for block in ["block:first", "block:second"] {
         fs::write(
@@ -309,16 +307,12 @@ fn takeover_resumes_predecessors_and_doctor_reads_liveness_without_the_old_store
 
 #[test]
 fn installer_round_trips_guarded_config_and_rolls_back_rpc_errors() {
-    let output = Command::new("python3")
+    let output = binary::command("python3")
         .args([
             "-I",
             concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rex_installer.py"),
-            env!("CARGO_BIN_EXE_namedrop"),
+            binary::namedrop_path(),
         ])
-        .env_remove("REX_BLOCK")
-        .env_remove("REX_SESSION")
-        .env_remove("REX_SERVER")
-        .env_remove("REX_CLIENT")
         .output()
         .unwrap();
     assert!(
@@ -341,7 +335,7 @@ fn a_binding_hook_queued_behind_the_handoff_gate_stays_quiet() {
         .open(state.join("runtime/commands.lock"))
         .unwrap();
     gate.lock().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+    let mut child = binary::namedrop()
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", f.0.join("home"))

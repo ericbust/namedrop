@@ -303,3 +303,14 @@ mod work_counters;
 pub fn test_process_opens(pid: u32, path: &std::path::Path) -> bool {
     mux::processes::opens(pid, path)
 }
+
+/// The `<pid>@<start>` incarnation that a Rex binding records for a live
+/// local process, as the survey reads it.
+#[cfg(feature = "test-support")]
+pub fn test_process_incarnation(pid: u32) -> Option<String> {
+    use mux::processes::{LocalProcesses, LocalRead, ThisMachine};
+    match ThisMachine.read(pid) {
+        LocalRead::Alive(process) => Some(process.incarnation.0),
+        _ => None,
+    }
+}
