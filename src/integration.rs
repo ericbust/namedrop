@@ -537,6 +537,7 @@ where
 pub(crate) fn onboard_settled_integrations<M, C, I>(
     runtime: &LifecycleRuntime<'_, M, C, I>,
     discovered: &DiscoveredWorktree,
+    writer: crate::installed_runtime::Writer,
 ) -> Result<crate::IntegrationPackageInstallation, String>
 where
     M: crate::mux::Mux,
@@ -545,7 +546,7 @@ where
 {
     // Both shared user-level packages are refreshed before any challenge is
     // issued, so a session started after this event loads the installed skill.
-    let installation = crate::refresh_user_integration_packages(runtime, discovered)?;
+    let installation = crate::refresh_user_integration_packages(runtime, discovered, writer)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
     let bindings = StateStore::open(runtime.state_directory)
         .map_err(|error| error.to_string())?

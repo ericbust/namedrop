@@ -1,6 +1,6 @@
 //! Stable command paths and shared-package ownership across compatible updates.
 mod packages;
-pub(crate) use packages::{PackageLease, package_guard};
+pub(crate) use packages::{PackageLease, Writer, package_guard};
 #[cfg(test)]
 pub(crate) fn test_package_lease() -> PackageLease {
     PackageLease::development()
@@ -241,10 +241,8 @@ pub fn validate_update_manifest(path: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Refuse a queued package refresh before it becomes a retrying background hook.
-pub fn check_package_ownership(
-    home: Option<&std::path::Path>,
-    state: &std::path::Path,
-) -> Result<(), String> {
-    package_guard(home, state)?.writable().map(|_| ())
+/// The `ND-INSTALL-002` refusal this runtime's package refresh would report,
+/// read without a lock or a write, for the status hook to print.
+pub fn package_refusal(home: Option<&std::path::Path>, state: &std::path::Path) -> Option<String> {
+    packages::refusal_notice(home, state)
 }

@@ -1,4 +1,5 @@
 """Exercise every package writer through an installed runtime and a script host."""
+import fcntl
 import hashlib
 import json
 import os
@@ -90,7 +91,7 @@ with tempfile.TemporaryDirectory(prefix='nd-lease-matrix-') as folder:
         import shutil
         shutil.copy2(binary,release/'namedrop');shutil.copy2(repo/'runtime.json',release/'runtime.json')
         (runtime/'current').symlink_to('releases/'+digest)
-        (runtime/'owner').write_text(owner)
+        if owner:(runtime/'owner').write_text(owner)
         launcher=runtime/'namedrop'
         launcher.write_text('#!/usr/bin/python3 -IB\nimport json,os,sys\nwith open('+repr(str(root/'pids'))+',"a") as f:f.write(json.dumps({"pid":os.getpid(),"args":sys.argv})+"\\n")\nos.execv('+repr(str(runtime/'current/namedrop'))+',sys.argv)\n')
         launcher.chmod(0o755)
@@ -101,18 +102,21 @@ with tempfile.TemporaryDirectory(prefix='nd-lease-matrix-') as folder:
     def env(home,selected,pane='p1'):
         home.mkdir(exist_ok=True)
         return {'HOME':str(home),'PATH':'/usr/bin:/bin','SHELL':'/bin/bash','ROOT':str(root),'CHECKOUT':str(root/'repo'),'SHELLPID':str(os.getpid()),'SOCK':address,'PYTHONDONTWRITEBYTECODE':'1','HERDR_BIN_PATH':str(repo/'tests/differential/herdr'),'HERDR_SOCKET_PATH':address,'HERDR_WORKSPACE_ID':'w1','HERDR_PANE_ID':pane,'HERDR_PLUGIN_STATE_DIR':str(selected)}
-    def run(home,selected,args,extra=None):
+    def run(home,selected,args,extra=None,launcher=None):
         e=env(home,selected,'p3' if args[0]=='name' else 'p1');e.update(extra or {})
-        p=subprocess.run([str(selected/'runtime/namedrop'),*args],input='',cwd=root/'repo',env=e,capture_output=True,text=True,timeout=30)
+        started=time.monotonic()
+        p=subprocess.run([str((launcher or selected)/'runtime/namedrop'),*args],input='',cwd=root/'repo',env=e,capture_output=True,text=True,timeout=30)
+        p.elapsed=time.monotonic()-started
         return p
     activate=['--json','activate','--input-json','{"confirmed":true}']
     p=run(root/'prewarm',state,activate);assert p.returncode==0,(p.stdout,p.stderr)
+    # Deactivate runs last: it deactivates the space even when its removals are refused.
     cases={
         'activate':activate,
         'name':['name','lease-name','--type','terminal'],
-        'deactivate':['--json','deactivate'],
         'event':['event','agent-status-changed','--input-json',json.dumps({'type':'pane_agent_status_changed','pane_id':'p1','workspace_id':'w1','agent_status':'idle'})],
         'hook':['hook','agent-status-changed'],
+        'deactivate':['--json','deactivate'],
     }
     extra={'HERDR_PLUGIN_EVENT':'pane.agent_status_changed','HERDR_PLUGIN_EVENT_JSON':json.dumps({'event':'pane_agent_status_changed','data':{'type':'pane_agent_status_changed','pane_id':'p1','workspace_id':'w1','agent_status':'idle'}})}
     try:
@@ -120,6 +124,8 @@ with tempfile.TemporaryDirectory(prefix='nd-lease-matrix-') as folder:
         for name,args in cases.items():
             before=snapshot(home);p=run(home,inactive if name=='name' else state,args,extra)
             assert 'ND-INSTALL-002' in p.stdout+p.stderr,(name,p.returncode,p.stdout,p.stderr)
+            # A refused refresh is the event's report: the event and the hook still exit 0.
+            if name in ['event','hook','deactivate']:assert p.returncode==0,(name,p.returncode,p.stdout,p.stderr)
             assert snapshot(home)==before,('denied writer changed files',name)
             print('denied',name,'unchanged',flush=True)
         for name,args in cases.items():
@@ -152,6 +158,65 @@ with tempfile.TemporaryDirectory(prefix='nd-lease-matrix-') as folder:
             else:
                 assert skill.read_text()==expected_skill,(name,'package refresh did not restore skill')
             print('admitted',name,'wrote files',flush=True)
+        def settled(home,before,seconds=3):
+            """Whether the files stay as they were while a hook's worker runs."""
+            until=time.monotonic()+seconds
+            while snapshot(home)==before and time.monotonic()<until:time.sleep(.05)
+            return snapshot(home)==before
+        def ok(p,*context):
+            assert p.returncode==0 and 'ND-INSTALL-002' not in p.stdout+p.stderr,(context,p.returncode,p.stdout,p.stderr)
+            return p
+
+        # Two Herdr states in one HOME: the second takes the record and the packages, as before the lease.
+        two=root/'two-herdr';legacy=installed('herdr-legacy',None)
+        ok(run(two,old,activate),'first herdr');ok(run(two,legacy,activate),'second herdr')
+        assert (two/'.config/namedrop/state-directory').read_text()==str(legacy)+'\n'
+        for package in ['.agents/skills/namedrop','.claude/skills/namedrop']:
+            assert str(legacy) in (two/package/'scripts/session-start').read_text(),package
+        # A per-state lock that cannot be taken fails each removal, and the space is still deactivated.
+        lock=legacy/'runtime/packages.lock';lock.unlink(missing_ok=True);lock.symlink_to('/dev/null')
+        p=ok(run(two,legacy,['--json','deactivate']),'deactivate with a broken lock');lock.unlink()
+        data=json.loads(p.stdout)['data']
+        assert data['deactivated'] is True,data
+        for removal in ['claude_permissions','codex_sandbox','subagent_hooks']:
+            assert data[removal]['error']=='runtime package lock is not a regular file',(removal,data)
+        # Herdr's runtime still serves another state directory.
+        other=root/'other-state';other.mkdir()
+        ok(run(root/'other-home',other,activate,launcher=old),'herdr runtime, other state')
+        print('two herdr states share the slot',flush=True)
+
+        # The status hook takes no package lock and writes nothing of its own.
+        fresh=root/'fresh';never=installed('herdr-never','herdr')
+        ok(run(fresh,never,cases['hook'],extra),'never activated hook');time.sleep(1.5)
+        assert not (fresh/'.config/namedrop').exists(),sorted(p.name for p in (fresh/'.config/namedrop').iterdir())
+        held=open(home/'.config/namedrop/packages.lock','a+');fcntl.flock(held,fcntl.LOCK_EX)
+        try:
+            p=ok(run(home,old,cases['hook'],extra),'hook under a held lock')
+            assert p.elapsed<2,p.elapsed
+            p=ok(run(home,old,cases['event']),'event under a held lock')
+            assert '"drain"' in p.stdout and p.elapsed<10,(p.elapsed,p.stdout)
+        finally:
+            held.close()
+        print('the status hook neither waits nor claims',flush=True)
+
+        # Herdr over a standalone record: activation writes nothing and names the standalone state.
+        mixed=root/'herdr-over-standalone'
+        ok(run(mixed,state,activate),'standalone first')
+        before=snapshot(mixed);p=run(mixed,old,activate)
+        assert p.returncode!=0 and 'ND-INSTALL-002' in p.stdout+p.stderr and str(state) in p.stdout+p.stderr,(p.returncode,p.stdout,p.stderr)
+        assert snapshot(mixed)==before,'herdr activation over a standalone record changed files'
+        skill=mixed/'.agents/skills/namedrop/SKILL.md';expected_skill=skill.read_text();skill.write_text('stale package\n')
+        ok(run(mixed,state,activate),'standalone again')
+        assert skill.read_text()==expected_skill,'the standalone owner did not write'
+        # Herdr's other writers leave the packages to the next activation and still do their own work.
+        herdr_inactive=installed('herdr-inactive','herdr')
+        for name in ['event','hook','name','deactivate']:
+            before=snapshot(mixed)
+            p=ok(run(mixed,herdr_inactive if name=='name' else old,cases[name],extra),'herdr writer over standalone',name)
+            if name=='event':assert '"drain"' in p.stdout,p.stdout
+            if name=='deactivate':assert json.loads(p.stdout)['data']['deactivated'] is True,p.stdout
+            assert settled(mixed,before) if name=='hook' else snapshot(mixed)==before,('herdr writer over standalone changed files',name)
+            print('herdr',name,'over a standalone record unchanged',flush=True)
     finally:
         sock.close()
         if (root/'pids').exists():
