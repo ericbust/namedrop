@@ -25,6 +25,7 @@ from unittest.mock import patch
 import livetest as live
 import rex_lane
 import rex_live
+import rex_remote
 import source as sources
 import selftest_daily
 import testbed
@@ -654,6 +655,135 @@ def check_rex_live_up_and_down(scratch):
             "block and keeps init.lua, the shell block finds no herdr, its check finds a planted "
             "one and types nothing into a busy block, an up stops at a herdr a login shell finds, "
             "neither starts or stops a Herdr, and a failed log copy still stops the profile")
+
+
+def check_rex_remote_lab(scratch):
+    """The lab's ssh wrapper reads only the lab's config, and that config names only the lab's
+    key and known_hosts, with no agent and no shared control socket."""
+    lab = rex_remote.Lab(scratch / "remote-lab")
+    lab.claim()
+    for name in ("logs", "home-a"):
+        lab.path(name).mkdir(parents=True)
+    lab.ssh_files()
+    config = lab.path("ssh/config").read_text()
+    assert "@LAB@" not in config and "~" not in config and ".ssh" not in config, config
+    named = re.findall(r"^\s*(IdentityFile|UserKnownHostsFile)\s+(\S+)", config, re.M)
+    assert named == [("IdentityFile", str(lab.path("ssh/id_lab"))),
+                     ("UserKnownHostsFile", str(lab.path("ssh/known_hosts")))], named
+    for setting in ("IdentitiesOnly yes", "IdentityAgent none", "GlobalKnownHostsFile /dev/null",
+                    "ControlPath none"):
+        assert setting in config, setting
+    lab.claim()
+    other = scratch / "remote-lab-not-a-lab"
+    other.mkdir()
+    (other / "keep").write_text("not the lab's")
+    for action in (rex_remote.Lab(other).claim, rex_remote.Lab(other).forget, rex_remote.Lab(other).down):
+        try:
+            action()
+        except RuntimeError as error:
+            assert "not a remote-host lab" in str(error), error
+        else:
+            raise AssertionError("{} ran in a directory with no lab marker".format(action.__name__))
+    assert sorted(path.name for path in other.iterdir()) == ["keep"]
+    fake = scratch / "remote-lab-fake-ssh"
+    fake.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+    fake.chmod(0o755)
+    wrapper = lab.path("bin/ssh").read_text().replace("exec /usr/bin/ssh", "exec " + str(fake))
+    lab.path("bin/ssh").write_text(wrapper)
+    seen = subprocess.run([str(lab.path("bin/ssh")), "-p", "2222", "nd@127.0.0.1", "true"], text=True,
+                          capture_output=True, env={"PATH": "/usr/bin:/bin"}, check=True).stdout.split()
+    assert seen[:2] == ["-F", str(lab.path("ssh/config"))], seen
+    assert "ssh -p 2222" in lab.path("logs/ssh-calls.log").read_text()
+    assert rex_remote.apt_version("0.1.0-preview.18") == "0.1.0~preview.18"
+    dockerfile = (rex_remote.FILES / "Dockerfile").read_text()
+    assert re.search(r"^ARG REX_KEY_FINGERPRINT=[0-9A-F]{40}$", dockerfile, re.M), "the key's fingerprint is pinned"
+    assert '"rex=$REX_VERSION"' in dockerfile and "authorized_keys" not in dockerfile.split("COPY")[-1]
+    assert re.search(r"^FROM \S+@sha256:[0-9a-f]{64}$", dockerfile, re.M), "the base image is pinned by digest"
+    assert re.search(r"@sha256:[0-9a-f]{64}$", rex_remote.LINUX_RUST), "the Linux build image is pinned by digest"
+    assert dockerfile.index("RUN apt-get update") < dockerfile.index("ARG "), \
+        "the Rex arguments come after the base layer, so a new version keeps sshd's host keys"
+    # The shape of preview.18's `rex hosts list --json`, as A's server printed it in the lab.
+    listed = {"home": {"label": "nd-tb-rexremote.sock", "endpoint": "unix:///tmp/nd-tb-rexremote.sock",
+                       "this_machine": False, "reached": True},
+              "hosts": [{"host": {"id": "host:01", "label": "labb", "endpoints": ["ssh://nd@127.0.0.1:60970"],
+                                  "added_from": "mac.local", "updated_at": "2026-11-15T14:29:37Z"},
+                         "from": "home", "held": False},
+                        {"host": {"id": "host:02", "label": "labb-http", "endpoints": ["http://127.0.0.1:60971"],
+                                  "added_from": "mac.local", "updated_at": "2026-11-15T14:29:38Z"},
+                         "from": "home", "held": False}],
+              "warnings": []}
+    assert rex_remote.hosts_by_label(listed) == {"labb": ["ssh://nd@127.0.0.1:60970"],
+                                                 "labb-http": ["http://127.0.0.1:60971"]}
+    assert rex_remote.hosts_by_label({"hosts": []}) == {}
+    import rex_remote_checks
+    notice = ("Namedrop could not relay this message to @bterm@labb-http: labb-http's Rex server answers as "
+              "the one labb reaches")
+    assert rex_remote_checks.names_label(notice, "labb") and rex_remote_checks.names_label(notice, "labb-http")
+    assert not rex_remote_checks.names_label("Namedrop could not relay this message to @bterm@labb-http", "labb")
+    assert rex_remote_checks.tests_passed("running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored\n") == 0
+    assert rex_remote_checks.tests_passed("test result: ok. 6 passed; 0 failed; 0 ignored; 1114 filtered out\n") == 6
+    return ("remote lab: its ssh runs with the lab's config, key and known_hosts only, B's image pins its "
+            "base, Rex's version and signing key, up reads Rex's nested host entries, up, --fresh and down "
+            "refuse a directory with no lab marker, check 7 reads labb as a whole label, and check 9 counts "
+            "a filter that ran no test as a failure")
+
+
+def check_rex_remote_down(scratch):
+    """`down` signals only the lab's processes: A's Namedrop binary and A's server by its
+    recorded pid, start time and command line. A process that only names the lab's socket
+    survives, and so does the shell that runs `down`."""
+    lab = rex_remote.Lab(scratch / "remote-down")
+    lab.claim()
+    binary = lab.path("target-mac/release/namedrop")
+    binary.parent.mkdir(parents=True)
+    binary.symlink_to(shutil.which("sleep"))
+    started = []
+
+    def start(*command):
+        process = subprocess.Popen(list(command), stdin=subprocess.DEVNULL)
+        started.append(process)
+        return process
+
+    def wait_listed(*pids):
+        for _ in range(50):
+            table = rex_remote.processes()
+            if all(pid in table for pid in pids):
+                return table
+            time.sleep(0.1)
+        raise AssertionError("not listed: {}".format(pids))
+
+    try:
+        ours = start(str(binary), "61")
+        server = start("/bin/sleep", "62")
+        bystander = start("/bin/sh", "-c", "sleep 63; true", str(lab.a_socket))
+        stale = start("/bin/sleep", "64")
+        table = wait_listed(ours.pid, server.pid, bystander.pid, stale.pid)
+        lab.state["a_server"] = {"pid": server.pid, "start": table[server.pid][1], "command": table[server.pid][2]}
+        assert os.getppid() in rex_remote.lineage(table) and os.getpid() in rex_remote.lineage(table)
+        assert set(lab.lab_processes()) == {ours.pid, server.pid}, lab.lab_processes()
+        stopped = lab.stop_lab_processes()
+        assert stopped == sorted([ours.pid, server.pid]), stopped
+        for process in (ours, server):
+            process.wait(timeout=5)
+        assert bystander.poll() is None, "a process that names the lab's socket was signalled"
+        # A recorded server pid whose start time no longer matches is another process.
+        lab.state["a_server"] = {"pid": stale.pid, "start": "Thu Jan  1 00:00:00 1970", "command": "/bin/sleep 64"}
+        assert lab.stop_lab_processes() == [] and stale.poll() is None
+        # The shell that runs `down` names the lab's socket and survives it.
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); import rex_remote; "
+                "print(rex_remote.Lab(sys.argv[2]).stop_lab_processes())")
+        ran = subprocess.run(["/bin/sh", "-c", '"$1" -I -c "$2" "$3" "$4"; echo "shell survived $0"', str(lab.a_socket),
+                              sys.executable, code, str(Path(rex_remote.__file__).parent), str(lab.dir)],
+                             text=True, capture_output=True, timeout=60)
+        assert ran.stdout.splitlines() == ["[]", "shell survived " + str(lab.a_socket)], (ran.stdout, ran.stderr)
+        assert bystander.poll() is None
+    finally:
+        for process in started:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+    return ("remote lab down: it stops A's Namedrop and A's recorded server, and spares a process that "
+            "names the lab's socket, a recycled server pid, and its own shell")
 
 
 def check_syntax(kit):
@@ -1677,6 +1807,8 @@ def run(kit):
                   ("Rex profile environment", lambda: check_rex_profile_environment(base)),
                   ("Rex live up and down", lambda: check_rex_live_up_and_down(base)),
                   ("Rex live down", lambda: check_rex_live_down_after_a_failed_stop(base)),
+                  ("remote lab", lambda: check_rex_remote_lab(base)),
+                  ("remote lab down", lambda: check_rex_remote_down(base)),
                   ("syntax", lambda: check_syntax(kit)),
                   ("screens", check_screens),
                   ("transcripts", check_transcripts),
