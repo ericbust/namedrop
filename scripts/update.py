@@ -15,6 +15,7 @@ import sys
 import tempfile
 
 SCHEMA_VERSION = 8
+SCHEMAS = (3, 4, 5, 6, 7, SCHEMA_VERSION)
 
 
 def prepare_target(before, directory):
@@ -153,7 +154,7 @@ def durable_state(panes, other_servers=False):
     with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2) as db:
         db.execute('BEGIN')
         schema = db.execute("PRAGMA user_version").fetchone()[0]
-        require(schema in (3, 4, 5, 6, 7, SCHEMA_VERSION),
+        require(schema in SCHEMAS,
                 "Unknown collaboration database schema; use the matching Namedrop release to inspect unfinished work.")
         deliveries = db.execute("""SELECT session_socket_id, worktree_id, delivery_id, state FROM mailbox_deliveries d
             WHERE state NOT IN ('settled', 'failed', 'cancelled') OR
@@ -307,23 +308,60 @@ def session_panes():
     return panes, unverified
 
 
+def rex_server_listens(endpoint):
+    # Imported here: macOS's system Python caches a newly imported module
+    # under HOME, and an update with no Rex session writes nothing new there.
+    import socket
+    path = endpoint.removeprefix('rex:')
+    if not os.path.isabs(path):
+        return False
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+        probe.settimeout(2)
+        try:
+            probe.connect(path)
+        except OSError:
+            return False
+    return True
+
+
 def rex_session_panes():
+    """The Rex-bound agent sessions in the store, which Herdr's survey cannot
+    see, and the stopped Rex servers whose sessions were left out. Only a
+    running server can record that a session ended, so a stopped server's
+    last sessions would otherwise be counted for ever."""
     path = Path(os.environ['HERDR_PLUGIN_STATE_DIR']) / 'namedrop.sqlite3'
     if not path.is_file():
-        return []  # durable_state refuses a missing store with its own message
+        return [], []  # durable_state refuses a missing store with its own message
     with contextlib.closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
-        rows = db.execute("""SELECT b.session_socket_id, b.worktree_id, b.pane_id, b.tab_id,
-                (SELECT o.agent_session_id FROM agent_session_observations o
+        if db.execute('PRAGMA user_version').fetchone()[0] not in SCHEMAS:
+            return [], []  # and an unknown schema, a store with no tables included
+        # The latest observation since the binding, as src/store.rs reads it.
+        latest = """FROM agent_session_observations o
                  WHERE o.session_socket_id=b.session_socket_id AND o.worktree_id=b.worktree_id
                    AND o.address_id=b.address_id AND o.observed_at_ms >= b.bound_at_ms
-                 ORDER BY o.observed_at_ms DESC, o.rowid DESC LIMIT 1)
-            FROM pane_bindings b JOIN pane_addresses a
-            USING (session_socket_id, worktree_id, address_id)
-            WHERE b.active=1 AND a.retired=0 AND b.session_socket_id LIKE 'rex:%'
-            ORDER BY b.session_socket_id, b.worktree_id, b.pane_id""").fetchall()
-    return [dict(_socket=socket, workspace_id=space, pane_id=pane, tab_id=tab,
-                 agent_session={'value': session}, agent_status='unknown')
-            for socket, space, pane, tab, session in rows if session]
+                 ORDER BY o.observed_at_ms DESC, o.rowid DESC LIMIT 1"""
+        rows = db.execute(f"""SELECT endpoint, space, pane, tab, session, status, alias,
+                (SELECT r.runtime FROM integration_registrations r
+                 WHERE r.session_socket_id=endpoint AND r.worktree_id=space AND r.address_id=address
+                   AND r.agent_session_id=session ORDER BY r.rowid DESC LIMIT 1)
+            FROM (SELECT b.session_socket_id AS endpoint, b.worktree_id AS space, b.address_id AS address,
+                    b.pane_id AS pane, b.tab_id AS tab,
+                    (SELECT o.agent_session_id {latest}) AS session, (SELECT o.status {latest}) AS status,
+                    (SELECT c.alias FROM alias_claims c
+                     WHERE c.session_socket_id=b.session_socket_id AND c.worktree_id=b.worktree_id
+                       AND c.address_id=b.address_id AND c.claim_state='active') AS alias
+                FROM pane_bindings b JOIN pane_addresses a
+                USING (session_socket_id, worktree_id, address_id)
+                WHERE b.active=1 AND a.retired=0 AND b.session_socket_id LIKE 'rex:%')
+            WHERE session != ''
+            ORDER BY endpoint, space, pane""").fetchall()
+    listening = {endpoint: rex_server_listens(endpoint) for endpoint in sorted({row[0] for row in rows})}
+    # Herdr's names for the agent kinds the integration registers.
+    agents = {'claude-code': 'claude', 'codex': 'codex'}
+    panes = [dict(_socket=endpoint, workspace_id=space, pane_id=pane, tab_id=tab, label=alias,
+                  agent=agents.get(runtime, runtime), agent_session={'value': session}, agent_status=status)
+             for endpoint, space, pane, tab, session, status, alias, runtime in rows if listening[endpoint]]
+    return panes, [endpoint for endpoint, up in listening.items() if not up]
 
 
 def preflight(live=False):
@@ -333,9 +371,11 @@ def preflight(live=False):
                 and p.get("workspace_id") == os.environ["HERDR_WORKSPACE_ID"]
                 and p['_socket'] == current_socket for p in panes),
             "The source pane/workspace is not present on this server.")
-    panes.extend(rex_session_panes())
+    rex_panes, stopped = rex_session_panes()
+    panes.extend(rex_panes)
     state = durable_state(panes, bool(unverified))
     state['other_servers'] = unverified
+    state['stopped_rex_servers'] = stopped
     agents = [p for p in panes if p.get("agent") or p.get("agent_session")
               or (p['_socket'], p.get('terminal_id')) in state['terminals']]
     state['live_update'] = live
@@ -434,7 +474,8 @@ def confirm_when_ready(before, live=False):
         # Reprint only when blockers change, not on every readiness poll.
         current = ([{k: pane.get(k) for k in ('_socket', 'pane_id', 'workspace_id', 'tab_id',
                     'agent', 'agent_session', 'agent_status', 'label', 'title', 'terminal_title_stripped')}
-                    for pane in agents], state['details'], state['joins'], state['other_servers'])
+                    for pane in agents], state['details'], state['joins'], state['other_servers'],
+                   state['stopped_rex_servers'])
         changed = current != previous
         if changed:
             metadata = labels(agents)
@@ -449,6 +490,8 @@ def confirm_when_ready(before, live=False):
                 print("  Held or uncertain handoffs need review in handoff status/inbox.")
             for server in state['other_servers']:
                 print("  Could not check another Herdr session: " + safe(server))
+            for server in state['stopped_rex_servers']:
+                print("  Not counted: the Rex server at " + safe(server) + " is not running, so its sessions have ended.")
             if live:
                 if state.get('activation_pending'):
                     print("\n  Complete Activate Namedrop before starting fresh sessions; initial setup has not finished.")

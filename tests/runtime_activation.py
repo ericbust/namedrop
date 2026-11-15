@@ -4,12 +4,14 @@ Run directly for the local checks. The upgrade lane is exposed through
 update_lifecycle.py --upgrade-from TAG and uses NAMEDROP_TEST_PREVIOUS_BINARY
 and NAMEDROP_TEST_BINARY built from that tag and this checkout respectively.
 """
+import contextlib
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import shutil
+import socket as socketlib
 import sqlite3
 import subprocess
 import sys
@@ -71,6 +73,36 @@ def schema(path):
             sql = (REPO / file).read_text().split('const SCHEMA: &str = r#"', 1)[1].split('"#;', 1)[0]
             db.executescript(sql)
         db.execute('PRAGMA user_version=8')
+
+
+@contextlib.contextmanager
+def rex_server():
+    """A listening Unix socket, as a running Rex server's, under /tmp so the
+    path fits sun_path."""
+    directory = tempfile.mkdtemp(prefix='nd-u4-', dir='/tmp')
+    path = os.path.join(directory, 'rex.sock')
+    try:
+        with contextlib.closing(socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)) as listener:
+            listener.bind(path)
+            listener.listen(16)
+            yield path
+    finally:
+        shutil.rmtree(directory)
+
+
+def rex_agent(path, endpoint, pane, *, alias, runtime, status):
+    """An active binding of `pane` on `endpoint` with an alias, a registration
+    and an observed session, the rows an agent's hooks leave in the store."""
+    address, session = pane + '-address', pane + '-session'
+    with contextlib.closing(sqlite3.connect(path)) as db, db:
+        db.execute("INSERT INTO pane_addresses VALUES (?, 's', ?, 'role', 0, 0, 0)", (endpoint, address))
+        db.execute("INSERT INTO pane_bindings VALUES (?, 's', ?, ?, ?, 1, 'tab', 5, NULL)",
+                   (endpoint, pane + '-binding', address, pane))
+        db.execute("INSERT INTO alias_claims VALUES (?, 's', ?, ?, 'active', NULL)", (endpoint, alias, address))
+        db.execute("INSERT INTO integration_registrations VALUES (?, 's', ?, ?, ?, ?, 'v', 'p', 1)",
+                   (endpoint, pane + '-registration', address, session, runtime))
+        db.execute("INSERT INTO agent_session_observations VALUES (?, 's', ?, ?, ?, ?, 5)",
+                   (endpoint, pane + '-observation', address, session, status))
 
 
 def archive(ref, destination):
@@ -260,7 +292,7 @@ class ActivationChecks(unittest.TestCase):
                 self.assertEqual(verdicts, {'head': True, 'changed': False})
 
     def test_rex_preflight(self):
-        with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory:
+        with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory, rex_server() as listening:
             base = Path(directory)
             env = environment(base)
             path = base / 'state/namedrop.sqlite3'
@@ -268,20 +300,26 @@ class ActivationChecks(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'Cannot verify durable collaboration state'):
                     update.preflight()
             schema(path)
-            socket = 'rex:/tmp/fixture.sock'
-            with sqlite3.connect(path) as db:
-                db.execute("INSERT INTO pane_addresses VALUES (?, 's', 'a', 'role', 0, 0, 0)", (socket,))
-                db.execute("INSERT INTO pane_bindings VALUES (?, 's','b','a','block',1,'tab',5,NULL)", (socket,))
-                db.execute("INSERT INTO agent_session_observations VALUES (?, 's','o','a','rex-session','working',5)", (socket,))
+            socket = 'rex:' + listening
+            rex_agent(path, socket, 'block', alias='alpha', runtime='claude-code', status='working')
+            # A Herdr binding with an observed session: Herdr's own survey
+            # reports it, so the store's copy must not count a second time.
+            rex_agent(path, listening, 'herdr-pane', alias='beta', runtime='claude-code', status='idle')
             with mock.patch.dict(os.environ, env, clear=True):
                 state, agents = update.preflight()
                 self.assertEqual(state['session_count'], 1)
-                self.assertEqual([(p['_socket'], p['agent_session']['value']) for p in agents], [(socket, 'rex-session')])
+                self.assertEqual(state['stopped_rex_servers'], [])
+                self.assertEqual([(p['_socket'], p['agent_session']['value'], p['label'], p['agent'], p['agent_status'])
+                                  for p in agents], [(socket, 'block-session', 'alpha', 'claude', 'working')])
                 self.assertFalse(update.ready(state, agents))
                 with mock.patch.object(update, 'structured', return_value={'result': {'workspaces': [], 'tabs': []}}) as host:
-                    update.labels(agents)
+                    metadata = update.labels(agents)
                     self.assertEqual([call.kwargs['socket'] for call in host.call_args_list],
                                      [env['HERDR_SOCKET_PATH']] * 2)
+                shown = io.StringIO()
+                with contextlib.redirect_stdout(shown):
+                    update.show_agents(agents, metadata)
+                self.assertIn(f'→ alpha (claude, working; block) [Rex: {socket}]', shown.getvalue())
                 rt = base / 'state/runtime'
                 rt.mkdir()
                 migration = rt / 'legacy-sessions.json'
@@ -289,11 +327,17 @@ class ActivationChecks(unittest.TestCase):
                 live_state, live_agents = update.preflight(live=True)
                 self.assertEqual(live_state['session_count'], 1)
                 self.assertTrue(update.ready(live_state, live_agents))
-                migration.write_text(json.dumps(dict(sessions=[[socket, 'rex-session']],
+                migration.write_text(json.dumps(dict(sessions=[[socket, 'block-session']],
                                                      codex_ready=True, packages_ready=True)))
                 self.assertFalse(update.ready(*update.preflight(live=True)))
+                # Codex's setup still pending blocks only Codex sessions.
+                migration.write_text(json.dumps(dict(sessions=[], codex_ready=False, packages_ready=True)))
+                self.assertTrue(update.ready(*update.preflight(live=True)))
                 with sqlite3.connect(path) as db:
-                    db.execute("INSERT INTO agent_session_observations VALUES (?, 's','ended','a','','unknown',5)", (socket,))
+                    db.execute("UPDATE integration_registrations SET runtime='codex'")
+                self.assertFalse(update.ready(*update.preflight(live=True)))
+                with sqlite3.connect(path) as db:
+                    db.execute("INSERT INTO agent_session_observations VALUES (?, 's','ended','block-address','','unknown',5)", (socket,))
                 self.assertTrue(update.ready(*update.preflight()))
                 with sqlite3.connect(path) as db:
                     db.execute("DELETE FROM agent_session_observations WHERE observation_id='ended'")
@@ -306,6 +350,43 @@ class ActivationChecks(unittest.TestCase):
                     db.execute('UPDATE pane_bindings SET bound_at_ms=5')
                     db.execute('UPDATE pane_addresses SET retired=1')
                 self.assertTrue(update.ready(*update.preflight()))
+
+    def test_rex_preflight_leaves_out_stopped_servers(self):
+        with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory, rex_server() as listening:
+            base = Path(directory)
+            env = environment(base)
+            path = base / 'state/namedrop.sqlite3'
+            schema(path)
+            refused = str(Path(listening).with_name('stopped.sock'))
+            with contextlib.closing(socketlib.socket(socketlib.AF_UNIX, socketlib.SOCK_STREAM)) as stopped:
+                stopped.bind(refused)  # the file stays, and nothing listens on it
+            missing = str(Path(listening).with_name('missing.sock'))
+            for endpoint in (refused, missing):
+                rex_agent(path, 'rex:' + endpoint, 'block', alias='alpha', runtime='claude-code', status='idle')
+            with mock.patch.dict(os.environ, env, clear=True):
+                state, agents = update.preflight()
+                self.assertEqual((state['session_count'], agents), (0, []))
+                self.assertEqual(state['stopped_rex_servers'], sorted(['rex:' + refused, 'rex:' + missing]))
+                self.assertTrue(update.ready(state, agents))
+                rex_agent(path, 'rex:' + listening, 'block', alias='alpha', runtime='claude-code', status='idle')
+                state, agents = update.preflight()
+                self.assertEqual([p['_socket'] for p in agents], ['rex:' + listening])
+                self.assertFalse(update.ready(state, agents))
+
+    def test_unknown_store_schema_keeps_its_message(self):
+        with tempfile.TemporaryDirectory(prefix='namedrop-u4-') as directory:
+            base = Path(directory)
+            env = environment(base)
+            root = base / 'checkout'
+            shutil.copytree(REPO / 'scripts', root / 'scripts')
+            fixture_release(root)
+            self.assertEqual(invoke(root, env, explicit=False).returncode, 0)
+            (base / 'state/namedrop.sqlite3').write_bytes(b'')  # a store file with no tables
+            fixture_release(root, number=2, state_schema=9)
+            result = invoke(root, env, explicit=False)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(result.stderr, 'Namedrop runtime activation stopped: Unknown collaboration database '
+                             'schema; use the matching Namedrop release to inspect unfinished work.\n')
 
     def test_fixture_differential(self):
         ref = os.environ.get('NAMEDROP_TEST_BASE_REF', 'cca00814')
