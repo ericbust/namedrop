@@ -192,8 +192,19 @@ for _, a in ipairs(actions) do
 			local argv = { NAMEDROP, "rex", "action", name, "--endpoint", endpoint(),
 				"--space", ctx.session_id, "--pane", ctx.block_id }
 			local result, err = rex.exec(argv, { env = { NAMEDROP_STATE_DIR = STATE }, timeout = 25 })
-			if result == nil then error(tostring(err), 0) end
-			if not result.ok then error(result.stderr, 0) end
+			if result == nil then
+				if tostring(err):find("no such file or directory", 1, true) then
+					error("Namedrop's launcher " .. NAMEDROP .. " is missing. Run sh scripts/install.sh again.", 0)
+				end
+				error("Namedrop's launcher " .. NAMEDROP .. " could not start: " .. tostring(err) .. ". Run sh scripts/install.sh again.", 0)
+			end
+			if result.ok then return end
+			if result.timed_out then
+				error(title .. " did not finish within 25 s, so Rex stopped it. If Namedrop is updating, try again when the update is done.", 0)
+			end
+			if result.stderr ~= nil and result.stderr ~= "" then error(result.stderr, 0) end
+			if result.signal ~= nil then error(title .. " stopped on " .. tostring(result.signal) .. " before it finished.", 0) end
+			error(title .. " exited with status " .. tostring(result.code) .. " and printed no reason.", 0)
 		end }
 	if key ~= nil and #rex.bindings{ key = key } == 0 then rex.bind(key, "namedrop_" .. name) end
 end
@@ -214,7 +225,7 @@ rex.exec.start({ NAMEDROP, "rex", "ensure", "--from-server" },
 
 Seven choices in it need a reason.
 
-- **One entry point.** `namedrop rex action <name>` maps the name to today's commands. `activate` runs a confirmed `activate`. `name`, `manage`, `doctor`, `status`, and `tour` run `ui launch <mode>`. `channels`, `pause`, `resume`, and `deactivate` run their commands. It prints a failure as one plain line on stderr, decoded from Namedrop's JSON envelope, and exits 1, so the palette shows `Error: <the line>` and never JSON. A name the binary does not know, as after a rollback to an older release, fails with `This Namedrop has no action <name>. Run sh scripts/install.sh again.` The module's text changes only when the list of actions does.
+- **One entry point.** `namedrop rex action <name>` maps the name to today's commands. `activate` runs a confirmed `activate`. `name`, `manage`, `doctor`, `status`, and `tour` run `ui launch <mode>`. `channels`, `pause`, `resume`, and `deactivate` run their commands. It prints a failure as one plain line on stderr, decoded from Namedrop's JSON envelope, and exits 1, so the palette shows `Error: <the line>` and never JSON. A run that leaves no such line is worded by the module itself, because Rex's own text for it is a bare `Error: ` or a raw spawn error (the U6 review measured both): Rex returns `nil` and `<path>: posix_spawn <path>: no such file or directory` for a missing launcher, which the module reports as `Namedrop's launcher <path> is missing. Run sh scripts/install.sh again.`, and any other start failure with Rex's reason and the same repair; a run past the 25 s limit returns `{ok = false, timed_out = true, signal = "SIGTERM", stderr = ""}`, reported as `<title> did not finish within 25 s, so Rex stopped it. If Namedrop is updating, try again when the update is done.`; and a run ended by a signal, or one that exits with an empty stderr, names the signal or the status. A name the binary does not know, as after a rollback to an older release, fails with `This Namedrop has no action <name>. Run sh scripts/install.sh again.` The module's text changes only when the list of actions does.
 - **The endpoint comes from `server.status`.** Rex does not set `REX_SERVER` in every block, and an action's `ctx` carried no server (measured). The primary Unix listener is the canonical endpoint that `prove_local` already uses (ADAPTER.md, "The endpoint string carries the kind"). An explicit `--endpoint` decides the home with no socket probe, and the adapter still proves the server local before it types anything.
 - **No revision check in Lua.** The Rust handshake is the only version gate. Its hello offers a range, and the server settles on the highest revision both support or closes the connection (measured), so every action and every CLI call is gated in one place, with one error. The tested range widens per release, after the probes of [What exists in Rex](#what-exists-in-rex) run on the new Rex build. Revision 13 joins it in U1: preview.18 differs from preview.14 only by the revision and one terminal action Namedrop does not use, and a build that offered 12 to 13 passed the same checks on both servers (measured).
 - **Keys are bound by default, and a bound key is skipped.** The module binds `alt+shift+cmd+{i,m,h,s,o}`, Herdr's letters on the one modifier set the Mac app leaves free, unless `rex.bindings{ key = … }` already returns a binding for the key. That call sees only the bindings the file made before the module (measured), which on line 1 is none, unless the person moved the line down. A key the person binds later in `init.lua` wins, because Rex puts the newest binding on top (measured). Doctor reads `client.keymap` and reports each Namedrop key as in effect, or as shadowed with the source line that shadows it, and lists the keys skipped at load. The bindings carry action names, so `rex keymap` shows each one with its source.
