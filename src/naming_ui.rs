@@ -110,12 +110,8 @@ fn target_terminal(runtime: &Runtime<'_>) -> Result<String, String> {
 
 pub(super) fn run(options: &RuntimeOptions, inherited: &dyn Inherited, mode: UiMode) -> ExitCode {
     if mode == UiMode::Status {
-        let observing = super::location(options, inherited).and_then(|location| location.pane);
-        return crate::agent_status_ui::run(
-            options,
-            inherited,
-            observing.as_ref().map(PaneId::as_str),
-        );
+        let observing = observing_pane(options, inherited);
+        return crate::agent_status_ui::run(options, inherited, observing.as_deref());
     }
     match run_prompt(options, inherited, mode) {
         Ok(()) => ExitCode::SUCCESS,
@@ -133,6 +129,22 @@ pub(super) fn run(options: &RuntimeOptions, inherited: &dyn Inherited, mode: UiM
             ExitCode::from(65)
         }
     }
+}
+
+/// The pane the status panel itself occupies. A Rex layer runs with an
+/// explicit `--endpoint`, so its home has no pane: its own block is only in
+/// the `REX_BLOCK` Rex gives it.
+fn observing_pane(options: &RuntimeOptions, inherited: &dyn Inherited) -> Option<String> {
+    if let Ok(Home::Rex(place)) = home::resolve(&options.flags(), inherited) {
+        return inherited
+            .var("REX_BLOCK")
+            .and_then(|block| block.into_string().ok())
+            .filter(|block| !block.is_empty())
+            .or(place.pane.map(|pane| pane.as_str().to_owned()));
+    }
+    super::location(options, inherited)
+        .and_then(|location| location.pane)
+        .map(|pane| pane.as_str().to_owned())
 }
 
 fn run_prompt(
@@ -1472,7 +1484,86 @@ fn prompt_line(label: &str) -> Result<Option<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::wrap_exact;
+    use super::{observing_pane, wrap_exact};
+    use clap::Parser;
+    use namedrop::mux::home::{Claimed, Inherited};
+    use std::{collections::BTreeMap, ffi::OsString, io, path::Path};
+
+    /// Inherited names only: no socket, ancestor or process is ever read.
+    struct Names(BTreeMap<&'static str, &'static str>);
+
+    impl Inherited for Names {
+        fn var(&self, name: &str) -> Option<OsString> {
+            self.0.get(name).map(OsString::from)
+        }
+        fn id(&self) -> u32 {
+            0
+        }
+        fn ancestors(&self) -> Vec<u32> {
+            Vec::new()
+        }
+        fn peer(&self, _socket: &Path) -> io::Result<u32> {
+            Err(io::ErrorKind::NotFound.into())
+        }
+        fn claimed(&self, _socket: &Path, _session: &str, _block: &str) -> Result<Claimed, String> {
+            Err("no Rex claim".to_owned())
+        }
+        fn incarnation(&self, _pid: u32) -> Option<String> {
+            None
+        }
+    }
+
+    fn observing(argv: &[&str], names: &[(&'static str, &'static str)]) -> Option<String> {
+        let cli = namedrop::cli::Cli::try_parse_from(
+            ["namedrop"]
+                .iter()
+                .chain(argv)
+                .chain(&["ui", "run", "status"]),
+        )
+        .unwrap();
+        observing_pane(&cli.runtime, &Names(names.iter().copied().collect()))
+    }
+
+    #[test]
+    fn a_rex_status_layer_observes_its_own_block_not_the_target() {
+        let layer = [
+            ("REX_BLOCK", "block:layer"),
+            ("REX_SESSION", "session:s"),
+            ("NAMEDROP_TARGET_PANE", "block:target"),
+        ];
+        assert_eq!(
+            observing(&["--endpoint", "rex:/tmp/r.sock"], &layer).as_deref(),
+            Some("block:layer")
+        );
+        assert_eq!(
+            observing(
+                &["--endpoint", "rex:/tmp/r.sock", "--pane", "block:flag"],
+                &layer
+            )
+            .as_deref(),
+            Some("block:layer")
+        );
+        assert_eq!(
+            observing(
+                &["--endpoint", "rex:/tmp/r.sock", "--pane", "block:flag"],
+                &[]
+            )
+            .as_deref(),
+            Some("block:flag")
+        );
+        assert_eq!(observing(&["--endpoint", "rex:/tmp/r.sock"], &[]), None);
+        // A Herdr popup keeps its own pane, and an inherited Rex block (Herdr
+        // inside Rex) never stands in for it.
+        let herdr = [
+            ("HERDR_SOCKET_PATH", "/tmp/herdr.sock"),
+            ("HERDR_PANE_ID", "popup-pane"),
+            ("REX_BLOCK", "block:outer"),
+        ];
+        assert_eq!(
+            observing(&["--endpoint", "/tmp/herdr.sock"], &herdr).as_deref(),
+            Some("popup-pane")
+        );
+    }
 
     #[test]
     fn doctor_wrapping_breaks_at_spaces_and_keeps_every_character() {
