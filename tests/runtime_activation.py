@@ -97,7 +97,7 @@ def rex_agent(path, endpoint, pane, *, alias, runtime, status):
     and an observed session, the rows an agent's hooks leave in the store."""
     address, session = pane + '-address', pane + '-session'
     with contextlib.closing(sqlite3.connect(path)) as db, db:
-        db.execute("INSERT INTO pane_addresses VALUES (?, 's', ?, 'role', 0, 0, 0)", (endpoint, address))
+        db.execute("INSERT INTO pane_addresses (session_socket_id,worktree_id,address_id,role_id,retired,collaboration_disabled,created_at_ms) VALUES (?, 's', ?, 'role', 0, 0, 0)", (endpoint, address))
         db.execute("INSERT INTO pane_bindings VALUES (?, 's', ?, ?, ?, 1, 'tab', 5, NULL)",
                    (endpoint, pane + '-binding', address, pane))
         db.execute("INSERT INTO alias_claims VALUES (?, 's', ?, ?, 'active', NULL)", (endpoint, alias, address))
@@ -254,11 +254,10 @@ class ActivationChecks(unittest.TestCase):
                                      '[--state-dir DIR --verify activate] [ARGUMENT...]\n'))
             self.assertEqual(os.readlink(chosen / 'runtime/current'), selected)
             self.assertFalse(owner.exists())
-            args[args.index('activate')] = 'install'
+            args[args.index('activate')] = 'unknown'
             rejected = subprocess.run(args, env=env, cwd=base, capture_output=True, text=True, timeout=60)
             self.assertEqual((rejected.returncode, rejected.stdout, rejected.stderr),
-                             (2, '', 'Namedrop runtime activation stopped: Unsupported runtime verification: install\n'),
-                             '--verify install belongs to U8')
+                             (2, '', 'Namedrop runtime activation stopped: Unsupported runtime verification: unknown\n'))
             self.assertEqual(os.readlink(chosen / 'runtime/current'), selected)
             self.assertFalse(owner.exists())
 
@@ -579,7 +578,6 @@ class ActivationChecks(unittest.TestCase):
                             contents = os.readlink(path)
                         elif path.is_file():
                             if path.name == 'owner':
-                                self.assertIs(source, REPO)
                                 self.assertEqual(path.read_text(), 'herdr\n')
                                 continue
                             contents = path.read_bytes()

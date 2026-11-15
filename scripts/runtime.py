@@ -91,8 +91,8 @@ def write_owned(path, contents, mode):
         Path(temporary).unlink(missing_ok=True)
 
 
-def record_legacy(runtime, *, first=False, codex_ready=False, packages_ready=False):
-    panes, unverified = session_panes()
+def record_legacy(runtime, *, first=False, codex_ready=False, packages_ready=False, survey=None):
+    panes, unverified = (survey or session_panes)()
     sessions = [[p['_socket'], (p.get('agent_session') or {}).get('value')]
                 for p in panes if (p.get('agent') or p.get('agent_session')) and (first or is_codex(p))]
     require(not unverified and all(item[1] for item in sessions),
@@ -569,6 +569,8 @@ def migration_record(runtime):
     require(isinstance(value, dict) and set(value) == {'previous', 'target'},
             'Invalid runtime migration record.')
     for name in ('previous', 'target'):
+        if name == 'previous' and value[name] is None:
+            continue
         target = Path(value[name])
         require(len(target.parts) == 2 and target.parts[0] == 'releases' and RELEASE.fullmatch(target.parts[1]),
                 'Invalid runtime migration target.')
@@ -577,7 +579,7 @@ def migration_record(runtime):
                 and hashlib.sha256((release / 'namedrop').read_bytes()).hexdigest() == target.name,
                 'The retained migration executable failed verification.')
         contract(release)
-    return Path(value['previous']), Path(value['target'])
+    return Path(value['previous']) if value['previous'] is not None else None, Path(value['target'])
 
 
 def recover_migration(runtime):
@@ -587,6 +589,12 @@ def recover_migration(runtime):
     with command_gate(runtime) as gate:
         previous, target = migration_record(runtime)
         require(current(runtime) in (previous, target), 'Runtime changed during an unfinished migration.')
+        if previous is None:
+            switch(runtime, target)
+            drain_legacy_commands(runtime)
+            migrate_selected(runtime, target, gate)
+            (runtime / 'migration.json').unlink()
+            return
         schema = state_schema(runtime)
         if schema == contract(runtime / previous)['state_schema']:
             switch(runtime, previous)
@@ -603,7 +611,8 @@ def switch_and_migrate(runtime, previous, target):
     with command_gate(runtime) as gate:
         record = runtime / 'migration.json'
         require(not record.exists() and not record.is_symlink(), 'An unfinished migration needs recovery.')
-        write_owned(record, json.dumps({'previous': str(previous), 'target': str(target)}) + '\n', 0o600)
+        write_owned(record, json.dumps({'previous': str(previous) if previous is not None else None,
+                                        'target': str(target)}) + '\n', 0o600)
         try:
             switch(runtime, target)
             drain_legacy_commands(runtime)
@@ -612,7 +621,7 @@ def switch_and_migrate(runtime, previous, target):
             # An atomic migration either left the old schema or committed the new
             # one. Never publish an old executable over newer state. Keep the
             # marker after an uncertain/committed failure for normal retry recovery.
-            if state_schema(runtime) == contract(runtime / previous)['state_schema']:
+            if previous is not None and state_schema(runtime) == contract(runtime / previous)['state_schema']:
                 switch(runtime, previous)
                 record.unlink()
             raise
@@ -804,17 +813,42 @@ def activate_codex_plugin(payload, refresh):
         return payload, 1
 
 
-def activate(root, args):
+def activate(root, args, *, verify='activate'):
     state = Path(os.environ['HERDR_PLUGIN_STATE_DIR'])
     require(state.is_absolute() and state.is_dir(), 'Activation needs an absolute, existing state directory.')
+    installation = None
+    if verify == 'install':
+        from runtime_install import Install
+        require(args in ([], ['--print-config']), 'Install verification accepts only --print-config.')
+        installation = Install(root, state, built_executable(root))
+        os.environ['NAMEDROP_STATE_DIR'] = str(state)
+        args = ['--plugin-state', str(state), '--json', 'install', '--input-json', '{"confirmed":true}', *args]
     runtime = state / 'runtime'
     retired = runtime / 'retired.json'
     if retired.exists():
         require(json.loads(retired.read_text()).get('reason') != 'herdr_handoff',
                 'Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again.')
+    if installation:
+        installation.check_owner()
     owned_directory(runtime)
     owned_directory(runtime / 'releases')
     with lock(runtime, 'activation.lock'):
+        if retired.exists():
+            require(json.loads(retired.read_text()).get('reason') != 'herdr_handoff',
+                    'Namedrop is moving to Herdr. Run Activate Namedrop in Herdr again.')
+        if installation:
+            installation.check_owner()
+            source = installation.source()
+        if installation and retired.exists():
+            with command_gate(runtime):
+                marker = json.loads(retired.read_text())
+                require(marker.get('reason') == 'removed', 'This retired state cannot be installed again.')
+                retired.unlink()
+                descriptor = os.open(runtime, os.O_RDONLY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
         recover_migration(runtime)
         previous = current(runtime)
         old = previous.name if previous is not None else None
@@ -823,10 +857,12 @@ def activate(root, args):
         live = previous is not None and live_compatible(contract(runtime / previous), incoming)
         if previous is not None:
             if not live or contract(runtime / previous)['state_schema'] != incoming['state_schema']:
-                state_before, agents = preflight(live=True) if live else preflight()
+                check = installation.preflight if installation else preflight
+                state_before, agents = check(live=True) if live else check()
                 for notice in rex_notices(state_before):
                     print(notice, file=sys.stderr)
                 require(ready(state_before, agents),
+                        'Some Rex sessions still use pre-launcher tools or incomplete setup. Finish their work and restart the agents before installing again; nothing was stopped.' if installation else
                         'Some sessions still use pre-launcher tools or incomplete setup. Open Update Namedrop for the specific blockers; nothing was stopped.' if live else
                         'This update needs a session refresh. Open Update Namedrop to install when current work is finished; nothing was stopped.')
         executable = built_executable(root)
@@ -860,23 +896,35 @@ def activate(root, args):
             # activations never reclassify new sessions as legacy sessions.
             require(not (runtime/'legacy-sessions.json').exists() and not (runtime/'legacy-sessions.json').is_symlink(),
                     'An existing runtime migration record needs inspection; nothing was overwritten.')
-            record_legacy(runtime, first=True)
+            record_legacy(runtime, first=True, survey=installation.session_panes if installation else None)
             write_owned(launcher, LAUNCHER, 0o700)
-        if (previous is not None and incoming.get('command_gate') == 1
-                and contract(runtime / previous)['state_schema'] != incoming['state_schema']):
+        if installation and previous is None:
+            with lock(runtime, 'packages.lock'):
+                write_owned(runtime / 'owner', 'standalone\n', 0o600)
+        if ((previous is not None and incoming.get('command_gate') == 1
+                and contract(runtime / previous)['state_schema'] != incoming['state_schema'])
+                or installation and previous is None
+                and (not (state / 'namedrop.sqlite3').exists() or state_schema(runtime) != incoming['state_schema'])):
             switch_and_migrate(runtime, previous, target)
         else:
             switch(runtime, target)
         payload = None
+        def record_source():
+            if installation and current(runtime) == target:
+                with lock(runtime, 'packages.lock'):
+                    write_owned(runtime / 'source.json', json.dumps(source) + '\n', 0o600)
         try:
             with lock(runtime, 'packages.lock'):
-                write_owned(runtime / 'owner', 'herdr\n', 0o600)
+                write_owned(runtime / 'owner', 'standalone\n' if installation else 'herdr\n', 0o600)
             result = subprocess.run([str(launcher), *args], capture_output=True, text=True)
             if result.returncode == 0:
                 payload = json.loads(result.stdout)
                 data = payload.get('data', {})
                 packages = data.get('integration_packages', {})
-                require(payload.get('status') == 'ok' and payload.get('operation') == 'activate'
+                if installation:
+                    installation.verify(payload)
+                else:
+                    require(payload.get('status') == 'ok' and payload.get('operation') == 'activate'
                         and data.get('activated') is True
                         and data.get('space_id') == os.environ['HERDR_WORKSPACE_ID']
                         and data.get('state_directory') == str(state)
@@ -887,7 +935,10 @@ def activate(root, args):
                     refreshed = subprocess.run([str(launcher), *args], capture_output=True,
                                                text=True, timeout=20, check=True)
                     value = json.loads(refreshed.stdout)
-                    require(value.get('status') == 'ok' and value.get('operation') == 'activate'
+                    if installation:
+                        installation.verify(value)
+                    else:
+                        require(value.get('status') == 'ok' and value.get('operation') == 'activate'
                             and value['data'].get('space_id') == data['space_id']
                             and value['data'].get('state_directory') == str(state)
                             and value['data'].get('activated') is True
@@ -902,12 +953,16 @@ def activate(root, args):
                     # Freeze Codex's cutoff only after its enabled host cache is
                     # verified, including sessions opened during cache refresh.
                     cache_ready = data.get('agent_integration_hook_activation', {}).get('codex', {}).get('migration_ready') is True
-                    record_legacy(runtime, first=not migration['packages_ready'], codex_ready=cache_ready, packages_ready=True)
+                    record_legacy(runtime, first=not migration['packages_ready'], codex_ready=cache_ready, packages_ready=True,
+                                  survey=installation.session_panes if installation else None)
+            if result.returncode:
+                restore(runtime, previous, incoming)
+            record_source()
         except BaseException:
             restore(runtime, previous, incoming)
+            record_source()
             raise
         if result.returncode:
-            restore(runtime, previous, incoming)
             print('Activation did not complete. The previous runtime remains selected; existing sessions can continue.'
                   if previous is not None and current(runtime) == previous else 'Inspect setup before starting sessions.', file=sys.stderr)
         if payload is not None:
@@ -935,17 +990,22 @@ if __name__ == '__main__':
         # No argparse: macOS's system Python caches each newly imported module
         # under HOME, and Herdr's activation writes nothing new there.
         root, *arguments = sys.argv[1:]
+        verify = 'activate'
         if arguments[:1] == ['--state-dir']:
             require(len(arguments) > 3 and arguments[1] and arguments[2] == '--verify',
                     'Usage: runtime.py ROOT [--state-dir DIR --verify activate] [ARGUMENT...]')
-            require(arguments[3] == 'activate', f'Unsupported runtime verification: {arguments[3]}')
+            require(arguments[3] in ('activate', 'install'), f'Unsupported runtime verification: {arguments[3]}')
+            verify = arguments[3]
             os.environ['HERDR_PLUGIN_STATE_DIR'] = arguments[1]
             arguments = arguments[4:]
+        else:
+            require(arguments[:1] in (['activate'], ['--herdr-pane']),
+                    'Expected activate or --herdr-pane after ROOT; explicit calls need --state-dir DIR --verify activate|install.')
         # Without them this is run.sh's `ROOT ARGUMENT...`, read as
         # `--state-dir "$HERDR_PLUGIN_STATE_DIR" --verify activate`. run.sh
         # keeps that shape because a released updater calls an update live
         # only when the new run.sh is byte for byte the installed one.
-        sys.exit(activate(Path(root).resolve(), arguments))
+        sys.exit(activate(Path(root).resolve(), arguments, verify=verify))
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, subprocess.SubprocessError) as error:
         print(f'Namedrop runtime activation stopped: {error}', file=sys.stderr)
         sys.exit(2)
