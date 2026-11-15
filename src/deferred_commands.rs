@@ -550,7 +550,12 @@ pub fn run_worker(state: &Path, socket: &str) -> Result<(), String> {
     if crate::installed_runtime::retirement::check(state, false).is_err() {
         return Ok(());
     }
-    let initial_gate = crate::runtime_command_guard(state, None)?;
+    // Like every helper, it waits for the gate with no bound, and a gate it
+    // cannot take, as for a retired state or an interrupted update, ends it
+    // quietly.
+    let Ok(initial_gate) = crate::runtime_command_guard(state, None) else {
+        return Ok(());
+    };
     probe(socket).map_err(|e| e.to_string())?;
     crate::installed_runtime::reexec_if_replaced(state)?;
     let directory = directory(state, socket)?;
