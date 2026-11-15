@@ -33,7 +33,7 @@ Do these steps on each machine that runs agents.
 	./target/release/namedrop activate --input-json '{"confirmed":true}'
 	```
 
-	Activation installs the Claude Code and Codex packages and adds the `namedrop` command to `~/.local/bin`. Any Namedrop command or hook in a Rex block starts the bridge when it is not running. Namedrop keeps its state in `$NAMEDROP_STATE_DIR` if you set it, or else in `$XDG_STATE_HOME/namedrop` or `~/.local/state/namedrop`.
+	Activation installs the Claude Code and Codex packages and adds the `namedrop` command to `~/.local/bin`. Any Namedrop command or hook in a Rex block starts the bridge when it is not running. Activation prints the state directory that Namedrop uses on the `State` line, under `Details`. Note it: you need it to turn on [terminals for other machines](#let-mentions-from-other-machines-reach-a-terminal). [Files in the state directory](rex-reference.md#files-in-the-state-directory) says how Namedrop picks the directory.
 
 4. Do the agent steps that activation prints. For Claude Code, start a new session or run `/reload-plugins`. For Codex, run the two `codex plugin` commands it prints, then start a new Codex session and approve Namedrop's hooks in `/hooks`.
 5. Open a new block, so that `namedrop` is on your `PATH`.
@@ -85,15 +85,17 @@ In this section, A is your machine and B is the machine whose agent you mention.
 	```
 
 3. Make sure that the `rex` command is on the `PATH` of Namedrop's commands on A. The relay runs `rex` to reach B.
-4. Send from a named block. In a shell block named with `--type terminal`, run:
+4. Ask a named agent on A to send the message. In Claude Code's prompt, type:
 
-	```sh
-	namedrop send --json --input-json '{"request_id":"pong-1","source":"@codex@devbox Reply with exactly the word pong."}'
+	```text
+	Run this command: namedrop send --json --input-json '{"author_kind":"agent_session","request_id":"pong-1","source":"@codex@devbox Reply with exactly the word pong."}'
 	```
 
-	The answer's `relayed` field says `@codex@devbox: queued for the Namedrop on devbox, which delivers it there.` An agent on A can send the same way. Ask it to use `namedrop send` and give it the address.
+	The command's `relayed` field says `@codex@devbox: queued for the Namedrop on devbox, which delivers it there.`
 
-5. Wait for the reply. A collects B's replies every 30 seconds while a thread with B is open, which is for 24 hours after the last message that B accepted or the last reply that A collected. The reply comes from `@codex@devbox`, in the thread of your message.
+5. Wait for the reply. A collects B's replies every 30 seconds while a thread with B is open, which is for 24 hours after the last message that B accepted or the last reply that A collected. The reply arrives in Claude Code from `@codex@devbox`, in the thread of your message.
+
+Send from an agent, not from a terminal, when you want to see the reply. A terminal can send the same command, but Namedrop saves a reply to a terminal in its thread and does not print it in the terminal.
 
 A remote address works only at the start of the `source` of `namedrop send`. Typed at the start of an agent's prompt, `@codex@devbox` is not a mention, and Namedrop sends nothing. The label must match a label that `rex hosts list` prints, letter for letter. Otherwise the send fails at once with `devbx is not in your Rex hosts (rex hosts list): devbox`, and nothing is queued.
 
@@ -117,14 +119,15 @@ By default, B relays a mention only to an agent. A mention from A to a terminal 
 
 A terminal runs each new message as a shell command. So a relayed mention to a terminal on B runs a command on B, under your account, that someone wrote on A. Turn this on only if you want the people and agents on A to run commands on B.
 
-To let relayed mentions reach B's terminals, create this file in B's state directory:
+To let relayed mentions reach B's terminals, create the file `relay/allow-terminals` in B's state directory. Use the directory on the `State` line that activation printed on B:
 
 ```sh
-mkdir -p ~/.local/state/namedrop/relay
-touch ~/.local/state/namedrop/relay/allow-terminals
+state='<the directory on the State line>'
+mkdir -p "$state/relay"
+touch "$state/relay/allow-terminals"
 ```
 
-If B keeps its state in another directory, create the file there. [Files in the state directory](rex-reference.md#files-in-the-state-directory) says where Namedrop looks. B reads the file for each new message, so you do not need to restart anything. A message that B refused before you created the file stays refused. Send it again. The terminal's output and exit code come back to the sender as a reply.
+If you did not note the line, [Files in the state directory](rex-reference.md#files-in-the-state-directory) says how Namedrop picks the directory. B reads the file for each new message, so you do not need to restart anything. A message that B refused before you created the file stays refused. Send it again. The terminal's output and exit code come back to the sender as a reply.
 
 To turn it off again, delete `relay/allow-terminals`.
 

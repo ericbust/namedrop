@@ -63,7 +63,14 @@ While B's bridge is stopped or B cannot be reached, A keeps the message and trie
 
 ## Files in the state directory
 
-The state directory is `$NAMEDROP_STATE_DIR`, or else the directory recorded in `~/.config/namedrop/state-directory`, or else `$XDG_STATE_HOME/namedrop` or `~/.local/state/namedrop`.
+On Rex, Namedrop uses the first of these state directories that it finds:
+
+1. The directory that `--plugin-state` names. The `namedrop` command that activation adds to `~/.local/bin` passes the directory it was activated with.
+2. `$NAMEDROP_STATE_DIR`, if it is set and not empty.
+3. The directory in the installation record. Activation writes the record to `$XDG_CONFIG_HOME/namedrop/state-directory` if `XDG_CONFIG_HOME` is an absolute path, or else to `~/.config/namedrop/state-directory`. A record that is missing, unreadable, or not an absolute path does not count.
+4. `$XDG_STATE_HOME/namedrop` if `XDG_STATE_HOME` is an absolute path, or else `~/.local/state/namedrop`.
+
+Activation prints the directory it uses on the `State` line, or as `state_directory` with `--json`. Use that directory, rather than working it out from this list.
 
 | File | Effect |
 |---|---|
