@@ -83,45 +83,16 @@ where
         && let Some(inspected) =
             crate::rex_ui::inspect(runtime.home_directory, runtime.mux.endpoint())
     {
-        let (confirmed, diagnostic, explanation) = match inspected {
-            Ok(diagnostic) => {
-                let confirmed = diagnostic["confirmed"] == true;
-                let keys = diagnostic["keys"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|k| {
-                        format!(
-                            "{}: {}{}",
-                            k["key"].as_str().unwrap_or(""),
-                            k["status"].as_str().unwrap_or(""),
-                            k["source"]
-                                .as_str()
-                                .map(|s| format!(" ({s})"))
-                                .unwrap_or_default()
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let mut explanation = format!(
-                    "Registered module: {}\nLoaded module: {}\nLoaded launcher: {}\nLoaded state: {}\nServer config: {}\nServer environment: {}\n{}",
-                    diagnostic["module"].as_str().unwrap_or(""),
-                    diagnostic["about"]["module"].as_str().unwrap_or(""),
-                    diagnostic["about"]["launcher"].as_str().unwrap_or(""),
-                    diagnostic["about"]["state"].as_str().unwrap_or(""),
-                    diagnostic["config"]["path"].as_str().unwrap_or(""),
-                    diagnostic["env"],
-                    keys
-                );
-                if let Some(error) = diagnostic["error"].as_str() {
-                    explanation.push_str(&format!("\nReadback error: {error}"));
-                }
-                (confirmed, diagnostic, explanation)
-            }
+        let (confirmed, explanation, diagnostic) = match inspected {
+            Ok(diagnostic) => (
+                diagnostic["confirmed"] == true,
+                rex_module_explanation(&diagnostic),
+                diagnostic,
+            ),
             Err(error) => (
                 false,
+                error.clone(),
                 serde_json::json!({"confirmed":false,"error":error}),
-                error,
             ),
         };
         let mut check = issue(
@@ -1629,6 +1600,46 @@ fn add_operation<M, C, I>(
         issue.repair.command = Some(command);
     }
 }
+/// Doctor's account of the Rex module. An issue's text renders as one line,
+/// because the report escapes control characters, newlines included.
+fn rex_module_explanation(diagnostic: &serde_json::Value) -> String {
+    let text = |value: &serde_json::Value| value.as_str().unwrap_or("none").to_owned();
+    let keys = diagnostic["keys"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|k| {
+            let status = match k["status"].as_str() {
+                Some("in_effect") => "in effect",
+                Some("shadowed") => "shadowed",
+                Some("skipped") => "skipped at load",
+                _ => "unknown",
+            };
+            match k["source"].as_str() {
+                Some(source) => format!("{} {status} ({source})", text(&k["key"])),
+                None => format!("{} {status}", text(&k["key"])),
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut explanation = format!(
+        "Registered module: {}. Loaded module: {}, launcher {}, state {}. Server config: {}. Server environment: {}. Keys: {}.",
+        text(&diagnostic["module"]),
+        text(&diagnostic["about"]["module"]),
+        text(&diagnostic["about"]["launcher"]),
+        text(&diagnostic["about"]["state"]),
+        text(&diagnostic["config"]["path"]),
+        diagnostic["env"],
+        if keys.is_empty() {
+            "none".to_owned()
+        } else {
+            keys.join(", ")
+        }
+    );
+    if let Some(error) = diagnostic["error"].as_str() {
+        explanation.push_str(&format!(" Readback error: {error}"));
+    }
+    explanation
+}
 
 #[must_use]
 pub fn render_health_report_to_text(report: &HealthReport) -> String {
@@ -1713,6 +1724,28 @@ pub fn render_health_report_to_text(report: &HealthReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rex_module_explanation_is_one_line_with_each_key() {
+        let diagnostic = serde_json::json!({
+            "module": "/cfg/namedrop.lua",
+            "about": {"module": "/cfg/namedrop.lua", "launcher": "/s/runtime/namedrop", "state": "/s"},
+            "config": {"path": "/cfg/init.lua"},
+            "env": {"HOME": "/home"},
+            "keys": [
+                {"key": "alt+shift+cmd+i", "status": "in_effect", "source": "namedrop.lua:39"},
+                {"key": "alt+shift+cmd+m", "status": "shadowed", "source": "init.lua:4"},
+                {"key": "alt+shift+cmd+h", "status": "skipped"}
+            ],
+            "error": "no about"
+        });
+        let explanation = rex_module_explanation(&diagnostic);
+        assert_eq!(terminal_safe_text(&explanation), explanation);
+        assert_eq!(
+            explanation,
+            "Registered module: /cfg/namedrop.lua. Loaded module: /cfg/namedrop.lua, launcher /s/runtime/namedrop, state /s. Server config: /cfg/init.lua. Server environment: {\"HOME\":\"/home\"}. Keys: alt+shift+cmd+i in effect (namedrop.lua:39), alt+shift+cmd+m shadowed (init.lua:4), alt+shift+cmd+h skipped at load. Readback error: no about"
+        );
+    }
 
     #[test]
     fn expired_relay_replies_are_one_notice_that_counts_each_sender() {
