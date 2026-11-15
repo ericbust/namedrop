@@ -255,7 +255,7 @@ fn main() -> ExitCode {
         Ok(guard) => guard,
         Err(error) => {
             eprintln!("{error}");
-            return ExitCode::from(69);
+            return refuse_before_screen(&cli, inherited, 69);
         }
     };
     // Recheck selection after acquiring the gate: a queued command may have
@@ -271,7 +271,10 @@ fn main() -> ExitCode {
                 use std::os::unix::process::CommandExt;
                 let error = Command::new(launcher).args(env::args_os().skip(1)).exec();
                 eprintln!("Could not run the selected Namedrop runtime: {error}");
-                return ExitCode::from(69);
+                // A layer may wait long for its key, and an update, the
+                // repair here, needs the gate meanwhile.
+                drop(command_guard);
+                return refuse_before_screen(&cli, inherited, 69);
             }
         }
     }
@@ -915,6 +918,18 @@ fn finish(
             format,
         ),
     }
+}
+
+/// A Rex layer keeps a quick failure open with no way to close it, so a
+/// screen refused before it starts waits for one key, as its own refusals do.
+fn refuse_before_screen(cli: &Cli, inherited: &dyn Inherited, code: u8) -> ExitCode {
+    if matches!(cli.naming_ui(), Some((false, _)))
+        && popup_input::is_rex(&cli.runtime, inherited)
+        && popup_input::wait_for_key().is_ok()
+    {
+        return ExitCode::SUCCESS;
+    }
+    ExitCode::from(code)
 }
 
 fn activation_complete(data: &serde_json::Value) -> bool {
