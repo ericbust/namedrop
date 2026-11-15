@@ -159,7 +159,8 @@ with tempfile.TemporaryDirectory(prefix='nd-lease-matrix-') as folder:
                 while json.loads(rex_record.read_text())['state']!=str(selected) and time.monotonic()<until:time.sleep(.05)
                 registered=json.loads(rex_record.read_text())
                 assert registered['state']==str(selected),(name,registered)
-                assert registered['launcher']==str(selected/'runtime/namedrop'),(name,registered)
+                # The launcher is the running executable's resolved path; the state is as given.
+                assert Path(registered['launcher'])==(selected/'runtime/namedrop').resolve(),(name,registered)
                 assert registered['line']=='removed' and registered['predecessors']==[{'state':'/retained'}],(name,registered)
                 assert 'namedrop_about' in module.read_text() and '-- stale module' not in module.read_text(),name
             after=snapshot(own)
