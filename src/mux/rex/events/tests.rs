@@ -117,6 +117,9 @@ fn expected(number: usize, kind: &str) -> MuxEvent {
         "closed" => MuxEvent::PaneClosed(slot()),
         "status" => MuxEvent::AgentStatusChanged(slot()),
         "resync" => MuxEvent::Resync(session(line)),
+        "created" => MuxEvent::Resync(SpaceId::new(
+            line["payload"]["session"]["session_id"].as_str().unwrap(),
+        )),
         "space" => MuxEvent::SpaceClosed(session(line)),
         _ => unreachable!(),
     }
@@ -124,7 +127,7 @@ fn expected(number: usize, kind: &str) -> MuxEvent {
 
 /// Every fixture line goes over the wire, and only the decode table's rows
 /// come out, in order. `title_changed`, `pwd_changed`, `bell`, view and
-/// owner changes, client events, and `session_created` yield nothing.
+/// owner changes and client events yield nothing.
 #[test]
 fn each_row_of_the_decode_table_yields_its_event_and_every_other_line_none() {
     let state = State::new();
@@ -140,6 +143,7 @@ fn each_row_of_the_decode_table_yields_its_event_and_every_other_line_none() {
         decoded.push(event);
     }
     let rows = [
+        (1, "created"),
         (2, "status"),
         (4, "appeared"),
         (6, "status"),
@@ -156,6 +160,7 @@ fn each_row_of_the_decode_table_yields_its_event_and_every_other_line_none() {
         (48, "resync"),
         (53, "closed"),
         (55, "space"),
+        (56, "created"),
         (57, "status"),
         (67, "closed"),
         (69, "space"),
@@ -170,6 +175,39 @@ fn each_row_of_the_decode_table_yields_its_event_and_every_other_line_none() {
             lines()[number - 1]["payload"]["event"]["payload"]["name"],
             name
         );
+    }
+    drop(stream);
+    assert_eq!(server.join().unwrap(), Some(1000));
+}
+
+#[test]
+fn a_session_without_startup_process_events_still_resyncs_before_it_closes() {
+    let state = State::new();
+    let wake = Wake::new().unwrap();
+    let (client, server) = serve("host-a", |server| {
+        let captured = lines();
+        send_events(
+            server,
+            &[
+                captured[0].clone(),
+                captured[52].clone(),
+                captured[54].clone(),
+            ],
+        );
+        server.close_code()
+    });
+    let mut stream = events(client, &state, &wake, Liveness::REX);
+    let space = SpaceId::new("session:01a1d75e-a97c-7d46-b30c-ab30e1f760bb");
+    for wanted in [
+        MuxEvent::Resync(space.clone()),
+        MuxEvent::PaneClosed(PaneSlot {
+            space: space.clone(),
+            pane: PaneId::new("block:01a1d75e-a97c-7e40-8e9b-755d9d5ff542"),
+            tab: None,
+        }),
+        MuxEvent::SpaceClosed(space),
+    ] {
+        assert_eq!(stream.next(Duration::from_secs(1)), Next::Event(wanted));
     }
     drop(stream);
     assert_eq!(server.join().unwrap(), Some(1000));
