@@ -296,6 +296,16 @@ fn deliver(
     });
     let receipt = match inserted {
         Ok(receipt) => receipt,
+        // The thread takes the item once a person on B resumes it, so the
+        // outcome is not stored and A sends the item again.
+        Err(error) if error.is_reply_limit() => {
+            let status = if request.relay >= 2 {
+                Status::Paused
+            } else {
+                Status::Retry
+            };
+            return Ok(outcome(status, Some(error.to_string())));
+        }
         Err(error) if error.kind() == crate::StoreErrorKind::InvalidInput => {
             let refusal = outcome(Status::Refused, Some(error.to_string()));
             store

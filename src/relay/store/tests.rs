@@ -136,23 +136,18 @@ fn a_newer_relay_schema_is_refused() {
 #[test]
 fn a_version_1_relay_database_is_brought_to_this_version_with_its_rows() {
     let state = State::new();
-    let store = state.open(NOW);
-    queue(&store, "message-1", NOW);
-    store
-        .count_other_label("rex:/tmp/a.sock", "devbox", NOW)
-        .unwrap();
-    store
-        .connection
+    state.made_by(VERSION_1_LAYOUTS[0].1, 1);
+    Connection::open(state.0.join("relay.sqlite3"))
+        .unwrap()
         .execute_batch(
-            "ALTER TABLE conditions DROP COLUMN other_label_at_ms;
-             ALTER TABLE dropped DROP COLUMN told;
-             DROP TABLE outbox_lost;
-             DROP TABLE lost;
-             DROP INDEX outbox_by_seq;
-             PRAGMA user_version = 1;",
+            "INSERT INTO outbound (label, message_id, recipient, endpoint, space, sender,
+                thread, text, state, created_at_ms, updated_at_ms)
+             VALUES ('devbox', 'message-1', 'bob', 'rex:/tmp/a.sock', 'session:a', 'alice',
+                'thread-1', 'hi', 'queued', 1800000000000, 1800000000000);
+             INSERT INTO conditions (endpoint, label, other_label)
+             VALUES ('rex:/tmp/a.sock', 'devbox', 1);",
         )
         .unwrap();
-    drop(store);
     let store = state.open(NOW);
     let version: u32 = store
         .connection
@@ -182,18 +177,7 @@ fn opens_that_race_to_make_or_migrate_the_database_each_succeed() {
                 state.made_by(VERSION_1_LAYOUTS[1].1, 1);
             }
             if version == 1 {
-                state
-                    .open(NOW)
-                    .connection
-                    .execute_batch(
-                        "ALTER TABLE conditions DROP COLUMN other_label_at_ms;
-                         ALTER TABLE dropped DROP COLUMN told;
-                         DROP TABLE outbox_lost;
-                         DROP TABLE lost;
-                         DROP INDEX outbox_by_seq;
-                         PRAGMA user_version = 1;",
-                    )
-                    .unwrap();
+                state.made_by(VERSION_1_LAYOUTS[0].1, 1);
             }
             let barrier = std::sync::Barrier::new(8);
             let failed: Vec<String> = std::thread::scope(|scope| {
@@ -703,6 +687,26 @@ fn a_queued_item_expires_24_hours_after_it_was_queued() {
             ),
             ("young".to_owned(), "queued".to_owned(), None),
         ]
+    );
+}
+
+/// An item B's Automatic Reply Limit paused that is still queued after 24
+/// hours expires with that reason, not as one B never answered.
+#[test]
+fn a_paused_item_expires_with_its_thread_s_pause_as_the_reason() {
+    let state = State::new();
+    let store = state.open(NOW);
+    queue(&store, "paused", NOW - OUTBOUND_LIFETIME_MS);
+    let item = store.queued("devbox", "rex:/tmp/a.sock").unwrap().remove(0);
+    store.paused("devbox", &item).unwrap();
+    assert_eq!(store.paused_untold("rex:/tmp/a.sock").unwrap().len(), 1);
+    drop(store);
+    let store = state.open(NOW);
+    assert!(store.paused_untold("rex:/tmp/a.sock").unwrap().is_empty());
+    let unsent = store.unsent("rex:/tmp/a.sock").unwrap();
+    assert_eq!(
+        unsent[0].reason,
+        "the Automatic Reply Limit kept its thread on devbox paused for 24 hours"
     );
 }
 

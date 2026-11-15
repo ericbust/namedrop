@@ -18,8 +18,11 @@ ALTER TABLE dropped ADD COLUMN told INTEGER NOT NULL DEFAULT 0;
 
 /// What version 2 lacks: on B, the index B's page reads by, and the
 /// replies for each A host it let go of, and on A, what B said it let go
-/// of and what A told the sender.
+/// of and what A told the sender, and whether B's Automatic Reply Limit
+/// paused an item and its sender was told.
 const TO_3: &str = "
+ALTER TABLE outbound ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE outbound ADD COLUMN paused_told INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX outbox_by_seq ON outbox (host_id, seq);
 CREATE TABLE outbox_lost (
     host_id TEXT NOT NULL,
@@ -113,6 +116,8 @@ CREATE TABLE outbound (
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     notified_at_ms INTEGER,
+    paused INTEGER NOT NULL DEFAULT 0,
+    paused_told INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (label, message_id, recipient)
 );
 CREATE TABLE collected (
@@ -299,6 +304,13 @@ fn current_layout() -> &'static Layout {
     })
 }
 
+/// The columns `TO_2` adds.
+const COLUMNS_NEW_IN_2: [(&str, &str); 2] =
+    [("conditions", "other_label_at_ms"), ("dropped", "told")];
+/// The tables and indexes `TO_3` makes, and the columns it adds.
+const NEW_IN_3: [&str; 3] = ["outbox_lost", "lost", "outbox_by_seq"];
+const COLUMNS_NEW_IN_3: [(&str, &str); 2] = [("outbound", "paused"), ("outbound", "paused_told")];
+
 /// Makes the database at `path`, or migrates it from its version, under
 /// the write lock, and says whether it then has this schema's layout. One
 /// that does not is left as it was.
@@ -309,10 +321,10 @@ fn upgrade(connection: &mut Connection, path: &Path) -> Result<bool, StoreError>
         let expected: Layout = current_layout()
             .iter()
             .filter(|(table, column, ..)| {
-                !matches!(table.as_str(), "outbox_lost" | "lost" | "outbox_by_seq")
-                    && !(version == 1
-                        && ((table == "conditions" && column == "other_label_at_ms")
-                            || (table == "dropped" && column == "told")))
+                let column = (table.as_str(), column.as_str());
+                !NEW_IN_3.contains(&table.as_str())
+                    && !COLUMNS_NEW_IN_3.contains(&column)
+                    && !(version == 1 && COLUMNS_NEW_IN_2.contains(&column))
             })
             .cloned()
             .collect();
@@ -402,6 +414,15 @@ pub(crate) struct Unsent {
     pub recipient: String,
     pub space: String,
     pub reason: String,
+}
+
+/// A queued item that B's Automatic Reply Limit paused, whose sender has
+/// not been told.
+pub(crate) struct Paused {
+    pub label: String,
+    pub message_id: String,
+    pub recipient: String,
+    pub space: String,
 }
 
 /// How a queued item ends.
@@ -1020,6 +1041,47 @@ impl RelayStore {
             })?
             .collect::<Result<_, _>>()?;
         Ok(counts)
+    }
+
+    /// Records that B's Automatic Reply Limit paused the thread `item` goes
+    /// to on B, so its sender is told once.
+    pub(crate) fn paused(&self, label: &str, item: &Queued) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE outbound SET paused = 1
+             WHERE label = ?1 AND message_id = ?2 AND recipient = ?3 AND state = 'queued'",
+            params![label, item.message_id, item.recipient],
+        )?;
+        Ok(())
+    }
+
+    /// The items of `endpoint` that B's Automatic Reply Limit paused and
+    /// whose sender has not been told, oldest first.
+    pub(crate) fn paused_untold(&self, endpoint: &str) -> Result<Vec<Paused>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT label, message_id, recipient, space FROM outbound
+             WHERE endpoint = ?1 AND state = 'queued' AND paused AND NOT paused_told
+             ORDER BY created_at_ms, rowid",
+        )?;
+        let paused = statement
+            .query_map(params![endpoint], |row| {
+                Ok(Paused {
+                    label: row.get(0)?,
+                    message_id: row.get(1)?,
+                    recipient: row.get(2)?,
+                    space: row.get(3)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(paused)
+    }
+
+    pub(crate) fn told_paused(&self, paused: &Paused) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE outbound SET paused_told = 1
+             WHERE label = ?1 AND message_id = ?2 AND recipient = ?3",
+            params![paused.label, paused.message_id, paused.recipient],
+        )?;
+        Ok(())
     }
 
     /// Records the `host_id` an item was first sent to.
@@ -1711,7 +1773,11 @@ impl RelayStore {
         let transaction = self.connection.transaction()?;
         transaction.execute(
             "UPDATE outbound SET state = 'expired',
-                reason = label || ' was unreachable for 24 hours', updated_at_ms = ?1
+                reason = CASE WHEN paused
+                    THEN 'the Automatic Reply Limit kept its thread on ' || label
+                        || ' paused for 24 hours'
+                    ELSE label || ' was unreachable for 24 hours' END,
+                updated_at_ms = ?1
              WHERE state = 'queued' AND created_at_ms <= ?2",
             params![now_ms, now_ms - OUTBOUND_LIFETIME_MS],
         )?;

@@ -137,6 +137,11 @@ pub(crate) enum Status {
     Refused,
     Ambiguous,
     Retry,
+    /// B's Automatic Reply Limit paused the B thread the item goes to, so
+    /// B takes no message in it until a person on B resumes it. A keeps the
+    /// item and sends it again. B says so only to a version 2 A, and a
+    /// version 1 A, which cannot read it, gets `Retry`.
+    Paused,
 }
 
 /// What B decided for one item.

@@ -1,12 +1,12 @@
 //! The notices a sender on A gets in its thread from a remote agent's relay
-//! author: that an item for that agent failed or expired, that the
-//! Automatic Reply Limit holds that agent's replies, that A refused one or
-//! let held ones expire, or that B let go of replies before A acknowledged
-//! them.
+//! author: that an item for that agent failed or expired, that B's
+//! Automatic Reply Limit paused the thread it goes to, that A's holds that
+//! agent's replies, that A refused one or let held ones expire, or that B
+//! let go of replies before A acknowledged them.
 
 use super::{
     RemoteName,
-    store::{Dropped, Held, LostReplies, RelayStore, Why},
+    store::{Dropped, Held, LostReplies, Paused, RelayStore, Why},
 };
 use crate::{
     ActorKind, DeliveryId, IdGenerator, MessageId, MutationAttribution, SpaceId, StateNamespace,
@@ -25,10 +25,11 @@ struct Notice<'a> {
     text: String,
 }
 
-/// Tells the sender of each item of `endpoint` that failed or expired,
-/// of each thread whose replies are held, of each reply A refused, and of
-/// each thread whose held replies expired, once, and calls `wake` for
-/// each space it told. A fault leaves the rest for the next call.
+/// Tells the sender of each item of `endpoint` that failed or expired, or
+/// that B's Automatic Reply Limit paused, of each thread whose replies are
+/// held, of each reply A refused, and of each thread whose held replies
+/// expired, once, and calls `wake` for each space it told. A fault leaves
+/// the rest for the next call.
 pub(crate) fn tell(
     state: &Path,
     endpoint: &Endpoint,
@@ -39,8 +40,9 @@ pub(crate) fn tell(
     let Ok(store) = RelayStore::open(state, now) else {
         return;
     };
-    let (Ok(unsent), Ok(held), Ok(dropped), Ok(lost)) = (
+    let (Ok(unsent), Ok(paused), Ok(held), Ok(dropped), Ok(lost)) = (
         store.unsent(&endpoint.key),
+        store.paused_untold(&endpoint.key),
         store.held(&endpoint.key, true),
         store.dropped(&endpoint.key),
         store.lost_untold(&endpoint.key),
@@ -68,6 +70,12 @@ pub(crate) fn tell(
             },
         );
         if !settle(told, &item.space, wake, || store.told(item, now)) {
+            return;
+        }
+    }
+    for paused in &paused {
+        let told = notice(state, gate, &endpoint.key, &paused_notice(paused));
+        if !settle(told, &paused.space, wake, || store.told_paused(paused)) {
             return;
         }
     }
@@ -156,6 +164,24 @@ fn dropped_notice(dropped: &Dropped) -> Notice<'_> {
                 }
             ),
         },
+    }
+}
+
+/// The notice that B's Automatic Reply Limit paused the thread `paused`
+/// goes to on B, so A keeps it until a person there resumes the thread.
+fn paused_notice(paused: &Paused) -> Notice<'_> {
+    let (alias, label) = (&paused.recipient, &paused.label);
+    Notice {
+        space: &paused.space,
+        label,
+        alias,
+        message: &paused.message_id,
+        request_id: format!("relay-paused:{label}:{}:{alias}", paused.message_id),
+        text: format!(
+            "The Automatic Reply Limit paused this thread on {label}, so {label} takes no more \
+             messages in it for now. Namedrop keeps this message for @{alias}@{label} and sends \
+             it once a person on {label} resumes the thread there with a message or Continue."
+        ),
     }
 }
 

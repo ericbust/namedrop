@@ -1528,3 +1528,38 @@ fn a_capture_retried_after_its_cursor_failed_counts_a_discard_once() {
         })
         .unwrap();
 }
+
+/// An answer into a B thread that B's Automatic Reply Limit paused is not
+/// refused for good: B stores nothing and says the thread is paused, or
+/// `retry` to a version 1 A, which cannot read that, and takes the answer
+/// once a person on B resumes the thread.
+#[test]
+fn an_answer_into_a_thread_b_s_limit_paused_is_taken_once_the_thread_resumes() {
+    let b = B::new();
+    b.call(&deliver("m1", "bob", "t1", "first"));
+    let relayed = b.rows(
+        "namedrop.sqlite3",
+        "SELECT message_id, thread_id FROM collaboration_messages",
+    );
+    let (message, thread) = (relayed[0][0].clone(), relayed[0][1].clone());
+    let main = Connection::open(b.0.join("namedrop.sqlite3")).unwrap();
+    main.execute(
+        "INSERT INTO thread_controls (session_socket_id, worktree_id, thread_id, paused, stopped,
+            reply_allowance) VALUES (?1, 'session:b1', ?2, 0, 0, 0)
+         ON CONFLICT DO UPDATE SET reply_allowance = 0",
+        params![REX, thread.as_str().unwrap()],
+    )
+    .unwrap();
+    let mut answer = deliver("m2", "bob", "t1", "answer");
+    answer["item"]["in_reply_to"] = message;
+    let limit = Some("the Automatic Reply Limit requires human continuation".to_owned());
+    assert_eq!(outcome(&b.call(&answer)), (Status::Retry, limit.clone()));
+    answer["relay"] = json!(2);
+    assert_eq!(outcome(&b.call(&answer)), (Status::Paused, limit));
+    assert_eq!(b.inbound(), 1, "nothing is stored for the paused answer");
+    assert_eq!(b.messages().len(), 1);
+    main.execute("UPDATE thread_controls SET reply_allowance = 10", [])
+        .unwrap();
+    assert_eq!(outcome(&b.call(&answer)), (Status::Accepted, None));
+    assert_eq!(b.messages().len(), 2);
+}

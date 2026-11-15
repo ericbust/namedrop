@@ -2049,6 +2049,62 @@ fn notices(space: &Space) -> Vec<Vec<String>> {
     )
 }
 
+/// An item B's Automatic Reply Limit paused stays queued and is sent again,
+/// and its sender hears once, from the relay author it sent to, that a
+/// person on B resumes the thread. It is delivered once B takes it.
+#[test]
+fn an_item_b_s_limit_paused_stays_queued_and_its_sender_is_told_once() {
+    let space = Space::new(REX);
+    let rex = rex(&["devbox"]);
+    let message = sent(&space, &rex);
+    let paused = || {
+        answer(
+            "paused",
+            Some("the Automatic Reply Limit requires human continuation"),
+            json!([]),
+        )
+    };
+    let told = || {
+        space.main(
+            "SELECT m.author_alias_snapshot, r.alias_snapshot, m.in_reply_to, m.body
+             FROM collaboration_messages m
+             JOIN message_recipients r USING (session_socket_id, worktree_id, message_id)
+             WHERE m.request_id LIKE 'relay-paused:%' ORDER BY m.rowid",
+        )
+    };
+    rex.answer_with(paused());
+    let (waits, woken) = work_for(&space, &rex, 1);
+    assert_eq!(waits, [BACKOFF[0]]);
+    assert_eq!(woken, ["session:a"]);
+    assert_eq!(outbound(&space)[0].0, "queued");
+    assert_eq!(
+        told(),
+        [[
+            "bob@devbox".to_owned(),
+            "alice".to_owned(),
+            message.clone(),
+            "The Automatic Reply Limit paused this thread on devbox, so devbox takes no more \
+             messages in it for now. Namedrop keeps this message for @bob@devbox and sends it \
+             once a person on devbox resumes the thread there with a message or Continue."
+                .to_owned()
+        ]]
+    );
+    rex.answer_with(paused());
+    let (_, woken) = work_for(&space, &rex, 1);
+    assert!(woken.is_empty(), "{woken:?}");
+    assert_eq!(told().len(), 1, "the sender is told once");
+    rex.answer_with(answer("accepted", None, json!([])));
+    work_for(&space, &rex, 1);
+    let ids: Vec<Value> = rex
+        .requests()
+        .iter()
+        .map(|r| r["item"]["id"].clone())
+        .collect();
+    assert_eq!(ids, [json!(message), json!(message), json!(message)]);
+    assert_eq!(outbound(&space)[0].0, "accepted");
+    assert!(notices(&space).is_empty(), "nothing failed");
+}
+
 /// A sender hears in its thread, once, from the relay author it sent to,
 /// that an item failed, with B's reason, and its space is woken.
 #[test]

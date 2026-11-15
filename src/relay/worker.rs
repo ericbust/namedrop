@@ -342,6 +342,11 @@ fn decide(
             *kept = true;
             return true;
         }
+        Status::Paused => {
+            *kept = true;
+            let _ = store.paused(label, item);
+            return true;
+        }
     };
     // The item stays queued, and B keeps each reply to it until a later
     // round settles it by B's stored outcome.
